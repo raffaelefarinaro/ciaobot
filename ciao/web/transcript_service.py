@@ -1514,7 +1514,7 @@ async def _assemble_chat_messages(
                 acp_rows, getattr(chat, "turn_verification", None) or {}
             )
             return [*handover_messages, *acp_rows]
-    if provider != "claude":
+    if not provider_registry.flag(provider, "session_jsonl_history"):
         current = pcm._transcripts.current_messages(
             ChatContext.for_web(chat_id), provider
         )

@@ -24,12 +24,13 @@ import signal
 import sys
 import time
 from collections import deque
-from collections.abc import Mapping
+from collections.abc import Awaitable, Callable, Mapping
 from pathlib import Path
 from typing import Any, Protocol, cast
 
 import acp
 from acp.connection import StreamDirection, StreamEvent
+from acp.exceptions import RequestError
 from acp.router import MessageRouter, Route
 from acp.schema import ClientCapabilities
 
@@ -212,17 +213,48 @@ def connect_client(
     """``acp.connect_to_agent`` over stdio, plus the spec's unprefixed extension notifications.
 
     The SDK hands only ``_``-prefixed methods to ``ext_notification``, and answers any other
-    unknown notification with method-not-found. opencode sends ``opencode/session/child_update``
-    with no underscore, so each name in ``extension_notifications`` gets a route on the
-    connection's own router that hands its payload to ``client.ext_notification`` under the name
-    as sent. Nothing else is routed here.
+    unknown notification with method-not-found, which it logs as an unhandled ERROR. opencode sends
+    ``opencode/session/child_update`` and codex sends ``auth/status_update``, both with no
+    underscore, so each name in ``extension_notifications`` gets a route on the connection's own
+    router that hands its payload to ``client.ext_notification`` under the name as sent. Any other
+    unknown notification is dropped by ``_drop_unknown_notifications``. Requests are unchanged.
     """
     conn = acp.connect_to_agent(client, stdin, stdout, observers=observers)  # type: ignore[arg-type]
     # The SDK builds the router inside ClientSideConnection and keeps no public handle on it.
-    router = cast(MessageRouter, conn._conn._handler)
+    core = cast(Any, conn._conn)
+    router = cast(MessageRouter, core._handler)
     for name in extension_notifications:
         router.add_route(Route(method=name, func=_extension_route(client, name), kind="notification"))
+    core._handler = _drop_unknown_notifications(router)
     return conn
+
+
+# The distinct unknown notification names a connection remembers for their one DEBUG line. A
+# misbehaving agent cannot grow the set without bound: names past the limit are dropped unlogged.
+_UNKNOWN_NOTIFICATION_LOG_LIMIT = 64
+_METHOD_NOT_FOUND = -32601
+
+
+def _drop_unknown_notifications(router: MessageRouter) -> Callable[[str, Any, bool], Awaitable[Any]]:
+    """The connection's dispatch: the router, with method-not-found for a notification swallowed.
+
+    Only the SDK's method-not-found on a notification is caught: the router raises it for a method
+    with no route. Any other error, and every request's method-not-found, propagates unchanged.
+    """
+    logged: set[str] = set()
+
+    async def handle(method: str, params: Any, is_notification: bool) -> Any:
+        try:
+            return await router(method, params, is_notification)
+        except RequestError as exc:
+            if not is_notification or exc.code != _METHOD_NOT_FOUND:
+                raise
+            if method not in logged and len(logged) < _UNKNOWN_NOTIFICATION_LOG_LIMIT:
+                logged.add(method)
+                logger.debug("ignored unsupported ACP notification method=%s", method)
+            return None
+
+    return handle
 
 
 def _extension_route(client: _ExtensionClient, name: str) -> Any:

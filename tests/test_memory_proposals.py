@@ -616,6 +616,7 @@ def test_decision_and_outcome_vocabularies_are_closed() -> None:
         "failed",
         "unshaped",
         "deferred",
+        "refused",
     }
 
 

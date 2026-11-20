@@ -243,6 +243,13 @@ def test_reconcile_retry_deferral_keys(region, monkeypatch):
     assert calls == [], "a deferred retry must not reach the write"
 
 
+def test_refused_keys(region, monkeypatch):
+    """`refused` is unreachable from today's callers; it must still say why nothing landed."""
+    monkeypatch.setattr(memory_proposals, "accept_region_fact", _fake_accept("refused"))
+    payload = _assert_keys("region_failed", region())
+    assert payload["error"] == "the write was not authorised, so nothing was written"
+
+
 def test_failed_keys(region, monkeypatch):
     monkeypatch.setattr(memory_proposals, "accept_region_fact", _fake_accept("failed"))
     payload = _assert_keys("region_failed", region())

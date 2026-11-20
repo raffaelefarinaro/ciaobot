@@ -534,7 +534,8 @@ class _Inventory:
 def _opencode_inventory(binary: str) -> _Inventory:
     """Skills and plugins, and the skills opencode ships.
 
-    A skill whose path is under ``/builtin/`` ships with opencode. Built-in
+    A skill whose path is under ``skill://`` is embedded in the opencode binary (its
+    ``embedded`` source); user and plugin skills have absolute file paths. Built-in
     plugins are opencode internals, and a plugin that failed to load (a
     duplicate ID, say) brings nothing, so both are left out.
 
@@ -546,7 +547,7 @@ def _opencode_inventory(binary: str) -> _Inventory:
     skills = bundled = None
     if skill_rows is not None and plugin_rows is not None:
         bundled = _row_names([
-            row for row in skill_rows if str(row.get("path") or "").startswith("/builtin/")
+            row for row in skill_rows if str(row.get("path") or "").startswith("skill://")
         ])
         own = [name for name in _row_names(skill_rows) if name not in bundled]
         plugins = _row_names([
