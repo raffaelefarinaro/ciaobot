@@ -21,7 +21,7 @@ import pytest
 from ciao.models import AgentRequest, ResultEvent
 from ciao.os_support.tool_path import engine_bin_dir
 from ciao.providers.acp import connection as connection_module
-from ciao.providers.acp.agents import OPENCODE, OpencodeAcpProvider
+from ciao.providers.acp.agents import CODEX, OPENCODE, CodexAcpProvider, OpencodeAcpProvider
 from ciao.providers.acp.connection import AcpConnection, AgentStartError, AgentVersionError, StderrRing
 from ciao.providers.acp.spec import AgentSpec
 from ciao.opencode_cli import OPENCODE_V2_REQUIRED, cached_opencode_version
@@ -637,6 +637,115 @@ def test_unprefixed_child_update_reaches_the_provider_through_the_router() -> No
 def test_unprefixed_child_update_without_a_route_is_not_delivered() -> None:
     # Without the spec's name on the router, the SDK answers the notification as an unknown method.
     assert asyncio.run(_deliver(_child_line("created"), ())) == []
+
+
+# -- unsupported notifications and Codex's auth/status_update through connect_client ------------
+
+_METHOD_NOT_FOUND = -32601
+
+
+def _frame(method: str, params: Any, request_id: int | None = None) -> bytes:
+    message: dict[str, Any] = {"jsonrpc": "2.0", "method": method, "params": params}
+    if request_id is not None:
+        message["id"] = request_id
+    return json.dumps(message).encode("utf-8") + b"\n"
+
+
+async def _open_peer(client: Any, names: tuple[str, ...]) -> tuple[Any, asyncio.StreamReader, asyncio.StreamWriter]:
+    """A ``connect_client`` connection plus the peer's end: write frames to it, read its replies."""
+    import socket
+
+    from ciao.providers.acp.connection import connect_client
+
+    ours, peer = socket.socketpair()
+    reader, writer = await asyncio.open_connection(sock=ours)
+    conn = connect_client(client, writer, reader, observers=[], extension_notifications=names)
+    peer_reader, peer_writer = await asyncio.open_connection(sock=peer)
+    return conn, peer_reader, peer_writer
+
+
+async def _settle(predicate: Any = None) -> None:
+    for _ in range(200):
+        if predicate is None or predicate():
+            break
+        await asyncio.sleep(0.01)
+    # The SDK logs an unhandled error after the handler raises, a tick after the frame is read.
+    await asyncio.sleep(0.05)
+
+
+def _error_records(caplog: pytest.LogCaptureFixture) -> list[logging.LogRecord]:
+    return [record for record in caplog.records if record.levelno >= logging.ERROR]
+
+
+@pytest.mark.asyncio
+async def test_codex_auth_status_update_reaches_the_handler_without_an_error(caplog: pytest.LogCaptureFixture) -> None:
+    caplog.set_level(logging.DEBUG)
+    provider = CodexAcpProvider(Path("."))
+    calls: list[tuple[str, Any]] = []
+
+    class _Session:
+        def on_ext(self, method: str, payload: Any, hook: Any) -> None:
+            calls.append((method, payload))
+            hook(normalizer, method, payload)
+
+    from ciao.providers.acp.normalize import UpdateNormalizer
+    from ciao.providers.acp.provider import AgentClient
+
+    normalizer = UpdateNormalizer(CODEX, "ses_root")
+    client = AgentClient(ext_hook=provider.ext_update)  # type: ignore[abstract]
+    client.session = _Session()  # type: ignore[assignment]
+    conn, _peer_reader, peer_writer = await _open_peer(client, CODEX.extension_notifications)
+    try:
+        peer_writer.write(_frame("auth/status_update", {"state": "authenticated", "accounts": [{"label": "ChatGPT"}]}))
+        peer_writer.write(_frame("auth/status_update", "not an object"))
+        await peer_writer.drain()
+        await _settle(lambda: len(calls) >= 2)
+    finally:
+        await conn.close()
+        peer_writer.close()
+    assert calls == [
+        ("auth/status_update", {"state": "authenticated", "accounts": [{"label": "ChatGPT"}]}),
+        ("auth/status_update", {}),
+    ]
+    assert _error_records(caplog) == []
+
+
+@pytest.mark.asyncio
+async def test_unknown_notification_is_dropped_with_one_debug_line_per_method(caplog: pytest.LogCaptureFixture) -> None:
+    from ciao.providers.acp.provider import AgentClient
+
+    caplog.set_level(logging.DEBUG)
+    conn, _peer_reader, peer_writer = await _open_peer(AgentClient(), ())  # type: ignore[abstract]
+    try:
+        for _ in range(3):
+            peer_writer.write(_frame("vendor/unsupported_thing", {"n": 1}))
+        peer_writer.write(_frame("vendor/other_thing", {}))
+        await peer_writer.drain()
+        await _settle()
+    finally:
+        await conn.close()
+        peer_writer.close()
+    assert _error_records(caplog) == []
+    lines = [record.getMessage() for record in caplog.records if record.levelno == logging.DEBUG]
+    assert sum("vendor/unsupported_thing" in line for line in lines) == 1
+    assert sum("vendor/other_thing" in line for line in lines) == 1
+
+
+@pytest.mark.asyncio
+async def test_unknown_request_still_gets_method_not_found(caplog: pytest.LogCaptureFixture) -> None:
+    from ciao.providers.acp.provider import AgentClient
+
+    caplog.set_level(logging.DEBUG)
+    conn, peer_reader, peer_writer = await _open_peer(AgentClient(), ())  # type: ignore[abstract]
+    try:
+        peer_writer.write(_frame("vendor/unknown_request", {}, request_id=7))
+        await peer_writer.drain()
+        reply = json.loads(await asyncio.wait_for(peer_reader.readline(), timeout=2))
+    finally:
+        await conn.close()
+        peer_writer.close()
+    assert reply["id"] == 7
+    assert reply["error"]["code"] == _METHOD_NOT_FOUND
 
 
 @pytest.mark.asyncio
