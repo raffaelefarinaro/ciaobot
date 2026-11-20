@@ -87,7 +87,8 @@ export const inventory: InventoryEntry[] = [
       "web/src/components/ChatSignals.vue",
       "web/src/components/NeedsYouCard.vue",
       "web/src/components/ProjectSidebar.vue",
-      "web/src/components/ProposalReviewPanel.vue"
+      "web/src/components/ProposalReviewPanel.vue",
+      "web/src/components/SubagentCard.vue"
     ],
     "variants": [
       "working",
@@ -887,6 +888,69 @@ export const inventory: InventoryEntry[] = [
     "loading": {
       "status": "unknown",
       "detail": "Initial and refresh loading fidelity in ChatSignals.vue has not yet been audited."
+    },
+    "migration": {
+      "status": "unassessed",
+      "note": "Inventory admission does not approve a design migration."
+    }
+  },
+  {
+    "id": "components-subagent-card",
+    "name": "SubagentCard",
+    "family": "Chat, messages, composer, activity and context",
+    "kind": "component",
+    "owner": {
+      "path": "web/src/components/SubagentCard.vue",
+      "anchor": "<template>"
+    },
+    "sources": [],
+    "consumers": [
+      "web/src/components/ChatPanel.vue",
+      "web/src/components/ChatTurnActivity.vue"
+    ],
+    "variants": [
+      "running",
+      "done",
+      "failed",
+      "many children",
+      "old journal"
+    ],
+    "variantNotes": "One card per subagent call, keyed by its tool_use_id: open while running, folded once it settles, the state as a word beside the working glyph or a mark. Children are text rows and file buttons, bounded to 50 with a count. The old-journal story is a card whose input was the call's title.",
+    "states": [
+      {
+        "name": "running",
+        "coverage": "covered",
+        "storyIds": ["subagent-card--running"],
+        "note": "Open, with the working glyph, the Running label and its nested rows."
+      },
+      {
+        "name": "done",
+        "coverage": "covered",
+        "storyIds": ["subagent-card--done"],
+        "note": "Folded by default, the Done label and no body until the reader opens it."
+      },
+      {
+        "name": "failed",
+        "coverage": "covered",
+        "storyIds": ["subagent-card--failed"],
+        "note": "Folded, the Failed label, the alert glyph and the failed border."
+      },
+      {
+        "name": "many children",
+        "coverage": "covered",
+        "storyIds": ["subagent-card--many-children"],
+        "note": "Fifty rows are drawn and the rest are a +N more count; the header counts every step."
+      },
+      {
+        "name": "old journal",
+        "coverage": "covered",
+        "storyIds": ["subagent-card--old-journal"],
+        "note": "A journal row with no description or type reads as plain Subagent."
+      }
+    ],
+    "loading": {
+      "status": "none",
+      "detail": "No fetch: the card is built from the live stream or a history row that is already loaded. Live cards grow while the turn runs; history cards are fixed."
     },
     "migration": {
       "status": "unassessed",
