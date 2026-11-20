@@ -10,13 +10,16 @@ import json
 from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
-from uuid import uuid4
+import threading
 
 import pytest
 
 from ciao import curation_apply as apply
 from ciao import curation_run, memory_proposals, memory_receipts
 from ciao.memory_proposals import read_decisions
+from contextlib import contextmanager
+
+from ciao import cli
 from ciao.memory_tool import read_region, ensure_regions
 from ciao.proposal_kinds import parse_bullet
 from ciao.proposal_predictions import record_prediction
@@ -63,18 +66,17 @@ def _lease(vault: Path) -> str:
     return curation_run.begin_run(vault, holder="run", ttl_s=3600).holder
 
 
-def _predict(queue: Path, text: str = FACT, verdict: str = "accept") -> None:
-    record_prediction(queue, kind="memory", text=text, verdict=verdict, reason="because")
+def _predict(queue: Path, text: str = FACT, verdict: str = "accept", kind: str = "memory") -> None:
+    record_prediction(queue, kind=kind, text=text, verdict=verdict, reason="because")
 
 
-def _plan(env, line: str = LINE, holder: str = "", operation_id: str = "") -> apply.ManagedMemoryAcceptIntent:
+def _plan(env, line: str = LINE, holder: str = "") -> apply.ManagedMemoryAcceptIntent:
     intent = apply.plan_memory_accept(
         env.vault,
         workspace="work",
         guide=env.guide,
         bullet=parse_bullet(line),
         holder=holder,
-        operation_id=operation_id or uuid4().hex,
     )
     assert isinstance(intent, apply.ManagedMemoryAcceptIntent), intent
     return intent
@@ -262,8 +264,9 @@ def test_a_crash_after_the_queue_settles_records_the_missing_decision(install, m
 
     real = apply.record_promotion
     monkeypatch.setattr(apply, "record_promotion", _crash)
-    with pytest.raises(RuntimeError):
-        apply.apply_memory_accept(intent, vault_root=install.vault)
+    assert apply.apply_memory_accept(intent, vault_root=install.vault) == apply.Failed(
+        apply.FAILED_DECISION
+    )
     assert FACT not in install.queue.read_text(encoding="utf-8")
     assert not [row for row in read_decisions(install.queue) if row["operation_id"] == intent.operation_id]
     monkeypatch.setattr(apply, "record_promotion", real)
@@ -319,3 +322,231 @@ def test_undo_of_the_guide_receipt_restores_the_region(install) -> None:
     )
 
     assert FACT not in _region_text(install)
+
+
+# ── cap, decision recording and guards ────────────────────────────────────
+
+
+def _decide(env, *, operation_id: str, text: str) -> None:
+    """A prior agent accept, recorded as a decision of its own operation."""
+    memory_proposals.record_promotion(
+        env.queue,
+        text=text,
+        kind="memory",
+        via="agent",
+        outcome="written",
+        operation_id=operation_id,
+    )
+
+
+def _fill_cap(env, count: int) -> None:
+    for n in range(count):
+        _decide(env, operation_id=f"filler-{n}", text=f"Filler fact number {n}.")
+
+
+def test_decision_not_recorded_returns_failed_and_a_replay_finishes_it(install, monkeypatch) -> None:
+    intent = _accept_ready(install)
+
+    def refuse(*_args, **_kwargs):
+        return False
+
+    real = apply.record_promotion
+    monkeypatch.setattr(apply, "record_promotion", refuse)
+    assert apply.apply_memory_accept(intent, vault_root=install.vault) == apply.Failed(
+        apply.FAILED_DECISION
+    )
+    assert not [r for r in read_decisions(install.queue) if r["operation_id"] == intent.operation_id]
+    monkeypatch.setattr(apply, "record_promotion", real)
+
+    result = apply.apply_memory_accept(intent, vault_root=install.vault)
+
+    assert isinstance(result, apply.Accepted)
+    assert _region_text(install).count(FACT) == 1
+    owned = [r for r in read_decisions(install.queue) if r["operation_id"] == intent.operation_id]
+    assert len(owned) == 1
+
+
+def test_decision_raising_returns_failed_and_a_replay_finishes_it(install, monkeypatch) -> None:
+    intent = _accept_ready(install)
+    real = apply.record_promotion
+    monkeypatch.setattr(apply, "record_promotion", _crash)
+    assert apply.apply_memory_accept(intent, vault_root=install.vault) == apply.Failed(
+        apply.FAILED_DECISION
+    )
+    monkeypatch.setattr(apply, "record_promotion", real)
+
+    assert isinstance(apply.apply_memory_accept(intent, vault_root=install.vault), apply.Accepted)
+    owned = [r for r in read_decisions(install.queue) if r["operation_id"] == intent.operation_id]
+    assert len(owned) == 1
+
+
+def test_the_fifth_slot_is_taken_by_exactly_one_of_two_concurrent_accepts(install, monkeypatch) -> None:
+    """Two accepts into different regions both pass preflight at four slots used."""
+    profile = "Prefers short answers."
+    install.queue_rows(LINE, f"- [profile] {profile}")
+    holder = _lease(install.vault)
+    _fill_cap(install, 4)
+    _predict(install.queue, FACT)
+    _predict(install.queue, profile, kind="profile")
+    intents = [
+        _plan(install, LINE, holder=holder),
+        _plan(install, f"- [profile] {profile}", holder=holder),
+    ]
+    barrier = threading.Barrier(2, timeout=20)
+    real_write = apply._write_region
+
+    def wait_then_write(*args, **kwargs):
+        barrier.wait()
+        return real_write(*args, **kwargs)
+
+    monkeypatch.setattr(apply, "_write_region", wait_then_write)
+    results: list[object] = [None, None]
+
+    errors: list[BaseException] = []
+
+    def run(index: int) -> None:
+        try:
+            results[index] = apply.apply_memory_accept(intents[index], vault_root=install.vault)
+        except BaseException as exc:  # surfaced below, not swallowed by the thread
+            errors.append(exc)
+
+    threads = [threading.Thread(target=run, args=(i,)) for i in range(2)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=60)
+
+    assert not errors, errors
+    accepted = [r for r in results if isinstance(r, apply.Accepted)]
+    assert len(accepted) == 1, results
+    assert apply._agent_slots(install.vault, install.queue, _lease_started(install.vault), exclude="") == 5
+    written = [text for text in (FACT, profile) if text in _region_text(install) or text in _profile_text(install)]
+    assert len(written) == 1
+
+
+def _lease_started(vault: Path):
+    from datetime import UTC, datetime
+
+    lease = curation_run.active_lease(vault)
+    return datetime.fromisoformat(lease["started_at"]).replace(tzinfo=UTC)
+
+
+def _profile_text(env) -> str:
+    entries, diags = read_region(env.guide, "profile")
+    assert not diags
+    return "\n".join(entries)
+
+
+def test_a_retry_of_a_crashed_cli_accept_resumes_the_same_operation(install, monkeypatch, tmp_path) -> None:
+    holder = _lease(install.vault)
+    _predict(install.queue)
+    needle = tmp_path / "needle.txt"
+    needle.write_text("Prefers uv over pip", encoding="utf-8")
+    argv = [
+        "memory-proposal-accept",
+        "--workspace", str(install.root),
+        "--vault-root", str(install.vault),
+        "--text-file", str(needle),
+        "--holder", holder,
+    ]
+    real = apply.queue_resolution
+    monkeypatch.setattr(apply, "queue_resolution", _crash)
+    with pytest.raises(RuntimeError):
+        cli.main(argv)
+    monkeypatch.setattr(apply, "queue_resolution", real)
+    journal = memory_receipts.journal_path(install.vault, install.guide)
+    first = [r for r in memory_receipts.read_receipts(journal) if r.get("kind") == "region_apply"]
+    assert len(first) == 1
+
+    assert cli.main(argv) == 0
+
+    receipts = [r for r in memory_receipts.read_receipts(journal) if r.get("kind") == "region_apply"]
+    assert [r["id"] for r in receipts] == [first[0]["id"]]
+    assert _region_text(install).count(FACT) == 1
+    decisions = [r for r in read_decisions(install.queue) if r.get("operation_id")]
+    assert len(decisions) == 1
+    assert decisions[0]["receipt_id"] == first[0]["id"]
+    assert decisions[0]["operation_id"] == first[0]["operation_id"]
+
+
+def test_a_lease_lost_between_the_two_effects_is_a_partial_conflict(install, monkeypatch) -> None:
+    """The lease check under the queue lock is what stops the settlement."""
+    intent = _accept_ready(install)
+    real_write = apply._write_region
+    lost = {"value": False}
+
+    def write_then_lose(*args, **kwargs):
+        result = real_write(*args, **kwargs)
+        lost["value"] = True
+        return result
+
+    def authority(vault, *, holder):
+        @contextmanager
+        def held():
+            yield not lost["value"]
+        return held()
+
+    monkeypatch.setattr(apply, "_write_region", write_then_lose)
+    monkeypatch.setattr(apply, "authorize_holder", authority)
+
+    result = apply.apply_memory_accept(intent, vault_root=install.vault)
+
+    assert result == apply.PartialConflict(result.guide_receipt_id)
+    assert _region_text(install).count(FACT) == 1
+    assert FACT in install.queue.read_text(encoding="utf-8")
+    assert not [r for r in read_decisions(install.queue) if r["operation_id"] == intent.operation_id]
+
+
+def test_handover_lowered_between_the_two_effects_stops_the_settlement(install, monkeypatch) -> None:
+    intent = _accept_ready(install)
+    real_write = apply._write_region
+    registry = install.root / ".runtime" / "workspaces.json"
+
+    def write_then_lower(*args, **kwargs):
+        result = real_write(*args, **kwargs)
+        entry = json.loads(registry.read_text(encoding="utf-8"))
+        entry[0]["memory_handover"] = "dismiss"
+        registry.write_text(json.dumps(entry), encoding="utf-8")
+        return result
+
+    monkeypatch.setattr(apply, "_write_region", write_then_lower)
+
+    result = apply.apply_memory_accept(intent, vault_root=install.vault)
+
+    assert isinstance(result, apply.PartialConflict)
+    assert _region_text(install).count(FACT) == 1
+    assert FACT in install.queue.read_text(encoding="utf-8")
+    assert not [r for r in read_decisions(install.queue) if r["operation_id"] == intent.operation_id]
+
+
+def test_a_slot_taken_after_preflight_refuses_the_guide_write(install, monkeypatch) -> None:
+    intent = _accept_ready(install)
+    real_write = apply._write_region
+
+    def fill_then_write(*args, **kwargs):
+        _fill_cap(install, 5)
+        return real_write(*args, **kwargs)
+
+    monkeypatch.setattr(apply, "_write_region", fill_then_write)
+    guide_before = install.guide.read_bytes()
+
+    result = apply.apply_memory_accept(intent, vault_root=install.vault)
+
+    assert result == apply.Refused(apply.REFUSED_WRITE_NOT_AUTHORISED)
+    assert install.guide.read_bytes() == guide_before
+    assert FACT in install.queue.read_text(encoding="utf-8")
+
+
+def test_a_row_whose_revision_changed_after_planning_is_refused(install) -> None:
+    line = f"{LINE} _(decide: nightly; first reason)_"
+    install.queue_rows(line)
+    holder = _lease(install.vault)
+    _predict(install.queue)
+    intent = _plan(install, line, holder=holder)
+    install.queue_rows(f"{LINE} _(decide: nightly; second reason)_")
+    guide_before = install.guide.read_bytes()
+
+    result = apply.apply_memory_accept(intent, vault_root=install.vault)
+
+    assert result == apply.Refused(apply.REFUSED_CHANGED)
+    assert install.guide.read_bytes() == guide_before

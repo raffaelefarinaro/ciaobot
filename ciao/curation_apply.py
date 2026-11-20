@@ -11,10 +11,17 @@ Lock order is guide, then queue, then state (see
 lock inside :func:`ciao.memory_proposals.accept_region_fact`; the queue is only
 ever taken after that, never around it.
 
+The cap is counted from durable records, not from decisions: each operation
+that wrote a region or settled a queue row left an agent receipt, and the
+region write checks the count under the guide lock before it writes. Two
+operations therefore cannot both take the fifth slot, because the first one's
+receipt is on disk before the guide lock is released.
+
 Authority is re-checked in three places: before the guide write, under the
 guide lock during the write (through ``authorize``), and again under the queue
-lock before the row is settled. A covered or exact-duplicate verdict writes no
-guide receipt, so the queue re-check is the only check that row gets.
+lock before the row is settled. Handover is read again at each of them.
+A covered or exact-duplicate verdict writes no guide receipt, so the queue
+re-check is the only check that row gets.
 
 A row the guide write has already settled but whose queue removal did not land
 is never removed unless the same row is still queued and the run still holds
@@ -24,6 +31,7 @@ recovery and undo as they are.
 
 from __future__ import annotations
 
+import hashlib
 import json
 from collections.abc import Iterator
 from contextlib import contextmanager
@@ -32,6 +40,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Literal
 
+from ciao import memory_proposals
 from ciao.curation_run import (
     PASS_PROPOSALS,
     PROPOSALS_RELATIVE,
@@ -45,7 +54,6 @@ from ciao.curation_run import (
 )
 from ciao.fact_candidates import external_anchor
 from ciao.memory_audit import strip_learned_stamp
-from ciao import memory_proposals
 from ciao.memory_proposals import (
     read_decisions,
     record_promotion,
@@ -58,15 +66,16 @@ from ciao.memory_receipts import (
     content_revision,
     destination_revision,
     find_receipts_by_operation_id,
+    journal_path,
     queue_lock,
     queue_resolution,
+    read_receipts,
 )
 from ciao.memory_tool import ensure_regions, read_region
 from ciao.proposal_kinds import ProposalBullet
 from ciao.proposal_predictions import (
     HANDOVER_ACCEPT_CAP,
     REGION_KINDS,
-    count_agent_accepts_since,
     handover_allows,
     latest_predictions,
     prediction_key,
@@ -77,9 +86,10 @@ from ciao.workspace_guide import guide_path
 
 REGION_APPLY_KIND = "region_apply"
 QUEUE_RESOLVE_KIND = "queue_resolve"
+_OPERATION_KINDS = frozenset({REGION_APPLY_KIND, QUEUE_RESOLVE_KIND})
+_UNPREPARED_CODES = frozenset({"missing", "missing_file"})
 
 # Fixed reasons. None of them echoes proposal text.
-_UNPREPARED_CODES = frozenset({"missing", "missing_file"})
 REFUSED_NO_OPERATION = "the accept has no operation id or holder"
 REFUSED_REGISTRY = "the installed engine does not register this workspace at this vault"
 REFUSED_HANDOVER = "the workspace handover does not allow an accept"
@@ -103,6 +113,7 @@ FAILED_QUEUE_RECEIPT = "the memory receipt journal is unavailable; the row was n
 FAILED_LEASE_LOST = "this run no longer holds the curation lease; progress was not recorded"
 FAILED_REMOVAL = "the queue row could not be removed exactly"
 FAILED_VERIFY = "the queue or region did not show the expected state after the write"
+FAILED_DECISION = "the decision could not be recorded; a retry finishes it"
 
 
 @dataclass(frozen=True, slots=True)
@@ -155,6 +166,17 @@ def accept_item_key(bullet: ProposalBullet, dup: int) -> str:
     return item_key(PASS_PROPOSALS, f"{_proposal_subject(bullet, dup)}\x00act:accept")
 
 
+def accept_operation_id(workspace: str, proposal_id: str, revision: str, prediction: str) -> str:
+    """The operation id for one row as judged.
+
+    The prediction is part of the identity: a fact re-queued and predicted again
+    is a new judgment and a new operation, while a retry of the same judgment
+    reproduces the same id and resumes it.
+    """
+    payload = json.dumps([workspace, proposal_id, revision, prediction], ensure_ascii=False)
+    return "cop_" + hashlib.sha256(payload.encode("utf-8")).hexdigest()[:32]
+
+
 def proposal_revision(bullet: ProposalBullet) -> str:
     """Digest of the row as the queue holds it, decider included."""
     return content_revision(
@@ -199,12 +221,12 @@ def plan_memory_accept(
     guide: Path,
     bullet: ProposalBullet,
     holder: str,
-    operation_id: str,
 ) -> ManagedMemoryAcceptIntent | Refused:
     """Bind one queued row, as the caller sees it now, into an intent.
 
-    The revisions are snapshots: the operation re-checks every one of them
-    under its locks before it writes anything.
+    The operation id is derived from the row and its revision, so a retry of the
+    same judged row resumes the same operation. The revisions are snapshots: the
+    operation re-checks every one of them under its locks before it writes.
     """
     queue = Path(vault_root) / PROPOSALS_RELATIVE
     with queue_lock(queue):
@@ -226,27 +248,79 @@ def plan_memory_accept(
         return Refused(REFUSED_REGION_UNREADABLE)
     entries = [] if diags else entries
     entry = matches[0]
+    revision = proposal_revision(bullet)
+    predicted_as = prediction_revision(predicted) if predicted else ""
     return ManagedMemoryAcceptIntent(
-        operation_id=operation_id,
+        operation_id=accept_operation_id(workspace, entry.proposal_id, revision, predicted_as),
         workspace=workspace,
         item_key=accept_item_key(bullet, entry.dup),
         proposal_id=entry.proposal_id,
-        proposal_revision=proposal_revision(bullet),
+        proposal_revision=revision,
         destination_revision=destination_revision(entries),
-        prediction_revision=prediction_revision(predicted) if predicted else "",
+        prediction_revision=predicted_as,
         holder=holder,
     )
 
 
+def _handover_open(vault: Path, workspace: str) -> bool:
+    """Whether the installed registry allows an accept for this workspace, read now."""
+    trusted = trusted_registry(workspace, vault)
+    if trusted is None:
+        return False
+    registered = trusted.workspace(workspace)
+    return registered is not None and handover_allows(registered.memory_handover, "accept")
+
+
+def _since(stamp: object, started: datetime) -> bool:
+    """Whether a recorded time is at or after the lease start. Unreadable times do not count."""
+    try:
+        moment = datetime.fromisoformat(str(stamp))
+    except ValueError:
+        return False
+    if moment.tzinfo is None:
+        moment = moment.replace(tzinfo=UTC)
+    return moment >= started
+
+
+def _agent_slots(vault: Path, queue: Path, started: datetime, *, exclude: str) -> int:
+    """How many of this run's accept slots are taken, not counting ``exclude``.
+
+    An operation takes a slot when it writes its agent receipts (region or queue)
+    and keeps it when its decision is recorded, so both are counted by operation
+    id. A decision with no operation id (written before operations existed) takes
+    one slot of its own.
+    """
+    operations: set[str] = set()
+    for row in read_receipts(journal_path(vault)):
+        if row.get("actor") != "agent" or row.get("kind") not in _OPERATION_KINDS:
+            continue
+        operation = str(row.get("operation_id", ""))
+        if operation and _since(row.get("ts"), started):
+            operations.add(operation)
+    unowned = 0
+    for row in read_decisions(queue):
+        if row.get("via") != "agent" or row.get("action") != "accepted":
+            continue
+        if not _since(row.get("ts"), started):
+            continue
+        operation = str(row.get("operation_id", ""))
+        if operation:
+            operations.add(operation)
+        else:
+            unowned += 1
+    operations.discard(exclude)
+    return len(operations) + unowned
+
+
 def _check_row(
-    vault: Path, queue: Path, intent: ManagedMemoryAcceptIntent, *, handover_ok: bool
+    vault: Path, queue: Path, intent: ManagedMemoryAcceptIntent
 ) -> tuple[QueuedProposal | None, datetime | None, str]:
-    """Every policy check that needs the queue, read now.
+    """Every policy check that needs the queue or the registry, read now.
 
     Returns ``(row, lease_started_at, "")`` when the accept may proceed, else
     ``(None, None, reason)``. The caller holds the queue lock.
     """
-    if not handover_ok:
+    if not _handover_open(vault, intent.workspace):
         return None, None, REFUSED_HANDOVER
     entry = _queued_row(queue, intent.workspace, intent.proposal_id)
     if entry is None:
@@ -277,18 +351,29 @@ def _check_row(
         return None, None, REFUSED_NO_LEASE
     if started.tzinfo is None:
         started = started.replace(tzinfo=UTC)
-    if count_agent_accepts_since(queue, started) >= HANDOVER_ACCEPT_CAP:
+    if _agent_slots(vault, queue, started, exclude=intent.operation_id) >= HANDOVER_ACCEPT_CAP:
         return None, None, REFUSED_CAP
     return entry, started, ""
 
 
 @contextmanager
 def _holder_may_accept(
-    vault: Path, queue: Path, *, holder: str, started: datetime
+    vault: Path,
+    queue: Path,
+    *,
+    holder: str,
+    started: datetime,
+    operation_id: str,
 ) -> Iterator[bool]:
-    """The lease holder is still this run and the cap has room. Holds the state lock."""
+    """The lease holder is still this run and a slot is free for this operation.
+
+    Holds the state lock for the caller's whole write, so the receipts it counts
+    cannot be added to underneath it.
+    """
     with authorize_holder(vault, holder=holder) as live:
-        yield bool(live) and count_agent_accepts_since(queue, started) < HANDOVER_ACCEPT_CAP
+        yield bool(live) and (
+            _agent_slots(vault, queue, started, exclude=operation_id) < HANDOVER_ACCEPT_CAP
+        )
 
 
 def _entries_for(queue: Path, workspace: str, proposal_id: str) -> int:
@@ -350,7 +435,11 @@ def _write_region(
             receipt_out=receipt,
             expected_revision=intent.destination_revision,
             authorize=lambda: _holder_may_accept(
-                vault, queue, holder=intent.holder, started=started
+                vault,
+                queue,
+                holder=intent.holder,
+                started=started,
+                operation_id=intent.operation_id,
             ),
             operation_id=intent.operation_id,
         )
@@ -376,23 +465,29 @@ def _settle_queue(
     queue: Path,
     intent: ManagedMemoryAcceptIntent,
     *,
-    handover_ok: bool,
     guide_receipt_id: str,
 ) -> tuple[ProposalBullet, str] | Refused | PartialConflict | Failed:
-    """Remove the queue row under the queue lock and the state lock. Returns ``(bullet, queue_receipt_id)``.
+    """Remove the queue row under the queue lock and the state lock.
 
-    Once the guide has been written (``guide_receipt_id`` set), any reason to stop
-    is a :class:`PartialConflict`: the region already holds the fact.
+    Returns ``(bullet, queue_receipt_id)``. Once the guide has been written
+    (``guide_receipt_id`` set), any reason to stop is a :class:`PartialConflict`:
+    the region already holds the fact.
     """
 
     def stop(reason: str) -> Refused | PartialConflict:
         return PartialConflict(guide_receipt_id) if guide_receipt_id else Refused(reason)
 
     with queue_lock(queue):
-        entry, started, reason = _check_row(vault, queue, intent, handover_ok=handover_ok)
+        entry, started, reason = _check_row(vault, queue, intent)
         if entry is None or started is None:
             return stop(reason or REFUSED_GONE)
-        with _holder_may_accept(vault, queue, holder=intent.holder, started=started) as allowed:
+        with _holder_may_accept(
+            vault,
+            queue,
+            holder=intent.holder,
+            started=started,
+            operation_id=intent.operation_id,
+        ) as allowed:
             if not allowed:
                 return stop(REFUSED_NOT_AUTHORISED)
             needle = entry.raw.strip()
@@ -441,8 +536,12 @@ def apply_memory_accept(intent: ManagedMemoryAcceptIntent, *, vault_root: Path) 
     receipts = find_receipts_by_operation_id(vault, intent.operation_id)
     if any(row.get("status") == PREPARED for row in receipts):
         return Failed(FAILED_INTERRUPTED)
-    guide_rows = [r for r in receipts if r.get("kind") == REGION_APPLY_KIND and r.get("status") == APPLIED]
-    queue_rows = [r for r in receipts if r.get("kind") == QUEUE_RESOLVE_KIND and r.get("status") == APPLIED]
+    guide_rows = [
+        r for r in receipts if r.get("kind") == REGION_APPLY_KIND and r.get("status") == APPLIED
+    ]
+    queue_rows = [
+        r for r in receipts if r.get("kind") == QUEUE_RESOLVE_KIND and r.get("status") == APPLIED
+    ]
     guide_receipt_id = str(guide_rows[0]["id"]) if guide_rows else ""
 
     # Exactly one decision per operation, written after both effects. Finding it
@@ -455,13 +554,13 @@ def apply_memory_accept(intent: ManagedMemoryAcceptIntent, *, vault_root: Path) 
     trusted = trusted_registry(intent.workspace, vault)
     if trusted is None:
         return PartialConflict(guide_receipt_id) if guide_receipt_id else Refused(REFUSED_REGISTRY)
-    registered = trusted.workspace(intent.workspace)
-    handover_ok = registered is not None and handover_allows(registered.memory_handover, "accept")
     guide = guide_path(trusted.agent_root(intent.workspace))
 
     bullet: ProposalBullet
+    queue_receipt_id = ""
     if guide_receipt_id or queue_rows:
-        # Resuming: the guide write (or the queue removal) already landed.
+        # Resuming: the guide write (or the queue removal) already landed. The
+        # queue settlement below re-checks handover and authority before it moves.
         outcome: Literal["written", "duplicate"] = "written" if guide_receipt_id else "duplicate"
         if queue_rows:
             bullet = ProposalBullet(
@@ -469,24 +568,19 @@ def apply_memory_accept(intent: ManagedMemoryAcceptIntent, *, vault_root: Path) 
                 text=str(queue_rows[0].get("removed_text", "")),
             )
             queue_receipt_id = str(queue_rows[0]["id"])
-        else:
-            queue_receipt_id = ""
     else:
         with queue_lock(queue):
-            entry, started, reason = _check_row(vault, queue, intent, handover_ok=handover_ok)
+            entry, started, reason = _check_row(vault, queue, intent)
         if entry is None or started is None:
             return Refused(reason or REFUSED_GONE)
         written = _write_region(vault, queue, guide, intent, entry.bullet, started)
         if isinstance(written, (Refused, Failed)):
             return written
         outcome, guide_receipt_id = written
-        queue_receipt_id = ""
         bullet = entry.bullet
 
     if not queue_receipt_id:
-        settled = _settle_queue(
-            vault, queue, intent, handover_ok=handover_ok, guide_receipt_id=guide_receipt_id
-        )
+        settled = _settle_queue(vault, queue, intent, guide_receipt_id=guide_receipt_id)
         if not isinstance(settled, tuple):
             return settled
         bullet, queue_receipt_id = settled
@@ -496,18 +590,24 @@ def apply_memory_accept(intent: ManagedMemoryAcceptIntent, *, vault_root: Path) 
     if _entries_for(queue, intent.workspace, intent.proposal_id):
         return PartialConflict(guide_receipt_id) if guide_receipt_id else Failed(FAILED_VERIFY)
 
-    record_promotion(
-        queue,
-        text=bullet.text,
-        kind=bullet.kind,
-        via="agent",
-        source=bullet.source,
-        destination=f"ciao:{bullet.kind}",
-        outcome=outcome,
-        proposal_id=intent.proposal_id,
-        receipt_id=guide_receipt_id,
-        operation_id=intent.operation_id,
-    )
+    try:
+        with queue_lock(queue):
+            recorded = record_promotion(
+                queue,
+                text=bullet.text,
+                kind=bullet.kind,
+                via="agent",
+                source=bullet.source,
+                destination=f"ciao:{bullet.kind}",
+                outcome=outcome,
+                proposal_id=intent.proposal_id,
+                receipt_id=guide_receipt_id,
+                operation_id=intent.operation_id,
+            )
+    except Exception:  # noqa: BLE001 — an unrecorded decision is finished by the replay
+        recorded = False
+    if not recorded:
+        return Failed(FAILED_DECISION)
     failure = _progress(vault, intent)
     if failure:
         return Failed(failure)

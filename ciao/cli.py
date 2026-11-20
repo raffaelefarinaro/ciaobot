@@ -5483,8 +5483,6 @@ def _memory_proposal_accept_command(args: argparse.Namespace) -> int:
     refused = _refuse_ambiguous_vault_write(args)
     if refused is not None:
         return refused
-    from uuid import uuid4
-
     from ciao.curation_apply import (
         Accepted,
         AlreadyDone,
@@ -5526,7 +5524,6 @@ def _memory_proposal_accept_command(args: argparse.Namespace) -> int:
         guide=guide,
         bullet=bullet,
         holder=holder,
-        operation_id=uuid4().hex,
     )
     if isinstance(planned, Refused):
         print(f"handover refused: {planned.reason}", file=sys.stderr)
