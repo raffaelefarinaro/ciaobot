@@ -290,6 +290,23 @@ weekly marker counts as the dispatch's only when it equals the UTC date of the j
 start. Index, audit and effect-count observations are not collected yet, so those
 obligations stay unknown.
 
+The usage projection (`ciao/care_usage.py`) is a separate, pure collector for
+attributable care model-call usage; it does not replace `collect_usage`, which folds absent
+counters into zero and sums per-turn aggregates. Its input is a trusted expected-call
+inventory (`proven` says whether it is the run's complete set of calls) plus typed
+per-attempt observations keyed by run, worker and stable call id. An observed counter is
+complete, including an observed zero; an unreported counter, a call with no observation,
+an unproven inventory or an unbound, mismatched or conflicting observation is `unknown` or
+`partial`, never zero. Identical duplicates collapse, conflicting duplicates make their
+call incomplete, failed attempts count as model calls when their evidence exists, and token,
+latency and cost coverage are independent. Metrics are reported per partition
+(`archive_capture`, `care_worker`, `skill_marginal`, `narrator_retry`) and for the run.
+Provider aggregates are not assumed to describe individual calls, and no provider adapter
+exists yet: OpenCode message/step identifiers and Claude turn aggregates are different
+granularities, so an adapter is a separate step once its event source is confirmed. Output
+carries counts, enumerated reasons, numbers and digests, never identifiers, prompts or paths.
+It claims no saving; equivalence is still decided only by `comparison_eligibility`.
+
 ## Permission mode
 
 The chats of a run start in a permission mode, and the default depends on the
