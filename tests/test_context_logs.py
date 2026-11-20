@@ -328,7 +328,7 @@ async def test_context_logs_never_reads_engine_logs(
         # A scoped builder resolves these names through debug_report's own
         # module globals, so patching only ciao.error_log would let a
         # regression that read a tail pass this guard.
-        "ciao.debug_report.tail_error_log",
+        "ciao.debug_report.tail_error_records",
         "ciao.debug_report.tail_debug_log",
         "ciao.error_log.tail_error_log",
         "ciao.error_log.tail_debug_log",

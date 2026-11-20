@@ -106,8 +106,8 @@ async function mountPanel(chatId = CHAT_ID, existing?: ReturnType<typeof createP
 
 const PROVIDERS = {
   connections: {
-    claude: { name: 'claude', label: 'Claude Code', ok: true, auth: 'ok', command: 'claude auth login', mcp_command: 'claude mcp' },
-    opencode: { name: 'opencode', label: 'OpenCode', ok: true, auth: 'ok', command: 'opencode auth login', mcp_command: 'opencode mcp' },
+    claude: { name: 'claude', label: 'Claude Code', ok: true, auth: 'ok', state: 'ready', command: 'claude auth login', mcp_command: 'claude mcp' },
+    opencode: { name: 'opencode', label: 'OpenCode', ok: true, auth: 'ok', state: 'ready', command: 'opencode auth login', mcp_command: 'opencode mcp' },
   },
 }
 

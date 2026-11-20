@@ -2,7 +2,8 @@
 
 The phase and the card both come from ``claude_status_probe``; these tests pin
 each install state so the phase cannot read "connected" while the card says the
-ACP adapter is missing, and never fail with an empty detail.
+ACP adapter is missing, and never fail with an empty detail. A CLI the user never
+installed is skipped, not failed.
 """
 
 from __future__ import annotations
@@ -16,7 +17,11 @@ from ciao import provider_registry
 from ciao.main import StartupTracker, run_provider_startup_check
 from ciao.setup_status import claude_status_probe
 
-_ADAPTER_MESSAGE = (
+# The phase has no install button, so it points at Settings; the card keeps its button wording.
+_PHASE_ADAPTER_MESSAGE = (
+    "Claude Code is installed, but its ACP adapter is not; open Settings → Providers to install it."
+)
+_CARD_ADAPTER_MESSAGE = (
     "Claude Code is installed, but the ACP adapter (claude-agent-acp) is not. "
     "Install the ACP adapter with the button below, or run: "
     "npm install -g @agentclientprotocol/claude-agent-acp@0.108.1"
@@ -51,7 +56,8 @@ def test_cli_missing_fails_the_phase_with_the_card_detail(monkeypatch, claude_pr
 
     phase = _phase(_run(claude_probe))
 
-    assert phase.status == "failed"
+    # Not installed is a choice, not a fault: neutral, never failed.
+    assert phase.status == "skipped"
     assert phase.message == "Claude Code is not installed on this machine."
     assert phase.message == claude_status_probe({}, config_path=None)["detail"]
 
@@ -65,8 +71,12 @@ def test_cli_present_but_adapter_missing_fails_with_the_adapter_message(
     phase = _phase(_run(claude_probe))
 
     assert phase.status == "failed"
-    assert phase.message == _ADAPTER_MESSAGE
-    assert "Settings → Providers" not in phase.message
+    assert phase.message == _PHASE_ADAPTER_MESSAGE
+    assert "button below" not in phase.message
+    # The card renders the same status from the same probe, with its own wording.
+    card = claude_status_probe({}, config_path=None)
+    assert card["detail"] == _CARD_ADAPTER_MESSAGE
+    assert card["state"] == "adapter_missing"
 
 
 def test_cli_and_adapter_present_and_signed_in_is_done(monkeypatch, claude_probe) -> None:
@@ -95,6 +105,16 @@ def test_adapter_missing_is_never_reported_connected(monkeypatch, claude_probe) 
 
     assert phase.status == "failed"
     assert "connected" not in phase.message
+
+
+def test_the_startup_phase_follows_the_explicit_state_not_the_detail_text() -> None:
+    def not_installed_with_other_words() -> dict:
+        return {"ok": False, "state": "not_installed", "detail": "gone"}
+
+    phase = _phase(_run(not_installed_with_other_words))
+
+    assert phase.status == "skipped"
+    assert phase.message == "gone"
 
 
 def test_a_probe_that_raises_never_leaves_an_empty_detail() -> None:
