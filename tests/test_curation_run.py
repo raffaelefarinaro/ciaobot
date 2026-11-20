@@ -429,16 +429,21 @@ def _expire_lease(vault: Path) -> None:
     cr._store(cr.state_path(vault), state)
 
 
+def _no_stray_temp_files(vault: Path) -> bool:
+    return not list(vault.rglob("*.write.tmp"))
+
+
 @pytest.mark.parametrize("during_scan", ["expired", "replaced"])
 def test_category_publication_refuses_lost_begin_lease(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, during_scan: str
 ) -> None:
     """The vocabulary scan runs outside every lock. A holder that lost its lease
-    while it ran must publish neither the sidecar nor the queue bullet.
+    while it ran must publish neither the sidecar nor the queue bullet, and must
+    leave no staged ``*.write.tmp`` behind.
 
-    Red before the fix: the sidecar was written after the scan returned, with no
-    holder check at all, so ``recipe-book.json`` existed although the lease was
-    gone.
+    The lease guard is the only thing that stops the sidecar being written here.
+    With the guard disabled, both cases fail on the sidecar assertion, because the
+    sidecar was written after the scan with no holder check at all.
     """
     from ciao import vault_index
     from ciao.vocabulary_proposals import category_sidecar_path
@@ -461,34 +466,158 @@ def test_category_publication_refuses_lost_begin_lease(
 
     monkeypatch.setattr(vault_index, "scan_vault", scan_then_lose)
 
-    with pytest.raises(cr.CurationBusy):
+    refused: Exception | None = None
+    try:
         cr._category_cluster_items(vault, holder=lease.holder, registry_root=vault)
+    except cr.CurationBusy as exc:
+        refused = exc
 
     assert not category_sidecar_path(vault, "recipe-book").exists()
     assert not (vault / cr.PROPOSALS_RELATIVE).exists()
+    assert _no_stray_temp_files(vault)
+    assert refused is not None
     if during_scan == "replaced":
         assert cr.load_state(vault).lease["holder"].startswith("replacement:")
 
 
-def test_category_begin_reports_lost_lease_as_75_without_success(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    from ciao.cli import CURATION_BUSY_EXIT, _curation_begin_command
-
+def _begin_args_for_recipe_vault(tmp_path: Path) -> tuple[Path, Path]:
     vault = _vault(tmp_path)
     guide = _guide(tmp_path)
     _fresh_log(vault, last_full_pass=(date.today() - timedelta(days=1)).isoformat())
-    printed = _capture(monkeypatch)
+    _cluster_vault(vault, "recipe-book", 3)
+    return vault, guide
 
-    def lost(*_args: object, **_kwargs: object) -> list[object]:
-        raise cr.CurationBusy("lease expired")
 
-    monkeypatch.setattr(cr, "_category_cluster_items", lost)
+def test_category_begin_lease_expiring_during_scan_exits_75_end_to_end(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The real ``curation-begin``: the lease really expires while the category scan
+    runs, and nothing is published or printed as success."""
+    from ciao import vault_index
+    from ciao import vocabulary_proposals as vp
+    from ciao.cli import CURATION_BUSY_EXIT, _curation_begin_command
 
-    assert _curation_begin_command(
-        _args(tmp_path, vault, guide, holder="nightly")
-    ) == CURATION_BUSY_EXIT
-    assert not printed
+    vault, guide = _begin_args_for_recipe_vault(tmp_path)
+    real_scan = vault_index.scan_vault
+    expired = []
+
+    def scan_then_expire(*args: object, **kwargs: object):
+        result = real_scan(*args, **kwargs)
+        if not expired:
+            expired.append(True)
+            _expire_lease(vault)
+        return result
+
+    monkeypatch.setattr(vault_index, "scan_vault", scan_then_expire)
+
+    code = _curation_begin_command(_args(tmp_path, vault, guide, holder="nightly"))
+
+    captured = capsys.readouterr()
+    assert expired == [True]
+    assert code == CURATION_BUSY_EXIT
+    assert captured.out == ""
+    assert "curation lease lost while building the worklist" in captured.err
+    assert not vp.category_sidecar_path(vault, "recipe-book").exists()
+    assert not (vault / cr.PROPOSALS_RELATIVE).exists()
+    assert _no_stray_temp_files(vault)
+
+
+def test_category_begin_plans_without_categories_when_the_queue_lock_is_held(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A queue lock that cannot be taken in time is not a reason to fail the
+    nightly plan: the category pass is advisory, the plan is produced, and an
+    empty plan releases the lease rather than holding it until the TTL."""
+    import functools
+    import threading
+
+    from ciao import memory_receipts as mr
+    from ciao.cli import _curation_begin_command
+
+    vault, guide = _begin_args_for_recipe_vault(tmp_path)
+    queue = vault / cr.PROPOSALS_RELATIVE
+    held = threading.Event()
+    release = threading.Event()
+
+    def hold_queue_lock() -> None:
+        with mr.queue_lock(queue):
+            held.set()
+            release.wait(10)
+
+    holder_thread = threading.Thread(target=hold_queue_lock)
+    holder_thread.start()
+    assert held.wait(10)
+    # The real timeout is 30 s; the same contended acquire with a short bound.
+    real_queue_lock = mr.queue_lock
+    monkeypatch.setattr(mr, "queue_lock", functools.partial(real_queue_lock, timeout_s=0.05))
+    try:
+        code = _curation_begin_command(_args(tmp_path, vault, guide, holder="nightly"))
+    finally:
+        release.set()
+        holder_thread.join(10)
+
+    out = capsys.readouterr().out
+    assert code == 0
+    assert json.loads(out)["empty"] is True
+    assert cr.active_lease(vault) is None
+    assert not (vault / cr.PROPOSALS_RELATIVE).exists()
+
+
+def test_category_begin_plans_when_publication_fails_with_an_os_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    from ciao import vocabulary_proposals as vp
+    from ciao.cli import _curation_begin_command
+
+    vault, guide = _begin_args_for_recipe_vault(tmp_path)
+
+    def read_only(*_args: object, **_kwargs: object):
+        raise PermissionError("read-only vault")
+
+    monkeypatch.setattr(vp, "write_category_sidecar", read_only)
+
+    code = _curation_begin_command(_args(tmp_path, vault, guide, holder="nightly"))
+
+    assert code == 0
+    assert json.loads(capsys.readouterr().out)["empty"] is True
+    assert cr.active_lease(vault) is None
+
+
+def test_category_begin_plans_when_the_queue_is_not_utf8(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """An unreadable queue is a publication failure: the plan is still produced."""
+    from ciao.cli import _curation_begin_command
+
+    vault, guide = _begin_args_for_recipe_vault(tmp_path)
+    queue = vault / cr.PROPOSALS_RELATIVE
+    queue.parent.mkdir(parents=True, exist_ok=True)
+    queue.write_bytes(b"\xff\xfe not utf-8\n")
+
+    code = _curation_begin_command(_args(tmp_path, vault, guide, holder="nightly"))
+
+    assert code == 0
+    assert json.loads(capsys.readouterr().out)["empty"] is True
+    assert cr.active_lease(vault) is None
+
+
+def test_a_begin_that_exits_non_zero_after_taking_the_lease_releases_it(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    from ciao.cli import _curation_begin_command
+
+    vault, guide = _begin_args_for_recipe_vault(tmp_path)
+
+    def broken_plan(*_args: object, **_kwargs: object):
+        raise cr.CurationStateError("state file is untrustworthy")
+
+    monkeypatch.setattr("ciao.cli._curation_plan", broken_plan)
+
+    code = _curation_begin_command(_args(tmp_path, vault, guide, holder="nightly"))
+
+    assert code == 1
+    assert cr.active_lease(vault) is None
+    assert cr.load_state(vault).last_run.get("status") == "error"
 
 
 def test_category_publish_expiry_between_sidecar_and_queue_is_recoverable(

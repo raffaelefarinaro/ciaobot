@@ -45,6 +45,7 @@ import logging
 import re
 import unicodedata
 from collections.abc import Callable
+from contextlib import AbstractContextManager
 from dataclasses import dataclass
 from datetime import UTC, datetime, date
 from pathlib import Path
@@ -1700,7 +1701,7 @@ def append_proposals(
     *,
     source_path: Path | None = None,
     allow_dismissed: bool = False,
-    before_publish: Callable[[], None] | None = None,
+    publish_guard: Callable[[], AbstractContextManager[object]] | None = None,
 ) -> Path | None:
     """Append a timestamped batch to ``Workspace/Memory-Proposals.md``.
 
@@ -1708,8 +1709,8 @@ def append_proposals(
     concurrent undo (or another writer) cannot land between the dedupe read and
     the rewrite and be silently overwritten.
 
-    ``before_publish`` is forwarded to the queue replacement and runs only when
-    there is something to write; see :func:`ciao.memory_receipts.write_queue_atomically`.
+    ``publish_guard`` wraps only the queue replacement, and only runs when there is
+    something to write; see :func:`ciao.memory_receipts.write_queue_atomically`.
     """
     if not proposals:
         return None
@@ -1749,7 +1750,7 @@ def append_proposals(
         block = header + "\n".join(lines) + "\n"
 
         write_queue_atomically(
-            out_path, existing + "\n" + block, before_publish=before_publish
+            out_path, existing + "\n" + block, publish_guard=publish_guard
         )
         return out_path
 
