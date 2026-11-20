@@ -23,6 +23,7 @@ import ciao.engine_update as engine_update
 import ciao.update_host as update_host
 from ciao.engine_update import (
     OPERATION_NAME,
+    PHASES,
     PREVIOUS_ENV_NAME,
     SERVER_LABEL,
     Operation,
@@ -340,6 +341,186 @@ def test_retire_staged_waits_out_a_running_update(tmp_path: Path) -> None:
 
     assert stage_dir.is_dir()
     assert read_operation(state) is not None
+
+
+def _staged_env(state: Path, name: str = "stage-op1") -> Path:
+    stage_dir = state / name
+    (stage_dir / "env" / "bin").mkdir(parents=True)
+    (stage_dir / "env" / "bin" / "python").write_text("")
+    return stage_dir
+
+
+def test_status_survives_a_failed_rmtree(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # `status` is read by the 0.5.x app: an OSError here must not become a
+    # traceback on stderr or a non-zero exit (#3410 review).
+    state = tmp_path / "update-state"
+    stage_dir = _staged_env(state)
+    _legacy_staged_record(state, stage_dir)
+
+    def busy(path: object, *args: object, **kwargs: object) -> None:
+        raise PermissionError("busy")
+
+    monkeypatch.setattr(engine_update.shutil, "rmtree", busy)
+
+    assert main(["status"]) == 0
+
+    captured = capsys.readouterr()
+    assert captured.err == ""
+    assert captured.out.startswith("staged 2.0.0 in ")
+    assert stage_dir.is_dir()
+    assert read_operation(state) is not None
+    assert engine_update.retire_staged(state) is False
+
+
+def test_retire_staged_survives_a_failed_unlink(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    state = tmp_path / "update-state"
+    stage_dir = _staged_env(state)
+    _legacy_staged_record(state, stage_dir)
+    real_unlink = Path.unlink
+
+    def refuse_record(self: Path, missing_ok: bool = False) -> None:
+        if self.name == OPERATION_NAME:
+            raise PermissionError("read-only volume")
+        real_unlink(self, missing_ok=missing_ok)
+
+    monkeypatch.setattr(Path, "unlink", refuse_record)
+
+    assert engine_update.retire_staged(state) is False
+    assert main(["status"]) == 0
+    assert capsys.readouterr().err == ""
+
+
+def test_status_survives_an_unwritable_state_dir(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # The lock file cannot be created, so the lock step raises before anything
+    # is touched; the record stays readable and `status` still answers.
+    state = tmp_path / "update-state"
+    stage_dir = _staged_env(state)
+    _legacy_staged_record(state, stage_dir)
+    state.chmod(0o500)
+    try:
+        assert engine_update.retire_staged(state) is False
+        assert main(["status"]) == 0
+    finally:
+        state.chmod(0o700)
+
+    captured = capsys.readouterr()
+    assert captured.err == ""
+    assert stage_dir.is_dir()
+
+
+def test_retire_staged_skips_an_operation_path_that_is_a_directory(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    state = tmp_path / "update-state"
+    (state / OPERATION_NAME).mkdir(parents=True)
+
+    assert engine_update.retire_staged(state) is False
+    assert main(["status"]) == 0
+    captured = capsys.readouterr()
+    assert captured.err == ""
+    assert (state / OPERATION_NAME).is_dir()
+
+
+def test_retire_staged_refuses_a_symlinked_state_dir(tmp_path: Path) -> None:
+    real = tmp_path / "real-updates"
+    real.mkdir()
+    stage_dir = _staged_env(real)
+    _legacy_staged_record(real, stage_dir)
+    link = tmp_path / "updates-link"
+    link.symlink_to(real, target_is_directory=True)
+    # The record names the env through the link, so only the state-dir check
+    # (not the parent comparison) can refuse it.
+    _legacy_staged_record(real, link / stage_dir.name)
+
+    assert engine_update.retire_staged(link) is False
+
+    assert stage_dir.is_dir()
+    assert read_operation(real) is not None
+
+
+def test_retire_staged_refuses_an_intermediate_symlink(tmp_path: Path) -> None:
+    state = tmp_path / "update-state"
+    state.mkdir()
+    outside = tmp_path / "elsewhere"
+    victim = _staged_env(outside, name="stage-victim")
+    (state / "mid").symlink_to(outside, target_is_directory=True)
+    _legacy_staged_record(state, state / "mid" / "stage-victim")
+
+    assert engine_update.retire_staged(state) is False
+
+    assert victim.is_dir()
+    assert read_operation(state) is not None
+
+
+@pytest.mark.parametrize(
+    "where",
+    ["state-itself", "parent", "nested", "non-stage-sibling", "dotdot"],
+)
+def test_retire_staged_refuses_paths_that_are_not_a_stage_child(
+    tmp_path: Path, where: str
+) -> None:
+    state = tmp_path / "update-state"
+    keep = _staged_env(state, name="stage-keep")
+    sibling = state / "backups"
+    sibling.mkdir()
+    (sibling / "data.txt").write_text("keep")
+    nested = _staged_env(state / "stage-outer", name="stage-inner")
+    targets = {
+        "state-itself": str(state),
+        "parent": str(tmp_path),
+        "nested": str(nested),
+        "non-stage-sibling": str(sibling),
+        "dotdot": str(state / "stage-keep" / ".." / "backups"),
+    }
+    _legacy_staged_record(state, Path(targets[where]))
+
+    assert engine_update.retire_staged(state) is False
+
+    assert keep.is_dir()
+    assert (sibling / "data.txt").read_text() == "keep"
+    assert nested.is_dir()
+    assert read_operation(state) is not None
+
+
+def test_retire_staged_refuses_a_relative_stage_dir(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Relative state dir and relative record: the parent comparison alone would
+    # accept this, so only the absolute-path rule refuses it.
+    monkeypatch.chdir(tmp_path)
+    state = Path("update-state")
+    state.mkdir()
+    relative = state / "stage-relative"
+    relative.mkdir()
+    _legacy_staged_record(state, relative)
+
+    assert engine_update.retire_staged(state) is False
+
+    assert relative.is_dir()
+    assert read_operation(state) is not None
+
+
+@pytest.mark.parametrize("phase", PHASES[PHASES.index("staged") + 1 :])
+def test_retire_staged_leaves_every_later_phase_alone(tmp_path: Path, phase: str) -> None:
+    state = tmp_path / "update-state"
+    stage_dir = _staged_env(state)
+    _legacy_staged_record(state, stage_dir)
+    record = json.loads((state / OPERATION_NAME).read_text())
+    record["phase"] = phase
+    (state / OPERATION_NAME).write_text(json.dumps(record))
+
+    assert engine_update.retire_staged(state) is False
+
+    assert stage_dir.is_dir()
+    op = read_operation(state)
+    assert op is not None
+    assert op.phase == phase
 
 
 # ── the receiving half (#570): fakes for launchd, uv, HTTP and the env ───

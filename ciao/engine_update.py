@@ -234,23 +234,30 @@ def write_operation(op: Operation, state_dir: Path | None = None) -> None:
         tmp.unlink(missing_ok=True)
 
 
-def _contained_stage_dir(raw: str, state_dir: Path) -> Path | None:
-    """Return the real path of a staged env that lies strictly inside ``state_dir``.
+# The 1.x stager named each env `stage-<operation id>` directly under the updates
+# state dir (the v1.10.0 record pinned in tests/test_engine_update_hop_contract.py).
+STAGE_DIR_PREFIX = "stage-"
 
-    A symlink at the recorded path is refused outright, and so is any path whose
-    resolved form leaves the state dir, so a record can never point the cleanup
-    at a directory the updater did not create.
+
+def _contained_stage_dir(raw: str, state_dir: Path) -> Path | None:
+    """Return the recorded env path only when it is a plain ``stage-*`` child of ``state_dir``.
+
+    Nothing is resolved, so nothing can be redirected: the path must be absolute,
+    its parent must be the state dir exactly as written (which rules out ``..``,
+    the state dir itself, its parents, nested directories and any intermediate
+    symlink), its name must carry the stage prefix, and it must not be a symlink.
     """
     if not raw:
         return None
     candidate = Path(raw)
+    if not candidate.is_absolute() or candidate.parent != state_dir:
+        return None
+    name = candidate.name
+    if not name.startswith(STAGE_DIR_PREFIX) or name == STAGE_DIR_PREFIX:
+        return None
     if candidate.is_symlink():
         return None
-    base = state_dir.resolve()
-    target = candidate.resolve()
-    if target == base or not target.is_relative_to(base):
-        return None
-    return target
+    return candidate
 
 
 def retire_staged(state_dir: Path | None = None) -> bool:
@@ -260,12 +267,28 @@ def retire_staged(state_dir: Path | None = None) -> bool:
     removed; nothing else retires that record. Only the ``staged`` phase is
     touched: a record that reached ``draining`` or later is in flight or
     half-applied and belongs to :func:`recover_interrupted_apply`. The directory
-    is removed only when it resolves inside the state dir, and the record is
-    removed after it, so an interrupted run is simply retried. Returns True
-    when a record was removed; False when there was nothing to do, the record
-    was refused, or another update holds the lock.
+    must be a direct ``stage-*`` child of the state dir (see
+    :func:`_contained_stage_dir`), and the record is removed after it, so an
+    interrupted run is simply retried. Returns True when a record was removed;
+    False when there was nothing to do, the record was refused, another update
+    holds the lock, or the filesystem refused an operation.
+
+    Never raises: ``status`` is read by the 0.5.x app and the startup path must
+    not fail on a stale record, so an ``OSError`` is logged at INFO and answered
+    False.
     """
     root = state_dir or default_state_dir()
+    try:
+        return _retire_staged(root)
+    except OSError as exc:
+        logger.info("Could not discard the staged engine update: %s", exc)
+        return False
+
+
+def _retire_staged(root: Path) -> bool:
+    if root.is_symlink():
+        logger.info("Update state dir is a symlink; leaving staged updates alone")
+        return False
     first = read_operation(root)
     if first is None or first.phase != "staged":
         return False
@@ -282,7 +305,7 @@ def retire_staged(state_dir: Path | None = None) -> bool:
         # stderr as part of its answer, and a refused record is still printed.
         if target is None:
             logger.info(
-                "Staged update %s points outside the update state dir; leaving it",
+                "Staged update %s does not name a stage dir in the update state dir; leaving it",
                 op.id,
             )
             return False

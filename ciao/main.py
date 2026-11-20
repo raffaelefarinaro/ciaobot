@@ -689,6 +689,16 @@ def provider_startup_phase(provider_id: str) -> str:
     return _STARTUP_PHASE_IDS.get(provider_id, f"connect_{provider_id}")
 
 
+async def _discard_staged_engine_update() -> None:
+    """Discard a never-applied 1.x staged update, on a worker thread, never raising."""
+    try:
+        from ciao.engine_update import retire_staged
+
+        await asyncio.to_thread(retire_staged)
+    except Exception:
+        logger.exception("Staged engine update cleanup failed")
+
+
 async def check_provider_startup(tracker: StartupTracker, phase: str, descriptor) -> None:
     """Start the provider's pinned ACP adapter install when its CLI is present, then settle the phase.
 
@@ -923,14 +933,10 @@ async def _run_server_locked(
         tracker.fail("recover_memory_receipts", "receipt recovery failed")
         logger.exception("Memory receipt recovery failed")
 
-    # A 1.x staged update that was never applied is discarded here, before the
-    # recovery step below looks at the record: that step ignores `staged`.
-    try:
-        from ciao.engine_update import retire_staged
-
-        retire_staged()
-    except Exception:
-        logger.exception("Staged engine update cleanup failed")
+    # A 1.x staged update that was never applied is discarded off the loop and
+    # not awaited: removing a whole staged env can take a while, and binding must
+    # not wait for it. Recovery ignores `staged`, so the two never race on a record.
+    asyncio.create_task(_discard_staged_engine_update())
 
     # An engine update interrupted by a reboot, a logout or a killed updater job
     # leaves its record in a post-move phase with the env moved aside and
