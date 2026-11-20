@@ -86,7 +86,10 @@ def test_tool_call_summary_uses_command_then_location_then_title() -> None:
     (loc,) = _normalizer().feed(_tool_call({"other": 1}, kind="read", locations=[{"path": "/w/a.py"}]))
     assert isinstance(loc, ToolUseEvent) and loc.tool_input == "/w/a.py"
     (title,) = _normalizer().feed(_tool_call(None, kind="think", title="Pondering"))
-    assert isinstance(title, ToolUseEvent) and title.tool_input == "Pondering" and title.tool_name == "Pondering"
+    # The title names the call; it is never echoed as the input.
+    assert isinstance(title, ToolUseEvent) and title.tool_input == "" and title.tool_name == "Pondering"
+    (raw,) = _normalizer().feed(_tool_call({"query": "ciao"}, kind="fetch", title="Search"))
+    assert isinstance(raw, ToolUseEvent) and raw.tool_input == "ciao"
 
 
 def test_tool_name_falls_back_to_kind_then_tool() -> None:
@@ -349,3 +352,123 @@ def test_fixture_replay_claude_turn_text_and_state() -> None:
     assert text.final_text == "Done."
     assert n.compacted is True
     assert n.usage == {"context_used": "2", "context_size": "200000"}
+
+
+# -- subagents and skills (opencode `subagent`/`skill`, Claude `Agent`) -----------------
+
+_PROMPT = "Run the whole audit. " + "Secret detail " * 40
+
+
+def _agent_frame(call_id: str, *, title: str = "subagent", name: str | None = "subagent", raw: Any = None,
+                 kind: str = "think", claude: str | None = None) -> dict[str, Any]:
+    frame: dict[str, Any] = {"sessionUpdate": "tool_call", "toolCallId": call_id, "title": title, "kind": kind}
+    if name is not None:
+        frame["name"] = name
+    if raw is not None:
+        frame["rawInput"] = raw
+    if claude is not None:
+        frame["_meta"] = {"claudeCode": {"toolName": claude}}
+    return frame
+
+
+def test_opencode_subagent_is_an_agent_call_summarised_from_raw_input() -> None:
+    n = _normalizer()
+    (first,) = n.feed(_agent_frame("c1", raw={}))
+    assert isinstance(first, ToolUseEvent) and (first.tool_name, first.tool_input) == ("Agent", "")
+    (update,) = n.feed({
+        "sessionUpdate": "tool_call_update", "toolCallId": "c1", "status": "in_progress", "title": "subagent",
+        "rawInput": {"agent": "general", "description": "Sleep 5", "prompt": _PROMPT},
+    })
+    assert isinstance(update, ToolUseEvent)
+    assert (update.tool_name, update.tool_input) == ("Agent", "[general] Sleep 5")
+    # The prompt is the agent's to read, never the journal's.
+    assert "Secret detail" not in update.tool_input
+
+
+def test_claude_agent_call_uses_claude_tool_name_and_subtype() -> None:
+    n = _normalizer()
+    (call,) = n.feed(_agent_frame("t1", title="Count entries", name=None, claude="Agent",
+                                  raw={"description": "Count entries", "prompt": _PROMPT, "subagent_type": "Explore"}))
+    assert isinstance(call, ToolUseEvent)
+    assert (call.tool_name, call.tool_input) == ("Agent", "[Explore] Count entries")
+
+
+def test_task_is_the_same_agent_call_as_agent() -> None:
+    (call,) = _normalizer().feed(_agent_frame("t2", title="Old task", name=None, claude="Task",
+                                              raw={"description": "Old task", "subagent_type": "general-purpose"}))
+    assert isinstance(call, ToolUseEvent) and call.tool_name == "Agent"
+
+
+def test_subagent_description_is_bounded_and_free_of_control_characters() -> None:
+    long_text = "Ex\x1b[2Jplore\x00" + "x" * 500
+    (call,) = _normalizer().feed(_agent_frame("t3", name=None, claude="Agent", raw={"description": long_text}))
+    assert isinstance(call, ToolUseEvent)
+    assert "\x1b" not in call.tool_input and "\x00" not in call.tool_input
+    assert len(call.tool_input) <= 200
+
+
+def test_opencode_skill_shows_the_skill_name_not_the_tool_name() -> None:
+    (call,) = _normalizer().feed(_agent_frame("s1", title="skill", name="skill", kind="other", raw={"name": "pdf-tools"}))
+    assert isinstance(call, ToolUseEvent)
+    assert (call.tool_name, call.tool_input) == ("Skill", "pdf-tools")
+
+
+def test_name_field_wins_over_title_for_tool_name() -> None:
+    (call,) = _normalizer().feed({
+        "sessionUpdate": "tool_call", "toolCallId": "b1", "name": "shell", "title": "Sleep: shell",
+        "kind": "execute", "rawInput": {"command": "sleep 5"},
+    })
+    assert isinstance(call, ToolUseEvent) and call.tool_name == "shell"
+    # A later title does not replace a name the agent sent: the re-announce renders the same.
+    later = _normalizer()
+    later.feed({"sessionUpdate": "tool_call", "toolCallId": "b2", "name": "shell", "title": "x", "kind": "execute"})
+    assert later.feed({"sessionUpdate": "tool_call_update", "toolCallId": "b2", "title": "Other title"}) == []
+
+
+def test_identical_reannounce_writes_no_second_tool_use() -> None:
+    n = _normalizer()
+    n.feed(_agent_frame("d1", raw={}))
+    in_progress = {
+        "sessionUpdate": "tool_call_update", "toolCallId": "d1", "status": "in_progress", "title": "subagent",
+        "rawInput": {"agent": "general", "description": "Sleep 5", "prompt": _PROMPT},
+    }
+    assert len(n.feed(in_progress)) == 1
+    assert n.feed(dict(in_progress)) == []
+    assert n.feed({"sessionUpdate": "tool_call_update", "toolCallId": "d1", "status": "in_progress"}) == []
+    # A changed description is a real change to the rendered input.
+    changed = n.feed({**in_progress, "rawInput": {"agent": "general", "description": "Sleep 9", "prompt": _PROMPT}})
+    assert [(e.tool_name, e.tool_input) for e in changed] == [("Agent", "[general] Sleep 9")]
+
+
+def test_launch_acknowledgement_is_background_and_a_plain_completion_is_not() -> None:
+    n = _normalizer()
+    n.feed(_agent_frame("b1", raw={"description": "Sleep 5", "agent": "general"}))
+    (ack,) = n.feed({
+        "sessionUpdate": "tool_call_update", "toolCallId": "b1", "status": "completed",
+        "rawOutput": {"metadata": {"sessionID": "ses_child", "status": "running", "truncated": False}},
+    })
+    assert isinstance(ack, ToolUseEvent) and (ack.type, ack.background) == ("tool_result", True)
+    n.feed({"sessionUpdate": "tool_call", "toolCallId": "p1", "title": "Read", "kind": "read", "rawInput": {}})
+    (done,) = n.feed({"sessionUpdate": "tool_call_update", "toolCallId": "p1", "status": "completed",
+                      "rawOutput": {"metadata": {"status": "running"}}})
+    assert isinstance(done, ToolUseEvent) and done.background is False
+
+
+def test_old_title_as_input_rows_are_still_plain_events() -> None:
+    # A journal row written before this change has no background or subagent_status key: the
+    # event defaults keep those rows valid.
+    event = ToolUseEvent(type="tool_result", tool_use_id="old")
+    assert (event.background, event.subagent_status) == (False, "")
+
+
+def test_journal_payload_carries_launch_and_terminal_status_only_when_set() -> None:
+    from ciao.web.chat_broker import event_to_json
+
+    ack = event_to_json(ToolUseEvent(type="tool_result", tool_use_id="call_a", background=True))
+    done = event_to_json(ToolUseEvent(type="tool_result", tool_use_id="call_a", subagent_status="failed", is_error=True))
+    plain = event_to_json(ToolUseEvent(type="tool_result", tool_use_id="call_b"))
+    assert ack == {"type": "tool_result", "tool_name": "", "tool_use_id": "call_a", "background": True}
+    assert done == {"type": "tool_result", "tool_name": "", "tool_use_id": "call_a", "is_error": True,
+                    "subagent_status": "failed"}
+    assert plain == {"type": "tool_result", "tool_name": "", "tool_use_id": "call_b"}
+

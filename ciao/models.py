@@ -255,6 +255,12 @@ class ToolUseEvent(StreamEvent):
     control_surface: str = ""
     # On a ``tool_result`` event: whether the call failed. ``None`` = unknown.
     is_error: bool | None = None
+    # On a ``tool_result`` for a backgrounded subagent: True when it only acknowledges the
+    # launch and the subagent keeps running. Its completion comes later as its own result.
+    background: bool = False
+    # On a ``tool_result`` that closes an OpenCode subagent: its terminal child status
+    # (``completed``, ``failed`` or ``interrupted``). Empty otherwise.
+    subagent_status: str = ""
 
 
 _SHELL_TOOL_NAMES = frozenset({"Bash", "bash", "shell"})

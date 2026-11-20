@@ -565,6 +565,10 @@ def event_to_json(event: StreamEvent) -> dict | None:
                 payload["tool_use_id"] = event.tool_use_id
             if event.is_error:
                 payload["is_error"] = True
+            if event.background:
+                payload["background"] = True
+            if event.subagent_status:
+                payload["subagent_status"] = event.subagent_status
             if event.tool_input:
                 payload["detail"] = event.tool_input
             if event.parent_tool_use_id:
