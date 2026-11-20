@@ -16,6 +16,14 @@ describe('StartupView', () => {
     expect(wrapper.emitted('skip')).toHaveLength(1)
   })
 
+  it('drops the connection-check copy once the engine is ready without phases', () => {
+    const wrapper = mount(StartupView, { props: { phases: [], overallReady: true } })
+    expect(wrapper.get('h1').text()).toBe('Connected to Ciaobot')
+    expect(wrapper.text()).not.toContain('Checking the connection')
+    expect(wrapper.get('.startup-description').text()).toBe('')
+    expect(wrapper.find('button').exists()).toBe(false)
+  })
+
   it('shows only phases actually reported by the engine, with readable statuses', () => {
     const wrapper = mount(StartupView, {
       props: {
