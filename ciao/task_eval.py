@@ -996,8 +996,27 @@ SETTLE_STABLE_POLLS = 2
 _PROCESS_STATE_LOCK = threading.Lock()
 
 
+def _error_object(raw: bytes) -> dict[str, Any] | None:
+    try:
+        value = json.loads(raw)
+    except ValueError:
+        return None
+    return value if isinstance(value, dict) else None
+
+
 class EngineAPIError(RuntimeError):
-    """The isolated engine answered an API call with an error status."""
+    """The isolated engine answered an API call with an error status.
+
+    ``status`` is the HTTP status; ``body`` is the decoded JSON object of the
+    error response, or None when the body was not a JSON object.
+    """
+
+    def __init__(
+        self, message: str, *, status: int = 0, body: Mapping[str, Any] | None = None
+    ) -> None:
+        super().__init__(message)
+        self.status = status
+        self.body = body
 
 
 def engine_env(base_env: Mapping[str, str], workdir: Path, ws: Path) -> dict[str, str]:
@@ -1350,7 +1369,12 @@ class IsolatedEngine(EngineSession):
             with self._opener.open(request, timeout=60) as response:
                 raw: bytes = response.read()
         except urllib.error.HTTPError as exc:
-            raise EngineAPIError(f"{method} {path} -> {exc.code}: {exc.read()[:300]!r}") from exc
+            raw_error = exc.read()
+            raise EngineAPIError(
+                f"{method} {path} -> {exc.code}: {raw_error[:300]!r}",
+                status=exc.code,
+                body=_error_object(raw_error),
+            ) from exc
         return json.loads(raw) if raw else None
 
     def start_prompt(self, prompt: str, *, provider: str, model: str) -> str:

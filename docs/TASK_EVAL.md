@@ -277,6 +277,11 @@ builders, evidence capture, continuation orchestration, report wiring and real
 baseline collection are deferred. Synthetic scenarios are not representative
 private usage; existing `ciao-task-eval/1` writers and reports remain unchanged.
 
+The schedule-run driver (`ciao/care_eval_run.py`) exists: it runs one materialized
+system schedule through the real schedule-run route of an engine the caller owns, pausing
+auto-fire first, and settles on the exact job-run row. Nothing collects usage yet; no
+savings claim is made.
+
 ## Permission mode
 
 The chats of a run start in a permission mode, and the default depends on the
