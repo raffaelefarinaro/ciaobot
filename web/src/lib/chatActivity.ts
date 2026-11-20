@@ -595,27 +595,33 @@ export function describeToolStep(line: string): string {
   if (!parsed) return ''
   const { name, summary } = parsed
   const lower = name.toLowerCase()
+  // The ACP adapter labels a call with its kind when the call has no input or
+  // title, so the summary can just repeat the tool name. That is no detail.
+  const detail = summary.toLowerCase() === lower ? '' : summary
   const base = (value: string) => value.split(/[\\/]/).filter(Boolean).pop() || value
-  const first = summary.split(/\s+/)[0] || ''
+  const first = detail.split(/\s+/)[0] || ''
   if (lower === 'read') return first ? `Reading ${base(first)}` : 'Reading a file'
   if (['write', 'edit', 'multiedit', 'patch', 'notebookedit'].includes(lower)) {
     return first ? `Editing ${base(first)}` : 'Editing a file'
   }
-  if (lower === 'grep' || lower === 'glob' || lower === 'codesearch') return summary ? `Searching ${summary}` : 'Searching'
-  if (lower === 'websearch') return summary ? `Searching the web for ${summary}` : 'Searching the web'
-  if (lower === 'webfetch') return summary ? `Reading ${summary}` : 'Reading a web page'
-  if (lower === 'bash') return summary || 'Running a command'
-  if (lower === 'agent' || lower === 'task') return summary ? `Delegating: ${summary}` : 'Delegating to an agent'
+  if (lower === 'grep' || lower === 'glob' || lower === 'codesearch') return detail ? `Searching ${detail}` : 'Searching'
+  if (lower === 'websearch') return detail ? `Searching the web for ${detail}` : 'Searching the web'
+  if (lower === 'webfetch') return detail ? `Reading ${detail}` : 'Reading a web page'
+  if (lower === 'bash') return detail || 'Running a command'
+  if (lower === 'agent' || lower === 'task' || lower === 'subagent') {
+    return detail ? `Subagent: ${detail}` : 'Running a subagent'
+  }
   if (lower === 'skill') {
-    const skill = skillNameFrom(summary)
-    return skill ? `Using the ${skill} skill` : 'Using a skill'
+    // A skill named "skill" is the echoed tool name, not a name.
+    const skill = skillNameFrom(detail)
+    return skill && skill.toLowerCase() !== 'skill' ? `Using the ${skill} skill` : 'Using a skill'
   }
   if (lower === 'todowrite' || lower === 'taskcreate' || lower === 'taskupdate') return 'Updating the plan'
   // Claude Code's deferred-tool loader: plumbing, not a step worth naming.
   if (lower === 'toolsearch') return 'Loading tools'
   const mcp = /^mcp__(.+?)__(.+)$/.exec(name)
   if (mcp) return `${mcp[1]} · ${mcp[2].replace(/_/g, ' ')}`
-  return summary ? `${name} ${summary}` : name
+  return detail ? `${name} ${detail}` : name
 }
 
 const PERMISSION_LINE_PREFIX = '\u{1F6A7} Permission: '
