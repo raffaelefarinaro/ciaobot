@@ -1,4 +1,5 @@
 import type { AppearancePayload } from './appearance'
+import type { SubagentCard } from './subagentCard'
 
 export type WorkspaceName = string
 
@@ -372,6 +373,9 @@ export interface ChatMessage {
   tool_name?: string
   is_error?: boolean
   effective_model?: string
+  // Populated when tool_name === '_subagent': one subagent call's card, rendered in the
+  // trace with its nested children. `steps` is bounded; `step_count` is the full count.
+  subagent?: SubagentCard
   usage?: Record<string, string>
   quota?: Record<string, unknown>
   images?: string[]
@@ -456,6 +460,10 @@ export type WsEvent =
       detail?: string;
       parent_tool_use_id?: string;
       session_id?: string;
+      // A subagent's launch acknowledgement: the subagent keeps running.
+      background?: boolean;
+      // A subagent's terminal child status (completed, failed, interrupted).
+      subagent_status?: string;
     }
   | { type: 'thinking'; text: string; parent_tool_use_id?: string }
   | { type: 'status'; message: string }
