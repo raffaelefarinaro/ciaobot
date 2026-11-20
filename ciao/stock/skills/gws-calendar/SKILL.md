@@ -9,6 +9,9 @@ metadata:
 
 > **PREREQUISITE:** Read `gws-shared` for Ciaobot auth (via `ciao gws`), global flags, and security rules.
 
+> [!CAUTION]
+> Setting `attendees` on `events patch` or `events update` **replaces the whole guest list and resets every RSVP**. First run `events get` for the event, then send every existing attendee with its `email` and `responseStatus`, plus the new guest. Never send only the new guest.
+
 ```bash
 ciao gws "$GWS_PROFILE" calendar <resource> <method> [flags]
 ```
