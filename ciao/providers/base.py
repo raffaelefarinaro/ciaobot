@@ -12,6 +12,7 @@ from typing import Any
 
 from ciao.models import (
     AgentRequest,
+    ResultEvent,
     StreamEvent,
 )
 
@@ -303,8 +304,13 @@ class BaseProvider(ABC):
         """
         return {}
 
-    async def abort_session(self, session_id: str) -> None:
-        """Abort a provider-side session; a no-op for adapters without one."""
+    async def abort_session(self, session_id: str) -> ResultEvent | None:
+        """Abort a provider-side session; a no-op for adapters without one.
+
+        Returns the partial result of a late turn the abort stopped, when it had text, so the
+        caller can keep it in the transcript. Nothing is returned for a session with none.
+        """
+        return None
 
     @property
     def seconds_since_activity(self) -> float:
