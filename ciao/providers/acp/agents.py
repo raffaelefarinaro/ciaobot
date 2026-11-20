@@ -170,6 +170,8 @@ CODEX = AgentSpec(
     binary="codex-acp",
     env={},  # CODEX_PATH is the user's own codex, added by CodexAcpProvider.spawn_env.
     client_meta={},  # No subagents opt-in: a Codex subagent is a plain tool call (plan Q6).
+    # codex-acp reports its sign-in state as an unprefixed ``auth/status_update`` (see CodexAcpProvider.ext_update).
+    extension_notifications=("auth/status_update",),
     modes={
         "plan": (
             ModeChoice("mode", ("read-only",)),
@@ -195,6 +197,24 @@ CODEX = AgentSpec(
 
 class CodexAcpProvider(AcpProvider):
     spec = CODEX
+
+    def ext_update(
+        self, normalizer: UpdateNormalizer, method: str, payload: Mapping[str, Any]
+    ) -> list[StreamEvent]:
+        """``auth/status_update`` is debug-logged only: the payload's state, never its account labels.
+
+        ``payload`` is always a mapping (the connection passes ``{}`` for a non-object), so each
+        field is checked before use and anything unexpected is ignored. No events are produced.
+        """
+        if method == "auth/status_update":
+            state = payload.get("state")
+            accounts = payload.get("accounts")
+            logger.debug(
+                "codex auth status: state=%s accounts=%d",
+                state if isinstance(state, str) else type(state).__name__,
+                len(accounts) if isinstance(accounts, list) else 0,
+            )
+        return []
 
     @classmethod
     def spawn_env(cls) -> dict[str, str]:
