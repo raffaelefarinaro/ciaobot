@@ -10,6 +10,11 @@ It is read-only. Nothing is written, no model is called and no scheduler is
 involved. Every doubt is a :class:`DeferredNote` with a fixed reason, never a
 partial answer: an unreadable, oversized or malformed store means the evidence
 cannot say what the note's proposals are, so it says nothing.
+
+Trust boundary: only the final path component of each file read is opened
+without following links; the components above it are checked with ``lstat``.
+The vault is trusted against concurrent local writers, so a race that swaps a
+parent directory between the check and the open is not defended against.
 """
 
 from __future__ import annotations
@@ -110,6 +115,8 @@ def prepare_one_stale_note(
         return DeferredNote(reason="the workspace's vault is not usable for this note")
     except nr.NoteTargetRefused:
         return DeferredNote(reason="the planned note path does not name a plain note")
+    except OSError:
+        return DeferredNote(reason="a file in the vault could not be read")
 
 
 def _selected(plan: cr.RunPlan) -> cr.StaleNoteTarget | None:
@@ -174,11 +181,10 @@ def _read_sidecars(vault: Path, workspace: str) -> list[nep.NoteEditProposal]:
     if store is None:
         return []
     try:
-        names = sorted(
-            entry.name
-            for entry in os.scandir(store)
-            if entry.name.endswith(".json")
-        )
+        with os.scandir(store) as entries:
+            names = sorted(
+                entry.name for entry in entries if entry.name.endswith(".json")
+            )
     except OSError as exc:
         raise _Refused("the note-edit store cannot be listed") from exc
     if len(names) > MAX_SIDECARS:
@@ -205,10 +211,19 @@ def _read_sidecars(vault: Path, workspace: str) -> list[nep.NoteEditProposal]:
     return proposals
 
 
+def _normal(text: str) -> str:
+    """Whitespace-collapsed text, the form the queue's bullets are written in."""
+    return " ".join(text.split())
+
+
 def _live_rows_for(
     vault: Path, workspace: str, relative_path: str
 ) -> list[pt.QueuedProposal]:
-    """The live note-edit queue rows whose bullet names this note."""
+    """The live note-edit queue rows whose bullet names this note.
+
+    Compared in the queue's own whitespace-collapsed form: the bullet was written
+    through ``_one_line``, so a path with a double space must match its own row.
+    """
     queue_dir = _plain_dir(vault, nep._QUEUE_RELATIVE[:-1])
     if queue_dir is None:
         return []
@@ -222,11 +237,11 @@ def _live_rows_for(
     except UnicodeDecodeError as exc:
         raise _Refused("the proposal queue is not UTF-8") from exc
     queue_rel = Path(workspace).joinpath(*nep._QUEUE_RELATIVE).as_posix()
-    head = f"{relative_path} — "
+    head = f"{_normal(relative_path)} —"
     return [
         entry
         for entry in pt.walk_proposal_queue(workspace, queue_rel, text)
-        if entry.bullet.kind == nep.KIND and entry.bullet.text.startswith(head)
+        if entry.bullet.kind == nep.KIND and _normal(entry.bullet.text).startswith(head)
     ]
 
 
@@ -235,9 +250,24 @@ def _references(
     rows: list[pt.QueuedProposal],
     target: cr.StaleNoteTarget,
 ) -> tuple[ProposalReference, ...]:
-    filed = {proposal.proposal_id for proposal in sidecars if proposal.proposal_id}
-    if any(row.proposal_id not in filed for row in rows):
-        raise _Refused("a queued proposal for this note has no readable record")
+    """The related records for the target, linked to the queue by proposal id.
+
+    The link is the record's ``proposal_id``. Anything that makes the link
+    ambiguous defers: two records sharing one queue row, a queue row for this
+    note whose record is missing, or whose record names another note.
+    """
+    by_row: dict[str, list[nep.NoteEditProposal]] = {}
+    for proposal in sidecars:
+        if proposal.proposal_id:
+            by_row.setdefault(proposal.proposal_id, []).append(proposal)
+    if any(len(records) > 1 for records in by_row.values()):
+        raise _Refused("two note-edit records name one queue row")
+    for row in rows:
+        records = by_row.get(row.proposal_id, [])
+        if not records:
+            raise _Refused("a queued proposal for this note has no readable record")
+        if records[0].relative_path != target.relative_path:
+            raise _Refused("a queued proposal for this note is filed against another note")
     live = {row.proposal_id for row in rows}
     references: list[ProposalReference] = []
     for proposal in sidecars:
