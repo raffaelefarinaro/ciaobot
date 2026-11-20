@@ -146,37 +146,60 @@ def adapter_prefix() -> Path:
 
 
 def absolute_executable(path: str | None) -> str | None:
-    """``path`` when it is an absolute, executable file whose folders are trusted; else ``None``.
+    """``path`` when it is an absolute, executable file in trusted folders; else ``None``.
 
     A relative path would resolve against the working directory of the process that runs it, so
-    it is refused here, for every executable the adapters are handed. The folder is judged twice:
-    the folder of ``path`` as given, and the folder of its real path, so a symlink in a closed
-    folder that points into an open one is refused, and so is the reverse. A folder passes when
-    others cannot write to it, and when its group cannot write to it either, unless it is owned by
-    the current user or by root: that is the Homebrew ``admin`` layout, where the group members are
-    the machine's administrators. A group-writable folder owned by anyone else is refused, and so
-    is a world-writable folder, sticky bit or not. Windows is not judged this way and is skipped.
+    it is refused here, for every executable the adapters are handed. The executable file itself
+    is refused when its group or others can write to it. The folder is judged twice: the folder of
+    ``path`` as given, and the folder of its real path, so a symlink in a closed folder that points
+    into an open one is refused, and so is the reverse. A folder is trusted when others cannot
+    write to it, and when its group cannot either. A group-writable folder is trusted only when it
+    is owned by the effective user or root, and its group is root, the effective group, or (on
+    macOS) ``admin``, the Homebrew layout whose group members are the machine's administrators; any
+    other owner or group is refused. A world-writable folder is refused, sticky bit or not.
+
+    When the folder as given was trusted only through that group-writable relaxation, the real
+    path is returned instead of ``path``, so the closed target is the one spawned and a later swap
+    of the symlink cannot redirect it. Otherwise ``path`` is returned unchanged. On Windows the
+    folder and file checks are skipped and ``path`` is returned.
     """
     if not path or not os.path.isabs(path):
         return None
     if not os.path.isfile(path) or not os.access(path, os.X_OK):
         return None
-    if not _windows():
-        real = os.path.realpath(path)
-        if not (_trusted_folder(os.path.dirname(path)) and _trusted_folder(os.path.dirname(real))):
-            return None
-    return path
+    if _windows():
+        return path
+    if os.stat(path).st_mode & 0o022:
+        return None
+    real = os.path.realpath(path)
+    given = _folder_trust(os.path.dirname(path))
+    target = _folder_trust(os.path.dirname(real))
+    if given is None or target is None:
+        return None
+    return real if given == "shared" else path
 
 
-def _trusted_folder(folder: str) -> bool:
-    """Whether ``folder`` is free of others' write access, and of group write access by strangers."""
+def _trusted_groups() -> frozenset[int]:
+    """The groups whose write access to a folder is trusted: root, the effective group, and on macOS ``admin``."""
+    groups = {0, os.getegid()}
+    if sys.platform == "darwin":
+        groups.add(80)  # the macOS admin group that Homebrew's bin folders are set up with
+    return frozenset(groups)
+
+
+def _folder_trust(folder: str) -> str | None:
+    """``"closed"`` when only the owner can write to ``folder``, ``"shared"`` when its group can too
+    and the owner and group are trusted, or ``None`` when it is refused."""
     try:
-        mode = os.stat(folder)
+        st = os.stat(folder)
     except OSError:
-        return False
-    if mode.st_mode & stat.S_IWOTH:
-        return False
-    return not (mode.st_mode & stat.S_IWGRP and mode.st_uid not in (os.getuid(), 0))
+        return None
+    if st.st_mode & stat.S_IWOTH:
+        return None
+    if not st.st_mode & stat.S_IWGRP:
+        return "closed"
+    trusted = st.st_uid in (os.geteuid(), 0) and st.st_gid in _trusted_groups()
+    return "shared" if trusted else None
 
 
 def _cli_path(name: str) -> str | None:

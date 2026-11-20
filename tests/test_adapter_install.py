@@ -1049,16 +1049,58 @@ def _own_folder(path: Path, mode: int) -> Path:
     return path
 
 
+def _stat_as(monkeypatch: pytest.MonkeyPatch, folder: Path, *, uid: int, gid: int) -> None:
+    """Make ``folder`` report owner ``uid`` and group ``gid``; its real mode and every other path are kept."""
+    real_stat = os.stat
+    target = os.path.realpath(folder)
+
+    def stat_as(path: Any, *args: Any, **kwargs: Any) -> Any:
+        st = real_stat(path, *args, **kwargs)
+        if os.path.realpath(path) == target:
+            return SimpleNamespace(st_mode=st.st_mode, st_uid=uid, st_gid=gid)
+        return st
+
+    monkeypatch.setattr(ai.os, "stat", stat_as)
+
+
 @pytest.mark.parametrize(
     ("folder_mode", "accepted"),
-    [(0o755, True), (0o775, True), (0o777, False), (0o757, False)],
-    ids=["own-755", "own-group-writable-775", "world-writable-777", "others-write-757"],
+    [(0o755, True), (0o775, True), (0o777, False), (0o757, False), (0o1777, False)],
+    ids=["own-755", "own-group-writable-775", "world-writable-777", "others-write-757", "sticky-1777"],
 )
 def test_an_executable_is_judged_by_its_folder_write_bits(tmp_path: Path, folder_mode: int, accepted: bool) -> None:
     folder = _own_folder(tmp_path / "bin", folder_mode)
     node = _executable(folder / "node")
 
-    assert (ai.absolute_executable(node) == node) is accepted
+    got = ai.absolute_executable(node)
+    assert (got is not None) is accepted
+    if accepted and folder_mode == 0o775:
+        # Accepted only through the group relaxation, so the real path is what gets spawned.
+        assert got == os.path.realpath(node)
+
+
+@pytest.mark.parametrize("gid_name", ["effective", "root", "admin"])
+def test_a_group_writable_own_folder_with_a_trusted_group_is_accepted(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, gid_name: str
+) -> None:
+    folder = _own_folder(tmp_path / "bin", 0o1775)
+    node = _executable(folder / "node")
+    gid = {"effective": os.getegid(), "root": 0, "admin": 80}[gid_name]
+    if gid_name == "admin" and sys.platform != "darwin":
+        pytest.skip("the admin group is trusted on macOS only")
+    _stat_as(monkeypatch, folder, uid=os.geteuid(), gid=gid)
+
+    assert ai.absolute_executable(node) == os.path.realpath(node)
+
+
+def test_a_group_writable_own_folder_with_an_untrusted_group_is_refused(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    folder = _own_folder(tmp_path / "bin", 0o775)
+    node = _executable(folder / "node")
+    _stat_as(monkeypatch, folder, uid=os.geteuid(), gid=12345)
+
+    assert ai.absolute_executable(node) is None
 
 
 def test_a_group_writable_folder_owned_by_another_user_is_refused(
@@ -1066,53 +1108,44 @@ def test_a_group_writable_folder_owned_by_another_user_is_refused(
 ) -> None:
     folder = _own_folder(tmp_path / "shared", 0o775)
     node = _executable(folder / "node")
-    real_stat = os.stat
-    target = os.path.realpath(folder)
+    _stat_as(monkeypatch, folder, uid=os.geteuid() + 1, gid=os.getegid())
 
-    def stat_with_another_owner(path: Any, *args: Any, **kwargs: Any) -> Any:
-        st = real_stat(path, *args, **kwargs)
-        if os.path.realpath(path) == target:
-            return SimpleNamespace(st_mode=st.st_mode, st_uid=os.getuid() + 1)
-        return st
-
-    monkeypatch.setattr(ai.os, "stat", stat_with_another_owner)
     assert ai.absolute_executable(node) is None
 
 
 def test_a_group_writable_folder_owned_by_root_is_accepted(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     folder = _own_folder(tmp_path / "shared", 0o775)
     node = _executable(folder / "node")
-    real_stat = os.stat
-    target = os.path.realpath(folder)
+    _stat_as(monkeypatch, folder, uid=0, gid=os.getegid())
 
-    def stat_as_root(path: Any, *args: Any, **kwargs: Any) -> Any:
-        st = real_stat(path, *args, **kwargs)
-        if os.path.realpath(path) == target:
-            return SimpleNamespace(st_mode=st.st_mode, st_uid=0)
-        return st
+    assert ai.absolute_executable(node) == os.path.realpath(node)
 
-    monkeypatch.setattr(ai.os, "stat", stat_as_root)
+
+@pytest.mark.parametrize("file_mode", [0o775, 0o777, 0o757])
+def test_a_group_or_world_writable_executable_file_is_refused(tmp_path: Path, file_mode: int) -> None:
+    folder = _own_folder(tmp_path / "bin", 0o755)
+    node = _executable(folder / "node")
+    Path(node).chmod(file_mode)
+
+    assert ai.absolute_executable(node) is None
+
+
+def test_a_writable_non_executable_file_is_refused(tmp_path: Path) -> None:
+    folder = _own_folder(tmp_path / "bin", 0o755)
+    node = folder / "node"
+    node.write_text("", encoding="utf-8")
+    node.chmod(0o666)
+
+    assert ai.absolute_executable(str(node)) is None
+
+
+def test_windows_skips_the_folder_and_file_checks(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    folder = _own_folder(tmp_path / "open", 0o777)
+    node = _executable(folder / "node")
+    Path(node).chmod(0o777)
+    monkeypatch.setattr(ai, "_windows", lambda: True)
+
     assert ai.absolute_executable(node) == node
-
-
-def test_a_symlink_in_an_open_folder_pointing_into_a_closed_one_is_accepted(tmp_path: Path) -> None:
-    closed = _own_folder(tmp_path / "homebrew-caskroom", 0o755)
-    target = _executable(closed / "codex")
-    link_folder = _own_folder(tmp_path / "homebrew-bin", 0o775)
-    link = link_folder / "codex"
-    link.symlink_to(target)
-
-    assert ai.absolute_executable(str(link)) == str(link)
-
-
-def test_a_symlink_in_a_closed_folder_pointing_into_a_world_writable_one_is_refused(tmp_path: Path) -> None:
-    open_folder = _own_folder(tmp_path / "open", 0o777)
-    target = _executable(open_folder / "codex")
-    link_folder = _own_folder(tmp_path / "closed", 0o755)
-    link = link_folder / "codex"
-    link.symlink_to(target)
-
-    assert ai.absolute_executable(str(link)) is None
 
 
 @pytest.mark.parametrize("bad", ["./node", "node", "", "relative/node", None])
@@ -1131,6 +1164,28 @@ def test_a_non_executable_file_is_refused(tmp_path: Path) -> None:
     inert.chmod(0o644)
 
     assert ai.absolute_executable(str(inert)) is None
+
+
+def test_a_symlink_in_an_open_folder_pointing_into_a_closed_one_returns_the_real_path(tmp_path: Path) -> None:
+    closed = _own_folder(tmp_path / "homebrew-caskroom", 0o755)
+    target = _executable(closed / "codex")
+    link_folder = _own_folder(tmp_path / "homebrew-bin", 0o775)
+    link = link_folder / "codex"
+    link.symlink_to(target)
+
+    got = ai.absolute_executable(str(link))
+    assert got == os.path.realpath(link)
+    assert got != str(link)
+
+
+def test_a_symlink_in_a_closed_folder_pointing_into_a_world_writable_one_is_refused(tmp_path: Path) -> None:
+    open_folder = _own_folder(tmp_path / "open", 0o777)
+    target = _executable(open_folder / "codex")
+    link_folder = _own_folder(tmp_path / "closed", 0o755)
+    link = link_folder / "codex"
+    link.symlink_to(target)
+
+    assert ai.absolute_executable(str(link)) is None
 
 
 def test_timeout_drains_the_pipes_once_more_after_the_kill(
