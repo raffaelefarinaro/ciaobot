@@ -6111,7 +6111,7 @@ def _curation_plan(
     category_items: tuple[Any, ...] = (),
     category_generation_attempted: bool = False,
 ) -> _CurationPlanningResult:
-    from ciao.curation_run import build_worklist_views, load_state, plan_run
+    from ciao.curation_run import build_worklist_views, load_state, plan_run_with_blocked
     from ciao.entity_types import load_entity_types
     from ciao.vault_index import VAULT_RENDER_PREFIX
 
@@ -6142,7 +6142,7 @@ def _curation_plan(
         workspace=name,
     )
     worklist = views.remaining
-    plan = plan_run(worklist, budget)
+    plan = plan_run_with_blocked(worklist, budget)
     coverage_notes = [
         "coverage is incomplete: discovery is not exhaustive and observed work may omit items"
     ]
@@ -6183,11 +6183,25 @@ def _print_curation(payload: dict[str, Any], *, as_json: bool) -> None:
         print(f"Coverage note: {note}")
     print(f"Weekly pass due: {'yes' if payload.get('weekly_due') else 'no'}")
     print(f"Handover: {payload['handover']}")
+    if payload.get("blocked_count"):
+        print(
+            f"WARNING: {payload['blocked_count']} oversized log item(s) are blocked: automated "
+            "rotation is unavailable in this release. Name each overdue log under **What needs you** "
+            "for an operator to archive by hand."
+        )
     for item in payload.get("planned", []):
         print(f"- [{item['pass']}] {item['label']} ({item['count']}) — {item['reason']}")
         for key in item["keys"]:
             print(f"    {key}")
+    skill_deferred = [item for item in payload.get("deferred", []) if item["pass"] == "skill_proposals"]
+    if skill_deferred:
+        # One aggregate line: deferred proposals are the next run's work and are
+        # not listed one per file in any report.
+        waiting = sum(int(item["count"]) for item in skill_deferred)
+        print(f"- {waiting} skill proposal(s) deferred to a later run; they are not listed individually.")
     for item in payload.get("deferred", []):
+        if item["pass"] == "skill_proposals":
+            continue
         print(f"- deferred [{item['pass']}] {item['label']} ({item['count']}) — {item['reason']}")
 
 
@@ -6399,8 +6413,54 @@ def _curation_end_command(args: argparse.Namespace) -> int:
             f"weekly marker {'advanced' if advanced else 'left due'}; "
             f"Observed work: {summary['remaining_observed_count']} (coverage incomplete)"
         )
+        if summary.get("marker_error"):
+            print(f"Weekly marker not advanced: {summary['marker_error']}")
         for note in summary["coverage_notes"]:
             print(f"Coverage note: {note}")
+    return 0
+
+
+def _curation_log_append_command(args: argparse.Namespace) -> int:
+    """Append one report to a packaged decision log under the live lease.
+
+    Exit 0 on success, 2 for usage or payload errors (including a report file
+    that is not a regular file), 75 when the lease is not this holder's, 1 for
+    an unsafe, corrupt or unreadable log. The lease is checked before the
+    report file is opened, and again inside the append. Success is the only
+    thing printed on stdout; diagnostics never echo the payload.
+    """
+    import json
+
+    from ciao.curation_logs import CurationLogError, read_payload_file
+    from ciao.curation_run import CurationBusy, CurationStateError, append_log, holder_is_live
+
+    holder = _curation_holder(args)
+    if not holder:
+        return 2
+    _workspace, vault, _guide, _budget, _registry_root, _name = _curation_context(args)
+    try:
+        if not holder_is_live(vault, holder=holder):
+            print("curation lease lost: this run no longer holds the curation lease", file=sys.stderr)
+            return CURATION_BUSY_EXIT
+        payload = read_payload_file(Path(args.text_file))
+        result = append_log(vault, holder=holder, log=args.log, payload=payload)
+    except ValueError as exc:
+        print(f"curation-log-append: {exc}", file=sys.stderr)
+        return 2
+    except CurationBusy as exc:
+        print(f"curation lease lost: {exc}", file=sys.stderr)
+        return CURATION_BUSY_EXIT
+    except (CurationStateError, CurationLogError) as exc:
+        print(f"curation log error: {exc}", file=sys.stderr)
+        return 1
+    except OSError:
+        print("curation log error: an I/O operation failed", file=sys.stderr)
+        return 1
+    if args.json:
+        json.dump(result, sys.stdout, ensure_ascii=False, indent=2)
+        sys.stdout.write("\n")
+    else:
+        print(f"appended {result['bytes_appended']} byte(s) to the {result['log']} log")
     return 0
 
 
@@ -9445,6 +9505,43 @@ def build_parser() -> argparse.ArgumentParser:
         help="Required: the `lease.holder` value `curation-begin` returned.",
     )
     curation_end_parser.set_defaults(func=_curation_end_command)
+
+    curation_log_append_parser = subparsers.add_parser(
+        "curation-log-append",
+        help="Append one technical report to a packaged decision log under the lease.",
+        description=(
+            "Appends the report in --text-file to Curation-Log or "
+            "Weekly-Review-Log, under the curation lease named by --holder. "
+            "Exit 0 with a JSON result on success, 2 for usage or payload "
+            "errors, 75 when the lease is not held by --holder, 1 when the log "
+            "is unsafe, corrupt or over its size limit. A retry after an "
+            "uncertain response (a timeout, a lost reply) can duplicate the "
+            "report: this command is not exactly-once. Check the log before "
+            "retrying."
+        ),
+    )
+    _add_curation_arguments(curation_log_append_parser)
+    curation_log_append_parser.add_argument(
+        "--log",
+        required=True,
+        choices=("curation", "weekly-review"),
+        help="Which decision log to append to.",
+    )
+    curation_log_append_parser.add_argument(
+        "--text-file",
+        required=True,
+        type=Path,
+        help=(
+            "File holding the report, UTF-8 without a byte-order mark, at most "
+            "256 KiB. An uncertain response can duplicate it on retry."
+        ),
+    )
+    curation_log_append_parser.add_argument(
+        "--holder",
+        required=True,
+        help="Required: the `lease.holder` value `curation-begin` returned.",
+    )
+    curation_log_append_parser.set_defaults(func=_curation_log_append_command)
 
     skill_proposal_add_parser = subparsers.add_parser(
         "skill-proposal-add",
