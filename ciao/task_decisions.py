@@ -16,11 +16,15 @@ from __future__ import annotations
 
 import json
 import os
+import re
+import stat
 import uuid
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, Final, Literal
 
+from ciao.os_support.files import open_fd
 from ciao.os_support.private import open_private
 
 DECISIONS_NAME = "Task-Decisions.jsonl"
@@ -29,6 +33,45 @@ MAX_REASON = 1000
 KINDS = ("delete", "reject", "approve", "complete")
 _ACTORS = ("user", "agent")
 _VIAS = ("pwa", "cli")
+#: The strict reader's bounds (#3239-a). Larger than any file a care pass should see.
+DECISIONS_READ_CEILING: Final = 4 * 1024 * 1024
+MAX_DECISION_LINE_BYTES: Final = 8 * 1024
+_READ_CHUNK: Final = 64 * 1024
+_ROW_KEYS: Final = frozenset(
+    {
+        "v", "id", "at", "kind", "task_id", "task_title", "task_created_by", "project_id",
+        "attempt_id", "attempt_state", "actor", "via", "reason",
+    }
+)
+_STRING_KEYS: Final = _ROW_KEYS - {"v"}
+_ID = re.compile(r"[0-9a-f]{32}")
+
+
+@dataclass(frozen=True, slots=True)
+class DecisionRow:
+    """The fields of one valid decision row a prompt may show (the rest stay on disk)."""
+
+    id: str
+    at: str
+    kind: str
+    task_id: str
+    attempt_id: str
+    actor: str
+    via: str
+    reason: str
+
+
+@dataclass(frozen=True, slots=True)
+class DecisionRead:
+    """What the strict reader found: ``ok``, ``absent``, ``unreadable``, ``malformed`` or ``oversize``.
+
+    ``rows`` holds every valid row in file order. It is empty for ``unreadable``
+    and ``oversize``; ``malformed`` keeps the valid rows for display.
+    """
+
+    status: Literal["ok", "absent", "unreadable", "malformed", "oversize"]
+    rows: tuple[DecisionRow, ...]
+    malformed_lines: int
 
 
 def decisions_path(vault_root: Path) -> Path:
@@ -114,3 +157,95 @@ def read_decisions(vault_root: Path) -> list[dict[str, Any]]:
         if isinstance(row, dict):
             rows.append(row)
     return rows
+
+
+def read_decisions_strict(vault_root: Path) -> DecisionRead:
+    """The decisions file, bounded and validated, for the task-decision context (#3239-a).
+
+    Unlike :func:`read_decisions` this never guesses: a missing file is ``absent``,
+    a directory, a link, a non-UTF-8 file or an OS error is ``unreadable``, a file
+    over :data:`DECISIONS_READ_CEILING` is ``oversize`` (no partial read), and any
+    non-blank line that is not a valid row counts toward ``malformed_lines``.
+    """
+    path = decisions_path(vault_root)
+    try:
+        fd = open_fd(path, os.O_RDONLY, follow_symlinks=False)
+    except FileNotFoundError:
+        return DecisionRead("absent", (), 0)
+    except OSError:
+        return DecisionRead("unreadable", (), 0)
+    data = bytearray()
+    try:
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            return DecisionRead("unreadable", (), 0)
+        while len(data) <= DECISIONS_READ_CEILING:
+            chunk = os.read(fd, min(_READ_CHUNK, DECISIONS_READ_CEILING + 1 - len(data)))
+            if not chunk:
+                break
+            data += chunk
+    except OSError:
+        return DecisionRead("unreadable", (), 0)
+    finally:
+        os.close(fd)
+    if len(data) > DECISIONS_READ_CEILING:
+        return DecisionRead("oversize", (), 0)
+    try:
+        text = bytes(data).decode("utf-8")
+    except UnicodeDecodeError:
+        return DecisionRead("unreadable", (), 0)
+    rows: list[DecisionRow] = []
+    seen: set[str] = set()
+    malformed = 0
+    for line in text.split("\n"):
+        if not line.strip():
+            continue
+        row = _strict_row(line)
+        if row is None or row.id in seen:
+            malformed += 1
+            continue
+        seen.add(row.id)
+        rows.append(row)
+    return DecisionRead("malformed" if malformed else "ok", tuple(rows), malformed)
+
+
+def _strict_row(line: str) -> DecisionRow | None:
+    """One line as a valid decision row, or ``None``. Exact keys, typed fields, aware time."""
+    if len(line.encode("utf-8")) > MAX_DECISION_LINE_BYTES:
+        return None
+    try:
+        obj = json.loads(line)
+    except ValueError:
+        return None
+    if not isinstance(obj, dict) or set(obj) != _ROW_KEYS:
+        return None
+    version = obj["v"]
+    if type(version) is not int or version != ROW_VERSION:
+        return None
+    for key in _STRING_KEYS:
+        value = obj[key]
+        if not isinstance(value, str):
+            return None
+        try:
+            value.encode("utf-8")
+        except UnicodeEncodeError:
+            return None
+    if obj["kind"] not in KINDS or obj["actor"] not in _ACTORS or obj["via"] not in _VIAS:
+        return None
+    if not _ID.fullmatch(obj["id"]):
+        return None
+    try:
+        at = datetime.fromisoformat(obj["at"])
+    except ValueError:
+        return None
+    if at.utcoffset() is None:
+        return None
+    return DecisionRow(
+        id=obj["id"],
+        at=obj["at"],
+        kind=obj["kind"],
+        task_id=obj["task_id"],
+        attempt_id=obj["attempt_id"],
+        actor=obj["actor"],
+        via=obj["via"],
+        reason=obj["reason"],
+    )

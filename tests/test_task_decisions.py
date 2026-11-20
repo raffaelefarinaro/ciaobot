@@ -17,6 +17,7 @@ from ciao.task_decisions import (
     clean_reason,
     decisions_path,
     read_decisions,
+    read_decisions_strict,
 )
 
 
@@ -128,3 +129,17 @@ def test_append_refuses_a_symlinked_decisions_file(tmp_path: Path) -> None:
     with pytest.raises(OSError):
         _append(tmp_path)
     assert target.read_text(encoding="utf-8") == "keep\n"
+
+
+def test_the_lenient_reader_still_skips_corrupt_lines_and_the_strict_one_reports_them(
+    tmp_path: Path,
+) -> None:
+    """``read_decisions`` keeps its lenient contract (decision_rules depends on it); the strict reader sees the damage."""
+    _append(tmp_path)
+    path = decisions_path(tmp_path)
+    path.write_text(path.read_text(encoding="utf-8") + "{not json\n", encoding="utf-8")
+    assert len(read_decisions(tmp_path)) == 1
+    strict = read_decisions_strict(tmp_path)
+    assert strict.status == "malformed"
+    assert strict.malformed_lines == 1
+    assert len(strict.rows) == 1

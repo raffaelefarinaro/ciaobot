@@ -777,6 +777,17 @@ class TaskAttemptStore:
         rows.sort(key=lambda record: not record.is_live)
         return tuple(rows)
 
+    def attempts_for_chat(self, chat_id: str) -> tuple[TaskAttempt, ...]:
+        """Every attempt that ran in *chat_id*, newest first; ``()`` when none did.
+
+        Raises :class:`TaskAttemptError` when the document is unreadable, exactly as
+        :meth:`_read` does: a caller that must know whether a chat has attempts (the
+        task-decision context, #3239-a) must not mistake a broken store for none.
+        """
+        rows = [record for record in self._read().values() if record.chat_id == chat_id]
+        rows.sort(key=_age_key, reverse=True)
+        return tuple(rows)
+
     def recover_interrupted(self) -> tuple[TaskAttempt, ...]:
         """Record every derived ``interrupted`` attempt on disk, and return them.
 
