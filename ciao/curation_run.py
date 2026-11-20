@@ -1282,8 +1282,27 @@ def _learnings_cleanup_items(
     return ([item] if item is not None else []), " ".join(notes)
 
 
+def _holder_live_unlocked(vault_root: Path, *, holder: str, now: datetime) -> bool:
+    """Whether *holder* owns a live lease. The caller holds the state lock."""
+    held = _live_lease(_load(state_path(vault_root)), now)
+    return held is not None and held.get("holder") == holder
+
+
+@contextmanager
+def _lease_guard(vault_root: Path, *, holder: str) -> Iterator[None]:
+    """Hold the state lock and require *holder* to own the live lease inside it.
+
+    Raises :class:`CurationBusy` without yielding when the lease is lost, so the
+    wrapped write never runs. The state lock is held for the body only.
+    """
+    with _state_lock(vault_root):
+        if not _holder_live_unlocked(vault_root, holder=holder, now=datetime.now(UTC)):
+            raise CurationBusy("this run no longer holds the curation lease")
+        yield
+
+
 def _category_cluster_items(
-    vault_root: Path, *, registry: EntityTypeRegistry
+    vault_root: Path, *, holder: str, registry_root: Path
 ) -> list[WorklistItem]:
     """File a ``[category]`` proposal per unlisted ``type:`` with a cluster.
 
@@ -1297,24 +1316,49 @@ def _category_cluster_items(
     nights running is one item rather than a new one each time, and a cluster
     the owner resolves makes its item disappear from the next worklist.
 
-    ``registry`` is the AGENT vault root's category list, not one loaded from
-    *vault_root*: on an install that has not re-rooted, ``entity-types.yaml`` is
-    a different directory from the notes, and reading the notes root left every
-    category the owner had just accepted looking unlisted — queued again the next
-    night, then refused as a duplicate on accept. It arrives from
-    :func:`build_worklist` rather than being loaded here for the same reason the
-    accept resolves its root through the config.
+    ``registry_root`` is the AGENT vault root, not *vault_root*: on an install
+    that has not re-rooted, ``entity-types.yaml`` is a different directory from
+    the notes, and reading the notes root left every category the owner had just
+    accepted looking unlisted — queued again the next night, then refused as a
+    duplicate on accept. The CLI passes the root it resolved.
+
+    This pass is advisory. Any failure other than a lost lease (a scan error, a
+    queue lock that cannot be taken, an unreadable queue, a write error) is logged
+    and the worklist is built without category items. Only :class:`CurationBusy`
+    propagates, because a holder that lost its lease must not go on to plan.
+
+    Two phases, so no lock is held across the vault scan. The scan is read-only.
+    Publication takes the proposal queue lock, then, around each replacement only,
+    the curation state lock, which re-checks *holder* against the live lease.
     """
+    from ciao.entity_types import load_entity_types
+    from ciao.memory_receipts import queue_lock
     from ciao.vocabulary_proposals import (
         CATEGORY_CLUSTER_THRESHOLD,
-        generate_category_proposals,
+        publish_category_candidates,
+        scan_category_candidates,
     )
 
     root = Path(vault_root)
     try:
-        queued = generate_category_proposals(root, registry=registry)
+        registry = load_entity_types(registry_root)
+        candidates = scan_category_candidates(root, registry=registry)
+        if not candidates:
+            return []
+        with queue_lock(root / PROPOSALS_RELATIVE):
+            queued = publish_category_candidates(
+                root,
+                candidates,
+                registry=load_entity_types(registry_root),
+                publish_guard=lambda: _lease_guard(root, holder=holder),
+            )
+    except CurationBusy:
+        raise
     except Exception:  # noqa: BLE001 — an advisory pass must not fail the plan
-        logger.warning("curation: category cluster scan failed", exc_info=True)
+        logger.warning(
+            "curation: category proposals were not filed; planning without them",
+            exc_info=True,
+        )
         return []
     if not queued:
         return []

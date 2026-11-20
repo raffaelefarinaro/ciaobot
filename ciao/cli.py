@@ -6208,11 +6208,27 @@ def _curation_plan_command(args: argparse.Namespace) -> int:
     return 0
 
 
+def _abandon_begun_run(vault, holder: str) -> None:
+    """Release a lease this begin took, before a non-zero exit.
+
+    A run that exits with an error must not hold the vault until its TTL, so
+    every failure after ``begin_run`` records an ``error`` end. A lease that is
+    already lost is left alone: its replacement, if any, is not ours to end.
+    """
+    from ciao.curation_run import CurationBusy, CurationStateError, end_run
+
+    try:
+        end_run(vault, holder=holder, status="error", planned=0, completed=0, deferred=0)
+    except (CurationBusy, CurationStateError):
+        pass
+
+
 def _curation_begin_command(args: argparse.Namespace) -> int:
     """Take the lease and print this run's plan.
 
     An empty worklist releases the lease again before returning: a quiet night
-    must not hold the lease until the TTL expires.
+    must not hold the lease until the TTL expires. Any other non-zero exit after
+    the lease is taken releases it as an ``error`` run first.
     """
     from ciao.curation_run import CurationBusy, CurationStateError, begin_run, end_run, holder_is_live
 
@@ -6227,17 +6243,23 @@ def _curation_begin_command(args: argparse.Namespace) -> int:
         return 1
 
     from ciao.curation_run import _category_cluster_items
-    from ciao.entity_types import load_entity_types
 
-    categories = tuple(
-        _category_cluster_items(vault, registry=load_entity_types(registry_root))
-    )
+    try:
+        categories = tuple(
+            _category_cluster_items(vault, holder=lease.holder, registry_root=registry_root)
+        )
+    except CurationBusy:
+        # Lost while the worklist was being published: nothing was written
+        # after the loss, and the replacement lease (if any) is left alone.
+        print("curation lease lost while building the worklist", file=sys.stderr)
+        return CURATION_BUSY_EXIT
     try:
         result = _curation_plan(
             args, category_items=categories, category_generation_attempted=True
         )
     except CurationStateError as exc:
         print(f"curation state error: {exc}", file=sys.stderr)
+        _abandon_begun_run(vault, lease.holder)
         return 1
     payload = result.payload
     payload["lease"] = lease.as_dict()
@@ -6256,6 +6278,7 @@ def _curation_begin_command(args: argparse.Namespace) -> int:
             is_live = holder_is_live(vault, holder=lease.holder)
         except CurationStateError as exc:
             print(f"curation state error: {exc}", file=sys.stderr)
+            _abandon_begun_run(vault, lease.holder)
             return 1
         if not is_live:
             print("curation lease lost while building the worklist", file=sys.stderr)

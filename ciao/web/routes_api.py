@@ -9978,7 +9978,10 @@ async def proposal_action(request: Request) -> JSONResponse:
         # once it is gone the vault still has the cluster, and the sidecar flag is
         # the only thing that keeps the next pass from filing it again. A refusal
         # that could not be written keeps its row.
-        decline_error = proposal_service.decline_category_row(config, row)
+        # Off the loop: the decline takes the proposal queue lock, which can wait.
+        decline_error = await asyncio.to_thread(
+            proposal_service.decline_category_row, config, row
+        )
         if decline_error:
             return JSONResponse({"error": decline_error, "id": pid}, status_code=409)
 

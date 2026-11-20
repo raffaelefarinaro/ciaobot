@@ -838,7 +838,7 @@ def _queued_row_id(
     """The queue row id for the bullet just written, or ``""`` if it is not there.
 
     Read back rather than assumed from the call, for the reason
-    :func:`ciao.vocabulary_proposals.generate_category_proposals` does it:
+    :func:`ciao.vocabulary_proposals.publish_category_candidates` does it:
     `append_proposals` dedupes the bullet text against the decision history as
     well as the live queue, so a bullet it declined to write would otherwise be
     reported as filed — and the check would then be pinned to a proposal id that
