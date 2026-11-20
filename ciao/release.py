@@ -977,11 +977,10 @@ def _probe_claude() -> ProviderProbe:
         return ProviderProbe("claude", None, None, None, "claude --version printed no version")
     source = f"claude {installed}"
     adapter_name = adapter_install.CLAUDE_ADAPTER
-    adapter_package = adapter_install.ADAPTERS[adapter_name].package
     adapter_pin = adapter_install.ADAPTERS[adapter_name].version
     state = adapter_install.detect(adapter_name)
     if state != "ready":
-        notes.append(f"{adapter_package} is {state}; the pin is {adapter_pin}")
+        notes.append(adapter_install.describe(adapter_name, state))
     else:
         try:
             run = subprocess.run(

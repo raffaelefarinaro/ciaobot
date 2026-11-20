@@ -726,15 +726,12 @@ async def _run_server_locked(
         engine_pid=engine_pid,
     )
 
-    async def install_adapter(phase: str, adapter: str) -> str:
-        """Install a pinned ACP adapter once, when its CLI is there. "" when it is ready."""
+    async def start_adapter_install(adapter: str) -> str | None:
+        """Start the pinned ACP adapter's install in the background. None when one started, else "" or the reason."""
         from ciao import adapter_install
 
-        def announce() -> None:
-            # Only when an install is about to run, so a ready adapter shows no install phase.
-            tracker.phase(phase).message = "installing the adapter…"
-
-        return await asyncio.to_thread(adapter_install.install_at_startup, adapter, announce)
+        # The install runs on its own thread and is shown on the Settings card, so no startup phase waits on npm.
+        return await asyncio.to_thread(adapter_install.start_install_in_background, adapter)
 
     # Start provider checks in the background
     tracker.start("connect_claude_code")
@@ -752,19 +749,18 @@ async def _run_server_locked(
                     "claude CLI not found on PATH",
                 )
                 return
-            adapter_error = await install_adapter(
-                "connect_claude_code", adapter_install.CLAUDE_ADAPTER
-            )
+            adapter_state = await start_adapter_install(adapter_install.CLAUDE_ADAPTER)
             proc = await asyncio.create_subprocess_exec(
                 cli, "--version",
                 stdout=subprocess.PIPE, stderr=subprocess.PIPE
             )
             stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=3.0)
-            if proc.returncode == 0 and adapter_error:
-                tracker.fail("connect_claude_code", adapter_error)
+            if proc.returncode == 0 and adapter_state:
+                tracker.fail("connect_claude_code", adapter_state)
             elif proc.returncode == 0:
                 version = stdout.decode().strip()
-                tracker.done("connect_claude_code", f"connected: {version}")
+                note = "; the ACP adapter is installing in the background" if adapter_state is None else ""
+                tracker.done("connect_claude_code", f"connected: {version}{note}")
             else:
                 tracker.fail("connect_claude_code", f"failed: exit {proc.returncode}")
         except Exception as e:
@@ -787,17 +783,20 @@ async def _run_server_locked(
                 from ciao import adapter_install
 
                 adapter = adapter_install.PROVIDER_ADAPTERS.get(descriptor.id)
+                installing = False
                 if adapter:
-                    adapter_error = await install_adapter(phase, adapter)
-                    if adapter_error:
-                        tracker.fail(phase, adapter_error)
+                    adapter_state = await start_adapter_install(adapter)
+                    if adapter_state:
+                        tracker.fail(phase, adapter_state)
                         return
+                    installing = adapter_state is None
                 status = await asyncio.to_thread(
                     descriptor.status_probe, os.environ
                 )
                 detail = str(status.get("detail") or "")
                 if status.get("ok"):
-                    tracker.done(phase, detail or "connected")
+                    note = "; the ACP adapter is installing in the background" if installing else ""
+                    tracker.done(phase, f"{detail or 'connected'}{note}")
                 else:
                     tracker.fail(phase, detail or "not connected")
             except Exception as exc:  # a probe must never block startup

@@ -906,7 +906,7 @@ def test_probe_claude_notes_a_missing_or_unpinned_adapter(
 ) -> None:
     import subprocess
 
-    from ciao import setup_status
+    from ciao import adapter_install, setup_status
 
     monkeypatch.setattr(setup_status, "claude_cli_path", lambda: "/fake/claude")
     monkeypatch.setattr(
@@ -930,6 +930,8 @@ def test_probe_claude_notes_a_missing_or_unpinned_adapter(
 
     assert probe.installed == "2.1.301"
     assert "claude-agent-acp" in probe.note or "not installed" in probe.note
+    if adapter is None:
+        assert probe.note == adapter_install.describe(adapter_install.CLAUDE_ADAPTER, "adapter_missing")
 
 
 def test_main_rejects_refresh_with_skip_provider_versions(tmp_path: Path) -> None:

@@ -255,6 +255,7 @@ def _provider(
     terminal_action: str = "",
     mcp_command: str = "",
     release_check: dict[str, str] | None = None,
+    adapter: str = "",
 ) -> dict[str, Any]:
     row: dict[str, Any] = {
         "name": name,
@@ -286,6 +287,8 @@ def _provider(
         row["terminal_action"] = terminal_action
     if mcp_command:
         row["mcp_command"] = mcp_command
+    if adapter:
+        row["adapter"] = adapter
     if release_check is not None:
         row["release_check"] = release_check
     return row
@@ -476,7 +479,8 @@ def codex_status_probe(
 ) -> dict[str, Any]:
     """Codex install and login state for Settings.
 
-    Installed means ``codex`` resolves and the pinned ``codex-acp`` adapter is ready. Signed in means ``codex login status``
+    Installed means ``codex`` resolves and the pinned ``codex-acp`` adapter is ready, either the
+    machine's own copy at the pin or the one Ciaobot installed. Signed in means ``codex login status``
     exits 0. Only the exit code is read: the command's output is never stored, returned or logged,
     so a token it might print cannot reach the PWA.
     """
@@ -541,6 +545,7 @@ def codex_status_probe(
             command="codex login",
             detail="Signed in to Codex.",
             version=version,
+            adapter=adapter_install.describe(adapter_install.CODEX_ADAPTER, "ready"),
         )
     return _provider(
         name="codex",
@@ -766,6 +771,7 @@ def _claude_status(
             release_check=check,
             terminal_action="claude-login",
             mcp_command=claude_mcp_command(binary),
+            adapter=adapter_install.describe(adapter_install.CLAUDE_ADAPTER, "ready"),
         )
     # No fallback on unparseable probe output: a timeout or process error is
     # not evidence of authentication, and neither is Desktop metadata — an

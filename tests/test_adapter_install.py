@@ -7,6 +7,7 @@ fake npm writes. Executables are empty files that are never run.
 from __future__ import annotations
 
 import asyncio
+import errno
 import hashlib
 import json
 import os
@@ -15,6 +16,7 @@ import signal
 import stat
 import subprocess
 import sys
+import threading
 from pathlib import Path
 from typing import Any, Callable
 
@@ -25,8 +27,12 @@ from ciao import setup_status
 from ciao.providers.acp import agents as agents_module
 from ciao.providers.acp import connection as connection_module
 from ciao.providers.acp.agents import CLAUDE, ClaudeAcpProvider, CodexAcpProvider
+from ciao.main import StartupTracker
 
 pytestmark = pytest.mark.skipif(sys.platform == "win32", reason="POSIX lock and permission semantics")
+
+# Captured before any fixture patches subprocess.Popen, for the one test that starts a real child.
+_REAL_POPEN = subprocess.Popen
 
 
 def _executable(path: Path) -> str:
@@ -60,8 +66,16 @@ def _pkg_dir(prefix: Path, name: str) -> Path:
     return prefix / name / "node_modules" / Path(*ai.ADAPTERS[name].package.split("/"))
 
 
+def _private_dir(path: Path) -> None:
+    """A folder the way the engine makes it: created if needed, then closed to everyone but us."""
+    path.mkdir(parents=True, exist_ok=True)
+    path.chmod(0o700)
+
+
 def _write_adapter(prefix: Path, name: str, *, version: str | None = None, entry: bool = True) -> Path:
     pin = ai.ADAPTERS[name]
+    _private_dir(prefix)
+    _private_dir(prefix / name)
     pkg = _pkg_dir(prefix, name)
     pkg.mkdir(parents=True, exist_ok=True)
     data: dict[str, Any] = {"name": pin.package, "version": pin.version if version is None else version}
@@ -152,8 +166,14 @@ def _writes_claude_tree(prefix: Path) -> Callable[[_Call], tuple[int, bytes, byt
 def test_install_line_runs_this_module_with_the_engine_python_and_never_global(prefix: Path) -> None:
     for name in (ai.CLAUDE_ADAPTER, ai.CODEX_ADAPTER):
         argv = shlex.split(ai.install_command(name))
-        assert argv == [sys.executable, "-m", "ciao.adapter_install", name]
+        assert argv == [sys.executable, *ai.isolated_probe_flags(), "-m", "ciao.adapter_install", name]
         assert "-g" not in argv and "--prefix" not in argv
+
+
+def test_install_line_is_isolated_so_a_planted_module_in_the_workspace_never_runs(prefix: Path) -> None:
+    argv = shlex.split(ai.install_command(ai.CLAUDE_ADAPTER))
+    assert argv[1] == "-I"
+    assert "-I" in ai.isolated_probe_flags()
 
 
 def test_codex_cli_install_is_the_pinned_cli_only() -> None:
@@ -374,7 +394,7 @@ def test_launch_does_not_read_a_tree_while_its_install_holds_the_lock(prefix: Pa
 def _hold(prefix: Path, name: str) -> int:
     import fcntl
 
-    prefix.mkdir(parents=True, exist_ok=True)
+    _private_dir(prefix)
     fd = os.open(prefix / f".ciao-{name}.lock", os.O_RDWR | os.O_CREAT, 0o600)
     fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
     return fd
@@ -395,14 +415,13 @@ def test_prefix_is_created_private_and_the_adapter_folder_too(prefix: Path, npm:
 def test_a_group_or_world_writable_prefix_is_refused_before_npm_runs(
     prefix: Path, npm: FakeNpm, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    prefix.mkdir(parents=True, mode=0o777)
-    prefix.chmod(0o777)
     _write_adapter(prefix, ai.CLAUDE_ADAPTER)
     _write_marker(prefix, ai.CLAUDE_ADAPTER)
+    prefix.chmod(0o777)
 
     assert ai.detect(ai.CLAUDE_ADAPTER) == "adapter_missing"
-    assert "writable by other users" in ai.describe(ai.CLAUDE_ADAPTER, "adapter_missing")
-    with pytest.raises(ai.AdapterInstallError, match="writable by other users"):
+    assert "open to other users" in ai.describe(ai.CLAUDE_ADAPTER, "adapter_missing")
+    with pytest.raises(ai.AdapterInstallError, match="open to other users"):
         ai.install(ai.CLAUDE_ADAPTER)
     assert npm.calls == []
 
@@ -479,7 +498,8 @@ def test_npm_gets_an_allowlisted_environment_and_no_secrets(
         assert value not in env.values()
     for key, value in kept.items():
         assert env[key] == value, key
-    assert env["PATH"] == "/term/bin"
+    # npm's own node comes first, so its env-node is the one that passed the version check.
+    assert env["PATH"] == f"{os.path.dirname(ai._node_path())}{os.pathsep}/term/bin"
 
 
 def test_install_that_finishes_without_a_ready_adapter_says_so(prefix: Path, npm: FakeNpm) -> None:
@@ -532,7 +552,7 @@ def test_marker_is_removed_before_npm_starts_and_a_complete_looking_tree_is_not_
     with pytest.raises(ai.AdapterInstallError, match="timed out"):
         ai.install(ai.CLAUDE_ADAPTER)
 
-    assert seen == [False], "the marker is gone before npm starts"
+    assert seen[0] is False, "the marker is gone before npm starts"
     assert not (prefix / f".ciao-{ai.CLAUDE_ADAPTER}.ok").exists()
     assert ai.detect(ai.CLAUDE_ADAPTER) == "adapter_missing"
 
@@ -642,29 +662,24 @@ def test_startup_install_runs_only_for_a_present_cli_with_a_missing_or_outdated_
     prefix: Path, npm: FakeNpm, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     npm.on_run = lambda call: (_write_adapter(prefix, ai.CODEX_ADAPTER), (0, b"", b""))[1]
-    announced: list[str] = []
 
-    monkeypatch.setattr(setup_status, "claude_cli_path", lambda: "")
     monkeypatch.setattr(agents_module, "codex_binary", lambda: None)
-    assert ai.install_at_startup(ai.CODEX_ADAPTER, lambda: announced.append("x")) == ai.describe(
-        ai.CODEX_ADAPTER, "cli_missing"
-    )
-    assert npm.calls == [] and announced == []
+    assert ai.install_at_startup(ai.CODEX_ADAPTER) == ai.describe(ai.CODEX_ADAPTER, "cli_missing")
+    assert npm.calls == []
 
     monkeypatch.setattr(agents_module, "codex_binary", lambda: str(prefix.parent / "bin" / "codex"))
-    assert ai.install_at_startup(ai.CODEX_ADAPTER, lambda: announced.append("x")) == ""
-    assert len(npm.calls) == 1 and announced == ["x"]
+    assert ai.install_at_startup(ai.CODEX_ADAPTER) == ""
+    assert len(npm.calls) == 1
 
-    assert ai.install_at_startup(ai.CODEX_ADAPTER, lambda: announced.append("x")) == ""
-    assert len(npm.calls) == 1 and announced == ["x"]
+    assert ai.install_at_startup(ai.CODEX_ADAPTER) == ""
+    assert len(npm.calls) == 1
 
 
 def test_a_ready_adapter_is_never_reinstalled_at_startup(prefix: Path, npm: FakeNpm) -> None:
     _ready(prefix, ai.CLAUDE_ADAPTER)
-    announced: list[str] = []
 
-    assert ai.install_at_startup(ai.CLAUDE_ADAPTER, lambda: announced.append("x")) == ""
-    assert npm.calls == [] and announced == []
+    assert ai.install_at_startup(ai.CLAUDE_ADAPTER) == ""
+    assert npm.calls == []
 
 
 def test_each_adapter_has_its_own_lock_so_installs_do_not_serialize(
@@ -739,3 +754,430 @@ def test_engine_entry_point_reports_usage_and_failures(
     npm.on_run = _writes_claude_tree(prefix)
     assert ai._main(["adapter_install.py", ai.CLAUDE_ADAPTER]) == 0
     assert "0.108.1 is installed" in capsys.readouterr().out
+
+
+# -- round 2: lock sharing, npm inheriting the lock, background start, machine-wide adapters ---
+
+
+def _join_installs(name: str) -> None:
+    for thread in threading.enumerate():
+        if thread.name == f"ciao-adapter-install-{name}":
+            thread.join(10)
+
+
+def test_npm_inherits_the_adapter_lock_so_it_outlives_the_engine(prefix: Path, npm: FakeNpm) -> None:
+    lock_path = prefix / f".ciao-{ai.CLAUDE_ADAPTER}.lock"
+    seen: dict[str, Any] = {}
+
+    def run(call: _Call) -> tuple[int, bytes, bytes]:
+        seen["pass_fds"] = call.kwargs["pass_fds"]
+        other = os.open(lock_path, os.O_RDWR)
+        try:
+            seen["held_while_npm_runs"] = not ai._try_lock(other, shared=False)
+        finally:
+            os.close(other)
+        _write_adapter(prefix, ai.CLAUDE_ADAPTER)
+        return 0, b"", b""
+
+    npm.on_run = run
+    ai.install(ai.CLAUDE_ADAPTER)
+
+    assert len(seen["pass_fds"]) == 1, "the lock fd is handed to npm"
+    assert seen["held_while_npm_runs"] is True
+    other = os.open(lock_path, os.O_RDWR)
+    try:
+        assert ai._try_lock(other, shared=False), "released once the install is done"
+    finally:
+        os.close(other)
+
+
+def test_a_lock_held_by_another_process_stops_the_install_before_npm_starts(
+    prefix: Path, npm: FakeNpm, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A leftover npm from a previous engine holds the lock; a second install must not start npm."""
+    prefix.mkdir(parents=True, mode=0o700)
+    lock_path = prefix / f".ciao-{ai.CLAUDE_ADAPTER}.lock"
+    script = (
+        "import fcntl, os, sys, time\n"
+        "fd = os.open(sys.argv[1], os.O_RDWR | os.O_CREAT, 0o600)\n"
+        "fcntl.flock(fd, fcntl.LOCK_EX)\n"
+        "print('locked', flush=True)\n"
+        "time.sleep(60)\n"
+    )
+    child = _REAL_POPEN([sys.executable, "-c", script, str(lock_path)], stdout=subprocess.PIPE, text=True)
+    try:
+        assert child.stdout is not None and child.stdout.readline().strip() == "locked"
+        monkeypatch.setattr(ai, "INSTALL_TIMEOUT_S", 0.3)
+        with pytest.raises(ai.AdapterInstallError, match="still running"):
+            ai.install(ai.CLAUDE_ADAPTER)
+        assert npm.calls == []
+    finally:
+        child.kill()
+        child.wait()
+        if child.stdout is not None:
+            child.stdout.close()
+
+
+def test_an_install_holding_the_lock_makes_a_launch_say_so_and_a_shared_holder_does_not(prefix: Path) -> None:
+    _ready(prefix, ai.CLAUDE_ADAPTER)
+    shared = os.open(prefix / f".ciao-{ai.CLAUDE_ADAPTER}.lock", os.O_RDWR | os.O_CREAT, 0o600)
+    try:
+        assert ai._try_lock(shared, shared=True)
+        assert ai.launch_argv(ai.CLAUDE_ADAPTER)[1].endswith("dist/index.js"), "launches share"
+        assert "is being installed" not in ai.describe(ai.CLAUDE_ADAPTER, "adapter_missing")
+    finally:
+        ai._unlock(shared)
+        os.close(shared)
+
+
+def test_concurrent_launches_both_succeed_while_the_tree_is_healthy(prefix: Path) -> None:
+    _ready(prefix, ai.CLAUDE_ADAPTER)
+    barrier = threading.Barrier(2)
+    results: list[list[str]] = []
+    errors: list[BaseException] = []
+
+    def launch() -> None:
+        barrier.wait()
+        try:
+            results.append(ai.launch_argv(ai.CLAUDE_ADAPTER))
+        except BaseException as exc:  # noqa: BLE001 - reported by the assertion below
+            errors.append(exc)
+
+    threads = [threading.Thread(target=launch) for _ in range(2)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(10)
+
+    assert errors == []
+    assert len(results) == 2 and results[0] == results[1]
+
+
+def test_startup_install_in_background_returns_while_npm_still_runs(prefix: Path, npm: FakeNpm) -> None:
+    release = threading.Event()
+    started = threading.Event()
+
+    def slow(call: _Call) -> tuple[int, bytes, bytes]:
+        started.set()
+        release.wait(10)
+        _write_adapter(prefix, ai.CLAUDE_ADAPTER)
+        return 0, b"", b""
+
+    npm.on_run = slow
+    try:
+        assert ai.start_install_in_background(ai.CLAUDE_ADAPTER) is None
+        assert started.wait(10), "the install runs on its own thread"
+        assert "is being installed" in ai.describe(ai.CLAUDE_ADAPTER, "adapter_missing")
+    finally:
+        release.set()
+        _join_installs(ai.CLAUDE_ADAPTER)
+    assert ai.detect(ai.CLAUDE_ADAPTER) == "ready"
+
+
+def test_overall_ready_is_reached_while_an_adapter_install_runs(prefix: Path, npm: FakeNpm) -> None:
+    release = threading.Event()
+    npm.on_run = lambda call: (release.wait(10), _write_adapter(prefix, ai.CLAUDE_ADAPTER), (0, b"", b""))[2]
+    tracker = StartupTracker()
+    tracker.start("connect_claude_code")
+    state = ai.start_install_in_background(ai.CLAUDE_ADAPTER)
+    tracker.done(
+        "connect_claude_code",
+        "connected: 2.1.301"
+        + ("; the ACP adapter is installing in the background" if state is None else ""),
+    )
+    try:
+        assert tracker.overall_ready is True, "the startup overlay is not held by the install"
+        assert tracker.phase("connect_claude_code").status == "done"
+    finally:
+        release.set()
+        _join_installs(ai.CLAUDE_ADAPTER)
+
+
+def test_windows_timeout_kills_the_whole_tree_with_taskkill(
+    npm: FakeNpm, monkeypatch: pytest.MonkeyPatch, killed: list[tuple[int, int]]
+) -> None:
+    monkeypatch.setattr(ai, "_windows", lambda: True)
+    commands: list[list[str]] = []
+
+    def fake_run(argv: list[str], **kwargs: Any) -> subprocess.CompletedProcess[bytes]:
+        commands.append(list(argv))
+        return subprocess.CompletedProcess(argv, 0)
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    proc = _FakeProc(npm, _Call([], {}))
+
+    ai._kill_tree(proc)  # type: ignore[arg-type]
+
+    assert commands == [["taskkill", "/F", "/T", "/PID", "4242"]]
+    assert proc.returncode == -9, "proc.kill is the fallback after taskkill"
+    assert killed == [], "no POSIX process-group signal on Windows"
+
+
+def test_windows_kill_still_kills_the_process_when_taskkill_cannot_run(
+    npm: FakeNpm, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(ai, "_windows", lambda: True)
+
+    def missing(argv: list[str], **kwargs: Any) -> None:
+        raise FileNotFoundError(argv[0])
+
+    monkeypatch.setattr(subprocess, "run", missing)
+    proc = _FakeProc(npm, _Call([], {}))
+
+    ai._kill_tree(proc)  # type: ignore[arg-type]
+
+    assert proc.returncode == -9
+
+
+def test_windows_npm_keeps_the_variables_npm_needs_to_start(
+    prefix: Path, npm: FakeNpm, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    npm.on_run = _writes_claude_tree(prefix)
+    needed = {
+        "TEMP": "C:\\Temp",
+        "TMP": "C:\\Temp",
+        "COMSPEC": "C:\\Windows\\system32\\cmd.exe",
+        "ProgramFiles": "C:\\Program Files",
+        "ProgramData": "C:\\ProgramData",
+        "SystemDrive": "C:",
+        "windir": "C:\\Windows",
+    }
+    for key, value in {**needed, "PWA_AUTH_TOKEN": "pwa-sentinel"}.items():
+        monkeypatch.setenv(key, value)
+
+    ai.install(ai.CLAUDE_ADAPTER)
+
+    env = npm.calls[0].kwargs["env"]
+    for key, value in needed.items():
+        assert env[key] == value, key
+    assert "PWA_AUTH_TOKEN" not in env
+
+
+def test_a_prefix_that_cannot_be_created_is_reported_with_its_error_type(
+    prefix: Path, npm: FakeNpm, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def denied(path: Path) -> None:
+        raise PermissionError(errno.EACCES, "denied")
+
+    monkeypatch.setattr(ai, "_ensure_private_dir", denied)
+    with pytest.raises(ai.AdapterInstallError, match=r"could not be prepared \(PermissionError\)"):
+        ai.install(ai.CLAUDE_ADAPTER)
+    assert npm.calls == []
+
+
+def test_a_lock_that_cannot_be_opened_is_reported_with_its_error_type(prefix: Path, npm: FakeNpm) -> None:
+    prefix.mkdir(parents=True, mode=0o700)
+    (prefix / f".ciao-{ai.CLAUDE_ADAPTER}.lock").mkdir()
+
+    with pytest.raises(ai.AdapterInstallError, match="IsADirectoryError"):
+        ai.install(ai.CLAUDE_ADAPTER)
+    assert npm.calls == []
+
+
+def test_a_marker_that_cannot_be_written_is_its_own_failure_and_stays_recorded(
+    prefix: Path, npm: FakeNpm, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    npm.on_run = _writes_claude_tree(prefix)
+    monkeypatch.setattr(ai, "_marker_path", lambda name: tmp_path / "missing" / "marker.ok")
+
+    first = ai.install_at_startup(ai.CLAUDE_ADAPTER)
+
+    assert first == "the install marker could not be written (FileNotFoundError)."
+    assert "npm could not run" not in first
+    assert ai.install_at_startup(ai.CLAUDE_ADAPTER) == first, "a later call never reads the failure as ready"
+    assert len(npm.calls) == 1
+
+
+def test_only_a_held_lock_counts_as_held_and_other_errors_propagate(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    fd = os.open(tmp_path / "lock", os.O_RDWR | os.O_CREAT, 0o600)
+    try:
+
+        def busy(fd_: int, op: int) -> None:
+            raise OSError(errno.EAGAIN, "busy")
+
+        monkeypatch.setattr(ai.fcntl, "flock", busy)
+        assert ai._try_lock(fd, shared=False) is False
+
+        def broken(fd_: int, op: int) -> None:
+            raise OSError(errno.EBADF, "bad fd")
+
+        monkeypatch.setattr(ai.fcntl, "flock", broken)
+        with pytest.raises(OSError, match="bad fd"):
+            ai._try_lock(fd, shared=False)
+    finally:
+        os.close(fd)
+
+
+def test_a_symlinked_prefix_is_refused(prefix: Path, npm: FakeNpm, tmp_path: Path) -> None:
+    real = tmp_path / "real-prefix"
+    _ready(real, ai.CLAUDE_ADAPTER)
+    prefix.symlink_to(real, target_is_directory=True)
+
+    assert ai.detect(ai.CLAUDE_ADAPTER) == "adapter_missing"
+    assert "symbolic link" in ai.describe(ai.CLAUDE_ADAPTER, "adapter_missing")
+    with pytest.raises(ai.AdapterInstallError, match="symbolic link"):
+        ai.install(ai.CLAUDE_ADAPTER)
+    assert npm.calls == []
+
+
+def test_a_lock_file_that_is_a_symlink_is_not_followed(prefix: Path, npm: FakeNpm, tmp_path: Path) -> None:
+    prefix.mkdir(parents=True, mode=0o700)
+    target = tmp_path / "elsewhere"
+    target.write_text("", encoding="utf-8")
+    (prefix / f".ciao-{ai.CLAUDE_ADAPTER}.lock").symlink_to(target)
+
+    with pytest.raises(ai.AdapterInstallError, match="could not be prepared"):
+        ai.install(ai.CLAUDE_ADAPTER)
+    assert target.read_text(encoding="utf-8") == ""
+    assert npm.calls == []
+
+
+def test_a_prefix_open_to_the_group_is_refused_not_only_one_open_to_others(prefix: Path, npm: FakeNpm) -> None:
+    _ready(prefix, ai.CLAUDE_ADAPTER)
+    prefix.chmod(0o750)
+
+    assert ai.detect(ai.CLAUDE_ADAPTER) == "adapter_missing"
+    assert "open to other users" in ai.describe(ai.CLAUDE_ADAPTER, "adapter_missing")
+
+
+def test_an_executable_in_a_group_or_world_writable_folder_is_refused(tmp_path: Path) -> None:
+    folder = tmp_path / "shared"
+    folder.mkdir()
+    node = _executable(folder / "node")
+
+    folder.chmod(0o775)
+    assert ai.absolute_executable(node) is None
+    folder.chmod(0o755)
+    assert ai.absolute_executable(node) == node
+
+
+def test_timeout_drains_the_pipes_once_more_after_the_kill(
+    prefix: Path, npm: FakeNpm, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    calls: list[int] = []
+
+    def hangs(call: _Call) -> tuple[int, bytes, bytes]:
+        calls.append(1)
+        raise subprocess.TimeoutExpired(call.argv, ai.INSTALL_TIMEOUT_S)
+
+    npm.on_run = hangs
+    with pytest.raises(ai.AdapterInstallError, match="timed out"):
+        ai.install(ai.CLAUDE_ADAPTER)
+    assert len(calls) == 2, "communicate once before the kill and once after it"
+
+
+def test_bin_as_a_string_is_accepted_and_an_absolute_bin_outside_the_package_is_not(prefix: Path, tmp_path: Path) -> None:
+    pkg = _write_adapter(prefix, ai.CLAUDE_ADAPTER)
+    pkg_json = pkg / "package.json"
+    data = json.loads(pkg_json.read_text(encoding="utf-8"))
+
+    data["bin"] = "dist/index.js"
+    pkg_json.write_text(json.dumps(data), encoding="utf-8")
+    _write_marker(prefix, ai.CLAUDE_ADAPTER)
+    assert ai.detect(ai.CLAUDE_ADAPTER) == "ready"
+
+    outside = tmp_path / "outside.js"
+    outside.write_text("//\n", encoding="utf-8")
+    data["bin"] = {ai.CLAUDE_ADAPTER: str(outside)}
+    pkg_json.write_text(json.dumps(data), encoding="utf-8")
+    assert ai.detect(ai.CLAUDE_ADAPTER) == "adapter_missing"
+
+
+@pytest.mark.parametrize("name", list(ai.ADAPTERS))
+def test_every_lock_entry_comes_from_the_npm_registry_with_no_git_file_or_link_source(name: str) -> None:
+    lock = json.loads(ai._stock_bytes(name, "package-lock.json"))
+    for key, entry in lock["packages"].items():
+        if not key:
+            continue
+        assert not entry.get("link"), key
+        assert entry.get("resolved", "").startswith("https://registry.npmjs.org/"), key
+        assert not str(entry.get("version", "")).startswith(("git", "file:", "link:", "http", "github:")), key
+
+
+# -- machine-wide adapter at the pin (M-6) ----------------------------------------------------
+
+
+def _global_install(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, *, version: str, writable: bool = False
+) -> Path:
+    """A machine-wide adapter: a package under a global npm root, its bin linked on the PATH."""
+    name = ai.CLAUDE_ADAPTER
+    root = tmp_path / "global-npm"
+    pkg = root / "lib" / "node_modules" / Path(*ai.ADAPTERS[name].package.split("/"))
+    pkg.mkdir(parents=True)
+    data = {"name": ai.ADAPTERS[name].package, "version": version, "bin": {name: "dist/index.js"}}
+    (pkg / "package.json").write_text(json.dumps(data), encoding="utf-8")
+    entry = _executable(pkg / "dist" / "index.js")
+    bin_dir = root / "bin"
+    bin_dir.mkdir(parents=True)
+    bin_path = bin_dir / name
+    bin_path.symlink_to(entry)
+    if writable:
+        pkg.chmod(0o777)
+    base = ai.resolve_tool
+    monkeypatch.setattr(ai, "resolve_tool", lambda cmd: str(bin_path) if cmd == name else base(cmd))
+    return pkg
+
+
+def test_a_machine_wide_adapter_at_the_pin_is_used_with_no_npm_call(
+    prefix: Path, npm: FakeNpm, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    pkg = _global_install(tmp_path, monkeypatch, version=ai.ADAPTERS[ai.CLAUDE_ADAPTER].version)
+
+    assert ai.detect(ai.CLAUDE_ADAPTER) == "ready"
+    ai.install(ai.CLAUDE_ADAPTER)
+    assert npm.calls == []
+    assert ai.launch_argv(ai.CLAUDE_ADAPTER) == [ai._node_path(), os.path.realpath(pkg / "dist" / "index.js")]
+    assert "using the adapter found at" in ai.describe(ai.CLAUDE_ADAPTER, "ready")
+
+
+def test_a_machine_wide_adapter_at_another_version_is_left_alone_and_the_private_one_is_installed(
+    prefix: Path, npm: FakeNpm, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    pkg = _global_install(tmp_path, monkeypatch, version="0.100.0")
+    before = (pkg / "package.json").read_bytes()
+    npm.on_run = _writes_claude_tree(prefix)
+
+    ai.install(ai.CLAUDE_ADAPTER)
+
+    assert len(npm.calls) == 1
+    assert (pkg / "package.json").read_bytes() == before, "the machine-wide copy is never modified"
+    assert ai.launch_argv(ai.CLAUDE_ADAPTER)[1].startswith(os.path.realpath(prefix))
+    assert "Ciaobot-managed adapter" in ai.describe(ai.CLAUDE_ADAPTER, "ready")
+
+
+def test_a_relative_or_writable_machine_wide_adapter_is_refused(
+    prefix: Path, npm: FakeNpm, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    pin = ai.ADAPTERS[ai.CLAUDE_ADAPTER].version
+    pkg = _global_install(tmp_path, monkeypatch, version=pin, writable=True)
+    assert ai.detect(ai.CLAUDE_ADAPTER) == "adapter_missing"
+    assert ai.in_use_path(ai.CLAUDE_ADAPTER) is None
+
+    # The same real package, reached through a relative path from the working directory.
+    pkg.chmod(0o755)
+    assert ai.detect(ai.CLAUDE_ADAPTER) == "ready"
+    monkeypatch.chdir(tmp_path / "global-npm")
+    base = ai.resolve_tool
+    monkeypatch.setattr(
+        ai, "resolve_tool", lambda cmd: "bin/claude-agent-acp" if cmd == ai.CLAUDE_ADAPTER else base(cmd)
+    )
+    assert ai.detect(ai.CLAUDE_ADAPTER) == "adapter_missing"
+    assert ai.in_use_path(ai.CLAUDE_ADAPTER) is None
+
+
+def test_an_attempt_that_raises_unexpectedly_never_reads_as_ready_on_a_later_call(
+    prefix: Path, npm: FakeNpm, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def unexpected(name: str) -> None:
+        raise RuntimeError("a bug, not an install error")
+
+    monkeypatch.setattr(ai, "install", unexpected)
+    with pytest.raises(RuntimeError, match="a bug"):
+        ai.install_at_startup(ai.CLAUDE_ADAPTER)
+
+    later = ai.install_at_startup(ai.CLAUDE_ADAPTER)
+    assert later != "", "nothing recorded must not read as ready"
+    assert "is not installed for Ciaobot yet" in later
