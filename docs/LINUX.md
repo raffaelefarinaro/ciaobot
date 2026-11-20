@@ -261,6 +261,17 @@ wheel, checks it against the stamped digest, refreshes the engine with
 workspace, its `.env` and its configuration are kept. `ciao update status`
 prints the last update record. Never update as root.
 
+The `sudo` step is the one that can fail. A run with no terminal (for example
+one started by a background caller) cannot answer the `sudo` password prompt,
+so it fails at the unit step, after `uv tool install --force` has already put
+the new code in place. The unit file is then not reinstalled and the service is
+not restarted by that run. Run `ciao update` from an interactive shell, so
+`sudo` can prompt, before relying on the new release.
+
+`ciao update` on a source checkout refuses with exit status 2 and tells you to
+update it with git. Source checkouts are updated as described in the next
+section, not by the installer.
+
 Source installs are updated by the administrator — never as the ciaobot
 account, which owns neither the source checkout nor the virtualenv. Pin the
 chosen source revision, build its frontend, install its Python dependencies,

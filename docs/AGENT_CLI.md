@@ -1,7 +1,7 @@
 # Ciaobot agent CLI control plane
 
 Since the S6 slice of the CLI-first migration, Ciaobot's own control surface
-for the two supported providers, Claude and OpenCode, is a command line:
+for the supported providers, Claude, Codex and OpenCode, is a command line:
 every operation runs as `ciao <noun> <verb> … --json` inside the managed
 provider's shell, described by the shared entry and linked references in
 `ciao/stock/skills/ciao-cli/`. The MCP adapter and `/mcp/` mount are
