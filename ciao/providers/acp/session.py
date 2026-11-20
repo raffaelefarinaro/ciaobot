@@ -382,10 +382,17 @@ class AcpSession:
         payload: Any,
         hook: Callable[[UpdateNormalizer, str, Mapping[str, Any]], list[StreamEvent]],
     ) -> None:
-        """Enqueue the events of one extension notification. Synchronous, like :meth:`on_update`."""
+        """Enqueue the events of one extension notification. Synchronous, like :meth:`on_update`.
+
+        Only a notification that yields events counts as agent output. One that yields none (an
+        auth status, a child of another session) must not touch the late turn: an empty late turn
+        would otherwise open, close as substantive, and wake the chat for nothing.
+        """
         if self._replaying or not isinstance(payload, Mapping):
             return
-        self._note_update(hook(self._normalizer, method, payload), kind="ext")
+        events = hook(self._normalizer, method, payload)
+        if events:
+            self._note_update(events, kind="ext")
 
     def _note_update(self, events: list[StreamEvent], *, kind: str) -> None:
         self._finish_shells(events)
