@@ -282,6 +282,14 @@ system schedule through the real schedule-run route of an engine the caller owns
 auto-fire first, and settles on the exact job-run row. Nothing collects usage yet; no
 savings claim is made.
 
+The seed builder (`ciao/care_eval_seed.py`) writes each scenario's public synthetic
+starting vault under a caller-owned directory and digests it as `fixture_sha256`. Its
+observer reads only files under that directory and maps the real guide, note check,
+queued `decide: you` row and `last_full_pass` marker to the oracle's symbolic bytes; the
+weekly marker counts as the dispatch's only when it equals the UTC date of the job-run
+start. Index, audit and effect-count observations are not collected yet, so those
+obligations stay unknown.
+
 ## Permission mode
 
 The chats of a run start in a permission mode, and the default depends on the
