@@ -577,7 +577,7 @@ export type EventsWsMessage =
   | { type: 'chat_streaming_started'; chat_id: string; project_id: string; background?: boolean }
   | { type: 'chat_streaming_done'; chat_id: string; project_id: string; is_error: boolean; last_error?: string; failure_id?: string; repo_location?: Partial<RepoLocation> }
   | { type: 'chat_repo_location'; chat_id: string; project_id: string; repo_location: Partial<RepoLocation> }
-  | { type: 'chat_result_ready'; chat_id: string; project_id: string; title: string; snippet: string }
+  | { type: 'chat_result_ready'; chat_id: string; project_id: string; title: string; snippet: string; memory_pass?: boolean }
   | { type: 'chat_read'; chat_id: string; last_read_at: string }
   | { type: 'chat_unread'; chat_id: string; last_read_at: string }
   | { type: 'chat_title'; chat_id: string; title: string; status?: 'pending' | 'ready' }

@@ -429,6 +429,13 @@ class AcpProvider(BaseProvider):
     def can_drain(self) -> bool:
         return self._session is not None and self.is_connected
 
+    async def abort_session(self, session_id: str) -> ResultEvent | None:
+        """Cancel the live session's turn, late turns included (Stop on a background chat)."""
+        session = self._session
+        if session is None or session.session_id != session_id:
+            return None
+        return await session.cancel()
+
     @property
     def background_work_outstanding(self) -> bool:
         session = self._session

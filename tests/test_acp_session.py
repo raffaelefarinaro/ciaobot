@@ -18,11 +18,12 @@ import pytest
 from acp.exceptions import RequestError
 from acp.schema import AllowedOutcome, DeniedOutcome, RequestPermissionResponse
 
-from ciao.models import ContextCompactedEvent, PermissionRequestEvent, ResultEvent, SystemStatusEvent
+from ciao.models import ContextCompactedEvent, PermissionRequestEvent, ResultEvent, ShellFinishedEvent, SystemStatusEvent
 from ciao.providers.acp import connection as connection_module
 from ciao.providers.acp.connection import AcpConnection
 from ciao.providers.acp.permissions import PermissionBroker
 from ciao.providers.acp.session import AcpSession, ModeNotApplied, SessionJournal, journal_path
+from ciao.providers.acp.shell_liveness import ShellLiveness
 from ciao.providers.acp.spec import ModeChoice
 from tests.acp_helpers import read_calls, write_scenario
 
@@ -421,6 +422,133 @@ async def test_close_finishes_open_late_turn(tmp_path: Path) -> None:
         assert event.wake_notice == _WAKE
         assert event.result == "background"
         assert harness.session.late_turn_open is False
+
+
+@pytest.mark.asyncio
+async def test_cancel_ends_an_open_late_turn_and_its_shells_without_a_wake(tmp_path: Path) -> None:
+    # Stop (cancel) ends the late turn and the shells it was tracking; neither may wake the chat.
+    async with _started(tmp_path, spec_quiet_period_s=30) as harness:
+        session = harness.session
+        session.on_update({
+            "sessionId": session.session_id,
+            "sessionUpdate": "agent_message_chunk",
+            "content": {"type": "text", "text": "background"},
+        })
+        session._shells.track_unpolled("call-1", command="sleep 60")
+        assert session.late_turn_open and session.background_shells_running
+
+        partial = await session.cancel()
+
+        # The partial reply comes back as a stopped wake result, not queued for a drain.
+        assert partial is not None
+        assert partial.stopped is True and partial.result == "background"
+        assert partial.origin == "task-notification" and partial.wake_notice
+        assert session.late_turn_open is False
+        assert session.background_shells_running is False
+        # The fake agent logs from its own process: wait until the cancel is on disk.
+        for _ in range(1000):
+            if "session/cancel" in _methods(harness.calls):
+                break
+            await asyncio.sleep(0.01)
+        assert _methods(harness.calls).count("session/cancel") == 1
+        with pytest.raises(asyncio.TimeoutError):
+            await asyncio.wait_for(_late_result(session), timeout=0.3)
+
+
+async def _late_result(session: AcpSession) -> ResultEvent:
+    # Only a result wakes the chat; the text chunk queued before Stop is not one.
+    async for event in session.late_events():
+        if isinstance(event, ResultEvent):
+            return event
+    raise AssertionError("late stream ended")
+
+
+async def _next_late_event(session: AcpSession) -> object:
+    async for event in session.late_events():
+        return event
+    raise AssertionError("late stream ended")
+
+
+@pytest.mark.asyncio
+async def test_cancel_empties_the_late_queue_so_a_new_drain_replays_nothing(tmp_path: Path) -> None:
+    async with _started(tmp_path, spec_quiet_period_s=30) as harness:
+        session = harness.session
+        session.on_update({
+            "sessionId": session.session_id,
+            "sessionUpdate": "agent_message_chunk",
+            "content": {"type": "text", "text": "background"},
+        })
+        # A shell end and a chunk are queued but not drained when the user presses Stop.
+        session._late_queue.put_nowait(ShellFinishedEvent(type="shell_finished", tool_use_id="call-1", ended_at=0.0))
+
+        await session.cancel()
+
+        # A new drain starts with nothing to replay: no stale chunk, no shell notice.
+        with pytest.raises(asyncio.TimeoutError):
+            await asyncio.wait_for(_next_late_event(session), timeout=0.3)
+
+
+@pytest.mark.asyncio
+async def test_cancel_with_nothing_running_sends_nothing(tmp_path: Path) -> None:
+    async with _started(tmp_path) as harness:
+        assert await harness.session.cancel() is None
+        await asyncio.sleep(0.3)
+        assert "session/cancel" not in _methods(harness.calls)
+
+
+@pytest.mark.asyncio
+async def test_foreground_cancel_keeps_tracked_shells_and_their_end_still_notifies(tmp_path: Path) -> None:
+    # Stopping the foreground reasoning leaves the running shell tracked; its end is still a notice.
+    async with _started(tmp_path, prompts=[{"steps": [{"await_cancel": True}]}]) as harness:
+        session = harness.session
+
+        async def run_turn() -> None:
+            async for _event in session.prompt([{"type": "text", "text": "go"}], display="go", unattended=False):
+                pass
+
+        turn = asyncio.create_task(run_turn())
+        for _ in range(1000):
+            if session.turn_running:
+                break
+            await asyncio.sleep(0.01)
+        session._shells.track_unpolled("call-1", command="make dev")
+
+        await session.cancel()
+        assert session.background_shells_running is True
+        await asyncio.wait_for(turn, timeout=5)
+
+        session._end_shell("call-1", session._shells.release("call-1"), None)  # type: ignore[arg-type]
+
+        async def first_shell_end() -> ShellFinishedEvent:
+            async for event in session.late_events():
+                if isinstance(event, ShellFinishedEvent):
+                    return event
+            raise AssertionError("late stream ended")
+
+        end = await asyncio.wait_for(first_shell_end(), timeout=5)
+        assert end.tool_use_id == "call-1"
+
+
+@pytest.mark.asyncio
+async def test_close_forgets_tracked_shells_and_pending_launch_commands(tmp_path: Path) -> None:
+    async with _started(tmp_path) as harness:
+        session = harness.session
+        session._shells.track_unpolled("call-1", command="make dev")
+        session._shell_commands["call-2"] = "sleep 60"
+
+        await session.close()
+
+        assert session._shells.tracking is False
+        assert session._shell_commands == {}
+        assert session.background_shells_running is False
+
+
+def test_shell_liveness_clear_stops_watching_every_shell() -> None:
+    shells = ShellLiveness()
+    assert shells.track_unpolled("call-1", command="make dev") is True
+    shells.clear()
+    assert shells.tracking is False
+    assert shells.polling is False
 
 
 @pytest.mark.asyncio
