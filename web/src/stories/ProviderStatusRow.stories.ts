@@ -4,6 +4,7 @@ import { h } from 'vue'
 import ProviderInstallBlock from '../components/settings/ProviderInstallBlock.vue'
 import ProviderStateBadge from '../components/settings/ProviderStateBadge.vue'
 import type { FixtureRoute } from './fixtureBoundary'
+import { resetHostTerminalForTests } from '../composables/useHostTerminal'
 import type { ProviderConnection, ProviderState } from '../lib/types'
 
 /**
@@ -62,12 +63,19 @@ const meta = {
     fixture: { routes: [HOST_TERMINAL] },
   },
   args: { connKey: 'claude', conn: connection('ready') },
-  render: (args) => h(ProviderInstallBlock, { connKey: args.connKey, conn: args.conn }),
+  render: (args) => installRender(args.connKey, args.conn),
 } satisfies Meta<typeof ProviderInstallBlock>
 export default meta
 type Story = StoryObj<typeof meta>
 
 const badge = (canvasElement: HTMLElement) => canvasElement.querySelector('.provider-state')
+
+// The host-terminal capability is cached per page; reset it so each story's
+// Install in Terminal button makes its own declared read.
+function installRender(connKey: string, conn: ProviderConnection) {
+  resetHostTerminalForTests()
+  return h(ProviderInstallBlock, { connKey, conn })
+}
 
 // The state mark on its own: the words and tone the card's row shows.
 const badgeOf = (state: ProviderState) => ({
@@ -111,24 +119,27 @@ export const BadgeFailed: Story = {
 // The install step: rendered only for a missing CLI or adapter.
 export const InstallNotInstalled: Story = {
   args: { connKey: 'claude', conn: connection('not_installed') },
+  render: (args) => installRender(args.connKey, args.conn),
   play: async ({ canvasElement }) => {
     expect(canvasElement.textContent).toContain('Claude Code is not installed on this machine.')
     expect(screen.getByRole('link', { name: 'installation guide ↗' }).getAttribute('href')).toBe(CLAUDE_GUIDE)
-    expect(await screen.findByRole('button', { name: 'Install in Terminal' })).toBeTruthy()
+    expect(await screen.findByRole('button', { name: 'Install Claude Code in Terminal' })).toBeTruthy()
   },
 }
 
 export const InstallAdapterMissing: Story = {
   args: { connKey: 'claude', conn: connection('adapter_missing') },
+  render: (args) => installRender(args.connKey, args.conn),
   play: async ({ canvasElement }) => {
     expect(canvasElement.textContent).toContain('npm install -g @agentclientprotocol/claude-agent-acp@0.108.1')
     expect(canvasElement.querySelector('a')).toBeNull()
-    expect(await screen.findByRole('button', { name: 'Install in Terminal' })).toBeTruthy()
+    expect(await screen.findByRole('button', { name: 'Install Claude Code in Terminal' })).toBeTruthy()
   },
 }
 
 export const InstallReady: Story = {
   args: { connKey: 'claude', conn: connection('ready') },
+  render: (args) => installRender(args.connKey, args.conn),
   play: async ({ canvasElement }) => {
     expect(canvasElement.textContent).not.toContain('Install')
     expect(canvasElement.querySelector('a')).toBeNull()
@@ -137,6 +148,7 @@ export const InstallReady: Story = {
 
 export const InstallFailed: Story = {
   args: { connKey: 'claude', conn: connection('failed') },
+  render: (args) => installRender(args.connKey, args.conn),
   play: async ({ canvasElement }) => {
     expect(canvasElement.textContent).not.toContain('Install')
     expect(canvasElement.querySelector('button')).toBeNull()
