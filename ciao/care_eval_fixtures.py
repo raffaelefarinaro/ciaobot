@@ -68,7 +68,8 @@ def _grade_value(key: str, expected: bytes, observed: Mapping[str, bytes | None]
     if key not in observed:
         return "unknown"
     value = observed[key]
-    if value is None:
+    # Strict: str, bytearray and memoryview are not the UTF-8 bytes the oracle expects.
+    if not isinstance(value, bytes):
         return "failed"
     return "passed" if value == expected else "failed"
 
@@ -88,13 +89,17 @@ def grade_fixture(
         outcome = _grade_value(item.observation_key, item.expected_bytes, observed)
         gates = _MARKER_GATES.get(item.observation_key, ())
         if outcome == "passed" and gates:
+            # A marker is creditable only when every gate passed. A gate that
+            # definitively failed (mismatch or explicit absence) fails the marker
+            # even when another gate is missing: a failed check is observed evidence
+            # that the marker is wrong, and failed beats unknown as in safety.
             gate_outcomes = [
                 _grade_value(gate, expected[gate], observed) for gate in gates if gate in expected
             ]
-            if len(gate_outcomes) != len(gates) or "unknown" in gate_outcomes:
-                outcome = "unknown"
-            elif "failed" in gate_outcomes:
+            if "failed" in gate_outcomes:
                 outcome = "failed"
+            elif len(gate_outcomes) != len(gates) or "unknown" in gate_outcomes:
+                outcome = "unknown"
         outcomes[item.id] = outcome
 
     protected = [
