@@ -10,6 +10,9 @@ from typing import Any
 
 from ciao.prompt_fence import fence
 
+# Verdict of a run whose exit status the engine cannot know (a background shell).
+UNKNOWN_VERDICT = "exit status unknown"
+
 
 def format_finished_runs(
     entries: list[dict[str, Any]], *, tail_lines: int
@@ -29,6 +32,9 @@ def format_finished_runs(
             verdict = "ok"
         elif status == "cancelled":
             verdict = "CANCELLED"
+        elif status == "unknown":
+            # A background shell's exit status is not on the wire: it is not a failure.
+            verdict = UNKNOWN_VERDICT
         else:
             verdict = "FAILED"
             any_failed = True

@@ -37,6 +37,7 @@ from ciao.models import (
     PromptCancelledEvent,
     ResultEvent,
     SessionTitleEvent,
+    ShellFinishedEvent,
     StreamEvent,
     SystemStatusEvent,
     ThinkingEvent,
@@ -287,6 +288,7 @@ class ChatStreamingHost(Protocol):
     def _flush_result_announce(self, chat_id: str) -> bool: ...
 
     def _background_work_outstanding(self, chat_id: str) -> bool: ...
+    def _note_shell_finished(self, chat_id: str, event: ShellFinishedEvent) -> None: ...
 
     def _spawn_detached(
         self, coro: Coroutine[object, object, object], name: str
@@ -2197,6 +2199,10 @@ class ChatStreaming:
                 drain_segment.feed(event)
                 if isinstance(event, SessionTitleEvent):
                     self._host.apply_adapter_title(chat_id, event.title)
+                    continue
+                if isinstance(event, ShellFinishedEvent):
+                    # Collected and announced once per window (project_chats), never streamed.
+                    self._host._note_shell_finished(chat_id, event)
                     continue
                 if (
                     isinstance(event, ResultEvent)

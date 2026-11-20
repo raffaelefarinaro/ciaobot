@@ -184,6 +184,7 @@ from ciao.models import (
     ChatContext,
     ImageAttachment,
     PermissionRequestEvent,
+    ShellFinishedEvent,
     StreamEvent,
     ToolUseEvent,
 )
@@ -227,6 +228,7 @@ from ciao.transcripts import (
     _global_sessions_present,
     parse_archive_turns,
 )
+from ciao import shell_wake
 from ciao.web import chat_service
 from ciao.web import restart_resume
 from ciao.web.chat_broker import (
@@ -260,6 +262,8 @@ from ciao.web.document_conversion import (
 from ciao.web.file_snapshots import SnapshotStore
 
 logger = logging.getLogger(__name__)
+# Background shells that end within this window are announced in one wake turn.
+SHELL_FINISHED_WINDOW_S = 3.0
 
 _ALLOWED_IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".gif", ".webp"}
 
@@ -1331,6 +1335,9 @@ class ProjectChatManager:
         # counts for or be inherited by a recycled chat id.
         self._provider_disconnect_failures: dict[str, int] = {}
         self._provider_reaper: asyncio.Task | None = None
+        # Background shells that finished, not yet announced, by chat; and the flush task per chat.
+        self._shell_finished_pending: dict[str, list[ShellFinishedEvent]] = {}
+        self._shell_finished_flushes: dict[str, asyncio.Task[object]] = {}
         self._provider_idle_timeout = _PROVIDER_IDLE_TIMEOUT_SECONDS
         self._provider_reap_interval = _PROVIDER_REAP_INTERVAL_SECONDS
         # Fold turn journals left behind by a crashed process into their
@@ -9165,6 +9172,36 @@ class ProjectChatManager:
         service = self._providers.get(chat_id)
         return bool(service is not None and service.background_work_outstanding)
 
+
+    def _note_shell_finished(self, chat_id: str, event: ShellFinishedEvent) -> None:
+        """Collect one finished background shell; the chat is told once per short window."""
+        pending = self._shell_finished_pending.setdefault(chat_id, [])
+        if any(known.tool_use_id == event.tool_use_id for known in pending):
+            return
+        pending.append(event)
+        if chat_id not in self._shell_finished_flushes:
+            self._shell_finished_flushes[chat_id] = self._spawn_detached(
+                self._flush_shell_finished(chat_id), f"shell-finished-{chat_id}"
+            )
+
+    async def _flush_shell_finished(self, chat_id: str) -> None:
+        """Wait out the coalescing window, then send one wake turn for the shells that ended."""
+        await asyncio.sleep(SHELL_FINISHED_WINDOW_S)
+        self._shell_finished_flushes.pop(chat_id, None)
+        events = self._shell_finished_pending.pop(chat_id, [])
+        chat = self._chats.get(chat_id)
+        if not events or chat is None or self._shutting_down:
+            return
+        reason = restart_resume.skip_reason(chat)
+        if reason:
+            logger.info("Not announcing %d finished shell(s) in chat %s: %s", len(events), chat_id, reason)
+            return
+        try:
+            self._deliver_wake(
+                chat, shell_wake.shell_finished_prompt(events), count=len(events), origin="background_run"
+            )
+        except Exception:  # noqa: BLE001 — one chat's notice must not break the others
+            logger.exception("Finished-shell notice failed for chat %s", chat_id)
 
     def _deliver_wake(self, parent: ChatInfo, prompt: str, *, count: int, origin: str) -> str:
         """Deliver one wake turn into *parent* and announce it.

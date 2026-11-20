@@ -91,15 +91,12 @@ def test_stock_skills_do_not_advise_background_shells() -> None:
 
 
 def test_stock_background_rule_keeps_the_subagent_exception() -> None:
-    """Stock docs that state the rule use the core's wording, and keep subagent dispatch allowed."""
-    shell_ban = (
-        "Do not start background shells (`run_in_background` on Bash, `Monitor`, "
-        "a trailing `&`, `nohup`, `setsid`, `disown`): Ciaobot cannot track them."
-    )
+    """Stock docs drop the shell ban and keep subagent dispatch allowed."""
     subagent_ok = "Dispatching a background subagent (the Agent tool with `run_in_background`) is allowed."
     for rel in ("ciao-cli/reference.md", "ciao-capabilities/references/workspaces-and-chats.md"):
         text = (STOCK_SKILLS / rel).read_text(encoding="utf-8")
-        assert text.count(shell_ban) == 1, rel
+        assert "Do not start background shells" not in text, rel
+        assert "Ciaobot cannot track them" not in text, rel
         assert text.count(subagent_ok) == 1, rel
 
 

@@ -14,6 +14,7 @@ import hashlib
 import json
 import logging
 import os
+import time
 from collections.abc import AsyncGenerator, Callable, Mapping, Sequence
 from pathlib import Path
 from typing import Any
@@ -33,6 +34,7 @@ from ciao.models import (
     BridgeMode,
     ContextCompactedEvent,
     ResultEvent,
+    ShellFinishedEvent,
     StreamEvent,
     SystemStatusEvent,
     ToolUseEvent,
@@ -42,12 +44,15 @@ from ciao.providers.acp.connection import AcpConnection
 from ciao.providers.acp.normalize import TurnText, UpdateNormalizer, canonical, result_event
 from ciao.providers.acp.permissions import PermissionBroker, mode_choices, pick_value
 from ciao.providers.acp.shell_liveness import CHECK_INTERVAL_S, ShellLiveness
+from ciao.providers.acp.shell_output import read_tail
 from ciao.providers.acp.spec import AgentSpec
 from ciao.redact import redact_text
 
 logger = logging.getLogger(__name__)
 
 _LATE_QUIET = frozenset({"usage_update", "config_option_update", "current_mode_update", "shell_settle"})
+# Background shell commands held between a launch and its acknowledgement; a session has few.
+_SHELL_COMMANDS_LIMIT = 64
 _LATE_WAKE = "The agent continued after background work finished."
 # A chat's model string is user-controlled, so a status line echoes at most this many characters.
 _STATUS_MODEL_CHARS = 80
@@ -205,6 +210,8 @@ class AcpSession:
         self._quiet_task: asyncio.Task[None] | None = None
         # Background shells whose process ends silently (no terminal meta): settled by a liveness check.
         self._shells = ShellLiveness()
+        # The command each background shell was launched with, by call id, until it settles.
+        self._shell_commands: dict[str, str] = {}
         self._shell_task: asyncio.Task[None] | None = None
         # The not-offered model status is reported once per session.
         self._model_reported = False
@@ -388,13 +395,28 @@ class AcpSession:
     def _track_shells(self, events: list[StreamEvent]) -> None:
         """Start watching each background shell whose launch acknowledgement names a pid."""
         for event in events:
+            if (
+                isinstance(event, ToolUseEvent) and event.type == "tool_use"
+                and event.shell_background and event.tool_use_id
+            ):
+                # Kept until the launch acknowledgement arrives, so the end notice can name it.
+                self._shell_commands[event.tool_use_id] = event.tool_input
+                while len(self._shell_commands) > _SHELL_COMMANDS_LIMIT:
+                    del self._shell_commands[next(iter(self._shell_commands))]
+                continue
             if not (
                 isinstance(event, ToolUseEvent) and event.type == "tool_result" and event.background
                 and event.shell_pid is not None and event.tool_use_id
             ):
                 continue
             # One ``ps`` snapshot, taken once per launch: the start time is what identifies the pid.
-            if not self._shells.track(event.tool_use_id, event.shell_pid, process_table()):
+            if not self._shells.track(
+                event.tool_use_id,
+                event.shell_pid,
+                process_table(),
+                command=self._shell_commands.pop(event.tool_use_id, ""),
+                output_path=event.output_path,
+            ):
                 continue
             if self._shell_task is None or self._shell_task.done():
                 self._shell_task = asyncio.create_task(self._watch_shells())
@@ -404,11 +426,26 @@ class AcpSession:
         while self._shells.tracking:
             await asyncio.sleep(CHECK_INTERVAL_S)
             table = await asyncio.to_thread(process_table)
-            for call_id in self._shells.settled(table):
+            for call_id, shell in self._shells.settled(table):
                 # The same path a tool_result takes: the journal (history) and the live queue.
                 self._note_update(
                     [ToolUseEvent(type="tool_result", tool_use_id=call_id, is_error=False, exit_code=None)],
                     kind="shell_settle",
+                )
+                # The end notice wakes the chat once. Its output tail is read here, off the loop.
+                tail = await asyncio.to_thread(read_tail, shell.output_path)
+                self._touch_late(
+                    [
+                        ShellFinishedEvent(
+                            type="shell_finished",
+                            tool_use_id=call_id,
+                            command=shell.command,
+                            output_path=shell.output_path,
+                            duration_s=round(time.monotonic() - shell.launched_at, 1),
+                            output_tail=tail,
+                        )
+                    ],
+                    substantive=False,
                 )
 
     def _touch_late(self, events: list[StreamEvent], *, substantive: bool) -> None:

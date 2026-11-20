@@ -19,6 +19,10 @@ STARTED = "Thu Nov 20 10:00:00 2026"
 LATER = "Thu Nov 20 11:30:00 2026"
 
 
+def _ids(settled: list[tuple[str, object]]) -> list[str]:
+    return [call_id for call_id, _ in settled]
+
+
 def test_a_live_pid_with_its_start_time_is_not_settled() -> None:
     shells = ShellLiveness()
     assert shells.track("call-1", 4242, {4242: (1, STARTED)})
@@ -29,7 +33,7 @@ def test_a_live_pid_with_its_start_time_is_not_settled() -> None:
 def test_a_vanished_pid_settles_once_and_stops_being_tracked() -> None:
     shells = ShellLiveness()
     shells.track("call-1", 4242, {4242: (1, STARTED)})
-    assert shells.settled({1: (0, "boot")}) == ["call-1"]
+    assert _ids(shells.settled({1: (0, "boot")})) == ["call-1"]
     assert not shells.tracking
     assert shells.settled({1: (0, "boot")}) == []
 
@@ -37,7 +41,7 @@ def test_a_vanished_pid_settles_once_and_stops_being_tracked() -> None:
 def test_a_reused_pid_with_a_different_start_time_counts_as_gone() -> None:
     shells = ShellLiveness()
     shells.track("call-1", 4242, {4242: (1, STARTED)})
-    assert shells.settled({4242: (1, LATER)}) == ["call-1"]
+    assert _ids(shells.settled({4242: (1, LATER)})) == ["call-1"]
 
 
 def test_an_empty_table_settles_nothing_so_a_failed_ps_cannot_end_every_shell() -> None:
@@ -66,6 +70,7 @@ def _session_stub() -> AcpSession:
     session = AcpSession.__new__(AcpSession)
     session._shells = ShellLiveness()
     session._shell_task = None
+    session._shell_commands = {}
     return session
 
 
@@ -83,6 +88,8 @@ async def test_the_watch_emits_a_settle_through_the_session_path_when_the_proces
     session = _session_stub()
     emitted: list[tuple[list[Any], str]] = []
     session._note_update = lambda events, *, kind: emitted.append((events, kind))  # type: ignore[method-assign]
+    ended: list[list[Any]] = []
+    session._touch_late = lambda events, *, substantive: ended.append(events)  # type: ignore[method-assign]
 
     session._track_shells([_background_ack("call-bg", 4242)])
     assert session._shell_task is not None
@@ -99,6 +106,9 @@ async def test_the_watch_emits_a_settle_through_the_session_path_when_the_proces
         "tool_result", "call-bg", False, False, None,
     )
     assert not session._shells.tracking
+    # The end event goes once, on the late path, and names the shell (no output file here).
+    (end,) = [e for batch in ended for e in batch]
+    assert (end.type, end.tool_use_id, end.output_tail) == ("shell_finished", "call-bg", None)
 
 
 @pytest.mark.asyncio
@@ -109,6 +119,7 @@ async def test_a_pid_reused_during_the_watch_is_settled_not_kept_alive(monkeypat
     session = _session_stub()
     emitted: list[str] = []
     session._note_update = lambda events, *, kind: emitted.append(events[0].tool_use_id)  # type: ignore[method-assign,index]
+    session._touch_late = lambda events, *, substantive: None  # type: ignore[method-assign]
 
     session._track_shells([_background_ack("call-bg", 4242)])
     table[4242] = (1, LATER)
@@ -125,3 +136,34 @@ def test_a_foreground_result_or_a_pidless_ack_starts_no_watch(monkeypatch: pytes
     ])
     assert session._shell_task is None
     assert not session._shells.tracking
+
+
+@pytest.mark.asyncio
+async def test_a_launched_shell_keeps_its_command_and_output_path_for_the_end_notice(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(session_module, "process_table", lambda: {4242: (1, STARTED)})
+    session = _session_stub()
+    session._track_shells([
+        ToolUseEvent(type="tool_use", tool_use_id="call-bg", tool_input="npm run dev", shell=True, shell_background=True),
+    ])
+    session._track_shells([
+        ToolUseEvent(
+            type="tool_result", tool_use_id="call-bg", background=True, shell_pid=4242,
+            output_path="/tmp/out.log",
+        ),
+    ])
+    (_, shell), = [(c, s) for c, s in session._shells._tracked.items()]
+    assert (shell.command, shell.output_path) == ("npm run dev", "/tmp/out.log")
+    assert "call-bg" not in session._shell_commands
+    assert session._shell_task is not None
+    session._shell_task.cancel()
+
+
+@pytest.mark.asyncio
+async def test_a_settled_shell_is_never_tracked_again_from_a_replayed_acknowledgement() -> None:
+    shells = ShellLiveness()
+    assert shells.track("call-1", 4242, {4242: (1, STARTED)})
+    assert _ids(shells.settled({1: (0, "boot")})) == ["call-1"]
+    assert shells.track("call-1", 4242, {4242: (1, STARTED)}) is False
+    assert not shells.tracking
