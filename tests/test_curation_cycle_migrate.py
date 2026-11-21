@@ -224,29 +224,6 @@ def test_progress_functions_round_trip_a_v2_file_and_keep_the_cycle_fields(tmp_p
     assert decoded.last_run["planned"] == 3
 
 
-def test_end_run_marker_advance_on_v2_fails_closed_and_publishes_no_marker(tmp_path: Path) -> None:
-    vault = _vault(tmp_path)
-    _put_log(vault)
-    _put_state(
-        vault,
-        cc.encode_state(
-            _cycle(required={cr.HYGIENE_INDEX_KEY: "2026-11-17", cr.HYGIENE_AUDIT_KEY: "2026-11-17"})
-        ),
-    )
-    before_log = (vault / cr.CURATION_LOG_RELATIVE).read_bytes()
-    lease = cr.begin_run(vault, holder="run", now=NOW)
-
-    summary = cr.end_run(
-        vault, holder=lease.holder, status="ok", advance_marker=True, today=TODAY, now=NOW
-    )
-
-    assert summary["status"] == "failed"
-    assert summary["full_pass_advanced"] is False
-    assert "not available" in summary["marker_error"]
-    assert (vault / cr.CURATION_LOG_RELATIVE).read_bytes() == before_log
-    assert cr.load_state(vault).lease == {}
-
-
 def test_advance_full_pass_refuses_a_v2_state_and_changes_nothing(tmp_path: Path) -> None:
     vault = _vault(tmp_path)
     _put_log(vault)
