@@ -277,6 +277,12 @@ export const useTerminalStore = defineStore('terminal', () => {
    */
   const locations = ref<TerminalFolderChoice[]>([])
   const phase = ref<TerminalPhase>('closed')
+  /**
+   * Bumped for each live output frame of the connected session. Replayed output
+   * (between `ready` and `replay_end`) does not count: it is old screen, not a
+   * program that has just started.
+   */
+  const liveOutputSeq = ref(0)
   /** A friendly message for the pane. Never a payload, never a credential. */
   const error = ref('')
   const globalCapacity = ref(false)
@@ -343,6 +349,8 @@ export const useTerminalStore = defineStore('terminal', () => {
   let socket: WebSocket | null = null
   /** True once the current connection completed the terminal handshake. */
   let terminalReady = false
+  /** True from `ready` until `replay_end`: output frames are the replay, not live output. */
+  let replaying = false
   /** Automatic reconnect attempts since the last completed handshake. */
   let reconnectAttempts = 0
   /** When the last valid frame arrived, in milliseconds. */
@@ -765,6 +773,7 @@ export const useTerminalStore = defineStore('terminal', () => {
         // The handshake is complete: the terminal is live, and the retry
         // budget starts again.
         terminalReady = true
+        replaying = true
         cancelTimer(readyTimer)
         readyTimer = null
         reconnectAttempts = 0
@@ -821,11 +830,13 @@ export const useTerminalStore = defineStore('terminal', () => {
         // the write.
         if (slice.bytes.length === 0) break
         enqueueOutput(surface, slice.bytes, slice.nextOffset)
+        if (!replaying) liveOutputSeq.value += 1
         break
       }
       case 'replay_end': {
         // The replay is over. It says how many bytes exist, not how many
         // this client consumed, so the cursor does not move.
+        replaying = false
         if (frame.truncated) truncated.value = true
         break
       }
@@ -1705,6 +1716,7 @@ export const useTerminalStore = defineStore('terminal', () => {
     activeSession,
     locations,
     phase,
+    liveOutputSeq,
     error,
     capacityError,
     focusOpen,

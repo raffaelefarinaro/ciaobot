@@ -2151,6 +2151,7 @@ class ChatStreaming:
                 context_label=chat.title,
                 provider=chat.provider,
                 is_error=bool(event.is_error),
+                is_partial=bool(event.stopped),
                 origin="background_run",
             )
         except Exception:

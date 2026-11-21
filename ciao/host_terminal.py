@@ -21,6 +21,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal
 
+from ciao.os_support.child_env import child_env
 from ciao.tool_path import terminal_path
 
 PLATFORM_MACOS, PLATFORM_LINUX, PLATFORM_OTHER = ("macos", "linux", "other")
@@ -149,7 +150,7 @@ def _terminal_env() -> dict[str, str]:
     """The engine's environment minus secrets."""
     env = {
         key: value
-        for key, value in os.environ.items()
+        for key, value in child_env().items()
         if key not in _STRIPPED_ENV_KEYS
         and not key.startswith("CIAO_")
         and not _is_sensitive_env_key(key)

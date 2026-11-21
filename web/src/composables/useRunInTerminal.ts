@@ -5,7 +5,19 @@ import { writeClipboard } from '../lib/codeCopy'
 
 export type RunInTerminalResult = 'typed' | 'copied' | 'copied_multiline' | 'failed'
 
+export interface RunInTerminalOptions {
+  enter?: boolean
+  chatId?: string
+  paste?: boolean
+  /** Typed as a separate line after the command's program has started (not in paste mode). */
+  followUp?: string
+}
+
 const LIVE_TIMEOUT_MS = 8000
+// A CLI that has started draws its screen, then stays quiet until it is used. The follow-up
+// waits for that quiet, but never longer than the cap once output has begun.
+const CLI_QUIET_MS = 600
+const CLI_START_CAP_MS = 8000
 // A fresh shell turns bracketed paste on when it draws its first prompt, so the
 // paste mode is polled for this long after the shell goes live.
 const PASTE_MODE_WAIT_MS = 2000
@@ -30,6 +42,10 @@ export function resetRunInTerminalSession(): void { ownSessions.clear() }
  * keystrokes. Whenever that is not possible the command is copied instead,
  * never dropped.
  *
+ * A `followUp` is typed as its own line once the launched program has started
+ * (see `waitCliStarted`). It is never copied: when the program does not start,
+ * only the launch command's own outcome is reported.
+ *
  * Paste mode types without pressing Enter: the text is wrapped in a bracketed
  * paste when the shell accepts one, so the shell inserts it at the prompt and
  * runs nothing. A multi-line command is copied instead when the shell does not
@@ -39,7 +55,7 @@ export function useRunInTerminal(
   liveTimeoutMs: number = LIVE_TIMEOUT_MS,
   pasteModeWaitMs: number = PASTE_MODE_WAIT_MS,
 ): {
-  run: (command: string, opts?: { enter?: boolean; chatId?: string; paste?: boolean }) => Promise<RunInTerminalResult>
+  run: (command: string, opts?: RunInTerminalOptions) => Promise<RunInTerminalResult>
   busy: Ref<boolean>
 } {
   const store = useTerminalStore()
@@ -66,6 +82,38 @@ export function useRunInTerminal(
     })
   }
 
+  /**
+   * Resolves true once the program started by the launch command has drawn and
+   * gone quiet, false if it never produced output, if the session ends or is
+   * switched away, or if the cap passes with no output at all. Output is read
+   * from the store's live output signal, so replayed screen does not count.
+   */
+  function waitCliStarted(ownId: string): Promise<boolean> {
+    return new Promise((resolve) => {
+      let seen = false
+      let quiet: ReturnType<typeof setTimeout> | null = null
+      let lastSeq = store.liveOutputSeq
+      const stop = watch(
+        () => [store.liveOutputSeq, store.phase, store.activeSession?.session_id] as const,
+        ([seq, phase, activeId]) => {
+          if (activeId !== ownId || DEAD_PHASES.has(phase)) return settle(false)
+          if (seq === lastSeq) return
+          lastSeq = seq
+          seen = true
+          if (quiet) clearTimeout(quiet)
+          quiet = setTimeout(() => settle(true), CLI_QUIET_MS)
+        },
+      )
+      const cap = setTimeout(() => settle(seen), CLI_START_CAP_MS)
+      const settle = (ok: boolean): void => {
+        clearTimeout(cap)
+        if (quiet) clearTimeout(quiet)
+        stop()
+        resolve(ok)
+      }
+    })
+  }
+
   /** Resolves true once the shell on screen accepts a paste; false after the wait or if the session changes. */
   function waitBracketedPaste(ownId: string): Promise<boolean> {
     const deadline = Date.now() + pasteModeWaitMs
@@ -82,7 +130,7 @@ export function useRunInTerminal(
 
   async function run(
     command: string,
-    opts?: { enter?: boolean; chatId?: string; paste?: boolean },
+    opts?: RunInTerminalOptions,
   ): Promise<RunInTerminalResult> {
     if (busy.value) return 'failed'
     busy.value = true
@@ -137,7 +185,14 @@ export function useRunInTerminal(
         text = command + (opts?.enter === false ? '' : '\r')
       }
       const bytes = new TextEncoder().encode(text)
-      return store.sendInput(bytes) ? 'typed' : await copy(command)
+      if (!store.sendInput(bytes)) return await copy(command)
+      if (opts?.followUp && !opts.paste && await waitCliStarted(ownId)) {
+        // Only into the session that was launched, and only while it is still the one on screen.
+        if (store.activeSession?.session_id === ownId) {
+          store.sendInput(new TextEncoder().encode(opts.followUp + '\r'))
+        }
+      }
+      return 'typed'
     } finally {
       busy.value = false
     }

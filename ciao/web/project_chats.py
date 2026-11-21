@@ -5167,12 +5167,14 @@ class ProjectChatManager:
         with self._chat_lifecycle_guard(chat_id):
             return self._delete_chat_guarded(chat_id)
 
-    def _forget_shell_wake_state(self, chat_id: str) -> None:
-        """Drop every shell-wake record of a chat: its pending and held notices, its wake limit, its flush."""
+    def _drop_held_shell_state(self, chat_id: str) -> None:
+        """Drop a chat's held, waiting and claimed shell notices, its continuation claim and its flush.
+
+        Shared by an archive or delete (the chat is gone) and a Stop of its late or wake turn
+        (the notices must never wake it afterwards). Not the wake limit: that outlives a Stop.
+        """
         self._shell_finished_pending.pop(chat_id, None)
         self._shell_finished_waiting.pop(chat_id, None)
-        self._shell_wake_times.pop(chat_id, None)
-        self._shell_wakes_paused.pop(chat_id, None)
         for key in [key for key in self._shell_notice_due if key[0] == chat_id]:
             del self._shell_notice_due[key]
         self._claimed_notices.pop(chat_id, None)
@@ -5181,6 +5183,12 @@ class ProjectChatManager:
         flush = self._shell_finished_flushes.pop(chat_id, None)
         if flush is not None:
             flush.cancel()
+
+    def _forget_shell_wake_state(self, chat_id: str) -> None:
+        """Drop every shell-wake record of a chat: its notices and claim, its wake limit, its flush."""
+        self._drop_held_shell_state(chat_id)
+        self._shell_wake_times.pop(chat_id, None)
+        self._shell_wakes_paused.pop(chat_id, None)
 
     def _delete_chat_guarded(self, chat_id: str) -> bool:
         # Resolved before the row leaves the registry: the cleanup below runs
@@ -9030,12 +9038,16 @@ class ProjectChatManager:
         self, chat_id: str, project_id: str, title: str, snippet: str
     ) -> None:
         """Publish ``chat_result_ready`` and queue a delayed result push."""
+        chat = self._chats.get(chat_id)
         self._events.publish({
             "type": "chat_result_ready",
             "chat_id": chat_id,
             "project_id": project_id,
             "title": title,
             "snippet": snippet,
+            # Native clients have no PWA store guard, so the pass is marked
+            # explicitly; an unknown chat is not a pass.
+            "memory_pass": chat is not None and self._is_memory_pass(chat),
         })
         self._schedule_push(chat_id, title, snippet)
 
@@ -10062,19 +10074,27 @@ class ProjectChatManager:
         return payload
 
     async def _finish_background_stop(self, chat_id: str) -> None:
-        """Abort OpenCode's follow-up execution and release the parked announce."""
+        """Abort the background turn and release the parked announce. Runs once the drain has unwound."""
+        # No drain is left to read a notice now, so the chat's held and claimed notices
+        # are dropped: the Stop must not be followed by a wake for them.
+        self._drop_held_shell_state(chat_id)
         # OpenCode's follow-up execution runs in its agent process, not in the
         # drain: ending the drain alone would leave it running (#1391).
         service = self._providers.get(chat_id)
         live = service.provider if service is not None else None
+        partial = None
         if live is not None and live.current_session_id:
             try:
-                await asyncio.wait_for(
+                partial = await asyncio.wait_for(
                     live.abort_session(live.current_session_id),
                     timeout=self._STOP_GRACE_S,
                 )
             except asyncio.TimeoutError:
                 pass
+        if partial is not None:
+            # The stopped late turn keeps its partial reply in the transcript. It is recorded
+            # as a turn, not announced: no wake follows the Stop.
+            self._streaming._record_wake_turn(chat_id, partial)
         # The drain's cancelled path leaves the park to the next
         # turn, but Stop starts none, so nobody is left to release it. Flush here or the chat keeps
         # its interim message with no unread badge, no push and no
@@ -10135,11 +10155,35 @@ class ProjectChatManager:
             if self._streaming.pending_stop_handoff(chat_id) is not None:
                 await self._streaming.join_stop_handoff(chat_id)
                 return True
+            # Between turns no drain holds a late turn, so the chat's held notices
+            # are dropped here, before the provider is asked to stop.
+            self._drop_held_shell_state(chat_id)
         provider = self._providers.get(chat_id)
-        if provider is None:
-            return False
         turn_task = stream.turn_task if stream is not None else None
         drive_task = self._streaming.drive_task(chat_id, stream)
+        if provider is None:
+            if stream is None or turn_task is None or turn_task.done():
+                return False
+            # A turn is registered but its provider is gone, so nothing can stop it politely:
+            # cancel the turn task, bounded by the grace, and clear the stream.
+            stream.force_closing = True
+            turn_task.cancel()
+            try:
+                await asyncio.wait_for(asyncio.shield(turn_task), timeout=self._STOP_GRACE_S)
+            except asyncio.TimeoutError:
+                logger.warning(
+                    "Turn for chat %s ignored its cancel for %.1fs; clearing its stream",
+                    chat_id,
+                    self._STOP_GRACE_S,
+                )
+            except asyncio.CancelledError:
+                pass
+            except Exception:  # noqa: BLE001 — teardown is best-effort
+                logger.debug("Turn errored while stopping chat %s", chat_id, exc_info=True)
+            if drive_task is not None:
+                await self._streaming.wait_for_drive_cleanup(chat_id, stream, self._STOP_GRACE_S)
+            self._broker.clear(chat_id, stream)
+            return True
         if turn_task is None or turn_task.done():
             if drive_task is not None:
                 return await self._streaming.wait_for_drive_cleanup(

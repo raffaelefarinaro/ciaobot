@@ -1375,6 +1375,73 @@ final class ChatNotificationsTests: XCTestCase {
         controller.stop()
     }
 
+    func testMemoryPassResultNeverBannersAndWithdrawsAnEarlierBanner() async {
+        let status = connectedStatus(origin)
+        let client = FakeNotificationClient()
+        client.authorization = .authorized
+        let preferences = MemoryNotificationPreference(true)
+        let provider = NotificationFakeCookieProvider()
+        provider.cookies = [makeCookie()]
+        let transport = NotificationFakeTransport()
+        let controller = makeController(
+            status: status,
+            client: client,
+            preferences: preferences,
+            provider: provider,
+            transport: transport
+        )
+
+        controller.start()
+        await settle()
+        let connection = transport.opens[0].connection
+        connection.emit(.snapshot(activeChatIDs: []))
+
+        let pass = ChatEvent.resultReady(
+            chatID: "chat-1", title: "Memory pass", snippet: "Report", workspace: "", memoryPass: true
+        )
+        connection.emit(pass)
+        XCTAssertTrue(client.delivered.isEmpty, "A memory pass result is never a system notification.")
+
+        connection.emit(.resultReady(chatID: "chat-1", title: "Answer", snippet: "Done", workspace: ""))
+        XCTAssertEqual(client.delivered.count, 1)
+        let delivered = client.delivered[0].identifier
+
+        connection.emit(pass)
+        XCTAssertEqual(client.delivered.count, 1, "The pass adds no banner.")
+        XCTAssertEqual(client.removed.last, delivered, "The pass withdraws the banner its chat already left.")
+        controller.stop()
+    }
+
+    func testMemoryPassResultDoesNotPoisonTheDedupeForALaterRealResult() async {
+        let status = connectedStatus(origin)
+        let client = FakeNotificationClient()
+        client.authorization = .authorized
+        let preferences = MemoryNotificationPreference(true)
+        let provider = NotificationFakeCookieProvider()
+        provider.cookies = [makeCookie()]
+        let transport = NotificationFakeTransport()
+        let controller = makeController(
+            status: status,
+            client: client,
+            preferences: preferences,
+            provider: provider,
+            transport: transport
+        )
+
+        controller.start()
+        await settle()
+        let connection = transport.opens[0].connection
+        connection.emit(.snapshot(activeChatIDs: []))
+
+        // The pass carries the same text a real answer later repeats.
+        connection.emit(.resultReady(chatID: "chat-1", title: "Same", snippet: "Same", workspace: "", memoryPass: true))
+        XCTAssertTrue(client.delivered.isEmpty)
+
+        connection.emit(.resultReady(chatID: "chat-1", title: "Same", snippet: "Same", workspace: ""))
+        XCTAssertEqual(client.delivered.count, 1, "A suppressed pass result must not make a real result look like a replay.")
+        controller.stop()
+    }
+
     func testAReadBeforeTheSnapshotStillWithdrawsTheBanner() async {
         let status = connectedStatus(origin)
         let client = FakeNotificationClient()

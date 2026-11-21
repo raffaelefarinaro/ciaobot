@@ -723,7 +723,7 @@ const GET_ROUTES = {
   }),
   '/api/settings/providers': () => ({
     connections: {
-      claude: { name: 'claude', label: 'Claude Code', short_label: 'Claude', ok: true, auth: 'ok', command: 'claude', mcp_command: 'claude mcp', version: '2.0.0', account: 'fixture@example.com' },
+      claude: { name: 'claude', label: 'Claude Code', short_label: 'Claude', ok: true, auth: 'ok', command: 'claude', mcp_command: 'claude', mcp_slash: '/mcp', version: '2.0.0', account: 'fixture@example.com' },
     },
   }),
   '/api/status': () => ({ active_model: 'synthetic-model', mode: 'auto', cost: 0 }),
