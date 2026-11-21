@@ -440,7 +440,7 @@ final class EventStreamTests: XCTestCase {
         let payload = """
         {"type":"chat_result_ready","chat_id":"chat-1","title":"\(longTitle)","snippet":"\(longSnippet)","workspace":"\(longWorkspace)"}
         """
-        guard case .resultReady(_, let title, let snippet, let workspace, _)? = ChatEventDecoder.decode(Data(payload.utf8)) else {
+        guard case .resultReady(_, let title, let snippet, let workspace, _, _)? = ChatEventDecoder.decode(Data(payload.utf8)) else {
             return XCTFail("expected a result event")
         }
         XCTAssertEqual(title.count, ChatEventDecoder.maximumTitleCharacters)
@@ -452,7 +452,7 @@ final class EventStreamTests: XCTestCase {
         // A single-workspace server omits the field on purpose and an older one
         // never sent it; both must decode as "no workspace", not fail.
         let payload = #"{"type":"chat_result_ready","chat_id":"chat-1","title":"Answer","snippet":"Done"}"#
-        guard case .resultReady(_, _, _, let workspace, _)? = ChatEventDecoder.decode(Data(payload.utf8)) else {
+        guard case .resultReady(_, _, _, let workspace, _, _)? = ChatEventDecoder.decode(Data(payload.utf8)) else {
             return XCTFail("a result without a workspace is still a result")
         }
         XCTAssertEqual(workspace, "")
