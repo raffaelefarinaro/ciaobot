@@ -392,6 +392,50 @@ def coerce_memory_handover(raw: object) -> str:
     raise ValueError(f"memory_handover must be one of: {', '.join(MEMORY_HANDOVERS)}")
 
 
+# Per-kind acceptance by Workspace care. Sparse: a kind with no key inherits
+# ``memory_handover``. Only acceptance is per kind; dismissal stays on the
+# legacy setting. A kind is added here only with its own guarded apply path.
+MEMORY_APPROVAL_KINDS: tuple[str, ...] = ("memory", "profile")
+MEMORY_APPROVAL_MODES: tuple[str, ...] = ("auto", "approve")
+
+
+def coerce_memory_approval(raw: object) -> dict[str, str]:
+    """Validate a stored per-kind approval map. None or {} -> {}; anything unknown raises ValueError."""
+    if raw is None:
+        return {}
+    if not isinstance(raw, dict):
+        raise ValueError("memory_approval must be an object of kind to mode")
+    out: dict[str, str] = {}
+    for kind, mode in raw.items():
+        if kind not in MEMORY_APPROVAL_KINDS:
+            raise ValueError(f"memory_approval kind must be one of: {', '.join(MEMORY_APPROVAL_KINDS)}")
+        if mode not in MEMORY_APPROVAL_MODES:
+            raise ValueError(f"memory_approval mode must be one of: {', '.join(MEMORY_APPROVAL_MODES)}")
+        out[str(kind)] = str(mode)
+    return out
+
+
+def merge_memory_approval(current: Mapping[str, str], patch: object) -> dict[str, str]:
+    """Apply a partial save to the per-kind map. Validates the whole patch before returning.
+
+    Each key sets that kind's mode; a ``null`` value resets that kind to inherited.
+    Keys not named in the patch are kept. A whole-field ``null`` is not a patch.
+    """
+    if not isinstance(patch, dict):
+        raise ValueError("memory_approval must be an object of kind to mode or null per kind")
+    merged = dict(current)
+    for kind, mode in patch.items():
+        if kind not in MEMORY_APPROVAL_KINDS:
+            raise ValueError(f"memory_approval kind must be one of: {', '.join(MEMORY_APPROVAL_KINDS)}")
+        if mode is None:
+            merged.pop(kind, None)
+        elif mode in MEMORY_APPROVAL_MODES:
+            merged[kind] = mode
+        else:
+            raise ValueError(f"memory_approval mode must be one of: {', '.join(MEMORY_APPROVAL_MODES)}")
+    return merged
+
+
 PROVIDER_OVERRIDE_FIELDS: tuple[str, ...] = (
     "model",
     "thinking",
@@ -483,6 +527,9 @@ class WorkspaceConfig:
     # Whether Workspace care may act on its own [memory]/[profile] verdicts
     # (off, dismiss, all). Operator-only: never set from an agent surface.
     memory_handover: str = DEFAULT_MEMORY_HANDOVER
+    # Sparse per-kind acceptance (MEMORY_APPROVAL_KINDS -> MEMORY_APPROVAL_MODES).
+    # A kind with no key inherits memory_handover. Operator-only, like the above.
+    memory_approval: dict[str, str] = field(default_factory=dict)
     # Operator-only per-provider overrides of the Providers defaults for new
     # chats and schedules in this workspace. Empty/missing = engine default.
     # Never set from an agent surface.
@@ -515,6 +562,13 @@ def _workspace_from_mapping(data: dict) -> WorkspaceConfig | None:
     except ValueError:
         memory_handover = DEFAULT_MEMORY_HANDOVER
     try:
+        memory_approval = coerce_memory_approval(data.get("memory_approval"))
+    except ValueError as exc:
+        logging.getLogger(__name__).warning(
+            "Ignoring invalid memory_approval for workspace %r: %s", name, exc
+        )
+        memory_approval = {}
+    try:
         provider_overrides = coerce_provider_overrides(data.get("provider_overrides"))
     except ValueError as exc:
         logging.getLogger(__name__).warning(
@@ -532,6 +586,7 @@ def _workspace_from_mapping(data: dict) -> WorkspaceConfig | None:
         gws_profile=str(data.get("gws_profile", "")).strip(),
         color=color,
         memory_handover=memory_handover,
+        memory_approval=memory_approval,
         provider_overrides=provider_overrides,
     )
 
@@ -1248,6 +1303,8 @@ class CiaoConfig:
                 row["claude_trim"] = workspace.claude_trim
             if workspace.memory_handover != DEFAULT_MEMORY_HANDOVER:
                 row["memory_handover"] = workspace.memory_handover
+            if workspace.memory_approval:
+                row["memory_approval"] = dict(workspace.memory_approval)
             if workspace.provider_overrides:
                 row["provider_overrides"] = workspace.provider_overrides
             payload.append(row)

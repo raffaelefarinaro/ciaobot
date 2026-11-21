@@ -22,9 +22,11 @@ from ciao.config import (
     DEFAULT_NEW_WORKSPACE_MEMORY_HANDOVER,
     DEFAULT_WORKSPACE_COLOR,
     WorkspaceConfig,
+    coerce_memory_approval,
     coerce_memory_handover,
     coerce_provider_overrides,
     coerce_workspace_color,
+    merge_memory_approval,
 )
 from ciao.model_tiers import is_tier
 from ciao.provider_service import capabilities_for
@@ -100,6 +102,10 @@ def workspace_to_dict(workspace: WorkspaceConfig, config: Any) -> dict:
     except ValueError:
         memory_handover = DEFAULT_MEMORY_HANDOVER
     try:
+        memory_approval = coerce_memory_approval(workspace.memory_approval)
+    except ValueError:
+        memory_approval = {}
+    try:
         provider_overrides = coerce_provider_overrides(workspace.provider_overrides)
     except ValueError:
         provider_overrides = {}
@@ -121,6 +127,7 @@ def workspace_to_dict(workspace: WorkspaceConfig, config: Any) -> dict:
         "gws_profile": getattr(workspace, "gws_profile", ""),
         "color": color,
         "memory_handover": memory_handover,
+        "memory_approval": memory_approval,
         "provider_overrides": provider_overrides,
     }
 
@@ -228,6 +235,17 @@ def workspace_from_request(
         memory_handover = existing.memory_handover
     else:
         memory_handover = DEFAULT_NEW_WORKSPACE_MEMORY_HANDOVER
+    if "memory_approval" in data:
+        # A partial save: each named kind is set or, with null, reset to inherited.
+        # Validated whole before anything is returned, so a bad entry changes nothing.
+        memory_approval = merge_memory_approval(
+            existing.memory_approval if existing is not None else {},
+            data.get("memory_approval"),
+        )
+    elif existing is not None:
+        memory_approval = dict(existing.memory_approval)
+    else:
+        memory_approval = {}
     if "provider_overrides" in data:
         provider_overrides = coerce_provider_overrides(data.get("provider_overrides"))
         _check_override_models(provider_overrides)
@@ -265,6 +283,7 @@ def workspace_from_request(
         gws_profile=gws_profile,
         color=color,
         memory_handover=memory_handover,
+        memory_approval=memory_approval,
         provider_overrides=provider_overrides,
     )
 

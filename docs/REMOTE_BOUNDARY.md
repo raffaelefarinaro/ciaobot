@@ -222,6 +222,7 @@ carried by the session.
   vault being written. A run that can already execute shell could end and retake
   its lease to reset the cap, as it could edit the registry; the file-tool deny
   patterns and the operator's Undo are the remaining controls.
+- **Per-kind acceptance (`memory_approval`, #3242) moves acceptance only.** A kind set to `auto` lets the run accept that kind even when the legacy `memory_handover` is `off` or `dismiss`; a kind set to `approve` refuses that kind's accepts even at `all`. The engine reads it at the same seams as the handover (before the guide write, under the guide lock and before the queue settlement), and it is operator-only in the same way (`PATCH /api/workspaces/{name}`; no agent verb, CLI or environment variable). Dismissal does not move.
 
 A second device installs its own engine and reads `GET /api/addresses` to find
 this one. There is nothing to unpair and no session to bridge.

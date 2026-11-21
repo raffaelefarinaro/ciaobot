@@ -1904,6 +1904,35 @@ def test_proposals_handover_returns_setting_and_agreement(tmp_path: Path) -> Non
     assert body["agreement"]["suggest_handover"] is False
 
 
+def test_proposals_handover_reports_the_per_kind_choice_and_what_it_resolves_to(tmp_path: Path) -> None:
+    config = _config(tmp_path)
+    client = _client(config)
+    config.workspace("personal").memory_approval = {"memory": "approve"}
+
+    body = client.get("/api/proposals/handover", params={"workspace": "personal"}).json()
+
+    assert body["memory_approval"] == {"memory": "approve"}
+    assert body["accept_resolved"] == {
+        "memory": {"mode": "approve", "inherited": False},
+        "profile": {"mode": "approve", "inherited": True},
+    }
+
+    config.workspace("personal").memory_handover = "all"
+    body = client.get("/api/proposals/handover", params={"workspace": "personal"}).json()
+    assert body["accept_resolved"]["profile"] == {"mode": "auto", "inherited": True}
+    assert body["accept_resolved"]["memory"] == {"mode": "approve", "inherited": False}
+
+    config.workspace("personal").memory_approval = {"profile": "auto"}
+    body = client.get("/api/proposals/handover", params={"workspace": "personal"}).json()
+    assert body["accept_resolved"] == {
+        "memory": {"mode": "auto", "inherited": True},
+        "profile": {"mode": "auto", "inherited": False},
+    }
+
+    missing = client.get("/api/proposals/handover", params={"workspace": "nope"})
+    assert missing.status_code == 404
+
+
 def test_proposals_handover_reports_whether_acting_is_available(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

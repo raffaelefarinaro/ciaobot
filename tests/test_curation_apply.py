@@ -886,3 +886,165 @@ def test_a_malformed_stored_plan_exits_one_without_a_traceback_and_keeps_the_lea
     assert curation_run.state_path(install.vault).exists()
     assert json.loads(path.read_text(encoding="utf-8"))["lease"]["holder"] == holder
 
+
+
+# ── per-kind acceptance (memory_approval) at the engine seam ────────────────
+
+PROFILE_LINE = "- [profile] Writes in short sentences."
+PROFILE_FACT = "Writes in short sentences."
+
+
+def _set_approval(env, mapping: dict | None) -> None:
+    registry = env.root / ".runtime" / "workspaces.json"
+    entry = json.loads(registry.read_text(encoding="utf-8"))
+    if mapping is None:
+        entry[0].pop("memory_approval", None)
+    else:
+        entry[0]["memory_approval"] = mapping
+    registry.write_text(json.dumps(entry), encoding="utf-8")
+
+
+def _profile_text(env) -> str:
+    entries, diags = read_region(env.guide, "profile")
+    assert not diags
+    return "\n".join(entries)
+
+
+def _cli_accept(env, holder: str, needle_file: Path) -> int:
+    return cli.main(
+        [
+            "memory-proposal-accept",
+            "--workspace", str(env.root),
+            "--vault-root", str(env.vault),
+            "--text-file", str(needle_file),
+            "--holder", holder,
+        ]
+    )
+
+
+def test_explicit_approve_refuses_the_direct_cli_accept_under_legacy_all(install, capsys, tmp_path) -> None:
+    _set_approval(install, {"memory": "approve"})
+    holder = _lease(install.vault)
+    _predict(install.queue)
+    needle = tmp_path / "needle.txt"
+    needle.write_text(FACT, encoding="utf-8")
+    guide_before = install.guide.read_bytes()
+    queue_before = install.queue.read_bytes()
+
+    assert _cli_accept(install, holder, needle) == 1
+
+    assert "needs your approval" in capsys.readouterr().err
+    assert install.guide.read_bytes() == guide_before
+    assert install.queue.read_bytes() == queue_before
+    journal = memory_receipts.journal_path(install.vault, install.guide)
+    assert not [r for r in memory_receipts.read_receipts(journal) if r.get("kind") == "region_apply"]
+    assert read_decisions(install.queue) == []
+
+
+def test_policy_changed_to_approve_is_refused_at_the_guide_lock_seam(install, monkeypatch) -> None:
+    """The value handed to ``accept_region_fact``'s authorize is what refuses, under the guide lock."""
+    intent = _accept_ready(install)
+    real = memory_proposals.accept_region_fact
+    seen: list[bool] = []
+
+    def flip_then_write(**kwargs):
+        # After the pre-write check passed, before the guide lock is taken.
+        _set_approval(install, {"memory": "approve"})
+        real_authorize = kwargs["authorize"]
+
+        @contextmanager
+        def observed():
+            with real_authorize() as allowed:
+                seen.append(allowed)
+                yield allowed
+
+        kwargs["authorize"] = observed
+        return real(**kwargs)
+
+    monkeypatch.setattr(memory_proposals, "accept_region_fact", flip_then_write)
+    guide_before = install.guide.read_bytes()
+
+    result = apply.apply_memory_accept(intent, vault_root=install.vault)
+
+    assert seen == [False]
+    assert result == apply.Refused(apply.REFUSED_WRITE_NOT_AUTHORISED)
+    assert install.guide.read_bytes() == guide_before
+    assert FACT in install.queue.read_text(encoding="utf-8")
+    assert not [r for r in read_decisions(install.queue) if r["operation_id"] == intent.operation_id]
+
+
+def test_policy_changed_to_approve_between_the_two_effects_is_a_partial_conflict_then_recovers(
+    install, monkeypatch
+) -> None:
+    intent = _accept_ready(install)
+    real_write = apply._write_region
+
+    def write_then_approve(*args, **kwargs):
+        result = real_write(*args, **kwargs)
+        _set_approval(install, {"memory": "approve"})
+        return result
+
+    monkeypatch.setattr(apply, "_write_region", write_then_approve)
+
+    result = apply.apply_memory_accept(intent, vault_root=install.vault)
+
+    assert isinstance(result, apply.PartialConflict)
+    assert _region_text(install).count(FACT) == 1
+    assert FACT in install.queue.read_text(encoding="utf-8")
+    assert not [r for r in read_decisions(install.queue) if r["operation_id"] == intent.operation_id]
+
+    # The operator restores the default and the same operation finishes it.
+    _set_approval(install, None)
+    monkeypatch.setattr(apply, "_write_region", real_write)
+    finished = apply.apply_memory_accept(intent, vault_root=install.vault)
+
+    assert isinstance(finished, apply.Accepted)
+    assert _region_text(install).count(FACT) == 1
+    assert FACT not in install.queue.read_text(encoding="utf-8")
+    owned = [r for r in read_decisions(install.queue) if r["operation_id"] == intent.operation_id]
+    assert len(owned) == 1
+
+
+def test_auto_under_legacy_off_accepts_only_its_kind(install) -> None:
+    install.queue_rows(LINE, PROFILE_LINE)
+    _set_approval(install, {"profile": "auto"})
+    holder = _lease(install.vault)
+    _predict(install.queue, FACT, kind="memory")
+    _predict(install.queue, PROFILE_FACT, kind="profile")
+    registry = install.root / ".runtime" / "workspaces.json"
+    entry = json.loads(registry.read_text(encoding="utf-8"))
+    entry[0]["memory_handover"] = "off"
+    registry.write_text(json.dumps(entry), encoding="utf-8")
+
+    profile = apply.apply_memory_accept(
+        _plan(install, PROFILE_LINE, holder=holder), vault_root=install.vault
+    )
+    memory = apply.apply_memory_accept(_plan(install, LINE, holder=holder), vault_root=install.vault)
+
+    assert isinstance(profile, apply.Accepted)
+    assert PROFILE_FACT in _profile_text(install)
+    assert memory == apply.Refused(apply.REFUSED_HANDOVER)
+    assert FACT not in _region_text(install)
+    assert FACT in install.queue.read_text(encoding="utf-8")
+
+
+def test_dismissal_follows_the_legacy_setting_only(install, capsys) -> None:
+    _set_approval(install, {"memory": "approve"})
+    registry = install.root / ".runtime" / "workspaces.json"
+    entry = json.loads(registry.read_text(encoding="utf-8"))
+    entry[0]["memory_handover"] = "dismiss"
+    registry.write_text(json.dumps(entry), encoding="utf-8")
+    _lease(install.vault)
+    _predict(install.queue, verdict="dismiss")
+    bullet = parse_bullet(LINE)
+
+    # Approve for accept does not stop a dismissal the legacy setting allows.
+    assert cli._handover_gate(install.root, "work", install.queue, bullet) == ""
+
+    _set_approval(install, {"memory": "auto"})
+    entry = json.loads(registry.read_text(encoding="utf-8"))
+    entry[0]["memory_handover"] = "off"
+    registry.write_text(json.dumps(entry), encoding="utf-8")
+
+    # An explicit accept choice never grants a dismissal the legacy setting refuses.
+    assert "does not allow dismiss" in cli._handover_gate(install.root, "work", install.queue, bullet)

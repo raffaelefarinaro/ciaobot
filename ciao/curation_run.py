@@ -54,6 +54,7 @@ if TYPE_CHECKING:
     from ciao.curation_cycle import CycleState
 
 from ciao import curation_logs, decision_rules, skill_proposals
+from ciao.proposal_predictions import HandoverPolicy, accept_allowed, handover_allows
 from ciao.entity_types import EntityTypeRegistry
 from ciao.vault_index import vault_relative
 from ciao.os_support.locks import lock_exclusive, unlock
@@ -438,10 +439,15 @@ def _proposal_subject(bullet: Any, dup: int) -> str:
     return "\x00".join((bullet.kind, bullet.target, bullet.source, str(dup), bullet.text))
 
 
-def _proposal_items(vault_root: Path, handover: str) -> list[WorklistItem]:
+def _acts_on(policy: HandoverPolicy, kind: str, verdict: str) -> bool:
+    if verdict == "accept":
+        return accept_allowed(policy, kind)
+    return handover_allows(policy.memory_handover, verdict)
+
+
+def _proposal_items(vault_root: Path, policy: HandoverPolicy) -> list[WorklistItem]:
     from ciao.proposal_predictions import (
         REGION_KINDS,
-        handover_allows,
         latest_predictions,
         prediction_key,
     )
@@ -452,16 +458,18 @@ def _proposal_items(vault_root: Path, handover: str) -> list[WorklistItem]:
     except (OSError, UnicodeError):
         return []
     # `[memory]`/`[profile]` rows are work only to record a verdict for, or to
-    # act on one when the operator's handover setting allows it; otherwise they
-    # stay queued, so a workspace with one decided-but-waiting cross-project fact
+    # act on one when the operator's policy allows that verdict for that kind;
+    # otherwise they stay queued, so a workspace with one decided-but-waiting cross-project fact
     # does not look busy forever. A `decide: you` row is predicted but never
     # acted on. The walk covers every row and a skipped row is only left out of
     # the keys, so leaving one out cannot renumber a later duplicate's ordinal.
     # The stage and verdict are part of a region row's subject, so a row that
     # moves from predict to act, or whose verdict changes, gets a new key and an
     # earlier `curation-progress` done-key cannot hide it. The key does not carry
-    # the handover setting: a predicted dismiss is `act:dismiss` under both
-    # `dismiss` and `all`. The item key never hashes the decider.
+    # the policy: a predicted dismiss is `act:dismiss` under both `dismiss` and
+    # `all`. An accept is `act:accept` only for a kind the policy lets the run
+    # accept, so a row of an approve-only kind is never planned as work no
+    # operation would perform. The item key never hashes the decider.
     predictions = latest_predictions(vault_root / PROPOSALS_RELATIVE)
     collected_keys: list[str] = []
     for entry in walk_proposal_queue("", PROPOSALS_RELATIVE, text):
@@ -471,7 +479,7 @@ def _proposal_items(vault_root: Path, handover: str) -> list[WorklistItem]:
             predicted = predictions.get(prediction_key(bullet.kind, bullet.text))
             if predicted is None:
                 stage = "predict"
-            elif bullet.decider != "you" and handover_allows(handover, predicted["verdict"]):
+            elif bullet.decider != "you" and _acts_on(policy, bullet.kind, predicted["verdict"]):
                 stage = f"act:{predicted['verdict']}"
             else:
                 continue
@@ -1593,11 +1601,11 @@ def build_worklist_views(
     memory_char_limit: int | None = None,
     user_char_limit: int | None = None,
     workspace: str | None,
-    handover: str = "off",
+    policy: HandoverPolicy | None = None,
 ) -> WorklistViews:
     """Compute tonight's work from files alone.
 
-    ``handover`` is the workspace's Memory handover setting (off, dismiss, all);
+    ``policy`` is the workspace's resolved care authority (legacy handover and per-kind choices);
     it decides whether a ``[memory]``/``[profile]`` row with a stored verdict is
     act work. The caller reads it from the registry, never from the model.
 
@@ -1660,7 +1668,7 @@ def build_worklist_views(
 
     collected: list[WorklistItem] = []
     collected.extend(category_items)
-    collected.extend(_proposal_items(vault_root, handover))
+    collected.extend(_proposal_items(vault_root, policy or HandoverPolicy("off")))
     collected.extend(
         _region_items(
             guide_path,
@@ -1792,7 +1800,7 @@ def build_worklist(
     memory_char_limit: int | None = None,
     user_char_limit: int | None = None,
     workspace: str | None,
-    handover: str = "off",
+    policy: HandoverPolicy | None = None,
 ) -> Worklist:
     return build_worklist_views(
         vault_root=vault_root,
@@ -1807,7 +1815,7 @@ def build_worklist(
         memory_char_limit=memory_char_limit,
         user_char_limit=user_char_limit,
         workspace=workspace,
-        handover=handover,
+        policy=policy,
     ).remaining
 
 

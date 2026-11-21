@@ -50,6 +50,7 @@ from ciao.sync_skills import SETUP_MEMORY_FAILED_RC
 if TYPE_CHECKING:  # only ever a type here; the queue model is imported locally.
     from ciao import skill_proposals
     from ciao.config import CiaoConfig, WorkspaceConfig
+    from ciao.proposal_predictions import HandoverPolicy
     from ciao.curation_run import RunPlan
     from ciao.curation_run import NoteCoverage, Worklist
 
@@ -5265,7 +5266,7 @@ def _memory_proposal_dismiss_command(args: argparse.Namespace) -> int:
             )
             return 2
         if args.handover:
-            refusal = _handover_gate(workspace, name, path, parsed, "dismiss")
+            refusal = _handover_gate(workspace, name, path, parsed)
             if refusal:
                 print(f"handover refused: {refusal}", file=sys.stderr)
                 return 1
@@ -5882,21 +5883,22 @@ def _installed_config(workspace: Path) -> CiaoConfig:
     return CiaoConfig.from_env(env_source)
 
 
-def _workspace_handover(workspace: Path, name: str | None) -> str:
-    """The operator's Memory handover for a registered workspace, else ``"off"``.
+def _workspace_policy(workspace: Path, name: str | None) -> HandoverPolicy:
+    """The operator's Memory handover and per-kind choices for a registered workspace, else off.
 
     Always re-read from the registry at call time: it is the operator's
     setting, so no argument, environment value or ``curation-begin`` output is
     trusted for it.
     """
+    from ciao.proposal_predictions import HandoverPolicy
+
     if name is None:
-        return "off"
+        return HandoverPolicy("off")
     config = _installed_config(workspace)
     registered = config.workspace(name)
     if registered is None:
-        return "off"
-    handover: str = registered.memory_handover
-    return handover
+        return HandoverPolicy("off")
+    return HandoverPolicy.of(registered)
 
 
 def _proposal_needle(args: argparse.Namespace) -> str | None:
@@ -5958,10 +5960,12 @@ def _match_one_row(path: Path, needle: str) -> tuple[Any, str] | None:
     return bullet, removal_needle
 
 
-def _handover_gate(
-    workspace: Path, name: str | None, queue: Path, bullet: Any, verdict: str
-) -> str:
-    """``""`` when the run may act on *bullet* with *verdict*, else why not."""
+def _handover_gate(workspace: Path, name: str | None, queue: Path, bullet: Any) -> str:
+    """``""`` when the run may dismiss *bullet*, else why not.
+
+    Dismissal only. Accepting goes through :func:`ciao.curation_apply.apply_memory_accept`,
+    which reads the per-kind acceptance policy; this gate never grants an accept.
+    """
     from ciao.curation_run import CurationStateError, active_lease
     from ciao.proposal_predictions import (
         REGION_KINDS,
@@ -5984,11 +5988,11 @@ def _handover_gate(
         return "curation state is uncertain; handover is refused"
     registered = trusted.workspace(name or "")
     handover = registered.memory_handover if registered is not None else "off"
-    if not handover_allows(handover, verdict):
-        return f"the workspace handover is {handover}, which does not allow {verdict}"
+    if not handover_allows(handover, "dismiss"):
+        return f"the workspace handover is {handover}, which does not allow dismiss"
     predicted = latest_predictions(queue).get(prediction_key(bullet.kind, bullet.text))
-    if predicted is None or predicted.get("verdict") != verdict:
-        return f"no stored {verdict} prediction for this row"
+    if predicted is None or predicted.get("verdict") != "dismiss":
+        return "no stored dismiss prediction for this row"
     return ""
 
 
@@ -6054,13 +6058,14 @@ def _curation_plan(
 ) -> _CurationPlanningResult:
     from ciao.curation_run import build_worklist_views, load_state, plan_run_with_blocked
     from ciao.entity_types import load_entity_types
+    from ciao.proposal_predictions import accept_kinds
     from ciao.vault_index import VAULT_RENDER_PREFIX
 
     workspace, vault, guide, budget, registry_root, name = _curation_context(args)
     state = load_state(vault)
-    handover = _workspace_handover(workspace, name)
+    policy = _workspace_policy(workspace, name)
     views = build_worklist_views(
-        handover=handover,
+        policy=policy,
         vault_root=vault,
         guide_path=guide,
         workspace_dir=workspace,
@@ -6097,7 +6102,8 @@ def _curation_plan(
     payload: dict[str, Any] = {
         "workspace": str(workspace),
         "vault_root": str(vault),
-        "handover": handover,
+        "handover": policy.memory_handover,
+        "accept_kinds": accept_kinds(policy),
         **worklist.as_dict(),
         **plan.as_dict(),
         "counts_complete": False,
@@ -6127,6 +6133,7 @@ def _print_curation(payload: dict[str, Any], *, as_json: bool) -> None:
         print(f"Coverage note: {note}")
     print(f"Weekly pass due: {'yes' if payload.get('weekly_due') else 'no'}")
     print(f"Handover: {payload['handover']}")
+    print(f"Accept kinds: {', '.join(payload.get('accept_kinds', [])) or 'none'}")
     if payload.get("blocked_count"):
         print(
             f"WARNING: {payload['blocked_count']} oversized log item(s) are blocked: automated "
@@ -9609,7 +9616,8 @@ def build_parser() -> argparse.ArgumentParser:
         help="Accept one queued [memory]/[profile] row into its region as the agent.",
         description=(
             "Accept one [memory]/[profile] row into its bounded region on the "
-            "agent's behalf. Refused unless handover is `all` and a stored "
+            "agent's behalf. Refused unless the operator's per-kind choice allows "
+            "accepting this kind (or handover is `all` where it is unset) and a stored "
             "accept prediction exists."
         ),
     )

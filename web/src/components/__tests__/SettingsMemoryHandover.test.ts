@@ -34,9 +34,19 @@ function response(overrides: Record<string, unknown> = {}, agree: Record<string,
   return {
     workspace: 'personal',
     handover: 'off',
+    memory_approval: {},
+    accept_resolved: inherited('approve'),
     acting_available: true,
     agreement: agreement(agree),
     ...overrides,
+  }
+}
+
+// Both kinds resolved to one mode, inherited from the legacy handover.
+function inherited(mode: 'auto' | 'approve') {
+  return {
+    memory: { mode, inherited: true },
+    profile: { mode, inherited: true },
   }
 }
 
@@ -231,7 +241,7 @@ describe('SettingsMemoryHandover', () => {
     const group = view.find('[role="radiogroup"]')
     expect(group.attributes('aria-label')).toBe('Memory handover')
     expect(group.classes()).toContain('instance-toggle')
-    const buttons = view.findAll('button.toggle-btn[role="radio"]')
+    const buttons = group.findAll('button.toggle-btn[role="radio"]')
     expect(buttons).toHaveLength(3)
     expect(view.text()).toContain('Dismiss and accept')
     expect(buttons.filter((b) => b.attributes('tabindex') === '0')).toHaveLength(1)
@@ -299,7 +309,8 @@ describe('SettingsMemoryHandover', () => {
     const view = await mountCard()
     expect(radio(view, 'all').attributes('tabindex')).toBe('-1')
     expect(radio(view, 'off').attributes('tabindex')).toBe('0')
-    expect(view.findAll('button[role="radio"]').filter((b) => b.attributes('tabindex') === '0')).toHaveLength(1)
+    const handoverGroup = view.find('[role="radiogroup"][aria-label="Memory handover"]')
+    expect(handoverGroup.findAll('button[role="radio"]').filter((b) => b.attributes('tabindex') === '0')).toHaveLength(1)
   })
 
   it('all but Off are disabled when acting is unavailable', async () => {
@@ -308,5 +319,166 @@ describe('SettingsMemoryHandover', () => {
     expect(radio(view, 'off').attributes('disabled')).toBeUndefined()
     expect(radio(view, 'dismiss').attributes('disabled')).toBeDefined()
     expect(radio(view, 'all').attributes('disabled')).toBeDefined()
+  })
+})
+
+// ── Per-kind acceptance (#3242) ─────────────────────────────────────────────
+
+const KIND_GROUP: Record<string, string> = { memory: 'handover-kind-memory', profile: 'handover-kind-profile' }
+const KIND_LABEL: Record<string, string> = { auto: 'Let Workspace care add it', approve: 'Ask me' }
+
+function kindRadio(view: VueWrapper, kind: string, mode: 'auto' | 'approve') {
+  const group = view.find(`[aria-labelledby="${KIND_GROUP[kind]}"]`)
+  return group.findAll('button[role="radio"]').find((b) => b.text() === KIND_LABEL[mode])!
+}
+
+function kindChecked(view: VueWrapper, kind: string, mode: 'auto' | 'approve'): boolean {
+  return kindRadio(view, kind, mode).attributes('aria-checked') === 'true'
+}
+
+function resetLink(view: VueWrapper, kind: string) {
+  return view.findAll('.handover-kind').find((row) => row.find('.handover-kind__label').text().toLowerCase() === kind)!
+    .findAll('button').find((b) => b.text() === 'Reset to inherited')
+}
+
+describe('SettingsMemoryHandover per-kind acceptance', () => {
+  it('shows each kind resolved now and says it is inherited, with no reset while inherited', async () => {
+    apiGet.mockResolvedValue(response({ handover: 'all', accept_resolved: inherited('auto') }))
+    const view = await mountCard()
+
+    expect(kindChecked(view, 'memory', 'auto')).toBe(true)
+    expect(kindChecked(view, 'profile', 'auto')).toBe(true)
+    expect(view.text()).toContain('Inherited from the handover above (Dismiss and accept)')
+    expect(resetLink(view, 'memory')).toBeUndefined()
+  })
+
+  it('shows an explicit kind as set, with a reset to inherited', async () => {
+    apiGet.mockResolvedValue(response({
+      handover: 'off',
+      memory_approval: { memory: 'auto' },
+      accept_resolved: { memory: { mode: 'auto', inherited: false }, profile: { mode: 'approve', inherited: true } },
+    }))
+    const view = await mountCard()
+
+    expect(kindChecked(view, 'memory', 'auto')).toBe(true)
+    expect(kindChecked(view, 'profile', 'approve')).toBe(true)
+    expect(view.text()).toContain('Set for this kind.')
+    expect(resetLink(view, 'memory')).toBeDefined()
+    expect(resetLink(view, 'profile')).toBeUndefined()
+  })
+
+  it('choosing Let Workspace care add it asks first and saves that one kind only', async () => {
+    const view = await mountCard()
+    askConfirm.mockResolvedValue(false)
+    await kindRadio(view, 'memory', 'auto').trigger('click')
+    await flushPromises()
+    expect(askConfirm).toHaveBeenCalledTimes(1)
+    expect(projectStore.updateWorkspace).not.toHaveBeenCalled()
+    expect(kindChecked(view, 'memory', 'approve')).toBe(true)
+
+    askConfirm.mockResolvedValue(true)
+    apiGet.mockResolvedValue(response({ memory_approval: { memory: 'auto' }, accept_resolved: {
+      memory: { mode: 'auto', inherited: false }, profile: { mode: 'approve', inherited: true },
+    } }))
+    await kindRadio(view, 'memory', 'auto').trigger('click')
+    await flushPromises()
+    expect(projectStore.updateWorkspace).toHaveBeenCalledTimes(1)
+    expect(projectStore.updateWorkspace).toHaveBeenCalledWith('personal', { memory_approval: { memory: 'auto' } })
+    expect(kindChecked(view, 'memory', 'auto')).toBe(true)
+  })
+
+  it('choosing Ask me saves approve without asking, and the profile row saves its own key', async () => {
+    apiGet.mockResolvedValue(response({ handover: 'all', accept_resolved: inherited('auto') }))
+    const view = await mountCard()
+
+    await kindRadio(view, 'memory', 'approve').trigger('click')
+    await flushPromises()
+    expect(askConfirm).not.toHaveBeenCalled()
+    expect(projectStore.updateWorkspace).toHaveBeenLastCalledWith('personal', { memory_approval: { memory: 'approve' } })
+
+    await kindRadio(view, 'profile', 'approve').trigger('click')
+    await flushPromises()
+    expect(projectStore.updateWorkspace).toHaveBeenLastCalledWith('personal', { memory_approval: { profile: 'approve' } })
+  })
+
+  it('reset sends null for that kind alone', async () => {
+    apiGet.mockResolvedValue(response({
+      memory_approval: { memory: 'approve', profile: 'auto' },
+      accept_resolved: { memory: { mode: 'approve', inherited: false }, profile: { mode: 'auto', inherited: false } },
+    }))
+    const view = await mountCard()
+
+    await resetLink(view, 'memory')!.trigger('click')
+    await flushPromises()
+
+    expect(projectStore.updateWorkspace).toHaveBeenCalledWith('personal', { memory_approval: { memory: null } })
+    expect(askConfirm).not.toHaveBeenCalled()
+  })
+
+  it('a refused kind save rolls the row back and shows the server message', async () => {
+    projectStore.updateWorkspace = vi.fn().mockRejectedValue(new Error('kind unknown')) as never
+    const view = await mountCard()
+
+    askConfirm.mockResolvedValue(true)
+    await kindRadio(view, 'profile', 'auto').trigger('click')
+    await flushPromises()
+
+    expect(view.find('[role="alert"]').text()).toContain('kind unknown')
+    expect(kindChecked(view, 'profile', 'approve')).toBe(true)
+    expect(kindChecked(view, 'profile', 'auto')).toBe(false)
+  })
+
+  it('without acting available, Let Workspace care add it is disabled and Ask me stays reachable', async () => {
+    apiGet.mockResolvedValue(response({ acting_available: false, memory_approval: { memory: 'auto' },
+      accept_resolved: { memory: { mode: 'auto', inherited: false }, profile: { mode: 'approve', inherited: true } } }))
+    const view = await mountCard()
+
+    expect(kindRadio(view, 'memory', 'auto').attributes('disabled')).toBeDefined()
+    expect(kindRadio(view, 'memory', 'approve').attributes('disabled')).toBeUndefined()
+    expect(resetLink(view, 'memory')!.attributes('disabled')).toBeUndefined()
+    await kindRadio(view, 'memory', 'approve').trigger('click')
+    await flushPromises()
+    expect(projectStore.updateWorkspace).toHaveBeenCalledWith('personal', { memory_approval: { memory: 'approve' } })
+  })
+
+  it('arrow keys on one kind save that kind and never the other', async () => {
+    const view = await mountCard()
+    askConfirm.mockResolvedValue(true)
+    await kindRadio(view, 'profile', 'approve').trigger('keydown', { key: 'ArrowRight' })
+    await flushPromises()
+
+    expect(askConfirm).toHaveBeenCalledTimes(1)
+    expect(projectStore.updateWorkspace).toHaveBeenCalledWith('personal', { memory_approval: { profile: 'auto' } })
+    expect(projectStore.updateWorkspace).toHaveBeenCalledTimes(1)
+  })
+
+  it('a late failed save for the old workspace never writes its error or rollback into the new one', async () => {
+    let fail: (e: Error) => void = () => {}
+    projectStore.updateWorkspace = vi.fn(() => new Promise<void>((_, reject) => { fail = reject })) as never
+    const view = mount(SettingsMemoryHandover)
+    mounted.push(view)
+    await flushPromises()
+    askConfirm.mockResolvedValue(true)
+    await kindRadio(view, 'memory', 'auto').trigger('click')
+    await flushPromises()
+
+    // The new workspace resolves its memory row to Let Workspace care add it.
+    apiGet.mockResolvedValue(response({
+      workspace: 'work', handover: 'dismiss', memory_approval: { memory: 'auto' },
+      accept_resolved: { memory: { mode: 'auto', inherited: false }, profile: { mode: 'approve', inherited: true } },
+    }))
+    projectStore.activeWorkspace = 'work'
+    await flushPromises()
+    expect(kindChecked(view, 'memory', 'auto')).toBe(true)
+
+    // The old workspace's save now fails. Its rollback must not touch this card.
+    fail(new Error('disk full'))
+    await flushPromises()
+
+    expect(view.find('[role="alert"]').exists()).toBe(false)
+    expect(view.text()).not.toContain('disk full')
+    expect(kindChecked(view, 'memory', 'auto')).toBe(true)
+    expect(isChecked(view, 'dismiss')).toBe(true)
+    expect(apiGet).toHaveBeenLastCalledWith('/api/proposals/handover?workspace=work')
   })
 })

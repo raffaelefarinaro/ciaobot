@@ -74,6 +74,9 @@ export interface WorkspaceInfo {
   disallowed_tools?: string[] | null
   /** Operator-only; absent or 'off': shadow verdicts only. */
   memory_handover?: MemoryHandover
+  // Per-kind acceptance, sparse. Read: only the kinds the operator set. In a
+  // save, null resets that kind to inherited from memory_handover.
+  memory_approval?: MemoryApprovalPatch
   gws_profile: string
   // PWA accent preset: amber | pink | cyan | emerald | violet | blue | teal | lime | fuchsia. Missing → amber (Ciao orange).
   color?: string
@@ -1992,6 +1995,18 @@ export type ProposalHistoryVia = 'pwa' | 'agent' | 'auto' | ''
 
 export type MemoryHandover = 'off' | 'dismiss' | 'all'
 
+/** The region kinds Workspace care can accept per kind (#3242). */
+export type MemoryApprovalKind = 'memory' | 'profile'
+/** `auto`: Workspace care may accept that kind. `approve`: it may not. */
+export type MemoryApprovalMode = 'auto' | 'approve'
+export type MemoryApprovalPatch = Partial<Record<MemoryApprovalKind, MemoryApprovalMode | null>>
+
+/** The choice the engine applies to an accept of one kind now, and whether it is inherited. */
+export interface AcceptResolved {
+  mode: MemoryApprovalMode
+  inherited: boolean
+}
+
 export interface ProposalPrediction {
   verdict: 'accept' | 'dismiss'
   reason: string
@@ -2017,6 +2032,9 @@ export interface HandoverAgreement {
 export interface HandoverResponse {
   workspace: string
   handover: MemoryHandover
+  /** The stored per-kind choices only; a kind absent here inherits `handover`. */
+  memory_approval: Partial<Record<MemoryApprovalKind, MemoryApprovalMode>>
+  accept_resolved: Record<MemoryApprovalKind, AcceptResolved>
   /** Whether the unattended run can act on this install at all (false when no trusted service definition registers the workspace). */
   acting_available: boolean
   agreement: HandoverAgreement

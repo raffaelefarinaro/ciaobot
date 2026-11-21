@@ -991,7 +991,15 @@ curl -sS -b /tmp/ciao.jar -X DELETE "http://localhost:${PWA_PORT:-8443}/api/chat
 # untrusted [memory]/[profile] text into the always-loaded AGENTS.md regions,
 # within the event-shape and duplicate guards and a cap of five accepts per
 # curation run, and each accept can be undone from History.
-# Each workspace also reports provider_overrides
+# Each workspace also reports memory_approval (sparse; keys "memory" and
+# "profile", values "auto" or "approve"; default {}): a per-kind acceptance
+# choice. "auto" lets the run accept that kind even when memory_handover is
+# off or dismiss; "approve" refuses that kind even at "all"; a kind with no key
+# inherits memory_handover. Dismissal always follows memory_handover. Save it
+# with the same PATCH /api/workspaces/{name}: a partial map sets the named kinds
+# and keeps the rest, {"profile": null} resets one kind to inherited, and a
+# whole-field null, an unknown kind or mode, or a non-object is a 400 that saves
+# nothing. Each workspace also reports provider_overrides
 # ({provider: {model, thinking, permission_mode, insights_model}}, sparse,
 # {} when none): this workspace's overrides of the Settings -> Providers
 # defaults for new chats and schedule runs on that provider. Empty or missing
@@ -1490,8 +1498,12 @@ the same rules per row and reports `promoted` and `dismissed` for each, keeping
 the bullets it could not write.
 
 `GET /api/proposals/handover?workspace=<name>` returns `{workspace, handover,
-acting_available, agreement}` and is read-only. `handover` is the workspace's
-Memory handover setting. `acting_available` is whether the unattended run can act
+memory_approval, accept_resolved, acting_available, agreement}` and is read-only.
+`handover` is the workspace's Memory handover setting. `memory_approval` is the
+stored per-kind map. `accept_resolved` has one entry per kind, `memory` and
+`profile`, as `{mode: "auto" | "approve", inherited: bool}`: the choice the engine
+applies to an accept of that kind now, and whether it comes from the legacy
+setting rather than an explicit choice. `acting_available` is whether the unattended run can act
 on it on this install: the handover gate trusts only the installed service
 definition (LaunchAgent or the root-owned systemd unit), so it is
 false only when no trusted service definition registers the workspace. `agreement` measures how often the verdicts the nightly run recorded

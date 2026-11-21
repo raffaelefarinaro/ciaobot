@@ -23,7 +23,9 @@ function stubGet(routines: unknown = {}) {
     if (url === '/api/agent-assets') return { subagents: [], commands: [], health: { status: 'ok', checks: [] } } as never
     if (url.startsWith('/api/proposals/handover')) {
       return {
-        workspace: 'personal', handover: 'off', acting_available: true,
+        workspace: 'personal', handover: 'off', memory_approval: {},
+        accept_resolved: { memory: { mode: 'approve', inherited: true }, profile: { mode: 'approve', inherited: true } },
+        acting_available: true,
         agreement: {
           decided: 0, matched: 0, rate: null, window: 50, min_decisions: 20, threshold: 0.9,
           predicted_accept: 0, accept_matched: 0, predicted_dismiss: 0, dismiss_matched: 0,

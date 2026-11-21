@@ -76,7 +76,8 @@ from ciao.proposal_kinds import ProposalBullet
 from ciao.proposal_predictions import (
     HANDOVER_ACCEPT_CAP,
     REGION_KINDS,
-    handover_allows,
+    HandoverPolicy,
+    accept_allowed,
     latest_predictions,
     prediction_key,
 )
@@ -93,6 +94,7 @@ _UNPREPARED_CODES = frozenset({"missing", "missing_file"})
 REFUSED_NO_OPERATION = "the accept has no operation id or holder"
 REFUSED_REGISTRY = "the installed engine does not register this workspace at this vault"
 REFUSED_HANDOVER = "the workspace handover does not allow an accept"
+REFUSED_APPROVAL = "this kind needs your approval in Settings; it stays queued"
 REFUSED_KIND = "only [memory] and [profile] rows can be handed over"
 REFUSED_DECIDE_YOU = "the row is marked decide: you"
 REFUSED_GONE = "the row is no longer queued"
@@ -262,13 +264,23 @@ def plan_memory_accept(
     )
 
 
-def _handover_open(vault: Path, workspace: str) -> bool:
-    """Whether the installed registry allows an accept for this workspace, read now."""
+def _accept_refusal(vault: Path, workspace: str, kind: str) -> str:
+    """Why the installed registry does not allow accepting ``kind`` now, or "".
+
+    Read at each call, never from the intent: the operator may have changed the
+    setting since the row was judged. A kind the operator set to ``approve`` gets
+    its own reason; anything else the policy refuses is the handover refusal.
+    """
     trusted = trusted_registry(workspace, vault)
     if trusted is None:
-        return False
+        return REFUSED_HANDOVER
     registered = trusted.workspace(workspace)
-    return registered is not None and handover_allows(registered.memory_handover, "accept")
+    if registered is None:
+        return REFUSED_HANDOVER
+    policy = HandoverPolicy.of(registered)
+    if accept_allowed(policy, kind):
+        return ""
+    return REFUSED_APPROVAL if policy.memory_approval.get(kind) == "approve" else REFUSED_HANDOVER
 
 
 def _since(stamp: object, started: datetime) -> bool:
@@ -320,14 +332,15 @@ def _check_row(
     Returns ``(row, lease_started_at, "")`` when the accept may proceed, else
     ``(None, None, reason)``. The caller holds the queue lock.
     """
-    if not _handover_open(vault, intent.workspace):
-        return None, None, REFUSED_HANDOVER
     entry = _queued_row(queue, intent.workspace, intent.proposal_id)
     if entry is None:
         return None, None, REFUSED_GONE
     bullet = entry.bullet
     if bullet.kind not in REGION_KINDS:
         return None, None, REFUSED_KIND
+    refusal = _accept_refusal(vault, intent.workspace, bullet.kind)
+    if refusal:
+        return None, None, refusal
     if bullet.decider == "you":
         return None, None, REFUSED_DECIDE_YOU
     if proposal_revision(bullet) != intent.proposal_revision:
@@ -361,18 +374,24 @@ def _holder_may_accept(
     vault: Path,
     queue: Path,
     *,
+    workspace: str,
+    kind: str,
     holder: str,
     started: datetime,
     operation_id: str,
 ) -> Iterator[bool]:
-    """The lease holder is still this run and a slot is free for this operation.
+    """The lease holder is still this run, the policy for ``kind`` still allows it, and a slot is free.
 
     Holds the state lock for the caller's whole write, so the receipts it counts
-    cannot be added to underneath it.
+    cannot be added to underneath it. The policy is read here too, because the
+    guide write runs after the queue checks and an operator can change the
+    setting between them.
     """
     with authorize_holder(vault, holder=holder) as live:
-        yield bool(live) and (
-            _agent_slots(vault, queue, started, exclude=operation_id) < HANDOVER_ACCEPT_CAP
+        yield (
+            bool(live)
+            and not _accept_refusal(vault, workspace, kind)
+            and _agent_slots(vault, queue, started, exclude=operation_id) < HANDOVER_ACCEPT_CAP
         )
 
 
@@ -437,6 +456,8 @@ def _write_region(
             authorize=lambda: _holder_may_accept(
                 vault,
                 queue,
+                workspace=intent.workspace,
+                kind=bullet.kind,
                 holder=intent.holder,
                 started=started,
                 operation_id=intent.operation_id,
@@ -486,6 +507,8 @@ def _settle_queue(
         with _holder_may_accept(
             vault,
             queue,
+            workspace=intent.workspace,
+            kind=entry.bullet.kind,
             holder=intent.holder,
             started=started,
             operation_id=intent.operation_id,
