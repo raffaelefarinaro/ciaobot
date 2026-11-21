@@ -243,3 +243,15 @@ def test_an_approve_kind_plans_no_accept_work_and_an_auto_kind_does(tmp_path: Pa
     auto_under_off = HandoverPolicy(memory_handover="off", memory_approval={"profile": "auto"})
     items = curation_run._proposal_items(vault, auto_under_off)
     assert len(items) == 1 and len(items[0].keys) == 1
+
+
+# ── fail closed for a kind the policy does not know ─────────────────────────
+
+
+@pytest.mark.parametrize("kind", ["project", ""])
+@pytest.mark.parametrize("policy_mode", [None, "auto"])
+def test_an_unknown_kind_is_never_accepted(kind: str, policy_mode: str | None) -> None:
+    approval = {} if policy_mode is None else {kind: policy_mode}
+    policy = HandoverPolicy(memory_handover="all", memory_approval=approval)
+
+    assert accept_allowed(policy, kind) is False

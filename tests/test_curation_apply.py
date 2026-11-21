@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import replace
+from datetime import UTC, datetime
 from pathlib import Path
 from types import SimpleNamespace
 import threading
@@ -1048,3 +1049,32 @@ def test_dismissal_follows_the_legacy_setting_only(install, capsys) -> None:
 
     # An explicit accept choice never grants a dismissal the legacy setting refuses.
     assert "does not allow dismiss" in cli._handover_gate(install.root, "work", install.queue, bullet)
+
+
+def test_the_refusal_reason_names_an_explicit_approve_and_the_legacy_refusal(install) -> None:
+    intent = _accept_ready(install)
+    holder = intent.holder
+
+    _set_approval(install, {"memory": "approve"})
+    _, _, reason = apply._check_row(install.vault, install.queue, intent)
+    assert reason == apply.REFUSED_APPROVAL
+    with apply._holder_may_accept(
+        install.vault, install.queue, workspace="work", kind="memory",
+        holder=holder, started=datetime.now(UTC), operation_id=intent.operation_id,
+    ) as allowed:
+        assert allowed is False
+    assert apply._accept_refusal(install.vault, "work", "memory") == apply.REFUSED_APPROVAL
+
+    _set_approval(install, None)
+    registry = install.root / ".runtime" / "workspaces.json"
+    entry = json.loads(registry.read_text(encoding="utf-8"))
+    entry[0]["memory_handover"] = "off"
+    registry.write_text(json.dumps(entry), encoding="utf-8")
+    _, _, reason = apply._check_row(install.vault, install.queue, intent)
+    assert reason == apply.REFUSED_HANDOVER
+    with apply._holder_may_accept(
+        install.vault, install.queue, workspace="work", kind="memory",
+        holder=holder, started=datetime.now(UTC), operation_id=intent.operation_id,
+    ) as allowed:
+        assert allowed is False
+    assert apply._accept_refusal(install.vault, "work", "memory") == apply.REFUSED_HANDOVER

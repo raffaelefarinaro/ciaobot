@@ -202,6 +202,8 @@ def accept_allowed(policy: HandoverPolicy, kind: str) -> bool:
     unset kind follows the legacy setting, so ``all`` allows and the rest refuse.
     Dismissal is not decided here; it stays with :func:`handover_allows`.
     """
+    if kind not in MEMORY_APPROVAL_KINDS:
+        return False
     mode = policy.memory_approval.get(kind)
     if mode == "approve":
         return False
