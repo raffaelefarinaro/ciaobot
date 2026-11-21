@@ -107,7 +107,6 @@ async def test_catch_up_skip_system_leaves_user_schedules_firing(tmp_path: Path)
         daily_time_utc="08:00",
         prompt="user routine",
         model="sonnet",
-        mode="bypass",
         chat_id=0,
         frequency="daily",
     )

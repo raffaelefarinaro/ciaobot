@@ -42,7 +42,6 @@ def _create(store: ScheduleStore, **overrides) -> ScheduleEntry:
         "daily_time_utc": "",
         "prompt": "check PRs",
         "model": "",
-        "mode": "auto",
         "chat_id": 0,
         "frequency": INTERVAL_FREQUENCY,
         "interval_minutes": 10,
@@ -120,7 +119,7 @@ def test_interval_entries_sort_after_timed_ones(store: ScheduleStore) -> None:
     """An empty daily_time_utc must not float interval rows to the top."""
     _create(store, interval_minutes=30)
     store.create(
-        daily_time_utc="09:00", prompt="p", model="", mode="auto", chat_id=0,
+        daily_time_utc="09:00", prompt="p", model="", chat_id=0,
         frequency="daily",
     )
     frequencies = [entry.frequency for entry in store.list_entries()]
@@ -565,7 +564,7 @@ def test_migrate_loops_is_idempotent_and_keeps_existing_entries(
 ) -> None:
     store = ScheduleStore(tmp_path)
     store.create(
-        daily_time_utc="09:00", prompt="daily", model="", mode="auto", chat_id=0,
+        daily_time_utc="09:00", prompt="daily", model="", chat_id=0,
         frequency="daily",
     )
     _write_loops(tmp_path, [
@@ -715,16 +714,16 @@ def test_backfill_stamps_the_rehome_fallback_on_pre_existing_entries(
     """
     store = ScheduleStore(tmp_path)
     bound = store.create(
-        daily_time_utc="", prompt="p", model="", mode="auto", chat_id=0,
+        daily_time_utc="", prompt="p", model="", chat_id=0,
         frequency=INTERVAL_FREQUENCY, interval_minutes=15, web_chat_id="chat-a",
     )
     project_bound = store.create(
-        daily_time_utc="", prompt="p", model="", mode="auto", chat_id=0,
+        daily_time_utc="", prompt="p", model="", chat_id=0,
         frequency=INTERVAL_FREQUENCY, interval_minutes=15,
         web_project_id="proj-b",
     )
     gone = store.create(
-        daily_time_utc="", prompt="p", model="", mode="auto", chat_id=0,
+        daily_time_utc="", prompt="p", model="", chat_id=0,
         frequency=INTERVAL_FREQUENCY, interval_minutes=15, web_chat_id="chat-gone",
     )
 

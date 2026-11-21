@@ -23,7 +23,6 @@ def _create(store: ScheduleStore, **overrides):
         daily_time_utc="09:00",
         prompt="p",
         model="m",
-        mode="auto",
         chat_id=1,
         title="t",
     )

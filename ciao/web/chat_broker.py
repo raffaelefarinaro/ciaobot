@@ -21,6 +21,7 @@ from ciao.models import (
     ContextCompactedEvent,
     ModelCapabilityQuestionEvent,
     ShellFinishedEvent,
+    WakeNoticeEvent,
     ModelChangedEvent,
     PermissionRequestEvent,
     PromptCancelledEvent,
@@ -547,7 +548,7 @@ def event_to_json(event: StreamEvent) -> dict | None:
     if isinstance(event, ContextCompactedEvent):
         # Host bookkeeping only: the drive loop clears the stable-context marker.
         return None
-    if isinstance(event, ShellFinishedEvent):
+    if isinstance(event, (ShellFinishedEvent, WakeNoticeEvent)):
         # Host bookkeeping only: the drive loop wakes the chat with one notice (not journaled).
         return None
     if isinstance(event, AssistantTextDelta):
@@ -625,7 +626,10 @@ def event_to_json(event: StreamEvent) -> dict | None:
             payload["parent_tool_use_id"] = event.parent_tool_use_id
         return payload
     if isinstance(event, SystemStatusEvent):
-        return {"type": "status", "message": event.status or ""}
+        payload = {"type": "status", "message": event.status or ""}
+        if event.denied_tool:
+            payload["denied_tool"] = event.denied_tool
+        return payload
     if isinstance(event, ModelChangedEvent):
         return {"type": "model_changed", "model": event.model}
     if isinstance(event, TokenUsageEvent):

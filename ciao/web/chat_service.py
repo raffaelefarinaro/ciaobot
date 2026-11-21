@@ -912,6 +912,7 @@ class ScheduleRunOutcome:
     completed: bool = False
     is_error: bool = False
     permission_requested: bool = False
+    permission_denied: str = ""
     question_requested: bool = False
     stream_error: bool = False
     retry_pending: bool = False
@@ -924,6 +925,7 @@ def _schedule_run_clean(outcome: ScheduleRunOutcome) -> bool:
         outcome.completed
         and not outcome.is_error
         and not outcome.permission_requested
+        and not outcome.permission_denied
         and not outcome.question_requested
         and not outcome.stream_error
         and not outcome.retry_pending
@@ -941,6 +943,14 @@ def _schedule_dispatch_status(
     """
     if outcome.retry_pending:
         return "skipped", None
+    if outcome.permission_denied:
+        # The broker refused an approval the run could not wait for. The turn may
+        # still have finished, so the denial is what makes the run a failure.
+        tool = outcome.permission_denied
+        return "error", (
+            f"Denied {tool}: a scheduled run cannot wait for approval. Set this "
+            f"routine's workspace or chat permission mode to allow {tool}, then run it again."
+        )
     if outcome.stream_error or outcome.is_error:
         error = (outcome.final_text or "stream error")[:1000]
         return "error", annotate_reauth(error, provider, model)

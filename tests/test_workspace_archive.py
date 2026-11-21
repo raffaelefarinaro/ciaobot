@@ -306,15 +306,15 @@ def test_archive_takes_the_workspace_schedules_and_stops_its_routines(tmp_path):
     client, config, pcm, store = _app(tmp_path, rerooted=True)
     general = next(p for p in pcm.list_projects("work") if p.is_auto)
     mine = store.create(
-        daily_time_utc="08:00", prompt="standup", model="", mode="auto",
+        daily_time_utc="08:00", prompt="standup", model="",
         chat_id=0, workspace="work",
     )
     by_project = store.create(
-        daily_time_utc="09:00", prompt="digest", model="", mode="auto",
+        daily_time_utc="09:00", prompt="digest", model="",
         chat_id=0, web_project_id=general.project_id,
     )
     other = store.create(
-        daily_time_utc="10:00", prompt="personal", model="", mode="auto",
+        daily_time_utc="10:00", prompt="personal", model="",
         chat_id=0, workspace="personal",
     )
     system_store = ScheduleStore(
@@ -563,7 +563,7 @@ def test_forget_transcript_subtree_refuses_prefixes_that_are_not_one_subtree(tmp
 def test_restore_round_trip(tmp_path, rerooted):
     client, config, pcm, store = _app(tmp_path, rerooted=rerooted)
     store.create(
-        daily_time_utc="08:00", prompt="standup", model="", mode="auto",
+        daily_time_utc="08:00", prompt="standup", model="",
         chat_id=0, workspace="work",
     )
     source = tmp_path / "work" if rerooted else Path(config.vault_root) / "work"
@@ -741,7 +741,7 @@ def test_a_failed_move_keeps_the_chats_and_schedules(tmp_path, monkeypatch):
     general = next(p for p in pcm.list_projects("work") if p.is_auto)
     chat = pcm.create_chat(general.project_id, title="work chat")
     mine = store.create(
-        daily_time_utc="08:00", prompt="standup", model="", mode="auto",
+        daily_time_utc="08:00", prompt="standup", model="",
         chat_id=0, workspace="work",
     )
 
@@ -812,7 +812,7 @@ def test_shared_layout_refuses_a_vault_that_is_its_own_repository(tmp_path):
 
 def _work_schedule(store: ScheduleStore):
     return store.create(
-        daily_time_utc="08:00", prompt="standup", model="", mode="auto",
+        daily_time_utc="08:00", prompt="standup", model="",
         chat_id=0, workspace="work",
     )
 
@@ -1287,13 +1287,14 @@ def test_restored_automations_come_back_paused_and_pinned_to_the_workspace(tmp_p
     for entry in entries.values():
         assert entry.enabled is False
         assert entry.workspace == "work"
-        assert entry.mode == ""
         assert entry.scope == "user"
         assert entry.last_triggered_on == ""
     # The foreign chat binding was dropped rather than kept.
     assert entries["sched-evil001"].web_chat_id is None
     raw = json.loads((tmp_path / ".runtime" / "schedules.json").read_text())
     assert all("unknown_key" not in row for row in raw["schedules"])
+    # A legacy `mode` key a row carried before the field was retired is gone too.
+    assert all("mode" not in row for row in raw["schedules"])
 
 
 @pytest.mark.parametrize(

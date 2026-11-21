@@ -106,7 +106,42 @@ async def test_unattended_rejects_without_emitting_card() -> None:
     status = emitted[0]
     assert isinstance(status, SystemStatusEvent)
     assert status.status == "Denied Bash: scheduled runs cannot wait for approval."
+    # Typed, so a schedule run can fail on it without parsing the sentence. No
+    # kind was sent, so the generic name stands in for the title.
+    assert status.denied_tool == "tool"
     assert not broker.has("call-1")
+
+
+async def test_unattended_denial_names_the_tool_kind_not_the_raw_title() -> None:
+    """Adapters often put the full shell command in the title. That text can carry
+    tokens or newlines, so the run's error names only the tool kind."""
+    emitted: list[object] = []
+    broker = PermissionBroker(emitted.append)
+    broker.unattended = True
+    secret_title = "Bash: curl -H 'Authorization: Bearer sk-FAKE-123' https://x.example\nrm -rf /"
+    await broker.request(
+        "sess",
+        {"toolCallId": "call-2", "title": secret_title, "kind": "execute"},
+        [_option("reject", "reject_once", "Reject")],
+    )
+    status = emitted[0]
+    assert isinstance(status, SystemStatusEvent)
+    assert status.denied_tool == "execute"
+    assert "sk-FAKE-123" not in status.denied_tool and "\n" not in status.denied_tool
+
+
+async def test_unattended_denial_without_a_kind_names_a_generic_tool() -> None:
+    emitted: list[object] = []
+    broker = PermissionBroker(emitted.append)
+    broker.unattended = True
+    await broker.request(
+        "sess",
+        {"toolCallId": "call-3", "title": "Some title"},
+        [_option("reject", "reject_once", "Reject")],
+    )
+    status = emitted[0]
+    assert isinstance(status, SystemStatusEvent)
+    assert status.denied_tool == "tool"
 
 
 def test_respond_unknown_id_is_acknowledged_as_already_resolved() -> None:

@@ -5746,6 +5746,11 @@ _SCHEDULE_CONFLICT = {
     "error": "schedule changed since you read it; reload and retry",
     "code": "schedule_conflict",
 }
+#: A schedule stores no permission mode. Refused rather than ignored, so a
+#: caller never believes it chose one.
+_SCHEDULE_MODE_REMOVED = {
+    "error": "mode is no longer supported; a schedule's runs use the workspace's new-chat default mode",
+}
 
 
 async def list_schedules(request: Request) -> JSONResponse:
@@ -5783,6 +5788,8 @@ async def create_schedule(request: Request) -> JSONResponse:
     pcm = request.app.state.project_chat_manager
     body = await request.json()
 
+    if "mode" in body:
+        return JSONResponse(_SCHEDULE_MODE_REMOVED, status_code=400)
     web_chat_id = body.get("web_chat_id")
     web_project_id = body.get("web_project_id")
 
@@ -5794,10 +5801,6 @@ async def create_schedule(request: Request) -> JSONResponse:
     # "inherit the selected workspace" and are resolved afresh at dispatch
     # time, so changing a workspace default also changes future runs.
     model = (body.get("model") or "").strip()
-    # Left unset on purpose. The form offers no permission-mode choice, so
-    # capturing one here froze whatever the Telegram context happened to be on
-    # into the entry; mode inherits at dispatch like model and provider do.
-    mode = ""
 
     frequency = body.get("frequency", "weekly")
     if frequency not in FREQUENCIES:
@@ -5896,7 +5899,6 @@ async def create_schedule(request: Request) -> JSONResponse:
             prompt=body["prompt"],
             model=model,
             provider=provider,
-            mode=mode,
             chat_id=body.get("chat_id", 0),
             timezone_name=body.get("timezone", DEFAULT_TIMEZONE),
             days_of_week=days_of_week,
@@ -6026,6 +6028,8 @@ async def schedule_detail(request: Request) -> JSONResponse:
         return JSONResponse({"error": "request body must be valid JSON"}, status_code=400)
     if not isinstance(body, dict):
         return JSONResponse({"error": "request body must be an object"}, status_code=400)
+    if "mode" in body:
+        return JSONResponse(_SCHEDULE_MODE_REMOVED, status_code=400)
     # Optional precondition: the `revision` the caller read. Taken out of the
     # body first so the field loop and the system-row normalizer never see it.
     expected_revision = body.pop("revision", None)
@@ -6061,9 +6065,7 @@ async def schedule_detail(request: Request) -> JSONResponse:
         entry.description = str(body["description"]).strip()
     if "time" in body:
         entry.daily_time_utc = body["time"]
-    text_changed = False
     if "prompt" in body:
-        text_changed = body["prompt"] != entry.prompt
         entry.prompt = body["prompt"]
     if "timezone" in body:
         entry.timezone_name = body["timezone"]
@@ -6126,15 +6128,9 @@ async def schedule_detail(request: Request) -> JSONResponse:
         if "archive_policy" in body:
             entry.archive_policy = normalize_archive_policy(body.get("archive_policy"))
         if "command" in body:
-            new_command = normalize_schedule_command(body.get("command"))
-            text_changed = text_changed or new_command != entry.command
-            entry.command = new_command
+            entry.command = normalize_schedule_command(body.get("command"))
     except ValueError as exc:
         return JSONResponse({"error": str(exc)}, status_code=400)
-    if text_changed:
-        # The operator owns the routine's content again, so a mode an agent
-        # pinned when it wrote the old text no longer applies.
-        entry.mode = ""
     if "enabled" in body:
         entry.enabled = bool(body["enabled"])
     # Never store an automation that cannot run. Shared with the MCP write path

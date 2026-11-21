@@ -703,7 +703,7 @@ async def test_archiving_a_run_chat_clears_its_needs_you_flag(tmp_path: Path) ->
 
     def _entry(run_chat: str) -> str:
         entry = store.create(
-            daily_time_utc="06:00", prompt="Brief.", model="", mode="auto", chat_id=0,
+            daily_time_utc="06:00", prompt="Brief.", model="", chat_id=0,
             web_project_id=project.project_id, workspace="work",
         )
         entry.last_run_chat_id = run_chat

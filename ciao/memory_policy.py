@@ -270,7 +270,7 @@ UNATTENDED_DEFERRED_ACTIONS: tuple[DeferredAction, ...] = (
     ),
     DeferredAction(
         "Create or move an automation into another workspace",
-        "Schedules are auto-approved and run unattended in bypass; only the caller's "
+        "Schedules run unattended and cannot wait for approval; only the caller's "
         "workspace is allowed.",
     ),
     DeferredAction(

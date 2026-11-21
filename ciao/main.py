@@ -16,14 +16,15 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, Awaitable, Callable, Literal, Mapping
 
 from ciao.config import RESTART_EXIT_CODE, CiaoConfig
-from ciao.execution_modes import cap_schedule_mode
 from ciao.legacy_node_state import (
     LegacyNodeState,
     STATE_FILENAME as LEGACY_STATE_FILENAME,
 )
 from ciao.legacy_node_state import detect as detect_legacy_node_state
 from ciao.legacy_node_state import writers_armed
+from ciao.models import BridgeMode
 from ciao.schedules import (
+    ScheduleEntry,
     ScheduleManager,
     ScheduleStore,
     dispatch_is_current,
@@ -143,15 +144,17 @@ class StartupTracker:
 
 
 def schedule_run_mode(
-    config: CiaoConfig, saved: str, provider: str, workspace: str | None
-) -> str:
-    """The permission mode one schedule run uses.
+    config: CiaoConfig, entry: ScheduleEntry, provider: str, workspace: str | None
+) -> BridgeMode:
+    """The permission mode a schedule run's chat starts in.
 
-    The default is the operator's pin for the provider the run resolves to, with
-    the workspace's override of that pin winning. A saved mode (an agent-made
-    routine) is an upper limit, not a pin: see ``cap_schedule_mode``.
+    A user routine takes the provider default for its workspace, exactly like a
+    new chat. A system routine (the packaged care routines) runs unattended with
+    nobody to approve anything, so it runs in bypass whatever the default is.
     """
-    return cap_schedule_mode(saved, config.default_mode_for_provider(provider, workspace))
+    if getattr(entry, "scope", "user") == "system":
+        return "bypass"
+    return config.default_mode_for_provider(provider, workspace)
 
 
 def _refresh_vault_index(
@@ -1100,15 +1103,13 @@ async def _run_server_locked(
         return pcm.prepare_schedule_chat(entry, prompt, model, mode, provider)
 
     def _resolve_schedule_target(entry):
-        # Empty entry.model / entry.mode means "use the current default".
-        # The mode default is the operator's pin for the provider this run
-        # actually resolves to (Settings -> Models & providers -> permission mode), so a
-        # routine obeys the same setting a hand-opened chat on that provider
-        # does, with this workspace's override of that pin winning. It used to
-        # fall back to the Telegram context's mode, which is a different
-        # surface's state and belongs to no workspace.
+        # Empty entry.model means "use the current default". A schedule stores no
+        # permission mode: its chat takes the default for the provider this run
+        # actually resolves to (Settings -> Models & providers -> permission mode),
+        # with this workspace's override of that pin winning, exactly as a new
+        # chat does.
         provider, model, workspace = pcm.schedule_effective_routing(entry)
-        mode = schedule_run_mode(config, entry.mode, provider, workspace)
+        mode = schedule_run_mode(config, entry, provider, workspace)
         return ("claude", model, mode, provider)
 
     # Classified before anything else touches the runtime root, because the
