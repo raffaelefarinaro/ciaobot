@@ -6320,6 +6320,7 @@ class _RunCounts:
     deferred: int
     complete: bool
     reasons: tuple[str, ...]
+    failed: int
 
 
 def _derive_run_counts(vault: Path, *, holder: str, workspace: str) -> _RunCounts:
@@ -6342,7 +6343,7 @@ def _derive_run_counts(vault: Path, *, holder: str, workspace: str) -> _RunCount
     stored = state.lease.get("plan") if state.lease.get("holder") == holder else None
     if not isinstance(stored, dict):
         return _RunCounts(
-            0, 0, 0, False, ("no begin-time plan recorded: this run's counts are not derived",)
+            0, 0, 0, False, ("no begin-time plan recorded: this run's counts are not derived",), 0
         )
     receipts = memory_receipts.read_receipts(memory_receipts.journal_path(vault))
     done = frozenset(state.done_keys)
@@ -6416,20 +6417,25 @@ def _derive_run_counts(vault: Path, *, holder: str, workspace: str) -> _RunCount
     )
     extra_done = [o for o in extra.outcomes if o.status in ("applied", "no_change")]
     counts = fold.counts
-    reasons: tuple[str, ...] = ()
+    failed = counts["failed"] + extra.counts["failed"]
+    reasons: list[str] = []
     if extra_done:
-        reasons = (
+        reasons.append(
             f"{len(extra_done)} accept(s) of rows found during the run are counted "
-            "as completed beyond the begin plan",
+            "as completed beyond the begin plan"
         )
+    if failed:
+        # A failed write is not ambiguity, so `complete` does not carry it; the
+        # reason and the `failed` count say it, so a run never reads as clean.
+        reasons.append(f"{failed} accept(s) failed; the run's receipts say which")
     return _RunCounts(
         planned=counts["planned"],
         completed=counts["applied"] + counts["no_change"] + counts["done_unverified"] + len(extra_done),
         deferred=int(stored.get("deferred_count", 0)),
-        # An unplanned operation that did not finish (failed, incomplete, queued)
-        # leaves the counts incomplete, as an ambiguous planned key would.
-        complete=fold.complete and len(extra_done) == len(extra.outcomes),
-        reasons=reasons,
+        # S1's meaning: no ambiguity. Planned and unplanned work both count.
+        complete=fold.complete and extra.complete,
+        reasons=tuple(reasons),
+        failed=failed,
     )
 
 
@@ -6483,6 +6489,7 @@ def _curation_end_command(args: argparse.Namespace) -> int:
         return 1
     summary.update(
         counts_complete=counts.complete,
+        failed=counts.failed,
         remaining_observed_count=int(payload["remaining_observed_count"]),
         coverage_notes=payload["coverage_notes"],
     )
@@ -6493,7 +6500,8 @@ def _curation_end_command(args: argparse.Namespace) -> int:
     else:
         print(
             f"run {summary['status']}: planned {summary['planned']}, "
-            f"completed {summary['completed']}, deferred {summary['deferred']}; "
+            f"completed {summary['completed']}, failed {summary['failed']}, "
+            f"deferred {summary['deferred']}; "
             f"weekly marker {'advanced' if advanced else 'left due'}; "
             f"Observed work: {summary['remaining_observed_count']} (coverage incomplete)"
         )

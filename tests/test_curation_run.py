@@ -5168,3 +5168,20 @@ def test_curation_end_without_a_begin_plan_reports_zero_counts_and_says_why(
     assert (summary["planned"], summary["completed"], summary["deferred"]) == (0, 0, 0)
     assert summary["counts_complete"] is False
     assert any("no begin-time plan recorded" in reason for reason in summary["reasons"])
+
+
+def test_record_plan_refuses_a_malformed_plan_and_stores_nothing(tmp_path: Path) -> None:
+    vault = _vault(tmp_path)
+    lease = cr.begin_run(vault, holder="nightly")
+    before = cr.load_state(vault).lease
+
+    with pytest.raises(cr.CurationStateError):
+        cr.record_plan(vault, holder=lease.holder, plan={"planned": "x"})
+    with pytest.raises(cr.CurationStateError):
+        cr.record_plan(
+            vault,
+            holder=lease.holder,
+            plan={"planned": [["p", "k"]] * (cr.LEASE_PLAN_MAX_KEYS + 1), "blocked": [],
+                  "blocked_overflow": 0, "deferred_count": 0},
+        )
+    assert cr.load_state(vault).lease == before
