@@ -120,6 +120,29 @@ final class AppSettingsWebKitTests: XCTestCase {
         XCTAssertEqual(js(without.webView, "typeof window.webkit.messageHandlers.ciaobotAppSettings") as? String, "undefined")
     }
 
+    /// The main window wires only the Settings bridge. The Dock icon is the
+    /// static brand icon, so no page-side workspace-colour handler exists.
+    func testMainWindowExposesNoWorkspaceColourBridge() throws {
+        var representable = WebWindow(origin: origin)
+        let fake = AppSettingsFakeNotifications(.off)
+        let settings = AppSettingsFakeSystemSettings()
+        let updates = AppSettingsFakeUpdates()
+        let bridge = AppSettingsBridge()
+        bridge.bind(notifications: fake, systemSettings: settings, updates: updates)
+        representable.appSettings = bridge
+        let coordinator = representable.makeCoordinator()
+        let webView = WebWindow.Coordinator.makeWebView(origin: origin, coordinator: coordinator)
+        webView.frame = NSRect(x: 0, y: 0, width: 400, height: 300)
+        let window = NSWindow(contentRect: webView.frame, styleMask: [.titled], backing: .buffered, defer: false)
+        window.contentView = webView
+        Self.retained.append(window)
+        Self.retained.append(coordinator)
+        let harness = Harness(coordinator: coordinator, webView: webView, fake: fake, settings: settings, updates: updates)
+        try load(harness)
+        XCTAssertEqual(js(webView, "typeof window.webkit.messageHandlers.ciaobotWorkspaceColor") as? String, "undefined")
+        XCTAssertEqual(js(webView, "typeof window.webkit.messageHandlers.ciaobotAppSettings") as? String, "object")
+    }
+
     func testGetResolvesToTheSnapshotWithoutAGesture() throws {
         let h = try makeHarness(state: .on)
         try load(h)
