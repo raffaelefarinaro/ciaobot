@@ -36,6 +36,7 @@ from ciao.models import (
     PermissionRequestEvent,
     PromptCancelledEvent,
     LATE_WAKE_NOTICE,
+    WakeNoticeEvent,
     ResultEvent,
     SessionTitleEvent,
     ShellFinishedEvent,
@@ -291,8 +292,9 @@ class ChatStreamingHost(Protocol):
     def _background_work_outstanding(self, chat_id: str) -> bool: ...
     def _note_shell_finished(self, chat_id: str, event: ShellFinishedEvent) -> None: ...
     def _release_shell_finished_waiting(self, chat_id: str) -> None: ...
-    def _continuation_started(self, chat_id: str) -> str | None: ...
     def _take_claimed_notice(self, chat_id: str, *, adopt: bool) -> str | None: ...
+    def _keep_unsent_echo(self, chat_id: str, text: str) -> None: ...
+    def _take_unsent_echo(self, chat_id: str) -> str | None: ...
 
     def _spawn_detached(
         self, coro: Coroutine[object, object, object], name: str
@@ -2108,7 +2110,7 @@ class ChatStreaming:
             return
         await self._host._drain_between_turns(chat_id, project_id)
 
-    def _record_wake_turn(self, chat_id: str, event: ResultEvent) -> None:
+    def _record_wake_turn(self, chat_id: str, event: ResultEvent, *, claimed: bool = False) -> None:
         """File a turn the provider ran on its own after background work finished.
 
         The provider's own session store holds the wake, but the durable transcript
@@ -2121,7 +2123,9 @@ class ChatStreaming:
             chat is None
             or event.origin != "task-notification"
             or not event.wake_notice
-            or not (event.result or "").strip()
+            # A claimed notice is already on the card in the journal and the live view: its turn is
+            # recorded even when the reply is blank, so the durable transcript shows the same card.
+            or not (claimed or (event.result or "").strip())
         ):
             return
         try:
@@ -2190,12 +2194,17 @@ class ChatStreaming:
             # Reset per terminal result: each wake is its own turn (#2139).
             drain_segment = FinalAnswerTracker()
             # The live card of a notice a continuation claimed; published before the continuation's text.
-            pending_echo: str | None = None
+            # A claimed card a superseded drain did not publish goes out first, here.
+            pending_echo: str | None = self._host._take_unsent_echo(chat_id)
             async for event in events:
                 # A shell notice is recorded before the supersede check below: the queue
                 # gave it up already, so a drain a foreground turn replaces must not lose it.
                 if isinstance(event, ShellFinishedEvent):
                     self._host._note_shell_finished(chat_id, event)
+                    continue
+                if isinstance(event, WakeNoticeEvent):
+                    # A claimed notice: its card goes out right before the continuation's reply.
+                    pending_echo = event.text
                     continue
                 # No await sits in this body, so one check covers every side
                 # effect of the iteration: a cancelled drain or one a
@@ -2206,14 +2215,12 @@ class ChatStreaming:
                     current_task is not None and current_task.cancelling() > 0
                 ) or (owner is not None and not owner.background):
                     superseded = True
+                    # The claim stays with the chat; its card waits for the next drain (not lost).
+                    if pending_echo is not None:
+                        self._host._keep_unsent_echo(chat_id, pending_echo)
                     break
                 if isinstance(event, ContextCompactedEvent):
                     self._clear_stable_context(chat_id)
-                if isinstance(event, AssistantTextDelta) and event.parent_tool_use_id is None:
-                    # A provider's own continuation starts speaking: it answers the shells that ended.
-                    claimed_text = self._host._continuation_started(chat_id)
-                    if claimed_text:
-                        pending_echo = claimed_text
                 drain_segment.feed(event)
                 if isinstance(event, SessionTitleEvent):
                     self._host.apply_adapter_title(chat_id, event.title)
@@ -2266,6 +2273,7 @@ class ChatStreaming:
                     )
                     drain_segment = FinalAnswerTracker()
                     is_error = bool(event.is_error)
+                    claimed_turn = False
                     if event.origin == "task-notification":
                         # The continuation closes: its turn takes the notice it claimed, if any.
                         # Only the provider's default notice is replaced; a real one is kept.
@@ -2274,7 +2282,8 @@ class ChatStreaming:
                         )
                         if claimed:
                             event.wake_notice = claimed
-                    self._record_wake_turn(chat_id, event)
+                            claimed_turn = True
+                    self._record_wake_turn(chat_id, event, claimed=claimed_turn)
                     settled = not self._host._background_work_outstanding(chat_id)
                     chat_now = self._host._chats.get(chat_id)
                     last_error = (

@@ -404,6 +404,16 @@ LATE_WAKE_NOTICE = "The agent continued after background work finished."
 
 
 @dataclass(slots=True)
+class WakeNoticeEvent(StreamEvent):
+    """A claimed shell notice, sent ahead of the continuation's reply. Host bookkeeping: never sent as is.
+
+    The session has already journaled the notice; the drain publishes the same card to the live stream.
+    """
+
+    text: str = ""
+
+
+@dataclass(slots=True)
 class ShellFinishedEvent(StreamEvent):
     """A background shell's process ended. Host bookkeeping: it wakes the chat, it is never shown.
 

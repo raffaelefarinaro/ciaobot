@@ -21,6 +21,7 @@ from ciao.models import (
     ContextCompactedEvent,
     ModelCapabilityQuestionEvent,
     ShellFinishedEvent,
+    WakeNoticeEvent,
     ModelChangedEvent,
     PermissionRequestEvent,
     PromptCancelledEvent,
@@ -547,7 +548,7 @@ def event_to_json(event: StreamEvent) -> dict | None:
     if isinstance(event, ContextCompactedEvent):
         # Host bookkeeping only: the drive loop clears the stable-context marker.
         return None
-    if isinstance(event, ShellFinishedEvent):
+    if isinstance(event, (ShellFinishedEvent, WakeNoticeEvent)):
         # Host bookkeeping only: the drive loop wakes the chat with one notice (not journaled).
         return None
     if isinstance(event, AssistantTextDelta):

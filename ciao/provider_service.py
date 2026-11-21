@@ -2,11 +2,12 @@
 
 from __future__ import annotations
 
-from collections.abc import AsyncGenerator
+from collections.abc import AsyncGenerator, Callable
 from contextlib import aclosing
 import logging
 import math
 from pathlib import Path
+from typing import Any
 
 from ciao import provider_registry
 from ciao.config import BridgeConfig
@@ -58,6 +59,7 @@ class ProviderService:
         # guide-local fallback under the agent root.
         self._workspace = workspace
         self._provider: ProviderImpl | None = None
+        self._continuation_hook: Callable[[list[Any]], str | None] | None = None
         self._active_handle: ActiveHandle | None = None
         if provider:
             self._ensure_provider(provider)
@@ -86,6 +88,7 @@ class ProviderService:
             # seam until the re-rooting release flips ``agent_root``.
             root = self._agent_root if self._agent_root is not None else self._config.workspace_root
             self._provider = factory(root, config=self._config)
+            self._provider.continuation_hook = self._continuation_hook
         return self._provider
 
     def ensure_provider(self, provider: str) -> ProviderImpl:
@@ -159,6 +162,12 @@ class ProviderService:
     def can_drain(self) -> bool:
         """True when the live provider currently permits a between-turn reader."""
         return self._provider is not None and self._provider.can_drain
+
+    def set_continuation_hook(self, hook: Callable[[list[Any]], str | None]) -> None:
+        """Ask for a held shell notice when the provider's own continuation starts speaking."""
+        self._continuation_hook = hook
+        if self._provider is not None:
+            self._provider.continuation_hook = hook
 
     @property
     def continues_after_shell(self) -> bool:
