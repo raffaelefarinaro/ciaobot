@@ -191,6 +191,16 @@ describe('InjectedPromptCard', () => {
     expect(wrapper.get('.injected-card-note').text()).toContain('You finished what this chat was waiting for')
   })
 
+  it('draws a loop_stop note as a notice with its fixed text', async () => {
+    const text = 'Loop stopped after 2 failed runs: denied Bash. Allow it and start it again if you want.'
+    const wrapper = mountCard({ prompt: { kind: 'loop_stop', text }, raw: text })
+    const card = wrapper.get('.injected-card')
+    expect(card.classes()).toContain('injected-card--loop_stop')
+    expect(card.attributes('aria-label')).toBe('Loop stopped')
+    await wrapper.get('.injected-card-toggle').trigger('click')
+    expect(wrapper.get('.injected-card-note').text()).toBe(text)
+  })
+
   it('draws a retry as a collapsed notice with the request behind a disclosure', async () => {
     const wrapper = mountCard({ prompt: { kind: 'retry' }, raw: 'Check the video' })
     const card = wrapper.get('.injected-card')

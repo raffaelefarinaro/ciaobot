@@ -202,6 +202,7 @@ from ciao.providers.base import (
     QuestionResponseResult,
 )
 from ciao.schedules import (
+    LOOP_FAIL_LIMIT,
     ScheduleEntry,
     ScheduleStore,
     loop_end_reason,
@@ -1373,6 +1374,8 @@ class ProjectChatManager:
         # Chats whose next reply is the one to a loop stop note (#3509): that
         # reply is not announced, because the engine's own notice already was.
         self._stop_notice_chats: set[str] = set()
+        # A stop note waiting for an open question or approval to be answered.
+        self._held_stop_notes: dict[str, str] = {}
         # Shell call ids a continuation answered, by chat: their ends are never announced as wakes.
         self._claimed_shell_ids: dict[str, set[str]] = {}
         # A claimed card a superseded drain did not publish, by chat.
@@ -5238,6 +5241,8 @@ class ProjectChatManager:
     def _forget_shell_wake_state(self, chat_id: str) -> None:
         """Drop every shell-wake record of a chat: its notices and claim, its wake limit, its flush."""
         self._drop_held_shell_state(chat_id)
+        self._stop_notice_chats.discard(chat_id)
+        self._held_stop_notes.pop(chat_id, None)
         self._shell_wake_times.pop(chat_id, None)
         self._shell_wakes_paused.pop(chat_id, None)
 
@@ -9073,6 +9078,9 @@ class ProjectChatManager:
         """
         if chat_id in self._stop_notice_chats:
             return
+        chat = self._chats.get(chat_id)
+        if chat is not None and self._loop_run_will_stop(chat):
+            return
         self._publish_result_ready(chat_id, project_id, title, snippet)
 
     def _publish_result_ready(
@@ -9139,22 +9147,104 @@ class ProjectChatManager:
         """Tell a loop's owner chat the engine stopped the loop after failed runs.
 
         The engine raises the one notification itself, with fixed text, so it
-        does not depend on what the model replies to the note. The failed run's
-        own pending push is cancelled first, and the note's reply is not
-        announced (see ``_announce_result_ready``).
+        never depends on the model. It goes out first and is never held: the
+        failed run's own pending push is cancelled, and the note for the model
+        follows. Any failure there is logged, not raised, since the row is gone.
         """
-        chat = self._chats.get(entry.owner_chat_id)
+        chat_id = entry.owner_chat_id
+        chat = self._chats.get(chat_id)
+        text = loop_wake.loop_stop_text(denied_tool)
+        try:
+            self._cancel_pending_push(chat_id)
+            self._publish_stop_notice(chat_id, chat, text)
+        except Exception:
+            logger.exception("Loop stop notice could not be published for %s", chat_id)
         if chat is None or chat.archived:
             return
-        text = loop_wake.loop_stop_text(denied_tool)
-        self._cancel_pending_push(chat.chat_id)
-        self._stop_notice_chats.add(chat.chat_id)
-        self._deliver_wake(chat, text, count=1, origin="background_run")
-        self._publish_result_ready(chat.chat_id, chat.project_id, chat.title, text)
+        try:
+            self._deliver_stop_note(chat, text)
+        except Exception:
+            logger.exception("Loop stop note could not be delivered to %s", chat_id)
+
+    def _publish_stop_notice(self, chat_id: str, chat: ChatInfo | None, text: str) -> None:
+        """The one user notification of a stop: the banner event and the push, now."""
+        title = chat.title if chat is not None else "Ciaobot"
+        self._events.publish({
+            "type": "chat_result_ready",
+            "chat_id": chat_id,
+            "project_id": chat.project_id if chat is not None else "",
+            "title": title,
+            "snippet": text,
+            "memory_pass": False,
+            "quiet_loop_run": False,
+        })
+        if self.notify_result_cb is None:
+            return
+        try:
+            self.notify_result_cb(chat_id, title, text)
+        except Exception:
+            logger.exception("notify_result_cb failed for %s", chat_id)
+
+    def _deliver_stop_note(self, chat: ChatInfo, text: str) -> None:
+        if self.chat_awaiting_answer(chat.chat_id):
+            # The owner has an open question or approval: the note waits for idle.
+            self._held_stop_notes[chat.chat_id] = text
+            return
+        self._start_stop_note(chat, text)
+
+    def _start_stop_note(self, chat: ChatInfo, text: str) -> str:
+        """Deliver the note as a wake of its own origin; True marker only if a turn started."""
+        delivery = self._deliver_wake(
+            chat, text, count=1, origin="loop_stop", report=False
+        )
+        if delivery == "started":
+            # Only a turn that started owns a reply. A queued or deferred note has none,
+            # so the next reply of this chat is announced as usual.
+            self._stop_notice_chats.add(chat.chat_id)
+        return delivery
+
+    async def _deliver_held_stop_note(self, chat_id: str, text: str) -> None:
+        chat = self._chats.get(chat_id)
+        if chat is None or chat.archived:
+            return
+        if self.chat_awaiting_answer(chat_id):
+            self._held_stop_notes[chat_id] = text
+            return
+        self._start_stop_note(chat, text)
 
     def _settle_stop_notice(self, chat_id: str) -> None:
-        """A turn ended: whatever reply it gave, the stop note's marker is spent."""
+        """A turn ended: the stop note's reply marker is spent with it.
+
+        A note held for an open question goes out now that the chat has moved on.
+        """
         self._stop_notice_chats.discard(chat_id)
+        held = self._held_stop_notes.get(chat_id)
+        if held is None or self.chat_awaiting_answer(chat_id):
+            return
+        del self._held_stop_notes[chat_id]
+        self._spawn_detached(
+            self._deliver_held_stop_note(chat_id, held), f"stop-note-{chat_id}"
+        )
+
+    def _loop_run_will_stop(self, chat: ChatInfo) -> bool:
+        """True when this loop run is the one that ends the loop for repeated failures.
+
+        Its own notice is then the stop notice, so the run's reply, its banner and
+        its push are left out: exactly one notification reaches the owner.
+        """
+        if str(chat.user_turn_origin.get(str(chat.user_turn_count - 1)) or "") != "loop":
+            return False
+        if chat.retry_status == "pending" or self.schedule_store is None:
+            return False
+        owned = [e for e in self.schedule_store.list_entries() if e.owner_chat_id == chat.chat_id]
+        if not owned:
+            return False
+        failed = (
+            bool(chat.last_error)
+            or chat.last_response_status != "success"
+            or chat.chat_id in self._unattended_denials
+        )
+        return failed and owned[0].fail_streak + 1 >= LOOP_FAIL_LIMIT
 
     def _schedule_push(self, chat_id: str, title: str, snippet: str) -> None:
         """Queue a delayed push for this chat. Cancels any prior pending
@@ -9561,7 +9651,9 @@ class ProjectChatManager:
         for event in self._shell_finished_waiting.pop(chat_id, []):
             self._note_shell_finished(chat_id, event)
 
-    def _deliver_wake(self, parent: ChatInfo, prompt: str, *, count: int, origin: str) -> str:
+    def _deliver_wake(
+        self, parent: ChatInfo, prompt: str, *, count: int, origin: str, report: bool = True
+    ) -> str:
         """Deliver one wake turn into *parent* and announce it.
 
         queue_message covers the two live cases in one call: it appends to the
@@ -9595,13 +9687,14 @@ class ProjectChatManager:
             # user may well be watching.
             self.start_stream(parent.chat_id, prompt, origin=origin)
             delivery = "started"
-        self._events.publish({
-            "type": "chat_runs_reported",
-            "chat_id": parent.chat_id,
-            "project_id": parent.project_id,
-            "count": count,
-            "delivery": delivery,
-        })
+        if report:
+            self._events.publish({
+                "type": "chat_runs_reported",
+                "chat_id": parent.chat_id,
+                "project_id": parent.project_id,
+                "count": count,
+                "delivery": delivery,
+            })
         return delivery
 
     # ── Between-turns SDK drain ──────────────────────────────────────────

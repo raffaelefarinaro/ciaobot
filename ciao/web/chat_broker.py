@@ -98,10 +98,11 @@ def take_pending_list(items: list[dict], entry_id: str) -> dict | None:
 #: ``user_echo`` / ``/messages`` so the PWA draws a notice card instead of a
 #: user bubble. Empty string = typed by the person. ``restart_resume`` is the
 #: one turn the engine sends into a chat whose turn a restart cut off (#2128).
-#: ``chat_action`` is the wake a Needs-you card's Continue sends.
+#: ``chat_action`` is the wake a Needs-you card's Continue sends. ``loop_stop``
+#: is the note the engine leaves when it stops a loop after failed runs (#3509).
 TURN_ORIGINS = frozenset({
-    "background_run", "chat_action", "cli_task_wake", "loop", "retry", "restart_resume",
-    "schedule", "task_delegation", "task_resume", "webhook", "update_task",
+    "background_run", "chat_action", "cli_task_wake", "loop", "loop_stop", "retry",
+    "restart_resume", "schedule", "task_delegation", "task_resume", "webhook", "update_task",
 })
 def _flushed_entry(entry: dict) -> dict:
     """A drained entry as it flushes or parks."""

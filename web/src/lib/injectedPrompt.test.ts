@@ -502,6 +502,17 @@ describe('summarizeInjectedPrompt', () => {
     })
   })
 
+  it('parses a loop_stop note by its origin, keeping its fixed text', () => {
+    const text = 'Loop stopped after 2 failed runs: denied Bash. Allow it and start it again if you want.'
+    expect(parseInjectedPrompt(text, 'loop_stop')).toEqual({ kind: 'loop_stop', text })
+  })
+
+  it('summarizes a loop_stop note', () => {
+    expect(summarizeInjectedPrompt({ kind: 'loop_stop', text: 'x' })).toEqual({
+      label: 'Loop stopped', facts: 'Failed runs in a row · permission mode unchanged', tone: null,
+    })
+  })
+
   it('summarizes an error notice', () => {
     const quota = errorNoticePrompt('you have reached your weekly usage limit, upgrade for higher limits')
     expect(quota).toMatchObject({ kind: 'error', label: 'Usage limit reached' })
