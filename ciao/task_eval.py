@@ -1139,12 +1139,14 @@ def prepare_workspace(
     auth_token: str | None = None,
     port: int | None = None,
     mode: str | None = None,
+    vault_fixture: Path | None = None,
 ) -> Path:
     """Build the throwaway workspace under ``workdir/ws`` without booting anything.
 
     ``setup_workspace`` runs with the live environment scrubbed and the working
     directory set to ``workdir``. The fixture vault is copied into
-    ``ws/personal/memory-vault`` and the task overlay over ``ws/personal``. The
+    ``ws/personal/memory-vault`` (``vault_fixture`` instead of the generic
+    ``_fixture`` when given) and the task overlay over ``ws/personal``. The
     workspace defaults to ``provider``, pins ``model`` for it, and starts its
     chats in ``mode`` (see :func:`resolve_mode`).
     """
@@ -1165,7 +1167,14 @@ def prepare_workspace(
     _pin_workspace_model(ws / ".runtime" / "workspaces.json", provider, model)
     _pin_default_mode(ws / ".runtime" / "app_settings.json", provider, resolved)
     personal = ws / WORKSPACE
-    shutil.copytree(TASKS_ROOT / FIXTURE_DIRNAME, personal / "memory-vault", dirs_exist_ok=True)
+    vault = personal / "memory-vault"
+    if vault_fixture is None:
+        shutil.copytree(TASKS_ROOT / FIXTURE_DIRNAME, vault, dirs_exist_ok=True)
+    else:
+        # A caller's vault is the whole starting vault: drop the template setup generated.
+        if vault.exists():
+            shutil.rmtree(vault)
+        shutil.copytree(vault_fixture, vault)
     if task.overlay is not None:
         shutil.copytree(task.overlay, personal, dirs_exist_ok=True)
     if task.gws_fake is not None:
@@ -1286,17 +1295,25 @@ class IsolatedEngine(EngineSession):
         model: str,
         keep_workdir: bool = False,
         mode: str | None = None,
+        vault_fixture: Path | None = None,
     ) -> "IsolatedEngine":
         workdir = Path(tempfile.mkdtemp(prefix=EVAL_WORKDIR_PREFIX))
         engine = cls(workdir, keep_workdir=keep_workdir)
         try:
-            engine._start(task, provider, model, mode)
+            engine._start(task, provider, model, mode, vault_fixture)
         except BaseException:
             engine.close()
             raise
         return engine
 
-    def _start(self, task: EvalTask, provider: str, model: str, mode: str | None) -> None:
+    def _start(
+        self,
+        task: EvalTask,
+        provider: str,
+        model: str,
+        mode: str | None,
+        vault_fixture: Path | None = None,
+    ) -> None:
         prepare_workspace(
             self.workdir,
             provider,
@@ -1305,6 +1322,7 @@ class IsolatedEngine(EngineSession):
             auth_token=self.token,
             port=self.port,
             mode=mode,
+            vault_fixture=vault_fixture,
         )
         self._mode = resolve_mode(provider, mode)
         self._log = self._log_path.open("wb")

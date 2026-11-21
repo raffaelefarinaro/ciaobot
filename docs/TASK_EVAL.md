@@ -293,6 +293,22 @@ it, as `prepare_workspace` builds them), and two readers exist but no caller bin
 yet: the curation cursor's done keys, and per-item counts of applied receipts for one
 run id, which stay unemitted until the settled run's holder is proven.
 
+The boot path (`ciao/care_eval_boot.py`) starts an isolated engine on a caller-supplied
+starting vault instead of the generic `_fixture`: `IsolatedEngine.boot` and
+`prepare_workspace` take an optional `vault_fixture`, and when given it replaces the vault
+the setup template generated, so the vault holds exactly the seed's files. The seed is the
+task overlay, so its one-line guide lands at `ws/personal/AGENTS.md`. Nothing is booted by
+the tests; whether the seed guide lets `curation-begin` plan is not yet verified.
+
+The record assembler (`ciao/care_eval_record.py`) turns one closed schedule-run outcome,
+the seed manifest and the observations into one `MeasurementRecord` through `public_record`.
+`entry` is always `schedule`, and `execution.status` carries the outcome. Only independent
+observations make a grade; with none the grade is `none` and outcomes stay unknown. Wall
+time is the caller's monotonic measurement and is complete only for a settled run. Token,
+call and cost metrics stay unknown unless a per-attempt usage report is passed, which the
+agent-driven run does not have. `environment_sha256` stays null, so comparisons remain
+`provenance_unknown` until an environment builder exists.
+
 The usage projection (`ciao/care_usage.py`) is a separate, pure collector for
 attributable care model-call usage; it does not replace `collect_usage`, which folds absent
 counters into zero and sums per-turn aggregates. Its input is a trusted expected-call
