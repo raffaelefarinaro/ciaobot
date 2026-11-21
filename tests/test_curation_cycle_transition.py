@@ -79,8 +79,12 @@ def _text(vault: Path) -> str:
     return cr.state_path(vault).read_text(encoding="utf-8")
 
 
+def _log_path(vault: Path) -> Path:
+    return vault / cr.CURATION_LOG_RELATIVE
+
+
 def _log(vault: Path) -> bytes:
-    return (vault / cr.CURATION_LOG_RELATIVE).read_bytes()
+    return _log_path(vault).read_bytes()
 
 
 def _record_publishes(monkeypatch: pytest.MonkeyPatch) -> list[bytes]:
@@ -149,7 +153,7 @@ def test_end_run_publishes_the_marker_once_and_rotates_the_cycle(
     assert published == [TARGET_BYTES]
     assert _log(vault) == TARGET_BYTES
     text = _text(vault)
-    assert "prepared" not in text and "committed" not in text
+    assert "committed" not in text and "phase" not in text
     decoded = cc.decode_state(text)
     assert decoded.cycle_id == NEXT_CID
     assert decoded.prior_marker == TARGET
@@ -321,7 +325,6 @@ def test_a_crash_before_the_publish_is_resumed_exactly_once(
     assert _log(vault) == MARKER_BYTES
     prepared = cc.decode_state(_text(vault)).pending
     assert prepared is not None
-    assert prepared.phase == "prepared"
     assert prepared.prior == PRIOR
     assert prepared.target_sha256 == TARGET.sha256
     assert prepared.proven_required == tuple(sorted(BOTH_REQUIRED))
@@ -600,3 +603,138 @@ def test_optional_work_left_outstanding_stays_outstanding_after_rotation(
     projection = cc.project_obligations([], decoded)
     assert projection.optional_outstanding == tuple(sorted((MERGE, RULE)))
     assert GUIDE not in projection.optional_outstanding
+
+
+# ── Pins and guards from the security review of d42476765 ────────────────
+
+
+def test_an_expired_preparer_is_published_once_and_the_entrant_keeps_its_own_lease(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Holder A prepares, its lease lapses unpublished, B's begin_run settles and takes B's lease."""
+    vault, lease_a, _ = _crash_after_prepare(tmp_path, monkeypatch)
+    published = _record_publishes(monkeypatch)
+
+    lease_b = cr.begin_run(vault, holder="entrant", now=LATER)
+
+    assert published == [TARGET_BYTES]
+    assert _log(vault) == TARGET_BYTES
+    state = cr.load_state(vault)
+    assert state.lease == lease_b.as_dict()
+    assert state.lease["holder"] != lease_a.holder
+    assert state.lease["expires_at"] == "2026-11-18T14:30:00Z"
+    assert cc.decode_state(_text(vault)).pending is None
+    cr.end_run(vault, holder=lease_b.holder, status="ok", now=LATER)
+    assert published == [TARGET_BYTES]
+
+
+def test_a_lease_that_lapses_between_settle_entry_and_the_publish_publishes_nothing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    vault, lease, _ = _crash_after_prepare(tmp_path, monkeypatch)
+    before = _text(vault)
+    published = _record_publishes(monkeypatch)
+    ticks = iter([NOW, NOW, LATER, LATER, LATER])
+
+    with pytest.raises(cr.CurationBusy):
+        cr.end_run(vault, holder=lease.holder, status="ok", clock=lambda: next(ticks))
+
+    assert published == []
+    assert _log(vault) == MARKER_BYTES
+    assert _text(vault) == before
+    assert cc.decode_state(_text(vault)).pending is not None
+
+
+def test_a_foreign_live_lease_is_never_settled_stolen_or_released(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    vault, lease_a, _ = _crash_after_prepare(tmp_path, monkeypatch)
+    before = _text(vault)
+    published = _record_publishes(monkeypatch)
+
+    with pytest.raises(cr.CurationBusy):
+        cr.record_done(vault, [DAILY], holder="foreign", now=NOW)
+    with pytest.raises(cr.CurationBusy):
+        cr.record_done(vault, [DAILY], now=NOW)
+    assert cr.renew_run(vault, holder="foreign", now=NOW) is False
+
+    assert published == []
+    assert _log(vault) == MARKER_BYTES
+    assert _text(vault) == before
+    assert cr.load_state(vault).lease["holder"] == lease_a.holder
+
+
+def test_a_log_that_changes_between_prepare_and_publish_is_refused_and_nothing_is_published(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    vault = _vault(tmp_path)
+    _put_cycle(vault, _cycle())
+    lease = cr.begin_run(vault, holder="run", now=NOW)
+    published = _record_publishes(monkeypatch)
+    late = MARKER_BYTES + b"\nlate report\n"
+
+    def drift_after_prepare(path: Path, state: cr.CurationState) -> None:
+        REAL_STORE(path, state)
+        if state.cycle is not None and state.cycle.pending is not None:
+            _log_path(vault).write_bytes(late)
+
+    monkeypatch.setattr(cr, "_store", drift_after_prepare)
+
+    summary = cr.end_run(
+        vault, holder=lease.holder, status="ok", advance_marker=True, live_keys=LIVE, today=TODAY, now=NOW
+    )
+
+    assert summary["status"] == "failed"
+    assert summary["full_pass_advanced"] is False
+    assert published == []
+    assert _log(vault) == late
+    decoded = cc.decode_state(_text(vault))
+    assert decoded.pending is None
+    assert decoded.cycle_id == CID
+
+
+def test_a_resume_whose_stamp_does_not_match_the_prepared_digest_blocks_and_writes_nothing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    vault, _, _ = _crash_after_prepare(tmp_path, monkeypatch)
+    document = json.loads(_text(vault))
+    document["pending"]["target_stamp"] = "2026-11-19"
+    cr.state_path(vault).write_text(json.dumps(document), encoding="utf-8")
+    before = _text(vault)
+    published = _record_publishes(monkeypatch)
+
+    with pytest.raises(cr.CurationStateError, match="cannot be settled automatically"):
+        cr.begin_run(vault, holder="next", now=LATER)
+
+    assert published == []
+    assert _log(vault) == MARKER_BYTES
+    assert _text(vault) == before
+
+
+def test_append_while_prepared_is_refused_for_the_curation_log_only(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    vault, lease, _ = _crash_after_prepare(tmp_path, monkeypatch)
+    before = _text(vault)
+
+    with pytest.raises(cr.CurationStateError, match="interrupted"):
+        cr.append_log(vault, holder=lease.holder, log="curation", payload=b"report\n", now=NOW)
+    result = cr.append_log(vault, holder=lease.holder, log="weekly-review", payload=b"review\n", now=NOW)
+
+    assert result["status"] == "appended"
+    assert (vault / cr.LOG_SELECTORS["weekly-review"]).read_bytes().endswith(b"review\n")
+    assert _log(vault) == MARKER_BYTES
+    assert _text(vault) == before
+
+
+def test_an_entry_that_only_settled_an_old_transition_reports_the_marker_advanced(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    vault, lease, _ = _crash_after_prepare(tmp_path, monkeypatch)
+    _record_publishes(monkeypatch)
+
+    summary = cr.end_run(vault, holder=lease.holder, status="ok", advance_marker=False, now=NOW)
+
+    assert summary["full_pass_advanced"] is True
+    assert summary["marker_error"] == ""
+    assert summary["status"] == "ok"

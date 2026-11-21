@@ -2617,7 +2617,7 @@ def append_log(
         held = _live_lease(state, effective_now)
         if not holder or held is None or held.get("holder") != holder:
             raise CurationBusy("this run no longer holds the curation lease")
-        if state.cycle is not None and state.cycle.pending is not None:
+        if log == "curation" and state.cycle is not None and state.cycle.pending is not None:
             raise CurationStateError(_TRANSITION_PENDING_APPEND)
         try:
             vault = curation_logs.canonical_vault(Path(vault_root))
@@ -2929,7 +2929,6 @@ def _advance_cycle_marker(
             target_stamp=stamp,
             target_sha256=target.sha256,
             proven_required=proven,
-            phase="prepared",
         )
     except curation_cycle.CycleError as exc:
         raise CurationStateError(str(exc)) from None
@@ -2962,8 +2961,18 @@ def _settle_pending(
     """Settle an interrupted weekly marker transition before any other write. Lock-assuming.
 
     Recovery runs only when no lease is live, or when ``holder`` holds the live
-    lease, so it never takes over a crashed run's lease. The outcome comes from
-    the marker bytes now: the target is committed by rotating, the prior bytes
+    lease, so it never takes over a crashed run's lease. A caller with no holder
+    (``holder=""``) settles only when no lease is live.
+
+    Rule for an expired preparing holder: a transition is prepared while its
+    preparer holds the live lease, and the proof it carries (``proven_required``)
+    was taken then. When that lease lapses without a publish, a later entry may
+    publish the same prepared target exactly once, provided the prior bytes still
+    match, and a holder-less entry may do so too. Refusing instead would wedge the
+    weekly marker behind a crashed run. The later entry's own lease is taken
+    afterwards and is never replaced here.
+
+    The outcome comes from the marker bytes now: the target is committed by rotating, the prior bytes
     are published once and then rotated, and anything else blocks. Rotation
     leaves ``lease`` and ``last_run`` untouched. Returns True when a transition
     was settled; ``state`` is updated in place and stored.
