@@ -2,6 +2,7 @@
 <html lang="en">
 <head>
   <meta charset="utf-8">
+  <script>try{var t=localStorage.getItem("ciao-site-theme");if(t)document.documentElement.dataset.theme=t}catch(e){}</script>
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Use It Anywhere · Ciaobot</title>
   <meta name="description" content="Run Ciaobot on one computer and use it from your phone, tablet or another computer over Tailscale.">
@@ -26,20 +27,19 @@
 <body>
   <header class="site-header">
     <div class="inner">
-      <a class="brand" href="./" aria-label="Ciaobot home"><picture><source media="(prefers-color-scheme: light)" srcset="assets/img/ciaobot-wordmark.png"><img src="assets/img/ciaobot-wordmark-light.png" alt=""></picture></a>
-      <nav class="site-nav" aria-label="Main">
-        <a href="guide.html">Guide</a>
-        <a href="features.html">Features</a>
+      <a class="brand" href="./" aria-label="Ciaobot home"><img class="wm-on-dark" src="assets/img/ciaobot-wordmark-light.png" alt="" width="112" height="26" loading="lazy"><img class="wm-on-light" src="assets/img/ciaobot-wordmark-ink.png" alt="" width="112" height="26" loading="lazy"></a>
+      <nav class="site-nav" id="site-nav" aria-label="Main">
         <a href="memory.html">Memory</a>
-        <a href="trust.html">Trust</a>
+        <a href="features.html">Features</a>
         <a href="https://github.com/raffaelefarinaro/ciaobot">GitHub</a>
       </nav>
+      <button class="theme-toggle" type="button" data-theme-toggle aria-label="Switch colour theme"><svg width="20" height="20" viewBox="0 0 20 20" aria-hidden="true" focusable="false"><circle cx="10" cy="10" r="7" fill="none" stroke="currentColor" stroke-width="1.6"/><path d="M10 3a7 7 0 0 1 0 14z" fill="currentColor"/></svg></button>
+      <button class="menu-toggle" type="button" data-menu-toggle aria-controls="site-nav" aria-expanded="false" aria-label="Open menu"><svg width="20" height="20" viewBox="0 0 20 20" aria-hidden="true" focusable="false"><path d="M3 5.5h14M3 10h14M3 14.5h14" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/></svg></button>
     </div>
   </header>
 
   <main class="narrow">
     <section>
-      <p class="eyebrow">Advanced</p>
       <h1>Use it from anywhere</h1>
       <p class="lead">Run Ciaobot on one computer, the <strong>host</strong>, and use it from your phone, tablet or laptop. The host can be your Mac at home, or a small rented server. Your notes, memory and AI sessions stay on the host; the other devices are just windows onto it.</p>
     </section>
@@ -67,8 +67,8 @@
       </svg>
       <p>A good host is a computer that is usually on: a Mac mini at home, a desktop, or a <a href="#vps">small Linux server in the cloud</a>. Scheduled tasks run on the host, so it needs to be awake for them to fire on time.</p>
       <div class="grid">
-        <div class="card"><h3>💻 A Mac at home</h3><p>The one-line install, and a browser or installed PWA to use it. Needs to stay awake for schedules.</p></div>
-        <div class="card"><h3>☁️ A VPS in the cloud</h3><p>Always on and reachable from anywhere, for a few euros a month. <a href="#vps">How →</a></p></div>
+        <div class="card"><h3>A Mac at home</h3><p>The Mac app, and a browser or installed PWA to use it. Needs to stay awake for schedules.</p></div>
+        <div class="card"><h3>A VPS in the cloud</h3><p>Always on and reachable from anywhere, for a few euros a month. <a href="#vps">How →</a></p></div>
       </div>
     </section>
 
@@ -128,8 +128,8 @@
         </li>
         <li>
           <h3>Install Ciaobot and an AI tool</h3>
-          <p>The server install is a few terminal commands: create a dedicated user, install Ciaobot, then sign in to Claude Code or opencode as that user. <a href="https://github.com/raffaelefarinaro/ciaobot/blob/main/docs/LINUX.md">docs/LINUX.md</a> lists every command, including running Ciaobot as a background service that starts on boot.</p>
-          <div class="note">Not comfortable in a terminal? Open a chat with Claude Code or opencode on your laptop, give it the link to <code>docs/LINUX.md</code> and your server's address, and let it walk you through (or do) the setup.</div>
+          <p>The server install is a few terminal commands: create a dedicated user, install Ciaobot, then sign in to Claude Code, Codex or OpenCode as that user. <a href="https://github.com/raffaelefarinaro/ciaobot/blob/main/docs/LINUX.md">docs/LINUX.md</a> lists every command, including running Ciaobot as a background service that starts on boot.</p>
+          <div class="note">Not comfortable in a terminal? Open a chat with Claude Code, Codex or OpenCode on your laptop, give it the link to <code>docs/LINUX.md</code> and your server's address, and let it walk you through (or do) the setup.</div>
         </li>
         <li>
           <h3>Open it from anywhere</h3>
@@ -141,14 +141,14 @@
 
     <nav class="next-page" aria-label="Next pages">
       <a class="btn" href="models.html">← AI models</a>
-      <a class="btn btn-primary" href="guide.html">Get started →</a>
+      <a class="btn btn-primary" href="./">Download Ciaobot →</a>
     </nav>
   </main>
 
   <footer class="site-footer">
     <div class="inner">
-      <span>Ciaobot is open source.</span>
-      <span>Last updated 11 November 2026</span>
+      <span>Ciaobot is open source under the MIT License. No telemetry, and this site runs no analytics.</span>
+      <span>Last updated 21 November 2026</span>
       <span><a href="https://github.com/raffaelefarinaro/ciaobot">GitHub</a> · <a href="https://github.com/raffaelefarinaro/ciaobot/releases">Release notes</a> · <a href="https://github.com/raffaelefarinaro/ciaobot/issues">Report an issue</a></span>
     </div>
   </footer>

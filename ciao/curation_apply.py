@@ -89,6 +89,10 @@ QUEUE_RESOLVE_KIND = "queue_resolve"
 _OPERATION_KINDS = frozenset({REGION_APPLY_KIND, QUEUE_RESOLVE_KIND})
 _UNPREPARED_CODES = frozenset({"missing", "missing_file"})
 
+# The decision reason an automated accept records. Fixed, so it never echoes
+# proposal text, and the History row can say why the run decided it.
+ACCEPT_DECISION_REASON = "accepted by the workspace care run"
+
 # Fixed reasons. None of them echoes proposal text.
 REFUSED_NO_OPERATION = "the accept has no operation id or holder"
 REFUSED_REGISTRY = "the installed engine does not register this workspace at this vault"
@@ -609,6 +613,7 @@ def apply_memory_accept(intent: ManagedMemoryAcceptIntent, *, vault_root: Path) 
                 operation_id=intent.operation_id,
                 run_id=intent.holder,
                 item_key=intent.item_key,
+                reason=ACCEPT_DECISION_REASON,
             )
     except Exception:  # noqa: BLE001 — an unrecorded decision is finished by the replay
         recorded = False
