@@ -687,6 +687,10 @@ async def archive_workspace_setting(request: Request) -> JSONResponse:
         project_ids, chat_ids = scope(name) if callable(scope) else (set(), set())
 
         def _belongs(item: dict) -> bool:
+            if item.get("owner_chat_id"):
+                # A chat-owned loop ends with its chat, which the removal below
+                # archives in the same pass. It is never snapshotted.
+                return False
             return (
                 str(item.get("workspace") or "") == name
                 or str(item.get("web_project_id") or "") in project_ids
@@ -5696,9 +5700,14 @@ def _enrich_schedule(
         # continues in a replacement chat (fork or fresh, prepare_schedule_chat
         # re-homes every cadence now) — so do not mark it unavailable and send
         # the user to re-pick a target they do not need to change.
-        entry_dict["context_available"] = chat is not None or (
-            pcm.resolve_automation_project(entry) is not None
-        )
+        if getattr(entry, "owner_chat_id", ""):
+            # A chat-owned loop is never re-homed: it is available only while its
+            # own chat is live.
+            entry_dict["context_available"] = chat is not None and not chat.archived
+        else:
+            entry_dict["context_available"] = chat is not None or (
+                pcm.resolve_automation_project(entry) is not None
+            )
     else:
         entry_dict["context_label"] = ""
     next_run = compute_next_run(entry)

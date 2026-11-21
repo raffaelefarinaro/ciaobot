@@ -1749,6 +1749,33 @@ class ScheduleStore:
             self._save(data)
         return entry
 
+    def delete_owned_by(self, owner_chat_id: str) -> list[str]:
+        """Remove every chat-owned loop of one chat in a single write.
+
+        Engine-internal: the owner chat is leaving, so there is no user edit
+        to check a revision against and nothing to authorize. Raises
+        ``ScheduleStoreCorrupt`` on an unreadable store, like every write; the
+        caller decides whether that may fail the chat's removal.
+        """
+        owner = (owner_chat_id or "").strip()
+        if not owner:
+            return []
+        with self._txn():
+            data = self._load_for_write()
+            items = data.get("schedules", [])
+            owned = [
+                item for item in items
+                if isinstance(item, dict)
+                and item.get("owner_chat_id") == owner
+                and item.get("scope") != "system"
+            ]
+            if not owned:
+                return []
+            gone = {id(item) for item in owned}
+            data["schedules"] = [item for item in items if id(item) not in gone]
+            self._save(data)
+        return [str(item.get("schedule_id", "")) for item in owned]
+
     def replace(
         self,
         entry: ScheduleEntry,
@@ -2624,13 +2651,15 @@ class ScheduleManager:
         target_refusal: Callable[[ScheduleEntry], str] | None = None,
         admission_closed: Callable[[], bool] | None = None,
         on_change: Callable[[], None] | None = None,
-        owner_alive: Callable[[str], bool] | None = None,
+        owner_alive: Callable[[str], bool | None] | None = None,
     ) -> None:
         self._store = store
         self._resolve_target = resolve_target
         # Told once each time a chat-owned loop ends, so open tabs refetch.
         self._on_change = on_change
-        # Whether a loop's owner chat still exists. False ends the loop.
+        # The state of a loop's owner chat: True runs it, False (gone or
+        # archived) ends it, None (its archive is in progress) skips this tick
+        # so a refused archive cannot lose the loop.
         self._owner_alive = owner_alive
         self._dispatch_to_web = dispatch_to_web
         self._prepare_chat = prepare_chat
@@ -3122,7 +3151,10 @@ class ScheduleManager:
                 return None
             # Before prepare_chat: a gone owner must not get a replacement chat
             # created for it, or that chat is left orphaned when the write is refused.
-            if self._owner_alive is not None and not self._owner_alive(entry.owner_chat_id):
+            owner = self._owner_state(entry)
+            if owner is None:
+                return None
+            if owner is False:
                 self._end_loop(entry, "owner-gone")
                 return None
         # As read, before prepare_chat may re-point the binding: the scoped
@@ -3246,8 +3278,10 @@ class ScheduleManager:
                 latest, "no chat left to dispatch into", base=latest_base
             )
         latest.last_status = status
+        # A chat-owned loop is never re-homed (see project_chats._rehome_interval_chat),
+        # so there is nothing to carry over for it.
         rehomed = bool(entry.web_chat_id) and entry.web_chat_id != bound_before
-        if rehomed and latest.web_chat_id == bound_before:
+        if rehomed and not is_owned_loop(entry) and latest.web_chat_id == bound_before:
             # prepare_chat re-pointed us at a replacement chat (the target was
             # archived or gone) and nobody has retargeted the stored row since.
             # Without carrying that across, the entry forgets the replacement
@@ -3413,12 +3447,24 @@ class ScheduleManager:
         if entry.schedule_id in self._inflight:
             return
         reason = loop_end_reason(entry, now)
-        if not reason and self._owner_alive is not None and not self._owner_alive(entry.owner_chat_id):
-            reason = "owner-gone"
+        if not reason:
+            owner = self._owner_state(entry)
+            if owner is None:
+                # Its owner is being archived: decide on the next tick, once the
+                # archive has either removed the loop or been refused.
+                return
+            if owner is False:
+                reason = "owner-gone"
         if reason:
             self._end_loop(entry, reason)
             return
         await self._tick_interval(entry, now)
+
+    def _owner_state(self, entry: ScheduleEntry) -> bool | None:
+        """True while the loop's owner chat runs it, False once it is gone, None mid-archive."""
+        if self._owner_alive is None:
+            return True
+        return self._owner_alive(entry.owner_chat_id)
 
     async def tick(self, now: datetime | None = None) -> None:
         if self._admission_refuses():
