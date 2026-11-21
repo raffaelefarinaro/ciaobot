@@ -46,6 +46,15 @@ TrimKind = Literal["tool", "skill", "setting"]
 # Always denied in every Claude chat; no catalog entry, no Settings switch.
 ALWAYS_DENIED_TOOLS: tuple[str, ...] = ("CronCreate", "CronDelete", "CronList", "ScheduleWakeup")
 ALWAYS_DENIED_SKILLS: tuple[str, ...] = ("loop",)
+# Keys removed from the catalog. A stored or stale-client map may still name them: they are
+# ignored (never stored, never a 400), like the other retired keys in the engine.
+RETIRED_KEYS: frozenset[str] = frozenset({
+    "tool:CronCreate",
+    "tool:CronDelete",
+    "tool:CronList",
+    "tool:ScheduleWakeup",
+    "skill:loop",
+})
 
 
 @dataclass(frozen=True)
@@ -325,6 +334,8 @@ def coerce_claude_trim(raw: object) -> dict[str, bool]:
         raise ValueError("claude_trim must be an object of option key -> true/false")
     picked: dict[str, bool] = {}
     for key, value in raw.items():
+        if key in RETIRED_KEYS:
+            continue
         entry = _BY_KEY.get(key)
         if entry is None:
             raise ValueError(f"unknown claude_trim option: {key}")

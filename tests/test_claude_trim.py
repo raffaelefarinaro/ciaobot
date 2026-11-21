@@ -157,10 +157,22 @@ def test_loop_family_denies_survive_any_stored_map(overrides: dict[str, bool]) -
     assert layer["skillOverrides"]["loop"] == "off"
 
 
-def test_removed_loop_keys_are_refused_by_the_strict_validator() -> None:
+def test_retired_loop_keys_are_ignored_by_the_strict_validator() -> None:
+    # A stale client may still send a removed key: it is dropped, never stored, never a 400.
     for key in sorted(_LOOP_FAMILY_KEYS):
-        with pytest.raises(ValueError, match=f"unknown claude_trim option: {key}"):
-            coerce_claude_trim({key: False})
+        assert coerce_claude_trim({key: False}) == {}
+        assert coerce_claude_trim({key: True}) == {}
+
+
+def test_a_map_mixing_a_retired_key_applies_the_valid_toggle() -> None:
+    assert coerce_claude_trim(
+        {"tool:CronCreate": False, "tool:RemoteTrigger": False, "tool:NotebookEdit": False}
+    ) == {"tool:RemoteTrigger": False, "tool:NotebookEdit": False}
+
+
+def test_unknown_keys_are_still_refused_by_the_strict_validator() -> None:
+    with pytest.raises(ValueError, match="unknown claude_trim option: tool:Nope"):
+        coerce_claude_trim({"tool:Nope": False})
 
 
 def test_stored_removed_loop_keys_load_leniently_and_drop_out() -> None:
