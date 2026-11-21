@@ -6187,16 +6187,19 @@ def _curation_due_command(args: argparse.Namespace) -> int:
     exits 1, which runs the chat as before.
     """
     from ciao.care_due import Busy, Due, Unavailable, care_due_verdict, verdict_payload
-    from ciao.curation_run import CurationStateError, active_lease
+    from ciao.curation_run import CurationStateError, active_lease, load_state
 
     _workspace, vault, _guide, _budget, registry_root, _name = _curation_context(args)
     lease: dict[str, Any] | None = None
     worklist = None
     plan = None
     candidates: list[dict[str, Any]] | None = None
+    transition_pending = False
     state_error = ""
     try:
         lease = active_lease(vault)
+        cycle = load_state(vault).cycle
+        transition_pending = cycle is not None and cycle.pending is not None
         planning = _curation_plan(args)
     except CurationStateError as exc:
         state_error = str(exc) or "curation state is unreadable"
@@ -6210,6 +6213,7 @@ def _curation_due_command(args: argparse.Namespace) -> int:
         lease=lease,
         category_candidates=candidates,
         state_error=state_error,
+        transition_pending=transition_pending,
     )
     if args.json:
         json.dump(verdict_payload(verdict), sys.stdout, ensure_ascii=False, indent=2)

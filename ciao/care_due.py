@@ -11,6 +11,21 @@ happens today: only :class:`Empty` lets a caller skip the chat. Every other
 verdict prints or exits non-zero, which the schedule treats as "run the chat as
 before". So the verdict can remove a no-op night, never hide a busy, unreadable
 or interrupted one.
+
+Deliberate edge cases:
+
+* ``partial`` note coverage (undated or unreadable notes, or a stale-note cap)
+  stays Empty. ``curation-begin`` plans nothing for those notes either, so the
+  night has no observed work and parity holds. Only ``unavailable`` coverage,
+  which means the scan did not run to the end, is Unavailable.
+* A missing ``Workspace/Learnings.md`` is reported by the planner as a blocked
+  learnings pass. That is a skipped-pass note, so the verdict is Unavailable.
+  This is safe (the chat still runs) but means a vault without that file never
+  gets an Empty night. Follow-up: give ``learnings_cleanup.plan_cleanup`` a
+  structured "no file, no work" result, then treat that case as Empty.
+* A prepared v2 cycle transition (``state.cycle.pending``) is Unavailable, not
+  Empty. The next ``curation-begin`` or ``curation-end`` settles it, so a night
+  that finds one must hand over to that run.
 """
 
 from __future__ import annotations
@@ -30,6 +45,9 @@ REASON_EMPTY = "no observed care work this run"
 REASON_DUE = "care work is due"
 REASON_BUSY = "a run holds the lease"
 REASON_STATE_UNREADABLE = "curation state is unreadable; the care verdict is unavailable"
+REASON_TRANSITION_PENDING = (
+    "a prepared care-cycle transition is waiting to be settled; the care verdict is unavailable"
+)
 REASON_CATEGORY_SCAN = "the category scan did not complete; the care verdict is unavailable"
 REASON_PASS_SKIPPED = "a worklist pass did not run this night; the care verdict is unavailable"
 
@@ -104,6 +122,7 @@ def care_due_verdict(
     lease: Mapping[str, Any] | None,
     category_candidates: Sequence[Mapping[str, Any]] | None,
     state_error: str = "",
+    transition_pending: bool = False,
 ) -> Verdict:
     """Decide whether tonight's care run has observed work.
 
@@ -111,12 +130,16 @@ def care_due_verdict(
     ``plan`` is its budgeted plan. ``lease`` is the live lease, or None.
     ``category_candidates`` is the read-only category scan, where None means the
     scan failed. ``worklist`` and ``plan`` may be None only when the state could
-    not be read, which ``state_error`` names.
+    not be read, which ``state_error`` names. ``transition_pending`` is True when
+    the loaded state is a v2 cycle with a prepared or committed marker transition
+    that no run has settled yet.
     """
     if state_error or worklist is None or plan is None:
         return Unavailable(REASON_STATE_UNREADABLE)
     if lease:
         return Busy()
+    if transition_pending:
+        return Unavailable(REASON_TRANSITION_PENDING)
     if category_candidates is None:
         return Unavailable(REASON_CATEGORY_SCAN)
     # The category pass files its rows under the lease, so a candidate the

@@ -2352,7 +2352,8 @@ def _live_lease(state: CurationState, now: datetime) -> dict[str, Any] | None:
     lease = state.lease
     if not lease or not lease.get("holder"):
         return None
-    expires = _parse_iso(str(lease["expires_at"]))
+    stamp = lease.get("expires_at")
+    expires = _parse_iso(stamp) if isinstance(stamp, str) else None
     if expires is None:
         raise CurationStateError("invalid curation lease expiry")
     if expires <= now:

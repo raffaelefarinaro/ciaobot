@@ -26,6 +26,7 @@ from ciao.care_due import (
     REASON_EMPTY,
     REASON_PASS_SKIPPED,
     REASON_STATE_UNREADABLE,
+    REASON_TRANSITION_PENDING,
     Busy,
     Due,
     Empty,
@@ -201,6 +202,37 @@ def test_a_blocked_oversize_log_is_due_because_an_operator_must_act() -> None:
         category_candidates=[],
     )
     assert isinstance(verdict, Due)
+
+
+def test_an_empty_worklist_whose_plan_still_has_blocked_work_is_due() -> None:
+    """Guards the ``and not plan.blocked`` in the Empty rule: removing it turns this red."""
+    blocked = _item(cr.PASS_LOGS)
+    verdict = care_due_verdict(
+        _worklist(),
+        plan=_plan(blocked=(blocked,)),
+        lease=None,
+        category_candidates=[],
+    )
+    assert isinstance(verdict, Due)
+
+
+def test_a_pending_cycle_transition_is_unavailable_and_a_live_lease_still_wins() -> None:
+    pending = care_due_verdict(
+        _worklist(),
+        plan=_plan(),
+        lease=None,
+        category_candidates=[],
+        transition_pending=True,
+    )
+    assert pending == Unavailable(REASON_TRANSITION_PENDING)
+    busy = care_due_verdict(
+        _worklist(),
+        plan=_plan(),
+        lease={"holder": "other"},
+        category_candidates=[],
+        transition_pending=True,
+    )
+    assert isinstance(busy, Busy)
 
 
 def test_budget_deferred_work_is_due() -> None:
@@ -433,6 +465,85 @@ def test_a_vault_without_a_learnings_file_is_unavailable_not_empty(
 
     assert (code, out) == (1, "")
     assert err == f"{REASON_PASS_SKIPPED}\n"
+
+
+def _write_cycle_state(vault: Path, *, pending: bool) -> None:
+    """A real v2 cycle document, written through the codec, with or without a transition."""
+    from ciao import curation_cycle as cc
+
+    prior = cc.marker_identity_of(b"---\nlast_full_pass: 2026-11-09\n---\n\n# Curation log\n")
+    target = cc.marker_identity_of(b"---\nlast_full_pass: 2026-11-21\n---\n\n# Curation log\n")
+    cycle_id = cc.cycle_identity(prior, "")
+    transition = (
+        cc.PreparedTransition(
+            cycle_id=cycle_id,
+            prior=prior,
+            target_stamp="2026-11-21",
+            target_sha256=target.sha256 or "",
+            proven_required=(),
+            phase="prepared",
+        )
+        if pending
+        else None
+    )
+    state = cc.CycleState(
+        cycle_id=cycle_id,
+        prior_marker=prior,
+        required={},
+        optional={},
+        carried=(),
+        legacy_historical={},
+        daily={},
+        lease={},
+        last_run={},
+        pending=transition,
+    )
+    (vault / cr.STATE_RELATIVE).write_text(cc.encode_state(state), encoding="utf-8")
+
+
+def test_a_prepared_cycle_transition_is_unavailable_on_disk(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    root, vault = _build(tmp_path, "idle")
+    _write_cycle_state(vault, pending=True)
+
+    code, out, err = _run(
+        capsys, ["curation-due", "--workspace", str(root), "--vault-root", str(vault)]
+    )
+
+    assert (code, out) == (1, "")
+    assert err == f"{REASON_TRANSITION_PENDING}\n"
+
+
+def test_a_settled_cycle_state_with_no_transition_reads_the_normal_verdict(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    root, vault = _build(tmp_path, "idle")
+    _write_cycle_state(vault, pending=False)
+
+    assert _run(
+        capsys, ["curation-due", "--workspace", str(root), "--vault-root", str(vault)]
+    ) == (0, "", "")
+
+
+def test_a_lease_with_no_expiry_is_a_state_error_and_the_chat_runs(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Shape check, not KeyError: the preflight exits 1 with the fixed reason, never a traceback."""
+    from ciao import curation_run as crun
+
+    root, vault = _build(tmp_path, "idle")
+    malformed = crun.CurationState(lease={"holder": "stale-holder"})
+    monkeypatch.setattr(crun, "load_state", lambda _vault: malformed)
+
+    with pytest.raises(crun.CurationStateError):
+        crun._live_lease(malformed, datetime.now(UTC))
+
+    code, out, err = _run(
+        capsys, ["curation-due", "--workspace", str(root), "--vault-root", str(vault)]
+    )
+    assert (code, out) == (1, "")
+    assert err == f"{REASON_STATE_UNREADABLE}\n"
 
 
 def test_a_held_live_lease_exits_seventy_five(
