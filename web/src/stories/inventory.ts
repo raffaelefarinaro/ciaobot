@@ -960,6 +960,86 @@ export const inventory: InventoryEntry[] = [
     }
   },
   {
+    "id": "components-chat-loop-chip",
+    "name": "ChatLoopChip",
+    "family": "Chat, messages, composer, activity and context",
+    "kind": "component",
+    "owner": {
+      "path": "web/src/components/ChatLoopChip.vue",
+      "anchor": "<template>"
+    },
+    "sources": [],
+    "consumers": [
+      "web/src/components/ChatPanel.vue"
+    ],
+    "variants": [
+      "one loop",
+      "several loops",
+      "narrow",
+      "menu open",
+      "archived"
+    ],
+    "variantNotes": "The composer-bar chip for a chat's own loops: cadence and end for one loop, a count for several, the short form under 700px. Its menu opens each loop in Automations or stops it (no confirm); a failed stop reads inline and keeps the menu open. Hidden when the chat is archived or has no loop.",
+    "states": [
+      {
+        "name": "default",
+        "coverage": "covered",
+        "storyIds": [
+          "chat-loop-chip--default"
+        ],
+        "note": "One loop: the chip names its cadence and end, with the full summary as its accessible name and tooltip."
+      },
+      {
+        "name": "several loops",
+        "coverage": "covered",
+        "storyIds": [
+          "chat-loop-chip--multiple"
+        ],
+        "note": "Two loops in one chat: a count, and the accessible name says how many."
+      },
+      {
+        "name": "narrow",
+        "coverage": "covered",
+        "storyIds": [
+          "chat-loop-chip--narrow"
+        ],
+        "note": "390px composer: the short form renders and the chip keeps a 32px-minimum box; coarse pointers get 44px through the component's own rule."
+      },
+      {
+        "name": "menu open",
+        "coverage": "covered",
+        "storyIds": [
+          "chat-loop-chip--menu-open"
+        ],
+        "note": "Opened: Open in Automations and Stop loop, portalled out of the chip."
+      },
+      {
+        "name": "keyboard focus",
+        "coverage": "covered",
+        "storyIds": [
+          "chat-loop-chip--keyboard-focus"
+        ],
+        "note": "Focusable, and Enter opens the menu."
+      },
+      {
+        "name": "archived",
+        "coverage": "covered",
+        "storyIds": [
+          "chat-loop-chip--archived"
+        ],
+        "note": "An archived chat renders no chip, even with its loops present. A chat with no loop also renders nothing (the empty branch of the same computed)."
+      }
+    ],
+    "loading": {
+      "status": "none",
+      "detail": "No loading state: the chip reads the task store's schedules and renders nothing until one matches."
+    },
+    "migration": {
+      "status": "unassessed",
+      "note": "Inventory admission does not approve a design migration."
+    }
+  },
+  {
     "id": "components-composer-activity",
     "name": "ComposerActivity",
     "family": "Chat, messages, composer, activity and context",

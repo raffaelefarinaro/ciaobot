@@ -8,6 +8,7 @@ import { api } from '../../lib/api'
 import type { ChatInfo, ProjectInfo, Schedule } from '../../lib/types'
 import { useProjectStore } from '../../stores/projects'
 import { useTaskStore } from '../../stores/tasks'
+import ChatLoopChip from '../ChatLoopChip.vue'
 import ChatPanel from '../ChatPanel.vue'
 
 const PaneHeaderStub = defineComponent({
@@ -214,6 +215,44 @@ describe('ChatPanel automation origin', () => {
     expect(row.get('.cd-detail').text()).toBe('Automation')
     expect(origin.findAll('button')).toHaveLength(0)
     expect(rail.findAll('.cd-heading').map(h => h.text())).toEqual(['Origin', 'Open', 'MCP', 'Files'])
+    vi.unstubAllGlobals()
+    wrapper.unmount()
+  })
+
+  // A chat's own loop reads as a loop in the origin row and gets its chip in
+  // the composer bar; the same schedule bound to the chat without an owner is
+  // still an automation.
+  it('names a chat loop as a loop in the origin row and wires its chip into the composer bar', async () => {
+    const observers: Array<() => void> = []
+    vi.stubGlobal('ResizeObserver', class {
+      private cb: ResizeObserverCallback
+      constructor(cb: ResizeObserverCallback) { this.cb = cb }
+      observe() {
+        observers.push(() => this.cb([{ contentRect: { width: 1200 } } as unknown as ResizeObserverEntry], this as unknown as ResizeObserver))
+      }
+      disconnect() {}
+      unobserve() {}
+    })
+    const loop = {
+      ...makeIntervalSchedule('loop-1'),
+      owner_chat_id: 'chat-1',
+      expires_at: '2099-01-01T14:30:00Z',
+      max_runs: 10,
+      run_count: 2,
+    } as Schedule
+    const { wrapper } = await mountPanel(undefined, [loop, makeIntervalSchedule('schedule-1')])
+    observers.forEach(fire => fire())
+    await nextTick()
+
+    const rows = wrapper.findAll('.chat-rail-origin-row')
+    const details = rows.map(row => row.get('.cd-detail').text())
+    expect(details).toContain('Automation')
+    expect(details.some(text => text.startsWith('Loop · ends '))).toBe(true)
+    // The panel is shallow-mounted here, so the chip is checked as wired: its
+    // own chat, in the composer bar. Its loop display is tested in ChatLoopChip.test.ts.
+    const chip = wrapper.get('.composer-bar').findComponent(ChatLoopChip)
+    expect(chip.exists()).toBe(true)
+    expect(chip.props('chatId')).toBe('chat-1')
     vi.unstubAllGlobals()
     wrapper.unmount()
   })

@@ -37,3 +37,24 @@ describe('scheduleList', () => {
     expect(cadenceBadge(s('a', { frequency: 'manual' }))).toBe('·')
   })
 })
+
+describe('scheduleList loops', () => {
+  it('gives chat-owned loops their own group, between One-offs and Routines', () => {
+    const list = [
+      s('routine'),
+      s('loop', { frequency: 'interval', interval_minutes: 5, owner_chat_id: 'chat-a', web_chat_id: 'chat-a' }),
+      s('soon', { frequency: 'once', run_at_date: '2026-12-01' }),
+      s('bound', { frequency: 'interval', interval_minutes: 30, web_chat_id: 'chat-b' }),
+    ]
+    const g = groupSidebarSchedules(list)
+    expect(g.loops.map(x => x.schedule_id)).toEqual(['loop'])
+    expect(g.routines.map(x => x.schedule_id)).toEqual(['routine', 'bound'])
+    expect(sidebarScheduleOrder(list).map(x => x.schedule_id)).toEqual(['soon', 'loop', 'routine', 'bound'])
+  })
+
+  it('keeps the system group out of loops', () => {
+    const g = groupSidebarSchedules([s('sys', { scope: 'system', frequency: 'interval', interval_minutes: 60 })])
+    expect(g.loops).toEqual([])
+    expect(g.system.map(x => x.schedule_id)).toEqual(['sys'])
+  })
+})

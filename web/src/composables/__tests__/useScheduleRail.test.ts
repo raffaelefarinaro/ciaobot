@@ -46,6 +46,22 @@ describe('useScheduleRail', () => {
     expect(rail.items.value[2].subtitle).toBe('Routine · 30m')
   })
 
+  it('lists a chat loop as a Loop between one-offs and routines, with its cadence', () => {
+    useTaskStore().schedules = [
+      schedule('r1'),
+      schedule('lp', {
+        frequency: 'interval', interval_minutes: 5, web_chat_id: 'chat-a',
+        owner_chat_id: 'chat-a', expires_at: '2099-01-01T00:00:00Z', max_runs: 10, run_count: 0,
+      }),
+      schedule('once', { frequency: 'once', run_at_date: '2026-12-01' }),
+    ] as never
+    const rail = useScheduleRail(() => 'lp')
+    expect(rail.items.value.map(i => i.id)).toEqual(['once', 'lp', 'r1'])
+    const loop = rail.items.value[1]
+    expect(loop.subtitle).toBe('Loop · every 5 min')
+    expect(loop.label).toBe('title lp, Loop, every 5 min')
+  })
+
   it('marks a missed run as needing you and a paused automation in its name', () => {
     useTaskStore().schedules = [
       schedule('a', { missed: true }),

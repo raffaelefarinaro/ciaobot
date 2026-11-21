@@ -52,6 +52,24 @@ function makeSchedule(overrides: Partial<Schedule> = {}): Schedule {
   } as Schedule
 }
 
+/** A chat-owned loop: interval cadence bound to, and owned by, one chat. */
+function loopSchedule(overrides: Partial<Schedule> = {}): Schedule {
+  return makeSchedule({
+    title: 'Watch the build',
+    frequency: 'interval',
+    interval_minutes: 5,
+    daily_time_utc: '',
+    web_project_id: null,
+    web_chat_id: 'chat-a',
+    owner_chat_id: 'chat-a',
+    expires_at: '2099-01-01T00:00:00Z',
+    max_runs: 10,
+    run_count: 3,
+    context_label: 'Build chat',
+    ...overrides,
+  })
+}
+
 /** Cards are addressed by their uppercase heading, e.g. "Schedule". */
 function card(wrapper: VueWrapper, name: string) {
   const found = wrapper.findAll('.prop-card').find(
@@ -619,6 +637,46 @@ describe('SchedulePanel property cards', () => {
     expect(store.deleteSchedule).toHaveBeenCalledWith('sched-1')
   })
 
+  it('draws a chat loop with its own rows, no edit, run or pause controls, and one Stop', async () => {
+    const wrapper = await mountPanel(loopSchedule())
+    for (const name of ['When', 'Where it runs', 'Model']) {
+      expect(card(wrapper, name).find('.card-edit').exists()).toBe(false)
+    }
+    expect(wrapper.find('.header-run').exists()).toBe(false)
+    expect(wrapper.find('.desktop-only').exists()).toBe(false)
+    expect(wrapper.get('a[href="/chat/chat-a"]').text()).toContain('Build chat')
+    const when = card(wrapper, 'When').text()
+    expect(when).toContain('Runs left')
+    expect(when).toContain('7')
+    expect(when).toContain('Ends')
+
+    // The prompt is still editable: a loop's prompt is not fixed like its lifetime.
+    expect(wrapper.findAll('.text-link').some(b => b.text() === 'Edit')).toBe(true)
+
+    // No ⋯ menu for a loop: its only actions are Stop and the prompt. Delete is Stop.
+    expect(wrapper.find('button[aria-label="More automation actions"]').exists()).toBe(false)
+
+    const stop = wrapper.findAll('button').find(b => b.text() === 'Stop loop')
+    expect(stop).toBeTruthy()
+    const store = useTaskStore()
+    store.deleteSchedule = vi.fn(async () => {})
+    await stop!.trigger('click')
+    await flushPromises()
+    expect(confirmMock).toHaveBeenCalledWith('Stop this loop? It won\'t run again.')
+    expect(store.deleteSchedule).toHaveBeenCalledTimes(1)
+    expect(store.deleteSchedule).toHaveBeenCalledWith('sched-1')
+  })
+
+  it('does not delete a loop when the Stop confirm is declined', async () => {
+    confirmMock.mockResolvedValue(false)
+    const wrapper = await mountPanel(loopSchedule())
+    const store = useTaskStore()
+    store.deleteSchedule = vi.fn(async () => {})
+    await wrapper.findAll('button').find(b => b.text() === 'Stop loop')!.trigger('click')
+    await flushPromises()
+    expect(store.deleteSchedule).not.toHaveBeenCalled()
+  })
+
   it('shows the automation\'s own state in the rail, and flags a failed run', async () => {
     const wrapper = await mountPanel(makeSchedule({
       last_status: 'error',
@@ -676,6 +734,21 @@ describe('SchedulePanel overview', () => {
     mounted.push(wrapper)
     return wrapper
   }
+
+  it('gives chat loops their own section, out of next up and paused', async () => {
+    useProjectStore().chats = [{ chat_id: 'chat-a', title: 'Build chat' }] as never
+    const wrapper = await mountOverview([
+      makeSchedule({ schedule_id: 'a', title: 'Morning brief' }),
+      loopSchedule({ schedule_id: 'l' }),
+      makeSchedule({ schedule_id: 'b', title: 'Old sweep', enabled: false, next_run: null }),
+    ])
+    const section = wrapper.get('[aria-labelledby="ov-loops-title"]')
+    expect(section.text()).toContain('Watch the build')
+    expect(section.text()).toContain('in Build chat · every 5 min · 7 runs left')
+    expect(wrapper.get('[aria-labelledby="ov-next-title"]').text()).not.toContain('Watch the build')
+    expect(wrapper.get('[aria-labelledby="ov-paused-title"]').text()).not.toContain('Watch the build')
+    expect(wrapper.get('[aria-labelledby="ov-next-title"]').text()).toContain('Morning brief')
+  })
 
   it('splits next up, paused and system routines, and counts them in the rail', async () => {
     const wrapper = await mountOverview([
