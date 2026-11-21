@@ -27,7 +27,7 @@ def test_pyproject_declares_public_license_and_python_floor() -> None:
 
     project = data["project"]
     assert project["requires-python"] == ">=3.12"
-    assert project["license"] == "Apache-2.0"
+    assert project["license"] == "MIT"
     assert data["project"]["scripts"]["ciao"] == "ciao.cli:main"
 
 
@@ -35,7 +35,7 @@ def test_public_metadata_files_exist() -> None:
     repo = Path(__file__).parents[1]
 
     assert (repo / "LICENSE").is_file()
-    assert "Apache License" in (repo / "LICENSE").read_text(encoding="utf-8")
+    assert "MIT License" in (repo / "LICENSE").read_text(encoding="utf-8")
     assert (repo / "SECURITY.md").is_file()
 
 
