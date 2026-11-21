@@ -13,6 +13,7 @@ import contextlib
 import json
 import os
 import stat
+import sys
 import uuid
 from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
@@ -114,6 +115,12 @@ def _migratable(tmp_path: Path) -> tuple[Path, bytes]:
         ),
     )
     return vault, before
+
+
+def _operator_at_terminal(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Make this test process look like an operator's terminal to the --apply gate."""
+    monkeypatch.setattr(sys.stdin, "isatty", lambda: True, raising=False)
+    monkeypatch.setattr(sys.stdout, "isatty", lambda: True, raising=False)
 
 
 def _tree(root: Path) -> dict[str, bytes | None]:
@@ -482,11 +489,13 @@ def test_crash_before_the_publish_leaves_v1_intact_and_the_backup_present(
         return real_replace(src, dst, *args, **kwargs)
 
     monkeypatch.setattr(cr.os, "replace", crashing)
-    with pytest.raises(OSError):
+    with pytest.raises(cr.CurationStateError) as raised:
         cr.migrate_state_to_cycle(vault, confirm_quiesced=True, expected_digest=digest, today=TODAY)
 
+    assert "delete" in str(raised.value) and BACKUP_NAME in str(raised.value)
     assert cr.state_path(vault).read_bytes() == before
     assert (vault / "Workspace" / BACKUP_NAME).read_bytes() == before
+    assert not (vault / "Workspace" / ".Curation-State.json.write.tmp").exists()
 
 
 def test_apply_publishes_under_the_state_lock(
@@ -740,10 +749,11 @@ def test_dry_run_and_apply_are_mutually_exclusive(tmp_path: Path) -> None:
 
 
 def test_apply_with_the_previewed_digest_migrates_the_registered_install(
-    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
 ) -> None:
     vault = _cli_install(tmp_path)
     capsys.readouterr()
+    _operator_at_terminal(monkeypatch)
     assert cli.main(["curation-cycle-migrate", "--vault-root", str(vault), "--dry-run", "--json"]) == 0
     digest = json.loads(capsys.readouterr().out)["digest"]
 
@@ -758,11 +768,12 @@ def test_apply_with_the_previewed_digest_migrates_the_registered_install(
 
 
 def test_apply_with_a_stale_digest_exits_one_and_names_the_refusal(
-    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
 ) -> None:
     vault = _cli_install(tmp_path)
     before = cr.state_path(vault).read_bytes()
     capsys.readouterr()
+    _operator_at_terminal(monkeypatch)
 
     code = cli.main(
         ["curation-cycle-migrate", "--vault-root", str(vault), "--apply", "--digest", "1" * 64,
@@ -772,3 +783,136 @@ def test_apply_with_a_stale_digest_exits_one_and_names_the_refusal(
     assert code == 1
     assert "digest" in capsys.readouterr().err
     assert cr.state_path(vault).read_bytes() == before
+
+
+# ── Hardening: digest day, backup, terminal gate, temporary file, lease ──
+
+
+@pytest.mark.parametrize("shift", [1, -1], ids=("later-day", "clock-set-back"))
+def test_a_shifted_preview_day_is_a_digest_mismatch(tmp_path: Path, shift: int) -> None:
+    """`dropped` depends on the day, so the digest must change when the day does."""
+    vault, before = _migratable(tmp_path)
+    digest = cr.migration_report(vault, today=TODAY)["digest"]
+
+    with pytest.raises(cr.CurationMigrationRefused) as raised:
+        cr.migrate_state_to_cycle(
+            vault,
+            confirm_quiesced=True,
+            expected_digest=digest,
+            today=TODAY + timedelta(days=shift),
+        )
+
+    assert "digest" in str(raised.value)
+    _assert_untouched(vault, before)
+
+
+def test_write_backup_refuses_an_existing_file_and_keeps_its_bytes(tmp_path: Path) -> None:
+    backup = tmp_path / "Curation-State.v1.bak"
+    backup.write_bytes(b"earlier backup")
+
+    with pytest.raises(cr.CurationMigrationRefused) as raised:
+        cr._write_backup(backup, b"new bytes")
+
+    assert "delete" in str(raised.value)
+    assert backup.read_bytes() == b"earlier backup"
+
+
+def test_a_planted_temporary_symlink_is_replaced_not_written_through(tmp_path: Path) -> None:
+    vault, _ = _migratable(tmp_path)
+    digest = cr.migration_report(vault, today=TODAY)["digest"]
+    target = tmp_path / "victim.txt"
+    target.write_bytes(b"do not touch")
+    planted = vault / "Workspace" / ".Curation-State.json.write.tmp"
+    planted.symlink_to(target)
+
+    cr.migrate_state_to_cycle(vault, confirm_quiesced=True, expected_digest=digest, today=TODAY)
+
+    assert target.read_bytes() == b"do not touch"
+    state = cr.state_path(vault)
+    assert not state.is_symlink()
+    assert cc.decode_state(state.read_text(encoding="utf-8")).daily == {DAILY: "2026-11-17"}
+    assert not planted.exists()
+
+
+def test_an_unparsable_lease_expiry_is_a_clean_blocker_and_nothing_is_written(tmp_path: Path) -> None:
+    vault = _vault(tmp_path)
+    _put_log(vault)
+    before = _put_state(
+        vault,
+        _v1(lease={"holder": "run", "started_at": "2026-11-18T00:00:00Z", "expires_at": "not-a-date"}),
+    )
+
+    report = cr.migration_report(vault, today=TODAY)
+
+    assert report["status"] == "unreadable"
+    assert any("lease" in reason for reason in report["blockers"])
+    with pytest.raises(cr.CurationMigrationRefused):
+        cr.migrate_state_to_cycle(
+            vault, confirm_quiesced=True, expected_digest=report["digest"], today=TODAY
+        )
+    _assert_untouched(vault, before)
+
+
+def test_apply_is_refused_without_an_interactive_terminal_and_writes_nothing(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    vault = _cli_install(tmp_path)
+    before = cr.state_path(vault).read_bytes()
+    digest = cr.migration_report(vault)["digest"]
+    capsys.readouterr()
+    monkeypatch.setattr(sys.stdin, "isatty", lambda: False, raising=False)
+    monkeypatch.setattr(sys.stdout, "isatty", lambda: True, raising=False)
+
+    code = cli.main(
+        ["curation-cycle-migrate", "--vault-root", str(vault), "--apply", "--digest", digest,
+         "--confirm-quiesced"]
+    )
+
+    assert code == 1
+    assert "interactive terminal" in capsys.readouterr().err
+    assert cr.state_path(vault).read_bytes() == before
+    assert not (vault / "Workspace" / BACKUP_NAME).exists()
+
+
+def test_apply_needs_stdout_to_be_a_terminal_as_well(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    vault = _cli_install(tmp_path)
+    digest = cr.migration_report(vault)["digest"]
+    capsys.readouterr()
+    monkeypatch.setattr(sys.stdin, "isatty", lambda: True, raising=False)
+    monkeypatch.setattr(sys.stdout, "isatty", lambda: False, raising=False)
+
+    code = cli.main(
+        ["curation-cycle-migrate", "--vault-root", str(vault), "--apply", "--digest", digest,
+         "--confirm-quiesced"]
+    )
+
+    assert code == 1
+    assert not (vault / "Workspace" / BACKUP_NAME).exists()
+
+
+def test_the_dry_run_stays_open_without_a_terminal(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    vault = _cli_install(tmp_path)
+    capsys.readouterr()
+    monkeypatch.setattr(sys.stdin, "isatty", lambda: False, raising=False)
+
+    assert cli.main(["curation-cycle-migrate", "--vault-root", str(vault), "--dry-run", "--json"]) == 0
+
+
+def test_the_migration_command_is_absent_from_every_agent_reference() -> None:
+    """The nightly agent must not be told the command exists: no help topic, stock file or doc."""
+    from ciao import agent_cli
+
+    root = Path(__file__).resolve().parents[1]
+    needle = b"curation-cycle-migrate"
+    assert needle not in agent_cli._help_text().encode()
+    for topic in agent_cli._HELP_TOPICS:
+        assert needle not in agent_cli._help_text(topic).encode(), topic
+    assert needle not in (root / "ciao" / "system_prompt.md").read_bytes()
+    assert needle not in (root / "docs" / "AGENT_CLI.md").read_bytes()
+    for path in (root / "ciao" / "stock").rglob("*"):
+        if path.is_file():
+            assert needle not in path.read_bytes(), path

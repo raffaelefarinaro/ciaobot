@@ -6310,6 +6310,13 @@ def _curation_cycle_migrate_command(args: argparse.Namespace) -> int:
                 file=sys.stderr,
             )
             return 2
+        if not _operator_terminal():
+            print(
+                "curation-cycle-migrate --apply runs only from an interactive terminal, typed by the "
+                "operator. It is refused for scripts and for automated agents; the dry run stays open.",
+                file=sys.stderr,
+            )
+            return 1
         try:
             report = migrate_state_to_cycle(
                 vault,
@@ -6335,6 +6342,14 @@ def _curation_cycle_migrate_command(args: argparse.Namespace) -> int:
     else:
         _print_cycle_migration(report, vault, applying=bool(args.apply))
     return 1 if report["blockers"] and not args.apply else 0
+
+
+def _operator_terminal() -> bool:
+    """Whether stdin and stdout are both a terminal, which means a person is at the keyboard."""
+    try:
+        return sys.stdin.isatty() and sys.stdout.isatty()
+    except (AttributeError, ValueError):
+        return False
 
 
 def _print_cycle_migration(report: dict[str, Any], vault: Path, *, applying: bool) -> None:

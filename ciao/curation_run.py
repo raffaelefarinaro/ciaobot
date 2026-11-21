@@ -2144,22 +2144,54 @@ def _store_cycle(path: Path, state: CurationState, cycle: CycleState) -> None:
     _publish_bytes(path, text.encode("utf-8"))
 
 
+def _fsync_directory(path: Path) -> None:
+    """Make a rename or create in ``path`` durable where the platform allows it. Best effort."""
+    try:
+        fd = os.open(path, os.O_RDONLY)
+    except OSError:
+        return
+    try:
+        os.fsync(fd)
+    except OSError:
+        pass
+    finally:
+        os.close(fd)
+
+
 def _publish_bytes(path: Path, data: bytes) -> None:
-    """Replace the state file with ``data``: a fsynced temporary sibling, then one rename."""
+    """Replace the state file with ``data``: a fresh fsynced temporary sibling, then one rename.
+
+    A stale temporary is removed first, and the new one is created exclusively
+    without following links, so nothing planted at that name is written through.
+    Only a temporary this call created is removed on failure.
+    """
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_name(f".{path.name}.write.tmp")
+    created = False
     try:
-        with tmp.open("wb") as handle:
+        try:
+            os.unlink(tmp)
+        except FileNotFoundError:
+            pass
+        fd = os.open(
+            tmp,
+            os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0),
+            0o600,
+        )
+        created = True
+        with os.fdopen(fd, "wb") as handle:
             handle.write(data)
             handle.flush()
             os.fsync(handle.fileno())
         os.replace(tmp, path)
     except BaseException:
-        try:
-            tmp.unlink()
-        except OSError:
-            pass
+        if created:
+            try:
+                os.unlink(tmp)
+            except OSError:
+                pass
         raise
+    _fsync_directory(path.parent)
 
 
 def _store(path: Path, state: CurationState) -> None:
@@ -2641,6 +2673,11 @@ def _write_full_pass_marker(
 # ── v1 to v2 migration (operator-run, #3061 B1) ───────────────────────────
 
 CYCLE_BACKUP_RELATIVE = "Workspace/Curation-State.v1.bak"
+_BACKUP_EXISTS = (
+    f"The migration backup {CYCLE_BACKUP_RELATIVE} already exists and is never overwritten. If an earlier --apply "
+    "failed, check that Workspace/Curation-State.json still holds the v1 state, then delete the "
+    ".bak by hand and run the dry run again."
+)
 
 
 class CurationMigrationRefused(CurationStateError):
@@ -2784,12 +2821,13 @@ def _migration_preview(vault_root: Path, *, today: date | None) -> _MigrationPre
     except OSError:
         blockers.append("the backup path cannot be inspected")
     else:
-        blockers.append(f"the backup path already exists and is never overwritten: {CYCLE_BACKUP_RELATIVE}")
+        blockers.append(_BACKUP_EXISTS)
 
     digest = hashlib.sha256()
     digest.update(b"state:" + (b"absent" if state_bytes is None else b"present") + b"\0")
     digest.update(state_bytes or b"")
     digest.update(b"\0marker:" + _marker_token(marker_state, log_bytes).encode("ascii"))
+    digest.update(b"\0today:" + day.isoformat().encode("ascii"))
 
     report: dict[str, Any] = {
         "status": status,
@@ -2831,7 +2869,7 @@ def _write_backup(path: Path, data: bytes) -> None:
     try:
         fd = os.open(path, flags, 0o600)
     except FileExistsError:
-        raise CurationMigrationRefused([f"the backup path already exists: {CYCLE_BACKUP_RELATIVE}"]) from None
+        raise CurationMigrationRefused([_BACKUP_EXISTS]) from None
     except OSError:
         raise CurationStateError("the migration backup cannot be created") from None
     try:
@@ -2840,7 +2878,11 @@ def _write_backup(path: Path, data: bytes) -> None:
             handle.flush()
             os.fsync(handle.fileno())
     except OSError:
-        raise CurationStateError("the migration backup cannot be written") from None
+        raise CurationStateError(
+            f"the migration backup could not be written; delete {CYCLE_BACKUP_RELATIVE} by hand "
+            "after checking the state file is still v1, then run the dry run again"
+        ) from None
+    _fsync_directory(path.parent)
 
 
 def migrate_state_to_cycle(
@@ -2874,5 +2916,12 @@ def migrate_state_to_cycle(
         if preview.vault is None or preview.state_bytes is None or preview.cycle_text is None:
             raise CurationMigrationRefused(["the migration preview is incomplete; nothing was written"])
         _write_backup(Path(report["backup_path"]), preview.state_bytes)
-        _publish_bytes(state_path(preview.vault), preview.cycle_text.encode("utf-8"))
+        try:
+            _publish_bytes(state_path(preview.vault), preview.cycle_text.encode("utf-8"))
+        except OSError:
+            raise CurationStateError(
+                "the v2 state could not be published after the backup was written; the state file "
+                "was not replaced. Check Workspace/Curation-State.json still holds the v1 state, then "
+                f"delete {CYCLE_BACKUP_RELATIVE} by hand before any retry"
+            ) from None
     return {**report, "status": "migrated"}
