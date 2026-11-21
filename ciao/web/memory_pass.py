@@ -245,18 +245,28 @@ APPROVED_TASK_PROMPT = (
     "- A procedure that belongs in a skill this workspace already owns: file a "
     "proposal for that skill with `ciao skill-proposal-add NAME --input-file FILE` "
     "(a JSON object with `title`, `problem`, `change`, `rationale`).\n"
-    "- A reusable procedure no skill covers: file a `[review]` draft for a new "
-    "skill through {draft} — a proposed `skill` name, and a `change` holding its "
-    "purpose, the trigger that should load it, and the steps.\n"
+    "- A reusable procedure no skill covers, once the recurrence rule below is "
+    "met: file a `[review]` draft for a new skill through {draft} — a proposed "
+    "`skill` name, and a `change` holding its purpose, the trigger that should "
+    "load it, and the steps.\n"
     "- A durable fact (a path, a contact, a preference, a decision): memory, as "
     "above.\n"
     "File nothing for a one-off: a task that will not recur teaches no procedure. "
     "When the procedure is reusable, file it as a learning. {sighting} "
-    "If Learnings already records the same "
-    "procedure from a different completion id, that is a second independent "
-    "occurrence: also file a skill proposal or a new-skill draft. The same "
-    "completion id seen again is not a new occurrence. A direct correction of "
-    "an owned skill can be proposed from this one occurrence. "
+    "One or two outcomes are a sighting, and that is all: file or update the "
+    "learning only. The recurrence rule is three distinct completed tasks already "
+    "recorded in Learnings as sightings of one learning, not counting what you "
+    "are filing now, because a learning you file here waits for the user to "
+    "accept. When Learnings already holds three, file the new-skill draft through "
+    "{draft} with a `recurrence` block, citing the learning id, its "
+    "`entry_revision` (the sha256 of that learning's canonical line as it stands "
+    "when you file, since each new sighting changes it), and exactly those three "
+    "completion ids from Learnings, shaped like {recurrence}. If Learnings holds "
+    "fewer than three, file the learning now and the draft in a later pass, once "
+    "three are recorded. The same completion id seen again is not a new "
+    "occurrence. "
+    "A direct correction of an owned skill can be proposed from this one "
+    "occurrence. "
     "Everything you file waits for the user to accept; you do not edit a skill "
     "or create one yourself. Read the task file at {task_path} for the Progress "
     "notes: user notes are the user's account, agent notes are work evidence."
@@ -374,6 +384,18 @@ LESSON_PROPOSAL_EXAMPLE = (
     '"change": "Under Deploy, add: run the staging gate first and wait for it to pass.", '
     '"rationale": "A learning records that production deploys must pass staging first.", '
     '"origins": [' + ORIGIN_EXAMPLE + "]}"
+)
+#: A new-skill draft as ``ciao skill-draft-add`` reads it, with the ``recurrence``
+#: block the gate checks (#3238-B). Shape only: the reader checks the field types
+#: and the id count, and the gate then checks the learning and its completions
+#: against the vault. The three ids are the recurrence threshold.
+RECURRENCE_DRAFT_EXAMPLE = (
+    '{"target": "new_skill", "skill": "deploy", '
+    '"title": "Run the staging gate before a deploy", '
+    '"change": "Purpose: deploys. Trigger: a request to ship. Steps: run the staging gate and wait for it to pass.", '
+    '"recurrence": {"procedure_learning_id": "<learning id>", '
+    '"entry_revision": "<sha256 of the learning\'s canonical line>", '
+    '"outcome_ids": ["<completion id>", "<completion id>", "<completion id>"]}}'
 )
 
 #: The skill-review section, appended to the pass prompt when the workspace owns
@@ -526,7 +548,12 @@ LESSON_ROUTING_PROMPT = Template(
     "6. When no skill fits at all and the lesson is a reusable workflow, file a "
     "`[review]` draft for a new skill with the same command: a proposed `skill` "
     "name, the `change` holding the purpose, the trigger that should load it and "
-    "the instruction it should carry. A person creates the file, reads it back "
+    "the instruction it should carry. The draft carries a `recurrence` block, "
+    "shaped like " + RECURRENCE_DRAFT_EXAMPLE + ": the procedure must be a "
+    "learning at the revision you read, backed by three distinct completed tasks "
+    "already recorded in Learnings, not counting this draft. "
+    "A one-off lesson with no recurrence stays an event-log or learning entry, "
+    "not a draft. A person creates the file, reads it back "
     "and syncs it; you do not create a directory, and you do not aim the "
     "edit-only `ciao skill-proposal-add` at a name that does not exist yet, "
     "because it refuses that on purpose. "
@@ -1338,6 +1365,7 @@ class MemoryPassCoordinator:
             ),
             resolution=resolution_section,
             draft=DRAFT_COMMAND,
+            recurrence=RECURRENCE_DRAFT_EXAMPLE,
             sighting=sighting,
             task_path=helper.get("task_path") or "the task file named in the conversation",
         )

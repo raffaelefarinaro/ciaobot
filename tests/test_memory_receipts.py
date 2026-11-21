@@ -2971,3 +2971,86 @@ def test_a_failed_guide_write_keeps_its_operation_id(tmp_path, monkeypatch):
     assert row["status"] == mr.FAILED
     assert row["operation_id"] == "op-x"
     assert row["workspace"] == "personal"
+
+
+# ── S2: a managed write stamps the run and the item it settles ──
+
+
+def test_a_crashed_stamped_region_write_keeps_run_and_item_through_recovery(tmp_path, monkeypatch):
+    guide = _guide(tmp_path, memory=["fact one"])
+    journal = mr.journal_path(tmp_path, None)
+    real_append = mr._append
+
+    def crash_before_applied(j, payload):
+        if payload.get("status") == mr.APPLIED:
+            raise _Crash()
+        real_append(j, payload)
+
+    monkeypatch.setattr(mr, "_append", crash_before_applied)
+    with pytest.raises(_Crash):
+        mr.commit_region_change(
+            guide,
+            "memory",
+            entries=["fact one", "Stamped fact. [2026-01-01]"],
+            actor="agent",
+            source="cli",
+            vault_root=tmp_path,
+            fact_text="Stamped fact.",
+            destination="ciao:memory",
+            operation_id="op-stamped",
+            run_id="run-1",
+            item_key="proposals:stamped",
+        )
+    monkeypatch.undo()
+    (prepared,) = mr.find_receipts_by_operation_id(tmp_path, "op-stamped")
+    assert (prepared["run_id"], prepared["item_key"]) == ("run-1", "proposals:stamped")
+
+    result = mr.recover_pending(journal=journal)
+
+    (settled,) = [r for r in result.reconciled if r["operation_id"] == "op-stamped"]
+    assert settled["status"] == mr.APPLIED
+    assert (settled["run_id"], settled["item_key"]) == ("run-1", "proposals:stamped")
+
+
+def test_a_failed_stamped_region_write_records_its_run_and_item(tmp_path, monkeypatch):
+    guide = _guide(tmp_path, memory=["fact one"])
+
+    def disk_full(*_args, **_kwargs):
+        raise OSError("disk full")
+
+    monkeypatch.setattr(mt, "write_guide_atomically", disk_full)
+    with pytest.raises(OSError):
+        mr.commit_region_change(
+            guide,
+            "memory",
+            entries=["fact one", "Failed fact. [2026-01-01]"],
+            actor="agent",
+            source="cli",
+            vault_root=tmp_path,
+            fact_text="Failed fact.",
+            destination="ciao:memory",
+            operation_id="op-failed",
+            run_id="run-2",
+            item_key="proposals:failed",
+        )
+
+    (effective,) = mr.find_receipts_by_operation_id(tmp_path, "op-failed")
+    assert effective["status"] == mr.FAILED
+    assert (effective["run_id"], effective["item_key"]) == ("run-2", "proposals:failed")
+
+
+def test_an_unstamped_region_write_carries_no_run_or_item_keys(tmp_path):
+    guide = _guide(tmp_path, memory=["fact one"])
+
+    receipt = mr.commit_region_change(
+        guide,
+        "memory",
+        entries=["fact one", "Plain fact. [2026-01-01]"],
+        actor="agent",
+        source="cli",
+        vault_root=tmp_path,
+        fact_text="Plain fact.",
+        destination="ciao:memory",
+    )
+
+    assert "run_id" not in receipt and "item_key" not in receipt
