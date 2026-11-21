@@ -471,7 +471,7 @@ const minPasswordLength = 4
 // The website's answer to "where is my password": it lives in the host's
 // workspace .env. The login page links here because the person locked out is
 // exactly the one who cannot ask Ciaobot.
-const PASSWORD_HELP_URL = 'https://www.raffaelefarinaro.com/ciaobot/guide.html#password'
+const PASSWORD_HELP_URL = 'https://www.raffaelefarinaro.com/ciaobot/#password'
 
 // The server answers a wrong password with a bare "invalid token"; say what
 // happened in the words the page uses.

@@ -366,8 +366,8 @@ curl -fsSL https://github.com/raffaelefarinaro/ciaobot/releases/latest/download/
 ```
 
 `tests/test_ci_workflow.py::test_first_party_install_command_stays_install_sh`
-pins that exact command into this skill, `README.md`, `site/index.html`,
-`site/guide.html` and `docs/DEVELOPMENT.md`, and fails if any of them starts
+pins that exact command into this skill, `README.md`, `docs/LINUX.md`
+and `docs/DEVELOPMENT.md`, and fails if any of them starts
 pointing a first-time user at `install-engine.sh` instead. `install.sh` is
 the one a user runs.
 
