@@ -762,6 +762,9 @@ async def test_terminal_outcome_is_aggregated_before_delivery() -> None:
 @pytest.mark.asyncio
 async def test_manager_private_streaming_state_is_collaborator_views() -> None:
     manager = object.__new__(ProjectChatManager)
+    manager._stop_notice_chats = set()
+    manager._held_stop_notes = {}
+    manager.schedule_store = None
     manager._streaming = ChatStreaming(cast(ChatStreamingHost, manager))
 
     manager._turn_perf_started[("chat-1", 0)] = 1.5

@@ -25,7 +25,11 @@ ENV_VAR = "ENABLE_CLAUDEAI_MCP_SERVERS"
 
 
 def _bare_manager() -> ProjectChatManager:
-    return ProjectChatManager.__new__(ProjectChatManager)
+    manager = ProjectChatManager.__new__(ProjectChatManager)
+    manager._stop_notice_chats = set()
+    manager._held_stop_notes = {}
+    manager.schedule_store = None
+    return manager
 
 
 def _real_manager(tmp_path: Path, *, connectors: bool) -> ProjectChatManager:

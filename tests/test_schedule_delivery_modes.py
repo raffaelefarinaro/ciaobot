@@ -156,6 +156,9 @@ def _job_rows(tmp_path: Path) -> list[dict]:
 
 def _manager_for_classifier() -> ProjectChatManager:
     manager = ProjectChatManager.__new__(ProjectChatManager)
+    manager._stop_notice_chats = set()
+    manager._held_stop_notes = {}
+    manager.schedule_store = None
     manager._config = CiaoConfig.from_env({
         "PWA_AUTH_TOKEN": "t",
         "CIAO_OLLAMA_LOCAL_DISCOVERY": "0",

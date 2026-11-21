@@ -42,6 +42,9 @@ def _acp_candidates(read_thread):
 
 def _manager(config=None, *, chats=None, projects=None) -> ProjectChatManager:
     manager = ProjectChatManager.__new__(ProjectChatManager)
+    manager._stop_notice_chats = set()
+    manager._held_stop_notes = {}
+    manager.schedule_store = None
     # The native-title readers are ROOT-scoped, so the manager resolves the
     # chat's own agent root. A config stub therefore has to answer the same
     # three questions `_agent_root_for_chat` asks in production.
@@ -241,6 +244,9 @@ async def test_start_stream_fires_title_immediately_for_question_prompt(
     )
 
     manager = ProjectChatManager.__new__(ProjectChatManager)
+    manager._stop_notice_chats = set()
+    manager._held_stop_notes = {}
+    manager.schedule_store = None
     manager._events = SimpleNamespace(publish=lambda *_args, **_kwargs: None)  # type: ignore[assignment,misc]
     manager._save = lambda: None  # type: ignore[assignment,method-assign,misc]
     manager._chats = {}  # type: ignore[assignment]
@@ -286,6 +292,9 @@ async def test_drive_finally_runs_second_title_pass_for_meta_question(
         title_status = "ready"
 
     manager = ProjectChatManager.__new__(ProjectChatManager)
+    manager._stop_notice_chats = set()
+    manager._held_stop_notes = {}
+    manager.schedule_store = None
     manager._events = SimpleNamespace(publish=lambda *_args, **_kwargs: None)  # type: ignore[assignment,misc]
     manager._save = lambda: None  # type: ignore[assignment,method-assign,misc]
     manager._chats = {"chat-q2": FakeChat()}  # type: ignore[assignment,dict-item]
@@ -329,6 +338,9 @@ async def test_drive_overwrites_title_when_assistant_framing_disagrees(
         title_status = "ready"
 
     manager = ProjectChatManager.__new__(ProjectChatManager)
+    manager._stop_notice_chats = set()
+    manager._held_stop_notes = {}
+    manager.schedule_store = None
     manager._chats = {"chat-q3": FakeChat()}  # type: ignore[assignment,dict-item]
     manager._titling = set()
 
@@ -393,6 +405,9 @@ async def test_auto_title_and_publish_runs_once_per_chat(monkeypatch) -> None:
         title_status = "pending"
 
     manager = ProjectChatManager.__new__(ProjectChatManager)
+    manager._stop_notice_chats = set()
+    manager._held_stop_notes = {}
+    manager.schedule_store = None
     manager._chats = {"c": FakeChat()}  # type: ignore[assignment,dict-item]
     manager._titling = set()
     manager._save = lambda: None  # type: ignore[assignment,method-assign,misc]
