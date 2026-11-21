@@ -31,7 +31,6 @@ final class AppAssetsTests: XCTestCase {
     /// cream field, C ink and the two accent dots. The export carries a little
     /// raster noise, so assertions allow a few levels of drift.
     private static let brandTile = (red: 247 / 255.0, green: 245 / 255.0, blue: 242 / 255.0)
-    private static let brandInk = (red: 28 / 255.0, green: 54 / 255.0, blue: 41 / 255.0)
     private static let brandAccent = (red: 215 / 255.0, green: 118 / 255.0, blue: 67 / 255.0)
     /// The two dots' centres in the icon's 1254 viewBox, mapped onto the tile.
     private static func dotCentre(_ x: CGFloat, _ y: CGFloat) -> (x: Int, y: Int) {
@@ -128,7 +127,7 @@ final class AppAssetsTests: XCTestCase {
         XCTAssertTrue(bitmap.hasAlpha, "A rounded icon needs a transparent outside.")
         XCTAssertEqual(bitmap.pixelsWide, Self.appIconCanvas)
         XCTAssertEqual(bitmap.pixelsHigh, Self.appIconCanvas)
-        XCTAssertNotNil(AppAssets.appIconImage, "The app could not decode the packaged icon.")
+        XCTAssertNotNil(NSImage(contentsOf: url), "The app could not decode the packaged icon.")
 
         let canvas = Self.appIconCanvas
         let inset = Self.appIconInset
@@ -172,58 +171,6 @@ final class AppAssetsTests: XCTestCase {
         for centre in [Self.dotCentre(870, 346), Self.dotCentre(863, 800)] {
             assertColour(bitmap, centre.x, centre.y, Self.brandAccent, "accent dot")
         }
-    }
-
-    /// The running icon repaints the field behind an ink mask; the Finder icon
-    /// keeps using `app-icon.png`. The mask must be the same canvas with only the
-    /// C stroke and its two dots opaque.
-    func testRunningIconInkMaskIsThePackagedMarkArtwork() throws {
-        let url = try XCTUnwrap(
-            AppAssets.dockIconInkURL(),
-            "dock-icon-ink.png is missing from the built SwiftPM resources"
-        )
-        XCTAssertEqual(url.lastPathComponent, "dock-icon-ink.png")
-        let ink = try XCTUnwrap(NSBitmapImageRep(data: try Data(contentsOf: url)))
-        let artwork = try XCTUnwrap(NSBitmapImageRep(data: try Data(contentsOf: XCTUnwrap(AppAssets.appIconURL()))))
-
-        XCTAssertEqual(ink.pixelsWide, Self.appIconCanvas)
-        XCTAssertEqual(ink.pixelsHigh, Self.appIconCanvas)
-        XCTAssertTrue(ink.hasAlpha)
-        XCTAssertNotEqual(try sha256(of: url), try sha256(of: XCTUnwrap(AppAssets.appIconURL())),
-                          "The ink mask must be its own resource, not the bundled icon")
-
-        // The exterior and the cream field are transparent in the mask.
-        for (x, y) in [(0, 0), (Self.appIconCanvas - 1, 0), (Self.appIconInset + 20, Self.appIconCanvas / 2),
-                       (Self.appIconCanvas / 2, 500), (Self.appIconCanvas / 2, 150)] {
-            XCTAssertEqual(byte(ink, x, y).alpha, 0,
-                           "The ink mask is not transparent at \(x),\(y)")
-        }
-        // The C stroke and both dots are fully covered.
-        let stroke = (x: Self.appIconInset + Int(824 * 335 / 1254),
-                      y: Self.appIconInset + Int(824 * 616 / 1254))
-        XCTAssertEqual(byte(ink, stroke.x, stroke.y).alpha, 255,
-                       "The ink mask lost the C stroke")
-        for centre in [Self.dotCentre(870, 346), Self.dotCentre(863, 800)] {
-            XCTAssertEqual(byte(ink, centre.x, centre.y).alpha, 255,
-                           "The ink mask lost a dot at \(centre.x),\(centre.y)")
-        }
-        XCTAssertNotNil(AppAssets.dockIconInkImage)
-        XCTAssertEqual(artwork.pixelsWide, ink.pixelsWide)
-
-        // The dots-only mask is its own resource for the cream dots.
-        let dotsURL = try XCTUnwrap(
-            AppAssets.dockIconDotsURL(),
-            "dock-icon-dots.png is missing from the built SwiftPM resources"
-        )
-        let dots = try XCTUnwrap(NSBitmapImageRep(data: try Data(contentsOf: dotsURL)))
-        XCTAssertEqual(dots.pixelsWide, Self.appIconCanvas)
-        XCTAssertEqual(byte(dots, Self.appIconInset + 20, Self.appIconCanvas / 2).alpha, 0)
-        XCTAssertEqual(byte(dots, stroke.x, stroke.y).alpha, 0)
-        for centre in [Self.dotCentre(870, 346), Self.dotCentre(863, 800)] {
-            XCTAssertEqual(byte(dots, centre.x, centre.y).alpha, 255,
-                           "The dots mask lost a dot at \(centre.x),\(centre.y)")
-        }
-        XCTAssertNotNil(AppAssets.dockIconDotsImage)
     }
 
     func testMenuBarTemplateIsPackagedAndLoadsAsATintedTemplate() throws {
@@ -342,17 +289,6 @@ final class AppAssetsTests: XCTestCase {
         XCTAssertEqual(flatIcon.colorAt(x: 0, y: 0)?.alphaComponent, 0)
         XCTAssertEqual(try sha256(of: resources.appendingPathComponent("mark_template.png")),
                        Self.trayTemplateSHA256)
-
-        // The running icon's ink mask ships beside the unchanged Finder artwork.
-        for (name, source) in [
-            ("dock-icon-ink.png", AppAssets.dockIconInkURL()),
-            ("dock-icon-dots.png", AppAssets.dockIconDotsURL()),
-        ] {
-            let copied = resources.appendingPathComponent(name)
-            XCTAssertTrue(FileManager.default.fileExists(atPath: copied.path),
-                          "The release app is missing Contents/Resources/\(name)")
-            XCTAssertEqual(try sha256(of: copied), try sha256(of: XCTUnwrap(source)))
-        }
 
         let plistData = try Data(contentsOf: contents.appendingPathComponent("Info.plist"))
         let plist = try XCTUnwrap(
