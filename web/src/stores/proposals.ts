@@ -1,6 +1,7 @@
 import { defineStore } from 'pinia'
 import { computed, ref } from 'vue'
 import { api } from '../lib/api'
+import { normaliseHistoryRow } from '../lib/proposalHistory'
 import type {
   ProposalsResponse,
   ProposalRow,
@@ -683,7 +684,7 @@ export const useProposalsStore = defineStore('proposals', () => {
           `/api/proposals/history?${query.toString()}`,
         )
         if (seq !== historySeq) return false
-        historyRows.value = data.rows ?? []
+        historyRows.value = (data.rows ?? []).map(normaliseHistoryRow)
         historyTotal.value = data.total ?? historyRows.value.length
         historyTruncated.value = Boolean(data.truncated)
         // The endpoint always sends this. The old `data.limit < requested`

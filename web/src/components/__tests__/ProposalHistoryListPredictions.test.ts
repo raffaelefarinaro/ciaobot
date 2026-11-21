@@ -108,7 +108,9 @@ describe('History rows settled by Workspace care', () => {
   it('does not use the care label for a non-region agent row', async () => {
     const view = await mountRows([historyRow({ via: 'agent', kind: 'learnings' })])
     expect(view.find('.ph-actor--care').exists()).toBe(false)
-    expect(view.find('.ph-actor').text()).toBe('agent')
+    // An agent call is an automated decision (S4a), so the chip names it as such;
+    // the care-settled "Filed by" wording stays reserved for region rows.
+    expect(view.find('.ph-actor').text()).toBe('Workspace care')
   })
 
   it('offers a row-level Undo for a care-settled row and calls undoReceipt', async () => {
