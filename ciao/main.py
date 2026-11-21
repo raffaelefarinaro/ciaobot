@@ -29,6 +29,7 @@ from ciao.schedules import (
     ScheduleStore,
     dispatch_is_current,
     migrate_loops,
+    publish_automations_changed,
 )
 from ciao.sessions import StateStore
 from ciao.signals import RestartRequested
@@ -1145,6 +1146,10 @@ async def _run_server_locked(
         chat_dispatchable=_interval_target_dispatchable,
         target_refusal=pcm.schedule_target_refusal,
         admission_closed=_update_admission_closed,
+        on_change=lambda: publish_automations_changed(pcm),
+        # Placeholder until chat-owned loops get their owner check: a loop's
+        # owner chat is not yet looked up, so every owner counts as alive.
+        owner_alive=lambda _chat_id: True,
     )
 
     # Create and wire up web app. The MCP control plane is mandatory for chat;

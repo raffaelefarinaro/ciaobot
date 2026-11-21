@@ -56,6 +56,7 @@ from ciao.schedules import (
     DEFAULT_TIMEZONE,
     FREQUENCIES,
     INTERVAL_FREQUENCY,
+    LoopRefused,
     ScheduleConflict,
     ScheduleEntry,
     ScheduleNotFound,
@@ -7029,6 +7030,8 @@ class CiaoControlPlane:
                 raise ControlPlaneError("schedule_not_found", f"Schedule '{schedule_id}' was not found.") from exc
             except ScheduleStoreCorrupt as exc:
                 raise ControlPlaneError("schedule_store_unavailable", "The schedule store is unreadable; nothing was changed.") from exc
+            except LoopRefused as exc:
+                raise ControlPlaneError(exc.code, str(exc)) from exc
 
         return translate()
 

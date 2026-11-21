@@ -606,3 +606,22 @@ def test_create_on_an_unreadable_store_answers_503_and_keeps_the_file(
     })
     assert resp.status_code == 503
     assert store_file.read_text(encoding="utf-8") == "{bad"
+
+
+# ── Chat-owned loops: the REST write door cannot change one ─────────────
+
+
+def test_patch_cannot_retarget_or_pause_a_loop(client: TestClient) -> None:
+    manager = client.app.state.schedule_manager
+    loop = manager.create_owned_loop(
+        owner_chat_id="chat-idle", prompt="watch the queue", interval_minutes=5
+    )
+    retarget = client.patch(
+        f"/api/schedules/{loop.schedule_id}", json={"web_chat_id": "chat-busy"}
+    )
+    assert retarget.status_code == 400
+    pause = client.patch(f"/api/schedules/{loop.schedule_id}", json={"enabled": False})
+    assert pause.status_code == 400
+    stored = next(e for e in manager.list_entries() if e.schedule_id == loop.schedule_id)
+    assert stored.web_chat_id == "chat-idle"
+    assert stored.enabled is True
