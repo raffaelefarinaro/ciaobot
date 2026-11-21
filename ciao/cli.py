@@ -6173,6 +6173,71 @@ def _curation_plan_command(args: argparse.Namespace) -> int:
     return 0
 
 
+def _category_candidates_or_none(vault: Path, registry_root: Path) -> list[dict[str, Any]] | None:
+    """The read-only category scan, or None when it failed (the verdict then says so)."""
+    from ciao.entity_types import load_entity_types
+    from ciao.vocabulary_proposals import scan_category_candidates
+
+    try:
+        return scan_category_candidates(vault, registry=load_entity_types(registry_root))
+    except Exception:  # noqa: BLE001 — a failed scan is reported as unavailable, never as empty
+        return None
+
+
+def _curation_due_command(args: argparse.Namespace) -> int:
+    """Say whether tonight's Workspace care has observed work, without starting it.
+
+    The schedule's preflight. Read-only: no lease, no write, no model. Output is
+    the contract the schedule relies on (see ``ciao/care_due.py``): an empty
+    night prints nothing and exits 0; due prints one line and exits 0; a held
+    lease exits 75; anything unreadable prints a fixed reason to stderr and
+    exits 1, which runs the chat as before.
+    """
+    from ciao.care_due import Busy, Due, Unavailable, care_due_verdict, verdict_payload
+    from ciao.curation_run import CurationStateError, active_lease, load_state
+
+    _workspace, vault, _guide, _budget, registry_root, _name = _curation_context(args)
+    lease: dict[str, Any] | None = None
+    worklist = None
+    plan = None
+    candidates: list[dict[str, Any]] | None = None
+    transition_pending = False
+    state_error = ""
+    try:
+        lease = active_lease(vault)
+        cycle = load_state(vault).cycle
+        transition_pending = cycle is not None and cycle.pending is not None
+        planning = _curation_plan(args)
+    except CurationStateError as exc:
+        state_error = str(exc) or "curation state is unreadable"
+    else:
+        worklist = planning.remaining
+        plan = planning.run_plan
+        candidates = _category_candidates_or_none(vault, registry_root)
+    verdict = care_due_verdict(
+        worklist,
+        plan=plan,
+        lease=lease,
+        category_candidates=candidates,
+        state_error=state_error,
+        transition_pending=transition_pending,
+    )
+    if args.json:
+        json.dump(verdict_payload(verdict), sys.stdout, ensure_ascii=False, indent=2)
+        sys.stdout.write("\n")
+    elif isinstance(verdict, Due):
+        print(f"care due: {verdict.planned_count} items planned")
+    elif isinstance(verdict, Busy):
+        print(f"care busy: {verdict.reason}")
+    elif isinstance(verdict, Unavailable):
+        print(verdict.reason, file=sys.stderr)
+    if isinstance(verdict, Busy):
+        return CURATION_BUSY_EXIT
+    if isinstance(verdict, Unavailable):
+        return 1
+    return 0
+
+
 def _abandon_begun_run(vault, holder: str) -> None:
     """Release a lease this begin took, before a non-zero exit.
 
@@ -9668,6 +9733,22 @@ def build_parser() -> argparse.ArgumentParser:
     )
     _add_curation_arguments(curation_plan_parser)
     curation_plan_parser.set_defaults(func=_curation_plan_command)
+
+    curation_due_parser = subparsers.add_parser(
+        "curation-due",
+        help="Say whether tonight's Workspace care has observed work, without starting it.",
+        description=(
+            "Read-only preflight for the nightly care run: takes no lease, writes "
+            "nothing and calls no model. Prints nothing and exits 0 when there is "
+            "no observed work; prints `care due: N items planned` and exits 0 when "
+            "there is; prints `care busy: ...` and exits 75 when a run holds the "
+            "lease; prints a fixed reason to stderr and exits 1 when the answer "
+            "cannot be trusted. Anything other than an empty night should run the "
+            "care chat as before."
+        ),
+    )
+    _add_curation_arguments(curation_due_parser)
+    curation_due_parser.set_defaults(func=_curation_due_command)
 
     curation_begin_parser = subparsers.add_parser(
         "curation-begin",

@@ -214,6 +214,40 @@ LEARNINGS_CLEANUP_MAX_ITEMS = 10
 # at once; the rest wait and are reported in a worklist note.
 OBSERVATIONS_MAX_ITEMS = 5
 
+# Worklist notes that say a pass did not run at all. Named here, beside the
+# code that emits them, so the care due verdict (ciao/care_due.py) reads the
+# same strings rather than matching prose a reword would silently break.
+NOTE_VAULT_SCAN_FAILED = "the vault scan failed, so no stale note or entry is planned"
+NOTE_ENTRY_PASS_NOT_PLANNED = (
+    "the stale-entry pass was not planned: no registered workspace name "
+    "was resolved for this vault, and an entry identity digests that "
+    "name, so a pass planned under a guessed one would mint work no "
+    "operation could be handed"
+)
+NOTE_LEARNINGS_NOT_PLANNED_NO_REGISTRY = (
+    "learnings cleanup was not planned: this worklist was built without a "
+    "workspace registry, and the settlement fold needs one"
+)
+NOTE_LEARNINGS_NOT_PLANNED_NO_NAME = (
+    "learnings cleanup was not planned: no registered workspace name "
+    "was resolved for this vault, and the settlement fold needs one"
+)
+NOTE_OBSERVATIONS_NOT_PLANNED = (
+    "observations were not planned: no registered workspace name was "
+    "resolved for this vault, and an observation id is minted under it"
+)
+# A prefix, because the cleanup's own blocked reason follows it.
+NOTE_LEARNINGS_CLEANUP_DID_NOT_RUN = "learnings cleanup did not run: "
+
+SKIPPED_PASS_NOTES: tuple[str, ...] = (
+    NOTE_VAULT_SCAN_FAILED,
+    NOTE_ENTRY_PASS_NOT_PLANNED,
+    NOTE_LEARNINGS_NOT_PLANNED_NO_REGISTRY,
+    NOTE_LEARNINGS_NOT_PLANNED_NO_NAME,
+    NOTE_OBSERVATIONS_NOT_PLANNED,
+)
+SKIPPED_PASS_NOTE_PREFIXES: tuple[str, ...] = (NOTE_LEARNINGS_CLEANUP_DID_NOT_RUN,)
+
 
 class CurationBusy(RuntimeError):
     """Another curation run holds this vault's lease.
@@ -678,7 +712,7 @@ def _stale_findings(
         )
     except Exception:  # noqa: BLE001 — an advisory pass must not fail the plan
         logger.warning("curation: stale-note scan failed", exc_info=True)
-        return [], "the vault scan failed, so no stale note or entry is planned"
+        return [], NOTE_VAULT_SCAN_FAILED
     stale_paths = {
         str(finding.get("path") or "") for finding in findings.get("stale_notes") or []
     }
@@ -1326,7 +1360,7 @@ def _learnings_cleanup_items(
         logger.warning("curation: learnings cleanup plan failed", exc_info=True)
         return [], ""
     if plan.blocked:
-        return [], f"learnings cleanup did not run: {plan.blocked}"
+        return [], f"{NOTE_LEARNINGS_CLEANUP_DID_NOT_RUN}{plan.blocked}"
 
     counts = plan.counts
     reasons = [
@@ -1704,12 +1738,7 @@ def build_worklist_views(
         # the workspace name, so a name invented here would mint work nothing
         # can act on. Skipped and said out loud, like the registry-less cleanup
         # pass below.
-        notes.append(
-            "the stale-entry pass was not planned: no registered workspace name "
-            "was resolved for this vault, and an entry identity digests that "
-            "name, so a pass planned under a guessed one would mint work no "
-            "operation could be handed"
-        )
+        notes.append(NOTE_ENTRY_PASS_NOT_PLANNED)
     else:
         entry_items, stale_entry = _stale_entry_items(
             vault_root=vault_root, workspace=workspace, scanned=scanned, today=today
@@ -1722,18 +1751,12 @@ def build_worklist_views(
     # directory's own name to fill it in.
     collected.extend(_learning_items(vault_root, workspace=workspace or "", today=today))
     if config is None:
-        notes.append(
-            "learnings cleanup was not planned: this worklist was built without a "
-            "workspace registry, and the settlement fold needs one"
-        )
+        notes.append(NOTE_LEARNINGS_NOT_PLANNED_NO_REGISTRY)
     elif workspace is None:
         # A registry is not enough on its own: the fold answers under the
         # registered name, so a worklist that never resolved one has no scope to
         # fold in even with the queue in reach.
-        notes.append(
-            "learnings cleanup was not planned: no registered workspace name "
-            "was resolved for this vault, and the settlement fold needs one"
-        )
+        notes.append(NOTE_LEARNINGS_NOT_PLANNED_NO_NAME)
     else:
         cleanup_items, cleanup_note = _learnings_cleanup_items(
             vault_root, workspace=workspace, config=config, today=today
@@ -1742,10 +1765,7 @@ def build_worklist_views(
         if cleanup_note:
             notes.append(cleanup_note)
     if workspace is None:
-        notes.append(
-            "observations were not planned: no registered workspace name was "
-            "resolved for this vault, and an observation id is minted under it"
-        )
+        notes.append(NOTE_OBSERVATIONS_NOT_PLANNED)
     else:
         observation_items, observation_note = _observation_items(
             vault_root, workspace=workspace, today=today, weekly_due=weekly_due
@@ -2339,7 +2359,8 @@ def _live_lease(state: CurationState, now: datetime) -> dict[str, Any] | None:
     lease = state.lease
     if not lease or not lease.get("holder"):
         return None
-    expires = _parse_iso(str(lease["expires_at"]))
+    stamp = lease.get("expires_at")
+    expires = _parse_iso(stamp) if isinstance(stamp, str) else None
     if expires is None:
         raise CurationStateError("invalid curation lease expiry")
     if expires <= now:
