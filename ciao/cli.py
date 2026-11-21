@@ -7007,7 +7007,8 @@ def _skill_draft_add_command(args: argparse.Namespace) -> int:
     ``same_as`` (an existing draft id of the same skill, to fold this sighting
     into) and ``distinct_from`` (every existing draft id of that skill when this is
     a different defect) are optional. A filing for a skill that already has drafts
-    is refused until one of them is given.
+    is refused until one of them is given. A ``new_skill`` may carry a ``recurrence``
+    block, and a memory pass over an approved task must carry one (exit 2 otherwise).
     """
     refused = _refuse_ambiguous_vault_write(args)
     if refused is not None:
@@ -7018,11 +7019,25 @@ def _skill_draft_add_command(args: argparse.Namespace) -> int:
     if payload is None:
         print(problem, file=sys.stderr)
         return 2
+    from ciao.upstream_drafts import chat_helper, new_skill_pass_refusal
+
     config = _proposal_config(args, "skill-draft-add")
     name = _active_workspace_name(config)
     origins, problem = _draft_origins(payload, name)
     if origins is None:
         print(problem, file=sys.stderr)
+        return 2
+    recurrence = payload.get("recurrence")
+    # The chat store is read only to decide the pass-chat gate; an unreadable store
+    # gives no helper, which leaves the recurrence-only gate in force.
+    helper = chat_helper(config, os.environ.get("CIAO_CHAT_ID", "").strip())
+    problem = new_skill_pass_refusal(
+        str(payload["target"]).strip(),
+        has_recurrence=recurrence is not None,
+        helper=helper,
+    )
+    if problem:
+        print(f"cannot file the draft: {problem}", file=sys.stderr)
         return 2
     try:
         stored = file_draft(
@@ -7039,24 +7054,26 @@ def _skill_draft_add_command(args: argparse.Namespace) -> int:
             origins=origins,
             same_as=str(payload.get("same_as") or "").strip(),
             distinct_from=[str(x).strip() for x in payload.get("distinct_from") or []],
+            recurrence=recurrence,
         )
     except DraftError as exc:
         print(f"cannot file the draft: {exc}", file=sys.stderr)
         return 2
     if args.json:
-        json.dump(
-            {
-                "filed": True,
-                "id": stored.id,
-                "target": stored.target,
-                "skill": stored.skill,
-                "workspace": name,
-                "lifecycle": stored.lifecycle,
-                "origins": len(stored.origins),
-            },
-            sys.stdout,
-            indent=2,
-        )
+        result: dict[str, Any] = {
+            "filed": True,
+            "id": stored.id,
+            "target": stored.target,
+            "skill": stored.skill,
+            "workspace": name,
+            "lifecycle": stored.lifecycle,
+            "origins": len(stored.origins),
+        }
+        if recurrence is not None:
+            # file_draft raises unless the gate is met, so a gated filing that
+            # reaches here is met by construction.
+            result["recurrence"] = "met"
+        json.dump(result, sys.stdout, indent=2)
         sys.stdout.write("\n")
     else:
         print(f"Filed {stored.target} draft {stored.id} for {stored.skill} in {name}.")
@@ -7147,7 +7164,37 @@ def _read_skill_draft_input(path: str) -> tuple[dict[str, Any] | None, str]:
         and all(isinstance(item, str) for item in payload["distinct_from"])
     ):
         return None, f'{path} "distinct_from" must be a list of draft ids'
+    if "recurrence" in payload:
+        problem = _recurrence_block_problem(path, payload["recurrence"])
+        if problem:
+            return None, problem
     return payload, ""
+
+
+def _recurrence_block_problem(path: str, block: Any) -> str:
+    """Why a ``recurrence`` block cannot be read, or ``""``. Names the field at fault.
+
+    Shape only: whether the procedure exists, is current and recurred is decided by
+    :func:`ciao.upstream_drafts.file_draft`, which has the vault in hand.
+    """
+    from ciao.upstream_drafts import MAX_OUTCOME_IDS
+
+    if not isinstance(block, dict):
+        return f'{path} "recurrence" must be an object'
+    for field in ("procedure_learning_id", "entry_revision"):
+        value = block.get(field)
+        if not isinstance(value, str) or not value.strip():
+            return f'{path} "recurrence.{field}" must be a non-empty string'
+    outcomes = block.get("outcome_ids")
+    if not isinstance(outcomes, list) or not outcomes:
+        return f'{path} "recurrence.outcome_ids" must be a non-empty list of completion ids'
+    if len(outcomes) > MAX_OUTCOME_IDS:
+        return (
+            f'{path} "recurrence.outcome_ids" may hold at most {MAX_OUTCOME_IDS} ids'
+        )
+    if not all(isinstance(item, str) and item.strip() for item in outcomes):
+        return f'{path} "recurrence.outcome_ids" must hold only completion id strings'
+    return ""
 
 
 def _draft_origins(

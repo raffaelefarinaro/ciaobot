@@ -65,13 +65,19 @@ import json
 import logging
 import re
 import subprocess
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-from ciao.learning_records import LEARNINGS_RELATIVE, normalized_statement
+from ciao.learning_records import (
+    LEARNINGS_RELATIVE,
+    LearningRecord,
+    entry_revision,
+    normalized_statement,
+    parse_learnings,
+)
 from ciao.memory_proposals import (
     MemoryProposal,
     append_proposals,
@@ -80,6 +86,8 @@ from ciao.memory_proposals import (
     record_promotion,
 )
 from ciao.memory_receipts import queue_lock, write_queue_atomically
+from ciao.recurrence import RECURRENCE_THRESHOLD, classify_recurrence
+from ciao.recurrence_evidence import EvidenceUnavailable, resolve_completions
 
 if TYPE_CHECKING:  # ``CiaoConfig`` is only ever a type here; duck-typed below.
     from ciao.config import CiaoConfig
@@ -109,6 +117,17 @@ SIDECAR_SCHEMA = 1
 UPSTREAM_ISSUE = "upstream_issue"
 NEW_SKILL = "new_skill"
 TARGETS: tuple[str, ...] = (UPSTREAM_ISSUE, NEW_SKILL)
+
+#: The most completion ids one ``recurrence`` block may claim. Checked again by
+#: the lookup, which bounds what it resolves; this bound is the refusal for a
+#: payload too large to be a considered claim at all.
+MAX_OUTCOME_IDS = 64
+
+#: The task-completion memory pass's source kind, and its approved-task focus.
+#: Spelled here rather than imported from ``ciao.web.chat_service``, which this
+#: module must not depend on: the chat store is read as data, not as a service.
+_TASK_COMPLETION_SOURCE = "task_completion"
+_APPROVED_TASK_FOCUS = "approved_task"
 
 # ── Draft lifecycles ────────────────────────────────────────────────────────
 #
@@ -144,7 +163,16 @@ SETTLED_DRAFTS = frozenset({DRAFT_FILED, DRAFT_REJECTED})
 #: machine identity, and a key this code does not understand is a field whose loss
 #: nobody would notice until a learning had been declared settled on a partial
 #: read. So an unknown key fails the entry rather than being skipped.
-_ORIGIN_FIELDS = frozenset({"learning_id", "finding", "source_revision", "summary"})
+#: ``completion_id`` is the persisted task completion a recurrence gate counted
+#: (#3238-B). It rides on the same entry as the learning link, so a new-skill
+#: draft's evidence needs no sidecar schema change.
+_ORIGIN_FIELDS = frozenset({
+    "learning_id",
+    "finding",
+    "source_revision",
+    "summary",
+    "completion_id",
+})
 
 #: What an owning repository may look like. ``owner/name`` and nothing else,
 #: because this string is handed straight to ``gh`` as the target of a **public**
@@ -244,6 +272,20 @@ class SiblingDraftExists(DraftRefused):
     def __init__(self, message: str, sibling_ids: tuple[str, ...]) -> None:
         super().__init__(message)
         self.sibling_ids = sibling_ids
+
+
+class RecurrenceRefused(DraftRefused):
+    """A new skill's procedure did not show recurrence across independent tasks.
+
+    ``status`` is the verdict: ``below`` when fewer than
+    :data:`~ciao.recurrence.RECURRENCE_THRESHOLD` distinct tasks back it, and
+    ``unavailable`` when the evidence could not be read or nothing claimed
+    resolved. A caller tells them apart by the status, never by the message.
+    """
+
+    def __init__(self, message: str, status: str) -> None:
+        super().__init__(message)
+        self.status = status
 
 
 class SanitizeRefused(DraftError):
@@ -468,6 +510,7 @@ def file_draft(
     origins: Sequence[dict[str, str]] = (),
     same_as: str = "",
     distinct_from: Sequence[str] = (),
+    recurrence: Mapping[str, Any] | None = None,
 ) -> UpstreamDraft:
     """File one deduplicated ``[review]`` draft, and return what is stored.
 
@@ -507,6 +550,11 @@ def file_draft(
     append is a no-op for a queue that already holds the identical bullet — so a
     re-run cannot stack two rows for one finding however it interleaves with the
     sidecar write.
+
+    A ``new_skill`` draft may carry ``recurrence`` (#3238-B): the procedure must be a
+    learning at the revision given, backed by :data:`~ciao.recurrence.RECURRENCE_THRESHOLD`
+    independent tasks, or :class:`RecurrenceRefused` is raised before anything is written.
+    The supported completion ids are stored on the record's ``origins``.
     """
     if target not in TARGETS:
         raise DraftRefused(
@@ -524,6 +572,18 @@ def file_draft(
         body = sanitize_lesson(body)
     repository = _checked_repository(repository)
     links = _validated_origins(origins)
+    if recurrence is not None:
+        if target != NEW_SKILL:
+            raise DraftRefused(
+                "a recurrence block applies to a new_skill draft only: an upstream "
+                "issue is not gated on how often its procedure recurred"
+            )
+        # Before the queue lock: the lookup reads every task file in the workspace,
+        # and a queue lock must not be held across that read.
+        links = _validated_origins([
+            *links,
+            *_recurrence_links(config, workspace, recurrence),
+        ])
     same_as = same_as.strip()
     if same_as and distinct_from:
         raise DraftRefused("pass same_as or distinct_from, not both")
@@ -742,17 +802,28 @@ def _join_notes(existing: str, incoming: str) -> str:
     return f"{left}\n{right}"
 
 
+def _origin_key(item: dict[str, str]) -> tuple[str, str, str]:
+    """The identity of one learning link: its learning, finding and completion.
+
+    A recurrence link names a completion and no finding, so two of them on one
+    learning differ only by completion; without that third part the second would
+    fold into the first and the gate's evidence would be under-counted.
+    """
+    return (
+        item.get("learning_id", ""),
+        normalized_statement(item.get("finding", "")),
+        item.get("completion_id", ""),
+    )
+
+
 def _merge_origins(
     existing: tuple[dict[str, str], ...], incoming: tuple[dict[str, str], ...]
 ) -> tuple[dict[str, str], ...]:
-    """Learning links, deduped by ``(learning_id, finding)`` in stored order."""
+    """Learning links, deduped by their identity in stored order."""
     merged = list(existing)
-    seen = {
-        (item.get("learning_id", ""), normalized_statement(item.get("finding", "")))
-        for item in existing
-    }
+    seen = {_origin_key(item) for item in existing}
     for item in incoming:
-        key = (item.get("learning_id", ""), normalized_statement(item.get("finding", "")))
+        key = _origin_key(item)
         if key in seen:
             continue
         seen.add(key)
@@ -788,6 +859,151 @@ def _validated_origins(
             if str(value).strip()
         })
     return tuple(links)
+
+
+# ── Recurrence gate (#3238-B) ───────────────────────────────────────────────
+
+
+def _recurrence_links(
+    config: CiaoConfig, workspace: str, recurrence: Mapping[str, Any]
+) -> list[dict[str, str]]:
+    """The learning links a recurrence block supports, or :class:`RecurrenceRefused`.
+
+    A new skill is filed only when its procedure recurred: the procedure is a
+    learning in this workspace at the revision the caller read, and at least
+    :data:`~ciao.recurrence.RECURRENCE_THRESHOLD` distinct tasks back it. Only the
+    completions the procedure itself cites are looked up, so an id the learning
+    never recorded cannot be counted however real it is. The returned links name
+    exactly the completions the verdict supported, one per task.
+    """
+    procedure = str(recurrence.get("procedure_learning_id") or "").strip()
+    revision = str(recurrence.get("entry_revision") or "").strip()
+    claimed_raw = recurrence.get("outcome_ids")
+    if not procedure:
+        raise DraftRefused('a recurrence block needs a non-empty "procedure_learning_id"')
+    if not revision:
+        raise DraftRefused(
+            'a recurrence block needs the "entry_revision" the procedure was read at, '
+            "so a procedure that has since changed is refused rather than counted"
+        )
+    if not isinstance(claimed_raw, (list, tuple)) or not claimed_raw:
+        raise DraftRefused('a recurrence block needs "outcome_ids": a non-empty list')
+    if len(claimed_raw) > MAX_OUTCOME_IDS:
+        raise DraftRefused(
+            f'a recurrence block may claim at most {MAX_OUTCOME_IDS} "outcome_ids"'
+        )
+    claimed = [str(item).strip() for item in claimed_raw]
+
+    record = _procedure_record(config, workspace, procedure, revision)
+    cited = {
+        value
+        for observation in record.observations
+        for value in (observation.source, observation.request)
+        if value
+    }
+    asked = [item for item in dict.fromkeys(claimed) if item in cited]
+    try:
+        resolved = resolve_completions(config, workspace, asked)
+    except EvidenceUnavailable as exc:
+        raise RecurrenceRefused(
+            f"the recurrence of {procedure} cannot be checked: {exc}. Nothing was "
+            "filed; retry once the task history can be read",
+            "unavailable",
+        ) from None
+    verdict = classify_recurrence(claimed, resolved)
+    if verdict.status != "met":
+        reasons = "; ".join(f"{item} ({why})" for item, why in verdict.excluded)
+        raise RecurrenceRefused(
+            f"the procedure {procedure} is backed by {len(verdict.supported)} "
+            f"independent task(s); a new skill needs {RECURRENCE_THRESHOLD}. Nothing "
+            "was filed. Each task counts once, however many completions it has"
+            + (f". Not counted: {reasons}" if reasons else ""),
+            verdict.status,
+        )
+    return [
+        {"learning_id": procedure, "completion_id": outcome.completion_id}
+        for outcome in verdict.supported
+    ]
+
+
+def _procedure_record(
+    config: CiaoConfig, workspace: str, procedure: str, revision: str
+) -> LearningRecord:
+    """The learning a recurrence block names, at the revision it was read at."""
+    path = Path(config.workspace_vault_root(workspace)).joinpath(LEARNINGS_RELATIVE)
+    try:
+        text = path.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError):
+        raise DraftRefused(
+            f"{procedure} cannot be checked: {LEARNINGS_RELATIVE} is not readable in "
+            f"{workspace}"
+        ) from None
+    for entry in parse_learnings(text, workspace=workspace).entries:
+        record = entry.record
+        if record is None or record.learning_id != procedure:
+            continue
+        if entry_revision(record) != revision:
+            raise DraftRefused(
+                f"the procedure {procedure} has changed since the revision it was read "
+                "at: re-read its current entry in Workspace/Learnings.md and file "
+                "against that revision"
+            )
+        return record
+    raise DraftRefused(
+        f"{procedure} is not a learning in {LEARNINGS_RELATIVE} of {workspace}"
+    )
+
+
+def new_skill_pass_refusal(
+    target: str, *, has_recurrence: bool, helper: Mapping[str, Any] | None
+) -> str:
+    """Why a new-skill draft from this chat must carry a recurrence block, or ``""``.
+
+    A memory pass over an approved task is the one helper chat that tends to
+    propose a new skill from a single task. Its draft, filed without a recurrence
+    block, is the loophole the gate exists to close, so the decision is made here
+    and not in the command: a pure function a test can state fully.
+
+    The check is on what the chat *is*, read from its helper. Any other chat, a
+    manual filing and an upstream issue are not gated by it.
+    """
+    if target != NEW_SKILL or has_recurrence or not helper:
+        return ""
+    if helper.get("kind") != "memory_pass":
+        return ""
+    approved = (
+        helper.get("source_kind") == _TASK_COMPLETION_SOURCE
+        or helper.get("focus") == _APPROVED_TASK_FOCUS
+    )
+    if not approved:
+        return ""
+    return (
+        "this chat is a memory pass over an approved task, and a new skill from it "
+        'needs a "recurrence" block: {"procedure_learning_id", "entry_revision", '
+        '"outcome_ids"} naming the procedure and the completions that back it. One '
+        "approved task is one outcome, not a recurring procedure"
+    )
+
+
+def chat_helper(config: CiaoConfig, chat_id: str) -> dict[str, Any] | None:
+    """The helper a chat was started for, read from the chat store, or ``None``.
+
+    The chat store is the registry the engine writes beside its state file. It is
+    read as data, not through the engine: this runs inside a CLI invocation that
+    is not the engine. Any read or parse failure is ``None``, so the caller falls
+    back to the recurrence-only gate rather than failing the filing.
+    """
+    if not chat_id:
+        return None
+    path = Path(config.state_path).parent / "web_projects.json"
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, ValueError):
+        return None
+    chats = data.get("chats") if isinstance(data, dict) else None
+    chat = chats.get(chat_id) if isinstance(chats, dict) else None
+    helper = chat.get("helper") if isinstance(chat, dict) else None
+    return dict(helper) if isinstance(helper, dict) else None
 
 
 # ── Reading ─────────────────────────────────────────────────────────────────
