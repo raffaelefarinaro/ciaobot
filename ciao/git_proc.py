@@ -27,6 +27,7 @@ import logging
 import subprocess
 from pathlib import Path
 
+from ciao.os_support.child_env import child_env
 from ciao.os_support.processes import ProcessTree, tree_spawn_options
 
 logger = logging.getLogger(__name__)
@@ -115,6 +116,7 @@ def run_git_sync(
             capture_output=True,
             text=True, encoding="utf-8",
             input=stdin,
+            env=child_env(),
         )
     except OSError as exc:
         return 1, "", str(exc)
@@ -134,6 +136,7 @@ async def run_git(
         *EXACT_BYTES,
         *args,
         cwd=str(workspace),
+        env=child_env(),
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
         **tree_spawn_options(),

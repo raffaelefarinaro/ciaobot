@@ -46,6 +46,7 @@ from pathlib import Path
 from typing import Any, Callable, Sequence
 
 from ciao.jsonio import write_private_text
+from ciao.os_support.child_env import child_env
 from ciao.os_support.private import make_private, make_private_dir
 
 logger = logging.getLogger(__name__)
@@ -903,7 +904,7 @@ def _profile_env_for_status(config, profile: str) -> dict[str, str] | None:
     config_dir = profile_config_dir(config, profile)
     if config_dir is None:
         return None
-    env = dict(os.environ)
+    env = child_env()
     env["GOOGLE_WORKSPACE_CLI_CONFIG_DIR"] = str(config_dir)
     # The workspace .env stores GOOGLE_APPLICATION_CREDENTIALS as a base64 string
     # meant for the BigQuery runner; gws expects a file path and must use its own

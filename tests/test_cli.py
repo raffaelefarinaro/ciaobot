@@ -1570,16 +1570,20 @@ def test_auth_rejects_a_non_runtime_provider(capsys) -> None:
 
 def test_auth_claude_uses_the_resolved_cli(monkeypatch) -> None:
     calls: list[list[str]] = []
+    envs: list[object] = []
     monkeypatch.setattr("ciao.setup_status.claude_cli_path", lambda: "/opt/ciao/claude")
-    monkeypatch.setattr(
-        cli.subprocess,
-        "run",
-        lambda cmd, check=False: calls.append(cmd) or type("P", (), {"returncode": 0})(),
-    )
+
+    def fake_run(cmd, check=False, env=None):
+        calls.append(cmd)
+        envs.append(env)
+        return type("P", (), {"returncode": 0})()
+
+    monkeypatch.setattr(cli.subprocess, "run", fake_run)
 
     assert cli.main(["auth", "claude"]) == 0
 
     assert calls == [["/opt/ciao/claude", "auth", "login"]]
+    assert isinstance(envs[0], dict)
 
 
 def test_vault_index_accepts_arbitrary_workspace_name(monkeypatch) -> None:
@@ -5400,3 +5404,97 @@ def test_curation_end_with_a_refused_marker_releases_the_lease_and_says_so(
     assert summary["full_pass_advanced"] is False
     assert summary["status"] == "failed"
     assert cr.load_state(vault).lease == {}
+
+
+def test_curation_plan_names_the_stale_notes_it_did_not_examine(tmp_path, monkeypatch):
+    """The plan says what the stale pass covered: the JSON carries the structured
+    status, the text line names the counts, and `counts_complete` stays False."""
+    from ciao import curation_run as cr
+
+    root, vault = _registered_install(tmp_path)
+    (vault / cr.CURATION_LOG_RELATIVE).write_text(
+        "---\nlast_full_pass: 2026-09-18\n---\n\n# Curation log\n", encoding="utf-8"
+    )
+    for index in range(8):
+        note = vault / "People" / f"Note{index:02d}.md"
+        note.parent.mkdir(parents=True, exist_ok=True)
+        note.write_text(
+            f"---\ntype: person\nupdated: 2024-01-{index + 1:02d}\n---\n\n# Note{index:02d}\n",
+            encoding="utf-8",
+        )
+    monkeypatch.setenv("PWA_AUTH_TOKEN", "test-token")
+    monkeypatch.setenv("CIAO_WORKSPACE", str(root))
+    monkeypatch.setenv("CIAO_ACTIVE_WORKSPACE", "work")
+
+    payload = cli._curation_plan(_curation_args()).payload
+
+    assert payload["counts_complete"] is False
+    coverage = payload["note_coverage"]
+    assert coverage["status"] == "partial"
+    assert coverage["flagged"] == 8
+    assert coverage["planned"] == cr.STALE_NOTE_MAX_ITEMS
+    assert coverage["eligible_deferred"] + coverage["unexamined"] == 3
+    lines = [note for note in payload["coverage_notes"] if note.startswith("stale notes:")]
+    assert lines == [
+        "stale notes: 5 planned of 8 flagged; 3 not examined this run "
+        f"(oldest {coverage['oldest_deferred_age_days']}d overdue)"
+    ]
+    assert "People/" not in lines[0] and "Note0" not in lines[0]
+
+
+def _coverage_fixture(**overrides: object):
+    from ciao import curation_run as cr
+
+    values: dict[str, object] = dict(
+        status="complete",
+        scanned=5,
+        exempt=0,
+        undated=0,
+        flagged=5,
+        never_queued=0,
+        unreadable=0,
+        settled=0,
+        planned=5,
+        eligible_deferred=0,
+        unexamined=0,
+        oldest_deferred_age_days=None,
+        cap=cr.STALE_NOTE_MAX_ITEMS,
+    )
+    values.update(overrides)
+    return cr.NoteCoverage(**values)
+
+
+@pytest.mark.parametrize(
+    ("coverage", "expected"),
+    [
+        (None, ""),
+        (_coverage_fixture(), ""),
+        (
+            _coverage_fixture(status="unavailable", flagged=0, planned=0),
+            "stale notes: not examined this run; the vault scan did not complete",
+        ),
+        (
+            _coverage_fixture(status="partial", flagged=2, planned=1, unreadable=1),
+            "stale notes: 1 planned of 2 flagged; 1 unreadable notes are not covered",
+        ),
+        (
+            _coverage_fixture(status="partial", undated=3),
+            "stale notes: 5 planned of 5 flagged; "
+            "3 undated notes are not covered by the note pass",
+        ),
+        (
+            _coverage_fixture(
+                status="partial",
+                flagged=8,
+                planned=5,
+                eligible_deferred=1,
+                unexamined=2,
+                oldest_deferred_age_days=412,
+            ),
+            "stale notes: 5 planned of 8 flagged; 3 not examined this run (oldest 412d overdue)",
+        ),
+    ],
+    ids=["no-coverage", "complete", "unavailable", "unreadable-only", "undated-only", "over-cap"],
+)
+def test_stale_coverage_line_names_only_what_was_not_covered(coverage, expected) -> None:
+    assert cli._stale_coverage_line(coverage) == expected

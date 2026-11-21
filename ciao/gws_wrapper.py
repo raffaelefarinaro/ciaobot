@@ -23,6 +23,7 @@ from typing import Sequence
 
 from ciao.agent_surface import AGENT_TOKEN_ENV
 from ciao.gws_auth import GWS_SERVICE_NAMES, gws_bin_override, profile_config_dir
+from ciao.os_support.child_env import child_env
 from ciao.os_support.processes import hand_off
 from ciao.tool_path import login_shell_path, resolve_command
 
@@ -74,7 +75,7 @@ def _gws_environment(workspace_root: Path, profile: str) -> dict[str, str]:
     config_dir = profile_config_dir(config, profile)
     if config_dir is None:
         raise ValueError(f"'{profile}' is not a usable profile name")
-    env = dict(os.environ)
+    env = child_env()
     env["GOOGLE_WORKSPACE_CLI_CONFIG_DIR"] = str(config_dir)
     env.pop("GOOGLE_APPLICATION_CREDENTIALS", None)
     # Resolve ``gws``-spawned subprocesses against the login-shell PATH the same

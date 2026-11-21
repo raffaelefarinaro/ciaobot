@@ -139,6 +139,8 @@ def test_corrupt_state_blocks_real_handover_commands_without_receipt_or_guide_ch
             "--vault-root",
             str(vault),
         ]
+        if verdict == "accept":
+            args += ["--holder", "test-run"]
         if verdict == "dismiss":
             args.append("--handover")
 
