@@ -686,16 +686,34 @@ def test_claude_trim_saves_persists_and_validates(tmp_path):
     }
     assert config.workspace("client-a").claude_trim == {"tool:ReportFindings": True}
 
-    # Scheduling options are trimmed by default, but the user can un-trim them.
-    assert "CronCreate" in config.disallowed_tools_for_workspace("client-a")
+    # Routine triggers are trimmed by default, and the user can un-trim them.
+    assert "RemoteTrigger" in config.disallowed_tools_for_workspace("client-a")
     untrimmed = client.patch(
         "/api/workspaces/client-a",
-        json={"claude_trim": {"tool:CronCreate": False}},
+        json={"claude_trim": {"tool:RemoteTrigger": False}},
     )
     assert untrimmed.status_code == 200
-    assert config.workspace("client-a").claude_trim == {"tool:CronCreate": False}
-    assert "CronCreate" not in config.disallowed_tools_for_workspace("client-a")
+    assert config.workspace("client-a").claude_trim == {"tool:RemoteTrigger": False}
+    assert "RemoteTrigger" not in config.disallowed_tools_for_workspace("client-a")
+
+    # The loop family has no switch: a stale client's retired key is ignored, the valid
+    # toggle in the same map still applies, and the loop family stays denied.
+    stale = client.patch(
+        "/api/workspaces/client-a",
+        json={"claude_trim": {"tool:CronCreate": False, "tool:RemoteTrigger": False, "skill:loop": False}},
+    )
+    assert stale.status_code == 200
+    assert config.workspace("client-a").claude_trim == {"tool:RemoteTrigger": False}
+    assert "CronCreate" in config.disallowed_tools_for_workspace("client-a")
     assert "CronDelete" in config.disallowed_tools_for_workspace("client-a")
+
+    # A key the catalog never had is still a 400.
+    unknown = client.patch(
+        "/api/workspaces/client-a",
+        json={"claude_trim": {"tool:Nope": False}},
+    )
+    assert unknown.status_code == 400
+    assert config.workspace("client-a").claude_trim == {"tool:RemoteTrigger": False}
 
     # An empty object resets to the catalog defaults.
     reset = client.patch("/api/workspaces/client-a", json={"claude_trim": {}})
@@ -715,7 +733,8 @@ def test_workspaces_payload_includes_trim_catalog(tmp_path):
     data = client.get("/api/workspaces").json()
     options = {option["key"]: option for option in data["claude_trim_options"]}
     assert options["tool:NotebookEdit"]["default_trimmed"] is True
-    assert options["tool:CronCreate"]["default_trimmed"] is True
+    assert options["tool:RemoteTrigger"]["default_trimmed"] is True
+    assert not ({"tool:CronCreate", "tool:ScheduleWakeup", "skill:loop"} & set(options))
     assert all("locked" not in option for option in options.values())
 
 

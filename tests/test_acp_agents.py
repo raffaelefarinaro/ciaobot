@@ -57,7 +57,8 @@ from tests.acp_helpers import read_calls, write_scenario
 FAKE_SPEC: AgentSpec | None = None
 
 _TEXT = {"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": "hi"}}
-_SCHEDULING = ("CronCreate", "CronDelete", "CronList", "ScheduleWakeup", "RemoteTrigger")
+_SCHEDULING = ("RemoteTrigger",)
+_LOOP_FAMILY = ("CronCreate", "CronDelete", "CronList", "ScheduleWakeup")
 
 
 class ClaudeOnFake(ClaudeAcpProvider):
@@ -146,7 +147,11 @@ def test_claude_auto_falls_back_to_accept_edits() -> None:
 
 
 def test_claude_spec_env_disables_auto_memory_and_artifact() -> None:
-    assert dict(CLAUDE.env) == {"CLAUDE_CODE_DISABLE_AUTO_MEMORY": "1", "CLAUDE_CODE_DISABLE_ARTIFACT": "1"}
+    assert dict(CLAUDE.env) == {
+        "CLAUDE_CODE_DISABLE_AUTO_MEMORY": "1",
+        "CLAUDE_CODE_DISABLE_ARTIFACT": "1",
+        "CLAUDE_CODE_DISABLE_CRON": "1",
+    }
 
 
 def _user_cli(tmp_path: Path) -> str:
@@ -169,11 +174,23 @@ def test_claude_executable_env_points_at_user_cli(monkeypatch: pytest.MonkeyPatc
 # -- disable options (parity rows 1-8) -------------------------------------------------
 
 
-def test_claude_meta_carries_trim_tool_denies_with_locked_scheduling(tmp_path: Path) -> None:
-    options = claude_session_options(_chat_request(_config(tmp_path)))
+def test_claude_meta_carries_every_loop_family_deny_with_no_switch(tmp_path: Path) -> None:
+    config = _config(tmp_path)
+    # A stored map that names the removed loop switches cannot un-deny them.
+    config.workspaces["work"].claude_trim = {"tool:CronCreate": False, "skill:loop": False}
+
+    options = claude_session_options(_chat_request(config))
 
     denies = options["disallowedTools"]
     assert denies[: len(trim_tool_denies({}))] == trim_tool_denies({})
+    for name in (*_LOOP_FAMILY, "Skill(loop)"):
+        assert name in denies
+    assert options["settings"]["skillOverrides"]["loop"] == "off"
+
+
+def test_claude_meta_carries_trim_tool_denies_for_routines(tmp_path: Path) -> None:
+    denies = claude_session_options(_chat_request(_config(tmp_path)))["disallowedTools"]
+
     for name in _SCHEDULING:
         assert name in denies
 

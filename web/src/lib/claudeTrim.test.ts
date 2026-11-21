@@ -21,7 +21,7 @@ const opt = (o: Partial<ClaudeTrimOption> & { key: string }): ClaudeTrimOption =
   ...o,
 })
 
-const scheduling = opt({ key: 'tool:CronCreate', group: 'scheduling', default_trimmed: true })
+const scheduling = opt({ key: 'tool:RemoteTrigger', group: 'scheduling', default_trimmed: true })
 const notebook = opt({ key: 'tool:NotebookEdit', group: 'features', default_trimmed: true })
 const findings = opt({ key: 'tool:ReportFindings', group: 'review', default_trimmed: false })
 const skills = [
@@ -38,7 +38,7 @@ describe('claude trim helpers', () => {
     expect(isTrimmed(notebook, {})).toBe(true)
     expect(isTrimmed(notebook, { 'tool:NotebookEdit': false })).toBe(false)
     expect(isTrimmed(scheduling, {})).toBe(true)
-    expect(isTrimmed(scheduling, { 'tool:CronCreate': false })).toBe(false)
+    expect(isTrimmed(scheduling, { 'tool:RemoteTrigger': false })).toBe(false)
   })
 
   it('setTrimmed writes only differences from the default', () => {
@@ -50,8 +50,8 @@ describe('claude trim helpers', () => {
 
   it('setTrimmed un-trims a scheduling option and never mutates', () => {
     const m = { 'tool:ReportFindings': true }
-    expect(setTrimmed(m, scheduling, false)).toEqual({ ...m, 'tool:CronCreate': false })
-    expect(setTrimmed({ 'tool:CronCreate': false }, scheduling, true)).toEqual({})
+    expect(setTrimmed(m, scheduling, false)).toEqual({ ...m, 'tool:RemoteTrigger': false })
+    expect(setTrimmed({ 'tool:RemoteTrigger': false }, scheduling, true)).toEqual({})
     setTrimmed(m, findings, false)
     expect(m).toEqual({ 'tool:ReportFindings': true })
   })
@@ -74,6 +74,8 @@ describe('claude trim helpers', () => {
 
   it('claudeTrimGroupNote explains only the scheduling group', () => {
     expect(claudeTrimGroupNote('scheduling')).toContain("outside Ciaobot's schedules")
+    // Loops are always denied by the engine, so the note must not offer them as a switch.
+    expect(claudeTrimGroupNote('scheduling')).not.toMatch(/loop/)
     expect(claudeTrimGroupNote('features')).toBe('')
   })
 
