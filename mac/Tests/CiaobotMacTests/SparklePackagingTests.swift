@@ -957,7 +957,7 @@ final class SparklePackagingTests: XCTestCase {
         try writeExecutable(fakeEngineDriver, at: scripts.appendingPathComponent("engine_build.py"))
         let resources = repo.appendingPathComponent("Sources/CiaobotMac/Resources", isDirectory: true)
         try fileManager.createDirectory(at: resources, withIntermediateDirectories: true)
-        for name in ["app-icon.png", "mark_template.png", "dock-icon-ink.png", "dock-icon-dots.png",
+        for name in ["app-icon.png", "mark_template.png",
                       "ciaobot-wordmark.png", "ciaobot-wordmark-light.png"] {
             try Data("resource\n".utf8).write(to: resources.appendingPathComponent(name))
         }

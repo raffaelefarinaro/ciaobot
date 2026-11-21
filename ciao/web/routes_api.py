@@ -8587,6 +8587,81 @@ def _restore_hint(row: dict[str, Any]) -> str:
 
 
 
+# Automated decisions: the curation run and the automations that call the
+# dismiss CLI record ``via=agent``; ``auto`` is receipt recovery finishing a
+# decision its writer could not.
+_AUTOMATED_VIAS = frozenset({"agent", "auto"})
+
+# Effective receipt status -> the History apply state. Precedence when one
+# operation owns several receipts: an undo or a failure says more about what
+# landed than an applied sibling does.
+_APPLY_PRECEDENCE: tuple[tuple[str, str], ...] = (
+    ("undone", "undone"),
+    ("failed", "failed"),
+    ("conflict", "conflict"),
+    ("rolled_back", "rolled_back"),
+    ("prepared", "pending"),
+    ("applied", "applied"),
+)
+_NOT_APPLIED = frozenset({"failed", "conflict", "rolled_back", "undone"})
+
+
+def _decision_actor(via: Any, run_id: str) -> str:
+    """``automated`` for a decision a run or an agent made, else ``human``."""
+    if run_id or str(via or "") in _AUTOMATED_VIAS:
+        return "automated"
+    return "human"
+
+
+def _history_reason(text: Any) -> str:
+    """The decision's reason as one line of plain text, bounded as the writer bounds it."""
+    from ciao.task_decisions import MAX_REASON
+
+    return " ".join(str(text or "").split())[:MAX_REASON]
+
+
+def _attach_apply_state(vault: Path, rows: list[dict[str, Any]]) -> None:
+    """Say whether each decision's write landed, from the receipts that performed it.
+
+    The decision row records that someone accepted; only its receipts say what
+    the write did. A row joins to its receipt by ``receipt_id``, or by
+    ``operation_id`` when it names no receipt. The answer comes from the
+    effective receipt rows only, so a failed write is ``applied: false`` even
+    though the decision was an approval, and an undo (which lands as a later row
+    under the same receipt id) wins over the original applied row.
+
+    ``applied`` is ``true`` or ``false`` when a receipt says so, and ``null``
+    while the write is pending or when no receipt exists to say.
+    """
+    from ciao.memory_receipts import journal_path, read_receipts
+
+    effective = read_receipts(journal_path(vault, None))
+    by_id = {str(r.get("id", "")): r for r in effective if r.get("id")}
+    by_operation: dict[str, list[dict[str, Any]]] = {}
+    for receipt in effective:
+        operation = str(receipt.get("operation_id", "") or "")
+        if operation:
+            by_operation.setdefault(operation, []).append(receipt)
+    for row in rows:
+        receipt_id = str(row.get("receipt_id", "") or "")
+        operation_id = str(row.get("operation_id", "") or "")
+        if receipt_id:
+            found = [by_id[receipt_id]] if receipt_id in by_id else []
+        else:
+            found = by_operation.get(operation_id, []) if operation_id else []
+        statuses = {str(r.get("status", "")) for r in found}
+        status = next(
+            (state for raw, state in _APPLY_PRECEDENCE if raw in statuses), "none"
+        )
+        row["apply_status"] = status
+        if status == "applied":
+            row["applied"] = True
+        elif status in _NOT_APPLIED:
+            row["applied"] = False
+        else:
+            row["applied"] = None
+
+
 def _attach_change_receipts(vault: Path, rows: list[dict[str, Any]]) -> None:
     """Point each decision at the receipt that performed it, where one exists.
 
@@ -8914,10 +8989,16 @@ async def proposals_history(request: Request) -> JSONResponse:
             # Read-side disambiguators for the id only; not part of the contract.
             row.pop("seq", None)
             row.pop("log", None)
-            # The curation run's lease holder and worklist key are for the care
-            # report only; the History payload does not carry them.
-            row.pop("run_id", None)
+            # The worklist key is for the care report only. The lease holder is
+            # kept for automated decisions, so History can link to the run that
+            # made them; a human decision carries none.
+            run_id = str(row.pop("run_id", "") or "")
             row.pop("item_key", None)
+            row["actor"] = _decision_actor(row.get("via"), run_id)
+            if run_id and row["actor"] == "automated":
+                row["run_id"] = run_id
+            row["decided_at"] = str(row.get("ts", ""))
+            row["reason"] = _history_reason(row.get("reason", ""))
             workspace_rows.append(row)
         # Join each region decision to the verdict the nightly run recorded for
         # that row before the operator decided, when it recorded one.
@@ -8932,6 +9013,10 @@ async def proposals_history(request: Request) -> JSONResponse:
             vault_for_receipts = Path(config.workspace_vault_root(workspace))
         except (AttributeError, ValueError):
             vault_for_receipts = queue.parent.parent
+        # Before the change join: that one pops ``receipt_id``, which this reads.
+        await asyncio.to_thread(
+            _attach_apply_state, vault_for_receipts, workspace_rows
+        )
         await asyncio.to_thread(
             _attach_change_receipts, vault_for_receipts, workspace_rows
         )
