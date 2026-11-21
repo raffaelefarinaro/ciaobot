@@ -98,6 +98,8 @@ class ItemOutcome:
 
 @dataclass(frozen=True, slots=True)
 class CareRunSummary:
+    """``complete`` is no ambiguity (nothing incomplete or queued), not all applied."""
+
     run_id: str
     workspace: str
     outcomes: tuple[ItemOutcome, ...]
@@ -114,6 +116,10 @@ def report_plan_from_run(
     operation_ids: Mapping[str, Sequence[str]] = _NO_OPERATIONS,
 ) -> CareReportPlan:
     """Flatten a run plan into one report item per (pass, key).
+
+    ``operation_ids`` is keyed by ``item_key`` only, not by pass: a key that
+    appears under two passes shares its operation ids. Each key's ids are
+    matched against receipts exactly as given; a repeated id is counted once.
 
     Order is planned, then deferred, then blocked. A key the plan blocks is
     reported as ``blocked`` only, even though :class:`RunPlan` also lists it in
@@ -158,6 +164,9 @@ def summarize_care_run(
     weekly: Mapping[str, str] | None = None,
 ) -> CareRunSummary:
     """Fold the receipts into one outcome per plan item, in plan order.
+
+    ``complete`` means no ambiguity remains: nothing is ``incomplete`` and nothing
+    is ``queued``. It does not mean every key is applied.
 
     ``receipts`` are the effective rows of the journal, one per id, oldest
     first. ``done_keys`` says which keys a pass reported finished; it only

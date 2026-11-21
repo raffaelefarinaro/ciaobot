@@ -580,3 +580,82 @@ def _truth_summary(case: str, tmp_path: Path) -> Any:
 )
 def test_complete_truth_table(tmp_path: Path, case: str, complete: bool) -> None:
     assert _truth_summary(case, tmp_path).complete is complete
+
+
+# ── Guard coverage: each refusal must be reachable and observable ────────
+
+
+@pytest.mark.parametrize("queue_status", [mr.FAILED, mr.CONFLICT, mr.ROLLED_BACK])
+def test_guide_applied_with_a_queue_leg_that_did_not_land_is_incomplete(
+    tmp_path: Path, queue_status: str
+) -> None:
+    _write_region(tmp_path, _guide(tmp_path), ["Fact one."], op="op-a")
+    template = _resolve_queue(tmp_path, op="op-template")
+    _append_row(
+        tmp_path,
+        _clone(template, id="queue-not-landed", status=queue_status, operation_id="op-a"),
+    )
+
+    summary = summarize_care_run(_one_planned(), _receipts(tmp_path))
+
+    assert _by_key(summary)["note:a"].status == "incomplete"
+    assert summary.complete is False
+
+
+def test_prepared_guide_row_beside_an_applied_queue_row_is_incomplete(tmp_path: Path) -> None:
+    _resolve_queue(tmp_path, op="op-a")
+    template = _write_region(tmp_path, _guide(tmp_path), ["Template fact."], op="op-template")
+    _append_row(
+        tmp_path,
+        _clone(template, id="guide-prepared-only", status=mr.PREPARED, operation_id="op-a"),
+    )
+
+    summary = summarize_care_run(_one_planned(), _receipts(tmp_path))
+
+    assert _by_key(summary)["note:a"].status == "incomplete"
+
+
+@pytest.mark.parametrize("field", ["before_revision", "after_revision", "changed"])
+def test_duplicates_that_differ_in_one_shape_field_are_incomplete(
+    tmp_path: Path, field: str
+) -> None:
+    region = _write_region(tmp_path, _guide(tmp_path), ["Fact one."], op="op-a")
+    _resolve_queue(tmp_path, op="op-a")
+    changed_value: Any = False if field == "changed" else "different-revision"
+    _append_row(tmp_path, _clone(region, id="region-twin", **{field: changed_value}))
+
+    summary = summarize_care_run(_one_planned(), _receipts(tmp_path))
+
+    assert _by_key(summary)["note:a"].status == "incomplete"
+
+
+def test_an_operation_id_listed_twice_does_not_count_its_receipts_twice(tmp_path: Path) -> None:
+    region = _write_region(tmp_path, _guide(tmp_path), ["Fact one."], op="op-a")
+    queue = _resolve_queue(tmp_path, op="op-a")
+    report = _report(
+        _run_plan(planned=(_item(PASS_STALE_NOTE, "note:a"),)),
+        {"note:a": ["op-a", "op-a"]},
+    )
+
+    outcome = _by_key(summarize_care_run(report, _receipts(tmp_path)))["note:a"]
+
+    assert outcome.status == "applied"
+    assert sorted(outcome.receipt_ids) == sorted([region["id"], queue["id"]])
+
+
+def test_a_failed_guide_write_reaches_the_report_as_failed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import ciao.memory_tool as tool
+
+    def disk_full(*_args: Any, **_kwargs: Any) -> None:
+        raise OSError("disk full")
+
+    guide = _guide(tmp_path)
+    monkeypatch.setattr(tool, "write_guide_atomically", disk_full)
+    with pytest.raises(OSError):
+        _write_region(tmp_path, guide, ["Fact one."], op="op-a")
+
+    summary = summarize_care_run(_one_planned(), _receipts(tmp_path))
+
+    assert _by_key(summary)["note:a"].status == "failed"
