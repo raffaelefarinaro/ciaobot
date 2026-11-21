@@ -5485,15 +5485,7 @@ def _memory_proposal_accept_command(args: argparse.Namespace) -> int:
     refused = _refuse_ambiguous_vault_write(args)
     if refused is not None:
         return refused
-    from ciao.curation_apply import (
-        Accepted,
-        AlreadyDone,
-        Failed,
-        PartialConflict,
-        Refused,
-        apply_memory_accept,
-        plan_memory_accept,
-    )
+    from ciao.curation_apply import Refused, apply_memory_accept, plan_memory_accept
     from ciao.memory_receipts import queue_lock
 
     workspace, vault, _registry_root, name = _resolve_workspace_and_vaults(args)
@@ -5508,8 +5500,9 @@ def _memory_proposal_accept_command(args: argparse.Namespace) -> int:
     with queue_lock(path):
         matched = _match_one_row(path, needle)
     if matched is None:
-        print(no_match, file=sys.stderr)
-        return 1
+        # The row may already be gone: an earlier attempt removed it and died
+        # before the decision or the progress key. Finish that operation.
+        return _resume_memory_accept(args, workspace, vault, name, needle, no_match)
     bullet, _removal_needle = matched
     holder = _curation_holder(args)
     if not holder:
@@ -5531,6 +5524,53 @@ def _memory_proposal_accept_command(args: argparse.Namespace) -> int:
         print(f"handover refused: {planned.reason}", file=sys.stderr)
         return 1
     result = apply_memory_accept(planned, vault_root=vault)
+    return _report_accept(result, args, workspace, bullet.kind, bullet.text)
+
+
+def _resume_memory_accept(
+    args: argparse.Namespace,
+    workspace: Path,
+    vault: Path,
+    name: str | None,
+    needle: str,
+    no_match: str,
+) -> int:
+    """Finish this run's unfinished accept of ``needle`` from its receipt, or report no match."""
+    from ciao.curation_apply import find_resumable_accept, resume_memory_accept
+
+    holder = (getattr(args, "holder", "") or "").strip()
+    receipt = find_resumable_accept(
+        vault, workspace=name or "", holder=holder, text=needle
+    )
+    if receipt is None:
+        print(no_match, file=sys.stderr)
+        return 1
+    trusted = trusted_registry(name, vault)
+    if trusted is None or name is None:
+        print("handover refused: the installed registry changed underneath", file=sys.stderr)
+        return 1
+    result = resume_memory_accept(vault, workspace=name, holder=holder, receipt=receipt)
+    return _report_accept(
+        result,
+        args,
+        workspace,
+        str(receipt.get("proposal_kind", "")),
+        str(receipt.get("removed_text", "")),
+    )
+
+
+def _report_accept(
+    result: object, args: argparse.Namespace, workspace: Path, kind: str, text: str
+) -> int:
+    """Print the outcome of one managed accept and return its exit code."""
+    from ciao.curation_apply import (
+        Accepted,
+        AlreadyDone,
+        Failed,
+        PartialConflict,
+        Refused,
+    )
+
     if isinstance(result, Refused):
         print(f"handover refused: {result.reason}", file=sys.stderr)
         return 1
@@ -5548,14 +5588,14 @@ def _memory_proposal_accept_command(args: argparse.Namespace) -> int:
         _emit_json(
             {
                 "accepted": True,
-                "text": bullet.text,
-                "region": bullet.kind,
+                "text": text,
+                "region": kind,
                 "receipt_id": receipt_id,
                 "workspace": str(workspace),
             }
         )
     else:
-        print(f"Accepted [{bullet.kind}] proposal into ciao:{bullet.kind}.")
+        print(f"Accepted [{kind}] proposal into ciao:{kind}.")
     return 0
 
 

@@ -469,6 +469,142 @@ def test_a_retry_of_a_crashed_cli_accept_resumes_the_same_operation(install, mon
     assert decisions[0]["operation_id"] == first[0]["operation_id"]
 
 
+def _accept_argv(install, tmp_path: Path, holder: str, text: str = FACT) -> list[str]:
+    needle = tmp_path / "needle.txt"
+    needle.write_text(text, encoding="utf-8")
+    return [
+        "memory-proposal-accept",
+        "--workspace", str(install.root),
+        "--vault-root", str(install.vault),
+        "--text-file", str(needle),
+        "--holder", holder,
+    ]
+
+
+def _receipts_of(install, kind: str) -> list[dict]:
+    journal = memory_receipts.journal_path(install.vault, install.guide)
+    return [r for r in memory_receipts.read_receipts(journal) if r.get("kind") == kind]
+
+
+def _state_of(install) -> tuple:
+    return (
+        install.queue.read_text(encoding="utf-8"),
+        _region_text(install),
+        read_decisions(install.queue),
+        _receipts_of(install, "region_apply"),
+        _receipts_of(install, "queue_resolve"),
+    )
+
+
+def _crash_at_decision(install, monkeypatch, argv: list[str]) -> None:
+    """A CLI accept that removes the queue row and then dies before the decision."""
+    real = apply.record_promotion
+    monkeypatch.setattr(apply, "record_promotion", _crash)
+    assert cli.main(argv) == 1
+    monkeypatch.setattr(apply, "record_promotion", real)
+    assert not [r for r in read_decisions(install.queue) if r.get("operation_id")]
+
+
+def test_a_retry_after_a_crash_at_the_decision_resumes_the_operation(install, monkeypatch, tmp_path) -> None:
+    holder = _lease(install.vault)
+    _predict(install.queue)
+    argv = _accept_argv(install, tmp_path, holder)
+    _crash_at_decision(install, monkeypatch, argv)
+    first = _receipts_of(install, "region_apply")
+    queued = _receipts_of(install, "queue_resolve")
+    assert len(first) == 1 and len(queued) == 1
+
+    assert cli.main(argv) == 0
+
+    assert [r["id"] for r in _receipts_of(install, "region_apply")] == [first[0]["id"]]
+    assert _region_text(install).count(FACT) == 1
+    decisions = [r for r in read_decisions(install.queue) if r.get("operation_id")]
+    assert len(decisions) == 1
+    assert decisions[0]["operation_id"] == queued[0]["operation_id"]
+    assert decisions[0]["receipt_id"] == first[0]["id"]
+    assert queued[0]["item_key"] in curation_run.load_state(install.vault).done_keys
+
+
+def test_a_retry_after_a_crash_at_progress_records_the_missing_progress_key(install, monkeypatch, tmp_path) -> None:
+    holder = _lease(install.vault)
+    _predict(install.queue)
+    argv = _accept_argv(install, tmp_path, holder)
+    real = apply.record_done
+    monkeypatch.setattr(apply, "record_done", _crash)
+    with pytest.raises(RuntimeError):
+        cli.main(argv)
+    monkeypatch.setattr(apply, "record_done", real)
+    queued = _receipts_of(install, "queue_resolve")
+    decided = [r for r in read_decisions(install.queue) if r.get("operation_id")]
+    assert len(decided) == 1
+    assert queued[0]["item_key"] not in curation_run.load_state(install.vault).done_keys
+
+    assert cli.main(argv) == 0
+
+    assert _region_text(install).count(FACT) == 1
+    assert len([r for r in read_decisions(install.queue) if r.get("operation_id")]) == 1
+    assert queued[0]["item_key"] in curation_run.load_state(install.vault).done_keys
+
+
+def test_a_finished_operation_is_not_resumed_again(install, monkeypatch, tmp_path) -> None:
+    holder = _lease(install.vault)
+    _predict(install.queue)
+    argv = _accept_argv(install, tmp_path, holder)
+    _crash_at_decision(install, monkeypatch, argv)
+    assert cli.main(argv) == 0
+    before = _state_of(install)
+
+    assert cli.main(argv) == 1
+
+    assert _state_of(install) == before
+
+
+@pytest.mark.parametrize(
+    "refusal",
+    ["other_holder", "no_lease", "handover_lowered", "other_workspace"],
+)
+def test_a_retry_that_no_longer_has_authority_resumes_nothing(install, monkeypatch, tmp_path, refusal) -> None:
+    holder = _lease(install.vault)
+    _predict(install.queue)
+    argv = _accept_argv(install, tmp_path, holder)
+    _crash_at_decision(install, monkeypatch, argv)
+    before = _state_of(install)
+    if refusal == "other_holder":
+        argv[argv.index("--holder") + 1] = "someone-else"
+    elif refusal == "no_lease":
+        curation_run.end_run(install.vault, holder=holder)
+    elif refusal == "handover_lowered":
+        registry = install.root / ".runtime" / "workspaces.json"
+        registry.write_text(
+            json.dumps([{"name": "work", "vault_root": str(install.vault), "memory_handover": "off"}]),
+            encoding="utf-8",
+        )
+    elif refusal == "other_workspace":
+        # The same receipt, as another workspace wrote it; the journal folds by id, last row wins.
+        journal = memory_receipts.journal_path(install.vault, install.guide)
+        row = dict(_receipts_of(install, "queue_resolve")[0], workspace="elsewhere")
+        with journal.open("a", encoding="utf-8") as handle:
+            handle.write(json.dumps(row, ensure_ascii=False) + "\n")
+        before = _state_of(install)
+
+    assert cli.main(argv) == 1
+
+    assert _state_of(install) == before
+
+
+def test_an_ambiguous_retry_resumes_nothing(install, monkeypatch, tmp_path) -> None:
+    holder = _lease(install.vault)
+    install.queue_rows(f"- [memory] {FACT}  _(from: chat-1)_", f"- [memory] {FACT}  _(from: chat-2)_")
+    _predict(install.queue)
+    _crash_at_decision(install, monkeypatch, _accept_argv(install, tmp_path, holder, "chat-1"))
+    _crash_at_decision(install, monkeypatch, _accept_argv(install, tmp_path, holder, "chat-2"))
+    before = _state_of(install)
+
+    assert cli.main(_accept_argv(install, tmp_path, holder)) == 1
+
+    assert _state_of(install) == before
+
+
 def test_a_lease_lost_between_the_two_effects_is_a_partial_conflict(install, monkeypatch) -> None:
     """The lease check under the queue lock is what stops the settlement."""
     intent = _accept_ready(install)

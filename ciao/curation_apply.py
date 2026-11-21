@@ -50,6 +50,7 @@ from ciao.curation_run import (
     active_lease,
     authorize_holder,
     item_key,
+    load_state,
     record_done,
 )
 from ciao.fact_candidates import external_anchor
@@ -513,6 +514,8 @@ def _settle_queue(
                     operation_id=intent.operation_id,
                     run_id=intent.holder,
                     item_key=intent.item_key,
+                    proposal_id=intent.proposal_id,
+                    proposal_source=entry.bullet.source,
                 ) as receipt:
                     removed = remove_proposal_by_substring(queue, needle)
             except QueueReceiptUnavailable:
@@ -570,6 +573,7 @@ def apply_memory_accept(intent: ManagedMemoryAcceptIntent, *, vault_root: Path) 
             bullet = ProposalBullet(
                 kind=str(queue_rows[0].get("proposal_kind", "")),
                 text=str(queue_rows[0].get("removed_text", "")),
+                source=str(queue_rows[0].get("proposal_source", "")),
             )
             queue_receipt_id = str(queue_rows[0]["id"])
     else:
@@ -623,3 +627,88 @@ def apply_memory_accept(intent: ManagedMemoryAcceptIntent, *, vault_root: Path) 
         outcome=outcome,
         region=bullet.kind,
     )
+
+
+def find_resumable_accept(
+    vault: Path, *, workspace: str, holder: str, text: str
+) -> dict[str, Any] | None:
+    """The one unfinished accept of this run that ``text`` names, as its queue receipt.
+
+    Used when the queue row is already gone, so the row cannot be matched. A
+    receipt matches when this run (``holder``) and this workspace wrote it, its
+    removed text equals ``text`` after whitespace flattening, and its operation
+    is unfinished: no decision yet, or a decision whose progress key is not
+    recorded. Anything other than exactly one such operation returns None.
+    """
+    if not (workspace and holder and " ".join(text.split())):
+        return None
+    wanted = " ".join(text.split())
+    queue = Path(vault) / PROPOSALS_RELATIVE
+    done = load_state(vault).done_keys
+    decided = {str(row["operation_id"]) for row in read_decisions(queue) if row.get("operation_id")}
+    candidates = [
+        row
+        for row in read_receipts(journal_path(vault))
+        if row.get("kind") == QUEUE_RESOLVE_KIND
+        and row.get("status") == APPLIED
+        and row.get("actor") == "agent"
+        and row.get("workspace") == workspace
+        and row.get("run_id") == holder
+        and row.get("operation_id")
+        and row.get("item_key")
+        and row.get("proposal_id")
+        and row.get("proposal_kind") in REGION_KINDS
+        and " ".join(str(row.get("removed_text", "")).split()) == wanted
+    ]
+    unfinished = [
+        row
+        for row in candidates
+        if not (str(row["operation_id"]) in decided and str(row["item_key"]) in done)
+    ]
+    operations = {str(row["operation_id"]) for row in unfinished}
+    if len(operations) != 1 or len(unfinished) != 1:
+        return None
+    return unfinished[0]
+
+
+def resume_memory_accept(
+    vault_root: Path, *, workspace: str, holder: str, receipt: dict[str, Any]
+) -> AcceptOutcome:
+    """Finish an interrupted accept from its queue receipt, under the same authority.
+
+    The row is already removed, so there is no row to re-check: the receipt is
+    the record of what was removed and which operation removed it. Handover,
+    the live lease held by ``holder``, and the cap are read here, as a new accept
+    reads them; :func:`apply_memory_accept` then finishes the operation's
+    missing decision or progress key under its own checks.
+    """
+    vault = Path(vault_root)
+    queue = vault / PROPOSALS_RELATIVE
+    operation_id = str(receipt.get("operation_id", ""))
+    if not _handover_open(vault, workspace):
+        return Refused(REFUSED_HANDOVER)
+    try:
+        lease = active_lease(vault)
+    except CurationStateError:
+        return Refused(REFUSED_UNCERTAIN)
+    if lease is None or lease.get("holder") != holder:
+        return Refused(REFUSED_NO_LEASE)
+    try:
+        started = datetime.fromisoformat(str(lease.get("started_at", "")))
+    except ValueError:
+        return Refused(REFUSED_NO_LEASE)
+    if started.tzinfo is None:
+        started = started.replace(tzinfo=UTC)
+    if _agent_slots(vault, queue, started, exclude=operation_id) >= HANDOVER_ACCEPT_CAP:
+        return Refused(REFUSED_CAP)
+    intent = ManagedMemoryAcceptIntent(
+        operation_id=operation_id,
+        workspace=workspace,
+        item_key=str(receipt.get("item_key", "")),
+        proposal_id=str(receipt.get("proposal_id", "")),
+        proposal_revision="",
+        destination_revision="",
+        prediction_revision="",
+        holder=holder,
+    )
+    return apply_memory_accept(intent, vault_root=vault)
