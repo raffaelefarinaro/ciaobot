@@ -168,7 +168,7 @@ export const DetailStale: Story = {
   render: () => renderState('detail-stale'),
   play: async ({ canvas }) => {
     await waitFor(() => expect(canvas.getByText(/Unchecked for/)).toBeTruthy())
-    expect(canvas.getByText(/Notes like this are due every 90 days\./)).toBeTruthy()
+    expect(canvas.getByText(/Notes like this are due every 30 days\./)).toBeTruthy()
     const link = canvas.getByRole('link', { name: 'Review in To decide' })
     expect(link.getAttribute('href')).toBe('/memory/review?show=revisit')
     await assertSettled(canvas)

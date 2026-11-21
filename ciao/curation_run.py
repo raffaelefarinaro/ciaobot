@@ -766,7 +766,8 @@ def _stale_note_items(
     frontmatter-then-mtime date rule, and three other surfaces (memory-audit, the
     Memory Map, the review queue's ``unverified`` signal) call it too. A fourth
     copy here would be a fourth thing to keep in agreement, so this pass consumes
-    its result — including with ``registry``, so a custom category's own
+    its result. ``registry`` is passed through to it, so the vault's category
+    aliases resolve the same way they do for the audit.
 
     What this adds is the two filters the queue adds and the audit does not, and
     the worklist's own bookkeeping:

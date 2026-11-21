@@ -1417,6 +1417,13 @@ def test_a_full_stale_backlog_in_both_passes_leaves_the_required_keys_planned(
     assert cr.REQUIRED_HYGIENE_KEYS <= planned
     assert sum(i.count for i in plan.planned if i.pass_id == cr.PASS_STALE_NOTE) == 20
     assert sum(i.count for i in plan.planned if i.pass_id == cr.PASS_STALE_ENTRY) == 5
+    # The two stale passes take 25 of the 40 slots, and the other passes get the rest:
+    # the weekly keys are among them, and the plan never exceeds the budget.
+    other = [
+        i for i in plan.planned if i.pass_id not in (cr.PASS_STALE_NOTE, cr.PASS_STALE_ENTRY)
+    ]
+    assert sum(i.count for i in other) >= len(cr.REQUIRED_HYGIENE_KEYS)
+    assert plan.planned_count <= cr.DEFAULT_MAX_ITEMS
 
 
 def test_a_missing_vault_is_not_a_failed_plan(tmp_path: Path) -> None:

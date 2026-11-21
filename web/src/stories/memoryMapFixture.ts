@@ -131,7 +131,7 @@ export function syntheticVault(): SyntheticGraph {
     nodes: [
       makeNode(mapHubId, 'Storybook hub', 'hub', d(mapHubId), { updated: '2026-10-20', age_days: 30 }),
       makeNode(mapNoteIds.person, 'Storybook person', 'person', d(mapNoteIds.person), { tags: ['self'], updated: '2026-11-10', age_days: 9 }),
-      makeNode(mapNoteIds.project, 'Storybook project', 'project', d(mapNoteIds.project), { updated: '2026-05-01', age_days: 202, stale: true, threshold_days: 90 }),
+      makeNode(mapNoteIds.project, 'Storybook project', 'project', d(mapNoteIds.project), { updated: '2026-05-01', age_days: 202, stale: true, threshold_days: 30 }),
       makeNode(mapNoteIds.reference, 'Storybook reference', 'reference', d(mapNoteIds.reference), { updated: '2026-09-15', age_days: 65 }),
       makeNode(mapNoteIds.meeting, 'Storybook meeting notes', 'log', d(mapNoteIds.meeting), { updated: '', age_days: null, mtime: 0 }),
       makeNode('storybook-vault/Storybook idea.md', 'Storybook idea', 'idea', 1),
@@ -162,7 +162,7 @@ export function denseSyntheticVault(): SyntheticGraph {
   return {
     nodes: ids.map((id, index) => makeNode(id, `Storybook note ${index + 1}`, ['note', 'project', 'resource', 'person'][index % 4], degree.get(id) ?? 0, {
       stale: index % 11 === 0,
-      threshold_days: index % 11 === 0 ? 90 : null,
+      threshold_days: index % 11 === 0 ? 30 : null,
       age_days: index % 11 === 0 ? 202 : 12,
     })),
     edges,

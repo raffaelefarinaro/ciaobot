@@ -178,7 +178,7 @@ test.describe('a note holding one overdue fact', () => {
     // Both kinds the counts name, so the tile's numbers and its list agree: a
     // "never checked" figure beside no such entry describes a fact the reader
     // cannot see.
-    await expect(block).toContainText('Checked 2019-05-01 — unverified for 2698d against a 90d horizon')
+    await expect(block).toContainText('Checked 2019-05-01 — unverified for 2698d against a 30d horizon')
     await expect(block).toContainText('not a usable date')
     // The whole-note flag is untouched: the map reports beside it, because the
     // nightly worklist is where an overdue bullet becomes a plan.

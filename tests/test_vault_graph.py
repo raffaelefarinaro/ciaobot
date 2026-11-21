@@ -134,7 +134,7 @@ def test_vault_graph_reports_staleness_from_mtime(client, tmp_path):
     import time
 
     vault = tmp_path / "memory-vault"
-    # Fixture notes are type `note` (default 180-day horizon): push one well
+    # Fixture notes are type `note` (the 30-day horizon): push one well
     # past it while its sibling stays fresh.
     old = time.time() - 400 * 86400
     os.utime(vault / "personal" / "B.md", (old, old))
@@ -250,8 +250,8 @@ def test_keep_clears_the_graph_stale_flag(client, tmp_path):
     )
     assert "unverified" in candidate.signals
     # The horizon rides on the node, so the map names the rule from the same
-    # table the flag came from.
-    assert mo()["threshold_days"] == 90
+    # constant the flag came from.
+    assert mo()["threshold_days"] == 30
     record_decision(vault, candidate, disposition="keep")
     assert mo()["stale"] is False
 
@@ -338,7 +338,7 @@ def test_a_note_checked_inside_its_cooldown_is_not_stale(client, tmp_path):
     assert check["pending"] is False
     assert check["citations"] == 0
     # The age and the horizon still ride along, so the map can explain itself.
-    assert node["threshold_days"] == 180
+    assert node["threshold_days"] == 30
     assert node["age_days"] > 300
 
 

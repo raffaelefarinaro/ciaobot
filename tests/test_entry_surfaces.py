@@ -604,7 +604,7 @@ def test_the_map_node_reports_coverage_and_never_raises_the_stale_flag(
         rendered="memory-vault/People/Alice.md",
         today=TODAY,
     )
-    # The file is one day old against a 90-day horizon: not stale *as a file*.
+    # The file is one day old against the 30-day horizon: not stale *as a file*.
     assert coverage.age_days == 1
     # And the fact beside it is seven years old: selected, and not clean.
     assert [v.reason_code for v in selected] == ["aged"]

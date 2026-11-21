@@ -132,7 +132,6 @@ def test_onboarding_names_effective_enabled_non_hidden_categories(
         "  folder: Clients\n"
         "  description: An account the user works with.\n"
         "  aliases: []\n"
-        "  stale_after_days: 0\n"
         "  enabled: true\n",
     )
     _write_registry(
@@ -142,7 +141,6 @@ def test_onboarding_names_effective_enabled_non_hidden_categories(
         "  kind: note\n"
         "  folder: Notebook\n"
         "  aliases: []\n"
-        "  stale_after_days: 0\n"
         "  enabled: true\n",
     )
 
@@ -376,7 +374,6 @@ def test_custom_category_label_is_plain_text_in_welcome(tmp_path: Path) -> None:
         "  kind: note\n"
         "  folder: Sneaky\n"
         "  aliases: []\n"
-        "  stale_after_days: 0\n"
         "  enabled: true\n",
     )
 

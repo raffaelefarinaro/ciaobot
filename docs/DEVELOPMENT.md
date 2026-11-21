@@ -1274,7 +1274,7 @@ entity note (person, project) asserts current state, so going unverified past
 its review horizon is a review candidate; logs and journals record events,
 which never go stale. One predicate, `memory_audit.note_verification`, ages each note from
 frontmatter `updated:` (a deliberate "I re-checked this" claim) or file mtime,
-against one horizon for every note, `memory_audit.NOTE_REVIEW_DAYS` (30 days);
+against one horizon for every note, `memory_audit.NOTE_REVIEW_DAYS`: a note is flagged at 30 days or more, not before;
 types are resolved through the vault's alias table; `log`, `journal` and `workspace`
 exempt — flagging an inbox for being an inbox is noise). `find_stale_notes`,
 the Memory Map's `stale` flag and the vault-review `unverified` signal all call

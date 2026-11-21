@@ -494,7 +494,7 @@ export const VERIFICATION_REVIEW = {
         last_update: '2024-01-05',
         type: 'person',
         age_days: 999,
-        unverified: { age_days: 999, threshold_days: 90, last_verified: '2024-01-05', source: 'frontmatter' },
+        unverified: { age_days: 999, threshold_days: 30, last_verified: '2024-01-05', source: 'frontmatter' },
         verification: check({
           outcome: 'retire',
           reason: 'the team page was replaced by the org chart',
@@ -615,7 +615,7 @@ export const VERIFICATION_REVIEW = {
               // boundary the panel already names, so the fact carries no context.
               context: [],
               reason: 'aged',
-              detail: 'unverified for 2698d against a 90d horizon',
+              detail: 'unverified for 2698d against a 30d horizon',
               age_days: 2698,
               last_verified: '2019-05-01',
               own_date: true,
@@ -1017,7 +1017,7 @@ const entryCoverage = (over = {}) => ({
       identity: 'entry-identity-aged-000000000000000000000000000000000000000000000000000000',
       excerpt: '- Reports to the CTO [verified: 2019-05-01]',
       reason: 'aged',
-      detail: 'unverified for 2698d against a 90d horizon',
+      detail: 'unverified for 2698d against a 30d horizon',
       age_days: 2698,
       last_verified: '2019-05-01',
       own_date: true,
@@ -1045,7 +1045,7 @@ export const VERIFICATION_NODES = [
     ...MEMORY_NODES[1],
     stale: false,
     age_days: 999,
-    threshold_days: 90,
+    threshold_days: 30,
     check: check({ outcome: 'retire', reason: 'the team page was replaced by the org chart', citations: 2, receipt_id: '', pending: true, proposal_id: 'proposal-verify-1' }),
   },
   {
@@ -1059,7 +1059,7 @@ export const VERIFICATION_NODES = [
     ...MEMORY_NODES[2],
     stale: true,
     age_days: 900,
-    threshold_days: 180,
+    threshold_days: 30,
     check: check({ outcome: 'retire', checked_at: '2026-08-01', retry_after: '2026-08-31', settled: false, pending: false, conflicted: true, proposal_id: 'proposal-verify-3', reason: 'folded into Atlas', citations: 1, receipt_id: '' }),
   },  {
     // A note whose own date is current and which still holds a fact from 2019.
@@ -1079,7 +1079,7 @@ export const VERIFICATION_NODES = [
     updated: '2026-09-29',
     stale: false,
     age_days: 1,
-    threshold_days: 90,
+    threshold_days: 30,
     check: null,
     entry_coverage: entryCoverage(),
   },

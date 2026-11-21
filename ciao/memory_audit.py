@@ -461,11 +461,11 @@ def audit_entries(
 # is asserted to whoever finally opens it, and the curation routine cannot
 # review what nothing ever lists.
 
-# Days after which a note's facts count as unverified, for every note type. One
-# number, deliberately: a per-type table made the owner tune twelve horizons and
-# still left the question of which one a note was on. A note that is 30 days old
-# is due whatever it is about, and the curation pass's check cooldown is the same
-# 30 days, so a note verified today is not asked about again until the month is out.
+# A note is flagged unverified at 30 days or more (age >= 30; 29 days is not due),
+# for every note type. One number, deliberately: a per-type table made the owner
+# tune twelve horizons and still left the question of which one a note was on.
+# The curation pass's check cooldown is the same 30 days, so a note verified today
+# is not asked about again until the month is out.
 NOTE_REVIEW_DAYS = 30
 
 # Event surfaces never age out — a log entry from two years ago is exactly as

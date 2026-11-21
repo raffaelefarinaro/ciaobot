@@ -54,7 +54,7 @@ function staleEntry(over = {}) {
     // bullet used to be reprinted and read as a second fact).
     excerpt: 'Landlord is Mr Silva [verified: 2019-05-01]',
     context: ['Verified with the agency.'],
-    reason: 'aged', detail: 'unverified for 2698d against a 90d horizon',
+    reason: 'aged', detail: 'unverified for 2698d against a 30d horizon',
     age_days: 2698, last_verified: '2019-05-01', own_date: true, supported: true,
     ...over,
   }

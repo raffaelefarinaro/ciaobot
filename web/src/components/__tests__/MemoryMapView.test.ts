@@ -68,7 +68,7 @@ function graphPayload() {
 function checkedPayload() {
   const base = (over: Record<string, unknown> = {}) => ({
     tags: [], aliases: [], description: '', workspace: 'personal', degree: 1,
-    mtime: 1, updated: '2025-01-01', age_days: 640, threshold_days: 180, ...over,
+    mtime: 1, updated: '2025-01-01', age_days: 640, threshold_days: 30, ...over,
   })
   return {
     nodes: [

@@ -70,7 +70,7 @@ WORKSPACE = "personal"
 TODAY = date.today()
 
 # Four notes, one per outcome the pipeline distinguishes, plus a fifth that is
-# only ever an `unverified`. Each is stale by two years against a 90-day person
+# only ever an `unverified`. Each is stale by two years against the 30-day horizon
 # horizon or a 30-day project one, so the selection pass has something to find.
 STILL_TRUE = "People/Sofia.md"
 CITED_UPDATE = "People/Rae.md"
