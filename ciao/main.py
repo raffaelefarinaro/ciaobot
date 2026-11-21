@@ -29,6 +29,7 @@ from ciao.schedules import (
     ScheduleStore,
     dispatch_is_current,
     migrate_loops,
+    publish_automations_changed,
 )
 from ciao.sessions import StateStore
 from ciao.signals import RestartRequested
@@ -1128,6 +1129,9 @@ async def _run_server_locked(
     # messages to an archived chat" (issue #126).
     def _interval_target_dispatchable(entry) -> bool:
         chat_id = getattr(entry, "web_chat_id", "") or ""
+        if getattr(entry, "owner_chat_id", ""):
+            # A chat-owned loop never re-homes: it runs only while its owner does.
+            return pcm.loop_owner_alive(entry.owner_chat_id) is True
         if not chat_id:
             return True  # project-bound: a fresh chat is created per run
         chat = pcm.get_chat(chat_id)
@@ -1145,6 +1149,8 @@ async def _run_server_locked(
         chat_dispatchable=_interval_target_dispatchable,
         target_refusal=pcm.schedule_target_refusal,
         admission_closed=_update_admission_closed,
+        on_change=lambda: publish_automations_changed(pcm),
+        owner_alive=pcm.loop_owner_alive,
     )
 
     # Create and wire up web app. The MCP control plane is mandatory for chat;

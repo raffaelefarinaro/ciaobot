@@ -117,6 +117,7 @@ def _client(*, pcm=None, tmp_path: Path | None = None):
                 disallowed_tools=None,
                 gws_profile="personal",
                 memory_handover="off",
+                memory_approval={},
                 provider_overrides={},
             ),
             "work": SimpleNamespace(
@@ -126,6 +127,7 @@ def _client(*, pcm=None, tmp_path: Path | None = None):
                 disallowed_tools=[],
                 gws_profile="work",
                 memory_handover="off",
+                memory_approval={},
                 provider_overrides={},
             ),
         },
@@ -204,6 +206,7 @@ def test_workspaces_endpoint_lists_configured_workspaces(tmp_path: Path) -> None
                 "claude_trim": {},
                 "color": "amber",
                 "memory_handover": "off",
+                "memory_approval": {},
                 "provider_overrides": {},
             },
             {
@@ -215,6 +218,7 @@ def test_workspaces_endpoint_lists_configured_workspaces(tmp_path: Path) -> None
                 "claude_trim": {},
                 "color": "amber",
                 "memory_handover": "off",
+                "memory_approval": {},
                 "provider_overrides": {},
             },
         ],

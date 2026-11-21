@@ -278,7 +278,7 @@ def test_curation_schedule_defers_and_never_hard_caps() -> None:
     assert "The region cap is advisory." in skill
     # The consolidation contract the architecture test also pins must survive.
     assert "Do not promote new facts into the bounded" in skill
-    assert "unless `curation-begin` reports `handover: all`" in skill
+    assert "unless `curation-begin` lists its kind in `accept_kinds`" in skill
     assert "Workspace/Memory-Consolidations.md" in skill
 
 

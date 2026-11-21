@@ -41,6 +41,11 @@ const NO_DECISIONS: HandoverAgreement = {
 const handover = (overrides: Partial<HandoverResponse> = {}): HandoverResponse => ({
   workspace: WORKSPACE,
   handover: 'off',
+  memory_approval: {},
+  accept_resolved: {
+    memory: { mode: 'approve', inherited: true },
+    profile: { mode: 'approve', inherited: true },
+  },
   acting_available: true,
   agreement: NO_DECISIONS,
   ...overrides,

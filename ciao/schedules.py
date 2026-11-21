@@ -13,6 +13,10 @@ re-homes or stops itself when the target chat is gone, and never replays
 intervals missed while the server was down. An interval entry bound to a
 ``web_project_id`` instead opens a fresh chat per run, which is the
 combination neither primitive offered before the merge.
+
+A chat-owned loop (``owner_chat_id``, made by :meth:`ScheduleStore.create_owned_loop`)
+is the exception to re-homing: it never moves to another chat, and it ends,
+which deletes its row, once its expiry or its run cap is reached.
 """
 
 from __future__ import annotations
@@ -104,6 +108,33 @@ FREQUENCIES = {"daily", "weekly", "monthly", "manual", "once", INTERVAL_FREQUENC
 # 20 seconds, so anything finer would be cadence the scheduler cannot honour.
 MIN_INTERVAL_MINUTES = 1
 DEFAULT_INTERVAL_MINUTES = 10
+
+# Chat-owned loops: a bounded interval run that lives in one chat. The caps are
+# engine constants, not settings, so a model cannot widen them. Over-cap values
+# are refused rather than clamped, so the refusal can teach the caller the cap.
+LOOP_MIN_INTERVAL_MINUTES = MIN_INTERVAL_MINUTES
+LOOP_DEFAULT_DURATION_MINUTES = 60
+LOOP_MAX_DURATION_MINUTES = 24 * 60
+# With a one-minute interval the run cap binds first (about 4.8 hours).
+LOOP_MAX_RUNS = 288
+LOOP_MAX_PER_CHAT = 3
+LOOP_MAX_GLOBAL = 20
+LOOP_MAX_PROMPT_CHARS = 4000
+# Fields that fix a loop's lifetime at creation. They never change afterwards.
+LOOP_LIFETIME_FIELDS = frozenset({"owner_chat_id", "expires_at", "max_runs"})
+
+
+class LoopRefused(ValueError):
+    """A chat-owned loop the engine will not create, keep or edit into.
+
+    ``code`` is stable (``loop_invalid``, ``loop_limit_chat``,
+    ``loop_limit_global``) so a caller can translate it without parsing text.
+    It is a ValueError, so the REST write routes already answer it as a 400.
+    """
+
+    def __init__(self, code: str, message: str) -> None:
+        super().__init__(message)
+        self.code = code
 
 # Exactly what ``compute_next_run`` can parse out of ``daily_time_utc``.
 _VALID_DAILY_TIME = re.compile(r"^([01][0-9]|2[0-3]):[0-5][0-9]$")
@@ -319,6 +350,9 @@ def stamp_fallback_project(entry: "ScheduleEntry", pcm: Any) -> bool:
     where its runs go, and a stale fallback under it would only mislead.
     Returns whether anything changed, so callers can skip a redundant write.
     """
+    if is_owned_loop(entry):
+        # A loop is never re-homed, so it never captures a fallback.
+        return False
     web_project_id = getattr(entry, "web_project_id", "") or ""
     web_chat_id = getattr(entry, "web_chat_id", "") or ""
     if web_project_id or not web_chat_id:
@@ -519,6 +553,10 @@ def restorable_user_schedule(
     """
     if not isinstance(item, dict) or item.get("scope", "user") != "user":
         return None
+    # A chat-owned loop is bound to a chat that does not survive the archive,
+    # and a rebuilt row would lose its expiry and cap: it is not restored.
+    if item.get("owner_chat_id"):
+        return None
     schedule_id = item.get("schedule_id")
     if (
         not isinstance(schedule_id, str)
@@ -697,6 +735,186 @@ def parse_dispatch_stamp(entry: "ScheduleEntry") -> datetime | None:
     return dt
 
 
+def _parse_utc_stamp(raw: object) -> datetime | None:
+    """An ISO timestamp with an explicit offset (the stored ``...Z`` form), or None."""
+    if not isinstance(raw, str) or not raw:
+        return None
+    try:
+        when = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    return when if when.tzinfo is not None else None
+
+
+def _is_plain_int(value: object) -> bool:
+    return isinstance(value, int) and not isinstance(value, bool)
+
+
+def is_owned_loop(entry: "ScheduleEntry") -> bool:
+    """True for a chat-owned loop: an interval entry bound to one chat, with a lifetime."""
+    return bool(entry.owner_chat_id)
+
+
+def interval_anchor(entry: "ScheduleEntry") -> datetime | None:
+    """The instant an interval's cadence is measured from, or None for "fire now".
+
+    The last dispatch when there is one. A loop that has never run is measured
+    from its creation, so a loop created during a turn cannot fire the moment
+    that turn ends, before the model has seen what it set up.
+    """
+    last = parse_dispatch_stamp(entry)
+    if last is None and is_owned_loop(entry):
+        return _parse_utc_stamp(entry.created_at)
+    return last
+
+
+def _owned_loop_violation(entry: "ScheduleEntry") -> str:
+    """Why an owned loop row is not a valid loop, or '' when it is one.
+
+    Checked on every write and on every tick, so a row that a raw edit or a
+    re-home has pushed off its shape ends instead of running unbounded.
+    """
+    if entry.frequency != INTERVAL_FREQUENCY:
+        return "a loop must be an interval"
+    if entry.web_chat_id != entry.owner_chat_id:
+        return "a loop must be bound to its owner chat"
+    if entry.web_project_id:
+        return "a loop cannot be bound to a project"
+    if entry.command:
+        return "a loop cannot run a command"
+    if entry.fallback_project_id:
+        return "a loop is never re-homed"
+    if entry.archive_policy != "manual":
+        return "a loop cannot be auto-archived"
+    if entry.scope != "user":
+        return "a loop must be a user schedule"
+    if entry.enabled is not True:
+        return "a loop cannot be paused"
+    if not _is_plain_int(entry.interval_minutes) or entry.interval_minutes < LOOP_MIN_INTERVAL_MINUTES:
+        return "a loop interval is below the floor"
+    if entry.interval_minutes > LOOP_MAX_DURATION_MINUTES:
+        return "a loop interval is above the duration cap"
+    prompt = entry.prompt.strip() if isinstance(entry.prompt, str) else ""
+    if not prompt or len(prompt) > LOOP_MAX_PROMPT_CHARS:
+        return "a loop needs a prompt of at most the limit"
+    created = _parse_utc_stamp(entry.created_at)
+    expires = _parse_utc_stamp(entry.expires_at)
+    if created is None:
+        return "a loop has no creation time"
+    if expires is None:
+        return "a loop has no expiry"
+    # Creation caps the duration at LOOP_MAX_DURATION_MINUTES; a row whose expiry
+    # is further out than that was edited by hand and would hold its slot for years.
+    if expires - created > timedelta(minutes=LOOP_MAX_DURATION_MINUTES):
+        return "a loop outlives its duration cap"
+    if not _is_plain_int(entry.max_runs) or not 1 <= entry.max_runs <= LOOP_MAX_RUNS:
+        return "a loop has no valid run cap"
+    if not _is_plain_int(entry.run_count) or entry.run_count < 0:
+        return "a loop has an unreadable run count"
+    return ""
+
+
+def _check_loop_row(entry: "ScheduleEntry") -> None:
+    """Raise :class:`LoopRefused` when ``entry`` is an owned loop that breaks its shape."""
+    if not is_owned_loop(entry):
+        return
+    reason = _owned_loop_violation(entry)
+    if reason:
+        raise LoopRefused("loop_invalid", f"invalid loop: {reason}")
+
+
+def _check_loop_lifetime(current: "ScheduleEntry", merged: "ScheduleEntry") -> None:
+    """Refuse a write that changes a loop's owner, expiry or run cap, or adds them.
+
+    Those are fixed at creation: extending a loop means stopping it and
+    creating a new one, which goes through the caps again. The run count only
+    goes up, since lowering it would hand a loop back its spent runs.
+    """
+    for name in LOOP_LIFETIME_FIELDS:
+        if getattr(current, name) != getattr(merged, name):
+            raise LoopRefused("loop_invalid", f"a loop's {name} is fixed when it is created")
+    if (
+        is_owned_loop(current)
+        and _is_plain_int(current.run_count)
+        and _is_plain_int(merged.run_count)
+        and merged.run_count < current.run_count
+    ):
+        raise LoopRefused("loop_invalid", "a loop's run count only goes up")
+
+
+# ASCII digits only, and at most four per part: Python's ``\d`` matches other
+# scripts, and an unbounded digit run is either a typo or a refusal to parse.
+_LOOP_SPAN = re.compile(r"(?:([0-9]{1,4})h)?(?:([0-9]{1,5})m)?", re.ASCII)
+_LOOP_CLOCK = re.compile(r"([01][0-9]|2[0-3]):([0-5][0-9])", re.ASCII)
+# C0 controls other than tab and newline: a prompt is text a model reads, not a terminal stream.
+_PROMPT_CONTROLS = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f]")
+
+
+def parse_loop_span(value: object) -> int | None:
+    """Whole minutes for a loop span written ``Nm``, ``Nh`` or ``NhMm``, or None.
+
+    Used for ``--every`` and for a duration ``--until``. Anything else, a bare
+    number included, is None so the caller can refuse it with an example.
+    """
+    if not isinstance(value, str):
+        return None
+    text = value.strip().lower()
+    match = _LOOP_SPAN.fullmatch(text)
+    if match is None or not text:
+        return None
+    hours, minutes = match.group(1), match.group(2)
+    if hours is None and minutes is None:
+        return None
+    total = int(hours or 0) * 60 + int(minutes or 0)
+    # Past a day is not a span any loop may take, so it is refused as a
+    # malformed value (the caller names the flag), not as a duration to clamp.
+    return total if total <= LOOP_MAX_DURATION_MINUTES else None
+
+
+def loop_until_minutes(value: object, now: datetime) -> int | None:
+    """Minutes from ``now`` until a loop's ``--until``, or None when it is neither form.
+
+    A duration is taken as written. A wall-clock ``HH:MM`` is its next
+    occurrence in :data:`DEFAULT_TIMEZONE`, strictly after ``now``, so a time
+    already past means tomorrow's. The result can be a day plus a DST hour;
+    the loop's own duration cap refuses that.
+    """
+    span = parse_loop_span(value)
+    if span is not None:
+        return span
+    if not isinstance(value, str):
+        return None
+    match = _LOOP_CLOCK.fullmatch(value.strip())
+    if match is None:
+        return None
+    zone = ZoneInfo(DEFAULT_TIMEZONE)
+    local_now = now.astimezone(zone)
+    target = local_now.replace(
+        hour=int(match.group(1)), minute=int(match.group(2)), second=0, microsecond=0
+    )
+    if target <= local_now:
+        target += timedelta(days=1)
+    return int((target.astimezone(UTC) - now.astimezone(UTC)).total_seconds() // 60)
+
+
+def loop_end_reason(entry: "ScheduleEntry", now: datetime) -> str:
+    """Why an owned loop must end now: ``invalid``, ``expired``, ``max-runs`` or ''.
+
+    An unreadable row counts as ended, never as a loop that may still run.
+    Ordinary schedules always return ''.
+    """
+    if not is_owned_loop(entry):
+        return ""
+    expires = _parse_utc_stamp(entry.expires_at)
+    if expires is None or _owned_loop_violation(entry):
+        return "invalid"
+    if now >= expires:
+        return "expired"
+    if entry.run_count >= entry.max_runs:
+        return "max-runs"
+    return ""
+
+
 def _matches_frequency(entry: "ScheduleEntry", dt_local: datetime) -> bool:
     if entry.frequency == "manual":
         return False  # manual schedules never auto-fire
@@ -735,7 +953,7 @@ def compute_next_run(
     if is_interval(entry):
         tz = ZoneInfo(entry.timezone_name)
         current = now or _now_utc()
-        last = parse_dispatch_stamp(entry)
+        last = interval_anchor(entry)
         if last is None:
             return current.astimezone(tz)
         return (last + interval_delta(entry)).astimezone(tz)
@@ -1187,6 +1405,14 @@ class ScheduleEntry:
     scope: str = "user"
     editable: bool = True
     removable: bool = True
+    # A chat-owned loop (see ``create_owned_loop``). ``owner_chat_id`` names the
+    # one chat it runs in and is empty for every ordinary schedule. The lifetime
+    # is fixed at creation: ``expires_at`` (ISO UTC) and ``max_runs`` bound it,
+    # and ``run_count`` counts the turns it started. An ended loop is deleted.
+    owner_chat_id: str = ""
+    expires_at: str = ""
+    max_runs: int = 0
+    run_count: int = 0
 
 
 # Stored beside a row's own fields (inside the system overlay for a system
@@ -1203,6 +1429,7 @@ RUN_STATE_FIELDS = frozenset({
     "last_recovered_on",
     "last_dispatch_id",
     "last_completed_on",
+    "run_count",
 })
 
 
@@ -1212,7 +1439,11 @@ _DIGEST_EXCLUDED = RUN_STATE_FIELDS | {"created_at", "scope", "editable", "remov
 
 
 def _editable_digest(entry: "ScheduleEntry") -> str:
-    content = {k: v for k, v in asdict(entry).items() if k not in _DIGEST_EXCLUDED}
+    # The loop fields are digest members only on a loop. An ordinary row's
+    # digest is the one it had before they existed, so an editor holding a
+    # revision token across this upgrade is not refused once for nothing.
+    excluded = _DIGEST_EXCLUDED if entry.owner_chat_id else _DIGEST_EXCLUDED | LOOP_LIFETIME_FIELDS
+    content = {k: v for k, v in asdict(entry).items() if k not in excluded}
     raw = json.dumps(content, sort_keys=True, separators=(",", ":"), default=str)
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()[:16]
 
@@ -1487,6 +1718,132 @@ class ScheduleStore:
             self._save(data)
         return entry
 
+    def create_owned_loop(
+        self,
+        *,
+        owner_chat_id: str,
+        prompt: str,
+        interval_minutes: int,
+        duration_minutes: int | None = None,
+        max_runs: int | None = None,
+        title: str = "",
+        workspace: str = "",
+        now: datetime | None = None,
+    ) -> ScheduleEntry:
+        """Create a chat-owned loop: the only door that makes one.
+
+        The caller gives a duration, never an absolute end, so a wrong clock on
+        the model's side cannot extend it. Over-cap values are refused. The caps
+        are counted under the writer lock, so two creators cannot both take the
+        last slot. A loop is never re-homed, so it has no project and no
+        fallback.
+        """
+        owner = (owner_chat_id or "").strip()
+        if not owner:
+            raise LoopRefused("loop_invalid", "a loop belongs to one chat")
+        text = _PROMPT_CONTROLS.sub("", prompt or "").strip()
+        if not text:
+            raise LoopRefused("loop_invalid", "a loop needs a prompt")
+        if len(text) > LOOP_MAX_PROMPT_CHARS:
+            raise LoopRefused(
+                "loop_invalid", f"a loop prompt is at most {LOOP_MAX_PROMPT_CHARS} characters"
+            )
+        if isinstance(interval_minutes, bool):
+            raise LoopRefused("loop_invalid", "interval_minutes must be an integer")
+        try:
+            interval = normalize_interval_minutes(interval_minutes)
+        except ValueError as exc:
+            raise LoopRefused("loop_invalid", str(exc)) from exc
+        if interval < LOOP_MIN_INTERVAL_MINUTES:
+            raise LoopRefused("loop_invalid", f"interval_minutes must be >= {LOOP_MIN_INTERVAL_MINUTES}")
+        duration = LOOP_DEFAULT_DURATION_MINUTES if duration_minutes is None else duration_minutes
+        if not _is_plain_int(duration) or not 1 <= duration <= LOOP_MAX_DURATION_MINUTES:
+            raise LoopRefused(
+                "loop_invalid",
+                f"duration_minutes must be from 1 to {LOOP_MAX_DURATION_MINUTES} (24 hours)",
+            )
+        runs = (
+            min(LOOP_MAX_RUNS, duration // interval + 1) if max_runs is None else max_runs
+        )
+        if not _is_plain_int(runs) or not 1 <= runs <= LOOP_MAX_RUNS:
+            raise LoopRefused("loop_invalid", f"max_runs must be from 1 to {LOOP_MAX_RUNS}")
+        start = now or _now_utc()
+        entry = ScheduleEntry(
+            schedule_id=f"sched-{uuid.uuid4().hex[:8]}",
+            daily_time_utc="",
+            prompt=text,
+            chat_id=0,
+            created_at=_utc_stamp(start),
+            frequency=INTERVAL_FREQUENCY,
+            interval_minutes=interval,
+            web_chat_id=owner,
+            title=title or "",
+            workspace=workspace or "",
+            owner_chat_id=owner,
+            expires_at=_utc_stamp(start + timedelta(minutes=duration)),
+            max_runs=runs,
+        )
+        with self._txn():
+            data = self._load_for_write()
+            items = data.setdefault("schedules", [])
+            owned = [i for i in items if isinstance(i, dict) and i.get("owner_chat_id")]
+            # The same prompt on the same cadence is a second copy of one loop, not a
+            # second loop: refuse it, and name the one already running.
+            for item in owned:
+                if (
+                    item.get("owner_chat_id") == owner
+                    and str(item.get("prompt") or "").strip() == text
+                    and item.get("interval_minutes") == interval
+                ):
+                    raise LoopRefused(
+                        "loop_duplicate",
+                        f"this chat already runs this loop as {item.get('schedule_id')}; "
+                        "stop it first, or change the prompt or the cadence",
+                    )
+            if sum(1 for i in owned if i.get("owner_chat_id") == owner) >= LOOP_MAX_PER_CHAT:
+                raise LoopRefused(
+                    "loop_limit_chat",
+                    f"this chat already has {LOOP_MAX_PER_CHAT} loops; wait for one to end",
+                )
+            if len(owned) >= LOOP_MAX_GLOBAL:
+                raise LoopRefused(
+                    "loop_limit_global",
+                    f"the engine already runs {LOOP_MAX_GLOBAL} loops; wait for one to end",
+                )
+            self._finalize_entry(entry)
+            row = self._serialize_entry(entry)
+            row[_REV_KEY] = 0
+            items.append(row)
+            self._save(data)
+        return entry
+
+    def delete_owned_by(self, owner_chat_id: str) -> list[str]:
+        """Remove every chat-owned loop of one chat in a single write.
+
+        Engine-internal: the owner chat is leaving, so there is no user edit
+        to check a revision against and nothing to authorize. Raises
+        ``ScheduleStoreCorrupt`` on an unreadable store, like every write; the
+        caller decides whether that may fail the chat's removal.
+        """
+        owner = (owner_chat_id or "").strip()
+        if not owner:
+            return []
+        with self._txn():
+            data = self._load_for_write()
+            items = data.get("schedules", [])
+            owned = [
+                item for item in items
+                if isinstance(item, dict)
+                and item.get("owner_chat_id") == owner
+                and item.get("scope") != "system"
+            ]
+            if not owned:
+                return []
+            gone = {id(item) for item in owned}
+            data["schedules"] = [item for item in items if id(item) not in gone]
+            self._save(data)
+        return [str(item.get("schedule_id", "")) for item in owned]
+
     def replace(
         self,
         entry: ScheduleEntry,
@@ -1541,6 +1898,7 @@ class ScheduleStore:
                     authorize(current)
                 self._check_revision(current, expected_revision, item=item)
                 merged = self._merge_changes(current, base, entry)
+                _check_loop_lifetime(current, merged)
                 self._finalize_entry(merged)
                 before, after = asdict(current), asdict(merged)
                 updated = dict(item)
@@ -1627,6 +1985,7 @@ class ScheduleStore:
             time_error = wall_clock_time_error(entry)
             if time_error:
                 raise ValueError(time_error)
+        _check_loop_row(entry)
 
     def _replace_whole(
         self,
@@ -1655,6 +2014,7 @@ class ScheduleStore:
                     row = self._serialize_entry(entry)
                     rev = _rev_value(item.get(_REV_KEY))
                     stored = self._entry_from_item(item)
+                    _check_loop_lifetime(stored, entry)
                     normalize_auto_archive(stored)
                     if _editable_digest(stored) != _editable_digest(entry):
                         rev += 1
@@ -1662,6 +2022,8 @@ class ScheduleStore:
                     items[index] = row
                     self._save(data)
                     return
+            if is_owned_loop(entry):
+                raise LoopRefused("loop_invalid", "a loop is created with create_owned_loop")
             row = self._serialize_entry(entry)
             row[_REV_KEY] = _fresh_epoch()
             items.append(row)
@@ -1729,6 +2091,8 @@ class ScheduleStore:
     def add_if_absent(self, entry: ScheduleEntry) -> bool:
         """Insert a user row unless its id exists; check and insert are one step."""
         self._finalize_entry(entry)
+        if is_owned_loop(entry):
+            raise LoopRefused("loop_invalid", "a loop is created with create_owned_loop")
         with self._txn():
             data = self._load_for_write()
             items = data.setdefault("schedules", [])
@@ -1949,6 +2313,14 @@ class ScheduleStore:
             entry.interval_minutes = int(entry.interval_minutes or 0)
         except (TypeError, ValueError):
             entry.interval_minutes = 0
+        try:
+            entry.max_runs = int(entry.max_runs or 0)
+        except (TypeError, ValueError):
+            entry.max_runs = 0
+        # A counter that is not an integer cannot bound a loop. It reads as -1,
+        # which ends the loop as invalid instead of letting it run uncounted.
+        if not _is_plain_int(entry.run_count):
+            entry.run_count = -1
         try:
             entry.command = normalize_schedule_command(entry.command)
         except ValueError:
@@ -2346,9 +2718,17 @@ class ScheduleManager:
         chat_dispatchable: Callable[[ScheduleEntry], bool] | None = None,
         target_refusal: Callable[[ScheduleEntry], str] | None = None,
         admission_closed: Callable[[], bool] | None = None,
+        on_change: Callable[[], None] | None = None,
+        owner_alive: Callable[[str], bool | None] | None = None,
     ) -> None:
         self._store = store
         self._resolve_target = resolve_target
+        # Told once each time a chat-owned loop ends, so open tabs refetch.
+        self._on_change = on_change
+        # The state of a loop's owner chat: True runs it, False (gone or
+        # archived) ends it, None (its archive is in progress) skips this tick
+        # so a refused archive cannot lose the loop.
+        self._owner_alive = owner_alive
         self._dispatch_to_web = dispatch_to_web
         self._prepare_chat = prepare_chat
         self._is_node_active = is_node_active
@@ -2423,6 +2803,30 @@ class ScheduleManager:
 
     def list_entries(self, *, chat_id: int | None = None) -> list[ScheduleEntry]:
         return self._store.list_entries(chat_id=chat_id)
+
+    def create_owned_loop(
+        self,
+        *,
+        owner_chat_id: str,
+        prompt: str,
+        interval_minutes: int,
+        duration_minutes: int | None = None,
+        max_runs: int | None = None,
+        title: str = "",
+        workspace: str = "",
+        now: datetime | None = None,
+    ) -> ScheduleEntry:
+        """See :meth:`ScheduleStore.create_owned_loop`."""
+        return self._store.create_owned_loop(
+            owner_chat_id=owner_chat_id,
+            prompt=prompt,
+            interval_minutes=interval_minutes,
+            duration_minutes=duration_minutes,
+            max_runs=max_runs,
+            title=title,
+            workspace=workspace,
+            now=now,
+        )
 
     def create(
         self,
@@ -2741,6 +3145,15 @@ class ScheduleManager:
             self._store.replace(entry, base=base)
         except ScheduleNotFound:
             return False
+        except LoopRefused as exc:
+            # A loop that a write has pushed off its shape (a re-home moved it
+            # off its chat, say) ends here, rather than raising out of the tick
+            # and stalling every other entry.
+            if not is_owned_loop(base):
+                raise
+            logger.warning("Loop %s cannot be kept: %s", base.schedule_id, exc)
+            self._end_loop(base, "invalid")
+            return False
         return True
 
     def _stamp_interval_status(self, entry: ScheduleEntry, status: str) -> None:
@@ -2755,9 +3168,27 @@ class ScheduleManager:
         entry.last_status = status
         self._persist(entry, base)
 
+    def _end_loop(self, entry: ScheduleEntry, reason: str) -> None:
+        """End a chat-owned loop by deleting its row, the one terminal state.
+
+        Nothing is left behind to pause, resume or retry. The transcript and
+        the job runs record what ran.
+        """
+        if not self._store.delete(entry.schedule_id):
+            return
+        logger.info(
+            "Loop %s ended: %s after %s runs", entry.schedule_id, reason, entry.run_count
+        )
+        if self._on_change is not None:
+            self._on_change()
+
     def _disable_interval(
         self, entry: ScheduleEntry, reason: str, *, base: ScheduleEntry | None = None
     ) -> None:
+        if is_owned_loop(entry):
+            # A loop whose target cannot run ends; it is never left disabled.
+            self._end_loop(entry, reason)
+            return
         logger.warning(
             "Interval schedule %s: %s; disabling it", entry.schedule_id, reason
         )
@@ -2779,6 +3210,21 @@ class ScheduleManager:
             # Deferred, not skipped: nothing is stamped and the entry stays due,
             # so the run happens after admission reopens.
             return None
+        if is_owned_loop(entry):
+            # The callers check this first; a loop that reaches here still gets
+            # no run past its end.
+            reason = loop_end_reason(entry, now)
+            if reason:
+                self._end_loop(entry, reason)
+                return None
+            # Before prepare_chat: a gone owner must not get a replacement chat
+            # created for it, or that chat is left orphaned when the write is refused.
+            owner = self._owner_state(entry)
+            if owner is None:
+                return None
+            if owner is False:
+                self._end_loop(entry, "owner-gone")
+                return None
         # As read, before prepare_chat may re-point the binding: the scoped
         # write persists that re-home and nothing else.
         base = dataclasses.replace(entry)
@@ -2814,6 +3260,10 @@ class ScheduleManager:
         if chat_id:
             entry.last_run_chat_id = chat_id
         entry.last_status = "running"
+        if is_owned_loop(entry):
+            # Counted here, in the same write as the stamp above: a turn that
+            # starts is a run, and a run that is refused, deferred or busy is not.
+            entry.run_count += 1
         # Interval entries have no expected slot (compute_last_expected_run
         # returns None for them), so the id carries no occurrence — it is here
         # purely so a superseded run cannot write its status over a newer one.
@@ -2896,8 +3346,10 @@ class ScheduleManager:
                 latest, "no chat left to dispatch into", base=latest_base
             )
         latest.last_status = status
+        # A chat-owned loop is never re-homed (see project_chats._rehome_interval_chat),
+        # so there is nothing to carry over for it.
         rehomed = bool(entry.web_chat_id) and entry.web_chat_id != bound_before
-        if rehomed and latest.web_chat_id == bound_before:
+        if rehomed and not is_owned_loop(entry) and latest.web_chat_id == bound_before:
             # prepare_chat re-pointed us at a replacement chat (the target was
             # archived or gone) and nobody has retargeted the stored row since.
             # Without carrying that across, the entry forgets the replacement
@@ -2916,7 +3368,7 @@ class ScheduleManager:
             return
         if entry.schedule_id in self._inflight:
             return
-        last = parse_dispatch_stamp(entry)
+        last = interval_anchor(entry)
         if last is not None and (now - last) < interval_delta(entry):
             return
         if not self._interval_dispatchable(entry):
@@ -2940,6 +3392,12 @@ class ScheduleManager:
         }
         if self._admission_refuses():
             return self._deferred_result(entry)
+        current = now or _now_utc()
+        if is_owned_loop(entry):
+            reason = loop_end_reason(entry, current)
+            if reason:
+                self._end_loop(entry, reason)
+                return {**result, "status": "refused", "error": "the loop has ended"}
         if not self._interval_dispatchable(entry):
             return {**result, "status": "missing-chat"}
         if self._interval_busy(entry):
@@ -2948,7 +3406,7 @@ class ScheduleManager:
                 "status": "busy",
                 "chat_id": entry.web_chat_id or "",
             }
-        chat_id = await self._fire_interval(entry, now or _now_utc())
+        chat_id = await self._fire_interval(entry, current)
         if self._store.get(entry.schedule_id) is None:
             # Deleted while the run was being started: nothing started.
             return {**result, "status": "refused", "error": "the schedule was deleted"}
@@ -3047,6 +3505,35 @@ class ScheduleManager:
         except ScheduleStoreCorrupt:
             logger.exception("system schedule state is unreadable; not stamping first-seen")
 
+    async def _tick_owned_loop(self, entry: ScheduleEntry, now: datetime) -> None:
+        """One chat-owned loop's tick: end it when it is over, else run its cadence.
+
+        It runs before the ordinary enabled/manual skip, so a loop past its end
+        is swept whatever state its row is in. A run in flight is left to
+        finish, so it is never cut off by its own expiry.
+        """
+        if entry.schedule_id in self._inflight:
+            return
+        reason = loop_end_reason(entry, now)
+        if not reason:
+            owner = self._owner_state(entry)
+            if owner is None:
+                # Its owner is being archived: decide on the next tick, once the
+                # archive has either removed the loop or been refused.
+                return
+            if owner is False:
+                reason = "owner-gone"
+        if reason:
+            self._end_loop(entry, reason)
+            return
+        await self._tick_interval(entry, now)
+
+    def _owner_state(self, entry: ScheduleEntry) -> bool | None:
+        """True while the loop's owner chat runs it, False once it is gone, None mid-archive."""
+        if self._owner_alive is None:
+            return True
+        return self._owner_alive(entry.owner_chat_id)
+
     async def tick(self, now: datetime | None = None) -> None:
         if self._admission_refuses():
             # A claim holds admission closed. Nothing is evaluated, so nothing
@@ -3059,6 +3546,9 @@ class ScheduleManager:
         self._record_first_seen(current)
         for entry in self._store.list_entries():
             base = dataclasses.replace(entry)
+            if is_owned_loop(entry):
+                await self._tick_owned_loop(entry, current)
+                continue
             # Manual and disabled schedules never auto-fire.
             if entry.frequency == "manual" or not entry.enabled:
                 continue

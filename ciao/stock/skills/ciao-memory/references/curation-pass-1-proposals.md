@@ -41,19 +41,18 @@ A fact that exists only as report prose has no review path and gets re-derived e
 
 ## Region rows and handover
 
-`curation-begin --json` reports `"handover": "off" | "dismiss" | "all"`. It is the operator's Settings choice; never change it or infer it from anywhere else.
+`curation-begin --json` reports `"handover": "off" | "dismiss" | "all"` and `"accept_kinds"`, a list of the kinds (`memory`, `profile`) the operator lets this run accept. Both are the operator's Settings choices; never change them or infer them from anywhere else. `handover` governs dismissals. A kind's acceptance is set per kind in Settings; `accept_kinds` is the only source for it, so never accept a row because `handover` is `all`.
 
 For each `[memory]` / `[profile]` row in the worklist:
 
 1. Judge it against the region and the chats you can read, and write a one-line reason to a file.
 2. Record the verdict with `ciao memory-proposal-predict --text-file <f> --verdict accept|dismiss --reason-file <r>`. A prediction is never a decision: the row stays queued and History shows nothing until the operator decides.
-3. Act on it only as this table allows:
+3. Act on it only as this table allows, by its verdict:
 
-| handover | predicted dismiss | predicted accept |
-|---|---|---|
-| `off` | leave queued | leave queued |
-| `dismiss` | `ciao memory-proposal-dismiss --handover --text-file <f>` | leave queued |
-| `all` | same | `ciao memory-proposal-accept --text-file <f> --holder <lease.holder>` |
+| predicted verdict | act only when | command | otherwise |
+|---|---|---|---|
+| dismiss | `handover` is `dismiss` or `all` | `ciao memory-proposal-dismiss --handover --text-file <f>` | leave queued |
+| accept | the row's kind is in `accept_kinds` | `ciao memory-proposal-accept --text-file <f> --holder <lease.holder>` | leave queued |
 
 - Never act on a `decide: you` row.
 - If an acting command exits 1, leave the row queued and escalate it with `ciao memory-proposal-escalate`, using the refusal it printed as the reason.

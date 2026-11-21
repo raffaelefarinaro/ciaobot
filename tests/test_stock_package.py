@@ -177,7 +177,7 @@ def test_stock_curation_skill_consolidation_contract() -> None:
     assert "Memory-Proposals.md" in skill
     # Promotion of new facts stays user-reviewed; over-cap has named options.
     assert "Do not promote new facts into the bounded" in skill
-    assert "unless `curation-begin` reports `handover: all`" in skill
+    assert "unless `curation-begin` lists its kind in `accept_kinds`" in skill
     assert "leave the region over its advisory cap" in skill
 
 
@@ -497,7 +497,7 @@ def test_curation_prompt_alone_carries_the_guardrails() -> None:
     prompt = _curation_prompt()
     for phrase in (
         "Do not promote new facts into the bounded",
-        "unless `curation-begin` reports `handover: all`",
+        "unless `curation-begin` lists its kind in `accept_kinds`",
         "ciao memory-proposal-predict --text-file",
         "You never edit a skill or this workspace's guide body",
         "you never settle a skill proposal or a guide-body proposal",
@@ -593,12 +593,14 @@ def test_pass_one_reference_states_the_handover_matrix() -> None:
     rows = {
         line.split("|")[1].strip(): line
         for line in pass1.splitlines()
-        if line.startswith("| `")
+        if line.startswith(("| dismiss", "| accept"))
     }
-    assert set(rows) == {"`off`", "`dismiss`", "`all`"}
-    assert rows["`off`"].count("leave queued") == 2
-    assert "memory-proposal-dismiss --handover" in rows["`dismiss`"]
-    assert "memory-proposal-accept" in rows["`all`"]
+    assert set(rows) == {"dismiss", "accept"}
+    # Dismissal follows the legacy handover; acceptance follows the row's kind.
+    assert "`handover` is `dismiss` or `all`" in rows["dismiss"]
+    assert "memory-proposal-dismiss --handover" in rows["dismiss"]
+    assert "`accept_kinds`" in rows["accept"]
+    assert "memory-proposal-accept" in rows["accept"]
 
 
 def test_care_prompt_names_the_decider_and_escalate_command() -> None:

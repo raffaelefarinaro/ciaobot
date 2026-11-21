@@ -79,6 +79,49 @@
       </div>
       <p class="hint hint--compact handover-hint" role="status">{{ selectedHint }}</p>
       <p v-if="saveError" class="action-result action-result--error" role="alert">{{ saveError }}</p>
+
+      <!-- Per-kind acceptance. Each row shows the choice the engine applies now and whether
+           it is inherited from the handover above; a reset appears only for an explicit one. -->
+      <div class="handover-kinds">
+        <p class="handover-kinds__title">Per kind</p>
+        <p class="hint hint--compact">
+          Choose what happens to each kind's suggestions. A kind you have not set follows the
+          handover above. Dismissals always follow the handover.
+        </p>
+        <div v-for="kind in KINDS" :key="kind.value" class="handover-kind">
+          <div class="handover-kind__head">
+            <span :id="`handover-kind-${kind.value}`" class="handover-kind__label">{{ kind.label }}</span>
+            <span class="hint hint--compact handover-kind__caption">{{ kindCaption(kind.value) }}</span>
+          </div>
+          <div
+            class="instance-toggle"
+            role="radiogroup"
+            :aria-labelledby="`handover-kind-${kind.value}`"
+            @keydown="onKindKeydown($event, kind.value)"
+          >
+            <button
+              v-for="option in KIND_OPTIONS"
+              :key="option.value"
+              type="button"
+              role="radio"
+              class="toggle-btn"
+              :class="{ active: kindMode(kind.value) === option.value }"
+              :aria-checked="kindMode(kind.value) === option.value"
+              :tabindex="option.value === kindTabStop(kind.value) ? 0 : -1"
+              :disabled="kindUnavailable(option.value)"
+              :aria-disabled="saving || kindUnavailable(option.value) ? 'true' : undefined"
+              @click="saveKind(kind.value, option.value)"
+            >{{ option.label }}</button>
+          </div>
+          <button
+            v-if="!kindInherited(kind.value)"
+            type="button"
+            class="set-link set-link--quiet handover-kind__reset"
+            :disabled="saving"
+            @click="saveKind(kind.value, null)"
+          >Reset to inherited</button>
+        </div>
+      </div>
     </template>
   </div>
 </template>
@@ -89,11 +132,16 @@ import { api } from '../../lib/api'
 import { askConfirm } from '../../lib/confirm'
 import { apiErrorMessage } from '../../lib/errorMessage'
 import { useProjectStore } from '../../stores/projects'
-import type { HandoverResponse, MemoryHandover } from '../../lib/types'
+import type {
+  HandoverResponse,
+  MemoryApprovalKind,
+  MemoryApprovalMode,
+  MemoryHandover,
+} from '../../lib/types'
 
 // The operator's switch for what the nightly run may settle on its own. The
-// card owns its data and saves through the existing workspace PATCH with this
-// one field. It never saves unprompted: the suggestion is text, not an action.
+// card owns its data and saves through the existing workspace PATCH, one field
+// at a time. It never saves unprompted: the suggestion is text, not an action.
 
 const OPTIONS: { value: MemoryHandover; label: string; hint: string }[] = [
   { value: 'off', label: 'Off', hint: 'Predict only. Workspace care records what it would do and never acts.' },
@@ -106,6 +154,25 @@ const OPTIONS: { value: MemoryHandover; label: string; hint: string }[] = [
   },
 ]
 
+const LEGACY_LABEL: Record<MemoryHandover, string> = {
+  off: 'Off',
+  dismiss: 'Dismiss',
+  all: 'Dismiss and accept',
+}
+
+const KINDS: { value: MemoryApprovalKind; label: string }[] = [
+  { value: 'memory', label: 'Memory' },
+  { value: 'profile', label: 'Profile' },
+]
+
+const KIND_OPTIONS: { value: MemoryApprovalMode; label: string }[] = [
+  { value: 'approve', label: 'Ask me' },
+  { value: 'auto', label: 'Let Workspace care add it' },
+]
+
+const CONFIRM_ACCEPT =
+  "Let Workspace care add facts to this workspace's always-loaded memory? Every change is listed in History and can be undone."
+
 const projectStore = useProjectStore()
 const workspace = computed(() => projectStore.activeWorkspace)
 
@@ -115,9 +182,16 @@ const loadError = ref('')
 const saving = ref(false)
 const saveError = ref('')
 const selected = ref<MemoryHandover>('off')
+const kindSelected = ref<Partial<Record<MemoryApprovalKind, MemoryApprovalMode>>>({})
 const optionEls = ref<HTMLButtonElement[]>([])
 const selectedHint = computed(() => OPTIONS.find((o) => o.value === selected.value)?.hint ?? '')
 let ticket = 0
+// Bumped when the workspace changes. A save or read started under an older
+// value may finish, but it must never write into the workspace now on screen.
+let workspaceToken = 0
+// The workspace token a save started under, so a save for the old workspace
+// never blocks or adopts state for the new one.
+let saveToken = -1
 
 const percent = computed(() => {
   const rate = data.value?.agreement.rate
@@ -133,13 +207,20 @@ async function load(): Promise<void> {
     if (mine !== ticket) return
     data.value = res
     loadError.value = ''
-    if (!saving.value) selected.value = res.handover
+    if (!ownSaveInFlight()) {
+      selected.value = res.handover
+      kindSelected.value = Object.fromEntries(KINDS.map((k) => [k.value, res.accept_resolved[k.value].mode]))
+    }
   } catch (e) {
     if (mine !== ticket) return
     loadError.value = apiErrorMessage(e, 'The request failed.')
   } finally {
     if (mine === ticket) loading.value = false
   }
+}
+
+function ownSaveInFlight(): boolean {
+  return saving.value && saveToken === workspaceToken
 }
 
 // Off stays reachable so a saved dismiss/all can always be turned back off.
@@ -194,26 +275,117 @@ async function choose(value: MemoryHandover): Promise<void> {
     return
   }
   const name = workspace.value
+  const token = workspaceToken
   saveError.value = ''
   if (value === 'all') {
-    const ok = await askConfirm(
-      "Let Workspace care add facts to this workspace's always-loaded memory? Every change is listed in History and can be undone.",
-      { title: 'Memory handover', confirmLabel: 'Allow', destructive: false },
-    )
-    if (!ok) {
-      selected.value = data.value.handover
+    const ok = await askConfirm(CONFIRM_ACCEPT, { title: 'Memory handover', confirmLabel: 'Allow', destructive: false })
+    if (!ok || token !== workspaceToken) {
+      if (token === workspaceToken && data.value) selected.value = data.value.handover
       return
     }
   }
   selected.value = value
   saving.value = true
+  saveToken = token
   try {
     await projectStore.updateWorkspace(name, { memory_handover: value })
     saving.value = false // load() only adopts the saved value while not saving
-    await load()
+    if (token === workspaceToken) await load()
   } catch (e) {
-    saveError.value = apiErrorMessage(e, 'The setting could not be saved.')
-    selected.value = data.value?.handover ?? 'off'
+    if (token === workspaceToken) {
+      saveError.value = apiErrorMessage(e, 'The setting could not be saved.')
+      selected.value = data.value?.handover ?? 'off'
+    }
+  } finally {
+    saving.value = false
+  }
+}
+
+// The effective mode a kind's row shows: the choice the operator made in this
+// card, else what the engine resolved on the last read.
+function kindMode(kind: MemoryApprovalKind): MemoryApprovalMode {
+  return kindSelected.value[kind] ?? data.value?.accept_resolved[kind]?.mode ?? 'approve'
+}
+
+function kindInherited(kind: MemoryApprovalKind): boolean {
+  return !(kind in (data.value?.memory_approval ?? {}))
+}
+
+function kindCaption(kind: MemoryApprovalKind): string {
+  if (!data.value) return ''
+  if (!kindInherited(kind)) return 'Set for this kind.'
+  return `Inherited from the handover above (${LEGACY_LABEL[data.value.handover]}).`
+}
+
+// Accepting a kind needs the install to be able to act; "Ask me" is always
+// available, so a saved auto can be turned back off on any install.
+function kindUnavailable(mode: MemoryApprovalMode): boolean {
+  return mode === 'auto' && !data.value?.acting_available
+}
+
+function kindTabStop(kind: MemoryApprovalKind): MemoryApprovalMode {
+  const mode = kindMode(kind)
+  return kindUnavailable(mode) ? 'approve' : mode
+}
+
+// Radio-group keys for one kind's two options: arrows and Home/End move the
+// selection (and so save), skipping an option the install cannot use.
+function onKindKeydown(e: KeyboardEvent, kind: MemoryApprovalKind): void {
+  const enabled = KIND_OPTIONS.map((o) => o.value).filter((mode) => !kindUnavailable(mode))
+  if (!enabled.length) return
+  const at = enabled.indexOf(kindMode(kind))
+  let target: MemoryApprovalMode | undefined
+  switch (e.key) {
+    case 'ArrowRight':
+    case 'ArrowDown':
+      target = enabled[(at + 1) % enabled.length]
+      break
+    case 'ArrowLeft':
+    case 'ArrowUp':
+      target = enabled[(at <= 0 ? enabled.length : at) - 1]
+      break
+    case 'Home':
+      target = enabled[0]
+      break
+    case 'End':
+      target = enabled[enabled.length - 1]
+      break
+    default:
+      return
+  }
+  e.preventDefault()
+  if (saving.value || target === undefined) return
+  const index = KIND_OPTIONS.findIndex((o) => o.value === target)
+  const buttons = (e.currentTarget as HTMLElement | null)?.querySelectorAll<HTMLButtonElement>('[role="radio"]')
+  buttons?.[index]?.focus()
+  void saveKind(kind, target)
+}
+
+// Saves one kind through the workspace PATCH, one key at a time. `null` resets
+// that kind to inherited. The other kinds are left as they are on the server.
+async function saveKind(kind: MemoryApprovalKind, mode: MemoryApprovalMode | null): Promise<void> {
+  if (saving.value || !data.value) return
+  if (mode === null ? kindInherited(kind) : mode === kindMode(kind)) return
+  const name = workspace.value
+  const token = workspaceToken
+  const previous = kindMode(kind)
+  if (mode === 'auto') {
+    const ok = await askConfirm(CONFIRM_ACCEPT, { title: 'Memory handover', confirmLabel: 'Allow', destructive: false })
+    if (!ok || token !== workspaceToken || saving.value) return
+  }
+  saveError.value = ''
+  if (mode !== null) kindSelected.value = { ...kindSelected.value, [kind]: mode }
+  saving.value = true
+  saveToken = token
+  try {
+    await projectStore.updateWorkspace(name, { memory_approval: { [kind]: mode } })
+    saving.value = false
+    if (token === workspaceToken) await load()
+  } catch (e) {
+    if (token === workspaceToken) {
+      saveError.value = apiErrorMessage(e, 'The setting could not be saved.')
+      if (mode !== null) kindSelected.value = { ...kindSelected.value, [kind]: previous }
+    }
   } finally {
     saving.value = false
   }
@@ -222,9 +394,11 @@ async function choose(value: MemoryHandover): Promise<void> {
 onMounted(load)
 watch(workspace, () => {
   // Another workspace's rate must never stand in for this one's.
+  workspaceToken += 1
   data.value = null
   loadError.value = ''
   saveError.value = ''
+  kindSelected.value = {}
   void load()
 })
 </script>
@@ -250,4 +424,32 @@ watch(workspace, () => {
 .handover-evidence p { margin: 0; }
 .handover-line { color: var(--fg); font-size: var(--text-sm); line-height: 1.5; }
 .handover-hint { margin-top: var(--space-2); }
+
+.handover-kinds {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+  margin-top: var(--space-4);
+  border-top: 1px solid var(--border);
+  padding-top: var(--space-3);
+}
+.handover-kinds__title { margin: 0; color: var(--fg); font-size: var(--text-sm); font-weight: 600; }
+.handover-kinds > .hint { margin: 0; }
+.handover-kind { display: flex; flex-direction: column; gap: var(--space-2); }
+.handover-kind__head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: var(--space-1) var(--space-3);
+}
+.handover-kind__label { color: var(--fg); font-size: var(--text-sm); font-weight: 600; }
+.handover-kind__caption { margin: 0; }
+.handover-kind__reset {
+  align-self: flex-start;
+  display: inline-flex;
+  align-items: center;
+}
+@media (pointer: coarse) {
+  .handover-kind__reset { min-height: var(--touch); }
+}
 </style>

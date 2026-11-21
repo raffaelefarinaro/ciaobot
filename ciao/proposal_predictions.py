@@ -16,11 +16,15 @@ setting lets the run act on a verdict. Nothing here changes the setting.
 from __future__ import annotations
 
 import json
+from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
-from ciao.config import MEMORY_HANDOVERS
+from ciao.config import MEMORY_APPROVAL_KINDS, MEMORY_HANDOVERS
+
+if TYPE_CHECKING:
+    from ciao.config import WorkspaceConfig
 
 REGION_KINDS: frozenset[str] = frozenset({"memory", "profile"})
 VERDICTS: tuple[str, ...] = ("accept", "dismiss")
@@ -169,6 +173,48 @@ def handover_allows(handover: str, verdict: str) -> bool:
     if handover == "all":
         return verdict in VERDICTS
     return False
+
+
+@dataclass(frozen=True, slots=True)
+class HandoverPolicy:
+    """A workspace's care authority as one run reads it: the legacy setting and its per-kind choices.
+
+    Built from the registry at the moment it is needed, never cached across a
+    decision. Every unattended accept resolves through :func:`accept_allowed`.
+    """
+
+    memory_handover: str
+    memory_approval: dict[str, str] = field(default_factory=dict)
+
+    @classmethod
+    def of(cls, registered: WorkspaceConfig) -> HandoverPolicy:
+        return cls(
+            memory_handover=registered.memory_handover,
+            memory_approval=dict(registered.memory_approval),
+        )
+
+
+def accept_allowed(policy: HandoverPolicy, kind: str) -> bool:
+    """Whether the run may accept a ``kind`` row into its region.
+
+    An explicit per-kind choice wins for that kind: ``approve`` refuses and
+    ``auto`` allows, even when the legacy setting is ``off`` or ``dismiss``. An
+    unset kind follows the legacy setting, so ``all`` allows and the rest refuse.
+    Dismissal is not decided here; it stays with :func:`handover_allows`.
+    """
+    if kind not in MEMORY_APPROVAL_KINDS:
+        return False
+    mode = policy.memory_approval.get(kind)
+    if mode == "approve":
+        return False
+    if mode == "auto":
+        return True
+    return handover_allows(policy.memory_handover, "accept")
+
+
+def accept_kinds(policy: HandoverPolicy) -> list[str]:
+    """The region kinds this policy lets the run accept, in the order the schedule names them."""
+    return [kind for kind in MEMORY_APPROVAL_KINDS if accept_allowed(policy, kind)]
 
 
 def attach_predictions(proposals_path: Path, rows: list[dict[str, Any]]) -> None:

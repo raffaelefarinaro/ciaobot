@@ -21,6 +21,8 @@ vi.mock('../../lib/api', () => {
       return Promise.resolve({
         workspace: 'work',
         handover: 'off',
+        memory_approval: {},
+        accept_resolved: { memory: { mode: 'approve', inherited: true }, profile: { mode: 'approve', inherited: true } },
         acting_available: true,
         agreement: {
           decided: 0, matched: 0, rate: null, window: 50, min_decisions: 20, threshold: 0.9,

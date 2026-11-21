@@ -76,9 +76,8 @@ def test_corrupt_state_blocks_handover_accept_and_dismiss_before_queue_mutation(
     )
     bullet = SimpleNamespace(kind="memory", decider="", text="Keep this queued.")
 
-    for verdict in ("accept", "dismiss"):
-        refusal = cli._handover_gate(vault, "work", queue, bullet, verdict)
-        assert "curation state is uncertain" in refusal
+    refusal = cli._handover_gate(vault, "work", queue, bullet)
+    assert "curation state is uncertain" in refusal
 
     assert queue.read_bytes() == queue_before
     assert state.read_bytes() == state_before

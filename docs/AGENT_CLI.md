@@ -127,7 +127,7 @@ runs; `ciao/stock/skills/ciao-cli/SKILL.md` is the reference entry and index, an
 application actions that are safe and meaningful for a scoped agent:
 bounded memory (`ciao memory status|update`), vault (`ciao vault search`,
 `ciao vault recall-check --claims-file FILE`, `ciao vault review …`), projects (`ciao project …`), workspaces
-(`ciao workspace list`), chats (`ciao chat …`), schedules (`ciao schedule …`), the task board
+(`ciao workspace list`), chats (`ciao chat …`), schedules (`ciao schedule …`), chat loops (`ciao loop …`), the task board
 (`ciao task …`, including `task delegate` and `task report`), notes
 (`ciao note create|related|verify`), webhook triggers (`ciao webhook …`),
 Google Workspace (`ciao gws status`), context and Ciaobot's own logs (`ciao context get|logs`), usage statistics (`ciao stats`), file
@@ -198,6 +198,22 @@ them back) with `--applied`), `--interrupted` when the work stopped part-way,
 which is neither and leaves the proposal queued with its chat bound to it, and
 the plain form for a decision against it. Never record `--applied` for a chat
 that simply finished: a turn ending is not a verified edit.
+
+## Loops
+
+`ciao loop start|list|stop` is the one way a chat asks for an interval that
+wakes it again. It is a chat-owned interval schedule, not a `ciao schedule`
+entry: the chat is the bearer token's principal, so there is no `--chat` flag
+and no argument can aim a loop at another chat. The engine enforces the bounds
+(one-minute floor, 24-hour duration, 288 runs, three per chat, twenty engine-wide),
+ends the loop when either bound is reached, and deletes its row.
+
+Loops exist as a separate door because an unattended `ciao schedule create
+--frequency interval` would escape any bound and run with nobody watching. That
+path is refused from an unattended turn (`unattended_forbidden`). A wake-up is
+unattended and not person-typed, so it cannot start a loop, which stops a loop
+from spawning another. `loop list` and `loop stop` stay available from a
+wake-up, because stopping is the point.
 
 ## Requests for the user (needs-action)
 
@@ -276,7 +292,7 @@ skill is not installed in workspace catalogs. Bare `ciao help` prints the full
 reference; a topic prints the shared entry and one grouped reference, bounded
 to 16,000 UTF-8 bytes. Topics are `memory`, `vault`, `queues` (memory and
 review); `note`, `file`, `chat`, `project` (workspace operations); `task`;
-`schedule`, `webhook`, `context`, `stats`, `gws`, `workspace`, `repo`
+`schedule`, `loop`, `webhook`, `context`, `stats`, `gws`, `workspace`, `repo`
 (automation and status); and `examples`. Use topic help for detailed lookups;
 `ciao <noun> --help` gives group syntax. Agent-surface commands use JSON envelopes; the top-level review-queue
 commands have their own documented output conventions.

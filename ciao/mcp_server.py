@@ -961,7 +961,12 @@ async def _op_schedule(service: CiaoMcpService, action: str, prompt: str | None 
             user's local time; pass one only when the user names another zone.
         frequency: "daily" | "weekly" | "monthly" | "manual" | "once" |
             "interval"; default "weekly". Use "interval" for sub-day
-            recurrence ("every 30 minutes") — see interval_minutes.
+            recurrence that belongs to a project ("every 30 minutes") —
+            see interval_minutes. To check something every N minutes
+            until a time inside this chat, use `ciao loop start`: a
+            loop wakes this chat, ends on its own and is never created
+            from an unattended turn. "interval" from an unattended turn
+            is refused (unattended_forbidden).
         interval_minutes: interval only — whole minutes between runs,
             minimum 1, default 10. Combine with project_id for a fresh
             chat per run. Give the prompt a short fixed no-change
@@ -993,11 +998,11 @@ async def _op_schedule(service: CiaoMcpService, action: str, prompt: str | None 
             Refused from an unattended (scheduled) turn; "" clears it.
         workspace: Omit in almost every case — the schedule is created
             in this chat's workspace. Any other name is refused unless
-            it restates this chat's workspace: schedules are
-            auto-approved model input and their unattended runs execute
-            in bypass, so planting one in another workspace would run
-            there with that workspace's guide, integrations, and file
-            authority and no operator approval. To automate a second
+            it restates this chat's workspace: a schedule is unattended
+            model input that runs with nobody watching, so planting one
+            in another workspace would run there with that workspace's
+            guide, integrations, and file authority and no operator
+            approval. To automate a second
             workspace, work from a chat scoped to it or ask the
             operator.
         schedule_id: (update only) The schedule to update.
@@ -1075,6 +1080,51 @@ async def _op_schedule(service: CiaoMcpService, action: str, prompt: str | None 
             mutating=True,
         )
     raise ControlPlaneError("invalid_action", "action must be preview, create, or update.")
+
+
+async def _op_loop_start(
+    service: CiaoMcpService,
+    every: str,
+    prompt: str = "",
+    until: str | None = None,
+    max_runs: int | None = None,
+) -> dict[str, Any]:
+    """Start a loop: this chat wakes every `every`, until `until` or for `max_runs` runs.
+
+    every: "Nm", "Nh" or "NhMm" (whole minutes, 1 minute to 24 hours).
+    until: a duration ("90m", "1h30m") from now, or a wall-clock "HH:MM"
+        (next occurrence, in the Ciaobot default zone). Give exactly one of
+        until or max_runs.
+    max_runs: 1 to 288 wake-ups. The loop also ends one interval after its
+        last run, so a loop never outlives its run cap.
+    prompt: What each wake-up does. Keep it self-contained: each wake-up
+        runs in this chat and sees this chat's history.
+
+    A chat holds at most three loops and the engine twenty. A loop belongs
+    to this chat only, is never re-homed, and is listed in Automations. A
+    wake-up cannot start a loop, and a wake-up that needs approval is
+    skipped rather than waiting for one. Only a turn the user typed starts a
+    loop, and a plan-mode chat cannot.
+    """
+    return await service._invoke(
+        "loop_start",
+        lambda cp, p: cp.loop_start(p, every=every, prompt=prompt, until=until, max_runs=max_runs),
+        mutating=True,
+    )
+
+
+async def _op_loop_list(service: CiaoMcpService) -> dict[str, Any]:
+    """List this chat's loops with their cadence, run count, end and last status."""
+    return await service._invoke("loop_list", lambda cp, p: cp.loop_list(p))
+
+
+async def _op_loop_stop(service: CiaoMcpService, loop_id: str = "") -> dict[str, Any]:
+    """Stop one of this chat's loops. loop_id may be omitted when the chat has exactly one.
+
+    Another chat's loop is reported as loop_not_found. Stopping deletes the
+    loop's row, so it will not wake again.
+    """
+    return await service._invoke("loop_stop", lambda cp, p: cp.loop_stop(p, loop_id), mutating=True)
 
 
 async def _op_schedule_action(
@@ -1597,6 +1647,9 @@ OPERATIONS: tuple[Operation, ...] = (
     Operation("schedules_list", _READ, _op_schedules_list.__doc__ or "", _op_schedules_list),
     Operation("schedule", _WRITE, _op_schedule.__doc__ or "", _op_schedule),
     Operation("schedule_action", _DESTRUCTIVE, _op_schedule_action.__doc__ or "", _op_schedule_action),
+    Operation("loop_start", _WRITE, _op_loop_start.__doc__ or "", _op_loop_start),
+    Operation("loop_list", _READ, _op_loop_list.__doc__ or "", _op_loop_list),
+    Operation("loop_stop", _WRITE, _op_loop_stop.__doc__ or "", _op_loop_stop),
     Operation("task_list", _READ, _op_task_list.__doc__ or "", _op_task_list),
     Operation("task_get", _READ, _op_task_get.__doc__ or "", _op_task_get),
     Operation("task_create", _WRITE, _op_task_create.__doc__ or "", _op_task_create),

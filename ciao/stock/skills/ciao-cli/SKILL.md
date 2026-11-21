@@ -39,5 +39,5 @@ The command tables, guards and examples live in five references beside this file
 - `memory`, `vault`, `queues` — [memory-and-review.md](references/memory-and-review.md): memory, vault search, note review and review queues.
 - `note`, `file`, `chat`, `project` — [workspace-operations.md](references/workspace-operations.md): notes, files, chats and projects, with the MCP/tool reload procedure.
 - `task` — [tasks.md](references/tasks.md): the board, delegation, reports and deletion.
-- `schedule`, `webhook`, `context`, `stats`, `gws`, `workspace`, `repo` — [automation-and-status.md](references/automation-and-status.md): automations, triggers, context and stats.
+- `schedule`, `loop`, `webhook`, `context`, `stats`, `gws`, `workspace`, `repo` — [automation-and-status.md](references/automation-and-status.md): automations, triggers, context and stats.
 - `examples` — [reference.md](reference.md): worked examples, errors and long-running commands.
