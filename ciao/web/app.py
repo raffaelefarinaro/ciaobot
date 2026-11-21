@@ -168,6 +168,7 @@ from ciao.web.routes_api import (
     care_cycle_status,
     proposals_history,
     run_schedule_now,
+    schedule_care_run,
     schedule_detail,
     startup_status_endpoint,
     menubar_chats_endpoint,
@@ -515,6 +516,7 @@ def create_app(config, app_settings=None, mcp_service=None) -> Starlette:
         Route("/api/schedules", create_schedule, methods=["POST"]),
         Route("/api/schedule-run/{schedule_id}", run_schedule_now, methods=["POST"]),
         Route("/api/schedules/{schedule_id}", schedule_detail, methods=["PATCH", "DELETE"]),
+        Route("/api/schedules/{schedule_id}/care-run", schedule_care_run, methods=["GET"]),
         # Workspace task board (B3). Every route names a *workspace*, never a
         # root: the service resolves the name to its own vault. The three
         # state-changing routes require the `expected_revision` the caller

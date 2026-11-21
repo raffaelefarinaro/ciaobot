@@ -222,6 +222,12 @@
                 > · open result</router-link>
               </dd>
             </div>
+            <div v-if="isCareSchedule(schedule.schedule_id) && schedule.last_run_chat_id" class="prop-row">
+              <dt>Outcome</dt>
+              <dd>
+                <CareRunOutcome :schedule-id="schedule.schedule_id" :chat-id="schedule.last_run_chat_id" />
+              </dd>
+            </div>
           </dl>
 
           <div v-else class="card-form">
@@ -738,6 +744,8 @@ import type { ScheduleUpdate } from '../stores/tasks'
 import { useProjectStore } from '../stores/projects'
 import type { RuntimeProvider, Schedule, ScheduleArchivePolicy } from '../lib/types'
 import NewScheduleForm from './NewScheduleForm.vue'
+import CareRunOutcome from './CareRunOutcome.vue'
+import { isCareSchedule } from '../lib/careRun'
 import PaneHeader from './PaneHeader.vue'
 import TitleRail from './TitleRail.vue'
 import ItemTitleRow from './ItemTitleRow.vue'
