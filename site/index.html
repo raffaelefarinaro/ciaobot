@@ -2,14 +2,15 @@
 <html lang="en">
 <head>
   <meta charset="utf-8">
+  <script>try{var t=localStorage.getItem("ciao-site-theme");if(t)document.documentElement.dataset.theme=t}catch(e){}</script>
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Your agents do the work. Ciaobot remembers.</title>
-  <meta name="description" content="A persistent workspace for Claude Code, Codex and OpenCode, with projects, files, automations and Markdown memory you own.">
+  <meta name="description" content="Claude Code, Codex and OpenCode do the work. Ciaobot gives them a place to work and turns it into memory you can read, check and correct. Open source, no telemetry.">
   <link rel="canonical" href="https://www.raffaelefarinaro.com/ciaobot/">
   <meta property="og:type" content="website">
   <meta property="og:site_name" content="Ciaobot">
   <meta property="og:title" content="Your agents do the work. Ciaobot remembers.">
-  <meta property="og:description" content="A persistent workspace for Claude Code, Codex and OpenCode, with projects, files, automations and Markdown memory you own.">
+  <meta property="og:description" content="Claude Code, Codex and OpenCode do the work. Ciaobot gives them a place to work and turns it into memory you can read, check and correct. Open source, no telemetry.">
   <meta property="og:url" content="https://www.raffaelefarinaro.com/ciaobot/">
   <meta property="og:image" content="https://www.raffaelefarinaro.com/ciaobot/assets/img/og.png">
   <meta property="og:image:type" content="image/png">
@@ -18,69 +19,198 @@
   <meta property="og:image:alt" content="Ciaobot — a personal assistant that remembers.">
   <meta name="twitter:card" content="summary_large_image">
   <meta name="twitter:title" content="Your agents do the work. Ciaobot remembers.">
-  <meta name="twitter:description" content="A persistent workspace for Claude Code, Codex and OpenCode, with projects, files, automations and Markdown memory you own.">
+  <meta name="twitter:description" content="Claude Code, Codex and OpenCode do the work. Ciaobot gives them a place to work and turns it into memory you can read, check and correct. Open source, no telemetry.">
   <meta name="twitter:image" content="https://www.raffaelefarinaro.com/ciaobot/assets/img/og.png">
   <link rel="icon" href="assets/img/favicon.png">
   <link rel="stylesheet" href="assets/style.css">
 </head>
-<body>
+<body class="home">
   <header class="site-header">
     <div class="inner">
-      <a class="brand" href="./" aria-label="Ciaobot home"><picture><source media="(prefers-color-scheme: light)" srcset="assets/img/ciaobot-wordmark.png"><img src="assets/img/ciaobot-wordmark-light.png" alt=""></picture></a>
-      <nav class="site-nav" aria-label="Main">
-        <a href="guide.html">Guide</a>
-        <a href="features.html">Features</a>
+      <a class="brand" href="./" aria-label="Ciaobot home"><img class="wm-on-dark" src="assets/img/ciaobot-wordmark-light.png" alt="" width="112" height="26" loading="lazy"><img class="wm-on-light" src="assets/img/ciaobot-wordmark-ink.png" alt="" width="112" height="26" loading="lazy"></a>
+      <nav class="site-nav" id="site-nav" aria-label="Main">
         <a href="memory.html">Memory</a>
-        <a href="trust.html">Trust</a>
+        <a href="features.html">Features</a>
         <a href="https://github.com/raffaelefarinaro/ciaobot">GitHub</a>
       </nav>
+      <button class="theme-toggle" type="button" data-theme-toggle aria-label="Switch colour theme"><svg width="20" height="20" viewBox="0 0 20 20" aria-hidden="true" focusable="false"><circle cx="10" cy="10" r="7" fill="none" stroke="currentColor" stroke-width="1.6"/><path d="M10 3a7 7 0 0 1 0 14z" fill="currentColor"/></svg></button>
+      <button class="menu-toggle" type="button" data-menu-toggle aria-controls="site-nav" aria-expanded="false" aria-label="Open menu"><svg width="20" height="20" viewBox="0 0 20 20" aria-hidden="true" focusable="false"><path d="M3 5.5h14M3 10h14M3 14.5h14" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/></svg></button>
     </div>
   </header>
 
   <main>
-    <section class="hero">
-      <div class="hero-copy">
-        <h1>Your agents do the work. <span>Ciaobot remembers.</span></h1>
-        <p class="lead">One persistent workspace for Claude Code, Codex and OpenCode—with projects, files, automations and memory in Markdown you own.</p>
-        <div class="install">
-          <a class="btn btn-primary install-client" data-mac-client href="https://github.com/raffaelefarinaro/ciaobot/releases/latest">Download Ciaobot for Mac</a>
-          <p class="install-note install-client-note">Apple silicon, macOS 13+. The app includes its own engine, or connects to an existing server.</p>
-          <div class="install-head">
-            <p class="install-label">Linux server (Ubuntu 24.04): install the engine with one command</p>
+    <div class="home-hero" data-ring-scroll>
+      <section class="home-stage" aria-labelledby="home-title">
+        <div class="home-copy">
+          <h1 id="home-title">Your agents do the work. <span>Ciaobot remembers.</span></h1>
+          <p class="home-agents">Works with <span class="rotator" data-rotator aria-hidden="true"><span class="is-on">Claude Code</span><span>Codex</span><span>OpenCode</span></span><span class="visually-hidden" data-rotator-text>Claude Code, Codex and OpenCode</span></p>
+          <p class="lead">Your agent does the thinking. Ciaobot gives it a place to work, and turns what you do together into memory you can read, check and correct.</p>
+          <div class="install">
+            <a class="btn btn-primary install-client" data-mac-client href="https://github.com/raffaelefarinaro/ciaobot/releases/latest">Download Ciaobot for Mac</a>
+            <p class="install-note install-client-note">Apple silicon, macOS 13+. The app includes its own engine. Running a Linux server instead? <a href="https://github.com/raffaelefarinaro/ciaobot/blob/main/docs/LINUX.md">Install the engine there</a>.</p>
           </div>
-          <div class="install-box">
-            <code id="install-cmd">curl -fsSL https://github.com/raffaelefarinaro/ciaobot/releases/latest/download/install.sh | sh</code>
-            <button type="button" data-copy="install-cmd" aria-label="Copy the install command">Copy</button>
-          </div>
-          <p class="install-note"><a href="https://github.com/raffaelefarinaro/ciaobot/blob/main/docs/LINUX.md">Read the Linux install guide</a></p>
+          <ul class="home-chips" aria-label="At a glance">
+            <li>Free and open source</li><li>No account, no telemetry</li>
+            <li class="gh" data-gh-stats hidden><a href="https://github.com/raffaelefarinaro/ciaobot"><span data-gh-stars></span> stars · <span data-gh-downloads></span> downloads</a></li>
+          </ul>
+        </div>
+        <div class="home-mark" aria-hidden="true">
+          <svg viewBox="260 250 720 720" focusable="false">
+            <g data-ring-spin>
+              <path d="M718.7 334.7A295 295 0 1 0 768.5 876.5" fill="none" stroke="currentColor" stroke-width="110" stroke-linecap="round"/>
+              <g fill="var(--primary)">
+                <path data-ring-a fill="none" stroke="var(--primary)" stroke-width="110" stroke-linecap="round"/>
+                <path data-ring-b fill="none" stroke="var(--primary)" stroke-width="110" stroke-linecap="round"/>
+                <circle data-dot-a cx="870" cy="346" r="91"/>
+                <circle data-dot-b cx="863" cy="800" r="56"/>
+              </g>
+            </g>
+          </svg>
+        </div>
+      </section>
+    </div>
+
+    <section class="home-section home-control" aria-labelledby="control-title">
+      <h2 id="control-title">Proactivity is hype. <span>Control is efficiency.</span></h2>
+      <p class="home-sub">Personal agents like OpenClaw and Hermes promise to act on their own. Ciaobot gives you the same agents with the steering wheel kept on your side.</p>
+      <div class="home-three">
+        <div><h3>You organise the work</h3><p>Workspaces for each part of your life, projects that carry their context, routines on the schedule you set. The agent works inside the structure you chose.</p></div>
+        <div><h3>You set how far it goes</h3><p>Each chat has a permission mode, from read-only plans to asking before every action. Unattended runs do only what needs no approval and report the rest.</p></div>
+        <div><h3>You can always look</h3><p>See what every chat and background job is doing, approve or refuse each card, and find every memory change in History with its reason.</p></div>
+      </div>
+    </section>
+
+    <section class="home-section" aria-labelledby="yours-title">
+      <h2 id="yours-title">We don't rebuild your agent. <span>We make it yours.</span></h2>
+      <p class="home-sub">Claude Code, Codex and OpenCode already know how to reason, write code and call tools. Ciaobot adds the part that turns a model into an assistant you can work with, and leaves the rest to them.</p>
+      <div class="home-four">
+        <div>
+          <h3>Your agent, with everything you set up</h3>
+          <p>Ciaobot drives the CLI you already signed in to, with <b>its own models, skills, plugins, subagents, MCP servers and connectors</b>. Nothing is re-implemented in between. Want one place for it all? Add skills, subagents and commands to Ciaobot once and every agent gets them.</p>
+          <a href="models.html">Agents and models <svg viewBox="0 0 20 20" width="18" height="18" aria-hidden="true" focusable="false"><path d="M4 10h12m-5-5 5 5-5 5" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg></a>
+        </div>
+        <div>
+          <h3>Memory you can check</h3>
+          <p>What a chat teaches lands as <b>Markdown notes you can open, correct or undo</b>. The Memory Map shows how they connect. Nothing happens that you cannot read.</p>
+          <a href="memory.html">How memory works <svg viewBox="0 0 20 20" width="18" height="18" aria-hidden="true" focusable="false"><path d="M4 10h12m-5-5 5 5-5 5" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg></a>
+        </div>
+        <div>
+          <h3>Better every week</h3>
+          <p>Once a day, at a time you choose, Ciaobot <b>tidies your memory</b>: it merges duplicates, retires what expired and flags notes that went stale. When the same correction keeps coming up, it <b>proposes a better skill</b>. You approve each change.</p>
+          <a href="memory.html#nightly">What the daily pass does <svg viewBox="0 0 20 20" width="18" height="18" aria-hidden="true" focusable="false"><path d="M4 10h12m-5-5 5 5-5 5" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg></a>
+        </div>
+        <div>
+          <h3>A place to work</h3>
+          <p><b>Workspace, project, chat.</b> Documents or code, with files beside the conversation and routines that run on a schedule, from your Mac or your phone.</p>
+          <div class="home-tree" aria-label="Example: the Work workspace holds the Client launch project, which holds the chat Draft the pricing email"><span>Work</span><span>└ Client launch</span><span class="leaf">└ Draft the pricing email</span></div>
         </div>
       </div>
-      <figure class="shot">
-        <video data-product-demo src="assets/img/archive.mp4" poster="assets/img/archive-poster.webp" width="1280" height="760" muted loop playsinline controls preload="metadata" aria-label="Ciaobot demo: send a message, receive an answer, then archive the chat to start memory insights"></video>
-        <figcaption>See a chat become lasting memory in 20 seconds.</figcaption>
+    </section>
+
+    <section class="home-section" id="remembers" aria-labelledby="remembers-title">
+      <h2 id="remembers-title">How it remembers</h2>
+      <p class="home-sub">No hidden database. When you archive a chat, its facts are filed into notes in your folder. Anything uncertain waits for you to decide.</p>
+      <div class="home-map">
+        <svg class="diagram" viewBox="0 0 1100 330" overflow="visible" role="img" aria-labelledby="loop-title loop-desc">
+          <title id="loop-title">The memory loop</title>
+          <desc id="loop-desc">You chat, then archive the chat. A memory pass files clear facts into your notes and holds uncertain ones in To decide. A daily pass tidies the notes, and your next chat loads them.</desc>
+          <rect class="box" x="0" y="60" width="180" height="84" rx="16"/><text x="90" y="109" text-anchor="middle" font-size="20" font-weight="700">Chat</text>
+          <rect class="box" x="250" y="60" width="180" height="84" rx="16"/><text x="340" y="109" text-anchor="middle" font-size="20" font-weight="700">Archive</text>
+          <rect class="box-solid" x="500" y="60" width="220" height="84" rx="16"/><text class="on-solid" x="610" y="109" text-anchor="middle" font-size="20" font-weight="700">Memory pass</text>
+          <rect class="box" x="830" y="0" width="230" height="84" rx="16"/><text x="945" y="49" text-anchor="middle" font-size="20" font-weight="700">Notes</text>
+          <rect class="box-pending" x="830" y="128" width="230" height="84" rx="16"/><text x="945" y="177" text-anchor="middle" font-size="20" font-weight="700">To decide</text>
+          <rect class="box" x="380" y="244" width="240" height="70" rx="16"/><text x="500" y="285" text-anchor="middle" font-size="20" font-weight="700">Daily tidy</text>
+          <path class="line" d="M180 102H250M430 102H500M720 92 830 42M1060 42H1090V279H620M380 279H90V144"/>
+          <path class="line pending" d="M720 112 830 170"/>
+          <text class="muted" x="340" y="174" text-anchor="middle" font-size="15">you archive</text>
+          <text class="muted" x="610" y="174" text-anchor="middle" font-size="15">runs in the background</text>
+          <text class="muted" x="236" y="268" text-anchor="middle" font-size="15">loaded in your next chat</text>
+        </svg>
+        <div class="home-legend">
+          <span><svg width="40" height="6" aria-hidden="true"><line x1="0" y1="3" x2="40" y2="3" stroke="currentColor" stroke-width="3"/></svg>written to your notes</span>
+          <span><svg width="40" height="6" aria-hidden="true"><line x1="0" y1="3" x2="40" y2="3" stroke="currentColor" stroke-width="3" stroke-dasharray="8 6"/></svg>waits for your yes</span>
+        </div>
+      </div>
+    </section>
+
+    <section class="home-section home-phone" aria-labelledby="phone-title">
+      <div class="home-phone-copy">
+        <h2 id="phone-title">Your assistant, <span>in your pocket.</span></h2>
+        <p class="home-sub">Your computer runs Ciaobot. Your phone opens it in the browser and adds it to the home screen, like any app. Same chats, same projects, same memory, nothing to sync.</p>
+        <ol class="home-phone-steps">
+          <li><span>Connect your phone and computer with Tailscale, a free private network.</span></li>
+          <li><span>Open Ciaobot's address in your phone's browser and sign in.</span></li>
+          <li><span>Tap <em>Share → Add to Home Screen</em> on iPhone, or <em>Install app</em> on Android.</span></li>
+        </ol>
+        <a href="remote.html">Use it from anywhere <svg viewBox="0 0 20 20" width="18" height="18" aria-hidden="true" focusable="false"><path d="M4 10h12m-5-5 5 5-5 5" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg></a>
+      </div>
+      <figure class="home-phone-frame">
+        <img class="on-light" src="assets/img/mobile-home.webp" alt="Ciaobot Home on a phone: a chat that needs you at the top, an unread reply, memory insights, and three memory proposals to review" width="780" height="1688" loading="lazy"><img class="on-dark" src="assets/img/mobile-home-dark.webp" alt="Ciaobot Home on a phone: a chat that needs you at the top, an unread reply, memory insights, and three memory proposals to review" width="780" height="1688" loading="lazy">
       </figure>
     </section>
 
-    <section class="essentials" aria-label="What Ciaobot adds">
-      <a href="models.html">
-        <h2>Use your agents <svg viewBox="0 0 20 20" width="20" height="20" aria-hidden="true" focusable="false"><path d="M4 10h12m-5-5 5 5-5 5" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg></h2>
-        <p>Claude Code, Codex and OpenCode, with the provider credentials you already have.</p>
-      </a>
-      <a href="features.html#organise">
-        <h2>Keep the context <svg viewBox="0 0 20 20" width="20" height="20" aria-hidden="true" focusable="false"><path d="M4 10h12m-5-5 5 5-5 5" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg></h2>
-        <p>Workspaces, projects, files and tasks stay connected to the work.</p>
-      </a>
-      <a href="memory.html">
-        <h2>Own the memory <svg viewBox="0 0 20 20" width="20" height="20" aria-hidden="true" focusable="false"><path d="M4 10h12m-5-5 5 5-5 5" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg></h2>
-        <p>Useful details become reviewable Markdown notes, not a locked-in database.</p>
-      </a>
+    <section class="home-section home-zero" aria-labelledby="zero-title">
+      <div>
+        <h2 id="zero-title">Zero <span>telemetry.</span></h2>
+        <p class="home-sub">Not opt-out. Not anonymous. None. We do not know you installed it, and this site runs no analytics either.</p>
+      </div>
+    </section>
+
+    <section class="home-section home-duo" aria-label="Work and portability">
+      <div>
+        <h2 id="work-title">Use it at work, <span>too.</span></h2>
+        <p class="home-sub">Ciaobot is a workspace and a few background jobs on top of the official CLIs: Claude Code, Codex and OpenCode. Your agent signs in with your company plan exactly as it does in a terminal, so using Ciaobot at work means the same sign-in, the same plan and the same terms your company already has. Ciaobot adds no account and no cloud of its own, and your files stay on your laptop or on a server your company runs.</p>
+        <ul class="home-points">
+          <li>Keep work and personal in separate workspaces, each with its own memory.</li>
+          <li>Run the engine on a company Linux server and open it from any device on your network.</li>
+          <li>Notes and archived chats are plain text files anyone can inspect.</li>
+        </ul>
+        <a href="remote.html">Run it on a server</a>
+      </div>
+      <div>
+        <h2 id="leave-title">Change your mind <span>later.</span></h2>
+        <p class="home-sub">The second brain Ciaobot builds is a folder of plain Markdown files, not tied to Ciaobot in any way. It works with any agent, any app, or any human. When better software comes along tomorrow, point it at the same folder and carry on.</p>
+        <div class="home-files" aria-label="Example of a Ciaobot workspace folder">
+          <span>~/Ciaobot/</span>
+          <span class="d1">AGENTS.md</span>
+          <span class="d1">work/</span>
+          <span class="d2">projects/client-launch.md</span>
+          <span class="d2">people/anna.md</span>
+          <span class="d1">personal/</span>
+          <span class="d2">places/seville.md</span>
+        </div>
+        <p class="home-opens">Opens in Obsidian, VS Code, Claude Code, Codex, OpenCode or any text editor. Uninstall Ciaobot and every file stays where it is.</p>
+      </div>
+    </section>
+
+    <section class="home-section" aria-labelledby="hand-title">
+      <h2 id="hand-title">Things to hand it</h2>
+      <ul class="home-uses">
+        <li><span class="kind">Routine</span><q>Every weekday at 8, read my inbox and draft what needs a reply.</q><p>An automation starts a chat on schedule, with the project's context already loaded.</p></li>
+        <li><span class="kind">From your phone</span><q>Pick up the venue search where we left it.</q><p>Open the same chat on your phone. The project remembers the shortlist.</p></li>
+        <li><span class="kind">Memory</span><q>What did we decide about the Rome trip last month?</q><p>It searches your notes, reads the right one, and says so when the notes do not know.</p></li>
+      </ul>
+    </section>
+
+    <section class="home-section home-oss" aria-labelledby="oss-title">
+      <div class="home-oss-head">
+        <div>
+          <h2 id="oss-title">Open source. <span>Make it yours.</span></h2>
+          <p class="home-sub">Every line is on GitHub under the MIT License. Read how it works, help build it, or take it in your own direction.</p>
+        </div>
+        <p class="home-oss-links"><a class="btn btn-primary" href="https://github.com/raffaelefarinaro/ciaobot">Star on GitHub</a> <a class="btn" href="https://github.com/raffaelefarinaro/ciaobot/issues/new">Ask for a change</a></p>
+      </div>
+      <div class="home-three">
+        <div><h3>Ask for changes</h3><p>Missing something, or found a bug? Open an issue and say what you need. Ideas from people using it every day shape what comes next.</p></div>
+        <div><h3>Help build it</h3><p>Pull requests are welcome, from a typo in the docs to a new feature. The repository has the architecture notes and the tests to get you going.</p></div>
+        <div><h3>Fork it</h3><p>Want it to work differently? Fork it and make it your own. The license lets you change, ship and keep it.</p></div>
+      </div>
     </section>
 
     <section id="answers" aria-label="Straight answers">
       <div class="narrow">
-        <p class="eyebrow">Before you install</p>
         <h2>Straight answers</h2>
-        <p>The six questions people ask before installing Ciaobot.</p>
+        <p class="home-sub">The questions people ask most.</p>
 
         <details class="guide-details">
           <summary>Does it cost extra?</summary>
@@ -93,7 +223,7 @@
         <details class="guide-details">
           <summary>Where does my data go?</summary>
           <div class="details-body">
-            <p>Notes, chats and memory stay in the folder you picked, as plain files. A chat turn sends the message and the context it needs to the model provider you chose. Beyond that, the only traffic is an update check to GitHub and the integrations you connect: Google, a webhook trigger, a backup repository. <a href="trust.html#leaves">What leaves the machine, in detail →</a></p>
+            <p>Notes, chats and memory stay in the folder you picked, as plain files. A chat turn sends the message and the context it needs to the model provider you chose. Beyond that, the only traffic is an update check to GitHub and the integrations you connect: Google, a webhook trigger, a backup repository.</p>
           </div>
         </details>
 
@@ -106,10 +236,18 @@
         </details>
 
         <details class="guide-details">
+          <summary>Is Windows supported?</summary>
+          <div class="details-body">
+            <p>Not as a host, for now. Ciaobot 2.0 drops Windows to focus on making the core system solid on macOS and Linux first. Windows is back on the <a href="features.html#roadmap">roadmap</a> for when there is time to do it properly.</p>
+            <p>You can still use it from a Windows computer: run Ciaobot on a Mac or a Linux server and open it in your browser.</p>
+          </div>
+        </details>
+
+        <details class="guide-details">
           <summary>Can I use my existing notes?</summary>
           <div class="details-body">
             <p>Yes. Point the installer at the folder with <code>--workspace</code>, or choose it during setup. Existing notes are left where they are: the first chat inventories the folder and re-files only what it can classify clearly, leaving anything ambiguous in place, and it does not delete or overwrite existing files.</p>
-            <p>Two caveats matter: keep the folder out of iCloud Drive, Dropbox, Google Drive and OneDrive, because sync conflicts damage files and Git history; and if the folder already sits in a Git repository, that repository's history covers it too. <a href="guide.html#before-you-start">Before you start →</a></p>
+            <p>Two caveats matter: keep the folder out of iCloud Drive, Dropbox, Google Drive and OneDrive, because sync conflicts damage files and Git history; and if the folder already sits in a Git repository, that repository's history covers it too.</p>
           </div>
         </details>
 
@@ -117,7 +255,7 @@
           <summary>What happens if I stop using it?</summary>
           <div class="details-body">
             <p>You keep the folder. Notes are Markdown, archived chats are readable copies, and the Git history stays with them. Uninstall the app and your files are untouched; open them in Obsidian or any editor, or hand the folder to another agent.</p>
-            <p>What you lose is the part that was Ciaobot: the review queue, the nightly pass, the search index and the schedules. The index is rebuilt from your files whenever it is needed, so it is the cheapest thing to lose.</p>
+            <p>What you lose is the part that was Ciaobot: the review queue, the daily pass, the search index and the schedules. The index is rebuilt from your files whenever it is needed, so it is the cheapest thing to lose.</p>
           </div>
         </details>
 
@@ -128,17 +266,25 @@
             <p>That reduces the damage of a wrong answer; it does not remove it. In our November 2026 run the best model passed 56 of 63 task runs, and the memory comparison found that reading the note beats reading the snippet. <a href="evals.html#care">The evaluation page says what those numbers cannot establish →</a></p>
           </div>
         </details>
+        <details class="guide-details" id="password">
+          <summary>I forgot my password. How do I sign in?</summary>
+          <div class="details-body">
+            <p>On the computer running Ciaobot, open <code>http://localhost:8443</code> and choose <strong>Sign in on this computer</strong>. Then set a new password in <strong>Settings → Access &amp; devices → PWA password</strong>.</p>
+            <p>You can also read <code>PWA_AUTH_TOKEN=</code> in the workspace's <code>.env</code> file (by default <code>~/Ciaobot/.env</code>), or run <code>ciao setup-url --workspace ~/Ciaobot</code> on that computer for a one-time sign-in link.</p>
+          </div>
+        </details>
       </div>
     </section>
   </main>
 
   <footer class="site-footer">
     <div class="inner">
-      <span>Ciaobot is open source.</span>
-      <span>Last updated 11 November 2026</span>
+      <span>Ciaobot is open source under the MIT License. No telemetry, and this site runs no analytics.</span>
+      <span>Last updated 21 November 2026</span>
       <span><a href="https://github.com/raffaelefarinaro/ciaobot">GitHub</a> · <a href="https://github.com/raffaelefarinaro/ciaobot/releases">Release notes</a> · <a href="https://github.com/raffaelefarinaro/ciaobot/issues">Report an issue</a></span>
     </div>
   </footer>
-  <script src="assets/site.js" defer></script>
+
+  <script src="assets/site.js"></script>
 </body>
 </html>
