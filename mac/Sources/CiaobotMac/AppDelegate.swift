@@ -485,8 +485,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             // One feed pair per saved host. The active host's entry uses the
             // session's own store; every other host uses its snapshot-verified
             // saved sign-in, and a remote host without one is never contacted.
+            // The fleet and the Servers rows read the same saved list.
+            let savedHosts = UserDefaultsHostListStore(lastServer: UserDefaultsLastServerStore())
             let fleet = HostFleetModel(
-                hosts: UserDefaultsHostListStore(lastServer: UserDefaultsLastServerStore()),
+                hosts: savedHosts,
                 status: session,
                 signIn: .live
             )
@@ -504,7 +506,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 changeHost: ConnectionMenuActions.changeConnectedHost(present: present),
                 updates: updater,
                 engineSupervisor: supervisor,
-                localEngineMode: mode == .local
+                localEngineMode: mode == .local,
+                hosts: savedHosts,
+                localEngineAvailable: ConnectionView.canRunLocalEngine(
+                    hostIsArm64: EngineSupervisor.hostIsArm64,
+                    hasEngine: supervisor?.hasEngine == true
+                ),
+                serverSwitch: ConnectionMenuActions.switchServer(present: present)
             )
         }
         controller.start()

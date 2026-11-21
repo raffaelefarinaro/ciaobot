@@ -466,6 +466,151 @@ final class LocalEngineWiringTests: XCTestCase {
         return store
     }
 
+    // MARK: Tray switch (probe-first)
+
+    private final class SwitchNoErasing: WebsiteDataStoreErasing {
+        func remove(identifier: UUID, completion: @escaping (Error?) -> Void) { completion(nil) }
+    }
+
+    /// A probe that records what happened before it answered, so a test can see
+    /// whether the engine had already stopped at the moment of the check.
+    private final class ObservingProbe: ProbeChecking {
+        let answer: Bool
+        let onCheck: () -> Void
+        init(answer: Bool, onCheck: @escaping () -> Void) {
+            self.answer = answer
+            self.onCheck = onCheck
+        }
+        func check(_ origin: Origin, completion: @escaping (Bool) -> Void) {
+            onCheck()
+            completion(answer)
+        }
+    }
+
+    private func switchView(
+        probe: ProbeChecking,
+        session: AppSessionStatus,
+        supervisor: EngineSupervisor?,
+        store: TransientEngineModeStore,
+        takeover: EngineTakeover? = nil,
+        engineMode: EngineMode,
+        hostIsArm64: Bool = true,
+        dialog: @escaping (EngineLifecycle.ModeSwitchDialog) -> Bool
+    ) throws -> ConnectionView {
+        let registry = try makeTempDirectory("switch-registry").appendingPathComponent("registry.json")
+        return ConnectionView(
+            probe: probe,
+            signIn: SessionSignIn(
+                registry: SessionStoreRegistry(fileURL: registry),
+                eraser: SwitchNoErasing(),
+                persistentAvailable: false
+            ),
+            session: session, lastServer: lastServer, hostStore: hostStore,
+            supervisor: supervisor, takeover: takeover, engineMode: engineMode, modeStore: store,
+            modeSwitchDialog: dialog, hostIsArm64: hostIsArm64)
+    }
+
+    /// A running local engine (its spawn is counted) and a connected session on
+    /// its loopback origin, as the running-origin watcher leaves them.
+    private func runningLocal() throws -> (EngineSupervisor, CountingEngineProcesses, AppSessionStatus) {
+        let home = try makeTempDirectory("switch-local")
+        let processes = CountingEngineProcesses()
+        let supervisor = EngineSupervisor(
+            engine: BundledEngine(root: home.appendingPathComponent("engine")),
+            home: EngineHome(home: home),
+            processes: processes,
+            identity: StubIdentity(),
+            environment: ["PATH": "/usr/bin"]
+        )
+        supervisor.start()
+        let session = AppSessionStatus()
+        session.reportConnected(try XCTUnwrap(Origin("http://127.0.0.1:9000")))
+        return (supervisor, processes, session)
+    }
+
+    /// Leaving local mode for a host that does not answer: the mode, the engine
+    /// and the session stay as they were, the confirmation is asked once, and the
+    /// reason is shown on the screen.
+    func testAFailedProbeFromLocalChangesNothingAndAsksOnce() throws {
+        let (supervisor, processes, session) = try runningLocal()
+        let store = savedLocal()
+        let remote = try XCTUnwrap(Origin("https://vps.example:8443"))
+        let probe = StubProbe(responds: false)
+        var asked = 0
+        let view = try switchView(probe: probe, session: session, supervisor: supervisor, store: store,
+                                  engineMode: .local) { _ in asked += 1; return true }
+
+        view.switchServer(to: .host(remote))
+
+        XCTAssertEqual(asked, 1, "The confirmation is asked exactly once")
+        XCTAssertEqual(probe.checked, [remote])
+        XCTAssertEqual(store.mode, .local, "A host that does not answer keeps local mode")
+        XCTAssertEqual(processes.terminated, [], "The engine is not stopped")
+        XCTAssertEqual(session.currentOrigin?.canonicalKey, "http://127.0.0.1:9000", "The session is intact")
+        XCTAssertNil(lastServer.savedOrigin, "A refused host is never remembered")
+    }
+
+    /// Only an answering host stops the engine, and the stop comes after the
+    /// probe: the engine is still running while the check is made.
+    func testASuccessfulProbeFromLocalStopsTheEngineOnceAfterTheAnswer() throws {
+        let (supervisor, processes, session) = try runningLocal()
+        let store = savedLocal()
+        let remote = try XCTUnwrap(Origin("https://vps.example:8443"))
+        var terminatedWhenChecked: Int?
+        let probe = ObservingProbe(answer: true) {
+            terminatedWhenChecked = processes.terminated.count
+        }
+        var asked = 0
+        let view = try switchView(probe: probe, session: session, supervisor: supervisor, store: store,
+                                  engineMode: .local) { _ in asked += 1; return true }
+
+        view.switchServer(to: .host(remote))
+
+        XCTAssertEqual(asked, 1)
+        XCTAssertEqual(terminatedWhenChecked, 0, "The engine keeps running while the host is probed")
+        XCTAssertEqual(processes.terminated.count, 1, "The engine stops once, after the answer")
+        XCTAssertEqual(store.mode, .external)
+        XCTAssertEqual(session.currentOrigin?.canonicalKey, remote.canonicalKey)
+    }
+
+    /// The This Mac row starts the takeover check exactly once, through the same
+    /// path as the button, and never asks the leave-local confirmation.
+    func testTheThisMacRowStartsTheTakeoverOnceAndAsksNothing() throws {
+        let fixture = try takeoverFixture("tray-this-mac", plan: Self.planJSON(action: "notNeeded"))
+        let store = TransientEngineModeStore()
+        store.mode = .external
+        var asked = 0
+        let session = AppSessionStatus()
+        let view = try switchView(probe: StubProbe(responds: true), session: session,
+                                  supervisor: fixture.supervisor, store: store,
+                                  takeover: fixture.takeover, engineMode: .external) { _ in
+            asked += 1
+            return true
+        }
+
+        view.switchServer(to: .thisMac)
+
+        XCTAssertEqual(fixture.takeover.generation, 1, "startLocal ran exactly once")
+        XCTAssertEqual(store.mode, .local)
+        XCTAssertEqual(asked, 0, "Entering local mode asks nothing")
+    }
+
+    /// A host switch from external mode never shows the leave-local dialog.
+    func testAnExternalHostSwitchNeverAsksForTheConfirmation() throws {
+        let store = TransientEngineModeStore()
+        store.mode = .external
+        let remote = try XCTUnwrap(Origin("https://vps.example:8443"))
+        let probe = StubProbe(responds: true)
+        var asked = 0
+        let view = try switchView(probe: probe, session: AppSessionStatus(), supervisor: nil,
+                                  store: store, engineMode: .external) { _ in asked += 1; return true }
+
+        view.switchServer(to: .host(remote))
+
+        XCTAssertEqual(asked, 0)
+        XCTAssertEqual(probe.checked, [remote])
+    }
+
     func testLaterKeepsTheSavedLocalChoice() throws {
         let store = savedLocal()
         try localView(store: store).applyTakeover(.deferred(origin: nil))
