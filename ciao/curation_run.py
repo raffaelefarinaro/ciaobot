@@ -48,7 +48,10 @@ from dataclasses import dataclass, field, replace
 from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 from collections.abc import Callable
-from typing import Any, Iterator
+from typing import TYPE_CHECKING, Any, Iterator
+
+if TYPE_CHECKING:
+    from ciao.curation_cycle import CycleState
 
 from ciao import curation_logs, decision_rules, skill_proposals
 from ciao.entity_types import EntityTypeRegistry
@@ -68,6 +71,7 @@ LEARNINGS_RELATIVE = "Workspace/Learnings.md"
 SKILL_PROPOSALS_RELATIVE = "/".join(skill_proposals.QUEUE_REL)
 
 STATE_VERSION = 1
+_CYCLE_MARKER_REFUSAL = "the weekly marker transition for a cycle state is not available in this release"
 
 # The skill's own thresholds, restated once in code so the agent no longer has
 # to evaluate them. Changing one here changes it for every workspace; the skill
@@ -1948,8 +1952,13 @@ class CurationState:
     done_keys: dict[str, str] = field(default_factory=dict)
     lease: dict[str, Any] = field(default_factory=dict)
     last_run: dict[str, Any] = field(default_factory=dict)
+    # Set only when the file is a v2 cycle document: the facade fields above are
+    # then derived from it, and the write goes back through the cycle codec.
+    cycle: CycleState | None = None
 
     def as_dict(self) -> dict[str, Any]:
+        if self.cycle is not None:
+            raise RuntimeError("a cycle state is written by the cycle codec, not as_dict")
         return {
             "version": STATE_VERSION,
             "done_keys": dict(self.done_keys),
@@ -2031,6 +2040,8 @@ def _load(path: Path) -> CurationState:
         raise _state_error(path, "invalid JSON state document") from None
     if not isinstance(raw, dict):
         raise _state_error(path, "state document must be an object")
+    if type(raw.get("version")) is int and raw["version"] == 2:
+        return _load_cycle(path, text)
     if set(raw) != {"version", "done_keys", "lease", "last_run"}:
         raise _state_error(path, "state document has missing or unknown fields")
     if type(raw["version"]) is not int or raw["version"] != STATE_VERSION:
@@ -2076,7 +2087,117 @@ def _load(path: Path) -> CurationState:
     )
 
 
+def _load_cycle(path: Path, text: str) -> CurationState:
+    """A v2 cycle document, read through the v1 consumers' facade.
+
+    ``done_keys`` is the union of the daily, optional and required evidence.
+    ``legacy_historical`` is history and never counts as done.
+    """
+    from ciao import curation_cycle
+
+    try:
+        cycle = curation_cycle.decode_state(text)
+    except curation_cycle.CycleError:
+        raise _state_error(path, "invalid cycle document") from None
+    return CurationState(
+        done_keys={**cycle.daily, **cycle.optional, **cycle.required},
+        lease=dict(cycle.lease),
+        last_run=dict(cycle.last_run),
+        cycle=cycle,
+    )
+
+
+def _fold_done(done_keys: dict[str, str]) -> tuple[dict[str, str], dict[str, str], dict[str, str]]:
+    """Route each done key to the cycle map its class belongs to: required, optional or daily."""
+    from ciao.curation_cycle import is_weekly_key
+
+    required: dict[str, str] = {}
+    optional: dict[str, str] = {}
+    daily: dict[str, str] = {}
+    for key, stamp in done_keys.items():
+        if key in REQUIRED_HYGIENE_KEYS:
+            required[key] = stamp
+        elif is_weekly_key(key):
+            optional[key] = stamp
+        else:
+            daily[key] = stamp
+    return required, optional, daily
+
+
+def _store_cycle(path: Path, state: CurationState, cycle: CycleState) -> None:
+    from ciao import curation_cycle
+
+    required, optional, daily = _fold_done(state.done_keys)
+    try:
+        text = curation_cycle.encode_state(
+            replace(
+                cycle,
+                required=required,
+                optional=optional,
+                daily=daily,
+                lease=dict(state.lease),
+                last_run=dict(state.last_run),
+            )
+        )
+    except curation_cycle.CycleError as exc:
+        raise CurationStateError(f"cannot write the cycle state: {exc}") from None
+    _publish_bytes(path, text.encode("utf-8"))
+
+
+def _fsync_directory(path: Path) -> None:
+    """Make a rename or create in ``path`` durable where the platform allows it. Best effort."""
+    try:
+        fd = os.open(path, os.O_RDONLY)
+    except OSError:
+        return
+    try:
+        os.fsync(fd)
+    except OSError:
+        pass
+    finally:
+        os.close(fd)
+
+
+def _publish_bytes(path: Path, data: bytes) -> None:
+    """Replace the state file with ``data``: a fresh fsynced temporary sibling, then one rename.
+
+    A stale temporary is removed first, and the new one is created exclusively
+    without following links, so nothing planted at that name is written through.
+    Only a temporary this call created is removed on failure.
+    """
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_name(f".{path.name}.write.tmp")
+    created = False
+    try:
+        try:
+            os.unlink(tmp)
+        except FileNotFoundError:
+            pass
+        fd = os.open(
+            tmp,
+            os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0),
+            0o600,
+        )
+        created = True
+        with os.fdopen(fd, "wb") as handle:
+            handle.write(data)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(tmp, path)
+    except BaseException:
+        if created:
+            try:
+                os.unlink(tmp)
+            except OSError:
+                pass
+        raise
+    _fsync_directory(path.parent)
+
+
 def _store(path: Path, state: CurationState) -> None:
+    if state.cycle is not None:
+        _store_cycle(path, state, state.cycle)
+        return
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_name(f".{path.name}.write.tmp")
     tmp.write_text(json.dumps(state.as_dict(), ensure_ascii=False, indent=2) + "\n", encoding="utf-8", newline="")
@@ -2453,6 +2574,8 @@ def end_run(
                     raise CurationBusy("the curation lease expired before the marker was written")
 
             try:
+                if state.cycle is not None:
+                    raise CurationStateError(_CYCLE_MARKER_REFUSAL)
                 _write_full_pass_marker(
                     Path(vault_root),
                     today=today or effective_now.astimezone(UTC).date(),
@@ -2504,6 +2627,8 @@ def advance_full_pass(
     marker only after it has confirmed the caller still holds the lease.
     """
     with _state_lock(Path(vault_root)):
+        if _load(state_path(Path(vault_root))).cycle is not None:
+            raise CurationStateError(_CYCLE_MARKER_REFUSAL)
         if not _hygiene_complete_unlocked(Path(vault_root)):
             return False
         _write_full_pass_marker(Path(vault_root), today=today)
@@ -2543,3 +2668,260 @@ def _write_full_pass_marker(
         curation_logs.publish_log(log, result, snapshot=snapshot)
     except curation_logs.CurationLogError as exc:
         raise CurationStateError(str(exc)) from None
+
+
+# ── v1 to v2 migration (operator-run, #3061 B1) ───────────────────────────
+
+CYCLE_BACKUP_RELATIVE = "Workspace/Curation-State.v1.bak"
+_BACKUP_EXISTS = (
+    f"The migration backup {CYCLE_BACKUP_RELATIVE} already exists and is never overwritten. If an earlier --apply "
+    "failed, check that Workspace/Curation-State.json still holds the v1 state, then delete the "
+    ".bak by hand and run the dry run again."
+)
+
+
+class CurationMigrationRefused(CurationStateError):
+    """A v1 to v2 migration was refused and nothing was written. ``blockers`` says why."""
+
+    def __init__(self, blockers: list[str]) -> None:
+        self.blockers = list(blockers)
+        super().__init__("; ".join(self.blockers) or "migration refused")
+
+
+@dataclass(frozen=True)
+class _MigrationPreview:
+    report: dict[str, Any]
+    vault: Path | None
+    state_bytes: bytes | None
+    cycle_text: str | None
+
+
+def _read_state_bytes(path: Path) -> bytes | None:
+    """The exact state bytes, or None for a reliably absent file. Classified as ``_load`` does."""
+    try:
+        return path.read_bytes()
+    except FileNotFoundError:
+        if _is_reliably_absent(path):
+            return None
+        raise _state_error(path, "state entry is not readable") from None
+    except OSError:
+        raise _state_error(path, "state file cannot be read") from None
+
+
+def _state_location_refusal(vault: Path) -> None:
+    """Refuse a state file reached through a link, which the migration never follows."""
+    workspace = vault / "Workspace"
+    if os.path.realpath(workspace) != str(workspace):
+        raise _state_error(state_path(vault), "the workspace directory is a link or alias")
+    try:
+        entry = os.lstat(state_path(vault))
+    except FileNotFoundError:
+        return
+    except OSError:
+        raise _state_error(state_path(vault), "state entry cannot be inspected") from None
+    if stat.S_ISLNK(entry.st_mode):
+        raise _state_error(state_path(vault), "the state file is a symlink")
+
+
+def _marker_stamp(data: bytes | None) -> str:
+    """The advisory marker date, classified as ``read_last_full_pass`` classifies it."""
+    if data is None:
+        return ""
+    try:
+        text = data.decode("utf-8")
+    except UnicodeDecodeError:
+        return ""
+    stamp = curation_logs.marker_value(text)
+    try:
+        date.fromisoformat(stamp)
+    except ValueError:
+        return ""
+    return stamp
+
+
+def _migration_preview(vault_root: Path, *, today: date | None) -> _MigrationPreview:
+    """Everything a migration would do, computed without writing. The caller holds the state lock."""
+    from ciao import curation_cycle
+
+    day = today or datetime.now(UTC).date()
+    blockers: list[str] = []
+    vault: Path | None = None
+    state_bytes: bytes | None = None
+    v1: CurationState | None = None
+    log_bytes: bytes | None = None
+    marker_state = "absent"
+    status = "absent"
+    stamp = ""
+    plan: curation_cycle.MigrationPlan | None = None
+    cycle_text: str | None = None
+    live: dict[str, Any] | None = None
+    backup = Path(vault_root) / CYCLE_BACKUP_RELATIVE
+
+    try:
+        vault = curation_logs.canonical_vault(Path(vault_root))
+        backup = vault / CYCLE_BACKUP_RELATIVE
+        _state_location_refusal(vault)
+        state_bytes = _read_state_bytes(state_path(vault))
+    except (curation_logs.CurationLogError, CurationStateError) as exc:
+        status = "unreadable"
+        blockers.append(f"the curation state cannot be read safely: {exc}")
+        state_bytes = None
+        vault = None
+
+    if vault is not None and state_bytes is not None:
+        try:
+            v1 = _load(state_path(vault))
+            status = "v2" if v1.cycle is not None else "v1"
+        except CurationStateError as exc:
+            status = "unreadable"
+            blockers.append(f"the v1 state cannot be read safely: {exc}")
+    if status == "v2":
+        blockers.append("the curation state is already a v2 cycle document; there is nothing to migrate")
+    elif state_bytes is None and status != "unreadable":
+        blockers.append("there is no curation state file to migrate; nothing is invented")
+
+    if vault is not None:
+        log_path = vault / CURATION_LOG_RELATIVE
+        try:
+            curation_logs.refuse_identity_overlap(
+                log_path, _other_curation_files(vault, LOG_SELECTORS["curation"])
+            )
+            log_bytes = curation_logs.read_log(log_path).data
+            marker_state = "absent" if log_bytes is None else "present"
+            stamp = _marker_stamp(log_bytes)
+            curation_cycle.expected_target(log_bytes, day.isoformat())
+        except (curation_logs.CurationLogError, curation_cycle.CycleError) as exc:
+            marker_state = "unreadable"
+            blockers.append(f"the curation log cannot serve as the weekly marker: {exc}")
+
+    if v1 is not None and v1.lease:
+        live_lease = _live_lease(v1, datetime.now(UTC))
+        if live_lease is not None:
+            live = {key: live_lease[key] for key in ("holder", "started_at", "expires_at") if key in live_lease}
+            blockers.append("a live curation lease holds this vault; wait for the run to finish or expire")
+
+    if v1 is not None and status == "v1" and marker_state != "unreadable":
+        try:
+            plan = curation_cycle.plan_migration(
+                replace(v1, lease={}),
+                last_full_pass=stamp,
+                prior_marker=curation_cycle.marker_identity_of(log_bytes),
+                today=day,
+            )
+            cycle_text = curation_cycle.encode_state(plan.state)
+        except curation_cycle.CycleError as exc:
+            plan = None
+            cycle_text = None
+            blockers.append(f"the v1 state cannot be migrated: {exc}")
+
+    try:
+        os.lstat(backup)
+    except FileNotFoundError:
+        pass
+    except OSError:
+        blockers.append("the backup path cannot be inspected")
+    else:
+        blockers.append(_BACKUP_EXISTS)
+
+    digest = hashlib.sha256()
+    digest.update(b"state:" + (b"absent" if state_bytes is None else b"present") + b"\0")
+    digest.update(state_bytes or b"")
+    digest.update(b"\0marker:" + _marker_token(marker_state, log_bytes).encode("ascii"))
+    digest.update(b"\0today:" + day.isoformat().encode("ascii"))
+
+    report: dict[str, Any] = {
+        "status": status,
+        "live_lease": live,
+        "marker": marker_state,
+        "last_full_pass": stamp,
+        "daily": len(plan.state.daily) if plan is not None else 0,
+        "weekly_historical": len(plan.state.legacy_historical) if plan is not None else 0,
+        "ambiguous": list(plan.ambiguous) if plan is not None else [],
+        "dropped": list(plan.dropped) if plan is not None else [],
+        "backup_path": str(backup),
+        "digest": digest.hexdigest(),
+        "blockers": blockers,
+    }
+    return _MigrationPreview(report=report, vault=vault, state_bytes=state_bytes, cycle_text=cycle_text)
+
+
+def _marker_token(marker_state: str, log_bytes: bytes | None) -> str:
+    if marker_state == "present" and log_bytes is not None:
+        return "present:" + hashlib.sha256(log_bytes).hexdigest()
+    return marker_state
+
+
+def migration_report(vault_root: Path, *, today: date | None = None) -> dict[str, Any]:
+    """What migrating the v1 state would do. Read-only: it writes no file.
+
+    ``blockers`` lists every plain-English reason the migration would refuse;
+    an empty list means it is applicable. ``digest`` identifies the exact state
+    and marker bytes previewed, so :func:`migrate_state_to_cycle` can prove the
+    vault has not changed since.
+    """
+    with _state_lock(Path(vault_root)):
+        return _migration_preview(Path(vault_root), today=today).report
+
+
+def _write_backup(path: Path, data: bytes) -> None:
+    """Create the backup exclusively, private, and durable before the state is replaced."""
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
+    try:
+        fd = os.open(path, flags, 0o600)
+    except FileExistsError:
+        raise CurationMigrationRefused([_BACKUP_EXISTS]) from None
+    except OSError:
+        raise CurationStateError("the migration backup cannot be created") from None
+    try:
+        with os.fdopen(fd, "wb") as handle:
+            handle.write(data)
+            handle.flush()
+            os.fsync(handle.fileno())
+    except OSError:
+        raise CurationStateError(
+            f"the migration backup could not be written; delete {CYCLE_BACKUP_RELATIVE} by hand "
+            "after checking the state file is still v1, then run the dry run again"
+        ) from None
+    _fsync_directory(path.parent)
+
+
+def migrate_state_to_cycle(
+    vault_root: Path,
+    *,
+    confirm_quiesced: bool,
+    expected_digest: str,
+    today: date | None = None,
+) -> dict[str, Any]:
+    """Move a quiescent v1 curation state to the v2 cycle document, under the state lock.
+
+    Refuses, writing nothing, unless ``confirm_quiesced`` is literally True, the
+    digest matches a fresh preview, and the preview has no blockers. The exact
+    v1 bytes are copied to ``Workspace/Curation-State.v1.bak`` before the state is
+    replaced; that backup is never overwritten or deleted by code.
+    """
+    if confirm_quiesced is not True:
+        raise CurationMigrationRefused(["the operator must confirm the engine is quiesced"])
+    if not isinstance(expected_digest, str) or not expected_digest:
+        raise CurationMigrationRefused(["a digest from a fresh dry run is required"])
+    root = Path(vault_root)
+    with _state_lock(root):
+        preview = _migration_preview(root, today=today)
+        report = preview.report
+        if report["blockers"]:
+            raise CurationMigrationRefused(list(report["blockers"]))
+        if expected_digest != report["digest"]:
+            raise CurationMigrationRefused(
+                ["the vault changed since the dry run (digest mismatch); run the dry run again"]
+            )
+        if preview.vault is None or preview.state_bytes is None or preview.cycle_text is None:
+            raise CurationMigrationRefused(["the migration preview is incomplete; nothing was written"])
+        _write_backup(Path(report["backup_path"]), preview.state_bytes)
+        try:
+            _publish_bytes(state_path(preview.vault), preview.cycle_text.encode("utf-8"))
+        except OSError:
+            raise CurationStateError(
+                "the v2 state could not be published after the backup was written; the state file "
+                "was not replaced. Check Workspace/Curation-State.json still holds the v1 state, then "
+                f"delete {CYCLE_BACKUP_RELATIVE} by hand before any retry"
+            ) from None
+    return {**report, "status": "migrated"}
