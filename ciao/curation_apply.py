@@ -50,6 +50,7 @@ from ciao.curation_run import (
     active_lease,
     authorize_holder,
     item_key,
+    load_state,
     record_done,
 )
 from ciao.fact_candidates import external_anchor
@@ -540,6 +541,8 @@ def _settle_queue(
                     operation_id=intent.operation_id,
                     run_id=intent.holder,
                     item_key=intent.item_key,
+                    proposal_id=intent.proposal_id,
+                    proposal_source=entry.bullet.source,
                 ) as receipt:
                     removed = remove_proposal_by_substring(queue, needle)
             except QueueReceiptUnavailable:
@@ -590,13 +593,15 @@ def apply_memory_accept(intent: ManagedMemoryAcceptIntent, *, vault_root: Path) 
     bullet: ProposalBullet
     queue_receipt_id = ""
     if guide_receipt_id or queue_rows:
-        # Resuming: the guide write (or the queue removal) already landed. The
-        # queue settlement below re-checks handover and authority before it moves.
+        # Resuming: the guide write (or the queue removal) already landed, so the
+        # settlement below is not repeated. The decision write is the authority
+        # check on this path: it holds the queue and state locks.
         outcome: Literal["written", "duplicate"] = "written" if guide_receipt_id else "duplicate"
         if queue_rows:
             bullet = ProposalBullet(
                 kind=str(queue_rows[0].get("proposal_kind", "")),
                 text=str(queue_rows[0].get("removed_text", "")),
+                source=str(queue_rows[0].get("proposal_source", "")),
             )
             queue_receipt_id = str(queue_rows[0]["id"])
     else:
@@ -621,23 +626,35 @@ def apply_memory_accept(intent: ManagedMemoryAcceptIntent, *, vault_root: Path) 
     if _entries_for(queue, intent.workspace, intent.proposal_id):
         return PartialConflict(guide_receipt_id) if guide_receipt_id else Failed(FAILED_VERIFY)
 
+    # The decision is written under the queue lock, then the state lock (the
+    # lock order), with the lease checked at write time. A concurrent retry that
+    # passed the first check is caught by the re-read under the lock.
+    recorded = False
+    prior_receipt: str | None = None
     try:
-        with queue_lock(queue):
-            recorded = record_promotion(
-                queue,
-                text=bullet.text,
-                kind=bullet.kind,
-                via="agent",
-                source=bullet.source,
-                destination=f"ciao:{bullet.kind}",
-                outcome=outcome,
-                proposal_id=intent.proposal_id,
-                receipt_id=guide_receipt_id,
-                operation_id=intent.operation_id,
-                run_id=intent.holder,
-                item_key=intent.item_key,
-                reason=ACCEPT_DECISION_REASON,
-            )
+        with queue_lock(queue), authorize_holder(vault, holder=intent.holder) as live:
+            prior = _decision_for(queue, intent.operation_id)
+            if prior is not None:
+                prior_receipt = str(prior.get("receipt_id", ""))
+                recorded = True
+            elif live:
+                recorded = bool(
+                    record_promotion(
+                        queue,
+                        text=bullet.text,
+                        kind=bullet.kind,
+                        via="agent",
+                        source=bullet.source,
+                        destination=f"ciao:{bullet.kind}",
+                        outcome=outcome,
+                        proposal_id=intent.proposal_id,
+                        receipt_id=guide_receipt_id,
+                        operation_id=intent.operation_id,
+                        run_id=intent.holder,
+                        item_key=intent.item_key,
+                        reason=ACCEPT_DECISION_REASON,
+                    )
+                )
     except Exception:  # noqa: BLE001 — an unrecorded decision is finished by the replay
         recorded = False
     if not recorded:
@@ -645,9 +662,117 @@ def apply_memory_accept(intent: ManagedMemoryAcceptIntent, *, vault_root: Path) 
     failure = _progress(vault, intent)
     if failure:
         return Failed(failure)
+    if prior_receipt is not None:
+        return AlreadyDone(prior_receipt)
     return Accepted(
         receipt_id=guide_receipt_id,
         queue_receipt_id=queue_receipt_id,
         outcome=outcome,
         region=bullet.kind,
     )
+
+
+def _live_lease_start(vault: Path) -> datetime | None:
+    """When the live lease started, or None when there is no readable live lease."""
+    try:
+        lease = active_lease(vault)
+    except CurationStateError:
+        return None
+    if lease is None:
+        return None
+    try:
+        started = datetime.fromisoformat(str(lease.get("started_at", "")))
+    except ValueError:
+        return None
+    return started.replace(tzinfo=UTC) if started.tzinfo is None else started
+
+
+def find_resumable_accept(
+    vault: Path, *, workspace: str, holder: str, text: str
+) -> dict[str, Any] | None:
+    """This run's accept of ``text`` as its queue receipt, when exactly one exists.
+
+    Used when the queue row is already gone, so the row cannot be matched. A
+    receipt matches when this run (``holder``) and this workspace wrote it during
+    the live lease (``_since`` the lease start), its removed text equals ``text``
+    after whitespace flattening, and it names exactly one operation. An
+    unfinished operation (no decision, or a decision without its progress key)
+    is resumed; when none is unfinished, a single finished one is returned so the
+    retry is idempotent (:func:`apply_memory_accept` answers AlreadyDone). Any
+    other count returns None.
+    """
+    wanted = " ".join(text.split())
+    if not (workspace and holder and wanted):
+        return None
+    started = _live_lease_start(vault)
+    if started is None:
+        return None
+    queue = Path(vault) / PROPOSALS_RELATIVE
+    done = load_state(vault).done_keys
+    decided = {str(row["operation_id"]) for row in read_decisions(queue) if row.get("operation_id")}
+    candidates = [
+        row
+        for row in read_receipts(journal_path(vault))
+        if row.get("kind") == QUEUE_RESOLVE_KIND
+        and row.get("status") == APPLIED
+        and row.get("actor") == "agent"
+        and row.get("workspace") == workspace
+        and row.get("run_id") == holder
+        and _since(row.get("ts"), started)
+        and row.get("operation_id")
+        and row.get("item_key")
+        and row.get("proposal_id")
+        and row.get("proposal_kind") in REGION_KINDS
+        and " ".join(str(row.get("removed_text", "")).split()) == wanted
+    ]
+    unfinished = [
+        row
+        for row in candidates
+        if not (str(row["operation_id"]) in decided and str(row["item_key"]) in done)
+    ]
+    finished = [row for row in candidates if row not in unfinished]
+    pool = unfinished or finished
+    return pool[0] if len(pool) == 1 else None
+
+
+def resume_memory_accept(
+    vault_root: Path, *, workspace: str, holder: str, receipt: dict[str, Any]
+) -> AcceptOutcome:
+    """Finish an interrupted accept from its queue receipt, under the same authority.
+
+    The row is already removed, so there is no row to re-check: the receipt is
+    the record of what was removed and which operation removed it. Handover,
+    the live lease held by ``holder``, and the cap are read here, as a new accept
+    reads them; :func:`apply_memory_accept` then finishes the operation's
+    missing decision or progress key under its own checks.
+    """
+    vault = Path(vault_root)
+    queue = vault / PROPOSALS_RELATIVE
+    operation_id = str(receipt.get("operation_id", ""))
+    if not _handover_open(vault, workspace):
+        return Refused(REFUSED_HANDOVER)
+    try:
+        lease = active_lease(vault)
+    except CurationStateError:
+        return Refused(REFUSED_UNCERTAIN)
+    if lease is None or lease.get("holder") != holder:
+        return Refused(REFUSED_NO_LEASE)
+    try:
+        started = datetime.fromisoformat(str(lease.get("started_at", "")))
+    except ValueError:
+        return Refused(REFUSED_NO_LEASE)
+    if started.tzinfo is None:
+        started = started.replace(tzinfo=UTC)
+    if _agent_slots(vault, queue, started, exclude=operation_id) >= HANDOVER_ACCEPT_CAP:
+        return Refused(REFUSED_CAP)
+    intent = ManagedMemoryAcceptIntent(
+        operation_id=operation_id,
+        workspace=workspace,
+        item_key=str(receipt.get("item_key", "")),
+        proposal_id=str(receipt.get("proposal_id", "")),
+        proposal_revision="",
+        destination_revision="",
+        prediction_revision="",
+        holder=holder,
+    )
+    return apply_memory_accept(intent, vault_root=vault)

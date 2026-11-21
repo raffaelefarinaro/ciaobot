@@ -2175,6 +2175,8 @@ def _load(path: Path) -> CurationState:
             raise _state_error(path, "lease expiry is invalid")
         if "plan" in lease:
             _check_lease_plan(path, lease["plan"])
+        if "chat_id" in lease and not isinstance(lease["chat_id"], str):
+            raise _state_error(path, "lease chat_id is invalid")
     if last_run:
         if (
             not isinstance(last_run.get("status"), str)
@@ -2185,6 +2187,10 @@ def _load(path: Path) -> CurationState:
             or any(not isinstance(reason, str) for reason in last_run["reasons"])
         ):
             raise _state_error(path, "last_run summary is invalid")
+        from ciao.curation_cycle import last_run_optional_valid
+
+        if not last_run_optional_valid(last_run):
+            raise _state_error(path, "last_run optional fields are invalid")
     return CurationState(
         done_keys=dict(done),
         lease=dict(lease),
@@ -2419,8 +2425,14 @@ def begin_run(
     holder: str = "",
     ttl_s: float = DEFAULT_MAX_SECONDS,
     now: datetime | None = None,
+    chat_id: str = "",
 ) -> Lease:
-    """Take this vault's curation lease, or raise :class:`CurationBusy`."""
+    """Take this vault's curation lease, or raise :class:`CurationBusy`.
+
+    ``chat_id`` is the chat the run executes in (the agent's ``CIAO_CHAT_ID``).
+    It is kept on the lease and copied to ``last_run`` by :func:`end_run`, so the
+    run's outcome can be shown for that chat and no other.
+    """
     holder = holder or f"{socket.gethostname()}:{os.getpid()}"
     with _state_lock(vault_root):
         now = (now or datetime.now(UTC)).astimezone(UTC)
@@ -2442,7 +2454,7 @@ def begin_run(
             .replace("+00:00", "Z"),
             vault_root=Path(vault_root),
         )
-        state.lease = lease.as_dict()
+        state.lease = {**lease.as_dict(), **({"chat_id": chat_id} if chat_id else {})}
         _store(state_path(vault_root), state)
     return lease
 
@@ -2686,8 +2698,15 @@ def end_run(
     today: date | None = None,
     now: datetime | None = None,
     clock: Callable[[], datetime] | None = None,
+    failed: int | None = None,
+    counts_complete: bool | None = None,
 ) -> dict[str, Any]:
     """Release the lease and record what the run actually did.
+
+    ``failed`` and ``counts_complete`` are the run's derived outcome. When both
+    are given, ``last_run`` also records the run id and the chat binding; when
+    either is absent (an error exit that derived nothing) none of the outcome
+    fields are written, and no outcome is shown for the run.
 
     ``live_keys`` are the keys still present in the freshly rebuilt worklist.
     Done keys outside that set are dropped: the work they named is gone from
@@ -2744,7 +2763,7 @@ def end_run(
                 reasons.append(f"weekly marker not advanced: {marker_error}")
         if live_keys is not None:
             state.done_keys = {k: v for k, v in state.done_keys.items() if k in live_keys}
-        summary = {
+        summary: dict[str, Any] = {
             "status": status,
             "finished_at": (
                 effective_now.replace(microsecond=0).isoformat().replace("+00:00", "Z")
@@ -2754,6 +2773,15 @@ def end_run(
             "deferred": deferred,
             "reasons": reasons,
         }
+        # The outcome block is all or nothing: it is written only when the caller
+        # derived the counts. The binding comes from the lease the run took, so a
+        # different chat can never claim this outcome.
+        if failed is not None and counts_complete is not None:
+            summary["run_id"] = str(state.lease.get("holder", ""))
+            summary["failed"] = failed
+            summary["counts_complete"] = counts_complete
+            if state.lease.get("chat_id"):
+                summary["chat_id"] = str(state.lease["chat_id"])
         state.last_run = summary
         state.lease = {}
         _store(state_path(vault_root), state)

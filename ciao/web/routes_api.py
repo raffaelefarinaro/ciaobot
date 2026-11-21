@@ -5997,6 +5997,47 @@ async def onboarding_interview(request: Request) -> JSONResponse:
     return JSONResponse({"chat_id": chat_id})
 
 
+async def schedule_care_run(request: Request) -> JSONResponse:
+    """The derived outcome of a schedule's last run, read-only and bound to its chat.
+
+    The stored run is shown only for a care routine, when it was taken by the
+    chat the schedule row names as its latest run and finished no earlier than
+    that dispatch. A newer or unrelated run, an earlier run, a run with no
+    derived counts, and a schedule with no run all answer ``{"care_run": null}``.
+    See ``ciao.care_run_outcome`` for the trust boundary of the chat binding. The
+    vault is the one the run's own CLI resolves: the chat's workspace, falling
+    back to the default profile exactly as ``workspace_shell_env`` does.
+    """
+    from ciao.care_run_outcome import is_care_schedule_id, outcome_for_chat
+    from ciao.config import GWS_DEFAULT_PROFILE
+    from ciao.curation_run import CurationStateError, load_state
+    from ciao.schedules import parse_dispatch_stamp
+
+    schedule_id = request.path_params["schedule_id"]
+    entry = request.app.state.schedule_manager._store.get(schedule_id)
+    if entry is None:
+        return JSONResponse({"error": "not found"}, status_code=404)
+    chat_id = str(entry.last_run_chat_id or "")
+    if not is_care_schedule_id(schedule_id) or not chat_id:
+        return JSONResponse({"care_run": None})
+    pcm = request.app.state.project_chat_manager
+    chat = pcm.get_chat(chat_id)
+    project = pcm.get_project(chat.project_id) if chat is not None else None
+    if project is None:
+        return JSONResponse({"care_run": None})
+    vault = request.app.state.config.workspace_vault_root(project.workspace or GWS_DEFAULT_PROFILE)
+    try:
+        state = load_state(vault)
+    except CurationStateError:
+        return JSONResponse(
+            {"error": "care run state is unreadable; nothing is shown"}, status_code=503
+        )
+    outcome = outcome_for_chat(
+        state.last_run, chat_id, dispatched_at=parse_dispatch_stamp(entry)
+    )
+    return JSONResponse({"care_run": outcome})
+
+
 async def schedule_detail(request: Request) -> JSONResponse:
     """Handle PATCH (update) and DELETE for a single schedule."""
     schedule_id = request.path_params["schedule_id"]
