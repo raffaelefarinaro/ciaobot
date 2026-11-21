@@ -1,7 +1,8 @@
 # Loop engineering notes
-Ciaobot facts the user-level `loop-engineering` skill (`~/.claude/skills`)
-reads, via the pointer in `AGENTS.md`; the gates are the ones under
-Verification in `AGENTS.md`.
+Ciaobot facts the `loop-engineering` skill (shipped in the
+[pensatoio](https://github.com/raffaelefarinaro/pensatoio) plugin) reads, via
+the pointer in `AGENTS.md`; the gates are the ones under Verification in
+`AGENTS.md`.
 - Finish the authorized graph without routine continuation questions. Keep one
   coordinator and a verified wake source while work is pending; a schedule is an
   observer that wakes the original authorized chat, not an unattended replacement
@@ -23,6 +24,13 @@ Verification in `AGENTS.md`.
   fan-out and a PR-scoped security review before merge. Preserve disjoint
   clean PR heads rather than syncing and restarting CI merely because
   develop moved.
+- Required checks for a develop PR (`<STATE>/required-checks.json`):
+  `{"workflow":"ci.yml","required":["linux-server","linux-web","linux-e2e","mac-app"],"allow_skipped":[]}`,
+  matching branch protection. `linux-e2e` and `mac-app` always report: their
+  scope step passes a PR that does not touch `web/` or `mac/`. No label turns
+  on extra jobs. There is no bounded-batch policy (no CI runs on develop
+  pushes), so the merge queue runs serially without a batch wait; the
+  security-sensitive paths below still merge one at a time.
 - PR target is `develop`. `Closes #N` does not auto-close on a develop merge;
   close issues explicitly: "Merged into develop via #<PR> (<sha>). Ships in the
   next release."
