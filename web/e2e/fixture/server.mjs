@@ -645,6 +645,28 @@ const GET_ROUTES = {
   '/api/proposals': (req) => (sessionOf(req).verification ? { rows: [...PROPOSALS, ...VERIFICATION_PROPOSALS] } : { rows: PROPOSALS }),
   // Settings > Workspace > Overview's Google account row: gws installed, no accounts.
   '/api/integrations/gws': () => ({ installed: true, binary_path: '/usr/local/bin/gws', cli_available: true, profiles: [] }),
+  // Settings > Workspace > Overview's Weekly care cycle card: the dry run. A
+  // switch made in this session flips the workspace to v2 (see careCycleApply).
+  '/api/care/cycle': (req, url) => {
+    const workspace = url.searchParams.get('workspace') || WORKSPACES[0].name
+    const switched = (sessionOf(req).careCycle || {})[workspace] === 'v2'
+    return {
+      workspace,
+      on_host: true,
+      lease_live: false,
+      status: switched ? 'v2' : 'v1',
+      live_lease: null,
+      marker: 'present',
+      last_full_pass: '2026-11-09',
+      daily: 2,
+      weekly_historical: 3,
+      ambiguous: [],
+      dropped: [],
+      backup_path: '/fixture/vault/Workspace/Curation-State.v1.bak',
+      digest: CARE_CYCLE_DIGEST,
+      blockers: [],
+    }
+  },
   // Settings > Workspace > Overview's Memory handover card.
   '/api/proposals/handover': (req, url) => ({
     workspace: url.searchParams.get('workspace') || WORKSPACES[0].name,
@@ -847,6 +869,31 @@ const WRITE_ROUTES = {
       })),
     }
   },
+}
+
+// The Weekly care cycle card's switch. It accepts only the exact body the card
+// sends, and the digest the dry run gave; a second switch is refused.
+const CARE_CYCLE_DIGEST = 'fixture-care-digest'
+
+function workspaceOf(body) {
+  return typeof body?.workspace === 'string' && body.workspace.trim() ? body.workspace.trim() : WORKSPACES[0].name
+}
+
+function careCycleApply(state, workspace, body, res) {
+  const exact = body && typeof body === 'object'
+    && Object.keys(body).sort().join(',') === 'confirm_quiesced,digest,workspace'
+    && body.confirm_quiesced === true
+    && typeof body.digest === 'string' && body.digest.length > 0
+  if (!exact) return sendJson(res, { error: 'send exactly workspace, digest and confirm_quiesced: true' }, 400)
+  state.careCycle = state.careCycle || {}
+  if (state.careCycle[workspace] === 'v2') {
+    return sendJson(res, { error: 'The switch was refused and nothing was written.', blockers: ['the curation state is already a v2 cycle document; there is nothing to migrate'] }, 409)
+  }
+  if (body.digest !== CARE_CYCLE_DIGEST) {
+    return sendJson(res, { error: 'The switch was refused and nothing was written.', blockers: ['the vault changed since the dry run (digest mismatch); run the dry run again'] }, 409)
+  }
+  state.careCycle[workspace] = 'v2'
+  return sendJson(res, { workspace, status: 'migrated', backup_path: '/fixture/vault/Workspace/Curation-State.v1.bak', digest: CARE_CYCLE_DIGEST })
 }
 
 function sendJson(res, body, status = 200) {
@@ -1129,6 +1176,9 @@ const server = http.createServer(async (req, res) => {
     const body = await readBody(req)
     const writer = sessionOf(req)
     writer.writes.push({ method: req.method, path: pathname })
+    if (pathname === '/api/care/cycle' && req.method === 'POST') {
+      return careCycleApply(writer, workspaceOf(body), body, res)
+    }
     // Reading a chat: stamp it read and tell every device of the install.
     const readMatch = req.method === 'POST' ? /^\/api\/chats\/([^/]+)\/read$/.exec(pathname) : null
     if (readMatch) {

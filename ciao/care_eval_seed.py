@@ -1,31 +1,45 @@
 """Synthetic starting vaults and effect observations for the care measurement harness.
 
 ``build_seed`` writes one scenario's public synthetic starting vault into a
-directory the caller owns and returns a manifest whose digest is the fixture's
+:class:`Layout` the caller owns and returns a manifest whose digest is the fixture's
 ``fixture_sha256``. ``observe`` reads only the files that run left behind and
 returns the ``Mapping[str, bytes | None]`` that :func:`care_eval_fixtures.grade_fixture`
 grades. It is the one place where real effects are translated into the oracle's
 symbolic bytes.
 
+The engine keeps the guide at the agent root and the vault beneath it, so the
+layout has two roots. :func:`layout_for_workspace` names them the way a booted
+isolated engine does. :func:`observe_cursor` and :func:`observe_effects` are
+separate readers for the curation cursor and the receipt journal; they need the
+settled run's holder id, which the caller must prove, so :func:`observe` never
+emits their keys.
+
 Nothing here runs a schedule, boots an engine, calls a model or reads the
-installed state. Paths are always under the ``root`` the caller passes.
+installed state. Paths are always under the roots the caller passes.
 """
 
 from __future__ import annotations
 
 import hashlib
 import json
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
+from typing import Literal
 
-from ciao import curation_logs
+from ciao import curation_logs, curation_run, memory_receipts
 from ciao import note_verification as nv
 from ciao import proposal_kinds
 from ciao.curation_logs import CurationLogError
-from ciao.curation_run import CURATION_LOG_RELATIVE, PROPOSALS_RELATIVE, WEEKLY_PASS_DAYS
+from ciao.curation_run import (
+    CURATION_LOG_RELATIVE,
+    PROPOSALS_RELATIVE,
+    WEEKLY_PASS_DAYS,
+    CurationStateError,
+)
 from ciao.memory_receipts import content_revision
+from ciao.task_eval import WORKSPACE
 from ciao.task_eval_contract import Scenario
 from ciao.workspace_guide import GUIDE_NAME
 
@@ -38,6 +52,7 @@ SYMBOL_WEEKLY_MARKER = b"2026-11-18"
 
 GUIDE_RELATIVE = GUIDE_NAME
 GUIDE_TEXT = SYMBOL_GUIDE
+VAULT_DIRNAME = "memory-vault"
 NOTE_RELATIVE = "Notes/Fixture Note.md"
 NOTE_TEXT = b"# Fixture note\n\nThe fixture note body.\n"
 PROPOSAL_TEXT = "Prefer short status updates"
@@ -46,9 +61,28 @@ PROPOSAL_ROW = f"- [memory] {PROPOSAL_TEXT} _(decide: you; needs a human call)_\
 # fixture digest independent of when it was built.
 SEED_MARKER = "2026-11-01"
 
+CursorStatus = Literal["ok", "absent", "unreadable"]
+
 
 class _Unknown(Exception):
     """A file exists but cannot be read as the observation needs: the key is omitted."""
+
+
+@dataclass(frozen=True)
+class Layout:
+    """Where the guide and the vault live.
+
+    The guide is at ``agent_root``; every other seeded file is under ``vault_root``.
+    """
+
+    agent_root: Path
+    vault_root: Path
+
+
+def layout_for_workspace(workspace: Path) -> Layout:
+    """The layout a booted isolated engine uses under ``workspace`` (``prepare_workspace``)."""
+    personal = Path(workspace) / WORKSPACE
+    return Layout(agent_root=personal, vault_root=personal / VAULT_DIRNAME)
 
 
 @dataclass(frozen=True)
@@ -79,6 +113,14 @@ class SeedManifest:
     fixture_sha256: str
 
 
+@dataclass(frozen=True)
+class CursorObservation:
+    """The curation cursor's done keys. Empty unless ``status`` is ``ok``."""
+
+    done_keys: frozenset[str]
+    status: CursorStatus
+
+
 def _seed_files(scenario: Scenario) -> dict[str, bytes]:
     guide = {GUIDE_RELATIVE: GUIDE_TEXT}
     if scenario == "nightly":
@@ -93,6 +135,10 @@ def _seed_files(scenario: Scenario) -> dict[str, bytes]:
     return dict(guide)
 
 
+def _root_for(layout: Layout, relative: str) -> Path:
+    return layout.agent_root if relative == GUIDE_RELATIVE else layout.vault_root
+
+
 def fixture_digest(scenario: str, files: Mapping[str, bytes]) -> str:
     """SHA-256 over the scenario name and the sorted (path, sha256) manifest."""
     rows = [[path, hashlib.sha256(files[path]).hexdigest()] for path in sorted(files)]
@@ -100,9 +146,10 @@ def fixture_digest(scenario: str, files: Mapping[str, bytes]) -> str:
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
-def build_seed(scenario: Scenario, root: Path, *, dispatch_date: date) -> SeedManifest:
-    """Write the scenario's starting vault under ``root`` and return its manifest.
+def build_seed(scenario: Scenario, layout: Layout, *, dispatch_date: date) -> SeedManifest:
+    """Write the scenario's starting vault into ``layout`` and return its manifest.
 
+    The guide goes under the agent root, every vault file under the vault root.
     Refuses to overwrite a file. A weekly-due seed must have its last full pass
     at least :data:`WEEKLY_PASS_DAYS` before ``dispatch_date``.
     """
@@ -112,7 +159,7 @@ def build_seed(scenario: Scenario, root: Path, *, dispatch_date: date) -> SeedMa
             raise ValueError("weekly_due seed needs its last full pass to be older than a week")
     files = _seed_files(scenario)
     for relative in sorted(files):
-        target = Path(root) / relative
+        target = _root_for(layout, relative) / relative
         target.parent.mkdir(parents=True, exist_ok=True)
         with target.open("xb") as handle:
             handle.write(files[relative])
@@ -129,34 +176,92 @@ def build_seed(scenario: Scenario, root: Path, *, dispatch_date: date) -> SeedMa
 
 def observe(
     scenario: Scenario,
-    root: Path,
+    layout: Layout,
     manifest: SeedManifest,
     dispatch: DispatchClock,
 ) -> dict[str, bytes | None]:
-    """The oracle's observations for one finished run of ``scenario`` under ``root``.
+    """The oracle's observations for one finished run of ``scenario`` under ``layout``.
 
     A key is omitted when the effect cannot be read (unknown), and maps to
-    ``None`` when the effect is observably absent (failed). Keys this slice
-    cannot observe (index/audit results, effect counts) are never emitted.
+    ``None`` when the effect is observably absent (failed). Index/audit results
+    and effect counts are never emitted here; see :func:`observe_cursor` and
+    :func:`observe_effects`.
     """
-    base = Path(root)
+    vault = Path(layout.vault_root)
     observed: dict[str, bytes | None] = {}
     readers: list[tuple[str, Callable[[], bytes | None]]] = [
-        ("guide_bytes", lambda: _guide(base, manifest))
+        ("guide_bytes", lambda: _guide(Path(layout.agent_root), manifest))
     ]
     if scenario == "nightly":
         readers += [
-            ("note_revision_verified", lambda: _note(base)),
-            ("pending_proposal_disposition", lambda: _disposition(base)),
+            ("note_revision_verified", lambda: _note(vault)),
+            ("pending_proposal_disposition", lambda: _disposition(vault)),
         ]
     elif scenario == "weekly_due":
-        readers.append(("weekly_marker", lambda: _marker(base, dispatch)))
+        readers.append(("weekly_marker", lambda: _marker(vault, dispatch)))
     for key, reader in readers:
         try:
             observed[key] = reader()
         except _Unknown:
             continue
     return observed
+
+
+def observe_cursor(vault_root: Path) -> CursorObservation:
+    """Read the curation cursor's done keys. Read-only; never raises on a bad file.
+
+    A corrupt state file is ``unreadable`` with no keys, so nothing is credited
+    from it. A missing one is ``absent``.
+    """
+    try:
+        state = curation_run.load_state(Path(vault_root))
+    except CurationStateError:
+        return CursorObservation(done_keys=frozenset(), status="unreadable")
+    if not curation_run.state_path(Path(vault_root)).is_file():
+        return CursorObservation(done_keys=frozenset(), status="absent")
+    return CursorObservation(done_keys=frozenset(state.done_keys), status="ok")
+
+
+def observe_effects(
+    vault_root: Path, run_id: str, item_keys: Iterable[str]
+) -> Mapping[str, int | None]:
+    """How many applied receipts the run ``run_id`` left for each ``item_key``.
+
+    Counts the effective (latest row per receipt id) ``applied`` receipts whose
+    ``run_id`` and ``item_key`` match. A prepared-only or undone receipt counts 0.
+    An absent journal counts 0; an unreadable one, or a symlinked one, is
+    ``None`` for every key. ``run_id`` must be the settled run's proven holder:
+    an empty one would match receipts written without a run id, so it is refused.
+    """
+    if not run_id:
+        raise ValueError("observe_effects needs the settled run's holder id")
+    keys = tuple(item_keys)
+    journal = memory_receipts.journal_path(Path(vault_root))
+    if not _journal_readable(journal):
+        return dict.fromkeys(keys)
+    counts = dict.fromkeys(keys, 0)
+    for row in memory_receipts.read_receipts(journal):
+        if row.get("status") != memory_receipts.APPLIED or row.get("run_id") != run_id:
+            continue
+        key = row.get("item_key")
+        if isinstance(key, str) and key in counts:
+            counts[key] += 1
+    return counts
+
+
+def _journal_readable(journal: Path) -> bool:
+    # read_receipts folds any OSError into an empty journal, so unreadable is
+    # decided here: an absent journal is genuinely empty, anything else is not.
+    if journal.is_symlink():
+        return False
+    try:
+        with journal.open("rb") as handle:
+            handle.read(1)
+    except FileNotFoundError:
+        return True
+    except OSError:
+        return False
+    return True
 
 
 def _read(path: Path) -> bytes | None:
