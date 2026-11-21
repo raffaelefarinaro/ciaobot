@@ -45,6 +45,7 @@ from pathlib import Path
 from typing import Any, Literal
 
 from ciao import job_runs
+from ciao.os_support.child_env import child_env
 
 logger = logging.getLogger(__name__)
 
@@ -100,12 +101,10 @@ class NodeResult:
     expected_failure: bool = False
 
 
-def _subprocess_env(payload: dict[str, Any]) -> dict[str, str] | None:
-    """Merge payload env overrides onto the current process environment."""
-    overrides = payload.get("env")
-    if not overrides:
-        return None
-    return {**os.environ, **{str(k): str(v) for k, v in dict(overrides).items()}}
+def _subprocess_env(payload: dict[str, Any]) -> dict[str, str]:
+    """Merge payload env overrides onto the engine's environment as a child gets it."""
+    overrides = payload.get("env") or {}
+    return {**child_env(), **{str(k): str(v) for k, v in dict(overrides).items()}}
 
 
 def _validate(dag: list[Node], edges: list[Edge]) -> dict[str, Node]:

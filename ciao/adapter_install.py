@@ -46,6 +46,7 @@ from importlib import resources
 from pathlib import Path
 from typing import Any
 
+from ciao.os_support.child_env import child_env
 from ciao.os_support.processes import isolated_probe_flags
 from ciao.redact import redact_text
 from ciao.tool_path import resolve_tool, terminal_path
@@ -594,11 +595,12 @@ def failure(name: str) -> str | None:
 
 def _npm_env(node: str) -> dict[str, str]:
     """npm's environment: an allowlist, with the node that passed the version check first on PATH."""
-    env = {key: os.environ[key] for key in _NPM_ENV_KEYS if key in os.environ}
+    source = child_env()
+    env = {key: source[key] for key in _NPM_ENV_KEYS if key in source}
     env.update(
         {
             key: value
-            for key, value in os.environ.items()
+            for key, value in source.items()
             if key.lower().startswith(_NPM_CONFIG_PREFIXES)
         }
     )

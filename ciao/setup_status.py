@@ -26,6 +26,7 @@ from typing import Mapping, Any
 
 from ciao import provider_registry
 from ciao.agent_paths import claude_global_config_path
+from ciao.os_support.child_env import child_env
 from ciao.os_support.shell_hints import path_hint
 from ciao.workspace_guide import guide_path
 
@@ -320,7 +321,7 @@ def _provider(
 def _cli_version(binary: str) -> str:
     try:
         run = subprocess.run(
-            [binary, "--version"], capture_output=True, text=True, encoding="utf-8", errors="replace",
+            [binary, "--version"], capture_output=True, text=True, encoding="utf-8", errors="replace", env=child_env(),
             timeout=3, check=False,
         )
     except (OSError, subprocess.SubprocessError):
@@ -369,6 +370,7 @@ def _discover_claude_system_skills_uncached() -> list[str]:
             res = subprocess.run(
                 [binary, "plugin", "list"],
                 capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=8.0, check=False,
+                env=child_env(),
             )
             cli_ok = res.returncode == 0
             output = (res.stdout or "") + "\n" + (res.stderr or "")
@@ -968,7 +970,7 @@ def claude_auth_status(
         # predating the `auth` subcommand) rather than reachable-but-signed-out.
         "cli_too_old": False,
     }
-    process_env = os.environ.copy()
+    process_env = child_env()
     if env is not None:
         process_env.update(env)
     try:

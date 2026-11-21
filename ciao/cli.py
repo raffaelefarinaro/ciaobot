@@ -39,6 +39,7 @@ from ciao.setup_marker import RUNTIME_DIR_NAME
 from ciao.setup_status import detect_nested_workspaces
 from ciao.macos_service import default_launch_agents_dir, hosted_service_python, load_server_plist
 from ciao.jsonio import write_private_text
+from ciao.os_support.child_env import child_env
 from ciao.os_support.private import make_private, open_private
 from ciao.os_support.processes import python_isolation_flags
 from ciao.git_proc import EXACT_BYTES
@@ -2037,7 +2038,7 @@ def _auth_command(args: argparse.Namespace) -> int:
         print(" ".join(command))
         return 0
     try:
-        proc = subprocess.run(command, check=False)
+        proc = subprocess.run(command, check=False, env=child_env())
     except OSError as exc:
         print(f"Error: failed to run {' '.join(command)}: {exc}", file=sys.stderr)
         return 1
