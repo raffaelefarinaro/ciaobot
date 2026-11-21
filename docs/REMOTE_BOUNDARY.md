@@ -92,8 +92,13 @@ carried by the session.
   403 and the CLI command (`ciao curation-cycle-migrate`) is the alternative. The
   session and host check are not the only guard: the body must carry the digest
   of a fresh dry run and a literal `confirm_quiesced: true`, and a live lease or a
-  stale digest refuses. Session-authenticated agents can reach the same route, so
-  this is not an agent barrier.
+  stale digest refuses. The POST is browser-only as well: it needs the session,
+  `host_browser_request`, and an `Origin` or `Referer` header (a browser sends one
+  on a same-origin POST). A plain request with the session cookie and no such
+  header, as a shell `curl` sends, gets 403 `browser_request_required` and writes
+  nothing (`care_cycle_browser_request`; `host_browser_request` itself is
+  unchanged). This stops a command-line caller without the browser's headers; it
+  does not stop a process that holds the session cookie and sends browser headers.
 - Opening a terminal on the engine's machine (`GET`/`POST /api/host/terminal`)
   needs the session *and* the same host-browser rule (`host_browser_request`:
   loopback peer, local `Host`, same-origin `Origin`/`Referer`). It is

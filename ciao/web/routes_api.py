@@ -7051,6 +7051,19 @@ def host_browser_request(request: Request) -> bool:
     return _same_origin(request, source)
 
 
+def care_cycle_browser_request(request: Request) -> bool:
+    """``host_browser_request`` plus a required Origin or Referer.
+
+    Only the care-cycle switch uses this. A browser sends Origin on a same-origin
+    POST, so a request with neither header is a script or a shell caller holding
+    the session cookie, and it is refused even though the peer and Host match.
+    ``host_browser_request`` itself is unchanged: the workspace move relies on it.
+    """
+    if not (request.headers.get("origin") or request.headers.get("referer")):
+        return False
+    return host_browser_request(request)
+
+
 def _workspace_move_local(request: Request) -> bool:
     return host_browser_request(request)
 
@@ -9070,6 +9083,12 @@ async def care_cycle_apply(request: Request) -> JSONResponse:
     if not host_browser_request(request):
         return JSONResponse(
             {"error": "Switching care runs only from the computer running Ciaobot.", "reason": "not_on_host"},
+            status_code=403,
+        )
+    if not care_cycle_browser_request(request):
+        return JSONResponse(
+            {"error": "Switching care runs needs the Ciaobot page in a browser; a script or command cannot switch it.",
+             "reason": "browser_request_required"},
             status_code=403,
         )
     try:

@@ -121,6 +121,9 @@
         <p id="care-cycle-reason" class="hint hint--compact">
           {{ canApply ? 'You will be asked to confirm before the switch runs.' : 'Tick the box above to confirm other copies are stopped.' }}
         </p>
+        <p class="hint hint--compact">
+          If the preview and the switch straddle midnight UTC, the switch is refused. Preview again.
+        </p>
       </template>
     </template>
   </div>

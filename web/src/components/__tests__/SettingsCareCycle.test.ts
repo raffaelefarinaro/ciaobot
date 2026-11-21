@@ -195,6 +195,7 @@ describe('SettingsCareCycle states', () => {
     expect(text).toContain('Ciaobot does not undo this automatically')
     expect(text).toContain('Stop other copies first.')
     expect(text).toContain('This does not touch your notes.')
+    expect(text).toContain('straddle midnight UTC, the switch is refused. Preview again.')
     expect(switchButton(view)!.attributes('aria-disabled')).toBe('true')
     await checkbox(view).setValue(true)
     expect(switchButton(view)!.attributes('aria-disabled')).toBeUndefined()

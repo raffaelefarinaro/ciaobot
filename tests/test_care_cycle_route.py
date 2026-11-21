@@ -313,3 +313,43 @@ def test_refused_requests_never_reach_the_library(tmp_path: Path, monkeypatch: p
 def test_the_route_is_host_only_and_not_loopback_allowlisted() -> None:
     assert PATH not in auth._LOOPBACK_ONLY_API
     assert PATH not in auth._PUBLIC_API
+
+
+# --- browser-only POST (F1) -------------------------------------------------
+
+
+def _session_only(client: TestClient) -> dict[str, str]:
+    """A session cookie with no Origin or Referer: what a shell curl would send."""
+    return {"Cookie": f"{SESSION_COOKIE}={client.app.state.serializer.dumps({'user': 'owner'})}"}
+
+
+def test_curl_style_apply_with_a_valid_session_and_no_origin_is_403_and_writes_nothing(tmp_path: Path) -> None:
+    vault = _vault(tmp_path)
+    client = _client(vault)
+    digest = _digest(client)
+    before = _state(vault)
+    response = client.post(PATH, json=_apply_body(digest), headers=_session_only(client))
+    assert response.status_code == 403
+    assert response.json()["reason"] == "browser_request_required"
+    assert _state(vault) == before
+    assert not (vault / BACKUP).exists()
+
+
+def test_a_same_origin_referer_alone_is_still_a_browser_request(tmp_path: Path) -> None:
+    vault = _vault(tmp_path)
+    client = _client(vault)
+    digest = _digest(client)
+    headers = {**_session_only(client), "Referer": f"{BASE}/settings/workspace"}
+    response = client.post(PATH, json=_apply_body(digest), headers=headers)
+    assert response.status_code == 200, response.text
+
+
+def test_a_cross_origin_referer_without_origin_is_refused(tmp_path: Path) -> None:
+    vault = _vault(tmp_path)
+    client = _client(vault)
+    digest = _digest(client)
+    before = _state(vault)
+    headers = {**_session_only(client), "Referer": "http://localhost:3000/page"}
+    response = client.post(PATH, json=_apply_body(digest), headers=headers)
+    assert response.status_code == 403
+    assert _state(vault) == before
