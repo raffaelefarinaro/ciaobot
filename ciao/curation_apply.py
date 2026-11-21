@@ -741,16 +741,22 @@ def resume_memory_accept(
     """Finish an interrupted accept from its queue receipt, under the same authority.
 
     The row is already removed, so there is no row to re-check: the receipt is
-    the record of what was removed and which operation removed it. Handover,
-    the live lease held by ``holder``, and the cap are read here, as a new accept
-    reads them; :func:`apply_memory_accept` then finishes the operation's
+    the record of what was removed and which operation removed it. The per-kind
+    policy for the receipt's kind, the live lease held by ``holder``, and the cap
+    are read here, as a new accept reads them; :func:`apply_memory_accept` then finishes the operation's
     missing decision or progress key under its own checks.
     """
     vault = Path(vault_root)
     queue = vault / PROPOSALS_RELATIVE
     operation_id = str(receipt.get("operation_id", ""))
-    if not _handover_open(vault, workspace):
-        return Refused(REFUSED_HANDOVER)
+    # The receipt records the kind the queue row was removed as; the policy for
+    # that kind is read now, exactly as a new accept reads it.
+    kind = str(receipt.get("proposal_kind", ""))
+    if kind not in REGION_KINDS:
+        return Refused(REFUSED_KIND)
+    refusal = _accept_refusal(vault, workspace, kind)
+    if refusal:
+        return Refused(refusal)
     try:
         lease = active_lease(vault)
     except CurationStateError:
