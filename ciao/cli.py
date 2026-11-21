@@ -6290,6 +6290,75 @@ def _curation_progress_command(args: argparse.Namespace) -> int:
     return 0
 
 
+def _curation_cycle_migrate_command(args: argparse.Namespace) -> int:
+    """Preview (--dry-run) or apply (--apply) the one-time v1 to v2 curation state migration.
+
+    Operator-only. Nothing else calls it, and nothing runs it on a schedule.
+    """
+    from ciao.curation_run import (
+        CurationMigrationRefused,
+        CurationStateError,
+        migrate_state_to_cycle,
+        migration_report,
+    )
+
+    _workspace, vault, _registry_root, _name = _resolve_workspace_and_vaults(args)
+    if args.apply:
+        if not args.digest or not args.confirm_quiesced:
+            print(
+                "curation-cycle-migrate --apply needs --digest from a dry run and --confirm-quiesced",
+                file=sys.stderr,
+            )
+            return 2
+        try:
+            report = migrate_state_to_cycle(
+                vault,
+                confirm_quiesced=args.confirm_quiesced,
+                expected_digest=args.digest,
+            )
+        except CurationMigrationRefused as exc:
+            for reason in exc.blockers:
+                print(f"refused: {reason}", file=sys.stderr)
+            return 1
+        except CurationStateError as exc:
+            print(f"curation state error: {exc}", file=sys.stderr)
+            return 1
+    else:
+        try:
+            report = migration_report(vault)
+        except CurationStateError as exc:
+            print(f"curation state error: {exc}", file=sys.stderr)
+            return 1
+    if args.json:
+        json.dump(report, sys.stdout, ensure_ascii=False, indent=2)
+        sys.stdout.write("\n")
+    else:
+        _print_cycle_migration(report, vault, applying=bool(args.apply))
+    return 1 if report["blockers"] and not args.apply else 0
+
+
+def _print_cycle_migration(report: dict[str, Any], vault: Path, *, applying: bool) -> None:
+    if applying:
+        print(f"migrated: {report['daily']} daily keys, backup at {report['backup_path']}")
+        return
+    print(f"status: {report['status']}")
+    print(f"marker: {report['marker']} (last_full_pass {report['last_full_pass'] or 'none'})")
+    print(f"daily keys: {report['daily']}; weekly keys kept as history: {report['weekly_historical']}")
+    print(f"ambiguous weekly keys (need fresh proof): {', '.join(report['ambiguous']) or 'none'}")
+    print(f"dropped daily keys (dated after today): {', '.join(report['dropped']) or 'none'}")
+    print(f"backup that apply writes: {report['backup_path']}")
+    print(f"digest: {report['digest']}")
+    if report["blockers"]:
+        for reason in report["blockers"]:
+            print(f"blocked: {reason}")
+        print("not applicable: resolve the blockers above, then run the dry run again")
+        return
+    print(
+        "apply with: ciao curation-cycle-migrate --vault-root "
+        f"{vault} --apply --digest {report['digest']} --confirm-quiesced"
+    )
+
+
 def _curation_end_command(args: argparse.Namespace) -> int:
     """Release the lease, record the counts, and stamp the weekly marker.
 
@@ -9450,6 +9519,52 @@ def build_parser() -> argparse.ArgumentParser:
         help="Required: the `lease.holder` value `curation-begin` returned.",
     )
     curation_end_parser.set_defaults(func=_curation_end_command)
+
+    curation_cycle_migrate_parser = subparsers.add_parser(
+        "curation-cycle-migrate",
+        help="Preview or apply the one-time move of the curation state to the v2 cycle document.",
+        description=(
+            "Operator-only. --dry-run reports what migrating the v1 curation state would do and "
+            "writes nothing. --apply copies the exact v1 bytes to Workspace/Curation-State.v1.bak, "
+            "then rewrites Workspace/Curation-State.json as the v2 cycle document. It needs the "
+            "digest printed by a dry run and --confirm-quiesced, and it refuses while a curation "
+            "run holds the lease. Not for a live vault yet: a migrated vault cannot advance the "
+            "weekly marker until a later release ships the cycle transition. An older engine's "
+            "curation refuses the v2 file until it is updated; nothing is corrupted. To undo, stop "
+            "the engine and copy the backup over Workspace/Curation-State.json."
+        ),
+    )
+    curation_cycle_migrate_parser.add_argument(
+        "--workspace",
+        type=Path,
+        default=None,
+        help="Workspace root. Defaults to CIAO_WORKSPACE or current directory.",
+    )
+    curation_cycle_migrate_parser.add_argument(
+        "--vault-root",
+        type=Path,
+        default=None,
+        help="Vault root. Defaults to CIAO_VAULT_ROOT or <workspace>/memory-vault.",
+    )
+    migrate_mode = curation_cycle_migrate_parser.add_mutually_exclusive_group(required=True)
+    migrate_mode.add_argument(
+        "--dry-run", action="store_true", help="Report what the migration would do. Writes nothing."
+    )
+    migrate_mode.add_argument(
+        "--apply", action="store_true", help="Migrate the state. Needs --digest and --confirm-quiesced."
+    )
+    curation_cycle_migrate_parser.add_argument(
+        "--digest", default="", help="The digest a dry run printed for this exact vault state."
+    )
+    curation_cycle_migrate_parser.add_argument(
+        "--confirm-quiesced",
+        action="store_true",
+        help="Confirm no curation run or engine is writing this vault while it migrates.",
+    )
+    curation_cycle_migrate_parser.add_argument(
+        "--json", action="store_true", help="Print the report as JSON."
+    )
+    curation_cycle_migrate_parser.set_defaults(func=_curation_cycle_migrate_command)
 
     curation_log_append_parser = subparsers.add_parser(
         "curation-log-append",
