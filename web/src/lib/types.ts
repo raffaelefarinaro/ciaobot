@@ -2156,7 +2156,24 @@ export interface ProposalHistoryRow {
    * restore is the way back.
    */
   reversible_by?: 'restore'
+  /** What the decision's receipts say the write did. ABSENT from an engine
+   * that predates it; `none` means no receipt performed or describes it. */
+  apply_status?: ProposalApplyStatus
+  /** `true` for applied, `false` for failed, conflict, rolled_back and undone,
+   * `null` for pending and none. ABSENT from an older engine. */
+  applied?: boolean | null
+  /** Who decided. ABSENT from an older engine; `normaliseHistoryRow` derives it from `via`. */
+  actor?: ProposalHistoryActor
+  /** The care run that made an automated decision (opaque lease holder). Only on `automated` rows. */
+  run_id?: string
+  /** The decision's own timestamp, the same value as `ts`. ABSENT from an older engine. */
+  decided_at?: string
 }
+
+export type ProposalApplyStatus =
+  | 'applied' | 'failed' | 'conflict' | 'rolled_back' | 'undone' | 'pending' | 'none'
+
+export type ProposalHistoryActor = 'human' | 'automated'
 
 /** One filed `note_edit` as the history ledger reports it. */
 export interface ProposalHistoryNoteEdit {

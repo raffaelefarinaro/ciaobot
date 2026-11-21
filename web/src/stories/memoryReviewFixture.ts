@@ -97,6 +97,10 @@ export const historyRows: ProposalHistoryRow[] = [
     destination: 'ciao:memory',
     outcome: 'written',
     proposal_id: 'storybook-proposal-old-alpha',
+    apply_status: 'applied',
+    applied: true,
+    actor: 'human',
+    decided_at: '2026-09-01T10:00:00+00:00',
   },
   {
     id: 'storybook-history-beta',
@@ -114,10 +118,35 @@ export const historyRows: ProposalHistoryRow[] = [
   },
 ]
 
-export type HistoryLoad = 'rows' | 'empty' | 'truncated' | 'held' | 'error'
+/** One accepted approval per apply outcome, plus an automated care decision. Synthetic only. */
+export const applyRows: ProposalHistoryRow[] = [
+  {
+    id: 'storybook-apply-failed', ts: '2026-09-03T10:00:00+00:00', action: 'accepted', via: 'pwa',
+    kind: 'memory', text: 'Storybook approval whose write failed', source: '', workspace: reviewWorkspace,
+    destination: 'ciao:memory', outcome: 'written', proposal_id: 'storybook-apply-p1',
+    apply_status: 'failed', applied: false, actor: 'human', decided_at: '2026-09-03T10:00:00+00:00',
+    reason: 'A synthetic reason that is long enough to be cut to one line in the list and offered in full on demand, so the reader can see what the operator wrote without the row growing past one screen.',
+  },
+  {
+    id: 'storybook-apply-undone', ts: '2026-09-04T10:00:00+00:00', action: 'accepted', via: 'pwa',
+    kind: 'memory', text: 'Storybook approval that was later undone', source: '', workspace: reviewWorkspace,
+    destination: 'ciao:memory', outcome: 'written', proposal_id: 'storybook-apply-p2',
+    apply_status: 'undone', applied: false, actor: 'human', decided_at: '2026-09-04T10:00:00+00:00',
+  },
+  {
+    id: 'storybook-apply-care', ts: '2026-09-05T10:00:00+00:00', action: 'accepted', via: 'auto',
+    kind: 'skill', text: 'Storybook care run filed a synthetic skill note', source: '', workspace: reviewWorkspace,
+    destination: 'skills', outcome: 'written', proposal_id: 'storybook-apply-p3',
+    apply_status: 'applied', applied: true, actor: 'automated', run_id: 'storybook-run-1',
+    decided_at: '2026-09-05T10:00:00+00:00',
+  },
+]
+
+export type HistoryLoad = 'rows' | 'empty' | 'truncated' | 'held' | 'error' | 'apply'
 
 function historyBody(load: HistoryLoad): unknown {
   if (load === 'empty') return { rows: [], total: 0, truncated: false, limit: 200, at_max: false }
+  if (load === 'apply') return { rows: applyRows, total: applyRows.length, truncated: false, limit: 200, at_max: false }
   if (load === 'truncated') return { rows: historyRows, total: 260, truncated: true, limit: 200, at_max: false }
   return { rows: historyRows, total: historyRows.length, truncated: false, limit: 200, at_max: false }
 }
@@ -159,6 +188,9 @@ export function proposalRoutes(options: { queue: QueueLoad, history?: HistoryLoa
 
 /** The history panel's own reads. */
 export function historyRoutes(load: HistoryLoad): FixtureRoute[] {
+  // An automated row asks the schedule list which Automations row its run is,
+  // so the apply load answers that read too (empty: no link, nothing guessed).
+  if (load === 'apply') return [historyRoute(load), { method: 'GET', path: '/api/schedules', respond: () => response([]) }]
   return [historyRoute(load)]
 }
 

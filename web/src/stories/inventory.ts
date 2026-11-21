@@ -4851,6 +4851,14 @@ export const inventory: InventoryEntry[] = [
         "note": "historyCanLoadMore branch: the server holds more decisions, so the \"show more\" control is offered (not clicked)."
       },
       {
+        "name": "apply-states",
+        "coverage": "covered",
+        "storyIds": [
+          "proposal-history-list--apply-states"
+        ],
+        "note": "Apply line and badge per receipt outcome: a failed approval reads Not applied, an undo reads Undone, an automated row names Workspace care. Covers the rendered words only; the run link needs a care-run GET and is unit-tested."
+      },
+      {
         "name": "change-disclosure",
         "coverage": "uncovered",
         "storyIds": [],

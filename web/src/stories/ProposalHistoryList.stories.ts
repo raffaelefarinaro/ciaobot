@@ -155,3 +155,19 @@ export const LoadMore: Story = {
     await assertSettled(canvas)
   },
 }
+
+export const ApplyStates: Story = {
+  parameters: { fixture: { routes: historyRoutes('apply') } },
+  render: () => reviewStage(
+    'Synthetic apply states: a failed approval reads Not applied, an undo reads Undone, and an automated decision names Workspace care.',
+    host => mountReview(host, ProposalHistoryList),
+  ),
+  play: async ({ canvas }) => {
+    await waitFor(() => expect(canvas.getByText('Storybook approval whose write failed')).toBeTruthy())
+    expect(canvas.getByText('Not applied')).toBeTruthy()
+    expect(canvas.getAllByText('Undone').length).toBeGreaterThan(0)
+    expect(canvas.getByText('Workspace care')).toBeTruthy()
+    expect(canvas.getByText('Show full reason')).toBeTruthy()
+    await assertSettled(canvas)
+  },
+}
