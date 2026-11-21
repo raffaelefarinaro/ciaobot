@@ -1161,11 +1161,13 @@ def _run_handover(
     from ciao import cli
 
     needle_file = _write(root.parent, "handover-needle.txt", needle)
+    holder = ["--holder", _LEASE["holder"] or "test-run"] if command == "memory-proposal-accept" else []
     return cli.main([
         command,
         "--workspace", str(root),
         "--vault-root", str(vault),
         "--text-file", str(needle_file),
+        *holder,
         *extra,
     ])
 
@@ -1438,12 +1440,15 @@ def test_accept_refuses_without_an_accept_prediction_and_for_decide_you(tmp_path
         assert read_decisions(queue) == []
 
 
+_LEASE: dict[str, str] = {"holder": ""}
+
+
 def _accepted_install(tmp_path: Path, bullet: str = _REGION_BULLET) -> tuple[Path, Path, Path]:
     from ciao import curation_run
 
     root, vault, queue = _handover_install(tmp_path, "all", bullet)
     _store_prediction(queue, "accept")
-    curation_run.begin_run(vault, holder="test-run", ttl_s=3600)
+    _LEASE["holder"] = curation_run.begin_run(vault, holder="test-run", ttl_s=3600).holder
     return root, vault, queue
 
 
@@ -1499,7 +1504,7 @@ def test_accept_leaves_an_event_shaped_row_queued(tmp_path: Path, capsys) -> Non
     _store_prediction(queue, "accept", fact)
     from ciao import curation_run
 
-    curation_run.begin_run(vault, holder="test-run", ttl_s=3600)
+    _LEASE["holder"] = curation_run.begin_run(vault, holder="test-run", ttl_s=3600).holder
     before = queue.read_bytes()
 
     rc = _run_handover("memory-proposal-accept", root, vault, "asked me to check the logs")
@@ -1587,7 +1592,7 @@ def test_handover_gate_refuses_a_prediction_the_operator_has_since_overruled(
     root, vault, queue = _handover_install(tmp_path, "all", _REGION_BULLET)
     _store_prediction(queue, "accept")
     _write_decision(queue, "Prefers uv over pip for installs.", "2999-01-01T00:00:00+00:00")
-    curation_run.begin_run(vault, holder="test-run", ttl_s=3600)
+    _LEASE["holder"] = curation_run.begin_run(vault, holder="test-run", ttl_s=3600).holder
     before = queue.read_bytes()
 
     assert _run_handover("memory-proposal-accept", root, vault, _REGION_NEEDLE) == 1
@@ -1673,7 +1678,7 @@ def test_accept_is_capped_per_curation_run(tmp_path: Path, capsys) -> None:
     root, vault, queue = _handover_install(tmp_path, "all", *[f"- [memory] {f}" for f in facts])
     from ciao import curation_run
 
-    curation_run.begin_run(vault, holder="test-run", ttl_s=3600)
+    _LEASE["holder"] = curation_run.begin_run(vault, holder="test-run", ttl_s=3600).holder
     for fact in facts:
         _store_prediction(queue, "accept", fact)
 
@@ -2130,7 +2135,7 @@ def test_accept_reports_a_refused_write_and_leaves_the_row_queued(
     from ciao import curation_run
 
     root, vault, queue = _handover_install(tmp_path, "all", _REGION_BULLET)
-    curation_run.begin_run(vault, holder="test-run", ttl_s=3600)
+    _LEASE["holder"] = curation_run.begin_run(vault, holder="test-run", ttl_s=3600).holder
     _store_prediction(queue, "accept")
     before = queue.read_bytes()
     monkeypatch.setattr(

@@ -4,9 +4,10 @@ import { COMPOSER, boot, isolate, openChatDetails, settled } from '../support/ap
 /**
  * Chat details MCP, in a real browser.
  *
- * Ciaobot keeps no MCP inventory. The section is one button that types the
- * chat's agent CLI MCP command into this chat's terminal. The command is the
- * provider row's `mcp_command`; the page never builds it.
+ * Ciaobot keeps no MCP inventory. The section is one button that starts the
+ * chat's agent CLI in this chat's terminal and then types its `/mcp` view
+ * command. Both are the provider row's `mcp_command` and `mcp_slash`; the page
+ * never builds them.
  */
 const CHAT_PATH = '/chat/alpha-chat-1'
 
@@ -24,12 +25,13 @@ test.describe('Chat details MCP button', () => {
     }
     const section = details.locator('.chat-rail-mcp')
     await expect(section.getByRole('heading', { name: 'MCP' })).toBeVisible()
-    await expect(section.locator('code')).toHaveText('claude mcp')
+    await expect(section.locator('code')).toHaveCount(0)
+    await expect(section.getByRole('button')).toHaveCount(1)
 
     await section.getByRole('button', { name: 'Open MCP settings in Claude Code', exact: true }).click()
     await expect(page.locator('.terminal-pane')).toBeVisible()
     // The terminal takes the right-hand space at this width, so the rail
-    // closes: assert the typed command in the terminal itself, not the note.
-    await expect(page.locator('.terminal-pane')).toContainText('claude mcp')
+    // closes: assert the typed launch command in the terminal itself.
+    await expect(page.locator('.terminal-pane')).toContainText('claude')
   })
 })

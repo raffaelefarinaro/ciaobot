@@ -53,10 +53,10 @@ For each `[memory]` / `[profile]` row in the worklist:
 |---|---|---|
 | `off` | leave queued | leave queued |
 | `dismiss` | `ciao memory-proposal-dismiss --handover --text-file <f>` | leave queued |
-| `all` | same | `ciao memory-proposal-accept --text-file <f>` |
+| `all` | same | `ciao memory-proposal-accept --text-file <f> --holder <lease.holder>` |
 
 - Never act on a `decide: you` row.
 - If an acting command exits 1, leave the row queued and escalate it with `ciao memory-proposal-escalate`, using the refusal it printed as the reason.
-- Never use `ciao memory update` or hand-edit `AGENTS.md` for this. Both acting commands re-check the setting themselves, and `memory-proposal-accept` takes at most five facts per run and only while you hold the curation lease.
+- Never use `ciao memory update` or hand-edit `AGENTS.md` for this. Both acting commands re-check the setting themselves, and `memory-proposal-accept` takes at most five facts per run and only while the `--holder` you pass (the `lease.holder` from `curation-begin`) still holds the curation lease.
 - Under **What needs you** report the region rows left queued. Count the rows you acted on under **What I did**.
 - When `ciao memory-proposals` returns a `review_path` for a row you leave queued, put it next to that row under **What needs you** as a Markdown link with the path unchanged: `[Review](<review_path>)`. The PWA opens only a Markdown link in place; a bare path or one in backticks renders as plain text. Keys and links are derived from the question's content, so an edited or resolved question may stop being available; never invent an id, and never accept a proposal because a link exists.

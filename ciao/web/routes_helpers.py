@@ -8,6 +8,7 @@ import subprocess
 import unicodedata
 from pathlib import Path
 
+from ciao.os_support.child_env import child_env
 from ciao.git_proc import EXACT_BYTES
 
 from starlette.responses import JSONResponse, Response
@@ -279,6 +280,7 @@ async def _commit_and_push(workspace: Path, message: str) -> tuple[bool, str]:
             capture_output=True,
             text=True,
             timeout=60,
+            env=child_env(),
         )
         out = (result.stdout or "").strip()
         err = (result.stderr or "").strip()
@@ -332,6 +334,7 @@ async def _git_pull_with_retry(
             capture_output=True,
             text=True,
             timeout=60,
+            env=child_env(),
         )
         out = (result.stdout or "").strip()
         err = (result.stderr or "").strip()

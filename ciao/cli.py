@@ -39,6 +39,7 @@ from ciao.setup_marker import RUNTIME_DIR_NAME
 from ciao.setup_status import detect_nested_workspaces
 from ciao.macos_service import default_launch_agents_dir, hosted_service_python, load_server_plist
 from ciao.jsonio import write_private_text
+from ciao.os_support.child_env import child_env
 from ciao.os_support.private import make_private, open_private
 from ciao.os_support.processes import python_isolation_flags
 from ciao.git_proc import EXACT_BYTES
@@ -49,7 +50,7 @@ from ciao.sync_skills import SETUP_MEMORY_FAILED_RC
 if TYPE_CHECKING:  # only ever a type here; the queue model is imported locally.
     from ciao import skill_proposals
     from ciao.config import CiaoConfig, WorkspaceConfig
-    from ciao.curation_run import Worklist
+    from ciao.curation_run import NoteCoverage, Worklist
 
 _WORKSPACE_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$")
 
@@ -2037,7 +2038,7 @@ def _auth_command(args: argparse.Namespace) -> int:
         print(" ".join(command))
         return 0
     try:
-        proc = subprocess.run(command, check=False)
+        proc = subprocess.run(command, check=False, env=child_env())
     except OSError as exc:
         print(f"Error: failed to run {' '.join(command)}: {exc}", file=sys.stderr)
         return 1
@@ -5474,20 +5475,25 @@ def _memory_proposal_predict_command(args: argparse.Namespace) -> int:
 def _memory_proposal_accept_command(args: argparse.Namespace) -> int:
     """Accept one queued ``[memory]``/``[profile]`` row into its region as the agent.
 
-    Refused unless the operator's handover is ``all``, the run stored an accept
-    prediction for the row and the row is not ``decide: you``. The write goes
-    through the same guarded path the PWA accept uses, so the fact gets the
-    event-shape guard, the duplicate check, the learned-at stamp and an undo
-    receipt that History offers.
+    A thin caller of :func:`ciao.curation_apply.apply_memory_accept`, the one
+    accept path for an unattended run. The operation re-checks the handover
+    setting, the live lease held by ``--holder``, the cap, and the row itself
+    before each effect, and it writes the guarded region write and the queue
+    settlement with receipts that History can undo.
     """
     refused = _refuse_ambiguous_vault_write(args)
     if refused is not None:
         return refused
-    from ciao import proposal_actions
-    from ciao.fact_candidates import external_anchor
-    from ciao.memory_proposals import accept_region_fact, remove_proposal_by_substring
-    from ciao.memory_receipts import QueueReceiptUnavailable, queue_lock, queue_resolution
-    from ciao.memory_tool import ensure_regions
+    from ciao.curation_apply import (
+        Accepted,
+        AlreadyDone,
+        Failed,
+        PartialConflict,
+        Refused,
+        apply_memory_accept,
+        plan_memory_accept,
+    )
+    from ciao.memory_receipts import queue_lock
 
     workspace, vault, _registry_root, name = _resolve_workspace_and_vaults(args)
     path = vault / "Workspace" / "Memory-Proposals.md"
@@ -5500,118 +5506,50 @@ def _memory_proposal_accept_command(args: argparse.Namespace) -> int:
     )
     with queue_lock(path):
         matched = _match_one_row(path, needle)
-        if matched is None:
-            print(no_match, file=sys.stderr)
-            return 1
-        bullet, removal_needle = matched
-        refusal = _handover_gate(workspace, name, path, bullet, "accept")
-        if refusal:
-            print(f"handover refused: {refusal}", file=sys.stderr)
-            return 1
-        # At most HANDOVER_ACCEPT_CAP accepts per curation run, counted from the
-        # sidecar's agent decisions since the live lease began. The lease is
-        # server-written state, so the count cannot be reset from the argument
-        # list; a run with no live lease may not accept at all.
-        refusal = _handover_accept_budget(vault, path)
-        if refusal:
-            print(f"handover refused: {refusal}", file=sys.stderr)
-            return 1
-    # Not written under the queue lock: the PWA writes the region and then takes
-    # the queue lock, and the region write takes the guide lock. The guide comes
-    # from the installed registry the gate just verified, not from --workspace.
+    if matched is None:
+        print(no_match, file=sys.stderr)
+        return 1
+    bullet, _removal_needle = matched
+    holder = _curation_holder(args)
+    if not holder:
+        return 1
+    # The guide comes from the installed registry, not from --workspace.
     trusted = trusted_registry(name, vault)
     if trusted is None or name is None:
         print("handover refused: the installed registry changed underneath", file=sys.stderr)
         return 1
     guide = guide_path(trusted.agent_root(name))
-    try:
-        ensure_regions(guide)
-    except (OSError, ValueError) as exc:
-        print(f"could not prepare {guide}: {exc}", file=sys.stderr)
+    planned = plan_memory_accept(
+        vault,
+        workspace=name,
+        guide=guide,
+        bullet=bullet,
+        holder=holder,
+    )
+    if isinstance(planned, Refused):
+        print(f"handover refused: {planned.reason}", file=sys.stderr)
         return 1
-    receipt: dict[str, Any] = {}
-    try:
-        outcome, _written = accept_region_fact(
-            guide_path=guide,
-            target=bullet.kind,
-            text=bullet.text,
-            vault_root=vault,
-            actor="agent",
-            source="cli",
-            workspace=name or "",
-            source_section=external_anchor(bullet.source) or "review",
-            receipt_out=receipt,
-        )
-    except (ValueError, OSError) as exc:
-        print(f"could not write ciao:{bullet.kind}: {exc}", file=sys.stderr)
+    result = apply_memory_accept(planned, vault_root=vault)
+    if isinstance(result, Refused):
+        print(f"handover refused: {result.reason}", file=sys.stderr)
         return 1
-    if outcome not in ("written", "duplicate"):
-        messages = {
-            "unshaped": "this reads as an event, not a standing rule; it stays queued",
-            "refused": "the write was not authorised; it stays queued",
-            "conflict": f"ciao:{bullet.kind} changed while this was being applied; retry",
-            "deferred": (
-                f"this fact may supersede an entry already in ciao:{bullet.kind}; "
-                "it stays queued"
-            ),
-        }
+    if isinstance(result, PartialConflict):
         print(
-            f"handover refused: {messages.get(outcome, f'could not write ciao:{bullet.kind}')}",
+            "the fact was written but the queue row did not settle; it needs a review",
             file=sys.stderr,
         )
         return 1
-    with queue_lock(path):
-        again = _match_one_row(path, needle)
-        if (
-            again is None
-            or again[0].kind != bullet.kind
-            or again[0].text != bullet.text
-        ):
-            print(
-                "the fact was written but the queue row moved; it stays queued",
-                file=sys.stderr,
-            )
-            return 1
-        try:
-            with queue_resolution(
-                path,
-                removed_text=bullet.text,
-                kind=bullet.kind,
-                promoted=True,
-                actor="agent",
-                source="cli",
-                workspace=name or "",
-                vault_root=vault,
-            ):
-                removed = remove_proposal_by_substring(path, again[1])
-        except QueueReceiptUnavailable as exc:
-            print(
-                f"the memory receipt journal is unavailable; "
-                f"the proposal was not removed: {exc}",
-                file=sys.stderr,
-            )
-            return 1
-    if removed is None:
-        print(no_match, file=sys.stderr)
+    if isinstance(result, Failed):
+        print(f"could not accept: {result.reason}", file=sys.stderr)
         return 1
-    proposal_actions.record_decision(
-        path,
-        action="accept",
-        text=removed[1],
-        kind=removed[0],
-        via="agent",
-        source=bullet.source,
-        destination=f"ciao:{bullet.kind}",
-        outcome="duplicate" if outcome == "duplicate" else "written",
-        receipt_id=str(receipt.get("id", "")),
-    )
+    receipt_id = result.receipt_id if isinstance(result, (Accepted, AlreadyDone)) else ""
     if args.json:
         _emit_json(
             {
                 "accepted": True,
-                "text": removed[1],
+                "text": bullet.text,
                 "region": bullet.kind,
-                "receipt_id": str(receipt.get("id", "")),
+                "receipt_id": receipt_id,
                 "workspace": str(workspace),
             }
         )
@@ -5985,28 +5923,6 @@ def _proposal_needle(args: argparse.Namespace) -> str | None:
     return needle
 
 
-def _handover_accept_budget(vault: Path, queue: Path) -> str:
-    """``""`` while this curation run may still accept, else why not."""
-    from ciao.curation_run import CurationStateError, active_lease
-    from ciao.proposal_predictions import HANDOVER_ACCEPT_CAP, count_agent_accepts_since
-
-    try:
-        lease = active_lease(vault)
-    except CurationStateError:
-        return "curation state is uncertain; handover is refused"
-    if lease is None:
-        return "accepting needs a live curation run (take the lease with curation-begin)"
-    try:
-        started = datetime.datetime.fromisoformat(str(lease.get("started_at", "")))
-    except ValueError:
-        return "the curation lease has no readable start time"
-    if started.tzinfo is None:
-        started = started.replace(tzinfo=datetime.UTC)
-    if count_agent_accepts_since(queue, started) >= HANDOVER_ACCEPT_CAP:
-        return f"this curation run already accepted its cap of {HANDOVER_ACCEPT_CAP} facts"
-    return ""
-
-
 def _clip(needle: str, limit: int = 80) -> str:
     """At most *limit* characters of a needle, for an error message."""
     flat = " ".join(needle.split())
@@ -6106,6 +6022,26 @@ class _CurationPlanningResult:
     remaining: Worklist
 
 
+def _stale_coverage_line(coverage: NoteCoverage | None) -> str:
+    """One coverage note naming the stale notes this run did not examine, or ""."""
+    if coverage is None or coverage.status == "complete":
+        return ""
+    if coverage.status == "unavailable":
+        return "stale notes: not examined this run; the vault scan did not complete"
+    parts = [f"stale notes: {coverage.planned} planned of {coverage.flagged} flagged"]
+    not_examined = coverage.eligible_deferred + coverage.unexamined
+    if not_examined:
+        overdue = ""
+        if coverage.oldest_deferred_age_days is not None:
+            overdue = f" (oldest {coverage.oldest_deferred_age_days}d overdue)"
+        parts.append(f"{not_examined} not examined this run{overdue}")
+    if coverage.undated:
+        parts.append(f"{coverage.undated} undated notes are not covered by the note pass")
+    if coverage.unreadable:
+        parts.append(f"{coverage.unreadable} unreadable notes are not covered")
+    return "; ".join(parts)
+
+
 def _curation_plan(
     args: argparse.Namespace,
     *,
@@ -6151,6 +6087,9 @@ def _curation_plan(
         coverage_notes.append(
             "category generation was omitted; category clusters were not scanned"
         )
+    stale_coverage = _stale_coverage_line(worklist.note_coverage)
+    if stale_coverage:
+        coverage_notes.append(stale_coverage)
     payload: dict[str, Any] = {
         "workspace": str(workspace),
         "vault_root": str(vault),
@@ -9402,6 +9341,11 @@ def build_parser() -> argparse.ArgumentParser:
         type=Path,
         default=None,
         help="Vault root. Defaults to CIAO_VAULT_ROOT or <workspace>/memory-vault.",
+    )
+    memory_proposal_accept_parser.add_argument(
+        "--holder",
+        default="",
+        help="The lease.holder that curation-begin reported for this run (required).",
     )
     memory_proposal_accept_parser.add_argument(
         "--json",

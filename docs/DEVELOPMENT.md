@@ -1326,6 +1326,8 @@ the reader cannot drift). `path_prefix` must be the prefix
 `find_stale_notes` — a drifted prefix makes every mtime `stat` miss silently,
 which reads as "nothing is stale" rather than as an error.
 
+The plan also reports what it did not cover. `build_worklist` returns a `note_coverage` (`curation_run.NoteCoverage`) next to the items, with a `status` of `complete`, `partial` (the cap stopped the pass, or a flagged note was unreadable, or a note was undated) or `unavailable` (the vault scan failed or the vault is missing). Every flagged note falls in exactly one bucket, so `planned + never_queued + unreadable + settled + eligible_deferred + unexamined == flagged`: `eligible_deferred` is the note that tripped the cap, and `unexamined` is every flagged note after it, which the pass never opened. Both are reported as "not examined this run", never as unchanged. This is metadata only: eligibility, the cap, the order and every write are unchanged, and `curation-plan` adds one `coverage_notes` line when the status is not `complete`.
+
 The judgement is `control_plane.verify_note`, exposed as the agent operation
 `verify_note` (`ciao/mcp_server.py`) and the command `ciao note verify
 --payload-file FILE`. It is a **managed operation**, not a CLI the agent could
