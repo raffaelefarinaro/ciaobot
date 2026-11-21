@@ -410,7 +410,13 @@ class ScheduleDispatcher:
                 # A pass is the app's own turn: a routine posted into it would
                 # run under the pass's restrictions and never reach the owner.
                 raise MemoryProjectRefused("a memory pass is not a target for a schedule")
+            # A chat-owned loop lives in its owner chat: once that chat is gone or
+            # archived the loop ends (the caller disables it), and nothing forks,
+            # replaces or re-points it.
+            owned = bool(getattr(entry, "owner_chat_id", ""))
             if target_chat is None or target_chat.archived:
+                if owned:
+                    return None
                 replacement = self._host._rehome_interval_chat(entry, prompt)
                 if replacement is None:
                     return None
@@ -434,7 +440,10 @@ class ScheduleDispatcher:
                 # three so the run uses what the schedule asked for.
                 if getattr(target_chat, "provider", "") != (provider or ""):
                     target_chat.provider = provider
-            _stamp(target_chat)
+            # A loop is not stamped onto its owner: the chat banner finds it
+            # through its web_chat_id, and a stamp would outlive the loop.
+            if not owned:
+                _stamp(target_chat)
             self._host._save()
             return cast(str, web_chat_id)
         if getattr(entry, "scope", "") == "system":
