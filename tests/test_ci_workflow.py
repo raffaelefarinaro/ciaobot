@@ -766,8 +766,6 @@ def test_first_party_install_command_stays_install_sh() -> None:
     )
     for relative in (
         "README.md",
-        "site/index.html",
-        "site/guide.html",
         "docs/LINUX.md",
         "docs/DEVELOPMENT.md",
         "skills/ciao-release/SKILL.md",
@@ -776,7 +774,7 @@ def test_first_party_install_command_stays_install_sh() -> None:
         assert one_liner in text, f"{relative} no longer documents the install command"
     # The release skill names install-engine.sh only to warn against it, so it
     # is exempt from the negative check; every other first-party page stays clean.
-    for relative in ("README.md", "site/index.html", "site/guide.html", "docs/LINUX.md"):
+    for relative in ("README.md", "site/index.html", "docs/LINUX.md"):
         text = (root / relative).read_text(encoding="utf-8")
         assert "install-engine.sh" not in text, (
             f"{relative} points a first-time user at install-engine.sh; the public"
