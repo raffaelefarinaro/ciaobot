@@ -973,7 +973,15 @@ class _ChatCreatePcm:
 
     def get_chat(self, chat_id: str):
         if chat_id == "chat-1":
-            return SimpleNamespace(chat_id=chat_id, mode=self.parent_mode)
+            return SimpleNamespace(
+                chat_id=chat_id,
+                mode=self.parent_mode,
+                # The turn fields every real chat carries; an update that changes what a schedule runs reads them.
+                user_turn_count=1,
+                user_turn_origin={"0": ""},
+                user_turn_unattended={},
+                helper={},
+            )
         return None
 
     def create_chat(self, project_id, **kwargs):
@@ -1660,7 +1668,15 @@ def _interval_control_plane(tmp_path: Path):
         workspace="work",
     )
     pcm.get_chat = lambda cid: (  # type: ignore[method-assign]
-        SimpleNamespace(chat_id="chat-work", project_id="project-work")
+        SimpleNamespace(
+            chat_id="chat-work",
+            project_id="project-work",
+            # The turn fields every real chat carries; an interval create reads them.
+            user_turn_count=1,
+            user_turn_origin={"0": ""},
+            user_turn_unattended={},
+            helper={},
+        )
         if cid == "chat-work"
         else None
     )

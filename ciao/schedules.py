@@ -121,7 +121,7 @@ LOOP_MAX_PER_CHAT = 3
 LOOP_MAX_GLOBAL = 20
 LOOP_MAX_PROMPT_CHARS = 4000
 # Fields that fix a loop's lifetime at creation. They never change afterwards.
-_LOOP_LIFETIME_FIELDS = frozenset({"owner_chat_id", "expires_at", "max_runs"})
+LOOP_LIFETIME_FIELDS = frozenset({"owner_chat_id", "expires_at", "max_runs"})
 
 
 class LoopRefused(ValueError):
@@ -830,7 +830,7 @@ def _check_loop_lifetime(current: "ScheduleEntry", merged: "ScheduleEntry") -> N
     creating a new one, which goes through the caps again. The run count only
     goes up, since lowering it would hand a loop back its spent runs.
     """
-    for name in _LOOP_LIFETIME_FIELDS:
+    for name in LOOP_LIFETIME_FIELDS:
         if getattr(current, name) != getattr(merged, name):
             raise LoopRefused("loop_invalid", f"a loop's {name} is fixed when it is created")
     if (
@@ -840,6 +840,61 @@ def _check_loop_lifetime(current: "ScheduleEntry", merged: "ScheduleEntry") -> N
         and merged.run_count < current.run_count
     ):
         raise LoopRefused("loop_invalid", "a loop's run count only goes up")
+
+
+# ASCII digits only, and at most four per part: Python's ``\d`` matches other
+# scripts, and an unbounded digit run is either a typo or a refusal to parse.
+_LOOP_SPAN = re.compile(r"(?:([0-9]{1,4})h)?(?:([0-9]{1,5})m)?", re.ASCII)
+_LOOP_CLOCK = re.compile(r"([01][0-9]|2[0-3]):([0-5][0-9])", re.ASCII)
+# C0 controls other than tab and newline: a prompt is text a model reads, not a terminal stream.
+_PROMPT_CONTROLS = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f]")
+
+
+def parse_loop_span(value: object) -> int | None:
+    """Whole minutes for a loop span written ``Nm``, ``Nh`` or ``NhMm``, or None.
+
+    Used for ``--every`` and for a duration ``--until``. Anything else, a bare
+    number included, is None so the caller can refuse it with an example.
+    """
+    if not isinstance(value, str):
+        return None
+    text = value.strip().lower()
+    match = _LOOP_SPAN.fullmatch(text)
+    if match is None or not text:
+        return None
+    hours, minutes = match.group(1), match.group(2)
+    if hours is None and minutes is None:
+        return None
+    total = int(hours or 0) * 60 + int(minutes or 0)
+    # Past a day is not a span any loop may take, so it is refused as a
+    # malformed value (the caller names the flag), not as a duration to clamp.
+    return total if total <= LOOP_MAX_DURATION_MINUTES else None
+
+
+def loop_until_minutes(value: object, now: datetime) -> int | None:
+    """Minutes from ``now`` until a loop's ``--until``, or None when it is neither form.
+
+    A duration is taken as written. A wall-clock ``HH:MM`` is its next
+    occurrence in :data:`DEFAULT_TIMEZONE`, strictly after ``now``, so a time
+    already past means tomorrow's. The result can be a day plus a DST hour;
+    the loop's own duration cap refuses that.
+    """
+    span = parse_loop_span(value)
+    if span is not None:
+        return span
+    if not isinstance(value, str):
+        return None
+    match = _LOOP_CLOCK.fullmatch(value.strip())
+    if match is None:
+        return None
+    zone = ZoneInfo(DEFAULT_TIMEZONE)
+    local_now = now.astimezone(zone)
+    target = local_now.replace(
+        hour=int(match.group(1)), minute=int(match.group(2)), second=0, microsecond=0
+    )
+    if target <= local_now:
+        target += timedelta(days=1)
+    return int((target.astimezone(UTC) - now.astimezone(UTC)).total_seconds() // 60)
 
 
 def loop_end_reason(entry: "ScheduleEntry", now: datetime) -> str:
@@ -1387,7 +1442,7 @@ def _editable_digest(entry: "ScheduleEntry") -> str:
     # The loop fields are digest members only on a loop. An ordinary row's
     # digest is the one it had before they existed, so an editor holding a
     # revision token across this upgrade is not refused once for nothing.
-    excluded = _DIGEST_EXCLUDED if entry.owner_chat_id else _DIGEST_EXCLUDED | _LOOP_LIFETIME_FIELDS
+    excluded = _DIGEST_EXCLUDED if entry.owner_chat_id else _DIGEST_EXCLUDED | LOOP_LIFETIME_FIELDS
     content = {k: v for k, v in asdict(entry).items() if k not in excluded}
     raw = json.dumps(content, sort_keys=True, separators=(",", ":"), default=str)
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()[:16]
@@ -1686,7 +1741,7 @@ class ScheduleStore:
         owner = (owner_chat_id or "").strip()
         if not owner:
             raise LoopRefused("loop_invalid", "a loop belongs to one chat")
-        text = (prompt or "").strip()
+        text = _PROMPT_CONTROLS.sub("", prompt or "").strip()
         if not text:
             raise LoopRefused("loop_invalid", "a loop needs a prompt")
         if len(text) > LOOP_MAX_PROMPT_CHARS:
@@ -1732,6 +1787,19 @@ class ScheduleStore:
             data = self._load_for_write()
             items = data.setdefault("schedules", [])
             owned = [i for i in items if isinstance(i, dict) and i.get("owner_chat_id")]
+            # The same prompt on the same cadence is a second copy of one loop, not a
+            # second loop: refuse it, and name the one already running.
+            for item in owned:
+                if (
+                    item.get("owner_chat_id") == owner
+                    and str(item.get("prompt") or "").strip() == text
+                    and item.get("interval_minutes") == interval
+                ):
+                    raise LoopRefused(
+                        "loop_duplicate",
+                        f"this chat already runs this loop as {item.get('schedule_id')}; "
+                        "stop it first, or change the prompt or the cadence",
+                    )
             if sum(1 for i in owned if i.get("owner_chat_id") == owner) >= LOOP_MAX_PER_CHAT:
                 raise LoopRefused(
                     "loop_limit_chat",

@@ -56,6 +56,9 @@ from ciao.schedules import (
     DEFAULT_TIMEZONE,
     FREQUENCIES,
     INTERVAL_FREQUENCY,
+    LOOP_LIFETIME_FIELDS,
+    LOOP_MAX_DURATION_MINUTES,
+    LOOP_MAX_RUNS,
     LoopRefused,
     ScheduleConflict,
     ScheduleEntry,
@@ -63,8 +66,10 @@ from ciao.schedules import (
     ScheduleStoreCorrupt,
     compute_next_run,
     is_interval,
+    loop_until_minutes,
     normalize_days_of_week,
     normalize_interval_minutes,
+    parse_loop_span,
     publish_automations_changed,
     stamp_fallback_project,
     wall_clock_time_error,
@@ -6797,7 +6802,9 @@ class CiaoControlPlane:
         rows = [
             self._schedule_payload(entry, revision)
             for entry, revision in self.schedules.snapshot()
-            if not entry.workspace or entry.workspace == workspace
+            if (not entry.workspace or entry.workspace == workspace)
+            # Another chat's loop is that chat's: its prompt and ids stay out of this chat's view.
+            and (not entry.owner_chat_id or entry.owner_chat_id == principal.chat_id)
         ]
         return _ok(rows)
 
@@ -6970,6 +6977,11 @@ class CiaoControlPlane:
 
     def schedule_create(self, principal: AgentPrincipal, **values: Any) -> dict[str, Any]:
         self._require_schedule_operator(principal)
+        if values.get("frequency") == INTERVAL_FREQUENCY:
+            # An interval made by an unattended run has no expiry and no run cap,
+            # so it would outlive the chat that asked for it. Chat-bound loops
+            # go through ``loop_start``, which is bounded.
+            self._require_person_typed_turn(principal, "Creating an interval schedule")
         preview = self.schedule_preview(principal, **values)["data"]
         entry = self.schedules.create(
             daily_time_utc=preview["daily_time_utc"],
@@ -7037,7 +7049,9 @@ class CiaoControlPlane:
 
     def _schedule(self, principal: AgentPrincipal, schedule_id: str) -> ScheduleEntry:
         entry = next((item for item in self.schedules.list_entries() if item.schedule_id == schedule_id), None)
-        if entry is None:
+        if entry is None or (entry.owner_chat_id and entry.owner_chat_id != principal.chat_id):
+            # Another chat's loop is not reachable from here, by any schedule verb.
+            # It reads as absent, as `loop stop` reports it.
             raise ControlPlaneError("schedule_not_found", f"Schedule '{schedule_id}' was not found.")
         self._schedule_access_check(principal)(entry)
         resolved: ScheduleEntry = entry
@@ -7054,6 +7068,14 @@ class CiaoControlPlane:
         entry = self._schedule(principal, schedule_id)
         if any(changes.get(field) is not None for field in self._SCHEDULE_RUN_FIELDS):
             self._require_schedule_operator(principal)
+        # An unattended run must not change what a schedule runs, whether it runs,
+        # or how often: each of those can turn one approved routine into an unbounded
+        # one nobody watches. Metadata (title, description, workspace-free fields) stays open.
+        # A loop's cadence is fixed by its lifetime check instead, below in the row checks.
+        if any(changes.get(field) is not None for field in ("prompt", "enabled")):
+            self._require_person_typed_turn(principal, "Changing what a schedule runs or whether it runs")
+        if not entry.owner_chat_id and any(changes.get(f) is not None for f in ("frequency", "interval_minutes")):
+            self._require_person_typed_turn(principal, "Changing a schedule's cadence")
         system_timing_fields: frozenset[str] = frozenset()
         if entry.scope == "system":
             try:
@@ -7177,7 +7199,9 @@ class CiaoControlPlane:
                             )
                         normalized["web_project_id"] = general.project_id
                         normalized["web_project_name"] = general.name
-        known = set(ScheduleEntry.__dataclass_fields__)
+        # A loop's owner, expiry and run cap are fixed at creation (see
+        # ``LOOP_LIFETIME_FIELDS``), so they are not editable fields at all.
+        known = set(ScheduleEntry.__dataclass_fields__) - LOOP_LIFETIME_FIELDS
         unknown = sorted(set(normalized) - known)
         if unknown:
             raise ControlPlaneError("invalid_fields", f"Unknown schedule fields: {', '.join(unknown)}")
@@ -7275,6 +7299,126 @@ class CiaoControlPlane:
             )
         publish_automations_changed(self.pcm)
         return _ok({"deleted": deleted, "schedule_id": schedule_id})
+
+    # ---- chat-owned loops (`ciao loop`) -------------------------------
+
+    def _own_loops(self, principal: AgentPrincipal) -> list[ScheduleEntry]:
+        """The loops this chat owns, in the caller's workspace. The chat is the token's."""
+        if not principal.chat_id:
+            return []
+        return [
+            entry
+            for entry in self.schedules.list_entries()
+            if entry.owner_chat_id == principal.chat_id
+            and (not entry.workspace or entry.workspace == principal.workspace)
+        ]
+
+    @staticmethod
+    def _loop_payload(entry: ScheduleEntry) -> dict[str, Any]:
+        next_run = compute_next_run(entry)
+        return {
+            "id": entry.schedule_id,
+            "title": entry.title,
+            "every_minutes": entry.interval_minutes,
+            "run_count": entry.run_count,
+            "max_runs": entry.max_runs,
+            "ends_at": entry.expires_at,
+            "next_run": next_run.isoformat() if next_run else None,
+            "last_status": entry.last_status,
+            "prompt_head": " ".join(entry.prompt.split())[:80],
+        }
+
+    def loop_start(
+        self,
+        principal: AgentPrincipal,
+        *,
+        every: str,
+        prompt: str,
+        until: str | None = None,
+        max_runs: int | None = None,
+    ) -> dict[str, Any]:
+        """Wake this chat every ``every`` until ``until``, or for ``max_runs`` runs.
+
+        The chat is the token's and nothing the caller passes can aim it. A
+        loop's wake turn is unattended and not person-typed, so the second gate
+        stops a loop from starting another. Plan chats are refused by the same
+        gate ``schedule_create`` uses; the dispatcher refuses mutating operations
+        in plan mode first, so this is the gate at the door, not the one a plan
+        chat meets.
+        """
+        self._require_schedule_operator(principal)
+        self._require_person_typed_turn(principal, "Starting a loop")
+        now = datetime.now(UTC).replace(second=0, microsecond=0)
+        interval = parse_loop_span(every)
+        if interval is None or interval < 1:
+            raise ControlPlaneError(
+                "invalid_every", "--every takes Nm, Nh or NhMm, for example 5m, 1h or 1h30m."
+            )
+        if until is None and max_runs is None:
+            raise ControlPlaneError("loop_invalid", "a loop needs --until or --max-runs")
+        if until is not None and max_runs is not None:
+            raise ControlPlaneError("loop_invalid", "give --until or --max-runs, not both")
+        runs: int | None = None
+        if until is not None:
+            duration = loop_until_minutes(until, now)
+            if duration is None:
+                raise ControlPlaneError(
+                    "invalid_until",
+                    "--until takes a duration such as 90m or 1h30m, or a wall-clock time such as 14:30.",
+                )
+        else:
+            if isinstance(max_runs, bool) or not isinstance(max_runs, int) or not 1 <= max_runs <= LOOP_MAX_RUNS:
+                raise ControlPlaneError("loop_invalid", f"max_runs must be from 1 to {LOOP_MAX_RUNS}")
+            # The run cap is the bound; the expiry leaves one interval of slack past the last run.
+            duration = min(LOOP_MAX_DURATION_MINUTES, interval * max_runs + interval)
+            runs = max_runs
+        collapsed = " ".join(prompt.split())
+        try:
+            entry = self.schedules.create_owned_loop(
+                owner_chat_id=principal.chat_id,
+                prompt=prompt,
+                interval_minutes=interval,
+                duration_minutes=duration,
+                max_runs=runs,
+                title=f"Loop: {collapsed[:40]}",
+                workspace=principal.workspace,
+                now=now,
+            )
+        except LoopRefused as exc:
+            message = str(exc)
+            if exc.code == "loop_limit_chat":
+                ids = ", ".join(loop.schedule_id for loop in self._own_loops(principal))
+                message = f"{message}. This chat's loops: {ids}. Stop one with `ciao loop stop <id>`."
+            raise ControlPlaneError(exc.code, message) from exc
+        publish_automations_changed(self.pcm)
+        return _ok(self._loop_payload(entry))
+
+    def loop_list(self, principal: AgentPrincipal) -> dict[str, Any]:
+        return _ok([self._loop_payload(entry) for entry in self._own_loops(principal)])
+
+    def loop_stop(self, principal: AgentPrincipal, loop_id: str = "") -> dict[str, Any]:
+        """Stop one of this chat's loops. Its row is deleted, as an ended loop's is."""
+        own = self._own_loops(principal)
+        wanted = (loop_id or "").strip()
+        if not wanted:
+            if not own:
+                raise ControlPlaneError("loop_not_found", "This chat has no loops.")
+            if len(own) > 1:
+                ids = ", ".join(loop.schedule_id for loop in own)
+                raise ControlPlaneError(
+                    "loop_id_required", f"This chat has more than one loop; pass the id to stop: {ids}."
+                )
+            wanted = own[0].schedule_id
+        if not any(loop.schedule_id == wanted for loop in own):
+            raise ControlPlaneError("loop_not_found", f"No loop '{wanted}' belongs to this chat.")
+        with self._schedule_store_errors(wanted):
+            deleted = self.schedules.delete(
+                wanted,
+                authorize=self._schedule_access_check(principal, removing=True),
+                expected_revision=None,
+            )
+        publish_automations_changed(self.pcm)
+        return _ok({"stopped": deleted, "id": wanted})
 
     # ---- workspace files/assets ---------------------------------------
 

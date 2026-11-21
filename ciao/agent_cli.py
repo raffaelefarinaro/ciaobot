@@ -40,7 +40,7 @@ from ciao.schedules import DEFAULT_TIMEZONE, FREQUENCIES
 AGENT_NOUNS: frozenset[str] = frozenset(
     {
         "memory", "vault", "note", "file", "chat", "project", "task", "schedule",
-        "workspace", "repo", "webhook", "context", "stats", "help",
+        "loop", "workspace", "repo", "webhook", "context", "stats", "help",
     }
 )
 #: Days `ciao stats --range` accepts; must equal `ciao.usage_stats.RANGES`
@@ -65,6 +65,7 @@ _HELP_TOPICS: dict[str, str] = {
     "project": "references/workspace-operations.md",
     "task": "references/tasks.md",
     "schedule": "references/automation-and-status.md",
+    "loop": "references/automation-and-status.md",
     "webhook": "references/automation-and-status.md",
     "context": "references/automation-and-status.md",
     "stats": "references/automation-and-status.md",
@@ -508,6 +509,27 @@ def build_parser() -> argparse.ArgumentParser:
         sub = schedule.add_parser(verb, help=verb_help)
         sub.add_argument("schedule_id")
 
+    loop = _verbs(nouns.add_parser("loop", help="Loops: this chat wakes on an interval until it ends."))
+    lstart = loop.add_parser(
+        "start", help="Start a loop bound to this chat. Give --every, one of --until or --max-runs, and one prompt source."
+    )
+    lstart.add_argument("--every", required=True, help="Cadence: Nm, Nh or NhMm, for example 5m, 1h or 1h30m.")
+    bounds = lstart.add_mutually_exclusive_group()
+    bounds.add_argument(
+        "--until", default=None,
+        help="Duration from now (90m, 1h30m), or the next wall-clock HH:MM in the Ciaobot default zone.",
+    )
+    bounds.add_argument("--max-runs", dest="max_runs", type=int, default=None, help="Number of wake-ups, 1 to 288.")
+    sources = lstart.add_mutually_exclusive_group()
+    sources.add_argument("--prompt", default=None, help="What each wake-up does.")
+    sources.add_argument(
+        "--prompt-file", default=None, metavar="FILE",
+        help="The same prompt, read from a Markdown or text file: @file.md or a plain path.",
+    )
+    loop.add_parser("list", help="List this chat's loops with their next run and last status.")
+    lstop = loop.add_parser("stop", help="Stop one of this chat's loops; ID may be omitted when the chat has exactly one.")
+    lstop.add_argument("loop_id", nargs="?", default="", metavar="ID")
+
     webhook = _verbs(nouns.add_parser("webhook", help="Webhook triggers in the active workspace."))
     webhook.add_parser("list", help="List triggers as public records.")
     wcreate = webhook.add_parser("create", help="Create a disabled trigger and mint its secret (shown once).")
@@ -946,6 +968,22 @@ def resolve(args: argparse.Namespace) -> tuple[str, dict[str, Any]] | None:
         if verb in ("create", "update", "preview"):
             return "schedule", _schedule_arguments(args, verb)
         return "schedule_action", {"schedule_id": args.schedule_id, "action": verb}
+    if noun == "loop":
+        if verb == "list":
+            return "loop_list", {}
+        if verb == "stop":
+            return "loop_stop", {"loop_id": args.loop_id}
+        # The engine refuses a missing bound or prompt, and a duration it cannot parse.
+        loop_arguments: dict[str, Any] = {"every": args.every}
+        if args.until is not None:
+            loop_arguments["until"] = args.until
+        if args.max_runs is not None:
+            loop_arguments["max_runs"] = args.max_runs
+        if args.prompt_file is not None:
+            loop_arguments["prompt"] = _task_body(args.prompt_file, flag="--prompt-file") or ""
+        else:
+            loop_arguments["prompt"] = args.prompt or ""
+        return "loop_start", loop_arguments
     if noun == "webhook":
         if verb == "list":
             return "webhook_list", {}
