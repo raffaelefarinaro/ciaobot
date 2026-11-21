@@ -288,7 +288,10 @@ observer reads only files under that directory and maps the real guide, note che
 queued `decide: you` row and `last_full_pass` marker to the oracle's symbolic bytes; the
 weekly marker counts as the dispatch's only when it equals the UTC date of the job-run
 start. Index, audit and effect-count observations are not collected yet, so those
-obligations stay unknown.
+obligations stay unknown. The seed takes a layout (guide at the agent root, vault under
+it, as `prepare_workspace` builds them), and two readers exist but no caller binds them
+yet: the curation cursor's done keys, and per-item counts of applied receipts for one
+run id, which stay unemitted until the settled run's holder is proven.
 
 The usage projection (`ciao/care_usage.py`) is a separate, pure collector for
 attributable care model-call usage; it does not replace `collect_usage`, which folds absent
