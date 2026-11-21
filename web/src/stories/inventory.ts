@@ -9218,6 +9218,102 @@ export const inventory: InventoryEntry[] = [
     }
   },
   {
+    "id": "components-settings-settings-care-cycle",
+    "name": "SettingsCareCycle",
+    "family": "Settings",
+    "kind": "component",
+    "owner": {
+      "path": "web/src/components/settings/SettingsCareCycle.vue",
+      "anchor": "<template>"
+    },
+    "sources": [],
+    "consumers": [
+      "web/src/components/settings/SettingsWorkspaceOverview.vue"
+    ],
+    "variants": [],
+    "variantNotes": "Detailed configurable variants have not yet been audited.",
+    "states": [
+      {
+        "name": "loading",
+        "coverage": "covered",
+        "storyIds": [
+          "settings-care-cycle--loading"
+        ],
+        "note": "Loading holds the first dry-run read: the checking line shows and no switch control renders."
+      },
+      {
+        "name": "failed",
+        "coverage": "covered",
+        "storyIds": [
+          "settings-care-cycle--failed"
+        ],
+        "note": "Failed answers the first read with an error: the role=alert message and a Try again control show."
+      },
+      {
+        "name": "ready",
+        "coverage": "covered",
+        "storyIds": [
+          "settings-care-cycle--ready"
+        ],
+        "note": "Ready lists what the switch keeps and the backup path. The switch stays aria-disabled until the checkbox is ticked."
+      },
+      {
+        "name": "blocked-by-lease",
+        "coverage": "covered",
+        "storyIds": [
+          "settings-care-cycle--blocked-by-lease"
+        ],
+        "note": "BlockedByLease shows the run-in-progress sentence and an aria-disabled switch with its reason beside it."
+      },
+      {
+        "name": "not-on-host",
+        "coverage": "covered",
+        "storyIds": [
+          "settings-care-cycle--not-on-host"
+        ],
+        "note": "NotOnHost explains the switch runs on the computer running Ciaobot, offers the copyable command and renders no switch control."
+      },
+      {
+        "name": "already-switched",
+        "coverage": "covered",
+        "storyIds": [
+          "settings-care-cycle--already-switched"
+        ],
+        "note": "AlreadySwitched is read-only: the switched line and no switch control."
+      },
+      {
+        "name": "confirming-and-applied",
+        "coverage": "covered",
+        "storyIds": [
+          "settings-care-cycle--applied"
+        ],
+        "note": "Applied opens the destructive confirm dialog from the card, posts after Switch, and shows the backup path as a status line."
+      },
+      {
+        "name": "apply-refused",
+        "coverage": "covered",
+        "storyIds": [
+          "settings-care-cycle--apply-refused"
+        ],
+        "note": "ApplyRefused shows the server's refusal and its blockers as an alert, with the checkbox cleared."
+      },
+      {
+        "name": "stale",
+        "coverage": "uncovered",
+        "storyIds": [],
+        "note": "Not isolable in the workshop: a failed re-read after a switch needs a second read that no story scripts. SettingsCareCycle.test.ts covers the kept-preview warning."
+      }
+    ],
+    "loading": {
+      "status": "known",
+      "detail": "Initial load: one dry-run read on mount (checking state). Failure: the failed state with Try again. Refresh: the card re-reads after a switch; a failed re-read keeps the last preview with a warning (stale state). A workspace switch re-reads and clears the previous preview. Not measured in this slice."
+    },
+    "migration": {
+      "status": "unassessed",
+      "note": "Inventory admission does not approve a design migration."
+    }
+  },
+  {
     "id": "components-settings-settings-claude-trim",
     "name": "SettingsClaudeTrim",
     "family": "Settings",

@@ -56,6 +56,7 @@
     <div v-if="workspacesResult" class="action-result action-result--error" role="alert">{{ workspacesResult }}</div>
 
     <SettingsMemoryHandover />
+    <SettingsCareCycle />
     <SettingsUpdateTasks />
 
     <div v-if="workspaceArchivable(form.name)" class="card">
@@ -86,6 +87,7 @@ import WorkspaceTile from '../WorkspaceTile.vue'
 import SettingsClaudeTrim from './SettingsClaudeTrim.vue'
 import SettingsWorkspaceModels from './SettingsWorkspaceModels.vue'
 import SettingsMemoryHandover from './SettingsMemoryHandover.vue'
+import SettingsCareCycle from './SettingsCareCycle.vue'
 import SettingsUpdateTasks from './SettingsUpdateTasks.vue'
 import WorkspaceGoogleAccount from './WorkspaceGoogleAccount.vue'
 import WorkspaceColorPicker from './WorkspaceColorPicker.vue'
