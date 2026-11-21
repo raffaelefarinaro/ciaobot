@@ -186,6 +186,9 @@ final class MenuBarController: NSObject, MenuBarControlling, NSMenuDelegate {
     static let loginItemRemoveFailedTitle = "Start at Login — Stop Failed"
     static let hideDockIconTitle = "Hide Dock Icon"
     static let changeHostTitle = "Change Connected Host…"
+    /// The top-level Servers section, shown only with more than one choice.
+    static let serversTitle = "Servers"
+    static let thisMacTitle = "This Mac"
     static let updatesUnavailableTitle = "Updates unavailable"
     static let checkForUpdatesTitle = "Check for Updates…"
     /// Says what an install does. The bundled engine is drained first, so the
@@ -227,6 +230,14 @@ final class MenuBarController: NSObject, MenuBarControlling, NSMenuDelegate {
     /// True when this app runs the bundled engine: the change-server row
     /// switches the engine mode itself, so it works without a connection.
     private var localEngineMode: Bool
+    /// The saved hosts that feed the Servers rows. Read when the menu is built,
+    /// never fetched or probed.
+    private let hosts: HostListStoring?
+    /// This Mac can run the bundled engine (arm64 and a usable engine), the same
+    /// predicate the connection screen uses to offer **Use Ciaobot on This Mac**.
+    private let localEngineAvailable: Bool
+    /// Hands a Servers row's request to the connection screen.
+    private let serverSwitch: ((ServerSwitchRequest) -> Void)?
     private let updates: ClientUpdateControlling?
     private let now: () -> Date
     /// Draws the working grid. Injected so a test records the chase frames
@@ -292,6 +303,9 @@ final class MenuBarController: NSObject, MenuBarControlling, NSMenuDelegate {
         // was: no restart row, and the change-server row only when connected.
         engineSupervisor: EngineSupervisor? = nil,
         localEngineMode: Bool = false,
+        hosts: HostListStoring? = nil,
+        localEngineAvailable: Bool = false,
+        serverSwitch: ((ServerSwitchRequest) -> Void)? = nil,
         now: @escaping () -> Date = Date.init,
         reduceMotion: @escaping () -> Bool = {
             NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
@@ -319,6 +333,9 @@ final class MenuBarController: NSObject, MenuBarControlling, NSMenuDelegate {
         self.changeHost = changeHost
         self.engineSupervisor = engineSupervisor
         self.localEngineMode = localEngineMode
+        self.hosts = hosts
+        self.localEngineAvailable = localEngineAvailable
+        self.serverSwitch = serverSwitch
         self.updates = updates
         self.now = now
         self.reduceMotion = reduceMotion
@@ -783,6 +800,12 @@ final class MenuBarController: NSObject, MenuBarControlling, NSMenuDelegate {
 
         menu.addItem(.separator())
 
+        // Servers sit directly under the status line: a switch is one click
+        // away, and the chat sections below still belong to the connected host.
+        if appendServerSection(to: menu) {
+            menu.addItem(.separator())
+        }
+
         var addedChatSection = false
         if let fleet {
             addedChatSection = appendFleetChatSections(to: menu, fleet: fleet)
@@ -980,7 +1003,7 @@ final class MenuBarController: NSObject, MenuBarControlling, NSMenuDelegate {
                 || TrayChatList.servesMultipleWorkspaces(snapshot)
             for group in groups {
                 if showsWorkspaceHeaders {
-                    menu.addItem(workspaceHeader(group.workspace))
+                    menu.addItem(sectionHeader(group.workspace))
                 }
                 for row in group.rows {
                     menu.addItem(chatItem(row, originKey: originKey, isActive: isActive))
@@ -1040,9 +1063,10 @@ final class MenuBarController: NSObject, MenuBarControlling, NSMenuDelegate {
         return item
     }
 
-    /// A label above one workspace's rows. It has no action and is never added
-    /// to `chatRowItems` or `animatedRows`, so it cannot open a chat.
-    private func workspaceHeader(_ title: String) -> NSMenuItem {
+    /// A label above a group of rows (a workspace's chats, or the Servers
+    /// section). It has no action and is never added to `chatRowItems` or
+    /// `animatedRows`, so it cannot open a chat or switch a server.
+    private func sectionHeader(_ title: String) -> NSMenuItem {
         if #available(macOS 14.0, *) {
             // AppKit reports a section header as enabled, so disable it
             // explicitly to match the fallback item below.
@@ -1051,6 +1075,64 @@ final class MenuBarController: NSObject, MenuBarControlling, NSMenuDelegate {
             return item
         }
         return disabledItem(title)
+    }
+
+    /// The Servers rows: one per saved host, plus This Mac when this Mac can run
+    /// the bundled engine. The section appears only with more than one choice,
+    /// so a single-host menu without a local engine is unchanged. Building it
+    /// reads the saved list and the live connection; it never probes or fetches.
+    private func appendServerSection(to menu: NSMenu) -> Bool {
+        guard let hosts else { return false }
+        let rows = ServerSwitchChoices.rows(
+            hosts: hosts.hosts,
+            connected: status.isConnected ? status.currentOrigin : nil,
+            localMode: localEngineMode,
+            localAvailable: localEngineAvailable
+        )
+        guard ServerSwitchChoices.showsSection(rows) else { return false }
+        menu.addItem(sectionHeader(Self.serversTitle))
+        for row in rows {
+            menu.addItem(serverItem(row))
+        }
+        return true
+    }
+
+    private func serverItem(_ row: ServerSwitchChoices.Row) -> NSMenuItem {
+        let title: String
+        let request: ServerSwitchRequest
+        let checked: Bool
+        let toolTip: String
+        switch row {
+        case .thisMac(let isChecked):
+            title = Self.thisMacTitle
+            request = .thisMac
+            checked = isChecked
+            toolTip = isChecked
+                ? "Ciaobot on this Mac is the connected server."
+                : "Run the Ciaobot engine bundled with this app on this Mac."
+        case .host(let origin, let label, let isChecked):
+            title = label
+            request = .host(origin)
+            checked = isChecked
+            toolTip = isChecked
+                ? "Connected to this server."
+                : "Connect to this server. Ciaobot checks its address first and keeps the current connection if the check fails."
+        }
+        let item = NSMenuItem(title: title, action: #selector(selectServer(_:)), keyEquivalent: "")
+        item.target = self
+        item.isEnabled = serverSwitch != nil
+        item.state = checked ? .on : .off
+        item.representedObject = request
+        item.toolTip = toolTip
+        return item
+    }
+
+    /// The only path from a Servers row to the connection screen. The row never
+    /// connects by itself: the screen probes, confirms and decides.
+    @objc func selectServer(_ sender: NSMenuItem) {
+        guard let request = sender.representedObject as? ServerSwitchRequest,
+              let serverSwitch else { return }
+        serverSwitch(request)
     }
 
     private func chatItem(_ row: TrayChatRow, originKey: String?, isActive: Bool) -> NSMenuItem {

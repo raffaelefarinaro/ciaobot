@@ -455,4 +455,15 @@ enum ConnectionMenuActions {
             NotificationCenter.default.post(name: .ciaobotChangeServer, object: nil)
         }
     }
+
+    /// A Servers row's request. It presents the window first, exactly as Change
+    /// Connected Host does, and posts only after the presentation succeeded, so
+    /// a request is never dropped silently. The connection screen performs the
+    /// switch.
+    static func switchServer(present: @escaping () -> Bool) -> (ServerSwitchRequest) -> Void {
+        return { request in
+            guard present() else { return }
+            NotificationCenter.default.post(name: .ciaobotSwitchServer, object: request)
+        }
+    }
 }

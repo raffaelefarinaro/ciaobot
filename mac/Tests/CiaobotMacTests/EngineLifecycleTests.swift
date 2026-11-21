@@ -1196,6 +1196,21 @@ final class EngineLifecycleTests: XCTestCase {
         XCTAssertEqual(processes.spawns.count, 0)
     }
 
+    /// The tray's This Mac row runs the screen's own start: the mode is saved,
+    /// then the supervisor starts, exactly as the button does.
+    func testTheTrayThisMacRowRunsTheSameStartAsTheButton() {
+        let store = TransientEngineModeStore()
+        store.mode = .external
+        var changes: [EngineMode] = []
+        let view = makeExternalView(supervisor: makeSupervisor(), modeStore: store) { changes.append($0) }
+
+        view.switchServer(to: .thisMac)
+
+        XCTAssertEqual(store.mode, .local)
+        XCTAssertEqual(changes, [.local])
+        XCTAssertEqual(processes.spawns.count, 1)
+    }
+
     /// An in-session switch reaches the delegate and the tray: after Connect
     /// to Another Server the quit is no longer a local-engine quit.
     func testAnInSessionModeSwitchUpdatesTheDelegateAndTheTray() throws {

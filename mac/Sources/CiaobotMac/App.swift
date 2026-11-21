@@ -597,6 +597,14 @@ struct ConnectionView: View {
                             .padding(.horizontal, 12)
                             .padding(.vertical, 6)
                     }
+                    if let error {
+                        // A refused tray switch keeps this session; the reason
+                        // is shown here because the form is not on screen.
+                        Text(error)
+                            .foregroundStyle(.red)
+                            .padding(.horizontal, 12)
+                            .padding(.vertical, 6)
+                    }
                     if let storageNotice {
                         Text(storageNotice)
                             .font(.caption)
@@ -725,6 +733,12 @@ struct ConnectionView: View {
             error = nil
             forgetMessage = nil
             session?.reportDisconnected()
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .ciaobotSwitchServer)) { note in
+            // A Servers row in the tray. The request runs outside this view
+            // update, so the confirmation can appear, as Change Server's does.
+            guard let request = note.object as? ServerSwitchRequest else { return }
+            DispatchQueue.main.async { self.switchServer(to: request) }
         }
         // Editing the address to another server is a different connection
         // too. Clear the click so the new address starts from the default
@@ -898,7 +912,15 @@ struct ConnectionView: View {
     /// The connection screen offers the bundled engine only in external mode,
     /// on an arm64 Mac, when the app actually carries a usable engine.
     var offersThisMac: Bool {
-        engineMode == .external && hostIsArm64 && supervisor?.hasEngine == true
+        engineMode == .external
+            && Self.canRunLocalEngine(hostIsArm64: hostIsArm64, hasEngine: supervisor?.hasEngine == true)
+    }
+
+    /// The bundled engine can run on this Mac: arm64 with a usable engine. The
+    /// screen's **Use Ciaobot on This Mac** button and the tray's This Mac row
+    /// both use this one predicate.
+    static func canRunLocalEngine(hostIsArm64: Bool, hasEngine: Bool) -> Bool {
+        hostIsArm64 && hasEngine
     }
 
     /// The failed-probe line. When the bundled engine is offered, the fix can
@@ -977,6 +999,56 @@ struct ConnectionView: View {
         engineDown = false
         dropSession()
         if let origin { connect(to: origin) }
+    }
+
+    /// One Servers row from the tray. This Mac is the same request as **Use
+    /// Ciaobot on This Mac**; a saved host is a probed switch, and leaving local
+    /// mode for it asks the same single confirmation as Change Server (S6).
+    /// Internal for tests.
+    func switchServer(to request: ServerSwitchRequest) {
+        guard !busy else { return }
+        switch request {
+        case .thisMac:
+            useThisMac()
+        case .host(let target):
+            guard engineMode == .local else {
+                probeAndSwitch(to: target)
+                return
+            }
+            // Cancel leaves the engine and the session exactly as they were.
+            guard presentModeSwitchDialog(EngineLifecycle.modeSwitchDialog) else { return }
+            connectToAnotherServer()
+            probeAndSwitch(to: target)
+        }
+    }
+
+    /// Probes `target` and replaces the session only after it answers. A host
+    /// that does not answer leaves the current session in place, and the reason
+    /// is shown on the screen. The record rules are Connect's: only an answering
+    /// host is remembered and saved.
+    private func probeAndSwitch(to target: Origin) {
+        // The live connection is the session's: it is what the tray shows, and
+        // it is never stale inside a probe completion.
+        guard session?.currentOrigin?.canonicalKey != target.canonicalKey, tasks.beginCheck() else { return }
+        error = nil
+        probe.check(target) { ok in
+            self.tasks.endCheck()
+            guard ok else {
+                self.error = Self.startupFailureText(offersThisMac: self.offersThisMac)
+                return
+            }
+            self.lastServer.remember(target)
+            if !self.isTestLaunch {
+                self.hostStore.add(target)
+            }
+            // Sign-in persistence and its default are computed for the address,
+            // so the field names the new host before its session is built.
+            self.address = target.url.absoluteString
+            // Same teardown as Change Server: the previous host's session ends,
+            // and consent given for it does not carry over.
+            self.dropSession()
+            self.establishSession(target)
+        }
     }
 
     private func dropSession() {
