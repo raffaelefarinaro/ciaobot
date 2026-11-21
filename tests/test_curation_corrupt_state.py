@@ -130,6 +130,76 @@ def test_invalid_state_documents_are_refused_without_rewriting(
     assert path.read_bytes() == original
 
 
+def _v2_text() -> str:
+    from ciao import curation_cycle as cc
+
+    prior = cc.marker_identity_of(b"---\nlast_full_pass: 2026-11-09\n---\n")
+    return cc.encode_state(
+        cc.CycleState(
+            cycle_id=cc.cycle_identity(prior, ""),
+            prior_marker=prior,
+            required={},
+            optional={},
+            carried=(),
+            legacy_historical={},
+            daily={"pass:abc123def456": "2026-11-17"},
+            lease={},
+            last_run={},
+            pending=None,
+        )
+    )
+
+
+def _v2_mutated(**changes: object) -> str:
+    document = json.loads(_v2_text())
+    for key, value in changes.items():
+        if value is _DROP:
+            del document[key]
+        else:
+            document[key] = value
+    return json.dumps(document, indent=2) + "\n"
+
+
+_DROP = object()
+
+
+@pytest.mark.parametrize(
+    "contents",
+    [
+        _v2_mutated(future=1),
+        _v2_mutated(daily=_DROP),
+        _v2_mutated(version=True),
+        _v2_mutated(version=3),
+        _v2_mutated(lease={"holder": "x"}),
+        _v2_mutated(last_run={"status": "ok"}),
+        _v2_mutated(version=2, done_keys={}, lease={}, last_run={}),
+        _v2_text().replace('"version": 2', '"version": 2, "version": 2', 1),
+    ],
+    ids=(
+        "unknown-field",
+        "missing-field",
+        "boolean-version",
+        "version-three",
+        "partial-lease",
+        "partial-last-run",
+        "v1-field-set-under-version-two",
+        "duplicate-version-key",
+    ),
+)
+def test_invalid_v2_documents_are_refused_without_rewriting(tmp_path: Path, contents: str) -> None:
+    path = cr.state_path(tmp_path / "vault")
+    path.parent.mkdir(parents=True)
+    path.write_text(contents, encoding="utf-8")
+    original = path.read_bytes()
+
+    with pytest.raises(cr.CurationStateError):
+        cr.load_state(path.parent.parent)
+    with pytest.raises(cr.CurationStateError):
+        cr.begin_run(path.parent.parent, holder="takeover")
+
+    assert path.read_bytes() == original
+
+
 @pytest.mark.parametrize(
     "contents",
     [

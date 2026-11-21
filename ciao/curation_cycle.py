@@ -4,8 +4,9 @@ A cycle is the unit a weekly marker publication closes. This module defines its
 document and the rules around it, and nothing else: strict encode and decode,
 the obligations a cycle still owes, a dry-run migration from the v1 state, and
 the decision that recovers an interrupted marker publication. It reads no
-files, takes no lock and writes nothing. ``curation_run`` and ``cli`` do not
-use it yet; activating it on a live vault is a separate, deliberate step.
+files, takes no lock and writes nothing. ``curation_run`` imports it only for the
+operator-run v1 to v2 migration and the v2 facade; nothing runs the migration on
+its own, and no live vault is moved by a release alone.
 
 Marker identity is byte-level on purpose. ``read_last_full_pass`` maps absent,
 malformed and ambiguous markers to the same advisory "", so recovery compares
@@ -388,7 +389,7 @@ def plan_migration(
         stamp = v1.done_keys[key]
         _check_key(key, "done key")
         _check_date(stamp, f"done date for {key}")
-        if _is_weekly_key(key):
+        if is_weekly_key(key):
             historical[key] = stamp
             if not last_full_pass or stamp > last_full_pass:
                 ambiguous.append(key)
@@ -414,7 +415,8 @@ def plan_migration(
 # ── Helpers ───────────────────────────────────────────────────────────────
 
 
-def _is_weekly_key(key: str) -> bool:
+def is_weekly_key(key: str) -> bool:
+    """Whether a work key is weekly: the two hygiene checks, the guide, the merge, or a rules key."""
     return key in REQUIRED_HYGIENE_KEYS or key in (GUIDE_KEY, MERGE_KEY) or key.startswith(f"{PASS_RULES}:")
 
 
