@@ -28,7 +28,7 @@ export interface ClaudeTrimGroup {
 
 // Shown under a group's title when un-trimming it has a consequence beyond context size.
 const GROUP_NOTES: Record<string, string> = {
-  scheduling: "Ciaobot's own schedules replace these, so they are hidden by default. Turn one on and Claude can create its own routines and loops outside Ciaobot's schedules, bypassing the PWA's scheduling and notifications.",
+  scheduling: "Ciaobot's own schedules replace these, so they are hidden by default. Turn one on and Claude can create claude.ai routines outside Ciaobot's schedules, bypassing the PWA's scheduling and notifications.",
 }
 
 export function claudeTrimGroupNote(id: string): string {

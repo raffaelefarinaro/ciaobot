@@ -10,9 +10,17 @@ Ciaobot does not want in a chat. Two reasons:
   features the workspace never uses are hidden to shrink each request.
 
 Each option has a default. A workspace stores only the options it changed, as a
-sparse ``claude_trim`` map of option key -> trimmed. Scheduling options are
-trimmed by default like the rest; un-trimming one lets Claude create its own
-routines and loops outside Ciaobot's schedules.
+sparse ``claude_trim`` map of option key -> trimmed. Routine triggers
+(``RemoteTrigger``, the ``schedule`` skill) are trimmed by default and can be
+un-trimmed: they create claude.ai routines, which the user may want.
+
+The loop family is different. Claude's own cron tools and interval wakeups
+(``CronCreate``, ``CronDelete``, ``CronList``, ``ScheduleWakeup``) and the
+bundled ``loop`` skill fire prompts on the harness's clock, outside Ciaobot's
+schedules and wake turns. They are denied in every Claude chat, with no
+Settings switch, so they are not catalog options: ``ALWAYS_DENIED_TOOLS`` and
+``ALWAYS_DENIED_SKILLS`` apply ahead of the workspace's choices. A stored map
+that still names a removed key loads without it.
 
 Two levers apply to bundled skills. The adapter passes both to the CLI through
 ``_meta.claudeCode.options``: ``skillOverrides`` in the settings layer
@@ -21,7 +29,10 @@ hides a skill from the model's listing and slash-command picker. A
 deny alone is not enough, because a denied skill still appears in the listing
 and the model burns a turn on an approval card for a tool it cannot run.
 Plugin skills are not affected by ``skillOverrides``: uninstall the plugin or
-shadow it with a same-named workspace skill.
+shadow it with a same-named workspace skill. The ``CLAUDE_CODE_DISABLE_CRON``
+environment variable on the adapter (``ciao/providers/acp/agents.py``) also
+stops durable cron jobs in a project's ``.claude/scheduled_tasks.json`` from
+firing, which a deny rule alone does not do.
 """
 
 from __future__ import annotations
@@ -31,6 +42,10 @@ from dataclasses import dataclass
 from typing import Any, Literal
 
 TrimKind = Literal["tool", "skill", "setting"]
+
+# Always denied in every Claude chat; no catalog entry, no Settings switch.
+ALWAYS_DENIED_TOOLS: tuple[str, ...] = ("CronCreate", "CronDelete", "CronList", "ScheduleWakeup")
+ALWAYS_DENIED_SKILLS: tuple[str, ...] = ("loop",)
 
 
 @dataclass(frozen=True)
@@ -80,30 +95,6 @@ def _setting(
 
 TRIM_OPTIONS: tuple[TrimOption, ...] = (
     _tool(
-        "CronCreate",
-        "Create cloud routines",
-        "Creates Claude cloud routines that bypass Ciaobot's schedules.",
-        "scheduling",
-    ),
-    _tool(
-        "CronDelete",
-        "Delete cloud routines",
-        "Deletes Claude cloud routines; Ciaobot's schedules replace them.",
-        "scheduling",
-    ),
-    _tool(
-        "CronList",
-        "List cloud routines",
-        "Lists Claude cloud routines; Ciaobot's schedules replace them.",
-        "scheduling",
-    ),
-    _tool(
-        "ScheduleWakeup",
-        "Interval wakeups",
-        "Harness-local interval loop that bypasses Ciaobot's schedules.",
-        "scheduling",
-    ),
-    _tool(
         "RemoteTrigger",
         "Remote triggers",
         "Fires claude.ai routines outside Ciaobot's schedules.",
@@ -112,13 +103,7 @@ TRIM_OPTIONS: tuple[TrimOption, ...] = (
     _skill(
         "schedule",
         "/schedule skill",
-        "Creates cloud routines; Ciaobot's schedules replace it.",
-        "scheduling",
-    ),
-    _skill(
-        "loop",
-        "/loop skill",
-        "Harness-local interval loop; Ciaobot's schedules replace it.",
+        "Creates claude.ai routines; Ciaobot's schedules replace it.",
         "scheduling",
     ),
     _tool(
@@ -389,9 +374,13 @@ def effective_trim(overrides: Mapping[str, bool]) -> dict[str, bool]:
 
 
 def trim_tool_denies(overrides: Mapping[str, bool]) -> list[str]:
-    """Denied tool names: tools by name, bundled skills as ``Skill(<name>)``, catalog order."""
+    """Denied tool names: always-denied tools and skills first, then the trimmed catalog in order.
+
+    Tools are named as-is, bundled skills as ``Skill(<name>)``. The always-denied
+    names ignore ``overrides``.
+    """
     effective = effective_trim(overrides)
-    denies: list[str] = []
+    denies: list[str] = [*ALWAYS_DENIED_TOOLS, *(f"Skill({name})" for name in ALWAYS_DENIED_SKILLS)]
     for o in TRIM_OPTIONS:
         if not effective[o.key]:
             continue
@@ -405,12 +394,13 @@ def trim_tool_denies(overrides: Mapping[str, bool]) -> list[str]:
 def claude_settings_layer(overrides: Mapping[str, bool]) -> dict[str, Any]:
     """The inline CLI settings layer: ``skillOverrides`` plus ``disable*`` keys set to True.
 
-    Untrimmed settings are omitted rather than written as False. The connectors
-    option is not a CLI settings key: a trimmed one sets
+    The always-denied skills are hidden whatever ``overrides`` says. Untrimmed
+    settings are omitted rather than written as False. The connectors option is
+    not a CLI settings key: a trimmed one sets
     ``ENABLE_CLAUDEAI_MCP_SERVERS=false`` on the spawned process instead.
     """
     effective = effective_trim(overrides)
-    layer: dict[str, Any] = {"skillOverrides": {}}
+    layer: dict[str, Any] = {"skillOverrides": {name: "off" for name in ALWAYS_DENIED_SKILLS}}
     for o in TRIM_OPTIONS:
         if not effective[o.key]:
             continue

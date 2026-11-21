@@ -43,7 +43,13 @@ logger = logging.getLogger(__name__)
 CLAUDE = AgentSpec(
     id="claude",
     binary="claude-agent-acp",
-    env={"CLAUDE_CODE_DISABLE_AUTO_MEMORY": "1", "CLAUDE_CODE_DISABLE_ARTIFACT": "1"},
+    # CLAUDE_CODE_DISABLE_CRON removes the cron tools and stops durable jobs in a project's
+    # .claude/scheduled_tasks.json from firing; the loop family is denied in claude_trim.py.
+    env={
+        "CLAUDE_CODE_DISABLE_AUTO_MEMORY": "1",
+        "CLAUDE_CODE_DISABLE_ARTIFACT": "1",
+        "CLAUDE_CODE_DISABLE_CRON": "1",
+    },
     # The claude.ai connectors switch travels only in _meta.claudeCode.options.env (see below).
     unset_env=("ENABLE_CLAUDEAI_MCP_SERVERS",),
     # Background shells: the adapter then sends `terminal_exit` when a background Bash ends.
