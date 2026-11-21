@@ -4787,8 +4787,10 @@ def test_batch_dismiss_settles_a_skill_draft_and_keeps_other_rows(tmp_path: Path
     assert draft.lifecycle == DRAFT_REJECTED
 
 
-def test_history_payload_drops_the_run_and_item_stamps(tmp_path: Path) -> None:
-    """#3056 S2: the care report reads run_id and item_key; the History payload never carries them."""
+def test_history_payload_drops_the_item_stamp_and_keeps_the_run_for_automated_rows(
+    tmp_path: Path,
+) -> None:
+    """#3056 S2 and S4a: item_key is the care report's alone; run_id links an automated row to its run."""
     config = _config(tmp_path)
     _seed_history(
         config,
@@ -4806,5 +4808,312 @@ def test_history_payload_drops_the_run_and_item_stamps(tmp_path: Path) -> None:
 
     row = _client(config).get("/api/proposals/history").json()["rows"][0]
 
-    assert "run_id" not in row and "item_key" not in row
+    assert row["run_id"] == "host:1:uuid"
+    assert "item_key" not in row
     assert row["operation_id"] == "cop_1"
+
+
+def _seed_receipts(config: CiaoConfig, workspace: str, rows: list[dict]) -> None:
+    """Write receipt rows straight into a workspace's memory journal."""
+    from ciao.memory_receipts import journal_path
+
+    journal = journal_path(config.workspace_vault_root(workspace), None)
+    journal.parent.mkdir(parents=True, exist_ok=True)
+    journal.write_text(
+        "".join(json.dumps(r, ensure_ascii=False) + "\n" for r in rows),
+        encoding="utf-8",
+    )
+
+
+def _accepted(**extra: Any) -> dict[str, Any]:
+    """One accepted decision row, as the operator's accept writes it."""
+    return {
+        "promoted_at": "2026-09-01T10:00:00+00:00",
+        "kind": "memory",
+        "text": "One.",
+        "via": "pwa",
+        **extra,
+    }
+
+
+def _region_receipt(receipt_id: str, status: str, **extra: Any) -> dict[str, Any]:
+    return {
+        "id": receipt_id,
+        "kind": "region_apply",
+        "status": status,
+        "ts": "2026-09-01T10:00:00+00:00",
+        "fact_text": "One.",
+        "destination": "ciao:memory",
+        **extra,
+    }
+
+
+def _only_history_row(config: CiaoConfig) -> dict[str, Any]:
+    rows = _client(config).get("/api/proposals/history").json()["rows"]
+    assert len(rows) == 1, rows
+    return rows[0]
+
+
+def test_history_shows_an_applied_accept_as_applied(tmp_path: Path) -> None:
+    config = _config(tmp_path)
+    _seed_history(config, "personal", [_accepted(receipt_id="rcpt_a")])
+    _seed_receipts(config, "personal", [_region_receipt("rcpt_a", "applied")])
+
+    row = _only_history_row(config)
+
+    assert row["applied"] is True
+    assert row["apply_status"] == "applied"
+
+
+def test_history_shows_an_approved_accept_whose_write_failed_as_not_applied(
+    tmp_path: Path,
+) -> None:
+    """Approval alone is not application: the decision row says accepted, the receipt says failed."""
+    config = _config(tmp_path)
+    _seed_history(config, "personal", [_accepted(receipt_id="rcpt_a")])
+    _seed_receipts(config, "personal", [_region_receipt("rcpt_a", "failed")])
+
+    row = _only_history_row(config)
+
+    assert row["action"] == "accepted"
+    assert row["applied"] is False
+    assert row["apply_status"] == "failed"
+
+
+def test_history_shows_a_conflicted_accept_as_not_applied(tmp_path: Path) -> None:
+    config = _config(tmp_path)
+    _seed_history(config, "personal", [_accepted(receipt_id="rcpt_a")])
+    _seed_receipts(config, "personal", [_region_receipt("rcpt_a", "conflict")])
+
+    row = _only_history_row(config)
+
+    assert row["applied"] is False
+    assert row["apply_status"] == "conflict"
+
+
+def test_history_shows_a_rolled_back_accept_as_not_applied(tmp_path: Path) -> None:
+    config = _config(tmp_path)
+    _seed_history(config, "personal", [_accepted(receipt_id="rcpt_a")])
+    _seed_receipts(config, "personal", [_region_receipt("rcpt_a", "rolled_back")])
+
+    row = _only_history_row(config)
+
+    assert row["applied"] is False
+    assert row["apply_status"] == "rolled_back"
+
+
+def test_history_shows_an_undone_accept_as_undone_even_though_it_was_applied(
+    tmp_path: Path,
+) -> None:
+    """An undo appends a later row under the same receipt id; the effective row wins over the applied one."""
+    config = _config(tmp_path)
+    _seed_history(config, "personal", [_accepted(receipt_id="rcpt_a")])
+    _seed_receipts(
+        config,
+        "personal",
+        [
+            _region_receipt("rcpt_a", "applied"),
+            _region_receipt(
+                "rcpt_a",
+                "undone",
+                undo_of="rcpt_a",
+                ts="2026-09-02T10:00:00+00:00",
+            ),
+        ],
+    )
+
+    row = _only_history_row(config)
+
+    assert row["applied"] is False
+    assert row["apply_status"] == "undone"
+
+
+def test_history_shows_a_prepared_accept_as_pending(tmp_path: Path) -> None:
+    config = _config(tmp_path)
+    _seed_history(config, "personal", [_accepted(receipt_id="rcpt_a")])
+    _seed_receipts(config, "personal", [_region_receipt("rcpt_a", "prepared")])
+
+    row = _only_history_row(config)
+
+    assert row["applied"] is None
+    assert row["apply_status"] == "pending"
+
+
+def test_history_shows_no_apply_state_for_a_decision_with_no_receipt(
+    tmp_path: Path,
+) -> None:
+    """A legacy accept with no receipt id and no operation: nothing says it was applied, so nothing does."""
+    config = _config(tmp_path)
+    _seed_history(config, "personal", [_accepted()])
+
+    row = _only_history_row(config)
+
+    assert row["applied"] is None
+    assert row["apply_status"] == "none"
+
+
+def test_history_joins_a_receipt_by_operation_id_when_the_decision_names_none(
+    tmp_path: Path,
+) -> None:
+    config = _config(tmp_path)
+    _seed_history(config, "personal", [_accepted(operation_id="cop_9")])
+    _seed_receipts(
+        config,
+        "personal",
+        [_region_receipt("rcpt_a", "failed", operation_id="cop_9")],
+    )
+
+    row = _only_history_row(config)
+
+    assert row["applied"] is False
+    assert row["apply_status"] == "failed"
+
+
+def test_history_names_an_automated_decision_and_its_run(tmp_path: Path) -> None:
+    config = _config(tmp_path)
+    _seed_history(
+        config,
+        "personal",
+        [
+            _accepted(
+                text="Automated.",
+                via="agent",
+                run_id="host:1:uuid",
+                item_key="proposals:abc",
+                reason="accepted by the care run",
+            ),
+        ],
+    )
+
+    row = _only_history_row(config)
+
+    assert row["actor"] == "automated"
+    assert row["run_id"] == "host:1:uuid"
+    assert "item_key" not in row
+    assert row["reason"] == "accepted by the care run"
+
+
+def test_history_names_an_operator_decision_as_human_with_no_run(
+    tmp_path: Path,
+) -> None:
+    config = _config(tmp_path)
+    _seed_history(config, "personal", [_accepted(via="pwa")])
+
+    row = _only_history_row(config)
+
+    assert row["actor"] == "human"
+    assert "run_id" not in row
+
+
+def test_history_bounds_and_flattens_the_reason_and_names_the_decision_time(
+    tmp_path: Path,
+) -> None:
+    config = _config(tmp_path)
+    long_reason = "first line\nsecond line " + "x" * 2000
+    _seed_history(config, "personal", [_accepted(reason=long_reason)])
+
+    row = _only_history_row(config)
+
+    assert "\n" not in row["reason"]
+    assert len(row["reason"]) <= 1000
+    assert row["reason"].startswith("first line second line")
+    assert row["decided_at"] == "2026-09-01T10:00:00+00:00"
+
+
+def test_an_automated_dismissal_without_a_reason_shows_the_fixed_reason_as_automated(
+    tmp_path: Path,
+) -> None:
+    """Driven through the CLI, the way the care run dismisses a row; History shows who and why."""
+    from ciao import cli
+
+    config = _default_vault(tmp_path)
+    queue = config.workspace_vault_root("personal") / "Workspace" / "Memory-Proposals.md"
+
+    rc = cli.main(
+        [
+            "memory-proposal-dismiss",
+            "--workspace", str(tmp_path),
+            "--vault-root", str(config.workspace_vault_root("personal")),
+            "Remember the lesson about check-first",
+        ]
+    )
+
+    assert rc == 0, queue.read_text(encoding="utf-8")
+    row = next(
+        r for r in _client(config).get("/api/proposals/history").json()["rows"]
+        if r["action"] == "dismissed"
+    )
+    assert row["actor"] == "automated"
+    assert row["reason"] == cli.DISMISS_DECISION_REASON
+    assert row["apply_status"] == "none"
+    assert "run_id" not in row
+
+
+def _history_auth_app(config: CiaoConfig) -> tuple[TestClient, dict[str, str]]:
+    """The history route and its neighbour behind the real session middleware."""
+    from itsdangerous import URLSafeTimedSerializer
+    from starlette.middleware import Middleware
+
+    from ciao.web.auth import SESSION_COOKIE, AuthMiddleware
+
+    serializer = URLSafeTimedSerializer(config.pwa_auth_token)
+    app = Starlette(
+        routes=[
+            Route("/api/proposals", list_proposals, methods=["GET"]),
+            Route("/api/proposals/history", proposals_history, methods=["GET"]),
+        ],
+        middleware=[Middleware(AuthMiddleware, serializer=serializer)],
+    )
+    app.state.config = config
+    cookies = {SESSION_COOKIE: serializer.dumps({"user": "owner"})}
+    return TestClient(app), cookies
+
+
+def test_history_needs_the_session_cookie_like_its_neighbour(tmp_path: Path) -> None:
+    config = _default_vault(tmp_path)
+    _seed_history(config, "personal", [_accepted(receipt_id="rcpt_a")])
+    client, cookies = _history_auth_app(config)
+
+    anonymous_history = client.get("/api/proposals/history")
+    anonymous_list = client.get("/api/proposals")
+
+    assert anonymous_history.status_code == 401
+    assert anonymous_history.json() == anonymous_list.json()
+    signed_in = client.get("/api/proposals/history", cookies=cookies)
+    assert signed_in.status_code == 200
+    assert signed_in.json()["rows"][0]["apply_status"] == "none"
+
+
+def test_history_clamp_serves_the_new_fields_and_still_reports_at_max(
+    tmp_path: Path,
+) -> None:
+    from ciao.web import routes_api as api_module
+
+    config = _config(tmp_path)
+    _seed_history(
+        config,
+        "personal",
+        [
+            _accepted(text=f"Fact {i}.", promoted_at=f"2026-09-01T10:00:{i:02d}+00:00", via="agent", run_id=f"host:{i}:uuid")
+            for i in range(6)
+        ],
+    )
+    client = _client(config)
+
+    monkeyed = api_module._HISTORY_MAX_LIMIT
+    api_module._HISTORY_MAX_LIMIT = 4
+    try:
+        data = client.get("/api/proposals/history", params={"limit": 200}).json()
+    finally:
+        api_module._HISTORY_MAX_LIMIT = monkeyed
+
+    assert len(data["rows"]) == 4
+    assert data["at_max"] is True
+    for row in data["rows"]:
+        assert row["actor"] == "automated"
+        assert row["run_id"].startswith("host:")
+        assert row["apply_status"] == "none"
+        assert row["applied"] is None
+        assert row["decided_at"] == row["ts"]
+        assert "reason" in row
+        assert "item_key" not in row

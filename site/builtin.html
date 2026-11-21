@@ -2,6 +2,7 @@
 <html lang="en">
 <head>
   <meta charset="utf-8">
+  <script>try{var t=localStorage.getItem("ciao-site-theme");if(t)document.documentElement.dataset.theme=t}catch(e){}</script>
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>What's Built In · Ciaobot</title>
   <meta name="description" content="The subagents, skills, commands and command-line tool that ship with Ciaobot, and how to add your own MCP servers, skills and subagents.">
@@ -26,20 +27,19 @@
 <body>
   <header class="site-header">
     <div class="inner">
-      <a class="brand" href="./" aria-label="Ciaobot home"><picture><source media="(prefers-color-scheme: light)" srcset="assets/img/ciaobot-wordmark.png"><img src="assets/img/ciaobot-wordmark-light.png" alt=""></picture></a>
-      <nav class="site-nav" aria-label="Main">
-        <a href="guide.html">Guide</a>
-        <a href="features.html">Features</a>
+      <a class="brand" href="./" aria-label="Ciaobot home"><img class="wm-on-dark" src="assets/img/ciaobot-wordmark-light.png" alt="" width="112" height="26" loading="lazy"><img class="wm-on-light" src="assets/img/ciaobot-wordmark-ink.png" alt="" width="112" height="26" loading="lazy"></a>
+      <nav class="site-nav" id="site-nav" aria-label="Main">
         <a href="memory.html">Memory</a>
-        <a href="trust.html">Trust</a>
+        <a href="features.html">Features</a>
         <a href="https://github.com/raffaelefarinaro/ciaobot">GitHub</a>
       </nav>
+      <button class="theme-toggle" type="button" data-theme-toggle aria-label="Switch colour theme"><svg width="20" height="20" viewBox="0 0 20 20" aria-hidden="true" focusable="false"><circle cx="10" cy="10" r="7" fill="none" stroke="currentColor" stroke-width="1.6"/><path d="M10 3a7 7 0 0 1 0 14z" fill="currentColor"/></svg></button>
+      <button class="menu-toggle" type="button" data-menu-toggle aria-controls="site-nav" aria-expanded="false" aria-label="Open menu"><svg width="20" height="20" viewBox="0 0 20 20" aria-hidden="true" focusable="false"><path d="M3 5.5h14M3 10h14M3 14.5h14" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/></svg></button>
     </div>
   </header>
 
   <main class="narrow">
     <section>
-      <p class="eyebrow">Under the hood</p>
       <h1>What's built in, and how to add more</h1>
       <p class="lead">Ciaobot includes skills that teach it how to do things, a few slash commands, and a command-line tool it uses to run the app. You can add your own subagents and skills too.</p>
       <ul class="toc" aria-label="On this page">
@@ -121,7 +121,7 @@
         </table>
       </div>
 
-      <h3>🔌 MCP servers: connect other apps</h3>
+      <h3>MCP servers: connect other apps</h3>
       <p>The <a href="https://modelcontextprotocol.io/">Model Context Protocol</a> is the standard way to plug an outside service (Notion, Linear, GitHub, your home automation) into an AI assistant as a set of tools.</p>
       <p><strong>Settings → MCP servers → New MCP server</strong>: give it a name and either a web address or a command to run. Tokens are stored in your workspace's private settings file, never in the server list.</p>
       <figure>
@@ -129,16 +129,16 @@
       </figure>
       <div class="prompt">Connect my Linear workspace as an MCP server.</div>
 
-      <h3>🧠 Skills: teach it how you like things done</h3>
+      <h3>Skills: teach it how you like things done</h3>
       <p><strong>Settings → Skills → New skill</strong> takes a zipped skill folder, or put a folder with a <code>SKILL.md</code> file in your workspace's <code>skills/</code> folder. <a href="https://docs.claude.com/en/docs/claude-code/skills">How skills work (Claude Code)</a> · <a href="https://opencode.ai/docs/skills/">in opencode</a>.</p>
       <div class="prompt">Make a skill for my weekly status update: five bullets, risks last, sent to leadership by 10 on Monday.</div>
 
-      <h3>🤖 Subagents: helpers for bigger jobs</h3>
+      <h3>Subagents: helpers for bigger jobs</h3>
       <p><strong>Settings → Subagents → + New subagent</strong>: a name, a description of when to use it, and its instructions. Ciaobot saves it once and makes it available to both Claude Code and opencode. <a href="https://docs.claude.com/en/docs/claude-code/sub-agents">About subagents (Claude Code)</a> · <a href="https://opencode.ai/docs/agents/">in opencode</a>.</p>
       <div class="prompt">Create a subagent that sweeps my inbox every morning and only reports what needs a reply.</div>
 
-      <h3>Already set up in Claude Code or opencode?</h3>
-      <p>Settings lists Ciaobot-managed extensions from the workspace repository (and some discovered provider items); it is not a complete inventory of everything installed in your CLI. Skills, commands, plugins, subagents and MCP servers you've installed in Claude Code or opencode can also be available when that tool runs a Ciaobot chat. The Providers page shows provider connection details. <a href="models.html#inherit">More →</a></p>
+      <h3>Already set up in your agent?</h3>
+      <p>Settings lists Ciaobot-managed extensions from the workspace repository (and some discovered provider items); it is not a complete inventory of everything installed in your CLI. Skills, commands, plugins, subagents and MCP servers you've installed in Claude Code, Codex or OpenCode can also be available when that agent runs a Ciaobot chat. The Providers page shows provider connection details. <a href="models.html#inherit">More →</a></p>
     </section>
 
 
@@ -150,8 +150,8 @@
 
   <footer class="site-footer">
     <div class="inner">
-      <span>Ciaobot is open source.</span>
-      <span>Last updated 11 November 2026</span>
+      <span>Ciaobot is open source under the MIT License. No telemetry, and this site runs no analytics.</span>
+      <span>Last updated 21 November 2026</span>
       <span><a href="https://github.com/raffaelefarinaro/ciaobot">GitHub</a> · <a href="https://github.com/raffaelefarinaro/ciaobot/releases">Release notes</a> · <a href="https://github.com/raffaelefarinaro/ciaobot/issues">Report an issue</a></span>
     </div>
   </footer>

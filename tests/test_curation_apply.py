@@ -109,6 +109,7 @@ def test_accept_writes_the_region_settles_the_row_and_owns_one_decision(install)
     assert decisions[0]["via"] == "agent"
     assert decisions[0]["action"] == "accepted"
     assert decisions[0]["receipt_id"] == result.receipt_id
+    assert decisions[0]["reason"] == apply.ACCEPT_DECISION_REASON
     journal = memory_receipts.journal_path(install.vault, install.guide)
     linked = memory_receipts.find_receipt(journal, result.receipt_id)
     assert linked is not None and linked["operation_id"] == intent.operation_id

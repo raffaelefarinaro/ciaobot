@@ -96,7 +96,7 @@
           <p class="mhw-foot">
             <a
               class="mhw-link"
-              href="https://www.raffaelefarinaro.com/ciaobot/memory.html#tags"
+              href="https://www.raffaelefarinaro.com/ciaobot/memory.html#control"
               target="_blank"
               rel="noopener noreferrer"
             >The full story on the site</a>
