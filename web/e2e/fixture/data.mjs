@@ -815,6 +815,10 @@ export const VERIFICATION_HISTORY = {
       destination: 'Projects/Atlas.md',
       outcome: 'written',
       proposal_id: 'proposal-verify-9',
+      apply_status: 'applied',
+      applied: true,
+      actor: 'human',
+      decided_at: '2026-09-28T10:12:00+00:00',
       note_edit: {
         id: 'fixture0000000000b9',
         relative_path: 'Projects/Atlas.md',

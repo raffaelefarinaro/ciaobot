@@ -4,13 +4,35 @@ import { computed, onMounted, ref, watch } from 'vue'
 import { useProposalsStore } from '../stores/proposals'
 import { useProjectStore } from '../stores/projects'
 import { useFileViewerStore } from '../stores/fileViewer'
+import { useTaskStore } from '../stores/tasks'
 import type { ProposalHistoryRow } from '../lib/types'
 import { kindLabel } from '../lib/proposalKinds'
 import { formatTime } from '../lib/time'
+import { fetchCareRun } from '../lib/careRun'
+import { applyLine, careRunScheduleIndex, historyActorLabel, reasonPreview } from '../lib/proposalHistory'
 
 const store = useProposalsStore()
 const projectStore = useProjectStore()
 const fileViewer = useFileViewerStore()
+const tasks = useTaskStore()
+
+// -- Apply state, reasons and the run behind an automated decision ----------
+//
+// The decision badge says what was decided; the apply line says what the write
+// did. A failed approval therefore reads "Not applied", never "Accepted".
+const openReasonIds = ref<Set<string>>(new Set())
+
+function isReasonOpen(row: ProposalHistoryRow): boolean {
+  return openReasonIds.value.has(row.id)
+}
+
+function toggleReason(row: ProposalHistoryRow) {
+  const next = new Set(openReasonIds.value)
+  if (next.has(row.id)) next.delete(row.id)
+  else next.add(row.id)
+  openReasonIds.value = next
+}
+
 
 // -- Changes and undo -------------------------------------------------------
 //
@@ -144,6 +166,34 @@ const ACTOR_FILTERS: { key: 'all' | 'pwa' | 'agent' | 'auto'; label: string }[] 
 
 const filteredRows = computed(() => store.visibleHistory(projectStore.activeWorkspace))
 
+/** The care run ids on the page, mapped to the care schedule whose last run each is. */
+const runSchedules = ref<Map<string, string>>(new Map())
+const automatedRunIds = computed(() => [
+  ...new Set(filteredRows.value
+    .filter(r => r.actor === 'automated' && r.run_id)
+    .map(r => r.run_id as string)),
+])
+let runTicket = 0
+
+async function resolveRunSchedules(): Promise<void> {
+  const mine = ++runTicket
+  if (!automatedRunIds.value.length) {
+    runSchedules.value = new Map()
+    return
+  }
+  if (!tasks.schedulesLoaded) await tasks.fetchSchedules().catch(() => {})
+  if (mine !== runTicket) return
+  runSchedules.value = await careRunScheduleIndex(tasks.schedules, id => fetchCareRun(id))
+}
+
+watch(() => automatedRunIds.value.join('|'), () => { void resolveRunSchedules() }, { immediate: true })
+
+/** The Automations row to link to for an automated decision, or null when it cannot be matched exactly. */
+function runScheduleFor(row: ProposalHistoryRow): string | null {
+  if (row.actor !== 'automated' || !row.run_id) return null
+  return runSchedules.value.get(row.run_id) ?? null
+}
+
 /** Who decided, in the same words the row's actor badge uses. */
 function actorLabel(via: string): string {
   if (via === 'pwa') return 'you'
@@ -190,6 +240,12 @@ function statusBadge(row: ProposalHistoryRow): { cls: string; text: string } {
     if (row.outcome === 'duplicate' || row.outcome === 'suppressed') {
       return { cls: 'badge--muted', text: 'Skipped · already known' }
     }
+    // The decision stands, but what it wrote is the headline when it did not land.
+    const apply = applyLine(row)
+    if (apply?.tone === 'bad') return { cls: 'badge--error', text: 'Not applied' }
+    if (row.apply_status === 'undone') return { cls: 'badge--muted', text: 'Undone' }
+    if (row.apply_status === 'rolled_back') return { cls: 'badge--muted', text: 'Rolled back' }
+    if (row.apply_status === 'pending') return { cls: 'badge--muted', text: 'Pending' }
     return { cls: 'badge--success', text: 'Accepted' }
   }
   if (row.outcome === 'swept') {
@@ -317,10 +373,15 @@ const filtersHideEverything = computed(
               <span class="ph-kind">{{ kindLabel(row.kind) }}</span>
               <span class="badge" :class="statusBadge(row).cls">{{ statusBadge(row).text }}</span>
               <span v-if="isCareSettled(row)" class="ph-actor ph-actor--care">{{ careLabel(row) }}</span>
-              <span v-else class="ph-actor">{{ actorLabel(row.via) }}</span>
-              <span v-if="row.ts" class="ph-time">{{ formatTime(row.ts) }}</span>
+              <span v-else class="ph-actor">{{ historyActorLabel(row) ?? actorLabel(row.via) }}</span>
+              <span v-if="row.decided_at || row.ts" class="ph-time">{{ formatTime(row.decided_at || row.ts) }}</span>
             </div>
             <p class="ph-text">{{ row.text }}</p>
+            <p
+              v-if="applyLine(row)"
+              class="ph-apply"
+              :class="`ph-apply--${applyLine(row)!.tone}`"
+            >{{ applyLine(row)!.text }}</p>
             <p v-if="row.prediction" class="ph-prediction">
               <span class="badge" :class="predictionBadge(row).cls">{{ predictionBadge(row).text }}</span>
               {{ predictionLine(row) }}
@@ -335,7 +396,19 @@ const filtersHideEverything = computed(
               >{{ store.isBusy(row.change.receipt_id) ? 'undoing…' : 'Undo' }}</button>
             </div>
             <p v-if="row.destination" class="ph-destination">{{ row.destination }}</p>
-            <p v-if="row.reason" class="ph-reason"><span class="ph-reason-label">Why</span> {{ row.reason }}</p>
+            <div v-if="row.reason" class="ph-reason-block">
+              <p class="ph-reason"><span class="ph-reason-label">Why</span> {{ isReasonOpen(row) ? row.reason : reasonPreview(row.reason).text }}</p>
+              <button
+                v-if="reasonPreview(row.reason).long"
+                type="button"
+                class="ph-reason-toggle"
+                :aria-expanded="isReasonOpen(row)"
+                @click="toggleReason(row)"
+              >{{ isReasonOpen(row) ? 'Show less' : 'Show full reason' }}</button>
+            </div>
+            <p v-if="runScheduleFor(row)" class="ph-run-line">
+              <router-link class="ph-run-link" :to="`/schedules/${runScheduleFor(row)}`">Workspace care run</router-link>
+            </p>
             <!-- A retirement went to the review trash, not through a memory
                  receipt, so the Changes box below says there is no snapshot.
                  Saying so alone would read as "nothing happened" beside a note
@@ -689,6 +762,51 @@ const filtersHideEverything = computed(
 .ph-reason-label {
   font-weight: 600;
 }
+
+.ph-reason-block {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 2px;
+}
+
+.ph-reason-toggle,
+.ph-run-link {
+  min-height: 30px;
+  padding: 0;
+  border: none;
+  background: none;
+  color: var(--accent2);
+  font-family: var(--font);
+  font-size: 0.8rem;
+  text-decoration: underline;
+  cursor: pointer;
+}
+.ph-reason-toggle:focus-visible,
+.ph-run-link:focus-visible {
+  outline: 2px solid var(--accent2);
+  outline-offset: 2px;
+  border-radius: 2px;
+}
+@media (pointer: coarse) {
+  .ph-reason-toggle,
+  .ph-run-link { min-height: var(--touch); }
+}
+
+.ph-run-line {
+  margin: 0;
+  font-size: 0.8rem;
+}
+
+/* The apply line states the outcome in words; the colour only reinforces it. */
+.ph-apply {
+  margin: 0;
+  font-size: 0.8rem;
+  font-weight: 600;
+  color: var(--fg2);
+}
+.ph-apply--ok { color: var(--success); }
+.ph-apply--bad { color: var(--error); }
 
 .ph-source-line {
   margin: 0;

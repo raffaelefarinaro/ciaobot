@@ -322,6 +322,30 @@ describe('proposal history', () => {
     expect(store.historyTruncated).toBe(true)
   })
 
+  it('normalises history rows from an engine that predates the apply fields', async () => {
+    vi.mocked(api.get).mockResolvedValue({
+      rows: [
+        historyRow({ id: 'old', via: 'pwa', reason: '   ' }),
+        historyRow({ id: 'new', via: 'auto', actor: 'automated', run_id: 'run_1', decided_at: '2026-09-02T08:00:00+00:00', reason: ' why\n now ' }),
+      ],
+      total: 2,
+      truncated: false,
+    } as never)
+
+    const store = useProposalsStore()
+    await store.fetchHistory()
+
+    const [old, fresh] = store.historyRows
+    expect(old.actor).toBe('human')
+    expect(old.decided_at).toBe('2026-09-01T10:00:00+00:00')
+    expect(old.reason).toBeUndefined()
+    expect(old.apply_status).toBeUndefined()
+    expect(fresh.actor).toBe('automated')
+    expect(fresh.decided_at).toBe('2026-09-02T08:00:00+00:00')
+    expect(fresh.reason).toBe('why now')
+    expect(fresh.run_id).toBe('run_1')
+  })
+
   it('drops a stale history response that lands after a forced refetch', async () => {
     let releaseFirst!: (value: unknown) => void
     const stale = new Promise((r) => { releaseFirst = r })
