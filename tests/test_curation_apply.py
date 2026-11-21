@@ -7,6 +7,7 @@ service definition is stubbed so the trusted registry reads that install only.
 from __future__ import annotations
 
 import json
+import time
 from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
@@ -546,7 +547,7 @@ def test_a_retry_after_a_crash_at_progress_records_the_missing_progress_key(inst
     assert queued[0]["item_key"] in curation_run.load_state(install.vault).done_keys
 
 
-def test_a_finished_operation_is_not_resumed_again(install, monkeypatch, tmp_path) -> None:
+def test_a_retry_of_a_finished_operation_is_already_done(install, monkeypatch, tmp_path) -> None:
     holder = _lease(install.vault)
     _predict(install.queue)
     argv = _accept_argv(install, tmp_path, holder)
@@ -554,9 +555,122 @@ def test_a_finished_operation_is_not_resumed_again(install, monkeypatch, tmp_pat
     assert cli.main(argv) == 0
     before = _state_of(install)
 
+    assert cli.main(argv) == 0
+
+    assert _state_of(install) == before
+
+
+def test_a_finished_operation_is_not_resumed_by_another_run_or_holder(install, monkeypatch, tmp_path) -> None:
+    holder = _lease(install.vault)
+    _predict(install.queue)
+    argv = _accept_argv(install, tmp_path, holder)
+    _crash_at_decision(install, monkeypatch, argv)
+    assert cli.main(argv) == 0
+    before = _state_of(install)
+
+    assert cli.main(_accept_argv(install, tmp_path, "someone-else")) == 1
+    curation_run.end_run(install.vault, holder=holder)
+    other = curation_run.begin_run(install.vault, holder="run-b", ttl_s=3600).holder
+
+    assert cli.main(_accept_argv(install, tmp_path, other)) == 1
+
+    assert _state_of(install) == before
+
+
+def test_run_b_does_not_resume_run_a_unfinished_receipt_with_the_same_text(install, monkeypatch, tmp_path) -> None:
+    holder_a = _lease(install.vault)
+    _predict(install.queue)
+    _crash_at_decision(install, monkeypatch, _accept_argv(install, tmp_path, holder_a))
+    curation_run.end_run(install.vault, holder=holder_a)
+    holder_b = curation_run.begin_run(install.vault, holder="run-b", ttl_s=3600).holder
+    before = _state_of(install)
+
+    assert cli.main(_accept_argv(install, tmp_path, holder_b)) == 1
+
+    assert _state_of(install) == before
+
+
+def test_a_receipt_from_an_earlier_lease_is_not_resumed(install, monkeypatch, tmp_path) -> None:
+    """An old unfinished receipt, named by its old holder under a new lease, is not resumed.
+
+    Each lease has its own holder string, so only the lease-start bound separates
+    the two: the holder match alone would accept it.
+    """
+    holder = _lease(install.vault)
+    _predict(install.queue)
+    argv = _accept_argv(install, tmp_path, holder)
+    _crash_at_decision(install, monkeypatch, argv)
+    curation_run.end_run(install.vault, holder=holder)
+    # Stamps are whole seconds, so the new lease must start in a later second.
+    time.sleep(1.1)
+    assert _lease(install.vault) != holder
+    before = _state_of(install)
+
+    assert apply.find_resumable_accept(install.vault, workspace="work", holder=holder, text=FACT) is None
     assert cli.main(argv) == 1
 
     assert _state_of(install) == before
+
+
+def test_the_finder_reads_only_the_holders_own_receipts(install, monkeypatch, tmp_path) -> None:
+    """Run A's unfinished receipt, inside A's live lease, is not offered to holder B."""
+    holder = _lease(install.vault)
+    _predict(install.queue)
+    _crash_at_decision(install, monkeypatch, _accept_argv(install, tmp_path, holder))
+    before = _state_of(install)
+
+    assert apply.find_resumable_accept(install.vault, workspace="work", holder="run-b", text=FACT) is None
+    assert apply.find_resumable_accept(install.vault, workspace="work", holder=holder, text=FACT) is not None
+    assert _state_of(install) == before
+
+
+def test_a_resume_is_refused_at_the_cap_even_with_an_unfinished_operation(install, monkeypatch, tmp_path) -> None:
+    holder = _lease(install.vault)
+    _predict(install.queue)
+    argv = _accept_argv(install, tmp_path, holder)
+    _crash_at_decision(install, monkeypatch, argv)
+    _fill_cap(install, apply.HANDOVER_ACCEPT_CAP)
+    before = _state_of(install)
+
+    assert cli.main(argv) == 1
+
+    assert _state_of(install) == before
+
+
+def test_a_decision_is_not_written_once_the_lease_is_gone(install, monkeypatch) -> None:
+    intent = _accept_ready(install)
+    real_settle = apply._settle_queue
+
+    def settle_then_lose_lease(vault, queue, intent_, **kwargs):
+        settled = real_settle(vault, queue, intent_, **kwargs)
+        curation_run.end_run(vault, holder=intent_.holder)
+        return settled
+
+    monkeypatch.setattr(apply, "_settle_queue", settle_then_lose_lease)
+
+    assert apply.apply_memory_accept(intent, vault_root=install.vault) == apply.Failed(apply.FAILED_DECISION)
+
+    assert not [r for r in read_decisions(install.queue) if r.get("operation_id") == intent.operation_id]
+    assert _region_text(install).count(FACT) == 1
+
+
+def test_a_concurrent_decision_is_not_recorded_twice(install, monkeypatch) -> None:
+    """Two retries pass the first check together; the second sees the first's decision under the lock."""
+    intent = _accept_ready(install)
+    assert isinstance(apply.apply_memory_accept(intent, vault_root=install.vault), apply.Accepted)
+    real_decision_for = apply._decision_for
+    calls = {"n": 0}
+
+    def first_check_sees_nothing(queue, operation_id):
+        calls["n"] += 1
+        return None if calls["n"] == 1 else real_decision_for(queue, operation_id)
+
+    monkeypatch.setattr(apply, "_decision_for", first_check_sees_nothing)
+
+    result = apply.apply_memory_accept(intent, vault_root=install.vault)
+
+    assert isinstance(result, apply.AlreadyDone)
+    assert len([r for r in read_decisions(install.queue) if r.get("operation_id") == intent.operation_id]) == 1
 
 
 @pytest.mark.parametrize(

@@ -566,8 +566,9 @@ def apply_memory_accept(intent: ManagedMemoryAcceptIntent, *, vault_root: Path) 
     bullet: ProposalBullet
     queue_receipt_id = ""
     if guide_receipt_id or queue_rows:
-        # Resuming: the guide write (or the queue removal) already landed. The
-        # queue settlement below re-checks handover and authority before it moves.
+        # Resuming: the guide write (or the queue removal) already landed, so the
+        # settlement below is not repeated. The decision write is the authority
+        # check on this path: it holds the queue and state locks.
         outcome: Literal["written", "duplicate"] = "written" if guide_receipt_id else "duplicate"
         if queue_rows:
             bullet = ProposalBullet(
@@ -598,22 +599,34 @@ def apply_memory_accept(intent: ManagedMemoryAcceptIntent, *, vault_root: Path) 
     if _entries_for(queue, intent.workspace, intent.proposal_id):
         return PartialConflict(guide_receipt_id) if guide_receipt_id else Failed(FAILED_VERIFY)
 
+    # The decision is written under the queue lock, then the state lock (the
+    # lock order), with the lease checked at write time. A concurrent retry that
+    # passed the first check is caught by the re-read under the lock.
+    recorded = False
+    prior_receipt: str | None = None
     try:
-        with queue_lock(queue):
-            recorded = record_promotion(
-                queue,
-                text=bullet.text,
-                kind=bullet.kind,
-                via="agent",
-                source=bullet.source,
-                destination=f"ciao:{bullet.kind}",
-                outcome=outcome,
-                proposal_id=intent.proposal_id,
-                receipt_id=guide_receipt_id,
-                operation_id=intent.operation_id,
-                run_id=intent.holder,
-                item_key=intent.item_key,
-            )
+        with queue_lock(queue), authorize_holder(vault, holder=intent.holder) as live:
+            prior = _decision_for(queue, intent.operation_id)
+            if prior is not None:
+                prior_receipt = str(prior.get("receipt_id", ""))
+                recorded = True
+            elif live:
+                recorded = bool(
+                    record_promotion(
+                        queue,
+                        text=bullet.text,
+                        kind=bullet.kind,
+                        via="agent",
+                        source=bullet.source,
+                        destination=f"ciao:{bullet.kind}",
+                        outcome=outcome,
+                        proposal_id=intent.proposal_id,
+                        receipt_id=guide_receipt_id,
+                        operation_id=intent.operation_id,
+                        run_id=intent.holder,
+                        item_key=intent.item_key,
+                    )
+                )
     except Exception:  # noqa: BLE001 — an unrecorded decision is finished by the replay
         recorded = False
     if not recorded:
@@ -621,6 +634,8 @@ def apply_memory_accept(intent: ManagedMemoryAcceptIntent, *, vault_root: Path) 
     failure = _progress(vault, intent)
     if failure:
         return Failed(failure)
+    if prior_receipt is not None:
+        return AlreadyDone(prior_receipt)
     return Accepted(
         receipt_id=guide_receipt_id,
         queue_receipt_id=queue_receipt_id,
@@ -629,20 +644,41 @@ def apply_memory_accept(intent: ManagedMemoryAcceptIntent, *, vault_root: Path) 
     )
 
 
+def _live_lease_start(vault: Path) -> datetime | None:
+    """When the live lease started, or None when there is no readable live lease."""
+    try:
+        lease = active_lease(vault)
+    except CurationStateError:
+        return None
+    if lease is None:
+        return None
+    try:
+        started = datetime.fromisoformat(str(lease.get("started_at", "")))
+    except ValueError:
+        return None
+    return started.replace(tzinfo=UTC) if started.tzinfo is None else started
+
+
 def find_resumable_accept(
     vault: Path, *, workspace: str, holder: str, text: str
 ) -> dict[str, Any] | None:
-    """The one unfinished accept of this run that ``text`` names, as its queue receipt.
+    """This run's accept of ``text`` as its queue receipt, when exactly one exists.
 
     Used when the queue row is already gone, so the row cannot be matched. A
-    receipt matches when this run (``holder``) and this workspace wrote it, its
-    removed text equals ``text`` after whitespace flattening, and its operation
-    is unfinished: no decision yet, or a decision whose progress key is not
-    recorded. Anything other than exactly one such operation returns None.
+    receipt matches when this run (``holder``) and this workspace wrote it during
+    the live lease (``_since`` the lease start), its removed text equals ``text``
+    after whitespace flattening, and it names exactly one operation. An
+    unfinished operation (no decision, or a decision without its progress key)
+    is resumed; when none is unfinished, a single finished one is returned so the
+    retry is idempotent (:func:`apply_memory_accept` answers AlreadyDone). Any
+    other count returns None.
     """
-    if not (workspace and holder and " ".join(text.split())):
-        return None
     wanted = " ".join(text.split())
+    if not (workspace and holder and wanted):
+        return None
+    started = _live_lease_start(vault)
+    if started is None:
+        return None
     queue = Path(vault) / PROPOSALS_RELATIVE
     done = load_state(vault).done_keys
     decided = {str(row["operation_id"]) for row in read_decisions(queue) if row.get("operation_id")}
@@ -654,6 +690,7 @@ def find_resumable_accept(
         and row.get("actor") == "agent"
         and row.get("workspace") == workspace
         and row.get("run_id") == holder
+        and _since(row.get("ts"), started)
         and row.get("operation_id")
         and row.get("item_key")
         and row.get("proposal_id")
@@ -665,10 +702,9 @@ def find_resumable_accept(
         for row in candidates
         if not (str(row["operation_id"]) in decided and str(row["item_key"]) in done)
     ]
-    operations = {str(row["operation_id"]) for row in unfinished}
-    if len(operations) != 1 or len(unfinished) != 1:
-        return None
-    return unfinished[0]
+    finished = [row for row in candidates if row not in unfinished]
+    pool = unfinished or finished
+    return pool[0] if len(pool) == 1 else None
 
 
 def resume_memory_accept(
