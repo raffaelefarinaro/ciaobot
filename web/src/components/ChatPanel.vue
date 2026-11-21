@@ -1209,6 +1209,10 @@
                 </template>
               </ModelSelector>
             </div>
+            <!-- A chat's own loops, beside its model: the loop's end and runs left,
+                 and a menu to open it in Automations or stop it. Renders nothing
+                 when the chat has no loop. -->
+            <ChatLoopChip :chat-id="chat.chat_id" :archived="chat.archived" />
             <label class="image-btn" title="Attach files" aria-label="Attach files">
               <input type="file" multiple hidden @change="handleFileSelect" />
               <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21.44 11.05l-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48"/></svg>
@@ -1292,7 +1296,7 @@
             <AppIcon class="cd-icon" name="clock" />
             <span class="cd-main">
               <span class="cd-primary">{{ s.title || 'Automation' }}</span>
-              <span class="cd-detail">Automation</span>
+              <span class="cd-detail">{{ isOwnedLoop(s) ? `Loop · ${loopEndsLabel(s, Date.now())}` : 'Automation' }}</span>
             </span>
             <span class="cd-trail" aria-hidden="true"><AppIcon name="arrow" /></span>
           </router-link>
@@ -1425,6 +1429,8 @@ import { useTerminalStore } from '../stores/terminal'
 import AgentContextSection from './AgentContextSection.vue'
 import { latestContextUsage } from '../lib/contextUsage'
 import ChatTurnActivity from './ChatTurnActivity.vue'
+import ChatLoopChip from './ChatLoopChip.vue'
+import { isOwnedLoop, loopEndsLabel } from '../lib/loops'
 import SubagentCard from './SubagentCard.vue'
 import ShellCard from './ShellCard.vue'
 import ComposerActivity from './ComposerActivity.vue'
