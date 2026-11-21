@@ -4,7 +4,7 @@ Ciaobot is a persistent personal workspace for Claude Code and OpenCode: your ag
 
 ## Using Ciaobot
 
-- [Get started](https://www.raffaelefarinaro.com/ciaobot/guide.html): install, connect an agent, and complete your first task.
+- [Get started](https://www.raffaelefarinaro.com/ciaobot/): download the Mac app, or install the engine on Linux with [docs/LINUX.md](LINUX.md); the app's onboarding does the rest.
 - [Workspaces, projects, and chats](https://www.raffaelefarinaro.com/ciaobot/features.html#organise): organise personal, work, and client context.
 - [Memory](https://www.raffaelefarinaro.com/ciaobot/memory.html): archiving, recall, proposals, history, and notes to revisit.
 - [Files and documents](https://www.raffaelefarinaro.com/ciaobot/features.html#documents): preview, pin, edit, and annotate outputs beside a chat.

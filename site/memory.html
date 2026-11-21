@@ -2,6 +2,7 @@
 <html lang="en">
 <head>
   <meta charset="utf-8">
+  <script>try{var t=localStorage.getItem("ciao-site-theme");if(t)document.documentElement.dataset.theme=t}catch(e){}</script>
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>How Memory Works · Ciaobot</title>
   <meta name="description" content="What Ciaobot remembers, where it keeps it, how it finds it again, and how you stay in control. Explained from how the code actually works.">
@@ -26,26 +27,51 @@
 <body>
   <header class="site-header">
     <div class="inner">
-      <a class="brand" href="./" aria-label="Ciaobot home"><picture><source media="(prefers-color-scheme: light)" srcset="assets/img/ciaobot-wordmark.png"><img src="assets/img/ciaobot-wordmark-light.png" alt=""></picture></a>
-      <nav class="site-nav" aria-label="Main">
-        <a href="guide.html">Guide</a>
-        <a href="features.html">Features</a>
+      <a class="brand" href="./" aria-label="Ciaobot home"><img class="wm-on-dark" src="assets/img/ciaobot-wordmark-light.png" alt="" width="112" height="26" loading="lazy"><img class="wm-on-light" src="assets/img/ciaobot-wordmark-ink.png" alt="" width="112" height="26" loading="lazy"></a>
+      <nav class="site-nav" id="site-nav" aria-label="Main">
         <a href="memory.html" aria-current="page">Memory</a>
-        <a href="trust.html">Trust</a>
+        <a href="features.html">Features</a>
         <a href="https://github.com/raffaelefarinaro/ciaobot">GitHub</a>
       </nav>
+      <button class="theme-toggle" type="button" data-theme-toggle aria-label="Switch colour theme"><svg width="20" height="20" viewBox="0 0 20 20" aria-hidden="true" focusable="false"><circle cx="10" cy="10" r="7" fill="none" stroke="currentColor" stroke-width="1.6"/><path d="M10 3a7 7 0 0 1 0 14z" fill="currentColor"/></svg></button>
+      <button class="menu-toggle" type="button" data-menu-toggle aria-controls="site-nav" aria-expanded="false" aria-label="Open menu"><svg width="20" height="20" viewBox="0 0 20 20" aria-hidden="true" focusable="false"><path d="M3 5.5h14M3 10h14M3 14.5h14" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/></svg></button>
     </div>
   </header>
 
   <main class="narrow">
-    <section>
-      <p class="eyebrow">Your second brain</p>
+    <section class="doc-intro">
       <h1>How memory works</h1>
-      <p class="lead">No magic and no hidden database. Ciaobot's memory is a folder of text notes plus a few simple rules about when to write and when to look.</p>
+      <p class="lead">No magic and no hidden database. Ciaobot's memory is a folder of Markdown notes, plus a few simple rules about when to write and when to look.</p>
     </section>
 
-    <section>
-      <h2>The short version</h2>
+    <section id="loop" aria-labelledby="loop-h">
+      <h2 id="loop-h">The loop, on one page</h2>
+      <p>Ciaobot doesn't take notes while you talk. When you archive a chat, a memory pass reads it in the background, files what it is sure about, and leaves anything uncertain for you. Solid lines are writes to your notes; the dashed line waits for your answer.</p>
+      <div class="home-map">
+        <svg class="diagram" viewBox="0 0 1100 330" overflow="visible" role="img" aria-labelledby="loop-title-m loop-desc-m">
+          <title id="loop-title-m">The memory loop</title>
+          <desc id="loop-desc-m">You chat, then archive the chat. A memory pass files clear facts into your notes and holds uncertain ones in To decide. A daily pass tidies the notes, and your next chat loads them.</desc>
+          <rect class="box" x="0" y="60" width="180" height="84" rx="16"/><text x="90" y="109" text-anchor="middle" font-size="20" font-weight="700">Chat</text>
+          <rect class="box" x="250" y="60" width="180" height="84" rx="16"/><text x="340" y="109" text-anchor="middle" font-size="20" font-weight="700">Archive</text>
+          <rect class="box-solid" x="500" y="60" width="220" height="84" rx="16"/><text class="on-solid" x="610" y="109" text-anchor="middle" font-size="20" font-weight="700">Memory pass</text>
+          <rect class="box" x="830" y="0" width="230" height="84" rx="16"/><text x="945" y="49" text-anchor="middle" font-size="20" font-weight="700">Notes</text>
+          <rect class="box-pending" x="830" y="128" width="230" height="84" rx="16"/><text x="945" y="177" text-anchor="middle" font-size="20" font-weight="700">To decide</text>
+          <rect class="box" x="380" y="244" width="240" height="70" rx="16"/><text x="500" y="285" text-anchor="middle" font-size="20" font-weight="700">Daily tidy</text>
+          <path class="line" d="M180 102H250M430 102H500M720 92 830 42M1060 42H1090V279H620M380 279H90V144"/>
+          <path class="line pending" d="M720 112 830 170"/>
+          <text class="muted" x="340" y="174" text-anchor="middle" font-size="15">you archive</text>
+          <text class="muted" x="610" y="174" text-anchor="middle" font-size="15">runs in the background</text>
+          <text class="muted" x="236" y="268" text-anchor="middle" font-size="15">loaded in your next chat</text>
+        </svg>
+        <div class="home-legend">
+          <span><svg width="40" height="6" aria-hidden="true"><line x1="0" y1="3" x2="40" y2="3" stroke="currentColor" stroke-width="3"/></svg>written to your notes</span>
+          <span><svg width="40" height="6" aria-hidden="true"><line x1="0" y1="3" x2="40" y2="3" stroke="currentColor" stroke-width="3" stroke-dasharray="8 6"/></svg>waits for your yes</span>
+        </div>
+      </div>
+    </section>
+
+    <section aria-labelledby="layers-h">
+      <h2 id="layers-h">Three layers</h2>
       <svg class="diagram" viewBox="0 0 720 250" role="img" aria-labelledby="sum-title sum-desc">
         <title id="sum-title">Three layers of memory</title>
         <desc id="sum-desc">Always known: core memory, two regions with character budgets, and the project description, loaded in every chat. Looked up when needed: the notes folder, searched by the assistant. Written after you archive: facts from the chat are checked and filed, or queued for you.</desc>
@@ -66,228 +92,64 @@
         <text class="muted" x="600" y="86" text-anchor="middle" font-size="14">After you archive a chat,</text>
         <text class="muted" x="600" y="108" text-anchor="middle" font-size="14">facts are checked and filed,</text>
         <text class="muted" x="600" y="140" text-anchor="middle" font-size="14">or queued for you</text>
-        <text class="muted" x="600" y="190" text-anchor="middle" font-size="13">tidied every night</text>
+        <text class="muted" x="600" y="190" text-anchor="middle" font-size="13">tidied once a day</text>
       </svg>
+      <ul>
+        <li><strong>Always known.</strong> A short core memory about you and how you work, plus the project's description, is loaded into every chat. It lives in <code>AGENTS.md</code> in your workspace.</li>
+        <li><strong>Looked up.</strong> Everything else is one note per project, person, place or lesson. When a question needs background, the assistant searches your notes, reads the right one, and says so when the notes don't know. Search stays inside the current workspace, so work notes never show up in a personal chat.</li>
+        <li><strong>Written.</strong> After you archive a chat, facts are checked and filed, or queued for you.</li>
+      </ul>
     </section>
 
-    <section>
-      <h2>1. What it always knows</h2>
-      <p>Every workspace has a <strong>core memory</strong> with two parts: <em>about you</em> (where you live, how you like answers) and <em>agent memory</em> (rules and facts that matter in every chat). Both live in a plain file called <code>AGENTS.md</code> in your workspace folder, and both have a character budget rather than a page count. These are the shipped defaults:</p>
-      <div class="table-wrap">
-        <table id="numbers">
-          <thead><tr><th>Limit</th><th>Value</th><th>What it means</th></tr></thead>
-          <tbody>
-            <tr><td>Agent memory region</td><td>3,000 characters</td><td>What every chat loads: environment facts, conventions, lessons. A budget, not a wall.</td></tr>
-            <tr><td>About-you region (profile)</td><td>1,375 characters</td><td>Identity, preferences, how you like answers. A smaller budget, the same rule.</td></tr>
-            <tr><td>Making room</td><td>at 85%</td><td>The nightly pass merges duplicates, drops expired facts and moves project-only facts out.</td></tr>
-            <tr><td>A project note</td><td>flagged after 30 days without a check</td><td>An active project's state changes weekly, so its facts go stale fastest.</td></tr>
-            <tr><td>A person note</td><td>flagged after 90 days</td><td>An employer or an address changes more slowly than a project's status.</td></tr>
-            <tr><td>Any other note</td><td>flagged after 180 days</td><td>The default. Journals, logs and workspace files are never counted stale.</td></tr>
-            <tr><td>A fact inside a region</td><td>90 days with an <code>[as-of:]</code> date, 180 without</td><td>A dated snapshot goes stale sooner than standing state.</td></tr>
-            <tr><td>After a check</td><td>30 days before it is asked again</td><td>A note the pass re-stamped, or could not check, is left alone for a month.</td></tr>
-            <tr><td>A search</td><td>10 results by default, 32-token snippets</td><td>Snippets pick the note; the assistant reads the note itself before answering.</td></tr>
-          </tbody>
-        </table>
+    <section id="control" aria-labelledby="control-h">
+      <h2 id="control-h">You decide what stays</h2>
+      <ul>
+        <li><strong>To decide.</strong> Each suggestion shows where it would go. Edit the wording, accept, dismiss, or talk it through with the assistant. Nothing about you lands in core memory without evidence or your OK.</li>
+        <li><strong>History and undo.</strong> Every memory decision is recorded with its reason, and changes with a receipt can be undone.</li>
+        <li><strong>Memory Map.</strong> See the whole vault as a graph of notes and links, or as a list, and open any note from it.</li>
+        <li><strong>Old notes are flagged, never deleted.</strong> You decide whether to retire them, and retired notes stay readable.</li>
+      </ul>
+    </section>
+
+    <section id="nightly" aria-labelledby="nightly-h">
+      <h2 id="nightly-h">The daily tidy-up</h2>
+      <p>Once a day, at a time you choose, the Workspace care routine looks after each workspace:</p>
+      <ul>
+        <li>It settles the simple suggestions and brings judgement calls back to you as a yes/no question.</li>
+        <li>When core memory gets full, it merges duplicates and drops expired facts, keeping a copy of every removed line as an undo log.</li>
+        <li>It re-checks notes that went too long without a look and flags the stale ones. When the same correction keeps coming up, it proposes a better skill.</li>
+      </ul>
+      <p>It never adds a new fact about you to core memory, or deletes a note, unless you allow it.</p>
+    </section>
+
+    <section id="backup" aria-labelledby="backup-h">
+      <h2 id="backup-h">Back it up</h2>
+      <p>Your memory lives in one folder, kept as a Git repository with the full history of every change. Connect it to a private GitHub repository and Ciaobot pushes to it automatically. Not set up yet? Choose <strong>Set up</strong> in Settings and Ciaobot walks you through it in a chat; you never need Git commands.</p>
+    </section>
+
+    <section aria-labelledby="files-h">
+      <h2 id="files-h">It's just text files</h2>
+      <div class="home-files" aria-label="The workspace folder">
+        <span>personal/</span>
+        <span class="d1">AGENTS.md</span>
+        <span class="d1">memory-vault/projects/…</span>
+        <span class="d1">memory-vault/People/…</span>
+        <span class="d1">Workspace/Learnings.md</span>
+        <span class="d1">Logs/Chats/</span>
       </div>
-      <p>Both region caps are <strong>advisory</strong>. A write over the budget goes through and is reported as over budget, with the count used and the budget it passed; it is never refused. When a region reaches 85%, consolidation merges duplicates, removes expired facts and moves project-only facts into their own notes. If nothing can go, the region stays over budget and says so. The cap is never a reason to drop a durable fact.</p>
-      <p>There is also no fixed number of searches or notes per question. The assistant reads the note its search picked, reads another only when identity or a conflict is still open, and retries with two or three different wordings before it says the notes do not know. <a href="evals.html#memory-comparison">How that measures up →</a></p>
-      <p>On top of that, each message carries a small, invisible header: the workspace, the project, <strong>the project's description</strong> and today's date. If you mention someone or something Ciaobot has a note about, it adds a pointer to that note too, so the assistant knows where to look.</p>
-      <p>That's all that's loaded automatically. Everything else is looked up only when it's needed, which keeps chats fast and focused.</p>
-      <div class="note">Facts can carry an expiry date ("Villa Rosa holds our date until 1 May"). Once the date passes, Ciaobot removes the fact before the next message, so stale facts don't linger.</div>
-    </section>
-
-    <section>
-      <h2>2. How it finds things again</h2>
-      <p>Everything else lives in your <strong>notes folder</strong>: one note per project, per person, per place, plus a learnings list. When a question needs background ("which venues are we still considering?"), the assistant searches that folder, uses the snippets to pick the best-matching note, and reads that note before it answers.</p>
-      <p>It's a plain full-text search on your own computer, and it only looks in the current workspace, so work notes never show up in a personal chat.</p>
-      <p>To see how this search does against other memory systems, read <a href="evals.html#memory-comparison">the November 2026 comparison</a>.</p>
-      <figure>
-        <a href="assets/img/memory-map.webp"><img src="assets/img/memory-map.webp" alt="The Memory map: notes for projects, people and places connected by lines" loading="lazy" width="1600" height="1000"></a>
-        <figcaption>The Memory view shows the notes folder as a map. Lines are links between notes.</figcaption>
-      </figure>
-    </section>
-
-    <section>
-      <h2>3. What happens when you archive a chat</h2>
-      <p>Ciaobot doesn't take notes while you talk. When you <strong>archive</strong> a chat, it saves the conversation and starts a <strong>memory pass</strong> in the background. Home shows a <em>memory insights</em> row while it runs.</p>
-      <ol class="steps">
-        <li>
-          <h3>Save the conversation</h3>
-          <p>A readable copy of the chat is saved in your folder, so nothing is lost even if nothing is filed.</p>
-        </li>
-        <li>
-          <h3>Open the memory pass if you like</h3>
-          <p>The pass is a chat of its own, in a Memory project the sidebar doesn't list, running on the model you chose in <strong>Settings → Providers</strong>. You can open it from Home, read what it did, and answer it or steer it like any other chat.</p>
-        </li>
-        <li>
-          <h3>File what's sure, queue what isn't</h3>
-          <p>It reads the conversation next to what Ciaobot already knows. It updates the notes a person or project already has, folds decisions into the project note, and creates a note only for something genuinely new. Facts it is confident about are written straight away, including into core memory. Anything unsure waits in <strong>To decide</strong> as a suggestion with a tag, and a one-line note on whether the nightly run can settle it or only you can.</p>
-        </li>
-      </ol>
-      <p>What it leaves out: anything from an automated run (that wasn't you), a pattern it has seen in fewer than three chats (counted quietly, not saved as a fact), the fact that a task was finished (the task already records it), and instructions hidden inside a chat (the conversation is evidence, never a command). What stays is the kind of thing a good assistant would write down: <em>"prefers morning meetings"</em>, <em>"venue shortlist: Villa Rosa and Casa Blu"</em>, <em>"Marco is the best man"</em>.</p>
-    </section>
-
-    <section>
-      <h2>Where each fact goes</h2>
-      <div class="table-wrap">
-        <table>
-          <thead><tr><th>Kind of fact</th><th>Where it's filed</th><th>Example</th></tr></thead>
-          <tbody>
-            <tr><td>About you, true everywhere</td><td>Core memory, <em>about you</em></td><td>"Lives in Milan, vegetarian"</td></tr>
-            <tr><td>A rule for every chat</td><td>Core memory, <em>agent memory</em></td><td>"Keep answers short; use tables for plans"</td></tr>
-            <tr><td>About one project</td><td>That project's note</td><td>"Wedding budget capped at €22k"</td></tr>
-            <tr><td>About a person</td><td>A note for that person</td><td>"Marco: best man, allergic to nuts"</td></tr>
-            <tr><td>A lesson for next time</td><td>The learnings list</td><td>"The school's calendar only accepts a work email"</td></tr>
-            <tr><td>Anything uncertain</td><td>Your suggestions queue</td><td>"Allergic to penicillin?"</td></tr>
-          </tbody>
-        </table>
-      </div>
-    </section>
-
-    <section id="tags">
-      <h2>Who settles each suggestion</h2>
-      <p>Every suggestion in <strong>To decide</strong> carries a tag. The memory pass also marks each one <em>nightly</em> (more context, such as other chats or notes, would settle it) or <em>you</em> (it is a judgement about your identity or preferences), with a one-line reason. Nightly leaves a suggestion for you when it is marked decide: you, or when it could not settle it.</p>
-      <div class="table-wrap">
-        <table>
-          <thead><tr><th>Tag</th><th>What it is</th><th>Who decides</th></tr></thead>
-          <tbody>
-            <tr><td><code>project</code></td><td>A fact or decision about one project</td><td>Workspace care files it into the project note</td></tr>
-            <tr><td><code>people</code></td><td>Something about a person</td><td>Workspace care updates that person's note</td></tr>
-            <tr><td><code>learnings</code></td><td>A lesson for next time</td><td>Workspace care adds it to the learnings list</td></tr>
-            <tr><td><code>review</code></td><td>A question with no home yet</td><td>Workspace care decides what it is. A judgement call becomes a yes/no question for you.</td></tr>
-            <tr><td><code>memory</code></td><td>A rule for every chat</td><td>You. Workspace care records a guess; it acts on it only if you allow it (see <a href="#nightly">Memory handover</a> below).</td></tr>
-            <tr><td><code>profile</code></td><td>About you: identity, style</td><td>You, same as above.</td></tr>
-          </tbody>
-        </table>
-      </div>
-    </section>
-
-    <section id="categories">
-      <h2>Categories: what's worth keeping, and how</h2>
-      <p>Every note in your memory folder has a <strong>category</strong>. The list of categories is what tells Ciaobot what deserves its own note, where that note goes, and how long its facts can be trusted. Without it, everything would land in one pile.</p>
-      <p>Each category carries four things:</p>
-      <ul>
-        <li><strong>When to use it</strong>: a one-line rule. <em>Project</em> is "something with an outcome and a finish line: status, decisions, next steps". <em>Person</em> is "a human you know or work with: updates, roles, relationships".</li>
-        <li><strong>Where it lives</strong>: the folder new notes of that kind are filed in, so people go under <code>People/</code> and projects under <code>Projects/</code>.</li>
-        <li><strong>How fresh it must stay</strong>: a note about a project is flagged for re-checking sooner (30 days) than one about a person (90 days).</li>
-        <li><strong>Whether it's a record of a thing or a document about it</strong>: people, projects, places, ideas and resources are things Ciaobot keeps a record <em>of</em>; a journal is a document.</li>
-      </ul>
-      <p>Ciaobot ships with a stock set: person, project, place, idea, resource, journal, and a catch-all <em>note</em> for anything that fits nowhere else. That catch-all is used before a new category is invented, which keeps the list from sprawling. A log is not its own category; it files as a journal.</p>
-      <h3>Make it yours</h3>
-      <p>Open <strong>Memory → Categories</strong> in the app to add, edit or turn off a category. It is stored in one editable file, <code>entity-types.yaml</code>, in your memory folder. Add a category (say <em>client</em> or <em>recipe</em>) with its own description and folder, change how quickly a kind of note goes stale, or turn a stock one off. Your edits are merged over the stock list, so you only write what you change. A sharper description gives a sharper filing decision: it's the same instruction the assistant reads when it decides what to save and where. A change shapes how <em>future</em> notes are filed; no empty folder is created.</p>
-    </section>
-
-    <section id="control">
-      <h2>See what it remembered. Decide what stays.</h2>
-      <p>Archived chats can file confident facts automatically; uncertain ones wait as proposals. Not every remembered fact requires approval, and not every historical change has an Undo button.</p>
-      <h3>Suggestions wait for you</h3>
-      <p>Each suggestion names its destination. <strong>To decide</strong> previews the change where it can be determined before writing; model-decided merges are labelled as such. Large-file previews can omit changes beyond the displayed window. Edit the wording, accept or dismiss it, or use <strong>talk about it</strong> to discuss it with the assistant.</p>
-      <p>When you accept or dismiss, the decision screen asks why — a quick chip or a few words, always optional, and you can continue without one. Accepting opens the card that confirms the change; dismissing opens a confirmation naming the suggestion. History shows your reason beside the decision, and the same goes for decisions on tasks.</p>
-      <figure>
-        <a href="assets/img/proposals.webp"><img src="assets/img/proposals.webp" alt="The suggested memories queue with profile and project suggestions" loading="lazy" width="1600" height="1000"></a>
-        <figcaption>Memory → To decide. Nothing about you lands in core memory without evidence or your OK.</figcaption>
-      </figure>
-      <h3>Review history and undo supported changes</h3>
-      <p><strong>History</strong> records memory decisions and shows before/after details for writes with receipts. <strong>Undo</strong> is available where a reversible receipt exists; older records and some batch entries are view-only. A memory or profile change that Workspace care applied itself under Memory handover reads <em>Filed by Workspace care</em> (or <em>Dismissed by Workspace care</em>), and an accepted one can be undone from the row.</p>
-      <h3>Retire notes without losing them</h3>
-      <p>Old or unused notes are flagged for your decision, not automatically deleted. Review the evidence, keep a note, or move it to the retired list. Retired notes remain restorable until you explicitly choose permanent deletion; there is no timed purge. Only a project can be marked <em>complete</em>; a person, a place or a reference is simply retired, and neither happens without you.</p>
-      <h3>Tell it directly</h3>
-      <div class="prompt">Remember that I'm allergic to penicillin.</div>
-      <div class="prompt">Forget what I said about the Casa Blu venue, we dropped it.</div>
-      <p><code>/remember</code> saves a fact as a suggestion; asking in plain words ("remember that…") lets the assistant write it straight away.</p>
-    </section>
-
-    <section id="nightly">
-      <h2>The nightly tidy-up</h2>
-      <p>Once a night, per workspace, a routine called <strong>Workspace care</strong> works through the queue and the notes:</p>
-      <ul>
-        <li>Files the suggestions tagged <em>project</em>, <em>people</em> and <em>learnings</em>, and decides the <em>review</em> ones. A judgement call comes back to you as a yes/no question.</li>
-        <li>For every <em>memory</em> and <em>profile</em> suggestion it records a guess (would you accept or dismiss it?) and leaves the suggestion for you. The guess is never a decision.</li>
-        <li>Leaves alone anything marked <em>decide: you</em>, and escalates what it cannot settle.</li>
-        <li>Tidies core memory only when a part reaches 85% of its budget (<a href="#numbers">the numbers</a>): it merges duplicates, drops expired facts and moves project-only facts into their project. Every line it removes is copied first to <code>Memory-Consolidations.md</code>, the undo log.</li>
-        <li>Re-checks notes, and single facts inside them, that have gone too long without a check, and flags the rest.</li>
-      </ul>
-      <h3>Memory handover</h3>
-      <p><strong>Settings → choose a workspace → Overview → Memory handover</strong> is the one switch that lets it do more for <em>memory</em> and <em>profile</em>, per workspace: <em>Off</em> (guess only), <em>Dismiss</em>, or <em>Dismiss and accept</em>, which lets queued text reach core memory, up to five changes per run, each with Undo in History. The settings card shows how often its guesses matched yours first. It cannot act on installs without a trusted service definition, and says so.</p>
-      <p>What it <strong>never</strong> does:</p>
-      <ul>
-        <li>add a new fact to core memory (unless you chose <em>Dismiss and accept</em>);</li>
-        <li>delete or retire a note: old or unused notes are only flagged, and you decide;</li>
-        <li>edit a skill or your workspace guide;</li>
-        <li>touch another workspace;</li>
-        <li>drop an important fact just to save space.</li>
-      </ul>
-    </section>
-
-    <section id="weekly">
-      <h2>The weekly pass</h2>
-      <p>About once a week the same run also does the slower work. It is review-only where it matters:</p>
-      <ul>
-        <li>Goes through the notes the vault flags as candidates to retire or merge (unchecked too long, unlinked, possible duplicates) and reports them. It never retires or deletes one.</li>
-        <li>Tidies the workspace: rebuilds the search index and fixes dead links and wrong note types.</li>
-        <li>Reviews the body of your workspace guide and files suggestions. It never edits the guide itself.</li>
-        <li>Reads your recent decisions and updates <code>Memory-Review-Rules.md</code> and <code>Task-Rules.md</code> when there are at least five new ones. A rule that would change a verdict is asked as a yes/no first.</li>
-      </ul>
-    </section>
-
-    <section id="cannot">
-      <h2>What this cannot establish</h2>
-      <p>Every mechanism above does one thing and stops there. These are the edges, written down rather than discovered later:</p>
-      <ul>
-        <li><strong>A keyword search cannot match a word the note does not contain.</strong> Ask for "brother-in-law" and a note that only says "Marco's wife's brother" is invisible. That is why new people and project notes get an <code>aliases:</code> line, and why the assistant retries with two or three other phrasings before it gives up. A synonym the note never uses is still a miss.</li>
-        <li><strong>Unverified is not the same as false.</strong> A note past its horizon is one nobody has checked, not one that has gone wrong. The review list is a reading list, not a verdict, and reaching it is never by itself a reason to retire a note.</li>
-        <li><strong>The nightly pass decides what to ask, not what is true.</strong> It compares a note with the chats and sources it can reach. When the evidence is not in front of it, the honest outcome is "unverified" and a cooldown — not a correction.</li>
-        <li><strong>"Written straight away" is the pass's confidence, not proof.</strong> It means the assistant judged the fact clear enough to file. History is what lets you check the judgement afterwards.</li>
-        <li><strong>The index is a copy.</strong> A search re-indexes the changed notes before it answers, so a hand edit is found on the next search; a note with <code>search: false</code>, or one of the queue and log files, is deliberately not in it at all.</li>
-        <li><strong>A note is one source with one day's view.</strong> It can faithfully record something that was already wrong when it was said. Evidence is not the same as truth.</li>
-        <li><strong>Nothing is deleted automatically, and that cuts both ways.</strong> An unused note stays until you decide, so a vault can keep things you would have thrown away. There is no timed purge to fall back on.</li>
-      </ul>
-      <p>None of this is a reason to distrust the folder. It is a reason to read a fact's date before acting on it, and to treat a suggestion as a suggestion.</p>
-    </section>
-
-    <section>
-      <h2>Projects you've finished</h2>
-      <p>A <strong>completed</strong> project leaves the sidebar, but its notes stay searchable, so "what did we decide about the movers last year?" still works.</p>
-    </section>
-
-
-    <section id="backup">
-      <h2>Back it up</h2>
-      <p>Your memory lives in one folder, so a private copy somewhere else protects it if the computer is lost. Ciaobot turns that folder into a Git repository, which gives it a full history of every change. If the folder is already inside a Git repository, Ciaobot uses that one instead (<a href="guide.html#before-you-start">what that means</a>). Once the repository is connected to a private GitHub repository, Ciaobot pushes to it automatically, with nothing for you to run.</p>
-      <p><strong>Settings → General → Memory backup</strong> shows where things stand. <em>Back up now</em> runs a copy on demand.</p>
-      <h3>If it isn't connected yet</h3>
-      <p>Choose <em>Set up in Ciaobot</em> and Ciaobot walks you through it in a chat, or choose <em>Copy setup prompt</em> and paste it into any agent (Claude Code, Codex, opencode, and so on). The agent creates the private repository, connects the folder to it and checks that the first backup worked. You never need to know Git commands.</p>
-    </section>
-
-    <section>
-      <h2>It's just text files</h2>
-      <p>Everything above is ordinary Markdown in the folder you picked during setup:</p>
-      <pre><code>personal/
-  AGENTS.md                  core memory (about you + agent memory)
-  memory-vault/
-    projects/active/…        one folder per project
-    projects/completed/…     finished projects
-    People/                  one note per person
-    Workspace/Learnings.md   lessons learned
-    Workspace/Memory-Proposals.md   your suggestions queue
-    Workspace/Memory-Consolidations.md   undo log for tidied core memory
-    Workspace/Memory-Review-Rules.md     what you keep and drop (editable)
-    Workspace/Task-Rules.md              how you like tasks done (editable)
-Logs/Chats/                  a readable copy of every archived chat</code></pre>
-      <p>You can open and edit it in <a href="https://obsidian.md">Obsidian</a> or any text editor, back it up like any folder, and keep using it with other AI tools, even without Ciaobot.</p>
-      <div class="note">Want the reasoning behind this design? See <a href="https://github.com/raffaelefarinaro/ciaobot/blob/main/docs/MEMORY_DESIGN.md">MEMORY_DESIGN.md</a>, or ask Ciaobot to explain it.</div>
+      <p>Open it in Obsidian or any text editor, back it up like any folder, and keep using it with other AI tools, with or without Ciaobot. Want every rule, budget and threshold? Read <a href="https://github.com/raffaelefarinaro/ciaobot/blob/main/docs/MEMORY_DESIGN.md">MEMORY_DESIGN.md</a>, or ask Ciaobot to explain it.</p>
     </section>
 
     <nav class="next-page" aria-label="Next pages">
-      <a class="btn" href="builtin.html">← What's built in</a>
-      <a class="btn btn-primary" href="models.html">AI models →</a>
+      <a class="btn" href="features.html">← Features</a>
+      <a class="btn" href="models.html">Agents and models →</a>
     </nav>
   </main>
 
   <footer class="site-footer">
     <div class="inner">
-      <span>Ciaobot is open source.</span>
-      <span>Last updated 11 November 2026</span>
+      <span>Ciaobot is open source under the MIT License. No telemetry, and this site runs no analytics.</span>
+      <span>Last updated 21 November 2026</span>
       <span><a href="https://github.com/raffaelefarinaro/ciaobot">GitHub</a> · <a href="https://github.com/raffaelefarinaro/ciaobot/releases">Release notes</a> · <a href="https://github.com/raffaelefarinaro/ciaobot/issues">Report an issue</a></span>
     </div>
   </footer>
