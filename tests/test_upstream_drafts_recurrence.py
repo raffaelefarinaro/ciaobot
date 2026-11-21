@@ -223,9 +223,18 @@ def test_an_invented_id_never_counts(tmp_path: Path) -> None:
     assert read_records(config, "work") == []
 
 
-def test_a_malformed_task_file_is_unavailable_not_below(tmp_path: Path) -> None:
+def test_a_truncated_file_that_could_hold_a_cited_completion_is_unavailable_not_below(
+    tmp_path: Path,
+) -> None:
+    """Two cited tasks read; the third cited completion may sit in a truncated file.
+
+    Counted as below it would be a refusal that claims the procedure did not
+    recur, which the unreadable file gives no grounds to say.
+    """
     config = _config(tmp_path)
-    cids = _three_tasks(config)
+    cids = [_cid(1), _cid(2), _cid(3)]
+    _task(config, "Task 1", [cids[0]])
+    _task(config, "Task 2", [cids[1]])
     procedure, revision = _procedure(config, cids)
     (_vault(config) / "Workspace" / "Tasks" / f"{_cid(9)}.md").write_text(
         "garbage\n", encoding="utf-8"
@@ -241,6 +250,27 @@ def test_a_malformed_task_file_is_unavailable_not_below(tmp_path: Path) -> None:
 
     assert exc.value.status == "unavailable"
     assert read_records(config, "work") == []
+
+
+def test_a_stray_file_and_an_unrelated_truncated_task_do_not_block_a_met_filing(
+    tmp_path: Path,
+) -> None:
+    config = _config(tmp_path)
+    cids = _three_tasks(config)
+    procedure, revision = _procedure(config, cids)
+    tasks = _vault(config) / "Workspace" / "Tasks"
+    (tasks / "README.md").write_text("notes\n", encoding="utf-8")
+    (tasks / f"{_cid(9)}.md").write_text("garbage\n", encoding="utf-8")
+
+    stored = file_draft(
+        config,
+        "work",
+        **_new_skill(),
+        recurrence=_recurrence(procedure, revision, cids),
+    )
+
+    assert stored.lifecycle == "pending"
+    assert len(stored.origins) == 3
 
 
 def test_a_stale_revision_refuses_before_any_task_is_read(tmp_path: Path) -> None:
@@ -399,6 +429,11 @@ def _helper(**overrides: Any) -> dict[str, Any]:
         (NEW_SKILL, True, _helper(), False),
         (NEW_SKILL, False, None, False),
         (NEW_SKILL, False, {"kind": "proposal"}, False),
+        # The kind check is what keeps a non-pass helper out of the gate: these
+        # carry the pass's own fields, and must still not be gated.
+        (NEW_SKILL, False, {"kind": "proposal", "source_kind": "task_completion"}, False),
+        (NEW_SKILL, False, {"kind": "update_task", "focus": "approved_task"}, False),
+        (NEW_SKILL, False, {"source_kind": "task_completion", "focus": "approved_task"}, False),
         (NEW_SKILL, False, _helper(source_kind="project_closure"), False),
         (UPSTREAM_ISSUE, False, _helper(), False),
     ],
@@ -415,6 +450,18 @@ def test_the_pass_chat_decision_is_a_pure_function(
         assert "recurrence" in message
 
 
+def test_an_unreadable_store_fails_closed_for_a_new_skill_without_a_block() -> None:
+    assert upstream_drafts.new_skill_pass_refusal(
+        NEW_SKILL, has_recurrence=False, helper=None, store_unreadable=True
+    )
+    assert not upstream_drafts.new_skill_pass_refusal(
+        NEW_SKILL, has_recurrence=True, helper=None, store_unreadable=True
+    )
+    assert not upstream_drafts.new_skill_pass_refusal(
+        UPSTREAM_ISSUE, has_recurrence=False, helper=None, store_unreadable=True
+    )
+
+
 def _chat_store(state_dir: Path, chat_id: str, helper: dict[str, Any]) -> None:
     state_dir.mkdir(parents=True, exist_ok=True)
     (state_dir / "web_projects.json").write_text(
@@ -428,16 +475,70 @@ def test_the_chat_helper_is_read_from_the_chat_store(tmp_path: Path) -> None:
     _chat_store(config.state_path.parent, "chat-1", _helper())
 
     assert upstream_drafts.chat_helper(config, "chat-1") == _helper()
+    # A chat id the store does not hold is no helper, not a failure.
     assert upstream_drafts.chat_helper(config, "missing") is None
     assert upstream_drafts.chat_helper(config, "") is None
 
 
-def test_an_unreadable_chat_store_reads_as_no_helper(tmp_path: Path) -> None:
+@pytest.mark.parametrize(
+    "contents",
+    [None, "{not json", "[]", '{"chats": []}'],
+    ids=["missing", "not-json", "not-an-object", "chats-not-a-mapping"],
+)
+def test_an_unreadable_chat_store_raises_rather_than_reading_as_no_helper(
+    tmp_path: Path, contents: str | None
+) -> None:
     config = _config(tmp_path)
-    config.state_path.parent.mkdir(parents=True, exist_ok=True)
-    (config.state_path.parent / "web_projects.json").write_text("{not json", encoding="utf-8")
+    if contents is not None:
+        config.state_path.parent.mkdir(parents=True, exist_ok=True)
+        (config.state_path.parent / "web_projects.json").write_text(contents, encoding="utf-8")
 
-    assert upstream_drafts.chat_helper(config, "chat-1") is None
+    with pytest.raises(upstream_drafts.ChatStoreUnreadable):
+        upstream_drafts.chat_helper(config, "chat-1")
+
+
+def test_a_store_read_through_the_real_manager_gates_a_task_completion_pass(
+    tmp_path: Path,
+) -> None:
+    """Drift guard: the helper is written by the real chat writer, read back here.
+
+    Nothing is hand-written: the helper goes through ``ProjectChatManager.create_chat``
+    and its normalization, and the kind, source and focus the gate compares against
+    are the engine's own constants. If the engine renames one, this fails.
+    """
+    import hashlib
+
+    from ciao.web import chat_service
+    from ciao.web.memory_pass import MEMORY_PASS_KIND
+    from tests.test_project_chat_persistence import _make_manager
+
+    resolution = "Retry once, then report absence."
+    helper = {
+        "kind": MEMORY_PASS_KIND,
+        "source_kind": chat_service.TASK_COMPLETION_SOURCE,
+        "task_path": f"Workspace/Tasks/{'a' * 32}.md",
+        "completion_id": _cid(1),
+        "completed_at": "2026-11-02T10:00:00+00:00",
+        "resolution": resolution,
+        "resolution_sha256": hashlib.sha256(resolution.encode("utf-8")).hexdigest(),
+        "archive_policy": "when_clean",
+    }
+    manager = _make_manager(tmp_path)
+    project = manager.create_project("Reviews", workspace="work")
+    chat = manager.create_chat(project.project_id, title="Pass", helper=helper)
+    stored = manager.get_chat(chat.chat_id)
+    assert stored is not None and stored.helper.get("kind") == MEMORY_PASS_KIND
+
+    config = _config(tmp_path)
+    read_back = upstream_drafts.chat_helper(config, chat.chat_id)
+
+    assert read_back is not None
+    assert upstream_drafts.new_skill_pass_refusal(
+        NEW_SKILL, has_recurrence=False, helper=read_back
+    )
+    # The literals the gate compares against are the engine's constants.
+    assert upstream_drafts._TASK_COMPLETION_SOURCE == chat_service.TASK_COMPLETION_SOURCE
+    assert upstream_drafts._APPROVED_TASK_FOCUS == "approved_task"
 
 
 def test_the_claims_cap_is_a_named_constant() -> None:
@@ -640,13 +741,26 @@ def test_cli_pass_chat_upstream_issue_is_not_gated(
     assert cli.main(["skill-draft-add", "--input-file", draft]) == 0
 
 
-def test_cli_without_a_chat_store_degrades_to_the_recurrence_gate(
+def test_cli_pass_chat_with_an_unreadable_store_fails_closed(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    """No store to consult is not a crash, and not a refusal of the manual route."""
     root = _cli_workspace(tmp_path)
     _cli_env(monkeypatch, tmp_path, root)
-    monkeypatch.setenv("CIAO_CHAT_ID", "unknown-chat")
+    monkeypatch.setenv("CIAO_CHAT_ID", "pass-chat")
+    # No store at all while a chat id is set: the chat cannot be ruled out.
+
+    assert cli.main(["skill-draft-add", "--input-file", _cli_payload(tmp_path)]) == 2
+    assert "recurrence" in capsys.readouterr().err
+    assert read_records(_cli_config(root), "personal") == []
+
+
+def test_cli_chat_missing_from_a_readable_store_is_not_gated(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    root = _cli_workspace(tmp_path)
+    _cli_env(monkeypatch, tmp_path, root)
+    _chat_store(_cli_config(root).state_path.parent, "other-chat", _helper())
+    monkeypatch.setenv("CIAO_CHAT_ID", "manual-chat")
 
     assert cli.main(["skill-draft-add", "--input-file", _cli_payload(tmp_path), "--json"]) == 0
     assert json.loads(capsys.readouterr().out)["filed"] is True

@@ -8,21 +8,28 @@ workspace (bounded) and a queue lock should not be held across that read.
 
 A completion counts only when a task file on disk holds it. An id nobody
 persisted resolves to ``None``, so an invented id is never a supported outcome.
-A task file or decisions file this code cannot read raises
-:class:`EvidenceUnavailable` rather than resolving to absent: a completion that
-might sit in an unreadable file must never be read as "not there".
+An unreadable task file (a task-named ``<32hex>.md`` the board refuses) is
+reported on :attr:`Lookup.unreadable`, and the caller turns an unresolved id into
+"unavailable" only when the verdict is not met: a completion that might sit in
+that file must never be read as "not there", while a missing file can only lower
+a count. Other files in the directory are not tasks and are ignored.
+
+Known limit: the completions a new skill cites come from ``Workspace/Learnings.md``,
+which a model writes. This lookup proves that the cited completions exist and are
+distinct tasks. It does not prove they are instances of the same procedure.
 """
 
 from __future__ import annotations
 
+import re
 from collections.abc import Sequence
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING
 
 from ciao.recurrence import Outcome
 from ciao.task_board import TASKS_RELATIVE, TaskBoardError, TaskBoardStore
-from ciao.task_decisions import read_decisions_strict
 from ciao.task_resolution import parse_completions
 
 if TYPE_CHECKING:
@@ -43,15 +50,37 @@ class EvidenceUnavailable(Exception):
     """The persisted history cannot be read in full, so no completion can be vouched for."""
 
 
+#: A task file's name: the 32-hex id the task store mints, plus ``.md``. Anything
+#: else in the task directory (a README, a backup) is not a task and is ignored.
+_TASK_FILE = re.compile(r"[0-9a-f]{32}\.md")
+
+
+@dataclass(frozen=True, slots=True)
+class Lookup:
+    """What one lookup found.
+
+    ``outcomes`` maps each asked-for id to its :class:`Outcome` or ``None``.
+    ``unreadable`` is true when a task file named like a task could not be read,
+    so an id left ``None`` may sit inside it. A missing file cannot raise a count,
+    so only an unreadable one can make a ``None`` mean "unknown" rather than
+    "absent".
+    """
+
+    outcomes: dict[str, Outcome | None]
+    unreadable: bool
+
+
 def resolve_completions(
     config: CiaoConfig, workspace: str, ids: Sequence[str]
-) -> dict[str, Outcome | None]:
-    """Map each asked-for completion id to the task that persisted it, or ``None``.
+) -> Lookup:
+    """Find the task that persisted each asked-for completion id.
 
     At most :data:`MAX_IDS` distinct ids are looked up, in first-appearance order.
     Non-string and blank entries are skipped. Raises :class:`EvidenceUnavailable`
-    when a task file or the decisions file is unreadable or malformed, or when the
-    task directory holds more than :data:`MAX_TASK_FILES` files.
+    only when the task board cannot be listed at all, or when the workspace holds
+    more than :data:`MAX_TASK_FILES` task-named files. An individual unreadable
+    task file is not an exception: it is reported through ``Lookup.unreadable``,
+    and the caller decides whether it matters to the verdict.
     """
     wanted: list[str] = []
     for item in ids:
@@ -60,21 +89,15 @@ def resolve_completions(
         if len(wanted) == MAX_IDS:
             break
     resolved: dict[str, Outcome | None] = dict.fromkeys(wanted)
-    if not wanted:
-        return resolved
-
     vault = Path(config.workspace_vault_root(workspace))
-    decisions = read_decisions_strict(vault)
-    if decisions.status not in ("ok", "absent"):
-        raise EvidenceUnavailable(
-            f"the decisions file is {decisions.status}, so the task history cannot be "
-            "read in full"
-        )
     tasks_dir = vault / TASKS_RELATIVE
-    if not tasks_dir.is_dir():
-        return resolved
-    names = [entry for entry in tasks_dir.iterdir() if entry.suffix == ".md"]
-    if len(names) > MAX_TASK_FILES:
+    if not wanted or not tasks_dir.is_dir():
+        return Lookup(resolved, unreadable=False)
+
+    task_files = [
+        entry for entry in tasks_dir.iterdir() if _TASK_FILE.fullmatch(entry.name)
+    ]
+    if len(task_files) > MAX_TASK_FILES:
         raise EvidenceUnavailable(
             f"the workspace holds more than {MAX_TASK_FILES} task files, which is more "
             "than one lookup reads"
@@ -90,15 +113,14 @@ def resolve_completions(
         listing = store.list()
     except (TaskBoardError, OSError) as exc:
         raise EvidenceUnavailable(f"the task board cannot be read: {exc}") from None
-    if listing.invalid:
-        raise EvidenceUnavailable(
-            f"{len(listing.invalid)} task file(s) are unreadable, so a completion "
-            "cannot be ruled out of them"
-        )
+    unreadable = any(
+        _TASK_FILE.fullmatch(Path(entry.relative_path).name) is not None
+        for entry in listing.invalid
+    )
     for document in listing.tasks:
         for completion in parse_completions(document.body):
             if completion.id in resolved and resolved[completion.id] is None:
                 resolved[completion.id] = Outcome(
                     completion_id=completion.id, task_id=document.record.id
                 )
-    return resolved
+    return Lookup(resolved, unreadable=unreadable)

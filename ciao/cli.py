@@ -7019,7 +7019,7 @@ def _skill_draft_add_command(args: argparse.Namespace) -> int:
     if payload is None:
         print(problem, file=sys.stderr)
         return 2
-    from ciao.upstream_drafts import chat_helper, new_skill_pass_refusal
+    from ciao.upstream_drafts import ChatStoreUnreadable, chat_helper, new_skill_pass_refusal
 
     config = _proposal_config(args, "skill-draft-add")
     name = _active_workspace_name(config)
@@ -7028,13 +7028,22 @@ def _skill_draft_add_command(args: argparse.Namespace) -> int:
         print(problem, file=sys.stderr)
         return 2
     recurrence = payload.get("recurrence")
-    # The chat store is read only to decide the pass-chat gate; an unreadable store
-    # gives no helper, which leaves the recurrence-only gate in force.
-    helper = chat_helper(config, os.environ.get("CIAO_CHAT_ID", "").strip())
+    # The pass-chat gate. CIAO_CHAT_ID is plain environment, so this is advisory:
+    # it stops a memory pass from filing a skill without a block, and cannot stop a
+    # process that sets the variable itself. An unreadable store fails closed.
+    chat_id = os.environ.get("CIAO_CHAT_ID", "").strip()
+    helper: dict[str, Any] | None = None
+    store_unreadable = False
+    if chat_id:
+        try:
+            helper = chat_helper(config, chat_id)
+        except ChatStoreUnreadable:
+            store_unreadable = True
     problem = new_skill_pass_refusal(
         str(payload["target"]).strip(),
         has_recurrence=recurrence is not None,
         helper=helper,
+        store_unreadable=store_unreadable,
     )
     if problem:
         print(f"cannot file the draft: {problem}", file=sys.stderr)

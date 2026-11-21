@@ -903,14 +903,26 @@ def _recurrence_links(
     }
     asked = [item for item in dict.fromkeys(claimed) if item in cited]
     try:
-        resolved = resolve_completions(config, workspace, asked)
+        lookup = resolve_completions(config, workspace, asked)
     except EvidenceUnavailable as exc:
         raise RecurrenceRefused(
             f"the recurrence of {procedure} cannot be checked: {exc}. Nothing was "
             "filed; retry once the task history can be read",
             "unavailable",
         ) from None
-    verdict = classify_recurrence(claimed, resolved)
+    verdict = classify_recurrence(claimed, lookup.outcomes)
+    if verdict.status != "met" and lookup.unreadable and any(
+        outcome is None for outcome in lookup.outcomes.values()
+    ):
+        # A cited completion may sit in a task file that could not be read, so
+        # "not found" is not evidence of absence here. Met verdicts are unaffected:
+        # an unreadable file can only hide a completion, never add one.
+        raise RecurrenceRefused(
+            f"the recurrence of {procedure} cannot be checked: a task file that "
+            "could not be read may hold a cited completion. Nothing was filed; repair "
+            "or remove that task file, then retry",
+            "unavailable",
+        )
     if verdict.status != "met":
         reasons = "; ".join(f"{item} ({why})" for item, why in verdict.excluded)
         raise RecurrenceRefused(
@@ -955,7 +967,11 @@ def _procedure_record(
 
 
 def new_skill_pass_refusal(
-    target: str, *, has_recurrence: bool, helper: Mapping[str, Any] | None
+    target: str,
+    *,
+    has_recurrence: bool,
+    helper: Mapping[str, Any] | None,
+    store_unreadable: bool = False,
 ) -> str:
     """Why a new-skill draft from this chat must carry a recurrence block, or ``""``.
 
@@ -965,9 +981,19 @@ def new_skill_pass_refusal(
     and not in the command: a pure function a test can state fully.
 
     The check is on what the chat *is*, read from its helper. Any other chat, a
-    manual filing and an upstream issue are not gated by it.
+    manual filing and an upstream issue are not gated by it. ``store_unreadable``
+    is set when the caller had a chat id but could not read its record: that chat
+    cannot be ruled out as a pass, so a new skill without a block is refused.
     """
-    if target != NEW_SKILL or has_recurrence or not helper:
+    if target != NEW_SKILL or has_recurrence:
+        return ""
+    if store_unreadable:
+        return (
+            "this session's chat record could not be read, so it cannot be ruled out "
+            'as a memory pass over an approved task; a new skill needs a "recurrence" '
+            "block, or the chat store must be repaired"
+        )
+    if not helper:
         return ""
     if helper.get("kind") != "memory_pass":
         return ""
@@ -985,24 +1011,38 @@ def new_skill_pass_refusal(
     )
 
 
+class ChatStoreUnreadable(Exception):
+    """The chat store exists but cannot be read as a chat registry.
+
+    Raised rather than answered with ``None``: an unreadable store must not look
+    like a chat that has no helper, because that is exactly the case the pass gate
+    exists to catch.
+    """
+
+
 def chat_helper(config: CiaoConfig, chat_id: str) -> dict[str, Any] | None:
-    """The helper a chat was started for, read from the chat store, or ``None``.
+    """The helper a chat was started for: a dict, ``None`` for a chat with none.
 
     The chat store is the registry the engine writes beside its state file. It is
-    read as data, not through the engine: this runs inside a CLI invocation that
-    is not the engine. Any read or parse failure is ``None``, so the caller falls
-    back to the recurrence-only gate rather than failing the filing.
+    read as data, not through the engine, because this runs inside a CLI invocation
+    that is not the engine. A chat id that is not in the store is ``None`` (no
+    helper). A store that cannot be read, or that is not a chat registry, raises
+    :class:`ChatStoreUnreadable`, and the caller fails closed.
     """
     if not chat_id:
         return None
     path = Path(config.state_path).parent / "web_projects.json"
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, UnicodeDecodeError, ValueError):
+    except (OSError, UnicodeDecodeError, ValueError) as exc:
+        raise ChatStoreUnreadable(f"{path} cannot be read: {exc}") from None
+    chats = data.get("chats", {}) if isinstance(data, dict) else None
+    if not isinstance(chats, dict):
+        raise ChatStoreUnreadable(f"{path} is not a chat registry")
+    chat = chats.get(chat_id)
+    if not isinstance(chat, dict):
         return None
-    chats = data.get("chats") if isinstance(data, dict) else None
-    chat = chats.get(chat_id) if isinstance(chats, dict) else None
-    helper = chat.get("helper") if isinstance(chat, dict) else None
+    helper = chat.get("helper")
     return dict(helper) if isinstance(helper, dict) else None
 
 
