@@ -2029,6 +2029,49 @@ export interface HandoverAgreement {
   suggest_handover: boolean
 }
 
+/**
+ * The dry run for switching a workspace's care state to the weekly cycle
+ * (`curation_run.migration_report`). `digest` names the exact bytes previewed.
+ */
+export interface CareCycleReport {
+  status: 'v1' | 'v2' | 'absent' | 'unreadable'
+  live_lease: { holder?: string; started_at?: string; expires_at?: string } | null
+  marker: 'absent' | 'present' | 'unreadable'
+  last_full_pass: string
+  daily: number
+  weekly_historical: number
+  ambiguous: string[]
+  dropped: string[]
+  backup_path: string
+  digest: string
+  blockers: string[]
+}
+
+/** `GET /api/care/cycle` answered on the engine's own computer. */
+export interface CareCycleHostResponse extends CareCycleReport {
+  workspace: string
+  on_host: true
+  lease_live: boolean
+}
+
+/** `GET /api/care/cycle` answered to a browser elsewhere: explain, show the CLI, no report. */
+export interface CareCycleRemoteResponse {
+  workspace: string
+  on_host: false
+  reason: 'not_on_host'
+  lease_live: null
+}
+
+export type CareCycleResponse = CareCycleHostResponse | CareCycleRemoteResponse
+
+/** `POST /api/care/cycle` on success. */
+export interface CareCycleApplied {
+  workspace: string
+  status: 'migrated'
+  backup_path: string
+  digest: string
+}
+
 export interface HandoverResponse {
   workspace: string
   handover: MemoryHandover

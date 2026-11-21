@@ -502,6 +502,11 @@ describe('component mount smoke', () => {
     expect(errors).toEqual([])
   })
 
+  it('SettingsCareCycle mounts without throwing', async () => {
+    const errors = await mountAndSettle(() => import('../settings/SettingsCareCycle.vue'))
+    expect(errors).toEqual([])
+  })
+
   it('SettingsView shows the memory backup section on /settings/advanced', async () => {
     const router = makeRouter()
     await router.push('/settings/advanced')

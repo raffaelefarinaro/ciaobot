@@ -50,6 +50,7 @@ from ciao import proposal_predictions
 from ciao import service_backend
 from ciao import transcripts
 from ciao import backup_service
+from ciao import curation_run
 from ciao import entity_types
 from ciao import provider_registry
 from ciao import repo_link
@@ -7051,6 +7052,19 @@ def host_browser_request(request: Request) -> bool:
     return _same_origin(request, source)
 
 
+def care_cycle_browser_request(request: Request) -> bool:
+    """``host_browser_request`` plus a required Origin or Referer.
+
+    Only the care-cycle switch uses this. A browser sends Origin on a same-origin
+    POST, so a request with neither header is a script or a shell caller holding
+    the session cookie, and it is refused even though the peer and Host match.
+    ``host_browser_request`` itself is unchanged: the workspace move relies on it.
+    """
+    if not (request.headers.get("origin") or request.headers.get("referer")):
+        return False
+    return host_browser_request(request)
+
+
 def _workspace_move_local(request: Request) -> bool:
     return host_browser_request(request)
 
@@ -9112,6 +9126,112 @@ async def proposals_handover(request: Request) -> JSONResponse:
             "agreement": payload,
         }
     )
+
+
+_CARE_CYCLE_BODY_KEYS = frozenset({"workspace", "confirm_quiesced", "digest"})
+_CARE_CYCLE_FAILED = (
+    "The switch stopped on a file error before it finished. Check the workspace folder, "
+    "then run the preview again."
+)
+
+
+async def care_cycle_status(request: Request) -> JSONResponse:
+    """The dry run for switching one workspace's care state to the weekly cycle.
+
+    Read-only. A browser that is not on the engine's computer gets ``on_host:
+    false`` and no report, so the card can explain and show the CLI command.
+    The report is ``curation_run.migration_report`` plus the workspace, the
+    host flag and whether a care run holds the lease.
+    """
+    config = request.app.state.config
+    workspace = request.query_params.get("workspace", "").strip()
+    if not workspace:
+        return JSONResponse({"error": "workspace is required"}, status_code=400)
+    if config.workspace(workspace) is None:
+        return JSONResponse({"error": f"unknown workspace: {workspace}"}, status_code=404)
+    if not host_browser_request(request):
+        return JSONResponse(
+            {"workspace": workspace, "on_host": False, "reason": "not_on_host", "lease_live": None}
+        )
+    vault = Path(config.workspace_vault_root(workspace))
+    try:
+        report = await asyncio.to_thread(curation_run.migration_report, vault)
+    except OSError:
+        logger.exception("care cycle dry run failed")
+        return JSONResponse({"error": _CARE_CYCLE_FAILED}, status_code=500)
+    return JSONResponse(
+        {
+            **report,
+            "workspace": workspace,
+            "on_host": True,
+            "lease_live": report["live_lease"] is not None,
+        }
+    )
+
+
+async def care_cycle_apply(request: Request) -> JSONResponse:
+    """Switch one workspace's care state to the weekly cycle. Host-only, and writes only on proof.
+
+    The body is exactly ``workspace``, ``digest`` (from a dry run) and
+    ``confirm_quiesced: true``. ``curation_run.migrate_state_to_cycle`` refuses
+    a live lease, a stale digest or any blocker, and only then backs up the v1
+    state and publishes v2. Session plus ``host_browser_request``: a remote
+    browser gets 403 and the CLI command instead.
+    """
+    if not host_browser_request(request):
+        return JSONResponse(
+            {"error": "Switching care runs only from the computer running Ciaobot.", "reason": "not_on_host"},
+            status_code=403,
+        )
+    if not care_cycle_browser_request(request):
+        return JSONResponse(
+            {"error": "Switching care runs needs the Ciaobot page in a browser; a script or command cannot switch it.",
+             "reason": "browser_request_required"},
+            status_code=403,
+        )
+    try:
+        body: Any = await request.json()
+    except ValueError:
+        body = None
+    if (
+        not isinstance(body, dict)
+        or set(body) != _CARE_CYCLE_BODY_KEYS
+        or body["confirm_quiesced"] is not True
+        or not isinstance(body["workspace"], str)
+        or not body["workspace"].strip()
+        or not isinstance(body["digest"], str)
+        or not body["digest"]
+    ):
+        return JSONResponse(
+            {"error": "send exactly workspace, digest and confirm_quiesced: true"}, status_code=400
+        )
+    config = request.app.state.config
+    workspace = body["workspace"].strip()
+    if config.workspace(workspace) is None:
+        return JSONResponse({"error": f"unknown workspace: {workspace}"}, status_code=404)
+    vault = Path(config.workspace_vault_root(workspace))
+    try:
+        report = await asyncio.to_thread(
+            curation_run.migrate_state_to_cycle,
+            vault,
+            confirm_quiesced=True,
+            expected_digest=body["digest"],
+        )
+    except curation_run.CurationMigrationRefused as exc:
+        return JSONResponse(
+            {
+                "error": "The switch was refused and nothing was written.",
+                "blockers": list(exc.blockers),
+            },
+            status_code=409,
+        )
+    except curation_run.CurationStateError as exc:
+        # Raised only with constant, user-facing text (the backup and publish steps).
+        return JSONResponse({"error": str(exc), "blockers": []}, status_code=409)
+    except OSError:
+        logger.exception("care cycle switch failed")
+        return JSONResponse({"error": _CARE_CYCLE_FAILED}, status_code=500)
+    return JSONResponse({**report, "workspace": workspace})
 
 
 def _linked_repos_for(request: Request, row: dict[str, Any]) -> list[str]:

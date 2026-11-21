@@ -112,6 +112,7 @@ it('lists Overview cards on the rail', async () => {
       'Chats and models',
       'Google account',
       'Memory handover',
+      'Weekly care cycle',
       'Update task history',
       'Archive this workspace',
       'All workspaces',

@@ -37,6 +37,10 @@ vi.mock('../../lib/api', () => {
         },
       })
     }
+    if (path.startsWith('/api/care/cycle')) {
+      // The Weekly care cycle card reads the dry run; this page test only needs the remote state.
+      return Promise.resolve({ workspace: 'personal', on_host: false, reason: 'not_on_host', lease_live: null })
+    }
     if (path.startsWith('/api/update-tasks')) return Promise.resolve({ tasks: [] })
     // The Overview's Chats and models card reads the engine defaults.
     if (path === '/api/settings/routines') return Promise.resolve({ model_options: { anthropic: [] } })
@@ -119,6 +123,7 @@ describe('Settings > Workspace Overview', () => {
         'Chats and models',
         'Google account',
         'Memory handover',
+        'Weekly care cycle',
         'Update task history',
         'Archive this workspace',
         'All workspaces',
