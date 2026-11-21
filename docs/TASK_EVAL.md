@@ -309,6 +309,12 @@ call and cost metrics stay unknown unless a per-attempt usage report is passed, 
 agent-driven run does not have. `environment_sha256` stays null, so comparisons remain
 `provenance_unknown` until an environment builder exists.
 
+The orchestrator (`ciao/care_eval_scenario.py`) sequences one `nightly` or `weekly_due` run:
+it verifies the seed on disk against the manifest, triggers the system schedule through the
+driver, observes and grades only a settled run, and returns the record. It never boots or
+stops an engine and never calls a model. `budget_continuation` is refused until decision D1.
+Weekly index and audit results stay unknown, so a weekly run cannot pass its marker obligation.
+
 The usage projection (`ciao/care_usage.py`) is a separate, pure collector for
 attributable care model-call usage; it does not replace `collect_usage`, which folds absent
 counters into zero and sums per-turn aggregates. Its input is a trusted expected-call
