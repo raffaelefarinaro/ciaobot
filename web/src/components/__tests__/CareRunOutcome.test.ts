@@ -103,6 +103,17 @@ describe('CareRunOutcome', () => {
     expect(wrapper.find('.care-run-counts').text()).toContain('Planned 4')
   })
 
+  it('asks again for the new schedule when the schedule changes', async () => {
+    get.mockResolvedValueOnce({ care_run: RUN })
+    const wrapper = mountOutcome({ scheduleId: 'system-memory-curation@personal' })
+    await flushPromises()
+    get.mockResolvedValueOnce({ care_run: { ...RUN, planned: 7 } })
+    await wrapper.setProps({ scheduleId: 'system-memory-curation@work' })
+    await flushPromises()
+    expect(get).toHaveBeenLastCalledWith('/api/schedules/system-memory-curation%40work/care-run')
+    expect(wrapper.find('.care-run-counts').text()).toContain('Planned 7')
+  })
+
   it('drops a slow answer for a previous chat when the chat changes', async () => {
     const first = deferred<{ care_run: typeof RUN | null }>()
     get.mockReturnValueOnce(first.promise)

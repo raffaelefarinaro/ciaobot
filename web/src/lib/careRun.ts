@@ -18,7 +18,9 @@ const CARE_ROUTINE = 'system-memory-curation'
 
 /** The nightly care routine, and its per-workspace copies (`system-memory-curation@<name>`). */
 export function isCareSchedule(scheduleId: string): boolean {
-  return scheduleId === CARE_ROUTINE || scheduleId.startsWith(`${CARE_ROUTINE}@`)
+  if (scheduleId === CARE_ROUTINE) return true
+  const prefix = `${CARE_ROUTINE}@`
+  return scheduleId.startsWith(prefix) && scheduleId.length > prefix.length
 }
 
 export function careRunPath(scheduleId: string): string {

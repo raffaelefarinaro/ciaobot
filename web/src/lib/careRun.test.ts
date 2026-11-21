@@ -10,6 +10,7 @@ describe('isCareSchedule', () => {
   it('does not match other automations', () => {
     expect(isCareSchedule('system-memory-curation-extra')).toBe(false)
     expect(isCareSchedule('sched-1')).toBe(false)
+    expect(isCareSchedule('system-memory-curation@')).toBe(false)
     expect(isCareSchedule('')).toBe(false)
   })
 })

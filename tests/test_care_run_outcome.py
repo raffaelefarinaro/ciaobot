@@ -9,6 +9,7 @@ that owns it, and the read-only schedule route. Every vault lives under
 from __future__ import annotations
 
 import json
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -19,7 +20,13 @@ from starlette.testclient import TestClient
 
 from ciao import curation_cycle as cc
 from ciao import curation_run as cr
-from ciao.care_run_outcome import MAX_REASON_CHARS, MAX_REASONS, outcome_for_chat
+from ciao.care_run_outcome import (
+    MAX_REASON_CHARS,
+    MAX_REASONS,
+    MAX_RUN_ID_CHARS,
+    is_care_schedule_id,
+    outcome_for_chat,
+)
 
 OLD_LAST_RUN = {
     "status": "ok",
@@ -183,6 +190,7 @@ def test_curation_begin_reads_the_chat_from_the_agent_environment(
 
 # ── The pure view: only the owning chat, never a newer run ───────────────
 
+BEFORE_RUN = datetime(2026, 11, 15, tzinfo=UTC)  # the scheduled run started before it finished
 _RUN = {
     **OLD_LAST_RUN,
     "run_id": "h:1:u",
@@ -194,7 +202,7 @@ _RUN = {
 
 
 def test_outcome_is_returned_for_the_owning_chat() -> None:
-    assert outcome_for_chat(_RUN, "chat-1") == {
+    assert outcome_for_chat(_RUN, "chat-1", dispatched_at=BEFORE_RUN) == {
         "run_id": "h:1:u",
         "planned": 3,
         "completed": 2,
@@ -207,28 +215,68 @@ def test_outcome_is_returned_for_the_owning_chat() -> None:
 
 @pytest.mark.parametrize("chat_id", ["", "chat-2"])
 def test_outcome_is_none_for_another_or_no_chat(chat_id: str) -> None:
-    assert outcome_for_chat(_RUN, chat_id) is None
+    assert outcome_for_chat(_RUN, chat_id, dispatched_at=BEFORE_RUN) is None
 
 
 def test_outcome_is_none_when_the_run_has_no_derived_counts() -> None:
     bare = {k: v for k, v in _RUN.items() if k not in ("failed", "counts_complete")}
-    assert outcome_for_chat(bare, "chat-1") is None
+    assert outcome_for_chat(bare, "chat-1", dispatched_at=BEFORE_RUN) is None
 
 
 def test_outcome_is_none_for_an_empty_last_run() -> None:
-    assert outcome_for_chat({}, "chat-1") is None
+    assert outcome_for_chat({}, "chat-1", dispatched_at=BEFORE_RUN) is None
 
 
 def test_outcome_reasons_are_capped_in_count_and_length() -> None:
     long = "x" * (MAX_REASON_CHARS * 2)
     run = {**_RUN, "reasons": [long] * (MAX_REASONS + 5)}
-    outcome = outcome_for_chat(run, "chat-1")
+    outcome = outcome_for_chat(run, "chat-1", dispatched_at=BEFORE_RUN)
     assert outcome is not None
     assert len(outcome["reasons"]) == MAX_REASONS
     assert all(len(reason) <= MAX_REASON_CHARS for reason in outcome["reasons"])
 
 
+# ── Engine-side predicate and the dispatch bound ─────────────────────────
+
+
+@pytest.mark.parametrize(
+    "schedule_id",
+    ["system-memory-curation", "system-memory-curation@personal"],
+)
+def test_care_predicate_matches_the_routine_and_its_workspace_copies(schedule_id: str) -> None:
+    assert is_care_schedule_id(schedule_id)
+
+
+@pytest.mark.parametrize(
+    "schedule_id", ["", "sched-1", "system-memory-curation-extra", "x/system-memory-curation", "system-memory-curation@"]
+)
+def test_care_predicate_refuses_other_schedules(schedule_id: str) -> None:
+    assert not is_care_schedule_id(schedule_id)
+
+
+def test_outcome_from_before_the_dispatch_is_not_shown() -> None:
+    later_dispatch = datetime(2026, 11, 17, tzinfo=UTC)
+    assert outcome_for_chat(_RUN, "chat-1", dispatched_at=later_dispatch) is None
+
+
+def test_outcome_is_not_shown_without_a_dispatch_time() -> None:
+    assert outcome_for_chat(_RUN, "chat-1", dispatched_at=None) is None
+
+
+def test_outcome_is_not_shown_for_an_unparseable_finish_time() -> None:
+    assert outcome_for_chat({**_RUN, "finished_at": "soon"}, "chat-1", dispatched_at=BEFORE_RUN) is None
+
+
+def test_run_id_is_capped() -> None:
+    outcome = outcome_for_chat({**_RUN, "run_id": "r" * (MAX_RUN_ID_CHARS * 3)}, "chat-1", dispatched_at=BEFORE_RUN)
+    assert outcome is not None
+    assert len(outcome["run_id"]) == MAX_RUN_ID_CHARS
+
+
 # ── The read-only route ──────────────────────────────────────────────────
+
+CARE_ID = "system-memory-curation@personal"
+PAST_DISPATCH = "2000-01-01T00:00:00+00:00"
 
 
 class _Store:
@@ -249,16 +297,41 @@ class _Pcm:
         return SimpleNamespace(workspace="personal") if project_id == "proj-1" else None
 
 
-def _client(tmp_path: Path, rows: dict[str, SimpleNamespace]) -> TestClient:
+def _row(chat_id: str, dispatched: str | None = PAST_DISPATCH) -> SimpleNamespace:
+    row = SimpleNamespace(last_run_chat_id=chat_id, timezone_name="UTC")
+    if dispatched is not None:
+        row.last_dispatched_at = dispatched
+    return row
+
+
+def _app(tmp_path: Path, rows: dict[str, SimpleNamespace], *, auth: bool = False) -> Starlette:
     from ciao.web.routes_api import schedule_care_run
 
     vault = tmp_path / "vault"
     config = SimpleNamespace(workspace_vault_root=lambda name: vault)
-    app = Starlette(routes=[Route("/api/schedules/{schedule_id}/care-run", schedule_care_run, methods=["GET"])])
+    middleware = []
+    if auth:
+        from itsdangerous import URLSafeTimedSerializer
+        from starlette.middleware import Middleware
+
+        from ciao.web.auth import AuthMiddleware
+
+        serializer = URLSafeTimedSerializer("test-secret")
+        middleware = [Middleware(AuthMiddleware, serializer=serializer)]
+    app = Starlette(
+        routes=[Route("/api/schedules/{schedule_id}/care-run", schedule_care_run, methods=["GET"])],
+        middleware=middleware,
+    )
     app.state.schedule_manager = SimpleNamespace(_store=_Store(rows))
     app.state.project_chat_manager = _Pcm()
     app.state.config = config
-    return TestClient(app)
+    if auth:
+        app.state.serializer = serializer
+    return app
+
+
+def _client(tmp_path: Path, rows: dict[str, SimpleNamespace]) -> TestClient:
+    return TestClient(_app(tmp_path, rows))
 
 
 def _finished_run(vault: Path, chat_id: str) -> None:
@@ -270,9 +343,9 @@ def _finished_run(vault: Path, chat_id: str) -> None:
 
 
 def test_route_returns_the_outcome_for_the_schedules_own_chat(tmp_path: Path) -> None:
-    rows = {"system-memory-curation@personal": SimpleNamespace(last_run_chat_id="chat-1")}
+    rows = {CARE_ID: _row("chat-1")}
     _finished_run(tmp_path / "vault", "chat-1")
-    response = _client(tmp_path, rows).get("/api/schedules/system-memory-curation@personal/care-run")
+    response = _client(tmp_path, rows).get(f"/api/schedules/{CARE_ID}/care-run")
     assert response.status_code == 200
     body = response.json()
     assert set(body) == {"care_run"}
@@ -284,21 +357,45 @@ def test_route_returns_the_outcome_for_the_schedules_own_chat(tmp_path: Path) ->
 
 
 def test_route_is_null_when_the_latest_schedule_chat_is_not_the_stored_run(tmp_path: Path) -> None:
-    rows = {"system-memory-curation@personal": SimpleNamespace(last_run_chat_id="chat-2")}
+    rows = {CARE_ID: _row("chat-2")}
     _finished_run(tmp_path / "vault", "chat-1")
-    response = _client(tmp_path, rows).get("/api/schedules/system-memory-curation@personal/care-run")
+    response = _client(tmp_path, rows).get(f"/api/schedules/{CARE_ID}/care-run")
+    assert response.json() == {"care_run": None}
+
+
+def test_route_is_null_for_an_outcome_older_than_the_dispatch(tmp_path: Path) -> None:
+    # The row was dispatched an hour from now, so the run that finished now predates it.
+    future = (datetime.now(UTC) + timedelta(hours=1)).isoformat()
+    rows = {CARE_ID: _row("chat-1", dispatched=future)}
+    _finished_run(tmp_path / "vault", "chat-1")
+    response = _client(tmp_path, rows).get(f"/api/schedules/{CARE_ID}/care-run")
+    assert response.json() == {"care_run": None}
+
+
+def test_route_is_null_when_the_row_has_no_usable_dispatch_time(tmp_path: Path) -> None:
+    rows = {CARE_ID: _row("chat-1", dispatched=None)}
+    _finished_run(tmp_path / "vault", "chat-1")
+    response = _client(tmp_path, rows).get(f"/api/schedules/{CARE_ID}/care-run")
+    assert response.json() == {"care_run": None}
+
+
+def test_route_is_null_for_a_non_care_schedule_even_when_its_chat_matches(tmp_path: Path) -> None:
+    rows = {"sched-1": _row("chat-1")}
+    _finished_run(tmp_path / "vault", "chat-1")
+    response = _client(tmp_path, rows).get("/api/schedules/sched-1/care-run")
+    assert response.status_code == 200
     assert response.json() == {"care_run": None}
 
 
 def test_route_is_null_when_the_schedule_has_no_run_yet(tmp_path: Path) -> None:
-    rows = {"system-memory-curation@personal": SimpleNamespace(last_run_chat_id="")}
-    response = _client(tmp_path, rows).get("/api/schedules/system-memory-curation@personal/care-run")
+    rows = {CARE_ID: _row("")}
+    response = _client(tmp_path, rows).get(f"/api/schedules/{CARE_ID}/care-run")
     assert response.json() == {"care_run": None}
 
 
 def test_route_is_null_when_no_run_is_recorded_in_the_vault(tmp_path: Path) -> None:
-    rows = {"system-memory-curation@personal": SimpleNamespace(last_run_chat_id="chat-1")}
-    response = _client(tmp_path, rows).get("/api/schedules/system-memory-curation@personal/care-run")
+    rows = {CARE_ID: _row("chat-1")}
+    response = _client(tmp_path, rows).get(f"/api/schedules/{CARE_ID}/care-run")
     assert response.json() == {"care_run": None}
 
 
@@ -308,10 +405,19 @@ def test_route_is_404_for_an_unknown_schedule(tmp_path: Path) -> None:
 
 
 def test_route_refuses_an_unreadable_state_file_with_503(tmp_path: Path) -> None:
-    rows = {"system-memory-curation@personal": SimpleNamespace(last_run_chat_id="chat-1")}
+    rows = {CARE_ID: _row("chat-1")}
     path = cr.state_path(tmp_path / "vault")
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text("{not json", encoding="utf-8")
-    response = _client(tmp_path, rows).get("/api/schedules/system-memory-curation@personal/care-run")
+    response = _client(tmp_path, rows).get(f"/api/schedules/{CARE_ID}/care-run")
     assert response.status_code == 503
     assert "care" in response.json()["error"]
+
+
+def test_route_requires_a_session_cookie(tmp_path: Path) -> None:
+    rows = {CARE_ID: _row("chat-1")}
+    _finished_run(tmp_path / "vault", "chat-1")
+    client = TestClient(_app(tmp_path, rows, auth=True))
+    response = client.get(f"/api/schedules/{CARE_ID}/care-run")
+    assert response.status_code == 401
+    assert "care_run" not in response.text
