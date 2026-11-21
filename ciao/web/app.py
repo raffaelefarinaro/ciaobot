@@ -164,6 +164,8 @@ from ciao.web.routes_api import (
     proposal_preview,
     proposals_batch,
     proposals_handover,
+    care_cycle_apply,
+    care_cycle_status,
     proposals_history,
     run_schedule_now,
     schedule_detail,
@@ -565,6 +567,9 @@ def create_app(config, app_settings=None, mcp_service=None) -> Starlette:
         Route("/api/proposals", list_proposals, methods=["GET"]),
         Route("/api/proposals/history", proposals_history, methods=["GET"]),
         Route("/api/proposals/handover", proposals_handover, methods=["GET"]),
+        # host-only: session + host_browser_request; never in _LOOPBACK_ONLY_API
+        Route("/api/care/cycle", care_cycle_status, methods=["GET"]),
+        Route("/api/care/cycle", care_cycle_apply, methods=["POST"]),
         Route("/api/proposals/batch", proposals_batch, methods=["POST"]),
         Route("/api/proposals/{id}/preview", proposal_preview, methods=["GET"]),
         # Before the `{action}` route: Starlette matches in order, and
