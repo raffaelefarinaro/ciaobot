@@ -466,6 +466,9 @@ struct ConnectionView: View {
     private let settledEvents: AnyPublisher<EngineTakeover.Settled, Never>
     /// The fixed notice for the last takeover outcome, shown on this screen.
     @State private var takeoverNotice: String?
+    /// The host a tray switch is probing right now, shown as "Checking…" so the
+    /// user sees why nothing changed yet. Nil when no tray probe runs.
+    @State private var switchingTo: String?
     /// Writes a mid-session engine-mode switch so the next launch starts in it.
     private let modeStore: EngineModeStoring?
     /// Internal so a test can prove local mode has no saved-origin auto
@@ -580,6 +583,9 @@ struct ConnectionView: View {
                             .padding(.horizontal, 32)
                             .padding(.top, 16)
                     }
+                    switchStatus
+                        .padding(.horizontal, 32)
+                        .padding(.top, 16)
                     LocalEngineView(
                         supervisor: local,
                         connection: localPhase,
@@ -597,14 +603,9 @@ struct ConnectionView: View {
                             .padding(.horizontal, 12)
                             .padding(.vertical, 6)
                     }
-                    if let error {
-                        // A refused tray switch keeps this session; the reason
-                        // is shown here because the form is not on screen.
-                        Text(error)
-                            .foregroundStyle(.red)
-                            .padding(.horizontal, 12)
-                            .padding(.vertical, 6)
-                    }
+                    switchStatus
+                        .padding(.horizontal, 12)
+                        .padding(.vertical, 6)
                     if let storageNotice {
                         Text(storageNotice)
                             .font(.caption)
@@ -711,7 +712,12 @@ struct ConnectionView: View {
         // nothing.
         .background(alignment: .center) { engineRunningWatcher }
         .frame(minWidth: 480, minHeight: 320)
-        .onAppear { launchOnAppear() }
+        .onAppear {
+            launchOnAppear()
+            // A tray request posted while this window had no view waits in the
+            // queue; the view takes it when it appears.
+            takeQueuedServerSwitch()
+        }
         .onReceive(NotificationCenter.default.publisher(for: .ciaobotChangeServer)) { _ in
             if engineMode == .local {
                 // The app-menu command and the tray row land here too. Only
@@ -737,8 +743,7 @@ struct ConnectionView: View {
         .onReceive(NotificationCenter.default.publisher(for: .ciaobotSwitchServer)) { note in
             // A Servers row in the tray. The request runs outside this view
             // update, so the confirmation can appear, as Change Server's does.
-            guard let request = note.object as? ServerSwitchRequest else { return }
-            DispatchQueue.main.async { self.switchServer(to: request) }
+            DispatchQueue.main.async { self.takeQueuedServerSwitch() }
         }
         // Editing the address to another server is a different connection
         // too. Clear the click so the new address starts from the default
@@ -1001,10 +1006,33 @@ struct ConnectionView: View {
         if let origin { connect(to: origin) }
     }
 
+    /// The status line for a tray switch: the probe in progress, then the reason
+    /// a switch did not happen. Shown on the engine status screen and on the
+    /// connected screen, so the user sees it wherever they are.
+    @ViewBuilder
+    private var switchStatus: some View {
+        if let switchingTo {
+            Text("Checking \(switchingTo)…")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+        }
+        if let error {
+            Text(error)
+                .foregroundStyle(.red)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+    }
+
+    /// Takes the request the tray queued, if any, and runs it. Internal for tests.
+    func takeQueuedServerSwitch() {
+        guard let request = ServerSwitchQueue.shared.take() else { return }
+        switchServer(to: request)
+    }
+
     /// One Servers row from the tray. This Mac is the same request as **Use
-    /// Ciaobot on This Mac**; a saved host is a probed switch, and leaving local
-    /// mode for it asks the same single confirmation as Change Server (S6).
-    /// Internal for tests.
+    /// Ciaobot on This Mac**. A saved host is probed first; leaving local mode
+    /// for it asks the single S6 confirmation before the probe, and the engine
+    /// keeps running until the host answers. Internal for tests.
     func switchServer(to request: ServerSwitchRequest) {
         guard !busy else { return }
         switch request {
@@ -1012,27 +1040,29 @@ struct ConnectionView: View {
             useThisMac()
         case .host(let target):
             guard engineMode == .local else {
-                probeAndSwitch(to: target)
+                probeAndSwitch(to: target, leavingLocal: false)
                 return
             }
             // Cancel leaves the engine and the session exactly as they were.
             guard presentModeSwitchDialog(EngineLifecycle.modeSwitchDialog) else { return }
-            connectToAnotherServer()
-            probeAndSwitch(to: target)
+            probeAndSwitch(to: target, leavingLocal: true)
         }
     }
 
-    /// Probes `target` and replaces the session only after it answers. A host
-    /// that does not answer leaves the current session in place, and the reason
-    /// is shown on the screen. The record rules are Connect's: only an answering
-    /// host is remembered and saved.
-    private func probeAndSwitch(to target: Origin) {
+    /// Probes `target` and changes anything only after it answers. A host that
+    /// does not answer changes nothing: the mode stays as it was, the engine and
+    /// session keep running, and the reason is shown. Only an answering host is
+    /// remembered and saved (Connect's rules). When leaving local mode, the
+    /// engine stops only here, after the answer, through `connectToAnotherServer`.
+    private func probeAndSwitch(to target: Origin, leavingLocal: Bool) {
         // The live connection is the session's: it is what the tray shows, and
         // it is never stale inside a probe completion.
         guard session?.currentOrigin?.canonicalKey != target.canonicalKey, tasks.beginCheck() else { return }
         error = nil
+        switchingTo = HostRecord.defaultLabel(for: target.canonicalKey)
         probe.check(target) { ok in
             self.tasks.endCheck()
+            self.switchingTo = nil
             guard ok else {
                 self.error = Self.startupFailureText(offersThisMac: self.offersThisMac)
                 return
@@ -1044,9 +1074,15 @@ struct ConnectionView: View {
             // Sign-in persistence and its default are computed for the address,
             // so the field names the new host before its session is built.
             self.address = target.url.absoluteString
-            // Same teardown as Change Server: the previous host's session ends,
-            // and consent given for it does not carry over.
-            self.dropSession()
+            if leavingLocal {
+                // Stops the engine, saves external, cancels any takeover and
+                // drops the local session in one step.
+                self.connectToAnotherServer()
+            } else {
+                // Same teardown as Change Server: the previous host's session
+                // ends, and consent given for it does not carry over.
+                self.dropSession()
+            }
             self.establishSession(target)
         }
     }

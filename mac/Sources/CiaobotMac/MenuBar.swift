@@ -188,7 +188,7 @@ final class MenuBarController: NSObject, MenuBarControlling, NSMenuDelegate {
     static let changeHostTitle = "Change Connected Host…"
     /// The top-level Servers section, shown only with more than one choice.
     static let serversTitle = "Servers"
-    static let thisMacTitle = "This Mac"
+    static let thisMacTitle = ServerSwitchChoices.thisMacLabel
     static let updatesUnavailableTitle = "Updates unavailable"
     static let checkForUpdatesTitle = "Check for Updates…"
     /// Says what an install does. The bundled engine is drained first, so the
@@ -1116,7 +1116,7 @@ final class MenuBarController: NSObject, MenuBarControlling, NSMenuDelegate {
             checked = isChecked
             toolTip = isChecked
                 ? "Connected to this server."
-                : "Connect to this server. Ciaobot checks its address first and keeps the current connection if the check fails."
+                : "Connect to \(origin.url.absoluteString). Ciaobot checks the address first and changes nothing if the check fails."
         }
         let item = NSMenuItem(title: title, action: #selector(selectServer(_:)), keyEquivalent: "")
         item.target = self

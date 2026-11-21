@@ -457,13 +457,17 @@ enum ConnectionMenuActions {
     }
 
     /// A Servers row's request. It presents the window first, exactly as Change
-    /// Connected Host does, and posts only after the presentation succeeded, so
-    /// a request is never dropped silently. The connection screen performs the
-    /// switch.
-    static func switchServer(present: @escaping () -> Bool) -> (ServerSwitchRequest) -> Void {
+    /// Connected Host does, then queues the request and posts. The queue keeps
+    /// the request if the window's view has to be rebuilt before it observes
+    /// the notification. The connection screen performs the switch.
+    static func switchServer(
+        present: @escaping () -> Bool,
+        queue: ServerSwitchQueue = .shared
+    ) -> (ServerSwitchRequest) -> Void {
         return { request in
             guard present() else { return }
-            NotificationCenter.default.post(name: .ciaobotSwitchServer, object: request)
+            queue.enqueue(request)
+            NotificationCenter.default.post(name: .ciaobotSwitchServer, object: nil)
         }
     }
 }

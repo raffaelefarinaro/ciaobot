@@ -85,6 +85,78 @@ final class ServerSwitchChoicesTests: XCTestCase {
     }
 }
 
+extension ServerSwitchChoicesTests {
+    func testRowsWithTheSameLabelGainTheirOriginToStayApart() throws {
+        let other = "https://second.example:8443"
+        let rows = ServerSwitchChoices.rows(
+            hosts: [
+                HostRecord(origin: remoteOrigin, label: "Work"),
+                HostRecord(origin: other, label: "Work"),
+            ],
+            connected: nil,
+            localMode: false,
+            localAvailable: false
+        )
+        XCTAssertEqual(rows.compactMap(label), [
+            "Work (vps.example:8443)",
+            "Work (second.example:8443)",
+        ])
+    }
+
+    func testAHostNamedLikeThisMacGainsItsOriginWhenThisMacIsOffered() throws {
+        let rows = ServerSwitchChoices.rows(
+            hosts: [HostRecord(origin: remoteOrigin, label: "This Mac")],
+            connected: nil,
+            localMode: false,
+            localAvailable: true
+        )
+        XCTAssertEqual(rows.compactMap(label), ["This Mac (vps.example:8443)"])
+    }
+
+    private var remoteOrigin: String { "https://vps.example:8443" }
+
+    private func label(_ row: ServerSwitchChoices.Row) -> String? {
+        if case .host(_, let label, _) = row { return label }
+        return nil
+    }
+}
+
+/// The tray's request reaches the connection screen even when its view must be
+/// rebuilt: the request waits in the queue until a view takes it.
+@MainActor
+final class ServerSwitchQueueTests: XCTestCase {
+    func testTheTrayActionQueuesItsRequestBeforeItPostsAndPresentsFirst() throws {
+        let queue = ServerSwitchQueue()
+        var presented = 0
+        let expectation = expectation(forNotification: .ciaobotSwitchServer, object: nil)
+        let action = ConnectionMenuActions.switchServer(present: { presented += 1; return true }, queue: queue)
+
+        action(.thisMac)
+
+        wait(for: [expectation], timeout: 1)
+        XCTAssertEqual(presented, 1)
+        XCTAssertEqual(queue.take(), .thisMac)
+        XCTAssertNil(queue.take(), "A request is taken once")
+    }
+
+    func testAFailedPresentationQueuesNothing() {
+        let queue = ServerSwitchQueue()
+        let action = ConnectionMenuActions.switchServer(present: { false }, queue: queue)
+
+        action(.thisMac)
+
+        XCTAssertNil(queue.take())
+    }
+
+    func testTheLatestRequestWinsBeforeItIsTaken() throws {
+        let queue = ServerSwitchQueue()
+        queue.enqueue(.thisMac)
+        queue.enqueue(.host(try XCTUnwrap(Origin("https://vps.example:8443"))))
+
+        XCTAssertEqual(queue.take(), .host(try XCTUnwrap(Origin("https://vps.example:8443"))))
+    }
+}
+
 /// The tray's rows as menu items. Every fixture is injected: no row probes,
 /// fetches, or touches the operator's real saved hosts or status item.
 @MainActor
