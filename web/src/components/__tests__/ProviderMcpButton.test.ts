@@ -19,7 +19,8 @@ function connection(over: Partial<ProviderConnection> = {}): ProviderConnection 
     auth: 'ok',
     state: 'ready',
     command: 'claude auth login',
-    mcp_command: 'claude mcp',
+    mcp_command: 'claude',
+    mcp_slash: '/mcp',
     ...over,
   }
 }
@@ -31,24 +32,48 @@ function mountButton(props: { connection: ProviderConnection; chatId?: string })
 describe('ProviderMcpButton', () => {
   afterEach(() => { runMock.mockReset() })
 
-  it('renders the agent label and the server-built command', () => {
+  it('renders only the button, labelled with the agent', () => {
     const wrapper = mountButton({ connection: connection() })
-    expect(wrapper.text()).toContain('Open MCP settings in Claude Code')
-    expect(wrapper.find('code').text()).toBe('claude mcp')
+    expect(wrapper.findAll('button')).toHaveLength(1)
+    expect(wrapper.get('button').text()).toBe('Open MCP settings in Claude Code')
+    expect(wrapper.find('code').exists()).toBe(false)
+    expect(wrapper.text()).not.toContain('claude')
+    expect(wrapper.find('[role="status"]').exists()).toBe(false)
   })
 
-  it('types mcp_command into the in-app terminal, with the chat when one is given', async () => {
+  it('launches mcp_command and then types mcp_slash, with the chat when one is given', async () => {
     runMock.mockResolvedValue('typed')
     const withChat = mountButton({ connection: connection(), chatId: 'c1' })
     await withChat.get('button').trigger('click')
     await flushPromises()
-    expect(runMock).toHaveBeenCalledWith('claude mcp', { chatId: 'c1' })
+    expect(runMock).toHaveBeenCalledWith('claude', { chatId: 'c1', followUp: '/mcp' })
 
     runMock.mockClear()
     const projectScoped = mountButton({ connection: connection() })
     await projectScoped.get('button').trigger('click')
     await flushPromises()
-    expect(runMock).toHaveBeenCalledWith('claude mcp', undefined)
+    expect(runMock).toHaveBeenCalledWith('claude', { followUp: '/mcp' })
+  })
+
+  it('shows Codex the same way, with its own launch command', async () => {
+    runMock.mockResolvedValue('typed')
+    const wrapper = mountButton({
+      connection: connection({ name: 'codex', label: 'Codex', mcp_command: "'/x y/codex'" }),
+    })
+    expect(wrapper.get('button').text()).toBe('Open MCP settings in Codex')
+    await wrapper.get('button').trigger('click')
+    await flushPromises()
+    expect(runMock).toHaveBeenCalledWith("'/x y/codex'", { followUp: '/mcp' })
+  })
+
+  it('types OpenCode its own slash command, /mcps, after the launch', async () => {
+    runMock.mockResolvedValue('typed')
+    const wrapper = mountButton({
+      connection: connection({ name: 'opencode', label: 'OpenCode', mcp_command: 'opencode', mcp_slash: '/mcps' }),
+    })
+    await wrapper.get('button').trigger('click')
+    await flushPromises()
+    expect(runMock).toHaveBeenCalledWith('opencode', { followUp: '/mcps' })
   })
 
   it('renders nothing when the row has no mcp_command', () => {
@@ -57,11 +82,28 @@ describe('ProviderMcpButton', () => {
     expect(wrapper.text()).toBe('')
   })
 
-  it('shows the copy note when the terminal run is copied', async () => {
+  it('stays silent when the command was typed', async () => {
+    runMock.mockResolvedValue('typed')
+    const wrapper = mountButton({ connection: connection() })
+    await wrapper.get('button').trigger('click')
+    await flushPromises()
+    expect(wrapper.find('[role="status"]').exists()).toBe(false)
+  })
+
+  it('shows one status line when the terminal was not ready and the command was copied', async () => {
     runMock.mockResolvedValue('copied')
     const wrapper = mountButton({ connection: connection(), chatId: 'c1' })
     await wrapper.get('button').trigger('click')
     await flushPromises()
     expect(wrapper.get('[role="status"]').text()).toContain('The terminal was not ready, so the command was copied.')
+    expect(wrapper.findAll('button')).toHaveLength(1)
+  })
+
+  it('shows a status line when nothing could reach the terminal or the clipboard', async () => {
+    runMock.mockResolvedValue('failed')
+    const wrapper = mountButton({ connection: connection() })
+    await wrapper.get('button').trigger('click')
+    await flushPromises()
+    expect(wrapper.get('[role="status"]').text()).toContain('Could not reach the terminal or the clipboard.')
   })
 })

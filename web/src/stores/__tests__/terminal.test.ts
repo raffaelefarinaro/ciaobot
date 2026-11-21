@@ -2782,6 +2782,28 @@ describe('terminal store attach offset', () => {
     expect(fakeSockets).toHaveLength(0)
   })
 
+  it('counts live output as the CLI output signal, not the replay on attach', async () => {
+    const store = useTerminalStore()
+    await store.open({ chatId: 'chat-1' })
+    apiPost.mockResolvedValue({ session: sessionPayload('s1') })
+    await store.createSession()
+    store.attachRenderer(makeRenderer('s1').renderer)
+
+    const socket = fakeSockets[0]
+    socket.receive({
+      type: 'ready', session_id: 's1', folder: '/tmp', cols: 80, rows: 24,
+      seq: 5, replay_start: 0, truncated: false,
+    })
+    socket.receive({ type: 'output', start: 0, end: 5, data: b64('hello') })
+    socket.receive({ type: 'replay_end', seq: 5, truncated: false })
+    await vi.advanceTimersByTimeAsync(0)
+    expect(store.liveOutputSeq).toBe(0)
+
+    socket.receive({ type: 'output', start: 5, end: 10, data: b64('world') })
+    await vi.advanceTimersByTimeAsync(0)
+    expect(store.liveOutputSeq).toBe(1)
+  })
+
   it('does not let replay_end advance the cursor', async () => {
     const store = useTerminalStore()
     await store.open({ chatId: 'chat-1' })

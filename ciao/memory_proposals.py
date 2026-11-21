@@ -1935,6 +1935,7 @@ def record_promotion(
     reason: str = "",
     once: bool = False,
     history_only: bool = False,
+    operation_id: str = "",
 ) -> bool:
     """Record an accepted proposal in the same decision history.
 
@@ -1961,6 +1962,7 @@ def record_promotion(
         reason=reason,
         once=once,
         history_only=history_only,
+        operation_id=operation_id,
     )
 
 
@@ -1981,6 +1983,7 @@ def _record_decision(
     reason: str = "",
     once: bool = False,
     history_only: bool = False,
+    operation_id: str = "",
 ) -> bool:
     cleaned = text.strip()
     if not cleaned:
@@ -2022,6 +2025,10 @@ def _record_decision(
         # offer an undo. Rows written before this existed carry no id and are
         # joined heuristically instead.
         entry["receipt_id"] = receipt_id
+    if operation_id:
+        # The managed operation (see :mod:`ciao.curation_apply`) that wrote this
+        # decision. It owns both receipts it links to, and finds them by this id.
+        entry["operation_id"] = operation_id
     if learning_id:
         # Which learning a derived finding was filed against, for the writers
         # that settle one finding at a time. Empty for every decision that is
@@ -2234,6 +2241,7 @@ def read_decisions(
                     "outcome": str(entry.get("outcome", "")),
                     "proposal_id": str(entry.get("proposal_id", "")),
                     "receipt_id": str(entry.get("receipt_id", "")),
+                    "operation_id": str(entry.get("operation_id", "")),
                     "learning_id": str(entry.get("learning_id", "")),
                     "finding": str(entry.get("finding", "")),
                     "reason": str(entry.get("reason", "")),

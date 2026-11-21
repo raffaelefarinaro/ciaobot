@@ -57,6 +57,7 @@ from ciao.repo_location import resolve_chat_location
 from ciao.git_mutation import RepositoryBusyError, ensure_mutable, repository_mutation
 from ciao.jsonio import loads_untrusted, write_private_text
 from ciao.memory_receipts import QueueLockError, QueueReceiptUnavailable
+from ciao.os_support.child_env import child_env
 from ciao.os_support.private import make_private_dir
 from ciao.port_in_use import BIND_PHASE
 from ciao.web.auth import (
@@ -1137,6 +1138,7 @@ async def provider_connection_action(request: Request) -> JSONResponse:
                 text=True,
                 timeout=30,
                 check=False,
+                env=child_env(),
             )
         except (FileNotFoundError, OSError, subprocess.SubprocessError) as exc:
             return JSONResponse({"error": str(exc)}, status_code=400)
@@ -5306,6 +5308,7 @@ async def workspace_binary(request: Request) -> Response:
                     capture_output=True,
                     text=True,
                     timeout=60,
+                    env=child_env(),
                 )
                 if conversion.returncode != 0:
                     return JSONResponse(
@@ -7217,6 +7220,7 @@ async def _snapshot_git(
             capture_output=True,
             text=True,
             timeout=timeout,
+            env=child_env(),
         )
     )
     try:

@@ -11,12 +11,12 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
-import os
 import subprocess
 from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
 
+from ciao.os_support.child_env import child_env
 from ciao.os_support.processes import ProcessTree, tree_spawn_options
 from ciao.prompt_fence import fence
 
@@ -114,7 +114,7 @@ async def run_schedule_command(
     command works. The command runs in its own process tree: on timeout the
     whole tree is killed and the output read so far is kept.
     """
-    env = dict(os.environ)
+    env = child_env()
     env.update(extra_env)
     process = await asyncio.create_subprocess_shell(
         command,
