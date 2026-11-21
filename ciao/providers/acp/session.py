@@ -535,13 +535,24 @@ class AcpSession:
         self._close_late()
 
     def _close_late(self) -> None:
+        event = self._end_late()
+        if event is not None:
+            self._late_queue.put_nowait(event)
+
+    def _end_late(self, *, stopped: bool = False) -> ResultEvent | None:
+        """Close the open late turn and journal its result. Returns that result when it had text.
+
+        The caller decides where the result goes: a drain queue for a turn that ended on its own,
+        or the Stop that asked for it (``stopped``), which keeps the partial reply and wakes nobody.
+        """
         if not self._late_open:
-            return
+            return None
         self._late_open = False
         task = self._quiet_task
         self._quiet_task = None
         if task is not None and task is not asyncio.current_task():
             task.cancel()
+        event: ResultEvent | None = None
         if self._late_substantive:
             event = result_event(
                 "end_turn",
@@ -552,10 +563,11 @@ class AcpSession:
                 origin="task-notification",
             )
             event.wake_notice = LATE_WAKE_NOTICE
-            self._late_queue.put_nowait(event)
+            event.stopped = stopped
             self._journal_event(event)
         self._late_text = TurnText()
         self._late_substantive = False
+        return event
 
     def _journal_event(self, event: StreamEvent) -> None:
         # Lazy: the providers package must not import ciao.web at module load.
@@ -755,7 +767,24 @@ class AcpSession:
             session_id=self.session_id,
         )
 
-    async def cancel(self) -> None:
+    async def cancel(self) -> ResultEvent | None:
+        """Cancel the running prompt, or the late turn the agent is running on its own.
+
+        A foreground Stop (a prompt running, no late turn open) only cancels the prompt: tracked
+        shells and their end notices are left as they were. A late or background Stop also
+        closes the late turn silently and stops watching the background shells, so nothing
+        still open wakes the chat afterwards. Returns the partial result of the stopped late
+        turn when it had text, for the transcript. With nothing running this is a no-op that
+        sends no ``session/cancel``.
+        """
+        background = self._late_open or not self._prompt_active
+        if not (self._prompt_active or self._late_open or self.background_shells_running):
+            return None
+        partial: ResultEvent | None = None
+        if background:
+            partial = self._end_late(stopped=True)
+            self._drop_background_shells()
+            self._discard_late_queue()
         # The permission response is written by the connection task after the
         # handler returns. ACP requires that cancelled outcome to be on the
         # wire before session/cancel, so wait until those writes have flushed.
@@ -763,6 +792,15 @@ class AcpSession:
         if answered:
             await self._connection.wait_until_responses_flushed(answered)
         await self._connection.conn.cancel(self.session_id)
+        return partial
+
+    def _discard_late_queue(self) -> None:
+        """Drop the late events queued but not yet drained: a stopped turn's chunks and shell ends never replay."""
+        while True:
+            try:
+                self._late_queue.get_nowait()
+            except asyncio.QueueEmpty:
+                return
 
     def late_events(self) -> AsyncGenerator[StreamEvent, None]:
         return self._late_events()
@@ -784,15 +822,21 @@ class AcpSession:
         """True while a tracked background shell runs, or its end notice is still on its way."""
         return self._shells.tracking or bool(self._deferred_ends) or bool(self._end_tasks)
 
-    async def close(self) -> None:
-        """``session/close`` when the agent advertises it, then nothing else."""
-        self._close_late()
+    def _drop_background_shells(self) -> None:
+        """Stop watching every background shell: no end notice follows, and launch commands still awaiting an ack go too."""
         if self._shell_task is not None:
             self._shell_task.cancel()
             self._shell_task = None
         for task in list(self._end_tasks):
             task.cancel()
         self._deferred_ends = []
+        self._shells.clear()
+        self._shell_commands.clear()
+
+    async def close(self) -> None:
+        """``session/close`` when the agent advertises it, then nothing else."""
+        self._close_late()
+        self._drop_background_shells()
         if self._cap_object("sessionCapabilities", "close") and self.session_id:
             await self._connection.conn.close_session(session_id=self.session_id)
 

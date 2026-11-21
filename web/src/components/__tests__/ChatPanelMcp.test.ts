@@ -106,8 +106,9 @@ async function mountPanel(chatId = CHAT_ID, existing?: ReturnType<typeof createP
 
 const PROVIDERS = {
   connections: {
-    claude: { name: 'claude', label: 'Claude Code', ok: true, auth: 'ok', state: 'ready', command: 'claude auth login', mcp_command: 'claude mcp' },
-    opencode: { name: 'opencode', label: 'OpenCode', ok: true, auth: 'ok', state: 'ready', command: 'opencode auth login', mcp_command: 'opencode mcp' },
+    claude: { name: 'claude', label: 'Claude Code', ok: true, auth: 'ok', state: 'ready', command: 'claude auth login', mcp_command: 'claude', mcp_slash: '/mcp' },
+    opencode: { name: 'opencode', label: 'OpenCode', ok: true, auth: 'ok', state: 'ready', command: 'opencode auth login', mcp_command: 'opencode', mcp_slash: '/mcps' },
+    codex: { name: 'codex', label: 'Codex', ok: true, auth: 'signed_in', state: 'ready', command: 'codex login', mcp_command: 'codex', mcp_slash: '/mcp' },
   },
 }
 
@@ -136,9 +137,10 @@ async function openDetails(panel: VueWrapper) {
 
 describe('ChatPanel Chat details MCP', () => {
   it.each([
-    ['claude', 'Open MCP settings in Claude Code', 'claude mcp'],
-    ['opencode', 'Open MCP settings in OpenCode', 'opencode mcp'],
-  ] as const)('a %s chat gets its own agent button and runs its own command', async (provider, label, command) => {
+    ['claude', 'Open MCP settings in Claude Code', 'claude', '/mcp'],
+    ['opencode', 'Open MCP settings in OpenCode', 'opencode', '/mcps'],
+    ['codex', 'Open MCP settings in Codex', 'codex', '/mcp'],
+  ] as const)('a %s chat gets its own agent button and runs its own launch command', async (provider, label, command, slash) => {
     const { wrapper: panel, store } = await mountPanel()
     store.chats = [makeChat({ provider })]
     await flushPromises()
@@ -147,7 +149,7 @@ describe('ChatPanel Chat details MCP', () => {
     expect(button).toBeDefined()
     await button!.trigger('click')
     await flushPromises()
-    expect(runMock).toHaveBeenCalledWith(command, { chatId: CHAT_ID })
+    expect(runMock).toHaveBeenCalledWith(command, { chatId: CHAT_ID, followUp: slash })
   })
 
   it('reads the provider list once, only after Chat details opens', async () => {

@@ -22,6 +22,7 @@ from collections.abc import Callable, Mapping
 from datetime import date
 from typing import Any
 
+from ciao.os_support.child_env import child_env
 logger = logging.getLogger(__name__)
 
 SCHEMA_VERSION = 1
@@ -287,6 +288,7 @@ def _probe_version(binary: str) -> str:
             errors="replace",
             timeout=3,
             check=False,
+            env=child_env(),
         )
     except (OSError, subprocess.SubprocessError):
         return ""

@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { reactive } from 'vue'
 import { resetRunInTerminalSession, useRunInTerminal } from '../useRunInTerminal'
 
@@ -15,6 +15,7 @@ const terminal = reactive({
   createSession: vi.fn(),
   sendInput: vi.fn(),
   bracketedPasteMode: vi.fn(() => false),
+  liveOutputSeq: 0,
 })
 const projects = reactive({
   activeProject: null as { project_id: string } | null,
@@ -238,3 +239,109 @@ describe('useRunInTerminal', () => {
     expect(terminal.selectSession).toHaveBeenCalledWith('s1')
   })
 })
+
+describe('useRunInTerminal follow-up input', () => {
+  beforeEach(() => {
+    vi.useFakeTimers()
+    terminal.phase = 'closed'
+    terminal.activeSession = null
+    terminal.sessions = []
+    terminal.liveOutputSeq = 0
+    resetRunInTerminalSession()
+    projects.activeProject = null
+    projects.workspaceProjects = [{ project_id: 'p1' }]
+    projects.projects = []
+    terminal.open.mockReset().mockImplementation(async () => { terminal.phase = 'ready' })
+    terminal.createSession.mockReset().mockImplementation(async () => {
+      const created = { session_id: 's1', exited: false }
+      terminal.sessions = [created]
+      terminal.activeSession = created
+      terminal.phase = 'live'
+      return true
+    })
+    terminal.sendInput.mockReset().mockReturnValue(true)
+    terminal.bracketedPasteMode.mockReset().mockReturnValue(false)
+    writeClipboard.mockReset().mockResolvedValue(true)
+  })
+
+  afterEach(() => { vi.useRealTimers() })
+
+  const typed = () => terminal.sendInput.mock.calls.map(([bytes]) => decode(bytes as Uint8Array))
+  /** One line of CLI output, as the terminal store reports live output. */
+  const emitOutput = () => { terminal.liveOutputSeq += 1 }
+
+  it('types the launch command, then /mcp as its own input after output has gone quiet', async () => {
+    const { run } = useRunInTerminal(500, 50)
+    const result = run('claude', { followUp: '/mcp' })
+    await vi.advanceTimersByTimeAsync(0)
+    expect(typed()).toEqual(['claude\r'])
+
+    emitOutput()
+    await vi.advanceTimersByTimeAsync(300)
+    emitOutput()
+    await vi.advanceTimersByTimeAsync(599)
+    expect(typed()).toEqual(['claude\r'])
+
+    await vi.advanceTimersByTimeAsync(1)
+    expect(typed()).toEqual(['claude\r', '/mcp\r'])
+    expect(await result).toBe('typed')
+    expect(writeClipboard).not.toHaveBeenCalled()
+  })
+
+  it('never types /mcp before the CLI has produced any output', async () => {
+    const { run } = useRunInTerminal(500, 50)
+    const result = run('codex', { followUp: '/mcp' })
+    await vi.advanceTimersByTimeAsync(7999)
+    expect(typed()).toEqual(['codex\r'])
+    await vi.advanceTimersByTimeAsync(1)
+    expect(typed()).toEqual(['codex\r'])
+    expect(await result).toBe('typed')
+    expect(writeClipboard).not.toHaveBeenCalled()
+  })
+
+  it('stops waiting at the cap and types /mcp once output has begun', async () => {
+    const { run } = useRunInTerminal(500, 50)
+    const result = run('claude', { followUp: '/mcp' })
+    await vi.advanceTimersByTimeAsync(0)
+    for (let elapsed = 0; elapsed < 7900; elapsed += 100) {
+      emitOutput()
+      await vi.advanceTimersByTimeAsync(100)
+    }
+    expect(typed()).toEqual(['claude\r'])
+    await vi.advanceTimersByTimeAsync(100)
+    expect(typed()).toEqual(['claude\r', '/mcp\r'])
+    expect(await result).toBe('typed')
+  })
+
+  it('never types /mcp when the session ends before the CLI settles', async () => {
+    const { run } = useRunInTerminal(500, 50)
+    const result = run('opencode', { followUp: '/mcps' })
+    await vi.advanceTimersByTimeAsync(0)
+    emitOutput()
+    await vi.advanceTimersByTimeAsync(100)
+    terminal.phase = 'ended'
+    await vi.advanceTimersByTimeAsync(2000)
+    expect(typed()).toEqual(['opencode\r'])
+    expect(await result).toBe('typed')
+  })
+
+  it('never types /mcp when the session is switched away', async () => {
+    const { run } = useRunInTerminal(500, 50)
+    const result = run('claude', { followUp: '/mcp' })
+    await vi.advanceTimersByTimeAsync(0)
+    emitOutput()
+    terminal.activeSession = { session_id: 'users', exited: false }
+    await vi.advanceTimersByTimeAsync(2000)
+    expect(typed()).toEqual(['claude\r'])
+    expect(await result).toBe('typed')
+  })
+
+  it('copies only the launch command when it cannot be typed, and types no follow-up', async () => {
+    terminal.sendInput.mockReturnValue(false)
+    const { run } = useRunInTerminal(500, 50)
+    expect(await run('claude', { followUp: '/mcp' })).toBe('copied')
+    expect(writeClipboard).toHaveBeenCalledTimes(1)
+    expect(writeClipboard).toHaveBeenCalledWith('claude')
+  })
+})
+

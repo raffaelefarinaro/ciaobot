@@ -1570,16 +1570,20 @@ def test_auth_rejects_a_non_runtime_provider(capsys) -> None:
 
 def test_auth_claude_uses_the_resolved_cli(monkeypatch) -> None:
     calls: list[list[str]] = []
+    envs: list[object] = []
     monkeypatch.setattr("ciao.setup_status.claude_cli_path", lambda: "/opt/ciao/claude")
-    monkeypatch.setattr(
-        cli.subprocess,
-        "run",
-        lambda cmd, check=False: calls.append(cmd) or type("P", (), {"returncode": 0})(),
-    )
+
+    def fake_run(cmd, check=False, env=None):
+        calls.append(cmd)
+        envs.append(env)
+        return type("P", (), {"returncode": 0})()
+
+    monkeypatch.setattr(cli.subprocess, "run", fake_run)
 
     assert cli.main(["auth", "claude"]) == 0
 
     assert calls == [["/opt/ciao/claude", "auth", "login"]]
+    assert isinstance(envs[0], dict)
 
 
 def test_vault_index_accepts_arbitrary_workspace_name(monkeypatch) -> None:
