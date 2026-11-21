@@ -343,9 +343,14 @@ class ThinkingEvent(StreamEvent):
 
 @dataclass(slots=True)
 class SystemStatusEvent(StreamEvent):
-    """System status event."""
+    """System status event.
+
+    ``denied_tool`` is set only on the broker's denial of an unattended approval
+    request, naming the tool, so a scheduled run can fail on it.
+    """
 
     status: str | None = None
+    denied_tool: str = ""
 
 
 @dataclass(slots=True)

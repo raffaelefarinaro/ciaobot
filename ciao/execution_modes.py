@@ -7,21 +7,9 @@ from pathlib import Path
 
 # Permission-mode strength, weakest first: ``plan`` is read-only, ``normal``
 # asks before acting, ``auto`` acts with safer defaults, ``bypass`` skips
-# approvals. Mirrors ``BridgeMode`` in ciao.models. Shared by the control plane
-# (an agent's ceiling) and the schedule dispatcher (a saved routine mode).
+# approvals. Mirrors ``BridgeMode`` in ciao.models. The control plane uses it as
+# an agent's ceiling when it creates or switches a chat's mode.
 MODE_RANK: dict[str, int] = {"plan": 0, "normal": 1, "auto": 2, "bypass": 3}
-
-
-def cap_schedule_mode(saved: str, default: str) -> str:
-    """The mode a schedule run uses: its saved mode, never above ``default``.
-
-    A saved mode is an upper limit, not a pin: when the workspace/engine default
-    is lowered later, a routine an agent saved at a higher mode drops with it.
-    An empty (or unrecognised) saved mode inherits ``default``.
-    """
-    if saved not in MODE_RANK or default not in MODE_RANK:
-        return default
-    return saved if MODE_RANK[saved] <= MODE_RANK[default] else default
 
 
 # ── Ciaobot control-plane approval policy ────────────────────────────────

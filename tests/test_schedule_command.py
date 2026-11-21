@@ -59,7 +59,6 @@ def test_command_round_trips_through_the_store(tmp_path: Path) -> None:
         daily_time_utc="08:00",
         prompt="Summarise the sync",
         model="",
-        mode="auto",
         chat_id=0,
         web_project_id="proj-1",
         command="  ./scripts/sync.sh  ",
@@ -83,7 +82,6 @@ def test_rows_written_before_the_field_load_as_no_command(tmp_path: Path) -> Non
         daily_time_utc="08:00",
         prompt="Plain prompt",
         model="",
-        mode="auto",
         chat_id=0,
         web_project_id="proj-1",
     )
@@ -351,7 +349,6 @@ async def test_quiet_command_does_not_resolve_or_repair_archived_stale_target(
         project_id="project-1",
         title="Archived",
         model="opus",
-        mode="auto",
         provider="claude",
         archived=True,
     )
@@ -722,7 +719,6 @@ def _command_interval(store: ScheduleStore, command: str) -> ScheduleEntry:
         daily_time_utc="",
         prompt="Run the routine.",
         model="",
-        mode="auto",
         chat_id=0,
         frequency="interval",
         interval_minutes=10,

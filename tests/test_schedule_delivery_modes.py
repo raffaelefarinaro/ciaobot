@@ -550,7 +550,6 @@ async def test_clean_run_is_judged_on_its_own_result_without_waiting(
         daily_time_utc="08:00",
         prompt="brief",
         model="opus",
-        mode="auto",
         chat_id=0,
         frequency="daily",
         web_chat_id=chat.chat_id,

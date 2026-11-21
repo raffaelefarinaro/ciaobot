@@ -232,7 +232,7 @@ An agent with vault write access can forge the `via=pwa` memory rows and `actor=
 
 ### Agent file access (2.0)
 
-Ciaobot applies no filesystem sandbox and no file-access scope. Every chat, schedule and webhook-triggered run has the same file access as the engine's user account, limited only by the CLI's own permission mode. Unattended runs are forced to `bypass` (`_effective_mode_for_chat` in `ciao/web/project_chats.py`), so a webhook payload or a scheduled prompt drives an unconfined bypass agent.
+Ciaobot applies no filesystem sandbox and no file-access scope. Every chat, schedule and webhook-triggered run has the same file access as the engine's user account, limited only by the CLI's own permission mode. Unattended runs keep their chat's own permission mode (`build_agent_request` in `ciao/web/project_chats.py` no longer forces `bypass`). Nobody watches an unattended turn, so the permission broker denies every approval request it would have to wait on (`ciao/providers/acp/permissions.py`): a scheduled prompt cannot escalate past what its chat's mode allows without asking, and an escalation in `auto` fails closed. A schedule stores no mode of its own; its chat takes the workspace default, so a `bypass` default gives a scheduled prompt an unconfined bypass agent.
 
 What disappears: the Seatbelt (macOS) and bwrap (Linux) sandbox, Claude `sandbox.filesystem`, and the `claude_file_tool_guard` hook. There is no data-root grant and no engine-supplied `GH_TOKEN`. A stored `agent_fs_scope` is ignored on load and dropped on the next workspace save.
 

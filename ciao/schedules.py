@@ -33,7 +33,7 @@ from datetime import UTC, datetime, timedelta
 from importlib import resources
 from pathlib import Path
 from collections.abc import Collection, Mapping, Sequence
-from typing import Any, Callable, Coroutine, Protocol, cast
+from typing import Any, Callable, Coroutine, Protocol
 from zoneinfo import ZoneInfo
 
 from ciao.jsonio import read_json_dict
@@ -41,7 +41,6 @@ from ciao.os_support.locks import lock_exclusive, unlock
 from ciao.schedule_command import normalize_schedule_command
 from ciao.models import BridgeMode
 
-_BRIDGE_MODES = frozenset({"normal", "plan", "auto", "bypass"})
 
 DEFAULT_TIMEZONE = "Europe/Zurich"
 logger = logging.getLogger(__name__)
@@ -407,7 +406,7 @@ def migrate_loops(runtime_root: Path) -> int:
             prompt=str(item.get("prompt") or ""),
             chat_id=0,
             created_at=str(item.get("created_at") or _now_utc().isoformat()),
-            # Empty model/mode is what makes an interval run inherit the target
+            # Empty model is what makes an interval run inherit the target
             # chat's own settings, which is how loops always behaved.
             model="",
             frequency=INTERVAL_FREQUENCY,
@@ -517,8 +516,6 @@ def restorable_user_schedule(
       workspace would otherwise run there. ``foreign_target(kind, id)`` lets
       the caller drop a chat or project id (``kind`` is ``"chat"`` or
       ``"project"``) that resolves into a different workspace.
-    - ``mode`` is empty, exactly as the create route leaves it: inherited at
-      dispatch, never pinned by the stored row.
     """
     if not isinstance(item, dict) or item.get("scope", "user") != "user":
         return None
@@ -619,7 +616,6 @@ def restorable_user_schedule(
         created_at=texts["created_at"] or _now_utc().isoformat().replace("+00:00", "Z"),
         model=texts["model"].strip(),
         provider=provider,
-        mode="",
         timezone_name=timezone_name,
         days_of_week=list(days) if days else None,
         thread_id=thread_id,
@@ -638,9 +634,7 @@ def restorable_user_schedule(
         description=texts["description"].strip(),
     )
     normalize_auto_archive(entry)
-    payload = asdict(entry)
-    payload.pop("mode", None)
-    return payload
+    return asdict(entry)
 
 
 def normalize_archive_policy(value: str | None) -> str:
@@ -1085,6 +1079,11 @@ def settle_runs_for_archived_chat(store: "ScheduleStore", chat_id: str) -> bool:
     return changed
 
 
+#: Keys a stored row may still carry from before they were retired. Loading
+#: ignores them (ScheduleEntry has no such field); a scoped write removes them.
+RETIRED_ITEM_KEYS = ("mode",)
+
+
 @dataclass(slots=True)
 class ScheduleEntry:
     """One persisted schedule (wall-clock, one-off, manual, or interval)."""
@@ -1099,16 +1098,6 @@ class ScheduleEntry:
     # means "inherit the target chat's provider (existing web_chat_id) or use
     # the resolver's default (new web_project_id chat)".
     provider: str = ""
-    # "" means "inherit", exactly as an empty `model`/`provider` does: the
-    # permission mode is resolved from the operator's own per-provider pin
-    # (Settings -> Models & providers) on every dispatch. A hardcoded "auto" here was
-    # not a default, it was an override — truthy, so it won every dispatch and
-    # the inheritance fallback below it could never fire. A routine on a
-    # provider pinned to `bypass` still stamped its chat `auto`, and a reply
-    # to that chat then ran under different permission rules than the run it
-    # was answering (which `unattended` forces to bypass) — which on opencode
-    # rotates the session, because a session's rules are fixed at creation.
-    mode: str = ""
     timezone_name: str = DEFAULT_TIMEZONE
     last_triggered_on: str = ""
     # Full ISO timestamp of the most recent dispatch through any path
@@ -1440,7 +1429,6 @@ class ScheduleStore:
         daily_time_utc: str,
         prompt: str,
         model: str,
-        mode: BridgeMode,
         chat_id: int,
         timezone_name: str = DEFAULT_TIMEZONE,
         days_of_week: list[str] | None = None,
@@ -1468,7 +1456,6 @@ class ScheduleStore:
             prompt=prompt,
             model=model,
             provider=provider,
-            mode=mode,
             chat_id=chat_id,
             created_at=_now_utc().isoformat().replace("+00:00", "Z"),
             timezone_name=timezone_name,
@@ -1557,6 +1544,8 @@ class ScheduleStore:
                 self._finalize_entry(merged)
                 before, after = asdict(current), asdict(merged)
                 updated = dict(item)
+                for retired in RETIRED_ITEM_KEYS:
+                    updated.pop(retired, None)
                 updated.update({k: v for k, v in after.items() if before.get(k) != v})
                 if _editable_digest(current) != _editable_digest(merged):
                     updated[_REV_KEY] = _rev_value(item.get(_REV_KEY)) + 1
@@ -2303,24 +2292,14 @@ class ScheduleStore:
         self._save_system_state(state)
 
     def _serialize_entry(self, entry: ScheduleEntry) -> dict:
-        # `mode` is stored as set: "" (every PWA-created row) inherits at
-        # dispatch, and a non-empty value is the ceiling an agent-created
-        # routine was pinned to, which must survive a restart.
         return asdict(entry)
 
 
-def entry_mode(entry: "ScheduleEntry") -> BridgeMode:
-    """The entry's own permission mode, narrowed for the no-resolver path.
-
-    ``ScheduleEntry.mode`` is a plain ``str`` because "" means "inherit", which
-    is not a ``BridgeMode``. Resolution normally happens in the manager's
-    ``resolve_target`` callback, which consults the operator's per-provider pin;
-    this is only the fallback for a manager constructed without one (tests, and
-    any standalone driver), where there is no config to consult and ``auto`` is
-    the safe read of "unset".
-    """
-    mode = getattr(entry, "mode", "")
-    return cast(BridgeMode, mode) if mode in _BRIDGE_MODES else "auto"
+#: The run mode for a manager built without a ``resolve_target`` (tests and
+#: standalone drivers, which have no config to consult). Production always
+#: resolves the run mode through the engine's per-provider default, and a
+#: schedule stores no mode of its own.
+NO_RESOLVER_RUN_MODE: BridgeMode = "auto"
 
 
 class _DispatchToWeb(Protocol):
@@ -2451,7 +2430,6 @@ class ScheduleManager:
         daily_time_utc: str,
         prompt: str,
         model: str,
-        mode: BridgeMode,
         chat_id: int,
         timezone_name: str = DEFAULT_TIMEZONE,
         days_of_week: list[str] | None = None,
@@ -2475,7 +2453,6 @@ class ScheduleManager:
             prompt=prompt,
             model=model,
             provider=provider,
-            mode=mode,
             chat_id=chat_id,
             timezone_name=timezone_name,
             days_of_week=days_of_week,
@@ -2808,7 +2785,7 @@ class ScheduleManager:
         _, model, mode, provider = (
             self._resolve_target(entry)
             if self._resolve_target is not None
-            else ("claude", entry.model, entry_mode(entry), entry.provider)
+            else ("claude", entry.model, NO_RESOLVER_RUN_MODE, entry.provider)
         )
         # The binding as it stood *before* prepare_chat, which is what
         # `_run_interval` needs to tell a re-home apart from a user edit.
@@ -3012,7 +2989,7 @@ class ScheduleManager:
         _, model, mode, provider = (
             self._resolve_target(entry)
             if self._resolve_target is not None
-            else ("claude", entry.model, entry_mode(entry), entry.provider)
+            else ("claude", entry.model, NO_RESOLVER_RUN_MODE, entry.provider)
         )
         # Prepare the chat synchronously so we can return its ID immediately.
         # Pass it through to dispatch so it doesn't create a second chat.
@@ -3114,7 +3091,7 @@ class ScheduleManager:
             _, model, mode, provider = (
                 self._resolve_target(entry)
                 if self._resolve_target is not None
-                else ("claude", entry.model, entry_mode(entry), entry.provider)
+                else ("claude", entry.model, NO_RESOLVER_RUN_MODE, entry.provider)
             )
             # Prepare the chat synchronously (like dispatch_now) so
             # last_run_chat_id is durable in the same write as
@@ -3325,7 +3302,7 @@ class ScheduleManager:
             _, model, mode, provider = (
                 self._resolve_target(entry)
                 if self._resolve_target is not None
-                else ("claude", entry.model, entry_mode(entry), entry.provider)
+                else ("claude", entry.model, NO_RESOLVER_RUN_MODE, entry.provider)
             )
             logger.info(
                 "Schedule %s: catch-up fire (latest missed %s, now %s%s)",

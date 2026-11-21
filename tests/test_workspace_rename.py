@@ -93,7 +93,6 @@ def _seed_all(config: CiaoConfig, tmp_path: Path, projects: _Projects):
         daily_time_utc="10:00",
         prompt="morning brief",
         model="",
-        mode="auto",
         chat_id=0,
         workspace="personal",
         title="Brief",
@@ -745,7 +744,7 @@ def test_rollback_keeps_a_schedule_edit_made_after_the_rename_wrote(
     _seed_all(config, tmp_path, projects)
     schedules, webhooks, imports = _stores(config, tmp_path)
     target = schedules.create(
-        daily_time_utc="09:00", prompt="p", model="m", mode="auto", chat_id=1,
+        daily_time_utc="09:00", prompt="p", model="m", chat_id=1,
         workspace="personal", title="t",
     )
 
@@ -787,7 +786,7 @@ def test_failure_inside_the_schedule_rename_step_is_rolled_back(
     _seed_all(config, tmp_path, projects)
     schedules, webhooks, imports = _stores(config, tmp_path)
     target = schedules.create(
-        daily_time_utc="09:00", prompt="p", model="m", mode="auto", chat_id=1,
+        daily_time_utc="09:00", prompt="p", model="m", chat_id=1,
         workspace="personal", title="t",
     )
 

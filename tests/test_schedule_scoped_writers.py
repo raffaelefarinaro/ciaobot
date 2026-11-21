@@ -17,7 +17,7 @@ from ciao.schedules import (
 
 
 def _create(store: ScheduleStore, **kw):
-    values = dict(daily_time_utc="09:00", prompt="p", model="m", mode="auto", chat_id=1, title="t")
+    values = dict(daily_time_utc="09:00", prompt="p", model="m", chat_id=1, title="t")
     values.update(kw)
     return store.create(**values)
 

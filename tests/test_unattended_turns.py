@@ -55,38 +55,37 @@ def test_unattended_prefix_tells_the_model_nobody_is_watching(tmp_path: Path) ->
     assert tick.index("unattended=true") < tick.index("[CIAO_CONTEXT_END]")
 
 
-def test_unattended_turn_runs_in_bypass(tmp_path: Path) -> None:
-    """Nobody can answer an approval prompt on a loop tick.
+def test_unattended_turn_keeps_the_chats_own_mode(tmp_path: Path) -> None:
+    """An automation tick runs in the chat's mode; nothing forces bypass.
 
-    Every escalating mode resolves to an unanswerable card that `_drive`
-    auto-denies, so the automation fails while reporting success.
+    A tick that cannot ask for approval is still denied by the permission
+    broker (`unattended` stays on the request), so an escalating action fails
+    closed rather than running.
     """
     pcm = _make_manager(tmp_path)
     project = pcm.create_project("loops", workspace="personal")
-    chat = pcm.create_chat(project.project_id, model="opus", provider="claude")
+    chat = pcm.create_chat(project.project_id, model="opus", provider="claude", mode="auto")
 
-    chat.mode = "auto"
-    assert pcm._effective_mode_for_chat(chat) == "auto"
-    assert pcm._effective_mode_for_chat(chat, unattended=True) == "bypass"
+    assert pcm.build_agent_request(chat, prompt="hi", unattended=True).mode == "auto"
 
-    # `plan` cannot escalate — it only proposes — so forcing bypass would turn
-    # a read-only tick into a writing one.
     chat.mode = "plan"
-    assert pcm._effective_mode_for_chat(chat, unattended=True) == "plan"
+    assert pcm.build_agent_request(chat, prompt="hi", unattended=True).mode == "plan"
 
 
-def test_build_agent_request_forwards_unattended_to_the_mode(tmp_path: Path) -> None:
-    """The flag has to survive the trip, or the bypass above is dead code."""
+def test_every_turn_of_a_scheduled_chat_runs_in_the_same_mode(tmp_path: Path) -> None:
+    """The automation tick, the user's reply and a later turn share one mode: no flip."""
     pcm = _make_manager(tmp_path)
     project = pcm.create_project("loops", workspace="personal")
-    chat = pcm.create_chat(project.project_id, model="opus", provider="claude")
-    chat.mode = "auto"
+    chat = pcm.create_chat(project.project_id, model="opus", provider="claude", mode="auto")
 
-    interactive = pcm.build_agent_request(chat, prompt="hi")
-    assert interactive.mode == "auto"
+    tick = pcm.build_agent_request(chat, prompt="tick", unattended=True)
+    reply = pcm.build_agent_request(chat, prompt="thanks")
+    later_tick = pcm.build_agent_request(chat, prompt="again", unattended=True)
 
-    tick = pcm.build_agent_request(chat, prompt="hi", unattended=True)
-    assert tick.mode == "bypass"
+    assert tick.mode == reply.mode == later_tick.mode == "auto"
+    # The flag still reaches the prompt: the capsule keeps saying nobody is watching.
+    assert "unattended=true" in tick.prompt
+    assert "unattended=true" not in reply.prompt
 
 
 def test_unattended_turn_flag_is_persisted_and_reloaded(tmp_path: Path) -> None:
