@@ -100,8 +100,8 @@ def take_pending_list(items: list[dict], entry_id: str) -> dict | None:
 #: one turn the engine sends into a chat whose turn a restart cut off (#2128).
 #: ``chat_action`` is the wake a Needs-you card's Continue sends.
 TURN_ORIGINS = frozenset({
-    "background_run", "chat_action", "cli_task_wake", "retry", "restart_resume", "schedule",
-    "task_delegation", "task_resume", "webhook", "update_task",
+    "background_run", "chat_action", "cli_task_wake", "loop", "retry", "restart_resume",
+    "schedule", "task_delegation", "task_resume", "webhook", "update_task",
 })
 def _flushed_entry(entry: dict) -> dict:
     """A drained entry as it flushes or parks."""

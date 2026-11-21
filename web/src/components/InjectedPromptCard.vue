@@ -39,6 +39,7 @@ const ICONS: Record<InjectedPrompt['kind'], AppIconName> = {
   background_run: 'activity',
   cli_task_wake: 'activity',
   schedule: 'clock',
+  loop: 'clock',
   task_resume: 'doc',
   webhook: 'comment',
   update_task: 'spark',
@@ -55,7 +56,7 @@ const icon = computed(() => ICONS[props.prompt.kind])
 // A notice the engine did not write (a provider's own shell) has no prompt to show.
 const hasRawToggle = computed(() =>
   props.raw.length > 0 &&
-  ['background_run', 'cli_task_wake', 'schedule', 'webhook'].includes(props.prompt.kind),
+  ['background_run', 'cli_task_wake', 'schedule', 'loop', 'webhook'].includes(props.prompt.kind),
 )
 const md = (text: string) => renderUserMarkdown(text, props.knownPaths ?? [])
 </script>
@@ -147,6 +148,14 @@ const md = (text: string) => renderUserMarkdown(text, props.knownPaths ?? [])
           </button>
           <pre v-if="detailOpen" :id="detailId" class="injected-card-output" tabindex="0" role="region" aria-label="Command output">{{ prompt.command.output }}</pre>
         </template>
+      </template>
+
+      <template v-else-if="prompt.kind === 'loop'">
+        <!-- eslint-disable-next-line vue/no-v-html -- renderUserMarkdown is the transcript's sanitising renderer -->
+        <div class="injected-card-prose" tabindex="0" role="region" aria-label="Loop prompt" v-html="md(prompt.prompt)"></div>
+        <!-- A loop's wake is not stamped onto its chat, so the card links the
+             Automations list rather than one entry. -->
+        <p class="injected-card-note"><router-link class="injected-card-link" to="/schedules">Open Automations</router-link></p>
       </template>
 
       <template v-else-if="prompt.kind === 'webhook'">

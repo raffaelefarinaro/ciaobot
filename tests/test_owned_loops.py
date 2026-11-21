@@ -601,7 +601,10 @@ async def test_a_loop_run_keeps_the_chat_mode_and_runs_unattended(tmp_path: Path
     await manager.tick(now=T0 + timedelta(minutes=10))
     await _settle()
 
-    assert host.started == [(chat.chat_id, "check", True)]
+    ((chat_id, wake, unattended),) = host.started
+    assert (chat_id, unattended) == (chat.chat_id, True)
+    assert wake.startswith("[Ciaobot] Loop wake, run 1 of ")
+    assert "<loop-prompt>\ncheck\n</loop-prompt>" in wake
     assert chats.get_chat(chat.chat_id).mode == "normal"
     assert store.get(loop.schedule_id).run_count == 1
 

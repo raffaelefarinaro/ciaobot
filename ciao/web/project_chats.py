@@ -10505,6 +10505,11 @@ class ProjectChatManager:
         existing = self._broker.get(chat_id)
         return existing is not None and not existing.background
 
+    def chat_awaiting_answer(self, chat_id: str) -> bool:
+        """True while the chat holds an open question or approval for the person."""
+        chat = self._chats.get(chat_id)
+        return chat is not None and bool(chat.pending_question or chat.pending_permission)
+
     def _rehome_interval_chat(
         self, entry: ScheduleEntry, prompt: str
     ) -> ChatInfo | None:
