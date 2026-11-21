@@ -38,6 +38,7 @@ __all__ = [
     "resolve_command",
     "resolve_on_terminal_path",
     "resolve_tool",
+    "terminal_launch_command",
     "terminal_path",
 ]
 
@@ -46,6 +47,23 @@ def resolve_on_terminal_path(cmd: str) -> str | None:
     """Absolute path to ``cmd`` as the user's terminal would resolve it, or None."""
     path = terminal_path()
     return _resolve_executable(cmd, path=path) if path else None
+
+
+def terminal_launch_command(name: str, binary: str | None) -> str:
+    """The line that starts ``name`` in the user's terminal.
+
+    The bare word when that terminal resolves it, else ``binary`` by absolute
+    path, shell-quoted. With neither, the bare word.
+    """
+    import shlex
+
+    try:
+        in_terminal = resolve_on_terminal_path(name)
+    except Exception:
+        in_terminal = None
+    if in_terminal:
+        return name
+    return shlex.quote(binary) if binary else name
 
 
 @functools.lru_cache(maxsize=1)

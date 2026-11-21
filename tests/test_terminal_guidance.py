@@ -123,14 +123,20 @@ def _inventory_command_names(monkeypatch: pytest.MonkeyPatch) -> set[str]:
     buttons start typing has to be documented.
     """
     # Settings -> MCP servers and Chat details render one button per agent that
-    # types the agent's own MCP command (`mcp_command` in /api/settings/providers).
+    # types the agent's launch command (`mcp_command` in /api/settings/providers)
+    # and then the follow-up input `mcp_slash`.
     from ciao import setup_status
     from ciao import opencode_cli as opencode
 
     # The bare form, as the server hands it out when the user's terminal
     # resolves the binary.
     monkeypatch.setattr("ciao.tool_path.resolve_on_terminal_path", lambda cmd: f"/usr/bin/{cmd}")
-    return {setup_status.claude_mcp_command(""), opencode.OPENCODE_MCP_COMMAND}
+    return {
+        setup_status.claude_launch_command(""),
+        opencode.opencode_launch_command(""),
+        setup_status.MCP_SLASH_COMMAND,
+        opencode.OPENCODE_MCP_SLASH,
+    }
 
 
 def test_settings_inventory_commands_are_the_ones_the_guidance_names(

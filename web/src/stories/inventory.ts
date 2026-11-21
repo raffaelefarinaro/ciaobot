@@ -9594,7 +9594,7 @@ export const inventory: InventoryEntry[] = [
     variants: [],
     variantNotes: 'Open, copy and terminal outcomes have not yet been audited.',
     states: [
-      { name: 'default', coverage: 'uncovered', storyIds: [], note: 'The button, command and reload note render when mcp_command is set; no story exists.' },
+      { name: 'default', coverage: 'uncovered', storyIds: [], note: 'The button and any status line render when mcp_command is set; no story exists.' },
       { name: 'typed', coverage: 'uncovered', storyIds: [], note: 'A typed terminal run has no story.' },
       { name: 'copied', coverage: 'uncovered', storyIds: [], note: 'A copied terminal fallback has no story.' },
       { name: 'failed', coverage: 'uncovered', storyIds: [], note: 'A failed terminal run has no story.' },

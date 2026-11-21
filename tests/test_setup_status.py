@@ -2382,24 +2382,45 @@ def test_completed_legacy_import_inspection_does_not_list_removed_workspaces(
     assert "research" not in inspect.json()["existing_workspaces"]
 
 
-def test_claude_mcp_command_uses_bare_name_on_terminal_path(monkeypatch) -> None:
-    from ciao.setup_status import claude_mcp_command
+def test_claude_launch_command_uses_bare_name_on_terminal_path(monkeypatch) -> None:
+    from ciao.setup_status import claude_launch_command
 
     monkeypatch.setattr("ciao.tool_path.resolve_on_terminal_path", lambda cmd: "/usr/bin/claude")
 
-    assert claude_mcp_command("/x y/claude") == "claude mcp"
+    assert claude_launch_command("/x y/claude") == "claude"
 
 
-def test_claude_mcp_command_quotes_the_bundled_binary(monkeypatch) -> None:
-    from ciao.setup_status import claude_mcp_command
+def test_claude_launch_command_quotes_the_bundled_binary(monkeypatch) -> None:
+    from ciao.setup_status import claude_launch_command
 
     monkeypatch.setattr("ciao.tool_path.resolve_on_terminal_path", lambda cmd: None)
     monkeypatch.setattr("ciao.setup_status.claude_cli_path", lambda: "/x y/claude")
 
-    assert claude_mcp_command() == "'/x y/claude' mcp"
+    assert claude_launch_command() == "'/x y/claude'"
 
 
-def test_installed_claude_row_carries_mcp_command(tmp_path, monkeypatch) -> None:
+def test_opencode_launch_command_follows_the_same_path_rule(monkeypatch) -> None:
+    from ciao.opencode_cli import opencode_launch_command
+
+    monkeypatch.setattr("ciao.tool_path.resolve_on_terminal_path", lambda cmd: "/usr/bin/opencode")
+    assert opencode_launch_command("/x y/opencode") == "opencode"
+
+    monkeypatch.setattr("ciao.tool_path.resolve_on_terminal_path", lambda cmd: None)
+    assert opencode_launch_command("/x y/opencode") == "'/x y/opencode'"
+
+
+def test_codex_launch_command_follows_the_same_path_rule(monkeypatch) -> None:
+    from ciao.setup_status import codex_launch_command
+
+    monkeypatch.setattr("ciao.providers.acp.agents.codex_binary", lambda: "/x y/codex")
+    monkeypatch.setattr("ciao.tool_path.resolve_on_terminal_path", lambda cmd: None)
+    assert codex_launch_command() == "'/x y/codex'"
+
+    monkeypatch.setattr("ciao.tool_path.resolve_on_terminal_path", lambda cmd: "/opt/homebrew/bin/codex")
+    assert codex_launch_command() == "codex"
+
+
+def test_installed_claude_row_carries_launch_command_and_mcp_slash(tmp_path, monkeypatch) -> None:
     monkeypatch.setattr("ciao.tool_path.resolve_on_terminal_path", lambda cmd: None)
 
     # Signed out (the autouse fixture) and signed in are both installed rows.
@@ -2407,8 +2428,9 @@ def test_installed_claude_row_carries_mcp_command(tmp_path, monkeypatch) -> None
     _sign_in_claude(monkeypatch)
     signed_in = setup_status(_config(tmp_path), env={})["providers"]["claude"]
 
-    assert signed_out["mcp_command"] == "/usr/local/bin/claude mcp"
-    assert signed_in["mcp_command"] == "/usr/local/bin/claude mcp"
+    assert signed_out["mcp_command"] == "/usr/local/bin/claude"
+    assert signed_in["mcp_command"] == "/usr/local/bin/claude"
+    assert signed_out["mcp_slash"] == signed_in["mcp_slash"] == "/mcp"
 
 
 def test_missing_claude_row_has_no_mcp_command(tmp_path, monkeypatch) -> None:
@@ -2420,6 +2442,63 @@ def test_missing_claude_row_has_no_mcp_command(tmp_path, monkeypatch) -> None:
 
     assert claude["auth"] == "not_installed"
     assert "mcp_command" not in claude
+    assert "mcp_slash" not in claude
+
+
+def test_opencode_row_carries_launch_command_and_mcp_slash(monkeypatch) -> None:
+    from types import SimpleNamespace
+
+    import ciao.opencode_cli as mod
+
+    def fake_run(cmd, *a, **k):
+        if cmd[1] == "--version":
+            return SimpleNamespace(stdout="opencode v2.3.2\n", returncode=0)
+        return SimpleNamespace(stdout="[]", returncode=0)
+
+    monkeypatch.setattr(mod, "resolve_opencode_binary", lambda _env=None: "/x y/opencode")
+    monkeypatch.setattr("ciao.tool_path.resolve_on_terminal_path", lambda cmd: None)
+    monkeypatch.setattr("subprocess.run", fake_run)
+    monkeypatch.setattr(mod, "_credential_count", lambda *a, **k: 0)
+    monkeypatch.setattr(mod, "_fetch_inventory_rows", lambda binary, **_k: (None, []))
+
+    row = mod.opencode_login_status()
+
+    assert row["mcp_command"] == "'/x y/opencode'"
+    assert row["mcp_slash"] == "/mcps"
+
+
+def test_installed_codex_row_carries_launch_command_and_mcp_slash(monkeypatch) -> None:
+    from types import SimpleNamespace
+
+    from ciao import adapter_install
+    from ciao.setup_status import codex_status_probe
+
+    def fake_run(cmd, *a, **k):
+        if cmd[1:] == ["--version"]:
+            return SimpleNamespace(stdout="codex-cli 0.1.0\n", returncode=0)
+        return SimpleNamespace(stdout="", stderr="", returncode=0)
+
+    monkeypatch.setattr("ciao.providers.acp.agents.codex_binary", lambda: "/x y/codex")
+    monkeypatch.setattr("ciao.tool_path.resolve_on_terminal_path", lambda cmd: None)
+    monkeypatch.setattr(adapter_install, "detect", lambda adapter: "ready")
+    monkeypatch.setattr("subprocess.run", fake_run)
+
+    row = codex_status_probe({})
+
+    assert row["mcp_command"] == "'/x y/codex'"
+    assert row["mcp_slash"] == "/mcp"
+
+
+def test_missing_codex_row_has_no_mcp_command(monkeypatch) -> None:
+    from ciao.setup_status import codex_status_probe
+
+    monkeypatch.setattr("ciao.providers.acp.agents.codex_binary", lambda: None)
+
+    row = codex_status_probe({})
+
+    assert row["auth"] == "not_installed"
+    assert "mcp_command" not in row
+    assert "mcp_slash" not in row
 
 
 def test_claude_cli_without_the_acp_adapter_is_not_ready(monkeypatch) -> None:
@@ -2539,7 +2618,9 @@ def test_codex_status_probe_child_env_drops_secrets_and_keeps_path(
     real_run = subprocess.run
 
     def spy(argv, **kwargs):  # type: ignore[no-untyped-def]
-        seen.append(kwargs.get("env"))
+        # Only the codex child is in scope; the terminal PATH probe is a login shell.
+        if list(argv)[1:2] in (["--version"], ["login"]):
+            seen.append(kwargs.get("env"))
         return real_run(argv, **kwargs)
 
     monkeypatch.setattr(setup_status.subprocess, "run", spy)

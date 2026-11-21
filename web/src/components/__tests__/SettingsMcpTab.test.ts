@@ -10,11 +10,11 @@ const providers = {
   connections: {
     claude: {
       name: 'claude', label: 'Claude Code', ok: true, auth: 'ok', state: 'ready', command: 'claude auth login',
-      mcp_command: 'claude mcp',
+      mcp_command: 'claude', mcp_slash: '/mcp',
     },
     opencode: {
       name: 'opencode', label: 'OpenCode', ok: true, auth: 'ok', state: 'ready', command: 'opencode auth login',
-      mcp_command: 'opencode mcp',
+      mcp_command: 'opencode', mcp_slash: '/mcps',
     },
     missing: {
       name: 'missing', label: 'Missing', ok: false, auth: 'not_installed', state: 'not_installed', command: '',
