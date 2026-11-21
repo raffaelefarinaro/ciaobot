@@ -1240,7 +1240,9 @@ acceptance — is stated once in `ciao/memory_policy.py` and described in
 any change here: the region cap is **advisory** on every path (a write goes
 through and reports `over_cap`; consolidation, not refusal, bounds a region),
 and an **unattended run defers** approval-requiring work and reports it instead
-of asking or routing around the missing reviewer. `tests/test_memory_policy.py`
+of asking or routing around the missing reviewer. For a scheduled run the ACP broker
+is the backstop: an approval it cannot wait for is denied at once and the run is
+recorded as `error` naming the denied tool (`tests/test_schedule_dispatch_boundary.py`). `tests/test_memory_policy.py`
 pins the matrix to the stock assets and the docs, so a copy that contradicts it
 fails the suite.
 

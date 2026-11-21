@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from functools import partial
 import copy
 import json
 import logging
@@ -267,12 +268,11 @@ logger = logging.getLogger(__name__)
 # coalesces shells that end together, and it lets the provider's own continuation claim the
 # notice first: OpenCode resumes the session by itself about 6 s after a shell ends.
 SHELL_FINISHED_WINDOW_S = 20.0
-# A continuation that started this long before a shell's end was that shell's answer (the end is
-# observed a few seconds after the process ends).
-SHELL_ANSWER_GRACE_S = 15.0
 # A chat gets at most this many shell wakes in the rolling window; past it, shell wakes pause
 # until the person replies (see ``_announce_shell_finished``).
 SHELL_WAKE_LIMIT = 6
+# Claimed shell ids kept per chat until their ends are skipped; the set is bounded.
+SHELL_CLAIMED_IDS_CAP = 256
 SHELL_WAKE_WINDOW_S = 600.0
 
 _ALLOWED_IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".gif", ".webp"}
@@ -1367,9 +1367,11 @@ class ProjectChatManager:
         # last started on a chat, and the chats whose continuation is speaking now; the notices a
         # continuation claimed, awaiting its close.
         self._shell_notice_due: dict[tuple[str, str], float] = {}
-        self._continuation_at: dict[str, float] = {}
-        self._continuation_open: set[str] = set()
         self._claimed_notices: dict[str, list[ShellFinishedEvent]] = {}
+        # Shell call ids a continuation answered, by chat: their ends are never announced as wakes.
+        self._claimed_shell_ids: dict[str, set[str]] = {}
+        # A claimed card a superseded drain did not publish, by chat.
+        self._unsent_echo: dict[str, str] = {}
         self._provider_idle_timeout = _PROVIDER_IDLE_TIMEOUT_SECONDS
         self._provider_reap_interval = _PROVIDER_REAP_INTERVAL_SECONDS
         # Fold turn journals left behind by a crashed process into their
@@ -5175,9 +5177,9 @@ class ProjectChatManager:
         self._shell_finished_waiting.pop(chat_id, None)
         for key in [key for key in self._shell_notice_due if key[0] == chat_id]:
             del self._shell_notice_due[key]
-        self._continuation_at.pop(chat_id, None)
-        self._continuation_open.discard(chat_id)
         self._claimed_notices.pop(chat_id, None)
+        self._claimed_shell_ids.pop(chat_id, None)
+        self._unsent_echo.pop(chat_id, None)
         flush = self._shell_finished_flushes.pop(chat_id, None)
         if flush is not None:
             flush.cancel()
@@ -5589,6 +5591,8 @@ class ProjectChatManager:
                 agent_root=agent_root,
                 workspace=self._workspace_for_chat(chat_id),
             )
+            # A provider's own continuation that starts on this chat answers the held shell notices.
+            self._providers[chat_id].set_continuation_hook(partial(self._continuation_started, chat_id))
             # Only on creation: the kind must describe the provider object that
             # is actually in the map, not whatever the chat row says later.
             self._provider_kind[chat_id] = provider_name
@@ -6140,7 +6144,7 @@ class ProjectChatManager:
             include_stable=include_stable,
             linked_repo_block=repo_block,
             linked_repo_line=repo_line,
-            permission_mode=self._effective_mode_for_chat(chat, unattended=unattended),
+            permission_mode=chat.mode,
             core=self._core_for_chat(chat),
         )
         if capsule:
@@ -6697,38 +6701,6 @@ class ProjectChatManager:
         overrides = config_workspace.claude_trim if config_workspace is not None else {}
         return bool(effective_trim(overrides)[CONNECTORS_TRIM_KEY])
 
-    def _effective_mode_for_chat(
-        self, chat: ChatInfo, *, unattended: bool = False
-    ) -> BridgeMode:
-        """Pick the runtime permission mode for ``chat``.
-
-        ``unattended`` (an automation run) forces ``bypass``. Nobody is
-        watching such a turn, so every mode that can escalate resolves to an
-        unanswerable prompt: ``_drive`` auto-denies it with "Scheduled runs
-        cannot wait for interactive approval", and the automation fails while
-        reporting success. An automation that fetches a page and writes a snapshot
-        died on its first tool call under the previous default (chats inherit
-        `auto`; ``ScheduleEntry.mode`` also defaults to `auto`). The
-        authorization for these turns happened when the user created the
-        automation, which is the same trade every cron runner makes.
-        Deny rules still apply — they are evaluated before the callback — so
-        the per-workspace denylist (`Skill(schedule)`, harness tools) is not
-        weakened by this.
-
-        Auto mode relies on Anthropic's server-side classifier to decide
-        which tool calls run silently and which escalate, which the Claude
-        Code path reaches directly. Other modes (``plan``, ``bypass``,
-        ``normal``) pass through unchanged: ``plan`` needs no classifier,
-        ``bypass`` is already what we want, and ``normal`` is an explicit
-        user opt-in to be asked every time.
-        """
-        if unattended and chat.mode != "plan":
-            # `plan` is exempt: it cannot escalate (it only proposes), so
-            # forcing bypass would turn a read-only planning tick into a
-            # writing one.
-            return "bypass"
-        return chat.mode
-
     @staticmethod
     def _rotate_session_id(chat: ChatInfo, new_session_id: str) -> None:
         """Record a mid-conversation SDK session rotation (autocompact, or a
@@ -6825,10 +6797,11 @@ class ProjectChatManager:
     ) -> AgentRequest:
         """Resolve all routing parameters and construct an AgentRequest.
 
-        ``unattended`` marks an automation-driven turn, which changes
-        the permission mode (see ``_effective_mode_for_chat``). ``compact``
-        marks a context compaction: the prompt is the bare command, so no
-        capsule, file expansion, images or stable-context marker apply.
+        ``unattended`` marks an automation-driven turn: the capsule tells the
+        model nobody is watching, and the permission broker denies any request
+        it would have to wait on. The turn runs in the chat's own mode.
+        ``compact`` marks a context compaction: the prompt is the bare command,
+        so no capsule, file expansion, images or stable-context marker apply.
         """
         if compact:
             images = None
@@ -6888,7 +6861,7 @@ class ProjectChatManager:
             prompt=full_prompt,
             model=self._runtime_model_for_chat(chat),
             provider=chat.provider,
-            mode=self._effective_mode_for_chat(chat, unattended=unattended),
+            mode=chat.mode,
             display_prompt=final_display_prompt,
             resume_session=resume_session,
             images=images or [],
@@ -9249,16 +9222,19 @@ class ProjectChatManager:
     def _note_shell_finished(self, chat_id: str, event: ShellFinishedEvent) -> None:
         """Hold one finished background shell's notice for its own window.
 
-        A continuation that started on this chat within ``SHELL_ANSWER_GRACE_S`` before the shell
-        ended was the shell's answer (the end can be observed late, behind a running prompt):
-        such a notice is not sent.
+        A shell whose end is held here may already have been answered by a continuation; that claim
+        is recorded by ``_continuation_started``, and the claimed shell ids are skipped here.
         """
+        claimed = self._claimed_shell_ids.get(chat_id)
+        if claimed is not None and event.tool_use_id in claimed:
+            # A continuation already answered it, and its card is in the journal. Its end is now
+            # dequeued and skipped, so the id has done its job.
+            claimed.discard(event.tool_use_id)
+            if not claimed:
+                self._claimed_shell_ids.pop(chat_id, None)
+            return
         pending = self._shell_finished_pending.setdefault(chat_id, [])
         if any(known.tool_use_id == event.tool_use_id for known in pending):
-            return
-        answered_at = self._continuation_at.get(chat_id)
-        if answered_at is not None and answered_at >= event.ended_at - SHELL_ANSWER_GRACE_S:
-            logger.info("Shell %s in chat %s was answered by the provider's own continuation", event.tool_use_id, chat_id)
             return
         pending.append(event)
         # Each notice keeps its own deadline: a later shell does not restart an earlier one's window.
@@ -9355,38 +9331,55 @@ class ProjectChatManager:
             for index in range(turn_count, int(chat.user_turn_count))
         )
 
-    def _continuation_started(self, chat_id: str) -> str | None:
+    def _continuation_started(self, chat_id: str, ended: list[ShellFinishedEvent]) -> str | None:
         """A provider's own continuation began to speak on *chat_id*: claim the shell notices it answers.
 
-        Only a provider whose spec sets ``continues_after_shell`` claims, and only the notices of
-        shells that ended before this moment: a later shell is not answered by it. Claimed notices
-        are not sent as wakes; the continuation's recorded turn carries them as its prompt.
-        Returns the notice text for the live card, or None when nothing was claimed.
+        The session offers the shell ends it emitted and has not offered yet (*ended*); the drain's
+        held notices that ended before now are claimed too. Only a provider whose spec sets
+        ``continues_after_shell`` claims, and only shells that ended before this moment. A claimed
+        shell is never re-announced: its end the drain dequeues later is recognised and skipped.
+        Returns the notice text for the live card and the journal, or None when nothing was claimed.
         """
         service = self._providers.get(chat_id)
         if service is None or not getattr(service, "continues_after_shell", False):
             return None
-        if chat_id in self._continuation_open:
-            return None  # already claimed for this continuation
         now = time.monotonic()
-        self._continuation_at[chat_id] = now
-        self._continuation_open.add(chat_id)
+        claimed: list[ShellFinishedEvent] = [event for event in ended if event.ended_at <= now]
+        claimed_ids = {event.tool_use_id for event in claimed}
         pending = self._shell_finished_pending.get(chat_id, [])
-        claimed = [event for event in pending if event.ended_at <= now]
+        held = [event for event in pending if event.ended_at <= now and event.tool_use_id not in claimed_ids]
+        for event in held:
+            claimed.append(event)
+            claimed_ids.add(event.tool_use_id)
         if not claimed:
             return None
-        keep = [event for event in pending if event.ended_at > now]
+        remaining = [event for event in pending if event.tool_use_id not in claimed_ids]
         for event in claimed:
             self._shell_notice_due.pop((chat_id, event.tool_use_id), None)
-        if keep:
-            self._shell_finished_pending[chat_id] = keep
+        if remaining:
+            self._shell_finished_pending[chat_id] = remaining
         else:
             self._shell_finished_pending.pop(chat_id, None)
             flush = self._shell_finished_flushes.pop(chat_id, None)
             if flush is not None:
                 flush.cancel()
+        self._claimed_shell_ids.setdefault(chat_id, set()).update(claimed_ids)
+        self._trim_claimed_shell_ids(chat_id)
         self._claimed_notices.setdefault(chat_id, []).extend(claimed)
         return shell_wake.shell_finished_prompt(claimed)
+
+    def _trim_claimed_shell_ids(self, chat_id: str) -> None:
+        """Bound the claimed ids of a chat: an end that never reaches the drain must not hold its id forever."""
+        claimed = self._claimed_shell_ids.get(chat_id)
+        while claimed is not None and len(claimed) > SHELL_CLAIMED_IDS_CAP:
+            claimed.discard(next(iter(claimed)))
+
+    def _keep_unsent_echo(self, chat_id: str, text: str) -> None:
+        """A drain was superseded before its claimed card went out: the next drain of the chat sends it."""
+        self._unsent_echo[chat_id] = text
+
+    def _take_unsent_echo(self, chat_id: str) -> str | None:
+        return self._unsent_echo.pop(chat_id, None)
 
     def _take_claimed_notice(self, chat_id: str, *, adopt: bool) -> str | None:
         """The continuation closed. Its recorded turn adopts the notice it claimed (returns the text).
@@ -9394,7 +9387,6 @@ class ProjectChatManager:
         When the turn cannot carry the notice (*adopt* False: the provider's own notification text
         is kept), the claimed shells are announced with a wake of Ciaobot's own instead: never dropped.
         """
-        self._continuation_open.discard(chat_id)
         claimed = self._claimed_notices.pop(chat_id, [])
         if not claimed:
             return None
@@ -9457,9 +9449,10 @@ class ProjectChatManager:
             self._ensure_retry_task(chat.chat_id)
             delivery = "deferred"
         else:
-            # Deliberately NOT unattended: that flag forces bypass mode, and a
-            # chat waking up to merge branches or act on a finished script
-            # should still raise approval cards. The user may well be watching.
+            # Deliberately NOT unattended: that flag makes the permission broker
+            # deny approval requests, and a chat waking up to merge branches or
+            # act on a finished script should still raise approval cards. The
+            # user may well be watching.
             self.start_stream(parent.chat_id, prompt, origin=origin)
             delivery = "started"
         self._events.publish({

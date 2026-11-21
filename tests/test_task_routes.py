@@ -931,9 +931,9 @@ async def test_delegation_launches_one_attended_chat_and_no_prompt_body(
 ) -> None:
     """No `unattended`, no caller-supplied prompt, one chat.
 
-    The kwargs are asserted at the boundary: `ProjectChatManager._effective_mode_for_chat`
-    turns `unattended=True` into `bypass`, so an approval card the delegated turn
-    raises would be unanswerable. And the prompt comes from the record, because a
+    The kwargs are asserted at the boundary: `unattended=True` makes the broker
+    deny the delegated turn's approval requests, so an approval card it raises
+    would be unanswerable. And the prompt comes from the record, because a
     route key carrying prompt text would let a request rewrite the instruction.
     """
     client, cookies, _config, pcm = world

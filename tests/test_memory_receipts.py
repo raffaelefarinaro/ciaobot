@@ -2942,3 +2942,32 @@ def test_queue_resolution_without_an_operation_id_writes_no_such_key(tmp_path):
         if line.strip()
     ]
     assert rows and all("operation_id" not in r for r in rows)
+
+
+def test_a_failed_guide_write_keeps_its_operation_id(tmp_path, monkeypatch):
+    """The failure row settles the prepared receipt, so it must name the same operation."""
+    import ciao.memory_tool as tool
+
+    guide = _guide(tmp_path)
+
+    def disk_full(*_args, **_kwargs):
+        raise OSError("disk full")
+
+    monkeypatch.setattr(tool, "write_guide_atomically", disk_full)
+    with pytest.raises(OSError):
+        mr.commit_region_change(
+            guide,
+            "memory",
+            entries=["Fact one."],
+            actor="agent",
+            source="care",
+            workspace="personal",
+            vault_root=tmp_path,
+            fact_text="Fact one.",
+            operation_id="op-x",
+        )
+
+    (row,) = mr.read_receipts(mr.journal_path(tmp_path, None))
+    assert row["status"] == mr.FAILED
+    assert row["operation_id"] == "op-x"
+    assert row["workspace"] == "personal"

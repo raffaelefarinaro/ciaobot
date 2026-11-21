@@ -219,9 +219,9 @@ async def test_an_accepted_receipt_launches_one_chat_in_its_pinned_project(
     assert len(pcm.started) == 1
     # The turn is the one chat just created...
     assert pcm.started[0][0] == "chat-webhook-1"
-    # ...started with no permission escalation. `unattended=True` is what
-    # `_effective_mode_for_chat` turns into `bypass`, and this is the whole
-    # reason the flag is not named anywhere in the dispatcher.
+    # ...started as an ordinary interactive turn. `unattended=True` is what
+    # marks a turn nobody watches (its approval requests are denied), so the
+    # flag is not named anywhere in the dispatcher.
     assert pcm.started[0][1] == {"origin": "webhook"}
     assert "unattended" not in json.dumps(pcm.started[0][1])
 

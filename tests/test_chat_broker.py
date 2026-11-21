@@ -11,6 +11,7 @@ from ciao.models import (
     AssistantTextDelta,
     PermissionRequestEvent,
     ResultEvent,
+    SystemStatusEvent,
     ThinkingEvent,
     ToolUseEvent,
 )
@@ -19,6 +20,15 @@ from ciao.web.chat_broker import (
     ChatStreamBroker,
     event_to_json,
 )
+
+
+def test_event_to_json_carries_the_denied_tool_on_a_status() -> None:
+    """The schedule dispatcher reads denied_tool off the payload; dropping it here
+    would turn a denied approval back into a silent success."""
+    payload = event_to_json(SystemStatusEvent(type="system", status="Denied X", denied_tool="execute"))
+    assert payload == {"type": "status", "message": "Denied X", "denied_tool": "execute"}
+    plain = event_to_json(SystemStatusEvent(type="system", status="Compacted context"))
+    assert plain == {"type": "status", "message": "Compacted context"}
 
 
 def test_event_to_json_text_delta() -> None:

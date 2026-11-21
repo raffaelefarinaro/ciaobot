@@ -45,6 +45,9 @@ def _session(spec: Any, monkeypatch: pytest.MonkeyPatch, table: dict[int, tuple[
     session._shell_commands = {}
     session._deferred_ends = []
     session._end_tasks = set()
+    session._ended_shells = {}
+    session.continuation_hook = None
+    session._late_speaking = False
     # What reaches the late queue is what the chat's drain turns into _note_shell_finished.
     session._touch_late = lambda events, *, substantive: ended.extend(  # type: ignore[method-assign]
         event for event in events if isinstance(event, ShellFinishedEvent)

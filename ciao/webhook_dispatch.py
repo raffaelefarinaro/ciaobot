@@ -10,10 +10,10 @@ module decides is whether a remote sender's event becomes an ordinary turn.
 Six rules; every one but the first is a refusal somebody could otherwise have taken:
 
 * **A webhook turn is an ordinary chat turn.**
-  ``ProjectChatManager._effective_mode_for_chat`` returns ``"bypass"`` for any
-  non-plan chat when ``unattended=True``, so this module calls
-  ``start_stream(chat_id, prompt)`` and never names that argument at all. The
-  chat is created like any new chat, in the operator's new-chat default
+  This module calls ``start_stream(chat_id, prompt)`` and never names the
+  ``unattended`` argument at all, so the turn is interactive: approval cards
+  reach Needs-you, and nothing is auto-denied as a scheduled run's would be.
+  The chat is created like any new chat, in the operator's new-chat default
   permission mode (Settings → Providers), and an approval card is an
   ordinary approval card that surfaces in Needs-you, exactly as it does for a
   wake turn (``_deliver_wake``) or the ``chat_prompt`` route. The sender never
@@ -137,7 +137,7 @@ class WebhookDispatchHost(Protocol):
 
     Typed rather than ``Any`` for the same reason ``ScheduleDispatchHost`` is:
     the point of this seam is that ``start_stream`` is declared with **no**
-    ``unattended`` parameter, so "no bypass for a webhook" is something the
+    ``unattended`` parameter, so "a webhook turn is never unattended" is something the
     type checker has to agree with instead of a comment nobody re-reads. The
     real manager satisfies this structurally — a wider signature whose extra
     parameters are all optional is compatible with a narrower protocol member.

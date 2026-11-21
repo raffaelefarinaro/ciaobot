@@ -31,11 +31,13 @@ from pydantic import TypeAdapter
 
 from ciao.model_tiers import resolve_tier
 from ciao.models import (
+    AssistantTextDelta,
     BridgeMode,
     ContextCompactedEvent,
     ResultEvent,
     LATE_WAKE_NOTICE,
     ShellFinishedEvent,
+    WakeNoticeEvent,
     StreamEvent,
     SystemStatusEvent,
     ToolUseEvent,
@@ -209,6 +211,12 @@ class AcpSession:
         self._late_text = TurnText()
         self._late_open = False
         self._late_substantive = False
+        # Set by the host: called with the shell ends this session has emitted and not yet offered,
+        # when a late turn starts speaking. Returns the notice the reply answers, or None.
+        self.continuation_hook: Callable[[list[ShellFinishedEvent]], str | None] | None = None
+        # The shell ends this session emitted and has not offered to a continuation, by call id.
+        self._ended_shells: dict[str, ShellFinishedEvent] = {}
+        self._late_speaking = False
         self._quiet_task: asyncio.Task[None] | None = None
         # Background shells whose process ends silently (no terminal meta): settled by a liveness check.
         self._shells = ShellLiveness()
@@ -420,8 +428,18 @@ class AcpSession:
                 if shell is not None:
                     self._end_shell(event.tool_use_id, shell, event.exit_code)
 
-    def _end_shell(self, call_id: str, shell: TrackedShell, exit_code: int | None) -> None:
-        """Announce that a background shell ended, once: the end event, with its output tail read off the loop."""
+    def _end_shell(
+        self, call_id: str, shell: TrackedShell, exit_code: int | None, *, claiming: bool = False
+    ) -> None:
+        """Announce that a background shell ended, once: the end event, with its output tail read off the loop.
+
+        An end observed while a continuation is still speaking is covered by it: the agent already
+        reported on the shells that were known, so this one gets no card and no wake. ``claiming``
+        ends are the ones the continuation itself settles, and they are offered to it.
+        """
+        if self._late_speaking and not claiming:
+            logger.info("Shell %s ended while the provider's continuation was speaking; it is covered", call_id)
+            return
         event = ShellFinishedEvent(
             type="shell_finished",
             tool_use_id=call_id,
@@ -431,6 +449,10 @@ class AcpSession:
             exit_code=exit_code,
             ended_at=time.monotonic(),
         )
+        # Kept here, not only in the queue: a continuation may speak before the drain dequeues this end.
+        self._ended_shells[call_id] = event
+        while len(self._ended_shells) > _SHELL_COMMANDS_LIMIT:
+            del self._ended_shells[next(iter(self._ended_shells))]
         try:
             loop = asyncio.get_running_loop()
         except RuntimeError:
@@ -509,6 +531,13 @@ class AcpSession:
                 self._end_shell(call_id, shell, None)
 
     def _touch_late(self, events: list[StreamEvent], *, substantive: bool) -> None:
+        if not self._late_speaking and any(
+            isinstance(event, AssistantTextDelta) and event.parent_tool_use_id is None for event in events
+        ):
+            # The provider's own continuation starts: a shell notice it answers is journaled first,
+            # so a reload shows the card before the reply, as the live view does.
+            self._late_speaking = True
+            self._claim_continuation()
         if not self._late_open:
             self._late_open = True
             self._late_text = TurnText()
@@ -520,6 +549,46 @@ class AcpSession:
             self._late_text.feed(event)
             self._journal_event(event)
         self._arm_quiet()
+
+    def _settle_dead_shells(self) -> None:
+        """End each tracked shell whose process is already gone, before the poll has noticed.
+
+        A continuation starts because a shell ended: that end must be in the claim, not found later.
+        """
+        if not self._shells.polling:
+            return
+        try:
+            table = process_table()
+        except Exception:  # noqa: BLE001 — a failed process listing settles nothing
+            logger.exception("Could not read the process table to settle a finished shell")
+            return
+        for call_id, shell in self._shells.settled(table):
+            self._end_shell(call_id, shell, None, claiming=True)
+
+    def _claim_continuation(self) -> None:
+        """Offer this session's unclaimed shell ends to the host; journal and queue the notice it returns.
+
+        Never raises: a failing hook or journal write is logged, and the reply that follows is kept.
+        """
+        self._settle_dead_shells()
+        ended = list(self._ended_shells.values())
+        self._ended_shells.clear()
+        hook = self.continuation_hook
+        if hook is None:
+            return  # the host also holds ends the drain dequeued earlier: it is asked even when ended is empty
+        try:
+            notice = hook(ended)
+        except Exception:
+            logger.exception("Shell notice claim failed; the reply is kept without its notice")
+            return
+        if not notice:
+            return
+        try:
+            self._journal.user(notice, turn_origin="background_run")
+        except Exception:
+            logger.exception("Could not journal a claimed shell notice; the reply is kept without it")
+            return
+        self._late_queue.put_nowait(WakeNoticeEvent(type="wake_notice", text=notice))
 
     def _arm_quiet(self) -> None:
         previous = self._quiet_task
@@ -548,6 +617,7 @@ class AcpSession:
         if not self._late_open:
             return None
         self._late_open = False
+        self._late_speaking = False
         task = self._quiet_task
         self._quiet_task = None
         if task is not None and task is not asyncio.current_task():
@@ -807,7 +877,11 @@ class AcpSession:
 
     async def _late_events(self) -> AsyncGenerator[StreamEvent, None]:
         while True:
-            yield await self._late_queue.get()
+            event = await self._late_queue.get()
+            if isinstance(event, ShellFinishedEvent):
+                # Dequeued: the drain hands it to the host, which owns the notice from here on.
+                self._ended_shells.pop(event.tool_use_id, None)
+            yield event
 
     @property
     def turn_running(self) -> bool:
@@ -830,6 +904,7 @@ class AcpSession:
         for task in list(self._end_tasks):
             task.cancel()
         self._deferred_ends = []
+        self._ended_shells.clear()
         self._shells.clear()
         self._shell_commands.clear()
 
@@ -848,6 +923,7 @@ class AcpSession:
         exception type only, and never raised: the caller's result does not depend on it.
         """
         self._close_late()
+        self._ended_shells.clear()
         if not self.session_id:
             return
         try:

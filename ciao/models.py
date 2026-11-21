@@ -343,9 +343,14 @@ class ThinkingEvent(StreamEvent):
 
 @dataclass(slots=True)
 class SystemStatusEvent(StreamEvent):
-    """System status event."""
+    """System status event.
+
+    ``denied_tool`` is set only on the broker's denial of an unattended approval
+    request, naming the tool, so a scheduled run can fail on it.
+    """
 
     status: str | None = None
+    denied_tool: str = ""
 
 
 @dataclass(slots=True)
@@ -401,6 +406,16 @@ class ContextCompactedEvent(StreamEvent):
 
 # The wake notice a provider's own continuation carries when nothing else names the turn.
 LATE_WAKE_NOTICE = "The agent continued after background work finished."
+
+
+@dataclass(slots=True)
+class WakeNoticeEvent(StreamEvent):
+    """A claimed shell notice, sent ahead of the continuation's reply. Host bookkeeping: never sent as is.
+
+    The session has already journaled the notice; the drain publishes the same card to the live stream.
+    """
+
+    text: str = ""
 
 
 @dataclass(slots=True)
