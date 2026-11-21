@@ -30,6 +30,7 @@ from ciao.schedules import (
     ScheduleStore,
     compute_next_run,
     is_owned_loop,
+    loop_end_reason,
     restorable_user_schedule,
 )
 from ciao.web.schedule_dispatch import ScheduleDispatcher, ScheduleDispatchHost
@@ -598,3 +599,83 @@ async def test_a_loop_run_keeps_the_chat_mode_and_runs_unattended(tmp_path: Path
     assert host.started == [(chat.chat_id, "check", True)]
     assert chats.get_chat(chat.chat_id).mode == "normal"
     assert store.get(loop.schedule_id).run_count == 1
+
+
+# ── Hand-written rows: the shape caps hold on tick and on write ─────────
+
+
+@pytest.mark.parametrize(
+    ("changes", "label"),
+    [
+        ({"expires_at": "9999-01-01T00:00:00Z"}, "far-future expiry"),
+        ({"interval_minutes": 10**6}, "huge interval"),
+        ({"max_runs": LOOP_MAX_RUNS + 1}, "run cap above the cap"),
+    ],
+)
+def test_a_hand_written_loop_beyond_the_caps_is_invalid(
+    store: ScheduleStore, changes: dict[str, Any], label: str
+) -> None:
+    loop = _loop(store)
+    row = dataclasses.replace(loop, **changes)
+    assert loop_end_reason(row, T0 + timedelta(minutes=1)) == "invalid", label
+    with pytest.raises(LoopRefused):
+        ScheduleStore._finalize_entry(row)
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [("expires_at", "9999-01-01T00:00:00Z"), ("interval_minutes", 10**6), ("max_runs", LOOP_MAX_RUNS + 1)],
+)
+async def test_a_hand_written_loop_beyond_the_caps_is_ended_by_the_tick(
+    store: ScheduleStore, tmp_path: Path, field: str, value: Any
+) -> None:
+    loop = _loop(store)
+    _edit_raw(tmp_path, loop.schedule_id, **{field: value})
+    manager, dispatched = _manager(store)
+    await manager.tick(now=T0 + timedelta(minutes=10))
+    await _settle()
+    assert dispatched == []
+    assert store.get(loop.schedule_id) is None
+
+
+# ── Owner gone: no chat is created for it ───────────────────────────────
+
+
+async def test_a_loop_whose_owner_is_gone_creates_no_chat(store: ScheduleStore) -> None:
+    ticked = _loop(store, chat="chat-a")
+    run_now = _loop(store, chat="chat-b")
+    prepared: list[str] = []
+
+    def prepare(entry, prompt, model, mode, provider):
+        prepared.append(entry.schedule_id)
+        return entry.web_chat_id
+
+    manager, dispatched = _manager(
+        store,
+        prepare_chat=prepare,
+        owner_alive=lambda chat_id: False,
+    )
+    # Run now first: the owner is gone, so it must end without preparing a chat.
+    result = await manager.dispatch_now(run_now.schedule_id, now=T0)
+    await _settle()
+    assert result["status"] != "started"
+    assert store.get(run_now.schedule_id) is None
+
+    await manager.tick(now=T0 + timedelta(minutes=10))
+    await _settle()
+    assert store.get(ticked.schedule_id) is None
+    assert prepared == []
+    assert dispatched == []
+
+
+# ── A refused write on an ordinary row still raises ─────────────────────
+
+
+def test_persist_still_raises_a_loop_refusal_for_an_ordinary_row(store: ScheduleStore) -> None:
+    ordinary = store.create(
+        daily_time_utc="", prompt="p", model="", chat_id=0,
+        frequency="interval", interval_minutes=10, web_chat_id="chat-x",
+    )
+    manager, _dispatched = _manager(store)
+    with pytest.raises(LoopRefused):
+        manager._persist(dataclasses.replace(ordinary, owner_chat_id="chat-x"), ordinary)

@@ -792,13 +792,21 @@ def _owned_loop_violation(entry: "ScheduleEntry") -> str:
         return "a loop cannot be paused"
     if not _is_plain_int(entry.interval_minutes) or entry.interval_minutes < LOOP_MIN_INTERVAL_MINUTES:
         return "a loop interval is below the floor"
+    if entry.interval_minutes > LOOP_MAX_DURATION_MINUTES:
+        return "a loop interval is above the duration cap"
     prompt = entry.prompt.strip() if isinstance(entry.prompt, str) else ""
     if not prompt or len(prompt) > LOOP_MAX_PROMPT_CHARS:
         return "a loop needs a prompt of at most the limit"
-    if _parse_utc_stamp(entry.created_at) is None:
+    created = _parse_utc_stamp(entry.created_at)
+    expires = _parse_utc_stamp(entry.expires_at)
+    if created is None:
         return "a loop has no creation time"
-    if _parse_utc_stamp(entry.expires_at) is None:
+    if expires is None:
         return "a loop has no expiry"
+    # Creation caps the duration at LOOP_MAX_DURATION_MINUTES; a row whose expiry
+    # is further out than that was edited by hand and would hold its slot for years.
+    if expires - created > timedelta(minutes=LOOP_MAX_DURATION_MINUTES):
+        return "a loop outlives its duration cap"
     if not _is_plain_int(entry.max_runs) or not 1 <= entry.max_runs <= LOOP_MAX_RUNS:
         return "a loop has no valid run cap"
     if not _is_plain_int(entry.run_count) or entry.run_count < 0:
@@ -3111,6 +3119,11 @@ class ScheduleManager:
             reason = loop_end_reason(entry, now)
             if reason:
                 self._end_loop(entry, reason)
+                return None
+            # Before prepare_chat: a gone owner must not get a replacement chat
+            # created for it, or that chat is left orphaned when the write is refused.
+            if self._owner_alive is not None and not self._owner_alive(entry.owner_chat_id):
+                self._end_loop(entry, "owner-gone")
                 return None
         # As read, before prepare_chat may re-point the binding: the scoped
         # write persists that re-home and nothing else.
