@@ -610,7 +610,14 @@ final class ChatNotificationController: ObservableObject, NotificationMenuProvid
             guard snapshotReceived else { return }
             activeChatIDs.remove(chatID)
 
-        case .resultReady(let chatID, let title, let snippet, let workspace, let memoryPass):
+        case .resultReady(let chatID, let title, let snippet, let workspace, let memoryPass, let quietLoopRun):
+            if quietLoopRun {
+                // A clean loop wake on its cadence: the chat is updated, but the
+                // owner is not interrupted every run. Failed, denied or waiting
+                // runs do not set this flag and still banner.
+                activeChatIDs.remove(chatID)
+                return
+            }
             if memoryPass {
                 // The memory pass is the app's own bookkeeping, not a result
                 // the owner asked for. It never banners, and it leaves the

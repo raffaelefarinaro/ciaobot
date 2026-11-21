@@ -1146,6 +1146,7 @@ async def _run_server_locked(
         prepare_chat=_prepare_chat,
         is_node_active=lambda: legacy_writers_armed,
         chat_busy=pcm.chat_stream_active,
+        chat_awaiting_answer=pcm.chat_awaiting_answer,
         chat_dispatchable=_interval_target_dispatchable,
         target_refusal=pcm.schedule_target_refusal,
         admission_closed=_update_admission_closed,

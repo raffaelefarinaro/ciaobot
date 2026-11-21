@@ -263,6 +263,8 @@ class _DriveHost:
         self.saves = 0
         self.announcements: list[tuple[str, str, str, str]] = []
         self.discarded: list[str] = []
+        self.denials: list[str] = []
+        self.loop_run_ends: list[str] = []
         self.detached_names: list[str] = []
         self.drain_awaits: list[str] = []
 
@@ -358,6 +360,12 @@ class _DriveHost:
     def _discard_result_announce(self, chat_id: str, token: int | None = None) -> None:
         del token
         self.discarded.append(chat_id)
+
+    def note_unattended_denial(self, chat_id: str) -> None:
+        self.denials.append(chat_id)
+
+    def notify_loop_run_end(self, chat_id: str) -> None:
+        self.loop_run_ends.append(chat_id)
 
     def _flush_result_announce(self, chat_id: str, token: int | None = None) -> bool:
         del chat_id, token

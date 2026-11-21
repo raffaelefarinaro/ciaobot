@@ -277,6 +277,35 @@ describe('InjectedPromptCard', () => {
     expect(output.attributes('aria-label')).toBe('Command output')
   })
 
+  it('draws a loop wake collapsed with its run and end, and the prompt when open', async () => {
+    const wrapper = mountCard({
+      prompt: { kind: 'loop', run: 3, of: 12, ends: '14:30 (Europe/Zurich)', prompt: 'Check the open PRs.' },
+      raw: '[Ciaobot] Loop wake, run 3 of 12 ...',
+    })
+    expect(wrapper.attributes('aria-label')).toBe('Loop wake')
+    expect(wrapper.get('.injected-card-head').text()).toContain('Loop wake')
+    expect(wrapper.get('.injected-card-head').text()).toContain('run 3 of 12 · ends 14:30 (Europe/Zurich)')
+    expect(wrapper.find('.injected-card-prose').exists()).toBe(false)
+    await wrapper.get('.injected-card-toggle').trigger('click')
+    const prose = wrapper.get('.injected-card-prose')
+    expect(prose.attributes('role')).toBe('region')
+    expect(prose.attributes('aria-label')).toBe('Loop prompt')
+    expect(prose.text()).toContain('Check the open PRs.')
+    expect(wrapper.get('.injected-card-raw-toggle').text()).toBe('Show full prompt')
+  })
+
+  it('links a loop card to the Automations list, not to a fake entry', async () => {
+    const wrapper = mountCard({
+      prompt: { kind: 'loop', run: 1, of: 2, ends: '14:30 (Europe/Zurich)', prompt: 'x' },
+      raw: 'raw',
+      schedule: { id: 'sched-1', title: 'Nightly' },
+    })
+    await wrapper.get('.injected-card-toggle').trigger('click')
+    const link = wrapper.getComponent(RouterLinkStub)
+    expect(link.props('to')).toBe('/schedules')
+    expect(link.text()).toBe('Open Automations')
+  })
+
   it('keeps a webhook instruction reachable and named', async () => {
     const wrapper = mountCard({
       prompt: { kind: 'webhook', instructions: longText, event: 'build failed' },

@@ -2720,6 +2720,7 @@ class ScheduleManager:
         admission_closed: Callable[[], bool] | None = None,
         on_change: Callable[[], None] | None = None,
         owner_alive: Callable[[str], bool | None] | None = None,
+        chat_awaiting_answer: Callable[[str], bool] | None = None,
     ) -> None:
         self._store = store
         self._resolve_target = resolve_target
@@ -2729,6 +2730,9 @@ class ScheduleManager:
         # archived) ends it, None (its archive is in progress) skips this tick
         # so a refused archive cannot lose the loop.
         self._owner_alive = owner_alive
+        # Whether the chat holds an open question or approval for the person. A
+        # loop's wake would fail against it, so it skips and retries instead.
+        self._chat_awaiting_answer = chat_awaiting_answer
         self._dispatch_to_web = dispatch_to_web
         self._prepare_chat = prepare_chat
         self._is_node_active = is_node_active
@@ -3124,9 +3128,13 @@ class ScheduleManager:
         # same tick has not reached the broker yet, so only the claim shows it.
         if chat_id in self._claimed_chats:
             return True
-        if self._chat_busy is None:
-            return False
-        return self._chat_busy(chat_id)
+        if self._chat_busy is not None and self._chat_busy(chat_id):
+            return True
+        return (
+            is_owned_loop(entry)
+            and self._chat_awaiting_answer is not None
+            and self._chat_awaiting_answer(chat_id)
+        )
 
     def _interval_dispatchable(self, entry: ScheduleEntry) -> bool:
         if self._chat_dispatchable is None:

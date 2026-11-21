@@ -28,6 +28,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Protocol, cast
 
 from ciao import job_runs
+from ciao import loop_wake
 from ciao import schedules as schedule_support
 from ciao.config import CiaoConfig
 from ciao.curation_run import unstarted_run_reason
@@ -594,6 +595,9 @@ class ScheduleDispatcher:
             if chat:
                 orig_model = chat.model
 
+        # A chat-owned loop's prompt is the model's own instruction, sent fenced
+        # inside the wake text below. Placeholders are not filled into it.
+        loop_owned = bool(getattr(entry, "owner_chat_id", ""))
         # Placeholder inputs differ by schedule scope. A trusted system routine
         # (startup triage, memory care) may see the engine-wide report; a user
         # schedule may see only the workspace it dispatches into, and its
@@ -601,8 +605,8 @@ class ScheduleDispatcher:
         # log text. Engine-wide inputs taint the run, so it records no
         # workspace; scoped user inputs do not.
         system_scope = entry.scope == "system"
-        had_error_placeholder = "{{ERROR_LOG}}" in prompt
-        had_issue_placeholder = "{{ISSUE_REPORT}}" in prompt
+        had_error_placeholder = not loop_owned and "{{ERROR_LOG}}" in prompt
+        had_issue_placeholder = not loop_owned and "{{ISSUE_REPORT}}" in prompt
         prompt_uses_engine_wide_diagnostics = system_scope and (
             had_error_placeholder or had_issue_placeholder
         )
@@ -706,8 +710,14 @@ class ScheduleDispatcher:
                 report_block = SCOPED_REPORT_OMISSION_NOTICE
             prompt = prompt.replace("{{ISSUE_REPORT}}", report_block)
 
+        stream_origin = "schedule"
+        if loop_owned:
+            prompt = loop_wake.loop_wake_prompt(entry, now=datetime.now(UTC))
+            stream_origin = "loop"
         try:
-            stream = self._host.start_stream(target_id, prompt, unattended=True, origin="schedule")
+            stream = self._host.start_stream(
+                target_id, prompt, unattended=True, origin=stream_origin
+            )
             async for raw_payload in stream.subscribe():
                 if not isinstance(raw_payload, dict):
                     continue
@@ -787,7 +797,13 @@ class ScheduleDispatcher:
                 )
 
         needs_user = False
-        if getattr(entry, "archive_policy", "manual") == "auto" and chat_service._schedule_run_clean(outcome):
+        # A loop's own chat is never archived by its run: its archive policy is
+        # manual, and the owner decides when the chat goes.
+        if (
+            not loop_owned
+            and getattr(entry, "archive_policy", "manual") == "auto"
+            and chat_service._schedule_run_clean(outcome)
+        ):
             needs_user = await self._host._schedule_run_needs_user(
                 entry, outcome, chat_id=target_id
             )

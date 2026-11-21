@@ -1375,6 +1375,37 @@ final class ChatNotificationsTests: XCTestCase {
         controller.stop()
     }
 
+    func testQuietLoopRunNeverBannersButAFailedOneStill() async {
+        let status = connectedStatus(origin)
+        let client = FakeNotificationClient()
+        client.authorization = .authorized
+        let preferences = MemoryNotificationPreference(true)
+        let provider = NotificationFakeCookieProvider()
+        provider.cookies = [makeCookie()]
+        let transport = NotificationFakeTransport()
+        let controller = makeController(
+            status: status,
+            client: client,
+            preferences: preferences,
+            provider: provider,
+            transport: transport
+        )
+
+        controller.start()
+        await settle()
+        let connection = transport.opens[0].connection
+        connection.emit(.snapshot(activeChatIDs: []))
+
+        connection.emit(.resultReady(
+            chatID: "chat-1", title: "Loop", snippet: "Checked", workspace: "", quietLoopRun: true
+        ))
+        XCTAssertTrue(client.delivered.isEmpty, "A clean loop wake on its cadence never banners.")
+
+        connection.emit(.resultReady(chatID: "chat-1", title: "Loop", snippet: "Failed", workspace: ""))
+        XCTAssertEqual(client.delivered.count, 1, "A failed or denied loop run still banners.")
+        controller.stop()
+    }
+
     func testMemoryPassResultNeverBannersAndWithdrawsAnEarlierBanner() async {
         let status = connectedStatus(origin)
         let client = FakeNotificationClient()

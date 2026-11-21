@@ -360,7 +360,7 @@ export interface ChatRetryInfo {
 
 /** Who the engine wrote an injected user turn for (ChatInfo.user_turn_origin). */
 export type TurnOrigin =
-  | 'background_run' | 'cli_task_wake' | 'retry' | 'schedule' | 'task_delegation'
+  | 'background_run' | 'cli_task_wake' | 'retry' | 'schedule' | 'loop' | 'task_delegation'
   | 'task_resume' | 'webhook' | 'update_task' | 'compaction' | 'restart_resume' | 'handover' | 'chat_action'
 
 export type VerifiedClaimStatus = 'supported' | 'unsupported' | 'general'
