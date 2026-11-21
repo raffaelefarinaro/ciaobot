@@ -5,6 +5,8 @@ from __future__ import annotations
 import pytest
 
 from ciao.claude_trim import (
+    ALWAYS_DENIED_SKILLS,
+    ALWAYS_DENIED_TOOLS,
     CONNECTORS_TRIM_KEY,
     TRIM_OPTIONS,
     catalog_payload,
@@ -40,15 +42,15 @@ def test_catalog_keys_unique_and_well_formed() -> None:
             assert option.kind == "setting"
 
 
-def test_default_denies_match_previous_harness_set() -> None:
+def test_default_denies_put_always_denied_loop_family_first() -> None:
     assert trim_tool_denies({}) == [
         "CronCreate",
         "CronDelete",
         "CronList",
         "ScheduleWakeup",
+        "Skill(loop)",
         "RemoteTrigger",
         "Skill(schedule)",
-        "Skill(loop)",
         "EnterPlanMode",
         "ExitPlanMode",
         "PushNotification",
@@ -113,30 +115,82 @@ def test_coerce_rejects_unknown_and_non_bool() -> None:
 
 SCHEDULING_KEYS = [o.key for o in TRIM_OPTIONS if o.group == "scheduling"]
 
+# The loop family (cron tools, interval wakeups, the /loop skill) fires prompts outside Ciaobot's
+# schedules, so it has no Settings switch. Each name here must stay denied in every chat.
+_LOOP_FAMILY_TOOLS = ("CronCreate", "CronDelete", "CronList", "ScheduleWakeup")
+_LOOP_FAMILY_KEYS = {"tool:CronCreate", "tool:CronDelete", "tool:CronList", "tool:ScheduleWakeup", "skill:loop"}
 
-def test_scheduling_options_are_trimmed_by_default_and_not_special() -> None:
-    assert SCHEDULING_KEYS
-    assert not hasattr(TRIM_OPTIONS[0], "locked")
+
+def test_scheduling_catalog_is_only_the_claude_routine_surfaces() -> None:
+    assert SCHEDULING_KEYS == ["tool:RemoteTrigger", "skill:schedule"]
     assert all(option(key).default_trimmed for key in SCHEDULING_KEYS)
+    assert not hasattr(TRIM_OPTIONS[0], "locked")
     # A map that never mentions them keeps them trimmed.
     assert all(effective_trim({})[key] for key in SCHEDULING_KEYS)
     assert all(effective_trim({"tool:NotebookEdit": False})[key] for key in SCHEDULING_KEYS)
 
 
-def test_untrimming_a_scheduling_option_is_accepted_and_sparse() -> None:
-    assert coerce_claude_trim({"tool:CronCreate": False}) == {"tool:CronCreate": False}
-    assert coerce_claude_trim({"tool:CronCreate": True}) == {}
-    assert load_claude_trim({"skill:loop": False}) == {"skill:loop": False}
+def test_loop_family_is_always_denied_and_not_in_the_catalog() -> None:
+    assert ALWAYS_DENIED_TOOLS == _LOOP_FAMILY_TOOLS
+    assert ALWAYS_DENIED_SKILLS == ("loop",)
+    keys = {o.key for o in TRIM_OPTIONS}
+    assert not (_LOOP_FAMILY_KEYS & keys)
+    assert not (_LOOP_FAMILY_KEYS & {row["key"] for row in catalog_payload()})
 
 
-def test_scheduling_option_reaches_denies_only_while_trimmed() -> None:
-    assert "CronCreate" in trim_tool_denies({})
-    assert "CronCreate" not in trim_tool_denies({"tool:CronCreate": False})
-    assert "CronDelete" in trim_tool_denies({"tool:CronCreate": False})
-    assert "Skill(loop)" in trim_tool_denies({})
-    assert "Skill(loop)" not in trim_tool_denies({"skill:loop": False})
-    assert claude_settings_layer({})["skillOverrides"]["loop"] == "off"
-    assert "loop" not in claude_settings_layer({"skill:loop": False})["skillOverrides"]
+@pytest.mark.parametrize(
+    "overrides",
+    [
+        {},
+        {"tool:CronCreate": False},
+        {"tool:ScheduleWakeup": False},
+        {"skill:loop": False},
+        {"tool:RemoteTrigger": False, "skill:schedule": False},
+    ],
+)
+def test_loop_family_denies_survive_any_stored_map(overrides: dict[str, bool]) -> None:
+    denies = trim_tool_denies(overrides)
+    for name in _LOOP_FAMILY_TOOLS:
+        assert name in denies
+    assert "Skill(loop)" in denies
+    layer = claude_settings_layer(overrides)
+    assert layer["skillOverrides"]["loop"] == "off"
+
+
+def test_retired_loop_keys_are_ignored_by_the_strict_validator() -> None:
+    # A stale client may still send a removed key: it is dropped, never stored, never a 400.
+    for key in sorted(_LOOP_FAMILY_KEYS):
+        assert coerce_claude_trim({key: False}) == {}
+        assert coerce_claude_trim({key: True}) == {}
+
+
+def test_a_map_mixing_a_retired_key_applies_the_valid_toggle() -> None:
+    assert coerce_claude_trim(
+        {"tool:CronCreate": False, "tool:RemoteTrigger": False, "tool:NotebookEdit": False}
+    ) == {"tool:RemoteTrigger": False, "tool:NotebookEdit": False}
+
+
+def test_unknown_keys_are_still_refused_by_the_strict_validator() -> None:
+    with pytest.raises(ValueError, match="unknown claude_trim option: tool:Nope"):
+        coerce_claude_trim({"tool:Nope": False})
+
+
+def test_stored_removed_loop_keys_load_leniently_and_drop_out() -> None:
+    assert load_claude_trim({"tool:CronCreate": False, "skill:loop": False}) == {}
+
+
+def test_untrimming_remote_triggers_is_accepted_and_sparse() -> None:
+    assert coerce_claude_trim({"tool:RemoteTrigger": False}) == {"tool:RemoteTrigger": False}
+    assert coerce_claude_trim({"tool:RemoteTrigger": True}) == {}
+    assert load_claude_trim({"skill:schedule": False}) == {"skill:schedule": False}
+
+
+def test_remote_trigger_reaches_denies_only_while_trimmed() -> None:
+    assert "RemoteTrigger" in trim_tool_denies({})
+    assert "RemoteTrigger" not in trim_tool_denies({"tool:RemoteTrigger": False})
+    assert "Skill(schedule)" in trim_tool_denies({})
+    assert "Skill(schedule)" not in trim_tool_denies({"skill:schedule": False})
+    assert "schedule" not in claude_settings_layer({"skill:schedule": False})["skillOverrides"]
 
 
 def test_catalog_payload_has_no_locked_field() -> None:
@@ -156,5 +210,5 @@ def test_load_is_lenient() -> None:
             "tool:CronCreate": False,
             "tool:NotebookEdit": False,
         }
-    ) == {"tool:CronCreate": False, "tool:NotebookEdit": False}
+    ) == {"tool:NotebookEdit": False}
     assert load_claude_trim("junk") == {}

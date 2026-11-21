@@ -1019,7 +1019,7 @@ curl -sS -b /tmp/ciao.jar "http://localhost:${PWA_PORT:-8443}/api/workspaces"
 # defaults, CSV or list; null/none = no extras), claude_trim (object of trim
 # option key -> true/false; sparse, replaces the stored map, {} resets to
 # defaults; an unknown key or a non-boolean is a
-# 400; the scheduling options are trimmed by default and can be un-trimmed).
+# 400, while keys retired from the catalog (the cron/wakeup tools and the loop skill, `RETIRED_KEYS`) are ignored so a stale tab still saves; the routine triggers are trimmed by default and can be un-trimmed).
 # `setting:claude_ai_connectors` (group Connectors, default not trimmed) hides
 # the Claude account's connectors: a trimmed workspace's Claude chats start
 # with ENABLE_CLAUDEAI_MCP_SERVERS=false. Memory passes never load them. A
