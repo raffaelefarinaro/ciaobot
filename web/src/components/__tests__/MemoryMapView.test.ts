@@ -570,7 +570,7 @@ describe('MemoryMapView sections', () => {
           types: [{
             id: 'customer', label: 'Customer', kind: 'entity', folder: 'Customers',
             description: 'Someone we do business with.', aliases: ['client'],
-            stale_after_days: 0, enabled: true, builtin: false, note_count: 2,
+            enabled: true, builtin: false, note_count: 2,
           }],
         })
       }

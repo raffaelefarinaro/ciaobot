@@ -1823,7 +1823,7 @@ def format_audit_markdown(report: dict[str, Any]) -> str:
                     f"{len(memory.get('superseded_state_candidates', []))}"
                 ),
                 (
-                    "- Notes not verified within their type's horizon "
+                    "- Notes not verified within the review horizon "
                     "(informational): "
                     f"{len(memory.get('stale_notes', []))} of "
                     f"{memory.get('notes_checked', 0)} dated notes"

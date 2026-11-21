@@ -173,23 +173,23 @@ export function denseSyntheticVault(): SyntheticGraph {
 
 type SyntheticEntityRow = {
   id: string; label: string; kind: 'entity' | 'note'; folder: string; description: string
-  aliases: string[]; stale_after_days: number; enabled: boolean; builtin: boolean
+  aliases: string[]; enabled: boolean; builtin: boolean
   core: boolean; hidden: boolean; note_count: number
 }
 
 const entityTypesRows: SyntheticEntityRow[] = [
   { id: 'person', label: 'Storybook people', kind: 'entity', folder: 'Storybook people',
     description: 'Synthetic record-of-a-thing category for the workshop.',
-    aliases: ['storybook folk'], stale_after_days: 90, enabled: true, builtin: true, core: true, hidden: false, note_count: 3 },
+    aliases: ['storybook folk'], enabled: true, builtin: true, core: true, hidden: false, note_count: 3 },
   { id: 'project', label: 'Storybook projects', kind: 'entity', folder: 'Storybook projects',
     description: 'Synthetic project category for the workshop.',
-    aliases: [], stale_after_days: 180, enabled: true, builtin: true, core: false, hidden: false, note_count: 2 },
+    aliases: [], enabled: true, builtin: true, core: false, hidden: false, note_count: 2 },
   { id: 'storybook-custom', label: 'Storybook custom type', kind: 'note', folder: 'Storybook notes',
     description: 'A synthetic category the workshop can edit and save.',
-    aliases: ['storybook type'], stale_after_days: 0, enabled: true, builtin: false, core: false, hidden: false, note_count: 1 },
+    aliases: ['storybook type'], enabled: true, builtin: false, core: false, hidden: false, note_count: 1 },
   { id: 'storybook-agent-type', label: 'Storybook agent type', kind: 'note', folder: 'Storybook agent',
     description: 'A synthetic agent-written type the Categories page never lists.',
-    aliases: [], stale_after_days: 0, enabled: true, builtin: false, core: false, hidden: true, note_count: 0 },
+    aliases: [], enabled: true, builtin: false, core: false, hidden: true, note_count: 0 },
 ]
 
 function entityTypesBody(): unknown {

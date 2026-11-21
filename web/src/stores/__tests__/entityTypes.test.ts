@@ -39,7 +39,6 @@ function row(overrides: Partial<EntityTypeRow> = {}): EntityTypeRow {
     folder: 'People',
     description: 'A human the user knows or works with.',
     aliases: ['human'],
-    stale_after_days: 90,
     enabled: true,
     builtin: true,
     core: false,
@@ -66,7 +65,6 @@ describe('toPatchBody', () => {
       folder: 'People',
       description: 'A human the user knows or works with.',
       aliases: ['human'],
-      stale_after_days: 90,
       enabled: true,
       builtin: true,
     })
@@ -98,7 +96,6 @@ describe('fromResponse', () => {
       folder: '',
       description: '',
       aliases: [],
-      stale_after_days: 0,
       enabled: true,
       builtin: false,
       core: false,

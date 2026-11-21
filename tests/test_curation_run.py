@@ -975,7 +975,7 @@ def test_a_stale_note_is_work_keyed_by_its_vault_relative_path(tmp_path: Path) -
     # every note forever.
     age = (date(2026, 9, 19) - date(2024, 1, 5)).days
     assert items[0].reason == (
-        f"unverified for {age}d against a 90d horizon; "
+        f"unverified for {age}d against a 30d horizon; "
         f"revision {mr.content_revision(note.read_text(encoding='utf-8'))}"
     )
 
@@ -1008,24 +1008,18 @@ def test_the_stale_pass_uses_the_shared_audit_predicate(tmp_path: Path) -> None:
     assert planned == {cr.item_key(cr.PASS_STALE_NOTE, "People/Sofia.md")}
 
 
-def test_a_custom_category_threshold_is_honoured(tmp_path: Path) -> None:
-    """The registry is threaded into the detector, not just the cluster pass.
+def test_a_retired_stale_after_days_key_has_no_effect_on_the_plan(tmp_path: Path) -> None:
+    """An owner file that still says `stale_after_days` loads, and the key does nothing.
 
-    A category with its own `stale_after_days` must reach the nightly plan or a
-    vault whose categories were retuned would keep re-verifying notes the owner
-    said age slowly — and, worse, keep quiet about the ones they said age fast.
-
-    Written through the vault's own `entity-types.yaml`, which is where a real
-    owner's threshold lives, so the test exercises the same load path the plan
-    does rather than a hand-built registry.
+    The horizon is one constant for every note, so a 1000-day override on
+    `person` cannot hide a note that is 110 days unverified: it is planned exactly
+    as it would be with no file at all.
     """
     from ciao import entity_types
 
     vault = _vault(tmp_path)
     guide = _guide(tmp_path)
     _fresh_log(vault, last_full_pass=date(2026, 9, 18).isoformat())
-    # `person` ages at 90 days by default, so 2026-06-01 is stale today. A vault
-    # that says its people age at 1000 days says the opposite.
     _note(vault, "People/Sofia.md", updated="2026-06-01")
     assert len(_stale_items(vault, guide)) == 1
 
@@ -1039,7 +1033,7 @@ def test_a_custom_category_threshold_is_honoured(tmp_path: Path) -> None:
     )
     entity_types.clear_entity_types_cache()
     try:
-        assert _stale_items(vault, guide) == []
+        assert len(_stale_items(vault, guide)) == 1
     finally:
         entity_types.clear_entity_types_cache()
 
@@ -1351,6 +1345,78 @@ def test_the_stale_cap_fills_with_notes_that_are_actually_due(tmp_path: Path) ->
     items = _stale_items(vault, guide, today=today)
 
     assert [item.label for item in items] == [f"New{index:02d}" for index in range(cr.STALE_NOTE_MAX_ITEMS)]
+
+
+def test_the_stale_note_cap_is_twenty_and_the_rest_are_reported(tmp_path: Path) -> None:
+    """Twenty and not five: 25 due notes plan 20, and coverage counts the rest."""
+    vault = _vault(tmp_path)
+    guide = _guide(tmp_path)
+    today = date(2026, 9, 19)
+    _fresh_log(vault, last_full_pass=date(2026, 9, 18).isoformat())
+    for index in range(25):
+        _note(vault, f"People/Note{index:02d}.md", updated="2024-01-05")
+
+    worklist = cr.build_worklist(
+        vault_root=vault,
+        workspace=vault.name,
+        guide_path=guide,
+        category_registry=_categories(vault),
+        workspace_dir=guide.parent,
+        today=today,
+    )
+    plan = cr.plan_run(worklist)
+
+    assert cr.STALE_NOTE_MAX_ITEMS == 20
+    assert sum(i.count for i in plan.planned if i.pass_id == cr.PASS_STALE_NOTE) == 20
+    coverage = worklist.note_coverage
+    assert coverage is not None
+    assert coverage.cap == 20
+    assert coverage.flagged == 25
+    assert coverage.planned == 20
+    assert coverage.eligible_deferred == 1
+    assert coverage.unexamined == 4
+    assert coverage.status == "partial"
+    assert any("wait for the next run" in note for note in worklist.notes)
+
+
+def test_a_full_stale_backlog_in_both_passes_leaves_the_required_keys_planned(
+    tmp_path: Path,
+) -> None:
+    """The two stale passes together can fill their caps (20 notes, 5 facts) and
+    the weekly hygiene keys still fit in the same plan.
+
+    Before the note cap rose, the two passes together could take at most 10 of the
+    25-item budget. At 20 + 5 they take all of it, so the budget has to grow by
+    the same 15 or the required checks are never reached.
+    """
+    vault = _vault(tmp_path)
+    guide = _guide(tmp_path)
+    for index in range(25):
+        _note(vault, f"People/Stale{index:02d}.md", updated="2024-01-05")
+    _entry_note(
+        vault,
+        "People/Sofia.md",
+        updated="2024-01-05",
+        facts=tuple(
+            (f"Fact number {index} about Sofia", "2024-01-05")
+            for index in range(cr.STALE_ENTRY_MAX_ITEMS * 2)
+        ),
+    )
+
+    worklist = cr.build_worklist(
+        vault_root=vault,
+        workspace=vault.name,
+        guide_path=guide,
+        category_registry=_categories(vault),
+        workspace_dir=guide.parent,
+        today=TODAY_ENTRIES,
+    )
+    plan = cr.plan_run(worklist)
+
+    planned = {key for item in plan.planned for key in item.keys}
+    assert cr.REQUIRED_HYGIENE_KEYS <= planned
+    assert sum(i.count for i in plan.planned if i.pass_id == cr.PASS_STALE_NOTE) == 20
+    assert sum(i.count for i in plan.planned if i.pass_id == cr.PASS_STALE_ENTRY) == 5
 
 
 def test_a_missing_vault_is_not_a_failed_plan(tmp_path: Path) -> None:
@@ -2847,7 +2913,7 @@ def test_the_schedule_verifies_stale_notes_through_the_managed_operation() -> No
     assert "ciao curation-progress --holder <lease.holder> --key" in stale
     # The queue's own signals still point at the managed pass rather than at a
     # hand edit.
-    assert "`unverified` (facts unchecked past the type's horizon" in prompt
+    assert "`unverified` (facts unchecked past the 30-day review horizon" in prompt
     assert "re-verify rather than retire" in prompt
 
 
@@ -3511,7 +3577,7 @@ def test_an_entry_is_work_keyed_by_its_identity_not_its_line(
     # and horizon have to travel with the values below so a reader can disagree
     # with the verdict without losing the evidence.
     assert items[0].reason == (
-        f"unverified for {age}d against a 90d horizon; "
+        f"unverified for {age}d against a 30d horizon; "
         f"People/Sofia.md at revision {mr.content_revision(note_text)}, "
         f"entry identity {entry.identity}, "
         f"entry fingerprint {entry.fingerprint} at characters "
@@ -4819,14 +4885,14 @@ def test_coverage_under_the_cap_plans_every_flagged_note(tmp_path: Path) -> None
 
 
 def test_coverage_over_the_cap_names_the_deferred_and_unexamined_notes(tmp_path: Path) -> None:
-    """Eight stale notes, five planned: the sixth is the one that trips the cap
-    (read and found eligible, so it is deferred), and the two behind it are
-    never opened, so they are unexamined. The age reported is the sixth's."""
+    """Three more stale notes than the cap: the one past the cap is read and found
+    eligible, so it is deferred, and the two behind it are never opened, so they
+    are unexamined. The age reported is the deferred note's."""
     vault = _vault(tmp_path)
     guide = _guide(tmp_path)
     today = date(2026, 9, 19)
     _fresh_log(vault, last_full_pass=date(2026, 9, 18).isoformat())
-    for index in range(8):
+    for index in range(cr.STALE_NOTE_MAX_ITEMS + 3):
         _note(
             vault,
             f"People/Note{index:02d}.md",
@@ -4837,17 +4903,19 @@ def test_coverage_over_the_cap_names_the_deferred_and_unexamined_notes(tmp_path:
 
     assert coverage == {
         "status": "partial",
-        "scanned": 8,
+        "scanned": cr.STALE_NOTE_MAX_ITEMS + 3,
         "exempt": 0,
         "undated": 0,
-        "flagged": 8,
+        "flagged": cr.STALE_NOTE_MAX_ITEMS + 3,
         "never_queued": 0,
         "unreadable": 0,
         "settled": 0,
         "planned": cr.STALE_NOTE_MAX_ITEMS,
         "eligible_deferred": 1,
         "unexamined": 2,
-        "oldest_deferred_age_days": (today - date(2024, 1, 6)).days,
+        "oldest_deferred_age_days": (
+            today - (date(2024, 1, 1) + timedelta(days=cr.STALE_NOTE_MAX_ITEMS))
+        ).days,
         "cap": cr.STALE_NOTE_MAX_ITEMS,
     }
     _assert_every_flagged_note_is_accounted_for(coverage)
@@ -4929,7 +4997,7 @@ def test_no_note_past_the_cap_break_is_read(
     vault = _vault(tmp_path)
     guide = _guide(tmp_path)
     _fresh_log(vault, last_full_pass=date(2026, 9, 18).isoformat())
-    for index in range(8):
+    for index in range(cr.STALE_NOTE_MAX_ITEMS + 3):
         _note(
             vault,
             f"People/Note{index:02d}.md",
@@ -5014,7 +5082,7 @@ def test_coverage_leaves_the_items_the_plan_and_their_order_alone(tmp_path: Path
     vault = _vault(tmp_path)
     guide = _guide(tmp_path)
     _fresh_log(vault, last_full_pass=date(2026, 9, 18).isoformat())
-    for index in range(8):
+    for index in range(cr.STALE_NOTE_MAX_ITEMS + 3):
         _note(
             vault,
             f"People/Note{index:02d}.md",

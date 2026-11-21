@@ -36,7 +36,6 @@ function row(overrides: Partial<EntityTypeRow> = {}): EntityTypeRow {
     folder: 'People',
     description: 'A human the user knows or works with.',
     aliases: ['human'],
-    stale_after_days: 90,
     enabled: true,
     builtin: true,
     core: false,
@@ -52,10 +51,10 @@ function body(types: EntityTypeRow[]): EntityTypesResponse {
 
 const STOCK = [
   row(),
-  row({ id: 'place', label: 'Place', folder: 'Places', stale_after_days: 0, aliases: [], note_count: 11 }),
+  row({ id: 'place', label: 'Place', folder: 'Places', aliases: [], note_count: 11 }),
   row({
     id: 'customer', label: 'Customer', folder: 'Customers', description: 'Someone we do business with.',
-    aliases: ['client'], stale_after_days: 0, builtin: false, note_count: 2,
+    aliases: ['client'], builtin: false, note_count: 2,
   }),
 ]
 
@@ -129,8 +128,8 @@ describe('MemoryCategoriesPanel', () => {
     expect(rows[0]!.get('.cat-num').text()).toBe('4')
     expect(rows[1]!.get('.cat-num').text()).toBe('11')
     expect(rows[0]!.text()).toContain('People')
-    expect(rows[0]!.text()).toContain('90 days')
-    expect(rows[1]!.text()).toContain('Default')
+    // There is no per-category horizon to show: every note is due on the one rule.
+    expect(wrapper.text()).not.toContain('Stale after')
     wrapper.unmount()
   })
 
@@ -228,7 +227,7 @@ describe('MemoryCategoriesPanel', () => {
     apiPatch.mockResolvedValue(body([...BUILTINS_ONLY, row({
       id: 'customer', label: 'Customer', folder: 'Customers',
       description: 'A person or company the user does business with. Use for accounts, deals and contacts.',
-      aliases: [], stale_after_days: 0, builtin: false, note_count: 0,
+      aliases: [], builtin: false, note_count: 0,
     })]))
     await drawer.get('form').trigger('submit')
     await flushPromises()
@@ -285,7 +284,7 @@ describe('MemoryCategoriesPanel', () => {
     expect((drawer.get('#cat-id').element as HTMLInputElement).readOnly).toBe(true)
     expect(drawer.find('.cat-btn--danger').exists()).toBe(false)
     expect(drawer.text()).toContain('can be turned off, but not deleted')
-    // The scope note is here so the stored folder/aliases/days are not read as
+    // The scope note is here so the stored folder and aliases are not read as
     // behaviour that already follows from them.
     expect(drawer.get('.cat-scope').text()).toContain('once that wiring lands')
 

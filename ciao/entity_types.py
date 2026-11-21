@@ -4,7 +4,8 @@ The kinds of notes the agent keeps were hardcoded in six places that had to be
 edited in step: ``vault_index``'s ``DIR_TYPE_MAP`` / ``CANONICAL_TYPES`` /
 ``TYPE_ALIASES``, ``config``'s ``_WORKSPACE_EVIDENCE_DIRS``,
 ``vault_lint``'s orphan-candidate
-folders and ``memory_audit``'s ``STALE_NOTE_THRESHOLDS_DAYS``. Nothing showed
+folders and ``memory_audit``'s per-type staleness table (since replaced by one
+``NOTE_REVIEW_DAYS`` for every note). Nothing showed
 the user that list, and adding a category was an edit in five modules with no
 schema to fill in.
 
@@ -44,10 +45,9 @@ same ``id``: only the keys it states change, so hand-writing
     - id: person
       label: Human
 
-relabels a category without dropping its folder, its aliases or its staleness.
+relabels a category without dropping its folder or its aliases.
 Stating a key with its default value is a real instruction — ``kind: note`` on
-a stock entity, or ``stale_after_days: 0`` on a project that should not age out
-at all — so the merge tracks which keys the file named rather than inferring it
+a stock entity — so the merge tracks which keys the file named rather than inferring it
 from the values. A vault ``id`` with no stock entry is appended as a custom one.
 ``builtin`` is never read from the file: a stock entry is builtin and a
 vault-only entry is not, whatever the file claims.
@@ -162,12 +162,7 @@ class EntityTypeFileError(ValueError):
 
 @dataclass(frozen=True, slots=True)
 class EntityType:
-    """One category: a frontmatter ``type:`` value and where its notes live.
-
-    ``stale_after_days`` is an override, not a rule: ``0`` means "whatever the
-    caller applies by default", which is how a category with no opinion about
-    ageing says so.
-    """
+    """One category: a frontmatter ``type:`` value and where its notes live."""
 
     id: str
     label: str
@@ -175,7 +170,6 @@ class EntityType:
     folder: str = ""
     description: str = ""
     aliases: tuple[str, ...] = ()
-    stale_after_days: int = 0
     enabled: bool = True
     builtin: bool = True
     core: bool = False
@@ -191,9 +185,9 @@ class EntityType:
 class _Stated:
     """A parsed entry beside the keys its file actually stated.
 
-    The merge needs the difference. ``kind: note`` on a stock entity, or
-    ``stale_after_days: 0`` on a project, asks for the default and is
-    indistinguishable from staying silent if the merge only compares values.
+    The merge needs the difference. ``kind: note`` on a stock entity asks for
+    the default and is indistinguishable from staying silent if the merge only
+    compares values.
     """
 
     entry: EntityType
@@ -218,7 +212,6 @@ class EntityTypeRegistry:
         "_entries",
         "_entity_folders",
         "_orphan_dirs",
-        "_stale_thresholds",
     )
 
     def __init__(self, entries: Sequence[EntityType]) -> None:
@@ -242,11 +235,6 @@ class EntityTypeRegistry:
         self._entity_folders: tuple[str, ...] = tuple(
             sorted(entry.folder for entry in enabled if entry.is_entity and entry.folder)
         )
-        self._stale_thresholds: dict[str, int] = {
-            entry.id: entry.stale_after_days
-            for entry in enabled
-            if entry.stale_after_days > 0
-        }
         self._orphan_dirs: frozenset[str] = frozenset(self._entity_folders) | _ORPHAN_EXTRA_DIRS
 
     def __len__(self) -> int:
@@ -287,15 +275,6 @@ class EntityTypeRegistry:
     def entity_folders(self) -> tuple[str, ...]:
         """The folders of the enabled ``kind: entity`` categories, sorted."""
         return self._entity_folders
-
-    def stale_thresholds(self) -> dict[str, int]:
-        """Type -> days before its facts count as unverified, where stated.
-
-        Only the categories that carry an opinion (a positive
-        ``stale_after_days``) appear; a caller applies its own default to the
-        rest and its own exempt set to the event surfaces.
-        """
-        return self._stale_thresholds
 
     def orphan_dirs(self) -> frozenset[str]:
         """Folders whose notes are candidates for the orphan check.
@@ -355,7 +334,7 @@ def _parse(payload: object, *, builtin: bool, partial: bool) -> list[_Stated]:
     Raises :class:`EntityTypeFileError` on anything a reader should not have to
     guess about: a document that is not a list, an entry that is not a mapping, a
     missing or non-string ``id``, an empty ``label``, an unknown ``kind``, an
-    alias list that is not a list of names, a negative ``stale_after_days``, an
+    alias list that is not a list of names, an
     ``enabled`` that is not a boolean. The caller decides whether that means
     "drop the file" (it always does) or "raise" (only a direct parse does).
     """
@@ -412,7 +391,6 @@ def _entry(raw: Mapping[str, object], *, builtin: bool, partial: bool) -> _State
         folder=_as_str(values["folder"], "folder"),
         description=_as_str(values["description"], "description"),
         aliases=_as_names(values["aliases"], "aliases"),
-        stale_after_days=_as_days(values["stale_after_days"]),
         enabled=_as_bool(values["enabled"], "enabled"),
         builtin=builtin,
         core=_as_bool(values["core"], "core"),
@@ -440,16 +418,6 @@ def _as_names(value: object, name: str) -> tuple[str, ...]:
     ):
         raise EntityTypeFileError(f"{name} must be a list of names, got {value!r}")
     return tuple(value)
-
-
-def _as_days(value: object) -> int:
-    # bool is an int subclass, and `enabled: true` in the wrong field is a typo
-    # worth reporting rather than reading as a one-day threshold.
-    if not isinstance(value, int) or isinstance(value, bool) or value < 0:
-        raise EntityTypeFileError(
-            f"stale_after_days must be a non-negative integer, got {value!r}"
-        )
-    return value
 
 
 def _as_bool(value: object, name: str) -> bool:
@@ -777,11 +745,6 @@ def validate_entries(entries: Sequence[EntityType]) -> None:
             problems.append(f"{name}: label must not be empty")
         if entry.kind not in _KINDS:
             problems.append(f"{name}: kind must be one of {sorted(_KINDS)}, got {entry.kind!r}")
-        days = entry.stale_after_days
-        # bool is an int subclass, and `enabled: true` in the wrong field is a
-        # typo worth reporting rather than reading as a one-day threshold.
-        if not isinstance(days, int) or isinstance(days, bool) or days < 0:
-            problems.append(f"{name}: stale_after_days must be a non-negative integer, got {days!r}")
         if not isinstance(entry.enabled, bool):
             problems.append(f"{name}: enabled must be a boolean, got {entry.enabled!r}")
 

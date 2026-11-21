@@ -4291,7 +4291,7 @@ def _memory_audit_command(args: argparse.Namespace) -> int:
         stale = report.get("stale_notes") or {}
         if stale:
             print(
-                "Notes not verified within their type's horizon (informational): "
+                "Notes not verified within the review horizon (informational): "
                 f"{len(stale.get('stale_notes', []))} of "
                 f"{stale.get('notes_checked', 0)} dated notes"
             )
@@ -8791,7 +8791,7 @@ def build_parser() -> argparse.ArgumentParser:
             "current state, entries citing a path that no longer exists, and "
             "subjects carrying more than one value. With --with-vault, also "
             "reports vault notes whose facts have gone unverified past their "
-            "type's horizon. Read-only. Exit 0 when clean, 1 when there are "
+            "review horizon. Read-only. Exit 0 when clean, 1 when there are "
             "findings, 2 when a region could not be read."
         ),
     )
@@ -8817,7 +8817,7 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help=(
             "Also age the vault's notes (frontmatter `updated:` or mtime "
-            "against per-type horizons) and report stale ones. Informational: "
+            "against the review horizon) and report stale ones. Informational: "
             "they never change the exit code."
         ),
     )

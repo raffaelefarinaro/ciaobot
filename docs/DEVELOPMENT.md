@@ -1271,11 +1271,11 @@ decline, and a finding that can never be cleared would pin the whole audit at
 
 The same state/event rule also decides how **age** is read on vault notes: an
 entity note (person, project) asserts current state, so going unverified past
-its type's horizon is a review candidate; logs and journals record events,
+its review horizon is a review candidate; logs and journals record events,
 which never go stale. One predicate, `memory_audit.note_verification`, ages each note from
 frontmatter `updated:` (a deliberate "I re-checked this" claim) or file mtime,
-against per-type horizons (project 30d, person 90d, everything else 180d; types
-resolved through the vault's alias table; `log`, `journal` and `workspace`
+against one horizon for every note, `memory_audit.NOTE_REVIEW_DAYS` (30 days);
+types are resolved through the vault's alias table; `log`, `journal` and `workspace`
 exempt — flagging an inbox for being an inbox is noise). `find_stale_notes`,
 the Memory Map's `stale` flag and the vault-review `unverified` signal all call
 it, so the three cannot disagree. The map additionally leaves `stale` off notes
@@ -1296,7 +1296,7 @@ and the daily `system-memory-curation` run.
 That last one stopped being prose. The selection is `PASS_STALE_NOTE` in
 `ciao/curation_run.py`: one `WorklistItem` per stale note, keyed by its
 **vault-relative** path, oldest first, and capped at
-`STALE_NOTE_MAX_ITEMS` per run. It calls `memory_audit.find_stale_notes` rather
+`STALE_NOTE_MAX_ITEMS` (20) per run. It calls `memory_audit.find_stale_notes` rather
 than re-deriving the thresholds, so the nightly plan, `os-audit`, the Memory Map
 and the review queue cannot disagree about which notes count — and it applies the
 two filters the audit does not: `vault_review.never_queued` (a note the queue
@@ -1403,8 +1403,8 @@ yesterday is not in that list at all, which is the whole point. So the pass call
 `memory_audit.note_entry_coverage` — the detector — once per note, with the note's
 own `updated:`/mtime handed back from `_stale_findings` so the detector reaches the
 same `memory_audit.note_verification` verdict on the same values with no second
-`stat`. That one function owns the entity type's horizon (a custom category's
-`stale_after_days` included), the type aliases, the exempt event types, the
+`stat`. That one function owns the review horizon (`memory_audit.NOTE_REVIEW_DAYS`, the
+same for every type), the type aliases, the exempt event types, the
 per-entry `[verified: YYYY-MM-DD]` stamp, the event-shaped exemptions, the
 unsupported entries and the coverage accounting. An entry with no stamp — or a
 stamp that is malformed, an impossible day, or a date that has not happened, and

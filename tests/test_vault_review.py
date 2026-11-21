@@ -1397,7 +1397,7 @@ def test_a_linked_person_note_unchecked_past_its_horizon_is_queued(tmp_path: Pat
     assert person.signals == ("unverified",)
     assert person.evidence["unverified"] == {
         "age_days": 116,
-        "threshold_days": 90,
+        "threshold_days": 30,
         "last_verified": "2026-06-01",
         "source": "frontmatter",
     }
@@ -1417,7 +1417,7 @@ def test_unverified_falls_back_to_mtime(tmp_path: Path) -> None:
     candidate = generate_candidates(tmp_path, workspace="personal", write_queue=False, now=_SEPT)[0]
     assert "unverified" in candidate.signals
     assert candidate.evidence["unverified"]["source"] == "mtime"
-    assert candidate.evidence["unverified"]["threshold_days"] == 180
+    assert candidate.evidence["unverified"]["threshold_days"] == 30
     assert candidate.evidence["age_days"] == candidate.evidence["unverified"]["age_days"]
 
 

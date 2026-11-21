@@ -461,15 +461,12 @@ def audit_entries(
 # is asserted to whoever finally opens it, and the curation routine cannot
 # review what nothing ever lists.
 
-# Days after which a note's facts count as unverified, by note type. Two
-# overrides over one default because entity types rot at different speeds: an
-# active project's state changes weekly while a person's employer changes
-# yearly.
-STALE_NOTE_THRESHOLDS_DAYS: dict[str, int] = {
-    "project": 30,
-    "person": 90,
-}
-STALE_NOTE_DEFAULT_DAYS = 180
+# Days after which a note's facts count as unverified, for every note type. One
+# number, deliberately: a per-type table made the owner tune twelve horizons and
+# still left the question of which one a note was on. A note that is 30 days old
+# is due whatever it is about, and the curation pass's check cooldown is the same
+# 30 days, so a note verified today is not asked about again until the month is out.
+NOTE_REVIEW_DAYS = 30
 
 # Event surfaces never age out — a log entry from two years ago is exactly as
 # true as it was the day it was written. ``workspace`` covers the Workspace/
@@ -478,23 +475,6 @@ STALE_NOTE_DEFAULT_DAYS = 180
 STALE_NOTE_EXEMPT_TYPES = frozenset({"log", "journal", "workspace"})
 
 _UPDATED_DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
-
-
-def note_threshold_days(
-    note_type: str, *, registry: EntityTypeRegistry | None = None
-) -> int:
-    """Days of silence after which this note type counts as unverified.
-
-    ``registry`` is the vault's category list, optional for the same reason as
-    everywhere else in this module: a caller that knows its vault passes one and
-    a category's own ``stale_after_days`` applies, and a caller with no vault in
-    hand keeps the two overrides above. A category with no opinion about ageing
-    is simply absent from the registry's view, so it falls through to the
-    default exactly as it does here.
-    """
-    if registry is None:
-        return STALE_NOTE_THRESHOLDS_DAYS.get(note_type, STALE_NOTE_DEFAULT_DAYS)
-    return registry.stale_thresholds().get(note_type, STALE_NOTE_DEFAULT_DAYS)
 
 
 def parse_verified_date(raw: str) -> datetime.date | None:
@@ -614,9 +594,8 @@ def note_verification(
     still get an age (the map shows it) but are never ``stale``. Ages are
     clamped at zero so a future ``updated:`` reads as "verified today".
 
-    ``registry`` is the vault's category list, threaded into both the type's
-    resolved name and its horizon so a category's ``stale_after_days`` reaches
-    the verdict rather than only the count beside it.
+    ``registry`` is the vault's category list, used to resolve the type's name
+    (an alias ages as its category, and an exempt alias is never due).
     """
     verified, source = note_last_verified(updated, mtime)
     if verified is None:
@@ -625,7 +604,7 @@ def note_verification(
     key = _stale_type_key(note_type, registry=registry)
     return NoteVerification(
         age_days=max(0, (current - verified).days),
-        threshold_days=note_threshold_days(key, registry=registry),
+        threshold_days=NOTE_REVIEW_DAYS,
         last_verified=verified,
         source=source,
         exempt=key in STALE_NOTE_EXEMPT_TYPES,
@@ -641,7 +620,7 @@ def find_stale_notes(
     today: datetime.date | None = None,
     registry: EntityTypeRegistry | None = None,
 ) -> dict[str, Any]:
-    """Vault notes whose facts have gone unverified past their type's horizon.
+    """Vault notes whose facts have gone unverified past the review horizon.
 
     ``entries`` are :class:`ciao.vault_index.Entry` objects (anything with
     ``path``/``title``/``type``/``updated`` works). Age comes from frontmatter
@@ -652,7 +631,7 @@ def find_stale_notes(
     ``registry`` is the vault's category list, and it is optional: omitted and a
     ``vault_root`` is known, it is loaded from that root (resolved, so the
     loader's cache key is the same root the mtime probe below used); omitted
-    with no root at all, the shipped thresholds stand, which is what keeps this
+    with no root at all, the shipped aliases stand, which is what keeps this
     function usable as a pure seam over entries a test built by hand.
 
     Precision-first like every detector in this module: exempt event types,
@@ -1300,11 +1279,7 @@ def note_entry_coverage(
     document = ne.parse_note_entries(
         text, note_path=relative, workspace=workspace, today=current
     )
-    threshold = (
-        verification.threshold_days
-        if verification is not None
-        else note_threshold_days(_stale_type_key(note_type, registry=registry), registry=registry)
-    )
+    threshold = NOTE_REVIEW_DAYS
     note_exempt = verification.exempt if verification is not None else is_stale_exempt_type(
         note_type, registry=registry
     )

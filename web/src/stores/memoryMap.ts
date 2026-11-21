@@ -364,7 +364,7 @@ export const useMemoryMapStore = defineStore('memoryMap', () => {
       .sort((a, b) => b.mtime - a.mtime),
   )
   /**
-   * Notes whose facts have gone unverified past their type's horizon. Same
+   * Notes whose facts have gone unverified past the review horizon. Same
    * to-do-list shape as orphans: each one is worth re-checking, correcting,
    * or deleting — and the daily curation routine works from the same list,
    * so what shows here is exactly what that run will touch.

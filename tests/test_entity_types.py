@@ -11,6 +11,7 @@ than about a literal one of them used to hold.
 
 from __future__ import annotations
 
+import datetime
 import logging
 from importlib import resources
 from pathlib import Path
@@ -44,9 +45,6 @@ def test_stock_registry_views(tmp_path: Path) -> None:
     assert len(registry.dir_type_map()) == 9
     assert registry.aliases() == vault_index.TYPE_ALIASES
     assert len(registry.aliases()) == 4
-
-    # The two aging overrides over memory_audit's default (which stays there).
-    assert registry.stale_thresholds() == memory_audit.STALE_NOTE_THRESHOLDS_DAYS
 
     # The folders the orphan linter watches: the entity categories' own folders
     # plus the lower-case names an entry cannot express. This used to be read
@@ -105,18 +103,14 @@ def test_a_vault_entry_overrides_a_stock_entry_by_id(tmp_path: Path) -> None:
         "- id: person\n"
         "  label: Human\n"
         "  folder: Humans\n"
-        "  stale_after_days: 45\n"
-        # Stating a key with its default is a real instruction, not a silence:
-        # a project the user does not want aged out at all.
-        "- id: project\n"
-        "  stale_after_days: 0\n",
+        # A key the registry no longer has is ignored, not an error.
+        "  stale_after_days: 45\n",
         encoding="utf-8",
     )
     registry = entity_types.load_entity_types(tmp_path)
 
     assert registry.dir_type_map()["Humans"] == "person"
     assert "People" not in registry.dir_type_map()
-    assert registry.stale_thresholds() == {"person": 45}
     assert registry.orphan_dirs() == frozenset(
         (stock.orphan_dirs() - {"People"}) | {"Humans"}
     )
@@ -148,7 +142,6 @@ def test_a_new_vault_entry_is_appended_as_custom(tmp_path: Path) -> None:
         "  folder: Customers\n"
         "  description: A company we sell to or support.\n"
         "  aliases: [client, account]\n"
-        "  stale_after_days: 60\n"
         "  builtin: true\n",
         encoding="utf-8",
     )
@@ -157,7 +150,6 @@ def test_a_new_vault_entry_is_appended_as_custom(tmp_path: Path) -> None:
     assert registry.canonical_types() == stock.canonical_types() | {"customer"}
     assert registry.dir_type_map()["Customers"] == "customer"
     assert registry.aliases() == {**stock.aliases(), "client": "customer", "account": "customer"}
-    assert registry.stale_thresholds() == {**stock.stale_thresholds(), "customer": 60}
     assert "Customers" in registry.entity_folders()
     assert "Customers" in registry.orphan_dirs(), "a new entity category joins the orphan watch"
 
@@ -183,7 +175,6 @@ def test_a_malformed_vault_file_fails_closed_to_stock(
         ("entry is not a mapping", "- just a string\n"),
         ("empty label", '- id: person\n  label: ""\n'),
         ("unknown kind", "- id: person\n  label: Person\n  kind: widget\n"),
-        ("negative threshold", "- id: person\n  label: Person\n  stale_after_days: -5\n"),
         ("aliases not names", "- id: person\n  label: Person\n  aliases: [1, 2]\n"),
     ):
         path.write_text(text, encoding="utf-8")
@@ -286,7 +277,7 @@ def test_no_vault_file_is_identical_for_the_bootstrap_and_rehome(tmp_path: Path)
 def test_no_vault_file_is_identical_for_the_index_lint_and_staleness(tmp_path: Path) -> None:
     """No `<vault>/entity-types.yaml`: the four consumers read the shipped list.
 
-    `scan_vault`, `canonical_type`, `run_validation` and `note_threshold_days`
+    `scan_vault`, `canonical_type`, `run_validation` and the note horizon
     are the modules #626 put the registry in front of, and each is checked
     twice: against the live constant it replaced, and against the same answer
     when the caller hands the loaded registry over explicitly. A caller that
@@ -311,7 +302,7 @@ def test_no_vault_file_is_identical_for_the_index_lint_and_staleness(tmp_path: P
     assert registry.canonical_types() == vault_index.CANONICAL_TYPES
     assert registry.dir_type_map() == vault_index.DIR_TYPE_MAP
     assert registry.aliases() == vault_index.TYPE_ALIASES
-    assert registry.stale_thresholds() == memory_audit.STALE_NOTE_THRESHOLDS_DAYS
+    assert not any(hasattr(entry, "stale_after_days") for entry in registry.entries())
 
     # Path -> type inference, read off the constant the shipped map is. The
     # workspace half is the same map read for a different question — is this
@@ -350,15 +341,12 @@ def test_no_vault_file_is_identical_for_the_index_lint_and_staleness(tmp_path: P
     )
     assert "note" in ben["message"]
 
-    # Every horizon, against the constant it replaced.
+    # The horizon is one constant for every note, whatever its type.
     for note_type in (*sorted(registry.canonical_types()), "client", "x"):
-        expected = memory_audit.STALE_NOTE_THRESHOLDS_DAYS.get(
-            note_type, memory_audit.STALE_NOTE_DEFAULT_DAYS
+        verdict = memory_audit.note_verification(
+            note_type, "2026-01-01", None, today=datetime.date(2026, 1, 31), registry=registry
         )
-        assert memory_audit.note_threshold_days(note_type) == expected
-        assert (
-            memory_audit.note_threshold_days(note_type, registry=registry) == expected
-        )
+        assert verdict is not None and verdict.threshold_days == memory_audit.NOTE_REVIEW_DAYS
 
 
 def test_stock_ships_only_the_trimmed_list(tmp_path: Path) -> None:

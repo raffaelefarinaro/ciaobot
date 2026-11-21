@@ -86,7 +86,6 @@ def _customer_row(**overrides: Any) -> dict[str, Any]:
         "folder": "Customers",
         "description": "An account we sell to or support.",
         "aliases": ["client"],
-        "stale_after_days": 60,
         "enabled": True,
     }
     row.update(overrides)
@@ -203,6 +202,22 @@ def test_patch_regenerates_vocabulary_with_a_categories_section(
     assert "`customer`" not in drift
 
 
+def test_patch_ignores_a_stale_after_days_key_from_an_older_client(
+    client: TestClient, vault: Path
+) -> None:
+    """The horizon is no longer a category setting, so an older client that still
+    sends `stale_after_days` is not refused: the key is dropped and the row saves.
+    """
+    response = client.patch(
+        "/api/memory/entity-types?workspace=personal",
+        json={"types": [{"id": "customer", "label": "C", "stale_after_days": 60}]},
+    )
+
+    assert response.status_code == 200, response.text
+    assert "stale_after_days" not in response.text
+    assert "stale_after_days" not in (vault / "entity-types.yaml").read_text(encoding="utf-8")
+
+
 @pytest.mark.parametrize(
     "label, body",
     [
@@ -227,10 +242,6 @@ def test_patch_regenerates_vocabulary_with_a_categories_section(
         (
             "enabled is a yes or a no",
             {"types": [{"id": "customer", "label": "C", "enabled": "yes"}]},
-        ),
-        (
-            "a negative staleness is a typo",
-            {"types": [{"id": "customer", "label": "C", "stale_after_days": -5}]},
         ),
         ("types is not a list", {"types": {"id": "customer"}}),
         ("types is a string", {"types": "customer"}),

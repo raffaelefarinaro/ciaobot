@@ -19,7 +19,6 @@ export interface EntityTypeRow {
   folder: string
   description: string
   aliases: string[]
-  stale_after_days: number
   enabled: boolean
   /** True for a category the install ships. Read-only, and set by the server. */
   builtin: boolean
@@ -79,7 +78,6 @@ export function toPatchBody(rows: EntityTypeRow[]): EntityTypesPatchBody {
       folder: row.folder,
       description: row.description,
       aliases: [...row.aliases],
-      stale_after_days: row.stale_after_days,
       enabled: row.enabled,
       builtin: row.builtin,
     })),
@@ -105,7 +103,6 @@ export function fromResponse(json: Partial<EntityTypesResponse> | null | undefin
       folder: typeof raw.folder === 'string' ? raw.folder : '',
       description: typeof raw.description === 'string' ? raw.description : '',
       aliases: Array.isArray(raw.aliases) ? raw.aliases.filter((a): a is string => typeof a === 'string') : [],
-      stale_after_days: typeof raw.stale_after_days === 'number' ? raw.stale_after_days : 0,
       enabled: raw.enabled !== false,
       builtin: raw.builtin === true,
       core: raw.core === true,

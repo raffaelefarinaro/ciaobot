@@ -238,7 +238,7 @@
                 <td class="muted">{{ categoryLabelFor(n) }}</td>
                 <td class="muted mm-tags">{{ n.tags.slice(0, 4).join(', ') }}</td>
                 <td class="deg-n">{{ n.degree }}</td>
-                <td class="mm-age" :class="{ 'stale-age': n.stale }">{{ mm.ageLabelOf(n) || '—' }}<span v-if="n.stale" class="stale-flag" title="Unverified past its type's horizon">Needs review</span></td>
+                <td class="mm-age" :class="{ 'stale-age': n.stale }">{{ mm.ageLabelOf(n) || '—' }}<span v-if="n.stale" class="stale-flag" title="Unverified past the review horizon">Needs review</span></td>
               </tr>
             </tbody>
           </table>

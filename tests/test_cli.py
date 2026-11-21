@@ -5415,7 +5415,7 @@ def test_curation_plan_names_the_stale_notes_it_did_not_examine(tmp_path, monkey
     (vault / cr.CURATION_LOG_RELATIVE).write_text(
         "---\nlast_full_pass: 2026-09-18\n---\n\n# Curation log\n", encoding="utf-8"
     )
-    for index in range(8):
+    for index in range(cr.STALE_NOTE_MAX_ITEMS + 5):
         note = vault / "People" / f"Note{index:02d}.md"
         note.parent.mkdir(parents=True, exist_ok=True)
         note.write_text(
@@ -5431,12 +5431,12 @@ def test_curation_plan_names_the_stale_notes_it_did_not_examine(tmp_path, monkey
     assert payload["counts_complete"] is False
     coverage = payload["note_coverage"]
     assert coverage["status"] == "partial"
-    assert coverage["flagged"] == 8
+    assert coverage["flagged"] == cr.STALE_NOTE_MAX_ITEMS + 5
     assert coverage["planned"] == cr.STALE_NOTE_MAX_ITEMS
-    assert coverage["eligible_deferred"] + coverage["unexamined"] == 3
+    assert coverage["eligible_deferred"] + coverage["unexamined"] == 5
     lines = [note for note in payload["coverage_notes"] if note.startswith("stale notes:")]
     assert lines == [
-        "stale notes: 5 planned of 8 flagged; 3 not examined this run "
+        f"stale notes: {cr.STALE_NOTE_MAX_ITEMS} planned of {cr.STALE_NOTE_MAX_ITEMS + 5} flagged; 5 not examined this run "
         f"(oldest {coverage['oldest_deferred_age_days']}d overdue)"
     ]
     assert "People/" not in lines[0] and "Note0" not in lines[0]

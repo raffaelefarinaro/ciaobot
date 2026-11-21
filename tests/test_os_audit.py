@@ -313,7 +313,7 @@ def test_run_os_audit_reports_stale_notes_as_informational(tmp_path: Path) -> No
     stale = memory["stale_notes"]
     assert len(stale) == 1
     assert stale[0]["path"] == "memory-vault/People/Mo.md"
-    assert stale[0]["threshold_days"] == 90
+    assert stale[0]["threshold_days"] == 30
     assert memory["notes_checked"] >= 1
 
     from ciao.os_audit import format_audit_markdown, memory_actionable_count
@@ -321,7 +321,7 @@ def test_run_os_audit_reports_stale_notes_as_informational(tmp_path: Path) -> No
     # Informational by contract: nothing here is actionable on its own.
     findings = memory_actionable_count(memory)
     assert findings == 0
-    assert "Notes not verified within their type's horizon" in (
+    assert "Notes not verified within the review horizon" in (
         format_audit_markdown(report)
     )
 
