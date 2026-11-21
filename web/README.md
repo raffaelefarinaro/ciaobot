@@ -218,6 +218,7 @@ web/
                            agreement rate and the operator-only per-workspace handover choice;
                            SettingsWorkspaceOverview.vue is the Workspace > Overview page;
                            SettingsWorkspaceModels.vue is its Chats and models card;
+                           SettingsCareCycle.vue is its Weekly care cycle card: the dry run and the host-only, checkbox-gated switch of the workspace's care state (`/api/care/cycle`; pure helpers in lib/careCycle.ts);
                            SettingsClaudeTrim.vue is its Claude context trimming card (catalog from the engine, pure helpers in lib/claudeTrim.ts; edits the same draft, saved by Chats and models' Save changes);
                            WorkspaceGoogleAccount.vue is its Google account row and
                            GoogleConnectDialog.vue the Connect dialog;

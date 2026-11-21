@@ -1004,11 +1004,15 @@ def queue_resolution(
     operation_id: str = "",
     run_id: str = "",
     item_key: str = "",
+    proposal_id: str = "",
+    proposal_source: str = "",
 ):
     """Bracket a queue rewrite with ``prepared`` then ``applied`` receipts.
 
     ``operation_id``, ``run_id`` and ``item_key``, when given, are stored on
-    both rows (see :func:`commit_region_change`).
+    both rows (see :func:`commit_region_change`). ``proposal_id`` and
+    ``proposal_source`` are stored the same way, so a retry can rebuild a
+    managed accept after its row is gone.
 
     The body performs the actual removal (with its own content-verified
     rewrite). A crash between the ``prepared`` row and the rewrite is
@@ -1058,6 +1062,10 @@ def queue_resolution(
             base["run_id"] = run_id
         if item_key:
             base["item_key"] = item_key
+        if proposal_id:
+            base["proposal_id"] = proposal_id
+        if proposal_source:
+            base["proposal_source"] = proposal_source
         # The prepared row is the crash-safety boundary for this rewrite: if it
         # cannot be persisted, a crash after the queue replacement would remove
         # the proposals with nothing for recovery or History to find. Abort
@@ -1093,6 +1101,8 @@ def queue_resolution(
                 operation_id=operation_id,
                 run_id=run_id,
                 item_key=item_key,
+                proposal_id=proposal_id,
+                proposal_source=proposal_source,
             )
 
 
@@ -1115,6 +1125,8 @@ def _write_queue_receipt(
     operation_id: str = "",
     run_id: str = "",
     item_key: str = "",
+    proposal_id: str = "",
+    proposal_source: str = "",
 ) -> dict[str, Any]:
     before = before_text
     if before is None:
@@ -1160,6 +1172,10 @@ def _write_queue_receipt(
         receipt["run_id"] = run_id
     if item_key:
         receipt["item_key"] = item_key
+    if proposal_id:
+        receipt["proposal_id"] = proposal_id
+    if proposal_source:
+        receipt["proposal_source"] = proposal_source
     if not undoable:
         # A per-fact history row for a batch that already records its
         # transaction-level before image on one row. It must not offer an undo:

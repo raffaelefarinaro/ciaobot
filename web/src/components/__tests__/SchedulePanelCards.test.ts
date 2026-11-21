@@ -9,8 +9,11 @@ import type { Schedule } from '../../lib/types'
 import { useTaskStore } from '../../stores/tasks'
 import { useProjectStore } from '../../stores/projects'
 import { useWebhookStore } from '../../stores/webhooks'
+import { api } from '../../lib/api'
 
 const confirmMock = vi.fn(async (_message: string) => true)
+// The outcome row fetches its own route; stub it so the panel never reaches the network.
+vi.mock('../../lib/api', () => ({ api: { get: vi.fn(async () => ({ care_run: null })) } }))
 vi.mock('../../lib/confirm', () => ({ askConfirm: (message: string) => confirmMock(message), pendingConfirm: { value: null } }))
 
 const Stub = defineComponent({ render: () => h('div') })
@@ -421,6 +424,35 @@ describe('SchedulePanel property cards', () => {
     expect(store.fetchModels).not.toHaveBeenCalled()
   })
   // ── Interval cadence (the primitive that replaced loops) ──
+
+  function outcomeRows(wrapper: VueWrapper) {
+    return wrapper.findAll('.prop-row').filter(row => row.find('dt').exists() && row.find('dt').text() === 'Outcome')
+  }
+
+  it('shows the care outcome row for a care routine whose last run has a chat', async () => {
+    vi.mocked(api.get).mockClear()
+    const wrapper = await mountPanel(makeSchedule({
+      schedule_id: 'system-memory-curation@personal',
+      last_run_chat_id: 'chat-9',
+    }))
+    expect(outcomeRows(wrapper)).toHaveLength(1)
+    expect(vi.mocked(api.get)).toHaveBeenCalledWith('/api/schedules/system-memory-curation%40personal/care-run')
+  })
+
+  it('hides the care outcome row for a non-care schedule even when it has a run chat', async () => {
+    vi.mocked(api.get).mockClear()
+    const wrapper = await mountPanel(makeSchedule({ last_run_chat_id: 'chat-9' }))
+    expect(outcomeRows(wrapper)).toHaveLength(0)
+    expect(vi.mocked(api.get)).not.toHaveBeenCalledWith(expect.stringContaining('/care-run'))
+  })
+
+  it('hides the care outcome row for a care routine with no run chat yet', async () => {
+    const wrapper = await mountPanel(makeSchedule({
+      schedule_id: 'system-memory-curation@personal',
+      last_run_chat_id: '',
+    }))
+    expect(outcomeRows(wrapper)).toHaveLength(0)
+  })
 
   it('shows the cadence and a status row instead of a time of day', async () => {
     const wrapper = await mountPanel(makeSchedule({

@@ -5492,15 +5492,7 @@ def _memory_proposal_accept_command(args: argparse.Namespace) -> int:
     refused = _refuse_ambiguous_vault_write(args)
     if refused is not None:
         return refused
-    from ciao.curation_apply import (
-        Accepted,
-        AlreadyDone,
-        Failed,
-        PartialConflict,
-        Refused,
-        apply_memory_accept,
-        plan_memory_accept,
-    )
+    from ciao.curation_apply import Refused, apply_memory_accept, plan_memory_accept
     from ciao.memory_receipts import queue_lock
 
     workspace, vault, _registry_root, name = _resolve_workspace_and_vaults(args)
@@ -5515,8 +5507,9 @@ def _memory_proposal_accept_command(args: argparse.Namespace) -> int:
     with queue_lock(path):
         matched = _match_one_row(path, needle)
     if matched is None:
-        print(no_match, file=sys.stderr)
-        return 1
+        # The row may already be gone: an earlier attempt removed it and died
+        # before the decision or the progress key. Finish that operation.
+        return _resume_memory_accept(args, workspace, vault, name, needle, no_match)
     bullet, _removal_needle = matched
     holder = _curation_holder(args)
     if not holder:
@@ -5538,6 +5531,53 @@ def _memory_proposal_accept_command(args: argparse.Namespace) -> int:
         print(f"handover refused: {planned.reason}", file=sys.stderr)
         return 1
     result = apply_memory_accept(planned, vault_root=vault)
+    return _report_accept(result, args, workspace, bullet.kind, bullet.text)
+
+
+def _resume_memory_accept(
+    args: argparse.Namespace,
+    workspace: Path,
+    vault: Path,
+    name: str | None,
+    needle: str,
+    no_match: str,
+) -> int:
+    """Finish this run's unfinished accept of ``needle`` from its receipt, or report no match."""
+    from ciao.curation_apply import find_resumable_accept, resume_memory_accept
+
+    holder = (getattr(args, "holder", "") or "").strip()
+    receipt = find_resumable_accept(
+        vault, workspace=name or "", holder=holder, text=needle
+    )
+    if receipt is None:
+        print(no_match, file=sys.stderr)
+        return 1
+    trusted = trusted_registry(name, vault)
+    if trusted is None or name is None:
+        print("handover refused: the installed registry changed underneath", file=sys.stderr)
+        return 1
+    result = resume_memory_accept(vault, workspace=name, holder=holder, receipt=receipt)
+    return _report_accept(
+        result,
+        args,
+        workspace,
+        str(receipt.get("proposal_kind", "")),
+        str(receipt.get("removed_text", "")),
+    )
+
+
+def _report_accept(
+    result: object, args: argparse.Namespace, workspace: Path, kind: str, text: str
+) -> int:
+    """Print the outcome of one managed accept and return its exit code."""
+    from ciao.curation_apply import (
+        Accepted,
+        AlreadyDone,
+        Failed,
+        PartialConflict,
+        Refused,
+    )
+
     if isinstance(result, Refused):
         print(f"handover refused: {result.reason}", file=sys.stderr)
         return 1
@@ -5555,14 +5595,14 @@ def _memory_proposal_accept_command(args: argparse.Namespace) -> int:
         _emit_json(
             {
                 "accepted": True,
-                "text": bullet.text,
-                "region": bullet.kind,
+                "text": text,
+                "region": kind,
                 "receipt_id": receipt_id,
                 "workspace": str(workspace),
             }
         )
     else:
-        print(f"Accepted [{bullet.kind}] proposal into ciao:{bullet.kind}.")
+        print(f"Accepted [{kind}] proposal into ciao:{kind}.")
     return 0
 
 
@@ -6173,6 +6213,71 @@ def _curation_plan_command(args: argparse.Namespace) -> int:
     return 0
 
 
+def _category_candidates_or_none(vault: Path, registry_root: Path) -> list[dict[str, Any]] | None:
+    """The read-only category scan, or None when it failed (the verdict then says so)."""
+    from ciao.entity_types import load_entity_types
+    from ciao.vocabulary_proposals import scan_category_candidates
+
+    try:
+        return scan_category_candidates(vault, registry=load_entity_types(registry_root))
+    except Exception:  # noqa: BLE001 — a failed scan is reported as unavailable, never as empty
+        return None
+
+
+def _curation_due_command(args: argparse.Namespace) -> int:
+    """Say whether tonight's Workspace care has observed work, without starting it.
+
+    The schedule's preflight. Read-only: no lease, no write, no model. Output is
+    the contract the schedule relies on (see ``ciao/care_due.py``): an empty
+    night prints nothing and exits 0; due prints one line and exits 0; a held
+    lease exits 75; anything unreadable prints a fixed reason to stderr and
+    exits 1, which runs the chat as before.
+    """
+    from ciao.care_due import Busy, Due, Unavailable, care_due_verdict, verdict_payload
+    from ciao.curation_run import CurationStateError, active_lease, load_state
+
+    _workspace, vault, _guide, _budget, registry_root, _name = _curation_context(args)
+    lease: dict[str, Any] | None = None
+    worklist = None
+    plan = None
+    candidates: list[dict[str, Any]] | None = None
+    transition_pending = False
+    state_error = ""
+    try:
+        lease = active_lease(vault)
+        cycle = load_state(vault).cycle
+        transition_pending = cycle is not None and cycle.pending is not None
+        planning = _curation_plan(args)
+    except CurationStateError as exc:
+        state_error = str(exc) or "curation state is unreadable"
+    else:
+        worklist = planning.remaining
+        plan = planning.run_plan
+        candidates = _category_candidates_or_none(vault, registry_root)
+    verdict = care_due_verdict(
+        worklist,
+        plan=plan,
+        lease=lease,
+        category_candidates=candidates,
+        state_error=state_error,
+        transition_pending=transition_pending,
+    )
+    if args.json:
+        json.dump(verdict_payload(verdict), sys.stdout, ensure_ascii=False, indent=2)
+        sys.stdout.write("\n")
+    elif isinstance(verdict, Due):
+        print(f"care due: {verdict.planned_count} items planned")
+    elif isinstance(verdict, Busy):
+        print(f"care busy: {verdict.reason}")
+    elif isinstance(verdict, Unavailable):
+        print(verdict.reason, file=sys.stderr)
+    if isinstance(verdict, Busy):
+        return CURATION_BUSY_EXIT
+    if isinstance(verdict, Unavailable):
+        return 1
+    return 0
+
+
 def _abandon_begun_run(vault, holder: str) -> None:
     """Release a lease this begin took, before a non-zero exit.
 
@@ -6206,8 +6311,11 @@ def _curation_begin_command(args: argparse.Namespace) -> int:
     )
 
     _workspace, vault, _guide, budget, registry_root, _name = _curation_context(args)
+    # The chat this run executes in: the binding the PWA uses to show its outcome.
+    # Empty outside an agent chat, and then no outcome is shown for the run.
+    chat_id = os.environ.get("CIAO_CHAT_ID", "").strip()
     try:
-        lease = begin_run(vault, holder=args.holder, ttl_s=budget.max_seconds)
+        lease = begin_run(vault, holder=args.holder, ttl_s=budget.max_seconds, chat_id=chat_id)
     except CurationBusy as exc:
         print(f"curation is already running: {exc}", file=sys.stderr)
         return CURATION_BUSY_EXIT
@@ -6573,6 +6681,8 @@ def _curation_end_command(args: argparse.Namespace) -> int:
             reasons=[*(args.reason or []), *counts.reasons],
             live_keys=live_keys,
             advance_marker=args.status == "ok",
+            failed=counts.failed,
+            counts_complete=counts.complete,
         )
     except CurationBusy as exc:
         print(f"curation lease lost: {exc}", file=sys.stderr)
@@ -9668,6 +9778,22 @@ def build_parser() -> argparse.ArgumentParser:
     )
     _add_curation_arguments(curation_plan_parser)
     curation_plan_parser.set_defaults(func=_curation_plan_command)
+
+    curation_due_parser = subparsers.add_parser(
+        "curation-due",
+        help="Say whether tonight's Workspace care has observed work, without starting it.",
+        description=(
+            "Read-only preflight for the nightly care run: takes no lease, writes "
+            "nothing and calls no model. Prints nothing and exits 0 when there is "
+            "no observed work; prints `care due: N items planned` and exits 0 when "
+            "there is; prints `care busy: ...` and exits 75 when a run holds the "
+            "lease; prints a fixed reason to stderr and exits 1 when the answer "
+            "cannot be trusted. Anything other than an empty night should run the "
+            "care chat as before."
+        ),
+    )
+    _add_curation_arguments(curation_due_parser)
+    curation_due_parser.set_defaults(func=_curation_due_command)
 
     curation_begin_parser = subparsers.add_parser(
         "curation-begin",
