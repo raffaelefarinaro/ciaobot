@@ -610,7 +610,15 @@ final class ChatNotificationController: ObservableObject, NotificationMenuProvid
             guard snapshotReceived else { return }
             activeChatIDs.remove(chatID)
 
-        case .resultReady(let chatID, let title, let snippet, let workspace):
+        case .resultReady(let chatID, let title, let snippet, let workspace, let memoryPass):
+            if memoryPass {
+                // The memory pass is the app's own bookkeeping, not a result
+                // the owner asked for. It never banners, and it leaves the
+                // dedupe map alone so a later real result is still announced.
+                activeChatIDs.remove(chatID)
+                withdrawDelivered(chatID: chatID, origin: origin)
+                return
+            }
             // Before the snapshot the client is still catching up. Those
             // events are not a fresh result and must never become a banner.
             guard snapshotReceived else { return }
@@ -637,6 +645,14 @@ final class ChatNotificationController: ObservableObject, NotificationMenuProvid
         case .ignored:
             break
         }
+    }
+
+    private func withdrawDelivered(chatID: String, origin: Origin) {
+        guard ChatLink.isValidChatID(chatID) else { return }
+        permission.removeDelivered(identifier: Self.notificationIdentifier(
+            origin: origin.canonicalKey,
+            chatID: chatID
+        ))
     }
 
     private func announce(

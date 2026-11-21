@@ -1849,7 +1849,7 @@ Agents may raise a card with `ciao chat needs-action`, but they never start, dis
 
 Global `/ws/events` payloads the PWA reacts to:
 
-- `chat_streaming_started` / `chat_streaming_done` / `chat_result_ready`: lifecycle of the main chat turn.
+- `chat_streaming_started` / `chat_streaming_done` / `chat_result_ready`: lifecycle of the main chat turn. `chat_result_ready` carries `memory_pass` (boolean, false when absent): true for the app-owned memory pass, which the native Mac notifier must not announce.
 - `chat_runs_reported`: emitted on a chat once a wake turn for finished background CLI tasks (the `cli_task_wake` origin) has been delivered into it. Fields: `{chat_id, project_id, count, delivery}`, where `delivery` is `"queued"` (the chat was mid-turn, so the wake was appended as a follow-up) or `"started"` (the chat was idle, so a new turn began). Completions inside a 5s window coalesce into one event.
 - `chat_pin_changed`: the chat's pinned file changed (a manual pin write or an agent `file_surface`), on this or another device. Fields: `{chat_id, path, dismissed_paths, revision}`, where `path` is the canonical POSIX path or `""` for closed and `revision` is the per-chat counter a later pin PATCH must quote. The connect `snapshot` carries the same payloads for every chat under `chat_pins`, so a client that missed this event still converges.
 - `chat_actions_changed`: a chat's needs-you cards changed. Fields: `{chat_id, actions}`, the complete list (`[]` clears it). The connect `snapshot` carries the same lists under `chat_actions`, a sparse and complete map that replaces the client's cache.
