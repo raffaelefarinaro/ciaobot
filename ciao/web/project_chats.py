@@ -203,6 +203,7 @@ from ciao.providers.base import (
 from ciao.schedules import (
     ScheduleEntry,
     ScheduleStore,
+    ScheduleStoreCorrupt,
     publish_automations_changed,
     settle_retrying_runs,
     settle_runs_for_archived_chat,
@@ -2990,6 +2991,7 @@ class ProjectChatManager:
                         logger.info("Repointed archived chat %s to %s", cid, found)
                         continue
                     self._chats.pop(cid)
+                    self._drop_owned_loops(cid, "transcript gone")
                     pruned_chats = True
                     logger.info("Pruned archived chat %s (transcript file no longer exists)", cid)
 
@@ -4286,6 +4288,7 @@ class ProjectChatManager:
             chat = self._chats.pop(cid, None)
             if chat is None:
                 continue
+            self._drop_owned_loops(cid, "empty")
             # No session, no images, no transcript -> nothing else to clean
             # up. Still cancel any in-flight provider just in case.
             self._cancel_between_turns_drain(cid)
@@ -5161,6 +5164,46 @@ class ProjectChatManager:
 
         asyncio.ensure_future(cleanup())
 
+    def loop_owner_alive(self, chat_id: str) -> bool | None:
+        """Whether a chat-owned loop's owner still runs it.
+
+        True: the owner is live. False: it is gone or archived, so the loop ends.
+        None: its archive is in progress, so the tick skips the loop until the
+        archive either removes it or is refused.
+        """
+        chat = self._chats.get(chat_id)
+        if chat is None or chat.archived:
+            return False
+        if chat_id in self._archive_locks:
+            return None
+        return True
+
+    def _drop_owned_loops(self, chat_id: str, reason: str) -> bool:
+        """End the chat-owned loops of a chat that is leaving the registry.
+
+        Synchronous on purpose: callers run it in the same section as the
+        registry change, so no tick can fire a loop whose owner has gone. An
+        unreadable store is logged, never raised: a removal must not fail on
+        it, and the tick sweep ends any loop whose owner is gone.
+        """
+        store = getattr(self, "schedule_store", None)
+        if store is None:
+            return False
+        try:
+            ids = store.delete_owned_by(chat_id)
+        except ScheduleStoreCorrupt:
+            logger.exception(
+                "Could not end the loops of chat %s (%s): the schedule store is unreadable; "
+                "the schedule sweep will end them",
+                chat_id, reason,
+            )
+            return False
+        if not ids:
+            return False
+        logger.info("Ended %d loop(s) of chat %s (%s)", len(ids), chat_id, reason)
+        publish_automations_changed(self)
+        return True
+
     def delete_chat(self, chat_id: str) -> bool:
         if chat_id not in self._chats:
             return False
@@ -5199,6 +5242,7 @@ class ProjectChatManager:
         chat = self._chats.pop(chat_id, None)
         if chat is None:
             return False
+        self._drop_owned_loops(chat_id, "deleted")
         self._forget_shell_wake_state(chat_id)
         self._repo_location_locks.pop(chat_id, None)
         self._revoke_mcp_chat(chat_id)
@@ -5424,6 +5468,9 @@ class ProjectChatManager:
         # await above. Refuse before the first mutation so a refusal never
         # leaves the MCP token revoked on a chat that stays alive.
         self._refuse_unsettled_teardown([chat_id])
+        # The last point that can still refuse is above: a refused archive keeps
+        # its loops, and the first mutation below is the point of no return.
+        self._drop_owned_loops(chat_id, "archived")
         self._revoke_mcp_chat(chat_id)
         if chat.retry_status:
             self._clear_chat_retry(chat)
@@ -10471,6 +10518,10 @@ class ProjectChatManager:
         chat is archived, and dispatching into it fails with an unobservable
         ``stream error`` on every later run (issue #407).
         """
+        if getattr(entry, "owner_chat_id", ""):
+            # Invariant: a chat-owned loop is deleted with its chat and is never
+            # forked, replaced or moved to another chat. The caller ends it.
+            return None
         chat_id = getattr(entry, "web_chat_id", "") or ""
         chat = self._chats.get(chat_id)
         title = (getattr(entry, "title", "") or "").strip()
@@ -10985,6 +11036,9 @@ class ProjectChatManager:
             )
         if chat is not None:
             self._unlink_chat_images(chat)
+        # Before the pop, in the same synchronous section: a chat whose
+        # transcript fails to archive above keeps its loops with it.
+        self._drop_owned_loops(chat_id, "project removed")
         self._chats.pop(chat_id, None)
         self._cancel_between_turns_drain(chat_id)
         provider = self._pop_provider(chat_id)
