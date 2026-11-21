@@ -3053,10 +3053,16 @@ def test_approved_task_section_states_the_three_task_recurrence_rule() -> None:
     }
     section = memory_pass.MemoryPassCoordinator._focus_section(helper)
     assert "second independent" not in section
-    assert "Three distinct completed tasks recorded as sightings of one learning" in section
+    assert (
+        "three distinct completed tasks already recorded in Learnings as sightings "
+        "of one learning, not counting what you are filing now"
+    ) in section
+    assert "When Learnings already holds three, file the new-skill draft" in section
     assert "`recurrence` block" in section
-    assert "`entry_revision`" in section
-    assert "exactly the completion ids from Learnings" in section
+    assert "`entry_revision` (the sha256 of that learning's canonical line" in section
+    assert "each new sighting changes it" in section
+    assert "exactly those three completion ids from Learnings" in section
+    assert "file the learning now and the draft in a later pass" in section
     assert "A direct correction of an owned skill can be proposed from this one occurrence." in section
     assert "Everything you file waits for the user to accept" in section
     assert "The same completion id seen again is not a new occurrence." in section
@@ -3085,6 +3091,9 @@ def test_recurrence_example_is_accepted_by_the_skill_draft_input_reader(
     block = payload["recurrence"]
     assert set(block) == {"procedure_learning_id", "entry_revision", "outcome_ids"}
     assert len(block["outcome_ids"]) == RECURRENCE_THRESHOLD
+    # The revision is the hash of the entry's canonical line, not a comment field.
+    assert "canonical line" in block["entry_revision"]
+    assert "comment" not in block["entry_revision"]
 
 
 def test_recurrence_example_is_rendered_into_both_draft_prompts() -> None:

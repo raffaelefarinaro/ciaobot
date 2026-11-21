@@ -254,11 +254,17 @@ APPROVED_TASK_PROMPT = (
     "File nothing for a one-off: a task that will not recur teaches no procedure. "
     "When the procedure is reusable, file it as a learning. {sighting} "
     "One or two outcomes are a sighting, and that is all: file or update the "
-    "learning only. Three distinct completed tasks recorded as sightings of one "
-    "learning are the recurrence rule: then file the new-skill draft through "
+    "learning only. The recurrence rule is three distinct completed tasks already "
+    "recorded in Learnings as sightings of one learning, not counting what you "
+    "are filing now, because a learning you file here waits for the user to "
+    "accept. When Learnings already holds three, file the new-skill draft through "
     "{draft} with a `recurrence` block, citing the learning id, its "
-    "`entry_revision`, and exactly the completion ids from Learnings, shaped like "
-    "{recurrence}. The same completion id seen again is not a new occurrence. "
+    "`entry_revision` (the sha256 of that learning's canonical line as it stands "
+    "when you file, since each new sighting changes it), and exactly those three "
+    "completion ids from Learnings, shaped like {recurrence}. If Learnings holds "
+    "fewer than three, file the learning now and the draft in a later pass, once "
+    "three are recorded. The same completion id seen again is not a new "
+    "occurrence. "
     "A direct correction of an owned skill can be proposed from this one "
     "occurrence. "
     "Everything you file waits for the user to accept; you do not edit a skill "
@@ -388,7 +394,7 @@ RECURRENCE_DRAFT_EXAMPLE = (
     '"title": "Run the staging gate before a deploy", '
     '"change": "Purpose: deploys. Trigger: a request to ship. Steps: run the staging gate and wait for it to pass.", '
     '"recurrence": {"procedure_learning_id": "<learning id>", '
-    '"entry_revision": "<entry revision from the learning comment>", '
+    '"entry_revision": "<sha256 of the learning\'s canonical line>", '
     '"outcome_ids": ["<completion id>", "<completion id>", "<completion id>"]}}'
 )
 
@@ -544,7 +550,8 @@ LESSON_ROUTING_PROMPT = Template(
     "name, the `change` holding the purpose, the trigger that should load it and "
     "the instruction it should carry. The draft carries a `recurrence` block, "
     "shaped like " + RECURRENCE_DRAFT_EXAMPLE + ": the procedure must be a "
-    "learning at the revision you read, backed by three distinct completed tasks. "
+    "learning at the revision you read, backed by three distinct completed tasks "
+    "already recorded in Learnings, not counting this draft. "
     "A one-off lesson with no recurrence stays an event-log or learning entry, "
     "not a draft. A person creates the file, reads it back "
     "and syncs it; you do not create a directory, and you do not aim the "
