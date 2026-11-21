@@ -6802,7 +6802,9 @@ class CiaoControlPlane:
         rows = [
             self._schedule_payload(entry, revision)
             for entry, revision in self.schedules.snapshot()
-            if not entry.workspace or entry.workspace == workspace
+            if (not entry.workspace or entry.workspace == workspace)
+            # Another chat's loop is that chat's: its prompt and ids stay out of this chat's view.
+            and (not entry.owner_chat_id or entry.owner_chat_id == principal.chat_id)
         ]
         return _ok(rows)
 
@@ -7066,6 +7068,14 @@ class CiaoControlPlane:
         entry = self._schedule(principal, schedule_id)
         if any(changes.get(field) is not None for field in self._SCHEDULE_RUN_FIELDS):
             self._require_schedule_operator(principal)
+        # An unattended run must not change what a schedule runs, whether it runs,
+        # or how often: each of those can turn one approved routine into an unbounded
+        # one nobody watches. Metadata (title, description, workspace-free fields) stays open.
+        # A loop's cadence is fixed by its lifetime check instead, below in the row checks.
+        if any(changes.get(field) is not None for field in ("prompt", "enabled")):
+            self._require_person_typed_turn(principal, "Changing what a schedule runs or whether it runs")
+        if not entry.owner_chat_id and any(changes.get(f) is not None for f in ("frequency", "interval_minutes")):
+            self._require_person_typed_turn(principal, "Changing a schedule's cadence")
         system_timing_fields: frozenset[str] = frozenset()
         if entry.scope == "system":
             try:

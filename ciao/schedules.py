@@ -842,8 +842,12 @@ def _check_loop_lifetime(current: "ScheduleEntry", merged: "ScheduleEntry") -> N
         raise LoopRefused("loop_invalid", "a loop's run count only goes up")
 
 
-_LOOP_SPAN = re.compile(r"(?:(\d+)h)?(?:(\d+)m)?")
-_LOOP_CLOCK = re.compile(r"([01]\d|2[0-3]):([0-5]\d)")
+# ASCII digits only, and at most four per part: Python's ``\d`` matches other
+# scripts, and an unbounded digit run is either a typo or a refusal to parse.
+_LOOP_SPAN = re.compile(r"(?:([0-9]{1,4})h)?(?:([0-9]{1,5})m)?", re.ASCII)
+_LOOP_CLOCK = re.compile(r"([01][0-9]|2[0-3]):([0-5][0-9])", re.ASCII)
+# C0 controls other than tab and newline: a prompt is text a model reads, not a terminal stream.
+_PROMPT_CONTROLS = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f]")
 
 
 def parse_loop_span(value: object) -> int | None:
@@ -861,7 +865,10 @@ def parse_loop_span(value: object) -> int | None:
     hours, minutes = match.group(1), match.group(2)
     if hours is None and minutes is None:
         return None
-    return int(hours or 0) * 60 + int(minutes or 0)
+    total = int(hours or 0) * 60 + int(minutes or 0)
+    # Past a day is not a span any loop may take, so it is refused as a
+    # malformed value (the caller names the flag), not as a duration to clamp.
+    return total if total <= LOOP_MAX_DURATION_MINUTES else None
 
 
 def loop_until_minutes(value: object, now: datetime) -> int | None:
@@ -1734,7 +1741,7 @@ class ScheduleStore:
         owner = (owner_chat_id or "").strip()
         if not owner:
             raise LoopRefused("loop_invalid", "a loop belongs to one chat")
-        text = (prompt or "").strip()
+        text = _PROMPT_CONTROLS.sub("", prompt or "").strip()
         if not text:
             raise LoopRefused("loop_invalid", "a loop needs a prompt")
         if len(text) > LOOP_MAX_PROMPT_CHARS:
@@ -1780,6 +1787,19 @@ class ScheduleStore:
             data = self._load_for_write()
             items = data.setdefault("schedules", [])
             owned = [i for i in items if isinstance(i, dict) and i.get("owner_chat_id")]
+            # The same prompt on the same cadence is a second copy of one loop, not a
+            # second loop: refuse it, and name the one already running.
+            for item in owned:
+                if (
+                    item.get("owner_chat_id") == owner
+                    and str(item.get("prompt") or "").strip() == text
+                    and item.get("interval_minutes") == interval
+                ):
+                    raise LoopRefused(
+                        "loop_duplicate",
+                        f"this chat already runs this loop as {item.get('schedule_id')}; "
+                        "stop it first, or change the prompt or the cadence",
+                    )
             if sum(1 for i in owned if i.get("owner_chat_id") == owner) >= LOOP_MAX_PER_CHAT:
                 raise LoopRefused(
                     "loop_limit_chat",

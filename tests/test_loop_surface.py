@@ -187,9 +187,9 @@ def test_every_refuses_garbage_with_an_example(tmp_path: Path) -> None:
 
 def test_a_chat_is_capped_and_the_refusal_names_the_loops_to_stop(tmp_path: Path) -> None:
     plane, _store = _plane(tmp_path)
-    ids = [_start(plane)["data"]["id"] for _ in range(LOOP_MAX_PER_CHAT)]
+    ids = [_start(plane, prompt=f"check {n}")["data"]["id"] for n in range(LOOP_MAX_PER_CHAT)]
     with pytest.raises(ControlPlaneError) as excinfo:
-        _start(plane)
+        _start(plane, prompt="one more")
     assert excinfo.value.code == "loop_limit_chat"
     assert "ciao loop stop" in str(excinfo.value)
     assert all(loop_id in str(excinfo.value) for loop_id in ids)
@@ -268,8 +268,8 @@ def test_loop_stop_without_an_id_needs_exactly_one_loop(tmp_path: Path) -> None:
         plane.loop_stop(_principal())
     assert excinfo.value.code == "loop_not_found"
 
-    _start(plane)
-    _start(plane)
+    _start(plane, prompt="first")
+    _start(plane, prompt="second")
     with pytest.raises(ControlPlaneError) as excinfo:
         plane.loop_stop(_principal())
     assert excinfo.value.code == "loop_id_required"
@@ -411,3 +411,79 @@ def test_the_core_prompt_routes_in_chat_loops_to_ciao_loop() -> None:
     assert "loop start|list|stop" in append
     for native in ("CronCreate", "ScheduleWakeup", "/loop"):
         assert native in append, native
+
+
+# ---- review round: reads, cadence gate, duplicates, span grammar, prompt text ----
+
+
+def test_schedules_list_hides_another_chats_loop(tmp_path: Path) -> None:
+    plane, _store = _plane(tmp_path, {CHAT: _chat(), "chat-b": _chat(chat_id="chat-b")})
+    mine = _start(plane)["data"]["id"]
+    rows = plane.schedules_list(_principal("chat-b"))["data"]
+    assert mine not in [row["schedule_id"] for row in rows]
+    assert [row["schedule_id"] for row in plane.schedules_list(_principal())["data"]] == [mine]
+
+
+def test_schedule_update_to_interval_from_an_unattended_turn_is_refused(tmp_path: Path) -> None:
+    chats = {CHAT: _chat()}
+    plane, store = _plane(tmp_path, chats)
+    daily = plane.schedule_create(
+        _principal(), prompt="daily", frequency="daily", daily_time="09:00", project_id="project-work"
+    )["data"]["schedule_id"]
+    chats[CHAT] = _chat(user_turn_unattended={"0": True})
+    with pytest.raises(ControlPlaneError) as excinfo:
+        plane.schedule_update(_principal(), daily, frequency="interval", interval_minutes=5)
+    assert excinfo.value.code == "unattended_forbidden"
+    assert store.get(daily).frequency == "daily"
+    with pytest.raises(ControlPlaneError) as excinfo:
+        plane.schedule_update(_principal(), daily, prompt="changed by a run")
+    assert excinfo.value.code == "unattended_forbidden"
+    # Metadata stays open to an unattended run.
+    assert plane.schedule_update(_principal(), daily, title="renamed")["ok"] is True
+    chats[CHAT] = _chat()
+    assert plane.schedule_update(_principal(), daily, frequency="interval", interval_minutes=5)["ok"] is True
+    assert store.get(daily).frequency == "interval"
+
+
+def test_a_repeat_start_with_the_same_prompt_and_cadence_is_refused(tmp_path: Path) -> None:
+    plane, _store = _plane(tmp_path, {CHAT: _chat(), "chat-b": _chat(chat_id="chat-b")})
+    first = _start(plane, every="5m", prompt="check the build")["data"]["id"]
+    with pytest.raises(ControlPlaneError) as excinfo:
+        _start(plane, every="5m", prompt="check the build")
+    assert excinfo.value.code == "loop_duplicate"
+    assert first in str(excinfo.value)
+    assert _start(plane, every="10m", prompt="check the build")["ok"] is True
+    assert _start(plane, every="5m", prompt="check the tests")["ok"] is True
+    assert _start(plane, _principal("chat-b"), every="5m", prompt="check the build")["ok"] is True
+
+
+@pytest.mark.parametrize("text", ["٥m", "١h", "1٤m", "+5m", " 5m5 "])
+def test_span_digits_are_ascii_only(text: str) -> None:
+    assert parse_loop_span(text) is None
+
+
+def test_huge_spans_are_refused_as_their_flag_not_as_loop_invalid(tmp_path: Path) -> None:
+    assert parse_loop_span("24h") == 1440
+    assert parse_loop_span("25h") is None
+    assert parse_loop_span("9" * 5000 + "m") is None
+    plane, _store = _plane(tmp_path)
+    with pytest.raises(ControlPlaneError) as excinfo:
+        _start(plane, every="99999999999h")
+    assert excinfo.value.code == "invalid_every"
+    with pytest.raises(ControlPlaneError) as excinfo:
+        _start(plane, until="99h")
+    assert excinfo.value.code == "invalid_until"
+
+
+def test_the_stored_prompt_drops_control_characters_but_keeps_newlines_and_tabs(tmp_path: Path) -> None:
+    plane, store = _plane(tmp_path)
+    loop_id = _start(plane, prompt="a\x00b\x07c\n\td\r\x1b")["data"]["id"]
+    assert store.get(loop_id).prompt == "abc\n\td"
+
+
+def test_the_prompt_cap_is_counted_after_control_characters_are_dropped(tmp_path: Path) -> None:
+    plane, _store = _plane(tmp_path)
+    _start(plane, prompt="x" * 3999 + "\x01y")
+    with pytest.raises(ControlPlaneError) as excinfo:
+        _start(plane, prompt="x" * 4001, every="6m")
+    assert excinfo.value.code == "loop_invalid"

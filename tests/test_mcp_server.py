@@ -973,7 +973,15 @@ class _ChatCreatePcm:
 
     def get_chat(self, chat_id: str):
         if chat_id == "chat-1":
-            return SimpleNamespace(chat_id=chat_id, mode=self.parent_mode)
+            return SimpleNamespace(
+                chat_id=chat_id,
+                mode=self.parent_mode,
+                # The turn fields every real chat carries; an update that changes what a schedule runs reads them.
+                user_turn_count=1,
+                user_turn_origin={"0": ""},
+                user_turn_unattended={},
+                helper={},
+            )
         return None
 
     def create_chat(self, project_id, **kwargs):

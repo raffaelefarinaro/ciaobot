@@ -9,6 +9,7 @@ the scheduler's cadence and counting, and the restore side.
 from __future__ import annotations
 
 import asyncio
+import itertools
 import dataclasses
 import hashlib
 import json
@@ -50,8 +51,12 @@ def store(tmp_path: Path) -> ScheduleStore:
     return ScheduleStore(tmp_path)
 
 
+_PROMPTS = itertools.count(1)
+
+
 def _loop(store: ScheduleStore, *, chat: str = "chat-a", now: datetime = T0, **kwargs: Any):
-    params: dict[str, Any] = {"prompt": "check PRs", "interval_minutes": 10}
+    # A fresh prompt per loop: an identical prompt and cadence in one chat is a duplicate, refused by design.
+    params: dict[str, Any] = {"prompt": f"check PRs {next(_PROMPTS)}", "interval_minutes": 10}
     params.update(kwargs)
     return store.create_owned_loop(owner_chat_id=chat, now=now, **params)
 
