@@ -26,7 +26,7 @@ To use another folder, such as a notes folder you already have, pass `--workspac
 curl -fsSL https://github.com/raffaelefarinaro/ciaobot/releases/latest/download/install.sh | sh -s -- --workspace ~/MyNotes
 ```
 
-The folder stays yours, in plain Markdown, usable with any other tool. Keep it out of iCloud Drive, Dropbox, Google Drive and OneDrive; [Before you start](https://www.raffaelefarinaro.com/ciaobot/guide.html#before-you-start) explains why, and what Ciaobot does with Git in it.
+The folder stays yours, in plain Markdown, usable with any other tool. Keep it out of iCloud Drive, Dropbox, Google Drive and OneDrive: sync conflicts damage files and Git history. Use Ciaobot's [private Git backup](https://www.raffaelefarinaro.com/ciaobot/memory.html#backup) instead.
 
 The first time you open Ciaobot, Home shows your workspace folder and the password on the computer running it (the password is also `PWA_AUTH_TOKEN` in the folder's `.env`). Change the AI tool in **Settings → Overview** and the password in **Settings → General**.
 
