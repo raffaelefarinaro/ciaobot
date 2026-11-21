@@ -74,6 +74,7 @@ from ciao.app_settings import DEFAULT_LOG_LEVEL, DEFAULT_PWA_HOST, LOG_LEVELS
 from ciao.config import (
     CLAUDE_MODELS,
     MAX_IMAGE_SIZE_BYTES,
+    MEMORY_APPROVAL_KINDS,
     CiaoConfig,
     RESTART_EXIT_CODE,
     WorkspaceConfig,
@@ -9146,10 +9147,22 @@ async def proposals_handover(request: Request) -> JSONResponse:
     trusted = await asyncio.to_thread(
         trusted_registry, workspace, Path(config.workspace_vault_root(workspace))
     )
+    policy = proposal_predictions.HandoverPolicy.of(registered)
+    # What the run would do for each kind now: the explicit choice, or the legacy
+    # setting when the kind is inherited. Reported only; the engine decides at the seam.
+    accept_resolved = {
+        kind: {
+            "mode": "auto" if proposal_predictions.accept_allowed(policy, kind) else "approve",
+            "inherited": kind not in policy.memory_approval,
+        }
+        for kind in MEMORY_APPROVAL_KINDS
+    }
     return JSONResponse(
         {
             "workspace": workspace,
             "handover": registered.memory_handover,
+            "memory_approval": dict(registered.memory_approval),
+            "accept_resolved": accept_resolved,
             "acting_available": trusted is not None,
             "agreement": payload,
         }

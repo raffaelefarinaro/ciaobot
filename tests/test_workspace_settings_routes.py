@@ -2450,3 +2450,83 @@ def test_reorder_workspaces_waits_for_the_registry_lock(tmp_path):
         assert list(config.workspaces) == wanted
 
     asyncio.run(scenario())
+
+
+def test_memory_approval_patch_merges_one_kind_and_keeps_the_other(tmp_path):
+    client, config, _pcm = _client(tmp_path)
+    registry = tmp_path / ".runtime" / "workspaces.json"
+    assert client.post("/api/workspaces", json={"name": "research"}).status_code == 201
+
+    first = client.patch("/api/workspaces/research", json={"memory_approval": {"profile": "auto"}})
+    second = client.patch("/api/workspaces/research", json={"memory_approval": {"memory": "approve"}})
+    assert first.status_code == second.status_code == 200, second.json()
+    assert config.workspace("research").memory_approval == {"profile": "auto", "memory": "approve"}
+    stored = {w["name"]: w for w in json.loads(registry.read_text())}
+    assert stored["research"]["memory_approval"] == {"profile": "auto", "memory": "approve"}
+    listed = client.get("/api/workspaces").json()
+    row = next(w for w in listed["workspaces"] if w["name"] == "research")
+    assert row["memory_approval"] == {"profile": "auto", "memory": "approve"}
+    # No silent propagation to another workspace.
+    assert config.workspace("personal").memory_approval == {}
+
+
+def test_memory_approval_null_for_one_kind_resets_only_that_kind(tmp_path):
+    client, config, _pcm = _client(tmp_path)
+    registry = tmp_path / ".runtime" / "workspaces.json"
+    client.post("/api/workspaces", json={"name": "research"})
+    client.patch("/api/workspaces/research", json={"memory_approval": {"memory": "approve", "profile": "auto"}})
+
+    reset = client.patch("/api/workspaces/research", json={"memory_approval": {"profile": None}})
+
+    assert reset.status_code == 200, reset.json()
+    assert config.workspace("research").memory_approval == {"memory": "approve"}
+    stored = {w["name"]: w for w in json.loads(registry.read_text())}
+    assert stored["research"]["memory_approval"] == {"memory": "approve"}
+
+
+def test_a_patch_that_leaves_memory_approval_out_keeps_it(tmp_path):
+    client, config, _pcm = _client(tmp_path)
+    client.post("/api/workspaces", json={"name": "research"})
+    client.patch("/api/workspaces/research", json={"memory_approval": {"memory": "auto"}})
+
+    saved = client.patch("/api/workspaces/research", json={"color": "amber"})
+
+    assert saved.status_code == 200, saved.json()
+    assert config.workspace("research").memory_approval == {"memory": "auto"}
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        {"memory_approval": None},  # whole-field null is refused; reset per kind
+        {"memory_approval": "auto"},
+        {"memory_approval": {"project": "auto"}},
+        {"memory_approval": {"memory": "everything"}},
+        {"memory_approval": {"memory": "approve", "profile": "Auto"}},  # one bad entry refuses all
+    ],
+)
+def test_a_bad_memory_approval_refuses_the_whole_save(tmp_path, body):
+    client, config, _pcm = _client(tmp_path)
+    registry = tmp_path / ".runtime" / "workspaces.json"
+    client.post("/api/workspaces", json={"name": "research"})
+    client.patch("/api/workspaces/research", json={"memory_approval": {"profile": "auto"}})
+    before_registry = registry.read_bytes()
+
+    refused = client.patch("/api/workspaces/research", json={**body, "color": "amber"})
+
+    assert refused.status_code == 400, refused.json()
+    assert config.workspace("research").memory_approval == {"profile": "auto"}
+    assert registry.read_bytes() == before_registry
+
+
+def test_creating_a_workspace_with_a_kind_choice_stores_it_sparse(tmp_path):
+    client, config, _pcm = _client(tmp_path)
+    registry = tmp_path / ".runtime" / "workspaces.json"
+
+    created = client.post("/api/workspaces", json={"name": "research", "memory_approval": {"memory": "approve"}})
+
+    assert created.status_code == 201, created.json()
+    assert config.workspace("research").memory_approval == {"memory": "approve"}
+    stored = {w["name"]: w for w in json.loads(registry.read_text())}
+    assert stored["research"]["memory_approval"] == {"memory": "approve"}
+    assert "memory_approval" not in stored["personal"]

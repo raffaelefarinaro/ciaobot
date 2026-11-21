@@ -9,6 +9,7 @@ from __future__ import annotations
 import json
 import time
 from dataclasses import replace
+from datetime import UTC, datetime
 from pathlib import Path
 from types import SimpleNamespace
 import threading
@@ -1137,3 +1138,305 @@ def test_a_malformed_stored_plan_exits_one_without_a_traceback_and_keeps_the_lea
     assert curation_run.state_path(install.vault).exists()
     assert json.loads(path.read_text(encoding="utf-8"))["lease"]["holder"] == holder
 
+
+
+# ── per-kind acceptance (memory_approval) at the engine seam ────────────────
+
+PROFILE_LINE = "- [profile] Writes in short sentences."
+PROFILE_FACT = "Writes in short sentences."
+
+
+def _set_approval(env, mapping: dict | None) -> None:
+    registry = env.root / ".runtime" / "workspaces.json"
+    entry = json.loads(registry.read_text(encoding="utf-8"))
+    if mapping is None:
+        entry[0].pop("memory_approval", None)
+    else:
+        entry[0]["memory_approval"] = mapping
+    registry.write_text(json.dumps(entry), encoding="utf-8")
+
+
+def _profile_text(env) -> str:
+    entries, diags = read_region(env.guide, "profile")
+    assert not diags
+    return "\n".join(entries)
+
+
+def _cli_accept(env, holder: str, needle_file: Path) -> int:
+    return cli.main(
+        [
+            "memory-proposal-accept",
+            "--workspace", str(env.root),
+            "--vault-root", str(env.vault),
+            "--text-file", str(needle_file),
+            "--holder", holder,
+        ]
+    )
+
+
+def test_explicit_approve_refuses_the_direct_cli_accept_under_legacy_all(install, capsys, tmp_path) -> None:
+    _set_approval(install, {"memory": "approve"})
+    holder = _lease(install.vault)
+    _predict(install.queue)
+    needle = tmp_path / "needle.txt"
+    needle.write_text(FACT, encoding="utf-8")
+    guide_before = install.guide.read_bytes()
+    queue_before = install.queue.read_bytes()
+
+    assert _cli_accept(install, holder, needle) == 1
+
+    assert "needs your approval" in capsys.readouterr().err
+    assert install.guide.read_bytes() == guide_before
+    assert install.queue.read_bytes() == queue_before
+    journal = memory_receipts.journal_path(install.vault, install.guide)
+    assert not [r for r in memory_receipts.read_receipts(journal) if r.get("kind") == "region_apply"]
+    assert read_decisions(install.queue) == []
+
+
+def test_policy_changed_to_approve_is_refused_at_the_guide_lock_seam(install, monkeypatch) -> None:
+    """The value handed to ``accept_region_fact``'s authorize is what refuses, under the guide lock."""
+    intent = _accept_ready(install)
+    real = memory_proposals.accept_region_fact
+    seen: list[bool] = []
+
+    def flip_then_write(**kwargs):
+        # After the pre-write check passed, before the guide lock is taken.
+        _set_approval(install, {"memory": "approve"})
+        real_authorize = kwargs["authorize"]
+
+        @contextmanager
+        def observed():
+            with real_authorize() as allowed:
+                seen.append(allowed)
+                yield allowed
+
+        kwargs["authorize"] = observed
+        return real(**kwargs)
+
+    monkeypatch.setattr(memory_proposals, "accept_region_fact", flip_then_write)
+    guide_before = install.guide.read_bytes()
+
+    result = apply.apply_memory_accept(intent, vault_root=install.vault)
+
+    assert seen == [False]
+    assert result == apply.Refused(apply.REFUSED_WRITE_NOT_AUTHORISED)
+    assert install.guide.read_bytes() == guide_before
+    assert FACT in install.queue.read_text(encoding="utf-8")
+    assert not [r for r in read_decisions(install.queue) if r["operation_id"] == intent.operation_id]
+
+
+def test_policy_changed_to_approve_between_the_two_effects_is_a_partial_conflict_then_recovers(
+    install, monkeypatch
+) -> None:
+    intent = _accept_ready(install)
+    real_write = apply._write_region
+
+    def write_then_approve(*args, **kwargs):
+        result = real_write(*args, **kwargs)
+        _set_approval(install, {"memory": "approve"})
+        return result
+
+    monkeypatch.setattr(apply, "_write_region", write_then_approve)
+
+    result = apply.apply_memory_accept(intent, vault_root=install.vault)
+
+    assert isinstance(result, apply.PartialConflict)
+    assert _region_text(install).count(FACT) == 1
+    assert FACT in install.queue.read_text(encoding="utf-8")
+    assert not [r for r in read_decisions(install.queue) if r["operation_id"] == intent.operation_id]
+
+    # The operator restores the default and the same operation finishes it.
+    _set_approval(install, None)
+    monkeypatch.setattr(apply, "_write_region", real_write)
+    finished = apply.apply_memory_accept(intent, vault_root=install.vault)
+
+    assert isinstance(finished, apply.Accepted)
+    assert _region_text(install).count(FACT) == 1
+    assert FACT not in install.queue.read_text(encoding="utf-8")
+    owned = [r for r in read_decisions(install.queue) if r["operation_id"] == intent.operation_id]
+    assert len(owned) == 1
+
+
+def test_auto_under_legacy_off_accepts_only_its_kind(install) -> None:
+    install.queue_rows(LINE, PROFILE_LINE)
+    _set_approval(install, {"profile": "auto"})
+    holder = _lease(install.vault)
+    _predict(install.queue, FACT, kind="memory")
+    _predict(install.queue, PROFILE_FACT, kind="profile")
+    registry = install.root / ".runtime" / "workspaces.json"
+    entry = json.loads(registry.read_text(encoding="utf-8"))
+    entry[0]["memory_handover"] = "off"
+    registry.write_text(json.dumps(entry), encoding="utf-8")
+
+    profile = apply.apply_memory_accept(
+        _plan(install, PROFILE_LINE, holder=holder), vault_root=install.vault
+    )
+    memory = apply.apply_memory_accept(_plan(install, LINE, holder=holder), vault_root=install.vault)
+
+    assert isinstance(profile, apply.Accepted)
+    assert PROFILE_FACT in _profile_text(install)
+    assert memory == apply.Refused(apply.REFUSED_HANDOVER)
+    assert FACT not in _region_text(install)
+    assert FACT in install.queue.read_text(encoding="utf-8")
+
+
+def test_dismissal_follows_the_legacy_setting_only(install, capsys) -> None:
+    _set_approval(install, {"memory": "approve"})
+    registry = install.root / ".runtime" / "workspaces.json"
+    entry = json.loads(registry.read_text(encoding="utf-8"))
+    entry[0]["memory_handover"] = "dismiss"
+    registry.write_text(json.dumps(entry), encoding="utf-8")
+    _lease(install.vault)
+    _predict(install.queue, verdict="dismiss")
+    bullet = parse_bullet(LINE)
+
+    # Approve for accept does not stop a dismissal the legacy setting allows.
+    assert cli._handover_gate(install.root, "work", install.queue, bullet) == ""
+
+    _set_approval(install, {"memory": "auto"})
+    entry = json.loads(registry.read_text(encoding="utf-8"))
+    entry[0]["memory_handover"] = "off"
+    registry.write_text(json.dumps(entry), encoding="utf-8")
+
+    # An explicit accept choice never grants a dismissal the legacy setting refuses.
+    assert "does not allow dismiss" in cli._handover_gate(install.root, "work", install.queue, bullet)
+
+
+def test_the_refusal_reason_names_an_explicit_approve_and_the_legacy_refusal(install) -> None:
+    intent = _accept_ready(install)
+    holder = intent.holder
+
+    _set_approval(install, {"memory": "approve"})
+    _, _, reason = apply._check_row(install.vault, install.queue, intent)
+    assert reason == apply.REFUSED_APPROVAL
+    with apply._holder_may_accept(
+        install.vault, install.queue, workspace="work", kind="memory",
+        holder=holder, started=datetime.now(UTC), operation_id=intent.operation_id,
+    ) as allowed:
+        assert allowed is False
+    assert apply._accept_refusal(install.vault, "work", "memory") == apply.REFUSED_APPROVAL
+
+    _set_approval(install, None)
+    registry = install.root / ".runtime" / "workspaces.json"
+    entry = json.loads(registry.read_text(encoding="utf-8"))
+    entry[0]["memory_handover"] = "off"
+    registry.write_text(json.dumps(entry), encoding="utf-8")
+    _, _, reason = apply._check_row(install.vault, install.queue, intent)
+    assert reason == apply.REFUSED_HANDOVER
+    with apply._holder_may_accept(
+        install.vault, install.queue, workspace="work", kind="memory",
+        holder=holder, started=datetime.now(UTC), operation_id=intent.operation_id,
+    ) as allowed:
+        assert allowed is False
+    assert apply._accept_refusal(install.vault, "work", "memory") == apply.REFUSED_HANDOVER
+
+
+# ── the resume path reads the per-kind policy of the receipt's kind ─────────
+
+
+def _crashed_accept(install, monkeypatch, tmp_path):
+    holder = _lease(install.vault)
+    _predict(install.queue)
+    argv = _accept_argv(install, tmp_path, holder)
+    _crash_at_decision(install, monkeypatch, argv)
+    return holder, argv
+
+
+def _set_policy(install, *, handover: str, approval: dict | None = None) -> None:
+    entry: dict = {"name": "work", "vault_root": str(install.vault), "memory_handover": handover}
+    if approval is not None:
+        entry["memory_approval"] = approval
+    (install.root / ".runtime" / "workspaces.json").write_text(json.dumps([entry]), encoding="utf-8")
+
+
+def _owned_decisions(install, operation_id: str) -> list[dict]:
+    return [r for r in read_decisions(install.queue) if r.get("operation_id") == operation_id]
+
+
+def test_a_resume_is_refused_when_the_operator_flips_the_kind_to_approve(install, monkeypatch, tmp_path) -> None:
+    holder, argv = _crashed_accept(install, monkeypatch, tmp_path)
+    receipt = _receipts_of(install, "queue_resolve")[0]
+    _set_policy(install, handover="all", approval={"memory": "approve"})
+    before = _state_of(install)
+
+    assert apply.resume_memory_accept(
+        install.vault, workspace="work", holder=holder, receipt=receipt
+    ) == apply.Refused(apply.REFUSED_WITHDRAWN)
+    assert cli.main(argv) == 1
+    assert _state_of(install) == before
+    assert _owned_decisions(install, receipt["operation_id"]) == []
+
+
+def test_a_resume_is_allowed_for_an_explicit_auto_under_legacy_off(install, monkeypatch, tmp_path) -> None:
+    holder, argv = _crashed_accept(install, monkeypatch, tmp_path)
+    _set_policy(install, handover="off", approval={"memory": "auto"})
+
+    assert cli.main(argv) == 0
+
+    receipt = _receipts_of(install, "queue_resolve")[0]
+    owned = _owned_decisions(install, receipt["operation_id"])
+    assert len(owned) == 1 and owned[0]["via"] == "agent"
+
+
+def test_a_resume_is_refused_under_legacy_off_without_an_explicit_choice(install, monkeypatch, tmp_path) -> None:
+    holder, argv = _crashed_accept(install, monkeypatch, tmp_path)
+    receipt = _receipts_of(install, "queue_resolve")[0]
+    _set_policy(install, handover="off")
+
+    assert apply.resume_memory_accept(
+        install.vault, workspace="work", holder=holder, receipt=receipt
+    ) == apply.Refused(apply.REFUSED_WITHDRAWN)
+    assert cli.main(argv) == 1
+
+
+def test_a_resume_reads_only_the_receipts_own_kind(install, monkeypatch, tmp_path) -> None:
+    holder, argv = _crashed_accept(install, monkeypatch, tmp_path)
+    _set_policy(install, handover="all", approval={"profile": "approve"})
+
+    assert cli.main(argv) == 0
+    receipt = _receipts_of(install, "queue_resolve")[0]
+    assert len(_owned_decisions(install, receipt["operation_id"])) == 1
+
+
+def test_a_resume_under_legacy_all_is_unchanged(install, monkeypatch, tmp_path) -> None:
+    holder, argv = _crashed_accept(install, monkeypatch, tmp_path)
+    receipt = _receipts_of(install, "queue_resolve")[0]
+
+    assert apply.resume_memory_accept(
+        install.vault, workspace="work", holder=holder, receipt=receipt
+    ) != apply.Refused(apply.REFUSED_HANDOVER)
+    assert cli.main(argv) == 0
+
+
+def test_a_resume_with_an_unknown_receipt_kind_is_refused(install, monkeypatch, tmp_path) -> None:
+    holder, _argv = _crashed_accept(install, monkeypatch, tmp_path)
+    receipt = dict(_receipts_of(install, "queue_resolve")[0], proposal_kind="project")
+    before = _state_of(install)
+
+    assert apply.resume_memory_accept(
+        install.vault, workspace="work", holder=holder, receipt=receipt
+    ) == apply.Refused(apply.REFUSED_KIND)
+    assert _state_of(install) == before
+
+
+def test_a_policy_withdrawn_between_the_resume_check_and_the_decision_writes_no_decision(
+    install, monkeypatch, tmp_path
+) -> None:
+    """The decision write re-reads the kind's policy; a withdrawal after the entry check stops it."""
+    holder, _argv = _crashed_accept(install, monkeypatch, tmp_path)
+    receipt = _receipts_of(install, "queue_resolve")[0]
+    guide_before = install.guide.read_bytes()
+    real_verify = apply._verify_region
+
+    def withdraw_then_verify(*args, **kwargs):
+        _set_policy(install, handover="all", approval={"memory": "approve"})
+        return real_verify(*args, **kwargs)
+
+    monkeypatch.setattr(apply, "_verify_region", withdraw_then_verify)
+
+    result = apply.resume_memory_accept(install.vault, workspace="work", holder=holder, receipt=receipt)
+
+    assert result == apply.Failed(apply.REFUSED_WITHDRAWN)
+    assert _owned_decisions(install, receipt["operation_id"]) == []
+    assert receipt["item_key"] not in curation_run.load_state(install.vault).done_keys
+    assert install.guide.read_bytes() == guide_before

@@ -26,6 +26,7 @@ from ciao import curation_run as cr
 from ciao import memory_receipts as mr
 from ciao import skill_proposals, task_decisions
 from ciao.config import CiaoConfig, WorkspaceConfig
+from ciao.proposal_predictions import HandoverPolicy
 from ciao.learning_records import (
     LearningRecord,
     allocate_learning_id,
@@ -4359,7 +4360,7 @@ def _worklist_for_queue(
             encoding="utf-8",
         )
     return cr.build_worklist(
-        handover=handover,
+        policy=HandoverPolicy(handover),
         vault_root=vault,
         workspace=vault.name,
         guide_path=guide,

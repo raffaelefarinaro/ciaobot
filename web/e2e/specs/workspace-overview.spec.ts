@@ -108,6 +108,33 @@ test.describe('workspace overview', () => {
     expect(saves).toHaveLength(2)
   })
 
+  test('the per-kind acceptance rows sit under the handover and take arrow keys', async ({ page }) => {
+    await page.setViewportSize({ width: 1280, height: 900 })
+    await boot(page, OVERVIEW, READY)
+
+    // Both kinds are labelled radiogroups under the handover card. They start
+    // inherited: "Ask me" is checked and no reset link is offered.
+    const profile = page.getByRole('radiogroup', { name: 'Profile', exact: true })
+    await expect(page.getByRole('radiogroup', { name: 'Memory', exact: true })).toBeVisible()
+    await profile.scrollIntoViewIfNeeded()
+    const askMe = profile.getByRole('radio', { name: 'Ask me', exact: true })
+    await expect(askMe).toHaveAttribute('aria-checked', 'true')
+    await expect(page.getByRole('button', { name: 'Reset to inherited' })).toHaveCount(0)
+
+    // Arrow keys reach "Let Workspace care add it" through the confirm dialog;
+    // once allowed, the row shows the choice as set for this kind.
+    await askMe.focus()
+    await page.keyboard.press('ArrowRight')
+    await page.getByRole('button', { name: 'Allow', exact: true }).click()
+    await expect(profile.getByRole('radio', { name: 'Let Workspace care add it', exact: true })).toHaveAttribute('aria-checked', 'true')
+    await expect(page.getByText('Set for this kind.')).toBeVisible()
+
+    // Reset returns the kind to the inherited choice.
+    await page.getByRole('button', { name: 'Reset to inherited' }).click()
+    await expect(askMe).toHaveAttribute('aria-checked', 'true')
+    await expect(page.getByRole('button', { name: 'Reset to inherited' })).toHaveCount(0)
+  })
+
   test('the All workspaces card ends the page and Settings \u2191 returns to the top', async ({ page }) => {
     await page.setViewportSize({ width: 1280, height: 700 })
     await boot(page, OVERVIEW, READY)
