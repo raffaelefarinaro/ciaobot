@@ -993,13 +993,40 @@ def test_cli_over_cap_or_unreadable_reason_file_exits_2_and_changes_nothing(
         assert not journal_path(vault, None).exists()
 
 
-def test_cli_without_reason_file_is_unchanged(tmp_path: Path) -> None:
+def test_cli_agent_dismiss_without_a_reason_records_the_fixed_reason(tmp_path: Path) -> None:
     from ciao import cli
 
     vault, queue = _reason_queue(tmp_path)
 
     assert cli.main(_dismiss_args(tmp_path, vault)) == 0
+    decision = read_decisions(queue)[0]
+    assert decision["via"] == "agent"
+    assert decision["reason"] == cli.DISMISS_DECISION_REASON
+
+
+def test_cli_agent_dismiss_keeps_a_caller_reason_over_the_fixed_one(tmp_path: Path) -> None:
+    from ciao import cli
+
+    vault, queue = _reason_queue(tmp_path)
+    reason_file = tmp_path / "reason.txt"
+    reason_file.write_text("stale after the rewrite", encoding="utf-8")
+
+    assert cli.main(_dismiss_args(tmp_path, vault, "--reason-file", str(reason_file))) == 0
+    assert read_decisions(queue)[0]["reason"] == "stale after the rewrite"
+
+
+def test_cli_human_style_dismiss_without_a_reason_is_not_given_the_automated_one(
+    tmp_path: Path,
+) -> None:
+    """The fixed reason is for automated dismissals; a decision with no `via` stays reasonless."""
+    from ciao import cli
+    from ciao.memory_proposals import record_dismissal
+
+    vault, queue = _reason_queue(tmp_path)
+    record_dismissal(queue, text="A human row.", kind="memory", via="pwa")
+
     assert read_decisions(queue)[0]["reason"] == ""
+    assert cli.DISMISS_DECISION_REASON not in read_decisions(queue)[0]["reason"]
 
 
 # ── credential-adjacent reason files are refused (#1734) ───────────────────
