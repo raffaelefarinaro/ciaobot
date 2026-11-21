@@ -361,6 +361,9 @@ class _DriveHost:
         del token
         self.discarded.append(chat_id)
 
+    def _settle_stop_notice(self, chat_id: str) -> None:
+        del chat_id
+
     def note_unattended_denial(self, chat_id: str) -> None:
         self.denials.append(chat_id)
 

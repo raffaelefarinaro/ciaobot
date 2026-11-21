@@ -137,7 +137,7 @@ def test_an_ordinary_row_keeps_the_revision_it_had_before_loops(tmp_path: Path) 
     excluded = {
         "last_triggered_on", "last_dispatched_at", "last_run_chat_id", "last_status",
         "last_recovered_on", "last_dispatch_id", "last_completed_on",
-        "created_at", "scope", "editable", "removable", *LOOP_KEYS,
+        "created_at", "scope", "editable", "removable", "fail_streak", *LOOP_KEYS,
     }
     content = {k: v for k, v in asdict(old).items() if k not in excluded}
     raw = json.dumps(content, sort_keys=True, separators=(",", ":"), default=str)

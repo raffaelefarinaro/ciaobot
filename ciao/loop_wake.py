@@ -10,11 +10,13 @@ data. The fence only delimits it.
 
 from __future__ import annotations
 
+import re
 from datetime import datetime
 from typing import TYPE_CHECKING
 from zoneinfo import ZoneInfo
 
 from ciao.prompt_fence import fence
+from ciao.schedules import LOOP_FAIL_LIMIT
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
     from ciao.schedules import ScheduleEntry
@@ -54,3 +56,22 @@ def loop_wake_prompt(entry: ScheduleEntry, *, now: datetime) -> str:
     )
     body = fence(LOOP_PROMPT_TAG, entry.prompt, label=_PROMPT_LABEL)
     return f"{header}\n\n{body}"
+
+
+_TOOL_NAME = re.compile(r"[A-Za-z][A-Za-z0-9_.-]{0,63}")
+
+
+def loop_stop_text(denied_tool: str) -> str:
+    """The fixed text of the notice a stopped loop leaves (#3509).
+
+    The same words go to the push, the Mac banner and the owner chat's note, so
+    the user reads one thing whatever the model says back. Only a tool's name
+    ever reaches it: a denied tool's title can carry a command, which is cut at
+    the first character that is not part of a name. A failure names no cause.
+    """
+    head = f"Loop stopped after {LOOP_FAIL_LIMIT} failed runs"
+    if not denied_tool:
+        return f"{head}. Start it again if you want."
+    match = _TOOL_NAME.match(denied_tool.strip())
+    tool = match.group(0) if match else "a tool"
+    return f"{head}: denied {tool}. Allow it and start it again if you want."

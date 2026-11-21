@@ -850,6 +850,9 @@ class ScheduleDispatcher:
             # _settle_schedule_retry). The job-run log keeps "skipped".
             _row_status = schedule_support.RUN_STATUS_RETRYING
         result["status"] = _row_status
+        if loop_owned and _row_status == "error":
+            # The loop stop notice names a denied tool, so the scheduler needs it.
+            result["denied_tool"] = outcome.permission_denied
         # A failed run is stamped on the stored row, not just in the job log:
         # without this a wall-clock entry failing every run (an archived target
         # resuming a dead provider session, say) produced an endless string of

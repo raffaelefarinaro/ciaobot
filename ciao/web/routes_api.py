@@ -5663,6 +5663,8 @@ def _enrich_schedule(
 ) -> dict:
     """Serialize a ScheduleEntry and attach computed fields (context_label, next_run)."""
     entry_dict = asdict(entry)
+    # Engine-internal streak: no PWA surface reads it, so it stays off the payload.
+    entry_dict.pop("fail_streak", None)
     if pcm is not None and hasattr(pcm, "schedule_effective_routing"):
         provider, model, workspace = pcm.schedule_effective_routing(entry)
         entry_dict["effective_provider"] = provider

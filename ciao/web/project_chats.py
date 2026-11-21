@@ -231,7 +231,7 @@ from ciao.transcripts import (
     _global_sessions_present,
     parse_archive_turns,
 )
-from ciao import shell_wake
+from ciao import loop_wake, shell_wake
 from ciao.web import chat_service
 from ciao.web import restart_resume
 from ciao.web.chat_broker import (
@@ -1369,6 +1369,9 @@ class ProjectChatManager:
         # continuation claimed, awaiting its close.
         self._shell_notice_due: dict[tuple[str, str], float] = {}
         self._claimed_notices: dict[str, list[ShellFinishedEvent]] = {}
+        # Chats whose next reply is the one to a loop stop note (#3509): that
+        # reply is not announced, because the engine's own notice already was.
+        self._stop_notice_chats: set[str] = set()
         # Shell call ids a continuation answered, by chat: their ends are never announced as wakes.
         self._claimed_shell_ids: dict[str, set[str]] = {}
         # A claimed card a superseded drain did not publish, by chat.
@@ -9059,7 +9062,18 @@ class ProjectChatManager:
     def _announce_result_ready(
         self, chat_id: str, project_id: str, title: str, snippet: str
     ) -> None:
-        """Publish ``chat_result_ready`` and queue a delayed result push."""
+        """Publish ``chat_result_ready`` and queue a delayed result push.
+
+        The reply to a loop stop note is not announced: the engine's own notice
+        already is, and the reply must not make a second notification.
+        """
+        if chat_id in self._stop_notice_chats:
+            return
+        self._publish_result_ready(chat_id, project_id, title, snippet)
+
+    def _publish_result_ready(
+        self, chat_id: str, project_id: str, title: str, snippet: str
+    ) -> None:
         chat = self._chats.get(chat_id)
         self._events.publish({
             "type": "chat_result_ready",
@@ -9116,6 +9130,27 @@ class ProjectChatManager:
             return
         snippet = self._result_snippet(chat.last_error or "The loop run needs your attention.")
         self._schedule_push(chat_id, chat.title, snippet)
+
+    def note_loop_stopped(self, entry: ScheduleEntry, denied_tool: str) -> None:
+        """Tell a loop's owner chat the engine stopped the loop after failed runs.
+
+        The engine raises the one notification itself, with fixed text, so it
+        does not depend on what the model replies to the note. The failed run's
+        own pending push is cancelled first, and the note's reply is not
+        announced (see ``_announce_result_ready``).
+        """
+        chat = self._chats.get(entry.owner_chat_id)
+        if chat is None or chat.archived:
+            return
+        text = loop_wake.loop_stop_text(denied_tool)
+        self._cancel_pending_push(chat.chat_id)
+        self._stop_notice_chats.add(chat.chat_id)
+        self._deliver_wake(chat, text, count=1, origin="background_run")
+        self._publish_result_ready(chat.chat_id, chat.project_id, chat.title, text)
+
+    def _settle_stop_notice(self, chat_id: str) -> None:
+        """A turn ended: whatever reply it gave, the stop note's marker is spent."""
+        self._stop_notice_chats.discard(chat_id)
 
     def _schedule_push(self, chat_id: str, title: str, snippet: str) -> None:
         """Queue a delayed push for this chat. Cancels any prior pending

@@ -1152,6 +1152,7 @@ async def _run_server_locked(
         admission_closed=_update_admission_closed,
         on_change=lambda: publish_automations_changed(pcm),
         owner_alive=pcm.loop_owner_alive,
+        on_loop_stopped=lambda entry, tool: pcm.note_loop_stopped(entry, tool),
     )
 
     # Create and wire up web app. The MCP control plane is mandatory for chat;
