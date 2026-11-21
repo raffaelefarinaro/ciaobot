@@ -5125,6 +5125,11 @@ def _observation_prune_command(args: argparse.Namespace) -> int:
     return 0
 
 
+# The reason an automated dismissal records when its caller gives none. Fixed,
+# so it never echoes proposal text, and History can say why the row was settled.
+DISMISS_DECISION_REASON = "dismissed by an automated memory pass without a stated reason"
+
+
 def _memory_proposal_dismiss_command(args: argparse.Namespace) -> int:
     """Dismiss (delete) one memory proposal from the review queue.
 
@@ -5323,13 +5328,15 @@ def _memory_proposal_dismiss_command(args: argparse.Namespace) -> int:
     # the agent filed itself, and hid it from the review page's History tab
     # as an accepted row. The curator files a fact first and dismisses second,
     # so that flow is a promotion; only a bare rejection is a dismissal.
+    # An automated dismissal with no reason of its own gets the fixed one; an
+    # accept's reason stays as given (the curation accept writes its own).
     proposal_actions.record_decision(
         path,
         action="accept" if args.promoted else "dismiss",
         text=removed_text,
         kind=kind,
         via="agent",
-        reason=reason,
+        reason=reason or ("" if args.promoted else DISMISS_DECISION_REASON),
     )
     if args.json:
         # `text` is the resolved bullet, not the caller's needle: a row can be

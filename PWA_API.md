@@ -1524,6 +1524,21 @@ trash) rather than as a change with no snapshot, which is a different claim. A
 row whose record cannot be read simply has no `note_edit` key, the same contract
 as a missing `change`.
 
+Every `GET /api/proposals/history` row also says what the decision did, from its
+receipts and nothing else: `apply_status` is `applied`, `failed`, `conflict`,
+`rolled_back`, `undone`, `pending` (the write is prepared but not settled) or
+`none` (no receipt performed or describes it). `applied` is `true` for `applied`,
+`false` for `failed`, `conflict`, `rolled_back` and `undone` (an undo wins over the
+applied row it reverses), and `null` for `pending` and `none`. An approval whose
+write failed is therefore an accepted row with `applied: false`, never an applied
+one. `actor` is `automated` for a decision made by the care run or an agent CLI
+call and `human` otherwise; an `automated` row carries `run_id`, the opaque lease
+holder of the run that made it, so an Automations entry and a History row can name
+the same run. A `human` row has no `run_id`. `decided_at` is the decision's
+timestamp (the same value as the row's `ts`), and `reason` is the optional why,
+flattened to one line and bounded at 1000 characters. The worklist key the care
+report reads is never in the payload.
+
 ```bash
 # List every queued proposal across all workspaces, plus open skill-proposal
 # records. Each row: {id, kind, text, source, workspace, path, line}. `id` is a
