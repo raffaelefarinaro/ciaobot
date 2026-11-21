@@ -85,7 +85,7 @@ describe('LoginView setup wizard tests', () => {
     expect(wrapper.text()).not.toContain('auth_token')
     expect(wrapper.get('.login-submit').text()).toBe('Log in')
     const help = wrapper.get('a.login-help')
-    expect(help.attributes('href')).toBe('https://www.raffaelefarinaro.com/ciaobot/guide.html#password')
+    expect(help.attributes('href')).toBe('https://www.raffaelefarinaro.com/ciaobot/#password')
     expect(help.attributes('target')).toBe('_blank')
   })
 
