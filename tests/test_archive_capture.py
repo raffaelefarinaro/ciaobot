@@ -6,7 +6,10 @@ import hashlib
 import json
 import os
 import re
+import signal
 import sys
+from collections.abc import Iterator
+from contextlib import contextmanager
 from datetime import UTC, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
@@ -457,3 +460,59 @@ def test_append_refuses_a_symlinked_file(tmp_path: Path) -> None:
     with pytest.raises(OSError):
         append_capture(tmp_path, _record())
     assert target.read_text(encoding="utf-8") == "keep\n"
+
+
+class _Blocked(BaseException):
+    """The alarm fired: the call blocked instead of returning.
+
+    A BaseException, so the pipeline's ``except Exception`` cannot swallow a hang.
+    """
+
+
+@contextmanager
+def _alarm(seconds: int) -> Iterator[None]:
+    """Fail the test with TimeoutError instead of hanging on a blocked open or write."""
+
+    def _fire(signum: int, frame: object) -> None:
+        # Not an OSError: a hang must not pass as the refusal the test expects.
+        raise _Blocked("append_capture blocked")
+
+    previous = signal.signal(signal.SIGALRM, _fire)
+    signal.alarm(seconds)
+    try:
+        yield
+    finally:
+        signal.alarm(0)
+        signal.signal(signal.SIGALRM, previous)
+
+
+_POSIX_ONLY = pytest.mark.skipif(
+    sys.platform == "win32" or not hasattr(os, "mkfifo"), reason="needs POSIX FIFOs"
+)
+
+
+@_POSIX_ONLY
+def test_append_refuses_a_fifo_with_no_reader_promptly(tmp_path: Path) -> None:
+    captures_path(tmp_path).parent.mkdir(parents=True)
+    os.mkfifo(captures_path(tmp_path))
+    with _alarm(5), pytest.raises(OSError):
+        append_capture(tmp_path, _record())
+
+
+@_POSIX_ONLY
+def test_append_refuses_a_fifo_that_has_a_reader_before_writing(tmp_path: Path) -> None:
+    captures_path(tmp_path).parent.mkdir(parents=True)
+    os.mkfifo(captures_path(tmp_path))
+    reader = os.open(captures_path(tmp_path), os.O_RDONLY | os.O_NONBLOCK)
+    try:
+        with _alarm(5), pytest.raises(OSError):
+            append_capture(tmp_path, _record())
+    finally:
+        os.close(reader)
+
+
+def test_append_refuses_a_directory_at_the_path(tmp_path: Path) -> None:
+    captures_path(tmp_path).mkdir(parents=True)
+    with pytest.raises(OSError):
+        append_capture(tmp_path, _record())
+    assert captures_path(tmp_path).is_dir()

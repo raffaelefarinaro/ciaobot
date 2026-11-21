@@ -1253,11 +1253,11 @@ class MemoryPassCoordinator:
         if not source_chat_id or not workspace:
             return ""
         vault = Path(self._host._config.workspace_vault_root(workspace))
-        store = self._attempt_store(workspace)
+        store = self.attempt_store(workspace)
         return task_context.section_for_chat(store, vault, source_chat_id)
 
-    def _attempt_store(self, workspace: str) -> TaskAttemptStore:
-        """The workspace's attempt store, opened for reading by the prompt builder."""
+    def attempt_store(self, workspace: str) -> TaskAttemptStore:
+        """The workspace's attempt store, opened for reading by the prompt builder and the archive capture (#3239-c2)."""
         config = self._host._config
         return TaskAttemptStore(
             workspace=workspace,
@@ -1296,7 +1296,7 @@ class MemoryPassCoordinator:
         workspace = self._workspace_of(source)
         if not workspace:
             return candidates
-        store = self._attempt_store(workspace)
+        store = self.attempt_store(workspace)
         try:
             own = store.attempts_for_chat(source.chat_id)
             for task_id in sorted({attempt.task_id for attempt in own}):
