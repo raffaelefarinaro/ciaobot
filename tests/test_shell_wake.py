@@ -255,6 +255,9 @@ class _Chats:
 def _manager(chat: Any, recorder: _Chats | None = None) -> ProjectChatManager:
     """A manager with the real wake delivery; only storage and the stream are replaced."""
     manager = ProjectChatManager.__new__(ProjectChatManager)
+    manager._stop_notice_chats = set()
+    manager._held_stop_notes = {}
+    manager.schedule_store = None
     recorder = recorder or _Chats()
     manager._shell_finished_pending = {}
     manager._shell_finished_flushes = {}

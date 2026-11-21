@@ -39,6 +39,9 @@ async def test_restart_wait_requires_stable_idle_window() -> None:
 
 def _bare_manager() -> ProjectChatManager:
     manager = object.__new__(ProjectChatManager)
+    manager._stop_notice_chats = set()
+    manager._held_stop_notes = {}
+    manager.schedule_store = None
     manager._broker = ChatStreamBroker()
     manager._retry_generations = {}
     manager._restart_draining = False

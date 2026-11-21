@@ -420,6 +420,9 @@ async def test_auto_archive_stays_a_manager_lifecycle_seam(
 @pytest.mark.asyncio
 async def test_manager_methods_are_thin_schedule_dispatch_delegates() -> None:
     manager = object.__new__(ProjectChatManager)
+    manager._stop_notice_chats = set()
+    manager._held_stop_notes = {}
+    manager.schedule_store = None
     calls: list[tuple[str, object]] = []
 
     class _Dispatcher:

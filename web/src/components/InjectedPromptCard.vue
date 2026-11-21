@@ -47,6 +47,7 @@ const ICONS: Record<InjectedPrompt['kind'], AppIconName> = {
   retry_scheduled: 'clock',
   restart_resume: 'activity',
   chat_action: 'activity',
+  loop_stop: 'clock',
   error: 'activity',
   handover: 'activity',
 }
@@ -207,6 +208,10 @@ const md = (text: string) => renderUserMarkdown(text, props.knownPaths ?? [])
 
       <template v-else-if="prompt.kind === 'chat_action'">
         <p class="injected-card-note">You finished what this chat was waiting for, so Ciaobot asked the agent to continue.</p>
+      </template>
+
+      <template v-else-if="prompt.kind === 'loop_stop'">
+        <p class="injected-card-note">{{ prompt.text }}</p>
       </template>
 
       <!-- The pack is the exact text the new provider received, kept one

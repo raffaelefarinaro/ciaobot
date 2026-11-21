@@ -194,6 +194,9 @@ More.
     from ciao.web.project_chats import ProjectChatManager
 
     pcm = ProjectChatManager.__new__(ProjectChatManager)
+    pcm._stop_notice_chats = set()
+    pcm._held_stop_notes = {}
+    pcm.schedule_store = None
     rows = pcm._parse_transcript_messages(md)
 
     assistant = [r for r in rows if r["role"] == "assistant"]
@@ -249,6 +252,9 @@ def test_archived_reply_with_inner_fences_is_read_whole(tmp_path: Path) -> None:
     )
     assert archived is not None
     pcm = ProjectChatManager.__new__(ProjectChatManager)
+    pcm._stop_notice_chats = set()
+    pcm._held_stop_notes = {}
+    pcm.schedule_store = None
     rows = pcm._parse_transcript_messages(archived.read_text(encoding="utf-8"))
 
     assert [r["content"] for r in rows if r["role"] == "assistant"] == [response]
@@ -300,6 +306,9 @@ line B
 - status: allowed
 """
     pcm = ProjectChatManager.__new__(ProjectChatManager)
+    pcm._stop_notice_chats = set()
+    pcm._held_stop_notes = {}
+    pcm.schedule_store = None
     rows = pcm._parse_transcript_messages(md)
 
     assistant = [r for r in rows if r["role"] == "assistant"]

@@ -362,6 +362,7 @@ export interface ChatRetryInfo {
 export type TurnOrigin =
   | 'background_run' | 'cli_task_wake' | 'retry' | 'schedule' | 'loop' | 'task_delegation'
   | 'task_resume' | 'webhook' | 'update_task' | 'compaction' | 'restart_resume' | 'handover' | 'chat_action'
+  | 'loop_stop'
 
 export type VerifiedClaimStatus = 'supported' | 'unsupported' | 'general'
 export interface VerifiedClaim { text: string; status: VerifiedClaimStatus; source: string }

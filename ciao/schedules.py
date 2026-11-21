@@ -120,6 +120,8 @@ LOOP_MAX_RUNS = 288
 LOOP_MAX_PER_CHAT = 3
 LOOP_MAX_GLOBAL = 20
 LOOP_MAX_PROMPT_CHARS = 4000
+# Consecutive failed runs (an error, a denied permission included) that end a loop.
+LOOP_FAIL_LIMIT = 2
 # Fields that fix a loop's lifetime at creation. They never change afterwards.
 LOOP_LIFETIME_FIELDS = frozenset({"owner_chat_id", "expires_at", "max_runs"})
 
@@ -1413,6 +1415,9 @@ class ScheduleEntry:
     expires_at: str = ""
     max_runs: int = 0
     run_count: int = 0
+    # Consecutive runs that ended ``error``. A clean run resets it; a busy skip or
+    # a deferral leaves it alone. Reaching LOOP_FAIL_LIMIT ends the loop.
+    fail_streak: int = 0
 
 
 # Stored beside a row's own fields (inside the system overlay for a system
@@ -1430,6 +1435,7 @@ RUN_STATE_FIELDS = frozenset({
     "last_dispatch_id",
     "last_completed_on",
     "run_count",
+    "fail_streak",
 })
 
 
@@ -2321,6 +2327,10 @@ class ScheduleStore:
         # which ends the loop as invalid instead of letting it run uncounted.
         if not _is_plain_int(entry.run_count):
             entry.run_count = -1
+        # Unlike the run count, a streak that does not read as an integer is just
+        # a streak of zero: old rows have none, and it only ever ends a loop early.
+        if not _is_plain_int(entry.fail_streak):
+            entry.fail_streak = 0
         try:
             entry.command = normalize_schedule_command(entry.command)
         except ValueError:
@@ -2693,6 +2703,11 @@ class _DispatchToWeb(Protocol):
     ) -> Coroutine[Any, Any, dict | None]: ...
 
 
+# (the loop as it was, the denied tool or "") for a loop the scheduler stopped
+# after LOOP_FAIL_LIMIT failed runs in a row.
+_OnLoopStopped = Callable[["ScheduleEntry", str], None]
+
+
 class ScheduleManager:
     """Polls schedules of every cadence and dispatches them as chat turns.
 
@@ -2721,11 +2736,15 @@ class ScheduleManager:
         on_change: Callable[[], None] | None = None,
         owner_alive: Callable[[str], bool | None] | None = None,
         chat_awaiting_answer: Callable[[str], bool] | None = None,
+        on_loop_stopped: _OnLoopStopped | None = None,
     ) -> None:
         self._store = store
         self._resolve_target = resolve_target
         # Told once each time a chat-owned loop ends, so open tabs refetch.
         self._on_change = on_change
+        # Told once when a loop is stopped for failing LOOP_FAIL_LIMIT runs in a
+        # row: (the loop as it was, the last run's error, the denied tool or "").
+        self._on_loop_stopped = on_loop_stopped
         # The state of a loop's owner chat: True runs it, False (gone or
         # archived) ends it, None (its archive is in progress) skips this tick
         # so a refused archive cannot lose the loop.
@@ -3176,19 +3195,20 @@ class ScheduleManager:
         entry.last_status = status
         self._persist(entry, base)
 
-    def _end_loop(self, entry: ScheduleEntry, reason: str) -> None:
+    def _end_loop(self, entry: ScheduleEntry, reason: str) -> bool:
         """End a chat-owned loop by deleting its row, the one terminal state.
 
         Nothing is left behind to pause, resume or retry. The transcript and
-        the job runs record what ran.
+        the job runs record what ran. True when this call deleted the row.
         """
         if not self._store.delete(entry.schedule_id):
-            return
+            return False
         logger.info(
             "Loop %s ended: %s after %s runs", entry.schedule_id, reason, entry.run_count
         )
         if self._on_change is not None:
             self._on_change()
+        return True
 
     def _disable_interval(
         self, entry: ScheduleEntry, reason: str, *, base: ScheduleEntry | None = None
@@ -3313,6 +3333,7 @@ class ScheduleManager:
         dispatch_id: str = "",
     ) -> None:
         status = "ok"
+        denied_tool = ""
         try:
             result = (
                 await self._dispatch_to_web(
@@ -3323,6 +3344,7 @@ class ScheduleManager:
             )
             if isinstance(result, dict) and result.get("status"):
                 status = str(result["status"])
+                denied_tool = str(result.get("denied_tool") or "")
         except asyncio.CancelledError:
             raise
         except Exception:
@@ -3354,6 +3376,17 @@ class ScheduleManager:
                 latest, "no chat left to dispatch into", base=latest_base
             )
         latest.last_status = status
+        if is_owned_loop(latest):
+            # Only a run that ran and failed, or ran clean, moves the streak; a busy
+            # skip, a deferral or a question leaves it as it stood.
+            if status == "error":
+                latest.fail_streak += 1
+            elif status == "ok":
+                latest.fail_streak = 0
+            if latest.fail_streak >= LOOP_FAIL_LIMIT:
+                if self._end_loop(latest, "repeated-failure") and self._on_loop_stopped is not None:
+                    self._on_loop_stopped(latest, denied_tool)
+                return
         # A chat-owned loop is never re-homed (see project_chats._rehome_interval_chat),
         # so there is nothing to carry over for it.
         rehomed = bool(entry.web_chat_id) and entry.web_chat_id != bound_before

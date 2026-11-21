@@ -287,6 +287,8 @@ class ChatStreamingHost(Protocol):
 
     def _discard_result_announce(self, chat_id: str) -> None: ...
 
+    def _settle_stop_notice(self, chat_id: str) -> None: ...
+
     def note_unattended_denial(self, chat_id: str) -> None: ...
 
     def notify_loop_run_end(self, chat_id: str) -> None: ...
@@ -1495,6 +1497,9 @@ class ChatStreaming:
                         self._host._maybe_archive_proposal_helper(chat_id),
                         f"archive-proposal-helper-{chat_id}",
                     )
+            # The reply to a loop stop note was not announced above; its marker is
+            # spent with the turn, so the next reply is announced as usual.
+            self._host._settle_stop_notice(chat_id)
             # A retried turn that failed with an error no classifier re-armed would
             # otherwise stay pending and re-fire on its old interval forever, never
             # reaching a cap (#2647). Stop it; the chat's last_error keeps the reason.
