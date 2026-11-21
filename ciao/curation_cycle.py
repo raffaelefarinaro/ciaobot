@@ -65,9 +65,7 @@ _LEASE_FIELDS = frozenset({"holder", "started_at", "expires_at"})
 # optional: a lease with no plan is a run that has not planned yet.
 _LEASE_OPTIONAL_FIELDS = frozenset({"plan"})
 _LAST_RUN_FIELDS = frozenset({"status", "finished_at", "planned", "completed", "deferred", "reasons"})
-_PENDING_FIELDS = frozenset(
-    {"cycle_id", "prior", "target_stamp", "target_sha256", "proven_required", "phase"}
-)
+_PENDING_FIELDS = frozenset({"cycle_id", "prior", "target_stamp", "target_sha256", "proven_required"})
 
 
 class CycleError(ValueError):
@@ -125,11 +123,11 @@ def expected_target(existing: bytes | None, stamp: str) -> MarkerIdentity:
 
 @dataclass(frozen=True, slots=True)
 class PreparedTransition:
-    """A marker publication the state has committed to, before it has happened.
+    """A marker publication the state has recorded as intended, before it has happened.
 
-    ``prepared`` means the state records the intent and the marker may or may
-    not have been published. ``committed`` means the state has recorded that
-    the publication is done.
+    A pending transition is prepared by definition: the marker may or may not
+    have been published, and the marker bytes decide which. A transition that
+    has been published is cleared by the rotation, never stored as done.
     """
 
     cycle_id: str
@@ -137,7 +135,6 @@ class PreparedTransition:
     target_stamp: str
     target_sha256: str
     proven_required: tuple[str, ...]
-    phase: Literal["prepared", "committed"]
 
     def __post_init__(self) -> None:
         _check_cycle_id(self.cycle_id)
@@ -150,8 +147,6 @@ class PreparedTransition:
             raise CycleError("proven required keys must be sorted and unique")
         if not set(self.proven_required) <= REQUIRED_HYGIENE_KEYS:
             raise CycleError("only required hygiene keys can be proven")
-        if self.phase not in ("prepared", "committed"):
-            raise CycleError("a transition is prepared or committed")
 
 
 RecoveryDecision = Literal["resume", "commit", "block"]
@@ -165,15 +160,15 @@ def decide_recovery(
     ``commit``: the target bytes are published, so record the commit. ``resume``:
     the prior bytes are still there, so publish once more; the caller must not
     loop on it. ``block``: anything else, including bytes that could not be read
-    (pass ``None``), a drifted or truncated file, or a regression from a
-    committed transition. Pure: it decides and never publishes.
+    (pass ``None``) and a drifted or truncated file. Pure: it decides and never
+    publishes.
     """
     if observed is None:
         return "block"
     target = MarkerIdentity("present", pending.target_sha256)
     if observed == target:
         return "commit"
-    if pending.phase == "prepared" and observed == pending.prior:
+    if observed == pending.prior:
         return "resume"
     return "block"
 
@@ -556,21 +551,16 @@ def _pending_document(pending: PreparedTransition) -> dict[str, Any]:
         "target_stamp": pending.target_stamp,
         "target_sha256": pending.target_sha256,
         "proven_required": list(pending.proven_required),
-        "phase": pending.phase,
     }
 
 
 def _decode_pending(value: object) -> PreparedTransition:
     fields = _mapping(value, "pending")
     _exact_fields(fields, _PENDING_FIELDS, "pending")
-    phase = fields["phase"]
-    if phase not in ("prepared", "committed"):
-        raise CycleError("a transition is prepared or committed")
     return PreparedTransition(
         cycle_id=_text(fields["cycle_id"], "pending cycle_id"),
         prior=_decode_marker(fields["prior"]),
         target_stamp=_text(fields["target_stamp"], "target_stamp"),
         target_sha256=_text(fields["target_sha256"], "target_sha256"),
         proven_required=tuple(_string_list(fields["proven_required"], "proven_required")),
-        phase=phase,
     )

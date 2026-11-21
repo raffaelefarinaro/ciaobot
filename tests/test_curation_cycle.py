@@ -52,7 +52,6 @@ PENDING = cc.PreparedTransition(
     target_stamp="2026-11-16",
     target_sha256=TARGET.sha256 or "",
     proven_required=(INDEX,),
-    phase="prepared",
 )
 
 
@@ -178,7 +177,6 @@ def test_pending_transition_owned_by_another_cycle_is_refused() -> None:
         target_stamp="2026-11-16",
         target_sha256=TARGET.sha256 or "",
         proven_required=(INDEX,),
-        phase="prepared",
     )
     with pytest.raises(cc.CycleError, match="another cycle"):
         cc.CycleState(
@@ -206,7 +204,7 @@ def test_uppercase_digest_is_refused_for_the_target_of_a_transition() -> None:
     with pytest.raises(cc.CycleError):
         cc.PreparedTransition(
             cycle_id=CID, prior=PRIOR, target_stamp="2026-11-16",
-            target_sha256=UPPER, proven_required=(INDEX,), phase="prepared",
+            target_sha256=UPPER, proven_required=(INDEX,),
         )
 
 
@@ -250,11 +248,11 @@ def test_extra_field_in_lease_or_last_run_is_refused(section: str) -> None:
     [
         lambda d: d["prior_marker"].update(kind="maybe"),  # type: ignore[union-attr]
         lambda d: d["prior_marker"].update(sha256=None),  # type: ignore[union-attr]
-        lambda d: d.update(pending={**d["pending"], "phase": "done"}),  # type: ignore[dict-item, arg-type]
+        lambda d: d.update(pending={**d["pending"], "phase": "prepared"}),  # type: ignore[dict-item, arg-type]
         lambda d: d.update(cycle_id="not-a-cycle"),
         lambda d: d.update(carried=[RULE, RULE]),
     ],
-    ids=["marker-kind", "present-without-digest", "pending-phase", "cycle-id", "duplicate-carried"],
+    ids=["marker-kind", "present-without-digest", "removed-pending-phase", "cycle-id", "duplicate-carried"],
 )
 def test_malformed_nested_values_are_refused(mutate: object) -> None:
     doc = _doc()
@@ -545,7 +543,6 @@ def test_recovery_resumes_an_absent_prior_marker() -> None:
         target_stamp="2026-11-16",
         target_sha256=TARGET.sha256 or "",
         proven_required=(),
-        phase="prepared",
     )
     assert cc.decide_recovery(absent_pending, cc.marker_identity_of(None)) == "resume"
 
@@ -559,34 +556,15 @@ def test_recovery_commits_first_when_prior_and_target_digests_are_equal() -> Non
         target_stamp="2026-11-16",
         target_sha256=PRIOR.sha256 or "",
         proven_required=(INDEX,),
-        phase="prepared",
     )
     assert cc.decide_recovery(same, PRIOR) == "commit"
 
 
-def test_committed_transition_only_accepts_the_target() -> None:
-    committed = cc.PreparedTransition(
-        cycle_id=CID,
-        prior=PRIOR,
-        target_stamp="2026-11-16",
-        target_sha256=TARGET.sha256 or "",
-        proven_required=(AUDIT, INDEX),
-        phase="committed",
-    )
-    assert cc.decide_recovery(committed, TARGET) == "commit"
-    assert cc.decide_recovery(committed, PRIOR) == "block"
-
-
-def test_prepared_transition_refuses_an_unknown_phase_or_unproven_key() -> None:
+def test_prepared_transition_refuses_an_unproven_key() -> None:
     with pytest.raises(cc.CycleError):
         cc.PreparedTransition(
             cycle_id=CID, prior=PRIOR, target_stamp="2026-11-16",
-            target_sha256=TARGET.sha256 or "", proven_required=(INDEX,), phase="done",  # type: ignore[arg-type]
-        )
-    with pytest.raises(cc.CycleError):
-        cc.PreparedTransition(
-            cycle_id=CID, prior=PRIOR, target_stamp="2026-11-16",
-            target_sha256=TARGET.sha256 or "", proven_required=(RULE,), phase="prepared",
+            target_sha256=TARGET.sha256 or "", proven_required=(RULE,),
         )
 
 

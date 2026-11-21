@@ -51,7 +51,7 @@ from collections.abc import Callable
 from typing import TYPE_CHECKING, Any, Iterator
 
 if TYPE_CHECKING:
-    from ciao.curation_cycle import CycleState
+    from ciao.curation_cycle import CycleState, MarkerIdentity
 
 from ciao import curation_logs, decision_rules, skill_proposals
 from ciao.entity_types import EntityTypeRegistry
@@ -71,7 +71,14 @@ LEARNINGS_RELATIVE = "Workspace/Learnings.md"
 SKILL_PROPOSALS_RELATIVE = "/".join(skill_proposals.QUEUE_REL)
 
 STATE_VERSION = 1
-_CYCLE_MARKER_REFUSAL = "the weekly marker transition for a cycle state is not available in this release"
+_ADVANCE_CYCLE_REFUSAL = "a cycle state advances its weekly marker through end_run, not advance_full_pass"
+_TRANSITION_NEEDS_OPERATOR = (
+    "an interrupted weekly marker transition cannot be settled automatically; check "
+    "Workspace/Curation-Log.md and Workspace/Curation-State.json before running again"
+)
+_TRANSITION_PENDING_APPEND = (
+    "a weekly marker transition is interrupted; end the run that holds the lease to settle it before appending"
+)
 
 # The skill's own thresholds, restated once in code so the agent no longer has
 # to evaluate them. Changing one here changes it for every workspace; the skill
@@ -2396,6 +2403,7 @@ def begin_run(
                 f"{held.get('holder', 'another run')} holds this vault until "
                 f"{held.get('expires_at', 'its lease expires')}"
             )
+        _settle_pending(Path(vault_root), state, holder="", clock=_recheck_clock(now, None))
         lease = Lease(
             holder=f"{holder}:{uuid.uuid4()}",
             started_at=now.replace(microsecond=0).isoformat().replace("+00:00", "Z"),
@@ -2424,6 +2432,7 @@ def renew_run(
         held = _live_lease(state, now)
         if held is None or held.get("holder") != holder:
             return False
+        _settle_pending(Path(vault_root), state, holder=holder, clock=_recheck_clock(now, None))
         state.lease["expires_at"] = (
             (now + timedelta(seconds=max(1.0, ttl_s)))
             .replace(microsecond=0)
@@ -2469,6 +2478,7 @@ def record_done(
             held = _live_lease(state, effective_now)
             if held is None or held.get("holder") != holder:
                 raise CurationBusy("this run no longer holds the curation lease")
+        _settle_pending(Path(vault_root), state, holder=holder, clock=_recheck_clock(now, None))
         stamp = (today or effective_now.astimezone(UTC).date()).isoformat()
         added = 0
         for key in keys:
@@ -2505,6 +2515,7 @@ def record_plan(
         held = _live_lease(state, effective_now)
         if held is None or held.get("holder") != holder:
             raise CurationBusy("this run no longer holds the curation lease")
+        _settle_pending(Path(vault_root), state, holder=holder, clock=_recheck_clock(now, None))
         _check_lease_plan(state_path(vault_root), plan)
         state.lease["plan"] = plan
         _store(state_path(vault_root), state)
@@ -2559,7 +2570,15 @@ def authorize_holder(
     vault = Path(vault_root)
     recheck = _recheck_clock(None, clock)
     with _state_lock(vault):
-        yield bool(holder) and _holds_live_lease_now(vault, holder=holder, clock=recheck)
+        ok = bool(holder) and _holds_live_lease_now(vault, holder=holder, clock=recheck)
+        if ok:
+            # A refused settle yields False: the guarded write is refused, nothing is raised
+            # through the guide lock held by the caller.
+            try:
+                _settle_pending(vault, _load(state_path(vault)), holder=holder, clock=recheck)
+            except (CurationStateError, CurationBusy):
+                ok = False
+        yield ok
 
 
 def _other_curation_files(vault: Path, relative: str) -> list[Path]:
@@ -2594,9 +2613,12 @@ def append_log(
     recheck = _recheck_clock(now, clock)
     with _state_lock(Path(vault_root)):
         effective_now = (now or recheck()).astimezone(UTC)
-        held = _live_lease(_load(state_path(vault_root)), effective_now)
+        state = _load(state_path(vault_root))
+        held = _live_lease(state, effective_now)
         if not holder or held is None or held.get("holder") != holder:
             raise CurationBusy("this run no longer holds the curation lease")
+        if log == "curation" and state.cycle is not None and state.cycle.pending is not None:
+            raise CurationStateError(_TRANSITION_PENDING_APPEND)
         try:
             vault = curation_logs.canonical_vault(Path(vault_root))
             path = vault / relative
@@ -2658,23 +2680,34 @@ def end_run(
         held = _live_lease(state, effective_now)
         if holder and (held is None or held.get("holder") != holder):
             raise CurationBusy("this run no longer holds the curation lease")
-        advanced = False
         marker_error = ""
         reasons = list(reasons)
-        if advance_marker and status == "ok" and REQUIRED_HYGIENE_KEYS <= set(state.done_keys):
+        settled = _settle_pending(Path(vault_root), state, holder=holder, clock=recheck)
+        advanced = settled
+        if advance_marker and status == "ok" and not settled and REQUIRED_HYGIENE_KEYS <= set(state.done_keys):
 
             def still_holder() -> None:
                 if holder and not _holds_live_lease_now(Path(vault_root), holder=holder, clock=recheck):
                     raise CurationBusy("the curation lease expired before the marker was written")
 
             try:
+                stamp = (today or effective_now.astimezone(UTC).date()).isoformat()
                 if state.cycle is not None:
-                    raise CurationStateError(_CYCLE_MARKER_REFUSAL)
-                _write_full_pass_marker(
-                    Path(vault_root),
-                    today=today or effective_now.astimezone(UTC).date(),
-                    before_publish=still_holder,
-                )
+                    _advance_cycle_marker(
+                        Path(vault_root),
+                        state,
+                        state.cycle,
+                        holder=holder,
+                        stamp=stamp,
+                        live_keys=live_keys,
+                        clock=recheck,
+                    )
+                else:
+                    _write_full_pass_marker(
+                        Path(vault_root),
+                        today=today or effective_now.astimezone(UTC).date(),
+                        before_publish=still_holder,
+                    )
                 advanced = True
             except CurationStateError as exc:
                 marker_error = str(exc)[:200]
@@ -2722,7 +2755,7 @@ def advance_full_pass(
     """
     with _state_lock(Path(vault_root)):
         if _load(state_path(Path(vault_root))).cycle is not None:
-            raise CurationStateError(_CYCLE_MARKER_REFUSAL)
+            raise CurationStateError(_ADVANCE_CYCLE_REFUSAL)
         if not _hygiene_complete_unlocked(Path(vault_root)):
             return False
         _write_full_pass_marker(Path(vault_root), today=today)
@@ -2762,6 +2795,216 @@ def _write_full_pass_marker(
         curation_logs.publish_log(log, result, snapshot=snapshot)
     except curation_logs.CurationLogError as exc:
         raise CurationStateError(str(exc)) from None
+
+
+# ── Cycle state: the weekly marker transition (#3061 B2) ───────────────────
+
+
+def _read_marker_log(vault_root: Path) -> tuple[Path, Path, curation_logs.LogSnapshot]:
+    """The canonical vault, the curation log path and its snapshot. Lock-free reads only."""
+    vault = curation_logs.canonical_vault(Path(vault_root))
+    log = vault / CURATION_LOG_RELATIVE
+    curation_logs.refuse_identity_overlap(log, _other_curation_files(vault, LOG_SELECTORS["curation"]))
+    return vault, log, curation_logs.read_log(log)
+
+
+def _observed_marker_identity(vault_root: Path) -> MarkerIdentity | None:
+    """The marker bytes as they are now, or None when the log cannot be read safely."""
+    from ciao import curation_cycle
+
+    try:
+        _, _, snapshot = _read_marker_log(vault_root)
+    except curation_logs.CurationLogError:
+        return None
+    return curation_cycle.marker_identity_of(snapshot.data)
+
+
+def _holder_check(vault_root: Path, holder: str, clock: Callable[[], datetime]) -> Callable[[], None] | None:
+    """The lease recheck run immediately before a publish; None when no holder is named."""
+    if not holder:
+        return None
+
+    def still_holder() -> None:
+        if not _holds_live_lease_now(Path(vault_root), holder=holder, clock=clock):
+            raise CurationBusy("the curation lease expired before the marker was written")
+
+    return still_holder
+
+
+def _publish_cycle_marker(
+    vault_root: Path,
+    stamp: str,
+    *,
+    expected_sha256: str,
+    before_publish: Callable[[], None] | None,
+) -> None:
+    """Publish the weekly marker, refusing any result other than the prepared target. Lock-assuming."""
+    from ciao import curation_cycle
+
+    try:
+        vault, log, snapshot = _read_marker_log(vault_root)
+        result = curation_logs.with_full_pass_marker(snapshot.data, stamp)
+        curation_logs.ensure_workspace_dir(vault)
+    except curation_logs.CurationLogError as exc:
+        raise CurationStateError(str(exc)) from None
+    if curation_cycle.marker_identity_of(result).sha256 != expected_sha256:
+        raise CurationStateError("the marker bytes to publish differ from the prepared target")
+    if before_publish is not None:
+        before_publish()
+    try:
+        curation_logs.publish_log(log, result, snapshot=snapshot)
+    except curation_logs.CurationLogError as exc:
+        raise CurationStateError(str(exc)) from None
+
+
+def _rotate_cycle(state: CurationState, target: MarkerIdentity) -> None:
+    """Start the next cycle after the marker reached ``target``. Lock-assuming; writes nothing.
+
+    Weekly evidence leaves the done keys, so the facade and the planner see no
+    hygiene or optional proof for the new cycle. Daily evidence stays. The cycle
+    id is named from the new prior marker, and any pending transition is cleared.
+    """
+    from ciao import curation_cycle
+
+    cycle = state.cycle
+    if cycle is None:
+        raise CurationStateError("a cycle rotation needs a cycle state")
+    state.done_keys = {k: v for k, v in state.done_keys.items() if not curation_cycle.is_weekly_key(k)}
+    state.cycle = replace(
+        cycle,
+        cycle_id=curation_cycle.cycle_identity(target, ""),
+        prior_marker=target,
+        pending=None,
+    )
+
+
+def _advance_cycle_marker(
+    vault_root: Path,
+    state: CurationState,
+    cycle: CycleState,
+    *,
+    holder: str,
+    stamp: str,
+    live_keys: frozenset[str] | set[str] | None,
+    clock: Callable[[], datetime],
+) -> None:
+    """Prepare, publish and rotate a cycle state's weekly marker. Lock-assuming.
+
+    The transition is stored (lease still held) before the publish, so a crash
+    on either side of it is settled by :func:`_settle_pending`. A refusal before
+    anything is published rolls the in-memory state back, and the caller's final
+    store writes the transition cleared. A lease that expires before the publish
+    raises :class:`CurationBusy` with the transition left prepared and nothing
+    published; the next entry settles it.
+    """
+    from ciao import curation_cycle
+
+    # The proof is read before the prune, which may drop the hygiene keys from done_keys.
+    proven = tuple(sorted(REQUIRED_HYGIENE_KEYS & set(state.done_keys)))
+    try:
+        _, _, snapshot = _read_marker_log(vault_root)
+        prior = curation_cycle.marker_identity_of(snapshot.data)
+        target = curation_cycle.expected_target(snapshot.data, stamp)
+    except (curation_logs.CurationLogError, curation_cycle.CycleError) as exc:
+        raise CurationStateError(str(exc)) from None
+    if target.sha256 is None:
+        raise CurationStateError("the marker target has no digest")
+    if live_keys is not None:
+        state.done_keys = {k: v for k, v in state.done_keys.items() if k in live_keys}
+        carried = tuple(
+            sorted(
+                k
+                for k in live_keys
+                if curation_cycle.is_weekly_key(k)
+                and k not in REQUIRED_HYGIENE_KEYS
+                and k not in state.done_keys
+            )
+        )
+    else:
+        carried = cycle.carried
+    try:
+        pending = curation_cycle.PreparedTransition(
+            cycle_id=cycle.cycle_id,
+            prior=prior,
+            target_stamp=stamp,
+            target_sha256=target.sha256,
+            proven_required=proven,
+        )
+    except curation_cycle.CycleError as exc:
+        raise CurationStateError(str(exc)) from None
+    state.cycle = replace(cycle, pending=pending, carried=carried)
+    try:
+        _store(state_path(vault_root), state)
+    except CurationStateError:
+        state.cycle = cycle
+        raise
+    try:
+        _publish_cycle_marker(
+            vault_root,
+            stamp,
+            expected_sha256=target.sha256,
+            before_publish=_holder_check(vault_root, holder, clock),
+        )
+    except CurationStateError:
+        state.cycle = cycle
+        raise
+    _rotate_cycle(state, curation_cycle.MarkerIdentity("present", target.sha256))
+
+
+def _settle_pending(
+    vault_root: Path,
+    state: CurationState,
+    *,
+    holder: str,
+    clock: Callable[[], datetime],
+) -> bool:
+    """Settle an interrupted weekly marker transition before any other write. Lock-assuming.
+
+    Recovery runs only when no lease is live, or when ``holder`` holds the live
+    lease, so it never takes over a crashed run's lease. A caller with no holder
+    (``holder=""``) settles only when no lease is live.
+
+    Rule for an expired preparing holder: a transition is prepared while its
+    preparer holds the live lease, and the proof it carries (``proven_required``)
+    was taken then. When that lease lapses without a publish, a later entry may
+    publish the same prepared target exactly once, provided the prior bytes still
+    match, and a holder-less entry may do so too. Refusing instead would wedge the
+    weekly marker behind a crashed run. The later entry's own lease is taken
+    afterwards and is never replaced here.
+
+    The outcome comes from the marker bytes now: the target is committed by rotating, the prior bytes
+    are published once and then rotated, and anything else blocks. Rotation
+    leaves ``lease`` and ``last_run`` untouched. Returns True when a transition
+    was settled; ``state`` is updated in place and stored.
+    """
+    from ciao import curation_cycle
+
+    cycle = state.cycle
+    if cycle is None or cycle.pending is None:
+        return False
+    held = _live_lease(state, clock().astimezone(UTC))
+    if held is not None and (not holder or held.get("holder") != holder):
+        raise CurationBusy(
+            "an interrupted weekly marker transition waits for the live curation lease to expire "
+            "or for its holder to finish"
+        )
+    pending = cycle.pending
+    decision = curation_cycle.decide_recovery(pending, _observed_marker_identity(vault_root))
+    if decision == "block":
+        raise CurationStateError(_TRANSITION_NEEDS_OPERATOR)
+    if decision == "resume":
+        try:
+            _publish_cycle_marker(
+                vault_root,
+                pending.target_stamp,
+                expected_sha256=pending.target_sha256,
+                before_publish=_holder_check(vault_root, holder, clock),
+            )
+        except CurationStateError:
+            raise CurationStateError(_TRANSITION_NEEDS_OPERATOR) from None
+    _rotate_cycle(state, curation_cycle.MarkerIdentity("present", pending.target_sha256))
+    _store(state_path(vault_root), state)
+    return True
 
 
 # ── v1 to v2 migration (operator-run, #3061 B1) ───────────────────────────
