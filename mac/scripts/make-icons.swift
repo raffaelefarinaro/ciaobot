@@ -23,18 +23,12 @@ import Foundation
 // Outputs:
 //   Sources/CiaobotMac/Resources/app-icon.png
 //     The static Finder, Launchpad and Dock icon.
-//   Sources/CiaobotMac/Resources/dock-icon-ink.png
-//     Coverage of the C stroke and both dots. The running app replaces the
-//     cream field around it with the active workspace accent.
-//   Sources/CiaobotMac/Resources/dock-icon-dots.png
-//     Coverage of the two dots. On an accent field the running app paints them
-//     in the brand cream, because brand orange on the amber field disappears.
 //   Sources/CiaobotMac/Resources/mark_template.png
 //     The mark alone in black-plus-alpha for the menu-bar item, where macOS
 //     applies the light/dark system tint.
 //
 // Usage:
-//   swift scripts/make-icons.swift [source.png] [app-icon.png] [ink.png] [dots.png] [template.png]
+//   swift scripts/make-icons.swift [source.png] [app-icon.png] [template.png]
 //
 // The app and the release build never run this script; regenerate only when
 // the brand artwork changes.
@@ -48,14 +42,8 @@ let sourceURL = arguments.count > 0 ? URL(fileURLWithPath: arguments[0]) : defau
 let appIconURL = arguments.count > 1
     ? URL(fileURLWithPath: arguments[1])
     : resourcesDirectory.appendingPathComponent("app-icon.png")
-let inkURL = arguments.count > 2
+let templateURL = arguments.count > 2
     ? URL(fileURLWithPath: arguments[2])
-    : resourcesDirectory.appendingPathComponent("dock-icon-ink.png")
-let dotsURL = arguments.count > 3
-    ? URL(fileURLWithPath: arguments[3])
-    : resourcesDirectory.appendingPathComponent("dock-icon-dots.png")
-let templateURL = arguments.count > 4
-    ? URL(fileURLWithPath: arguments[4])
     : resourcesDirectory.appendingPathComponent("mark_template.png")
 
 let canvasSize = 1024
@@ -370,7 +358,6 @@ func coverage(_ pixel: Pixel, over ink: Pixel) -> (amount: Double, residual: Dou
 }
 
 let inkMask = Canvas(pixels: canvasSize)
-let dotsMask = Canvas(pixels: canvasSize)
 for y in 0..<canvasSize {
     for x in 0..<canvasSize {
         let pixel = appIcon.read(x, y)
@@ -384,14 +371,10 @@ for y in 0..<canvasSize {
         guard amount >= inkThreshold else { continue }
         amount = (amount - inkThreshold) / (1 - inkThreshold)
         let alpha = UInt8((amount * 255).rounded())
-        let index = y * canvasSize + x
-        let inkOffset = index * 4
+        let inkOffset = (y * canvasSize + x) * 4
         inkMask.bytes[inkOffset + 3] = alpha
-        if isDot { dotsMask.bytes[index * 4 + 3] = alpha }
     }
 }
-writePNG(inkMask, to: inkURL, label: "dock-icon-ink.png")
-writePNG(dotsMask, to: dotsURL, label: "dock-icon-dots.png")
 
 // --- 4. The 18 pt menu-bar template --------------------------------------
 

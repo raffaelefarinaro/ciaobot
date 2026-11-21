@@ -11,15 +11,6 @@ import Foundation
 enum AppAssets {
     static let appIconName = "app-icon"
     static let appIconExtension = "png"
-    /// The running app icon's ink mask: the mark's C stroke and two dots on the
-    /// app icon's canvas. `scripts/make-icons.swift` generates it beside
-    /// `app-icon.png`; the Finder icon never uses it.
-    static let dockIconInkName = "dock-icon-ink"
-    static let dockIconInkExtension = "png"
-    /// The mark's two dots alone: on an accent field the running icon paints
-    /// them in the brand cream so they stay visible on every preset.
-    static let dockIconDotsName = "dock-icon-dots"
-    static let dockIconDotsExtension = "png"
     static let menuBarImageName = "mark_template"
     static let menuBarImageExtension = "png"
     /// The supplied full wordmark, dark ink for a light surface and cream ink
@@ -177,8 +168,8 @@ enum AppAssets {
     }
 
     /// The rounded macOS app icon generated from the approved brand artwork.
-    /// It is used by the debug executable's Dock icon and is copied beside the
-    /// packaged `.app`'s `AppIcon.icns`, which `CFBundleIconFile` names.
+    /// It is copied beside the packaged `.app`'s `AppIcon.icns`, which
+    /// `CFBundleIconFile` names, and the Dock shows the bundle's icon as-is.
     /// Regenerate it with `scripts/make-icons.swift`; the original PWA snapshot
     /// is kept in `Sources/CiaobotMac/Artwork` for provenance and tests.
     static func appIconURL(
@@ -193,54 +184,6 @@ enum AppAssets {
         imageURL(
             named: appIconName,
             fileExtension: appIconExtension,
-            fileManager: fileManager,
-            moduleResourceURL: moduleResourceURL,
-            moduleBundleURL: moduleBundleURL,
-            mainResourceURL: mainResourceURL,
-            mainBundleURL: mainBundleURL,
-            executableURL: executableURL,
-            environment: environment
-        )
-    }
-
-    /// The mark's ink coverage (`app-icon.png` minus its cream field) that the
-    /// running Dock icon keeps while it repaints the field. It is a separate
-    /// resource so the Finder/Launchpad icon and its `.icns` stay unchanged.
-    static func dockIconInkURL(
-        fileManager: FileManager = .default,
-        moduleResourceURL: URL? = Bundle(for: AssetBundleToken.self).resourceURL,
-        moduleBundleURL: URL? = Bundle(for: AssetBundleToken.self).bundleURL,
-        mainResourceURL: URL? = Bundle.main.resourceURL,
-        mainBundleURL: URL? = Bundle.main.bundleURL,
-        executableURL: URL? = Bundle.main.executableURL,
-        environment: [String: String] = ProcessInfo.processInfo.environment
-    ) -> URL? {
-        imageURL(
-            named: dockIconInkName,
-            fileExtension: dockIconInkExtension,
-            fileManager: fileManager,
-            moduleResourceURL: moduleResourceURL,
-            moduleBundleURL: moduleBundleURL,
-            mainResourceURL: mainResourceURL,
-            mainBundleURL: mainBundleURL,
-            executableURL: executableURL,
-            environment: environment
-        )
-    }
-
-    /// The mark's two dots alone, used only while a workspace accent is drawn.
-    static func dockIconDotsURL(
-        fileManager: FileManager = .default,
-        moduleResourceURL: URL? = Bundle(for: AssetBundleToken.self).resourceURL,
-        moduleBundleURL: URL? = Bundle(for: AssetBundleToken.self).bundleURL,
-        mainResourceURL: URL? = Bundle.main.resourceURL,
-        mainBundleURL: URL? = Bundle.main.bundleURL,
-        executableURL: URL? = Bundle.main.executableURL,
-        environment: [String: String] = ProcessInfo.processInfo.environment
-    ) -> URL? {
-        imageURL(
-            named: dockIconDotsName,
-            fileExtension: dockIconDotsExtension,
             fileManager: fileManager,
             moduleResourceURL: moduleResourceURL,
             moduleBundleURL: moduleBundleURL,
@@ -279,15 +222,6 @@ enum AppAssets {
     /// unchanged rather than failing the screen.
     static let wordmarkImage: NSImage? = wordmarkImageURL(dark: false).flatMap { NSImage(contentsOf: $0) }
     static let wordmarkLightImage: NSImage? = wordmarkImageURL(dark: true).flatMap { NSImage(contentsOf: $0) }
-
-    /// Used for the debug executable, which has no `CFBundleIconFile`, and as
-    /// the running icon's fallback. The packaged `.app` uses the `.icns`
-    /// produced by `scripts/build-app.sh` for Finder and Launchpad.
-    static let appIconImage: NSImage? = appIconURL().flatMap { NSImage(contentsOf: $0) }
-
-    /// Decoded once; the running icon renders at most one variant per preset.
-    static let dockIconInkImage: NSImage? = dockIconInkURL().flatMap { NSImage(contentsOf: $0) }
-    static let dockIconDotsImage: NSImage? = dockIconDotsURL().flatMap { NSImage(contentsOf: $0) }
 
     /// A template image (black pixels plus alpha) so macOS applies the menu-bar
     /// tint, including in dark mode and while the menu is open.

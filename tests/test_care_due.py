@@ -481,7 +481,6 @@ def _write_cycle_state(vault: Path, *, pending: bool) -> None:
             target_stamp="2026-11-21",
             target_sha256=target.sha256 or "",
             proven_required=(),
-            phase="prepared",
         )
         if pending
         else None

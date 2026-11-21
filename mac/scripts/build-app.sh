@@ -148,11 +148,6 @@ cp "Sources/CiaobotMac/Resources/app-icon.png" "$resources/app-icon.png"
 cp "Sources/CiaobotMac/Resources/mark_template.png" "$resources/mark_template.png"
 cp "Sources/CiaobotMac/Resources/ciaobot-wordmark.png" "$resources/ciaobot-wordmark.png"
 cp "Sources/CiaobotMac/Resources/ciaobot-wordmark-light.png" "$resources/ciaobot-wordmark-light.png"
-# The running icon repaints the cream field behind this ink mask. It is a
-# separate resource: AppIcon.icns below is still generated from the unchanged
-# app-icon.png.
-cp "Sources/CiaobotMac/Resources/dock-icon-ink.png" "$resources/dock-icon-ink.png"
-cp "Sources/CiaobotMac/Resources/dock-icon-dots.png" "$resources/dock-icon-dots.png"
 
 # Native Finder/Dock icon. It is generated from the brand artwork snapshot in
 # Sources/CiaobotMac/Resources by scripts/make-icons.swift, never read from the

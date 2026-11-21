@@ -642,10 +642,6 @@ struct WebWindow: NSViewRepresentable {
     /// Reports the live view to the app session so the tray can open a chat
     /// path. It carries no page data.
     var onWebViewReady: ((WKWebView) -> Void)? = nil
-    /// The validated active-workspace accent from this view's main frame, or
-    /// nil for the bundled fallback. The view is passed back so the session can
-    /// refuse a callback from a view it already replaced.
-    var onWorkspaceColor: ((WorkspaceColorPreset?, WKWebView?) -> Void)? = nil
     /// The native Settings bridge. Only the connected main window is given one;
     /// setup and child windows get no `ciaobotAppSettings` handler.
     var appSettings: AppSettingsBridge? = nil
@@ -660,7 +656,6 @@ struct WebWindow: NSViewRepresentable {
             openExternal: openExternal,
             viewTracker: viewTracker,
             navigationProfile: navigationProfile,
-            onWorkspaceColor: onWorkspaceColor,
             appSettings: appSettings
         )
     }
@@ -693,7 +688,6 @@ struct WebWindow: NSViewRepresentable {
 
     final class Coordinator: NSObject, WKNavigationDelegate, WKUIDelegate, WKScriptMessageHandler, WKScriptMessageHandlerWithReply {
         static let trustedClickMessageName = "ciaobotTrustedClick"
-        static let workspaceColorMessageName = "ciaobotWorkspaceColor"
         static let appSettingsMessageName = "ciaobotAppSettings"
         /// The one rejection string the page ever sees.
         static let appSettingsRefusal = "refused"
@@ -762,112 +756,6 @@ struct WebWindow: NSViewRepresentable {
         })();
         """
 
-        /// Reports the active workspace accent the web UI already renders on
-        /// `#ciao-app[data-workspace-color]`. It is a separate script from the
-        /// stylesheet above: the stylesheet must never gain a bridge, and this
-        /// observer carries only one bounded attribute value.
-        ///
-        /// The root may be created after document start and may be replaced or
-        /// unmounted by the SPA, so the observer watches the document subtree
-        /// and re-reads the current element each time. It reports the initial
-        /// value, later changes, an explicit `null` when the attribute is
-        /// removed, and one explicit `null` after a root that existed is
-        /// unmounted. While no root has ever appeared it stays silent, so an
-        /// older server that never publishes a colour leaves the bundled icon
-        /// in place. Only a change is sent, so re-renders that keep the same
-        /// accent are quiet.
-        ///
-        /// A string longer than the native bound is sent as `null` rather than
-        /// forwarded; the coordinator enforces the same bound on the raw value
-        /// and treats an oversized value as unknown.
-        ///
-        /// The script does not trust its own document identity. It starts with
-        /// no token and posts no value until native adoption installs one at
-        /// commit; every value message carries that token, so a message the
-        /// previous same-origin document queued before commit is refused after
-        /// native rotates the token. A back/forward-cached restore asks native
-        /// to re-adopt instead of assuming the old token still counts.
-        ///
-        /// It is injected into the main frame only, and the coordinator
-        /// re-checks the handler name, view identity, main frame, exact origin,
-        /// committed document, token and value before the app sees anything.
-        /// Child windows get a fresh user content controller, so this bridge
-        /// never reaches them.
-        static let workspaceColorScript = """
-        (() => {
-          const bridge = window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.\(workspaceColorMessageName);
-          if (!bridge) return;
-          const limit = \(WorkspaceColorPreset.maximumMessageLength);
-          let sent = false;
-          let last;
-          let seenRoot = false;
-          // Null until native adoption. Without it this document posts no
-          // value, so a pre-commit message cannot cross the commit boundary.
-          let documentToken = null;
-          const root = () => document.getElementById('ciao-app');
-          // known: false while no root has ever appeared (an older server).
-          // value: null for an absent colour or after a known root is gone.
-          const currentValue = () => {
-            const element = root();
-            if (!element) return seenRoot ? { known: true, value: null } : { known: false };
-            seenRoot = true;
-            const raw = element.getAttribute('data-workspace-color');
-            if (typeof raw !== 'string') return { known: true, value: null };
-            const bytes = new TextEncoder().encode(raw).length;
-            return { known: true, value: bytes > limit ? null : raw };
-          };
-          const report = () => {
-            if (typeof documentToken !== 'string' || documentToken.length === 0) return;
-            const next = currentValue();
-            if (!next.known) return;
-            if (sent && next.value === last) return;
-            sent = true;
-            last = next.value;
-            try { bridge.postMessage({ value: next.value, token: documentToken }); } catch (_) {}
-          };
-          // A failed or cancelled navigation leaves this document on screen
-          // after the native side reset the icon. Clearing the dedupe baseline
-          // makes it report its current colour again with its existing token.
-          const refresh = () => {
-            sent = false;
-            last = undefined;
-            report();
-          };
-          window.__ciaobotWorkspaceColorRefresh = refresh;
-          // Native adoption for this committed document. Rotating the token
-          // also makes any queued pre-commit message from the previous
-          // document stale.
-          window.__ciaobotWorkspaceColorAdopt = (token) => {
-            if (typeof token !== 'string' || token.length === 0) return;
-            documentToken = token;
-            sent = false;
-            last = undefined;
-            report();
-          };
-          // A back/forward-cached restore does not run the document-start
-          // script again. Ask native to re-adopt this document with a fresh
-          // token; the request itself carries no colour.
-          addEventListener('pageshow', (event) => {
-            if (!event.persisted) return;
-            if (typeof documentToken !== 'string' || documentToken.length === 0) return;
-            try { bridge.postMessage({ adopt: true }); } catch (_) {}
-          });
-          const observe = () => {
-            const target = document.documentElement;
-            if (!target) return false;
-            report();
-            new MutationObserver(report).observe(target, {
-              subtree: true,
-              childList: true,
-              attributes: true,
-              attributeFilter: ['data-workspace-color']
-            });
-            return true;
-          };
-          if (!observe()) document.addEventListener('DOMContentLoaded', observe, { once: true });
-        })();
-        """
-
         private static let trustedClickScript = """
         (() => {
           if (window.__CIAOBOT_TRUSTED_CLICK_INSTALLED__) return;
@@ -901,10 +789,6 @@ struct WebWindow: NSViewRepresentable {
         private(set) weak var webView: WKWebView?
         private var reportedFailure = false
         private var armedHostChatLoad: URL?
-        /// The validated accent last handed to the app. Deduplicates re-renders
-        /// that repeat the same attribute value.
-        private var lastReportedWorkspaceColor: WorkspaceColorPreset?
-        private var hasReportedWorkspaceColor = false
         /// The document that owns the view. Incremented when a new provisional
         /// navigation starts; a page message is accepted only while the
         /// committed document is the current one. Both start at zero so a
@@ -922,24 +806,12 @@ struct WebWindow: NSViewRepresentable {
         private var provisionalNavigation: AnyObject?
         private weak var provisionalNavigationView: WKWebView?
         private var provisionalNavigationGeneration = 0
-        /// The identity native adopted for the current committed document. A
-        /// fresh value is issued at every commit and bfcache re-adoption; a
-        /// value message carrying any other token is refused, even when its
-        /// view, origin and generation still match.
-        private(set) var adoptedDocumentToken: String? = UUID().uuidString
         /// Set by `prepareForRelease`; a late page callback after teardown must
         /// not reach the app.
         private(set) var isReleased = false
-        /// The app-facing sink for this view's workspace accent.
-        var onWorkspaceColor: ((WorkspaceColorPreset?, WKWebView?) -> Void)?
         /// The Settings bridge, nil for every window but the connected main one.
         private(set) var appSettings: AppSettingsBridge?
         private var appSettingsSubscription: AnyCancellable?
-        /// Test/observability hook: receives each page payload before any
-        /// validation, so a test can prove what the injected observer sent
-        /// rather than only what survived the native checks.
-        var workspaceColorPayloadObserver: ((Any) -> Void)?
-
         /// Test/observability hook: called before the file-panel origin check.
         var filePanelFrameOriginObserver: ((String, String, Int) -> Void)?
 
@@ -955,7 +827,7 @@ struct WebWindow: NSViewRepresentable {
         var testCrossOriginFrameObserver: ((WKFrameInfo) -> Void)?
         #endif
 
-        init(origin: Origin, onFailure: ((String) -> Void)?, downloadFailure: @escaping DownloadFailureHandler, filePanel: @escaping FilePanelHandler, downloadDestination: @escaping DownloadDestination, openExternal: @escaping ExternalOpener, viewTracker: SessionViewTracker? = nil, navigationProfile: WebWindowNavigationProfile = .main, onWorkspaceColor: ((WorkspaceColorPreset?, WKWebView?) -> Void)? = nil, appSettings: AppSettingsBridge? = nil) {
+        init(origin: Origin, onFailure: ((String) -> Void)?, downloadFailure: @escaping DownloadFailureHandler, filePanel: @escaping FilePanelHandler, downloadDestination: @escaping DownloadDestination, openExternal: @escaping ExternalOpener, viewTracker: SessionViewTracker? = nil, navigationProfile: WebWindowNavigationProfile = .main, appSettings: AppSettingsBridge? = nil) {
             self.origin = origin
             self.onFailure = onFailure
             self.downloadFailure = downloadFailure
@@ -964,7 +836,6 @@ struct WebWindow: NSViewRepresentable {
             self.openExternal = openExternal
             self.viewTracker = viewTracker
             self.navigationProfile = navigationProfile
-            self.onWorkspaceColor = onWorkspaceColor
             self.appSettings = appSettings
             self.downloads = DownloadCoordinator(origin: origin, destination: downloadDestination, failure: downloadFailure)
         }
@@ -997,16 +868,6 @@ struct WebWindow: NSViewRepresentable {
                 injectionTime: .atDocumentStart,
                 forMainFrameOnly: true
             ))
-            // Only the connected main window wires a colour sink. Setup and
-            // child windows get neither the observer script nor its bridge.
-            if coordinator.onWorkspaceColor != nil {
-                controller.addUserScript(WKUserScript(
-                    source: workspaceColorScript,
-                    injectionTime: .atDocumentStart,
-                    forMainFrameOnly: true
-                ))
-                controller.add(coordinator, name: workspaceColorMessageName)
-            }
             controller.addUserScript(WKUserScript(
                 source: trustedClickScript,
                 injectionTime: .atDocumentStart,
@@ -1053,8 +914,6 @@ struct WebWindow: NSViewRepresentable {
             gestureGate.clear()
             clickGesture.clear()
             clearProvisionalNavigation()
-            adoptedDocumentToken = nil
-            onWorkspaceColor = nil
             appSettings = nil
             appSettingsSubscription = nil
             webView?.configuration.userContentController.removeAllScriptMessageHandlers()
@@ -1062,17 +921,11 @@ struct WebWindow: NSViewRepresentable {
 
         func attach(_ webView: WKWebView) {
             if self.webView !== webView {
-                // A replacement view starts a new page and a new dedupe
-                // baseline; otherwise the same colour as the old page would be
-                // deduplicated away after the session already reset.
-                hasReportedWorkspaceColor = false
-                lastReportedWorkspaceColor = nil
                 documentGeneration = 0
                 committedDocumentGeneration = 0
                 provisionalNavigation = nil
                 provisionalNavigationView = nil
                 provisionalNavigationGeneration = 0
-                adoptedDocumentToken = UUID().uuidString
             }
             self.webView = webView
             subscribeToAppSettingsChanges()
@@ -1158,20 +1011,6 @@ struct WebWindow: NSViewRepresentable {
                 return
             }
             #endif
-            if message.name == Self.workspaceColorMessageName {
-                workspaceColorPayloadObserver?(message.body)
-                let frameOrigin = message.frameInfo.securityOrigin
-                handleWorkspaceColorMessage(
-                    name: message.name,
-                    isMainFrame: message.frameInfo.isMainFrame,
-                    scheme: frameOrigin.protocol,
-                    host: frameOrigin.host,
-                    port: frameOrigin.port,
-                    view: message.webView,
-                    body: message.body
-                )
-                return
-            }
             guard message.name == Self.trustedClickMessageName else { return }
             let frameOrigin = message.frameInfo.securityOrigin
             MainActor.assumeIsolated {
@@ -1299,82 +1138,6 @@ struct WebWindow: NSViewRepresentable {
             guard let number = value as? NSNumber,
                   CFGetTypeID(number) == CFBooleanGetTypeID() else { return nil }
             return number.boolValue
-        }
-
-        /// Validates one workspace-colour message. `WKScriptMessage` cannot be
-        /// constructed in a test, so the fields are passed explicitly and the
-        /// production dispatch above is the only caller.
-        ///
-        /// Every field is treated as untrusted: the handler name must be this
-        /// client's, the sending view must be the coordinator's current view
-        /// (not merely the same origin), the frame must be the main frame of
-        /// the exact selected origin, the document must be the committed one,
-        /// and a value payload must carry the exact token native adopted for
-        /// that document. A value message with a missing, unknown or non-string
-        /// token, or any key besides `value` and `token`, is refused whole, so
-        /// a message queued by the previous document before commit cannot
-        /// survive into the new one. `adopt: true` asks native to rotate the
-        /// token for the committed document; it carries no colour itself.
-        /// `neutral`, an unknown word, an oversized string and `null` all mean
-        /// the bundled icon. Nothing is accepted after release.
-        func handleWorkspaceColorMessage(
-            name: String,
-            isMainFrame: Bool,
-            scheme: String,
-            host: String,
-            port: Int,
-            view: WKWebView?,
-            body: Any
-        ) {
-            guard !isReleased,
-                  name == Self.workspaceColorMessageName,
-                  let view,
-                  self.webView === view,
-                  isMainFrame,
-                  // The previous document must not repaint the Dock while a
-                  // new provisional navigation is between commit points.
-                  committedDocumentGeneration == documentGeneration,
-                  origin.matches(scheme: scheme, host: host, port: port),
-                  let payload = body as? [String: Any] else { return }
-
-            // A cached page asks for a fresh adoption; this request changes no
-            // colour by itself.
-            if payload.count == 1, (payload["adopt"] as? Bool) == true {
-                adoptCurrentDocument(in: view)
-                return
-            }
-
-            guard payload.count == 2,
-                  let token = payload["token"] as? String,
-                  !token.isEmpty,
-                  token == adoptedDocumentToken,
-                  let value = payload["value"] else { return }
-
-            let accent: WorkspaceColorPreset?
-            if value is NSNull {
-                accent = nil
-            } else if let raw = value as? String {
-                // Bound the raw value before trimming: an oversized or
-                // otherwise unusable value is unknown, not a reason to keep
-                // the previous colour.
-                if raw.utf8.count > WorkspaceColorPreset.maximumMessageLength {
-                    accent = nil
-                } else {
-                    let normalized = raw.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
-                    accent = WorkspaceColorPreset(rawValue: normalized)
-                }
-            } else {
-                return
-            }
-            reportWorkspaceColor(accent, from: view)
-        }
-
-        private func reportWorkspaceColor(_ accent: WorkspaceColorPreset?, from view: WKWebView) {
-            guard !isReleased, self.webView === view else { return }
-            guard !hasReportedWorkspaceColor || lastReportedWorkspaceColor != accent else { return }
-            hasReportedWorkspaceColor = true
-            lastReportedWorkspaceColor = accent
-            onWorkspaceColor?(accent, view)
         }
 
         func webView(_ webView: WKWebView, decidePolicyFor action: WKNavigationAction, decisionHandler: @escaping (WKNavigationActionPolicy) -> Void) {
@@ -1568,18 +1331,14 @@ struct WebWindow: NSViewRepresentable {
             download.delegate = downloads
         }
 
-        /// A new document owns its own accent. The previous page's colour must
-        /// not survive a navigation, and a document that never reports one
-        /// leaves the bundled icon in place. Bumping the generation also
-        /// refuses anything the old document still posts before WebKit commits
-        /// the new one.
+        /// Bumping the generation refuses anything the old document still
+        /// posts before WebKit commits the new one.
         func webView(_ webView: WKWebView, didStartProvisionalNavigation navigation: WKNavigation!) {
             handleProvisionalStart(from: webView, navigation: navigation)
         }
 
-        /// The new document is now the committed one, so its own observer may
-        /// report. Until this point every page message belongs to the old
-        /// document.
+        /// The new document is now the committed one. Until this point every
+        /// page message belongs to the old document.
         func webView(_ webView: WKWebView, didCommit navigation: WKNavigation!) {
             handleCommit(from: webView, navigation: navigation)
         }
@@ -1602,14 +1361,12 @@ struct WebWindow: NSViewRepresentable {
             provisionalNavigation = navigation ?? NSObject()
             provisionalNavigationView = view
             provisionalNavigationGeneration = documentGeneration
-            reportWorkspaceColor(nil, from: view)
         }
 
         func handleCommit(from view: WKWebView, navigation: AnyObject?) {
             guard isCurrentProvisionalNavigation(from: view, navigation: navigation) else { return }
             committedDocumentGeneration = provisionalNavigationGeneration
             clearProvisionalNavigation()
-            adoptCurrentDocument(in: view)
         }
 
         func handleProvisionalFailure(from view: WKWebView, navigation: AnyObject?, error: Error) {
@@ -1620,9 +1377,6 @@ struct WebWindow: NSViewRepresentable {
             // as current again instead of being treated as stale forever.
             committedDocumentGeneration = provisionalNavigationGeneration
             reportFailure(error)
-            // Its observer already deduplicated the colour it showed before the
-            // reset; ask it to report that value again now.
-            resyncWorkspaceColor(in: view)
         }
 
         private func isCurrentProvisionalNavigation(from view: WKWebView, navigation: AnyObject?) -> Bool {
@@ -1637,27 +1391,6 @@ struct WebWindow: NSViewRepresentable {
         private func clearProvisionalNavigation() {
             provisionalNavigation = nil
             provisionalNavigationView = nil
-        }
-
-        /// Rotates the document identity for the committed view and installs it
-        /// in the page. The adoption call also makes the page report its current
-        /// colour once, so a document that has not reported yet (late root) is
-        /// covered by the same path.
-        private func adoptCurrentDocument(in view: WKWebView) {
-            guard self.webView === view else { return }
-            let token = UUID().uuidString
-            adoptedDocumentToken = token
-            view.evaluateJavaScript(
-                "window.__ciaobotWorkspaceColorAdopt && window.__ciaobotWorkspaceColorAdopt(\"\(token)\");",
-                completionHandler: nil
-            )
-        }
-
-        private func resyncWorkspaceColor(in view: WKWebView) {
-            view.evaluateJavaScript(
-                "window.__ciaobotWorkspaceColorRefresh && window.__ciaobotWorkspaceColorRefresh();",
-                completionHandler: nil
-            )
         }
 
         func webView(_ webView: WKWebView, didFail navigation: WKNavigation!, withError error: Error) {
