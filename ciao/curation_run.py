@@ -240,6 +240,59 @@ class StaleNoteTarget:
 
 
 @dataclass(frozen=True, slots=True)
+class NoteCoverage:
+    """What the stale-note pass examined this run, and what it did not.
+
+    Metadata about the pass, never an input to it: eligibility, the cap, the
+    order and every write are settled before this exists, and nothing reads it
+    back. ``status`` is ``complete`` when every flagged note was examined (a
+    note settled by an existing check counts as examined), ``partial`` when the
+    cap stopped the pass or a note was unreadable or undated, and
+    ``unavailable`` when the vault scan did not run to the end.
+
+    Every flagged note lands in exactly one bucket, so
+    ``planned + never_queued + unreadable + settled + eligible_deferred +
+    unexamined == flagged``. ``eligible_deferred`` is the note that tripped the
+    cap (read, and due, but without a slot). ``unexamined`` is every flagged
+    note after it, which the pass never opened. Neither means the note is
+    settled, and the reports say "not examined", not "unchanged".
+    ``oldest_deferred_age_days`` is the trip note's age, from the scan's
+    metadata, so it reads no body.
+    """
+
+    status: str
+    scanned: int
+    exempt: int
+    undated: int
+    flagged: int
+    never_queued: int
+    unreadable: int
+    settled: int
+    planned: int
+    eligible_deferred: int
+    unexamined: int
+    oldest_deferred_age_days: int | None
+    cap: int
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "status": self.status,
+            "scanned": self.scanned,
+            "exempt": self.exempt,
+            "undated": self.undated,
+            "flagged": self.flagged,
+            "never_queued": self.never_queued,
+            "unreadable": self.unreadable,
+            "settled": self.settled,
+            "planned": self.planned,
+            "eligible_deferred": self.eligible_deferred,
+            "unexamined": self.unexamined,
+            "oldest_deferred_age_days": self.oldest_deferred_age_days,
+            "cap": self.cap,
+        }
+
+
+@dataclass(frozen=True, slots=True)
 class WorklistItem:
     """One pass that has work, with the keys of the things to work on."""
 
@@ -274,6 +327,7 @@ class Worklist:
     last_full_pass: str
     generated_at: str
     notes: tuple[str, ...] = ()
+    note_coverage: NoteCoverage | None = None
 
     @property
     def empty(self) -> bool:
@@ -284,7 +338,7 @@ class Worklist:
         return sum(item.count for item in self.items)
 
     def as_dict(self) -> dict[str, Any]:
-        return {
+        payload: dict[str, Any] = {
             "empty": self.empty,
             "weekly_due": self.weekly_due,
             "last_full_pass": self.last_full_pass,
@@ -293,6 +347,9 @@ class Worklist:
             "items": [item.as_dict() for item in self.items],
             "notes": list(self.notes),
         }
+        if self.note_coverage is not None:
+            payload["note_coverage"] = self.note_coverage.as_dict()
+        return payload
 
 
 @dataclass(frozen=True, slots=True)
@@ -689,8 +746,14 @@ def _stale_note_items(
     vault_root: Path,
     scanned: list[_ScannedNote],
     today: date,
-) -> tuple[list[WorklistItem], str]:
-    """The stale notes due to be checked, and a note for the worklist about the rest.
+    scan_unavailable: bool,
+) -> tuple[list[WorklistItem], str, NoteCoverage]:
+    """The stale notes due to be checked, a note about the rest, and their coverage.
+
+    The coverage is metadata about this selection and changes none of it: see
+    :class:`NoteCoverage`. ``scan_unavailable`` is the caller's word that the
+    scan did not run (a failed scan or a missing vault), which the scan list
+    alone cannot say, since both leave it empty.
 
     The selection is the audit's, not a second one: :func:`_stale_findings` already
     owns the thresholds, the exempt event types, the alias resolution and the
@@ -767,10 +830,12 @@ def _stale_note_items(
         key=lambda note: (-(note.age_days or 0), note.rendered),
     )
     items: list[WorklistItem] = []
-    settled = 0
+    never_queued_count = unreadable = settled = eligible_deferred = unexamined = 0
+    oldest_deferred: int | None = None
     capped = False
-    for note in flagged:
+    for position, note in enumerate(flagged):
         if never_queued(note.rendered):
+            never_queued_count += 1
             continue
         try:
             text = (root / note.relative).read_bytes().decode("utf-8")
@@ -780,13 +845,19 @@ def _stale_note_items(
             # nobody can judge — and reporting a revision for text we never read
             # would be the one thing worse.
             logger.debug("curation: stale note %s is not readable UTF-8", note.relative)
+            unreadable += 1
             continue
         revision = mr.content_revision(text)
         if not nv.should_check(root, note.relative, revision, today=today):
             settled += 1
             continue
         if len(items) >= STALE_NOTE_MAX_ITEMS:
+            # The note that trips the cap was read and is due; it just has no
+            # slot. Every flagged note after it is never opened at all.
             capped = True
+            eligible_deferred = 1
+            unexamined = len(flagged) - position - 1
+            oldest_deferred = note.age_days
             break
         items.append(
             WorklistItem(
@@ -801,18 +872,43 @@ def _stale_note_items(
             )
         )
     if capped:
-        return items, (
+        note_text = (
             f"more than {STALE_NOTE_MAX_ITEMS} notes are due; this run plans the "
             f"{STALE_NOTE_MAX_ITEMS} oldest of {len(flagged)} flagged, and the rest "
             "wait for the next run"
         )
-    if settled:
-        return items, (
+    elif settled:
+        note_text = (
             f"{settled} of {len(flagged)} flagged note(s) already have a check that "
             "settles them — inside its cooldown, or waiting on a proposal for a "
             "person to decide"
         )
-    return items, ""
+    else:
+        note_text = ""
+    undated = sum(1 for note in scanned if not note.dated and not note.exempt)
+    exempt = sum(1 for note in scanned if note.exempt)
+    if scan_unavailable:
+        status = "unavailable"
+    elif capped or unreadable or undated:
+        status = "partial"
+    else:
+        status = "complete"
+    coverage = NoteCoverage(
+        status=status,
+        scanned=len(scanned),
+        exempt=exempt,
+        undated=undated,
+        flagged=len(flagged),
+        never_queued=never_queued_count,
+        unreadable=unreadable,
+        settled=settled,
+        planned=len(items),
+        eligible_deferred=eligible_deferred,
+        unexamined=unexamined,
+        oldest_deferred_age_days=oldest_deferred,
+        cap=STALE_NOTE_MAX_ITEMS,
+    )
+    return items, note_text, coverage
 
 
 @dataclass(frozen=True, slots=True)
@@ -1577,8 +1673,11 @@ def build_worklist_views(
     )
     if scan_note:
         notes.append(scan_note)
-    stale_items, stale_note = _stale_note_items(
-        vault_root=vault_root, scanned=scanned, today=today
+    stale_items, stale_note, note_coverage = _stale_note_items(
+        vault_root=vault_root,
+        scanned=scanned,
+        today=today,
+        scan_unavailable=bool(scan_note) or not vault_root.is_dir(),
     )
     collected.extend(stale_items)
     if stale_note:
@@ -1656,6 +1755,7 @@ def build_worklist_views(
             last_full_pass=last_full_pass,
             generated_at=generated_at,
             notes=tuple(notes),
+            note_coverage=note_coverage,
         ),
         remaining=Worklist(
             items=remaining,
@@ -1663,6 +1763,7 @@ def build_worklist_views(
             last_full_pass=last_full_pass,
             generated_at=generated_at,
             notes=tuple(notes),
+            note_coverage=note_coverage,
         ),
     )
 

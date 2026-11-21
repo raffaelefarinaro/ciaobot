@@ -4740,3 +4740,370 @@ def test_the_closer_with_a_trailing_space_is_read_and_written_the_same_way(tmp_p
     assert cr.advance_full_pass(vault, today=date(2026, 9, 19)) is True
     assert cr.read_last_full_pass(log) == "2026-09-19"
     assert log.read_bytes().count(b"last_full_pass") == 1
+
+
+# ── The stale-note coverage status ────────────────────────────────────────
+
+
+def _coverage_worklist(vault: Path, guide: Path, today: date = date(2026, 9, 19)) -> cr.Worklist:
+    return cr.build_worklist(
+        vault_root=vault,
+        workspace=vault.name,
+        guide_path=guide,
+        category_registry=_categories(vault),
+        workspace_dir=guide.parent,
+        today=today,
+    )
+
+
+def _coverage(vault: Path, guide: Path, today: date = date(2026, 9, 19)) -> dict[str, object]:
+    coverage = _coverage_worklist(vault, guide, today).note_coverage
+    assert coverage is not None
+    return coverage.as_dict()
+
+
+def _assert_every_flagged_note_is_accounted_for(coverage: dict[str, object]) -> None:
+    accounted = sum(
+        int(coverage[key])
+        for key in (
+            "planned",
+            "never_queued",
+            "unreadable",
+            "settled",
+            "eligible_deferred",
+            "unexamined",
+        )
+    )
+    assert accounted == coverage["flagged"], coverage
+
+
+def test_coverage_with_nothing_flagged_is_complete_and_empty(tmp_path: Path) -> None:
+    vault = _vault(tmp_path)
+    guide = _guide(tmp_path)
+    _fresh_log(vault, last_full_pass=date(2026, 9, 18).isoformat())
+    _note(vault, "People/Fresh.md", updated="2026-09-18")
+
+    assert _coverage(vault, guide) == {
+        "status": "complete",
+        "scanned": 1,
+        "exempt": 0,
+        "undated": 0,
+        "flagged": 0,
+        "never_queued": 0,
+        "unreadable": 0,
+        "settled": 0,
+        "planned": 0,
+        "eligible_deferred": 0,
+        "unexamined": 0,
+        "oldest_deferred_age_days": None,
+        "cap": cr.STALE_NOTE_MAX_ITEMS,
+    }
+
+
+def test_coverage_under_the_cap_plans_every_flagged_note(tmp_path: Path) -> None:
+    vault = _vault(tmp_path)
+    guide = _guide(tmp_path)
+    _fresh_log(vault, last_full_pass=date(2026, 9, 18).isoformat())
+    for name in ("Ada", "Bea", "Cy"):
+        _note(vault, f"People/{name}.md", updated="2024-01-05")
+
+    coverage = _coverage(vault, guide)
+
+    assert coverage["status"] == "complete"
+    assert coverage["flagged"] == 3
+    assert coverage["planned"] == 3
+    assert coverage["eligible_deferred"] == 0
+    assert coverage["unexamined"] == 0
+    assert coverage["oldest_deferred_age_days"] is None
+    _assert_every_flagged_note_is_accounted_for(coverage)
+
+
+def test_coverage_over_the_cap_names_the_deferred_and_unexamined_notes(tmp_path: Path) -> None:
+    """Eight stale notes, five planned: the sixth is the one that trips the cap
+    (read and found eligible, so it is deferred), and the two behind it are
+    never opened, so they are unexamined. The age reported is the sixth's."""
+    vault = _vault(tmp_path)
+    guide = _guide(tmp_path)
+    today = date(2026, 9, 19)
+    _fresh_log(vault, last_full_pass=date(2026, 9, 18).isoformat())
+    for index in range(8):
+        _note(
+            vault,
+            f"People/Note{index:02d}.md",
+            updated=(date(2024, 1, 1) + timedelta(days=index)).isoformat(),
+        )
+
+    coverage = _coverage(vault, guide, today)
+
+    assert coverage == {
+        "status": "partial",
+        "scanned": 8,
+        "exempt": 0,
+        "undated": 0,
+        "flagged": 8,
+        "never_queued": 0,
+        "unreadable": 0,
+        "settled": 0,
+        "planned": cr.STALE_NOTE_MAX_ITEMS,
+        "eligible_deferred": 1,
+        "unexamined": 2,
+        "oldest_deferred_age_days": (today - date(2024, 1, 6)).days,
+        "cap": cr.STALE_NOTE_MAX_ITEMS,
+    }
+    _assert_every_flagged_note_is_accounted_for(coverage)
+
+
+def test_a_mixed_vault_accounts_for_every_flagged_note_exactly(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from ciao import note_verification as nv
+
+    vault = _vault(tmp_path)
+    guide = _guide(tmp_path)
+    today = date(2026, 9, 19)
+    _fresh_log(vault, last_full_pass=date(2026, 9, 18).isoformat())
+    # Flagged but never queued: a Workspace/ file the review queue cannot show.
+    _note(vault, "Workspace/Scratch.md", updated="2024-01-05")
+    # Flagged, settled by a check inside its cooldown.
+    settled = _note(vault, "People/Settled.md", updated="2024-01-05")
+    nv.record_note_check(
+        vault,
+        nv.NoteCheck(
+            relative_path="People/Settled.md",
+            content_revision=mr.content_revision(settled.read_text(encoding="utf-8")),
+            outcome=nv.UNVERIFIED,
+            checked_at=today,
+            retry_after=today + timedelta(days=nv.CHECK_COOLDOWN_DAYS),
+        ),
+    )
+    # Flagged and planned.
+    _note(vault, "People/Sofia.md", updated="2024-01-05")
+    # Flagged, but its body cannot be read for a revision. The scan decodes every
+    # note it lists, so a note it cannot decode never reaches this pass; the read
+    # failure is simulated at the seam the pass actually uses.
+    _note(vault, "People/Unreadable.md", updated="2024-01-05")
+    real_read_bytes = Path.read_bytes
+
+    def flaky_read_bytes(self: Path) -> bytes:
+        if self.name == "Unreadable.md":
+            raise OSError("permission denied")
+        return real_read_bytes(self)
+
+    monkeypatch.setattr(Path, "read_bytes", flaky_read_bytes)
+    # Not flagged: no usable date (its mtime is the epoch, so there is no date at
+    # all), and an exempt event type.
+    undated = _note(vault, "People/NoDate.md", updated="not-a-date")
+    os.utime(undated, (0, 0))
+    _note(vault, "journal/2024-01-05-standup.md", type_="journal")
+
+    coverage = _coverage(vault, guide, today)
+
+    assert coverage == {
+        "status": "partial",
+        "scanned": 6,
+        "exempt": 1,
+        "undated": 1,
+        "flagged": 4,
+        "never_queued": 1,
+        "unreadable": 1,
+        "settled": 1,
+        "planned": 1,
+        "eligible_deferred": 0,
+        "unexamined": 0,
+        "oldest_deferred_age_days": None,
+        "cap": cr.STALE_NOTE_MAX_ITEMS,
+    }
+    _assert_every_flagged_note_is_accounted_for(coverage)
+
+
+def test_no_note_past_the_cap_break_is_read(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Read sentinel at the seam the claim is about: the note pass's own body reads.
+
+    Only reads made while `_stale_note_items` runs are recorded, so the entry pass
+    (which reads bodies later, outside this function) does not pollute the record.
+    A read-ahead past the cap break would open the sixth note's neighbours and
+    fail this test.
+    """
+    vault = _vault(tmp_path)
+    guide = _guide(tmp_path)
+    _fresh_log(vault, last_full_pass=date(2026, 9, 18).isoformat())
+    for index in range(8):
+        _note(
+            vault,
+            f"People/Note{index:02d}.md",
+            updated=(date(2024, 1, 1) + timedelta(days=index)).isoformat(),
+        )
+    real_stale_note_items = cr._stale_note_items
+    real_read_bytes = Path.read_bytes
+    inside_note_pass = False
+    opened: list[str] = []
+
+    def recording_note_pass(**kwargs):
+        nonlocal inside_note_pass
+        inside_note_pass = True
+        try:
+            return real_stale_note_items(**kwargs)
+        finally:
+            inside_note_pass = False
+
+    def sentinel_read_bytes(self: Path) -> bytes:
+        if inside_note_pass and self.parent.name == "People":
+            opened.append(self.name)
+        return real_read_bytes(self)
+
+    monkeypatch.setattr(cr, "_stale_note_items", recording_note_pass)
+    monkeypatch.setattr(Path, "read_bytes", sentinel_read_bytes)
+
+    worklist = _coverage_worklist(vault, guide)
+
+    assert opened == [f"Note{index:02d}.md" for index in range(cr.STALE_NOTE_MAX_ITEMS + 1)]
+    assert worklist.note_coverage is not None
+    assert worklist.note_coverage.unexamined == 2
+
+
+def test_a_vault_with_only_an_unreadable_note_is_partial(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    vault = _vault(tmp_path)
+    guide = _guide(tmp_path)
+    _fresh_log(vault, last_full_pass=date(2026, 9, 18).isoformat())
+    _note(vault, "People/Unreadable.md", updated="2024-01-05")
+    real_read_bytes = Path.read_bytes
+
+    def flaky_read_bytes(self: Path) -> bytes:
+        if self.name == "Unreadable.md":
+            raise OSError("permission denied")
+        return real_read_bytes(self)
+
+    monkeypatch.setattr(Path, "read_bytes", flaky_read_bytes)
+
+    coverage = _coverage(vault, guide)
+
+    assert coverage["status"] == "partial"
+    assert coverage["unreadable"] == 1
+    assert coverage["undated"] == 0
+    assert coverage["planned"] == 0
+    _assert_every_flagged_note_is_accounted_for(coverage)
+
+
+def test_a_vault_with_only_an_undated_note_is_partial(tmp_path: Path) -> None:
+    """An exempt journal with no usable date is not counted as undated: the
+    exempt set is its own category and it is reported under `exempt`."""
+    vault = _vault(tmp_path)
+    guide = _guide(tmp_path)
+    _fresh_log(vault, last_full_pass=date(2026, 9, 18).isoformat())
+    undated = _note(vault, "People/NoDate.md", updated="not-a-date")
+    os.utime(undated, (0, 0))
+    journal = _note(vault, "journal/undated-standup.md", updated="not-a-date", type_="journal")
+    os.utime(journal, (0, 0))
+
+    coverage = _coverage(vault, guide)
+
+    assert coverage["status"] == "partial"
+    assert coverage["flagged"] == 0
+    assert coverage["undated"] == 1
+    assert coverage["exempt"] == 1
+    _assert_every_flagged_note_is_accounted_for(coverage)
+
+
+def test_coverage_leaves_the_items_the_plan_and_their_order_alone(tmp_path: Path) -> None:
+    from dataclasses import replace as dc_replace
+
+    vault = _vault(tmp_path)
+    guide = _guide(tmp_path)
+    _fresh_log(vault, last_full_pass=date(2026, 9, 18).isoformat())
+    for index in range(8):
+        _note(
+            vault,
+            f"People/Note{index:02d}.md",
+            updated=(date(2024, 1, 1) + timedelta(days=index)).isoformat(),
+        )
+
+    worklist = _coverage_worklist(vault, guide)
+    bare = dc_replace(worklist, note_coverage=None)
+
+    stale = [item for item in worklist.items if item.pass_id == cr.PASS_STALE_NOTE]
+    assert [item.keys for item in stale] == [
+        (cr.item_key(cr.PASS_STALE_NOTE, f"People/Note{index:02d}.md"),)
+        for index in range(cr.STALE_NOTE_MAX_ITEMS)
+    ]
+    assert worklist.as_dict() | {"note_coverage": None} == bare.as_dict() | {"note_coverage": None}
+    assert cr.plan_run(worklist).as_dict() == cr.plan_run(bare).as_dict()
+
+
+def test_coverage_is_the_same_on_a_repeated_build(tmp_path: Path) -> None:
+    vault = _vault(tmp_path)
+    guide = _guide(tmp_path)
+    _fresh_log(vault, last_full_pass=date(2026, 9, 18).isoformat())
+    for index in range(7):
+        _note(vault, f"People/Note{index:02d}.md", updated="2024-01-05")
+
+    first = _coverage_worklist(vault, guide).note_coverage
+    second = _coverage_worklist(vault, guide).note_coverage
+
+    assert first is not None
+    assert first == second
+
+
+def test_a_failed_vault_scan_is_reported_as_unavailable(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from ciao import vault_index
+
+    vault = _vault(tmp_path)
+    guide = _guide(tmp_path)
+    _fresh_log(vault, last_full_pass=date(2026, 9, 18).isoformat())
+    _note(vault, "People/Sofia.md", updated="2024-01-05")
+
+    def broken_scan(*_args: object, **_kwargs: object):
+        raise RuntimeError("scan exploded")
+
+    monkeypatch.setattr(vault_index, "scan_vault", broken_scan)
+
+    coverage = _coverage(vault, guide)
+
+    assert coverage["status"] == "unavailable"
+    assert coverage["scanned"] == 0
+    assert coverage["flagged"] == 0
+    assert coverage["planned"] == 0
+
+
+def test_a_missing_vault_is_reported_as_unavailable(tmp_path: Path) -> None:
+    guide = _guide(tmp_path)
+
+    worklist = cr.build_worklist(
+        vault_root=tmp_path / "no-such-vault",
+        workspace="no-such-vault",
+        guide_path=guide,
+        category_registry=_categories(tmp_path / "no-such-vault"),
+        workspace_dir=tmp_path,
+        today=date(2026, 9, 19),
+    )
+
+    assert worklist.note_coverage is not None
+    assert worklist.note_coverage.status == "unavailable"
+
+
+def test_worklist_as_dict_carries_coverage_only_when_it_is_known() -> None:
+    plain = cr.Worklist((), False, "", "now")
+    assert "note_coverage" not in plain.as_dict()
+
+    coverage = cr.NoteCoverage(
+        status="complete",
+        scanned=0,
+        exempt=0,
+        undated=0,
+        flagged=0,
+        never_queued=0,
+        unreadable=0,
+        settled=0,
+        planned=0,
+        eligible_deferred=0,
+        unexamined=0,
+        oldest_deferred_age_days=None,
+        cap=cr.STALE_NOTE_MAX_ITEMS,
+    )
+    with_coverage = cr.Worklist((), False, "", "now", note_coverage=coverage)
+    assert with_coverage.as_dict()["note_coverage"] == coverage.as_dict()
