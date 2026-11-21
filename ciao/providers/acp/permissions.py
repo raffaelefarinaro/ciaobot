@@ -119,6 +119,7 @@ class PermissionBroker:
             self.emit(SystemStatusEvent(
                 type="system",
                 status=f"Denied {title}: scheduled runs cannot wait for approval.",
+                denied_tool=title,
             ))
             return _outcome(stored, approved=False)
         loop = asyncio.get_running_loop()

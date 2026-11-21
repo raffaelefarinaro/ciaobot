@@ -22,7 +22,9 @@ from ciao.legacy_node_state import (
 )
 from ciao.legacy_node_state import detect as detect_legacy_node_state
 from ciao.legacy_node_state import writers_armed
+from ciao.models import BridgeMode
 from ciao.schedules import (
+    ScheduleEntry,
     ScheduleManager,
     ScheduleStore,
     dispatch_is_current,
@@ -139,6 +141,20 @@ class StartupTracker:
             "phases": [asdict(p) for p in self._phases.values()],
             "overall_ready": self.overall_ready,
         }
+
+
+def schedule_run_mode(
+    config: CiaoConfig, entry: ScheduleEntry, provider: str, workspace: str | None
+) -> BridgeMode:
+    """The permission mode a schedule run's chat starts in.
+
+    A user routine takes the provider default for its workspace, exactly like a
+    new chat. A system routine (the packaged care routines) runs unattended with
+    nobody to approve anything, so it runs in bypass whatever the default is.
+    """
+    if getattr(entry, "scope", "user") == "system":
+        return "bypass"
+    return config.default_mode_for_provider(provider, workspace)
 
 
 def _refresh_vault_index(
@@ -1093,7 +1109,7 @@ async def _run_server_locked(
         # with this workspace's override of that pin winning, exactly as a new
         # chat does.
         provider, model, workspace = pcm.schedule_effective_routing(entry)
-        mode = config.default_mode_for_provider(provider, workspace)
+        mode = schedule_run_mode(config, entry, provider, workspace)
         return ("claude", model, mode, provider)
 
     # Classified before anything else touches the runtime root, because the

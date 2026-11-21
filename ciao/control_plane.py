@@ -6948,7 +6948,27 @@ class CiaoControlPlane:
             raise ControlPlaneError("invalid_time", time_error)
         return _ok(self._schedule_payload(entry))
 
+    #: What a routine runs and when, decided later with nobody watching. Only a
+    #: chat that may act can set these; the rest of a routine is plain metadata.
+    _SCHEDULE_RUN_FIELDS = ("prompt", "command", "provider", "enabled")
+
+    def _require_schedule_operator(self, principal: AgentPrincipal) -> None:
+        """Refuse a plan-mode caller's routine edit: the webhook gate, for schedules.
+
+        A plan chat is read-only, but a routine it writes runs later, unwatched,
+        in its workspace's default mode, which is stronger than plan. So a plan
+        caller may not create a routine or change what one runs.
+        """
+        if self.chat_mode(principal) == "plan":
+            raise ControlPlaneError(
+                "schedule_requires_operator",
+                "A plan-mode chat cannot create a routine or change what one runs. "
+                "A routine runs later, unwatched, in its workspace's default permission "
+                "mode, which is stronger than plan. Ask the user to make this change in Automations.",
+            )
+
     def schedule_create(self, principal: AgentPrincipal, **values: Any) -> dict[str, Any]:
+        self._require_schedule_operator(principal)
         preview = self.schedule_preview(principal, **values)["data"]
         entry = self.schedules.create(
             daily_time_utc=preview["daily_time_utc"],
@@ -7029,6 +7049,8 @@ class CiaoControlPlane:
         **changes: Any,
     ) -> dict[str, Any]:
         entry = self._schedule(principal, schedule_id)
+        if any(changes.get(field) is not None for field in self._SCHEDULE_RUN_FIELDS):
+            self._require_schedule_operator(principal)
         system_timing_fields: frozenset[str] = frozenset()
         if entry.scope == "system":
             try:

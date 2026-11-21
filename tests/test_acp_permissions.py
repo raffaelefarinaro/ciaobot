@@ -106,6 +106,8 @@ async def test_unattended_rejects_without_emitting_card() -> None:
     status = emitted[0]
     assert isinstance(status, SystemStatusEvent)
     assert status.status == "Denied Bash: scheduled runs cannot wait for approval."
+    # Typed, so a schedule run can fail on it without parsing the sentence.
+    assert status.denied_tool == "Bash"
     assert not broker.has("call-1")
 
 

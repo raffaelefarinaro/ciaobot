@@ -1285,6 +1285,74 @@ def test_agent_routine_text_edit_leaves_no_mode_behind(tmp_path: Path) -> None:
     assert not hasattr(stored, "mode")
 
 
+def _plan_gate_routine(tmp_path: Path):
+    """A routine created by an auto chat, plus the pcm whose chat mode a test can flip."""
+    pcm = _work_project_pcm()
+    control_plane, schedules = _schedule_control_plane(tmp_path, pcm)
+    principal = _chat_create_principal(project_id="project-work", workspace="work")
+    created = control_plane.schedule_create(
+        principal, prompt="Check for new signals.", daily_time="09:00", frequency="weekly",
+    )
+    return pcm, control_plane, schedules, principal, created["data"]["schedule_id"]
+
+
+def test_plan_caller_cannot_create_a_routine(tmp_path: Path) -> None:
+    """A plan chat is read-only; a routine would run later in the workspace default mode."""
+    pcm = _work_project_pcm()
+    pcm.parent_mode = "plan"
+    control_plane, schedules = _schedule_control_plane(tmp_path, pcm)
+
+    with pytest.raises(ControlPlaneError) as excinfo:
+        control_plane.schedule_create(
+            _chat_create_principal(project_id="project-work", workspace="work"),
+            prompt="Check for new signals.", daily_time="09:00", frequency="weekly",
+        )
+
+    assert excinfo.value.code == "schedule_requires_operator"
+    assert schedules.list_entries() == []
+
+
+@pytest.mark.parametrize(
+    "changes",
+    [{"prompt": "New text."}, {"enabled": False}, {"provider": "opencode"}],
+)
+def test_plan_caller_cannot_change_a_routines_run(tmp_path: Path, changes: dict) -> None:
+    pcm, control_plane, schedules, principal, schedule_id = _plan_gate_routine(tmp_path)
+    before = schedules.list_entries()[0]
+    pcm.parent_mode = "plan"
+
+    with pytest.raises(ControlPlaneError) as excinfo:
+        control_plane.schedule_update(principal, schedule_id, **changes)
+
+    assert excinfo.value.code == "schedule_requires_operator"
+    assert schedules.list_entries()[0] == before
+
+
+@pytest.mark.parametrize("mode", ["normal", "auto", "bypass"])
+def test_non_plan_callers_may_change_a_routines_prompt(tmp_path: Path, mode: str) -> None:
+    pcm, control_plane, schedules, principal, schedule_id = _plan_gate_routine(tmp_path)
+    pcm.parent_mode = mode
+
+    control_plane.schedule_update(principal, schedule_id, prompt="New text.")
+
+    assert schedules.list_entries()[0].prompt == "New text."
+
+
+def test_plan_caller_may_still_change_pure_metadata(tmp_path: Path) -> None:
+    pcm, control_plane, schedules, principal, schedule_id = _plan_gate_routine(tmp_path)
+    pcm.parent_mode = "plan"
+
+    updated = control_plane.schedule_update(
+        principal, schedule_id, title="Renamed", description="Weekly check.", daily_time="10:00",
+    )
+
+    stored = schedules.list_entries()[0]
+    assert stored.title == "Renamed"
+    assert stored.description == "Weekly check."
+    assert stored.daily_time_utc == "10:00"
+    assert updated["data"]["title"] == "Renamed"
+
+
 # ── workspace boundary for schedule targeting ────────────────────────────
 #
 # MCP tokens are scoped to one workspace, and a schedule is auto-approved

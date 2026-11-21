@@ -706,6 +706,8 @@ class ScheduleDispatcher:
                 event_type = payload.get("type")
                 if event_type == "permission_request":
                     outcome.permission_requested = True
+                elif event_type == "status" and payload.get("denied_tool"):
+                    outcome.permission_denied = str(payload["denied_tool"])
                 elif (
                     event_type == "tool_use"
                     and payload.get("tool_name") == "AskUserQuestion"
@@ -862,6 +864,7 @@ class ScheduleDispatcher:
                 "chat_id": target_id,
                 "archived_to": outcome.archived_to,
                 "permission_requested": outcome.permission_requested,
+                "permission_denied": outcome.permission_denied,
                 "question_requested": outcome.question_requested,
                 "retry_pending": outcome.retry_pending,
                 **command_extra,

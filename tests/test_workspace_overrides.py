@@ -554,11 +554,25 @@ def test_schedule_runs_take_the_workspace_default_mode(tmp_path: Path) -> None:
     )
     assert config.default_mode_for_provider("claude", "work") == "bypass"
     assert config.default_mode_for_provider("claude", "personal") == "auto"
-    # The saved-mode ceiling and its dispatch helper are gone.
+    # The saved-mode ceiling is gone with the field it capped.
     assert not hasattr(execution_modes, "cap_schedule_mode")
-    assert not hasattr(ciao_main, "schedule_run_mode")
-    main_source = " ".join(inspect.getsource(ciao_main).split())
-    assert "mode = config.default_mode_for_provider(provider, workspace)" in main_source
+
+    user = ScheduleEntry(schedule_id="sched-u", daily_time_utc="09:00", prompt="p",
+                         chat_id=0, created_at="2026-01-01T00:00:00Z")
+    # A user routine takes the workspace default, including auto.
+    assert ciao_main.schedule_run_mode(config, user, "claude", "personal") == "auto"
+    assert ciao_main.schedule_run_mode(config, user, "claude", "work") == "bypass"
+
+
+def test_system_routine_runs_bypass_whatever_the_workspace_default(tmp_path: Path) -> None:
+    """The packaged system-memory-curation routine runs unattended and needs bypass
+    on a default install, where the default is auto."""
+    config = _config(tmp_path, provider_default_modes={"claude": "auto"})
+    system = ScheduleEntry(schedule_id="system-memory-curation@personal", daily_time_utc="03:00",
+                           prompt="care", chat_id=0, created_at="2026-01-01T00:00:00Z",
+                           scope="system")
+    assert config.default_mode_for_provider("claude", "personal") == "auto"
+    assert ciao_main.schedule_run_mode(config, system, "claude", "personal") == "bypass"
 
 
 def test_agent_edit_of_a_routines_text_does_not_pin_a_mode(tmp_path: Path) -> None:

@@ -287,6 +287,57 @@ async def test_dispatch_keeps_schedule_outcome_vocabulary(
 
 
 @pytest.mark.asyncio
+async def test_a_denied_approval_fails_the_run_and_names_the_action(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The broker denies an unattended approval with no card, so the turn can
+    still finish with a result. That run must not be recorded as a success."""
+    events: list[dict[str, object]] = [
+        {
+            "type": "status",
+            "message": "Denied Bash: scheduled runs cannot wait for approval.",
+            "denied_tool": "Bash",
+        },
+        {"type": "result", "text": "I could not run the command.", "is_error": False},
+    ]
+    host = _ScheduleHost(tmp_path, events)
+    dispatcher = ScheduleDispatcher(cast(ScheduleDispatchHost, host))
+    rows = _capture_run_records(monkeypatch)
+
+    result = await dispatcher.dispatch_schedule(
+        _entry(), "Run the routine.", "opus", "auto", "claude"
+    )
+
+    assert result["status"] == "error"
+    assert len(rows) == 1 and rows[0].status == "error"
+    assert rows[0].error is not None
+    assert "Denied Bash" in rows[0].error
+    assert "mode" in rows[0].error
+
+
+@pytest.mark.asyncio
+async def test_a_run_without_a_denial_is_unchanged(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    events: list[dict[str, object]] = [
+        {"type": "status", "message": "Compacted context"},
+        {"type": "result", "text": "done", "is_error": False},
+    ]
+    host = _ScheduleHost(tmp_path, events)
+    dispatcher = ScheduleDispatcher(cast(ScheduleDispatchHost, host))
+    rows = _capture_run_records(monkeypatch)
+
+    result = await dispatcher.dispatch_schedule(
+        _entry(), "Run the routine.", "opus", "auto", "claude"
+    )
+
+    assert result == {"chat_id": "chat-1", "status": "ok"}
+    assert rows[0].status == "ok" and rows[0].error is None
+
+
+@pytest.mark.asyncio
 async def test_auto_archive_stays_a_manager_lifecycle_seam(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
