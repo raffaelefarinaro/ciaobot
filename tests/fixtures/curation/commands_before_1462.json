@@ -30,15 +30,7 @@
     ],
     [
       "curation-end",
-      "--completed"
-    ],
-    [
-      "curation-end",
       "--holder"
-    ],
-    [
-      "curation-end",
-      "--planned"
     ],
     [
       "curation-end",

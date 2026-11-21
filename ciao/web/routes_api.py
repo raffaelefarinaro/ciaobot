@@ -8914,6 +8914,10 @@ async def proposals_history(request: Request) -> JSONResponse:
             # Read-side disambiguators for the id only; not part of the contract.
             row.pop("seq", None)
             row.pop("log", None)
+            # The curation run's lease holder and worklist key are for the care
+            # report only; the History payload does not carry them.
+            row.pop("run_id", None)
+            row.pop("item_key", None)
             workspace_rows.append(row)
         # Join each region decision to the verdict the nightly run recorded for
         # that row before the operator decided, when it recorded one.

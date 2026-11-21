@@ -35,7 +35,9 @@ An unattempted or failed pass records no key. A failure here goes to step 4 with
 
 ## 4. End
 
-`ciao curation-end --holder <lease.holder> --status ok|failed --planned <n> --completed <n>`
+`ciao curation-end --holder <lease.holder> --status ok|failed`
+
+The counts are derived from the run's own receipts; you do not pass them. `completed` can exceed `planned` when the run accepted rows it found during the run, because those are work the plan did not name.
 
 Use `failed` after any failure in steps 2 to 3b, and add `--reason "bounded operation failure"`. The end releases the lease and stamps the weekly marker itself, only when both weekly checks are recorded and the status is `ok`. The output's `full_pass_advanced` says whether it did; if it is false, say the weekly pass is still due. You never write that marker by hand.
 

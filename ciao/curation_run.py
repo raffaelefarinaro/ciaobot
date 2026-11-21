@@ -1936,6 +1936,68 @@ def plan_run_with_blocked(worklist: Worklist, budget: RunBudget | None = None) -
     )
 
 
+# Blocked keys kept on the lease. Blocked items never take budget, so an
+# oversized log stays observed night after night; the lease keeps this many
+# pairs and only a count beyond them.
+LEASE_PLAN_BLOCKED_CAP = 100
+
+
+# Bounds a stored plan is checked against on every read. Planned keys are
+# budget-bounded in practice; the ceiling only stops a corrupt or hostile state
+# file from making every command load a huge list.
+LEASE_PLAN_MAX_KEYS = 10_000
+LEASE_PLAN_KEY_MAX_CHARS = 512
+_LEASE_PLAN_FIELDS = frozenset({"planned", "blocked", "blocked_overflow", "deferred_count"})
+
+
+def _check_lease_plan(path: Path, plan: object) -> None:
+    """Refuse a stored plan of the wrong shape or size, as a state error.
+
+    Corrupt lease state is a :class:`CurationStateError` everywhere else in this
+    module (see :func:`_load`), so a malformed plan is handled the same way: every
+    command that loads the state stops with a state error and does not release
+    or rewrite the lease.
+    """
+    if not isinstance(plan, dict) or set(plan) != _LEASE_PLAN_FIELDS:
+        raise _state_error(path, "lease plan has missing or unknown fields")
+    planned, blocked = plan["planned"], plan["blocked"]
+    if (
+        not isinstance(planned, list)
+        or not isinstance(blocked, list)
+        or len(planned) > LEASE_PLAN_MAX_KEYS
+        or len(blocked) > LEASE_PLAN_BLOCKED_CAP
+    ):
+        raise _state_error(path, "lease plan lists are malformed or too large")
+    for pair in (*planned, *blocked):
+        if (
+            not isinstance(pair, list)
+            or len(pair) != 2
+            or not all(
+                isinstance(part, str) and 0 < len(part) <= LEASE_PLAN_KEY_MAX_CHARS
+                for part in pair
+            )
+        ):
+            raise _state_error(path, "lease plan entries are malformed")
+    for count in (plan["blocked_overflow"], plan["deferred_count"]):
+        if type(count) is not int or count < 0:
+            raise _state_error(path, "lease plan counts are malformed")
+
+
+def lease_plan(run_plan: RunPlan) -> dict[str, Any]:
+    """This run's begin-time plan as the lease stores it: pairs, bounded, plus a count.
+
+    ``planned`` is already bounded by the run budget. ``deferred_count`` is the
+    begin-time count the run reports as deferred; it is a scalar, not a key list.
+    """
+    blocked_pairs = [[item.pass_id, key] for item in run_plan.blocked for key in item.keys]
+    return {
+        "planned": [[item.pass_id, key] for item in run_plan.planned for key in item.keys],
+        "blocked": blocked_pairs[:LEASE_PLAN_BLOCKED_CAP],
+        "blocked_overflow": max(0, len(blocked_pairs) - LEASE_PLAN_BLOCKED_CAP),
+        "deferred_count": run_plan.deferred_count,
+    }
+
+
 # ── Persisted state ───────────────────────────────────────────────────────
 
 
@@ -2076,6 +2138,8 @@ def _load(path: Path) -> CurationState:
             raise _state_error(path, "lease start time is invalid")
         if not isinstance(expires, str) or _parse_iso(expires) is None:
             raise _state_error(path, "lease expiry is invalid")
+        if "plan" in lease:
+            _check_lease_plan(path, lease["plan"])
     if last_run:
         if (
             not isinstance(last_run.get("status"), str)
@@ -2420,6 +2484,30 @@ def record_done(
             )
         _store(state_path(vault_root), state)
     return added
+
+
+def record_plan(
+    vault_root: Path,
+    *,
+    holder: str,
+    plan: dict[str, Any],
+    now: datetime | None = None,
+) -> None:
+    """Store this run's begin-time plan on the lease it holds.
+
+    The plan dies with the lease: :func:`end_run` clears the lease, so
+    ``last_run`` keeps its strict shape. Rejects a holder that no longer owns
+    the lease, like :func:`record_done`.
+    """
+    with _state_lock(vault_root):
+        effective_now = (now or datetime.now(UTC)).astimezone(UTC)
+        state = _load(state_path(vault_root))
+        held = _live_lease(state, effective_now)
+        if held is None or held.get("holder") != holder:
+            raise CurationBusy("this run no longer holds the curation lease")
+        _check_lease_plan(state_path(vault_root), plan)
+        state.lease["plan"] = plan
+        _store(state_path(vault_root), state)
 
 
 LOG_SELECTORS: dict[str, str] = {

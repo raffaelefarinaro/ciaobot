@@ -550,3 +550,339 @@ def test_a_row_whose_revision_changed_after_planning_is_refused(install) -> None
 
     assert result == apply.Refused(apply.REFUSED_CHANGED)
     assert install.guide.read_bytes() == guide_before
+
+
+# ── S2: the accept stamps the run and the item on every row it writes ──
+
+
+def _operation_rows(env, operation_id: str) -> list[dict]:
+    journal = memory_receipts.journal_path(env.vault, env.guide)
+    return [r for r in memory_receipts.read_receipts(journal) if r.get("operation_id") == operation_id]
+
+
+def test_an_accept_stamps_run_and_item_on_both_receipts_and_the_decision(install) -> None:
+    intent = _accept_ready(install)
+
+    assert isinstance(apply.apply_memory_accept(intent, vault_root=install.vault), apply.Accepted)
+
+    rows = _operation_rows(install, intent.operation_id)
+    assert sorted(r["kind"] for r in rows) == ["queue_resolve", "region_apply"]
+    assert {(r["run_id"], r["item_key"]) for r in rows} == {(intent.holder, intent.item_key)}
+    (decision,) = [r for r in read_decisions(install.queue) if r["operation_id"] == intent.operation_id]
+    assert (decision["run_id"], decision["item_key"]) == (intent.holder, intent.item_key)
+
+
+def test_a_replay_in_a_later_run_adds_no_rows_and_keeps_the_first_stamps(install) -> None:
+    intent = _accept_ready(install)
+    assert isinstance(apply.apply_memory_accept(intent, vault_root=install.vault), apply.Accepted)
+    before = _operation_rows(install, intent.operation_id)
+    curation_run.end_run(install.vault, holder=intent.holder)
+    later = replace(intent, holder=_lease(install.vault))
+
+    assert isinstance(apply.apply_memory_accept(later, vault_root=install.vault), apply.AlreadyDone)
+
+    assert _operation_rows(install, intent.operation_id) == before
+    decisions = [r for r in read_decisions(install.queue) if r["operation_id"] == intent.operation_id]
+    assert [(d["run_id"], d["item_key"]) for d in decisions] == [(intent.holder, intent.item_key)]
+
+
+def test_a_writer_without_a_run_leaves_both_keys_empty(install) -> None:
+    memory_proposals.record_promotion(
+        install.queue, text=FACT, kind="memory", via="cli", outcome="written"
+    )
+
+    (row,) = [r for r in read_decisions(install.queue) if r["text"] == FACT]
+    assert row["run_id"] == "" and row["item_key"] == ""
+
+
+def test_a_crash_between_the_effects_keeps_the_stamps_on_the_finishing_rows(install, monkeypatch) -> None:
+    intent = _accept_ready(install)
+    real = apply.queue_resolution
+    monkeypatch.setattr(apply, "queue_resolution", _crash)
+    with pytest.raises(RuntimeError):
+        apply.apply_memory_accept(intent, vault_root=install.vault)
+    monkeypatch.setattr(apply, "queue_resolution", real)
+
+    assert isinstance(apply.apply_memory_accept(intent, vault_root=install.vault), apply.Accepted)
+
+    rows = _operation_rows(install, intent.operation_id)
+    assert {(r["run_id"], r["item_key"]) for r in rows} == {(intent.holder, intent.item_key)}
+
+
+def _run_night(env, capsys: pytest.CaptureFixture[str]) -> dict:
+    capsys.readouterr()
+    assert cli.main(["curation-begin", "--vault-root", str(env.vault), "--json"]) == 0
+    return json.loads(capsys.readouterr().out)
+
+
+def test_curation_end_derives_counts_from_the_begin_plan_and_the_runs_own_receipts(install, capsys) -> None:
+    payload = _run_night(install, capsys)
+    holder = payload["lease"]["holder"]
+    planned_keys = {key for item in payload["planned"] for key in item["keys"]}
+    assert curation_run.HYGIENE_INDEX_KEY in planned_keys
+    _predict(install.queue)
+    intent = _plan(install, holder=holder)
+    # Planned at its predict stage; the accept settles under act:accept, which the
+    # begin plan never named, so it counts as extra work (see the next test).
+    assert intent.item_key not in planned_keys
+    assert isinstance(apply.apply_memory_accept(intent, vault_root=install.vault), apply.Accepted)
+    assert cli.main(
+        ["curation-progress", "--vault-root", str(install.vault), "--holder", holder,
+         "--key", curation_run.HYGIENE_INDEX_KEY]
+    ) == 0
+    capsys.readouterr()
+
+    # The counts are no longer the agent's to state: the flags are gone.
+    with pytest.raises(SystemExit):
+        cli.main(["curation-end", "--vault-root", str(install.vault), "--holder", holder,
+                  "--status", "ok", "--completed", "99"])
+    capsys.readouterr()
+    assert cli.main(
+        ["curation-end", "--vault-root", str(install.vault), "--holder", holder,
+         "--status", "ok", "--json"]
+    ) == 0
+    summary = json.loads(capsys.readouterr().out)
+
+    assert summary["planned"] == len(planned_keys)
+    assert summary["completed"] == 2  # the accept (applied) and the index check (done, unverified)
+    assert summary["counts_complete"] is True
+    stored = curation_run.load_state(install.vault).last_run
+    assert (stored["planned"], stored["completed"]) == (summary["planned"], 2)
+
+
+def test_a_planned_accept_with_no_receipt_is_not_counted_as_completed(install, capsys) -> None:
+    payload = _run_night(install, capsys)
+    holder = payload["lease"]["holder"]
+    planned_keys = {key for item in payload["planned"] for key in item["keys"]}
+    capsys.readouterr()
+
+    assert cli.main(
+        ["curation-end", "--vault-root", str(install.vault), "--holder", holder,
+         "--status", "ok", "--json"]
+    ) == 0
+    summary = json.loads(capsys.readouterr().out)
+
+    assert summary["planned"] == len(planned_keys)
+    assert summary["completed"] == 0
+
+
+@contextmanager
+def _guide_write_fails(monkeypatch):
+    """Patch the guide write to fail, restored at exit without touching other fixtures."""
+    def disk_full(*_args, **_kwargs):
+        raise OSError("disk full")
+
+    with monkeypatch.context() as patched:
+        patched.setattr("ciao.memory_tool.write_guide_atomically", disk_full)
+        yield
+
+
+def _end(env, capsys: pytest.CaptureFixture[str], holder: str, status: str = "ok") -> dict:
+    capsys.readouterr()
+    assert cli.main(
+        ["curation-end", "--vault-root", str(env.vault), "--holder", holder,
+         "--status", status, "--json"]
+    ) == 0
+    return json.loads(capsys.readouterr().out)
+
+
+def test_a_planned_key_accepted_under_its_planned_key_is_counted_once(install, capsys) -> None:
+    _predict(install.queue)
+    payload = _run_night(install, capsys)
+    holder = payload["lease"]["holder"]
+    intent = _plan(install, holder=holder)
+    assert intent.item_key in {key for item in payload["planned"] for key in item["keys"]}
+    assert isinstance(apply.apply_memory_accept(intent, vault_root=install.vault), apply.Accepted)
+
+    summary = _end(install, capsys, holder)
+
+    assert summary["completed"] == 1
+    assert summary["counts_complete"] is True
+
+
+def test_a_row_predicted_and_accepted_in_one_run_is_unplanned_extra_work(install, capsys) -> None:
+    payload = _run_night(install, capsys)
+    holder = payload["lease"]["holder"]
+    planned_keys = {key for item in payload["planned"] for key in item["keys"]}
+    _predict(install.queue)
+    intent = _plan(install, holder=holder)
+    assert intent.item_key not in planned_keys
+    assert isinstance(apply.apply_memory_accept(intent, vault_root=install.vault), apply.Accepted)
+
+    summary = _end(install, capsys, holder)
+
+    assert summary["planned"] == len(planned_keys)
+    assert summary["completed"] == 1
+    assert summary["counts_complete"] is True
+
+
+def test_a_failed_accept_of_a_row_found_during_the_run_is_not_completed(install, capsys, monkeypatch) -> None:
+    payload = _run_night(install, capsys)
+    holder = payload["lease"]["holder"]
+    _predict(install.queue)
+    intent = _plan(install, holder=holder)
+
+    with _guide_write_fails(monkeypatch):
+        assert isinstance(apply.apply_memory_accept(intent, vault_root=install.vault), apply.Failed)
+
+    summary = _end(install, capsys, holder)
+
+    assert summary["completed"] == 0
+    assert summary["failed"] == 1
+    assert summary["counts_complete"] is True
+    assert any("1 accept(s) failed" in reason for reason in summary["reasons"])
+
+
+def test_an_accept_resumed_by_a_later_run_is_matched_by_operation_and_credited_once(
+    install, capsys, monkeypatch
+) -> None:
+    holder_a = _lease(install.vault)
+    _predict(install.queue)
+    intent_a = _plan(install, holder=holder_a)
+    real = apply.queue_resolution
+    monkeypatch.setattr(apply, "queue_resolution", _crash)
+    with pytest.raises(RuntimeError):
+        apply.apply_memory_accept(intent_a, vault_root=install.vault)
+    monkeypatch.setattr(apply, "queue_resolution", real)
+    curation_run.end_run(install.vault, holder=holder_a)
+
+    payload = _run_night(install, capsys)
+    holder_b = payload["lease"]["holder"]
+    intent_b = _plan(install, holder=holder_b)
+    assert intent_b.operation_id == intent_a.operation_id
+    assert isinstance(apply.apply_memory_accept(intent_b, vault_root=install.vault), apply.Accepted)
+
+    summary = _end(install, capsys, holder_b)
+
+    assert summary["completed"] == 1
+    assert summary["counts_complete"] is True
+
+
+def test_the_plan_is_cut_to_the_budget_and_the_end_reports_that_cut(install, capsys) -> None:
+    capsys.readouterr()
+    assert cli.main(
+        ["curation-begin", "--vault-root", str(install.vault), "--max-items", "2", "--json"]
+    ) == 0
+    payload = json.loads(capsys.readouterr().out)
+    planned = sum(len(item["keys"]) for item in payload["planned"])
+    assert planned == 2 and payload["deferred_count"] >= 1
+
+    summary = _end(install, capsys, payload["lease"]["holder"])
+
+    assert summary["planned"] == planned
+    assert summary["deferred"] == payload["deferred_count"]
+
+
+def test_the_fold_is_handed_only_this_runs_operation_ids_by_key(install, capsys, monkeypatch) -> None:
+    from ciao import care_report
+
+    payload = _run_night(install, capsys)
+    holder = payload["lease"]["holder"]
+    _predict(install.queue)
+    intent = _plan(install, holder=holder)
+    assert isinstance(apply.apply_memory_accept(intent, vault_root=install.vault), apply.Accepted)
+    memory_receipts._append(
+        memory_receipts.journal_path(install.vault),
+        {
+            "id": "foreign-1", "ts": "2026-11-21T00:00:00Z", "actor": "agent", "source": "cli",
+            "workspace": "work", "kind": "region_apply", "status": "applied",
+            "operation_id": "cop_foreign", "run_id": "other-run", "item_key": intent.item_key,
+            "changed": True, "before_revision": "a", "after_revision": "b",
+        },
+    )
+    handed: list[tuple[str, tuple[str, ...]]] = []
+    real = care_report.summarize_care_run
+
+    def spy(plan, receipts, **kwargs):
+        handed.extend((item.item_key, item.operation_ids) for item in plan.items)
+        return real(plan, receipts, **kwargs)
+
+    monkeypatch.setattr(care_report, "summarize_care_run", spy)
+    _end(install, capsys, holder)
+
+    assert (intent.item_key, (intent.operation_id,)) in handed
+    assert all("cop_foreign" not in operations for _, operations in handed)
+
+
+def test_a_planned_key_whose_only_receipt_is_another_runs_is_unfinished_for_this_run(
+    install, capsys, monkeypatch
+) -> None:
+    from ciao import care_report
+
+    _predict(install.queue)
+    holder_a = _lease(install.vault)
+    intent_a = _plan(install, holder=holder_a)
+
+    # A's guide write fails: a FAILED receipt stamped with A's run, and the row
+    # stays queued, so the same key is planned again by the next run.
+    with _guide_write_fails(monkeypatch):
+        assert isinstance(apply.apply_memory_accept(intent_a, vault_root=install.vault), apply.Failed)
+    curation_run.end_run(install.vault, holder=holder_a)
+
+    payload = _run_night(install, capsys)
+    holder_b = payload["lease"]["holder"]
+    assert intent_a.item_key in {key for item in payload["planned"] for key in item["keys"]}
+    handed: list[tuple[str, tuple[str, ...]]] = []
+    real = care_report.summarize_care_run
+
+    def spy(plan, receipts, **kwargs):
+        handed.extend((item.item_key, item.operation_ids) for item in plan.items)
+        return real(plan, receipts, **kwargs)
+
+    monkeypatch.setattr(care_report, "summarize_care_run", spy)
+    summary = _end(install, capsys, holder_b)
+
+    assert (intent_a.item_key, ()) in handed
+    assert all(intent_a.operation_id not in operations for _, operations in handed)
+    assert summary["completed"] == 0
+
+
+def test_a_failed_planned_accept_is_counted_as_failed_and_leaves_the_run_complete(
+    install, capsys, monkeypatch
+) -> None:
+    _predict(install.queue)
+    payload = _run_night(install, capsys)
+    holder = payload["lease"]["holder"]
+    intent = _plan(install, holder=holder)
+    assert intent.item_key in {key for item in payload["planned"] for key in item["keys"]}
+
+    with _guide_write_fails(monkeypatch):
+        assert isinstance(apply.apply_memory_accept(intent, vault_root=install.vault), apply.Failed)
+
+    summary = _end(install, capsys, holder)
+
+    assert summary["failed"] == 1
+    assert summary["completed"] == 0
+    assert summary["counts_complete"] is True
+    assert any("1 accept(s) failed" in reason for reason in summary["reasons"])
+
+
+@pytest.mark.parametrize("bad_plan", [
+    "garbage",
+    ["planned"],
+    {"planned": "x", "blocked": [], "blocked_overflow": 0, "deferred_count": 0},
+    {"planned": [["proposals", 7]], "blocked": [], "blocked_overflow": 0, "deferred_count": 0},
+    {"planned": [["proposals", "k"]] * 20_001, "blocked": [], "blocked_overflow": 0, "deferred_count": 0},
+    {"planned": [], "blocked": [], "blocked_overflow": -1, "deferred_count": 0},
+    {"planned": [], "blocked": []},
+])
+def test_a_malformed_stored_plan_exits_one_without_a_traceback_and_keeps_the_lease(
+    install, capsys, bad_plan
+) -> None:
+    payload = _run_night(install, capsys)
+    holder = payload["lease"]["holder"]
+    path = curation_run.state_path(install.vault)
+    doc = json.loads(path.read_text(encoding="utf-8"))
+    doc["lease"]["plan"] = bad_plan
+    path.write_text(json.dumps(doc), encoding="utf-8")
+    capsys.readouterr()
+
+    code = cli.main(
+        ["curation-end", "--vault-root", str(install.vault), "--holder", holder, "--status", "ok"]
+    )
+
+    assert code == 1
+    assert "curation state error" in capsys.readouterr().err
+    assert curation_run.state_path(install.vault).exists()
+    assert json.loads(path.read_text(encoding="utf-8"))["lease"]["holder"] == holder
+
