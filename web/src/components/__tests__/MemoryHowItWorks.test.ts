@@ -168,7 +168,7 @@ describe('MemoryHowItWorks disclosure', () => {
     const wrapper = await mountCard()
     const link = wrapper.find('a[target="_blank"]')
 
-    expect(link.attributes('href')).toBe('https://www.raffaelefarinaro.com/ciaobot/memory.html#tags')
+    expect(link.attributes('href')).toBe('https://www.raffaelefarinaro.com/ciaobot/memory.html#control')
     expect(link.attributes('target')).toBe('_blank')
     expect(link.attributes('rel')).toContain('noopener')
     expect(link.attributes('rel')).toContain('noreferrer')
