@@ -588,3 +588,14 @@ def test_prepared_transition_refuses_an_unknown_phase_or_unproven_key() -> None:
             cycle_id=CID, prior=PRIOR, target_stamp="2026-11-16",
             target_sha256=TARGET.sha256 or "", proven_required=(RULE,), phase="prepared",
         )
+
+
+def test_v2_lease_accepts_the_optional_begin_plan_and_no_other_extra_field() -> None:
+    lease = {"holder": "run", "started_at": "2026-11-21T00:00:00Z", "expires_at": "2026-11-21T01:00:00Z"}
+    plan = {"planned": [["proposals", "k"]], "blocked": [], "blocked_overflow": 0, "deferred_count": 0}
+
+    cc._check_lease({**lease, "plan": plan})
+    with pytest.raises(cc.CycleError):
+        cc._check_lease({**lease, "plan": "not an object"})
+    with pytest.raises(cc.CycleError):
+        cc._check_lease({**lease, "extension": "kept"})

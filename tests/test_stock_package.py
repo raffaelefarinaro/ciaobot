@@ -681,3 +681,11 @@ def test_skill_proposal_reference_reports_only_the_planned_named_files() -> None
     assert "do not run `ciao skill-drafts`" in section
     assert "Settle nothing" in section
     assert "one aggregate line" in section
+
+
+def test_lifecycle_end_names_no_count_flags_and_says_the_counts_are_derived() -> None:
+    """#3056 S2: the end takes no counts from the agent; the shipped text must not ask for them."""
+    section = _reference("curation-run-lifecycle.md")
+    assert "ciao curation-end --holder <lease.holder> --status ok|failed" in section
+    assert "--planned" not in section and "--completed" not in section
+    assert "The counts are derived from the run's own receipts; you do not pass them." in section

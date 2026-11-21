@@ -442,6 +442,8 @@ def _write_region(
                 operation_id=intent.operation_id,
             ),
             operation_id=intent.operation_id,
+            run_id=intent.holder,
+            item_key=intent.item_key,
         )
     except (ValueError, OSError):
         return Failed(FAILED_GUIDE_WRITE)
@@ -509,6 +511,8 @@ def _settle_queue(
                     workspace=intent.workspace,
                     vault_root=vault,
                     operation_id=intent.operation_id,
+                    run_id=intent.holder,
+                    item_key=intent.item_key,
                 ) as receipt:
                     removed = remove_proposal_by_substring(queue, needle)
             except QueueReceiptUnavailable:
@@ -603,6 +607,8 @@ def apply_memory_accept(intent: ManagedMemoryAcceptIntent, *, vault_root: Path) 
                 proposal_id=intent.proposal_id,
                 receipt_id=guide_receipt_id,
                 operation_id=intent.operation_id,
+                run_id=intent.holder,
+                item_key=intent.item_key,
             )
     except Exception:  # noqa: BLE001 — an unrecorded decision is finished by the replay
         recorded = False

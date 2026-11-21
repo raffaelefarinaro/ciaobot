@@ -4381,7 +4381,9 @@ def test_curation_end_prunes_only_remaining_keys_and_forwards_run_outcome(
     monkeypatch.setattr(
         cli,
         "_curation_plan",
-        lambda _args: cli._CurationPlanningResult(payload, discovered, remaining),
+        lambda _args: cli._CurationPlanningResult(
+            payload, discovered, remaining, cr.plan_run_with_blocked(remaining)
+        ),
     )
     seen: dict[str, Any] = {}
 
@@ -4395,23 +4397,24 @@ def test_curation_end_prunes_only_remaining_keys_and_forwards_run_outcome(
         _curation_args(
             holder=lease.holder,
             status="ok",
-            planned=7,
-            completed=5,
             reason=["reported reason"],
             json=True,
         )
     ) == 0
 
-    assert seen == {
+    # No begin-time plan was stored, so the counts are zero and say why; the
+    # payload's own deferred count is no longer what the end records.
+    assert seen["reasons"][0] == "reported reason"
+    assert "no begin-time plan recorded" in seen["reasons"][1]
+    assert {key: seen[key] for key in ("holder", "status", "planned", "completed", "deferred")} == {
         "holder": lease.holder,
         "status": "ok",
-        "planned": 7,
-        "completed": 5,
-        "deferred": 2,
-        "reasons": ["reported reason"],
-        "live_keys": frozenset({"keep-a", "keep-b"}),
-        "advance_marker": True,
+        "planned": 0,
+        "completed": 0,
+        "deferred": 0,
     }
+    assert seen["live_keys"] == frozenset({"keep-a", "keep-b"})
+    assert seen["advance_marker"] is True
 
 
 def test_the_curation_workspace_name_is_the_registry_s_not_the_directory_s(
@@ -5306,7 +5309,7 @@ def test_blocked_only_nights_discover_the_same_overdue_log_and_record_no_progres
         holder = payload["lease"]["holder"]
         assert cli.main(
             ["curation-end", "--vault-root", str(vault), "--holder", holder, "--status", "ok",
-             "--planned", "0", "--completed", "0", "--json"]
+             "--json"]
         ) == 0
         assert log.read_bytes() == before
     assert "logs" not in cr.load_state(vault).done_keys
@@ -5368,7 +5371,7 @@ def test_one_combined_lifecycle_begin_append_progress_end_through_the_real_comma
     capsys.readouterr()
     assert cli.main(
         ["curation-end", "--vault-root", str(vault), "--holder", holder, "--status", "ok",
-         "--planned", "2", "--completed", "2", "--json"]
+         "--json"]
     ) == 0
     summary = json.loads(capsys.readouterr().out)
 
@@ -5397,7 +5400,7 @@ def test_curation_end_with_a_refused_marker_releases_the_lease_and_says_so(
 
     code = cli.main(
         ["curation-end", "--vault-root", str(vault), "--holder", lease.holder,
-         "--status", "ok", "--planned", "1", "--completed", "1", "--json"]
+         "--status", "ok", "--json"]
     )
     summary = json.loads(capsys.readouterr().out)
     assert code == 0
