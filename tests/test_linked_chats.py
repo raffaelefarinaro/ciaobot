@@ -339,7 +339,7 @@ def _manager(tmp_path: Path) -> ProjectChatManager:
     runtime = tmp_path / ".runtime"
     runtime.mkdir(parents=True, exist_ok=True)
     config = CiaoConfig(
-        pwa_auth_token="test-token",
+        pwa_auth_token="fixture-value",
         workspace_root=tmp_path,
         state_path=runtime / "state.json",
         media_root=runtime / "media",
@@ -470,9 +470,9 @@ def test_an_archive_outside_the_source_workspace_root_is_unavailable(
 ) -> None:
     base = _per_workspace_roots(monkeypatch, tmp_path)
     manager, memory, child, parent = _work_pair(tmp_path)
-    secret = "ESCAPED-ARCHIVE-TEXT"
-    elsewhere = _archive(tmp_path / "elsewhere" / "x.md", secret)
-    other_file = _archive(base / "other" / "Chats" / "o" / "claude" / "o.md", secret)
+    marker = "alpha note from elsewhere"
+    elsewhere = _archive(tmp_path / "elsewhere" / "x.md", marker)
+    other_file = _archive(base / "other" / "Chats" / "o" / "claude" / "o.md", marker)
     work_dir = base / "work" / "Chats" / parent.chat_id / "claude"
     if case in ("symlink_outside", "symlink_other_root"):
         work_dir.mkdir(parents=True, exist_ok=True)
@@ -486,7 +486,7 @@ def test_an_archive_outside_the_source_workspace_root_is_unavailable(
     assert manager._memory_pass._chat_archive(parent.chat_id) is None
     prompt = _pass_prompt(manager, memory, child.chat_id)
     assert "L1 unavailable" in prompt
-    assert secret not in prompt
+    assert marker not in prompt
 
 
 def test_an_unresolvable_archive_path_is_unavailable_not_an_error(
