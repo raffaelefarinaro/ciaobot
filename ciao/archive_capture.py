@@ -22,6 +22,7 @@ unavailable: it is reported in :attr:`CaptureRead.conflicts` and left out of
 from __future__ import annotations
 
 import dataclasses
+import errno
 import hashlib
 import json
 import os
@@ -226,8 +227,17 @@ def append_capture(vault_root: Path, record: CaptureRecord) -> None:
         raise ValueError("capture line is over the 4 KiB bound")
     path = captures_path(vault_root)
     path.parent.mkdir(parents=True, exist_ok=True)
-    fd = open_private(path, os.O_WRONLY | os.O_APPEND, follow_symlinks=False)
+    # O_NONBLOCK so a FIFO with no reader fails with ENXIO instead of blocking the
+    # caller (the archive runs on the engine loop). On a regular file it has no
+    # effect on the write below.
+    fd = open_private(
+        path, os.O_WRONLY | os.O_APPEND | os.O_NONBLOCK, follow_symlinks=False
+    )
     try:
+        # A FIFO with a reader passes the open; refuse anything that is not a
+        # regular file before a byte is written.
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            raise OSError(errno.EINVAL, "the archive captures path is not a regular file")
         view = memoryview(line)
         while view:
             written = os.write(fd, view)

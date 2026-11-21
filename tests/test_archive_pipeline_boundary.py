@@ -10,7 +10,11 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-from collections.abc import Callable, Coroutine
+import os
+import signal
+import sys
+from collections.abc import Callable, Coroutine, Iterator
+from contextlib import contextmanager
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import cast
@@ -617,3 +621,87 @@ async def test_a_repeat_archive_of_the_same_chat_folds_to_the_first_capture(
     assert read.status == "ok"
     assert [(r.chat_id, r.captured_at) for r in read.records] == [(chat.chat_id, first_at)]
     assert host.enqueued == [(chat.chat_id, archive, project.vault_doc_path)] * 2
+
+
+class _Blocked(BaseException):
+    """The alarm fired: the call blocked instead of returning.
+
+    A BaseException, so the pipeline's ``except Exception`` cannot swallow a hang.
+    """
+
+
+@contextmanager
+def _alarm(seconds: int) -> Iterator[None]:
+    def _fire(signum: int, frame: object) -> None:
+        raise _Blocked("the archive blocked on the capture path")
+
+    previous = signal.signal(signal.SIGALRM, _fire)
+    signal.alarm(seconds)
+    try:
+        yield
+    finally:
+        signal.alarm(0)
+        signal.signal(signal.SIGALRM, previous)
+
+
+@pytest.mark.asyncio
+@pytest.mark.skipif(
+    sys.platform == "win32" or not hasattr(os, "mkfifo"), reason="needs POSIX FIFOs"
+)
+@pytest.mark.parametrize("reader_present", [False, True])
+async def test_a_fifo_at_the_capture_path_never_blocks_the_archive(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture, reader_present: bool
+) -> None:
+    host, pipeline, chat, project, _outcome = _setup(tmp_path)
+    vault = host._config.workspace_root / "vault" / "personal"
+    archive_capture.captures_path(vault).parent.mkdir(parents=True)
+    os.mkfifo(archive_capture.captures_path(vault))
+    reader = (
+        os.open(archive_capture.captures_path(vault), os.O_RDONLY | os.O_NONBLOCK)
+        if reader_present
+        else None
+    )
+    archive = _real_archive(tmp_path, ["Plan the Q3 review"])
+    try:
+        with _alarm(5), caplog.at_level(logging.ERROR, logger=archive_pipeline.__name__):
+            pipeline.run_archive_postprocess(
+                chat.chat_id, ArchiveOutcome(path=archive, turn_count=1), chat, project
+            )
+            await asyncio.sleep(0)
+    finally:
+        if reader is not None:
+            os.close(reader)
+
+    assert host.enqueued == [(chat.chat_id, archive, project.vault_doc_path)]
+    assert host.index_calls == ["index"]
+    assert any("capture" in r.getMessage().lower() for r in caplog.records)
+
+
+@pytest.mark.asyncio
+async def test_the_capture_row_exists_before_the_memory_pass_is_enqueued(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Call order, not just content: a write after the enqueue must fail this."""
+    host, pipeline, chat, project, _outcome = _setup(tmp_path)
+    vault = host._config.workspace_root / "vault" / "personal"
+    rows_at_enqueue: list[int] = []
+
+    def _enqueue(
+        source: ChatInfo,
+        project_meta: ProjectInfo | None,
+        archive_path: Path,
+        doc_path: str,
+        focus: dict[str, str] | None = None,
+    ) -> str:
+        del source, project_meta, archive_path, doc_path, focus
+        rows_at_enqueue.append(len(archive_capture.read_captures(vault).records))
+        return "memory-chat"
+
+    monkeypatch.setattr(host, "enqueue_memory_pass", _enqueue)
+    archive = _real_archive(tmp_path, ["Plan the Q3 review"])
+
+    pipeline.run_archive_postprocess(
+        chat.chat_id, ArchiveOutcome(path=archive, turn_count=1), chat, project
+    )
+
+    assert rows_at_enqueue == [1]
