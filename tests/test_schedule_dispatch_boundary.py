@@ -317,6 +317,43 @@ async def test_a_denied_approval_fails_the_run_and_names_the_action(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("events", "archived"),
+    [
+        ([{"type": "result", "text": "done", "is_error": False}], ["chat-1"]),
+        (
+            [
+                {"type": "status", "message": "Denied execute", "denied_tool": "execute"},
+                {"type": "result", "text": "done", "is_error": False},
+            ],
+            [],
+        ),
+    ],
+)
+async def test_a_denied_run_is_never_auto_archived_as_clean(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    events: list[dict[str, object]],
+    archived: list[str],
+) -> None:
+    host = _ScheduleHost(tmp_path, events)
+    archive = ArchiveOutcome(path=tmp_path / "archive.md", turn_count=1)
+
+    async def archive_chat(chat_id: str) -> ArchiveOutcome | None:
+        host.archives.append(chat_id)
+        return archive
+
+    host.archive_chat = archive_chat  # type: ignore[method-assign]
+    dispatcher = ScheduleDispatcher(cast(ScheduleDispatchHost, host))
+    monkeypatch.setattr("ciao.web.schedule_dispatch.job_runs.record_run", lambda row: None)
+
+    await dispatcher.dispatch_schedule(
+        _entry(archive_policy="auto"), "Run the routine.", "opus", "auto", "claude"
+    )
+
+    assert host.archives == archived
+
+
 async def test_a_run_without_a_denial_is_unchanged(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

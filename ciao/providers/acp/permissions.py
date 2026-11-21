@@ -47,6 +47,14 @@ def _title(tool_call: Mapping[str, Any]) -> str:
     return "tool"
 
 
+def _denied_kind(tool_call: Mapping[str, Any]) -> str:
+    """The ACP tool kind (``execute``, ``edit``, ...), or ``tool`` when none is given."""
+    kind = tool_call.get("kind")
+    if isinstance(kind, str) and kind.isidentifier():
+        return kind
+    return "tool"
+
+
 def _tool_input(tool_call: Mapping[str, Any], title: str) -> str:
     """The card summary ``normalize._summary`` would show for this tool call."""
     raw = tool_call.get("rawInput")
@@ -119,7 +127,10 @@ class PermissionBroker:
             self.emit(SystemStatusEvent(
                 type="system",
                 status=f"Denied {title}: scheduled runs cannot wait for approval.",
-                denied_tool=title,
+                # The kind, never the title: adapters often put the full shell
+                # command (tokens, URLs, newlines) in the title, and this name
+                # is copied into the run's recorded error.
+                denied_tool=_denied_kind(tool_call),
             ))
             return _outcome(stored, approved=False)
         loop = asyncio.get_running_loop()
