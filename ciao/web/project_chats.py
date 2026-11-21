@@ -203,7 +203,6 @@ from ciao.providers.base import (
 from ciao.schedules import (
     ScheduleEntry,
     ScheduleStore,
-    ScheduleStoreCorrupt,
     publish_automations_changed,
     settle_retrying_runs,
     settle_runs_for_archived_chat,
@@ -5182,19 +5181,20 @@ class ProjectChatManager:
         """End the chat-owned loops of a chat that is leaving the registry.
 
         Synchronous on purpose: callers run it in the same section as the
-        registry change, so no tick can fire a loop whose owner has gone. An
-        unreadable store is logged, never raised: a removal must not fail on
-        it, and the tick sweep ends any loop whose owner is gone.
+        registry change, so no tick can fire a loop whose owner has gone. Any
+        failure to write the store (unreadable, disk full) is logged, never
+        raised: the removal must not abort halfway through its teardown, and the
+        tick sweep ends any loop whose owner is gone. ``CancelledError`` is a
+        ``BaseException`` and still propagates.
         """
         store = getattr(self, "schedule_store", None)
         if store is None:
             return False
         try:
             ids = store.delete_owned_by(chat_id)
-        except ScheduleStoreCorrupt:
+        except Exception:  # noqa: BLE001 — the sweep is the backstop; never break a removal
             logger.exception(
-                "Could not end the loops of chat %s (%s): the schedule store is unreadable; "
-                "the schedule sweep will end them",
+                "Could not end the loops of chat %s (%s); the schedule sweep will end them",
                 chat_id, reason,
             )
             return False
@@ -5468,9 +5468,6 @@ class ProjectChatManager:
         # await above. Refuse before the first mutation so a refusal never
         # leaves the MCP token revoked on a chat that stays alive.
         self._refuse_unsettled_teardown([chat_id])
-        # The last point that can still refuse is above: a refused archive keeps
-        # its loops, and the first mutation below is the point of no return.
-        self._drop_owned_loops(chat_id, "archived")
         self._revoke_mcp_chat(chat_id)
         if chat.retry_status:
             self._clear_chat_retry(chat)
@@ -5487,6 +5484,10 @@ class ProjectChatManager:
             except ValueError:
                 chat.archive_path = str(result)
         self._save()
+        # Only once the archive is recorded: a failure or cancellation above keeps
+        # the loops, and loop_owner_alive reads None (not False) while the archive
+        # lock is held, so the sweep cannot end them early.
+        self._drop_owned_loops(chat_id, "archived")
         # The archived chat is read-only history: it carries no actions.
         self._clear_chat_actions(chat)
         self._events.publish({

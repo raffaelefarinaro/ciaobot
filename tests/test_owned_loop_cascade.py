@@ -561,3 +561,187 @@ def test_enrichment_reports_an_owned_loop_unavailable_once_its_owner_is_archived
     owner.archived = True
 
     assert _enrich_schedule(entry, pcm)["context_available"] is False
+
+
+# ── review follow-ups: store failures, archive window, prune, carry-over, reset ──
+
+
+def _broken_store(store: ScheduleStore, monkeypatch: pytest.MonkeyPatch) -> None:
+    def disk_full(owner_chat_id: str) -> list[str]:
+        raise OSError("disk full")
+
+    monkeypatch.setattr(store, "delete_owned_by", disk_full)
+
+
+def test_a_disk_error_does_not_abort_a_chat_delete(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    pcm, store = _make_manager(tmp_path)
+    project = pcm.create_project("Holder", workspace="personal")
+    chat = pcm.create_chat(project.project_id, title="Plain")
+    _broken_store(store, monkeypatch)
+
+    assert pcm.delete_chat(chat.chat_id) is True
+
+    assert pcm.get_chat(chat.chat_id) is None
+
+
+def test_a_disk_error_does_not_abort_the_empty_chat_cleanup(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    pcm, store = _make_manager(tmp_path)
+    project = pcm.create_project("Holder", workspace="personal")
+    chat = pcm.create_chat(project.project_id, title="New Chat")
+    _broken_store(store, monkeypatch)
+
+    assert chat.chat_id in pcm._cleanup_empty_chats()
+
+    assert pcm.get_chat(chat.chat_id) is None
+
+
+def test_a_disk_error_does_not_abort_the_archived_transcript_prune(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    pcm, store = _make_manager(tmp_path)
+    project = pcm.create_project("Holder", workspace="personal")
+    chat = pcm.create_chat(project.project_id, title="Gone")
+    chat.archived = True
+    chat.archive_path = "memory-vault/personal/Logs/Chats/gone/claude/none.md"
+    for root in pcm._config.chats_roots():
+        root.mkdir(parents=True, exist_ok=True)
+    _broken_store(store, monkeypatch)
+
+    pcm._discover_archived_chats()
+
+    assert pcm.get_chat(chat.chat_id) is None
+
+
+async def test_a_cancelled_archive_after_the_provider_step_keeps_the_loops(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    pcm, store = _make_manager(tmp_path)
+    project = pcm.create_project("Holder", workspace="personal")
+    chat = pcm.create_chat(project.project_id, title="Cancelled")
+    mine = _loop(store, chat.chat_id)
+
+    async def cancelled(*_args: Any, **_kwargs: Any) -> None:
+        raise asyncio.CancelledError
+
+    monkeypatch.setattr(pcm, "_disconnect_provider", cancelled)
+
+    with pytest.raises(asyncio.CancelledError):
+        await pcm.archive_chat(chat.chat_id)
+
+    assert chat.archived is False
+    assert mine.schedule_id in _ids(store)
+
+
+async def test_a_cancelled_save_during_archive_keeps_the_loops(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    pcm, store = _make_manager(tmp_path)
+    project = pcm.create_project("Holder", workspace="personal")
+    chat = pcm.create_chat(project.project_id, title="Cancelled save")
+    mine = _loop(store, chat.chat_id)
+    real_save = pcm._save
+
+    def save_then_cancel(*args: Any, **kwargs: Any) -> None:
+        if chat.archived:
+            raise asyncio.CancelledError
+        real_save(*args, **kwargs)
+
+    monkeypatch.setattr(pcm, "_save", save_then_cancel)
+
+    with pytest.raises(asyncio.CancelledError):
+        await pcm.archive_chat(chat.chat_id)
+
+    assert mine.schedule_id in _ids(store)
+
+
+async def test_a_completed_archive_drops_the_loops_only_after_it_is_recorded(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    pcm, store = _make_manager(tmp_path)
+    project = pcm.create_project("Holder", workspace="personal")
+    chat = pcm.create_chat(project.project_id, title="Completed")
+    mine = _loop(store, chat.chat_id)
+    seen_saved_archived: list[bool] = []
+    real_save = pcm._save
+
+    def record_save(*args: Any, **kwargs: Any) -> None:
+        real_save(*args, **kwargs)
+        if chat.archived:
+            seen_saved_archived.append(mine.schedule_id in _ids(store))
+
+    monkeypatch.setattr(pcm, "_save", record_save)
+
+    await pcm.archive_chat(chat.chat_id)
+
+    assert mine.schedule_id not in _ids(store)
+    # The loop was still present at the save that recorded the archive.
+    assert seen_saved_archived == [True]
+
+
+def test_the_archived_transcript_prune_ends_the_loop_of_a_chat_whose_transcript_is_gone(
+    tmp_path: Path,
+) -> None:
+    pcm, store = _make_manager(tmp_path)
+    project = pcm.create_project("Holder", workspace="personal")
+    chat = pcm.create_chat(project.project_id, title="Pruned")
+    mine = _loop(store, chat.chat_id)
+    other = _loop(store, "chat-kept")
+    chat.archived = True
+    chat.archive_path = "memory-vault/personal/Logs/Chats/gone/claude/none.md"
+    for root in pcm._config.chats_roots():
+        root.mkdir(parents=True, exist_ok=True)
+
+    pcm._discover_archived_chats()
+
+    assert pcm.get_chat(chat.chat_id) is None
+    assert mine.schedule_id not in _ids(store)
+    assert other.schedule_id in _ids(store)
+
+
+async def test_a_dispatch_that_repoints_a_loop_leaves_the_stored_row_on_its_owner(
+    tmp_path: Path,
+) -> None:
+    store = ScheduleStore(tmp_path)
+    mine = _loop(store, "chat-owner")
+
+    async def repoint(entry, model, mode, provider, *, target_chat_id=None):
+        entry.web_chat_id = "chat-replacement"
+        return {"status": "ok"}
+
+    manager = ScheduleManager(
+        store=store,
+        dispatch_to_web=repoint,
+        prepare_chat=lambda entry, prompt, model, mode, provider: entry.web_chat_id,
+        chat_busy=lambda chat_id: False,
+        chat_dispatchable=lambda entry: True,
+        owner_alive=lambda chat_id: True,
+    )
+    await manager.tick(now=T0 + timedelta(minutes=11))
+    for task in list(manager._run_tasks):
+        await asyncio.wait_for(task, 5)
+
+    stored = store.get(mine.schedule_id)
+    assert stored is not None
+    assert stored.web_chat_id == "chat-owner"
+
+
+def test_a_chat_reset_keeps_its_loop_running_into_the_fresh_session(
+    tmp_path: Path,
+) -> None:
+    pcm, store = _make_manager(tmp_path)
+    project = pcm.create_project("Holder", workspace="personal")
+    owner = pcm.create_chat(project.project_id, title="Reset me", provider="claude")
+    mine = _loop(store, owner.chat_id)
+
+    assert pcm.new_session(owner.chat_id) is not None
+
+    assert pcm.get_chat(owner.chat_id) is not None
+    assert pcm.loop_owner_alive(owner.chat_id) is True
+    assert mine.schedule_id in _ids(store)
+    entry = store.get(mine.schedule_id)
+    assert entry is not None
+    assert pcm.prepare_schedule_chat(entry, entry.prompt, "opus", "auto", "claude") == owner.chat_id
