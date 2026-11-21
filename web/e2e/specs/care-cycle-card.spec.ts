@@ -26,8 +26,10 @@ async function openCard(page: Page): Promise<Locator> {
 }
 
 test.describe('care cycle card', () => {
+  // One fixture session per test: the dry run and the switch are per session, so a
+  // worker-wide id let a switch in one test show "already switched" in the next.
   test.beforeEach(async ({ page }, testInfo) => {
-    await isolate(page, `care-cycle-${testInfo.workerIndex}`)
+    await isolate(page, `care-cycle-${testInfo.testId}`)
   })
 
   test('fits a phone, meets touch targets, and switches only after the box and the confirm', async ({ page }) => {
