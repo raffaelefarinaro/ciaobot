@@ -2,6 +2,7 @@
 <html lang="en">
 <head>
   <meta charset="utf-8">
+  <script>try{var t=localStorage.getItem("ciao-site-theme");if(t)document.documentElement.dataset.theme=t}catch(e){}</script>
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>AI Models · Ciaobot</title>
   <meta name="description" content="Ciaobot uses Claude Code for your Anthropic subscription and opencode for everything else: OpenAI, OpenRouter, Z.ai, Ollama Cloud, local Ollama and more.">
@@ -26,104 +27,93 @@
 <body>
   <header class="site-header">
     <div class="inner">
-      <a class="brand" href="./" aria-label="Ciaobot home"><picture><source media="(prefers-color-scheme: light)" srcset="assets/img/ciaobot-wordmark.png"><img src="assets/img/ciaobot-wordmark-light.png" alt=""></picture></a>
-      <nav class="site-nav" aria-label="Main">
-        <a href="guide.html">Guide</a>
-        <a href="features.html">Features</a>
+      <a class="brand" href="./" aria-label="Ciaobot home"><img class="wm-on-dark" src="assets/img/ciaobot-wordmark-light.png" alt="" width="112" height="26" loading="lazy"><img class="wm-on-light" src="assets/img/ciaobot-wordmark-ink.png" alt="" width="112" height="26" loading="lazy"></a>
+      <nav class="site-nav" id="site-nav" aria-label="Main">
         <a href="memory.html">Memory</a>
-        <a href="trust.html">Trust</a>
+        <a href="features.html">Features</a>
         <a href="https://github.com/raffaelefarinaro/ciaobot">GitHub</a>
       </nav>
+      <button class="theme-toggle" type="button" data-theme-toggle aria-label="Switch colour theme"><svg width="20" height="20" viewBox="0 0 20 20" aria-hidden="true" focusable="false"><circle cx="10" cy="10" r="7" fill="none" stroke="currentColor" stroke-width="1.6"/><path d="M10 3a7 7 0 0 1 0 14z" fill="currentColor"/></svg></button>
+      <button class="menu-toggle" type="button" data-menu-toggle aria-controls="site-nav" aria-expanded="false" aria-label="Open menu"><svg width="20" height="20" viewBox="0 0 20 20" aria-hidden="true" focusable="false"><path d="M3 5.5h14M3 10h14M3 14.5h14" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/></svg></button>
     </div>
   </header>
 
   <main class="narrow">
-    <section>
-      <p class="eyebrow">Any AI model</p>
-      <h1>Bring the AI you already use</h1>
-      <p class="lead">Your agents do the work. Ciaobot keeps the context. Connect Claude Code or OpenCode using your existing provider access, and add a persistent personal workspace around them.</p>
+    <section class="doc-intro">
+      <h1>Bring the agent you already use</h1>
+      <p class="lead">Claude Code, Codex and OpenCode already know how to reason, write code and call tools. Ciaobot drives the one you signed in to and adds the workspace, memory and files around it.</p>
     </section>
 
-    <section>
-      <svg class="diagram" viewBox="0 0 720 260" role="img" aria-labelledby="prov-title prov-desc">
-        <title id="prov-title">Two ways to reach a model</title>
-        <desc id="prov-desc">Ciaobot sits on top. Claude Code connects to your Claude subscription. opencode connects to OpenAI, OpenRouter, Z.ai, Ollama Cloud, local Ollama and many other providers.</desc>
-        <rect class="box-accent" x="210" y="10" width="300" height="60" rx="14"/>
-        <text x="360" y="37" text-anchor="middle" font-weight="700" font-size="17">Ciaobot</text>
-        <text class="muted" x="360" y="57" text-anchor="middle" font-size="13">workspaces · memory · files · schedules</text>
-        <rect class="box" x="40" y="110" width="280" height="60" rx="12"/>
-        <text x="180" y="137" text-anchor="middle" font-weight="600" font-size="16">Claude Code</text>
-        <text class="muted" x="180" y="157" text-anchor="middle" font-size="13">official Anthropic agent</text>
-        <rect class="box" x="400" y="110" width="280" height="60" rx="12"/>
-        <text x="540" y="137" text-anchor="middle" font-weight="600" font-size="16">opencode</text>
-        <text class="muted" x="540" y="157" text-anchor="middle" font-size="13">open-source agent, any provider</text>
-        <rect class="box-secondary" x="40" y="200" width="280" height="50" rx="12"/>
-        <text x="180" y="230" text-anchor="middle" font-size="14">Claude subscription</text>
-        <rect class="box-secondary" x="400" y="200" width="280" height="50" rx="12"/>
-        <text x="540" y="222" text-anchor="middle" font-size="13">OpenAI · OpenRouter · Z.ai · Ollama Cloud</text>
-        <text x="540" y="240" text-anchor="middle" font-size="13">local Ollama · LM Studio · and more</text>
-        <path class="line" d="M300 70 L180 110"/>
-        <path class="line" d="M420 70 L540 110"/>
-        <path class="line" d="M180 170 V200"/>
-        <path class="line" d="M540 170 V200"/>
-      </svg>
+    <section id="map" aria-labelledby="map-h">
+      <h2 id="map-h">One layer on top, nothing in between</h2>
+      <div class="home-map">
+        <svg class="diagram" viewBox="0 0 1000 410" role="img" aria-labelledby="prov-title prov-desc">
+          <title id="prov-title">How Ciaobot reaches a model</title>
+          <desc id="prov-desc">Ciaobot sits on top and talks to three agent CLIs over the Agent Client Protocol: Claude Code, Codex and OpenCode. Each CLI owns its own sign-in, models, MCP servers and connectors. Claude Code reaches Claude, Codex reaches OpenAI, OpenCode reaches OpenRouter, Ollama, local models and other providers.</desc>
+          <rect class="box-solid" x="300" y="0" width="400" height="80" rx="16"/>
+          <text class="on-solid" x="500" y="36" text-anchor="middle" font-size="26" font-weight="700">Ciaobot</text>
+          <text class="on-solid" x="500" y="61" text-anchor="middle" font-size="18">workspaces · memory · files · routines</text>
+          <path class="line" d="M500 80V115M160 115H840M160 115V150M500 115V150M840 115V150"/>
+          <text class="muted" x="660" y="106" font-size="18">Agent Client Protocol</text>
+          <rect class="box" x="40" y="150" width="240" height="90" rx="16"/><text x="160" y="190" text-anchor="middle" font-size="23" font-weight="700">Claude Code</text><text class="muted" x="160" y="216" text-anchor="middle" font-size="18">claude auth login</text>
+          <rect class="box" x="380" y="150" width="240" height="90" rx="16"/><text x="500" y="190" text-anchor="middle" font-size="23" font-weight="700">Codex</text><text class="muted" x="500" y="216" text-anchor="middle" font-size="18">codex login</text>
+          <rect class="box" x="720" y="150" width="240" height="90" rx="16"/><text x="840" y="190" text-anchor="middle" font-size="23" font-weight="700">OpenCode</text><text class="muted" x="840" y="216" text-anchor="middle" font-size="18">opencode auth login</text>
+          <path class="line" d="M160 240V290M500 240V290M840 240V290"/>
+          <rect class="box-pending" x="40" y="290" width="240" height="76" rx="16"/><text x="160" y="324" text-anchor="middle" font-size="20">Claude</text><text class="muted" x="160" y="348" text-anchor="middle" font-size="17">+ claude.ai connectors</text>
+          <rect class="box-pending" x="380" y="290" width="240" height="76" rx="16"/><text x="500" y="324" text-anchor="middle" font-size="20">OpenAI</text><text class="muted" x="500" y="348" text-anchor="middle" font-size="17">ChatGPT plan or API key</text>
+          <rect class="box-pending" x="720" y="290" width="240" height="76" rx="16"/><text x="840" y="324" text-anchor="middle" font-size="20">OpenRouter · Ollama</text><text class="muted" x="840" y="348" text-anchor="middle" font-size="17">cloud or local, and more</text>
+          <text class="muted" x="500" y="394" text-anchor="middle" font-size="18">Each agent keeps its own sign-in, models, MCP servers and settings.</text>
+        </svg>
+      </div>
+      <p>Ciaobot talks to each agent through the <a href="https://agentclientprotocol.com">Agent Client Protocol</a>, using a small adapter it installs on first use (Node 22 or newer). It never installs or replaces the agent itself: it runs the <code>claude</code>, <code>codex</code> or <code>opencode</code> already on your machine.</p>
     </section>
 
     <section>
       <h2>Why Ciaobot doesn't build its own agent</h2>
-      <p>Claude Code and OpenCode already handle the model and tool execution loop. Ciaobot starts and supervises their sessions, adds workspace and project context, and keeps files, recurring tasks and reviewable memory around the work. It builds on those agents rather than replacing them.</p>
-      <p>Why not just use either agent directly? You can. Ciaobot is for when you want short tasks to share durable context, documents to review beside the chat, and useful knowledge to survive the end of a session.</p>
+      <p>The agents are excellent and improve every week. Re-implementing them would mean always being behind. So Ciaobot leaves the thinking, the tool calls and the model access to them, and focuses on what they don't do: separate areas of your life, project context carried into every chat, memory you can review, routines that run on schedule, and documents beside the conversation.</p>
+      <p>Why not just use the agent directly? You can, and nothing stops you using both. Ciaobot is for when short tasks should share context, and what you learn should outlive the session.</p>
     </section>
 
     <section id="continuity">
-      <h2>Change your AI, not your second brain.</h2>
-      <p>Your notes, project context and remembered preferences stay in a folder you own. They remain ordinary Markdown, useful with another agent or text editor even when Ciaobot is not running.</p>
-      <p>This is continuity of your workspace, not a promise that provider sessions are interchangeable. A handover gives the other provider visible conversation history; its tools, permissions and supported capabilities may differ.</p>
+      <h2>Change your AI, not your second brain</h2>
+      <p>Your notes, project context and remembered preferences stay in a folder you own, as ordinary Markdown, useful with another agent or a text editor even when Ciaobot is not running.</p>
+      <p>That is continuity of your workspace, not a promise that agent sessions are interchangeable. Each agent's tools, permissions and capabilities differ.</p>
     </section>
 
-    <section>
-      <h2>Claude: through Claude Code</h2>
-      <p>For Anthropic's models, Ciaobot uses <a href="https://docs.anthropic.com/en/docs/claude-code/overview">Claude Code</a>, Anthropic's own agent, through its official SDK. That means you use your <strong>Claude subscription</strong> exactly as Anthropic intends. Sign in once with <code>claude auth login</code> and Ciaobot uses that session.</p>
-      <p>If the model you picked is busy or unavailable, Ciaobot steps down to the next one automatically instead of failing the chat.</p>
-    </section>
-
-    <section>
-      <h2>Everything else: through opencode</h2>
-      <p>For every other provider, Ciaobot uses <a href="https://opencode.ai/">opencode</a>, an open-source agent that connects to <a href="https://opencode.ai/docs/providers/">dozens of providers</a>:</p>
-      <ul>
-        <li><strong>OpenAI</strong> models, with a ChatGPT plan or an API key;</li>
-        <li><strong><a href="https://openrouter.ai">OpenRouter</a></strong>, for hundreds of models behind one account;</li>
-        <li><strong><a href="https://z.ai">Z.ai</a></strong> (GLM) and other hosted providers;</li>
-        <li><strong><a href="https://ollama.com">Ollama Cloud</a></strong>, or <strong>Ollama running locally</strong> on your own machine, fully offline;</li>
-        <li>LM Studio and any OpenAI-compatible endpoint.</li>
-      </ul>
-      <p>Connect a provider with <code>opencode auth login</code>. Every model opencode can reach appears in Ciaobot's model pickers by itself.</p>
+    <section id="agents">
+      <h2>The three agents</h2>
+      <div class="doc-cards">
+        <div>
+          <h3>Claude Code</h3>
+          <p>Anthropic's agent, on your Claude subscription or API key. Sign in once with <code>claude auth login</code>.</p>
+        </div>
+        <div>
+          <h3>Codex</h3>
+          <p>OpenAI's agent CLI. Install <code>@openai/codex</code> and sign in with <code>codex login</code>. Settings can run both steps in its terminal.</p>
+        </div>
+        <div>
+          <h3>OpenCode</h3>
+          <p>Open source and bring-your-own-provider: <a href="https://opencode.ai">OpenCode 2.3.2 or newer</a> reaches OpenRouter, Ollama Cloud, local Ollama, LM Studio and many more. Connect them with <code>opencode auth login</code>.</p>
+        </div>
+      </div>
+      <p>Ciaobot never reads or stores a provider credential. Signing in is always the agent's own command.</p>
     </section>
 
     <section id="inherit">
-      <h2>You keep your plugins, skills and MCP servers</h2>
-      <p>Ciaobot starts Claude Code and opencode with your normal settings, not a stripped-down copy. So whatever you've already set up there keeps working in Ciaobot chats:</p>
-      <ul>
-        <li><strong>Claude Code:</strong> your skills, subagents, commands, plugins and MCP servers, plus the connectors you've enabled on claude.ai (Slack, Notion, Atlassian and so on).</li>
-        <li><strong>opencode:</strong> your global configuration, providers, plugins, skills and MCP servers.</li>
-      </ul>
-      <p>On top of that, anything you add <strong>inside Ciaobot</strong> is shared by both tools: an MCP server you add in Settings → MCP servers, a skill in Settings → Skills, a subagent in Settings → Subagents. Ciaobot writes each one once and translates it into the format each tool expects. <a href="builtin.html#extend">How to add your own →</a></p>
+      <h2>Your connectors and MCP servers come along</h2>
+      <p>Each agent owns its MCP servers, their sign-in and their on/off state, so whatever you have already set up keeps working in Ciaobot chats. That includes the connectors you enabled on claude.ai, such as Slack, Notion or Atlassian, which reach Claude Code sessions.</p>
+      <p><strong>Settings → MCP</strong> opens each installed agent's own MCP command in the built-in terminal, so you add and sign in to servers the way that agent expects. Google Workspace is built in separately, through the <code>gws</code> command line. <a href="builtin.html">What else is built in →</a></p>
     </section>
 
     <section>
-      <h2>Pick a model per workspace, per chat, per job</h2>
+      <h2>Pick the agent per workspace, per chat, per job</h2>
       <ul>
-        <li><strong>Per workspace:</strong> Choose the workspace in Settings to set which tool it uses by default, for example Claude for Work and a local model for Personal.</li>
-        <li><strong>Per chat:</strong> click the model chip in the chat header (<kbd>⌥</kbd>+<kbd>M</kbd>) to change model or thinking level. Switching to the other tool hands the chat over with its visible history.</li>
-        <li><strong>Per job:</strong> automations and memory extraction each have their own model setting.</li>
+        <li><strong>Per workspace:</strong> choose the default agent in Settings, for example Claude Code for Work and a local model through OpenCode for Personal.</li>
+        <li><strong>Per chat:</strong> change the model from the chat header.</li>
+        <li><strong>Per job:</strong> automations and the memory pass each have their own model setting.</li>
       </ul>
       <p>How do the models compare on real tasks? <a href="evals.html">See how we measure Ciaobot →</a></p>
-      <figure>
-        <a href="assets/img/voice.webp"><img src="assets/img/voice.webp" alt="Settings, Providers: chat provider defaults and connection state" loading="lazy" width="1600" height="1000"></a>
-        <figcaption>Settings → Providers: provider connection status and defaults for new chats.</figcaption>
-      </figure>
     </section>
-
 
     <nav class="next-page" aria-label="Next pages">
       <a class="btn" href="memory.html">← How memory works</a>
@@ -133,8 +123,8 @@
 
   <footer class="site-footer">
     <div class="inner">
-      <span>Ciaobot is open source.</span>
-      <span>Last updated 11 November 2026</span>
+      <span>Ciaobot is open source under the MIT License. No telemetry, and this site runs no analytics.</span>
+      <span>Last updated 21 November 2026</span>
       <span><a href="https://github.com/raffaelefarinaro/ciaobot">GitHub</a> · <a href="https://github.com/raffaelefarinaro/ciaobot/releases">Release notes</a> · <a href="https://github.com/raffaelefarinaro/ciaobot/issues">Report an issue</a></span>
     </div>
   </footer>

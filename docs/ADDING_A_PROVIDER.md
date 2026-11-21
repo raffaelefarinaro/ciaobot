@@ -133,7 +133,7 @@ equivalent in its own permission language.
 These name the providers in user-facing text and need the new id:
 
 - `INTEGRATIONS.md` (install and login).
-- `docs/LINUX.md` (adapter installs) and the provider cards in `site/guide.html`.
+- `docs/LINUX.md` (adapter installs) and the agent list on `site/models.html`.
 - The stock `ciao-capabilities` skill (`ciao/stock/skills/ciao-capabilities`).
 - `.github/workflows/discover-agents.yml`, the weekly probe. It installs and runs
   a real turn for `claude` and `opencode` only. `codex` is not in it yet.
