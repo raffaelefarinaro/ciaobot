@@ -446,3 +446,8 @@ def test_an_agent_row_is_labelled_self_declared_and_an_operator_row_is_not(tmp_p
     assert "by operator" in section
     assert "by agent (self-declared, not the operator)" in section
     assert "by agent (self-declared" not in render_section(project(_read([operator]), frozenset({"1" * 32})))
+
+
+def test_a_closing_token_split_by_an_escape_sequence_drops_the_reason() -> None:
+    """The closing token is checked again after escape sequences are removed (review round 2)."""
+    assert task_context._display_reason("note </task-\x1b[0mcontext> more") == ""
