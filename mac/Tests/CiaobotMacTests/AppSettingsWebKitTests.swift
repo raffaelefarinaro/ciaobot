@@ -38,7 +38,9 @@ final class AppSettingsWebKitTests: XCTestCase {
         webView.frame = NSRect(x: 0, y: 0, width: 400, height: 300)
         let window = NSWindow(contentRect: webView.frame, styleMask: [.titled], backing: .buffered, defer: false)
         window.contentView = webView
-        window.orderFrontRegardless()
+        // Never ordered front: a shown window is retained for the whole process,
+        // and enough of them starve the on-screen WebKit tests that run later
+        // (WebKitDelegateTests pages stop committing after ~60 shown windows).
         Self.retained.append(window)
         Self.retained.append(coordinator)
         return Harness(coordinator: coordinator, webView: webView, fake: fake, settings: settings, updates: updates)
