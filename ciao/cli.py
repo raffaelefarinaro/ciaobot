@@ -50,6 +50,7 @@ from ciao.sync_skills import SETUP_MEMORY_FAILED_RC
 if TYPE_CHECKING:  # only ever a type here; the queue model is imported locally.
     from ciao import skill_proposals
     from ciao.config import CiaoConfig, WorkspaceConfig
+    from ciao.curation_run import RunPlan
     from ciao.curation_run import NoteCoverage, Worklist
 
 _WORKSPACE_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$")
@@ -6020,6 +6021,9 @@ class _CurationPlanningResult:
     payload: dict[str, Any]
     discovered: Worklist
     remaining: Worklist
+    # The run's plan as the budget cut it: what the lease stores at begin, and
+    # what the end's counts are derived from.
+    run_plan: RunPlan
 
 
 def _stale_coverage_line(coverage: NoteCoverage | None) -> str:
@@ -6101,7 +6105,7 @@ def _curation_plan(
         "coverage_notes": coverage_notes,
         "last_run": state.last_run,
     }
-    return _CurationPlanningResult(payload, views.discovered, views.remaining)
+    return _CurationPlanningResult(payload, views.discovered, views.remaining, plan)
 
 
 def _print_curation(payload: dict[str, Any], *, as_json: bool) -> None:
@@ -6184,7 +6188,15 @@ def _curation_begin_command(args: argparse.Namespace) -> int:
     must not hold the lease until the TTL expires. Any other non-zero exit after
     the lease is taken releases it as an ``error`` run first.
     """
-    from ciao.curation_run import CurationBusy, CurationStateError, begin_run, end_run, holder_is_live
+    from ciao.curation_run import (
+        CurationBusy,
+        CurationStateError,
+        begin_run,
+        end_run,
+        holder_is_live,
+        lease_plan,
+        record_plan,
+    )
 
     _workspace, vault, _guide, budget, registry_root, _name = _curation_context(args)
     try:
@@ -6237,6 +6249,17 @@ def _curation_begin_command(args: argparse.Namespace) -> int:
         if not is_live:
             print("curation lease lost while building the worklist", file=sys.stderr)
             return CURATION_BUSY_EXIT
+        # The end derives its counts from this plan, so it is stored on the lease
+        # before the run does any work.
+        try:
+            record_plan(vault, holder=lease.holder, plan=lease_plan(result.run_plan))
+        except CurationBusy:
+            print("curation lease lost while recording the plan", file=sys.stderr)
+            return CURATION_BUSY_EXIT
+        except CurationStateError as exc:
+            print(f"curation state error: {exc}", file=sys.stderr)
+            _abandon_begun_run(vault, lease.holder)
+            return 1
     _print_curation(payload, as_json=args.json)
     return 0
 
@@ -6288,6 +6311,16 @@ def _curation_progress_command(args: argparse.Namespace) -> int:
     else:
         print(f"recorded {len(keys)} item(s), {added} newly done")
     return 0
+
+
+@dataclass(frozen=True, slots=True)
+class _RunCounts:
+    planned: int
+    completed: int
+    deferred: int
+    complete: bool
+    reasons: tuple[str, ...]
+    failed: int
 
 
 def _curation_cycle_migrate_command(args: argparse.Namespace) -> int:
@@ -6374,29 +6407,148 @@ def _print_cycle_migration(report: dict[str, Any], vault: Path, *, applying: boo
     )
 
 
-def _curation_end_command(args: argparse.Namespace) -> int:
-    """Release the lease, record the counts, and stamp the weekly marker.
 
-    The marker is stamped by code rather than by the agent because the rule —
-    both weekly checks reliably done — is mechanical, and an agent that stamped
-    it after a failed audit made the weekly pass skip a week with nothing to
-    show for it. `end_run` does the stamping, so it happens only for the run
-    that still owns the lease.
+
+def _derive_run_counts(vault: Path, *, holder: str, workspace: str) -> _RunCounts:
+    """This run's counts, from the plan stored at begin and the run's own receipts.
+
+    Read-only. The plan is used only when the lease still names ``holder``; a
+    run that no longer holds the lease gets no counts and ``end_run`` refuses it.
+    ``planned`` is the stored plan's pairs. ``completed`` is the planned keys that
+    finished (applied, no change needed, or reported done with no receipt) plus
+    the operations this run applied on rows its plan did not name, so it can
+    exceed ``planned``. An operation belongs to a key when a receipt this run
+    wrote carries both that operation id and the key, so another run's receipts
+    never count here. ``complete`` is false while any unplanned operation did
+    not finish. ``deferred`` is the begin-time count; the end does not recount it.
+    """
+    from ciao import care_report, memory_receipts
+    from ciao.curation_run import load_state
+
+    state = load_state(vault)
+    stored = state.lease.get("plan") if state.lease.get("holder") == holder else None
+    if not isinstance(stored, dict):
+        return _RunCounts(
+            0, 0, 0, False, ("no begin-time plan recorded: this run's counts are not derived",), 0
+        )
+    receipts = memory_receipts.read_receipts(memory_receipts.journal_path(vault))
+    done = frozenset(state.done_keys)
+    # Operation ids this run wrote, grouped by the key they settle. A later run
+    # that resumes an operation writes its own rows under the same id, and the
+    # fold matches every row of that id, so the resumed operation counts once.
+    operations: dict[str, list[str]] = {}
+    for row in receipts:
+        operation = str(row.get("operation_id", ""))
+        key = str(row.get("item_key", ""))
+        if row.get("run_id") != holder or not operation or not key:
+            continue
+        bound = operations.setdefault(key, [])
+        if operation not in bound:
+            bound.append(operation)
+    planned = [
+        care_report.ReportItem(
+            pass_id=str(pass_id),
+            item_key=str(key),
+            disposition="planned",
+            operation_ids=tuple(operations.get(str(key), ())),
+        )
+        for pass_id, key in stored.get("planned", [])
+    ]
+    blocked = [
+        care_report.ReportItem(
+            pass_id=str(pass_id),
+            item_key=str(key),
+            disposition="blocked",
+            operation_ids=tuple(operations.get(str(key), ())),
+        )
+        for pass_id, key in stored.get("blocked", [])
+    ]
+    planned_keys = {item.item_key for item in (*planned, *blocked)}
+    fold = care_report.summarize_care_run(
+        care_report.CareReportPlan(
+            run_id=holder, workspace=workspace, items=tuple([*planned, *blocked])
+        ),
+        receipts,
+        done_keys=done,
+    )
+    # Work the run did on rows that were not in its begin plan: a row predicted
+    # and accepted in the same run settles under a key the plan never named.
+    # One item per operation id, so a resumed operation is counted once.
+    extra_items: list[care_report.ReportItem] = []
+    extra_ops: set[str] = set()
+    for row in receipts:
+        operation = str(row.get("operation_id", ""))
+        key = str(row.get("item_key", ""))
+        if (
+            row.get("run_id") != holder
+            or not operation
+            or not key
+            or key in planned_keys
+            or operation in extra_ops
+        ):
+            continue
+        extra_ops.add(operation)
+        extra_items.append(
+            care_report.ReportItem(
+                pass_id="proposals",
+                item_key=key,
+                disposition="planned",
+                operation_ids=(operation,),
+            )
+        )
+    extra = care_report.summarize_care_run(
+        care_report.CareReportPlan(run_id=holder, workspace=workspace, items=tuple(extra_items)),
+        receipts,
+        done_keys=done,
+    )
+    extra_done = [o for o in extra.outcomes if o.status in ("applied", "no_change")]
+    counts = fold.counts
+    failed = counts["failed"] + extra.counts["failed"]
+    reasons: list[str] = []
+    if extra_done:
+        reasons.append(
+            f"{len(extra_done)} accept(s) of rows found during the run are counted "
+            "as completed beyond the begin plan"
+        )
+    if failed:
+        # A failed write is not ambiguity, so `complete` does not carry it; the
+        # reason and the `failed` count say it, so a run never reads as clean.
+        reasons.append(f"{failed} accept(s) failed; the run's receipts say which")
+    return _RunCounts(
+        planned=counts["planned"],
+        completed=counts["applied"] + counts["no_change"] + counts["done_unverified"] + len(extra_done),
+        deferred=int(stored.get("deferred_count", 0)),
+        # S1's meaning: no ambiguity. Planned and unplanned work both count.
+        complete=fold.complete and extra.complete,
+        reasons=tuple(reasons),
+        failed=failed,
+    )
+
+
+def _curation_end_command(args: argparse.Namespace) -> int:
+    """Release the lease, record the derived counts, and stamp the weekly marker.
+
+    The counts come from the run's own receipts and the plan it stored at
+    begin, never from the agent. The marker is stamped by code rather than by
+    the agent because the rule — both weekly checks reliably done — is
+    mechanical, and an agent that stamped it after a failed audit made the
+    weekly pass skip a week with nothing to show for it. `end_run` does the
+    stamping, so it happens only for the run that still owns the lease.
     """
     from ciao.curation_run import CurationBusy, CurationStateError, end_run
 
-    _workspace, vault, _guide, _budget, _registry_root, _name = _curation_context(args)
+    _workspace, vault, _guide, _budget, _registry_root, name = _curation_context(args)
     holder = _curation_holder(args)
     if not holder:
         return 2
     try:
         result = _curation_plan(args)
+        counts = _derive_run_counts(vault, holder=holder, workspace=name or "")
     except CurationStateError as exc:
         print(f"curation state error: {exc}", file=sys.stderr)
         return 1
     payload = result.payload
     live_keys = frozenset(key for item in result.remaining.items for key in item.keys)
-    deferred = int(payload.get("deferred_count", 0))
     try:
         # `end_run` stamps the marker itself, inside the lease check. Stamping
         # it out here let a run whose lease had expired — one this call then
@@ -6408,10 +6560,10 @@ def _curation_end_command(args: argparse.Namespace) -> int:
             vault,
             holder=holder,
             status=args.status,
-            planned=args.planned,
-            completed=args.completed,
-            deferred=deferred,
-            reasons=args.reason or [],
+            planned=counts.planned,
+            completed=counts.completed,
+            deferred=counts.deferred,
+            reasons=[*(args.reason or []), *counts.reasons],
             live_keys=live_keys,
             advance_marker=args.status == "ok",
         )
@@ -6422,7 +6574,8 @@ def _curation_end_command(args: argparse.Namespace) -> int:
         print(f"curation state error: {exc}", file=sys.stderr)
         return 1
     summary.update(
-        counts_complete=False,
+        counts_complete=counts.complete,
+        failed=counts.failed,
         remaining_observed_count=int(payload["remaining_observed_count"]),
         coverage_notes=payload["coverage_notes"],
     )
@@ -6433,7 +6586,8 @@ def _curation_end_command(args: argparse.Namespace) -> int:
     else:
         print(
             f"run {summary['status']}: planned {summary['planned']}, "
-            f"completed {summary['completed']}, deferred {summary['deferred']}; "
+            f"completed {summary['completed']}, failed {summary['failed']}, "
+            f"deferred {summary['deferred']}; "
             f"weekly marker {'advanced' if advanced else 'left due'}; "
             f"Observed work: {summary['remaining_observed_count']} (coverage incomplete)"
         )
@@ -9558,7 +9712,8 @@ def build_parser() -> argparse.ArgumentParser:
         "curation-end",
         help="Release the curation lease and record the run's counts.",
         description=(
-            "Releases the lease, records planned/completed/deferred counts and "
+            "Releases the lease, records the planned/completed/deferred counts "
+            "derived from this run's own receipts (no counts are passed in) and "
             "reasons so a no-op run is distinguishable from skipped or failed "
             "work, and — only when both weekly checks are recorded done and "
             "the status is ok — stamps `last_full_pass`. An unreliable weekly "
@@ -9571,12 +9726,6 @@ def build_parser() -> argparse.ArgumentParser:
         choices=["ok", "failed"],
         default="ok",
         help="Whether the run completed its planned work reliably.",
-    )
-    curation_end_parser.add_argument(
-        "--planned", type=int, default=0, help="Items this run planned to do."
-    )
-    curation_end_parser.add_argument(
-        "--completed", type=int, default=0, help="Items this run actually finished."
     )
     curation_end_parser.add_argument(
         "--reason",

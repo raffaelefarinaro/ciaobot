@@ -4756,3 +4756,26 @@ def test_batch_dismiss_settles_a_skill_draft_and_keeps_other_rows(tmp_path: Path
     assert "A bullet outside the batch that must survive." in text
     draft = next(d for d in read_records(config, "personal") if d.id == draft_id)
     assert draft.lifecycle == DRAFT_REJECTED
+
+
+def test_history_payload_drops_the_run_and_item_stamps(tmp_path: Path) -> None:
+    """#3056 S2: the care report reads run_id and item_key; the History payload never carries them."""
+    config = _config(tmp_path)
+    _seed_history(
+        config,
+        "personal",
+        [{
+            "promoted_at": "2026-09-01T10:00:00+00:00",
+            "kind": "memory",
+            "text": "One.",
+            "via": "agent",
+            "operation_id": "cop_1",
+            "run_id": "host:1:uuid",
+            "item_key": "proposals:abc",
+        }],
+    )
+
+    row = _client(config).get("/api/proposals/history").json()["rows"][0]
+
+    assert "run_id" not in row and "item_key" not in row
+    assert row["operation_id"] == "cop_1"

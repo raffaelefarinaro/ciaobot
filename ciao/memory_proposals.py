@@ -551,6 +551,8 @@ def _promote_to_region(
     expected_revision: str | None = None,
     authorize: Callable[[], AbstractContextManager[bool]] | None = None,
     operation_id: str = "",
+    run_id: str = "",
+    item_key: str = "",
 ) -> tuple[PromotionOutcome, str | None]:
     """Write one region-bound proposal.
 
@@ -793,6 +795,8 @@ def _promote_to_region(
                     provenance=_provenance_row(proposal),
                     authorize=authorize,
                     operation_id=operation_id,
+                    run_id=run_id,
+                    item_key=item_key,
                 )
                 if receipt_out is not None:
                     receipt_out.update(receipt)
@@ -854,6 +858,8 @@ def _promote_to_region(
             provenance=_provenance_row(proposal),
             authorize=authorize,
             operation_id=operation_id,
+            run_id=run_id,
+            item_key=item_key,
         )
         if receipt_out is not None:
             receipt_out.update(receipt)
@@ -891,6 +897,8 @@ def accept_region_fact(
     expected_revision: str | None = None,
     authorize: Callable[[], AbstractContextManager[bool]] | None = None,
     operation_id: str = "",
+    run_id: str = "",
+    item_key: str = "",
 ) -> tuple[PromotionOutcome, str | None]:
     """Write one approved region fact through the guarded path.
 
@@ -940,6 +948,8 @@ def accept_region_fact(
         expected_revision=expected_revision,
         authorize=authorize,
         operation_id=operation_id,
+        run_id=run_id,
+        item_key=item_key,
     )
 
 
@@ -1936,6 +1946,8 @@ def record_promotion(
     once: bool = False,
     history_only: bool = False,
     operation_id: str = "",
+    run_id: str = "",
+    item_key: str = "",
 ) -> bool:
     """Record an accepted proposal in the same decision history.
 
@@ -1963,6 +1975,8 @@ def record_promotion(
         once=once,
         history_only=history_only,
         operation_id=operation_id,
+        run_id=run_id,
+        item_key=item_key,
     )
 
 
@@ -1984,6 +1998,8 @@ def _record_decision(
     once: bool = False,
     history_only: bool = False,
     operation_id: str = "",
+    run_id: str = "",
+    item_key: str = "",
 ) -> bool:
     cleaned = text.strip()
     if not cleaned:
@@ -2029,6 +2045,13 @@ def _record_decision(
         # The managed operation (see :mod:`ciao.curation_apply`) that wrote this
         # decision. It owns both receipts it links to, and finds them by this id.
         entry["operation_id"] = operation_id
+    if run_id:
+        # The curation lease holder that made this decision. Read back for the
+        # care report's counts; never sent to the History payload.
+        entry["run_id"] = run_id
+    if item_key:
+        # The worklist key this decision settled (see ``run_id``).
+        entry["item_key"] = item_key
     if learning_id:
         # Which learning a derived finding was filed against, for the writers
         # that settle one finding at a time. Empty for every decision that is
@@ -2242,6 +2265,8 @@ def read_decisions(
                     "proposal_id": str(entry.get("proposal_id", "")),
                     "receipt_id": str(entry.get("receipt_id", "")),
                     "operation_id": str(entry.get("operation_id", "")),
+                    "run_id": str(entry.get("run_id", "")),
+                    "item_key": str(entry.get("item_key", "")),
                     "learning_id": str(entry.get("learning_id", "")),
                     "finding": str(entry.get("finding", "")),
                     "reason": str(entry.get("reason", "")),

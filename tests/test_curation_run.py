@@ -97,7 +97,7 @@ def _planning_result(payload: dict[str, object] | None = None):
     from ciao.cli import _CurationPlanningResult
 
     worklist = cr.Worklist((), False, "", "")
-    return _CurationPlanningResult(payload or {}, worklist, worklist)
+    return _CurationPlanningResult(payload or {}, worklist, worklist, cr.RunPlan((), (), cr.RunBudget()))
 
 
 # ── Worklist ──────────────────────────────────────────────────────────────
@@ -5182,3 +5182,81 @@ def test_worklist_as_dict_carries_coverage_only_when_it_is_known() -> None:
     )
     with_coverage = cr.Worklist((), False, "", "now", note_coverage=coverage)
     assert with_coverage.as_dict()["note_coverage"] == coverage.as_dict()
+
+
+# ── S2: the begin-time plan lives on the lease until the run ends ──
+
+
+def test_record_plan_is_holder_checked_and_lives_on_the_lease_until_the_end(tmp_path: Path) -> None:
+    vault = _vault(tmp_path)
+    lease = cr.begin_run(vault, holder="nightly")
+    plan = {"planned": [["proposals", "k1"]], "blocked": [], "blocked_overflow": 0, "deferred_count": 3}
+
+    with pytest.raises(cr.CurationBusy):
+        cr.record_plan(vault, holder="someone-else", plan=plan)
+    cr.record_plan(vault, holder=lease.holder, plan=plan)
+    assert cr.load_state(vault).lease["plan"] == plan
+
+    assert cr.renew_run(vault, holder=lease.holder)
+    assert cr.load_state(vault).lease["plan"] == plan
+    cr.end_run(vault, holder=lease.holder)
+    state = cr.load_state(vault)
+    assert state.lease == {}
+    assert set(state.last_run) == {"status", "finished_at", "planned", "completed", "deferred", "reasons"}
+
+
+def test_lease_plan_stores_the_planned_pairs_and_caps_the_blocked_ones() -> None:
+    planned = (cr.WorklistItem(pass_id="proposals", label="p", reason="r", keys=("a", "b")),)
+    blocked = tuple(
+        cr.WorklistItem(pass_id=cr.PASS_LOGS, label="l", reason="x", keys=(f"log-{i}",))
+        for i in range(cr.LEASE_PLAN_BLOCKED_CAP + 5)
+    )
+    run_plan = cr.RunPlan(
+        planned=planned, deferred=blocked, budget=cr.RunBudget(max_items=2), blocked=blocked
+    )
+
+    plan = cr.lease_plan(run_plan)
+
+    assert plan["planned"] == [["proposals", "a"], ["proposals", "b"]]
+    assert len(plan["blocked"]) == cr.LEASE_PLAN_BLOCKED_CAP
+    assert plan["blocked_overflow"] == 5
+    assert plan["deferred_count"] == cr.LEASE_PLAN_BLOCKED_CAP + 5
+
+
+# ── S2: curation-end derives planned and completed from receipts ──
+
+
+def test_curation_end_without_a_begin_plan_reports_zero_counts_and_says_why(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from ciao.cli import _curation_end_command
+
+    vault = _vault(tmp_path)
+    guide = _guide(tmp_path)
+    _fresh_log(vault, last_full_pass="2026-09-01")
+    lease = cr.begin_run(vault, holder="nightly")
+    printed = _capture(monkeypatch)
+
+    assert _curation_end_command(_args(tmp_path, vault, guide, holder=lease.holder, status="ok", json=True)) == 0
+
+    summary = json.loads("".join(printed))
+    assert (summary["planned"], summary["completed"], summary["deferred"]) == (0, 0, 0)
+    assert summary["counts_complete"] is False
+    assert any("no begin-time plan recorded" in reason for reason in summary["reasons"])
+
+
+def test_record_plan_refuses_a_malformed_plan_and_stores_nothing(tmp_path: Path) -> None:
+    vault = _vault(tmp_path)
+    lease = cr.begin_run(vault, holder="nightly")
+    before = cr.load_state(vault).lease
+
+    with pytest.raises(cr.CurationStateError):
+        cr.record_plan(vault, holder=lease.holder, plan={"planned": "x"})
+    with pytest.raises(cr.CurationStateError):
+        cr.record_plan(
+            vault,
+            holder=lease.holder,
+            plan={"planned": [["p", "k"]] * (cr.LEASE_PLAN_MAX_KEYS + 1), "blocked": [],
+                  "blocked_overflow": 0, "deferred_count": 0},
+        )
+    assert cr.load_state(vault).lease == before

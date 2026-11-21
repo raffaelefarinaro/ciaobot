@@ -61,6 +61,9 @@ _STATE_FIELDS = frozenset(
 )
 _MARKER_FIELDS = frozenset({"kind", "sha256"})
 _LEASE_FIELDS = frozenset({"holder", "started_at", "expires_at"})
+# The begin-time plan a run stores on its lease (curation_run.record_plan). It is
+# optional: a lease with no plan is a run that has not planned yet.
+_LEASE_OPTIONAL_FIELDS = frozenset({"plan"})
 _LAST_RUN_FIELDS = frozenset({"status", "finished_at", "planned", "completed", "deferred", "reasons"})
 _PENDING_FIELDS = frozenset(
     {"cycle_id", "prior", "target_stamp", "target_sha256", "proven_required", "phase"}
@@ -449,8 +452,10 @@ def _check_date_map(mapping: object, label: str) -> None:
 def _check_lease(lease: dict[str, Any]) -> None:
     if not lease:
         return
-    if set(lease) != _LEASE_FIELDS:
+    if not _LEASE_FIELDS <= set(lease) <= _LEASE_FIELDS | _LEASE_OPTIONAL_FIELDS:
         raise CycleError("lease has missing or unknown fields")
+    if "plan" in lease and not isinstance(lease["plan"], dict):
+        raise CycleError("lease plan must be an object")
     holder = lease.get("holder")
     if not isinstance(holder, str) or not holder.strip():
         raise CycleError("lease holder is invalid")

@@ -753,6 +753,8 @@ def commit_region_change(
     provenance: dict[str, Any] | None = None,
     authorize: Callable[[], AbstractContextManager[bool]] | None = None,
     operation_id: str = "",
+    run_id: str = "",
+    item_key: str = "",
 ) -> dict[str, Any]:
     """Replace one region's body through the receipt protocol.
 
@@ -768,7 +770,10 @@ def commit_region_change(
     lock, because that lock is not re-entrant.
 
     ``operation_id``, when given, is stored on the receipt so the operation
-    that owns the queue effect can be matched to this write.
+    that owns the queue effect can be matched to this write. ``run_id`` (the
+    curation lease holder) and ``item_key`` (the worklist key the write settles)
+    are stored beside it, on every row of the write, so a care report can count
+    the run's own receipts. Neither is written when empty.
 
     ``provenance``, when given, is the fact's evidence chain as
     :mod:`ciao.fact_candidates` records it — the transcript message ids it was
@@ -863,6 +868,10 @@ def commit_region_change(
         }
         if operation_id:
             base["operation_id"] = operation_id
+        if run_id:
+            base["run_id"] = run_id
+        if item_key:
+            base["item_key"] = item_key
         if before_text == after_text:
             # Nothing to write: a no-op still gets a receipt so a caller can
             # distinguish "already satisfied" from "wrote something".
@@ -913,6 +922,8 @@ def commit_region_change(
                     # Same operation as the prepared row it settles, or the effective
                     # row (last row per id) loses its binding to the owning operation.
                     **({"operation_id": operation_id} if operation_id else {}),
+                    **({"run_id": run_id} if run_id else {}),
+                    **({"item_key": item_key} if item_key else {}),
                 },
             )
         except Exception:  # noqa: BLE001 — recording must not mask the failure
@@ -991,10 +1002,13 @@ def queue_resolution(
     workspace: str = "",
     vault_root: Path | None = None,
     operation_id: str = "",
+    run_id: str = "",
+    item_key: str = "",
 ):
     """Bracket a queue rewrite with ``prepared`` then ``applied`` receipts.
 
-    ``operation_id``, when given, is stored on both rows.
+    ``operation_id``, ``run_id`` and ``item_key``, when given, are stored on
+    both rows (see :func:`commit_region_change`).
 
     The body performs the actual removal (with its own content-verified
     rewrite). A crash between the ``prepared`` row and the rewrite is
@@ -1040,6 +1054,10 @@ def queue_resolution(
         }
         if operation_id:
             base["operation_id"] = operation_id
+        if run_id:
+            base["run_id"] = run_id
+        if item_key:
+            base["item_key"] = item_key
         # The prepared row is the crash-safety boundary for this rewrite: if it
         # cannot be persisted, a crash after the queue replacement would remove
         # the proposals with nothing for recovery or History to find. Abort
@@ -1073,6 +1091,8 @@ def queue_resolution(
                 receipt_id=rid,
                 prepared=True,
                 operation_id=operation_id,
+                run_id=run_id,
+                item_key=item_key,
             )
 
 
@@ -1093,6 +1113,8 @@ def _write_queue_receipt(
     prepared: bool = False,
     undoable: bool = True,
     operation_id: str = "",
+    run_id: str = "",
+    item_key: str = "",
 ) -> dict[str, Any]:
     before = before_text
     if before is None:
@@ -1134,6 +1156,10 @@ def _write_queue_receipt(
     }
     if operation_id:
         receipt["operation_id"] = operation_id
+    if run_id:
+        receipt["run_id"] = run_id
+    if item_key:
+        receipt["item_key"] = item_key
     if not undoable:
         # A per-fact history row for a batch that already records its
         # transaction-level before image on one row. It must not offer an undo:
