@@ -6199,8 +6199,11 @@ def _curation_begin_command(args: argparse.Namespace) -> int:
     )
 
     _workspace, vault, _guide, budget, registry_root, _name = _curation_context(args)
+    # The chat this run executes in: the binding the PWA uses to show its outcome.
+    # Empty outside an agent chat, and then no outcome is shown for the run.
+    chat_id = os.environ.get("CIAO_CHAT_ID", "").strip()
     try:
-        lease = begin_run(vault, holder=args.holder, ttl_s=budget.max_seconds)
+        lease = begin_run(vault, holder=args.holder, ttl_s=budget.max_seconds, chat_id=chat_id)
     except CurationBusy as exc:
         print(f"curation is already running: {exc}", file=sys.stderr)
         return CURATION_BUSY_EXIT
@@ -6566,6 +6569,8 @@ def _curation_end_command(args: argparse.Namespace) -> int:
             reasons=[*(args.reason or []), *counts.reasons],
             live_keys=live_keys,
             advance_marker=args.status == "ok",
+            failed=counts.failed,
+            counts_complete=counts.complete,
         )
     except CurationBusy as exc:
         print(f"curation lease lost: {exc}", file=sys.stderr)

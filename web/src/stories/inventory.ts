@@ -5152,6 +5152,38 @@ export const inventory: InventoryEntry[] = [
     }
   },
   {
+    "id": "components-care-run-outcome",
+    "name": "CareRunOutcome",
+    "family": "Tasks, projects and automations",
+    "kind": "component",
+    "owner": {
+      "path": "web/src/components/CareRunOutcome.vue",
+      "anchor": "<template>"
+    },
+    "sources": [],
+    "consumers": [
+      "web/src/components/SchedulePanel.vue"
+    ],
+    "variants": [],
+    "variantNotes": "No configurable variants; variants are unassessed. The states (loading, counts, incomplete, reasons, null, error with Retry) are exercised by CareRunOutcome.test.ts, not by a story.",
+    "states": [
+      {
+        "name": "default",
+        "coverage": "uncovered",
+        "storyIds": [],
+        "note": "Rendered state is covered by CareRunOutcome.test.ts, not by a story."
+      }
+    ],
+    "loading": {
+      "status": "known",
+      "detail": "Loading, first-load error with Retry, and a stale answer for a previous chat are handled and tested in CareRunOutcome.vue."
+    },
+    "migration": {
+      "status": "unassessed",
+      "note": "Inventory admission does not approve a design migration."
+    }
+  },
+  {
     "id": "components-settings-view",
     "name": "SettingsView",
     "family": "Settings",

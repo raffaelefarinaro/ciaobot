@@ -18,7 +18,7 @@ from __future__ import annotations
 import hashlib
 import json
 import re
-from collections.abc import Iterable
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from datetime import date, datetime
 from typing import Any, Literal
@@ -63,8 +63,11 @@ _MARKER_FIELDS = frozenset({"kind", "sha256"})
 _LEASE_FIELDS = frozenset({"holder", "started_at", "expires_at"})
 # The begin-time plan a run stores on its lease (curation_run.record_plan). It is
 # optional: a lease with no plan is a run that has not planned yet.
-_LEASE_OPTIONAL_FIELDS = frozenset({"plan"})
+_LEASE_OPTIONAL_FIELDS = frozenset({"plan", "chat_id"})
 _LAST_RUN_FIELDS = frozenset({"status", "finished_at", "planned", "completed", "deferred", "reasons"})
+# Written by curation-end once the run's derived outcome is known. Optional, so
+# a state file from before they existed still decodes (no schema bump).
+_LAST_RUN_OPTIONAL_FIELDS = frozenset({"run_id", "chat_id", "failed", "counts_complete"})
 _PENDING_FIELDS = frozenset(
     {"cycle_id", "prior", "target_stamp", "target_sha256", "proven_required", "phase"}
 )
@@ -456,6 +459,8 @@ def _check_lease(lease: dict[str, Any]) -> None:
         raise CycleError("lease has missing or unknown fields")
     if "plan" in lease and not isinstance(lease["plan"], dict):
         raise CycleError("lease plan must be an object")
+    if "chat_id" in lease and not isinstance(lease["chat_id"], str):
+        raise CycleError("lease chat_id must be a string")
     holder = lease.get("holder")
     if not isinstance(holder, str) or not holder.strip():
         raise CycleError("lease holder is invalid")
@@ -468,7 +473,7 @@ def _check_lease(lease: dict[str, Any]) -> None:
 def _check_last_run(last_run: dict[str, Any]) -> None:
     if not last_run:
         return
-    if set(last_run) != _LAST_RUN_FIELDS:
+    if not _LAST_RUN_FIELDS <= set(last_run) <= _LAST_RUN_FIELDS | _LAST_RUN_OPTIONAL_FIELDS:
         raise CycleError("last_run has missing or unknown fields")
     finished = last_run.get("finished_at")
     if (
@@ -480,6 +485,19 @@ def _check_last_run(last_run: dict[str, Any]) -> None:
         or any(not isinstance(reason, str) for reason in last_run["reasons"])
     ):
         raise CycleError("last_run summary is invalid")
+    if not last_run_optional_valid(last_run):
+        raise CycleError("last_run optional fields are invalid")
+
+
+def last_run_optional_valid(last_run: Mapping[str, Any]) -> bool:
+    """Whether each optional ``last_run`` field that is present has its type. Shared with the v1 loader."""
+    checks = {
+        "run_id": lambda value: isinstance(value, str),
+        "chat_id": lambda value: isinstance(value, str),
+        "failed": lambda value: type(value) is int,
+        "counts_complete": lambda value: type(value) is bool,
+    }
+    return all(checks[name](last_run[name]) for name in checks if name in last_run)
 
 
 def _parse_instant(value: str) -> datetime | None:
