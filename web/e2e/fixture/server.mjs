@@ -302,11 +302,17 @@ const FOLD_TRANSCRIPT = [
 
 const sessions = new Map()
 
-/** The workspace registry as this session sees it: a saved Memory handover shows on its workspace. */
+/** The workspace registry as this session sees it: a saved Memory handover and per-kind choices show on their workspace. */
 function workspacesPayload(state) {
   const ordered = orderedWorkspaces(state)
   return {
-    workspaces: ordered.map(w => (state.handover[w.name] ? { ...w, memory_handover: state.handover[w.name] } : w)),
+    workspaces: ordered.map(w => {
+      let row = state.handover[w.name] ? { ...w, memory_handover: state.handover[w.name] } : w
+      if (state.memoryApproval[w.name] && Object.keys(state.memoryApproval[w.name]).length) {
+        row = { ...row, memory_approval: { ...state.memoryApproval[w.name] } }
+      }
+      return row
+    }),
     active: ordered[0].name,
     provider_options: [{ value: 'claude', label: 'Claude' }],
   }
@@ -357,7 +363,7 @@ function sessionOf(req) {
   const id = /(?:^|;\s*)e2e_session=([^;]+)/.exec(cookie)?.[1] || 'default'
   let state = sessions.get(id)
   if (!state) {
-    state = { activeStreams: [], sockets: new Set(), chatSockets: new Map(), pendingChatFrames: new Map(), connections: 0, transcript: null, terminals: new Map(), chatActions: new Map(), terminalUnlocked: false, appearance: { text_contrast: 'normal', body_font: 'system', theme: null, font_scale: null, custom_colors: {}, revision: 'a0' }, handover: {}, workspaceOrder: null, chatPatches: new Map(), removedChats: new Set(), tasksByWorkspace: null, taskPatches: new Map(), taskWrites: 0, schedulePatches: new Map(), removedSchedules: new Set(), actions: null, writes: [], projects: null }
+    state = { activeStreams: [], sockets: new Set(), chatSockets: new Map(), pendingChatFrames: new Map(), connections: 0, transcript: null, terminals: new Map(), chatActions: new Map(), terminalUnlocked: false, appearance: { text_contrast: 'normal', body_font: 'system', theme: null, font_scale: null, custom_colors: {}, revision: 'a0' }, handover: {}, memoryApproval: {}, workspaceOrder: null, chatPatches: new Map(), removedChats: new Set(), tasksByWorkspace: null, taskPatches: new Map(), taskWrites: 0, schedulePatches: new Map(), removedSchedules: new Set(), actions: null, writes: [], projects: null }
     sessions.set(id, state)
   }
   return state
@@ -668,12 +674,22 @@ const GET_ROUTES = {
     }
   },
   // Settings > Workspace > Overview's Memory handover card.
-  '/api/proposals/handover': (req, url) => ({
-    workspace: url.searchParams.get('workspace') || WORKSPACES[0].name,
-    handover: sessionOf(req).handover[url.searchParams.get('workspace') || WORKSPACES[0].name] || 'off',
+  '/api/proposals/handover': (req, url) => {
+    const state = sessionOf(req)
+    const name = url.searchParams.get('workspace') || WORKSPACES[0].name
+    const handover = state.handover[name] || 'off'
+    const approval = state.memoryApproval[name] || {}
+    // The engine's rule: an explicit kind choice wins; an unset kind follows the legacy handover (all = auto).
+    const resolve = kind => ({ mode: approval[kind] || (handover === 'all' ? 'auto' : 'approve'), inherited: !(kind in approval) })
+    return {
+    workspace: name,
+    handover,
+    memory_approval: { ...approval },
+    accept_resolved: { memory: resolve('memory'), profile: resolve('profile') },
     acting_available: true,
     agreement: { decided: 0, matched: 0, rate: null, window: 50, min_decisions: 20, threshold: 0.9, predicted_accept: 0, accept_matched: 0, predicted_dismiss: 0, dismiss_matched: 0, suggest_handover: false },
-  }),
+    }
+  },
   '/api/proposals/history': (req) => (sessionOf(req).verification ? VERIFICATION_HISTORY : { rows: [], total: 0, truncated: false, limit: 200, at_max: true }),
   '/api/vault/graph': (req) => (sessionOf(req).verification
     ? { workspace: WORKSPACES[0].name, workspaces: orderedWorkspaces(sessionOf(req)).map(w => w.name), nodes: VERIFICATION_NODES, edges: MEMORY_EDGES }
@@ -1231,6 +1247,15 @@ const server = http.createServer(async (req, res) => {
       const name = decodeURIComponent(workspacePatch[1])
       if (body && WORKSPACES.some(w => w.name === name) && typeof body.memory_handover === 'string') {
         state.handover[name] = body.memory_handover
+      }
+      // Per-kind acceptance merges one key at a time; null resets that kind to inherited.
+      if (body && WORKSPACES.some(w => w.name === name) && body.memory_approval && typeof body.memory_approval === 'object') {
+        const merged = { ...(state.memoryApproval[name] || {}) }
+        for (const [kind, mode] of Object.entries(body.memory_approval)) {
+          if (mode === null) delete merged[kind]
+          else merged[kind] = mode
+        }
+        state.memoryApproval[name] = merged
       }
       return sendJson(res, workspacesPayload(state))
     }
