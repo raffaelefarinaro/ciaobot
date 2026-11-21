@@ -36,7 +36,7 @@ function editableOf(row: EntityTypeRow) {
   return {
     id: row.id, label: row.label, kind: row.kind, folder: row.folder,
     description: row.description, aliases: [...row.aliases],
-    stale_after_days: row.stale_after_days, enabled: row.enabled, builtin: row.builtin,
+    enabled: row.enabled, builtin: row.builtin,
   }
 }
 
@@ -131,7 +131,6 @@ interface FormState {
   folder: string
   description: string
   aliases: string
-  stale_after_days: number
   /** The row being edited, or '' when this drawer is adding one. */
   editing: string
   /** True for a builtin: the id is a shipped key and cannot be renamed. */
@@ -140,7 +139,7 @@ interface FormState {
 
 const form = reactive<FormState>({
   id: '', label: '', kind: 'entity', folder: '', description: '', aliases: '',
-  stale_after_days: 0, editing: '', builtin: false,
+  editing: '', builtin: false,
 })
 
 /** Whether the drawer is adding a new category rather than editing one. */
@@ -168,7 +167,6 @@ function openDrawerFor(row: EntityTypeRow) {
   form.folder = row.folder
   form.description = row.description
   form.aliases = row.aliases.join(', ')
-  form.stale_after_days = row.stale_after_days
   form.editing = row.id
   form.builtin = row.builtin
   drawerOpen.value = true
@@ -182,7 +180,6 @@ function openDrawerForPreset(preset: typeof CATEGORY_PRESETS[number]) {
   form.folder = preset.folder
   form.description = preset.description
   form.aliases = ''
-  form.stale_after_days = 0
   form.editing = ''
   form.builtin = false
   drawerOpen.value = true
@@ -196,7 +193,6 @@ function openDrawerEmpty() {
   form.folder = ''
   form.description = ''
   form.aliases = ''
-  form.stale_after_days = 0
   form.editing = ''
   form.builtin = false
   drawerOpen.value = true
@@ -230,21 +226,9 @@ const labelError = computed(() => {
   return form.label ? 'A category needs a label.' : ''
 })
 
-const daysError = computed(() => {
-  const value = form.stale_after_days
-  if (Number.isInteger(value) && value >= 0) return ''
-  return 'Days must be a whole number, 0 or more.'
-})
-
 /** What blocks a save. A missing label blocks it whether or not the field has
  * been touched — only the *sentence* about it waits for that. */
-const formValid = computed(() => !idError.value && !daysError.value && form.label.trim() !== '')
-
-/** `0` means the caller's own default, so the field says so rather than showing 0. */
-function staleHint(row: EntityTypeRow): string {
-  if (!row.stale_after_days) return 'Default'
-  return row.stale_after_days === 1 ? '1 day' : `${row.stale_after_days} days`
-}
+const formValid = computed(() => !idError.value && form.label.trim() !== '')
 
 function parseAliases(value: string): string[] {
   return value.split(',').map((alias) => alias.trim()).filter(Boolean)
@@ -260,7 +244,6 @@ function rowFromForm(): EntityTypeRow {
     folder: form.folder.trim(),
     description: form.description.trim(),
     aliases: parseAliases(form.aliases),
-    stale_after_days: Math.max(0, Math.round(form.stale_after_days || 0)),
     // Adding is always enabled: a category the user just created and cannot
     // see used would read as a broken save. An edit takes the flag from the
     // DRAFT, never from the saved row: the drawer owns no enabled control, so
@@ -392,7 +375,6 @@ async function saveDraft() {
               <th scope="col" class="cat-col-wide">Kind</th>
               <th scope="col">Folder</th>
               <th scope="col" class="cat-num">Notes</th>
-              <th scope="col" class="cat-col-wide">Stale after</th>
               <th scope="col" class="cat-actions-col">On</th>
             </tr>
           </thead>
@@ -421,7 +403,6 @@ async function saveDraft() {
               <td class="cat-muted cat-col-wide">{{ row.kind === 'entity' ? 'Entity' : 'Note' }}</td>
               <td class="cat-muted"><code>{{ row.folder || '—' }}</code></td>
               <td class="cat-num">{{ row.note_count.toLocaleString() }}</td>
-              <td class="cat-muted cat-col-wide">{{ staleHint(row) }}</td>
               <td class="cat-actions-col">
                 <button
                   type="button"
@@ -533,21 +514,6 @@ async function saveDraft() {
           </div>
 
           <div class="cat-field">
-            <label for="cat-days">Stale after (days)</label>
-            <input
-              id="cat-days"
-              v-model.number="form.stale_after_days"
-              type="number"
-              min="0"
-              step="1"
-              :aria-invalid="daysError ? 'true' : undefined"
-              :aria-describedby="daysError ? 'cat-days-error' : 'cat-days-help'"
-            />
-            <p v-if="daysError" id="cat-days-error" class="cat-field-error" role="alert">{{ daysError }}</p>
-            <p v-else id="cat-days-help" class="cat-field-note">0 uses the default. A note past it asks to be re-checked.</p>
-          </div>
-
-          <div class="cat-field">
             <label for="cat-kind">Kind</label>
             <select id="cat-kind" v-model="form.kind">
               <option value="entity">Entity — a record of the thing</option>
@@ -559,8 +525,8 @@ async function saveDraft() {
                configured with, and the consumers that read it are still to come
                (A2a). Saying so is honest; faking the behaviour is not. -->
           <p class="cat-scope">
-            Folder, aliases and stale-after are stored now; they start changing how
-            notes are sorted, linted and aged once that wiring lands.
+            Folder and aliases are stored now; they start changing how notes are
+            sorted and linted once that wiring lands.
           </p>
 
           <p v-if="store.error" class="cat-error" role="alert">{{ store.error }}</p>
@@ -748,8 +714,8 @@ async function saveDraft() {
 .cat-muted code { font-family: var(--font-mono); }
 
 /* At phone width the two metadata columns are what pushes the enable switch
-   off the right edge, and the switch is the row's whole point — so Kind and
-   Stale after go, and stay readable in the drawer. The label, the folder and
+   off the right edge, and the switch is the row's whole point — so Kind goes,
+   and stays readable in the drawer. The label, the folder and
    the count stay, because they are what identifies the row. */
 @media (max-width: 700px) {
   .cat-col-wide { display: none; }

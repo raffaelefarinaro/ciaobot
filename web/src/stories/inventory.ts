@@ -3703,7 +3703,7 @@ export const inventory: InventoryEntry[] = [
         "storyIds": [
           "memory-map-view--detail-stale"
         ],
-        "note": "The tile's stale callout: Unchecked for… with the type's horizon rule and the Review in To decide link to /memory/review?show=revisit."
+        "note": "The tile's stale callout: Unchecked for… with the review horizon rule and the Review in To decide link to /memory/review?show=revisit."
       },
       {
         "name": "detail-pending",

@@ -124,8 +124,8 @@ describe('vault review labels', () => {
     }
     expect(signalRowLabel('unverified', {
       ...base,
-      unverified: { age_days: 95, threshold_days: 90, last_verified: '2026-06-22', source: 'frontmatter' },
-    })).toBe('unchecked 3 months (limit 90 days)')
+      unverified: { age_days: 95, threshold_days: 30, last_verified: '2026-06-22', source: 'frontmatter' },
+    })).toBe('unchecked 3 months (limit 30 days)')
     expect(signalRowLabel('unverified', base)).toBe('unchecked too long')
     expect(signalRowLabel('superseded_language', base)).toBe('says it was superseded')
     expect(signalRowLabel('stale_horizon', base)).toBe('stale horizon')

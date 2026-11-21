@@ -10,7 +10,7 @@ On a full pass, do this first:
 2. Run `ciao memory-audit --json --with-vault --vault-root <this workspace's vault>`. It may queue candidates.
 3. Report each candidate and its evidence under **What needs you** and leave it undecided; it stays queued for the next attended pass.
 
-Every decision on a candidate (keep, trash, restore, complete, restore-completed, delete) is refused unattended with `unattended_forbidden`, so run none of them. There is no archive operation either, and moving or editing a note to imitate one skips the receipt. Orphan status is only a linking signal, never proof that a note is disposable. The queue's signals are `unverified` (facts unchecked past the type's horizon, the same notes `stale_notes` lists, so re-verify rather than retire), `unlinked`, `possible_duplicate`, `superseded_language` (evidence names the line) and `weak_provenance`.
+Every decision on a candidate (keep, trash, restore, complete, restore-completed, delete) is refused unattended with `unattended_forbidden`, so run none of them. There is no archive operation either, and moving or editing a note to imitate one skips the receipt. Orphan status is only a linking signal, never proof that a note is disposable. The queue's signals are `unverified` (facts unchecked past the 30-day review horizon, the same notes `stale_notes` lists, so re-verify rather than retire), `unlinked`, `possible_duplicate`, `superseded_language` (evidence names the line) and `weak_provenance`.
 
 In an attended follow-up, decide to keep any candidate you also intend to edit before making the edit. Its ID includes the note's content hash, so editing first makes the later decision fail; an edit does not stamp `updated:`. This pass itself leaves all candidates undecided.
 
@@ -62,7 +62,7 @@ Reading a note is not checking it, and citing it as evidence is not checking it 
 
 When pass 0 hands you a `stale_entry` item, one call judges that one fact instead of the whole note. The numbered steps for it are in `note-verify.md`. Three things to know before you start:
 
-- The item's `reason` names which kind of staleness it is, and the difference is work. `unverified for 400d against a 90d horizon` is a fact somebody checked and time passed. `nobody has recorded a [verified:] check on this entry` is a fact nobody has ever looked at. The second wants the same evidence and no more, and a `still_valid` on it is refused until the entry carries a stamp to move, so read the note before deciding it needs a source.
+- The item's `reason` names which kind of staleness it is, and the difference is work. `unverified for 400d against a 30d horizon` is a fact somebody checked and time passed. `nobody has recorded a [verified:] check on this entry` is a fact nobody has ever looked at. The second wants the same evidence and no more, and a `still_valid` on it is refused until the entry carries a stamp to move, so read the note before deciding it needs a source.
 - Run `ciao note related` on the entry's note too, and treat a disagreeing note exactly as above.
 - Record the key you settled with `ciao curation-progress --holder <lease.holder> --key <key>`, like any other item.
 

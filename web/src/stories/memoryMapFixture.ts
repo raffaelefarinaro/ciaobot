@@ -131,7 +131,7 @@ export function syntheticVault(): SyntheticGraph {
     nodes: [
       makeNode(mapHubId, 'Storybook hub', 'hub', d(mapHubId), { updated: '2026-10-20', age_days: 30 }),
       makeNode(mapNoteIds.person, 'Storybook person', 'person', d(mapNoteIds.person), { tags: ['self'], updated: '2026-11-10', age_days: 9 }),
-      makeNode(mapNoteIds.project, 'Storybook project', 'project', d(mapNoteIds.project), { updated: '2026-05-01', age_days: 202, stale: true, threshold_days: 90 }),
+      makeNode(mapNoteIds.project, 'Storybook project', 'project', d(mapNoteIds.project), { updated: '2026-05-01', age_days: 202, stale: true, threshold_days: 30 }),
       makeNode(mapNoteIds.reference, 'Storybook reference', 'reference', d(mapNoteIds.reference), { updated: '2026-09-15', age_days: 65 }),
       makeNode(mapNoteIds.meeting, 'Storybook meeting notes', 'log', d(mapNoteIds.meeting), { updated: '', age_days: null, mtime: 0 }),
       makeNode('storybook-vault/Storybook idea.md', 'Storybook idea', 'idea', 1),
@@ -162,7 +162,7 @@ export function denseSyntheticVault(): SyntheticGraph {
   return {
     nodes: ids.map((id, index) => makeNode(id, `Storybook note ${index + 1}`, ['note', 'project', 'resource', 'person'][index % 4], degree.get(id) ?? 0, {
       stale: index % 11 === 0,
-      threshold_days: index % 11 === 0 ? 90 : null,
+      threshold_days: index % 11 === 0 ? 30 : null,
       age_days: index % 11 === 0 ? 202 : 12,
     })),
     edges,
@@ -173,23 +173,23 @@ export function denseSyntheticVault(): SyntheticGraph {
 
 type SyntheticEntityRow = {
   id: string; label: string; kind: 'entity' | 'note'; folder: string; description: string
-  aliases: string[]; stale_after_days: number; enabled: boolean; builtin: boolean
+  aliases: string[]; enabled: boolean; builtin: boolean
   core: boolean; hidden: boolean; note_count: number
 }
 
 const entityTypesRows: SyntheticEntityRow[] = [
   { id: 'person', label: 'Storybook people', kind: 'entity', folder: 'Storybook people',
     description: 'Synthetic record-of-a-thing category for the workshop.',
-    aliases: ['storybook folk'], stale_after_days: 90, enabled: true, builtin: true, core: true, hidden: false, note_count: 3 },
+    aliases: ['storybook folk'], enabled: true, builtin: true, core: true, hidden: false, note_count: 3 },
   { id: 'project', label: 'Storybook projects', kind: 'entity', folder: 'Storybook projects',
     description: 'Synthetic project category for the workshop.',
-    aliases: [], stale_after_days: 180, enabled: true, builtin: true, core: false, hidden: false, note_count: 2 },
+    aliases: [], enabled: true, builtin: true, core: false, hidden: false, note_count: 2 },
   { id: 'storybook-custom', label: 'Storybook custom type', kind: 'note', folder: 'Storybook notes',
     description: 'A synthetic category the workshop can edit and save.',
-    aliases: ['storybook type'], stale_after_days: 0, enabled: true, builtin: false, core: false, hidden: false, note_count: 1 },
+    aliases: ['storybook type'], enabled: true, builtin: false, core: false, hidden: false, note_count: 1 },
   { id: 'storybook-agent-type', label: 'Storybook agent type', kind: 'note', folder: 'Storybook agent',
     description: 'A synthetic agent-written type the Categories page never lists.',
-    aliases: [], stale_after_days: 0, enabled: true, builtin: false, core: false, hidden: true, note_count: 0 },
+    aliases: [], enabled: true, builtin: false, core: false, hidden: true, note_count: 0 },
 ]
 
 function entityTypesBody(): unknown {

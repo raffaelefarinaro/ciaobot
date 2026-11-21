@@ -244,7 +244,7 @@ describe('VaultReviewPanel', () => {
             ...candidate().evidence,
             type: 'person',
             backlinks: ['a.md', 'b.md', 'c.md'],
-            unverified: { age_days: 95, threshold_days: 90, last_verified: '2026-06-22', source: 'frontmatter' },
+            unverified: { age_days: 95, threshold_days: 30, last_verified: '2026-06-22', source: 'frontmatter' },
           },
         }),
         candidate({
@@ -254,7 +254,7 @@ describe('VaultReviewPanel', () => {
           evidence: {
             ...candidate().evidence,
             type: 'person',
-            unverified: { age_days: 102, threshold_days: 90, last_verified: '2026-06-15', source: 'mtime' },
+            unverified: { age_days: 102, threshold_days: 30, last_verified: '2026-06-15', source: 'mtime' },
           },
         }),
       ],
@@ -264,7 +264,7 @@ describe('VaultReviewPanel', () => {
     await flushPromises()
 
     const [first, second] = wrapper.findAll('.vr-row')
-    expect(first.get('.vr-why').text()).toContain('unchecked 3 months (limit 90 days)')
+    expect(first.get('.vr-why').text()).toContain('unchecked 3 months (limit 30 days)')
     expect(first.get('.vr-why').text()).toContain('3 backlinks')
     const flag = first.get('.vr-flag')
     expect(flag.attributes('aria-expanded')).toBe('false')
@@ -275,7 +275,7 @@ describe('VaultReviewPanel', () => {
     expect(flag.attributes('aria-expanded')).toBe('true')
     expect((box.element as HTMLElement).style.display).toBe('')
     expect(box.text()).toContain('Last checked 2026-06-22, from the note\'s updated: field.')
-    expect(box.text()).toContain('Person notes are due every 90 days.')
+    expect(box.text()).toContain('Person notes are due every 30 days.')
 
     await second.get('.vr-flag').trigger('click')
     expect(second.get('.vr-evidence').text())
@@ -913,7 +913,7 @@ function checkedCandidate(overrides: Partial<VaultReviewCandidate> = {}): VaultR
     signals: ['unlinked'],
     evidence: {
       ...candidate().evidence,
-      unverified: { age_days: 640, threshold_days: 180, last_verified: '2024-11-02', source: 'frontmatter' },
+      unverified: { age_days: 640, threshold_days: 30, last_verified: '2024-11-02', source: 'frontmatter' },
       verification: check({ outcome: 'unverified', pending: false, proposal_id: '', citations: 0, reason: 'no source this pass reached could support it' }) as never,
     },
     ...overrides,

@@ -43,7 +43,7 @@ function finding(over: Record<string, unknown> = {}) {
     identity: 'a'.repeat(64),
     excerpt: '- Landlord is Mr Silva [verified: 2019-05-01]',
     reason: 'aged',
-    detail: 'unverified for 2698d against a 90d horizon',
+    detail: 'unverified for 2698d against a 30d horizon',
     age_days: 2698,
     last_verified: '2019-05-01',
     own_date: true,
@@ -54,7 +54,7 @@ function finding(over: Record<string, unknown> = {}) {
 function payload() {
   const base = (over: Record<string, unknown> = {}) => ({
     tags: [], aliases: [], description: '', workspace: 'personal', degree: 1,
-    mtime: 1, updated: '2026-09-29', age_days: 1, threshold_days: 90, ...over,
+    mtime: 1, updated: '2026-09-29', age_days: 1, threshold_days: 30, ...over,
   })
   return {
     nodes: [
@@ -159,7 +159,7 @@ describe('MemoryMapView entry coverage', () => {
     // The date and the number in one clause. A trailing em dash here read as a
     // sentence the layout had cut off, which is a different claim from the one
     // the tile is making.
-    expect(block.text()).toContain('Checked 2019-05-01 — unverified for 2698d against a 90d horizon')
+    expect(block.text()).toContain('Checked 2019-05-01 — unverified for 2698d against a 30d horizon')
     // The whole-note flag is untouched: `stale` is the file verdict and the
     // nightly worklist is where an overdue bullet becomes a plan, so the map
     // reports beside it rather than raising it.

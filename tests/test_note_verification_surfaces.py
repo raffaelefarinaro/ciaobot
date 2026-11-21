@@ -70,7 +70,7 @@ WORKSPACE = "personal"
 TODAY = date.today()
 
 # Four notes, one per outcome the pipeline distinguishes, plus a fifth that is
-# only ever an `unverified`. Each is stale by two years against a 90-day person
+# only ever an `unverified`. Each is stale by two years against the 30-day horizon
 # horizon or a 30-day project one, so the selection pass has something to find.
 STILL_TRUE = "People/Sofia.md"
 CITED_UPDATE = "People/Rae.md"
@@ -430,14 +430,11 @@ def test_the_pass_selects_the_stale_notes_and_states_their_revisions(
         for item in pipeline["worklist"].items
         if item.pass_id == curation_run.PASS_STALE_NOTE
     ]
-    # One item per note, up to the cap, and the overflow is REPORTED rather than
-    # silently dropped — a nightly plan that quietly covered four of six stale
-    # notes would leave a backlog nobody knew was waiting.
-    assert len(stale) == curation_run.STALE_NOTE_MAX_ITEMS < len(BODIES)
-    cap_note = next(
-        note for note in pipeline["worklist"].notes if "more than" in note
-    )
-    assert str(len(BODIES)) in cap_note and "oldest" in cap_note
+    # One item per note. Every stale note here fits under the cap, so the plan
+    # covers all of them and reports no overflow; the overflow report itself is
+    # pinned in test_curation_run.
+    assert len(stale) == len(BODIES) <= curation_run.STALE_NOTE_MAX_ITEMS
+    assert not any("more than" in note for note in pipeline["worklist"].notes)
     # Each reason states the revision, which is the whole of what selection is
     # for: the operation refuses a verdict about text nobody read, and a caller
     # that cannot say what it read gets nothing.

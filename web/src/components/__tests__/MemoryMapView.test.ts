@@ -68,7 +68,7 @@ function graphPayload() {
 function checkedPayload() {
   const base = (over: Record<string, unknown> = {}) => ({
     tags: [], aliases: [], description: '', workspace: 'personal', degree: 1,
-    mtime: 1, updated: '2025-01-01', age_days: 640, threshold_days: 180, ...over,
+    mtime: 1, updated: '2025-01-01', age_days: 640, threshold_days: 30, ...over,
   })
   return {
     nodes: [
@@ -570,7 +570,7 @@ describe('MemoryMapView sections', () => {
           types: [{
             id: 'customer', label: 'Customer', kind: 'entity', folder: 'Customers',
             description: 'Someone we do business with.', aliases: ['client'],
-            stale_after_days: 0, enabled: true, builtin: false, note_count: 2,
+            enabled: true, builtin: false, note_count: 2,
           }],
         })
       }

@@ -146,34 +146,40 @@ HYGIENE_INDEX_KEY = "hygiene:vault-index"
 HYGIENE_AUDIT_KEY = "hygiene:os-audit"
 REQUIRED_HYGIENE_KEYS: frozenset[str] = frozenset({HYGIENE_INDEX_KEY, HYGIENE_AUDIT_KEY})
 
-DEFAULT_MAX_ITEMS = 25
+# Raised from 25 with the note cap (below): the two stale passes can now take 25
+# between them, so the budget grows by the 15 items the note cap added, and the
+# passes behind them keep the 15-item headroom they had when the cap was 5.
+DEFAULT_MAX_ITEMS = 40
 DEFAULT_MAX_SECONDS = 1800.0
 
 # How many stale notes one run may plan, however many are due.
 #
 # The pass sits ahead of the weekly hygiene keys in :data:`PASS_ORDER`, and the
 # budget is a whole-run allowance, so an uncapped backlog spends it: a first run
-# against a vault that has never been verified plans 25 notes, the two required
+# against a vault that has never been verified plans every due note, the two required
 # hygiene checks are never reached, `last_full_pass` cannot advance, and the
 # backlog is still there tomorrow — a vault that is one large migration away from
 # being cared for stays uncared for. A cap bounds what one night can be asked
 # for, and because a note whose verdict lands re-stamps its own `updated:` the
-# backlog drains rather than recurring: tonight's five are gone tomorrow.
+# backlog drains rather than recurring: tonight's twenty are gone tomorrow.
 #
-# Small on purpose. A verification is a model read of the note plus its sources
-# and a journaled write, so five is a night's work for a human-sized pass, and
-# the constant exists to keep that number honest rather than to fill the budget.
-STALE_NOTE_MAX_ITEMS = 5
+# Twenty, up from five, now that every note is due on the same 30-day horizon: a
+# vault that has never been verified has far more due notes than the old per-type
+# tables produced, and at five a night it would take months to drain. Each one is a
+# model read of the note plus its sources and a journaled write, so the number is
+# still a night's work for a human-sized pass, and the budget above is sized so the
+# weekly keys still get their slots behind it.
+STALE_NOTE_MAX_ITEMS = 20
 
 # How many stale entries one run may plan, however many are due.
 #
-# The same argument as :data:`STALE_NOTE_MAX_ITEMS`, and the same number, because
-# the work is the same shape: a verification is a model read of a fact plus its
-# sources and a journaled write, and five is a night's work. It is also a *separate*
-# cap from the note pass's rather than a shared allowance, because the two select
-# different units and a shared one would let a vault with 500 stale bullets spend
-# the whole entry budget on one note's list and never look at the other 499 files
-# it also has.
+# The same argument as :data:`STALE_NOTE_MAX_ITEMS`, at a smaller number, because
+# a fact is a finer unit than a note and one note can hold many: a verification is
+# a model read of a fact plus its sources and a journaled write, and five is a
+# night's work. It is also a *separate* cap from the note pass's rather than a
+# shared allowance, because the two select different units and a shared one would
+# let a vault with 500 stale bullets spend the whole entry budget on one note's
+# list and never look at the other 499 files it also has.
 #
 # A whole-note verdict re-stamps the note's `updated:`, so the entry pass drains
 # rather than recurs for entries it settles: tonight's five are stamped, and the
@@ -642,7 +648,7 @@ def _stale_findings(
     from ciao.memory_audit import (
         find_stale_notes,
         is_stale_exempt_type,
-        note_threshold_days,
+        NOTE_REVIEW_DAYS,
         note_verification,
     )
     from ciao.vault_index import VAULT_RENDER_PREFIX, scan_vault
@@ -703,7 +709,7 @@ def _stale_findings(
                     stale=False,
                     exempt=is_stale_exempt_type(note_type, registry=registry),
                     age_days=None,
-                    threshold_days=note_threshold_days(note_type, registry=registry),
+                    threshold_days=NOTE_REVIEW_DAYS,
                     last_verified=None,
                     note_type=note_type,
                     updated=entry.updated or "",
@@ -764,8 +770,8 @@ def _stale_note_items(
     frontmatter-then-mtime date rule, and three other surfaces (memory-audit, the
     Memory Map, the review queue's ``unverified`` signal) call it too. A fourth
     copy here would be a fourth thing to keep in agreement, so this pass consumes
-    its result — including with ``registry``, so a custom category's own
-    ``stale_after_days`` reaches the verdict exactly as it reaches the map's flag.
+    its result. ``registry`` is passed through to it, so the vault's category
+    aliases resolve the same way they do for the audit.
 
     What this adds is the two filters the queue adds and the audit does not, and
     the worklist's own bookkeeping:
@@ -798,10 +804,10 @@ def _stale_note_items(
     The cap is applied *after* the cooldown filter, not before it. Capping first
     would be the same starvation with a smaller constant: the cooled-down note
     that is still the oldest would consume a slot every night and nothing behind
-    it would ever be planned. Filtering first means the five items are five
-    notes with a question actually waiting for them. The two ways a note can be
+    it would ever be planned. Filtering first means every planned item is a
+    note with a question actually waiting for it. The two ways a note can be
     left out — a check that already settles it, and the cap — are reported back
-    as one worklist note rather than passing for a queue of five.
+    as one worklist note rather than passing for a complete queue.
 
     The reason carries the note's current
     :func:`ciao.memory_receipts.content_revision` — the exact value the managed
@@ -949,7 +955,7 @@ def _due_entries(
     scanned: list[_ScannedNote],
     today: date,
 ) -> list[_StaleEntry]:
-    """Every list item whose own date is past its type's horizon.
+    """Every list item whose own date is past the review horizon.
 
     The audit selected *notes*; this is the same verdict read one bullet in, and
     the reason the two are not the same question is the whole reason this pass
@@ -962,7 +968,7 @@ def _due_entries(
     **The selection itself is the audit's, not a second one.**
     :func:`ciao.memory_audit.note_entry_coverage` is the detector, and this
     function is the worklist's client of it rather than a reimplementation: the
-    entity-type horizon (a custom category's ``stale_after_days`` included), the
+    one review horizon, the
     type aliases, the exempt event types, the frontmatter-then-mtime date rule,
     the per-entry ``[verified:]`` stamp, the event-shaped exemptions, the
     unsupported entries and the coverage accounting all come from there. An entry

@@ -12,8 +12,6 @@
 #   description    one line saying when to use this category
 #   aliases        near-duplicate `type:` values a real vault used, mapped onto
 #                   this id by the indexer
-#   stale_after_days  days after which the note's facts count as unverified
-#                   (0 = the caller's default, not "never")
 #   enabled        false keeps the entry out of every derived view, so a user
 #                   can turn a builtin off without deleting it
 #   core           set by the loader, never read from a vault file: the app
@@ -29,7 +27,6 @@
   folder: People
   description: A human the user knows or works with. Use for people updates, roles, relationships.
   aliases: []
-  stale_after_days: 90
   enabled: true
   builtin: true
 - id: project
@@ -38,7 +35,6 @@
   folder: Projects
   description: Something with an outcome and a finish line. Use for status, decisions, next steps.
   aliases: []
-  stale_after_days: 30
   enabled: true
   core: true
   builtin: true
@@ -48,7 +44,6 @@
   folder: Places
   description: A physical place, city, region or venue. Use for addresses, travel, local context.
   aliases: []
-  stale_after_days: 0
   enabled: true
   builtin: true
 - id: idea
@@ -57,7 +52,6 @@
   folder: Ideas
   description: A thought worth keeping before it is a plan. Use for options and rough concepts.
   aliases: []
-  stale_after_days: 0
   enabled: true
   builtin: true
 - id: resource
@@ -66,7 +60,6 @@
   folder: Resources
   description: Something to read, watch or use. Use for links, tools and pointers to other material.
   aliases: []
-  stale_after_days: 0
   enabled: true
   builtin: true
 - id: journal
@@ -75,7 +68,6 @@
   folder: journal
   description: A dated record of what happened. Use for running notes, event logs and project history.
   aliases: [hackathon-log, log, project-log]
-  stale_after_days: 0
   enabled: true
   builtin: true
 - id: note
@@ -84,7 +76,6 @@
   folder: ""
   description: Any other note, such as a document, reference or draft. Use before inventing a new category.
   aliases: [discussion-prep]
-  stale_after_days: 0
   enabled: true
   builtin: true
 - id: workspace
@@ -93,7 +84,6 @@
   folder: Workspace
   description: The agent's own working surface. Use for the queue, proposals and curation paperwork.
   aliases: []
-  stale_after_days: 0
   enabled: true
   core: true
   hidden: true
@@ -104,7 +94,6 @@
   folder: ""
   description: A candidate new skill, proposed and not yet accepted.
   aliases: []
-  stale_after_days: 0
   enabled: true
   core: true
   hidden: true

@@ -417,7 +417,7 @@ def test_stale_notes_flags_old_mtime_person_note() -> None:
     finding = report["stale_notes"][0]
     assert finding["path"] == "memory-vault/People/Mo.md"
     assert finding["age_days"] == 200
-    assert finding["threshold_days"] == 90
+    assert finding["threshold_days"] == 30
     assert finding["source"] == "mtime"
     assert report["notes_checked"] == 1
 
@@ -461,8 +461,12 @@ def test_stale_notes_exempts_event_and_queue_types() -> None:
     assert report["notes_exempt"] == 3
 
 
-def test_stale_notes_thresholds_vary_by_type() -> None:
-    """An active project rots in weeks; a plain note has months."""
+def test_stale_notes_use_one_horizon_for_every_type() -> None:
+    """A project and a plain note that are both 40 days unverified are both due.
+
+    The per-type table (a project rots in weeks, a person in months, anything else
+    in six) is gone: the type a note carries no longer changes when it is due.
+    """
     today = datetime.date(2026, 8, 23)
     mtime = _days_ago(40, today=today)
     entries = [
@@ -473,8 +477,8 @@ def test_stale_notes_thresholds_vary_by_type() -> None:
     report = find_stale_notes(entries, mtimes={e.path_key: mtime for e in entries}, today=today)
 
     flagged = {f["type"]: f for f in report["stale_notes"]}
-    assert set(flagged) == {"project"}
-    assert flagged["project"]["threshold_days"] == 30
+    assert set(flagged) == {"project", "idea"}
+    assert {f["threshold_days"] for f in flagged.values()} == {30}
     assert report["notes_checked"] == 2
 
 
@@ -740,11 +744,11 @@ def test_note_verification_prefers_frontmatter_and_reports_horizon() -> None:
     assert result is not None
     assert result.source == "frontmatter"
     assert result.age_days == 116
-    assert result.threshold_days == 90
+    assert result.threshold_days == 30
     assert result.stale is True
     assert result.as_evidence() == {
         "age_days": 116,
-        "threshold_days": 90,
+        "threshold_days": 30,
         "last_verified": "2026-06-01",
         "source": "frontmatter",
     }
@@ -779,7 +783,7 @@ def test_note_verification_exempts_event_types_including_aliases_and_case() -> N
 
     # A capitalised type ages on its canonical horizon, not the default one.
     person = note_verification("Person", "2026-06-01", None, today=today)
-    assert person is not None and person.threshold_days == 90 and person.stale
+    assert person is not None and person.threshold_days == 30 and person.stale
 
 
 def test_find_stale_notes_uses_the_shared_predicate_for_aliased_exempt_types() -> None:
@@ -793,7 +797,7 @@ def test_find_stale_notes_uses_the_shared_predicate_for_aliased_exempt_types() -
     )
 
     assert [f["path"] for f in report["stale_notes"]] == ["memory-vault/People/Mo.md"]
-    assert report["stale_notes"][0]["threshold_days"] == 90
+    assert report["stale_notes"][0]["threshold_days"] == 30
     assert report["notes_exempt"] == 1
 
 
@@ -857,68 +861,91 @@ def test_the_curation_stale_pass_agrees_with_the_audit_on_aliased_exempt_types(
     assert [item.keys[0] for item in stale] == [cr.item_key(cr.PASS_STALE_NOTE, "People/Mo.md")]
 
 
-def test_a_vault_category_sets_its_own_staleness(tmp_path: Path) -> None:
-    """A category's `stale_after_days` is the horizon its notes age against,
-    reached through that category's aliases and dropped when it is disabled.
+def test_every_note_kind_is_reviewed_after_30_days() -> None:
+    """One horizon for every note kind: 31 days is due, 29 days is not.
 
-    The alias-typed note is the load-bearing half: `client` claims no id of its
-    own, so without the registry's alias table it would age on its own spelling,
-    take the default horizon and sit unflagged at 20 days. Both notes sharing
-    the 10-day horizon is the assertion that it resolved.
+    The per-category table (project 30, person 90, everything else 180) and the
+    category `stale_after_days` override are gone, so the type a note carries
+    changes nothing about when it is due.
+    """
+    from ciao.memory_audit import NOTE_REVIEW_DAYS, note_verification
+
+    assert NOTE_REVIEW_DAYS == 30
+    today = datetime.date(2026, 9, 25)
+    for note_type in ("project", "person", "customer", "unlisted-kind"):
+        for age, due in ((31, True), (29, False)):
+            updated = (today - datetime.timedelta(days=age)).isoformat()
+            verdict = note_verification(note_type, updated, None, today=today)
+            assert verdict is not None, note_type
+            assert verdict.threshold_days == 30, note_type
+            assert verdict.stale is due, (note_type, age)
+
+
+def test_a_note_verified_today_is_not_due_again_for_thirty_days() -> None:
+    """The horizon and the check cooldown are the same 30 days, so a note the
+    pass has just verified (its `updated:` is today) is quiet for a full month.
+    """
+    from ciao.memory_audit import note_verification
+
+    today = datetime.date(2026, 9, 25)
+    for offset, stale in ((0, False), (29, False), (30, True)):
+        later = today + datetime.timedelta(days=offset)
+        verdict = note_verification("person", today.isoformat(), None, today=later)
+        assert verdict is not None
+        assert verdict.stale is stale, offset
+
+
+def test_exempt_and_undated_notes_are_unchanged_by_the_uniform_horizon() -> None:
+    from ciao.memory_audit import note_verification
+
+    today = datetime.date(2026, 9, 25)
+    for note_type in ("log", "journal", "workspace"):
+        verdict = note_verification(note_type, "2020-01-01", None, today=today)
+        assert verdict is not None
+        assert verdict.exempt is True and verdict.stale is False
+    assert note_verification("project", "", None, today=today) is None
+
+
+def test_a_registry_that_still_states_stale_after_days_loads_and_ignores_it(
+    tmp_path: Path,
+) -> None:
+    """An owner file written before the key was removed keeps working.
+
+    `customer` states a 1000-day horizon and `person` a 5-day one. Both keys are
+    ignored, so at 31 days both notes are due at the uniform 30, and the file
+    still loads: the aliased category resolves and no fallback to stock happens.
     """
     from ciao import entity_types
-    from ciao.memory_audit import (
-        STALE_NOTE_DEFAULT_DAYS,
-        is_stale_exempt_type,
-        note_threshold_days,
-    )
+    from ciao.memory_audit import find_stale_notes
 
-    today = datetime.date(2026, 8, 23)
+    today = datetime.date(2026, 9, 25)
     vault = tmp_path / "memory-vault"
     (vault / "Clients").mkdir(parents=True)
-    categories = vault / "entity-types.yaml"
-    customer = (
+    (vault / "entity-types.yaml").write_text(
         "- id: customer\n"
         "  label: Customer\n"
         "  kind: entity\n"
         "  folder: Clients\n"
         "  aliases: [client]\n"
-        "  stale_after_days: 10\n"
+        "  stale_after_days: 1000\n"
+        "- id: person\n"
+        "  label: Person\n"
+        "  stale_after_days: 5\n",
+        encoding="utf-8",
     )
+    entity_types.clear_entity_types_cache()
     entries = [
         _entry("memory-vault/Clients/Acme.md", "customer"),
         _entry("memory-vault/Clients/Beta.md", "client"),
-        _entry("memory-vault/Journal/day.md", "journal"),
+        _entry("memory-vault/People/Mo.md", "person"),
     ]
-    mtimes = {e.path_key: _days_ago(20, today=today) for e in entries}
+    mtimes = {e.path_key: _days_ago(31, today=today) for e in entries}
 
-    categories.write_text(customer, encoding="utf-8")
-    entity_types.clear_entity_types_cache()
     report = find_stale_notes(entries, vault_root=vault, mtimes=mtimes, today=today)
 
-    assert {f["path"] for f in report["stale_notes"]} == {
-        "memory-vault/Clients/Acme.md",
-        "memory-vault/Clients/Beta.md",
-    }
-    assert {f["threshold_days"] for f in report["stale_notes"]} == {10}
-    assert report["notes_checked"] == 2
-    assert report["notes_exempt"] == 1, "the exempt set is this module's, not the file's"
-
-    # A caller holding the registry gets the same horizon with no vault in hand.
-    registry = entity_types.load_entity_types(vault)
-    assert note_threshold_days("customer", registry=registry) == 10
-    assert not is_stale_exempt_type("client", registry=registry)
-
-    # Disabled: no opinion, so the default — and 20 days is nowhere near it.
-    categories.write_text(customer + "  enabled: false\n", encoding="utf-8")
-    entity_types.clear_entity_types_cache()
-    disabled = find_stale_notes(entries, vault_root=vault, mtimes=mtimes, today=today)
-
-    assert disabled["stale_notes"] == []
-    assert disabled["notes_checked"] == 2
-    assert note_threshold_days(
-        "customer", registry=entity_types.load_entity_types(vault)
-    ) == STALE_NOTE_DEFAULT_DAYS
+    assert {f["path"] for f in report["stale_notes"]} == {e.path_key for e in entries}
+    assert {f["threshold_days"] for f in report["stale_notes"]} == {30}
+    assert entity_types.load_entity_types(vault).get("customer") is not None
 
 
 # --- the entry excerpt and its context are prose, not source ---------------

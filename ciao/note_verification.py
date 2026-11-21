@@ -2,7 +2,7 @@
 state that stops the question being asked twice.
 
 :mod:`ciao.memory_audit.find_stale_notes` already *selects* the notes whose facts
-have gone unverified past their type's horizon, and :mod:`ciao.note_receipts`
+have gone unverified past the review horizon, and :mod:`ciao.note_receipts`
 already writes one note atomically with a durable, undoable receipt. What sits
 between them is the judgement, and this module is it: a typed request carrying
 the agent's verdict for **one** note, checked against the autonomy rule, applied

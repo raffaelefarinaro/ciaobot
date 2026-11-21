@@ -11,7 +11,6 @@
   folder: products
   description: A product, service or line the user ships or sells. Use for versions, pricing, positioning.
   aliases: []
-  stale_after_days: 0
   enabled: true
 - id: feature
   label: Feature
@@ -19,7 +18,6 @@
   folder: features
   description: A capability of one product. Use for scope, state and spec-level detail.
   aliases: [feature-brief]
-  stale_after_days: 0
   enabled: true
 - id: automation
   label: Automation
@@ -27,7 +25,6 @@
   folder: automations
   description: A recurring or triggered routine. Use for what it does, when it fires, how it failed.
   aliases: []
-  stale_after_days: 0
   enabled: true
 - id: document
   label: Document
@@ -35,7 +32,6 @@
   folder: Documents
   description: A durable document of the user's own. Use for plans, templates and written material.
   aliases: [doc, plan, planning-doc, template]
-  stale_after_days: 0
   enabled: true
 - id: reference
   label: Reference
@@ -43,7 +39,6 @@
   folder: references
   description: Material quoted from elsewhere. Use for external analysis and citations.
   aliases: [analysis]
-  stale_after_days: 0
   enabled: true
 - id: content
   label: Content
@@ -51,5 +46,4 @@
   folder: content
   description: Something to publish. Use for drafts, posts and published material.
   aliases: []
-  stale_after_days: 0
   enabled: true

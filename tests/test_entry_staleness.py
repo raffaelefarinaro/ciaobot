@@ -117,11 +117,11 @@ def test_only_old_and_undated_entries_are_selected() -> None:
 def test_the_boundary_date_counts_and_one_day_short_does_not() -> None:
     """`>=` horizon, and the off-by-one that silently doubles a queue.
 
-    An entry aged exactly the threshold is due: a note is due every 90 days, and
-    on the 90th it is due. A detector that used `>` would keep a fact alive for
+    An entry aged exactly the threshold is due: a note is due every 30 days, and
+    on the 30th it is due. A detector that used `>` would keep a fact alive for
     one extra night for no reason a reader could see.
     """
-    horizon = 90
+    horizon = 30
     exact = f"- Landlord is Mr Silva [verified: {TODAY - datetime.timedelta(days=horizon)}]"
     short = f"- Landlord is Mr Silva [verified: {TODAY - datetime.timedelta(days=horizon - 1)}]"
     assert _cover(exact).stale == 1
@@ -424,7 +424,7 @@ def test_an_unstamped_bullet_becomes_work_once_the_note_ages() -> None:
 
 
 def test_a_custom_category_horizon_reaches_the_entry_level(tmp_path: Path) -> None:
-    """A category's own `stale_after_days`, and the alias resolution with it.
+    """The alias resolution reaches the entry level, and so does the one horizon.
 
     The detector resolves the type through the same registry `note_verification`
     does, so `type: Person` and `type: hackathon-log` behave here exactly as they
@@ -434,7 +434,7 @@ def test_a_custom_category_horizon_reaches_the_entry_level(tmp_path: Path) -> No
 
     registry = EntityTypeRegistry(
         [
-            EntityType(id="person", label="Person", folder="People", stale_after_days=90),
+            EntityType(id="person", label="Person", folder="People"),
             EntityType(id="hackathon", label="Hackathon", folder="Hackathons"),
             EntityType(
                 id="hackathon-log",
@@ -442,18 +442,16 @@ def test_a_custom_category_horizon_reaches_the_entry_level(tmp_path: Path) -> No
                 folder="Hackathons",
                 aliases=["hackathon"],
             ),
-            EntityType(
-                id="project", label="Project", folder="Projects", stale_after_days=3650
-            ),
+            EntityType(id="project", label="Project", folder="Projects"),
             EntityType(id="journal", label="Journal", folder="Logs"),
         ]
     )
     _coverage, selected, _doc = _selected(
         "- Speaks Italian [verified: 2026-09-28]", note_type="Person", today=TODAY
     )
-    # The capitalised spelling resolves to `person`, so the horizon is 90 days and
-    # not the 180-day default a spelling nobody claims would age on.
-    assert _coverage.threshold_days == 90
+    # The capitalised spelling resolves to `person`, and every note has the same
+    # 30-day horizon, so the alias is not what decides it.
+    assert _coverage.threshold_days == 30
     assert selected == ()
     aged = ma.note_entry_coverage(
         _note("- Speaks Italian [verified: 2020-01-01]", note_type="Person"),
@@ -481,7 +479,8 @@ def test_a_custom_category_horizon_reaches_the_entry_level(tmp_path: Path) -> No
         )[1]
         == ()
     )
-    # A project's own 3650-day horizon applies to its entries.
+    # A project's entries age on the same 30-day horizon as any other note's, so a
+    # 2020 stamp on one is due.
     project = ma.note_entry_coverage(
         _note("- Ships in March [verified: 2020-01-01]", note_type="project"),
         note_type="project",
@@ -492,8 +491,8 @@ def test_a_custom_category_horizon_reaches_the_entry_level(tmp_path: Path) -> No
         today=TODAY,
         registry=registry,
     )
-    assert project[0].threshold_days == 3650
-    assert project[1] == ()
+    assert project[0].threshold_days == 30
+    assert [v.reason_code for v in project[1]] == [ma.STALE_ENTRY_AGED]
 
 
 # --- the batch form --------------------------------------------------------
@@ -641,7 +640,7 @@ def test_a_curation_plan_offers_exactly_the_detector_s_findings(tmp_path: Path) 
     )
     (tmp_path / "Workspace").mkdir(exist_ok=True)
     registry = EntityTypeRegistry(
-        [EntityType(id="person", label="Person", folder="People", stale_after_days=90)]
+        [EntityType(id="person", label="Person", folder="People")]
     )
     scanned, note = cr._stale_findings(
         vault_root=tmp_path,
