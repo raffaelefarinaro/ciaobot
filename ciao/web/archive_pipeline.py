@@ -15,11 +15,15 @@ import asyncio
 import logging
 import shutil
 from collections.abc import Callable, Coroutine
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Protocol
 
+from ciao.archive_capture import append_capture, build_record
 from ciao.config import CiaoConfig
 from ciao.schedules import is_system_schedule_id
+from ciao.task_attempts import TaskAttempt, TaskAttemptError, TaskAttemptStore
+from ciao.task_decisions import read_decisions_strict
 from ciao.transcripts import transcript_has_human_turn
 from ciao.web.chat_broker import EventsHub
 
@@ -40,6 +44,8 @@ class ArchivePipelineHost(Protocol):
     def events(self) -> EventsHub: ...
 
     def _workspace_vault_root(self, workspace: str) -> Path: ...
+
+    def attempt_store(self, workspace: str) -> TaskAttemptStore: ...
 
     def _spawn_detached(
         self, coro: Coroutine[object, object, object], name: str
@@ -135,6 +141,51 @@ class ArchivePipeline:
             return ""
         return project.vault_doc_path
 
+    def _capture_archive(
+        self,
+        chat_id: str,
+        outcome: ArchiveOutcome,
+        workspace: str,
+        vault_root: Path,
+        focus: dict[str, str] | None,
+    ) -> None:
+        """Write one capture record for an archive that enqueues a pass (#3239-c2).
+
+        Best-effort, like the enqueue after it: a capture that cannot be built or
+        written is logged and the archive carries on.
+        """
+        try:
+            from ciao.web.chat_service import _COMPLETION_ID_RE
+
+            completion_id = str((focus or {}).get("completion_id") or "")
+            kind = "archive"
+            if (focus or {}).get("focus") == "approved_task" and _COMPLETION_ID_RE.fullmatch(
+                completion_id
+            ):
+                kind = "completion"
+            else:
+                completion_id = ""
+            attempts: tuple[TaskAttempt, ...] | None
+            try:
+                attempts = self._host.attempt_store(workspace).attempts_for_chat(chat_id)
+            except TaskAttemptError:
+                attempts = None
+            append_capture(
+                vault_root,
+                build_record(
+                    workspace=workspace,
+                    chat_id=chat_id,
+                    kind=kind,
+                    completion_id=completion_id,
+                    turn_count=outcome.turn_count,
+                    attempts=attempts,
+                    decisions=read_decisions_strict(vault_root),
+                    now=datetime.now(UTC),
+                ),
+            )
+        except Exception:  # noqa: BLE001 — the archive already succeeded
+            logger.exception("Failed to write the archive capture for %s", chat_id)
+
     def run_archive_postprocess(
         self,
         chat_id: str,
@@ -191,6 +242,7 @@ class ArchivePipeline:
                         chat_id,
                     )
                 else:
+                    self._capture_archive(chat_id, outcome, workspace, vault_root, focus)
                     try:
                         self._host.enqueue_memory_pass(
                             chat,

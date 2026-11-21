@@ -27,6 +27,7 @@ from typing import TYPE_CHECKING, Any, Optional, cast
 
 if TYPE_CHECKING:
     from ciao.mcp_server import CiaoMcpService
+    from ciao.task_attempts import TaskAttemptStore
 
 RESTART_DRAIN_MESSAGE = (
     "Ciaobot is waiting for active chats to finish before restarting"
@@ -5337,6 +5338,9 @@ class ProjectChatManager:
         focus: dict[str, str] | None = None,
     ) -> str | None:
         return self._memory_pass.enqueue(source, project, archive_path, doc_path, focus)
+
+    def attempt_store(self, workspace: str) -> TaskAttemptStore:
+        return self._memory_pass.attempt_store(workspace)
 
     def enqueue_task_completion(
         self,
