@@ -721,6 +721,12 @@ export interface Schedule {
   scope?: string
   editable?: boolean
   removable?: boolean
+  // A chat-owned loop (see lib/loops.ts). Set only on loops: the chat that
+  // owns it, its end (ISO UTC), its turn cap and the turns it has started.
+  owner_chat_id?: string
+  expires_at?: string
+  max_runs?: number
+  run_count?: number
 }
 
 // ── Webhook triggers ─────────────────────────────────────────────────────

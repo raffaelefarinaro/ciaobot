@@ -1,13 +1,15 @@
 /**
  * The sidebar's automation list, shared by the sidebar rows and the open
  * automation's title rail so both walk the same order: One-offs (soonest
- * first), then Routines, then System.
+ * first), then chat Loops, then Routines, then System.
  */
 import type { Schedule } from './types'
 import { oneOffSortKey, oneOffWhen, scheduleClock } from './scheduleClock'
+import { isOwnedLoop } from './loops'
 
 export interface ScheduleGroups {
   oneOffs: Schedule[]
+  loops: Schedule[]
   routines: Schedule[]
   system: Schedule[]
 }
@@ -18,15 +20,16 @@ export function groupSidebarSchedules(schedules: readonly Schedule[]): ScheduleG
       .filter(s => s.frequency === 'once')
       .slice()
       .sort((a, b) => oneOffSortKey(a).localeCompare(oneOffSortKey(b))),
-    routines: schedules.filter(s => s.frequency !== 'once' && s.scope !== 'system'),
-    system: schedules.filter(s => s.frequency !== 'once' && s.scope === 'system'),
+    loops: schedules.filter(s => s.frequency !== 'once' && isOwnedLoop(s)),
+    routines: schedules.filter(s => s.frequency !== 'once' && !isOwnedLoop(s) && s.scope !== 'system'),
+    system: schedules.filter(s => s.frequency !== 'once' && !isOwnedLoop(s) && s.scope === 'system'),
   }
 }
 
 /** Sidebar order, top to bottom. */
 export function sidebarScheduleOrder(schedules: readonly Schedule[]): Schedule[] {
   const g = groupSidebarSchedules(schedules)
-  return [...g.oneOffs, ...g.routines, ...g.system]
+  return [...g.oneOffs, ...g.loops, ...g.routines, ...g.system]
 }
 
 /** A schedule's display name: its title, or the first line of its prompt. */

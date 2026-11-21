@@ -258,6 +258,32 @@
           </div>
         </template>
 
+        <!-- A chat's loops: model-made, bounded, never paused. Shown only when
+             there is one; the row's title carries the full summary. -->
+        <template v-if="scheduleGroups.loops.length">
+          <div class="schedule-group schedule-group--loops">
+            <h2 class="schedule-group-header" title="Loops run inside one chat and end on their own">Loops</h2>
+            <div class="schedule-group-items">
+              <SidebarRow
+                v-for="s in scheduleGroups.loops"
+                :key="s.schedule_id"
+                :to="`/schedules/${s.schedule_id}`"
+                class="schedule-item"
+                :text="scheduleTitle(s)"
+                :meta="cadenceBadge(s)"
+                :title="loopSummary(s, Date.now())"
+              >
+                <span
+                  v-if="s.enabled && s.web_chat_id && store.isChatStreaming(s.web_chat_id)"
+                  class="schedule-mark"
+                  title="This automation is working"
+                ><ActivityGlyph kind="working" /></span>
+                <span v-if="s.missed" class="schedule-mark missed-dot" title="Expected to run but didn't"><ActivityGlyph kind="alert" /></span>
+              </SidebarRow>
+            </div>
+          </div>
+        </template>
+
         <!-- Routines always shows, so its label can carry the create action
              (it used to be a footer button); an empty workspace says so. -->
         <div class="schedule-group">
@@ -1024,6 +1050,7 @@ import { isApplePlatform } from '../lib/platform'
 import { scheduleInWorkspace, scheduleNeedsAttention } from '../lib/automationWorkspace'
 import { useWorkspaceSchedules } from '../composables/useWorkspaceSchedules'
 import { cadenceBadge, groupSidebarSchedules, scheduleTitle } from '../lib/scheduleList'
+import { loopSummary } from '../lib/loops'
 import SidebarRow from './SidebarRow.vue'
 import SidebarListSkeleton from './SidebarListSkeleton.vue'
 import { listAnchor, roamFocus } from '../lib/listRoaming'

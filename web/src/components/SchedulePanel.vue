@@ -49,6 +49,16 @@
                the header. On narrow panes the toggle joins the menu too; on a
                phone Run now does as well, so the header is one line like a
                chat's. -->
+          <!-- A chat loop is never paused and never run by hand: its one
+               action is Stop, which ends it (the loop's row is deleted). -->
+          <button
+            v-if="isLoop"
+            type="button"
+            class="btn-small btn-danger"
+            :disabled="stoppingLoop"
+            @click="onStopLoop"
+          >Stop loop</button>
+          <template v-else>
           <button
             class="btn-small btn-run header-run fold-wide"
             :class="{ 'btn-running': showRunning }"
@@ -81,6 +91,7 @@
             </DropdownMenuItem>
           </ItemHeaderMenu>
           </span>
+          </template>
         </template>
 
       </template>
@@ -164,6 +175,7 @@
         @animationend="onArrivalEnd"
       >
       <div class="page-main" data-rail-column>
+      <p v-if="stopError" class="context-help" role="alert">{{ stopError }}</p>
       <p v-if="!schedule.enabled" class="disabled-banner">
         {{ isIntervalSchedule(schedule) ? 'Stopped' : 'Paused' }} — it won't run
         on its own. "Run now" still works.
@@ -184,6 +196,18 @@
           </div>
 
           <dl v-if="editingCard !== 'schedule'" class="prop-rows">
+            <template v-if="isLoop">
+              <div class="prop-row">
+                <dt>Chat</dt>
+                <dd><router-link class="text-link" :to="`/chat/${schedule.owner_chat_id}`">{{ ownerChatTitle(schedule) }}</router-link></dd>
+              </div>
+              <div class="prop-row">
+                <dt>Runs left</dt><dd>{{ loopRunsLeft(schedule) }}</dd>
+              </div>
+              <div class="prop-row">
+                <dt>Ends</dt><dd>{{ loopEndsWhen(schedule, Date.now()) }}</dd>
+              </div>
+            </template>
             <div class="prop-row">
               <dt>Repeats</dt><dd>{{ frequencyLabel(schedule) }}</dd>
             </div>
@@ -537,7 +561,7 @@
             <button type="button" class="text-link" @click="copyPrompt(schedule.prompt, schedule.schedule_id)">
               {{ promptCopyLabel(schedule.schedule_id) }}
             </button>
-            <button v-if="canEditSchedule && !editingCard" type="button" class="text-link" @click="startCardEdit('content')">Edit</button>
+            <button v-if="canEditPrompt && !editingCard" type="button" class="text-link" @click="startCardEdit('content')">Edit</button>
           </div>
         </div>
         <p v-if="schedule.description" class="schedule-description">{{ schedule.description }}</p>
@@ -604,6 +628,25 @@
               <template #heading><span class="list-row-title ov-title">{{ s.title || promptTitle(s.prompt) }}</span></template>
               <template #sub>{{ cadenceSummary(s) }}</template>
               <template #end><span class="list-row-when ov-when--alert">due {{ relativeWhen(s.last_expected_run) }}</span></template>
+            </ListRow>
+          </section>
+
+          <section v-if="loops.length" class="ov-section" aria-labelledby="ov-loops-title">
+            <div class="ov-head">
+              <h2 id="ov-loops-title" title="A loop runs inside one chat and ends on its own">Loops</h2>
+            </div>
+            <ListRow
+              v-for="s in loops"
+              :key="s.schedule_id"
+              :to="`/schedules/${s.schedule_id}`"
+              class="ov-item"
+            >
+              <template #heading>
+                <span class="list-row-title ov-title">{{ s.title || promptTitle(s.prompt) }}</span>
+                <span v-if="s.web_chat_id && projectStore.isChatStreaming(s.web_chat_id)" class="spinner-dot" title="Running now" />
+              </template>
+              <template #sub>in {{ ownerChatTitle(s) }} · {{ loopCadenceLabel(s) }} · {{ loopRunsLeftLabel(s) }}</template>
+              <template #end><span class="list-row-when">{{ loopEndsWhen(s, Date.now()) }}</span></template>
             </ListRow>
           </section>
 
@@ -755,6 +798,7 @@ import { listAnchor, roamFocus } from '../lib/listRoaming'
 import { railLeanStyle, railMotionClass } from '../lib/titleRail'
 import { takeScheduleRailArrival, useScheduleRail } from '../composables/useScheduleRail'
 import { scheduleTitle } from '../lib/scheduleList'
+import { isOwnedLoop, loopCadenceLabel, loopEndsWhen, loopRunsLeft, loopRunsLeftLabel } from '../lib/loops'
 import ModelSelector from './ModelSelector.vue'
 import WebhookTriggers from './WebhookTriggers.vue'
 import { providerForModelSection, sectionsFromModelsResponse } from '../lib/modelSections'
@@ -964,7 +1008,14 @@ const missedSchedules = computed(() => workspaceSchedules.value.filter(s => s.mi
 
 // The overview splits the user's own routines from Ciaobot's system ones, and
 // keeps paused routines out of "Next up": they have no run coming.
-const userRoutines = computed(() => workspaceSchedules.value.filter(s => s.scope !== 'system'))
+// Chat loops have their own section: they cannot be paused, and their end is
+// what matters, not a next run.
+const userRoutines = computed(() => workspaceSchedules.value.filter(s => s.scope !== 'system' && !isOwnedLoop(s)))
+const loops = computed(() =>
+  workspaceSchedules.value
+    .filter(isOwnedLoop)
+    .sort((a, b) => (Date.parse(a.expires_at || '') || Infinity) - (Date.parse(b.expires_at || '') || Infinity)),
+)
 const upcomingRoutines = computed(() =>
   userRoutines.value
     .filter(s => s.enabled && s.next_run)
@@ -1413,9 +1464,48 @@ async function onSystemWorkspaceChange(event: Event) {
     }
   }
 }
-const canEditSchedule = computed(() => !!schedule.value && schedule.value.scope !== 'system')
-const canEditEngine = computed(() => !!schedule.value)
+// A chat loop's lifetime and target are fixed when it is made: its When,
+// Where it runs and Model cards are read-only. Its prompt stays editable.
+const isLoop = computed(() => !!schedule.value && isOwnedLoop(schedule.value))
+const canEditPrompt = computed(() => !!schedule.value && schedule.value.scope !== 'system')
+const canEditSchedule = computed(() => canEditPrompt.value && !isLoop.value)
+const canEditEngine = computed(() => !!schedule.value && !isLoop.value)
 const canEditAdvanced = computed(() => !!schedule.value)
+
+function ownerChatTitle(s: Schedule): string {
+  const chat = projectStore.chats.find(c => c.chat_id === s.owner_chat_id)
+  if (chat) return chat.title || 'Untitled chat'
+  // Not in the loaded chats yet: the engine's label is the owner's title.
+  return s.context_label || 'chat no longer exists'
+}
+
+const stoppingLoop = ref(false)
+const stopError = ref('')
+
+async function onStopLoop() {
+  if (!schedule.value || !isLoop.value || stoppingLoop.value) return
+  // Captured before the confirm, as onDelete does.
+  const id = schedule.value.schedule_id
+  if (!await askConfirm('Stop this loop? It won\'t run again.', {
+    title: 'Stop loop',
+    confirmLabel: 'Stop loop',
+  })) return
+  stoppingLoop.value = true
+  stopError.value = ''
+  try {
+    await store.deleteSchedule(id)
+  } catch (error) {
+    // Already gone (ended, or its chat was archived meanwhile): the loop is
+    // stopped as far as the user is concerned.
+    if ((error as { status?: number } | null)?.status !== 404) {
+      stopError.value = 'Could not stop the loop. Try again.'
+      return
+    }
+  } finally {
+    stoppingLoop.value = false
+  }
+  router.push('/schedules')
+}
 
 // Every card seeds the full editData from the schedule, so an unedited field
 // always round-trips its current value and saving one card can't clobber another.
@@ -1432,6 +1522,8 @@ function startCardEdit(card: Exclude<EditCard, ''>) {
   const isSystem = schedule.value.scope === 'system'
   if (isSystem) {
     if (card !== 'engine' && card !== 'advanced') return
+  } else if (isLoop.value) {
+    if (card !== 'content' && card !== 'advanced') return
   } else if (!canEditSchedule.value) return
   editData.value = {
     workspace: schedule.value.workspace || projectStore.activeWorkspace,

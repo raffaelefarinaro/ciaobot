@@ -925,6 +925,27 @@ describe('ProjectSidebar global new chat', () => {
     wrapper.unmount()
   })
 
+  it('lists a chat loop under its own Loops group, above Routines', async () => {
+    const schedules = useTaskStore()
+    schedules.schedulesLoaded = true
+    schedules.schedules = [
+      { schedule_id: 'routine', title: 'Routine', prompt: 'r', workspace: 'personal', enabled: true, frequency: 'daily', daily_time_utc: '09:00' },
+      {
+        schedule_id: 'loop', title: 'Watch the build', prompt: 'w', workspace: 'personal', enabled: true,
+        frequency: 'interval', interval_minutes: 5, daily_time_utc: '', web_chat_id: 'chat-a',
+        owner_chat_id: 'chat-a', expires_at: '2099-01-01T00:00:00Z', max_runs: 10, run_count: 3,
+      },
+    ] as never
+    const wrapper = await mountSidebar('schedules')
+    expect(wrapper.findAll('.schedule-group-header').map(h => h.text())).toEqual(['Loops', 'Routines'])
+    const loopRow = wrapper.get('.schedule-item[href="/schedules/loop"]')
+    expect(loopRow.text()).toContain('Watch the build')
+    expect(loopRow.attributes('title')).toContain('every 5 min')
+    expect(loopRow.attributes('title')).toContain('7 runs left')
+    expect(wrapper.findAll('.schedule-group-items')[1].text()).toContain('Routine')
+    wrapper.unmount()
+  })
+
   it('puts New automation on the Routines label', async () => {
     const wrapper = await mountSidebar('schedules')
     useTaskStore().schedulesLoaded = true

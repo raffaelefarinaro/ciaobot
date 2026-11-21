@@ -1192,6 +1192,12 @@ const server = http.createServer(async (req, res) => {
     const body = await readBody(req)
     const writer = sessionOf(req)
     writer.writes.push({ method: req.method, path: pathname })
+    // Stopping a loop deletes its schedule for this session (DELETE /api/schedules/:id).
+    const scheduleDelete = req.method === 'DELETE' ? /^\/api\/schedules\/([^/]+)$/.exec(pathname) : null
+    if (scheduleDelete) {
+      writer.removedSchedules.add(decodeURIComponent(scheduleDelete[1]))
+      return sendJson(res, { ok: true })
+    }
     if (pathname === '/api/care/cycle' && req.method === 'POST') {
       return careCycleApply(writer, workspaceOf(body), body, res)
     }

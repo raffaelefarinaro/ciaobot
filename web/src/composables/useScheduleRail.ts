@@ -2,6 +2,7 @@ import { computed } from 'vue'
 import { useRouter } from 'vue-router'
 import { useProjectStore } from '../stores/projects'
 import { cadenceBadge, groupSidebarSchedules, scheduleTitle } from '../lib/scheduleList'
+import { isOwnedLoop, loopCadenceLabel } from '../lib/loops'
 import type { RailItem, RailMark } from '../lib/titleRail'
 import type { Schedule } from '../lib/types'
 import { markRailArrival, takeRailArrival, useTitleRail, type TitleRail } from './useTitleRail'
@@ -44,7 +45,7 @@ export function useScheduleRail(currentId: () => string): TitleRail {
       const working = s.enabled && !!s.web_chat_id && store.isChatStreaming(s.web_chat_id)
       const mark: RailMark | null = s.missed ? 'needs' : working ? 'working' : null
       const title = scheduleTitle(s)
-      const when = scheduleRailWhen(s)
+      const when = isOwnedLoop(s) && s.enabled ? loopCadenceLabel(s) : scheduleRailWhen(s)
       return {
         id: s.schedule_id,
         title,
@@ -56,6 +57,7 @@ export function useScheduleRail(currentId: () => string): TitleRail {
     }
     return [
       ...groups.oneOffs.map(s => item(s, 'One-off')),
+      ...groups.loops.map(s => item(s, 'Loop')),
       ...groups.routines.map(s => item(s, 'Routine')),
       ...groups.system.map(s => item(s, 'System')),
     ]
