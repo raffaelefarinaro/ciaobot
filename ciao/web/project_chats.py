@@ -203,6 +203,7 @@ from ciao.providers.base import (
 from ciao.schedules import (
     ScheduleEntry,
     ScheduleStore,
+    loop_end_reason,
     publish_automations_changed,
     settle_retrying_runs,
     settle_runs_for_archived_chat,
@@ -1432,6 +1433,9 @@ class ProjectChatManager:
         # replies to the same chat cancel the previous timer and start a
         # new one (coalesce rapid replies into a single push).
         self._pending_push: dict[str, asyncio.Task] = {}
+        # Chats whose current unattended turn had a permission request denied.
+        # A loop run that hit one is not a quiet run, whatever its text says.
+        self._unattended_denials: set[str] = set()
         self._archive_locks: dict[str, asyncio.Lock] = {}
         # Callers currently holding or waiting on each archive lock, so
         # the lock is only dropped once the last one is done with it.
@@ -8722,6 +8726,7 @@ class ProjectChatManager:
                     chat_meta.failure_id = ""
                     turn_index = chat_meta.user_turn_count
                     chat_meta.user_turn_count = turn_index + 1
+                    self._unattended_denials.discard(chat_id)
                     chat_meta.turn_owner = restart_resume.PROCESS_TOKEN
                     if image_refs:
                         chat_meta.user_turn_images[str(turn_index)] = list(image_refs)
@@ -9065,8 +9070,52 @@ class ProjectChatManager:
             # Native clients have no PWA store guard, so the pass is marked
             # explicitly; an unknown chat is not a pass.
             "memory_pass": chat is not None and self._is_memory_pass(chat),
+            # A clean run of a loop that is still going: native clients keep it
+            # off the banner, as they do the memory pass.
+            "quiet_loop_run": chat is not None and self._loop_run_quiet(chat),
         })
         self._schedule_push(chat_id, title, snippet)
+
+    def note_unattended_denial(self, chat_id: str) -> None:
+        """A permission request was denied for an unattended turn of this chat."""
+        self._unattended_denials.add(chat_id)
+
+    def _loop_run_quiet(self, chat: ChatInfo) -> bool:
+        """True for a clean run of a chat-owned loop that is still going.
+
+        Such a run is the loop doing its job on a cadence, so it sends no push
+        and no banner. Anything else still notifies: a failed or denied run, a
+        run waiting on the owner's answer, the last run, and a loop that has
+        already ended (its owner archived, its cap or expiry reached).
+        """
+        last_origin = str(chat.user_turn_origin.get(str(chat.user_turn_count - 1)) or "")
+        if last_origin != "loop":
+            return False
+        if (
+            chat.pending_question
+            or chat.pending_permission
+            or chat.last_error
+            or chat.last_response_status != "success"
+            or chat.chat_id in self._unattended_denials
+        ):
+            return False
+        store = self.schedule_store
+        if store is None:
+            return False
+        owned = [entry for entry in store.list_entries() if entry.owner_chat_id == chat.chat_id]
+        if not owned:
+            return False
+        return loop_end_reason(owned[0], datetime.now(UTC)) == ""
+
+    def notify_loop_run_end(self, chat_id: str) -> None:
+        """Push a loop run that ended in a way the owner should hear about."""
+        chat = self._chats.get(chat_id)
+        if chat is None or self._loop_run_quiet(chat):
+            return
+        if str(chat.user_turn_origin.get(str(chat.user_turn_count - 1)) or "") != "loop":
+            return
+        snippet = self._result_snippet(chat.last_error or "The loop run needs your attention.")
+        self._schedule_push(chat_id, chat.title, snippet)
 
     def _schedule_push(self, chat_id: str, title: str, snippet: str) -> None:
         """Queue a delayed push for this chat. Cancels any prior pending
@@ -9079,6 +9128,8 @@ class ProjectChatManager:
             # the owner started. No result, question or permission push may
             # reach them; the pass and its pending input stay inspectable from
             # its memory-insight row and the chat itself.
+            return
+        if chat is not None and self._loop_run_quiet(chat):
             return
         if (
             chat is not None
@@ -9106,6 +9157,8 @@ class ProjectChatManager:
                 # The classification is re-checked at fire time: a pass queued
                 # before this guard existed, or one whose helper/project the
                 # registry has since rewritten, must still never wake the owner.
+                return
+            if self._loop_run_quiet(chat):
                 return
             if chat.archived:
                 # The chat was archived during the delay window — e.g. an

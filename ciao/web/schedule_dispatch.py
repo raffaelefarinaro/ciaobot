@@ -808,7 +808,7 @@ class ScheduleDispatcher:
                 entry, outcome, chat_id=target_id
             )
 
-        if not loop_owned and chat_service._should_auto_archive_schedule_run(entry, outcome, needs_user=needs_user):
+        if chat_service._should_auto_archive_schedule_run(entry, outcome, needs_user=needs_user):
             chat_meta = self._host._chats.get(target_id)
             project_meta = (
                 self._host._projects.get(chat_meta.project_id) if chat_meta else None

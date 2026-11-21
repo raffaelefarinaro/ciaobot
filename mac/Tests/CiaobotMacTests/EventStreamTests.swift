@@ -384,6 +384,23 @@ final class EventStreamTests: XCTestCase {
         XCTAssertNil(ChatEventDecoder.decode(Data(repeating: 0x20, count: ChatEventDecoder.maximumMessageBytes + 1)))
     }
 
+    func testDecoderReadsTheQuietLoopRunMarkerAndTreatsItsAbsenceAsFalse() {
+        let quiet = Data("""
+        {"type":"chat_result_ready","chat_id":"chat-1","project_id":"p1","title":"Loop","snippet":"Done","quiet_loop_run":true}
+        """.utf8)
+        XCTAssertEqual(
+            ChatEventDecoder.decode(quiet),
+            .resultReady(chatID: "chat-1", title: "Loop", snippet: "Done", workspace: "", quietLoopRun: true)
+        )
+        let failed = Data("""
+        {"type":"chat_result_ready","chat_id":"chat-1","project_id":"p1","title":"Loop","snippet":"Done","quiet_loop_run":false}
+        """.utf8)
+        XCTAssertEqual(
+            ChatEventDecoder.decode(failed),
+            .resultReady(chatID: "chat-1", title: "Loop", snippet: "Done", workspace: "", quietLoopRun: false)
+        )
+    }
+
     func testDecoderReadsTheMemoryPassMarkerAndTreatsItsAbsenceAsFalse() {
         let pass = Data("""
         {"type":"chat_result_ready","chat_id":"chat-1","project_id":"p1","title":"Memory pass","snippet":"Done","memory_pass":true}

@@ -293,3 +293,131 @@ def test_a_chat_with_an_open_question_or_approval_is_awaiting_an_answer(tmp_path
     chat.pending_permission = '{"request_id": "p-1"}'
     assert pcm.chat_awaiting_answer(chat.chat_id) is True
     assert pcm.chat_awaiting_answer("no-such-chat") is False
+
+
+# ── Pushes: a clean loop run stays quiet, everything else still notifies ──
+
+_ACTIVITY = "2026-11-21T12:00:00Z"
+
+
+def _quiet_setup(tmp_path: Path, *, max_runs: int = 12, run_count: int = 0):
+    from tests.test_chat_messages_interrupted import _make_manager
+
+    pcm = _make_manager(tmp_path)
+    project = pcm.create_project("Loops", workspace="personal")
+    chat = pcm.create_chat(project.project_id, title="Loop chat")
+    store = ScheduleStore(tmp_path)
+    pcm.schedule_store = store
+    loop = store.create_owned_loop(
+        owner_chat_id=chat.chat_id, prompt="check", interval_minutes=10,
+        max_runs=max_runs, now=datetime.now(UTC),
+    )
+    if run_count:
+        store.update_fields(loop.schedule_id, {"run_count": run_count})
+    pushes: list[tuple[str, str, str]] = []
+    pcm.notify_result_cb = lambda cid, title, snippet: pushes.append((cid, title, snippet))
+    pcm._push_delay_seconds = 0
+    chat.user_turn_count = 1
+    chat.last_activity_at = _ACTIVITY
+    chat.last_response = "done"
+    chat.last_snippet = "done"
+    chat.last_response_status = "success"
+    return pcm, chat, pushes
+
+
+def _finish(chat, origin: str, *, status: str = "success", error: str = "") -> None:
+    if origin:
+        chat.user_turn_origin = {"0": origin}
+    chat.last_response_status = status
+    chat.last_error = error
+
+
+async def _push_after_turn(pcm, chat) -> None:
+    pcm._schedule_push(chat.chat_id, chat.title, "snippet")
+    await asyncio.sleep(0.05)
+
+
+async def test_a_clean_loop_run_does_not_push(tmp_path: Path) -> None:
+    pcm, chat, pushes = _quiet_setup(tmp_path)
+    _finish(chat, "loop")
+    await _push_after_turn(pcm, chat)
+    assert pushes == []
+
+
+async def test_a_failed_loop_run_pushes(tmp_path: Path) -> None:
+    pcm, chat, pushes = _quiet_setup(tmp_path)
+    _finish(chat, "loop", status="error", error="usage limit reached")
+    pcm.notify_loop_run_end(chat.chat_id)
+    await asyncio.sleep(0.05)
+    assert [cid for cid, _, _ in pushes] == [chat.chat_id]
+
+
+async def test_a_denied_loop_run_pushes(tmp_path: Path) -> None:
+    pcm, chat, pushes = _quiet_setup(tmp_path)
+    _finish(chat, "loop")
+    pcm.note_unattended_denial(chat.chat_id)
+    await _push_after_turn(pcm, chat)
+    assert len(pushes) == 1
+
+
+async def test_a_loop_run_waiting_on_the_owner_pushes(tmp_path: Path) -> None:
+    pcm, chat, pushes = _quiet_setup(tmp_path)
+    _finish(chat, "loop", status="question")
+    chat.pending_question = '{"request_id": "q-1"}'
+    await _push_after_turn(pcm, chat)
+    assert len(pushes) == 1
+
+
+async def test_the_last_loop_run_pushes_once_the_loop_is_over(tmp_path: Path) -> None:
+    pcm, chat, pushes = _quiet_setup(tmp_path, max_runs=3, run_count=3)
+    _finish(chat, "loop")
+    await _push_after_turn(pcm, chat)
+    assert len(pushes) == 1
+
+
+async def test_a_loop_run_after_its_owner_archived_or_the_loop_ended_pushes(tmp_path: Path) -> None:
+    pcm, chat, pushes = _quiet_setup(tmp_path)
+    _finish(chat, "loop")
+    pcm.schedule_store.delete_owned_by(chat.chat_id)
+    await _push_after_turn(pcm, chat)
+    assert len(pushes) == 1
+
+
+@pytest.mark.parametrize("origin", ["schedule", ""])
+async def test_a_schedule_or_typed_turn_still_pushes_when_clean(tmp_path: Path, origin: str) -> None:
+    pcm, chat, pushes = _quiet_setup(tmp_path)
+    _finish(chat, origin)
+    await _push_after_turn(pcm, chat)
+    assert len(pushes) == 1
+
+
+async def test_the_result_event_marks_a_quiet_loop_run(tmp_path: Path) -> None:
+    pcm, chat, _ = _quiet_setup(tmp_path)
+    events: list[dict[str, object]] = []
+    pcm._events = SimpleNamespace(publish=events.append)  # type: ignore[assignment]
+    _finish(chat, "loop")
+    pcm._announce_result_ready(chat.chat_id, chat.project_id, "t", "s")
+    assert events[-1]["quiet_loop_run"] is True
+
+    _finish(chat, "loop", status="error", error="boom")
+    pcm._announce_result_ready(chat.chat_id, chat.project_id, "t", "s")
+    assert events[-1]["quiet_loop_run"] is False
+
+
+# ── Wiring: the busy skip for loops is passed by main.py ─────────────────
+
+
+def test_main_passes_the_loop_busy_check_to_the_schedule_manager() -> None:
+    import ast
+
+    import ciao
+
+    tree = ast.parse((Path(ciao.__file__).resolve().parent / "main.py").read_text(encoding="utf-8"))
+    managers = [
+        node for node in ast.walk(tree)
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+        and node.func.id == "ScheduleManager"
+    ]
+    assert len(managers) == 1
+    keywords = {kw.arg: ast.unparse(kw.value) for kw in managers[0].keywords}
+    assert keywords.get("chat_awaiting_answer") == "pcm.chat_awaiting_answer"

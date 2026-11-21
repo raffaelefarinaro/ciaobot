@@ -287,6 +287,10 @@ class ChatStreamingHost(Protocol):
 
     def _discard_result_announce(self, chat_id: str) -> None: ...
 
+    def note_unattended_denial(self, chat_id: str) -> None: ...
+
+    def notify_loop_run_end(self, chat_id: str) -> None: ...
+
     def _flush_result_announce(self, chat_id: str) -> bool: ...
 
     def _background_work_outstanding(self, chat_id: str) -> bool: ...
@@ -790,6 +794,7 @@ class ChatStreaming:
                         if isinstance(event, PermissionRequestEvent):
                             self._host._notify_permission(chat_id, event)
                             if unattended:
+                                self._host.note_unattended_denial(chat_id)
                                 permission_result = await self._host.respond_permission(
                                     chat_id,
                                     request_id=event.request_id,
@@ -1458,6 +1463,9 @@ class ChatStreaming:
                 # `drain_between_turns`).
                 follow_up_expected = True
             self._host._discard_result_announce(chat_id)
+            # A loop run that failed, was denied or waits on the owner notifies
+            # here; a clean one stays quiet (see ProjectChatManager._loop_run_quiet).
+            self._host.notify_loop_run_end(chat_id)
             owns_retry = self._host._owns_retry(chat_id, stream)
             if turn_succeeded and not had_error and is_retry and not stream.network_retry_armed and owns_retry:
                 chat_now = self._host._chats.get(chat_id)
