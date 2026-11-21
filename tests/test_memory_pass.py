@@ -3043,6 +3043,57 @@ def test_approved_task_section_without_a_completion_id_cites_the_task_file() -> 
     assert "none recorded" not in section
 
 
+def test_approved_task_section_states_the_three_task_recurrence_rule() -> None:
+    """#3238-C: one or two outcomes are a sighting; three recorded as one learning file the draft."""
+    helper = {
+        "focus": "approved_task",
+        "task_title": "Ship it",
+        "task_summary": "Did the work.",
+        "completion_id": _COMPLETION_ID,
+    }
+    section = memory_pass.MemoryPassCoordinator._focus_section(helper)
+    assert "second independent" not in section
+    assert "Three distinct completed tasks recorded as sightings of one learning" in section
+    assert "`recurrence` block" in section
+    assert "`entry_revision`" in section
+    assert "exactly the completion ids from Learnings" in section
+    assert "A direct correction of an owned skill can be proposed from this one occurrence." in section
+    assert "Everything you file waits for the user to accept" in section
+    assert "The same completion id seen again is not a new occurrence." in section
+
+
+def test_lesson_routing_keeps_a_one_off_lesson_out_of_the_draft_path() -> None:
+    """#3238-C: a new-skill draft needs recurrence; a one-off stays a learning or event."""
+    text = _rendered_chat_lesson_routing()
+    assert (
+        "A one-off lesson with no recurrence stays an event-log or learning entry, "
+        "not a draft."
+    ) in text
+
+
+def test_recurrence_example_is_accepted_by_the_skill_draft_input_reader(
+    tmp_path: Path,
+) -> None:
+    from ciao import cli
+    from ciao.recurrence import RECURRENCE_THRESHOLD
+
+    path = tmp_path / "draft.json"
+    path.write_text(memory_pass.RECURRENCE_DRAFT_EXAMPLE, encoding="utf-8")
+    payload, problem = cli._read_skill_draft_input(str(path))
+    assert problem == ""
+    assert payload is not None and payload["target"] == "new_skill"
+    block = payload["recurrence"]
+    assert set(block) == {"procedure_learning_id", "entry_revision", "outcome_ids"}
+    assert len(block["outcome_ids"]) == RECURRENCE_THRESHOLD
+
+
+def test_recurrence_example_is_rendered_into_both_draft_prompts() -> None:
+    helper = {"focus": "approved_task", "task_title": "Ship it", "task_summary": "x"}
+    approved = memory_pass.MemoryPassCoordinator._focus_section(helper)
+    assert memory_pass.RECURRENCE_DRAFT_EXAMPLE in approved
+    assert memory_pass.RECURRENCE_DRAFT_EXAMPLE in _rendered_chat_lesson_routing()
+
+
 def test_lesson_step_three_requires_origins_and_the_draft_ends_the_turn_in_step_six() -> None:
     text = _rendered_chat_lesson_routing()
     assert "Include an `origins` list; it is the only link to the learning" in text
