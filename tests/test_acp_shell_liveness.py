@@ -73,6 +73,9 @@ def _session_stub() -> AcpSession:
     session._shell_commands = {}
     session._deferred_ends = []
     session._end_tasks = set()
+    session._ended_shells = {}
+    session.continuation_hook = None
+    session._late_speaking = False
     session._prompt_active = False
     return session
 

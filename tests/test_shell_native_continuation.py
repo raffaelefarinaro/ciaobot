@@ -1,7 +1,8 @@
 """A provider's own continuation after a background shell: one turn for the shell, no wake of ours.
 
-The fixture is a trimmed capture (``tests/fixtures/acp/shell_opencode_native_continuation.jsonl``):
-the shell call, then the agent's own continuation with no prompt from Ciaobot.
+Every scenario drives the real AcpSession (``_end_shell``, ``_touch_late``, ``_close_late``) and the
+real ``ChatStreaming.drain_between_turns`` reading the session's late queue. Only the chat's
+transcript and stream are stand-ins. The fixture is a trimmed capture of the OpenCode continuation.
 """
 
 from __future__ import annotations
@@ -9,15 +10,17 @@ from __future__ import annotations
 import asyncio
 import json
 import time
+from functools import partial
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
 import pytest
 
-from ciao.models import AssistantTextDelta, ResultEvent, ShellFinishedEvent, ToolUseEvent
+from ciao.models import AssistantTextDelta, ResultEvent, ToolUseEvent
 from ciao.web import chat_streaming, project_chats
 from ciao.web.chat_streaming import ChatStreaming
+from tests.test_continuation_claim_session import _end, _session
 
 FIXTURE = Path(__file__).parent / "fixtures" / "acp" / "shell_opencode_native_continuation.jsonl"
 NATIVE_TEXT = "The background command finished and printed `done-marker`."
@@ -33,21 +36,6 @@ def _continuation_text() -> str:
     return "".join(parts)
 
 
-def _shell(call_id: str, command: str, ended_at: float) -> ShellFinishedEvent:
-    return ShellFinishedEvent(
-        type="shell_finished", tool_use_id=call_id, command=command,
-        duration_s=6.0, exit_code=None, ended_at=ended_at,
-    )
-
-
-def _text(text: str) -> AssistantTextDelta:
-    return AssistantTextDelta(type="text_delta", text=text)
-
-
-def _final(text: str, wake_notice: str = WAKE_NOTICE) -> ResultEvent:
-    return ResultEvent(type="result", result=text, origin="task-notification", wake_notice=wake_notice)
-
-
 class _Recorder:
     def __init__(self) -> None:
         self.turns: list[dict[str, Any]] = []
@@ -57,8 +45,12 @@ class _Recorder:
 
 
 class _Broker:
-    def get(self, chat_id: str) -> None:
-        return None
+    """The chat's stream owner: a foreground turn that takes the drain over is set here."""
+
+    owner: Any = None
+
+    def get(self, chat_id: str) -> Any:
+        return self.owner
 
     def register(self, chat_id: str, stream: Any) -> None:
         return None
@@ -83,37 +75,25 @@ class _FakeStream:
 
 
 class _Host:
-    """The drain's host: the real manager's shell hooks, a recording transcript and broker."""
-
-    def __init__(self, manager: Any, script: list[Any], recorder: _Recorder) -> None:
+    def __init__(self, manager: Any, session: Any, recorder: _Recorder, broker: _Broker) -> None:
         self._manager = manager
-        self._script = script
         self._transcripts = recorder
-        self._broker = _Broker()
-        self._providers = {"chat-1": SimpleNamespace(drain_events=self._drain)}
+        self._broker = broker
+        self._providers = {"chat-1": SimpleNamespace(drain_events=session._late_events)}
         self._chats = manager._chats
         self._config = SimpleNamespace(workspace_root=Path("/tmp"))
-
-    async def _drain(self) -> Any:
-        for item in self._script:
-            if isinstance(item, float):
-                await asyncio.sleep(item)  # the time between two events of the provider's stream
-            else:
-                yield item
 
     def _agent_root_for_chat(self, chat_id: str) -> None:
         return None
 
     def __getattr__(self, name: str) -> Any:
-        if name in (
-            "_note_shell_finished", "_continuation_started", "_take_claimed_notice",
-            "_deliver_wake", "_events",
-        ):
+        if name in ("_note_shell_finished", "_take_claimed_notice", "_keep_unsent_echo", "_take_unsent_echo",
+                    "_deliver_wake", "_events"):
             return getattr(self._manager, name)
         return lambda *args, **kwargs: None
 
 
-def _setup(monkeypatch: pytest.MonkeyPatch, window: float, flagged: bool = True) -> tuple[Any, Any]:
+def _setup(monkeypatch: pytest.MonkeyPatch, window: float, flagged: bool = True) -> tuple[Any, Any, _Recorder, _Broker]:
     from tests.test_shell_wake import _chat, _manager
 
     monkeypatch.setattr(project_chats, "SHELL_FINISHED_WINDOW_S", window)
@@ -122,26 +102,42 @@ def _setup(monkeypatch: pytest.MonkeyPatch, window: float, flagged: bool = True)
     chat = _chat(model="m", mode="bypass", provider="opencode", session_id="", title="t")
     manager = _manager(chat)
     manager._providers = {"chat-1": SimpleNamespace(continues_after_shell=flagged)}
-    return manager, chat
+    session = _session()
+    session.continuation_hook = partial(manager._continuation_started, "chat-1")
+    return manager, session, _Recorder(), _Broker()
 
 
-def _run(manager: Any, *, notes: list[Any] = (), script: list[Any] = (), after: float = 0.0,
-         calls: list[Any] = ()) -> _Recorder:
-    """Run one scenario in one event loop: the held-notice timers and the provider's drain share it."""
-    recorder = _Recorder()
+def _text(text: str) -> AssistantTextDelta:
+    return AssistantTextDelta(type="text_delta", text=text)
+
+
+def _final(text: str, wake_notice: str = WAKE_NOTICE) -> ResultEvent:
+    return ResultEvent(type="result", result=text, origin="task-notification", wake_notice=wake_notice)
+
+
+def _run(manager: Any, session: Any, recorder: _Recorder, broker: _Broker, steps: list[Any], after: float = 0.0) -> None:
+    """Run the steps in order while the real drain reads the session's queue; the timers share the loop.
+
+    A step is a callable (a session operation), a float (a pause) or an ``("drain",)`` to restart the drain.
+    """
+    host = _Host(manager, session, recorder, broker)
 
     async def main() -> None:
-        for call in calls:  # what happened first on the provider's side
-            call()
-        for note in notes:
-            note()
-        if script:
-            await ChatStreaming(_Host(manager, list(script), recorder)).drain_between_turns("chat-1", "p")  # type: ignore[arg-type]
-        if after:
-            await asyncio.sleep(after)
+        drain = asyncio.create_task(ChatStreaming(host).drain_between_turns("chat-1", "p"))  # type: ignore[arg-type]
+        for step in steps:
+            if isinstance(step, float):
+                await asyncio.sleep(step)
+            elif isinstance(step, tuple) and step == ("drain",):
+                if drain.done():
+                    drain = asyncio.create_task(ChatStreaming(host).drain_between_turns("chat-1", "p"))  # type: ignore[arg-type]
+            else:
+                step()
+                await asyncio.sleep(0)  # let the drain run between two session events
+        await asyncio.sleep(after)
+        drain.cancel()
+        await asyncio.gather(drain, return_exceptions=True)
 
     asyncio.run(main())
-    return recorder
 
 
 def test_the_fixture_continuation_is_the_native_text() -> None:
@@ -162,14 +158,12 @@ def test_a_turn_boundary_splits_the_reply_text_instead_of_gluing_it() -> None:
 
 
 def test_a_continuation_that_runs_past_the_window_is_one_turn_and_no_wake(monkeypatch: pytest.MonkeyPatch) -> None:
-    # Finding 1: it starts 0.05 s after the shell ends and runs 0.3 s, well past the 0.15 s window.
-    manager, _chat_obj = _setup(monkeypatch, window=0.15)
-    recorder = _run(
-        manager,
-        notes=[lambda: manager._note_shell_finished("chat-1", _shell("call-1", "sleep 6; echo done-marker .", time.monotonic()))],
-        script=[0.05, _text(NATIVE_TEXT), 0.3, _final(NATIVE_TEXT)],
-        after=0.2,
-    )
+    manager, session, recorder, broker = _setup(monkeypatch, window=0.15)
+    _run(manager, session, recorder, broker, [
+        lambda: _end(session, "call-1", "sleep 6; echo done-marker ."),
+        0.05, lambda: session._touch_late([_text(NATIVE_TEXT)], substantive=True),
+        0.3, lambda: session._close_late(),
+    ], after=0.2)
     assert [turn["response"] for turn in recorder.turns] == [NATIVE_TEXT]
     assert recorder.turns[0]["prompt"].splitlines()[0] == "[Ciaobot] 1 background run finished."
     assert recorder.turns[0]["origin"] == "background_run"
@@ -177,169 +171,132 @@ def test_a_continuation_that_runs_past_the_window_is_one_turn_and_no_wake(monkey
 
 
 def test_after_the_window_with_no_continuation_exactly_one_wake_is_sent(monkeypatch: pytest.MonkeyPatch) -> None:
-    manager, _chat_obj = _setup(monkeypatch, window=0.05)
-    _run(manager, notes=[lambda: manager._note_shell_finished("chat-1", _shell("call-x", "make", time.monotonic()))], after=0.2)
+    manager, session, recorder, broker = _setup(monkeypatch, window=0.05)
+    _run(manager, session, recorder, broker, [lambda: _end(session, "call-x", "make")], after=0.2)
     assert len(manager._recorder.started) == 1
 
 
 def test_an_unrelated_subagent_notification_does_not_claim_the_shell(monkeypatch: pytest.MonkeyPatch) -> None:
-    # Finding 2: a subagent's completion (a tool result, no reply text) closes at +0.08 s.
-    manager, _chat_obj = _setup(monkeypatch, window=0.2)
+    # A subagent's completion (a tool result, no reply text) closes its late turn.
+    manager, session, recorder, broker = _setup(monkeypatch, window=0.2)
     subagent = ToolUseEvent(type="tool_result", tool_use_id="task-9", tool_name="task", exit_code=0)
-    recorder = _run(
-        manager,
-        notes=[lambda: manager._note_shell_finished("chat-1", _shell("call-1", "sleep 6", time.monotonic()))],
-        script=[0.08, subagent, _final("")],
-        after=0.25,
-    )
-    assert recorder.turns == []  # the subagent turn had no reply to file
+    _run(manager, session, recorder, broker, [
+        lambda: _end(session, "call-1", "sleep 6"),
+        0.05, lambda: session._late_queue.put_nowait(subagent), 0.02, lambda: session._close_late(),
+    ], after=0.25)
+    assert recorder.turns == []
     (_chat, prompt, origin), = manager._recorder.started
-    assert origin == "background_run" and "sleep 6" in prompt  # the shell's own wake still goes out
+    assert origin == "background_run" and "sleep 6" in prompt
 
 
 def test_a_provider_that_does_not_continue_on_its_own_is_never_claimed(monkeypatch: pytest.MonkeyPatch) -> None:
-    manager, _chat_obj = _setup(monkeypatch, window=0.1, flagged=False)
-    recorder = _run(
-        manager,
-        notes=[lambda: manager._note_shell_finished("chat-1", _shell("call-1", "make", time.monotonic()))],
-        script=[_text(NATIVE_TEXT), _final(NATIVE_TEXT)],
-        after=0.2,
-    )
-    # The provider's own reply is still its own turn, with its own prompt: nothing was claimed.
-    assert [turn["prompt"] for turn in recorder.turns] == [WAKE_NOTICE]
+    manager, session, recorder, broker = _setup(monkeypatch, window=0.1, flagged=False)
+    _run(manager, session, recorder, broker, [
+        lambda: _end(session, "call-1", "make"),
+        lambda: session._touch_late([_text(NATIVE_TEXT)], substantive=True),
+        lambda: session._close_late(),
+    ], after=0.2)
+    assert [turn["prompt"] for turn in recorder.turns] == [WAKE_NOTICE]  # the reply keeps its own prompt
     assert len(manager._recorder.started) == 1  # our own wake went out after the window
 
 
 def test_a_provider_notification_text_is_kept_and_the_claimed_shell_is_still_announced(monkeypatch: pytest.MonkeyPatch) -> None:
-    # Finding 2: a real wake_notice from the provider is never overwritten; the shell is not lost.
-    manager, _chat_obj = _setup(monkeypatch, window=0.5)
-    recorder = _run(
-        manager,
-        notes=[lambda: manager._note_shell_finished("chat-1", _shell("call-1", "make", time.monotonic()))],
-        script=[0.02, _text(NATIVE_TEXT), _final(NATIVE_TEXT, wake_notice="Claude: a real notice.")],
-    )
+    manager, session, recorder, broker = _setup(monkeypatch, window=0.5)
+    _run(manager, session, recorder, broker, [
+        lambda: _end(session, "call-1", "make"),
+        lambda: session._touch_late([_text(NATIVE_TEXT)], substantive=True),
+        lambda: session._late_queue.put_nowait(_final(NATIVE_TEXT, wake_notice="Claude: a real notice.")),
+    ])
     assert [turn["prompt"] for turn in recorder.turns] == ["Claude: a real notice."]
     (_chat, prompt, _origin), = manager._recorder.started
     assert prompt.splitlines()[0] == "[Ciaobot] 1 background run finished."
 
 
-def test_a_continuation_before_the_shell_end_answers_it_and_no_wake_is_sent(monkeypatch: pytest.MonkeyPatch) -> None:
-    # Finding 3: the continuation spoke first; the shell end is observed late (deferred behind a prompt).
-    manager, _chat_obj = _setup(monkeypatch, window=0.05)
-    _run(
-        manager,
-        calls=[lambda: manager._continuation_started("chat-1")],
-        notes=[lambda: manager._note_shell_finished("chat-1", _shell("call-1", "make", time.monotonic() - 5.0))],
-        after=0.15,
-    )
-    assert manager._recorder.started == [] and manager._recorder.queued == []
-
-
-def test_a_continuation_long_before_a_shell_end_does_not_answer_it(monkeypatch: pytest.MonkeyPatch) -> None:
-    manager, _chat_obj = _setup(monkeypatch, window=0.05)
-
-    def old_continuation() -> None:
-        manager._continuation_started("chat-1")
-        manager._continuation_at["chat-1"] -= 600.0  # that continuation was ten minutes earlier
-
-    _run(
-        manager,
-        calls=[old_continuation],
-        notes=[lambda: manager._note_shell_finished("chat-1", _shell("call-1", "make", time.monotonic()))],
-        after=0.15,
-    )
-    assert len(manager._recorder.started) == 1
-
-
-def test_a_continuation_claims_only_the_shells_that_ended_before_it_started(monkeypatch: pytest.MonkeyPatch) -> None:
-    # Finding 5: shell two ends after the continuation started; it keeps its own window.
-    manager, _chat_obj = _setup(monkeypatch, window=0.15)
-    now = time.monotonic()
-    recorder = _run(
-        manager,
-        notes=[
-            lambda: manager._note_shell_finished("chat-1", _shell("call-1", "job one", now)),
-            lambda: manager._note_shell_finished("chat-1", _shell("call-2", "job two", now + 0.1)),
-        ],
-        script=[0.03, _text(NATIVE_TEXT), _final(NATIVE_TEXT)],
-        after=0.25,
-    )
+def test_a_second_shell_ending_later_is_not_claimed_by_the_first_continuation(monkeypatch: pytest.MonkeyPatch) -> None:
+    manager, session, recorder, broker = _setup(monkeypatch, window=0.15)
+    _run(manager, session, recorder, broker, [
+        lambda: _end(session, "call-1", "job one"),
+        0.02, lambda: session._touch_late([_text(NATIVE_TEXT)], substantive=True),
+        0.01, lambda: session._close_late(),
+        lambda: _end(session, "call-2", "job two"),  # after the continuation closed: not covered by it
+    ], after=0.3)
     assert "job one" in recorder.turns[0]["prompt"] and "job two" not in recorder.turns[0]["prompt"]
     prompts = [p for _, p, _ in manager._recorder.started]
     assert len(prompts) == 1 and "job two" in prompts[0] and "job one" not in prompts[0]
 
 
-def test_a_second_shell_keeps_its_own_window_and_does_not_restart_the_first(monkeypatch: pytest.MonkeyPatch) -> None:
-    # Finding 5: shell one's deadline is not pushed back by shell two ending 0.1 s later.
-    manager, _chat_obj = _setup(monkeypatch, window=0.15)
-    first_due: list[float] = []
-
-    async def scenario() -> None:
-        manager._note_shell_finished("chat-1", _shell("call-1", "job one", time.monotonic()))
-        first_due.append(manager._shell_notice_due[("chat-1", "call-1")])
-        await asyncio.sleep(0.1)
-        manager._note_shell_finished("chat-1", _shell("call-2", "job two", time.monotonic()))
-        await asyncio.sleep(0.1)  # shell one's window has closed; shell two's has not
-
-    asyncio.run(scenario())
-    assert len(manager._recorder.started) == 1 and "job one" in manager._recorder.started[0][1]
-    assert manager._shell_notice_due.get(("chat-1", "call-2"), 0.0) > first_due[0]
+def test_each_held_notice_keeps_its_own_window(monkeypatch: pytest.MonkeyPatch) -> None:
+    # Finding 5: job two ends 0.1 s after job one; job one's window closes first, job two keeps its own.
+    manager, session, recorder, broker = _setup(monkeypatch, window=0.15)
+    _run(manager, session, recorder, broker, [
+        lambda: _end(session, "call-1", "job one"),
+        0.1, lambda: _end(session, "call-2", "job two"),
+    ], after=0.35)
+    prompts = [p for _, p, _ in manager._recorder.started]
+    assert len(prompts) == 2
+    assert "job one" in prompts[0] and "job two" not in prompts[0]
+    assert "job two" in prompts[1] and "job one" not in prompts[1]
 
 
 def test_a_claimed_continuation_does_not_count_toward_the_wake_limit(monkeypatch: pytest.MonkeyPatch) -> None:
-    # Finding 5: a continuation's recorded turn is not one of our wakes.
-    manager, chat_obj = _setup(monkeypatch, window=0.1)
-    origins_before = dict(chat_obj.user_turn_origin)
-    _run(
-        manager,
-        notes=[lambda: manager._note_shell_finished("chat-1", _shell("call-1", "make", time.monotonic()))],
-        script=[0.01, _text(NATIVE_TEXT), _final(NATIVE_TEXT)],
-    )
+    manager, session, recorder, broker = _setup(monkeypatch, window=0.1)
+    chat = manager._chats["chat-1"]
+    origins_before = dict(chat.user_turn_origin)
+    _run(manager, session, recorder, broker, [
+        lambda: _end(session, "call-1", "make"),
+        lambda: session._touch_late([_text(NATIVE_TEXT)], substantive=True),
+        lambda: session._close_late(),
+    ])
     assert len(manager._shell_wake_times.get("chat-1", ())) == 0
-    assert chat_obj.user_turn_origin == origins_before
-    assert manager._three_shell_wakes_in_a_row(chat_obj) is False
+    assert chat.user_turn_origin == origins_before
+    assert manager._three_shell_wakes_in_a_row(chat) is False
 
 
-def test_the_claimed_notice_card_is_published_before_the_continuation_reply(monkeypatch: pytest.MonkeyPatch) -> None:
-    # Finding 6: live parity with the reload: the notice row, then the reply.
-    manager, _chat_obj = _setup(monkeypatch, window=0.5)
-    _run(
-        manager,
-        notes=[lambda: manager._note_shell_finished("chat-1", _shell("call-1", "make", time.monotonic()))],
-        script=[0.01, _text(NATIVE_TEXT), _final(NATIVE_TEXT)],
-    )
+def test_the_claimed_card_is_published_before_the_continuation_reply(monkeypatch: pytest.MonkeyPatch) -> None:
+    manager, session, recorder, broker = _setup(monkeypatch, window=0.5)
+    _run(manager, session, recorder, broker, [
+        lambda: _end(session, "call-1", "make"),
+        lambda: session._touch_late([_text(NATIVE_TEXT)], substantive=True),
+        lambda: session._close_late(),
+    ])
     echo = _FakeStream.published[0]
     assert echo["type"] == "user_echo" and echo["origin"] == "background_run"
     assert echo["text"].splitlines()[0] == "[Ciaobot] 1 background run finished."
     assert any(p["type"] == "text_delta" for p in _FakeStream.published[1:])
 
 
-def test_a_shutdown_delivers_held_notices_instead_of_dropping_them(monkeypatch: pytest.MonkeyPatch) -> None:
-    # Finding 4: restart resume covers a turn the restart cut off; a held notice must start one.
-    manager, _chat_obj = _setup(monkeypatch, window=30.0)
-    manager._memory_pass = SimpleNamespace(close=lambda: None)
-    _run(
-        manager,
-        notes=[
-            lambda: manager._note_shell_finished("chat-1", _shell("call-1", "make", time.monotonic())),
-            manager.begin_shutdown,
-        ],
-    )
-    assert len(manager._recorder.started) == 1
-    assert "make" in manager._recorder.started[0][1]
-    assert manager._shell_finished_pending == {} and manager._shell_notice_due == {}
+def test_a_whitespace_only_continuation_still_records_the_card_it_was_claimed_for(monkeypatch: pytest.MonkeyPatch) -> None:
+    # Finding 3: the card is in the journal and the live view, so the durable transcript records it too.
+    manager, session, recorder, broker = _setup(monkeypatch, window=0.5)
+    _run(manager, session, recorder, broker, [
+        lambda: _end(session, "call-1", "make"),
+        lambda: session._touch_late([_text("   ")], substantive=True),
+        lambda: session._close_late(),
+    ])
+    assert len(recorder.turns) == 1
+    assert recorder.turns[0]["prompt"].splitlines()[0] == "[Ciaobot] 1 background run finished."
+    assert recorder.turns[0]["response"].strip() == ""
 
 
-def test_a_forgotten_chat_keeps_no_held_notice_or_claim(monkeypatch: pytest.MonkeyPatch) -> None:
-    # Archive and delete while a notice is held: nothing left to announce or to claim.
-    manager, _chat_obj = _setup(monkeypatch, window=30.0)
-    _run(
-        manager,
-        notes=[
-            lambda: manager._note_shell_finished("chat-1", _shell("call-1", "make", time.monotonic())),
-            lambda: manager._forget_shell_wake_state("chat-1"),
-        ],
-    )
-    assert manager._continuation_started("chat-1") is None
-    assert manager._shell_notice_due == {} and manager._claimed_notices == {}
-    assert manager._recorder.started == []
+def test_a_superseded_drain_keeps_the_claim_and_the_card_for_the_next_drain(monkeypatch: pytest.MonkeyPatch) -> None:
+    # Finding 4: a foreground turn takes the drain over between the notice and the reply.
+    manager, session, recorder, broker = _setup(monkeypatch, window=0.5)
+
+    def foreground_takes_over() -> None:
+        broker.owner = SimpleNamespace(background=False)
+
+    def foreground_done() -> None:
+        broker.owner = None
+
+    _run(manager, session, recorder, broker, [
+        lambda: _end(session, "call-1", "make"),
+        0.02, lambda: session._touch_late([_text("first")], substantive=True),
+        foreground_takes_over, 0.02,
+        lambda: session._late_queue.put_nowait(_text(NATIVE_TEXT)),  # consumed by the superseded drain
+        0.02, lambda: foreground_done(), ("drain",), 0.05,
+        lambda: session._close_late(),
+    ])
+    assert len(recorder.turns) == 1 and recorder.turns[0]["prompt"].splitlines()[0] == "[Ciaobot] 1 background run finished."
+    cards = [p for p in _FakeStream.published if p["type"] == "user_echo"]
+    assert len(cards) == 1  # the card was published once, by the drain that could publish it
+    assert manager._claimed_notices.get("chat-1") in (None, [])

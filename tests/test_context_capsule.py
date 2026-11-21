@@ -263,8 +263,8 @@ def test_the_prompt_prefix_states_the_effective_permission_mode(tmp_path: Path) 
     chat = manager.create_chat(project.project_id)
 
     assert f"permission_mode={chat.mode}" in manager._build_prompt_prefix(chat)
-    if chat.mode != "plan":
-        assert "permission_mode=bypass" in manager._build_prompt_prefix(chat, unattended=True)
+    # An automation tick states the chat's own mode too: unattended forces none.
+    assert f"permission_mode={chat.mode}" in manager._build_prompt_prefix(chat, unattended=True)
 
 
 # #1436: a linked project's capsule carries the repo's instructions.

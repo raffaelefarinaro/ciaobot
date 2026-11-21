@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import dataclasses
 import json
 from datetime import UTC, datetime
 from pathlib import Path
@@ -72,7 +73,6 @@ def test_schedule_policy_fields_round_trip(store: ScheduleStore) -> None:
         daily_time_utc="01:00",
         prompt="curate",
         model="sonnet",
-        mode="auto",
         chat_id=0,
         frequency="daily",
         archive_policy="auto",
@@ -168,7 +168,6 @@ async def test_catch_up_fires_past_due_schedule(store: ScheduleStore):
         daily_time_utc="08:00",
         prompt="morning",
         model="sonnet",
-        mode="bypass",
         chat_id=0,
         frequency="weekly",
         days_of_week=["mon", "tue", "wed", "thu", "fri"],
@@ -192,7 +191,6 @@ async def test_catch_up_skips_new_schedule_before_first_run(store: ScheduleStore
         daily_time_utc="18:00",
         prompt="evening",
         model="sonnet",
-        mode="bypass",
         chat_id=0,
         frequency="daily",
     )
@@ -211,7 +209,6 @@ async def test_catch_up_skips_already_triggered_today(store: ScheduleStore):
         daily_time_utc="08:00",
         prompt="morning",
         model="sonnet",
-        mode="bypass",
         chat_id=0,
         frequency="daily",
     )
@@ -233,7 +230,6 @@ async def test_catch_up_fires_latest_weekly_slot_from_previous_day(
         daily_time_utc="08:00",
         prompt="sunday-only",
         model="sonnet",
-        mode="bypass",
         chat_id=0,
         frequency="weekly",
         days_of_week=["sun"],
@@ -254,7 +250,6 @@ async def test_catch_up_monthly_matches_day(store: ScheduleStore):
         daily_time_utc="10:00",
         prompt="monthly",
         model="sonnet",
-        mode="bypass",
         chat_id=0,
         frequency="monthly",
         day_of_month=19,
@@ -274,7 +269,6 @@ async def test_catch_up_monthly_skips_other_days(store: ScheduleStore):
         daily_time_utc="10:00",
         prompt="monthly",
         model="sonnet",
-        mode="bypass",
         chat_id=0,
         frequency="monthly",
         day_of_month=25,
@@ -294,7 +288,6 @@ async def test_catch_up_runs_only_latest_missed_occurrence_once(
         daily_time_utc="08:00",
         prompt="daily summary",
         model="sonnet",
-        mode="bypass",
         chat_id=0,
         frequency="daily",
     )
@@ -318,7 +311,6 @@ async def test_previous_day_catch_up_does_not_suppress_todays_tick(
         daily_time_utc="08:00",
         prompt="daily summary",
         model="sonnet",
-        mode="bypass",
         chat_id=0,
         frequency="daily",
     )
@@ -349,7 +341,6 @@ async def test_manual_schedule_skipped_by_tick(store: ScheduleStore):
         daily_time_utc="",  # manual entries don't need a time
         prompt="monthly usage report",
         model="sonnet",
-        mode="bypass",
         chat_id=0,
         frequency="manual",
     )
@@ -367,7 +358,6 @@ async def test_manual_schedule_skipped_by_catch_up(store: ScheduleStore):
         daily_time_utc="",
         prompt="manual-only",
         model="sonnet",
-        mode="bypass",
         chat_id=0,
         frequency="manual",
     )
@@ -383,7 +373,6 @@ async def test_manual_schedule_runs_via_dispatch_now(store: ScheduleStore):
         daily_time_utc="",
         prompt="manual-only",
         model="sonnet",
-        mode="bypass",
         chat_id=0,
         frequency="manual",
     )
@@ -399,7 +388,6 @@ async def test_schedule_last_run_chat_id_is_recorded(store: ScheduleStore) -> No
         daily_time_utc="",
         prompt="record chat id",
         model="sonnet",
-        mode="auto",
         chat_id=0,
         frequency="manual",
     )
@@ -424,7 +412,6 @@ async def test_dispatch_now_interactive_run_returns_immediately(store: ScheduleS
         daily_time_utc="",
         prompt="manual interactive",
         model="sonnet",
-        mode="auto",
         chat_id=0,
         frequency="manual",
         archive_policy="manual",
@@ -454,7 +441,6 @@ async def test_dispatch_now_returns_chat_id_immediately_for_auto_archive(
         daily_time_utc="",
         prompt="manual background",
         model="sonnet",
-        mode="auto",
         chat_id=0,
         frequency="manual",
         archive_policy="auto",
@@ -494,7 +480,6 @@ def test_compute_next_run_returns_none_for_manual(store: ScheduleStore):
         daily_time_utc="",
         prompt="manual-only",
         model="sonnet",
-        mode="bypass",
         chat_id=0,
         frequency="manual",
     )
@@ -514,7 +499,6 @@ async def test_once_fires_on_exact_date_then_deletes(store: ScheduleStore):
         daily_time_utc="10:00",
         prompt="one-off",
         model="sonnet",
-        mode="bypass",
         chat_id=0,
         frequency="once",
         run_at_date="2026-01-19",
@@ -533,7 +517,6 @@ async def test_once_does_not_fire_before_date(store: ScheduleStore):
         daily_time_utc="10:00",
         prompt="one-off",
         model="sonnet",
-        mode="bypass",
         chat_id=0,
         frequency="once",
         run_at_date="2026-01-20",
@@ -552,7 +535,6 @@ async def test_once_does_not_fire_at_wrong_time_same_day(store: ScheduleStore):
         daily_time_utc="10:00",
         prompt="one-off",
         model="sonnet",
-        mode="bypass",
         chat_id=0,
         frequency="once",
         run_at_date="2026-01-19",
@@ -576,7 +558,6 @@ async def test_once_catch_up_does_not_fire_past_due_from_yesterday(store: Schedu
         daily_time_utc="10:00",
         prompt="one-off",
         model="sonnet",
-        mode="bypass",
         chat_id=0,
         frequency="once",
         run_at_date="2026-01-18",  # yesterday
@@ -596,7 +577,6 @@ async def test_once_dispatch_now_deletes_entry(store: ScheduleStore):
         daily_time_utc="10:00",
         prompt="one-off",
         model="sonnet",
-        mode="bypass",
         chat_id=0,
         frequency="once",
         run_at_date="2026-05-09",
@@ -616,7 +596,6 @@ def test_once_compute_next_run_returns_target_datetime(store: ScheduleStore):
         daily_time_utc="10:00",
         prompt="one-off",
         model="sonnet",
-        mode="bypass",
         chat_id=0,
         frequency="once",
         run_at_date="2026-01-19",
@@ -635,7 +614,6 @@ def test_once_compute_next_run_returns_none_if_past(store: ScheduleStore):
         daily_time_utc="10:00",
         prompt="one-off",
         model="sonnet",
-        mode="bypass",
         chat_id=0,
         frequency="once",
         run_at_date="2026-01-10",
@@ -767,7 +745,6 @@ async def test_dispatch_now_stamps_last_dispatched_at(
         daily_time_utc="",
         prompt="manual run",
         model="sonnet",
-        mode="bypass",
         chat_id=0,
         frequency="manual",
     )
@@ -800,7 +777,6 @@ async def test_enrich_schedule_manual_run_today_not_missed(
         daily_time_utc="14:30",
         prompt="daily kr update",
         model="sonnet",
-        mode="bypass",
         chat_id=0,
         frequency="daily",
         timezone_name="UTC",
@@ -968,7 +944,6 @@ def test_user_schedule_description_round_trips(tmp_path: Path) -> None:
         daily_time_utc="09:00",
         prompt="do a thing",
         model="",
-        mode="auto",
         chat_id=0,
         frequency="daily",
     )
@@ -985,7 +960,6 @@ def test_create_accepts_title_and_description(tmp_path: Path) -> None:
         daily_time_utc="09:00",
         prompt="do a thing",
         model="",
-        mode="auto",
         chat_id=0,
         frequency="daily",
         title="My Routine",
@@ -1231,7 +1205,6 @@ async def test_interrupted_run_is_recoverable_with_run_now(store: ScheduleStore)
         daily_time_utc="08:00",
         prompt="daily summary",
         model="sonnet",
-        mode="bypass",
         chat_id=0,
         frequency="daily",
         timezone_name="UTC",
@@ -1261,7 +1234,6 @@ async def test_catch_up_recovers_an_interrupted_run(store: ScheduleStore):
         daily_time_utc="08:00",
         prompt="daily summary",
         model="sonnet",
-        mode="bypass",
         chat_id=0,
         frequency="daily",
         timezone_name="UTC",
@@ -1288,7 +1260,6 @@ async def test_catch_up_recovers_an_interrupted_weekly_run(store: ScheduleStore)
         daily_time_utc="08:00",
         prompt="weekly review",
         model="sonnet",
-        mode="bypass",
         chat_id=0,
         frequency="weekly",
         days_of_week=["mon"],
@@ -1327,7 +1298,7 @@ def test_settle_retrying_runs_only_touches_this_chats_retrying_rows(
     for status, chat in (("retrying", "chat-a"), ("retrying", "chat-b"), ("skipped", "chat-a")):
         e = store.create(
             daily_time_utc="08:00", prompt=f"p {status} {chat}", model="sonnet",
-            mode="bypass", chat_id=0, frequency="daily", timezone_name="UTC",
+            chat_id=0, frequency="daily", timezone_name="UTC",
         )
         e.last_status = status
         e.last_run_chat_id = chat
@@ -1349,7 +1320,7 @@ def test_archiving_the_run_chat_fails_a_retrying_run(store: ScheduleStore):
     for status in ("retrying", "skipped"):
         e = store.create(
             daily_time_utc="08:00", prompt=f"p {status}", model="sonnet",
-            mode="bypass", chat_id=0, frequency="daily", timezone_name="UTC",
+            chat_id=0, frequency="daily", timezone_name="UTC",
         )
         e.last_status = status
         e.last_run_chat_id = "chat-x"
@@ -1374,7 +1345,6 @@ async def test_catch_up_never_refires_a_completed_run(store: ScheduleStore):
             daily_time_utc="08:00",
             prompt=f"daily summary {status}",
             model="sonnet",
-            mode="bypass",
             chat_id=0,
             frequency="daily",
             timezone_name="UTC",
@@ -1405,7 +1375,6 @@ async def test_catch_up_recovers_an_interrupted_run_only_once(
         daily_time_utc="08:00",
         prompt="daily summary",
         model="sonnet",
-        mode="bypass",
         chat_id=0,
         frequency="daily",
         timezone_name="UTC",
@@ -1443,7 +1412,6 @@ async def test_tick_marks_a_wall_clock_run_in_flight(store: ScheduleStore):
         daily_time_utc="08:00",
         prompt="daily summary",
         model="sonnet",
-        mode="bypass",
         chat_id=0,
         frequency="daily",
         timezone_name="UTC",
@@ -1473,7 +1441,6 @@ async def test_restart_turns_an_unfinished_run_into_a_recoverable_miss(
         daily_time_utc="08:00",
         prompt="daily summary",
         model="sonnet",
-        mode="bypass",
         chat_id=0,
         frequency="daily",
         timezone_name="UTC",
@@ -1506,7 +1473,6 @@ async def test_reconcile_leaves_this_process_runs_alone(store: ScheduleStore):
         daily_time_utc="08:00",
         prompt="daily summary",
         model="sonnet",
-        mode="bypass",
         chat_id=0,
         frequency="daily",
         timezone_name="UTC",
@@ -1534,7 +1500,6 @@ async def test_catch_up_fires_nothing_on_a_client_node(store: ScheduleStore):
         daily_time_utc="08:00",
         prompt="daily summary",
         model="sonnet",
-        mode="bypass",
         chat_id=0,
         frequency="daily",
         timezone_name="UTC",
@@ -1564,7 +1529,6 @@ async def test_catch_up_on_a_client_node_leaves_persisted_run_state_alone(
         daily_time_utc="08:00",
         prompt="daily summary",
         model="sonnet",
-        mode="bypass",
         chat_id=0,
         frequency="daily",
         timezone_name="UTC",
@@ -1597,7 +1561,6 @@ async def test_catch_up_recovers_an_interrupted_run_on_a_host_node(
         daily_time_utc="08:00",
         prompt="daily summary",
         model="sonnet",
-        mode="bypass",
         chat_id=0,
         frequency="daily",
         timezone_name="UTC",
@@ -1627,7 +1590,6 @@ async def test_catch_up_without_a_node_callback_still_runs(store: ScheduleStore)
         daily_time_utc="08:00",
         prompt="daily summary",
         model="sonnet",
-        mode="bypass",
         chat_id=0,
         frequency="daily",
         timezone_name="UTC",
@@ -1721,7 +1683,6 @@ def _daily_entry(store: ScheduleStore, prompt: str = "daily summary"):
         daily_time_utc="08:00",
         prompt=prompt,
         model="sonnet",
-        mode="bypass",
         chat_id=0,
         frequency="daily",
         timezone_name="UTC",
@@ -1938,7 +1899,6 @@ async def test_a_run_crossing_midnight_belongs_to_the_slot_it_was_dispatched_for
         daily_time_utc="23:55",
         prompt="late night log",
         model="sonnet",
-        mode="bypass",
         chat_id=0,
         frequency="daily",
         timezone_name="UTC",
@@ -1979,7 +1939,6 @@ async def test_a_midnight_run_that_was_interrupted_recovers_its_own_slot(
         daily_time_utc="23:55",
         prompt="late night log",
         model="sonnet",
-        mode="bypass",
         chat_id=0,
         frequency="daily",
         timezone_name="UTC",
@@ -2019,7 +1978,6 @@ async def test_a_superseded_interval_run_does_not_restamp_the_entry(
         daily_time_utc="",
         prompt="poll",
         model="sonnet",
-        mode="bypass",
         chat_id=0,
         frequency="interval",
         interval_minutes=15,
@@ -2073,7 +2031,6 @@ def test_user_schedule_dispatch_identity_round_trips(tmp_path: Path) -> None:
         daily_time_utc="08:00",
         prompt="daily summary",
         model="sonnet",
-        mode="bypass",
         chat_id=0,
         frequency="daily",
     )
@@ -2204,7 +2161,6 @@ async def test_admission_closed_defers_every_entry_path_without_consuming(
         daily_time_utc="08:00",
         prompt="one-shot due during the claim",
         model="sonnet",
-        mode="bypass",
         chat_id=0,
         frequency="once",
         run_at_date="2026-06-15",
@@ -2214,7 +2170,6 @@ async def test_admission_closed_defers_every_entry_path_without_consuming(
         daily_time_utc="08:00",
         prompt="daily slot due during the claim",
         model="sonnet",
-        mode="bypass",
         chat_id=0,
         frequency="daily",
         timezone_name="UTC",
@@ -2223,7 +2178,6 @@ async def test_admission_closed_defers_every_entry_path_without_consuming(
         daily_time_utc="",
         prompt="interval due during the claim",
         model="sonnet",
-        mode="bypass",
         chat_id=0,
         frequency="interval",
         interval_minutes=15,
@@ -2272,3 +2226,38 @@ async def test_admission_closed_defers_every_entry_path_without_consuming(
     assert store.get(once.schedule_id) is None
     assert dispatched.count(interval.schedule_id) == 1
     assert dispatched.count(daily.schedule_id) == 1
+
+
+def test_schedule_entry_carries_no_permission_mode() -> None:
+    from dataclasses import fields
+
+    from ciao.schedules import ScheduleEntry
+
+    assert "mode" not in {f.name for f in fields(ScheduleEntry)}
+
+
+def test_a_stored_mode_key_is_ignored_on_load_and_dropped_on_the_next_write(
+    tmp_path: Path,
+) -> None:
+    """Rows saved before schedules lost their mode still load; the key goes on the next write."""
+    row = {
+        "schedule_id": "sched-legacy1",
+        "daily_time_utc": "09:00",
+        "prompt": "Old routine.",
+        "chat_id": 0,
+        "created_at": "2026-01-01T00:00:00Z",
+        "enabled": True,
+        "mode": "auto",
+    }
+    path = tmp_path / "schedules.json"
+    path.write_text(json.dumps({"schedules": [row]}), encoding="utf-8")
+    store = ScheduleStore(tmp_path)
+
+    current = store.get("sched-legacy1")
+    assert current is not None
+    # The edit path that keeps unknown stored keys, so the stale key is the test.
+    store.replace(dataclasses.replace(current, prompt="New routine."), base=current)
+
+    stored = json.loads(path.read_text(encoding="utf-8"))["schedules"][0]
+    assert "mode" not in stored
+    assert stored["prompt"] == "New routine."

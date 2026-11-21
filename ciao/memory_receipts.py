@@ -910,6 +910,9 @@ def commit_region_change(
                     "region": region,
                     "status": FAILED,
                     "error": str(exc),
+                    # Same operation as the prepared row it settles, or the effective
+                    # row (last row per id) loses its binding to the owning operation.
+                    **({"operation_id": operation_id} if operation_id else {}),
                 },
             )
         except Exception:  # noqa: BLE001 — recording must not mask the failure

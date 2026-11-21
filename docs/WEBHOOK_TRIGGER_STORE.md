@@ -299,8 +299,8 @@ created is an ordinary one the operator opens like any other.
 
 **An ordinary chat, with no escalation.** `ProjectChatManager.start_stream` is
 called as `start_stream(chat_id, prompt)` — the `unattended` flag is never
-named. That flag is what `_effective_mode_for_chat` turns into `bypass` for any
-non-plan chat, and a webhook does not set it. The chat is created like any new
+named. That flag marks a turn unattended, which makes the permission broker deny
+its approval requests, and a webhook does not set it. The chat is created like any new
 chat: its permission mode, model and provider are the operator's new-chat
 defaults from Settings (so a `bypass` default applies here too — a deliberate
 choice, one setting rather than a second per-trigger one), and an approval card raised in the
@@ -416,7 +416,7 @@ have taken.
   it was removed. A record still carrying `mode` is an unknown key, so a
   schema-1 store written before the removal reads as `corrupt_store`: delete
   `<runtime>/webhooks.json` and recreate its triggers. Dispatch never passes
-  `unattended`, so the forced-`bypass` path for automations does not apply.
+  `unattended`, so the unattended-run path for automations does not apply.
 - **Caller-supplied prompts.** `input_policy` is `event_text` only: fixed
   instructions plus bounded event text. A caller-prompt mode is a separately
   approved per-trigger choice, and payload URLs are never fetched.

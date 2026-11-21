@@ -485,9 +485,8 @@ async def test_start_stream_is_called_with_no_unattended_and_nothing_else(
 ) -> None:
     """The whole no-escalation property, asserted on the call itself.
 
-    ``ProjectChatManager._effective_mode_for_chat`` returns ``bypass`` for any
-    non-plan chat when ``unattended=True``, so a delegation that named it would run
-    a turn nobody could approve anything in. The recording fake pins the exact
+    ``unattended=True`` makes the permission broker deny every approval request,
+    so a delegation that named it would run a turn nobody could approve anything in. The recording fake pins the exact
     kwargs, so adding the flag later fails here rather than in production.
     """
     plane, pcm = _world(tmp_path)

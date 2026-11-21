@@ -115,14 +115,14 @@ async def test_stop_drops_a_claimed_notice_so_no_wake_follows(tmp_path: Path) ->
     manager._providers[chat.chat_id] = _ContinuingProvider()  # type: ignore[assignment]
 
     manager._note_shell_finished(chat.chat_id, _shell("call-1"))
-    assert manager._continuation_started(chat.chat_id) is not None
-    assert manager._claimed_notices[chat.chat_id] and chat.chat_id in manager._continuation_open
+    # The continuation claims the held notice (the session offers its ends; here none, the drain's held one).
+    assert manager._continuation_started(chat.chat_id, []) is not None
+    assert manager._claimed_notices[chat.chat_id]
 
     assert await asyncio.wait_for(manager.stop_chat(chat.chat_id), timeout=5) is False
 
     assert chat.chat_id not in manager._claimed_notices
-    assert chat.chat_id not in manager._continuation_open
-    assert chat.chat_id not in manager._continuation_at
+    assert chat.chat_id not in manager._claimed_shell_ids
     # The next late close finds nothing to adopt or deliver: no wake after Stop.
     assert manager._take_claimed_notice(chat.chat_id, adopt=False) is None
     assert manager._broker.get(chat.chat_id) is None

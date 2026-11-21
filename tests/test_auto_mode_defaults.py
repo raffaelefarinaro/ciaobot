@@ -30,13 +30,11 @@ def test_chat_info_default_mode_is_auto() -> None:
     assert chat.mode == "auto"
 
 
-def test_schedule_default_mode_inherits() -> None:
-    """A schedule pins no mode: "" resolves to the operator's per-provider pin
-    at dispatch, the same setting a hand-opened chat on that provider obeys.
+def test_schedule_stores_no_permission_mode() -> None:
+    """A schedule has no mode of its own. Its chat takes the operator's per-provider
+    default at dispatch, the same setting a hand-opened chat on that provider obeys.
 
-    It used to default to "auto", which is truthy and therefore an override,
-    not a default — a routine on a provider pinned to `bypass` still stamped
-    its chat `auto`, and the inheritance fallback behind it was dead code."""
+    A stored "auto" used to be an override that beat a workspace's `bypass`."""
     sched = ScheduleEntry(
         schedule_id="s1",
         daily_time_utc="09:00",
@@ -44,7 +42,7 @@ def test_schedule_default_mode_inherits() -> None:
         chat_id=0,
         created_at="2026-04-20T00:00:00Z",
     )
-    assert sched.mode == ""
+    assert not hasattr(sched, "mode")
 
 
 def test_bridge_config_default_claude_mode_is_auto() -> None:
@@ -72,12 +70,11 @@ def test_config_ignores_legacy_mode_env() -> None:
 def test_schedule_chat_is_stamped_with_the_providers_pinned_mode(tmp_path) -> None:
     """The end of the chain the empty default unblocks.
 
-    A routine chat is created with the entry's mode, so a hardcoded "auto" on
-    the entry was stamped onto the chat and the operator's Settings -> Models & providers
-    pin never applied. The chat then disagreed with its own unattended run
-    (which `_effective_mode_for_chat` forces to bypass), and on opencode a reply
-    to that chat rotated the session — a session's permission rules are fixed
-    when it is created.
+    A routine chat is created with the provider default, so the operator's
+    Settings -> Models & providers pin applies. The chat then keeps that mode on
+    its unattended run and on the user's reply; on opencode a changed mode would
+    rotate the session, because a session's permission rules are fixed when it is
+    created.
     """
     from ciao.sessions import StateStore
     from ciao.transcripts import TranscriptStore

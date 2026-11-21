@@ -775,6 +775,20 @@ def _render_acp_journal(
     for record in records:
         kind = record.get("type")
         parent = record.get("parent_tool_use_id")
+        if kind == "user" and record.get("turn_origin"):
+            # A turn the engine recorded on its own (a claimed shell notice, before the
+            # provider's continuation reply): its notice card, not a user turn. It takes no
+            # user index, and it ends the reply before it, so that reply is its own answer.
+            flush_text()
+            flush_tools()
+            notice = str(record.get("text") or "").strip()
+            if notice:
+                result.append({
+                    "role": "system",
+                    "content": notice,
+                    "origin": str(record["turn_origin"]),
+                })
+            continue
         if kind == "user":
             flush_text()
             flush_tools()

@@ -1236,6 +1236,123 @@ def test_schedule_update_rejects_chat_binding(tmp_path: Path) -> None:
     assert stored.web_chat_id is None
 
 
+def test_schedule_create_refuses_a_mode_instead_of_dropping_it(tmp_path: Path) -> None:
+    """A schedule has no permission mode, so naming one is refused, never silently run at the default."""
+    control_plane, schedules = _schedule_control_plane(tmp_path, _work_project_pcm())
+
+    with pytest.raises(ControlPlaneError) as excinfo:
+        control_plane.schedule_create(
+            _chat_create_principal(project_id="project-work", workspace="work"),
+            prompt="Check for new signals.",
+            daily_time="09:00",
+            frequency="weekly",
+            mode="bypass",
+        )
+
+    assert excinfo.value.code == "invalid_fields"
+    assert schedules.list_entries() == []
+
+
+def test_schedule_update_refuses_a_mode(tmp_path: Path) -> None:
+    control_plane, schedules = _schedule_control_plane(tmp_path, _work_project_pcm())
+    principal = _chat_create_principal(project_id="project-work", workspace="work")
+    result = control_plane.schedule_create(
+        principal,
+        prompt="Check for new signals.",
+        daily_time="09:00",
+        frequency="weekly",
+    )
+
+    with pytest.raises(ControlPlaneError) as excinfo:
+        control_plane.schedule_update(principal, result["data"]["schedule_id"], mode="bypass")
+
+    assert excinfo.value.code == "invalid_fields"
+    assert "mode" not in result["data"]
+
+
+def test_agent_routine_text_edit_leaves_no_mode_behind(tmp_path: Path) -> None:
+    """An agent rewriting a routine's text used to pin the caller's ceiling into it. Now it pins nothing."""
+    control_plane, schedules = _schedule_control_plane(tmp_path, _work_project_pcm())
+    principal = _chat_create_principal(project_id="project-work", workspace="work")
+    created = control_plane.schedule_create(
+        principal, prompt="Check for new signals.", daily_time="09:00", frequency="weekly",
+    )
+
+    control_plane.schedule_update(principal, created["data"]["schedule_id"], prompt="New text.")
+
+    stored = schedules.list_entries()[0]
+    assert stored.prompt == "New text."
+    assert not hasattr(stored, "mode")
+
+
+def _plan_gate_routine(tmp_path: Path):
+    """A routine created by an auto chat, plus the pcm whose chat mode a test can flip."""
+    pcm = _work_project_pcm()
+    control_plane, schedules = _schedule_control_plane(tmp_path, pcm)
+    principal = _chat_create_principal(project_id="project-work", workspace="work")
+    created = control_plane.schedule_create(
+        principal, prompt="Check for new signals.", daily_time="09:00", frequency="weekly",
+    )
+    return pcm, control_plane, schedules, principal, created["data"]["schedule_id"]
+
+
+def test_plan_caller_cannot_create_a_routine(tmp_path: Path) -> None:
+    """A plan chat is read-only; a routine would run later in the workspace default mode."""
+    pcm = _work_project_pcm()
+    pcm.parent_mode = "plan"
+    control_plane, schedules = _schedule_control_plane(tmp_path, pcm)
+
+    with pytest.raises(ControlPlaneError) as excinfo:
+        control_plane.schedule_create(
+            _chat_create_principal(project_id="project-work", workspace="work"),
+            prompt="Check for new signals.", daily_time="09:00", frequency="weekly",
+        )
+
+    assert excinfo.value.code == "schedule_requires_operator"
+    assert schedules.list_entries() == []
+
+
+@pytest.mark.parametrize(
+    "changes",
+    [{"prompt": "New text."}, {"enabled": False}, {"provider": "opencode"}],
+)
+def test_plan_caller_cannot_change_a_routines_run(tmp_path: Path, changes: dict) -> None:
+    pcm, control_plane, schedules, principal, schedule_id = _plan_gate_routine(tmp_path)
+    before = schedules.list_entries()[0]
+    pcm.parent_mode = "plan"
+
+    with pytest.raises(ControlPlaneError) as excinfo:
+        control_plane.schedule_update(principal, schedule_id, **changes)
+
+    assert excinfo.value.code == "schedule_requires_operator"
+    assert schedules.list_entries()[0] == before
+
+
+@pytest.mark.parametrize("mode", ["normal", "auto", "bypass"])
+def test_non_plan_callers_may_change_a_routines_prompt(tmp_path: Path, mode: str) -> None:
+    pcm, control_plane, schedules, principal, schedule_id = _plan_gate_routine(tmp_path)
+    pcm.parent_mode = mode
+
+    control_plane.schedule_update(principal, schedule_id, prompt="New text.")
+
+    assert schedules.list_entries()[0].prompt == "New text."
+
+
+def test_plan_caller_may_still_change_pure_metadata(tmp_path: Path) -> None:
+    pcm, control_plane, schedules, principal, schedule_id = _plan_gate_routine(tmp_path)
+    pcm.parent_mode = "plan"
+
+    updated = control_plane.schedule_update(
+        principal, schedule_id, title="Renamed", description="Weekly check.", daily_time="10:00",
+    )
+
+    stored = schedules.list_entries()[0]
+    assert stored.title == "Renamed"
+    assert stored.description == "Weekly check."
+    assert stored.daily_time_utc == "10:00"
+    assert updated["data"]["title"] == "Renamed"
+
+
 # ── workspace boundary for schedule targeting ────────────────────────────
 #
 # MCP tokens are scoped to one workspace, and a schedule is auto-approved
@@ -1367,7 +1484,7 @@ def test_schedule_update_rejects_moving_an_entry_to_another_workspace(
     """Refused even when the move names a real project in the destination."""
     control_plane, schedules = _schedule_control_plane(tmp_path, _work_project_pcm())
     entry = schedules.create(
-        daily_time_utc="09:00", prompt="p", model="", mode="auto",
+        daily_time_utc="09:00", prompt="p", model="",
         chat_id=0, workspace="personal",
         web_project_id="project-1", web_project_name="Ciaobot Improvements",
     )
@@ -1390,7 +1507,7 @@ def test_schedule_update_rejects_a_bare_move_and_keeps_the_bindings(
 ) -> None:
     control_plane, schedules = _schedule_control_plane(tmp_path, _work_project_pcm())
     entry = schedules.create(
-        daily_time_utc="09:00", prompt="p", model="", mode="auto",
+        daily_time_utc="09:00", prompt="p", model="",
         chat_id=0, workspace="personal",
         web_chat_id="chat-1",
         web_project_id="project-1", web_project_name="Ciaobot Improvements",
@@ -1413,7 +1530,7 @@ def test_schedule_update_restating_the_current_workspace_still_works(
     """A restated workspace is not a move: run bindings survive untouched."""
     control_plane, schedules = _schedule_control_plane(tmp_path, _work_project_pcm())
     entry = schedules.create(
-        daily_time_utc="09:00", prompt="p", model="", mode="auto",
+        daily_time_utc="09:00", prompt="p", model="",
         chat_id=0, workspace="personal",
         web_project_id="project-1", web_project_name="Ciaobot Improvements",
     )
@@ -1436,7 +1553,7 @@ def test_schedule_update_rejects_unregistered_and_foreign_names_alike(
 ) -> None:
     control_plane, schedules = _schedule_control_plane(tmp_path, _work_project_pcm())
     entry = schedules.create(
-        daily_time_utc="09:00", prompt="p", model="", mode="auto",
+        daily_time_utc="09:00", prompt="p", model="",
         chat_id=0, workspace="personal",
     )
 
@@ -2451,7 +2568,7 @@ def test_schedule_update_to_a_project_clears_a_legacy_chat_binding(
     """
     control_plane, schedules = _schedule_control_plane(tmp_path, _work_project_pcm())
     entry = schedules.create(
-        daily_time_utc="09:00", prompt="p", model="", mode="auto",
+        daily_time_utc="09:00", prompt="p", model="",
         chat_id=0, workspace="personal",
         web_chat_id="chat-1",
         web_project_id="project-1", web_project_name="Ciaobot Improvements",

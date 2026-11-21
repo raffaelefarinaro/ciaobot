@@ -207,7 +207,6 @@ def test_failed_dispatch_stamps_last_status_on_the_row(tmp_path: Path) -> None:
         daily_time_utc="08:00",
         prompt="brief",
         model="opus",
-        mode="auto",
         chat_id=0,
         frequency="daily",
         web_chat_id=chat.chat_id,
@@ -241,7 +240,6 @@ def test_later_clean_run_clears_the_error_stamp(tmp_path: Path) -> None:
         daily_time_utc="08:00",
         prompt="brief",
         model="opus",
-        mode="auto",
         chat_id=0,
         frequency="daily",
         web_chat_id=chat.chat_id,
@@ -271,7 +269,6 @@ def test_successful_dispatch_does_not_stamp_last_status(tmp_path: Path) -> None:
         daily_time_utc="08:00",
         prompt="brief",
         model="opus",
-        mode="auto",
         chat_id=0,
         frequency="daily",
         web_chat_id=chat.chat_id,
@@ -307,7 +304,6 @@ def test_skipped_dispatch_stamps_last_status_on_the_row(tmp_path: Path) -> None:
         daily_time_utc="08:00",
         prompt="brief",
         model="opus",
-        mode="auto",
         chat_id=0,
         frequency="daily",
         web_chat_id=chat.chat_id,
@@ -337,7 +333,7 @@ def _retry_dispatch(tmp_path: Path, kind: str) -> tuple[dict, object]:
     project = pcm.create_project("Holder", workspace="personal")
     chat = pcm.create_chat(project.project_id, title="Daily brief", model="opus")
     entry = store.create(
-        daily_time_utc="08:00", prompt="brief", model="opus", mode="auto",
+        daily_time_utc="08:00", prompt="brief", model="opus",
         chat_id=0, frequency="daily", web_chat_id=chat.chat_id, workspace="personal",
     )
     chat.retry_status = "pending"
@@ -373,7 +369,7 @@ def _retrying_row(pcm, store, dispatch_id: str = "2026-06-15#abc"):
     project = pcm.create_project("Holder", workspace="personal")
     chat = pcm.create_chat(project.project_id, title="Daily brief", model="opus")
     entry = store.create(
-        daily_time_utc="08:00", prompt="brief", model="opus", mode="auto",
+        daily_time_utc="08:00", prompt="brief", model="opus",
         chat_id=0, frequency="daily", web_chat_id=chat.chat_id, workspace="personal",
     )
     entry.last_status = "retrying"
@@ -512,7 +508,6 @@ def test_health_stamp_publishes_schedules_changed(tmp_path: Path) -> None:
         daily_time_utc="08:00",
         prompt="brief",
         model="opus",
-        mode="auto",
         chat_id=0,
         frequency="daily",
         web_chat_id=chat.chat_id,
@@ -554,7 +549,6 @@ def test_rehomed_wall_clock_replacement_keeps_the_dispatch_provider(
         daily_time_utc="08:00",
         prompt="brief",
         model="opus",
-        mode="auto",
         chat_id=0,
         frequency="daily",
         web_chat_id=chat.chat_id,
@@ -600,7 +594,6 @@ def test_a_superseded_run_does_not_restamp_the_current_dispatch(
         daily_time_utc="08:00",
         prompt="brief",
         model="opus",
-        mode="auto",
         chat_id=0,
         frequency="daily",
         web_chat_id=chat.chat_id,
@@ -643,7 +636,6 @@ def test_a_superseded_run_still_credits_the_slot_it_completed(
         daily_time_utc="08:00",
         prompt="brief",
         model="opus",
-        mode="auto",
         chat_id=0,
         frequency="daily",
         web_chat_id=chat.chat_id,
