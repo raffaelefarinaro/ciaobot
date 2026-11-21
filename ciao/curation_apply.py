@@ -100,6 +100,10 @@ REFUSED_NO_OPERATION = "the accept has no operation id or holder"
 REFUSED_REGISTRY = "the installed engine does not register this workspace at this vault"
 REFUSED_HANDOVER = "the workspace handover does not allow an accept"
 REFUSED_APPROVAL = "this kind needs your approval in Settings; it stays queued"
+REFUSED_WITHDRAWN = (
+    "the setting no longer allows this kind; the fact is already in the guide "
+    "and can be undone from History"
+)
 REFUSED_KIND = "only [memory] and [profile] rows can be handed over"
 REFUSED_DECIDE_YOU = "the row is marked decide: you"
 REFUSED_GONE = "the row is no longer queued"
@@ -631,12 +635,17 @@ def apply_memory_accept(intent: ManagedMemoryAcceptIntent, *, vault_root: Path) 
     # passed the first check is caught by the re-read under the lock.
     recorded = False
     prior_receipt: str | None = None
+    withdrawn = False
     try:
         with queue_lock(queue), authorize_holder(vault, holder=intent.holder) as live:
             prior = _decision_for(queue, intent.operation_id)
             if prior is not None:
                 prior_receipt = str(prior.get("receipt_id", ""))
                 recorded = True
+            elif live and _accept_refusal(vault, intent.workspace, bullet.kind):
+                # The operator withdrew consent for this kind after the region
+                # write: no decision, no progress key. The receipts stay undoable.
+                withdrawn = True
             elif live:
                 recorded = bool(
                     record_promotion(
@@ -657,6 +666,8 @@ def apply_memory_accept(intent: ManagedMemoryAcceptIntent, *, vault_root: Path) 
                 )
     except Exception:  # noqa: BLE001 — an unrecorded decision is finished by the replay
         recorded = False
+    if withdrawn:
+        return Failed(REFUSED_WITHDRAWN)
     if not recorded:
         return Failed(FAILED_DECISION)
     failure = _progress(vault, intent)
@@ -745,6 +756,11 @@ def resume_memory_accept(
     policy for the receipt's kind, the live lease held by ``holder``, and the cap
     are read here, as a new accept reads them; :func:`apply_memory_accept` then finishes the operation's
     missing decision or progress key under its own checks.
+
+    Decision: once the region write has landed and the operator's policy for the
+    kind forbids it, resume refuses and does not finish the bookkeeping. The
+    operator withdrew consent; the fact stays in the guide and the receipt
+    journal keeps it undoable from History.
     """
     vault = Path(vault_root)
     queue = vault / PROPOSALS_RELATIVE
@@ -754,9 +770,11 @@ def resume_memory_accept(
     kind = str(receipt.get("proposal_kind", ""))
     if kind not in REGION_KINDS:
         return Refused(REFUSED_KIND)
-    refusal = _accept_refusal(vault, workspace, kind)
-    if refusal:
-        return Refused(refusal)
+    if _accept_refusal(vault, workspace, kind):
+        # A queue receipt exists only after the region write, so the fact is in
+        # the guide. A withdrawn setting leaves it there, undoable, and finishes
+        # nothing else.
+        return Refused(REFUSED_WITHDRAWN)
     try:
         lease = active_lease(vault)
     except CurationStateError:

@@ -1361,7 +1361,7 @@ def test_a_resume_is_refused_when_the_operator_flips_the_kind_to_approve(install
 
     assert apply.resume_memory_accept(
         install.vault, workspace="work", holder=holder, receipt=receipt
-    ) == apply.Refused(apply.REFUSED_APPROVAL)
+    ) == apply.Refused(apply.REFUSED_WITHDRAWN)
     assert cli.main(argv) == 1
     assert _state_of(install) == before
     assert _owned_decisions(install, receipt["operation_id"]) == []
@@ -1385,7 +1385,7 @@ def test_a_resume_is_refused_under_legacy_off_without_an_explicit_choice(install
 
     assert apply.resume_memory_accept(
         install.vault, workspace="work", holder=holder, receipt=receipt
-    ) == apply.Refused(apply.REFUSED_HANDOVER)
+    ) == apply.Refused(apply.REFUSED_WITHDRAWN)
     assert cli.main(argv) == 1
 
 
@@ -1417,3 +1417,26 @@ def test_a_resume_with_an_unknown_receipt_kind_is_refused(install, monkeypatch, 
         install.vault, workspace="work", holder=holder, receipt=receipt
     ) == apply.Refused(apply.REFUSED_KIND)
     assert _state_of(install) == before
+
+
+def test_a_policy_withdrawn_between_the_resume_check_and_the_decision_writes_no_decision(
+    install, monkeypatch, tmp_path
+) -> None:
+    """The decision write re-reads the kind's policy; a withdrawal after the entry check stops it."""
+    holder, _argv = _crashed_accept(install, monkeypatch, tmp_path)
+    receipt = _receipts_of(install, "queue_resolve")[0]
+    guide_before = install.guide.read_bytes()
+    real_verify = apply._verify_region
+
+    def withdraw_then_verify(*args, **kwargs):
+        _set_policy(install, handover="all", approval={"memory": "approve"})
+        return real_verify(*args, **kwargs)
+
+    monkeypatch.setattr(apply, "_verify_region", withdraw_then_verify)
+
+    result = apply.resume_memory_accept(install.vault, workspace="work", holder=holder, receipt=receipt)
+
+    assert result == apply.Failed(apply.REFUSED_WITHDRAWN)
+    assert _owned_decisions(install, receipt["operation_id"]) == []
+    assert receipt["item_key"] not in curation_run.load_state(install.vault).done_keys
+    assert install.guide.read_bytes() == guide_before
