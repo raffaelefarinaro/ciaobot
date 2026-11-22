@@ -101,14 +101,15 @@ pre code { background: none; border: 0; padding: 0; }
 .brand {
   display: flex;
   align-items: center;
-  gap: 10px;
+  gap: 0;
   color: var(--text);
   text-decoration: none;
   font-weight: 700;
   letter-spacing: -0.02em;
   font-size: 18px;
 }
-.brand img { display: block; width: 112px; height: auto; }
+.brand img { display: block; width: 90px; height: auto; }
+.brand-c { display: block; width: 20px; height: 20px; flex: none; margin-right: 1px; overflow: visible; color: var(--text); cursor: pointer; }
 .site-nav { display: flex; gap: 4px; flex-wrap: wrap; margin-left: auto; }
 .site-nav a {
   color: var(--muted);
@@ -663,7 +664,7 @@ td a code, .pill-list a { color: var(--primary); }
 .pill-list a:hover { text-decoration: underline; }
 
 /* Header: wordmark per theme, and the theme toggle */
-.brand img { width: 112px; height: auto; }
+.brand img { width: 90px; height: auto; }
 .wm-on-light { display: none !important; }
 @media (prefers-color-scheme: light) { :root:not([data-theme="dark"]) .wm-on-light { display: block !important; } :root:not([data-theme="dark"]) .wm-on-dark { display: none !important; } }
 :root[data-theme="light"] .wm-on-light { display: block !important; }
