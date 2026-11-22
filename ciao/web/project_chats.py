@@ -5555,6 +5555,33 @@ class ProjectChatManager:
             chat_id, outcome, chat_meta, project_meta, focus
         )
 
+    def capture_for_enqueue(
+        self,
+        chat_id: str,
+        path: Path,
+        turn_count: int,
+        workspace: str,
+        focus: dict[str, str] | None,
+    ) -> None:
+        """Write the capture for a pass enqueued on an already-archived chat (#3239-c3b).
+
+        The approved-task path enqueues directly for a chat archived earlier, so no
+        archive runs the capture for it. Reuses the archive's ``_capture_archive``
+        unchanged; best-effort, so it never fails the approval or the enqueue.
+        """
+        try:
+            vault_root = self._workspace_vault_root(workspace)
+        except Exception:  # noqa: BLE001 — the approval already succeeded
+            logger.exception("Failed to resolve the vault for the capture of %s", chat_id)
+            return
+        self._archive_pipeline_for()._capture_archive(
+            chat_id,
+            ArchiveOutcome(path=path, turn_count=turn_count),
+            workspace,
+            vault_root,
+            focus,
+        )
+
 
     def _make_archive_index_operation(
         self, outcome: ArchiveOutcome

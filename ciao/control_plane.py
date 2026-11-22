@@ -4546,6 +4546,16 @@ class CiaoControlPlane:
                         path = Path(archive_path)
                         if not path.is_absolute():
                             path = Path(self.config.workspace_root) / path
+                        # The capture lands before the pass it describes, off the
+                        # loop (the vault may be a stalled mount), and is best-effort.
+                        await asyncio.to_thread(
+                            self.pcm.capture_for_enqueue,
+                            attempt.chat_id,
+                            path,
+                            int(getattr(chat, "user_turn_count", 0) or 0),
+                            workspace,
+                            focus,
+                        )
                         self.pcm.enqueue_memory_pass(
                             chat, project, path,
                             project.vault_doc_path if project is not None and not project.is_auto else "",
