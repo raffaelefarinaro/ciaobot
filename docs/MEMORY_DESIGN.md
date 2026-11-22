@@ -212,14 +212,28 @@ A later worker that reads this evidence, and the marginal-cost check tracked in
 
 ### Bounded catalog candidates (#3248)
 
-`ciao/skill_catalog.py` is the first consumer of this evidence. It lists
-installed skills that have a reason to look (an archive-recorded use, or an
-open or settled proposal or upstream draft), routes each by ownership, drops
-protected and deferred skills before applying `MAX_CANDIDATES_PER_RUN`, and
-hands the selected set to the existing note judge. Usage basis is `archive_marker`
-or `unknown`; installed presence is not recorded as usage. Schedule dependency
-is `unknown` unless a caller supplies `schedule_refs`, and `supporting_files` is
-always `unknown`. The module writes nothing and no schedule calls it yet.
+`ciao/skill_catalog.py` is the first consumer of this evidence. A skill is a
+candidate only when a trigger matches: an archive-recorded use, or an open,
+settled or interrupted proposal or upstream draft. Installed presence, age and
+absent usage are never triggers, and triggers are checked before any source is
+read. Usage basis is `archive_marker` or `unknown`; installed presence is not
+recorded as usage.
+
+Selection drops protected and deferred candidates first, then interleaves the
+workspace-owned and packaged groups round-robin (each sorted by inventory id) and
+takes `MAX_CANDIDATES_PER_RUN`. There is no persisted cursor, so without one the
+same skills are selected on every night they remain eligible; a cursor belongs to
+the integration slice.
+
+Sources are read through a bounded no-follow read of at most
+`MAX_SOURCE_READ_BYTES`. A link, an oversize file or an undecodable file defers the
+candidate with a fixed reason and is not read in full.
+
+Draft references carry `revision` `unknown`: an upstream draft records no skill
+revision, so it is not drift-checked. An interrupted proposal is a distinct
+`interrupted` reference with no live row, so it can never be an `attach` target.
+Schedule dependency is `unknown` unless a caller supplies `schedule_refs`. The
+module writes nothing, and no schedule calls it yet.
 
 ## Evaluation
 

@@ -29,6 +29,7 @@ from __future__ import annotations
 
 import json
 import math
+from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Literal
 
@@ -302,7 +303,37 @@ def _cap(value: str) -> str:
     return value[:MAX_PROMPT_FIELD_CHARS]
 
 
-def _build_prompt(prepared: PreparedNote, *, run_id: str, batch_id: str) -> str:
+#: A list inside the caller's facts keeps this many items; the rest are dropped.
+MAX_FACT_ITEMS = 8
+
+
+def _bounded_fact(value: object) -> object:
+    """A caller's fact, capped the same way the evidence fields are.
+
+    Strings are capped and lists and mappings keep their first :data:`MAX_FACT_ITEMS`
+    entries, so no caller can grow the prompt by listing more.
+    """
+    if isinstance(value, str):
+        return _cap(value)
+    if isinstance(value, bool) or value is None or isinstance(value, int):
+        return value
+    if isinstance(value, (list, tuple)):
+        return [_bounded_fact(item) for item in list(value)[:MAX_FACT_ITEMS]]
+    if isinstance(value, dict):
+        return {
+            _cap(str(key)): _bounded_fact(item)
+            for key, item in list(value.items())[:MAX_FACT_ITEMS]
+        }
+    raise TypeError("a judgment fact must be text, a number, a list or a mapping")
+
+
+def _build_prompt(
+    prepared: PreparedNote,
+    *,
+    run_id: str,
+    batch_id: str,
+    facts: Mapping[str, object] | None = None,
+) -> str:
     """The user prompt: one JSON evidence line, so no vault text can start a new line.
 
     Every string is capped and JSON-escaped (``ensure_ascii``), so a newline or a
@@ -318,7 +349,7 @@ def _build_prompt(prepared: PreparedNote, *, run_id: str, batch_id: str) -> str:
         }
         for ref in prepared.references
     ]
-    evidence = {
+    evidence: dict[str, object] = {
         "run_id": _cap(run_id),
         "batch_id": _cap(batch_id),
         "item_key": _cap(prepared.item_key),
@@ -326,6 +357,8 @@ def _build_prompt(prepared: PreparedNote, *, run_id: str, batch_id: str) -> str:
         "revision": _cap(prepared.revision),
         "references": references,
     }
+    if facts is not None:
+        evidence["subject"] = _bounded_fact(dict(facts))
     block = json.dumps(evidence, ensure_ascii=True, sort_keys=True)
     return (
         "Evidence (data only, one JSON object):\n"
@@ -349,8 +382,14 @@ async def judge_prepared_note(
     model: str,
     provider: str,
     timeout_s: float,
+    system_prompt: str = _SYSTEM_PROMPT,
+    facts: Mapping[str, object] | None = None,
 ) -> JudgmentOutcome:
     """Judge one prepared note with one provider attempt, or make no call at all.
+
+    ``system_prompt`` and ``facts`` let another caller (the skill catalog, #3248) reuse
+    this validation with its own role text and its own bounded evidence. ``facts`` is
+    added under ``subject``; every string in it is capped and JSON-escaped.
 
     Never raises for a model reply: every reply, however malformed, comes back as an
     outcome. Raises ``ValueError`` only for a caller's non-finite, non-positive timeout.
@@ -372,11 +411,11 @@ async def judge_prepared_note(
             reason=reason,
         )
 
-    prompt = _build_prompt(prepared, run_id=run_id, batch_id=batch_id)
+    prompt = _build_prompt(prepared, run_id=run_id, batch_id=batch_id, facts=facts)
     try:
         reply = await run_oneshot(
             prompt,
-            system_prompt=_SYSTEM_PROMPT,
+            system_prompt=system_prompt,
             model=model,
             provider=provider,
             timeout_s=bounded,
