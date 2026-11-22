@@ -404,7 +404,7 @@ def test_corruption_blocks_all_core_mutators_before_state_or_marker_writes(
     with pytest.raises(cr.CurationStateError):
         cr.end_run(vault, advance_marker=True)
     with pytest.raises(cr.CurationStateError):
-        cr.advance_full_pass(vault)
+        cr.end_run(vault, advance_marker=True)
 
     assert path.read_bytes() == state_before
     assert log.read_bytes() == log_before

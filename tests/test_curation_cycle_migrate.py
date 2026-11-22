@@ -224,24 +224,6 @@ def test_progress_functions_round_trip_a_v2_file_and_keep_the_cycle_fields(tmp_p
     assert decoded.last_run["planned"] == 3
 
 
-def test_advance_full_pass_refuses_a_v2_state_and_changes_nothing(tmp_path: Path) -> None:
-    vault = _vault(tmp_path)
-    _put_log(vault)
-    before = _put_state(
-        vault,
-        cc.encode_state(
-            _cycle(required={cr.HYGIENE_INDEX_KEY: "2026-11-17", cr.HYGIENE_AUDIT_KEY: "2026-11-17"})
-        ),
-    )
-    before_log = (vault / cr.CURATION_LOG_RELATIVE).read_bytes()
-
-    with pytest.raises(cr.CurationStateError):
-        cr.advance_full_pass(vault, today=TODAY)
-
-    assert cr.state_path(vault).read_bytes() == before
-    assert (vault / cr.CURATION_LOG_RELATIVE).read_bytes() == before_log
-
-
 def test_scan_vault_ignores_the_migration_backup(tmp_path: Path) -> None:
     vault, before = _migratable(tmp_path)
     (vault / "People").mkdir()

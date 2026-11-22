@@ -66,7 +66,8 @@ curation_logs.publish_log = announcing_publish
 if operation == "append":
     cr.append_log(vault, holder=holder, log="curation", payload=b"technical report")
 elif operation == "marker":
-    cr.advance_full_pass(vault, today=date(2026, 9, 19))
+    with cr._state_lock(vault):
+        cr._write_full_pass_marker(vault, today=date(2026, 9, 19))
 else:
     raise SystemExit(f"unknown operation {operation}")
 sys.stdout.write("done\n")

@@ -72,7 +72,6 @@ LEARNINGS_RELATIVE = "Workspace/Learnings.md"
 SKILL_PROPOSALS_RELATIVE = "/".join(skill_proposals.QUEUE_REL)
 
 STATE_VERSION = 1
-_ADVANCE_CYCLE_REFUSAL = "a cycle state advances its weekly marker through end_run, not advance_full_pass"
 _TRANSITION_NEEDS_OPERATOR = (
     "an interrupted weekly marker transition cannot be settled automatically; check "
     "Workspace/Curation-Log.md and Workspace/Curation-State.json before running again"
@@ -2792,31 +2791,6 @@ def hygiene_complete(vault_root: Path) -> bool:
     """Whether both required weekly checks are recorded as done."""
     done = set(load_state(vault_root).done_keys)
     return REQUIRED_HYGIENE_KEYS <= done
-
-
-def advance_full_pass(
-    vault_root: Path,
-    *,
-    today: date | None = None,
-) -> bool:
-    """Stamp ``last_full_pass`` — but only when both weekly checks succeeded.
-
-    The skill already said the marker may only advance after a reliable index
-    refresh and audit; saying it is not enforcing it, and a run that reported a
-    scan error and stamped anyway made the weekly pass silently skip a week.
-    Returns False and leaves the marker alone when either check is missing.
-
-    Ownership-blind on purpose: this is the standalone entry point. The nightly
-    CLI goes through ``end_run(advance_marker=True)`` instead, which stamps the
-    marker only after it has confirmed the caller still holds the lease.
-    """
-    with _state_lock(Path(vault_root)):
-        if _load(state_path(Path(vault_root))).cycle is not None:
-            raise CurationStateError(_ADVANCE_CYCLE_REFUSAL)
-        if not _hygiene_complete_unlocked(Path(vault_root)):
-            return False
-        _write_full_pass_marker(Path(vault_root), today=today)
-        return True
 
 
 def _hygiene_complete_unlocked(vault_root: Path) -> bool:
