@@ -312,8 +312,19 @@ agent-driven run does not have. `environment_sha256` stays null, so comparisons 
 The orchestrator (`ciao/care_eval_scenario.py`) sequences one `nightly` or `weekly_due` run:
 it verifies the seed on disk against the manifest, triggers the system schedule through the
 driver, observes and grades only a settled run, and returns the record. It never boots or
-stops an engine and never calls a model. `budget_continuation` is refused until decision D1.
-Weekly index and audit results stay unknown, so a weekly run cannot pass its marker obligation.
+stops an engine and never calls a model. Weekly index and audit results stay unknown, so a
+weekly run cannot pass its marker obligation.
+
+`budget_continuation` (decision D1) is two attributable scheduled runs, `run_continuation`.
+Attempt 1 must settle with work left: the curation cursor is read twice and both reads must
+agree, and the last run must report deferred work. Attempt 1 is never graded or published.
+Attempt 2 must settle under its own run id, add cursor keys, and leave the attempt-1 keys
+without any applied effect under its run id, which shows it resumed rather than restarted.
+Only attempt 2 is graded, through the same oracle path. Any other outcome (attempt 1 not
+settled or complete early, cursor unreadable or unstable, attempt 2 not settled, superseded
+or timed out, no new work, a restart, an unverifiable resume) returns `Unavailable` with a
+fixed reason and no record. Effect-count obligations stay unknown until the item keys are
+bound to the seed's symbolic expectations; the record's wall time is attempt 2's own.
 
 The usage projection (`ciao/care_usage.py`) is a separate, pure collector for
 attributable care model-call usage; it does not replace `collect_usage`, which folds absent
