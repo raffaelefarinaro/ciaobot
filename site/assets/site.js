@@ -78,17 +78,16 @@
   });
 })();
 
-// The home page mark: as the visitor scrolls, the C spins and its two dots
-// glide onto its open ends and spread like clay until the ring is closed.
-// Reduced motion keeps the static mark. Geometry matches web/src/components/CiaoMark.vue.
-(function () {
-  var stage = document.querySelector('[data-ring-scroll]');
-  if (!stage) return;
-  var spin = stage.querySelector('[data-ring-spin]');
-  var segA = stage.querySelector('[data-ring-a]');
-  var segB = stage.querySelector('[data-ring-b]');
-  var dotA = stage.querySelector('[data-dot-a]');
-  var dotB = stage.querySelector('[data-dot-b]');
+// The Ciaobot mark: the C spins and its two dots glide onto its open ends and
+// spread like clay until the ring is closed. createRing(root) returns draw(p)
+// for p in 0..1; the home hero drives it from the scroll, the header C from hover.
+// Geometry matches web/src/components/CiaoMark.vue.
+function createRing(root, dotsFadeIn) {
+  var spin = root.querySelector('[data-ring-spin]');
+  var segA = root.querySelector('[data-ring-a]');
+  var segB = root.querySelector('[data-ring-b]');
+  var dotA = root.querySelector('[data-dot-a]');
+  var dotB = root.querySelector('[data-dot-b]');
   var CX = 630, CY = 616, R = 295, A0 = -72.48, A1 = 62.0, MEET = (A0 + A1) / 2;
   var DA = { a: -48.4, d: 361, r: 91 }, DB = { a: 38.3, d: 297, r: 56 };
   function rad(d) { return d * Math.PI / 180; }
@@ -101,8 +100,8 @@
   function clamp(t) { return Math.max(0, Math.min(1, t)); }
   function smooth(t) { t = clamp(t); return t * t * (3 - 2 * t); }
   function inOut(t) { return t < 0.5 ? 4 * t * t * t : 1 - Math.pow(-2 * t + 2, 3) / 2; }
-  var LAND = 0.35; // share of the scroll spent landing the dots on the C's ends
-  function draw(p) {
+  var LAND = 0.35; // share of the motion spent landing the dots on the C's ends
+  return function draw(p) {
     // 1. Each dot glides onto its end of the C and settles to the stroke's width.
     var land = smooth(p / LAND);
     // 2. Then it pushes back out along the opening, spreading into the ring
@@ -112,6 +111,8 @@
     var tipA = A0 + (MEET - A0) * grow, tipB = A1 + (MEET - A1) * grow;
     segA.setAttribute('d', grow > 0 ? arc(A0, tipA) : '');
     segB.setAttribute('d', grow > 0 ? arc(tipB, A1) : '');
+    // The header C is a plain letter at rest; its dots appear as the motion starts.
+    var seen = dotsFadeIn ? smooth(p / 0.12) : 1;
     [[DA, dotA, A0, tipA], [DB, dotB, A1, tipB]].forEach(function (d) {
       var dot = d[0], el = d[1];
       var ang = grow > 0 ? d[3] : lerp(dot.a, d[2], land);
@@ -119,33 +120,61 @@
       el.setAttribute('cx', CX + dist * Math.cos(rad(ang)));
       el.setAttribute('cy', CY + dist * Math.sin(rad(ang)));
       el.setAttribute('r', lerp(dot.r, 55, land));
+      el.setAttribute('opacity', seen);
     });
     spin.setAttribute('transform', 'rotate(' + (360 * inOut(p)) + ' ' + CX + ' ' + CY + ')');
-  }
-  var reduce = window.matchMedia('(prefers-reduced-motion: reduce)');
+  };
+}
+
+// Follow a moving target with a little inertia and call draw(shown) each frame.
+function followTarget(draw, reduce) {
   var shown = 0, target = 0, frame = 0;
-  function measure() {
-    var box = stage.getBoundingClientRect();
-    var span = stage.offsetHeight - window.innerHeight;
-    if (span < 200) span = stage.offsetHeight;
-    return clamp(-box.top / span);
-  }
   function tick() {
-    // Follow the scroll with a little inertia so wheel steps read as one motion.
     shown += (target - shown) * 0.14;
     if (Math.abs(target - shown) < 0.0005) shown = target;
     draw(shown);
     frame = shown === target ? 0 : requestAnimationFrame(tick);
   }
-  function update() {
+  return function set(next) {
     if (reduce.matches) { cancelAnimationFrame(frame); frame = 0; shown = target = 0; draw(0); return; }
-    target = measure();
+    target = next;
     if (!frame) frame = requestAnimationFrame(tick);
+  };
+}
+
+// Home hero: the ring follows the scroll. Reduced motion keeps the static mark.
+(function () {
+  var stage = document.querySelector('[data-ring-scroll]');
+  if (!stage) return;
+  var reduce = window.matchMedia('(prefers-reduced-motion: reduce)');
+  var set = followTarget(createRing(stage, false), reduce);
+  function measure() {
+    var box = stage.getBoundingClientRect();
+    var span = stage.offsetHeight - window.innerHeight;
+    if (span < 200) span = stage.offsetHeight;
+    return Math.max(0, Math.min(1, -box.top / span));
   }
+  function update() { set(measure()); }
   window.addEventListener('scroll', update, { passive: true });
   window.addEventListener('resize', update);
   reduce.addEventListener('change', update);
   update();
+})();
+
+// Header C: closes into the ring while the pointer (or keyboard focus) is on it,
+// and opens back into the C when it leaves. Clicking it goes home like the rest
+// of the logo, since the whole wordmark is one link.
+(function () {
+  var mark = document.querySelector('[data-brand-ring]');
+  if (!mark) return;
+  var reduce = window.matchMedia('(prefers-reduced-motion: reduce)');
+  var set = followTarget(createRing(mark, true), reduce);
+  var link = mark.closest('a');
+  set(0);
+  mark.addEventListener('mouseenter', function () { set(1); });
+  mark.addEventListener('mouseleave', function () { set(0); });
+  link.addEventListener('focus', function () { set(1); });
+  link.addEventListener('blur', function () { set(0); });
 })();
 
 // Home lead: the agent name cycles Claude Code → Codex → OpenCode. Screen
