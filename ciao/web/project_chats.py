@@ -5326,7 +5326,7 @@ class ProjectChatManager:
         project = self._projects.get(chat.project_id)
         outcome = await self.archive_chat(chat_id)
         if outcome is not None:
-            self.run_archive_postprocess(chat_id, outcome, chat, project)
+            await self.run_archive_postprocess(chat_id, outcome, chat, project)
         return bool(chat.archived)
 
     # ── Memory pass ──────────────────────────────────────────────────────
@@ -5543,7 +5543,7 @@ class ProjectChatManager:
     def _insights_model_for(self, chat: ChatInfo, workspace: str) -> str:
         return self._archive_pipeline_for()._insights_model_for(chat, workspace)
 
-    def run_archive_postprocess(
+    async def run_archive_postprocess(
         self,
         chat_id: str,
         outcome: ArchiveOutcome,
@@ -5551,16 +5551,10 @@ class ProjectChatManager:
         project_meta: ProjectInfo | None,
         focus: dict[str, str] | None = None,
     ) -> None:
-        return self._archive_pipeline_for().run_archive_postprocess(
+        await self._archive_pipeline_for().run_archive_postprocess(
             chat_id, outcome, chat_meta, project_meta, focus
         )
 
-    def _run_archive_index_best_effort(
-        self, chat_id: str, outcome: ArchiveOutcome, operation: Callable[[], None]
-    ) -> None:
-        return self._archive_pipeline_for()._run_archive_index_best_effort(
-            chat_id, outcome, operation
-        )
 
     def _make_archive_index_operation(
         self, outcome: ArchiveOutcome

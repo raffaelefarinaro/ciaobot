@@ -3104,7 +3104,7 @@ async def chat_archive(request: Request) -> JSONResponse:
     except RecoveryLifecycleConflict as exc:
         return JSONResponse({"error": str(exc)}, status_code=409)
     if outcome is not None:
-        pcm.run_archive_postprocess(chat_id, outcome, chat_meta, project_meta)
+        await pcm.run_archive_postprocess(chat_id, outcome, chat_meta, project_meta)
     return JSONResponse({
         "ok": True,
         "archived_to": str(outcome.path) if outcome is not None else None,

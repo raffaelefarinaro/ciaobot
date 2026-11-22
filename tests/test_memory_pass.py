@@ -1708,7 +1708,7 @@ async def test_postprocess_enqueues_and_skips_one_shot_when_enabled(
     project = manager.get_project(source.project_id)
     archive = _archive_file(tmp_path)
 
-    manager.run_archive_postprocess(
+    await manager.run_archive_postprocess(
         source.chat_id,
         ArchiveOutcome(archive, 1),
         source,
@@ -1760,7 +1760,7 @@ async def test_postprocess_unchanged_when_disabled(
     project = manager.get_project(source.project_id)
     archive = _archive_file(tmp_path)
 
-    manager.run_archive_postprocess(
+    await manager.run_archive_postprocess(
         source.chat_id,
         ArchiveOutcome(archive, 1),
         source,
@@ -1790,7 +1790,7 @@ async def test_memory_pass_chat_archive_does_not_recurse(
 
     # Archiving the pass itself must not queue a pass of the pass, and must not
     # run the one-shot stages over the pass's own bookkeeping.
-    manager.run_archive_postprocess(
+    await manager.run_archive_postprocess(
         memory_id,
         ArchiveOutcome(archive, 1),
         memory_chat,

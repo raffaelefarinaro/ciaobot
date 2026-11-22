@@ -1193,7 +1193,7 @@ class HeadlessEngine:
                 return record
             before = len(self.providers)
             started = time.perf_counter()
-            pcm.run_archive_postprocess(chat.chat_id, outcome, chat_meta, project_meta)
+            await pcm.run_archive_postprocess(chat.chat_id, outcome, chat_meta, project_meta)
             pass_chat = next(
                 (
                     other

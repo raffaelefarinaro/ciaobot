@@ -742,7 +742,7 @@ async def test_archive_route_returns_the_postprocess_lifecycle(
 
     monkeypatch.setattr(pcm._transcripts, "archive_session", fake_archive_session)
 
-    def fake_postprocess(chat_id: str, *_args: object, **_kwargs: object) -> None:
+    async def fake_postprocess(chat_id: str, *_args: object, **_kwargs: object) -> None:
         target = pcm.get_chat(chat_id)
         assert target is not None
         target.postprocess = {
@@ -980,7 +980,7 @@ async def test_archive_postprocess_indexes_under_the_shared_write_lock(
 
     archive_path = tmp_path / "archive.md"
     archive_path.write_text("# chat\n\nfindme archive body\n", encoding="utf-8")
-    pcm.run_archive_postprocess(
+    await pcm.run_archive_postprocess(
         chat.chat_id,
         ArchiveOutcome(
             path=archive_path,
@@ -1057,7 +1057,7 @@ async def test_archive_index_waits_for_the_detached_task_under_load(
 
         archive_path = tmp_path / "archive.md"
         archive_path.write_text("# chat\n\nfindme archive body\n", encoding="utf-8")
-        pcm.run_archive_postprocess(
+        await pcm.run_archive_postprocess(
             chat.chat_id,
             ArchiveOutcome(
                 path=archive_path,
@@ -1106,8 +1106,8 @@ async def test_archive_index_waits_for_the_detached_task_under_load(
         async_reads.reset_vault_read_executor()
 
 
-def test_synchronous_archive_indexing_is_best_effort(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+async def test_archive_indexing_failure_is_logged_not_raised(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
     """PR #467 review: a failed FTS update must not fail the archive.
 
@@ -1131,17 +1131,21 @@ def test_synchronous_archive_indexing_is_best_effort(
     archive_path = tmp_path / "archive.md"
     archive_path.write_text("# chat\n\nbody\n", encoding="utf-8")
 
-    # No running loop here: this forces the synchronous inline branch, which
-    # must not raise even though the optional index write fails.
-    pcm.run_archive_postprocess(
-        chat.chat_id,
-        ArchiveOutcome(
-            path=archive_path,
-            turn_count=1,
-        ),
-        chat,
-        project,
-    )
+    # The optional index write fails in its detached task: the archive must
+    # not raise, and the failure is logged.
+    with caplog.at_level(logging.ERROR):
+        await pcm.run_archive_postprocess(
+            chat.chat_id,
+            ArchiveOutcome(
+                path=archive_path,
+                turn_count=1,
+            ),
+            chat,
+            project,
+        )
+        await asyncio.gather(*list(pcm._detached_tasks))
+
+    assert any("failed to index archived file" in r.getMessage() for r in caplog.records)
 
 
 def _opencode_on_fake_agent(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, **scenario: Any) -> Path:
