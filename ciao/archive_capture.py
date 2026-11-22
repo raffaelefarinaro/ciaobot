@@ -17,6 +17,11 @@ wins and a resumed chat archived again is not a new sighting. Only a difference
 in the other content fields (counts, ids, statuses) makes the identity
 unavailable: it is reported in :attr:`CaptureRead.conflicts` and left out of
 :attr:`CaptureRead.records`, never resolved silently.
+
+When the live file would pass :data:`CAPTURES_ROTATE_BYTES`, it rolls to a dated
+``Archive-Captures.<UTC-date>.jsonl`` sibling and only the newest
+:data:`CAPTURES_KEEP_ROTATED` rotated files are kept. The reader reads the live
+file only, so a row that rolled out no longer counts for the fold.
 """
 
 from __future__ import annotations
@@ -28,6 +33,7 @@ import json
 import os
 import re
 import stat
+import threading
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -49,8 +55,17 @@ MAX_TURN_COUNT: Final = 1_000_000
 MAX_NAME: Final = 128
 MAX_CAPTURE_LINE_BYTES: Final = 4 * 1024
 #: The strict reader's bound. Larger than the decisions file's, because captures
-#: accumulate one row per archived chat and have no rotation yet.
+#: accumulate one row per archived chat.
 CAPTURES_READ_CEILING: Final = 8 * 1024 * 1024
+#: The live file rolls to a dated sibling before an append would take it past this,
+#: so it stays well under the read ceiling and keeps reading.
+CAPTURES_ROTATE_BYTES: Final = CAPTURES_READ_CEILING // 2
+#: Rotated files kept beside the live file. The oldest beyond this are deleted.
+CAPTURES_KEEP_ROTATED: Final = 4
+_MAX_ROTATE_CLASHES: Final = 100
+_ROTATED_NAME: Final = re.compile(r"Archive-Captures\.(\d{4}-\d{2}-\d{2})(?:\.(\d+))?\.jsonl")
+#: Serializes appends and rotation within this process. The engine is one process.
+_APPEND_LOCK: Final = threading.Lock()
 _READ_CHUNK: Final = 64 * 1024
 _ROW_KEYS: Final = frozenset(
     {
@@ -221,30 +236,95 @@ def build_record(
 
 
 def append_capture(vault_root: Path, record: CaptureRecord) -> None:
-    """Append one record as one line, fsynced. Never trims, never rewrites."""
+    """Append one record as one line, fsynced. Never trims or rewrites a row.
+
+    Rolls the live file to a dated sibling first when this line would take it past
+    :data:`CAPTURES_ROTATE_BYTES`.
+    """
     line = (json.dumps(record.to_row(), ensure_ascii=False) + "\n").encode("utf-8")
     if len(line) > MAX_CAPTURE_LINE_BYTES:
         raise ValueError("capture line is over the 4 KiB bound")
     path = captures_path(vault_root)
     path.parent.mkdir(parents=True, exist_ok=True)
+    with _APPEND_LOCK:
+        fd = _open_live(path, len(line))
+        try:
+            view = memoryview(line)
+            while view:
+                written = os.write(fd, view)
+                view = view[written:]
+            os.fsync(fd)
+        finally:
+            os.close(fd)
+
+
+def _open_regular(path: Path) -> int:
+    """The live file open for append. Refuses anything that is not a regular file."""
     # O_NONBLOCK so a FIFO with no reader fails with ENXIO instead of blocking the
     # caller (the archive runs on the engine loop). On a regular file it has no
-    # effect on the write below.
-    fd = open_private(
-        path, os.O_WRONLY | os.O_APPEND | os.O_NONBLOCK, follow_symlinks=False
-    )
+    # effect on the write.
+    fd = open_private(path, os.O_WRONLY | os.O_APPEND | os.O_NONBLOCK, follow_symlinks=False)
     try:
-        # A FIFO with a reader passes the open; refuse anything that is not a
-        # regular file before a byte is written.
+        # A FIFO with a reader passes the open; refuse it before a byte is written.
         if not stat.S_ISREG(os.fstat(fd).st_mode):
             raise OSError(errno.EINVAL, "the archive captures path is not a regular file")
-        view = memoryview(line)
-        while view:
-            written = os.write(fd, view)
-            view = view[written:]
-        os.fsync(fd)
-    finally:
+    except BaseException:
         os.close(fd)
+        raise
+    return fd
+
+
+def _open_live(path: Path, incoming: int) -> int:
+    """The live file open for append, rolled first if ``incoming`` bytes would overflow it."""
+    fd = _open_regular(path)
+    size = os.fstat(fd).st_size
+    if size == 0 or size + incoming <= CAPTURES_ROTATE_BYTES:
+        return fd
+    os.close(fd)
+    _rotate(path)
+    return _open_regular(path)
+
+
+def _rotate(path: Path) -> None:
+    """Move the live file to the next free dated name, then prune the oldest.
+
+    A hard link refuses an existing target where a rename would replace it, so a
+    rotated file is never overwritten. A race with another process may rotate once
+    more or leave a duplicate row, which the fold already absorbs.
+    """
+    day = datetime.now(UTC).strftime("%Y-%m-%d")
+    for clash in range(1, _MAX_ROTATE_CLASHES + 1):
+        suffix = "" if clash == 1 else f".{clash}"
+        target = path.with_name(f"Archive-Captures.{day}{suffix}.jsonl")
+        try:
+            os.link(path, target, follow_symlinks=False)
+        except FileExistsError:
+            continue
+        except FileNotFoundError:
+            return  # another writer already rolled the live file
+        try:
+            os.unlink(path)
+        except FileNotFoundError:
+            pass
+        _prune_rotated(path)
+        return
+    raise OSError(errno.EEXIST, "no free name for a rotated archive captures file")
+
+
+def _prune_rotated(path: Path) -> None:
+    """Delete the oldest rotated files beyond :data:`CAPTURES_KEEP_ROTATED`."""
+    rotated: list[tuple[str, int, Path]] = []
+    for entry in path.parent.iterdir():
+        match = _ROTATED_NAME.fullmatch(entry.name)
+        if match is None or entry.is_symlink() or not entry.is_file():
+            continue
+        rotated.append((match.group(1), int(match.group(2) or 1), entry))
+    rotated.sort(key=lambda item: (item[0], item[1]))
+    for _day, _clash, entry in rotated[: max(len(rotated) - CAPTURES_KEEP_ROTATED, 0)]:
+        try:
+            os.unlink(entry)
+        except FileNotFoundError:
+            pass
 
 
 def read_captures(vault_root: Path) -> CaptureRead:
@@ -253,7 +333,7 @@ def read_captures(vault_root: Path) -> CaptureRead:
     A missing file is ``absent``; a directory, a link, a FIFO, a non-UTF-8 file or
     an OS error is ``unreadable``; a file over :data:`CAPTURES_READ_CEILING` is
     ``oversize`` with no partial read. Any non-blank line that is not a valid row
-    counts toward ``malformed_lines``.
+    counts toward ``malformed_lines``. Only the live file is read; rotated files are not.
     """
     path = captures_path(vault_root)
     # O_NONBLOCK so a FIFO left at this path is refused by the S_ISREG check below
