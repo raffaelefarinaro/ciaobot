@@ -8,6 +8,7 @@ import os
 import re
 import signal
 import sys
+import threading
 from collections.abc import Iterator
 from contextlib import contextmanager
 from datetime import UTC, datetime, timedelta, timezone
@@ -16,6 +17,7 @@ from typing import Any
 
 import pytest
 
+from ciao import archive_capture
 from ciao.archive_capture import (
     CAPTURES_READ_CEILING,
     CaptureRecord,
@@ -516,3 +518,144 @@ def test_append_refuses_a_directory_at_the_path(tmp_path: Path) -> None:
     with pytest.raises(OSError):
         append_capture(tmp_path, _record())
     assert captures_path(tmp_path).is_dir()
+
+
+# Rotation (#3239 c3-a): the live file rolls to a dated name at half the read ceiling.
+
+
+def _row_bytes(record: CaptureRecord) -> int:
+    return len((json.dumps(record.to_row(), ensure_ascii=False) + "\n").encode("utf-8"))
+
+
+def _rotated(vault: Path) -> list[str]:
+    return sorted(p.name for p in captures_path(vault).parent.glob("Archive-Captures.*.jsonl"))
+
+
+def test_rotation_triggers_at_the_threshold_and_not_below(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    record = _record()
+    size = _row_bytes(record)
+    monkeypatch.setattr(archive_capture, "CAPTURES_ROTATE_BYTES", size * 3)
+    for _ in range(3):
+        append_capture(tmp_path, record)
+    assert _rotated(tmp_path) == []
+    assert captures_path(tmp_path).stat().st_size == size * 3
+    append_capture(tmp_path, record)
+    assert len(_rotated(tmp_path)) == 1
+    assert captures_path(tmp_path).stat().st_size == size
+
+
+def test_the_live_file_restarts_empty_after_rotation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    first, second = _record(chat_id="chat-a"), _record(chat_id="chat-b")
+    monkeypatch.setattr(archive_capture, "CAPTURES_ROTATE_BYTES", _row_bytes(first))
+    append_capture(tmp_path, first)
+    append_capture(tmp_path, second)
+    (rotated,) = _rotated(tmp_path)
+    old_rows = (captures_path(tmp_path).parent / rotated).read_text(encoding="utf-8")
+    assert [json.loads(line)["chat_id"] for line in old_rows.splitlines()] == ["chat-a"]
+    live = captures_path(tmp_path).read_text(encoding="utf-8").splitlines()
+    assert [json.loads(line)["chat_id"] for line in live] == ["chat-b"]
+
+
+def test_rotated_names_are_dated_and_never_overwrite(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    record = _record()
+    monkeypatch.setattr(archive_capture, "CAPTURES_ROTATE_BYTES", _row_bytes(record))
+    today = datetime.now(UTC).strftime("%Y-%m-%d")
+    decoy = captures_path(tmp_path).parent / f"Archive-Captures.{today}.jsonl"
+    decoy.parent.mkdir(parents=True, exist_ok=True)
+    decoy.write_text("keep\n", encoding="utf-8")
+    for _ in range(3):
+        append_capture(tmp_path, record)
+    assert decoy.read_text(encoding="utf-8") == "keep\n"
+    names = _rotated(tmp_path)
+    assert len(names) == 3
+    assert len(set(names)) == 3
+    assert all(name.startswith(f"Archive-Captures.{today}") for name in names)
+    if sys.platform != "win32":
+        for name in names:
+            if name != decoy.name:
+                assert (captures_path(tmp_path).parent / name).stat().st_mode & 0o777 == 0o600
+
+
+def test_rotation_refuses_a_symlinked_live_file(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    if sys.platform == "win32":
+        pytest.skip("symlinks need privileges on Windows")
+    monkeypatch.setattr(archive_capture, "CAPTURES_ROTATE_BYTES", 1)
+    target = tmp_path / "elsewhere.jsonl"
+    target.write_text("keep\n", encoding="utf-8")
+    captures_path(tmp_path).parent.mkdir(parents=True)
+    captures_path(tmp_path).symlink_to(target)
+    with pytest.raises(OSError):
+        append_capture(tmp_path, _record())
+    assert target.read_text(encoding="utf-8") == "keep\n"
+    assert _rotated(tmp_path) == []
+
+
+def test_rotated_files_are_bounded_and_the_newest_are_kept(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    record = _record()
+    monkeypatch.setattr(archive_capture, "CAPTURES_ROTATE_BYTES", _row_bytes(record))
+    monkeypatch.setattr(archive_capture, "CAPTURES_KEEP_ROTATED", 4)
+    old = [f"Archive-Captures.2001-01-0{day}.jsonl" for day in range(1, 7)]
+    captures_path(tmp_path).parent.mkdir(parents=True)
+    for name in old:
+        (captures_path(tmp_path).parent / name).write_text("x\n", encoding="utf-8")
+    append_capture(tmp_path, record)
+    append_capture(tmp_path, record)
+    survivors = _rotated(tmp_path)
+    assert len(survivors) == 4
+    assert [name for name in survivors if name in old] == old[-3:]
+    assert "Archive-Captures.2001-01-01.jsonl" not in survivors
+
+
+def test_concurrent_appends_across_rotation_lose_and_corrupt_no_rows(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(archive_capture, "CAPTURES_ROTATE_BYTES", _row_bytes(_record()) * 5)
+    monkeypatch.setattr(archive_capture, "CAPTURES_KEEP_ROTATED", 1000)
+    threads, per_thread = 8, 25
+    failures: list[BaseException] = []
+
+    def worker(index: int) -> None:
+        try:
+            for i in range(per_thread):
+                append_capture(tmp_path, _record(chat_id=f"t{index}-{i}"))
+        except BaseException as exc:  # surfaced below, not swallowed
+            failures.append(exc)
+
+    pool = [threading.Thread(target=worker, args=(n,)) for n in range(threads)]
+    for thread in pool:
+        thread.start()
+    for thread in pool:
+        thread.join()
+    assert failures == []
+    rotated = _rotated(tmp_path)
+    assert rotated
+    rows = []
+    for path in [captures_path(tmp_path), *(captures_path(tmp_path).parent / n for n in rotated)]:
+        rows.extend(json.loads(line) for line in path.read_text(encoding="utf-8").splitlines())
+    assert len(rows) == threads * per_thread
+    assert len({row["chat_id"] for row in rows}) == threads * per_thread
+
+
+def test_a_read_after_rotation_is_not_oversize(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    size = _row_bytes(_record(chat_id="chat-000"))
+    monkeypatch.setattr(archive_capture, "CAPTURES_ROTATE_BYTES", size * 4)
+    monkeypatch.setattr(archive_capture, "CAPTURES_READ_CEILING", size * 6)
+    for i in range(20):
+        append_capture(tmp_path, _record(chat_id=f"chat-{i:03d}"))
+    assert _rotated(tmp_path)
+    read = read_captures(tmp_path)
+    assert read.status == "ok"
+    live_rows = captures_path(tmp_path).read_text(encoding="utf-8").splitlines()
+    assert len(read.records) == len(live_rows)
