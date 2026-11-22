@@ -168,7 +168,7 @@ class ScheduleDispatchHost(Protocol):
 
     async def archive_chat(self, chat_id: str) -> ArchiveOutcome | None: ...
 
-    def run_archive_postprocess(
+    async def run_archive_postprocess(
         self,
         chat_id: str,
         outcome: ArchiveOutcome,
@@ -820,7 +820,7 @@ class ScheduleDispatcher:
                 archive_outcome = None
             if archive_outcome is not None:
                 try:
-                    self._host.run_archive_postprocess(
+                    await self._host.run_archive_postprocess(
                         target_id, archive_outcome, chat_meta, project_meta
                     )
                 except Exception:  # noqa: BLE001

@@ -16,6 +16,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+from unittest.mock import AsyncMock
 from starlette.applications import Starlette
 from starlette.routing import Route
 from starlette.testclient import TestClient
@@ -1680,7 +1681,7 @@ def test_chat_archive_archives_the_chat_a_title_resolved_to(tmp_path: Path) -> N
         return SimpleNamespace(path=Path("/tmp/chat.md"))
 
     pcm.archive_chat = _archive
-    pcm.run_archive_postprocess = lambda *args: None
+    pcm.run_archive_postprocess = AsyncMock(return_value=None)
     principal = McpPrincipal(
         token_id="t", chat_id="chat-2", project_id="project-2", workspace="personal", provider="claude"
     )

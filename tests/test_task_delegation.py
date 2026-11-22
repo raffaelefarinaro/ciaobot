@@ -2655,9 +2655,10 @@ async def test_approving_a_delegated_result_archives_its_chat_and_queues_a_learn
         return SimpleNamespace(path=tmp_path / "archive.md", turn_count=3)
 
     pcm.archive_chat = archive_chat  # type: ignore[attr-defined]
-    pcm.run_archive_postprocess = (  # type: ignore[attr-defined]
-        lambda chat_id, outcome, chat, project, focus=None: postprocessed.append((chat_id, focus))
-    )
+    async def _postprocess(chat_id, outcome, chat, project, focus=None):  # type: ignore[no-untyped-def]
+        postprocessed.append((chat_id, focus))
+
+    pcm.run_archive_postprocess = _postprocess  # type: ignore[attr-defined]
     current = _get_task(plane, task["id"])
 
     # The route runs the approval in a worker thread (`asyncio.to_thread`),
@@ -2703,9 +2704,10 @@ async def test_approving_with_an_over_length_resolution_drops_it_from_the_focus(
         return SimpleNamespace(path=tmp_path / "archive.md", turn_count=3)
 
     pcm.archive_chat = archive_chat  # type: ignore[attr-defined]
-    pcm.run_archive_postprocess = (  # type: ignore[attr-defined]
-        lambda chat_id, outcome, chat, project, focus=None: postprocessed.append((chat_id, focus))
-    )
+    async def _postprocess(chat_id, outcome, chat, project, focus=None):  # type: ignore[no-untyped-def]
+        postprocessed.append((chat_id, focus))
+
+    pcm.run_archive_postprocess = _postprocess  # type: ignore[attr-defined]
     current = _get_task(plane, task["id"])
 
     await asyncio.to_thread(

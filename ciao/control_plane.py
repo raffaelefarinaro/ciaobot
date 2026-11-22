@@ -3622,7 +3622,7 @@ class CiaoControlPlane:
             with _lifecycle_conflicts():
                 outcome = await self.pcm.archive_chat(target_id)
             if outcome is not None:
-                self.pcm.run_archive_postprocess(target_id, outcome, chat, project)
+                await self.pcm.run_archive_postprocess(target_id, outcome, chat, project)
             return {
                 "chat_id": target_id,
                 "archived_to": str(outcome.path) if outcome else None,
@@ -4554,7 +4554,7 @@ class CiaoControlPlane:
                     return
                 outcome = await self.pcm.archive_chat(attempt.chat_id)
                 if outcome is not None:
-                    self.pcm.run_archive_postprocess(
+                    await self.pcm.run_archive_postprocess(
                         attempt.chat_id, outcome, chat, project, focus
                     )
             except Exception:  # noqa: BLE001 — the approval already succeeded

@@ -204,7 +204,7 @@ class _ScheduleHost:
         self.archives.append(chat_id)
         return None
 
-    def run_archive_postprocess(
+    async def run_archive_postprocess(
         self,
         chat_id: str,
         outcome: ArchiveOutcome,

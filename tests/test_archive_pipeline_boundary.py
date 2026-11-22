@@ -8,11 +8,13 @@ the archive is indexed for search, both through the host protocol.
 from __future__ import annotations
 
 import asyncio
+import inspect
 import json
 import logging
 import os
 import signal
 import sys
+import threading
 from collections.abc import Callable, Coroutine, Iterator
 from contextlib import contextmanager
 from datetime import UTC, datetime
@@ -98,12 +100,6 @@ class _Host:
         del outcome
         return lambda: self.index_calls.append("index")
 
-    def _run_archive_index_best_effort(
-        self, chat_id: str, outcome: ArchiveOutcome, operation: Callable[[], None]
-    ) -> None:
-        del chat_id, outcome
-        operation()
-
     async def _index_archive_file_off_loop(
         self, chat_id: str, outcome: ArchiveOutcome, operation: Callable[[], None]
     ) -> None:
@@ -134,7 +130,7 @@ def _setup(
 async def test_archive_queues_the_memory_pass_and_indexes(tmp_path: Path) -> None:
     host, pipeline, chat, project, outcome = _setup(tmp_path)
 
-    pipeline.run_archive_postprocess(chat.chat_id, outcome, chat, project)
+    await pipeline.run_archive_postprocess(chat.chat_id, outcome, chat, project)
     await asyncio.sleep(0)
 
     assert host.enqueued == [(chat.chat_id, outcome.path, project.vault_doc_path)]
@@ -152,7 +148,7 @@ async def test_archive_enqueues_the_pass_even_with_a_persisted_opt_out(
     path.write_text('{"insights_enabled": false}', encoding="utf-8")
     AppSettingsStore(path).apply_to_config(host._config)
 
-    pipeline.run_archive_postprocess(chat.chat_id, outcome, chat, project)
+    await pipeline.run_archive_postprocess(chat.chat_id, outcome, chat, project)
     await asyncio.sleep(0)
 
     assert host.enqueued == [(chat.chat_id, outcome.path, project.vault_doc_path)]
@@ -199,7 +195,7 @@ async def test_an_all_unattended_archive_queues_no_pass(tmp_path: Path) -> None:
     archive = _real_archive(tmp_path, [_automated("Curate"), _automated("Care")])
     outcome = ArchiveOutcome(path=archive, turn_count=2)
 
-    pipeline.run_archive_postprocess(chat.chat_id, outcome, chat, project)
+    await pipeline.run_archive_postprocess(chat.chat_id, outcome, chat, project)
     await asyncio.sleep(0)
 
     assert host.enqueued == []
@@ -215,7 +211,7 @@ async def test_a_focused_pass_on_an_all_unattended_archive_still_runs(
     archive = _real_archive(tmp_path, [_automated("Curate")])
     outcome = ArchiveOutcome(path=archive, turn_count=1)
 
-    pipeline.run_archive_postprocess(
+    await pipeline.run_archive_postprocess(
         chat.chat_id, outcome, chat, project, focus={"kind": "approved_task"}
     )
     await asyncio.sleep(0)
@@ -231,7 +227,7 @@ async def test_an_archive_with_one_human_turn_queues_the_pass(tmp_path: Path) ->
     )
     outcome = ArchiveOutcome(path=archive, turn_count=2)
 
-    pipeline.run_archive_postprocess(chat.chat_id, outcome, chat, project)
+    await pipeline.run_archive_postprocess(chat.chat_id, outcome, chat, project)
     await asyncio.sleep(0)
 
     assert host.enqueued == [(chat.chat_id, archive, project.vault_doc_path)]
@@ -243,7 +239,7 @@ async def test_a_normal_archive_queues_the_pass(tmp_path: Path) -> None:
     archive = _real_archive(tmp_path, ["Plan the Q3 review"])
     outcome = ArchiveOutcome(path=archive, turn_count=1)
 
-    pipeline.run_archive_postprocess(chat.chat_id, outcome, chat, project)
+    await pipeline.run_archive_postprocess(chat.chat_id, outcome, chat, project)
     await asyncio.sleep(0)
 
     assert host.enqueued == [(chat.chat_id, archive, project.vault_doc_path)]
@@ -263,7 +259,7 @@ async def test_a_system_schedule_archive_queues_no_pass(
     archive = _real_archive(tmp_path, [_automated("Care"), "looks good, carry on"])
     outcome = ArchiveOutcome(path=archive, turn_count=2)
 
-    pipeline.run_archive_postprocess(chat.chat_id, outcome, chat, project)
+    await pipeline.run_archive_postprocess(chat.chat_id, outcome, chat, project)
     await asyncio.sleep(0)
 
     assert host.enqueued == []
@@ -279,7 +275,7 @@ async def test_a_focused_pass_on_a_system_schedule_archive_still_runs(
     archive = _real_archive(tmp_path, ["Care"])
     outcome = ArchiveOutcome(path=archive, turn_count=1)
 
-    pipeline.run_archive_postprocess(
+    await pipeline.run_archive_postprocess(
         chat.chat_id, outcome, chat, project, focus={"kind": "approved_task"}
     )
     await asyncio.sleep(0)
@@ -297,7 +293,7 @@ async def test_a_user_schedule_archive_with_a_human_turn_queues_the_pass(
     archive = _real_archive(tmp_path, [_automated("Brief me"), "move the 3pm"])
     outcome = ArchiveOutcome(path=archive, turn_count=2)
 
-    pipeline.run_archive_postprocess(chat.chat_id, outcome, chat, project)
+    await pipeline.run_archive_postprocess(chat.chat_id, outcome, chat, project)
     await asyncio.sleep(0)
 
     assert host.enqueued == [(chat.chat_id, archive, project.vault_doc_path)]
@@ -308,7 +304,7 @@ async def test_an_unparseable_archive_still_queues_the_pass(tmp_path: Path) -> N
     host, pipeline, chat, project, outcome = _setup(tmp_path)
     outcome.path.write_text("not a transcript at all\n", encoding="utf-8")
 
-    pipeline.run_archive_postprocess(chat.chat_id, outcome, chat, project)
+    await pipeline.run_archive_postprocess(chat.chat_id, outcome, chat, project)
     await asyncio.sleep(0)
 
     assert host.enqueued == [(chat.chat_id, outcome.path, project.vault_doc_path)]
@@ -319,18 +315,10 @@ async def test_an_empty_archive_queues_no_pass(tmp_path: Path) -> None:
     host, pipeline, chat, project, outcome = _setup(tmp_path)
     empty = ArchiveOutcome(path=outcome.path, turn_count=0)
 
-    pipeline.run_archive_postprocess(chat.chat_id, empty, chat, project)
+    await pipeline.run_archive_postprocess(chat.chat_id, empty, chat, project)
     await asyncio.sleep(0)
 
     assert host.enqueued == []
-    assert host.index_calls == ["index"]
-
-
-def test_synchronous_callers_index_inline(tmp_path: Path) -> None:
-    host, pipeline, chat, project, outcome = _setup(tmp_path)
-
-    pipeline.run_archive_postprocess(chat.chat_id, outcome, chat, project)
-
     assert host.index_calls == ["index"]
 
 
@@ -418,7 +406,7 @@ async def test_a_queued_archive_hands_one_exact_record_to_the_capture(
     archive = _real_archive(tmp_path, ["Plan the Q3 review", "and the budget"])
     outcome = ArchiveOutcome(path=archive, turn_count=2)
 
-    pipeline.run_archive_postprocess(chat.chat_id, outcome, chat, project)
+    await pipeline.run_archive_postprocess(chat.chat_id, outcome, chat, project)
     await asyncio.sleep(0)
 
     assert written == [
@@ -449,7 +437,7 @@ async def test_a_chat_with_no_attempt_captures_empty_ids(
     written = _capture_spy(monkeypatch)
     archive = _real_archive(tmp_path, ["Plan the Q3 review"])
 
-    pipeline.run_archive_postprocess(
+    await pipeline.run_archive_postprocess(
         chat.chat_id, ArchiveOutcome(path=archive, turn_count=1), chat, project
     )
 
@@ -472,7 +460,7 @@ async def test_an_unreadable_attempt_store_captures_unreadable_not_an_error(
     monkeypatch.setattr(host, "attempt_store", lambda workspace: _Broken(), raising=False)
     archive = _real_archive(tmp_path, ["Plan the Q3 review"])
 
-    pipeline.run_archive_postprocess(
+    await pipeline.run_archive_postprocess(
         chat.chat_id, ArchiveOutcome(path=archive, turn_count=1), chat, project
     )
 
@@ -493,7 +481,7 @@ async def test_a_malformed_decisions_file_captures_its_status_and_keeps_valid_ro
     _write_decisions(host, [_decision_row(started.attempt.attempt_id, 1), "{not json"])
     archive = _real_archive(tmp_path, ["Plan the Q3 review"])
 
-    pipeline.run_archive_postprocess(
+    await pipeline.run_archive_postprocess(
         chat.chat_id, ArchiveOutcome(path=archive, turn_count=1), chat, project
     )
 
@@ -512,7 +500,7 @@ async def test_a_focused_approved_task_archive_captures_a_completion(
     archive = _real_archive(tmp_path, ["Care"])
     focus = {"focus": "approved_task", "completion_id": _COMPLETION, "task_title": "T"}
 
-    pipeline.run_archive_postprocess(
+    await pipeline.run_archive_postprocess(
         chat.chat_id, ArchiveOutcome(path=archive, turn_count=1), chat, project, focus
     )
 
@@ -534,7 +522,7 @@ async def test_a_focus_without_a_valid_completion_id_captures_an_archive(
     archive = _real_archive(tmp_path, ["Care"])
     focus = {"focus": "approved_task", "completion_id": "NOT-HEX", "task_title": "T"}
 
-    pipeline.run_archive_postprocess(
+    await pipeline.run_archive_postprocess(
         chat.chat_id, ArchiveOutcome(path=archive, turn_count=1), chat, project, focus
     )
 
@@ -566,7 +554,7 @@ async def test_a_guarded_archive_writes_no_capture(
         monkeypatch.setattr(memory_pass, "MEMORY_PASS_CHATS", False)
         archive = _real_archive(tmp_path, ["Plan the Q3 review", "and more"])
 
-    pipeline.run_archive_postprocess(
+    await pipeline.run_archive_postprocess(
         chat.chat_id, ArchiveOutcome(path=archive, turn_count=turn_count), chat, project
     )
     await asyncio.sleep(0)
@@ -589,7 +577,7 @@ async def test_a_failed_capture_write_never_fails_or_blocks_the_archive(
     archive = _real_archive(tmp_path, ["Plan the Q3 review"])
 
     with caplog.at_level(logging.ERROR, logger=archive_pipeline.__name__):
-        pipeline.run_archive_postprocess(
+        await pipeline.run_archive_postprocess(
             chat.chat_id, ArchiveOutcome(path=archive, turn_count=1), chat, project
         )
         await asyncio.sleep(0)
@@ -611,8 +599,8 @@ async def test_a_repeat_archive_of_the_same_chat_folds_to_the_first_capture(
     archive = _real_archive(tmp_path, ["Plan the Q3 review"])
     outcome = ArchiveOutcome(path=archive, turn_count=1)
 
-    pipeline.run_archive_postprocess(chat.chat_id, outcome, chat, project)
-    pipeline.run_archive_postprocess(chat.chat_id, outcome, chat, project)
+    await pipeline.run_archive_postprocess(chat.chat_id, outcome, chat, project)
+    await pipeline.run_archive_postprocess(chat.chat_id, outcome, chat, project)
 
     vault = host._config.workspace_root / "vault" / "personal"
     lines = archive_capture.captures_path(vault).read_text(encoding="utf-8").splitlines()
@@ -664,7 +652,7 @@ async def test_a_fifo_at_the_capture_path_never_blocks_the_archive(
     archive = _real_archive(tmp_path, ["Plan the Q3 review"])
     try:
         with _alarm(5), caplog.at_level(logging.ERROR, logger=archive_pipeline.__name__):
-            pipeline.run_archive_postprocess(
+            await pipeline.run_archive_postprocess(
                 chat.chat_id, ArchiveOutcome(path=archive, turn_count=1), chat, project
             )
             await asyncio.sleep(0)
@@ -700,8 +688,67 @@ async def test_the_capture_row_exists_before_the_memory_pass_is_enqueued(
     monkeypatch.setattr(host, "enqueue_memory_pass", _enqueue)
     archive = _real_archive(tmp_path, ["Plan the Q3 review"])
 
-    pipeline.run_archive_postprocess(
+    await pipeline.run_archive_postprocess(
         chat.chat_id, ArchiveOutcome(path=archive, turn_count=1), chat, project
     )
 
     assert rows_at_enqueue == [1]
+
+
+@pytest.mark.asyncio
+async def test_the_capture_is_written_before_the_pass_is_queued(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    host, pipeline, chat, project, outcome = _setup(tmp_path)
+    order: list[str] = []
+    monkeypatch.setattr(
+        archive_pipeline,
+        "append_capture",
+        lambda vault_root, record: order.append("capture"),
+        raising=True,
+    )
+
+    def _enqueue(
+        source: ChatInfo,
+        project_meta: ProjectInfo | None,
+        archive_path: Path,
+        doc_path: str,
+        focus: dict[str, str] | None = None,
+    ) -> str:
+        del source, project_meta, archive_path, doc_path, focus
+        order.append("enqueue")
+        return "memory-chat"
+
+    host.enqueue_memory_pass = _enqueue  # type: ignore[method-assign]
+
+    await pipeline.run_archive_postprocess(chat.chat_id, outcome, chat, project)
+
+    assert order == ["capture", "enqueue"]
+
+
+@pytest.mark.asyncio
+async def test_the_capture_runs_off_the_loop_thread(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    host, pipeline, chat, project, outcome = _setup(tmp_path)
+    loop_thread = threading.get_ident()
+    seen: list[int] = []
+    monkeypatch.setattr(
+        archive_pipeline,
+        "append_capture",
+        lambda vault_root, record: seen.append(threading.get_ident()),
+        raising=True,
+    )
+
+    await pipeline.run_archive_postprocess(chat.chat_id, outcome, chat, project)
+
+    assert len(seen) == 1
+    assert seen[0] != loop_thread
+    assert host.enqueued == [(chat.chat_id, outcome.path, project.vault_doc_path)]
+
+
+def test_the_archive_postprocess_seams_are_coroutines() -> None:
+    from ciao.web.project_chats import ProjectChatManager
+
+    assert inspect.iscoroutinefunction(ArchivePipeline.run_archive_postprocess)
+    assert inspect.iscoroutinefunction(ProjectChatManager.run_archive_postprocess)

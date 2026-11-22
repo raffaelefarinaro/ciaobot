@@ -55,10 +55,6 @@ class ArchivePipelineHost(Protocol):
         self, outcome: ArchiveOutcome
     ) -> Callable[[], None]: ...
 
-    def _run_archive_index_best_effort(
-        self, chat_id: str, outcome: ArchiveOutcome, operation: Callable[[], None]
-    ) -> None: ...
-
     def _index_archive_file_off_loop(
         self, chat_id: str, outcome: ArchiveOutcome, operation: Callable[[], None]
     ) -> Coroutine[object, object, None]: ...
@@ -186,7 +182,7 @@ class ArchivePipeline:
         except Exception:  # noqa: BLE001 — the archive already succeeded
             logger.exception("Failed to write the archive capture for %s", chat_id)
 
-    def run_archive_postprocess(
+    async def run_archive_postprocess(
         self,
         chat_id: str,
         outcome: ArchiveOutcome,
@@ -242,7 +238,12 @@ class ArchivePipeline:
                         chat_id,
                     )
                 else:
-                    self._capture_archive(chat_id, outcome, workspace, vault_root, focus)
+                    # The capture reads and fsyncs under the vault, which may be a
+                    # stalled mount; it runs off the loop, and the enqueue waits
+                    # for it so the pass never runs ahead of its record.
+                    await asyncio.to_thread(
+                        self._capture_archive, chat_id, outcome, workspace, vault_root, focus
+                    )
                     try:
                         self._host.enqueue_memory_pass(
                             chat,
@@ -263,33 +264,10 @@ class ArchivePipeline:
         # concurrent scan holds SQLite's write lock past the connection timeout
         # and this write is skipped with "database is locked".
         operation = self._host._make_archive_index_operation(outcome)
-        try:
-            loop = asyncio.get_running_loop()
-        except RuntimeError:
-            loop = None
-        if loop is None:
-            # Synchronous caller (CLI/tests): run inline. Best-effort like the
-            # async branch — an optional FTS update must never fail an archive
-            # that already succeeded.
-            self._host._run_archive_index_best_effort(chat_id, outcome, operation)
-        else:
-            self._host._spawn_detached(
-                self._host._index_archive_file_off_loop(chat_id, outcome, operation),
-                name=f"archive-index-{chat_id}",
-            )
-
-    def _run_archive_index_best_effort(
-        self, chat_id: str, outcome: ArchiveOutcome, operation: Callable[[], None]
-    ) -> None:
-        """Run the archive index write inline, logging but never raising."""
-        try:
-            operation()
-        except Exception:  # noqa: BLE001 — archiving already succeeded
-            logger.exception(
-                "FTS search: failed to index archived file %s for chat %s",
-                outcome.path,
-                chat_id,
-            )
+        self._host._spawn_detached(
+            self._host._index_archive_file_off_loop(chat_id, outcome, operation),
+            name=f"archive-index-{chat_id}",
+        )
 
     def _make_archive_index_operation(
         self, outcome: ArchiveOutcome

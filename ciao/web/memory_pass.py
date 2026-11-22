@@ -1066,7 +1066,7 @@ class MemoryPassCoordinator:
             project = host._projects.get(chat.project_id)
             # The recursion guard is `is_memory_pass_chat`: this pass is
             # never enqueued for another pass.
-            host.run_archive_postprocess(chat.chat_id, outcome, chat, project)
+            await host.run_archive_postprocess(chat.chat_id, outcome, chat, project)
 
     @staticmethod
     def _helper(chat: ChatInfo) -> dict:

@@ -10,6 +10,7 @@ from types import SimpleNamespace
 from typing import Any
 
 import pytest
+from unittest.mock import AsyncMock
 from starlette.applications import Starlette
 from starlette.routing import Mount
 from starlette.testclient import TestClient
@@ -1754,7 +1755,7 @@ async def test_chat_archive_defaults_to_caller_chat() -> None:
 
     fake_pcm = SimpleNamespace(
         archive_chat=_archive_chat,
-        run_archive_postprocess=lambda cid, outcome, chat, project: None,
+        run_archive_postprocess=AsyncMock(return_value=None),
         active_chat_ids=lambda: set(),
     )
     control_plane = CiaoControlPlane(
