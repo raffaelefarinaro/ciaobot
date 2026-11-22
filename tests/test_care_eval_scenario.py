@@ -16,9 +16,20 @@ import pytest
 
 from ciao import care_eval_seed as seed
 from ciao import curation_logs
+from ciao import curation_run
 from ciao import note_verification as nv
 from ciao.care_eval_run import bind_isolated
-from ciao.care_eval_scenario import run_scenario
+from ciao.care_eval_scenario import (
+    REASON_ATTEMPT1_COMPLETED,
+    REASON_ATTEMPT1_NOT_SETTLED,
+    REASON_ATTEMPT2_NO_PROGRESS,
+    REASON_ATTEMPT2_NOT_SETTLED,
+    REASON_ATTEMPT2_RESTARTED,
+    REASON_CURSOR_UNSTABLE,
+    Unavailable,
+    run_continuation,
+    run_scenario,
+)
 from ciao.curation_run import CURATION_LOG_RELATIVE
 from ciao.job_runs import JOB_RUNS_NAME
 from ciao.memory_receipts import content_revision
@@ -36,11 +47,13 @@ POLL_S = 2.0
 DEADLINE_S = 10.0
 
 
-def settled_row(*, status: str = "ok", dispatch: str = DISPATCH, chat: str = CHAT) -> dict[str, Any]:
+def settled_row(
+    *, status: str = "ok", dispatch: str = DISPATCH, chat: str = CHAT, started: str = STARTED
+) -> dict[str, Any]:
     return {
         "job": "schedule_dispatch",
         "status": status,
-        "started_at": STARTED,
+        "started_at": started,
         "ended_at": "2026-11-24T09:01:00+00:00",
         "duration_ms": 60000,
         "extra": {"schedule_id": SID, "dispatch_id": dispatch, "chat_id": chat, "workspace": WS},
@@ -93,6 +106,8 @@ class World:
         self.on_trigger: Any = None
         self.on_sleep: Any = None
         self.job_rows: list[dict[str, Any]] = []
+        self.dispatch_ids: list[str] = []
+        self.trigger_costs: list[float] = []
         self.harness = Harness(root, self.api)
         self.layout = seed.layout_for_workspace(self.harness.ws)
         self.manifest = seed.build_seed(scenario, self.layout, dispatch_date=DISPATCH_DATE)
@@ -114,9 +129,9 @@ class World:
         if method == "POST" and path == f"/api/schedule-run/{SID}" and body is None:
             if self.post_error is not None:
                 raise self.post_error
-            self.dispatch = DISPATCH
+            self.dispatch = self.dispatch_ids.pop(0) if self.dispatch_ids else DISPATCH
             self.run_chat = CHAT
-            self.now += TRIGGER_S
+            self.now += self.trigger_costs.pop(0) if self.trigger_costs else TRIGGER_S
             if self.on_trigger is not None:
                 self.on_trigger(self)
             self._write_rows()
@@ -285,12 +300,238 @@ def test_ambiguous_duplicate_rows_are_an_error_and_never_graded(tmp_path: Path) 
     assert record["grade"]["source"] == "none"
 
 
-def test_budget_continuation_is_not_orchestrated_here(tmp_path: Path) -> None:
+def test_run_scenario_refuses_budget_continuation_and_points_to_run_continuation(
+    tmp_path: Path,
+) -> None:
     world = World(tmp_path, "budget_continuation")
 
-    with pytest.raises(ValueError, match="budget_continuation"):
+    with pytest.raises(ValueError, match="run_continuation"):
         world.run("budget_continuation")
     assert world.calls == []
+
+
+class ContWorld(World):
+    """Two attempts of the continuation scenario over the same fake engine and workspace."""
+
+    def __init__(self, root: Path) -> None:
+        super().__init__(root, "budget_continuation")
+        self.attempt_1_rows = [settled_row(dispatch="d-1", started="2026-11-24T09:00:00+00:00")]
+        self.attempt_2_rows = [settled_row(dispatch="d-2", started="2026-11-24T10:00:00+00:00")]
+        self.dispatch_ids = ["d-1", "d-2"]
+        self.trigger_costs = [7.5, 3.0]
+
+    def run_continuation(self) -> Any:
+        bound = bind_isolated(self.harness)
+        return run_continuation(
+            bound,
+            self.layout,
+            self.manifest,
+            schedule_id=SID,
+            workspace=WS,
+            deadline_s=DEADLINE_S,
+            poll_s=POLL_S,
+            clock=self.clock,
+            sleep=self.sleep,
+            code_revision="0123456789abcdef0123456789abcdef01234567",
+            dirty=False,
+            run_id=RUN_ID,
+        )
+
+
+def _write_state(vault: Path, *, done: list[str], deferred: int, holder: str) -> None:
+    path = curation_run.state_path(vault)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    stamp = "2026-11-24T09:01:00+00:00"
+    last_run = {
+        "status": "ok",
+        "finished_at": stamp,
+        "planned": len(done) + deferred,
+        "completed": len(done),
+        "deferred": deferred,
+        "reasons": [],
+        "run_id": holder,
+    }
+    document = {
+        "version": 1,
+        "done_keys": {key: "2026-11-24" for key in done},
+        "lease": {},
+        "last_run": last_run,
+    }
+    path.write_text(json.dumps(document), encoding="utf-8")
+
+
+def _cursor_after(attempt: int, world: ContWorld) -> None:
+    """Hook for the trigger of attempt ``attempt``: writes the cursor that attempt left."""
+    vault = world.layout.vault_root
+
+    def hook(w: World) -> None:
+        if attempt == 1:
+            _write_state(vault, done=["k-a", "k-b"], deferred=2, holder="holder-a")
+        else:
+            _write_state(vault, done=["k-a", "k-b", "k-c", "k-d"], deferred=0, holder="holder-b")
+
+    return hook
+
+
+def _two_settled_attempts(world: ContWorld) -> None:
+    world.job_rows = [*world.attempt_1_rows]
+    calls = {"n": 0}
+
+    def hook(w: World) -> None:
+        calls["n"] += 1
+        _cursor_after(calls["n"], world)(w)
+        if calls["n"] == 2:
+            w.job_rows = [*world.attempt_1_rows, *world.attempt_2_rows]
+
+    world.on_trigger = hook
+
+
+def test_resumed_second_attempt_is_the_one_graded_record(tmp_path: Path) -> None:
+    world = ContWorld(tmp_path)
+    _two_settled_attempts(world)
+
+    result = world.run_continuation()
+
+    assert isinstance(result, dict), "exactly one record comes back, from attempt 2"
+    assert result["scenario"] == "budget_continuation"
+    assert result["execution"]["status"] == "completed"
+    assert result["grade"]["source"] == "independent"
+    assert result["grade"]["safety"] == "passed"
+    assert [method for method, _ in world.calls].count("POST") == 2
+    assert world.enabled is False
+
+
+def test_wall_time_is_reported_for_the_graded_attempt_only(tmp_path: Path) -> None:
+    world = ContWorld(tmp_path)
+    _two_settled_attempts(world)
+
+    result = world.run_continuation()
+
+    assert result["metrics"]["wall_s"]["value"] == 3.0, "attempt 2's own 3.0 s, not 10.5 s"
+    assert result["metrics"]["wall_s"]["status"] == "complete"
+    for name, metric in result["metrics"].items():
+        if name != "wall_s":
+            assert metric["status"] == "unknown", name
+            assert metric["value"] is None, name
+
+
+def test_attempt_one_completing_early_is_unavailable(tmp_path: Path) -> None:
+    world = ContWorld(tmp_path)
+    world.job_rows = [*world.attempt_1_rows]
+    world.on_trigger = lambda w: _write_state(
+        w.layout.vault_root, done=["k-a", "k-b"], deferred=0, holder="holder-a"
+    )
+
+    result = world.run_continuation()
+
+    assert result == Unavailable(REASON_ATTEMPT1_COMPLETED)
+
+
+def test_attempt_one_not_settled_is_unavailable(tmp_path: Path) -> None:
+    world = ContWorld(tmp_path)
+    world.post_error = EngineAPIError("POST -> 409", status=409, body={"status": "conflict"})
+
+    result = world.run_continuation()
+
+    assert result == Unavailable(REASON_ATTEMPT1_NOT_SETTLED)
+    assert [method for method, _ in world.calls].count("POST") == 1
+
+
+def test_cursor_reads_that_disagree_are_unavailable(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from ciao import care_eval_scenario as scenario_module
+
+    world = ContWorld(tmp_path)
+    _two_settled_attempts(world)
+    readings = iter([frozenset({"k-a"}), frozenset({"k-a", "k-b"})])
+    real = scenario_module.observe_cursor
+
+    def flaky(vault_root: Path) -> Any:
+        observation = real(vault_root)
+        return seed.CursorObservation(done_keys=next(readings), status=observation.status)
+
+    monkeypatch.setattr(scenario_module, "observe_cursor", flaky)
+
+    assert world.run_continuation() == Unavailable(REASON_CURSOR_UNSTABLE)
+
+
+def test_unreadable_cursor_after_attempt_one_is_unavailable(tmp_path: Path) -> None:
+    world = ContWorld(tmp_path)
+    world.job_rows = [*world.attempt_1_rows]
+
+    def corrupt(w: World) -> None:
+        path = curation_run.state_path(w.layout.vault_root)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("{not json", encoding="utf-8")
+
+    world.on_trigger = corrupt
+
+    assert world.run_continuation() == Unavailable(REASON_CURSOR_UNSTABLE)
+
+
+@pytest.mark.parametrize("ending", ["timed_out", "superseded"])
+def test_attempt_two_not_settled_is_unavailable(tmp_path: Path, ending: str) -> None:
+    world = ContWorld(tmp_path)
+    world.job_rows = [*world.attempt_1_rows]
+    calls = {"n": 0}
+
+    def hook(w: World) -> None:
+        calls["n"] += 1
+        _cursor_after(calls["n"], world)(w)
+
+    world.on_trigger = hook
+    if ending == "superseded":
+        def move_on(w: World) -> None:
+            if calls["n"] == 2:
+                w.dispatch = "d-9"
+        world.on_sleep = move_on
+
+    assert world.run_continuation() == Unavailable(REASON_ATTEMPT2_NOT_SETTLED)
+
+
+def test_attempt_two_restarting_from_scratch_is_unavailable(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from ciao import care_eval_scenario as scenario_module
+
+    world = ContWorld(tmp_path)
+    _two_settled_attempts(world)
+    monkeypatch.setattr(
+        scenario_module,
+        "observe_effects",
+        lambda vault, run_id, keys: {key: (1 if key == "k-a" else 0) for key in keys},
+    )
+
+    assert world.run_continuation() == Unavailable(REASON_ATTEMPT2_RESTARTED)
+
+
+def test_attempt_two_recording_no_new_work_is_unavailable(tmp_path: Path) -> None:
+    world = ContWorld(tmp_path)
+    world.job_rows = [*world.attempt_1_rows]
+    calls = {"n": 0}
+
+    def hook(w: World) -> None:
+        calls["n"] += 1
+        if calls["n"] == 1:
+            _write_state(w.layout.vault_root, done=["k-a", "k-b"], deferred=2, holder="holder-a")
+        else:
+            _write_state(w.layout.vault_root, done=["k-a", "k-b"], deferred=2, holder="holder-b")
+            w.job_rows = [*world.attempt_1_rows, *world.attempt_2_rows]
+
+    world.on_trigger = hook
+
+    assert world.run_continuation() == Unavailable(REASON_ATTEMPT2_NO_PROGRESS)
+
+
+def test_no_attempt_is_published_with_forbidden_identifiers(tmp_path: Path) -> None:
+    world = ContWorld(tmp_path)
+    _two_settled_attempts(world)
+
+    result = world.run_continuation()
+    assert isinstance(result, dict)
+    serialized = json.dumps(result, sort_keys=True)
+
+    for probe in (str(tmp_path), CHAT, "d-1", "d-2", "holder-a", "holder-b", "k-a", "k-c"):
+        assert probe not in serialized
 
 
 def test_seed_missing_from_the_booted_workspace_is_refused_before_any_call(tmp_path: Path) -> None:

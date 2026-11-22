@@ -222,6 +222,32 @@ def observe_cursor(vault_root: Path) -> CursorObservation:
     return CursorObservation(done_keys=frozenset(state.done_keys), status="ok")
 
 
+@dataclass(frozen=True)
+class LastRun:
+    """The curation state's last-run summary, as far as the continuation check needs it."""
+
+    run_id: str | None
+    planned: int
+    deferred: int
+
+
+def observe_last_run(vault_root: Path) -> LastRun | None:
+    """The last run's holder id and work counts. Read-only; None when unreadable or absent."""
+    try:
+        state = curation_run.load_state(Path(vault_root))
+    except CurationStateError:
+        return None
+    summary = state.last_run
+    if not summary:
+        return None
+    run_id = summary.get("run_id")
+    return LastRun(
+        run_id=run_id if isinstance(run_id, str) and run_id else None,
+        planned=int(summary["planned"]),
+        deferred=int(summary["deferred"]),
+    )
+
+
 def observe_effects(
     vault_root: Path, run_id: str, item_keys: Iterable[str]
 ) -> Mapping[str, int | None]:
