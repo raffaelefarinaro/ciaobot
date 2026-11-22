@@ -210,6 +210,17 @@ A later worker that reads this evidence, and the marginal-cost check tracked in
   telemetry speculation may enter the evidence the worker sees or cites.
 - Its cost is bounded and checked against #3054 before it is scheduled.
 
+### Bounded catalog candidates (#3248)
+
+`ciao/skill_catalog.py` is the first consumer of this evidence. It lists
+installed skills that have a reason to look (an archive-recorded use, or an
+open or settled proposal or upstream draft), routes each by ownership, drops
+protected and deferred skills before applying `MAX_CANDIDATES_PER_RUN`, and
+hands the selected set to the existing note judge. Usage basis is `archive_marker`
+or `unknown`; installed presence is not recorded as usage. Schedule dependency
+is `unknown` unless a caller supplies `schedule_refs`, and `supporting_files` is
+always `unknown`. The module writes nothing and no schedule calls it yet.
+
 ## Evaluation
 
 Don't trust LoCoMo-style vendor numbers (misconfiguration-sensitive; string

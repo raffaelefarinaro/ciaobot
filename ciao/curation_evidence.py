@@ -55,8 +55,9 @@ class ProposalReference:
     ``status`` is ``open`` for an unsettled record with a live queue row, and
     ``settled`` for a record the owner decided. ``revision`` is ``current`` when
     the record was filed against the note's revision now, and ``historical``
-    when it was filed against an older one. ``proposal_id`` is the live queue row
-    id, or empty when the record has no live row.
+    when it was filed against an older one. It is ``unknown`` for a record that
+    carries no revision at all (a skill upstream draft, #3248). ``proposal_id``
+    is the live queue row id, or empty when the record has no live row.
     """
 
     sidecar_id: str
