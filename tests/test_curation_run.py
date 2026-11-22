@@ -1856,11 +1856,11 @@ def test_the_weekly_marker_advances_only_after_both_required_checks(
     _fresh_log(vault, last_full_pass="2026-09-01")
 
     cr.record_done(vault, [cr.HYGIENE_INDEX_KEY])
-    assert cr.advance_full_pass(vault, today=date(2026, 9, 19)) is False
+    assert cr.end_run(vault, advance_marker=True, today=date(2026, 9, 19))["full_pass_advanced"] is False
     assert cr.read_last_full_pass(vault / cr.CURATION_LOG_RELATIVE) == "2026-09-01"
 
     cr.record_done(vault, [cr.HYGIENE_AUDIT_KEY])
-    assert cr.advance_full_pass(vault, today=date(2026, 9, 19)) is True
+    assert cr.end_run(vault, advance_marker=True, today=date(2026, 9, 19))["full_pass_advanced"] is True
     assert cr.read_last_full_pass(vault / cr.CURATION_LOG_RELATIVE) == "2026-09-19"
 
 
@@ -1872,7 +1872,7 @@ def test_advancing_the_marker_keeps_the_existing_log_body(tmp_path: Path) -> Non
     )
     cr.record_done(vault, sorted(cr.REQUIRED_HYGIENE_KEYS))
 
-    cr.advance_full_pass(vault, today=date(2026, 9, 19))
+    cr.end_run(vault, advance_marker=True, today=date(2026, 9, 19))
 
     text = (vault / cr.CURATION_LOG_RELATIVE).read_text(encoding="utf-8")
     assert "tags: [ciao]" in text
@@ -4538,14 +4538,14 @@ def _lock_depth(monkeypatch: pytest.MonkeyPatch) -> list[int]:
     return observed
 
 
-def test_advance_full_pass_checks_and_writes_under_the_state_lock(
+def test_end_run_marker_checks_and_writes_under_the_state_lock(
     tmp_path: Path, _lock_depth: list[int]
 ) -> None:
     vault = _vault(tmp_path)
     _fresh_log(vault, last_full_pass="2026-09-01")
     cr.record_done(vault, sorted(cr.REQUIRED_HYGIENE_KEYS))
 
-    assert cr.advance_full_pass(vault, today=date(2026, 9, 19)) is True
+    assert cr.end_run(vault, advance_marker=True, today=date(2026, 9, 19))["full_pass_advanced"] is True
     assert _lock_depth == [1]
 
 
@@ -4811,7 +4811,7 @@ def test_the_closer_with_a_trailing_space_is_read_and_written_the_same_way(tmp_p
     assert cr.read_last_full_pass(log) == "2026-09-01"
 
     cr.record_done(vault, sorted(cr.REQUIRED_HYGIENE_KEYS))
-    assert cr.advance_full_pass(vault, today=date(2026, 9, 19)) is True
+    assert cr.end_run(vault, advance_marker=True, today=date(2026, 9, 19))["full_pass_advanced"] is True
     assert cr.read_last_full_pass(log) == "2026-09-19"
     assert log.read_bytes().count(b"last_full_pass") == 1
 
