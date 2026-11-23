@@ -73,7 +73,7 @@ function renderAppearance(fixture: AppearanceFixture, narrow = false) {
 
 const meta = {
   id: 'settings-appearance',
-  title: 'Settings appearance and Google/SettingsAppearance',
+  title: 'Settings appearance/SettingsAppearance',
   component: SettingsAppearance,
   tags: ['!autodocs'],
   parameters: {

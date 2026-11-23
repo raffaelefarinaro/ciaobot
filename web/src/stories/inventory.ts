@@ -2583,7 +2583,6 @@ export const inventory: InventoryEntry[] = [
       "web/src/components/ProviderSignInHint.vue",
       "web/src/components/SettingsView.vue",
       "web/src/components/onboarding/OnboardingRuntimeStage.vue",
-      "web/src/components/settings/GoogleConnectDialog.vue",
       "web/src/components/settings/ProviderInstallBlock.vue"
     ],
     "variants": [],
@@ -5472,8 +5471,7 @@ export const inventory: InventoryEntry[] = [
       "web/src/components/UsageView.vue",
       "web/src/components/VaultReviewPanel.vue",
       "web/src/components/WebhookTriggers.vue",
-      "web/src/components/settings/SettingsWorkspaceOverview.vue",
-      "web/src/components/settings/WorkspaceGoogleAccount.vue"
+      "web/src/components/settings/SettingsWorkspaceOverview.vue"
     ],
     "variants": [
       "rows",
@@ -8794,107 +8792,6 @@ export const inventory: InventoryEntry[] = [
     }
   },
   {
-    "id": "components-settings-google-connect-dialog",
-    "name": "GoogleConnectDialog",
-    "family": "Settings",
-    "kind": "component",
-    "owner": {
-      "path": "web/src/components/settings/GoogleConnectDialog.vue",
-      "anchor": "<template>"
-    },
-    "sources": [],
-    "consumers": [
-      "web/src/components/settings/WorkspaceGoogleAccount.vue"
-    ],
-    "variants": [
-      "connect",
-      "reauth"
-    ],
-    "variantNotes": "The open prop and the connect/reauth mode change the title, display-name field, setup steps, checklist, sign-in controls and footer; every audited branch is a row state below.",
-    "states": [
-      {
-        "name": "closed",
-        "coverage": "covered",
-        "storyIds": ["google-connect-dialog--closed"],
-        "note": "Props open=false: the modal backdrop (v-if=\"open\") renders nothing."
-      },
-      {
-        "name": "default",
-        "coverage": "covered",
-        "storyIds": ["google-connect-dialog--default"],
-        "note": "Connect mode with gws not installed and no profile: focused editable display name, install step, upload client panel, a disabled Sign-in control with its reason and a disabled Done with its reason; Escape closes."
-      },
-      {
-        "name": "install-problem",
-        "coverage": "covered",
-        "storyIds": ["google-connect-dialog--install-problem"],
-        "note": "The install_problem branch (gwsIntegration.install_problem) renders a role=alert inside the install step."
-      },
-      {
-        "name": "install-done",
-        "coverage": "covered",
-        "storyIds": ["google-connect-dialog--install-done"],
-        "note": "installed=true replaces the install step with its checklist entry and keeps the OAuth client step pending."
-      },
-      {
-        "name": "client-done-ready",
-        "coverage": "covered",
-        "storyIds": ["google-connect-dialog--client-done-ready"],
-        "note": "Client secret present but the profile not configured: both checklist entries with the Replace file action, the ready Sign-in and Paste-a-code controls and the profile's storage hint."
-      },
-      {
-        "name": "client-gcloud",
-        "coverage": "covered",
-        "storyIds": ["google-connect-dialog--client-gcloud"],
-        "note": "The gcloud radio shows the derived setup command, and Check again (declared POST profiles/add then GET) registers the profile and swaps in its stored name."
-      },
-      {
-        "name": "connected",
-        "coverage": "covered",
-        "storyIds": ["google-connect-dialog--connected"],
-        "note": "A configured profile linked to this workspace: the connected line with the workspace link, Done enabled, no sign-in controls; Done closes the dialog."
-      },
-      {
-        "name": "expired-reauth",
-        "coverage": "covered",
-        "storyIds": ["google-connect-dialog--expired-reauth"],
-        "note": "Reauth mode over a profile that needs re-login: the title, the expired warning with the cached token error, sign-in controls offered and Done still blocked."
-      },
-      {
-        "name": "relogin-pending",
-        "coverage": "covered",
-        "storyIds": ["google-connect-dialog--relogin-pending"],
-        "note": "The loopback wait status with Stop sign-in; the declared relogin/cancel write ends the wait and restores the sign-in buttons. Google OAuth start actions (Sign in, Paste a code) deliberately fail closed: their POSTs are undeclared, so the plays assert the controls instead of running them."
-      },
-      {
-        "name": "relogin-pending-blocked",
-        "coverage": "covered",
-        "storyIds": ["google-connect-dialog--relogin-pending-blocked"],
-        "note": "The blocked-tab variant of the wait: the Open authorization page link points at the fixture URL."
-      },
-      {
-        "name": "paste-code-flow",
-        "coverage": "covered",
-        "storyIds": ["google-connect-dialog--paste-code-flow"],
-        "note": "The paste flow: Complete Sign-In is blocked while the field is empty and the declared exchange write replaces the box with the connected line."
-      },
-      {
-        "name": "narrow",
-        "coverage": "covered",
-        "storyIds": ["google-connect-dialog--narrow"],
-        "note": "Reauth state in a maximum 390px container."
-      }
-    ],
-    "loading": {
-      "status": "none",
-      "detail": "No read or loading branch at open: everything arrives through the injected Google accounts state. Reads happen only on explicit actions (Check again), which the covered states declare; OAuth writes stay undeclared and fail closed."
-    },
-    "migration": {
-      "status": "unassessed",
-      "note": "Inventory admission does not approve a design migration."
-    }
-  },
-  {
     "id": "components-settings-provider-state-badge",
     "name": "ProviderStateBadge",
     "family": "Settings",
@@ -10862,98 +10759,6 @@ export const inventory: InventoryEntry[] = [
     }
   },
   {
-    "id": "components-settings-workspace-google-account",
-    "name": "WorkspaceGoogleAccount",
-    "family": "Settings",
-    "kind": "component",
-    "owner": {
-      "path": "web/src/components/settings/WorkspaceGoogleAccount.vue",
-      "anchor": "<template>"
-    },
-    "sources": [],
-    "consumers": [
-      "web/src/components/settings/SettingsWorkspaceOverview.vue"
-    ],
-    "variants": [
-      "connected",
-      "expired",
-      "none",
-      "actions menu",
-      "advanced panel"
-    ],
-    "variantNotes": "Observed branches audited: loading skeleton, load error with retry, none, connected, expired, actions menu (stop-using confirm and busy menu), advanced panel and narrow wrap. The old 'connecting' variant does not exist in the template: gwsAccountState renders connected, expired or none.",
-    "states": [
-      {
-        "name": "loading",
-        "coverage": "covered",
-        "storyIds": ["workspace-google-account--loading"],
-        "note": "Initial: the generic SkeletonLoader placeholder (rows, one count, announced as Loading Google account) while the integration read has not settled."
-      },
-      {
-        "name": "load-error",
-        "coverage": "covered",
-        "storyIds": ["workspace-google-account--load-error", "workspace-google-account--refresh-failure"],
-        "note": "Initial failure: the warn hint and Retry (v-else-if=\"gwsIntegrationError\"). The retry's declared read replaces the error with the row (load-error) or answers another failure the hint re-renders (refresh-failure)."
-      },
-      {
-        "name": "none",
-        "coverage": "covered",
-        "storyIds": ["workspace-google-account--none"],
-        "note": "No linked profile (v-else): the hint, the Connect Google account control, and the Connect dialog with focus returned to the row's opener after it closes."
-      },
-      {
-        "name": "connected",
-        "coverage": "covered",
-        "storyIds": ["workspace-google-account--connected"],
-        "note": "A linked configured profile: the Connected badge, label and email line, and the actions menu with Re-authenticate offered; Escape closes the menu. The profile's workspace list carries a second workspace so Stop using is offered."
-      },
-      {
-        "name": "expired",
-        "coverage": "covered",
-        "storyIds": ["workspace-google-account--expired"],
-        "note": "A linked profile that needs re-login: the Sign-in expired badge, the cached token error hint, the Sign in again control and the reauth dialog with focus returned to it."
-      },
-      {
-        "name": "advanced-panel",
-        "coverage": "covered",
-        "storyIds": ["workspace-google-account--advanced-panel"],
-        "note": "The Advanced / headless setup menu item opens the command panel (v-if=\"advancedOpen && profile\"); without a stored client the Create client command shows; Hide closes it."
-      },
-      {
-        "name": "advanced-panel-secret",
-        "coverage": "covered",
-        "storyIds": ["workspace-google-account--advanced-panel-secret"],
-        "note": "The same panel with a stored client secret: the Create client block is absent and the Login, Headless and Stored commands remain."
-      },
-      {
-        "name": "stop-using-confirm",
-        "coverage": "covered",
-        "storyIds": ["workspace-google-account--stop-using-confirm"],
-        "note": "The menu's Stop using in this workspace item opens the production confirm; cancelling writes nothing and leaves the link. Confirmed destructive actions are the Overview host's composition, not this row's isolated render."
-      },
-      {
-        "name": "busy",
-        "coverage": "covered",
-        "storyIds": ["workspace-google-account--busy"],
-        "note": "Disconnect and remove while the removal write is held: the actions menu is actually disabled through the owner's busy flag, not just styled."
-      },
-      {
-        "name": "narrow",
-        "coverage": "covered",
-        "storyIds": ["workspace-google-account--narrow"],
-        "note": "The connected row in a maximum 390px container: the actions wrap onto their own line under the name and email."
-      }
-    ],
-    "loading": {
-      "status": "known",
-      "detail": "Initial loading is the generic SkeletonLoader (rows): its two-line geometry does not match the loaded row's set-row badge and menu geometry, which a later loading slice should replace. A failed read renders the hint and Retry; the declared reads cover both a recoving retry and a refresh failure. No stale or refresh-keep state exists: the owner renders only the injected fetch result and never fetches on mount."
-    },
-    "migration": {
-      "status": "unassessed",
-      "note": "Inventory admission does not approve a design migration."
-    }
-  },
-  {
     "id": "css-chat-details",
     "name": "chatDetails",
     "family": "Shared CSS",
@@ -11290,7 +11095,6 @@ export const inventory: InventoryEntry[] = [
     "sources": [],
     "consumers": [
       "web/src/components/SettingsView.vue",
-      "web/src/components/settings/GoogleConnectDialog.vue",
       "web/src/components/settings/SettingsAllWorkspaces.vue",
       "web/src/components/settings/SettingsAppInstall.vue",
       "web/src/components/settings/SettingsAppearance.vue",
@@ -11306,8 +11110,7 @@ export const inventory: InventoryEntry[] = [
       "web/src/components/settings/SettingsServer.vue",
       "web/src/components/settings/SettingsUpdateTasks.vue",
       "web/src/components/settings/SettingsWorkspaceModels.vue",
-      "web/src/components/settings/SettingsWorkspaceOverview.vue",
-      "web/src/components/settings/WorkspaceGoogleAccount.vue"
+      "web/src/components/settings/SettingsWorkspaceOverview.vue"
     ],
     "variants": ["settings-card"],
     "variantNotes": "Shared scoped settings panel family, not the global card implementation; consumers are stylesheet include sites.",
@@ -11544,7 +11347,6 @@ export const inventory: InventoryEntry[] = [
       "web/src/components/onboarding/OnboardingButton.vue",
       "web/src/components/onboarding/OnboardingView.vue",
       "web/src/components/settings/CustomColorsDialog.vue",
-      "web/src/components/settings/GoogleConnectDialog.vue",
       "web/src/components/settings/SettingsAllWorkspaces.vue",
       "web/src/components/settings/SettingsAppearance.vue",
       "web/src/components/settings/SettingsClaudeTrim.vue",
@@ -11560,8 +11362,7 @@ export const inventory: InventoryEntry[] = [
       "web/src/components/settings/SettingsUpdateTasks.vue",
       "web/src/components/settings/SettingsWorkspaceModels.vue",
       "web/src/components/settings/SettingsWorkspaceOverview.vue",
-      "web/src/components/settings/WorkspaceColorPicker.vue",
-      "web/src/components/settings/WorkspaceGoogleAccount.vue"
+      "web/src/components/settings/WorkspaceColorPicker.vue"
     ],
     "consumers": [],
     "variants": [
@@ -11721,7 +11522,6 @@ export const inventory: InventoryEntry[] = [
       "web/src/components/onboarding/OnboardingLocationStage.vue",
       "web/src/components/onboarding/OnboardingMemoryStage.vue",
       "web/src/components/settings/CustomColorsDialog.vue",
-      "web/src/components/settings/GoogleConnectDialog.vue",
       "web/src/components/settings/SettingsAllWorkspaces.vue",
       "web/src/components/settings/SettingsAppInstall.vue",
       "web/src/components/settings/SettingsAppearance.vue",
@@ -11736,8 +11536,7 @@ export const inventory: InventoryEntry[] = [
       "web/src/components/settings/SettingsServer.vue",
       "web/src/components/settings/SettingsUpdateTasks.vue",
       "web/src/components/settings/SettingsWorkspaceModels.vue",
-      "web/src/components/settings/SettingsWorkspaceOverview.vue",
-      "web/src/components/settings/WorkspaceGoogleAccount.vue"
+      "web/src/components/settings/SettingsWorkspaceOverview.vue"
     ],
     "consumers": [],
     "variants": [
@@ -11840,8 +11639,7 @@ export const inventory: InventoryEntry[] = [
       "web/src/components/ProposalHistoryList.vue",
       "web/src/components/SettingsView.vue",
       "web/src/components/TaskWorkspaceSurface.vue",
-      "web/src/components/WebhookTriggers.vue",
-      "web/src/components/settings/WorkspaceGoogleAccount.vue"
+      "web/src/components/WebhookTriggers.vue"
     ],
     "consumers": [],
     "variants": [
@@ -12258,7 +12056,6 @@ export const inventory: InventoryEntry[] = [
       "web/src/components/onboarding/OnboardingSummary.vue",
       "web/src/components/onboarding/OnboardingView.vue",
       "web/src/components/settings/CustomColorsDialog.vue",
-      "web/src/components/settings/GoogleConnectDialog.vue",
       "web/src/components/settings/SettingsAllWorkspaces.vue",
       "web/src/components/settings/SettingsAppInstall.vue",
       "web/src/components/settings/SettingsAppearance.vue",
@@ -12275,8 +12072,7 @@ export const inventory: InventoryEntry[] = [
       "web/src/components/settings/SettingsUpdateTasks.vue",
       "web/src/components/settings/SettingsWorkspaceModels.vue",
       "web/src/components/settings/SettingsWorkspaceOverview.vue",
-      "web/src/components/settings/WorkspaceColorPicker.vue",
-      "web/src/components/settings/WorkspaceGoogleAccount.vue"
+      "web/src/components/settings/WorkspaceColorPicker.vue"
     ],
     "consumers": [],
     "variants": [
@@ -12318,8 +12114,7 @@ export const inventory: InventoryEntry[] = [
     "sources": [
       "web/src/components/MemoryCategoriesPanel.vue",
       "web/src/components/ProjectView.vue",
-      "web/src/components/TaskWorkspaceSurface.vue",
-      "web/src/components/settings/GoogleConnectDialog.vue"
+      "web/src/components/TaskWorkspaceSurface.vue"
     ],
     "consumers": [],
     "variants": [

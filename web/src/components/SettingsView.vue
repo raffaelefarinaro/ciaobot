@@ -744,7 +744,7 @@
 
           <!-- Add Skill Form: folder note + zip upload -->
           <div v-if="showAddSkill" class="settings-form-panel">
-            <div class="gws-account-add" style="margin-bottom: 12px;">
+            <div class="skill-add-note" style="margin-bottom: 12px;">
               <p class="ws-label">Add a skill</p>
               <p class="hint hint--compact">
                 Place a folder <code>skills/&lt;name&gt;/SKILL.md</code> in the workspace, then run <code>ciao sync-skills</code>. Or upload a zip containing exactly one top-level folder with <code>SKILL.md</code>. Validated before extract.
@@ -1214,7 +1214,6 @@ import type {
   LocalHandbackResult,
 } from '../lib/types'
 import { askConfirm } from '../lib/confirm'
-import { GWS_ACCOUNTS_KEY, useGwsAccounts } from '../composables/useGwsAccounts'
 import {
   WORKSPACE_ADMIN_KEY,
   useWorkspaceAdmin,
@@ -1720,9 +1719,6 @@ const unsubscribeProviderRefresh = subscribeProviderRefresh(() => {
   else providerKeysLoaded.value = false
 })
 onUnmounted(() => { providerViewAlive = false; providerPendingOwner = null; providerEpoch++; settingsModelEpoch++; unsubscribeProviderRefresh() })
-const gwsAccounts = useGwsAccounts({ notifySaved, notifyFailed })
-const { gwsProfileOptions, fetchGwsIntegration } = gwsAccounts
-provide(GWS_ACCOUNTS_KEY, gwsAccounts)
 
 async function fetchProviderKeys(): Promise<void> {
   const pending = waitForProviderMutation()
@@ -2406,8 +2402,6 @@ function notifyFailed(title: string, detail: string) {
 const workspaceAdmin = useWorkspaceAdmin({
   notifySaved,
   notifyFailed,
-  gwsProfileOptions,
-  fetchGwsIntegration,
 })
 const {
   workspacesLoaded,
@@ -2538,7 +2532,7 @@ function loadSettingsTab(tab: string): Promise<void> {
     case 'workspace':
       // Not scoped: the list covers every workspace. Handover and Update tasks
       // reload themselves when the active workspace changes.
-      reads = [fetchGwsIntegration(), ensureWorkspaceList(), fetchArchivedWorkspaces()]
+      reads = [ensureWorkspaceList(), fetchArchivedWorkspaces()]
       break
     case 'skills':
       reads = [fetchSkills()]
@@ -3544,7 +3538,7 @@ a.btn-secondary {
 .tier-provider-note {
   margin-top: var(--space-2);
 }
-.gws-account-add {
+.skill-add-note {
   display: flex;
   flex-direction: column;
   gap: var(--space-2);
