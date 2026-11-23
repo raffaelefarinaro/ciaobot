@@ -1489,12 +1489,11 @@ def test_documented_manual_recovery_resolves_selected_vault(tmp_path: Path) -> N
     )
     registry_path = runtime / "workspaces.json"
     registry_path.write_text(json.dumps([
-        {"name": "personal", "vault_root": ".", "default_provider": "claude", "gws_profile": ""},
+        {"name": "personal", "vault_root": ".", "default_provider": "claude"},
         {
             "name": "research",
             "vault_root": "research/memory-vault",
             "default_provider": "claude",
-            "gws_profile": "research-account",
             "disallowed_tools": ["Bash"],
         },
     ], indent=2), encoding="utf-8")
@@ -1534,7 +1533,6 @@ def test_documented_manual_recovery_resolves_selected_vault(tmp_path: Path) -> N
 
     # The second workspace and every unrelated setting survive the edit.
     assert config.workspace_vault_root("research") == install / "research" / "memory-vault"
-    assert config.workspace("research").gws_profile == "research-account"
     assert config.workspace("research").disallowed_tools == ["Bash"]
     assert "PWA_PORT=8443" in env_path.read_text(encoding="utf-8").splitlines()
     assert "# operator comment" in env_path.read_text(encoding="utf-8").splitlines()

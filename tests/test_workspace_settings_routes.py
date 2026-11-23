@@ -299,7 +299,6 @@ def test_post_workspace_persists_runtime_registry_and_updates_live_config(tmp_pa
         "vault_root": "memory-vault/client-a",
         "default_provider": "claude",
         "disallowed_tools": ["mcp__claude_ai_Slack", "Bash"],
-        "gws_profile": "work",
         "color": "amber",
         "memory_handover": "all",
     }
@@ -332,32 +331,25 @@ def test_patch_and_delete_workspace_update_runtime_registry(tmp_path):
             "vault_root": "memory-vault/personal",
             "default_provider": "claude",
             "disallowed_tools": None,
-            "gws_profile": "personal",
             "color": "amber",
         },
     ]
     assert pcm.refresh_count == 3
 
 
-def test_workspace_gws_profile_must_be_a_profile_id(tmp_path):
-    client, config, _pcm = _client(tmp_path)
+def test_workspace_patch_ignores_a_gws_profile_field(tmp_path):
+    client, _, _pcm = _client(tmp_path)
     client.post("/api/workspaces", json={"name": "client-a"})
+    registry = tmp_path / ".runtime" / "workspaces.json"
+    before = next(w for w in json.loads(registry.read_text()) if w["name"] == "client-a")
 
-    bad = client.patch("/api/workspaces/client-a", json={"gws_profile": "x\ncurl"})
-    assert bad.status_code == 400
-    assert "gws_profile must be a profile id" in bad.json()["error"]
-    assert config.workspace("client-a").gws_profile != "x\ncurl"
+    patched = client.patch("/api/workspaces/client-a", json={"gws_profile": "x\ncurl"})
 
-    ok = client.patch("/api/workspaces/client-a", json={"gws_profile": "acme"})
-    assert ok.status_code == 200
-    assert config.workspace("client-a").gws_profile == "acme"
-
-    # A save that leaves the key out keeps the stored link; an empty one unlinks.
-    client.patch("/api/workspaces/client-a", json={"color": "cyan"})
-    assert config.workspace("client-a").gws_profile == "acme"
-    cleared = client.patch("/api/workspaces/client-a", json={"gws_profile": ""})
-    assert cleared.status_code == 200
-    assert config.workspace("client-a").gws_profile == ""
+    assert patched.status_code == 200
+    stored = next(w for w in json.loads(registry.read_text()) if w["name"] == "client-a")
+    assert stored["color"] == before["color"]
+    assert stored["default_provider"] == before["default_provider"]
+    assert "gws_profile" not in stored
 
 
 def test_workspace_save_never_accepts_a_request_body_vault_path(tmp_path):
@@ -514,13 +506,11 @@ def test_stale_stored_provider_serializes_coerced_and_saves(tmp_path):
                     "vault_root": "memory-vault/personal",
                     "default_provider": "ollama",
                     "model_bucket": "big",
-                    "gws_profile": "personal",
                 },
                 {
                     "name": "work",
                     "vault_root": "memory-vault/work",
                     "default_provider": "claude",
-                    "gws_profile": "work",
                 },
             ]
         )
@@ -540,7 +530,7 @@ def test_stale_stored_provider_serializes_coerced_and_saves(tmp_path):
     # A save that omits the provider keeps working despite the stale record.
     untouched = client.patch(
         "/api/workspaces/personal",
-        json={"gws_profile": "personal"},
+        json={"color": "amber"},
     )
     assert untouched.status_code == 200
 
@@ -737,7 +727,7 @@ def test_workspace_color_defaults_persists_and_validates(tmp_path):
     # Other fields can update without resetting color.
     keep = client.patch(
         "/api/workspaces/client-a",
-        json={"gws_profile": "work"},
+        json={"disallowed_tools": "Bash"},
     )
     assert keep.status_code == 200
     assert config.workspace("client-a").color == "emerald"

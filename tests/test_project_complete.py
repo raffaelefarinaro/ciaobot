@@ -69,12 +69,10 @@ def _make_custom_workspace_config(tmp_path: Path) -> CiaoConfig:
             "home": WorkspaceConfig(
                 name="home",
                 vault_root="memory-vault/home",
-                gws_profile="personal",
             ),
             "client": WorkspaceConfig(
                 name="client",
                 vault_root="vaults/client",
-                gws_profile="work",
             ),
         },
     )

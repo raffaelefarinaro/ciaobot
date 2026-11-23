@@ -90,7 +90,6 @@ def _config(tmp_path: Path, *, rerooted: bool) -> CiaoConfig:
             "work": WorkspaceConfig(
                 name="work",
                 vault_root=roots["work"],
-                gws_profile="work",
                 color="cyan",
                 default_provider="claude",
             ),
@@ -212,7 +211,7 @@ def test_archive_moves_the_whole_agent_root_intact(tmp_path):
     assert metadata["layout"] == "per-root"
     assert metadata["original_path"] == "work"
     assert metadata["workspace"]["color"] == "cyan"
-    assert metadata["workspace"]["gws_profile"] == "work"
+    assert "gws_profile" not in metadata["workspace"]
     assert metadata["workspace"]["default_provider"] == "claude"
     assert metadata["archived_at"].endswith("Z")
 
@@ -1364,7 +1363,7 @@ def test_restore_rebuilds_settings_and_never_widens_access(tmp_path):
     preview = client.get("/api/workspaces/archived").json()["archived"][0]
     assert preview["disallowed_tools"] is None
     assert preview["default_provider"] == "claude"
-    assert preview["gws_profile"] == ""
+    assert "gws_profile" not in preview
 
     restored = client.post("/api/workspaces/archived/restore", json={"id": archived["id"]})
 
@@ -1372,7 +1371,7 @@ def test_restore_rebuilds_settings_and_never_widens_access(tmp_path):
     work = config.workspaces["work"]
     assert work.default_provider == "claude"
     assert work.disallowed_tools is None
-    assert work.gws_profile == ""
+    assert not hasattr(work, "gws_profile")
     assert work.color == "amber"
     assert work.vault_root == "work/memory-vault"
 

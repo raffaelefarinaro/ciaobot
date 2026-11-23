@@ -605,7 +605,6 @@ def _recording_config(tmp_path: Path) -> SimpleNamespace:
         bootstrap_mode=False,
         _workspace_registry_changed=False,
         import_legacy_workspaces_env=lambda: None,
-        import_legacy_gws_profile_env=lambda: None,
     )
 
 

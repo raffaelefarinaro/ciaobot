@@ -33,7 +33,7 @@ from ciao.web.project_chats import ProjectChatManager
 from tests.conftest import attach_stub_mcp
 
 
-def _make_manager(tmp_path: Path, *, gws_profile: str = "") -> ProjectChatManager:
+def _make_manager(tmp_path: Path) -> ProjectChatManager:
     runtime = tmp_path / ".runtime"
     runtime.mkdir(parents=True, exist_ok=True)
     config = CiaoConfig(
@@ -45,7 +45,6 @@ def _make_manager(tmp_path: Path, *, gws_profile: str = "") -> ProjectChatManage
             "personal": WorkspaceConfig(
                 name="personal",
                 vault_root="memory-vault/personal",
-                gws_profile=gws_profile,
             )
         },
     )
@@ -57,11 +56,9 @@ def _make_manager(tmp_path: Path, *, gws_profile: str = "") -> ProjectChatManage
     ))
 
 
-def _chat_extra_env(
-    tmp_path: Path, monkeypatch, *, provider: str = "claude", gws_profile: str = ""
-) -> dict:
+def _chat_extra_env(tmp_path: Path, monkeypatch, *, provider: str = "claude") -> dict:
     """A real chat turn's ``extra_env`` for one provider."""
-    manager = _make_manager(tmp_path, gws_profile=gws_profile)
+    manager = _make_manager(tmp_path)
     project = manager.create_project("path", workspace="personal")
     chat = manager.create_chat(project.project_id, provider=provider)
     return manager.build_agent_request(chat, prompt="hi").extra_env
@@ -261,58 +258,14 @@ def test_agent_request_default_extra_env_is_untouched() -> None:
     assert request.extra_env == {}
 
 
-# ── bare `gws` resolves the workspace's Google account ─────────────────────
+# ── the engine no longer sets the Google variables ───────────────────────
 
 
-def test_chat_turn_env_points_bare_gws_at_the_linked_account(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    creds = tmp_path / "secrets" / "gws-personal"
-    creds.mkdir(parents=True)
-    (creds / "credentials.json").write_text("{}", encoding="utf-8")
-
-    extra_env = _chat_extra_env(tmp_path, monkeypatch, gws_profile="personal")
-
-    assert extra_env["GWS_PROFILE"] == "personal"
-    assert extra_env["GOOGLE_WORKSPACE_CLI_CONFIG_DIR"] == str(creds.resolve())
-
-
-def test_chat_turn_env_isolates_bare_gws_for_an_unlinked_workspace(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    creds = tmp_path / "secrets" / "gws-personal"
-    creds.mkdir(parents=True)
-    (creds / "credentials.json").write_text("{}", encoding="utf-8")
-
-    extra_env = _chat_extra_env(tmp_path, monkeypatch)
-
-    assert extra_env["GWS_PROFILE"] == ""
-    # Pointed at a dir that holds no credentials, so a bare `gws` cannot fall
-    # back to the operator's ~/.config/gws login.
-    unlinked = Path(extra_env["GOOGLE_WORKSPACE_CLI_CONFIG_DIR"])
-    assert unlinked.parent.name == "gws-unlinked"
-    assert not unlinked.exists()
-    assert (tmp_path / "secrets") not in unlinked.parents
-
-
-def test_chat_turn_env_isolates_bare_gws_without_an_account(
+def test_chat_turn_env_has_no_google_workspace_variables(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     extra_env = _chat_extra_env(tmp_path, monkeypatch)
 
-    assert extra_env["GWS_PROFILE"] == ""
-    assert Path(extra_env["GOOGLE_WORKSPACE_CLI_CONFIG_DIR"]).parent.name == "gws-unlinked"
-
-
-def test_unlinked_workspaces_get_separate_bare_gws_dirs(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """Credentials an agent logs in to one unlinked workspace must not serve another."""
-    manager = _make_manager(tmp_path, gws_profile="")
-    dirs = set()
-    for workspace in ("personal", "side-project"):
-        project = manager.create_project(workspace, workspace=workspace)
-        chat = manager.create_chat(project.project_id, provider="claude")
-        dirs.add(manager.build_agent_request(chat, prompt="hi").extra_env["GOOGLE_WORKSPACE_CLI_CONFIG_DIR"])
-    assert len(dirs) == 2
-    assert all(Path(d).parent.name == "gws-unlinked" for d in dirs)
+    assert "GWS_PROFILE" not in extra_env
+    assert "GOOGLE_WORKSPACE_CLI_CONFIG_DIR" not in extra_env
+    assert extra_env["CIAO_ACTIVE_WORKSPACE"] == "personal"

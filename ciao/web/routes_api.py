@@ -5324,10 +5324,10 @@ async def schedule_care_run(request: Request) -> JSONResponse:
     derived counts, and a schedule with no run all answer ``{"care_run": null}``.
     See ``ciao.care_run_outcome`` for the trust boundary of the chat binding. The
     vault is the one the run's own CLI resolves: the chat's workspace, falling
-    back to the default profile exactly as ``workspace_shell_env`` does.
+    back to the default workspace name exactly as ``workspace_shell_env`` does.
     """
     from ciao.care_run_outcome import is_care_schedule_id, outcome_for_chat
-    from ciao.config import GWS_DEFAULT_PROFILE
+    from ciao.config import DEFAULT_WORKSPACE_NAME
     from ciao.curation_run import CurationStateError, load_state
     from ciao.schedules import parse_dispatch_stamp
 
@@ -5343,7 +5343,7 @@ async def schedule_care_run(request: Request) -> JSONResponse:
     project = pcm.get_project(chat.project_id) if chat is not None else None
     if project is None:
         return JSONResponse({"care_run": None})
-    vault = request.app.state.config.workspace_vault_root(project.workspace or GWS_DEFAULT_PROFILE)
+    vault = request.app.state.config.workspace_vault_root(project.workspace or DEFAULT_WORKSPACE_NAME)
     try:
         state = load_state(vault)
     except CurationStateError:

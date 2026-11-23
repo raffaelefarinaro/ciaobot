@@ -72,7 +72,6 @@ def test_the_bootstrap_registry_is_read_off_the_vault(tmp_path: Path) -> None:
 
     assert list(config.workspaces) == ["personal", "work"]
     assert config.workspace("personal").vault_root == "memory-vault/personal"
-    assert config.workspace("work").gws_profile == "work"
 
 
 def test_the_bootstrap_registry_claims_only_what_exists(tmp_path: Path) -> None:
@@ -165,13 +164,11 @@ def test_workspace_registry_file_defines_named_workspaces(tmp_path: Path) -> Non
                 "vault_root": "memory-vault/home",
                 "default_provider": "claude",
                 "disallowed_tools": ["Bash", "mcp__example"],
-                "gws_profile": "personal",
             },
             {
                 "name": "client",
                 "vault_root": "/tmp/client-vault",
                 "default_provider": "opencode",
-                "gws_profile": "work",
             },
         ]
     )
@@ -183,7 +180,6 @@ def test_workspace_registry_file_defines_named_workspaces(tmp_path: Path) -> Non
     assert list(config.workspaces) == ["home", "client"]
     assert config.workspace_names() == ["home", "client"]
     assert config.workspace("home").vault_root == "memory-vault/home"
-    assert config.workspace("home").gws_profile == "personal"
     assert config.default_provider_for_workspace("home") == "claude"
     # extras are additive, not a replacement
     assert config.disallowed_tools_for_workspace("home") == [
@@ -455,3 +451,33 @@ def test_process_runtime_root_still_moves_the_runtime(tmp_path, monkeypatch) -> 
     config = CiaoConfig.from_env(export=False)
 
     assert config.state_path.parent == (tmp_path / "isolated").resolve()
+
+
+def test_a_stale_gws_profile_key_is_ignored_and_dropped_on_next_write(tmp_path: Path) -> None:
+    (tmp_path / ".runtime").mkdir(parents=True)
+    registry = tmp_path / ".runtime" / "workspaces.json"
+    registry.write_text(
+        json.dumps(
+            [
+                {
+                    "name": "home",
+                    "vault_root": "memory-vault/home",
+                    "default_provider": "claude",
+                    "gws_profile": "personal",
+                }
+            ]
+        ),
+        encoding="utf-8",
+    )
+    config = _config(
+        CIAO_WORKSPACE=str(tmp_path),
+        CIAO_RUNTIME_ROOT=str(tmp_path / ".runtime"),
+    )
+
+    assert config.workspace_names() == ["home"]
+    assert not hasattr(config.workspace("home"), "gws_profile")
+
+    config.persist_workspace_registry()
+    rows = json.loads(registry.read_text(encoding="utf-8"))
+    assert all("gws_profile" not in row for row in rows)
+    assert rows[0]["name"] == "home"

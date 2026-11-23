@@ -199,7 +199,6 @@ def _registry_entry(config: Any, workspace: WorkspaceConfig) -> dict[str, Any]:
         "default_provider": config.default_provider_for_workspace(workspace.name),
         "disallowed_tools": workspace.disallowed_tools,
         "claude_trim": workspace.claude_trim,
-        "gws_profile": workspace.gws_profile,
         "color": workspace.color,
         "shared_brains": [
             {"name": link.name, "path": link.path, "identity": link.identity}
@@ -550,7 +549,6 @@ def _workspace_entry(metadata: dict[str, Any]) -> dict[str, Any]:
 # rest of it trustworthy. Validation plus a confirmation that shows what will
 # be applied covers both cases.
 
-_GWS_PROFILE_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{0,63}$")
 _TOOL_NAME_RE = re.compile(r"^[A-Za-z0-9_.:*()/@-][A-Za-z0-9_.:*()/@ -]{0,199}$")
 
 
@@ -595,11 +593,6 @@ def restored_settings(config: Any, metadata: dict[str, Any]) -> dict[str, Any]:
     claude_trim = absorb_legacy_claude_ai_connectors(
         entry, load_claude_trim(entry.get("claude_trim"))
     )
-    profile = entry.get("gws_profile")
-    if not isinstance(profile, str) or not (
-        profile == "" or _GWS_PROFILE_RE.fullmatch(profile)
-    ):
-        profile = ""
     try:
         color = coerce_workspace_color(entry.get("color"))
     except ValueError:
@@ -618,7 +611,6 @@ def restored_settings(config: Any, metadata: dict[str, Any]) -> dict[str, Any]:
         "default_provider": provider,
         "disallowed_tools": disallowed,
         "claude_trim": {k: v for k, v in claude_trim.items() if v},
-        "gws_profile": profile,
         "color": color,
         "shared_brains": shared_brains,
     }
@@ -839,7 +831,6 @@ def list_archives(config: Any) -> list[dict[str, Any]]:
             "layout": str(metadata.get("layout") or ""),
             "color": settings["color"],
             "default_provider": settings["default_provider"],
-            "gws_profile": settings["gws_profile"],
             "disallowed_tools": settings["disallowed_tools"],
             "schedules": len(schedules),
             "schedules_dropped": dropped,
@@ -907,7 +898,6 @@ def register_restored(
         default_provider=settings["default_provider"],
         disallowed_tools=settings["disallowed_tools"],
         claude_trim=settings["claude_trim"],
-        gws_profile=settings["gws_profile"],
         color=settings["color"],
         shared_brains=settings["shared_brains"],
     )

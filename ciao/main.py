@@ -579,7 +579,6 @@ async def _async_main(
         # One-time import of the retired CIAO_WORKSPACES variable; it writes
         # the registry, so it runs under the lock like the persist below.
         config.import_legacy_workspaces_env()
-        config.import_legacy_gws_profile_env()
         if config._workspace_registry_changed:
             config.persist_workspace_registry()
         if app_engine:

@@ -1532,9 +1532,6 @@ def setup_workspace(
                     "name": name,
                     "vault_root": stored_vault_root,
                     "default_provider": default_provider,
-                    # No Google account is linked at scaffold time; the user
-                    # chooses in Settings → Overview after setup.
-                    "gws_profile": "",
                 }],
                 indent=2,
             ) + "\n",
@@ -1633,10 +1630,6 @@ def setup_workspace(
                     "name": ws_name,
                     "vault_root": stored_root,
                     "default_provider": provider,
-                    # No Google account is linked at scaffold time: which
-                    # accounts exist is the user's choice, made in Settings →
-                    # Workspaces after setup.
-                    "gws_profile": "",
                 }
             )
             _write_if_missing(
@@ -1671,7 +1664,6 @@ def setup_workspace(
                         "name": name,
                         "vault_root": stored_root,
                         "default_provider": provider,
-                        "gws_profile": "",
                     }
                 ],
                 indent=2,
