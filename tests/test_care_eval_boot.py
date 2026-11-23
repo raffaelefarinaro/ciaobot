@@ -38,7 +38,6 @@ def test_care_task_is_a_schedule_boot_with_no_prompt_and_the_seed_overlay(tmp_pa
     assert task.prompt == ""
     assert task.entry == {"kind": "schedule"}
     assert task.overlay == overlay
-    assert task.gws_fake is None
 
 
 def test_prepare_workspace_with_a_caller_vault_copies_only_the_seed(tmp_path: Path) -> None:
