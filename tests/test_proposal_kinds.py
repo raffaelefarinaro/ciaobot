@@ -41,6 +41,10 @@ def test_rehome_and_profile_are_matched_by_the_shared_regex() -> None:
         assert bullet.text == "some content"
 
 
+def test_legacy_learnings_bullet_is_not_a_review_row() -> None:
+    assert pk.parse_bullet("- [learnings] keep this lesson") is None
+
+
 def test_regex_is_derived_from_the_kind_table() -> None:
     """A kind added to KINDS is matched without editing the regex by hand."""
     for kind in pk.KINDS:

@@ -265,6 +265,17 @@ describe('queue load errors', () => {
     expect(store.rows.map(r => r.id)).toEqual(['a'])
   })
 
+  it('exposes legacy learning queue status from the proposals response', async () => {
+    const queues = { personal: { state: 'pending' as const, rows: 2 } }
+    vi.mocked(api.get).mockResolvedValueOnce({ rows: [], legacy_learning_queues: queues } as never)
+    const store = useProposalsStore()
+
+    expect(store.legacyLearningQueues).toEqual({})
+    await store.fetch()
+
+    expect(store.legacyLearningQueues).toEqual(queues)
+  })
+
   it('does not let a list refresh erase an unread action failure', async () => {
     // The risk named in the ticket: refresh used to clear `error`, hiding an
     // accept failure the operator had not read. The two slots are separate now.

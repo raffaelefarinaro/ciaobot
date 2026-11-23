@@ -7794,7 +7794,35 @@ async def list_proposals(request: Request) -> JSONResponse:
     config = request.app.state.config
     # Off the event loop: the scan is blocking file I/O.
     rows, _by_id = await asyncio.to_thread(proposal_service._scan_proposal_rows, config)
-    return JSONResponse({"rows": rows})
+    legacy_learning_queues: dict[str, dict[str, Any]] = {}
+    from ciao.learnings_queue_drain import inspect as inspect_learning_queue
+
+    for workspace in config.workspace_names():
+        try:
+            state = await asyncio.to_thread(
+                inspect_learning_queue,
+                Path(config.workspace_vault_root(workspace)),
+                workspace=workspace,
+                runtime_root=Path(config.state_path).parent,
+            )
+            status = (
+                "unknown" if state["failed"]
+                else "blocked" if state["unresolved"]
+                else "pending" if state["rows"]
+                else "clear"
+            )
+            if status != "clear":
+                legacy_learning_queues[workspace] = {
+                    "state": status,
+                    "rows": len(state["rows"]),
+                }
+        except Exception:
+            # A failed safety scan is itself visible; it must never look clean.
+            legacy_learning_queues[workspace] = {
+                "state": "unknown",
+                "rows": 0,
+            }
+    return JSONResponse({"rows": rows, "legacy_learning_queues": legacy_learning_queues})
 
 
 _HISTORY_DEFAULT_LIMIT = 200
@@ -9227,8 +9255,6 @@ async def proposals_batch(request: Request) -> JSONResponse:
                         promotion = await proposal_service._accept_project_row(config, row)
                     elif accept.action == "write_people_note":
                         promotion = await proposal_service._accept_people_row(config, row)
-                    elif accept.action == "append_learnings":
-                        promotion = proposal_service._accept_learnings_row(config, row)
                     elif accept.action == "append_repo_doc":
                         promotion = await asyncio.to_thread(
                             proposal_service._accept_repo_row, config, row, linked
@@ -9799,13 +9825,6 @@ async def proposal_action(request: Request) -> JSONResponse:
                 if not promoted.ok:
                     return JSONResponse(
                         {"error": promoted.error or "could not write the note", "id": pid},
-                        status_code=409,
-                    )
-            elif accept.action == "append_learnings":
-                promoted = proposal_service._accept_learnings_row(config, promote_row)
-                if not promoted.ok:
-                    return JSONResponse(
-                        {"error": promoted.error or "could not append", "id": pid},
                         status_code=409,
                     )
             elif accept.action == "append_repo_doc":

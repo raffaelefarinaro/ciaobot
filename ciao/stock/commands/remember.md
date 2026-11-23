@@ -12,7 +12,7 @@ Turn `$ARGUMENTS` into one durable, present-tense fact — never "User said X �
    - cross-project preference, environment fact, or lesson → `memory`
    - who the user is (identity, role, communication style) → `profile`
    - true only within the active project → `project` (needs the project's canonical doc path as payload)
-   - a durable fact about a person → `people` (needs the person's name as payload). For another entity category, `--kind` accepts only `memory`, `profile`, `project`, `people`, `repo`, `learnings` and `review`, so a category name is refused: use `people` when the thing is a person, otherwise `review`, naming the thing and its category in the fact.
+   - a durable fact about a person → `people` (needs the person's name as payload). For another entity category, `--kind` accepts only `memory`, `profile`, `project`, `people`, `repo` and `review`, so a category name is refused: use `people` when the thing is a person, otherwise `review`, naming the thing and its category in the fact.
    - specific to the linked code repository this chat works in → `repo` (needs the repository's absolute path as payload)
    - reusable how-to knowledge spanning projects → record it directly with `ciao memory learn` in step 3
    - durable but unsure where it belongs → `review`

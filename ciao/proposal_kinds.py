@@ -14,8 +14,7 @@ roots plan). ``[rehome]`` is a file move with a destination and a reason, not
 a bounded-region edit, so its accept descriptor is a distinct type and can
 never be mistaken for an "add to memory" action. The destination kinds added
 by the proposal-routing work follow the same rule: ``[project <doc-path>]``,
-``[people <Name>]``, and
-``[learnings]`` each carry a descriptor of their own, and ``[review]`` — the
+``[people <Name>]`` each carry a descriptor of their own, and ``[review]`` — the
 "the model was not sure" bucket — deliberately accepts only by manual routing,
 so no one-click action can guess a destination for it.
 
@@ -58,7 +57,6 @@ KINDS: tuple[str, ...] = (
     "rehome",
     "project",
     "people",
-    "learnings",
     "review",
     "category",
     "note_edit",
@@ -203,13 +201,6 @@ class PeopleAccept:
 
 
 @dataclass(frozen=True, slots=True)
-class LearningsAccept:
-    """Accept a `[learnings]` proposal by appending to Workspace/Learnings.md."""
-
-    action: Literal["append_learnings"] = "append_learnings"
-
-
-@dataclass(frozen=True, slots=True)
 class ReviewAccept:
     """A `[review]` row has no known destination, so nothing is automatic.
 
@@ -279,7 +270,6 @@ AcceptDescriptor = (
     | RehomeAccept
     | DocFoldAccept
     | PeopleAccept
-    | LearningsAccept
     | ReviewAccept
     | CategoryAccept
     | NoteEditAccept
@@ -297,7 +287,6 @@ _ACCEPT: dict[str, AcceptDescriptor] = {
     "rehome": RehomeAccept(destination="", reason=""),
     "project": DocFoldAccept(),
     "people": PeopleAccept(),
-    "learnings": LearningsAccept(),
     "review": ReviewAccept(),
     "category": CategoryAccept(),
     "note_edit": NoteEditAccept(),

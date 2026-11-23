@@ -25,7 +25,6 @@ import urllib.error
 import urllib.request
 
 from ciao import dev, package_smoke, package_version, proposal_kinds, public_release, release, service_backend
-from ciao.learning_records import REQUEST_ID_RE
 from ciao.workspace_discovery import trusted_registry
 from ciao.server_host import (
     BUNDLE_ID,
@@ -2478,7 +2477,9 @@ def _registered_owner(config: Any, vault: Path) -> str | None:
     return None
 
 
-def _learnings_workspace(args: argparse.Namespace) -> tuple[Path, str, Path]:
+def _learnings_workspace(
+    args: argparse.Namespace, *, workspace_root: Path | None = None
+) -> tuple[Path, str, Path]:
     """``(vault root, workspace name, runtime root)`` for a learnings command.
 
     The three belong together because all three are answers read from the same
@@ -2514,7 +2515,7 @@ def _learnings_workspace(args: argparse.Namespace) -> tuple[Path, str, Path]:
     Raises ``ValueError`` with a message to print; every caller turns that into
     exit 1 before anything is written.
     """
-    from ciao.config import CiaoConfig, installed_workspace_env
+    from ciao.config import CiaoConfig, _overlay_workspace_env, installed_workspace_env
 
     # A read-only resolution must not mint a session secret just because the CLI
     # runs outside the server env (the same rule the memory-audit command and
@@ -2523,7 +2524,10 @@ def _learnings_workspace(args: argparse.Namespace) -> tuple[Path, str, Path]:
     # The install the server sees, overlaid under this process's env — the same
     # resolution `from_env()` applies to a bare shell — so a learnings run from
     # any directory reads the real registry and that install's `.env`.
-    env = installed_workspace_env(os.environ)
+    if workspace_root is not None:
+        env = _overlay_workspace_env(os.environ, workspace=str(workspace_root))
+    else:
+        env = installed_workspace_env(os.environ)
     if not env.get("PWA_AUTH_TOKEN", "").strip():
         # Not `setdefault`: the install's `.env` reaches this mapping now, and an
         # empty `PWA_AUTH_TOKEN=` hand-written there would leave `from_env`
@@ -2746,6 +2750,9 @@ def _learnings_migration_status(summary: dict[str, Any]) -> int:
 def _learnings_queue_drain_command(args: argparse.Namespace) -> int:
     from ciao.learnings_queue_drain import drain, revert
 
+    if args.fresh_only and (not args.apply or args.revert):
+        print("--fresh-only requires --apply and cannot be used with --revert", file=sys.stderr)
+        return 2
     try:
         vault, workspace, runtime = _learnings_workspace(args)
     except ValueError as exc:
@@ -2754,7 +2761,13 @@ def _learnings_queue_drain_command(args: argparse.Namespace) -> int:
     summary = (
         revert(vault, args.revert, workspace=workspace, runtime_root=runtime, apply=args.apply)
         if args.revert
-        else drain(vault, workspace=workspace, runtime_root=runtime, apply=args.apply)
+        else drain(
+            vault,
+            workspace=workspace,
+            runtime_root=runtime,
+            apply=args.apply,
+            fresh_only=args.fresh_only,
+        )
     )
     if args.json:
         print(json.dumps(summary, ensure_ascii=False, indent=2))
@@ -4627,6 +4640,26 @@ def _decision_rules_write_command(args: argparse.Namespace) -> int:
     return 0
 
 
+def _learnings_queue_drain_command_text(
+    workspace: str | None,
+    vault: Path,
+    *,
+    workspace_root: Path,
+    runtime_root: Path,
+    apply: bool,
+) -> str:
+    """Copyable command bound to one registered workspace and vault."""
+    command = (
+        f"CIAO_WORKSPACE={shlex.quote(str(workspace_root))} "
+        f"CIAO_RUNTIME_ROOT={shlex.quote(str(runtime_root))} "
+        "ciao learnings-queue-drain"
+    )
+    if workspace:
+        command += f" --workspace {shlex.quote(workspace)}"
+    command += f" --vault-root {shlex.quote(str(vault))}"
+    return command + (" --apply" if apply else "")
+
+
 def _memory_proposals_command(args: argparse.Namespace) -> int:
     """List pending memory proposals in a workspace's review queue.
 
@@ -4642,7 +4675,32 @@ def _memory_proposals_command(args: argparse.Namespace) -> int:
     except ValueError as exc:
         print(f"ciao memory-proposals: {exc}", file=sys.stderr)
         return 2
-    workspace, vault = _resolve_workspace_and_vault(args)
+    workspace, vault, _agent_vault, _registered_name = _resolve_workspace_and_vaults(args)
+    from ciao.learnings_queue_drain import inspect as inspect_learning_queue
+
+    try:
+        name = _proposal_review_owner(args, workspace, vault)
+        drain_args = argparse.Namespace(
+            workspace=name, vault_root=vault, runtime_root=None
+        )
+        drain_vault, drain_workspace, runtime = _learnings_workspace(
+            drain_args, workspace_root=workspace
+        )
+        legacy = inspect_learning_queue(
+            drain_vault, workspace=drain_workspace, runtime_root=runtime
+        )
+        if legacy["rows"] or legacy["failed"] or legacy["unresolved"]:
+            print(
+                "Legacy learning proposals need attention: run `"
+                f"{_learnings_queue_drain_command_text(name, vault, workspace_root=workspace, runtime_root=runtime, apply=False)}` to inspect, "
+                "then add `--apply` to migrate them.",
+                file=sys.stderr,
+            )
+    except Exception:
+        print(
+            "Could not safely inspect legacy learning proposals. Run `ciao learnings-queue-drain` in this workspace.",
+            file=sys.stderr,
+        )
     path = vault / "Workspace" / "Memory-Proposals.md"
     rows = _listed_proposal_rows(path, _proposal_review_owner(args, workspace, vault))
     from ciao.proposal_predictions import REGION_KINDS, latest_predictions, prediction_key
@@ -4699,14 +4757,6 @@ def _memory_proposal_add_command(args: argparse.Namespace) -> int:
     surviving only as prose in one nightly report. Re-filing an identical fact
     is a no-op; the queue dedupes by text.
 
-    ``--kind learnings --request ID`` is how a ``/remember`` of a reusable
-    lesson keeps its provenance. A ``/remember`` usually happens in a chat that
-    is never archived, so there is no transcript turn to cite — and the two ways
-    out are not equivalent: citing a fabricated turn is a reference to a
-    conversation that never happened, whereas the request id is the real,
-    re-readable origin of the sighting. The accepted line renders ``req:<id>``
-    and the learning model deduplicates on it, so a retry of the same
-    ``/remember`` cannot inflate the recurrence count.
     """
     refused = _refuse_ambiguous_vault_write(args)
     if refused is not None:
@@ -4796,27 +4846,6 @@ def _memory_proposal_add_command(args: argparse.Namespace) -> int:
             )
             return 2
         payload = str(repo_payload)
-    # `--request` is lesson provenance: it is what a `[learnings]` accept hands
-    # to `append_learning` so the line can cite the user request the sighting
-    # came from instead of an archive turn that does not exist. A request on any
-    # other kind would be a field the accept cannot act on, so it is refused by
-    # name rather than stored where nothing reads it.
-    request = (getattr(args, "request", "") or "").strip()
-    if request and kind != "learnings":
-        print(
-            f"--request is provenance for a [learnings] fact, not kind {kind!r}: "
-            "the only accept that records one is the learnings append",
-            file=sys.stderr,
-        )
-        return 2
-    if request and not REQUEST_ID_RE.match(request):
-        print(
-            f"--request {request!r} is not a plain request identifier (letters, "
-            "digits, dot, dash and underscore only): it is cited on a learnings "
-            "line, so it has to survive a round trip through the queue",
-            file=sys.stderr,
-        )
-        return 2
     decide = (args.decide or "").strip()
     reason_file = (args.decide_reason_file or "").strip()
     decide_reason = ""
@@ -4839,7 +4868,6 @@ def _memory_proposal_add_command(args: argparse.Namespace) -> int:
         text=text,
         source_section=args.source.strip() or "curation",
         payload=payload,
-        request=request,
         decider=decide,
         decide_reason=decide_reason,
     )
@@ -4872,7 +4900,6 @@ def _memory_proposal_add_command(args: argparse.Namespace) -> int:
                 "review_key": review_key,
                 "review_path": review_path,
                 "text": text,
-                "request": request,
                 "decide": decide,
                 # argparse supplies a Path when --workspace is explicit, and
                 # json.dump cannot serialize one; report the resolved root.
@@ -8964,6 +8991,11 @@ def build_parser() -> argparse.ArgumentParser:
     drain_parser.add_argument("--workspace", default=None)
     drain_parser.add_argument("--runtime-root", type=Path, default=None)
     drain_parser.add_argument("--apply", action="store_true")
+    drain_parser.add_argument(
+        "--fresh-only",
+        action="store_true",
+        help="With --apply, refuse recovery and apply only a new batch (for unattended care).",
+    )
     drain_parser.add_argument("--revert", type=Path, default=None)
     drain_parser.add_argument("--json", action="store_true")
     drain_parser.set_defaults(func=_learnings_queue_drain_command)
@@ -9440,7 +9472,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--kind",
         default="memory",
         help=(
-            "Destination kind: memory, profile, project, people, learnings, "
+            "Destination kind: memory, profile, project, people, "
             "review, repo. Defaults to memory."
         ),
     )
@@ -9456,17 +9488,6 @@ def build_parser() -> argparse.ArgumentParser:
         "--source",
         default="curation",
         help="Provenance label recorded on the bullet. Defaults to curation.",
-    )
-    memory_proposal_add_parser.add_argument(
-        "--request",
-        default="",
-        help=(
-            "The user-request identifier this fact was asked for under. "
-            "Learnings only: it is what the accepted line cites as `req:<id>` "
-            "when the `/remember` has no archived turn behind it, so the "
-            "sighting keeps a real origin instead of a manufactured transcript "
-            "one. Plain letters, digits, dot, dash and underscore."
-        ),
     )
     memory_proposal_add_parser.add_argument(
         "--workspace",

@@ -142,7 +142,6 @@ watch(open, (isOpen) => {
 const TAG_ROWS: { kind: string; what: string; who: string }[] = [
   { kind: 'project', what: 'A fact or decision about one project', who: 'Nightly files it.' },
   { kind: 'people', what: 'Something about a person', who: 'Nightly files it.' },
-  { kind: 'learnings', what: 'A lesson for next time', who: 'Nightly files it.' },
   {
     kind: 'review',
     what: 'A question with no home yet',
