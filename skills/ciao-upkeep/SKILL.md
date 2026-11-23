@@ -1,6 +1,6 @@
 ---
 name: ciao-upkeep
-description: Keep Ciaobot current between releases — check every dependency and pin we install and whether its upstream is still alive (Python, npm, the gws CLI, GitHub Actions, the Node floor, Playwright), keep the stock skill catalog, ciao-capabilities and the marketing site in sync with the code, sweep doc rot, and maintain the watchlist in docs/UPKEEP.md. Trigger on "keep ciao up to date", "check dependencies", "any updates", "check the site", "watchlist", "upkeep", or after a feature ships that adds a user-facing capability.
+description: Keep Ciaobot current between releases — check every dependency and pin we install and whether its upstream is still alive (Python, npm, GitHub Actions, the Node floor, Playwright), keep the stock skill catalog, ciao-capabilities and the marketing site in sync with the code, sweep doc rot, and maintain the watchlist in docs/UPKEEP.md. Trigger on "keep ciao up to date", "check dependencies", "any updates", "check the site", "watchlist", "upkeep", or after a feature ships that adds a user-facing capability.
 ---
 
 # Ciaobot upkeep
@@ -56,7 +56,6 @@ The full inventory — what is pinned where, and what the checker misses:
 |---|---|---|
 | Python deps (incl. `firecrawl-anydoc>=0.2.4,<0.3.0`) | `pyproject.toml` | yes — reported only |
 | Frontend deps | `web/package.json` | yes — reported only |
-| **`gws` CLI** | generated, not pinned by hand — see below | **drift reported, updates manual** |
 | AnyDoc | rides the `pyproject.toml` pin | yes |
 | GitHub Actions | `.github/workflows/*.yml` | **no** |
 | Node floor | `.nvmrc` **and** `web/scripts/check-node.mjs` | **no** |
@@ -65,11 +64,6 @@ The full inventory — what is pinned where, and what the checker misses:
 The unchecked ones need their own check:
 
 ```bash
-# gws: nothing to bump by hand — see the note below
-npm view @googleworkspace/cli version 2>/dev/null || echo "check github.com/googleworkspace/cli"
-gws --version
-grep -m1 'version:' ciao/stock/skills/gws-shared/SKILL.md
-
 # Actions
 grep -rhoE 'uses: [^ ]+@v[0-9]+' .github/workflows | sort -u
 ```
@@ -145,67 +139,6 @@ driver (#3138 C2b), so this check is by hand.
 5. Update the `Last checked` cell of the "Claude harness trim catalog" row in
    `docs/UPKEEP.md`.
 
-### `gws`: never hand-edit the version
-
-The `gws-*` skills are **generated**, and so is the version. `gws
-generate-skills` writes `metadata: version:` into `gws-shared/SKILL.md` itself,
-and `gws-shared` is one of the shipped skills, so regenerating advances the pin
-automatically. Upgrading the local `gws` CLI is the only input; there is
-nothing to hand-maintain.
-
-So the procedure is: upgrade the CLI, then regenerate. **Do not edit
-`metadata.version` by hand** — a hand-bumped pin is either overwritten by the
-next regeneration or, worse, records a version the skills were never generated
-from, which is the exact drift the pin exists to prevent.
-
-```bash
-# 1. the input: upgrade the CLI, then confirm it
-gws --version
-
-# 2. dry run — reports which skills would change, writes nothing
-env -u PYTHONPATH .venv/bin/python -c "
-from pathlib import Path
-from ciao.gws_skills import regenerate_stock_gws_skills
-r = regenerate_stock_gws_skills(Path('$(pwd)/ciao/stock/skills'), write=False)
-print('would update:', r.updated)
-print('missing:', r.missing)"
-
-# 3. then write
-env -u PYTHONPATH .venv/bin/python -c "
-from pathlib import Path
-from ciao.gws_skills import regenerate_stock_gws_skills
-r = regenerate_stock_gws_skills(Path('$(pwd)/ciao/stock/skills'), write=True)
-print('updated:', r.updated)
-print('missing:', r.missing)"
-```
-
-`missing` is the output that matters: a skill the CLI no longer generates is
-reported and **left untouched**, so the repo keeps shipping a skill for a
-command that may no longer exist. That is a decision, not a warning to wave
-through — either drop the skill in the same PR or record why it stays.
-
-**The invariant, and the check after regenerating:**
-
-```bash
-env -u PYTHONPATH .venv/bin/python -c "
-from pathlib import Path
-from ciao.gws_skills import installed_gws_version, pinned_gws_version
-d = Path('$(pwd)/ciao/stock/skills')
-i, p = installed_gws_version(), pinned_gws_version(d)
-print('installed', i, 'pinned', p, 'OK' if i == p else 'DRIFT')"
-```
-
-**This also happens at release time.** `ciao/release.py:600`
-(`_refresh_stock_gws_skills`) regenerates unconditionally during `--apply` and
-stages whatever changed, so a `gws` upgrade that lands before a cut is picked up
-and gated by the release instead. That is a legitimate path, and the safer one,
-because the full check suite runs over it. Do it as its own PR anyway when you
-want a small reviewable diff rather than a regeneration folded into a release
-commit.
-
-`ciao release` reports the drift as `Stock gws skills: gws CLI X != pinned Y`
-and treats a missing CLI as a skip, not a failure.
-
 ## 2. Stock skills ↔ capabilities ↔ the marketing site
 
 Three places describe the same product to three different audiences, and
@@ -218,7 +151,7 @@ cover **none** of these three surfaces.
 to the catalog is invisible to the two audiences that matter:
 
 ```bash
-ls ciao/stock/skills/ | grep -v '^gws-'
+ls ciao/stock/skills/
 ```
 
 For each one, check it appears in:
@@ -330,12 +263,6 @@ coverage it does not have.
   `except Exception: pass`, and `release.py` prints "Dependency update check
   skipped" on any exception. A network failure reads exactly like "no updates
   available". Confirm you got a real report, not a skipped one.
-- **The `gws` version is generated, never hand-edited.** `gws generate-skills`
-  emits `metadata: version:` into `gws-shared/SKILL.md`, and `gws-shared` is one
-  of the shipped skills, so regeneration advances the pin. Hand-bumping it is
-  the failure this pin prevents: it either gets overwritten, or it records a
-  version the skills were never generated from. Upgrade the CLI, regenerate,
-  and let the pin follow.
 - **Never `git add -A` in this checkout.** Another session may be editing it.
   Stage explicit paths and read `git diff --cached` before committing.
 - **Use `rtk proxy git …` for anything you are about to commit on.** The RTK

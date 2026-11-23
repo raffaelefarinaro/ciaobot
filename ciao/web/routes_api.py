@@ -440,12 +440,6 @@ async def upsert_workspace_setting(request: Request) -> JSONResponse:
             if read_receipt(Path(config.state_path).parent) is not None:
                 register_new_workspace(config, workspace.name)
                 onboarding_target = {"kind": "workspace", "name": workspace.name}
-        profile_changed = (
-            not created
-            and existing is not None
-            and str(getattr(existing, "gws_profile", "") or "")
-            != str(getattr(workspace, "gws_profile", "") or "")
-        )
         config.workspaces[workspace.name] = workspace
         try:
             _persist_workspaces(config)
@@ -466,34 +460,6 @@ async def upsert_workspace_setting(request: Request) -> JSONResponse:
             if onboarding_target is not None:
                 payload["onboarding_target"] = onboarding_target
             payload["bootstrapped"] = await _bootstrap_new_agent_root(config, workspace.name)
-        elif profile_changed:
-            # Linking a workspace to its first account (or unlinking it) changes
-            # which `gws-*` stock skills it should get, and skill sync only runs at
-            # startup/repair. Resync now so the catalog matches the new linkage
-            # instead of waiting for a restart. On a pre-re-root install the target
-            # root is shared by every workspace, so the gate aggregates all of them
-            # (unlinking one must not prune the shared catalog while another still
-            # links an account).
-            from ciao.sync_skills import (  # noqa: PLC0415
-                resolve_workspace_skills_gws_gate,
-                sync_workspace_skills,
-            )
-
-            try:
-                root = Path(config.agent_root(workspace.name))
-                await asyncio.to_thread(
-                    sync_workspace_skills,
-                    root,
-                    refresh_upstream=False,
-                    gws_profile=resolve_workspace_skills_gws_gate(
-                        config, root, workspace.name
-                    ),
-                )
-            except Exception:  # noqa: BLE001 - the update already succeeded
-                logger.exception(
-                    "Could not resync skills for workspace %s after profile change",
-                    workspace.name,
-                )
         if renamed is not None:
             _publish_workspaces_changed(request, renamed["from"], renamed["to"])
         return JSONResponse(payload, status_code=201 if created else 200)
@@ -570,48 +536,11 @@ async def _bootstrap_new_agent_root(config, name: str) -> bool:
     try:
         # `refresh_upstream=False`: this is a local seeding on a user-facing
         # request, not the periodic upstream regeneration.
-        from ciao.gws_auth import workspace_gws_profile  # noqa: PLC0415
-
-        await asyncio.to_thread(
-            sync_workspace_skills,
-            root,
-            refresh_upstream=False,
-            gws_profile=workspace_gws_profile(config, name),
-        )
+        await asyncio.to_thread(sync_workspace_skills, root, refresh_upstream=False)
     except Exception:  # noqa: BLE001 - creation already succeeded
         logger.exception("Could not seed agent root for new workspace %s", name)
         return False
     return True
-
-
-async def _resync_shared_skills(config, name: str, verb: str) -> None:
-    """Resync the shared skill catalog after the registry changed.
-
-    On a pre-re-root install the shared catalog serves every workspace, so
-    removing (or restoring) the only one with a GWS profile changes whether the
-    gws-* skills belong there. After re-rooting the active catalogs live under
-    each <install>/<workspace> root and the install root is retired, so syncing
-    it would recreate CLAUDE.md/.claude/skills there - skip it in that layout.
-    """
-    if getattr(config, "_rerooted", lambda: False)():
-        return
-    try:
-        from ciao.sync_skills import (  # noqa: PLC0415
-            resolve_workspace_skills_gws_gate,
-            sync_workspace_skills,
-        )
-
-        root = Path(config.workspace_root)
-        await asyncio.to_thread(
-            sync_workspace_skills,
-            root,
-            refresh_upstream=False,
-            gws_profile=resolve_workspace_skills_gws_gate(
-                config, root, config.primary_workspace()
-            ),
-        )
-    except Exception:  # noqa: BLE001 - the registry change already succeeded
-        logger.exception("Could not resync shared skills after %s workspace %s", verb, name)
 
 
 def _schedule_manager(request: Request) -> Any:
@@ -892,7 +821,6 @@ async def archive_workspace_setting(request: Request) -> JSONResponse:
             return rows, rebuilt
 
         search_rows, index_rebuilt = await asyncio.to_thread(_forget)
-        await _resync_shared_skills(config, name, "archiving")
         payload = _workspaces_payload(config)
         payload["archived"] = {
             "id": archived["id"],
@@ -1015,8 +943,6 @@ async def restore_archived_workspace(request: Request) -> JSONResponse:
             # The root's guide and assets came back with it, but its skill mirrors
             # may point at a packaged catalog that changed while it was archived.
             await _bootstrap_new_agent_root(config, name)
-        else:
-            await _resync_shared_skills(config, name, "restoring")
         payload = _workspaces_payload(config)
         payload["restored"] = {
             "id": archive_id,

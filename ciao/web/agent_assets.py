@@ -933,13 +933,7 @@ def repair_workspace_health(config: Any) -> dict:
         # ever copying, so the bounded memory regions travel with the file.
         if migrate_root(root) in ("relinked", "renamed", "merged"):
             merged_agents_guide = True
-        from ciao.gws_auth import workspace_gws_profile  # noqa: PLC0415
-
-        sync_workspace_skills(
-            root,
-            refresh_upstream=False,
-            gws_profile=workspace_gws_profile(config, ws_name),
-        )
+        sync_workspace_skills(root, refresh_upstream=False)
     health = workspace_health(config)
     if merged_agents_guide:
         health["merged_agents_guide"] = True

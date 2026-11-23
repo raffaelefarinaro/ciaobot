@@ -1581,7 +1581,6 @@ def setup_workspace(
             sync_result = sync_workspace_skills(
                 asset_root,
                 refresh_upstream=False,
-                workspace_name=_name or None,
             )
         except Exception as exc:  # noqa: BLE001 — a scaffold step, never fatal
             print(f"skill sync failed for {asset_root}: {exc}", file=sys.stderr)
