@@ -9434,6 +9434,62 @@ export const inventory: InventoryEntry[] = [
     }
   },
   {
+    "id": "components-settings-settings-shared-brains",
+    "name": "SettingsSharedBrains",
+    "family": "Settings",
+    "kind": "component",
+    "owner": {
+      "path": "web/src/components/settings/SettingsSharedBrains.vue",
+      "anchor": "<template>"
+    },
+    "sources": [],
+    "consumers": [
+      "web/src/components/settings/SettingsWorkspaceOverview.vue"
+    ],
+    "variants": [],
+    "variantNotes": "Detailed configurable variants have not yet been audited.",
+    "states": [
+      {
+        "name": "loading",
+        "coverage": "uncovered",
+        "storyIds": [],
+        "note": "Loading holds the first read: the checking line shows and no add form renders. Not isolable in the workshop; SettingsSharedBrains.test.ts covers it."
+      },
+      {
+        "name": "empty",
+        "coverage": "uncovered",
+        "storyIds": [],
+        "note": "No brains linked: the privacy sentence and the add form only. Not isolable in the workshop; SettingsSharedBrains.test.ts covers it."
+      },
+      {
+        "name": "listed",
+        "coverage": "uncovered",
+        "storyIds": [],
+        "note": "One row per brain, each with its own plain-words status line (warn and ok rows), then the add form. Not isolable in the workshop; SettingsSharedBrains.test.ts covers it."
+      },
+      {
+        "name": "error",
+        "coverage": "uncovered",
+        "storyIds": [],
+        "note": "First-load failure shows the role=alert message and a Try again control. Not isolable in the workshop; SettingsSharedBrains.test.ts covers it."
+      },
+      {
+        "name": "at-limit",
+        "coverage": "uncovered",
+        "storyIds": [],
+        "note": "Five brains linked: the add form is replaced by the limit sentence. Not isolable in the workshop; SettingsSharedBrains.test.ts covers it."
+      }
+    ],
+    "loading": {
+      "status": "known",
+      "detail": "Initial load: one read of the linked brains on mount and on workspace change. Saves send the whole list and re-read. Not measured in this slice."
+    },
+    "migration": {
+      "status": "unassessed",
+      "note": "Inventory admission does not approve a design migration."
+    }
+  },
+  {
     "id": "components-settings-settings-claude-trim",
     "name": "SettingsClaudeTrim",
     "family": "Settings",

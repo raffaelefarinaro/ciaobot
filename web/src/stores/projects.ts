@@ -56,6 +56,7 @@ import type {
   RuntimeProvider,
   ClaudeTrimOption,
   WorkspaceInfo,
+  WorkspacePatch,
   WorkspaceName,
   WorkspaceProviderOption,
   WorkspacesResponse,
@@ -2598,7 +2599,7 @@ export const useProjectStore = defineStore('projects', () => {
     } finally { endWorkspaceMutation() }
   }
 
-  async function updateWorkspace(name: WorkspaceName, payload: Partial<WorkspaceInfo>) {
+  async function updateWorkspace(name: WorkspaceName, payload: WorkspacePatch) {
     const selectionEpoch = workspaceSelectionEpoch
     const epoch = beginWorkspaceMutation()
     try {

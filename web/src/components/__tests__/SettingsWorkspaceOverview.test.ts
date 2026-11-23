@@ -123,6 +123,7 @@ describe('Settings > Workspace Overview', () => {
         'Chats and models',
         'Google account',
         'Memory handover',
+        'Shared brains',
         'Weekly care cycle',
         'Update task history',
         'Archive this workspace',
