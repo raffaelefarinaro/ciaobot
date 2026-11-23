@@ -95,7 +95,8 @@ CONTEXT_POLICIES: tuple[MemoryWritePolicy, ...] = (
         summary=(
             "The user asks a chat to remember or forget a fact. It is queued for "
             "review by default; a live region write is allowed only when the user "
-            "explicitly asks for it in the current turn."
+            "explicitly asks for it in the current turn. A reusable lesson is "
+            "recorded directly through `ciao memory learn`."
         ),
         writes_regions=True,
         writes_vault=True,
@@ -117,7 +118,9 @@ CONTEXT_POLICIES: tuple[MemoryWritePolicy, ...] = (
             "for a genuinely new entity, and queues whatever it is unsure of — "
             "including anything with no decided destination — in "
             "Workspace/Memory-Proposals.md. A turn the transcript marks as "
-            "automated is not the user's, and is never lifted as a fact."
+            "automated is not the user's, and is never lifted as a fact. A "
+            "reusable lesson it finds is recorded through `ciao memory learn`, "
+            "never hand-edited into Workspace/Learnings.md."
         ),
         writes_regions=True,
         writes_vault=True,
@@ -140,7 +143,8 @@ CONTEXT_POLICIES: tuple[MemoryWritePolicy, ...] = (
             "and defers anything that needs a reviewer — including a retirement "
             "verdict, which it files as a note_edit proposal instead of applying. "
             "The one exception is operator-granted handover=all, where an "
-            "accept goes through the guarded region write with an undo receipt."
+            "accept goes through the guarded region write with an undo receipt. "
+            "It never records a new learning."
         ),
         writes_regions=True,
         writes_vault=True,
@@ -207,6 +211,11 @@ class DeferredAction:
 
 
 UNATTENDED_DEFERRED_ACTIONS: tuple[DeferredAction, ...] = (
+    DeferredAction(
+        "Record a new learning",
+        "A learning is recorded by an attended turn through `ciao memory learn`; "
+        "an unattended run notes the lesson in its report instead.",
+    ),
     DeferredAction(
         "Promote a new fact into the always-loaded ciao:memory / ciao:profile regions",
         "New region facts need a reviewer; queue them in Workspace/Memory-Proposals.md.",

@@ -352,6 +352,42 @@ _BULLET_RE = re.compile(r"^ {0,3}(?:[-*+]) +(?P<body>\S.*)$")
 _ISO_DATE_RE = re.compile(r"\d{4}-\d{2}-\d{2}")
 _DATE_ATTEMPT_RE = re.compile(r"\d{4}-\d{1,2}-\d{1,2}|\d{1,2}/\d{1,2}/\d{2,4}")
 _IDENTIFIER_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:/#-]*$")
+MAX_LEARNING_SOURCE_CHARS = 128
+
+#: What a request identifier may contain. Narrow on purpose: it is cited on a
+#: learnings line as ``req:<id>`` and has to survive a round trip through a
+#: one-line Markdown bullet's ``_(request: …)_`` tail, so a newline, a ``)`` or a
+#: backtick is refused at the door rather than mangled into another citation.
+REQUEST_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}\Z")
+
+#: Longest statement one learning may carry. Same bound as a queued fact.
+MAX_LEARNING_CHARS = 240
+
+#: Stored sightings per learning. A sighting past this is refused, never folded
+#: in by dropping an old identity: a dropped identity could be replayed and
+#: counted again.
+MAX_LEARNING_OBSERVATIONS = 64
+
+# A queue tail a statement must not carry: the ``_(request: …)_`` citation and
+# the date/expiry tags the queue reads back as metadata.
+_QUEUE_TAIL_RE = re.compile(r"_\(|_\)|\[\s*idx|\[\s*as-of|\[\s*expires", re.IGNORECASE)
+
+
+def learning_text_refusal(text: str) -> str | None:
+    """Why *text* cannot be stored as a learning statement, or ``None``.
+
+    The statement is written as one line that the parser reads back. Anything
+    that would open or close the metadata comment, or look like a citation or a
+    queue tail, would be read as structure rather than prose, so it is refused
+    before it is written rather than escaped after.
+    """
+    if "<!-- ciao:learning" in text or "-->" in text:
+        return "a metadata comment marker"
+    if _SOURCES_RE.search(text):
+        return "a sources citation"
+    if _QUEUE_TAIL_RE.search(text):
+        return "a queue tail"
+    return None
 
 # The two structured shapes are matched with the writer's own `-` marker, not
 # with any bullet marker: `* [2024-05-01] …` is prose someone typed, and reading

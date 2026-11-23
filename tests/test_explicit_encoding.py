@@ -61,6 +61,8 @@ def _problem(call: ast.Call) -> str | None:
     if name in {"read_text", "write_text"} and isinstance(func, ast.Attribute):
         return f"{name}() without encoding="
     if name == "open":
+        if owner == "os":
+            return None
         if isinstance(func, ast.Name) or owner == "io":
             # builtins/io.open(file, mode, ...)
             mode = keywords.get("mode", call.args[1] if len(call.args) > 1 else None)
@@ -198,6 +200,8 @@ def test_the_newline_scan_itself(source: str, flagged: bool) -> None:
         ("p.open('ab')", False),
         ("p.open()", True),
         ("os.open(p, os.O_RDONLY)", False),
+        ("os.open('Workspace', flags, dir_fd=root_fd)", False),
+        ("Path('file').open('w')", True),
         ("tarfile.open(tmp, 'w:gz')", False),
         ("zf.open(info)", False),
         ("opener.open(request, timeout=5)", False),

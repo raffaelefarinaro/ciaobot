@@ -25,6 +25,7 @@ import urllib.error
 import urllib.request
 
 from ciao import dev, gws_wrapper, package_smoke, package_version, proposal_kinds, public_release, release, service_backend
+from ciao.learning_records import REQUEST_ID_RE
 from ciao.workspace_discovery import trusted_registry
 from ciao.server_host import (
     BUNDLE_ID,
@@ -4663,13 +4664,6 @@ def _memory_proposals_command(args: argparse.Namespace) -> int:
     return 0
 
 
-#: What a ``--request`` identifier may contain. Narrow on purpose: it is cited on
-#: a ``Workspace/Learnings.md`` line as ``req:<id>`` and has to survive a round
-#: trip through a one-line Markdown bullet and back, so anything that would end
-#: the bullet's ``_(request: …)_`` tail — a newline, a ``)``, a backtick — is
-#: refused at the door rather than mangled into a citation that names something
-#: else.
-_REQUEST_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
 
 
 def _memory_proposal_add_command(args: argparse.Namespace) -> int:
@@ -4792,7 +4786,7 @@ def _memory_proposal_add_command(args: argparse.Namespace) -> int:
             file=sys.stderr,
         )
         return 2
-    if request and not _REQUEST_ID_RE.match(request):
+    if request and not REQUEST_ID_RE.match(request):
         print(
             f"--request {request!r} is not a plain request identifier (letters, "
             "digits, dot, dash and underscore only): it is cited on a learnings "
