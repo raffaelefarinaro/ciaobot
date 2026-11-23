@@ -107,7 +107,7 @@
 
     <section id="extend">
       <h2>Add your own</h2>
-      <p>There are three ways to give Ciaobot new abilities, and the easiest is always the same: <strong>ask Ciaobot to make it</strong>. The MCP and Skills settings even have an <em>Add via chat</em> button that opens a chat for exactly that.</p>
+      <p>There are three ways to give Ciaobot new abilities, and the easiest is always the same: <strong>ask Ciaobot to make it</strong>. The Skills, Subagents, Commands and MCP settings each have an <em>Ask Ciao</em> button that opens a chat for exactly that.</p>
       <div class="table-wrap">
         <table>
           <thead><tr><th>If you want to…</th><th>Use</th><th>Example</th></tr></thead>
@@ -123,10 +123,7 @@
 
       <h3>MCP servers: connect other apps</h3>
       <p>The <a href="https://modelcontextprotocol.io/">Model Context Protocol</a> is the standard way to plug an outside service (Notion, Linear, GitHub, your home automation) into an AI assistant as a set of tools.</p>
-      <p><strong>Settings → MCP servers → New MCP server</strong>: give it a name and either a web address or a command to run. Tokens are stored in your workspace's private settings file, never in the server list.</p>
-      <figure>
-        <a href="assets/img/mcp.webp"><img src="assets/img/mcp.webp" alt="Settings, MCP servers tab with Add via chat and New MCP server buttons and two example servers" loading="lazy" width="1600" height="1000"></a>
-      </figure>
+      <p>Each agent keeps its own MCP servers and sign-ins. <strong>Settings → MCP servers</strong> has one button per installed agent that opens that agent's own MCP command in the built-in terminal, so you add and sign in to a server the way the agent expects. <a href="models.html#inherit">More →</a></p>
       <div class="prompt">Connect my Linear workspace as an MCP server.</div>
 
       <h3>Skills: teach it how you like things done</h3>
