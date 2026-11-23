@@ -2935,6 +2935,46 @@ def test_pass_for_a_missing_linked_repo_has_no_repo_section(tmp_path: Path) -> N
     assert memory_pass.REPO_PROPOSAL_COMMAND not in prompt
 
 
+def _brains_on(manager: ProjectChatManager, workspace: str, *paths: str) -> None:
+    from ciao.config import SharedBrainLink, WorkspaceConfig
+
+    record = manager._config.workspaces.setdefault(workspace, WorkspaceConfig(name=workspace, vault_root=f"memory-vault/{workspace}"))
+    record.shared_brains = [
+        SharedBrainLink(name=f"brain-{i}", path=path, identity=f"github.com/acme/notes-{i}")
+        for i, path in enumerate(paths)
+    ]
+
+
+def test_pass_for_workspace_with_two_shared_brains_carries_both_names_and_paths(
+    tmp_path: Path,
+) -> None:
+    manager, pass_chat = _linked_pass(tmp_path, None)
+    _brains_on(manager, "work", "/brains/acme", "/brains/ops")
+
+    prompt = manager._memory_pass._prompt_for(pass_chat)
+
+    assert "This workspace has shared team folders:" in prompt
+    assert "- brain-0: /brains/acme" in prompt
+    assert "- brain-1: /brains/ops" in prompt
+    assert "do not propose it as a memory" in prompt
+
+
+def test_pass_without_a_shared_brain_has_no_section(tmp_path: Path) -> None:
+    manager, pass_chat = _linked_pass(tmp_path, None)
+
+    assert "shared team folders" not in manager._memory_pass._prompt_for(pass_chat)
+
+
+def test_task_completion_and_project_closure_passes_carry_no_shared_brain_section(
+    tmp_path: Path,
+) -> None:
+    manager, pass_chat = _linked_pass(tmp_path, None)
+    _brains_on(manager, "work", "/brains/acme")
+    for source_kind in (chat_service.TASK_COMPLETION_SOURCE, chat_service.PROJECT_CLOSURE_SOURCE):
+        pass_chat.helper = {**pass_chat.helper, "source_kind": source_kind}
+        assert "shared team folders" not in manager._memory_pass._prompt_for(pass_chat)
+
+
 def test_approved_task_summary_is_fenced_and_cannot_close_its_fence() -> None:
     helper = {
         "focus": "approved_task",

@@ -167,9 +167,11 @@ from ciao.config import (
     MAX_IMAGE_SIZE_BYTES,
     BridgeConfig,
 )
+from ciao import shared_brain
 from ciao.context.capsule import (
     build_context_capsule,
     render_linked_repo_block,
+    render_shared_brain_block,
 )
 from ciao.context.capsule import (
     context_digest as stable_context_digest,
@@ -6139,6 +6141,39 @@ class ProjectChatManager:
         if callable(revoke):
             revoke(chat_id)
 
+    def shared_brains_for_chat(self, chat: ChatInfo) -> list[tuple[str, str]]:
+        """The (name, path) of each shared brain the chat's workspace links, or [].
+
+        A memory-pass chat gets none, the same rule as the linked repository.
+        """
+        return self._shared_brain_pairs(chat, self._projects.get(chat.project_id))
+
+    def _shared_brain_pairs(self, chat: ChatInfo, project: ProjectInfo | None) -> list[tuple[str, str]]:
+        if project is None or is_memory_pass_chat(chat, project):
+            return []
+        record = self._config.workspace(project.workspace)
+        links = getattr(record, "shared_brains", None) or []
+        return [(link.name, link.path) for link in links]
+
+    def _shared_brain_context(self, chat: ChatInfo, project: ProjectInfo | None) -> tuple[str, str]:
+        """(stable ``[Shared brains]`` block, digest fingerprint), ("", "") when none.
+
+        Runs on every turn, so it touches the disk only with ``is_dir`` and one
+        ``fetched_at`` stat per brain: no git subprocess (see ``_linked_repo_context``).
+        The fingerprint is name, path and reachability, never the update date.
+        """
+        pairs = self._shared_brain_pairs(chat, project)
+        if not pairs:
+            return "", ""
+        brains: list[tuple[str, str, bool, str]] = []
+        fingerprint: list[str] = []
+        for name, path in pairs:
+            missing = not Path(path).is_dir()
+            updated = "" if missing else (shared_brain.fetched_at(path) or "")[:10]
+            brains.append((name, path, missing, updated))
+            fingerprint.append(f"{name}\0{path}\0{'missing' if missing else 'ok'}")
+        return render_shared_brain_block(brains), "\n".join(fingerprint)
+
     def _linked_repo_context(
         self,
         chat: ChatInfo,
@@ -6214,6 +6249,7 @@ class ProjectChatManager:
         repo_block, _repo_fp, repo_line, inlined = self._linked_repo_context(
             chat, project, inline_instructions=not already_inlined
         )
+        shared_block, _shared_fp = self._shared_brain_context(chat, project)
         include_stable = self._needs_stable_context(chat)
         chat.instructions_inline_pending = repo_path if include_stable and inlined else ""
         handover = self._format_handover_context(chat)
@@ -6229,6 +6265,7 @@ class ProjectChatManager:
             include_stable=include_stable,
             linked_repo_block=repo_block,
             linked_repo_line=repo_line,
+            shared_brain_block=shared_block,
             permission_mode=chat.mode,
             core=self._core_for_chat(chat),
         )
@@ -6262,6 +6299,7 @@ class ProjectChatManager:
         project_context = project.context if project else ""
         canonical_doc = project.vault_doc_path if project else ""
         _b, repo_fp, _l, _i = self._linked_repo_context(chat, project)
+        _sb, shared_fp = self._shared_brain_context(chat, project)
         return (
             stable_context_digest(
                 workspace=workspace,
@@ -6270,6 +6308,7 @@ class ProjectChatManager:
                 project_context=project_context,
                 canonical_doc=canonical_doc,
                 linked_repo=repo_fp,
+                shared_brain=shared_fp,
                 core=self._core_for_chat(chat),
             ),
             chat.session_id or "__pending__",
@@ -6284,6 +6323,7 @@ class ProjectChatManager:
         project_context = project.context if project else ""
         canonical_doc = project.vault_doc_path if project else ""
         repo_block, _repo_fp, repo_line, _i = self._linked_repo_context(chat, project)
+        shared_block, _shared_fp = self._shared_brain_context(chat, project)
         capsule = build_context_capsule(
             workspace=workspace,
             gws_profile=gws_profile,
@@ -6294,6 +6334,7 @@ class ProjectChatManager:
             include_stable=True,
             linked_repo_block=repo_block,
             linked_repo_line=repo_line,
+            shared_brain_block=shared_block,
             core=self._core_for_chat(chat),
         )
         if not capsule:
