@@ -54,8 +54,8 @@ ChatActionErrorReason = Literal[
     "invalid_param",         # the generic bad value: a str outside a kind's closed set (provider, mode, setting, reason, tool, ...)
     "empty",                 # E1 command: empty after normalization
     "too_long", "invalid_characters", "invalid_url",
-    "invalid_body",          # a start/callback body the kind does not accept (E1 command steps)
-    "invalid_state",         # start/continue/callback in the wrong state
+    "invalid_body",          # a start body the kind does not accept (E1 command steps)
+    "invalid_state",         # start/continue in the wrong state
     "not_local",             # J: a host-only start from a non-loopback caller
 ]
 

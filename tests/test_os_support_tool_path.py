@@ -150,7 +150,7 @@ def test_terminal_path_reprobes_when_the_shell_changes(monkeypatch: pytest.Monke
 def test_rc_fingerprint_survives_an_unreadable_paths_d(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A sandboxed `ciao gws` cannot read /etc/paths.d, and Python 3.12+
+    """A sandboxed `opencode` cannot read /etc/paths.d, and Python 3.12+
     Path.is_dir() re-raises that EPERM. The fingerprint must mark the path and
     carry on, or every login_shell_path() caller crashes (#2448)."""
     real_is_dir = Path.is_dir
