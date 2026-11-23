@@ -262,7 +262,6 @@ def _provider(
     detail: str = "",
     version: str = "",
     account: str = "",
-    protocol: str = "",
     skills: list[str] | None = None,
     bundled_skills: list[str] | None = None,
     install_url: str = "",
@@ -289,8 +288,6 @@ def _provider(
         row["version"] = version
     if account:
         row["account"] = account
-    if protocol:
-        row["protocol"] = protocol
     if skills is not None:
         row["skills"] = skills
     if bundled_skills is not None:
@@ -877,7 +874,6 @@ def _claude_status(
             detail=detail,
             version=version,
             account=account,
-            protocol="Agent SDK ready",
             skills=claude_skills,
             cli_path=binary,
             release_check=check,
