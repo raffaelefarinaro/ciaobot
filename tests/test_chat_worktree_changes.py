@@ -180,6 +180,9 @@ async def test_fifo_repository_metadata_is_rejected_without_blocking(
     pipe.unlink(missing_ok=True)
     os.mkfifo(pipe)
 
+    # Git can open alternates during repository discovery, before our explicit
+    # metadata inspection. This guards that discovery path as well as the
+    # bounded metadata reader.
     result = await asyncio.wait_for(read_worktree_changes(repo, repo, dedicated=False), timeout=2)
 
     assert result == {"state": "unavailable", "reason": "unsupported_checkout"}

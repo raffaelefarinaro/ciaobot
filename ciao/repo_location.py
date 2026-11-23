@@ -138,6 +138,13 @@ async def _read_worktree_changes(
     env = {key: value for key, value in os.environ.items() if not key.startswith("GIT_")}
     env.update({"GIT_CONFIG_NOSYSTEM": "1", "GIT_CONFIG_GLOBAL": os.devnull,
                 "GIT_OPTIONAL_LOCKS": "0", "GIT_NO_LAZY_FETCH": "1", "GIT_TERMINAL_PROMPT": "0"})
+    # Git may load objects/info/alternates while initializing its repository
+    # state, before we can inspect that repository-controlled file ourselves.
+    # Point discovery and metadata-only commands at an empty object directory
+    # until the actual object directory's alternates file has passed our
+    # bounded, nonblocking read.
+    discovery_objects = tempfile.TemporaryDirectory(prefix="ciao-git-discovery-")
+    env["GIT_OBJECT_DIRECTORY"] = discovery_objects.name
 
     async def read(cwd: Path, *args: str, cap: int = 64 * 1024) -> bytes:
         result = await run_git_bounded(cwd, "-c", "core.fsmonitor=false", *args,
@@ -180,6 +187,7 @@ async def _read_worktree_changes(
         )
         if alternates and alternates.strip():
             raise UnsupportedCheckout
+        env.pop("GIT_OBJECT_DIRECTORY", None)
         if list((objects / "pack").glob("*.promisor")):
             raise UnsupportedCheckout
         for setting in ("core.sparseCheckout", "index.sparse"):
@@ -263,6 +271,8 @@ async def _read_worktree_changes(
         return {"state": "unavailable", "reason": "unsupported_checkout"}
     except (OSError, asyncio.TimeoutError, RuntimeError, ValueError, IndexError) as exc:
         raise RuntimeError("git read failed") from exc
+    finally:
+        discovery_objects.cleanup()
 
 
 def tool_event_hints(event: ToolUseEvent) -> list[str]:
