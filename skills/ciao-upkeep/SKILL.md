@@ -1,6 +1,6 @@
 ---
 name: ciao-upkeep
-description: Keep Ciaobot current between releases — check every dependency and pin we install (Python, npm, the gws CLI, GitHub Actions, the Node floor, Playwright), keep the stock skill catalog, ciao-capabilities and the marketing site in sync with the code, sweep doc rot, and maintain the watchlist in docs/UPKEEP.md. Trigger on "keep ciao up to date", "check dependencies", "any updates", "check the site", "watchlist", "upkeep", or after a feature ships that adds a user-facing capability.
+description: Keep Ciaobot current between releases — check every dependency and pin we install and whether its upstream is still alive (Python, npm, the gws CLI, GitHub Actions, the Node floor, Playwright), keep the stock skill catalog, ciao-capabilities and the marketing site in sync with the code, sweep doc rot, and maintain the watchlist in docs/UPKEEP.md. Trigger on "keep ciao up to date", "check dependencies", "any updates", "check the site", "watchlist", "upkeep", or after a feature ships that adds a user-facing capability.
 ---
 
 # Ciaobot upkeep
@@ -73,6 +73,36 @@ grep -m1 'version:' ciao/stock/skills/gws-shared/SKILL.md
 # Actions
 grep -rhoE 'uses: [^ ]+@v[0-9]+' .github/workflows | sort -u
 ```
+
+### Upstream health: is anyone still shipping it?
+
+Everything above compares our pin with upstream's **latest** release. That
+never asks how old the latest release is, so a dependency can go dormant while
+its row reads "installed = latest". `gws` did exactly that: no release after
+2026-03-31, and the 2026-11-11 check still recorded "0.22.5 installed = npm
+latest = pinned". Run this on every upkeep pass:
+
+```bash
+python3 scripts/upstream-health.py        # --all to list every upstream
+```
+
+It reads the dependency list from the manifests (`pyproject.toml`,
+`web/package.json`, the `ADAPTERS` pins, `mac/Package.swift`, workflow `uses:`
+lines, plus the CLIs in `EXTRA_GITHUB`), so a new dependency is covered without
+editing it. A project whose latest release is older than 180 days, that the
+registry marks deprecated or inactive, or whose repo is archived, gets an
+activity check on its GitHub default branch:
+
+- **slow**: substantive commits in the last 90 days. Alive, just releasing
+  rarely. No action.
+- **FLAG**: no substantive commits in 90 days (CI, chore, docs and bot commits
+  do not count). Each FLAG needs a row in `docs/UPKEEP.md` with a decision:
+  *feature-complete, keep* (say why that is safe), *replace* (name the
+  replacement and file the issue), or *watch* (say what would change it).
+
+A FLAG on something user-facing that Ciaobot wraps in its own code (as it did
+`gws`) is the expensive kind: the wrapper, its skills and its Settings card all
+age with it. Decide early.
 
 **The Node floor is a paired edit and the failure is silent.** `.nvmrc` and
 `SUPPORTED_RANGE` in `web/scripts/check-node.mjs` must move together. Below the
