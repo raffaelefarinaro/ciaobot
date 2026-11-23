@@ -6,7 +6,7 @@
  * What a mount can decide: that it starts collapsed and says so to assistive
  * tech, that the toggle is a native button wired to its body, that the open
  * choice is remembered per browser and a blocked store never throws, that the
- * tag table reads the six kinds through `kindLabel`, that the copy names only
+ * tag table reads the five remaining kinds through `kindLabel`, that the copy names only
  * the things it is allowed to name, and that it makes no request at all.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'

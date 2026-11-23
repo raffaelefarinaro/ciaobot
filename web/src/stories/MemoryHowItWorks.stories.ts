@@ -99,7 +99,7 @@ export const Expanded: Story = {
     expect(canvas.getByText('What gets saved')).toBeTruthy()
     expect(canvas.getByText('Who decides each tag', { selector: 'caption' })).toBeTruthy()
     const rows = canvasElement.querySelectorAll<HTMLElement>('table.mhw-table tbody tr')
-    expect(rows.length).toBe(6)
+    expect(rows.length).toBe(5)
     expect(rows[0]!.querySelector<HTMLElement>('.mhw-tag')!.textContent).toBeTruthy()
     const siteLink = canvasElement.querySelector<HTMLAnchorElement>('a[target="_blank"]')!
     expect(siteLink.rel).toContain('noopener')
