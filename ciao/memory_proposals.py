@@ -13,7 +13,6 @@ belongs. The destination vocabulary is :data:`DESTINATIONS`:
 * ``[people: <Name>]`` — durable fact about a person → the ``person``
   category's note, in the folder the vault's category registry names for it
   (``People/<Name>.md`` with the shipped categories).
-* ``[learnings]`` — reusable how-to knowledge → ``Workspace/Learnings.md``.
 * ``[review]``   — nobody was sure → waits for a human or the curator.
 
 ``[repo <path>]`` is queued too but is not in :data:`DESTINATIONS`, see
@@ -523,7 +522,6 @@ DESTINATIONS: tuple[str, ...] = (
     "profile",
     "project",
     "people",
-    "learnings",
     "review",
 )
 """Destination vocabulary shared with the proposals queue and the stock memory
@@ -2712,8 +2710,7 @@ _STUB_HEADER = (
     "first, then dismiss with `ciao memory-proposal-dismiss --text-file <file> "
     "--promoted` so the outcome counts as a promotion); "
     "`[project <doc-path>]` folds into that canonical doc; `[people <Name>]` "
-    "updates `People/<Name>.md`; `[learnings]` appends to "
-    "`Workspace/Learnings.md`; `[review]` has no known destination yet — "
+    "updates `People/<Name>.md`; `[review]` has no known destination yet — "
     "decide what it is first. Standing directives stay in the AGENTS.md body "
     "outside the fenced regions.\n"
 )

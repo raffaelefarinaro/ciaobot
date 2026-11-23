@@ -177,6 +177,34 @@ def test_real_preview_changes_no_notes_receipts_state_or_chats(tmp_path: Path) -
     assert snapshot() == before
 
 
+def test_drain_preview_api_redacts_applied_receipt_path(tmp_path: Path) -> None:
+    from ciao import learnings_queue_drain
+
+    config = config_for(tmp_path)
+    vault = Path(config.workspace_vault_root("personal"))
+    workspace = vault / "Workspace"
+    workspace.mkdir(parents=True)
+    queue = workspace / "Memory-Proposals.md"
+    queue.write_text("- [learnings] keep this lesson\n", encoding="utf-8")
+    applied = learnings_queue_drain.drain(
+        vault,
+        workspace="personal",
+        runtime_root=Path(config.state_path).parent,
+        apply=True,
+    )
+    assert applied.get("applied") is True
+    receipt_path = Path(applied["receipts"][0])
+
+    response = client_for(config).get(
+        "/api/update-tasks/learnings-queue-drain/preview?workspace=personal&fresh=1"
+    )
+
+    assert response.status_code == 200
+    assert str(tmp_path) not in response.text
+    assert str(receipt_path) not in response.text
+    assert receipt_path.name in response.json()["plan"]["applied_receipts"]
+
+
 def test_preview_unknown_preserves_null_plan_without_sensitive_error_text(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

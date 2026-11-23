@@ -1,6 +1,7 @@
 """Observational preparation of update tasks; never authorizes an apply."""
 
 import logging
+import re
 from pathlib import Path
 from typing import Any
 
@@ -9,6 +10,37 @@ from ciao.update_task_catalog import UpdateTask
 
 logger = logging.getLogger(__name__)
 _GENERIC = "Could not prepare this task; no changes were made."
+_ABSOLUTE_PATH_RE = re.compile(r"(?<![\w.-])(?:[A-Za-z]:[\\/]|/(?!/)|\\\\|~/)[^\s\"'<>;,)]*")
+
+
+def _redact_drain_paths(value: Any, roots: tuple[str, ...]) -> Any:
+    """Remove host paths recursively from diagnostic plan data."""
+    if isinstance(value, str):
+        redacted = value
+        for root in roots:
+            if root:
+                redacted = redacted.replace(root, "<workspace path>")
+        return _ABSOLUTE_PATH_RE.sub("<path>", redacted)
+    if isinstance(value, list):
+        return [_redact_drain_paths(item, roots) for item in value]
+    if isinstance(value, tuple):
+        return tuple(_redact_drain_paths(item, roots) for item in value)
+    if isinstance(value, dict):
+        return {key: _redact_drain_paths(item, roots) for key, item in value.items()}
+    return value
+
+
+def _reviewable_drain_plan(
+    plan: dict[str, Any], *, vault: Path, runtime_root: Path
+) -> dict[str, Any]:
+    """Keep receipt basenames while stripping host paths from the preview."""
+    public = dict(plan)
+    for key in ("receipts", "applied_receipts"):
+        paths = public.get(key)
+        if isinstance(paths, list):
+            public[key] = [Path(str(path)).name for path in paths]
+    roots = (str(vault.resolve()), str(runtime_root.resolve()))
+    return _redact_drain_paths(public, roots)
 
 
 def prepare(task: UpdateTask, *, config: Any, workspace: str) -> dict[str, Any]:
@@ -35,6 +67,9 @@ def prepare(task: UpdateTask, *, config: Any, workspace: str) -> dict[str, Any]:
             )
             rows = plan["rows"]
             blocked = bool(plan["failed"] or plan["unresolved"])
+            plan = _reviewable_drain_plan(
+                plan, vault=vault, runtime_root=Path(config.state_path).parent
+            )
             result.update(
                 state="blocked" if blocked else "review" if rows else "not_applicable",
                 plan=plan,

@@ -115,12 +115,12 @@ describe('MemoryHowItWorks disclosure', () => {
     expect(button.attributes('aria-expanded')).toBe('true')
   })
 
-  it('has the six tag rows in order, labelled through kindLabel', async () => {
+  it('has the five remaining tag rows in order, labelled through kindLabel', async () => {
     const wrapper = await mountCard()
     const rows = wrapper.findAll('table.mhw-table tbody tr')
 
-    expect(rows).toHaveLength(6)
-    const kinds = ['project', 'people', 'learnings', 'review', 'memory', 'profile']
+    expect(rows).toHaveLength(5)
+    const kinds = ['project', 'people', 'review', 'memory', 'profile']
     kinds.forEach((kind, i) => {
       expect(rows[i].find('.mhw-tag').text()).toBe(kindLabel(kind))
     })
@@ -131,7 +131,6 @@ describe('MemoryHowItWorks disclosure', () => {
     const whoCells = wrapper.findAll('table.mhw-table tbody tr').map(r => r.findAll('td')[2].text())
 
     expect(whoCells).toEqual([
-      'Nightly files it.',
       'Nightly files it.',
       'Nightly files it.',
       'Nightly decides. A judgement call comes back to you as a yes or no.',

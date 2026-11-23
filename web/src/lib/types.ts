@@ -1859,6 +1859,7 @@ export interface ProposalSkillAcceptResponse {
 
 export interface ProposalsResponse {
   rows: ProposalRow[]
+  legacy_learning_queues?: Record<string, { state: 'pending' | 'blocked' | 'unknown'; rows: number }>
 }
 
 /** One per-row outcome from `POST /api/proposals/batch` or `/{id}/{action}`. */

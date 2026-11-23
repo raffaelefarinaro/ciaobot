@@ -618,7 +618,7 @@ second `--apply` finds nothing to change and writes no second receipt.
 
 `Learnings.md` is bookkeeping rather than an entity note, so this is deliberately
 *not* a `commit_note_change` — see `ciao/learnings_migrate.py` for why, and for
-the lock it takes against a concurrent `[learnings]` accept.
+the lock it takes against concurrent learning writes.
 
 One consequence worth knowing when reading a vault mid-migration: a line that was
 *read* rather than witnessed keeps its unknown recurrence. A plain bullet renders
@@ -626,10 +626,9 @@ One consequence worth knowing when reading a vault mid-migration: a line that wa
 and both stay there. `curation_run` skips an entry whose count is unknown rather than
 treating it as `x1`, so it is not promotable until attributable evidence
 accumulates — a bullet nobody can attribute has no recurrence, and inventing one
-would be a decision nobody made. A `[learnings]` accept is the one exception, because
-the writer witnessed that sighting: it files the entry at today's date and `(x1)`
-with no citation, and every source it is given from then on counts on top of that.
-The migration is what gives the read lines an identity to accumulate evidence against.
+would be a decision nobody made. A learning recorded through the direct
+`ciao memory learn` operation carries its own source or request identity. The
+migration is what gives older read lines an identity to accumulate evidence against.
 
 ### Learnings cleanup
 

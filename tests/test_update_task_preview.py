@@ -94,6 +94,73 @@ def test_real_learnings_preview_is_read_only_and_preserves_review(tmp_path: Path
     assert snapshot(tmp_path) == before
 
 
+def test_prepared_drain_receipt_with_empty_queue_is_blocked_not_no_work(tmp_path: Path) -> None:
+    from ciao import learnings_queue_drain as drain, update_task_preview as preview
+
+    config = config_for(tmp_path)
+    vault = Path(config.workspace_vault_root("personal"))
+    workspace = vault / "Workspace"
+    workspace.mkdir(parents=True)
+    queue = workspace / "Memory-Proposals.md"
+    queue.write_text("- [learnings] lesson interrupted during drain\n", encoding="utf-8")
+    receipt = drain._prepare_batch(
+        vault,
+        workspace="personal",
+        queue_text=queue.read_text(encoding="utf-8"),
+        learning_exists=False,
+        learning_text="",
+    )
+    assert receipt is not None
+    runtime = Path(config.state_path).parent
+    folder = drain._receipt_dir(runtime)
+    drain._private_dir(folder, create=True)
+    receipt_path = folder / f"{drain.RECEIPT_PREFIX}{receipt['run_id']}.json"
+    drain._write_receipt(receipt_path, receipt, create=True)
+    queue.write_text("# no pending learning rows\n", encoding="utf-8")
+
+    result = preview.prepare(task("learnings-queue-drain"), config=config, workspace="personal")
+
+    assert result["state"] == "blocked"
+    assert result["plan"]["rows"] == []
+    assert result["plan"]["unresolved"]
+    assert "recovery or inspection" in result["summary"]
+    assert "no work remains" not in result["summary"].lower()
+    prompt = Path(__file__).resolve().parents[1] / "ciao/stock/update-tasks/prompts/learnings-queue-drain-1.md"
+    prompt_text = prompt.read_text(encoding="utf-8")
+    assert "`unresolved` and `failed` are empty" in prompt_text
+    assert "ask the user before running any command" in prompt_text
+    assert "with `--apply`" in prompt_text
+
+
+def test_applied_receipt_preview_redacts_all_host_paths(tmp_path: Path) -> None:
+    from ciao import learnings_queue_drain as drain, update_task_preview as preview
+
+    config = config_for(tmp_path)
+    vault = Path(config.workspace_vault_root("personal"))
+    workspace = vault / "Workspace"
+    workspace.mkdir(parents=True)
+    queue = workspace / "Memory-Proposals.md"
+    queue.write_text("- [learnings] an applied lesson\n", encoding="utf-8")
+    runtime = Path(config.state_path).parent
+    applied = drain.drain(vault, workspace="personal", runtime_root=runtime, apply=True)
+    assert applied.get("applied") is True
+    receipt_path = Path(applied["receipts"][0])
+
+    result = preview.prepare(task("learnings-queue-drain"), config=config, workspace="personal")
+    rendered = str(result)
+
+    assert result["state"] == "not_applicable"
+    assert str(tmp_path) not in rendered
+    assert str(receipt_path) not in rendered
+    assert receipt_path.name in result["plan"]["applied_receipts"]
+    diagnostic = preview._reviewable_drain_plan(
+        {"failed": [f"cannot read {receipt_path}"], "nested": {"path": str(receipt_path)}},
+        vault=vault,
+        runtime_root=runtime,
+    )
+    assert str(tmp_path) not in str(diagnostic)
+
+
 def test_registry_and_serializer_failure_are_unknown_not_invalid_workspace(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

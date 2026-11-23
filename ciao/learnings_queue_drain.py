@@ -591,7 +591,11 @@ def _resume_revert(vault: Path, receipt: dict[str, Any], receipt_path: Path, *, 
     _write_receipt(receipt_path, receipt)
 
 
-def _read_receipt_set(runtime_root: Path) -> tuple[list[tuple[Path, dict[str, Any]]], list[str]]:
+def _read_receipt_set(
+    runtime_root: Path, *, workspace: str, vault: Path
+) -> tuple[list[tuple[Path, dict[str, Any]]], list[str]]:
+    requested_workspace = workspace
+    requested_vault = vault.resolve()
     folder = _receipt_dir(runtime_root)
     try:
         if not _private_dir(folder, create=False):
@@ -603,16 +607,43 @@ def _read_receipt_set(runtime_root: Path) -> tuple[list[tuple[Path, dict[str, An
     for path in sorted(folder.glob(f"{RECEIPT_PREFIX}*.json")):
         try:
             receipt = _load_receipt(path, runtime_root=runtime_root)
-            workspace = receipt.get("workspace")
+            receipt_workspace = receipt.get("workspace")
             vault_identity = receipt.get("vault_identity")
-            if not isinstance(workspace, str) or not workspace or not isinstance(vault_identity, str):
+            if not isinstance(receipt_workspace, str) or not receipt_workspace or not isinstance(vault_identity, str):
                 raise ValueError("receipt workspace identity is invalid")
             receipt_vault = Path(vault_identity)
             if not receipt_vault.is_absolute() or str(receipt_vault.resolve()) != vault_identity:
                 raise ValueError("receipt vault identity is not canonical")
-            _validate_receipt(receipt, vault=receipt_vault, workspace=workspace)
+            _validate_receipt(receipt, vault=receipt_vault, workspace=receipt_workspace)
             receipts.append((path, receipt))
         except (OSError, UnicodeError, ValueError, TypeError, KeyError, json.JSONDecodeError) as exc:
+            # Preserve an identifiable damaged receipt's scope. An unreadable
+            # receipt with no recoverable identity remains globally unknown.
+            try:
+                fd = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+                try:
+                    if not is_private_descriptor_strict(fd):
+                        raise ValueError("receipt must be owner-only")
+                    with os.fdopen(os.dup(fd), "rb") as handle:
+                        data = handle.read(MAX_RECEIPT_BYTES + 1)
+                finally:
+                    os.close(fd)
+                partial = json.loads(data.decode("utf-8")) if len(data) <= MAX_RECEIPT_BYTES else None
+            except (OSError, UnicodeError, ValueError, TypeError, json.JSONDecodeError):
+                partial = None
+            if isinstance(partial, dict):
+                named_workspace = partial.get("workspace")
+                named_vault = partial.get("vault_identity")
+                if isinstance(named_workspace, str) and isinstance(named_vault, str):
+                    try:
+                        identity = Path(named_vault)
+                        if (
+                            named_workspace != requested_workspace
+                            or identity.resolve() != requested_vault
+                        ):
+                            continue
+                    except (OSError, RuntimeError):
+                        pass
             errors.append(f"{path.name}: {exc}")
     return receipts, errors
 
@@ -636,7 +667,7 @@ def inspect(vault_root: Path, *, workspace: str, runtime_root: Path) -> dict[str
                 row = _parse_row(raw)
                 if row is not None:
                     summary["rows"].append(row)
-        receipts, errors = _read_receipt_set(runtime_root)
+        receipts, errors = _read_receipt_set(runtime_root, workspace=workspace, vault=vault)
         summary["unresolved"].extend(errors)
         for path, receipt in receipts:
             if receipt.get("workspace") != workspace or receipt.get("vault_identity") != str(vault):
@@ -706,7 +737,7 @@ def _recover_locked(
     vault: Path, *, workspace: str, runtime_root: Path
 ) -> tuple[list[str], list[str]]:
     """Recover while the caller holds queue then Learnings locks."""
-    receipts, errors = _read_receipt_set(runtime_root)
+    receipts, errors = _read_receipt_set(runtime_root, workspace=workspace, vault=vault)
     if errors:
         return errors, []
     completed: list[str] = []

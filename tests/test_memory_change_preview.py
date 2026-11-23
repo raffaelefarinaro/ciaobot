@@ -42,7 +42,6 @@ QUEUE = """# Memory Proposals
 
 - [memory] Raffa deploys with the check-first script.  _(from: chat-1)_
 - [memory] Raffa reviews PRs before merging.  _(from: chat-1)_
-- [learnings] Vitest skips component files on old Node.  _(from: chat-1)_
 """
 
 
@@ -197,24 +196,6 @@ def test_preview_of_an_edited_wording_runs_against_the_same_destination(
     assert row["text"] not in preview["after"]
 
 
-def test_preview_of_a_learning_shows_the_recurrence_bump(tmp_path: Path) -> None:
-    from ciao.memory_proposals import append_learning
-
-    config = _vault(tmp_path)
-    vault = Path(config.workspace_vault_root("personal"))
-    append_learning(vault, "Vitest skips component files on old Node.", workspace="personal")
-    client = _client(config)
-    row = _row(client, "learnings")
-
-    preview = client.get(f"/api/proposals/{row['id']}/preview").json()["preview"]
-    assert preview["destination"] == "Workspace/Learnings.md"
-    # Not a second copy: the existing entry's count goes up, which is the whole
-    # reason a bullet's own text cannot describe the write.
-    assert preview["operation"] == "update"
-    assert "(x2)" in preview["after"]
-    assert "(x2)" not in preview["before"]
-
-
 def test_preview_of_a_fact_about_a_known_person_offers_the_fold(tmp_path: Path) -> None:
     """An existing person note is folded at accept time, not refused.
 
@@ -347,7 +328,6 @@ def test_batch_reports_a_per_destination_summary(tmp_path: Path) -> None:
     summary = {entry["destination"]: entry for entry in body["summary"]}
     assert summary["ciao:memory"]["ok"] == 2
     assert summary["ciao:memory"]["failed"] == 0
-    assert summary["Workspace/Learnings.md"]["ok"] == 1
     # The per-row results survive the grouping.
     assert len(body["results"]) == 3
 
@@ -357,7 +337,6 @@ def test_batch_fails_only_the_row_whose_destination_moved(tmp_path: Path) -> Non
     client = _client(config)
     stale = _row(client, "memory", "check-first")
     fresh = _row(client, "memory", "reviews PRs")
-    learning = _row(client, "learnings")
     preview = client.get(f"/api/proposals/{stale['id']}/preview").json()["preview"]
 
     # Move the region out from under the stale card. The guide is created
@@ -372,7 +351,7 @@ def test_batch_fails_only_the_row_whose_destination_moved(tmp_path: Path) -> Non
         "/api/proposals/batch",
         json={
             "action": "accept",
-            "ids": [stale["id"], fresh["id"], learning["id"]],
+            "ids": [stale["id"], fresh["id"]],
             "revisions": {stale["id"]: preview["revision"]},
         },
     ).json()
@@ -381,7 +360,6 @@ def test_batch_fails_only_the_row_whose_destination_moved(tmp_path: Path) -> Non
     assert results[stale["id"]]["conflict"] is True
     assert results[stale["id"]]["promoted"] is False
     assert results[fresh["id"]]["promoted"] is True
-    assert results[learning["id"]]["promoted"] is True
     summary = {entry["destination"]: entry for entry in body["summary"]}
     assert summary["ciao:memory"]["conflicts"] == 1
     assert summary["ciao:memory"]["ok"] == 1
@@ -733,36 +711,6 @@ def test_undo_restores_the_guide_byte_for_byte(tmp_path: Path) -> None:
     assert _guide(config).read_bytes() == pristine
 
 
-def test_accepting_a_learning_writes_the_source_the_card_showed(
-    tmp_path: Path,
-) -> None:
-    """The preview renders the source into the entry; so must the write.
-
-    The accept called `append_learning` without the row's source, so a
-    recurrence bump previewed as "sources: chat-7, chat-1" and landed as
-    "sources: chat-7" — the one disagreement between the card and the write
-    that the preview contract is supposed to rule out.
-    """
-    from ciao.memory_proposals import append_learning, learnings_path
-
-    config = _vault(tmp_path)
-    vault = Path(config.workspace_vault_root("personal"))
-    # Filed from a different chat, so the accepted row's own source is what
-    # the entry is missing and the bump has to add.
-    append_learning(
-        vault, "Vitest skips component files on old Node.", workspace="personal",
-        source="chat-7",
-    )
-    client = _client(config)
-    row = _row(client, "learnings")
-    preview = client.get(f"/api/proposals/{row['id']}/preview").json()["preview"]
-    assert preview["operation"] == "update"
-
-    client.post(f"/api/proposals/{row['id']}/accept")
-
-    assert learnings_path(vault).read_text(encoding="utf-8") == preview["after"]
-
-
 def test_receipt_detail_is_404_for_an_unknown_id(tmp_path: Path) -> None:
     assert _client(_vault(tmp_path)).get("/api/memory/receipts/nope").status_code == 404
 
@@ -798,13 +746,6 @@ def test_a_region_preview_names_its_entry_separator(tmp_path: Path) -> None:
     row = _row(client, "memory", "check-first")
     preview = client.get(f"/api/proposals/{row['id']}/preview").json()["preview"]
     assert preview["separator"] == "\n\u00a7\n"
-
-
-def test_a_file_preview_separates_by_line(tmp_path: Path) -> None:
-    client = _client(_vault(tmp_path))
-    row = _row(client, "learnings")
-    preview = client.get(f"/api/proposals/{row['id']}/preview").json()["preview"]
-    assert preview["separator"] == "\n"
 
 
 def test_a_region_preview_reads_without_creating_the_guide(tmp_path: Path) -> None:

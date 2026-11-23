@@ -41,7 +41,7 @@
     "since_version": "0.0.0",
     "scope": "workspace",
     "title": "Move pending learning proposals into Learnings.md",
-    "why": "This workspace has legacy [learnings] rows in Memory-Proposals.md. The drain records a receipt before writing, preserves the other queue bytes and can be reverted if needed.",
+    "why": "This workspace has legacy learning rows in Memory-Proposals.md. The drain records a receipt before writing, preserves the other queue bytes and can be reverted if needed.",
     "detector": "learnings-queue-drain-needed",
     "completion_check": "learnings-queue-drain-recorded",
     "prompt_resource": "prompts/learnings-queue-drain-1.md",

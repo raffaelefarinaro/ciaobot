@@ -347,6 +347,23 @@ def test_malformed_receipt_rows_are_reported_without_crashing(tmp_path: Path, br
     assert queue.read_text() == "- [learnings] one\n"
 
 
+def test_corrupt_receipt_scope_uses_requested_workspace_not_prior_receipt(
+    tmp_path: Path,
+) -> None:
+    vault, runtime = _vault(tmp_path)
+    folder = drain._receipt_dir(runtime)
+    drain._private_dir(folder, create=True)
+    for filename, workspace in (("a-work", "work"), ("z-personal", "personal")):
+        path = folder / f"{drain.RECEIPT_PREFIX}{filename}.json"
+        path.write_text(json.dumps({"workspace": workspace, "vault_identity": str(vault.resolve())}))
+        path.chmod(0o600)
+
+    summary = drain.inspect(vault, workspace="personal", runtime_root=runtime)
+
+    assert len(summary["unresolved"]) == 1
+    assert "z-personal" in summary["unresolved"][0]
+
+
 def test_apply_aborts_if_workspace_is_replaced_before_publication(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     vault, runtime = _vault(tmp_path)
     workspace = vault / "Workspace"

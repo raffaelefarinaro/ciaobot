@@ -1458,6 +1458,20 @@ Routes: `GET /api/proposals`, `GET /api/proposals/history`,
 `POST /api/proposals/{id}/{action}` (action is `accept` or `dismiss`),
 `POST /api/proposals/batch`, `POST /api/proposals/dismiss-older-than`.
 
+`GET /api/proposals` also returns `legacy_learning_queues`, a map keyed by
+registered workspace. A present entry has `state` (`pending`, `blocked`, or
+`unknown`) and `rows`. It reports legacy `[learnings]` bullets even though they
+are no longer review rows. The response contains no host paths or shell
+commands. To inspect or recover the queue, start the workspace's **Move pending
+learning proposals into Learnings.md** task from Home. If you dismissed the
+task, reopen it in Settings → Workspace → Overview → Update task history. These
+actions are scoped to the active workspace and ask before applying changes. For
+an unknown scan result, check the vault location in that workspace's Overview.
+Preserve any linked `Workspace` and its contents; do not replace or follow it.
+Ask Ciaobot in that workspace to inspect the situation and guide a repair for
+you to review before authorizing. Migration checks never follow an external
+`Workspace` symlink.
+
 `POST /api/proposals/{id}/{action}` also takes an optional `reason` (a string,
 trimmed, at most 1000 characters; 400 if longer or not a string) that is stored
 on the decision row. `/api/proposals/batch` and `dismiss-older-than` take no
