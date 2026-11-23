@@ -17,8 +17,6 @@ import pytest
 from ciao import adapter_install, host_terminal, setup_status
 from ciao import opencode_cli as opencode
 
-REPO_ROOT = Path(__file__).resolve().parents[1]
-
 
 class _Spawns:
     def __init__(self) -> None:
@@ -111,19 +109,6 @@ def test_update_actions_resolve_from_current_checks(
     with pytest.raises(host_terminal.NothingToUpdate) as excinfo:
         host_terminal.action_command(f"{provider}-update")
     assert not isinstance(excinfo.value, (KeyError, LookupError))
-
-
-def test_frontend_copy_names_the_gws_install_command() -> None:
-    assert host_terminal.GWS_INSTALL_COMMAND == (
-        "npm install -g --allow-scripts=@googleworkspace/cli @googleworkspace/cli"
-    )
-    text = (REPO_ROOT / "web/src/lib/gwsInstall.ts").read_text(encoding="utf-8")
-    assert f"'{host_terminal.GWS_INSTALL_COMMAND}'" in text
-    # The dialog and the chat prompt read the one constant, never a literal.
-    for rel in ("web/src/components/settings/GoogleConnectDialog.vue", "web/src/composables/useGwsAccounts.ts"):
-        text = (REPO_ROOT / rel).read_text(encoding="utf-8")
-        assert "GWS_INSTALL_COMMAND" in text, rel
-        assert "npm install -g @googleworkspace/cli" not in text, rel
 
 
 def test_macos_opens_terminal_at_a_folder(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:

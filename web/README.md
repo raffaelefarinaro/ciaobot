@@ -220,8 +220,6 @@ web/
                            SettingsWorkspaceModels.vue is its Chats and models card;
                            SettingsCareCycle.vue is its Weekly care cycle card: the dry run and the host-only, checkbox-gated switch of the workspace's care state (`/api/care/cycle`; pure helpers in lib/careCycle.ts);
                            SettingsClaudeTrim.vue is its Claude context trimming card (catalog from the engine, pure helpers in lib/claudeTrim.ts; edits the same draft, saved by Chats and models' Save changes);
-                           WorkspaceGoogleAccount.vue is its Google account row and
-                           GoogleConnectDialog.vue the Connect dialog;
                            SettingsAllWorkspaces.vue is Overview's last card: boxed
                            rows, the short New workspace form and Archived; rows reorder by
                            drag, Alt/Option+Up/Down on the handle, or Move up / Move down in
@@ -262,7 +260,7 @@ web/
                           useChatRail, useScheduleRail and useProjectRail (the chat, automation and project rails over it), usePullToClose (pull a title down to close),
                           useModalFocus, useOverlayBackEntry (one history entry per open
                           overlay; Back closes it), useWorkspaceAdmin, useProviderChoices,
-                          useGwsAccounts, useHomeNoticeWindows, useDragSort: the pointer drag-sort engine
+                          useHomeNoticeWindows, useDragSort: the pointer drag-sort engine
                           for the task lanes and the sidebar's project list; there is no drag handle, so
                           `surfaceHandlers` lets a row's own non-interactive content drag on a fine pointer (a
                           `data-drag-primary` name control keeps its click below the threshold), while the row menu's
@@ -273,7 +271,7 @@ web/
                           replay its neighbours in either lane; it persists nothing and calls `onCommit`;
                           useMenuFocusReturn keeps a menu action's trigger focus without stealing it back after
                           the user has focused or pressed elsewhere)
-    lib/                  pure helpers (api, time, safeMarkdown, contrast, gwsProfileId, chatActions, permissionModes, notificationInbox, sourceHealth,
+    lib/                  pure helpers (api, time, safeMarkdown, contrast, chatActions, permissionModes, notificationInbox, sourceHealth,
                           updateTasks, etc.) — no Vue imports; `taskOrder.ts` (the server order, lane derivation,
                           placement anchors and the preview mirror of the server's insertion) and `dragSort.ts`
                           (drop-slot geometry, settled order, auto-scroll step, announcement wording);
@@ -720,8 +718,8 @@ Prefer the utility classes over re-inventing the same button/badge/card per comp
   opener's own ×; Back only leaves it.
 - **Workspace > Overview (`/settings/workspace`).** The first item of the
   workspace rail group is the page for `projectStore.activeWorkspace`:
-  `SettingsWorkspaceOverview.vue` draws the Workspace, Claude context trimming,
-  Chats and models and Google account cards (one editor, one Save changes /
+  `SettingsWorkspaceOverview.vue` draws the Workspace, Claude context trimming and
+  Chats and models cards (one editor, one Save changes /
   Discard row, in the last form card, Chats and models), then Memory handover, Update
   task history and, for an archivable workspace, Archive this workspace. The
   editor state is not in the component: `composables/useWorkspaceAdmin.ts` owns
@@ -742,17 +740,6 @@ Prefer the utility classes over re-inventing the same button/badge/card per comp
   `lib/workspaceOverrides.ts` (`normalizeOverrides`, `setOverride`) so
   `JSON.stringify(form)` stays a stable dirty check;
   `effectiveWorkspaceDefaultModel` feeds the schedule forms' "Inherit" label.
-  The Google account card is one row for the active workspace
-  (`WorkspaceGoogleAccount.vue`: connected, sign-in expired, or none) and the
-  `GoogleConnectDialog.vue` modal sheet behind its Connect / Sign in again
-  buttons. Both `inject` `useGwsAccounts` (`GWS_ACCOUNTS_KEY`), which holds every
-  Google account call and sign-in flow; `SettingsView.vue` calls it once. The
-  account id is derived from the workspace name (`lib/gwsProfileId.ts`, a mirror
-  of `gws_auth.slugify_profile`; `tests/test_gws_auth.py` pins only its reserved-name list) and never
-  typed. The workspace is linked when the account connects, through
-  `useWorkspaceAdmin.setWorkspaceGwsLink`; saving the form cards never sends
-  `gws_profile`. All workspaces has no Google card: an account no
-  workspace links to has no screen.
 - **`SettingsView.vue` ownership boundary.** Settings is being split the same
   way, one tab at a time, into `components/settings/`. General is split
   into four pages. General begins with the Updates section (compact to a title

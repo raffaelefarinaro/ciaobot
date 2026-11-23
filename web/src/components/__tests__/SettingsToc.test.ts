@@ -37,9 +37,6 @@ async function mountSettings(routines?: unknown, tab = '') {
         provider_options: [{ value: 'claude', label: 'Claude' }],
       } as never
     }
-    if (url === '/api/integrations/gws') {
-      return { installed: false, binary_path: '', cli_available: false, profiles: [] } as never
-    }
     if (url.startsWith('/api/proposals/handover')) {
       return {
         workspace: 'work',
@@ -110,7 +107,6 @@ it('lists Overview cards on the rail', async () => {
     expect(labels).toEqual([
       'Workspace',
       'Chats and models',
-      'Google account',
       'Memory handover',
       'Shared brains',
       'Weekly care cycle',

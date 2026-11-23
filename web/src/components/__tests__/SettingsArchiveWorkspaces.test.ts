@@ -42,14 +42,6 @@ vi.mock('../../lib/api', () => {
       })
     }
     if (path.startsWith('/api/update-tasks')) return Promise.resolve({ tasks: [] })
-    if (path === '/api/integrations/gws') {
-      return Promise.resolve({
-        installed: false,
-        binary_path: '',
-        cli_available: false,
-        profiles: [],
-      })
-    }
     // The Overview's Chats and models card reads the engine defaults.
     if (path === '/api/settings/routines') return Promise.resolve({ model_options: { anthropic: [] } })
     return Promise.resolve({})
@@ -320,7 +312,7 @@ describe('Settings > Workspaces archive', () => {
       expect(request!.message).toContain('2 automations, restored paused')
       expect(request!.message).toContain('1 automation in the archive did not pass validation')
       expect(request!.message).toContain('Extra tools denied: workspace default')
-      expect(request!.message).toContain('Google account: work')
+      expect(request!.message).not.toContain('Google account')
       expect(api.post).not.toHaveBeenCalled()
       request!.resolve(true)
       await flushPromises()

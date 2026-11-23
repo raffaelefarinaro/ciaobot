@@ -7,7 +7,7 @@
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { createPinia, setActivePinia } from 'pinia'
-import { computed, effectScope, nextTick, type EffectScope } from 'vue'
+import { effectScope, nextTick, type EffectScope } from 'vue'
 import { flushPromises, mount, type VueWrapper } from '@vue/test-utils'
 import SettingsWorkspaceModels from '../settings/SettingsWorkspaceModels.vue'
 import SettingsWorkspaceOverview from '../settings/SettingsWorkspaceOverview.vue'
@@ -91,8 +91,6 @@ beforeEach(async () => {
   admin = scope.run(() => useWorkspaceAdmin({
     notifySaved: vi.fn(),
     notifyFailed: vi.fn(),
-    gwsProfileOptions: computed(() => []),
-    fetchGwsIntegration: vi.fn().mockResolvedValue(undefined),
   }))!
   await admin.fetchWorkspacesList()
 })
@@ -325,7 +323,7 @@ describe('SettingsWorkspaceModels', () => {
     store.activeWorkspace = 'missing'
     const view = mount(SettingsWorkspaceOverview, { global: {
       provide: { [WORKSPACE_ADMIN_KEY as symbol]: admin },
-      stubs: ['SettingsClaudeTrim', 'WorkspaceGoogleAccount', 'SettingsMemoryHandover', 'SettingsUpdateTasks', 'SettingsAllWorkspaces', 'WorkspaceTile', 'WorkspaceColorPicker'],
+      stubs: ['SettingsClaudeTrim', 'SettingsMemoryHandover', 'SettingsUpdateTasks', 'SettingsAllWorkspaces', 'WorkspaceTile', 'WorkspaceColorPicker'],
     } })
     mounted.push(view)
     expect(view.findComponent(SettingsWorkspaceModels).exists()).toBe(false)
