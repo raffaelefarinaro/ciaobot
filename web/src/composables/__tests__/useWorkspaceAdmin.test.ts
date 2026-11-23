@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { createPinia, setActivePinia } from 'pinia'
-import { computed, effectScope } from 'vue'
+import { effectScope } from 'vue'
 import { useWorkspaceAdmin } from '../useWorkspaceAdmin'
 import { useProjectStore } from '../../stores/projects'
 import type { WorkspaceInfo } from '../../lib/types'
@@ -31,8 +31,6 @@ function setup(initial: WorkspaceInfo) {
   const admin = scope.run(() => useWorkspaceAdmin({
     notifySaved: vi.fn(),
     notifyFailed: vi.fn(),
-    gwsProfileOptions: computed(() => []),
-    fetchGwsIntegration: vi.fn().mockResolvedValue(undefined),
   }))!
   return { admin, update }
 }
@@ -45,6 +43,7 @@ describe('useWorkspaceAdmin saveWorkspace provider_overrides', () => {
     await admin.fetchWorkspacesList()
     await admin.saveWorkspace('work')
     expect(update.mock.calls[0][1]).not.toHaveProperty('provider_overrides')
+    expect(update.mock.calls[0][1]).not.toHaveProperty('gws_profile')
   })
 
   it('sends the whole map when changed', async () => {

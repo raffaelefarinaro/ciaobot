@@ -42,7 +42,6 @@ export function restoreConfirmMessage(item: ArchivedWorkspace): string {
   }
   lines.push(`Extra tools denied: ${listOrNone(item.disallowed_tools, 'workspace default')}`)
   lines.push(`Agent CLI/Runtime: ${item.default_provider || 'claude'}`)
-  lines.push(`Google account: ${item.gws_profile || 'none'}`)
   return lines.join('\n')
 }
 

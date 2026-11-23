@@ -230,28 +230,6 @@ test.describe('narrow viewport', () => {
     }).toPass({ timeout: 5_000 })
   })
 
-  test('an expired Google account row keeps its name and email clear of the actions', async ({ page }) => {
-    const profile = {
-      name: 'alpha', label: 'Personal', purpose: '', examples: [], configured: true,
-      credentials_present: true, client_secret_present: true, config_dir: '/synthetic/alpha',
-      workspaces: ['alpha'], setup_command: '', headless_auth_command: '',
-      email: 'a-long-address-for-a-phone@example.com', token_valid: false,
-      token_error: 'Token has been expired or revoked.', needs_relogin: true, loopback_eligible: true,
-    }
-    await page.route('**/api/integrations/gws*', route => route.fulfill({
-      json: { installed: true, binary_path: '/usr/local/bin/gws', cli_available: true, profiles: [profile] },
-    }))
-    await boot(page, '/settings/workspace', '.settings-main .section-title')
-    const head = page.locator('.gws-account .set-row-head')
-    await expect(head).toContainText('Sign-in expired')
-    const main = (await head.locator('.set-row-main').boundingBox())!
-    const actions = (await head.locator('.set-row-actions').boundingBox())!
-    // The actions wrap below the name instead of squeezing it to "Pe...".
-    expect(actions.y).toBeGreaterThanOrEqual(main.y + main.height - 1)
-    const title = head.locator('.set-row-title')
-    expect(await title.evaluate(el => el.scrollWidth <= el.clientWidth)).toBe(true)
-  })
-
   test('an open chat does not scroll sideways at 390px', async ({ page }) => {
     await boot(page, '/chat/alpha-chat-1', COMPOSER)
 
