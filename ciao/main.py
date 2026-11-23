@@ -555,7 +555,6 @@ async def _async_main(
     app_engine_port: int | None = None,
 ) -> int:
     _ensure_tool_dirs_on_path()
-    os.environ.setdefault("GOOGLE_WORKSPACE_CLI_KEYRING_BACKEND", "file")
     config = CiaoConfig.from_env()
     if app_engine_port is not None:
         # The app's `--port`: this process only, ahead of the instance lock
@@ -1005,8 +1004,8 @@ async def _run_server_locked(
             # stale `.agents/skills` links, reporting 17 tracked deletions for
             # mirrors nothing reads any more.
             targets = config.agent_root_targets()
-            for root, name in targets:
-                update_skills(str(root), workspace_name=name)
+            for root, _name in targets:
+                update_skills(str(root))
             tracker.done("update_skills")
         except Exception:
             tracker.fail("update_skills", "skill install failed")
@@ -1196,7 +1195,7 @@ async def _run_server_locked(
     app.state.state_store = state
     app.state.transcript_store = transcripts
     app.state.project_chat_manager = pcm
-    # Needs-you handlers reach app singletons (terminal sessions, the gws re-login manager) through this.
+    # Needs-you handlers reach app singletons (terminal sessions) through this.
     pcm.actions_runtime.bind_app_state(app.state)
 
     from ciao.web.connection_tracker import ConnectionTracker
@@ -1249,19 +1248,6 @@ async def _run_server_locked(
             logger.exception("Failed scheduling notification clear for %s", chat_id)
 
     pcm.clear_notifications_cb = _clear_notifications
-
-    # Google Workspace token health + server-managed re-login (issue #145).
-    from ciao.gws_auth import GwsHealthMonitor, GwsReloginManager, ManualPkceStore
-
-    app.state.gws_health_monitor = GwsHealthMonitor(
-        config,
-        push_manager=app.state.push_manager,
-        events_hub=pcm.events,
-        runtime_root=config.state_path.parent,
-    )
-    app.state.gws_relogin_manager = GwsReloginManager(config)
-    # PKCE verifier store for the manual/paste OAuth flow (issue #354).
-    app.state.gws_manual_pkce_store = ManualPkceStore()
 
     # Wire push delivery into the broker drive task so a successful turn
     # notifies subscribed devices even when no WebSocket client is connected.
@@ -1488,37 +1474,7 @@ async def _run_server_locked(
     app.state.backup_stop = backup_stop
     asyncio.create_task(app.state.backup_service.backup_loop(stop=backup_stop))
 
-    # ── Google Workspace token health ────────────────────────
-    # Cheap periodic `auth status` ping per configured GWS profile. When a
-    # refresh token is revoked/expired the monitor fires ONE PWA notification
-    # plus an in-app status event (debounced until the token recovers), so
-    # GWS-dependent schedules don't fail silently (issue #145). The credential
-    # files are never read into logs; only the boolean validity is surfaced.
-    _gws_health_interval = 900
-
-    async def _gws_health_loop() -> None:
-        monitor = app.state.gws_health_monitor
-        # Small initial delay so a fresh boot settles before the first probe.
-        await asyncio.sleep(30)
-        while True:
-            try:
-                async with job_runs.track(
-                    "gws_health", "Google Workspace token health", category="system",
-                ) as run:
-                    summary = await asyncio.to_thread(monitor.check_once)
-                    run.extra["checked"] = summary.get("checked", [])
-                    if summary.get("invalid"):
-                        run.extra["invalid"] = summary["invalid"]
-                    if summary.get("notified"):
-                        run.extra["notified"] = summary["notified"]
-            except asyncio.CancelledError:
-                break
-            except Exception:
-                logger.exception("GWS token health check failed")
-            await asyncio.sleep(_gws_health_interval)
-
     if not getattr(config, "bootstrap_mode", False):
-        asyncio.create_task(_gws_health_loop())
         asyncio.create_task(shared_brain.update_loop(config))
 
 

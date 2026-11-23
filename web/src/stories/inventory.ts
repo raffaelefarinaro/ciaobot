@@ -2999,7 +2999,7 @@ export const inventory: InventoryEntry[] = [
         "name": "workspace-scope",
         "coverage": "covered",
         "storyIds": ["in-app-toast--workspace-scope"],
-        "note": "Only toasts for the active workspace and account render; another workspace's chat or profile toast stays hidden."
+        "note": "Only toasts for the active workspace render; another workspace's chat toast stays hidden."
       },
       {
         "name": "narrow",
@@ -6872,88 +6872,6 @@ export const inventory: InventoryEntry[] = [
     }
   },
   {
-    "id": "components-needs-you-callback-paste-field",
-    "name": "CallbackPasteField",
-    "family": "Needs-you bodies",
-    "kind": "component",
-    "owner": {
-      "path": "web/src/components/needs-you/CallbackPasteField.vue",
-      "anchor": "<template>"
-    },
-    "sources": [],
-    "consumers": [
-      "web/src/components/needs-you/GwsAuthBody.vue"
-    ],
-    "variants": [],
-    "variantNotes": "Props are the chat action and its params; no configurable variants beyond the states listed.",
-    "states": [
-      {
-        "name": "default",
-        "coverage": "covered",
-        "storyIds": [
-          "callback-paste-field--default"
-        ],
-        "note": "Empty input: the submit is disabled and the value is empty."
-      },
-      {
-        "name": "ready",
-        "coverage": "covered",
-        "storyIds": [
-          "callback-paste-field--ready"
-        ],
-        "note": "A loopback callback address enables the submit; no alert shows."
-      },
-      {
-        "name": "pending",
-        "coverage": "covered",
-        "storyIds": [
-          "callback-paste-field--pending"
-        ],
-        "note": "The callback write is held: input is readonly and the submit reads Sending… and is disabled."
-      },
-      {
-        "name": "action-error",
-        "coverage": "covered",
-        "storyIds": [
-          "callback-paste-field--refused"
-        ],
-        "note": "The engine refusal shows the role=alert copy, linked by aria-describedby, and clears the value."
-      },
-      {
-        "name": "sent",
-        "coverage": "covered",
-        "storyIds": [
-          "callback-paste-field--sent"
-        ],
-        "note": "An accepted callback clears the value and shows no alert; the card owns what follows."
-      },
-      {
-        "name": "keyboard-focus",
-        "coverage": "covered",
-        "storyIds": [
-          "callback-paste-field--keyboard-focus"
-        ],
-        "note": "Tab lands on the input with a visible focus outline."
-      },
-      {
-        "name": "narrow",
-        "coverage": "covered",
-        "storyIds": [
-          "callback-paste-field--narrow"
-        ],
-        "note": "Narrow renders the input inside a maximum 390px container."
-      }
-    ],
-    "loading": {
-      "status": "none",
-      "detail": "No fetch of its own: the field posts the typed address only on submit. Pending and refused outcomes are covered; there is no initial or refresh loading state."
-    },
-    "migration": {
-      "status": "unassessed",
-      "note": "Inventory admission does not approve a design migration."
-    }
-  },
-  {
     "id": "components-needs-you-command-body",
     "name": "CommandBody",
     "family": "Needs-you bodies",
@@ -7167,118 +7085,6 @@ export const inventory: InventoryEntry[] = [
     "loading": {
       "status": "none",
       "detail": "No fetch of its own: the card passes the action in, and every request runs only from a click, so there is no initial, refresh or stale loading state."
-    },
-    "migration": {
-      "status": "unassessed",
-      "note": "Inventory admission does not approve a design migration."
-    }
-  },
-  {
-    "id": "components-needs-you-gws-auth-body",
-    "name": "GwsAuthBody",
-    "family": "Needs-you bodies",
-    "kind": "component",
-    "owner": {
-      "path": "web/src/components/needs-you/GwsAuthBody.vue",
-      "anchor": "<template>"
-    },
-    "sources": [],
-    "consumers": [
-      "web/src/components/needs-you/registry.ts"
-    ],
-    "variants": [],
-    "variantNotes": "Props are the chat action and its params; no configurable variants beyond the states listed.",
-    "states": [
-      {
-        "name": "open",
-        "coverage": "covered",
-        "storyIds": [
-          "gws-auth-body--open"
-        ],
-        "note": "Open shows Sign in with Google only, with no link."
-      },
-      {
-        "name": "starting",
-        "coverage": "covered",
-        "storyIds": [
-          "gws-auth-body--starting"
-        ],
-        "note": "A held start request shows Starting… and blocks the control; the placeholder tab is stubbed."
-      },
-      {
-        "name": "failed",
-        "coverage": "covered",
-        "storyIds": [
-          "gws-auth-body--failed"
-        ],
-        "note": "Failed offers Try again and no manual-connect link for an ordinary refusal."
-      },
-      {
-        "name": "failed-manual-connect",
-        "coverage": "covered",
-        "storyIds": [
-          "gws-auth-body--failed-manual-connect"
-        ],
-        "note": "A failure that names the web app adds the link to Settings, which navigates to the workspace page."
-      },
-      {
-        "name": "waiting",
-        "coverage": "covered",
-        "storyIds": [
-          "gws-auth-body--waiting"
-        ],
-        "note": "Waiting shows the Google consent link with noopener; no button and no paste field."
-      },
-      {
-        "name": "waiting-without-consent",
-        "coverage": "covered",
-        "storyIds": [
-          "gws-auth-body--waiting-without-consent"
-        ],
-        "note": "A waiting URL that is not a Google consent page shows no link and no control."
-      },
-      {
-        "name": "waiting-off-engine-host",
-        "coverage": "uncovered",
-        "storyIds": [],
-        "note": "The paste-back branch renders only when isLoopbackPage() is false. The workshop runs on loopback, so this branch cannot render here without mocking the module; CallbackPasteField has its own stories."
-      },
-      {
-        "name": "working",
-        "coverage": "covered",
-        "storyIds": [
-          "gws-auth-body--working"
-        ],
-        "note": "Working renders no control while the sign-in starts."
-      },
-      {
-        "name": "done",
-        "coverage": "covered",
-        "storyIds": [
-          "gws-auth-body--done"
-        ],
-        "note": "Done renders no control; the card owns Continue."
-      },
-      {
-        "name": "keyboard-focus",
-        "coverage": "covered",
-        "storyIds": [
-          "gws-auth-body--keyboard-focus"
-        ],
-        "note": "Tab lands on Sign in with Google with a visible focus outline."
-      },
-      {
-        "name": "narrow",
-        "coverage": "covered",
-        "storyIds": [
-          "gws-auth-body--narrow"
-        ],
-        "note": "Narrow keeps the primary control within a maximum 390px container."
-      }
-    ],
-    "loading": {
-      "status": "none",
-      "detail": "No fetch of its own: the card passes the action in, and every request runs only from a click, so there is no initial, refresh or stale loading state. The start request runs from the primary control."
     },
     "migration": {
       "status": "unassessed",
@@ -11336,10 +11142,8 @@ export const inventory: InventoryEntry[] = [
       "web/src/components/VaultReviewPanel.vue",
       "web/src/components/WebhookTriggers.vue",
       "web/src/components/WorkspaceMoveDialog.vue",
-      "web/src/components/needs-you/CallbackPasteField.vue",
       "web/src/components/needs-you/CommandBody.vue",
       "web/src/components/needs-you/DeviceCodeBody.vue",
-      "web/src/components/needs-you/GwsAuthBody.vue",
       "web/src/components/needs-you/HelperTerminalButton.vue",
       "web/src/components/needs-you/PermissionModeBody.vue",
       "web/src/components/needs-you/RestartBody.vue",
@@ -11514,7 +11318,6 @@ export const inventory: InventoryEntry[] = [
       "web/src/components/TaskWorkspaceSurface.vue",
       "web/src/components/WebhookTriggers.vue",
       "web/src/components/WorkspaceMoveDialog.vue",
-      "web/src/components/needs-you/CallbackPasteField.vue",
       "web/src/components/onboarding/OnboardingAccessStage.vue",
       "web/src/components/onboarding/OnboardingCareStage.vue",
       "web/src/components/onboarding/OnboardingChoice.vue",
@@ -12039,10 +11842,8 @@ export const inventory: InventoryEntry[] = [
       "web/src/components/VaultReviewPanel.vue",
       "web/src/components/WebhookTriggers.vue",
       "web/src/components/WorkspaceMoveDialog.vue",
-      "web/src/components/needs-you/CallbackPasteField.vue",
       "web/src/components/needs-you/CommandBody.vue",
       "web/src/components/needs-you/DeviceCodeBody.vue",
-      "web/src/components/needs-you/GwsAuthBody.vue",
       "web/src/components/needs-you/HelperTerminalButton.vue",
       "web/src/components/needs-you/PermissionModeBody.vue",
       "web/src/components/needs-you/RestartBody.vue",

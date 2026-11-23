@@ -13,7 +13,6 @@ function ws(overrides?: WorkspaceInfo['provider_overrides']): WorkspaceInfo {
     name: 'work',
     vault_root: 'work',
     default_provider: 'claude',
-    gws_profile: '',
     ...(overrides ? { provider_overrides: overrides } : {}),
   }
 }

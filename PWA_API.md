@@ -69,10 +69,9 @@ The route source of truth is `ciao/web/app.py`. This file is kept in sync by `te
 | POST | `/api/chats/{chat_id}/retry` | Set, stop, or run deferred chat retry |
 | POST | `/api/chats/{chat_id}/compact` | Compact the chat's provider session to shrink its context window (the Compact button beside the context meter). Runs as a stream like a turn, so status and result events arrive on the chat socket. 404 unknown chat; 409 `{error:"chat is archived", archived:true}`, `{error:"chat is busy"}` while a turn runs, the open-question error while a native question awaits an answer, or `{error:"nothing to compact yet"}` before the chat has a provider session |
 | POST | `/api/chats/{chat_id}/stop` | Stop an in-flight turn; HTTP fallback for the websocket `stop` message, for when that chat's socket is disconnected or mid-reconnect |
-| POST | `/api/chats/{chat_id}/actions/{action_id}/start` | Start a needs-you card's work (`gws_auth`, `device_code` or `system_setting`). Body: a JSON object, usually `{}`, or empty. `{action}` with state `waiting` (the sign-in URL is in `params.url`) or `failed`. 400 `{"error":"invalid_body","action":null}` when the body is not an object; 400 `{"error": <reason>, "action": <payload>}` for any refusal such as `invalid_state`; 404 `{"error":"not found"}` for an unknown chat; 409 `{"error":"chat_action_conflict","actions":[...]}` for an unknown or stale action id. `command` cards take `{"step": "typed"}` after the PWA typed the command into the chat's terminal (state `working`), or `{"step": "ran"}` when the user says they ran it (state `done`); any other body is 400 `invalid_body`, and a step on a card that is not `open` or `working` is 400 `invalid_state`. The engine never writes to a terminal for this kind. Browser-only; an agent cannot start a card |
+| POST | `/api/chats/{chat_id}/actions/{action_id}/start` | Start a needs-you card's work (`device_code` or `system_setting`). Body: a JSON object, usually `{}`, or empty. `{action}` with state `waiting` (the sign-in URL is in `params.url`) or `failed`. 400 `{"error":"invalid_body","action":null}` when the body is not an object; 400 `{"error": <reason>, "action": <payload>}` for any refusal such as `invalid_state`; 404 `{"error":"not found"}` for an unknown chat; 409 `{"error":"chat_action_conflict","actions":[...]}` for an unknown or stale action id. `command` cards take `{"step": "typed"}` after the PWA typed the command into the chat's terminal (state `working`), or `{"step": "ran"}` when the user says they ran it (state `done`); any other body is 400 `invalid_body`, and a step on a card that is not `open` or `working` is 400 `invalid_state`. The engine never writes to a terminal for this kind. Browser-only; an agent cannot start a card |
 | POST | `/api/chats/{chat_id}/actions/{action_id}/dismiss` | "Not now" on a needs-you card. Removes the card, cancels any sign-in attempt, and remembers its key so later turns do not re-raise it. `{actions}` with the remaining list; 404 unknown chat; 409 `chat_action_conflict` for a stale id. Browser-only |
 | POST | `/api/chats/{chat_id}/actions/{action_id}/continue` | Continue on a `done` needs-you card. Wakes the chat once (origin `chat_action`) and removes the card. `{actions, delivery}` with `delivery` one of `queued`, `deferred` or `started`; 400 `{"error":"invalid_state","action":...}` unless the card is `done`; 404 and 409 as above. Browser-only |
-| POST | `/api/chats/{chat_id}/actions/{action_id}/callback` | Finish a Google sign-in from another device. Body exactly `{"url": "<the address of the page that failed to load>"}` (≤ 8 KiB body, ≤ 4096-char URL). Only for a `gws_auth` action in state `waiting`; every other kind is refused `unsupported_kind`. The URL must be `http://127.0.0.1:<the pending sign-in's port>/` with its `state`; the engine finishes the sign-in in process and makes no request (refusals `no_pending_sign_in`, `bad_callback_url`, `state_mismatch`; 200 `{action}` is `done` or `failed`). 400 `{error: <reason>, action}` (`invalid_body`, `invalid_state`, `unsupported_kind` or one of the refusals above); 404; 409 `{error: "chat_action_conflict", actions}`; 413 `{error: "too_large"}`. Browser-only |
 | POST | `/api/chats/{chat_id}/prompt` | Send a prompt to start a background turn in the chat. Returns 409 `{error:"chat is archived", archived:true}` if the chat was archived; start a new chat (or `continue`) instead of retrying |
 | GET | `/api/chats/{chat_id}/messages` | Load persisted chat messages |
 | GET | `/api/chats/{chat_id}/messages/part` | Fetch one full history row by absolute index (lazy expansion) |
@@ -193,16 +192,6 @@ The route source of truth is `ciao/web/app.py`. This file is kept in sync by `te
 | POST | `/api/workspaces/archived/restore` | Restore an archived workspace (`{id}`): move its folder back, re-register it, and put its schedules back **paused**. Every registry field and schedule row is rebuilt from validated metadata: invalid schedules and system rows are dropped, and restored ones are pinned to the workspace; chat-owned loops are never in an archive, so none comes back. Refuses when the name or the folder is taken, or when the archive's vault location is not inside the restored folder (409). Response `restored: {id, name, path, schedules, schedules_paused, schedules_dropped}` |
 | GET | `/api/settings/providers` | Read each provider CLI's connection status. Each installed row carries `mcp_command`, the CLI's launch command (`claude`, `opencode`, `codex`; the bare word when the user's terminal resolves it, else the binary by absolute path, shell-quoted) and `mcp_slash`, `/mcp`, the slash command the in-app terminal types once that CLI has started to open its MCP view (`/mcp` for Claude Code and Codex, `/mcps` for OpenCode). The OpenCode row includes `credential_inventory` as described below; successful responses are `Cache-Control: no-store`. |
 | POST | `/api/settings/providers/{provider}/{action}` | Connect (browser on the engine's computer only: loopback peer, local `Host`, exact same-origin `Origin`; opens the provider sign-in in a terminal through `ciao.host_terminal`; any other browser gets 403 `not_on_host` with `command`, which Settings types into the in-app browser terminal (`useRunInTerminal`), copying or showing it when the terminal cannot take it), verify, or log out through the Claude Code or opencode CLI. A successful OpenCode verify includes the inventory and `Cache-Control: no-store`, and invalidates all workspace model caches before probing. Later model reads fetch again; existing pickers must refetch, running chats are not restarted, and responses may arrive out of order. |
-| GET | `/api/integrations/gws` | Read Google Workspace CLI install, profile auth, and workspace usage status; `install_problem` is non-empty when the npm package is present but its binary is missing |
-| POST | `/api/integrations/gws/install` | Install the `@googleworkspace/cli` (`gws`) binary globally via npm |
-| POST | `/api/integrations/gws/client-secret` | Upload GCP client_secret.json for a profile |
-| POST | `/api/integrations/gws/auth-url` | Generate Google OAuth authorization URL for a profile |
-| POST | `/api/integrations/gws/exchange` | Complete Google OAuth flow and exchange code for credentials |
-| POST | `/api/integrations/gws/profiles/add` | Register a Google account (`name`, optional `label`) so workspaces can link to it |
-| POST | `/api/integrations/gws/profiles/remove` | Forget a Google account: delete its credential directory and unlink workspaces |
-| POST | `/api/integrations/gws/relogin/start` | Start a server-managed OAuth re-login; returns the consent URL and keeps a loopback callback listener alive in-process |
-| GET | `/api/integrations/gws/relogin/status` | Poll a pending re-login (pending/completed/error/none) |
-| POST | `/api/integrations/gws/relogin/cancel` | Cancel a pending re-login and tear down its loopback listener |
 | GET | `/api/push/public-key` | Read VAPID public key |
 | POST | `/api/push/subscribe` | Store push subscription |
 | POST | `/api/push/unsubscribe` | Remove push subscription |
@@ -1150,28 +1139,6 @@ curl -sS -b /tmp/ciao.jar -X PATCH "http://localhost:${PWA_PORT:-8443}/api/sched
 curl -sS -b /tmp/ciao.jar -X POST "http://localhost:${PWA_PORT:-8443}/api/admin/deploy"
 ```
 
-**Google Workspace re-login (recover a revoked/expired token)**
-
-```bash
-# Check which profiles report a dead login (token_valid=false / needs_relogin=true).
-# The values come from the periodic health monitor's cache — no live probe here.
-curl -sS -b /tmp/ciao.jar "http://localhost:${PWA_PORT:-8443}/api/integrations/gws"
-
-# Start a server-managed re-login. Returns { auth_url, state, port, expires_in }.
-# The loopback callback listener lives IN the engine process, so — unlike
-# `gws auth login` in a background bash task — it survives across chat turns and
-# actually captures the redirect. Open auth_url in a browser and sign in.
-curl -sS -b /tmp/ciao.jar -X POST "http://localhost:${PWA_PORT:-8443}/api/integrations/gws/relogin/start" \
-  -H 'content-type: application/json' -d '{"profile":"personal"}'
-
-# Poll until status is "completed" (or "error"). Never returns tokens.
-curl -sS -b /tmp/ciao.jar "http://localhost:${PWA_PORT:-8443}/api/integrations/gws/relogin/status?profile=personal"
-
-# Abort a pending attempt and free the loopback port.
-curl -sS -b /tmp/ciao.jar -X POST "http://localhost:${PWA_PORT:-8443}/api/integrations/gws/relogin/cancel" \
-  -H 'content-type: application/json' -d '{"profile":"personal"}'
-```
-
 **Routine settings (Settings → General, Access & devices, Advanced, Providers)**
 
 ```bash
@@ -1900,7 +1867,7 @@ are written through the existing signed-session, origin-gated
 
 **Chat actions (needs-you cards)**
 
-A chat's `actions` field (on every chat payload) lists its transient needs-you cards, each as `{id, kind, origin, state, params, error, created_at}`. `kind` is one of `command`, `gws_auth`, `permission_mode`, `device_code`, `system_setting`, `restart` or `limit`; `state` is one of `open`, `working`, `waiting`, `done` or `failed`; `origin` is `engine` or `agent`. There is no MCP sign-in card: an MCP server signs in through its CLI's own MCP command, and a request for the retired `mcp_auth` kind is refused `invalid_kind`.
+A chat's `actions` field (on every chat payload) lists its transient needs-you cards, each as `{id, kind, origin, state, params, error, created_at}`. `kind` is one of `command`, `permission_mode`, `device_code`, `system_setting`, `restart` or `limit`; `state` is one of `open`, `working`, `waiting`, `done` or `failed`; `origin` is `engine` or `agent`. There is no MCP sign-in card: an MCP server signs in through its CLI's own MCP command, and a request for the retired `mcp_auth` kind is refused `invalid_kind`.
 
 A `command` card's `params.command` is model-written text the user reviews before running. It is normalized (CRLF and a bare CR become line feeds, outer whitespace is stripped) and bounded at 4096 UTF-8 bytes before and after normalization. Text that is not a string, has no UTF-8 form, is empty, or holds a control character (ESC included), a DEL, or an invisible or direction-changing character is refused with the reason `invalid_type`, `invalid_encoding`, `empty`, `too_long` or `invalid_characters`, and the refusal never echoes the text.
 
@@ -1909,8 +1876,6 @@ Cards live in memory only. Archive, a new session and a handover clear them, and
 The engine polls a started sign-in every 2 seconds until it finishes (the card becomes `done`) or fails. After 10 minutes the card is `failed` with "Timed out waiting for sign-in". Continue on a `done` card wakes the chat once.
 
 A `system_setting` card (`params.setting`, one of the ten macOS privacy panes, plus optional `note`) opens that System Settings pane on the engine's own Mac when started and becomes `done`. Start is refused 400 `not_local` for a caller that is not a loopback peer (`is_loopback_client`), and the card is left unchanged; on a non-macOS host it becomes `failed`.
-
-A Google sign-in opened on another device ends on a page that cannot load, because the redirect goes to a listener on the engine's computer. `POST /api/chats/{chat_id}/actions/{action_id}/callback` takes that address and hands it to the `gws_auth` handler, which finishes the pending Google sign-in in process.
 
 Agents may raise a card with `ciao chat needs-action`, but they never start, dismiss or continue one; those are the card's own buttons, on a signed session.
 

@@ -295,7 +295,7 @@ describe('HomeIntake', () => {
   it('starts the chat on a picked model instead of the workspace default', async () => {
     const store = useProjectStore()
     store.workspaces = [
-      { name: 'personal', vault_root: '', default_provider: 'opencode', gws_profile: '' },
+      { name: 'personal', vault_root: '', default_provider: 'opencode' },
     ] as unknown as typeof store.workspaces
     store.workspaceRegistryStatus = 'ready'
     store.workspaceProviderOptions = [

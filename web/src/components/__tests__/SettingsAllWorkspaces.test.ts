@@ -60,7 +60,6 @@ function registry(names: string[]): WorkspacesResponse {
       name,
       vault_root: `${name}/memory-vault`,
       default_provider: 'claude',
-      gws_profile: name === 'personal' ? 'p' : '',
       color: 'pink',
     })),
     active: names[0] ?? null,

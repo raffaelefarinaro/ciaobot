@@ -30,7 +30,7 @@ async function mountSettings(routines?: unknown, tab = '') {
     if (url === '/api/workspaces') {
       return {
         workspaces: ['personal', 'work'].map(name => ({
-          name, vault_root: name, default_provider: 'claude', gws_profile: '', color: 'pink',
+          name, vault_root: name, default_provider: 'claude', color: 'pink',
         })),
         active: 'work',
         primary: 'personal',

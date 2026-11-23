@@ -34,19 +34,19 @@ def test_system_prompt_payload_returns_instructions_for_empty() -> None:
     assert "<ciaobot_core>" in payload["append"]
 
 
-def test_system_prompt_points_to_gws_wrapper() -> None:
-    """The core keeps only the routing rule; service detail lives in skills."""
+def test_system_prompt_has_no_google_workspace_rule() -> None:
+    """The core keeps no Google routing rule; service detail lives outside it."""
     payload = mi.system_prompt_payload("")
     assert payload is not None
     append = payload["append"]
-    assert "Google Workspace calls go through" in append
-    assert "ciao gws" in append
-    assert "GWS_PROFILE" in append
+    assert "ciao gws" not in append
+    assert "GWS_PROFILE" not in append
+    assert "Google Workspace" not in append
     assert "supportsAllDrives" not in append
 
 
 def test_system_prompt_keeps_provider_sandbox_detail_out_of_the_core() -> None:
-    """Provider-specific retry mechanics belong in the GWS skill."""
+    """Provider-specific retry mechanics belong outside the core prompt."""
     payload = mi.system_prompt_payload("")
     assert payload is not None
     append = payload["append"]

@@ -73,7 +73,7 @@ async function seedStore() {
     provider: 'claude', mode: 'bypass',
   }] as unknown as typeof store.chats
   store.activeChatId = CHAT_ID
-  store.workspaces = [{ name: 'personal', vault_root: '', default_provider: 'claude', gws_profile: '' }]
+  store.workspaces = [{ name: 'personal', vault_root: '', default_provider: 'claude' }]
   store.activeWorkspace = 'personal'
   store.bootstrapped = true
   vi.spyOn(store, 'fetchAll').mockResolvedValue()

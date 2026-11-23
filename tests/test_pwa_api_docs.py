@@ -50,10 +50,6 @@ BROWSER_OR_INTERNAL_ROUTES: dict[str, str] = {
         "Needs-you card buttons (Sign in / Not now / Continue); signed session, browser-only. "
         "Agents raise actions with `ciao chat needs-action` but never start, dismiss or continue them"
     ),
-    "/api/chats/{chat_id}/actions/{action_id}/callback": (
-        "Needs-you card paste-back field; signed session, browser-only. Finishes a pending gws_auth sign-in "
-        "in process from the pasted loopback redirect; no request is made, and the agent never holds the callback URL"
-    ),
     "/api/auth/settings": "browser Settings auth form; enable/disable or change PWA password",
     "/api/setup/finish": "browser first-run setup handoff; writes local config and requests restart",
     "/api/setup/mkdir": "browser first-run setup folder picker; creates a local folder (bootstrap + localhost only)",
@@ -87,11 +83,6 @@ BROWSER_OR_INTERNAL_ROUTES: dict[str, str] = {
     "/api/settings/providers/{provider}/{action}": "browser-only handoff to provider CLI login, verification, or logout",
     "/api/admin/skills/add": "deprecated GitHub skill add; returns 410, replaced by /api/skills/import",
     "/api/skills/import": "browser skills import; uploads validated zip",
-    "/api/integrations/gws/client-secret": "browser GWS integration client_secret upload",
-    "/api/integrations/gws/auth-url": "browser GWS integration auth url request",
-    "/api/integrations/gws/exchange": "browser GWS integration oauth token exchange",
-    "/api/integrations/gws/profiles/add": "browser Settings action; registers a Google account for linking",
-    "/api/integrations/gws/profiles/remove": "browser Settings action; deletes a Google account and its local credentials",
     "/api/import/preview": "browser Memory import selection; reads the chosen conversations on the engine host to state what would be processed",
 }
 
@@ -183,3 +174,12 @@ def test_state_changing_routes_have_agent_recipe_or_allowlist() -> None:
         "BROWSER_OR_INTERNAL_ROUTES has entries for routes that no longer "
         f"exist or are no longer state-changing: {stale}"
     )
+
+
+def test_gws_integration_routes_are_gone() -> None:
+    repo = Path(__file__).resolve().parents[1]
+    app_source = (repo / "ciao" / "web" / "app.py").read_text(encoding="utf-8")
+
+    route_paths = re.findall(r'(?:Route|WebSocketRoute)\("([^"]+)"', app_source)
+    assert [path for path in route_paths if path.startswith("/api/integrations/gws")] == []
+    assert "/api/chats/{chat_id}/actions/{action_id}/callback" not in route_paths

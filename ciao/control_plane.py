@@ -130,12 +130,6 @@ A title like "Do the thing." makes the agent ask the user what the task is, whic
 costs a full run for nothing, so a delegation must say what the work is.
 """
 
-# A GWS health reading older than this is treated as stale: the monitor
-# preserves prior state when probes are unavailable or checks are disabled, so
-# a cached "valid" reading can outlive the token it described. Mirrors the
-# 900s check interval in ``ciao.main`` plus a small grace period.
-_GWS_HEALTH_STALE_AFTER = 1200.0
-
 #: Heavy/hidden subtrees skipped by the ``file_surface`` suggestions walk so a
 #: missing-path miss does not scan the whole workspace (install root) or let a
 #: vendored file outrank a real workspace artifact.
@@ -1899,77 +1893,6 @@ class CiaoControlPlane:
         )
         return _ok(data)
 
-    def gws_status(self, principal: AgentPrincipal) -> dict[str, Any]:
-        """Report Google Workspace connection status for the active workspace.
-
-        Resolves the workspace's linked ``gws_profile`` the same way the runtime
-        does (only an explicit link naming an existing account counts), then
-        reports whether credentials are present and whether the periodic health
-        monitor's last reading says the token is valid. Read-only and cheap: it
-        never runs ``gws auth status`` itself, so the agent can answer "is
-        Google connected?" without a subprocess.
-        """
-        workspace = self._workspace(principal)
-        from ciao import gws_auth
-
-        profile = gws_auth.workspace_gws_profile(self.config, workspace)
-        if not profile:
-            return _ok(
-                {
-                    "profile": "",
-                    "configured": False,
-                    "connected": False,
-                    "needs_relogin": False,
-                }
-            )
-
-        config_dir = gws_auth.profile_config_dir(self.config, profile)
-        credentials_present = False
-        if config_dir is not None:
-            credentials_present = any(
-                (config_dir / name).is_file()
-                for name in ("credentials.json", "credentials.enc")
-            )
-        health = gws_auth.read_health_cache(
-            Path(self.config.state_path).parent
-        ).get(profile, {})
-        token_valid = (
-            bool(health.get("token_valid")) if "token_valid" in health else None
-        )
-        # The health monitor preserves prior state when a probe is unavailable,
-        # so a cached reading
-        # can outlive the token it described. Only a fresh, confirmed valid
-        # reading establishes a connection; a stale one is reported as unknown
-        # rather than assumed good.
-        checked_at = health.get("checked_at")
-        fresh = (
-            isinstance(checked_at, (int, float))
-            and (time.time() - float(checked_at)) <= _GWS_HEALTH_STALE_AFTER
-        )
-        connected = bool(credentials_present and token_valid is True and fresh)
-        # The health monitor debounces a single invalid reading (notify_threshold
-        # consecutive invalid runs) before treating a login as dead. Mirror that:
-        # only a confirmed invalid state (notified_invalid) surfaces as
-        # needs_relogin, so a transient reading does not trigger a false
-        # re-authentication prompt.
-        needs_relogin = bool(
-            credentials_present
-            and token_valid is False
-            and health.get("notified_invalid")
-        )
-        return _ok(
-            {
-                "profile": profile,
-                "configured": credentials_present,
-                "connected": connected,
-                "token_valid": token_valid,
-                "needs_relogin": needs_relogin,
-                "token_error": str(health.get("token_error") or ""),
-                "checked_at": checked_at,
-                "stale": bool(credentials_present and not fresh),
-            }
-        )
-
     def memory_status(self, principal: AgentPrincipal) -> dict[str, Any]:
         """Report native guide memory usage without copying its contents."""
         workspace = self._workspace(principal)
@@ -3633,17 +3556,6 @@ class CiaoControlPlane:
         # J (system_setting: macOS hosts only).
         if kind == "system_setting" and sys.platform != "darwin":
             raise ControlPlaneError("invalid_action", "System Settings panes exist only when Ciaobot runs on macOS.")
-        # F (gws_auth: only the workspace's linked profile).
-        if kind == "gws_auth":
-            from ciao import gws_auth
-
-            linked = gws_auth.workspace_gws_profile(self.config, self._workspace(principal))
-            if not linked or validated["profile"] != linked:
-                raise ControlPlaneError(
-                    "invalid_action",
-                    "gws_auth can only ask for this workspace's linked Google account; "
-                    "run `ciao gws status` to see it.",
-                )
         if kind == "permission_mode" and validated["mode"] == self.chat_mode(principal):
             raise ControlPlaneError("invalid_action", f"This chat is already in {validated['mode']} mode.")
         try:

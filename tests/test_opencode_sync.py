@@ -177,8 +177,8 @@ def test_skill_sync_preserves_native_mcp_configs(tmp_path, monkeypatch):
     before = (native.read_bytes(), claude.read_bytes())
     monkeypatch.setenv("CIAO_MEMORY_DIR", str(tmp_path / "memory"))
 
-    sync_workspace_skills(root, refresh_upstream=False, gws_profile="", workspace_name="test")
-    sync_workspace_skills(root, refresh_upstream=False, gws_profile="", workspace_name="test")
+    sync_workspace_skills(root, refresh_upstream=False)
+    sync_workspace_skills(root, refresh_upstream=False)
 
     assert (native.read_bytes(), claude.read_bytes()) == before
     assert not sidecar.exists()
