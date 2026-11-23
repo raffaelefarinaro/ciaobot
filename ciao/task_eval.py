@@ -19,7 +19,6 @@ import json
 import os
 import re
 import secrets
-import shlex
 import signal
 import shutil
 import socket
@@ -34,23 +33,18 @@ import urllib.request
 from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 from concurrent.futures import ThreadPoolExecutor
 from email.parser import BytesParser
-from email.utils import getaddresses
 from functools import partial
 from dataclasses import asdict, dataclass, field
 from datetime import UTC, date, datetime
 from http.cookiejar import CookieJar
 from pathlib import Path
-from types import SimpleNamespace
 from typing import Any, Protocol
 
 import yaml
 
-import ciao
 from ciao import agent_paths, behavioral_eval
 from ciao.config import PERMISSION_MODES
 from ciao.os_support.processes import isolated_probe_flags, python_isolation_flags
-from ciao.os_support.tool_path import dedupe_path
-from ciao.tool_path import common_tool_dirs
 
 TASKS_ROOT: Path = Path(__file__).resolve().parent / "stock" / "evals" / "tasks"
 FIXTURE_DIRNAME = "_fixture"
