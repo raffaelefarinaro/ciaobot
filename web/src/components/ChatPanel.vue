@@ -1437,6 +1437,7 @@ import ShellCard from './ShellCard.vue'
 import ComposerActivity from './ComposerActivity.vue'
 import { NO_RUNNING_WORK } from '../lib/runningWork'
 import { api } from '../lib/api'
+import { withoutProviderCatalogs } from '../lib/modelCatalogs'
 import { askConfirm } from '../lib/confirm'
 import { recordSentPrompt } from '../lib/chatDrafts'
 import { splitAttachmentBlock, type AttachedFile } from '../lib/chatAttachments'
@@ -3915,19 +3916,42 @@ const onNativeDragLeave = () => { if (!props.inactive) handleNativeFileDragLeave
 const onNativeDrop = (e: Event) => { if (!props.inactive) handleNativeFileDrop(e) }
 
 let modelsSeq = 0
-async function loadModels(): Promise<void> {
+function applyModelsResponse(response: ModelsResponse): void {
+  modelsResponse.value = response
+  models.value = response.models
+  providerModels.value = response.provider_models || {}
+  providerDefaults.value = response.provider_defaults || {}
+  thinkingLevels.value = response.thinking_levels || {}
+}
+async function loadModels(authChangeProviders: readonly string[] = []): Promise<void> {
   const seq = ++modelsSeq
   try {
     const r = await api.get<ModelsResponse>('/api/models')
     // Quick reopens can resolve out of order; only the newest request lands.
     if (seq !== modelsSeq) return
-    modelsResponse.value = r
-    models.value = r.models
-    providerModels.value = r.provider_models || {}
-    providerDefaults.value = r.provider_defaults || {}
-    thinkingLevels.value = r.thinking_levels || {}
-  } catch { /* use defaults */ }
+    applyModelsResponse(withoutProviderCatalogs(r, taskStore.uncertainModelProviders))
+  } catch {
+    if (seq !== modelsSeq || !authChangeProviders.length) return
+    for (const provider of authChangeProviders) taskStore.markModelCatalogUncertain(provider)
+  }
 }
+watch(
+  () => taskStore.uncertainModelProviders.join('\0'),
+  (current, previous) => {
+    const uncertain = current ? current.split('\0') : []
+    const prior = previous ? previous.split('\0') : []
+    const added = uncertain.filter(provider => !prior.includes(provider))
+    const removed = prior.filter(provider => !uncertain.includes(provider))
+    if (added.length) {
+      modelsSeq++
+      if (modelsResponse.value) {
+        applyModelsResponse(withoutProviderCatalogs(modelsResponse.value, added))
+      }
+    }
+    if (removed.length) void loadModels(removed)
+  },
+  { flush: 'sync' },
+)
 
 onMounted(async () => {
   for (const event of startupFocusEvents) {

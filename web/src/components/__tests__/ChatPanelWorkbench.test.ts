@@ -8,7 +8,7 @@ import { createPinia, setActivePinia } from 'pinia'
 import { defineComponent, h, nextTick } from 'vue'
 import { flushPromises, shallowMount, type VueWrapper } from '@vue/test-utils'
 import { api } from '../../lib/api'
-import type { ChatInfo, ChatMessage, ProjectInfo } from '../../lib/types'
+import type { ChatInfo, ChatMessage, ModelsResponse, ProjectInfo } from '../../lib/types'
 import { useProjectStore } from '../../stores/projects'
 import { useTaskStore } from '../../stores/tasks'
 import ChatPanel from '../ChatPanel.vue'
@@ -179,6 +179,98 @@ describe('ChatPanel aligned layout', () => {
     await wrapper.get('.composer-bar .model-picker-summary').trigger('click')
     await flushPromises()
     expect(modelFetches()).toBe(2)
+    wrapper.unmount()
+  })
+
+  it('refreshes an already mounted model picker after provider auth changes', async () => {
+    const { useTaskStore } = await import('../../stores/tasks')
+    const wrapper = await mountPanel()
+    const tasks = useTaskStore()
+    const get = vi.mocked(api.get)
+    const modelFetches = () => get.mock.calls.filter(([path]) => path === '/api/models').length
+    expect(modelFetches()).toBe(1)
+
+    tasks.markModelCatalogUncertain('claude')
+    tasks.clearModelCatalogUncertainty('claude')
+    await flushPromises()
+    expect(modelFetches()).toBe(2)
+    wrapper.unmount()
+  })
+
+  it('ignores a stale provider catalog after auth uncertainty until that provider is verified', async () => {
+    const { useTaskStore } = await import('../../stores/tasks')
+    const wrapper = await mountPanel()
+    const tasks = useTaskStore()
+    const state = (wrapper.vm as unknown as { $: { setupState: unknown } }).$.setupState as {
+      modelsResponse: unknown
+      models: string[]
+      providerModels: Record<string, string[]>
+    }
+    const priorCatalogs = {
+      ...MODELS_RESPONSE,
+      provider_models: { ...MODELS_RESPONSE.provider_models, opencode: ['peer/model'] },
+    }
+    state.modelsResponse = priorCatalogs
+    state.providerModels = priorCatalogs.provider_models
+    const get = vi.mocked(api.get)
+    const original = get.getMockImplementation()!
+    const modelFetches = () => get.mock.calls.filter(([path]) => path === '/api/models').length
+    let finishStale!: (value: ModelsResponse) => void
+    get.mockImplementation(((path: string) => path === '/api/models'
+      ? new Promise<ModelsResponse>(resolve => { finishStale = resolve }) : original(path)) as typeof api.get)
+
+    await wrapper.get('.composer-bar .model-picker-summary').trigger('click')
+    expect(modelFetches()).toBe(2)
+    tasks.markModelCatalogUncertain('claude')
+    finishStale({ ...MODELS_RESPONSE, provider_models: { claude: ['stale-model'], opencode: ['fresh-peer'] } })
+    await flushPromises()
+
+    expect(state.providerModels.claude).toBeUndefined()
+    expect(state.providerModels.opencode).toEqual(['peer/model'])
+
+    get.mockImplementation(((path: string) => path === '/api/models'
+      ? Promise.resolve({ ...MODELS_RESPONSE, provider_models: { claude: ['fresh-model'] } }) : original(path)) as typeof api.get)
+    tasks.clearModelCatalogUncertainty('claude')
+    await flushPromises()
+
+    expect(modelFetches()).toBe(3)
+    expect(state.providerModels).toEqual({ claude: ['fresh-model'] })
+    get.mockImplementation(original)
+    wrapper.unmount()
+  })
+
+  it('does not use Claude top-level default as the active picker model while auth is uncertain', async () => {
+    const { useTaskStore } = await import('../../stores/tasks')
+    const wrapper = await mountPanel([], { model: '', provider: 'claude' })
+    const tasks = useTaskStore()
+    const state = (wrapper.vm as unknown as { $: { setupState: unknown } }).$.setupState as {
+      activeModelId: string
+    }
+
+    expect(state.activeModelId).toBe('sonnet')
+    tasks.markModelCatalogUncertain('claude')
+    await flushPromises()
+    expect(state.activeModelId).toBe('')
+    wrapper.unmount()
+  })
+
+  it('keeps cached chat model options after an ordinary transient fetch failure', async () => {
+    const wrapper = await mountPanel()
+    const state = (wrapper.vm as unknown as { $: { setupState: unknown } }).$.setupState as {
+      modelsResponse: unknown
+      providerModels: Record<string, string[]>
+    }
+    const get = vi.mocked(api.get)
+    const original = get.getMockImplementation()!
+    get.mockImplementation(((path: string) => path === '/api/models'
+      ? Promise.reject(new Error('temporary network error')) : original(path)) as typeof api.get)
+
+    await wrapper.get('.composer-bar .model-picker-summary').trigger('click')
+    await flushPromises()
+
+    expect(state.modelsResponse).not.toBeNull()
+    expect(state.providerModels).toEqual({ claude: ['haiku', 'sonnet', 'opus'] })
+    get.mockImplementation(original)
     wrapper.unmount()
   })
 

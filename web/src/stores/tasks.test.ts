@@ -4,7 +4,7 @@ import { createPinia, setActivePinia } from 'pinia'
 import { api } from '../lib/api'
 import { useTaskStore } from './tasks'
 import { useProjectStore } from './projects'
-import type { Schedule } from '../lib/types'
+import type { ModelsResponse, Schedule } from '../lib/types'
 
 vi.mock('../lib/api', () => ({
   api: {
@@ -16,6 +16,53 @@ vi.mock('../lib/api', () => ({
 }))
 
 const get = vi.mocked(api.get)
+
+it('keeps uncertain provider choices out of model reads while preserving peer providers', async () => {
+  setActivePinia(createPinia())
+  const projects = useProjectStore()
+  projects.workspaces = [{ name: 'personal', vault_root: 'personal' }] as never
+  projects.activeWorkspace = 'personal'
+  projects.workspaceRegistryStatus = 'ready'
+  const store = useTaskStore()
+  store.models = {
+    models: ['sonnet'], provider_models: { claude: ['sonnet'], opencode: ['old/model'] },
+    provider_defaults: { claude: 'sonnet', opencode: 'old/model' },
+    default: 'sonnet',
+  }
+  get.mockResolvedValue({
+    models: ['sonnet'], provider_models: { claude: ['sonnet'], opencode: ['stale/model'] },
+    provider_defaults: { claude: 'sonnet', opencode: 'stale/model' },
+  } as never)
+
+  store.markModelCatalogUncertain('opencode')
+
+  expect(store.modelCatalogUncertain).toBe(true)
+  expect(store.models?.provider_models).toEqual({ claude: ['sonnet'] })
+  await expect(store.fetchModels()).resolves.toMatchObject({ status: 'success' })
+  expect(store.models?.provider_models).toEqual({ claude: ['sonnet'] })
+  expect(get).toHaveBeenCalledTimes(1)
+
+  let finishStale!: (value: ModelsResponse) => void
+  vi.mocked(api.get).mockImplementationOnce(() => new Promise<ModelsResponse>(resolve => { finishStale = resolve }))
+  const staleRead = store.fetchModels()
+  store.clearModelCatalogUncertainty('opencode')
+  finishStale({
+    models: ['sonnet'], provider_models: { claude: ['sonnet'], opencode: ['stale/model'] },
+    provider_defaults: { claude: 'sonnet', opencode: 'stale/model' },
+    default: 'sonnet',
+  })
+  await expect(staleRead).resolves.toMatchObject({ status: 'success' })
+  expect(store.models?.models).toEqual(['sonnet'])
+  expect(store.models?.provider_models.opencode).toBeUndefined()
+
+  get.mockResolvedValueOnce({
+    models: ['sonnet'], provider_models: { claude: ['sonnet'], opencode: ['fresh/model'] },
+    provider_defaults: { claude: 'sonnet', opencode: 'fresh/model' },
+    default: 'sonnet',
+  } satisfies ModelsResponse)
+  await store.fetchModels()
+  expect(store.models?.provider_models.opencode).toEqual(['fresh/model'])
+})
 
 it.each(['move', 'engine'] as const)('excludes conflicting routine writes while %s is pending', async first => {
   setActivePinia(createPinia())

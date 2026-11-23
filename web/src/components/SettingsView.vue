@@ -1180,6 +1180,7 @@ import SettingsAllWorkspaces from './settings/SettingsAllWorkspaces.vue'
 import { ref, computed, nextTick, onMounted, onUnmounted, watch, provide } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { api } from '../lib/api'
+import { withoutProviderCatalogs } from '../lib/modelCatalogs'
 import { isDesktopClient } from '../lib/pwaPlatform'
 import { describeInterruptedCards, type RestartBlocker } from '../lib/restartBlockers'
 import { errorMessage, apiErrorMessage, errorPayload, errorPayloadList } from '../lib/errorMessage'
@@ -1710,6 +1711,7 @@ let settingsModelEpoch = 0
 let providerViewAlive = true
 let providerPendingOwner: symbol | null = null
 let deferredProviderRead: Promise<void> | null = null
+let providerActionInProgress = false
 const unsubscribeProviderRefresh = subscribeProviderRefresh(() => {
   if (!providerViewAlive) return
   for (const key of tabLoads.keys()) {
@@ -1829,19 +1831,26 @@ async function providerConnectionAction(provider: string, action: 'verify' | 'lo
       && transition === workspaceTransition && workspace === projectStore.activeWorkspace
       && taskTransition === taskStore.modelTransition
       && providerMutationIsCurrent(sharedGeneration)
+    providerActionInProgress = true
     providerConnectionPending.value = provider
     providerPendingOwner = owner
     providerConnectionResult.value = ''
     try {
+      taskStore.markModelCatalogUncertain(provider)
       const result = await api.post<ProviderConnection>(`/api/settings/providers/${provider}/${action}`)
+      taskStore.clearModelCatalogUncertainty(provider)
       if (!current()) return
       if (action === 'verify' && providerKeys.value?.connections) {
         providerKeys.value = { ...providerKeys.value, connections: { ...providerKeys.value.connections, [provider]: result } }
       }
+      const [settingsResult, sharedResult] = await Promise.all([
+        fetchWorkspaceModels(false, workspace), taskStore.fetchModels(workspace),
+      ])
+      if (!current()) return
+      if (settingsResult !== 'success' || sharedResult.status !== 'success') {
+        taskStore.markModelCatalogUncertain(provider)
+      }
       if (action === 'verify' && provider === 'opencode') {
-        if (!current()) return
-        const [settingsResult, sharedResult] = await Promise.all([fetchWorkspaceModels(false, workspace), taskStore.fetchModels(workspace)])
-        if (!current()) return
         if (settingsResult === 'superseded' || sharedResult.status === 'superseded') {
           providerConnectionResult.value = 'Model reads were superseded. Please try again.'
           return
@@ -1856,6 +1865,7 @@ async function providerConnectionAction(provider: string, action: 'verify' | 'lo
     } catch {
       if (current()) providerConnectionResult.value = 'Could not update provider status. Please try again.'
     } finally {
+      providerActionInProgress = false
       if (providerViewAlive && providerPendingOwner === owner) {
         providerPendingOwner = null
         providerConnectionPending.value = ''
@@ -2427,6 +2437,26 @@ watch(
   { immediate: true },
 )
 const workspaceModelsError = ref('')
+watch(
+  () => taskStore.uncertainModelProviders.join('\0'),
+  (current, previous) => {
+    const uncertain = current ? current.split('\0') : []
+    const prior = previous ? previous.split('\0') : []
+    const added = uncertain.filter(provider => !prior.includes(provider))
+    const removed = prior.filter(provider => !uncertain.includes(provider))
+    settingsModelEpoch++
+    if (workspaceModels.value && added.length) {
+      workspaceModels.value = withoutProviderCatalogs(workspaceModels.value, added)
+    }
+    workspaceModelsError.value = uncertain.length
+      ? `Model availability is uncertain for ${uncertain.join(', ')}. Verify provider status before refreshing.`
+      : ''
+    if (removed.length && !providerActionInProgress && currentTab.value === 'providers') {
+      void fetchWorkspaceModels()
+    }
+  },
+  { flush: 'sync' },
+)
 
 // One row "..." menu open at a time, keyed by row. Esc closes it here and
 // marks the press handled: ChatLayout's window Esc handler leaves Settings
@@ -2472,8 +2502,10 @@ async function fetchWorkspaceModels(force = false, workspace = projectStore.acti
   try {
     const result = await api.get<ModelsResponse>(`/api/models?${query}`)
     if (!current()) return 'superseded'
-    workspaceModels.value = result
-    workspaceModelsError.value = ''
+    workspaceModels.value = withoutProviderCatalogs(result, taskStore.uncertainModelProviders)
+    workspaceModelsError.value = taskStore.uncertainModelProviders.length
+      ? `Model availability is uncertain for ${taskStore.uncertainModelProviders.join(', ')}. Verify provider status before refreshing.`
+      : ''
     return 'success'
   } catch {
     if (!current()) return 'superseded'
