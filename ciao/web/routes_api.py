@@ -1040,18 +1040,16 @@ async def provider_connection_action(request: Request) -> JSONResponse:
         adapter = provider_registry.require(provider).factory()
         adapter.invalidate_model_catalog()
         try:
-            from ciao.providers.acp.provider import acp_catalog_epoch, wait_for_catalog_logouts
-
-            if not await wait_for_catalog_logouts(provider):
+            if not await adapter.wait_for_model_catalog_mutations():
                 return JSONResponse(
                     {"error": "Provider logout is still running; status was not verified."},
                     status_code=503,
                     headers={"Cache-Control": "no-store"},
                 )
-            verification_epoch = acp_catalog_epoch(provider)
+            verification_epoch = adapter.model_catalog_epoch()
 
             def status_changed_during_verification() -> JSONResponse | None:
-                if acp_catalog_epoch(provider) == verification_epoch:
+                if adapter.model_catalog_epoch() == verification_epoch:
                     return None
                 return JSONResponse(
                     {"error": "Provider status changed during verification; status was not verified."},
@@ -1086,8 +1084,6 @@ async def provider_connection_action(request: Request) -> JSONResponse:
             # would run the obsolete top-level `claude logout`, which prints a
             # "did you mean" hint and exits 0 without signing out.
             logout_command = _auth_command_for_provider(provider)[:-1] + ["logout"]
-            from ciao.providers.acp.provider import register_catalog_logout, unregister_catalog_logout
-
             async def run_logout() -> subprocess.CompletedProcess[str]:
                 worker = asyncio.current_task()
                 try:
@@ -1103,13 +1099,13 @@ async def provider_connection_action(request: Request) -> JSONResponse:
                 finally:
                     adapter.invalidate_model_catalog()
                     if worker is not None:
-                        unregister_catalog_logout(provider, worker)
+                        adapter.unregister_model_catalog_mutation(worker)
 
             # Keep a strong reference before the first await. Shielding lets the
             # subprocess finish, invalidate, and release model readers if this
             # HTTP request is canceled or the browser disconnects.
             logout_worker = asyncio.create_task(run_logout())
-            register_catalog_logout(provider, logout_worker)
+            adapter.register_model_catalog_mutation(logout_worker)
 
             def consume_worker_error(task: asyncio.Task[Any]) -> None:
                 if not task.cancelled():
@@ -5683,8 +5679,7 @@ async def list_models(request: Request) -> JSONResponse:
     }
     # Every descriptor that runs over ACP reports its own catalog, opencode included. A probe
     # that raises leaves that provider with an empty catalog; the exception is logged by type only.
-    acp_descriptors = [item for item in provider_registry.descriptors() if item.acp_spec_path]
-    from ciao.providers.acp.provider import acp_catalog_epoch
+    catalog_descriptors = [item for item in provider_registry.descriptors() if item.acp_spec_path]
 
     # Another provider probe can keep this aggregation open after a cached
     # result was read. Recheck the epoch immediately before the response and
@@ -5692,9 +5687,9 @@ async def list_models(request: Request) -> JSONResponse:
     deadline = asyncio.get_running_loop().time() + 60.0
     results_by_provider: dict[str, Any] = {}
     epochs_by_provider: dict[str, int] = {}
-    pending_descriptors = acp_descriptors
+    pending_descriptors = catalog_descriptors
     while pending_descriptors:
-        before = {item.id: acp_catalog_epoch(item.id) for item in pending_descriptors}
+        before = {item.id: item.factory().model_catalog_epoch() for item in pending_descriptors}
         results = await asyncio.gather(
             *(_acp_catalog(item, workspace_root, refresh) for item in pending_descriptors),
             return_exceptions=True,
@@ -5703,23 +5698,24 @@ async def list_models(request: Request) -> JSONResponse:
             results_by_provider[item.id] = result
             epochs_by_provider[item.id] = before[item.id]
         stale = [
-            item for item in acp_descriptors
-            if item.id in epochs_by_provider and epochs_by_provider[item.id] != acp_catalog_epoch(item.id)
+            item for item in catalog_descriptors
+            if item.id in epochs_by_provider
+            and epochs_by_provider[item.id] != item.factory().model_catalog_epoch()
         ]
         if not stale:
             break
         if asyncio.get_running_loop().time() >= deadline:
             for item in stale:
                 results_by_provider[item.id] = []
-                epochs_by_provider[item.id] = acp_catalog_epoch(item.id)
+                epochs_by_provider[item.id] = item.factory().model_catalog_epoch()
             break
         pending_descriptors = stale
-    acp_results = [results_by_provider.get(item.id, []) for item in acp_descriptors]
+    acp_results = [results_by_provider.get(item.id, []) for item in catalog_descriptors]
     acp_models: dict[str, list[str]] = {}
     acp_defaults: dict[str, str] = {}
     acp_evidence: dict[str, dict[str, Any]] = {}
     acp_levels: dict[str, list[str]] = {}
-    for item, result in zip(acp_descriptors, acp_results, strict=True):
+    for item, result in zip(catalog_descriptors, acp_results, strict=True):
         if isinstance(result, BaseException):
             logger.warning("%s model catalog failed (%s).", item.id, type(result).__name__)
         rows = result if isinstance(result, list) else []

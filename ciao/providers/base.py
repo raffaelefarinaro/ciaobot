@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import math
 import re
 from abc import ABC, abstractmethod
@@ -228,6 +229,26 @@ class BaseProvider(ABC):
     def invalidate_model_catalog(cls) -> None:
         """Drop any cached model catalog so the next ``model_catalog`` probes again."""
         return None
+
+    @classmethod
+    def model_catalog_epoch(cls) -> int:
+        """Return the generation for host-side model catalog consistency checks."""
+        return 0
+
+    @classmethod
+    def register_model_catalog_mutation(cls, task: asyncio.Task[Any]) -> None:
+        """Keep a provider catalog mutation visible to concurrent catalog readers."""
+        return None
+
+    @classmethod
+    def unregister_model_catalog_mutation(cls, task: asyncio.Task[Any]) -> None:
+        """Release a provider catalog mutation after its worker actually completes."""
+        return None
+
+    @classmethod
+    async def wait_for_model_catalog_mutations(cls) -> bool:
+        """Wait for relevant auth changes before reading this provider's status."""
+        return True
 
     @abstractmethod
     def run_streaming(

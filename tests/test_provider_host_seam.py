@@ -21,6 +21,10 @@ _HOST_SEAMS = (
     "abort_session",
     "model_catalog",
     "invalidate_model_catalog",
+    "model_catalog_epoch",
+    "register_model_catalog_mutation",
+    "unregister_model_catalog_mutation",
+    "wait_for_model_catalog_mutations",
     "native_title_candidates",
     "delete_session",
 )

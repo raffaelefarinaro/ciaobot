@@ -573,6 +573,22 @@ class AcpProvider(BaseProvider):
         invalidate_acp_catalog(cls.spec.id)
 
     @classmethod
+    def model_catalog_epoch(cls) -> int:
+        return acp_catalog_epoch(cls.spec.id)
+
+    @classmethod
+    def register_model_catalog_mutation(cls, task: asyncio.Task[Any]) -> None:
+        register_catalog_logout(cls.spec.id, task)
+
+    @classmethod
+    def unregister_model_catalog_mutation(cls, task: asyncio.Task[Any]) -> None:
+        unregister_catalog_logout(cls.spec.id, task)
+
+    @classmethod
+    async def wait_for_model_catalog_mutations(cls) -> bool:
+        return await wait_for_catalog_logouts(cls.spec.id)
+
+    @classmethod
     async def model_catalog(
         cls, workspace_root: Path, *, force: bool = False
     ) -> list[dict[str, Any]]:
