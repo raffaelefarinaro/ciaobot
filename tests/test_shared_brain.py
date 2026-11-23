@@ -404,17 +404,16 @@ async def test_update_loop_updates_each_distinct_path_once(root: Path, monkeypat
         return {"outcome": "up_to_date", "reason": "", "detail": "", "at": ""}
 
     monkeypatch.setattr(sb, "update_brain", record)
-    config = SimpleNamespace(
-        workspaces={
-            "a": SimpleNamespace(shared_brains=[SharedBrainLink("x", "/p/one", "h/o/x")]),
-            "b": SimpleNamespace(
-                shared_brains=[
-                    SharedBrainLink("x", "/p/one", "h/o/x"),
-                    SharedBrainLink("y", "/p/two", "h/o/y"),
-                ]
-            ),
-        }
-    )
+    config = FakeConfig(Path("/zz-install"))
+    config.workspaces = {
+        "a": SimpleNamespace(shared_brains=[SharedBrainLink("x", "/p/one", "h/o/x")]),
+        "b": SimpleNamespace(
+            shared_brains=[
+                SharedBrainLink("x", "/p/one", "h/o/x"),
+                SharedBrainLink("y", "/p/two", "h/o/y"),
+            ]
+        ),
+    }
     task = asyncio.create_task(sb.update_loop(config))
     for _ in range(200):
         if len(seen) >= 2:
@@ -438,7 +437,8 @@ async def test_update_loop_caps_each_pass_and_rotates(monkeypatch) -> None:
 
     monkeypatch.setattr(sb, "update_brain", record)
     links = [SharedBrainLink(f"n{i}", f"/p/{i}", f"h/o/{i}") for i in range(3)]
-    config = SimpleNamespace(workspaces={"a": SimpleNamespace(shared_brains=links)})
+    config = FakeConfig(Path("/zz-install"))
+    config.workspaces = {"a": SimpleNamespace(shared_brains=links)}
     task = asyncio.create_task(sb.update_loop(config))
     for _ in range(500):
         if len(seen) >= 4:
@@ -589,25 +589,6 @@ def test_bad_rows_are_dropped_on_load(tmp_path: Path) -> None:
     assert shared_brains_from_rows(rows) == [sb.SharedBrainLink(**good)]
 
 
-def test_load_drops_a_brain_pointing_into_the_install(tmp_path: Path) -> None:
-    from ciao.config import CiaoConfig
-
-    install = tmp_path / "install"
-    install.mkdir()
-    registry = tmp_path / "install" / ".runtime"
-    registry.mkdir()
-    inside = {"name": "inside", "path": str(install / "vaultish"), "identity": "github.com/a/i"}
-    outside = {"name": "outside", "path": str(tmp_path / "away"), "identity": "github.com/a/o"}
-    (registry / "workspaces.json").write_text(
-        json.dumps([{"name": "personal", "vault_root": "personal", "shared_brains": [inside, outside]}]),
-        encoding="utf-8",
-    )
-    config = CiaoConfig.from_env(
-        {"CIAO_WORKSPACE": str(install), "CIAO_RUNTIME_ROOT": str(registry), "PWA_AUTH_TOKEN": "t"}
-    )
-    assert [link.name for link in config.workspace("personal").shared_brains] == ["outside"]
-
-
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     "key,value",
@@ -721,3 +702,138 @@ def test_forget_unlinked_prunes_lock_and_result_entries() -> None:
     sb._forget_unlinked({"/kept"})
     assert "/gone" not in sb._locks and "/gone" not in sb._last_update
     assert "/kept" in sb._locks and "/kept" in sb._last_update
+
+
+# --- second review: worktree scope, tampering after link, GIT_* env, pointers ---
+
+
+@pytest.mark.parametrize("key,value", [("filter.x.smudge", "cat"), ("core.sshCommand", "ssh")])
+def test_link_refuses_worktree_scoped_program_config(root: Path, key: str, value: str) -> None:
+    checkout = make_checkout(root / "wt-hostile", "https://github.com/x/wt")
+    git(checkout, "config", "extensions.worktreeConfig", "true")
+    git(checkout, "config", "--worktree", key, value)
+    with pytest.raises(ValueError, match="can run programs"):
+        sb.resolve_links(FakeConfig(root), "work", [{"path": str(checkout)}], [])
+
+
+@pytest.mark.parametrize(
+    "key,value",
+    [
+        ("core.alternateRefsCommand", "cat"),
+        ("gpg.program", "/bin/evil"),
+        ("merge.verifySignatures", "true"),
+        ("core.pager", "/bin/evil"),
+        ("core.editor", "/bin/evil"),
+        ("diff.external", "/bin/evil"),
+        ("url.file:///tmp/evil.insteadOf", "https://github.com/x/notes"),
+        ("url.file:///tmp/evil.pushInsteadOf", "https://github.com/x/notes"),
+        ("remote.origin.pushurl", "file:///tmp/evil"),
+    ],
+)
+def test_link_refuses_more_program_and_redirect_keys(root: Path, key: str, value: str) -> None:
+    checkout = make_checkout(root / "more-hostile", "https://github.com/x/more")
+    git(checkout, "config", key, value)
+    with pytest.raises(ValueError, match="can run programs"):
+        sb.resolve_links(FakeConfig(root), "work", [{"path": str(checkout)}], [])
+
+
+@pytest.mark.asyncio
+async def test_update_refuses_config_tampered_after_linking(pair: SimpleNamespace, monkeypatch) -> None:
+    push_from_seed(pair, "remote.md")
+    git(pair.clone, "config", "core.sshCommand", "/bin/evil")
+    calls = record_git(monkeypatch)
+    result = await sb.update_brain(str(pair.clone), FakeConfig(pair.root))
+    assert result["outcome"] == "failed" and result["reason"] == "unsafe_config"
+    assert not [a for a in calls if "fetch" in a or "merge" in a]
+
+
+@pytest.mark.asyncio
+async def test_restored_row_with_hostile_config_is_refused_at_update(
+    pair: SimpleNamespace, monkeypatch
+) -> None:
+    from ciao.config import shared_brains_from_rows
+
+    push_from_seed(pair, "remote.md")
+    git(pair.clone, "config", "filter.x.smudge", "cat")
+    row = {"name": "notes", "path": str(pair.clone.resolve()), "identity": "github.com/x/notes"}
+    (link,) = shared_brains_from_rows([row])
+    calls = record_git(monkeypatch)
+    result = await sb.update_brain(link.path, FakeConfig(pair.root))
+    assert result["reason"] == "unsafe_config"
+    assert not [a for a in calls if "fetch" in a or "merge" in a]
+
+
+def test_brain_state_reports_unsafe_config(pair: SimpleNamespace) -> None:
+    git(pair.clone, "config", "core.pager", "/bin/evil")
+    link = sb.SharedBrainLink(name="notes", path=str(pair.clone.resolve()), identity="github.com/x/notes")
+    assert sb.brain_state(link, FakeConfig(pair.root))["problem"] == "unsafe_config"
+
+
+@pytest.mark.asyncio
+async def test_git_dir_pointer_is_refused_at_update_and_link(pair: SimpleNamespace, monkeypatch) -> None:
+    worktree = pair.root / "linked-wt"
+    git(pair.clone, "worktree", "add", "-q", str(worktree), "-b", "wt-branch")
+    assert (worktree / ".git").is_file()
+    with pytest.raises(ValueError, match="fresh clone"):
+        sb.resolve_links(FakeConfig(pair.root), "work", [{"path": str(worktree)}], [])
+    calls = record_git(monkeypatch)
+    result = await sb.update_brain(str(worktree), FakeConfig(pair.root))
+    assert result["reason"] == "not_a_checkout"
+    assert not [a for a in calls if "fetch" in a or "merge" in a]
+
+
+@pytest.mark.asyncio
+async def test_engine_git_dir_does_not_redirect_the_update(pair: SimpleNamespace, monkeypatch) -> None:
+    other = make_checkout(pair.root / "other-repo")
+    (other / "o.md").write_text("o\n", encoding="utf-8")
+    git(other, "add", ".")
+    git(other, "commit", "-q", "-m", "other")
+    other_head = git(other, "rev-parse", "HEAD")
+    new_head = push_from_seed(pair, "remote.md")
+    monkeypatch.setenv("GIT_DIR", str(other / ".git"))
+    monkeypatch.setenv("GIT_WORK_TREE", str(other))
+    result = await sb.update_brain(str(pair.clone), FakeConfig(pair.root))
+    assert result["outcome"] == "updated", result
+    clean = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
+
+    def head(path: Path) -> str:
+        return subprocess.run(
+            ["git", "-C", str(path), "rev-parse", "HEAD"],
+            capture_output=True, text=True, env=clean, check=True,
+        ).stdout.strip()
+
+    assert head(pair.clone) == new_head
+    assert head(other) == other_head
+
+
+@pytest.mark.asyncio
+async def test_forget_unlinked_keeps_a_locked_entry() -> None:
+    lock = asyncio.Lock()
+    await lock.acquire()
+    sb._locks["/running"] = lock
+    try:
+        sb._forget_unlinked(set())
+        assert "/running" in sb._locks
+    finally:
+        lock.release()
+        sb._locks.pop("/running", None)
+
+
+def test_load_keeps_a_brain_pointing_into_the_install_and_reports_it(tmp_path: Path) -> None:
+    from ciao.config import CiaoConfig
+
+    install = tmp_path / "install"
+    registry = install / ".runtime"
+    registry.mkdir(parents=True)
+    inside = {"name": "inside", "path": str(install / "vaultish"), "identity": "github.com/a/i"}
+    (registry / "workspaces.json").write_text(
+        json.dumps([{"name": "personal", "vault_root": "personal", "shared_brains": [inside]}]),
+        encoding="utf-8",
+    )
+    config = CiaoConfig.from_env(
+        {"CIAO_WORKSPACE": str(install), "CIAO_RUNTIME_ROOT": str(registry), "PWA_AUTH_TOKEN": "t"}
+    )
+    (link,) = config.workspace("personal").shared_brains
+    assert link.name == "inside"
+    assert sb.brain_state(link, config)["problem"] == "outside_install"
+    assert sb._linked_paths(config) == []

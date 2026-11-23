@@ -900,24 +900,26 @@ class CiaoConfig:
         if not self.workspaces:
             self.workspaces = _bootstrap_registry(self.vault_root)
         self._workspace_registry_changed = self._normalize_workspace_vault_roots()
-        self._drop_unsafe_shared_brains()
+        self._note_unsafe_shared_brains()
 
-    def _drop_unsafe_shared_brains(self) -> None:
-        """Drop any shared brain that points into the install, a vault or the runtime dir."""
+    def _note_unsafe_shared_brains(self) -> None:
+        """Log shared brains that point into the install, a vault or the runtime dir.
+
+        They are kept, not dropped: ``brain_state`` reports them as
+        ``problem: outside_install`` and the update loop skips them, so the
+        operator sees them and can remove them in Settings.
+        """
         from ciao.shared_brain import overlaps_protected  # noqa: PLC0415
 
         for workspace in self.workspaces.values():
-            links = getattr(workspace, "shared_brains", None)
-            if not links:
-                continue
-            kept = [link for link in links if not overlaps_protected(self, link.path)]
-            if len(kept) != len(links):
-                logging.getLogger(__name__).warning(
-                    "Dropped %d shared brain(s) of workspace %r that point into the install or a vault",
-                    len(links) - len(kept),
-                    workspace.name,
-                )
-                workspace.shared_brains = kept
+            for link in getattr(workspace, "shared_brains", None) or []:
+                if overlaps_protected(self, link.path):
+                    logging.getLogger(__name__).warning(
+                        "Shared brain %r of workspace %r points into the install or a vault; "
+                        "it is kept and reported, not updated",
+                        link.name,
+                        workspace.name,
+                    )
 
     def workspace(self, name: str | None) -> WorkspaceConfig | None:
         if not name:

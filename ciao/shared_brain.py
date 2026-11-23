@@ -52,9 +52,17 @@ _HARDEN: tuple[str, ...] = (
     "-c", "gc.auto=0",
     "-c", "credential.helper=",
 )
-#: Keys a checkout's own config may hold that would let git run a program (or
-#: read more config) on our behalf. A folder with one is refused at link time.
-_UNSAFE_KEYS_EXACT = frozenset({"core.sshcommand", "core.gitproxy", "core.fsmonitor"})
+#: Settings a checkout's own config (local or worktree scope) may hold. Anything
+#: else can run a program, redirect a URL or read more config on git's behalf, and
+#: the folder is refused. The allowlist is deliberate: a denylist missed
+#: worktree-scoped and insteadOf keys. Real-world LFS clones (filter.lfs.*) are
+#: refused by this list; that is the trade-off.
+_SAFE_KEYS = frozenset({
+    "core.repositoryformatversion", "core.filemode", "core.bare", "core.logallrefupdates",
+    "core.ignorecase", "core.precomposeunicode", "core.symlinks",
+    "remote.origin.url", "remote.origin.fetch", "fetch.prune",
+})
+_SAFE_PREFIXES = ("branch.", "user.", "init.", "pull.", "extensions.")
 
 _locks: dict[str, asyncio.Lock] = {}
 _last_update: dict[str, dict[str, Any]] = {}
@@ -70,6 +78,10 @@ def _git_env(folder: Path) -> dict[str, str]:
     ``GIT_SSH_COMMAND`` outranks a checkout's ``core.sshCommand``; prompts are off.
     """
     env = child_env()
+    # An inherited GIT_DIR, GIT_WORK_TREE, GIT_CONFIG_* and friends would point
+    # git at another repository or config than the folder being updated.
+    for name in [key for key in env if key.startswith("GIT_")]:
+        del env[name]
     env["GIT_CEILING_DIRECTORIES"] = str(folder.parent)
     env["GIT_TERMINAL_PROMPT"] = "0"
     env["GIT_SSH_COMMAND"] = "ssh -o BatchMode=yes"
@@ -168,28 +180,45 @@ def validate_brain_path(config: Any, raw: str) -> str:
     return resolved
 
 
-def _unsafe_config_key(key: str) -> bool:
-    lowered = key.lower()
-    section = lowered.split(".", 1)[0]
+def _first_unsafe_key(listing: str) -> str | None:
+    """The first local or worktree setting outside the allowlist, or None.
+
+    Global, system and command-line scopes are not the folder's own and are skipped.
+    """
+    for line in listing.splitlines():
+        scope, _, entry = line.partition("\t")
+        if scope not in ("local", "worktree"):
+            continue
+        key = entry.split("=", 1)[0]
+        lowered = key.lower()
+        if lowered in _SAFE_KEYS or lowered.startswith(_SAFE_PREFIXES):
+            continue
+        return key
+    return None
+
+
+def _refusal_message(key: str) -> str:
     return (
-        lowered.startswith("filter.")
-        or lowered in _UNSAFE_KEYS_EXACT
-        or section in ("include", "includeif")
-        or "uploadpack" in lowered
-        or (lowered.startswith("credential") and lowered.endswith(".helper"))
+        "this folder's git settings can run programs; use a fresh clone "
+        f"(refused setting: {redact_text(key)})"
     )
 
 
+def _require_own_git_dir(path: str) -> None:
+    """A linked worktree or submodule keeps ``.git`` as a pointer file; refuse it."""
+    if not (Path(path) / ".git").is_dir():
+        raise ValueError("this folder is a linked worktree or submodule; use a fresh clone")
+
+
 def _refuse_program_config(path: str) -> None:
-    """Refuse a new link whose own git config can run programs (see ``_UNSAFE_KEYS_EXACT``)."""
-    code, out = _git(Path(path), "config", "--local", "--list")
+    """Refuse a new link whose own git config (any local or worktree scope) is outside the allowlist."""
+    _require_own_git_dir(path)
+    code, listing = _git(Path(path), "config", "--list", "--show-scope")
     if code != 0:
         raise ValueError(f"could not read the git settings of {path}")
-    for line in out.splitlines():
-        if _unsafe_config_key(line.split("=", 1)[0]):
-            raise ValueError(
-                "this folder's git settings can run programs; use a fresh clone"
-            )
+    key = _first_unsafe_key(listing)
+    if key is not None:
+        raise ValueError(_refusal_message(key))
 
 
 def _derived_name(identity: str, taken: set[str]) -> str:
@@ -278,10 +307,13 @@ def _path_problem(config: Any, path: str) -> str:
     """
     if os.path.islink(path) or os.path.realpath(path) != path:
         return "moved"
-    if not os.path.isdir(path):
-        return "missing"
     if overlaps_protected(config, path):
         return "outside_install"
+    if not os.path.isdir(path):
+        return "missing"
+    git_entry = os.path.join(path, ".git")
+    if os.path.exists(git_entry) and not os.path.isdir(git_entry):
+        return "not_a_checkout"
     return ""
 
 
@@ -315,6 +347,10 @@ def brain_state(link: SharedBrainLink, config: Any) -> dict[str, Any]:
     code, top = _git(folder, "rev-parse", "--show-toplevel")
     if code != 0 or not _is_own_checkout(folder, top):
         state["problem"] = "not_a_checkout"
+        return state
+    code, listing = _git(folder, "config", "--list", "--show-scope")
+    if code != 0 or _first_unsafe_key(listing) is not None:
+        state["problem"] = "unsafe_config"
         return state
     try:
         origin_now = canonical_identity(_origin_url(link.path))
@@ -367,6 +403,9 @@ async def _update_unlocked(config: Any, folder: Path) -> dict[str, Any]:
     code, top, _ = await _git_async(folder, "rev-parse", "--show-toplevel")
     if code != 0 or not _is_own_checkout(folder, top):
         return _result("failed", "not_a_checkout")
+    code, listing, _ = await _git_async(folder, "config", "--list", "--show-scope")
+    if code != 0 or _first_unsafe_key(listing) is not None:
+        return _result("failed", "unsafe_config")
     code, branch, _ = await _git_async(folder, "branch", "--show-current")
     if code != 0 or not branch.strip():
         return _result("skipped", "detached")
@@ -428,18 +467,24 @@ async def _run_pass(config: Any, paths: list[str]) -> dict[str, int]:
 
 
 def _linked_paths(config: Any) -> list[str]:
+    """Distinct linked paths the loop should update; links into the install or a vault are kept but skipped."""
     seen: dict[str, None] = {}
     for workspace in getattr(config, "workspaces", {}).values():
         for link in getattr(workspace, "shared_brains", []):
-            seen[link.path] = None
+            if not overlaps_protected(config, link.path):
+                seen[link.path] = None
     return list(seen)
 
 
 def _forget_unlinked(keep: set[str]) -> None:
-    """Drop lock and result entries for folders no workspace links any more."""
-    for table in (_locks, _last_update):
-        for key in [k for k in table if k not in keep]:
-            table.pop(key, None)
+    """Drop lock and result entries for folders no workspace links any more.
+
+    A lock that is held belongs to a running update and stays.
+    """
+    for key in [k for k in _locks if k not in keep and not _locks[k].locked()]:
+        _locks.pop(key, None)
+    for key in [k for k in _last_update if k not in keep]:
+        _last_update.pop(key, None)
 
 
 def _next_batch(paths: list[str]) -> list[str]:
