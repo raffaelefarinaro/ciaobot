@@ -56,6 +56,7 @@
     <div v-if="workspacesResult" class="action-result action-result--error" role="alert">{{ workspacesResult }}</div>
 
     <SettingsMemoryHandover />
+    <SettingsSharedBrains />
     <SettingsCareCycle />
     <SettingsUpdateTasks />
 
@@ -87,6 +88,7 @@ import WorkspaceTile from '../WorkspaceTile.vue'
 import SettingsClaudeTrim from './SettingsClaudeTrim.vue'
 import SettingsWorkspaceModels from './SettingsWorkspaceModels.vue'
 import SettingsMemoryHandover from './SettingsMemoryHandover.vue'
+import SettingsSharedBrains from './SettingsSharedBrains.vue'
 import SettingsCareCycle from './SettingsCareCycle.vue'
 import SettingsUpdateTasks from './SettingsUpdateTasks.vue'
 import WorkspaceGoogleAccount from './WorkspaceGoogleAccount.vue'

@@ -84,6 +84,53 @@ export interface WorkspaceInfo {
   provider_overrides?: ProviderOverrides
   // Sparse Claude context-trim overrides: option key -> trimmed. Missing = catalog defaults.
   claude_trim?: Record<string, boolean>
+  // Operator-only; absent or empty = no shared brains. Read: the linked folders.
+  // Save: the whole list as { path, name? } rows (a name is set once, at link time).
+  shared_brains?: SharedBrainLink[] | SharedBrainRow[]
+}
+
+/** A save row for one shared-brain folder; the name is optional and taken from the repository when absent. */
+export interface SharedBrainRow {
+  path: string
+  name?: string
+}
+
+/** One linked shared-brain folder, as the workspace registry lists it. */
+export interface SharedBrainLink {
+  name: string
+  path: string
+  identity: string
+}
+
+/** The last update attempt for a brain, as `ciao/shared_brain.py` records it. */
+export interface SharedBrainUpdate {
+  outcome: 'updated' | 'up_to_date' | 'skipped' | 'failed'
+  reason: string
+  detail: string
+  at: string
+}
+
+/** Live state of one linked brain, from `GET /api/workspaces/{name}/shared-brains`. */
+export interface SharedBrainState {
+  name: string
+  identity: string
+  path: string
+  origin_changed: boolean
+  missing: boolean
+  // '' or why the folder cannot be used now: missing, moved, not_a_checkout,
+  // outside_install, unsafe_config, origin_changed.
+  problem: string
+  branch: string
+  head: string
+  head_date: string
+  dirty: boolean
+  upstream: boolean
+  fetched_at: string | null
+  last_update: SharedBrainUpdate | null
+}
+
+export interface SharedBrainsResponse {
+  shared_brains: SharedBrainState[]
 }
 
 export interface WorkspacesResponse {

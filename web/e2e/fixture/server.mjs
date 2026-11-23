@@ -308,6 +308,7 @@ function workspacesPayload(state) {
   return {
     workspaces: ordered.map(w => {
       let row = state.handover[w.name] ? { ...w, memory_handover: state.handover[w.name] } : w
+      row = { ...row, shared_brains: (state.sharedBrains?.[w.name] ?? []).map(({ name, path }) => ({ name, path, identity: sharedBrainIdentity(name) })) }
       if (state.memoryApproval[w.name] && Object.keys(state.memoryApproval[w.name]).length) {
         row = { ...row, memory_approval: { ...state.memoryApproval[w.name] } }
       }
@@ -358,12 +359,50 @@ function reorderWorkspaces(state, order) {
   return true
 }
 
+// Shared-brain folders the fixture accepts. Anything else is "not a git repository", as the engine refuses it.
+const SHARED_BRAIN_PATHS = ['/synthetic/team-notes', '/synthetic/team-notes-dirty', '/synthetic/other-notes']
+const SHARED_BRAIN_LIMIT = 5
+
+function sharedBrainIdentity(name) {
+  return `github.com/acme/${name}`
+}
+
+/** Store a workspace's whole shared-brain list, as the engine validates it; returns an error message or null. */
+function saveSharedBrains(state, name, rows) {
+  if (rows.length > SHARED_BRAIN_LIMIT) return `A workspace can link at most ${SHARED_BRAIN_LIMIT} shared brains`
+  const seenPaths = new Set()
+  const seenNames = new Set()
+  const stored = []
+  for (const row of rows) {
+    const path = typeof row?.path === 'string' ? row.path.trim() : ''
+    if (!SHARED_BRAIN_PATHS.includes(path)) return `Not a git repository: ${path}`
+    if (seenPaths.has(path)) return `Already linked: ${path}`
+    const brainName = typeof row.name === 'string' && row.name.trim() ? row.name.trim() : path.split('/').pop()
+    if (seenNames.has(brainName)) return `A shared brain named ${brainName} is already linked`
+    seenPaths.add(path)
+    seenNames.add(brainName)
+    stored.push({ name: brainName, path })
+  }
+  state.sharedBrains = { ...(state.sharedBrains || {}), [name]: stored }
+  return null
+}
+
+/** Live state of each linked brain: two are up to date, one has local changes. */
+function sharedBrainStates(state, name) {
+  return (state.sharedBrains?.[name] ?? []).map(({ name: brain, path }) => {
+    const base = { name: brain, identity: sharedBrainIdentity(brain), path, origin_changed: false, missing: false, problem: '', branch: 'main', head: 'abc1234', head_date: '2026-11-20', dirty: false, upstream: true, fetched_at: '2026-11-22T10:00:00Z' }
+    const at = '2026-11-22T10:00:00Z'
+    if (path === '/synthetic/team-notes-dirty') return { ...base, dirty: true, last_update: { outcome: 'skipped', reason: 'local_changes', detail: '', at } }
+    return { ...base, last_update: { outcome: 'up_to_date', reason: '', detail: '', at } }
+  })
+}
+
 function sessionOf(req) {
   const cookie = req.headers.cookie || ''
   const id = /(?:^|;\s*)e2e_session=([^;]+)/.exec(cookie)?.[1] || 'default'
   let state = sessions.get(id)
   if (!state) {
-    state = { activeStreams: [], sockets: new Set(), chatSockets: new Map(), pendingChatFrames: new Map(), connections: 0, transcript: null, terminals: new Map(), chatActions: new Map(), terminalUnlocked: false, appearance: { text_contrast: 'normal', body_font: 'system', theme: null, font_scale: null, custom_colors: {}, revision: 'a0' }, handover: {}, memoryApproval: {}, workspaceOrder: null, chatPatches: new Map(), removedChats: new Set(), tasksByWorkspace: null, taskPatches: new Map(), taskWrites: 0, schedulePatches: new Map(), removedSchedules: new Set(), actions: null, writes: [], projects: null }
+    state = { activeStreams: [], sockets: new Set(), chatSockets: new Map(), pendingChatFrames: new Map(), connections: 0, transcript: null, terminals: new Map(), chatActions: new Map(), terminalUnlocked: false, appearance: { text_contrast: 'normal', body_font: 'system', theme: null, font_scale: null, custom_colors: {}, revision: 'a0' }, handover: {}, memoryApproval: {}, sharedBrains: {}, workspaceOrder: null, chatPatches: new Map(), removedChats: new Set(), tasksByWorkspace: null, taskPatches: new Map(), taskWrites: 0, schedulePatches: new Map(), removedSchedules: new Set(), actions: null, writes: [], projects: null }
     sessions.set(id, state)
   }
   return state
@@ -861,6 +900,7 @@ const GET_PATTERNS = [
   [/^\/api\/memory\/receipts\/mrcpt_fixture_2$/, () => VERIFICATION_RECEIPT],
   [/^\/api\/memory\/receipts\/mrcpt_fixture_entry$/, () => VERIFICATION_ENTRY_RECEIPT],
   [/^\/api\/projects\/[^/]+\/chats$/, projectChats],
+  [/^\/api\/workspaces\/([^/]+)\/shared-brains$/, (req, url) => ({ shared_brains: sharedBrainStates(sessionOf(req), decodeURIComponent(url.pathname.split('/')[3] || '')) })],
 ]
 
 /**
@@ -1253,6 +1293,11 @@ const server = http.createServer(async (req, res) => {
       const name = decodeURIComponent(workspacePatch[1])
       if (body && WORKSPACES.some(w => w.name === name) && typeof body.memory_handover === 'string') {
         state.handover[name] = body.memory_handover
+      }
+      // The shared-brain list is saved whole; an invalid list changes nothing and answers 400.
+      if (body && WORKSPACES.some(w => w.name === name) && Array.isArray(body.shared_brains)) {
+        const refused = saveSharedBrains(state, name, body.shared_brains)
+        if (refused) return sendJson(res, { error: refused }, 400)
       }
       // Per-kind acceptance merges one key at a time; null resets that kind to inherited.
       if (body && WORKSPACES.some(w => w.name === name) && body.memory_approval && typeof body.memory_approval === 'object') {

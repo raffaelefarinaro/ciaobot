@@ -23,7 +23,7 @@ test.describe('workspace overview', () => {
     const rail = page.locator('.settings-toc-item')
     await expect(rail.first()).toBeVisible()
     const labels = await rail.allTextContents()
-    for (const title of ['Workspace', 'Google account', 'Memory handover', 'Update task history', 'All workspaces']) {
+    for (const title of ['Workspace', 'Google account', 'Memory handover', 'Shared brains', 'Update task history', 'All workspaces']) {
       expect(labels).toContain(title)
     }
     const name = page.locator('#workspace-name-input')

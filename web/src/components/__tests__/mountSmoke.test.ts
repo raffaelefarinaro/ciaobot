@@ -502,6 +502,11 @@ describe('component mount smoke', () => {
     expect(errors).toEqual([])
   })
 
+  it('SettingsSharedBrains mounts without throwing', async () => {
+    const errors = await mountAndSettle(() => import('../settings/SettingsSharedBrains.vue'))
+    expect(errors).toEqual([])
+  })
+
   it('SettingsCareCycle mounts without throwing', async () => {
     const errors = await mountAndSettle(() => import('../settings/SettingsCareCycle.vue'))
     expect(errors).toEqual([])
