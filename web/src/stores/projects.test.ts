@@ -4203,7 +4203,7 @@ describe('needs-you chat actions', () => {
     },
   )
 
-  test.each(['command', 'gws_auth', 'permission_mode', 'device_code', 'system_setting', 'restart', 'limit'] as const)(
+  test.each(['command', 'permission_mode', 'device_code', 'system_setting', 'restart', 'limit'] as const)(
     'a %s action creates attention',
     (kind) => {
       const store = useProjectStore()

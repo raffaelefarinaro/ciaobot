@@ -24,7 +24,7 @@ from typing import TYPE_CHECKING, Any, cast
 import urllib.error
 import urllib.request
 
-from ciao import dev, gws_wrapper, package_smoke, package_version, proposal_kinds, public_release, release, service_backend
+from ciao import dev, package_smoke, package_version, proposal_kinds, public_release, release, service_backend
 from ciao.learning_records import REQUEST_ID_RE
 from ciao.workspace_discovery import trusted_registry
 from ciao.server_host import (
@@ -10628,32 +10628,6 @@ def build_parser() -> argparse.ArgumentParser:
     )
     scaffold_parser.set_defaults(func=_scaffold_command)
 
-    # Help-only stub: `main()` intercepts `gws` before build_parser() runs, so
-    # this parser is never parsed against. It exists so `ciao --help` still
-    # lists the subcommand; the interception is what makes `ciao gws --version`
-    # reach the real CLI instead of being eaten by argparse. Do not give it a
-    # `func` — nothing can dispatch through it.
-    subparsers.add_parser(
-        "gws",
-        help="Profile-aware passthrough to the gws CLI (replaces scripts/gws-profile.sh).",
-        add_help=False,
-    )
-
-    gws_helper_parser = subparsers.add_parser(
-        "gws-auth-helper",
-        help="Interactive headless GWS OAuth re-auth (replaces scripts/gws-auth-helper.py).",
-    )
-    gws_helper_parser.add_argument("profile", help="GWS profile (Google account name) to authenticate")
-    gws_helper_parser.add_argument(
-        "--redirect-url",
-        help="Full redirect URL from the browser; skip the interactive prompt.",
-    )
-    gws_helper_parser.add_argument(
-        "--scopes",
-        help="Space-separated OAuth scopes to request instead of the full default set.",
-    )
-    gws_helper_parser.set_defaults(func=_gws_auth_helper_command)
-
     return parser
 
 
@@ -10670,17 +10644,6 @@ def _scaffold_command(args: argparse.Namespace) -> int:
         print(f"Unknown scaffold target type: {target_type}", file=sys.stderr)
         return 1
     return 0
-
-
-def _gws_auth_helper_command(args: argparse.Namespace) -> int:
-    from ciao import gws_auth_helper
-
-    argv = [args.profile]
-    if getattr(args, "redirect_url", None):
-        argv += ["--redirect-url", args.redirect_url]
-    if getattr(args, "scopes", None):
-        argv += ["--scopes", args.scopes]
-    return gws_auth_helper.main_entry(argv)
 
 
 # EX_NOPERM.
@@ -10746,10 +10709,6 @@ def _dispatch(argv_list: list[str]) -> int:
 
             return run_update(rest)
         return update_main(rest)
-    if argv_list[:1] == ["gws"]:
-        # Passthrough: forward everything (including leading gws options such as
-        # `--version`) untouched, keeping argparse out of the way.
-        return gws_wrapper.main(argv_list[1:])
     parser = build_parser()
     args = parser.parse_args(argv_list)
     if not hasattr(args, "func"):

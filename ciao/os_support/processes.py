@@ -302,14 +302,3 @@ def bounded_output(
             except Exception:
                 cleanup_failed = True
     return None if cleanup_failed else result
-
-
-# ── Handing this process over to another program ───────────────────────────
-# A thin CLI wrapper (`ciao gws`) prepares an environment and then becomes the
-# real tool, so the caller sees the tool's output and exit code. POSIX does
-# that with execve, exactly as the wrapper did before.
-
-
-def hand_off(executable: str, argv: list[str], env: dict[str, str]) -> int:
-    """Replace this process with ``argv`` (``os.execve``); does not return."""
-    os.execve(executable, argv, env)

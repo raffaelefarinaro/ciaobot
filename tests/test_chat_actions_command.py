@@ -437,14 +437,12 @@ def test_the_cli_routes_only_the_kinds_flags(tmp_path: Path) -> None:
     command_file = tmp_path / "command.txt"
     command_file.write_text("ls -la\n", encoding="utf-8")
 
-    assert _resolve(["chat", "needs-action", "gws_auth", "--profile", "work"]) == (
-        "chat_needs_action",
-        {"kind": "gws_auth", "params": {"profile": "work"}},
-    )
-    with pytest.raises(agent_cli.UsageError, match="--profile does not apply to needs-action command."):
-        _resolve(["chat", "needs-action", "command", "--command-file", str(command_file), "--profile", "x"])
+    with pytest.raises(agent_cli.UsageError, match="--mode does not apply to needs-action command."):
+        _resolve(["chat", "needs-action", "command", "--command-file", str(command_file), "--mode", "plan"])
     with pytest.raises(agent_cli.UsageError, match="needs-action command requires --command-file."):
         _resolve(["chat", "needs-action", "command"])
     with pytest.raises(SystemExit) as excinfo:
         agent_cli.build_parser().parse_args(["chat", "needs-action", "limit"])
     assert excinfo.value.code == 2
+    with pytest.raises(SystemExit):
+        agent_cli.build_parser().parse_args(["chat", "needs-action", "gws_auth"])

@@ -20,7 +20,6 @@ from ciao.chat_actions import ChatAction, ChatActionError, action_payload
 from ciao.provider_service import ProviderImpl
 from ciao.web.chat_actions_base import ActionContext, ActionHandler
 from ciao.web.device_code_auth import DeviceCodeFlow
-from ciao.web.gws_auth_action import GwsAuthHandler
 
 if TYPE_CHECKING:
     from ciao.terminal_sessions import TerminalSessionManager
@@ -186,7 +185,6 @@ ACTION_HANDLERS: dict[str, ActionHandler] = {
     "permission_mode": PermissionModeHandler(),
     "system_setting": SystemSettingHandler(),
     "device_code": DeviceCodeFlow(),
-    "gws_auth": GwsAuthHandler(),
 }
 
 
@@ -285,28 +283,6 @@ class ChatActionsRuntime:
         self._pcm.remove_action(chat_id, action_id)
         delivery = self._pcm._deliver_wake(chat, prompt, count=1, origin="chat_action")
         return self._pcm.chat_action_payloads(chat_id), delivery
-
-    async def callback(
-        self, chat_id: str, action_id: str, url: str, *, is_loopback: bool
-    ) -> dict[str, object]:
-        """Hand a pasted sign-in address to the card kind's handler. Does not start or stop the poll:
-        the card is already ``waiting``, so its poll is running from ``start``."""
-        action = self._pcm.get_action(chat_id, action_id)
-        if action is None:
-            raise self._conflict(chat_id)
-        if action.state != "waiting":
-            raise ChatActionError("invalid_state")
-        handler = ACTION_HANDLERS.get(action.kind)
-        if handler is None:
-            raise ChatActionError("unsupported_kind")
-        ctx = self.context(chat_id, is_loopback=is_loopback)
-        if ctx is None:
-            raise self._conflict(chat_id)
-        await handler.callback(ctx, action, url)
-        current = self._pcm.get_action(chat_id, action_id)
-        if current is None:
-            raise self._conflict(chat_id)
-        return action_payload(current)
 
     def cancel_removed(self, chat_id: str, actions: list[ChatAction]) -> None:
         """Stop the polls of, and cancel, actions a lifecycle clear dropped. Synchronous."""

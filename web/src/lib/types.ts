@@ -368,7 +368,7 @@ export interface ChatPinState {
 }
 
 /** A needs-you kind the engine can raise on a chat. */
-export type ChatActionKind = 'command' | 'gws_auth' | 'permission_mode' | 'device_code' | 'system_setting' | 'restart' | 'limit'
+export type ChatActionKind = 'command' | 'permission_mode' | 'device_code' | 'system_setting' | 'restart' | 'limit'
 
 /** Where a needs-you action is in its life. */
 export type ChatActionState = 'open' | 'working' | 'waiting' | 'done' | 'failed'
