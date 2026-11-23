@@ -19,10 +19,11 @@ def write_scenario(tmp_path: Path, **scenario: Any) -> tuple[AgentSpec, Path]:
     (``spec_initialize_timeout_s``, ``spec_client_meta``, ``spec_env``).
     """
     overrides = {k[len("spec_"):]: scenario.pop(k) for k in list(scenario) if k.startswith("spec_")}
+    provider_id = str(scenario.pop("provider_id", "fake"))
     scenario_path = tmp_path / "scenario.json"
     scenario_path.write_text(json.dumps(scenario), encoding="utf-8")
     spec = AgentSpec(
-        id="fake",
+        id=provider_id,
         binary=sys.executable,
         args=(str(FAKE_AGENT), str(scenario_path)),
         **overrides,

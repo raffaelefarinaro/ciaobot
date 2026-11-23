@@ -50,6 +50,10 @@ is available, these controls are disabled and it can still run on schedule.
 Recovery rejects model and thinking changes until the server can atomically
 guard them against a newer failure, and rejects provider handovers.
 
+Automatic quota retries show the persisted next-attempt date and time in local
+time. Confirmed Claude reset times are used when valid; recognized quota errors
+without a trustworthy reset keep the hourly schedule.
+
 Production hashed JavaScript and CSS under `/assets` use negotiated gzip above
 500 bytes. Other static files, API responses, and chat streams keep their
 existing response path. Conditional and ranged asset requests retain their

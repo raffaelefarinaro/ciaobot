@@ -58,6 +58,7 @@ from pathlib import Path
 from typing import Any
 
 import acp
+from acp.exceptions import RequestError
 from acp.connection import StreamDirection
 from acp.schema import (
     AgentCapabilities,
@@ -271,6 +272,9 @@ class FakeAgent:
             elif "stop" in step:
                 return PromptResponse.model_validate(
                     {"stopReason": step["stop"], **({"usage": step["usage"]} if "usage" in step else {})})
+            elif "prompt_error" in step:
+                error = step["prompt_error"]
+                raise RequestError(int(error.get("code", -32000)), str(error.get("message", "failed")), error.get("data"))
         return None
 
     async def prompt(self, session_id: str, prompt: Any, **kwargs: Any) -> Any:

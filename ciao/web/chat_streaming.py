@@ -20,6 +20,7 @@ import time
 import uuid
 from collections.abc import AsyncGenerator, Awaitable, Callable, Coroutine, Sequence
 from dataclasses import dataclass, field, replace
+from datetime import datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Protocol, cast
 
@@ -243,6 +244,7 @@ class ChatStreamingHost(Protocol):
         had_progress: bool,
         reason: str,
         unattended: bool,
+        quota_reset_at: datetime | None = None,
     ) -> bool: ...
 
     def _stop_result_payload(
@@ -935,7 +937,7 @@ class ChatStreaming:
                                 had_error = True
                                 result_text = event.result or ""
                                 last_error_text = result_text
-                                if chat_service._is_retryable_quota_error(result_text):
+                                if event.quota_limited or chat_service._is_retryable_quota_error(result_text):
                                     _arm_retry(
                                         chat_id,
                                         stream,
@@ -945,6 +947,7 @@ class ChatStreaming:
                                         had_progress=had_provider_progress,
                                         reason=result_text or "quota limit",
                                         unattended=run_unattended,
+                                        quota_reset_at=event.quota_reset_at if event.quota_limited else None,
                                     )
                                 elif chat_service._is_retryable_connection_error(
                                     result_text

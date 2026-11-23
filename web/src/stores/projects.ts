@@ -5086,6 +5086,7 @@ export const useProjectStore = defineStore('projects', () => {
             last_error: msg.last_error || '',
             attempts: msg.attempts || 0,
             interval_seconds: msg.interval_seconds || 3600,
+            kind: msg.kind,
             mode: msg.mode,
             schedule_id: msg.schedule_id,
           } : null
@@ -6970,6 +6971,7 @@ export const useProjectStore = defineStore('projects', () => {
             last_error: event.last_error || '',
             attempts: event.attempts || 0,
             interval_seconds: event.interval_seconds || 3600,
+            kind: event.kind,
             mode: event.mode,
             schedule_id: event.schedule_id,
           } : null

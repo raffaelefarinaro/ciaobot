@@ -863,8 +863,11 @@ curl -sS -b /tmp/ciao.jar -X POST "http://localhost:${PWA_PORT:-8443}/api/chats/
 curl -sS -b /tmp/ciao.jar -X POST "http://localhost:${PWA_PORT:-8443}/api/chats/$CID/retry" \
   -H 'content-type: application/json' -d '{"action":"stop"}'
 
-# Every usage-limit retry (session, weekly, monthly) is hourly, up to a week
-# of attempts; the card reads "Retrying this turn every hour".
+# Structured Claude quota errors use their rejected bucket reset when its UTC
+# timestamp is valid, future, and no more than 31 days away. Other recognized
+# quota errors use the existing hourly cadence, up to a week of attempts.
+# `retry` on chat responses and `chat_retry` events include `kind` alongside
+# `next_at`, `last_error`, `attempts`, and `interval_seconds`.
 # A failed turn carries `last_error` (one-line snippet, "" when the last turn
 # succeeded or a new turn started) on the chat object, and the
 # `chat_streaming_done` event repeats it as `last_error`.
