@@ -5,6 +5,7 @@ import { createPinia, setActivePinia } from 'pinia'
 import { defineComponent, h } from 'vue'
 import { flushPromises, shallowMount, type VueWrapper } from '@vue/test-utils'
 import { api } from '../../lib/api'
+import { formatTime } from '../../lib/time'
 import type { ChatInfo, ProjectInfo } from '../../lib/types'
 import { useProjectStore } from '../../stores/projects'
 import { useTaskStore } from '../../stores/tasks'
@@ -1053,7 +1054,7 @@ describe('ChatPanel retry from error bubble', () => {
     wrapper.unmount()
   })
 
-  it('says a weekly or monthly limit retries every hour, never once a day', async () => {
+  it('shows the scheduled time for a weekly or monthly quota reset', async () => {
     const { wrapper, store } = await mountPanel()
     store.chats[0].retry = {
       status: 'pending',
@@ -1061,11 +1062,73 @@ describe('ChatPanel retry from error bubble', () => {
       last_error: 'weekly usage limit',
       attempts: 0,
       interval_seconds: 3600,
+      kind: 'quota',
     }
     await flushPromises()
-    expect(wrapper.find('.retry-state-title').text()).toBe('Retrying this turn every hour')
+    expect(wrapper.find('.retry-state-title').text()).toBe('Retrying this turn')
+    expect(wrapper.text()).toContain('Next try')
     expect(wrapper.text()).not.toContain('once a day')
     expect(wrapper.text()).not.toContain('every few hours')
+    wrapper.unmount()
+  })
+
+  it('keeps the quota date after the chat hint and preserves manual hourly wording', async () => {
+    const sockets: Array<{ url: string; emit(event: Record<string, unknown>): void }> = []
+    class FakeRetryWebSocket {
+      static CONNECTING = 0
+      static OPEN = 1
+      static CLOSING = 2
+      static CLOSED = 3
+      readyState = FakeRetryWebSocket.CONNECTING
+      onopen: ((event: Event) => void) | null = null
+      onmessage: ((event: MessageEvent) => void) | null = null
+      onclose: ((event: CloseEvent) => void) | null = null
+      onerror: ((event: Event) => void) | null = null
+      constructor(readonly url: string) { sockets.push(this) }
+      send() {}
+      close() { this.readyState = FakeRetryWebSocket.CLOSED }
+      emit(event: Record<string, unknown>) { this.onmessage?.({ data: JSON.stringify(event) } as MessageEvent) }
+    }
+    vi.stubGlobal('WebSocket', FakeRetryWebSocket)
+
+    const { wrapper, store } = await mountPanel()
+    const resetDate = new Date()
+    resetDate.setDate(resetDate.getDate() + 2)
+    resetDate.setHours(16, 45, 0, 0)
+    const nextAt = resetDate.toISOString()
+    const expectedNextTry = `Next try ${formatTime(nextAt)}`
+
+    store.connectEventsWs()
+    const eventsSocket = sockets.find(socket => socket.url.endsWith('/ws/events'))!
+    eventsSocket.emit({
+      type: 'chat_retry', chat_id: 'chat-1', project_id: 'project-1',
+      status: 'pending', next_at: nextAt, last_error: 'Provider quota limit reached.',
+      attempts: 0, interval_seconds: 3600, kind: 'quota', mode: 'literal', schedule_id: 'quota-1',
+    })
+    await flushPromises()
+    expect(wrapper.get('.retry-state-title').text()).toBe('Retrying this turn')
+    expect(wrapper.get('.retry-state-meta').text()).toContain(expectedNextTry)
+
+    store.connectWs('chat-1')
+    const chatSocket = sockets.find(socket => socket.url.endsWith('/ws/chat/chat-1'))!
+    chatSocket.emit({
+      type: 'chat_retry', status: 'pending', next_at: nextAt,
+      last_error: 'Provider quota limit reached.', attempts: 0,
+      interval_seconds: 3600, kind: 'quota', mode: 'literal', schedule_id: 'quota-1',
+    })
+    await flushPromises()
+    expect(wrapper.get('.retry-state-title').text()).toBe('Retrying this turn')
+    expect(wrapper.get('.retry-state-meta').text()).toContain(expectedNextTry)
+
+    eventsSocket.emit({
+      type: 'chat_retry', chat_id: 'chat-1', project_id: 'project-1',
+      status: 'pending', next_at: new Date(Date.now() + 2 * 60 * 60 * 1000).toISOString(),
+      last_error: 'manual recovery', attempts: 0, interval_seconds: 3600,
+      kind: '', mode: 'literal', schedule_id: 'manual-1',
+    })
+    await flushPromises()
+    expect(wrapper.get('.retry-state-title').text()).toBe('Retrying this turn every hour')
+    store.disconnectWs('chat-1')
     wrapper.unmount()
   })
 

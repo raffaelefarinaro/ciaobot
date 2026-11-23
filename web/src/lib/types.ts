@@ -406,6 +406,7 @@ export interface ChatRetryInfo {
   last_error: string
   attempts: number
   interval_seconds: number
+  kind?: string
   mode?: 'continue_recovery' | 'literal'
   schedule_id?: string
 }
@@ -616,7 +617,7 @@ export type WsEvent =
   // Server is draining for restart; client should show RestartNotice, not
   // treat this as a chat failure.
   | { type: 'server_restarting'; message: string }
-  | { type: 'chat_retry'; status: 'pending' | 'stopped' | ''; next_at?: string; last_error?: string; attempts?: number; interval_seconds?: number; mode?: 'continue_recovery' | 'literal'; schedule_id?: string }
+  | { type: 'chat_retry'; status: 'pending' | 'stopped' | ''; next_at?: string; last_error?: string; attempts?: number; interval_seconds?: number; kind?: string; mode?: 'continue_recovery' | 'literal'; schedule_id?: string }
   // Idle heartbeat from the broker / events hub. Clients treat it as a
   // liveness signal only and must not mutate chat UI state.
   | { type: 'keepalive' }
@@ -642,7 +643,7 @@ export type EventsWsMessage =
   | { type: 'chat_archived'; chat_id: string; project_id: string; archive_path?: string }
   | { type: 'chat_postprocess'; chat_id: string; project_id: string; postprocess: ChatPostprocess | null }
   | { type: 'chat_deleted'; chat_id: string; project_id: string; reason?: string }
-  | { type: 'chat_retry'; chat_id: string; project_id: string; status: 'pending' | 'stopped' | ''; next_at?: string; last_error?: string; attempts?: number; interval_seconds?: number; mode?: 'continue_recovery' | 'literal'; schedule_id?: string }
+  | { type: 'chat_retry'; chat_id: string; project_id: string; status: 'pending' | 'stopped' | ''; next_at?: string; last_error?: string; attempts?: number; interval_seconds?: number; kind?: string; mode?: 'continue_recovery' | 'literal'; schedule_id?: string }
   | { type: 'project_created'; project: ProjectInfo }
   | { type: 'project_updated'; project: ProjectInfo }
   | { type: 'project_deleted'; project_id: string }

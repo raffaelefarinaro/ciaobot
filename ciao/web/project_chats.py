@@ -334,9 +334,8 @@ _RESUME_CONTINUE_PROMPT = "continue"
 # persistently flaky connection cannot loop forever burning quota. Once hit,
 # the turn is left for the user to continue manually.
 _MAX_CONNECTION_DROP_RETRIES = 6
-# Cap on quota retries: every usage-limit retry is hourly (_RETRY_INTERVAL_SECONDS),
-# so a week of attempts covers a weekly limit, and a limit that never clears
-# still stops.
+# Cap on quota retries: a week of attempts covers weekly limits; confirmed
+# provider resets can schedule an individual attempt sooner or later.
 _MAX_QUOTA_RETRIES = 7 * 24
 # A retry that comes due while the chat is running a turn waits this long and
 # checks again, not a whole retry interval.
@@ -1150,6 +1149,7 @@ class ChatInfo:
                 "last_error": self.retry_last_error,
                 "attempts": self.retry_attempts,
                 "interval_seconds": self.retry_interval_seconds,
+                "kind": self.retry_kind,
                 "mode": "continue_recovery" if isinstance(self.retry_recovery, dict) and self.retry_recovery.get("mode") == "continue" else "literal",
                 "recovery_state": _recovery_state(self.retry_recovery),
                 "schedule_id": self.retry_schedule_id if self.retry_recovery == "" else "",
@@ -7683,6 +7683,7 @@ class ProjectChatManager:
         had_progress: bool,
         reason: str,
         unattended: bool,
+        quota_reset_at: datetime | None = None,
     ) -> bool:
         """Arm a deferred retry for a quota/connection/auth failure.
 
@@ -7752,18 +7753,32 @@ class ProjectChatManager:
             interval = _RETRY_CONNECTION_INTERVAL_SECONDS
         else:
             interval = _RETRY_INTERVAL_SECONDS
+        next_at = None
+        if kind == "quota" and quota_reset_at is not None:
+            now = datetime.now(UTC)
+            if now < quota_reset_at <= now + timedelta(days=31):
+                next_at = quota_reset_at.isoformat()
         armed = self.set_chat_retry(
             chat_id,
             prompt,
             image_refs=image_refs,
             reason=reason,
+            next_at=next_at,
             interval_seconds=interval,
             unattended=unattended,
             _owner=stream,
         )
         if armed is None:
             return False
-        stream.publish({"type": "chat_retry", "status": "pending"})
+        stream.publish({
+            "type": "chat_retry", "status": armed.retry_status,
+            "next_at": armed.retry_next_at, "last_error": armed.retry_last_error,
+            "attempts": armed.retry_attempts,
+            "interval_seconds": armed.retry_interval_seconds,
+            "kind": armed.retry_kind,
+            "mode": "continue_recovery" if isinstance(armed.retry_recovery, dict) and armed.retry_recovery.get("mode") == "continue" else "literal",
+            "schedule_id": armed.retry_schedule_id if armed.retry_recovery == "" else "",
+        })
         self._park_pending_for_retry(chat_id, stream)
         return True
 
@@ -8403,6 +8418,7 @@ class ProjectChatManager:
             "last_error": chat.retry_last_error,
             "attempts": chat.retry_attempts,
             "interval_seconds": chat.retry_interval_seconds,
+            "kind": chat.retry_kind,
             "mode": "continue_recovery" if isinstance(chat.retry_recovery, dict) and chat.retry_recovery.get("mode") == "continue" else "literal",
             "recovery_state": _recovery_state(chat.retry_recovery),
             "schedule_id": chat.retry_schedule_id if chat.retry_recovery == "" else "",
@@ -8556,7 +8572,7 @@ class ProjectChatManager:
                         return
                     continue
                 # The retry stream now owns success/failure state. A failed
-                # retry re-arms `retry_next_at` (a bucket reset, or 30s after a
+                # retry re-arms `retry_next_at` (a provider reset, or 30s after a
                 # dropped connection), so wait for the stream to end and re-read
                 # the chat at the top of the loop. Sleeping for the interval
                 # would ignore the re-armed time (a five-hour bucket reset).

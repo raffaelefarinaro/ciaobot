@@ -16,6 +16,7 @@ import logging
 import os
 import time
 from collections.abc import AsyncGenerator, Callable, Mapping, Sequence
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -800,6 +801,28 @@ class AcpSession:
         if task.cancelled():
             return self._unexpected_stop()
         exc = task.exception()
+        if isinstance(exc, RequestError):
+            data = getattr(exc, "data", None)
+            if isinstance(data, Mapping):
+                reset_at: datetime | None = None
+                quota_limited = False
+                if self.spec.id == "claude" and data.get("errorKind") == "rate_limit":
+                    quota_limited = True
+                    rate_limit = data.get("rateLimit")
+                    raw_reset = rate_limit.get("resetsAt") if isinstance(rate_limit, Mapping) and rate_limit.get("status") == "rejected" else None
+                    if isinstance(raw_reset, int) and not isinstance(raw_reset, bool):
+                        try:
+                            reset_at = datetime.fromtimestamp(raw_reset, UTC)
+                        except (OverflowError, OSError, ValueError):
+                            pass
+                elif self.spec.id == "codex" and data.get("codexErrorInfo") == "usageLimitExceeded":
+                    quota_limited = True
+                if quota_limited:
+                    return ResultEvent(
+                        type="result", result="Provider quota limit reached.",
+                        session_id=self.session_id, is_error=True,
+                        quota_limited=True, quota_reset_at=reset_at,
+                    )
         if isinstance(exc, ConnectionError) or not self._connection.alive:
             return self._unexpected_stop()
         if exc is not None:
