@@ -3,21 +3,23 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { createPinia, setActivePinia } from 'pinia'
 import { flushPromises, mount } from '@vue/test-utils'
+vi.mock('../../lib/api', () => ({ api: { get: vi.fn() } }))
 import ChatRepoSection from '../ChatRepoSection.vue'
+import { api } from '../../lib/api'
 import type { ProjectRepo, RepoLocation } from '../../lib/types'
 
 const repo: ProjectRepo = { path: '/r/app', branch: 'main', dirty: false, missing: false }
 const worktree: RepoLocation = { path: '/r/app-wt', branch: 'feat-x', is_worktree: true, exists: true }
 
-function mountSection(r: ProjectRepo, location: Partial<RepoLocation> | null) {
+function mountSection(r: ProjectRepo, location: Partial<RepoLocation> | null, eligible = false) {
   return mount(ChatRepoSection, {
     attachTo: document.body,
-    props: { repo: r, location, chatId: 'c1' },
+    props: { repo: r, location, chatId: 'c1', eligible },
   })
 }
 
 describe('ChatRepoSection', () => {
-  beforeEach(() => { setActivePinia(createPinia()) })
+  beforeEach(() => { setActivePinia(createPinia()); vi.mocked(api.get).mockReset() })
   afterEach(() => { document.body.innerHTML = ''; vi.unstubAllGlobals() })
 
   it('shows name, branch and clean state for the main checkout', () => {
@@ -32,6 +34,50 @@ describe('ChatRepoSection', () => {
     expect(wrapper.get('.chat-repo-branch').text()).toContain('main')
     expect(wrapper.get('.chat-repo-clean').text()).toBe('clean')
     expect(wrapper.find('.chat-repo-branch').attributes('title')).toBeUndefined()
+    wrapper.unmount()
+  })
+
+  it('fetches only after opening and renders patch text and untracked names literally', async () => {
+    const response = { state: 'ready' as const, source: 'worktree' as const, staged: '<script>staged</script>', unstaged: '', untracked: ['new\nfile.txt'], truncated: false }
+    vi.mocked(api.get).mockResolvedValue(response)
+    const wrapper = mountSection(repo, worktree, true)
+    expect(api.get).not.toHaveBeenCalled()
+    await wrapper.get('.chat-repo-changes-button').trigger('click')
+    await flushPromises()
+    expect(api.get).toHaveBeenCalledWith('/api/chats/c1/worktree-changes')
+    expect(wrapper.get('.chat-repo-changes').text()).toContain('Worktree changes')
+    expect(wrapper.get('.chat-repo-changes pre').text()).toBe('<script>staged</script>')
+    expect(wrapper.find('script').exists()).toBe(false)
+    expect(wrapper.text()).toContain('new\nfile.txt')
+    wrapper.unmount()
+  })
+
+  it('discards an old response after the chat changes', async () => {
+    let resolve!: (value: unknown) => void
+    vi.mocked(api.get).mockReturnValue(new Promise((done) => { resolve = done }) as ReturnType<typeof api.get>)
+    const wrapper = mountSection(repo, worktree, true)
+    await wrapper.get('.chat-repo-changes-button').trigger('click')
+    await wrapper.setProps({ chatId: 'c2' })
+    resolve({ state: 'ready', source: 'worktree', staged: 'stale', unstaged: '', untracked: [], truncated: false })
+    await flushPromises()
+    expect(wrapper.text()).not.toContain('stale')
+    expect(wrapper.find('.chat-repo-changes').exists()).toBe(false)
+    wrapper.unmount()
+  })
+
+  it('shows linked checkout source, clean and truncation states, with retry after a read error', async () => {
+    vi.mocked(api.get).mockRejectedValueOnce(new Error('private host detail'))
+      .mockResolvedValueOnce({ state: 'ready', source: 'linked_checkout', staged: '', unstaged: '', untracked: [], truncated: true })
+    const wrapper = mountSection(repo, {}, true)
+    await wrapper.get('.chat-repo-changes-button').trigger('click')
+    await flushPromises()
+    expect(wrapper.get('[role=alert]').text()).toContain('Could not read checkout changes')
+    expect(wrapper.text()).not.toContain('private host detail')
+    await wrapper.get('.chat-repo-changes button').trigger('click')
+    await flushPromises()
+    expect(wrapper.text()).toContain('Linked checkout changes')
+    expect(wrapper.text()).toContain('No uncommitted changes.')
+    expect(wrapper.text()).toContain('Snapshot truncated')
     wrapper.unmount()
   })
 

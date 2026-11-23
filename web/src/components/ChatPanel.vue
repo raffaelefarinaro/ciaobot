@@ -1342,6 +1342,7 @@
           :repo="project.repo"
           :location="chat.repo_location ?? null"
           :chat-id="chat.chat_id"
+          :eligible="!chat.archived"
         />
       </div>
       <!-- What the agent is given. The project also lives here on wide panes;

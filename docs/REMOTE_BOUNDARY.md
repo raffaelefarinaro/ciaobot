@@ -49,6 +49,10 @@ carried by the session.
   `/share-target` do not pass through it. Malformed or excessively nested JSON
   is refused as 400 before handler dispatch; application errors are not
   translated as parse failures.
+- `GET /api/chats/{chat_id}/worktree-changes` is session and same-origin gated,
+  accepts no repository or command input, and reads only the registered chat
+  checkout. Git runs with isolated metadata and configuration; the endpoint
+  exposes bounded patch text and untracked names, never a write operation.
 - `_LOOPBACK_ONLY_API` is the only peer-scoped surface: the loopback-only
   local feed (`/api/menubar-chats`; legacy route
   name, no native client), the update

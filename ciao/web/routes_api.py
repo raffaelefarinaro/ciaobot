@@ -3288,6 +3288,24 @@ async def chat_message_part(request: Request) -> JSONResponse:
     return JSONResponse(row)
 
 
+async def chat_worktree_changes(request: Request) -> Response:
+    """Return one bounded, read-only Git snapshot for this authenticated chat."""
+    pcm = request.app.state.project_chat_manager
+    chat_id = request.path_params["chat_id"]
+    if pcm.get_chat(chat_id) is None:
+        return JSONResponse({"error": "not found"}, status_code=404,
+                            headers={"Cache-Control": "no-store"})
+    try:
+        result = await pcm.worktree_changes_for_chat(chat_id)
+    except Exception:
+        return JSONResponse({"error": "unable to read checkout changes"}, status_code=503,
+                            headers={"Cache-Control": "no-store"})
+    if result is None:
+        return JSONResponse({"error": "not found"}, status_code=404,
+                            headers={"Cache-Control": "no-store"})
+    return JSONResponse(result, headers={"Cache-Control": "no-store"})
+
+
 # ── Images ───────────────────────────────────────────────────────────────
 
 async def chat_images(request: Request) -> JSONResponse:

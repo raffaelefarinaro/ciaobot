@@ -6117,6 +6117,34 @@ class ProjectChatManager:
         path = Path(raw).expanduser()
         return str(path.resolve()) if path.is_dir() else ""
 
+    async def worktree_changes_for_chat(self, chat_id: str) -> dict[str, Any] | None:
+        """Read the current checkout changes for a visible linked-project chat."""
+        chat = self._chats.get(chat_id)
+        if chat is None:
+            return None
+        project = self._projects.get(chat.project_id)
+        if (chat.archived or project is None or not self._is_known_workspace(project.workspace)
+                or is_memory_pass_chat(chat, project)):
+            return {"state": "unavailable"}
+        linked = self.linked_repo_for_chat(chat)
+        if not linked:
+            return {"state": "unavailable"}
+        raw_location = dict(chat.repo_location)
+        dedicated = bool(raw_location.get("is_worktree"))
+        checkout = Path(str(raw_location.get("path"))) if dedicated and raw_location.get("path") else Path(linked)
+        if dedicated and not checkout.is_dir():
+            return {"state": "unavailable"}
+        project_id, workspace, repo_path = chat.project_id, project.workspace, project.repo_path
+        recorded_location = dict(raw_location)
+        result = await repo_location.read_worktree_changes(checkout, Path(linked), dedicated=dedicated)
+        current, current_project = self._chats.get(chat_id), self._projects.get(project_id)
+        if (current is not chat or current is None or current.archived or current.project_id != project_id
+                or dict(current.repo_location) != recorded_location or current_project is not project
+                or current_project.workspace != workspace or current_project.repo_path != repo_path
+                or self.linked_repo_for_chat(current) != linked):
+            return {"state": "unavailable"}
+        return result
+
     def _gws_config_dir(self, workspace: str | None) -> tuple[Path, bool]:
         """The workspace's gws credential directory and whether an account is linked.
 

@@ -69,6 +69,7 @@ from ciao.web.routes_api import (
     chat_archive,
     chat_continue,
     chat_detail,
+    chat_worktree_changes,
     chat_file_path,
     resolve_chat_file_paths,
     chat_fork,
@@ -446,6 +447,7 @@ def create_app(config, app_settings=None, mcp_service=None) -> Starlette:
         # /read-all must precede /{chat_id} so the literal isn't swallowed.
         Route("/api/chats/read-all", chats_mark_all_read, methods=["POST"]),
         Route("/api/chats/{chat_id}", chat_detail, methods=["GET", "PATCH", "DELETE"]),
+        Route("/api/chats/{chat_id}/worktree-changes", chat_worktree_changes, methods=["GET"]),
         Route("/api/chats/{chat_id}/file-path", chat_file_path, methods=["GET"]),
         Route("/api/chats/{chat_id}/file-paths/resolve", resolve_chat_file_paths, methods=["POST"]),
         Route("/api/chats/{chat_id}/new", chat_new_session, methods=["POST"]),

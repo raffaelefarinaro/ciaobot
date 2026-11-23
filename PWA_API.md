@@ -83,6 +83,7 @@ The route source of truth is `ciao/web/app.py`. This file is kept in sync by `te
 | GET | `/api/system-prompt` | The Ciaobot core (`ciao/system_prompt.md`) that every provider receives: OpenCode as a system instruction, ACP agents (Claude, Codex) at the head of each session's first prompt. `{text, chars}`. Read-only; shown in Chat details → Always loaded |
 | GET | `/api/chats/{chat_id}/file-path?path=...` | Resolve an allowlisted chat file to its canonical absolute identity, relative to the chat agent root; fuzzy-matched only inside the chat's agent and vault roots |
 | POST | `/api/chats/{chat_id}/file-paths/resolve` | Browser-only batch: canonical path or `null` for each mentioned file in a completed reply; exact matching only, read-only (see the chat-file contract) |
+| GET | `/api/chats/{chat_id}/worktree-changes` | On-demand bounded diff of the chat's recorded worktree or linked checkout; authenticated, read-only, `Cache-Control: no-store` |
 | GET | `/api/workspace-dir?path=...&chat_id=...` | Read-only folder listing for the folder browser, confined to the workspace, vault and (with `chat_id` or `project_id`) that workspace's agent root, vault and the project's linked repo. With a chat or project and no `path`, it lists the project's own vault folder (the project page's Browse files passes `project_id`); an unknown `project_id` is 404. A file path answers 400 `{error:"not_a_directory", kind:"file", path}` so one request classifies a link |
 | POST | `/api/workspace-file` | Write user-edited text file (allowlist + snapshot) |
 | GET | `/api/workspace-html` | Render an `.html` artifact as `text/html` in a sandboxing CSP (panel Preview) |
@@ -803,6 +804,14 @@ default. WebSockets, webhook ingress and `/share-target` are outside this HTTP
 API limit; their own policies remain authoritative.
 
 **Chats**
+
+`GET /api/chats/{chat_id}/worktree-changes` takes no query or body inputs and
+returns one uncached snapshot on demand. Ready responses have
+`{state:"ready",source:"worktree"|"linked_checkout",staged,unstaged,untracked,truncated}`;
+patches are UTF-8 text and `untracked` contains filenames only. The combined
+Git capture is capped at 256 KiB and the filename list at 200 entries. Unsupported
+checkout state returns `{state:"unavailable",reason:"unsupported_checkout"}`;
+Git read failures return 503 with a fixed error, and an unknown chat returns 404.
 
 ```bash
 # Create — title/model/mode/provider all optional. The proposal Review UI also

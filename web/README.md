@@ -59,6 +59,8 @@ The chat rail uses Option/Alt+Left and Right to move through the current workspa
 
 ## Dev workflow
 
+The Repository section in Chat details reads `/api/chats/{chat_id}/worktree-changes` only after **View changes** is opened; **Refresh** is explicit. It shows staged and unstaged patches, untracked filenames, a clean state, unavailable and retry states, and a truncation notice. A response is discarded when its chat or checkout changes. The view is read-only and uses Vue text interpolation for paths and patches.
+
 The embedded LoginView keeps terminal guidance and the six-item product tour for the CLI bootstrap.
 
 ```bash
