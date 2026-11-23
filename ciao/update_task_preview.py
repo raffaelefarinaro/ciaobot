@@ -40,7 +40,8 @@ def _reviewable_drain_plan(
         if isinstance(paths, list):
             public[key] = [Path(str(path)).name for path in paths]
     roots = (str(vault.resolve()), str(runtime_root.resolve()))
-    return _redact_drain_paths(public, roots)
+    redacted_plan: dict[str, Any] = _redact_drain_paths(public, roots)
+    return redacted_plan
 
 
 def prepare(task: UpdateTask, *, config: Any, workspace: str) -> dict[str, Any]:
