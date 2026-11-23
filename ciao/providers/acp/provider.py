@@ -52,13 +52,48 @@ logger = logging.getLogger(__name__)
 
 _CATALOG_TTL_S = 300.0
 _CATALOG_PROBE_TIMEOUT_S = 25.0
+_CATALOG_LOGOUT_WAIT_S = 32.0
 # Successful probes only: a failed probe is retried on the next call.
 _catalog_cache: dict[tuple[str, str], tuple[float, list[dict[str, Any]]]] = {}
 _catalog_locks: dict[tuple[str, str], asyncio.Lock] = {}
+_catalog_epochs: dict[str, int] = {}
+_pending_catalog_logouts: dict[str, set[asyncio.Task[Any]]] = {}
+
+
+def acp_catalog_epoch(agent_id: str) -> int:
+    return _catalog_epochs.get(agent_id, 0)
+
+
+def register_catalog_logout(agent_id: str, task: asyncio.Task[Any]) -> None:
+    _pending_catalog_logouts.setdefault(agent_id, set()).add(task)
+
+
+def unregister_catalog_logout(agent_id: str, task: asyncio.Task[Any]) -> None:
+    workers = _pending_catalog_logouts.get(agent_id)
+    if workers is None:
+        return
+    workers.discard(task)
+    if not workers:
+        _pending_catalog_logouts.pop(agent_id, None)
+
+
+async def wait_for_catalog_logouts(agent_id: str) -> bool:
+    """Wait for same-provider logout workers; a timeout must never expose cached rows."""
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + _CATALOG_LOGOUT_WAIT_S
+    while workers := tuple(_pending_catalog_logouts.get(agent_id, ())):
+        remaining = deadline - loop.time()
+        if remaining <= 0:
+            return False
+        _done, pending = await asyncio.wait(workers, timeout=remaining)
+        if pending:
+            return False
+    return True
 
 
 def invalidate_acp_catalog(agent_id: str) -> None:
     """Drop the cached model catalog of one ACP agent, in every workspace."""
+    _catalog_epochs[agent_id] = acp_catalog_epoch(agent_id) + 1
     for key in [key for key in _catalog_cache if key[0] == agent_id]:
         _catalog_cache.pop(key, None)
 
@@ -547,8 +582,12 @@ class AcpProvider(BaseProvider):
         cached per (agent, workspace) for ``_CATALOG_TTL_S``; ``force`` bypasses the cache.
         """
         key = (cls.spec.id, str(workspace_root))
+        if not await wait_for_catalog_logouts(cls.spec.id):
+            logger.warning("%s model catalog skipped while logout is still running.", cls.spec.id)
+            return []
         lock = _catalog_locks.setdefault(key, asyncio.Lock())
         async with lock:
+            epoch = acp_catalog_epoch(cls.spec.id)
             cached = _catalog_cache.get(key)
             if not force and cached is not None and time.monotonic() - cached[0] < _CATALOG_TTL_S:
                 return [dict(row) for row in cached[1]]
@@ -565,6 +604,8 @@ class AcpProvider(BaseProvider):
             except Exception as exc:  # noqa: BLE001 — a failed probe is an empty catalog
                 # The adapter's error text stays out of the log, as in the turn path.
                 logger.warning("%s model catalog probe failed (%s).", cls.spec.id, type(exc).__name__)
+                return []
+            if epoch != acp_catalog_epoch(cls.spec.id):
                 return []
             _catalog_cache[key] = (time.monotonic(), rows)
             return [dict(row) for row in rows]

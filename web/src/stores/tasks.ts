@@ -2,6 +2,7 @@ import { defineStore } from 'pinia'
 import { computed, onScopeDispose, ref, watch } from 'vue'
 import { api } from '../lib/api'
 import { sectionsFromModelsResponse } from '../lib/modelSections'
+import { withoutProviderCatalogs } from '../lib/modelCatalogs'
 import { useProjectStore } from './projects'
 import type {
   RuntimeProvider,
@@ -56,10 +57,30 @@ export const useTaskStore = defineStore('tasks', () => {
   const modelError = ref('')
   const modelResult = ref<'success' | 'error' | null>(null)
   const modelStale = ref(false)
+  const uncertainModelProviders = ref<string[]>([])
+  const modelCatalogUncertain = computed(() => uncertainModelProviders.value.length > 0)
   const modelEmpty = computed(() => !!models.value && !sectionsFromModelsResponse(models.value).some(section => section.models.length))
   const modelGeneration = ref(0)
   onScopeDispose(() => { modelGeneration.value++ })
   const modelTransition = ref(0)
+  function markModelCatalogUncertain(provider: string): void {
+    if (uncertainModelProviders.value.includes(provider)) return
+    uncertainModelProviders.value = [...uncertainModelProviders.value, provider]
+    modelGeneration.value++
+    if (models.value) models.value = withoutProviderCatalogs(models.value, [provider])
+    modelLoading.value = false
+    modelError.value = `Model availability for ${provider} is uncertain. Verify provider status before refreshing.`
+    modelResult.value = 'error'
+    modelStale.value = false
+  }
+  function clearModelCatalogUncertainty(provider: string): void {
+    if (!uncertainModelProviders.value.includes(provider)) return
+    uncertainModelProviders.value = uncertainModelProviders.value.filter(item => item !== provider)
+    if (!modelCatalogUncertain.value) {
+      modelError.value = ''
+      modelResult.value = null
+    }
+  }
   const projects = useProjectStore()
   const modelWorkspaceEligible = computed(() =>
     projects.workspaceRegistryStatus === 'ready'
@@ -169,22 +190,28 @@ export const useTaskStore = defineStore('tasks', () => {
       return { status: 'superseded', workspace, generation: null }
     }
     const generation = ++modelGeneration.value
+    const uncertainAtStart = uncertainModelProviders.value
     const current = () => generation === modelGeneration.value
       && modelWorkspaceEligible.value && workspace === projects.activeWorkspace
     modelLoading.value = true
-    modelError.value = ''
+    if (!modelCatalogUncertain.value) modelError.value = ''
     modelResult.value = null
     modelStale.value = models.value !== null
     try {
       const response = await api.get<ModelsResponse>(`/api/models?${new URLSearchParams({ workspace })}`)
       if (!current()) return { status: 'superseded', workspace, generation }
-      models.value = response
+      models.value = withoutProviderCatalogs(response, [...new Set([...uncertainAtStart, ...uncertainModelProviders.value])])
       modelResult.value = 'success'
       modelStale.value = false
+      if (modelCatalogUncertain.value) {
+        modelError.value = `Model availability is uncertain for ${uncertainModelProviders.value.join(', ')}. Verify provider status before refreshing.`
+      }
       return { status: 'success', workspace, generation }
     } catch {
       if (!current()) return { status: 'superseded', workspace, generation }
-      modelError.value = 'Could not load models.'
+      modelError.value = modelCatalogUncertain.value
+        ? `Model availability is uncertain for ${uncertainModelProviders.value.join(', ')}. Verify provider status before refreshing.`
+        : 'Could not load models.'
       modelResult.value = 'error'
       return { status: 'error', workspace, generation, error: modelError.value }
     } finally {
@@ -311,9 +338,10 @@ export const useTaskStore = defineStore('tasks', () => {
   }
 
   return {
-    schedules, schedulesByChat, status, models, loading, modelLoading, modelError, modelResult, modelStale, modelEmpty, modelTransition, modelWorkspaceEligible, updatingSchedules,
+    schedules, schedulesByChat, status, models, loading, modelLoading, modelError, modelResult, modelStale, uncertainModelProviders, modelCatalogUncertain, modelEmpty, modelTransition, modelWorkspaceEligible, updatingSchedules,
     scheduleLoading, scheduleLoadError, schedulesLoaded,
     fetchSchedules, fetchStatus, fetchModels, fetchAll,
+    markModelCatalogUncertain, clearModelCatalogUncertainty,
     createSchedule, runScheduleNow, updateSchedule, reserveScheduleUpdate, releaseScheduleUpdate, deleteSchedule, updateStatus,
   }
 })

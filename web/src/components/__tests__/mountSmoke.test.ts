@@ -1469,6 +1469,64 @@ describe('component mount smoke', () => {
     wrapper.unmount()
   })
 
+  it.each(['claude', 'codex', 'opencode'])('refreshes visible model readers after %s verification', async (provider) => {
+    const project = (await import('../../stores/projects')).useProjectStore()
+    const tasks = (await import('../../stores/tasks')).useTaskStore()
+    project.workspaces = [{ name: 'work', vault_root: 'work' }] as never
+    project.activeWorkspace = 'work'
+    const shared = vi.fn().mockResolvedValue({ status: 'success', workspace: 'work', generation: 2 })
+    tasks.fetchModels = shared as never
+    tasks.models = { models: ['old-model'], provider_models: { claude: ['old-model'] } } as never
+    tasks.models = { models: ['old-model'], provider_models: { claude: ['old-model'] } } as never
+    vi.mocked(api.post).mockResolvedValueOnce({ name: provider, ok: true, state: 'ready' })
+    const router = makeRouter()
+    await router.push('/settings/providers')
+    await router.isReady()
+    const mod = await import('../SettingsView.vue')
+    const wrapper = mount(mod.default as never, { global: { plugins: [router], stubs: { Teleport: true } } })
+    await flushPromises()
+    const before = vi.mocked(api.get).mock.calls.filter(([path]) => String(path).startsWith('/api/models')).length
+    const state = (wrapper.vm as unknown as { $: { setupState: unknown } }).$.setupState as {
+      providerConnectionAction: (provider: string, action: 'verify') => Promise<void>
+    }
+
+    await state.providerConnectionAction(provider, 'verify')
+    await flushPromises()
+
+    expect(shared).toHaveBeenCalledWith('work')
+    expect(vi.mocked(api.get).mock.calls.filter(([path]) => String(path).startsWith('/api/models'))).toHaveLength(before + 1)
+    expect(tasks.uncertainModelProviders).toEqual([])
+    wrapper.unmount()
+  })
+
+  it('keeps peer-provider uncertainty visible after a successful Settings model read', async () => {
+    const tasks = (await import('../../stores/tasks')).useTaskStore()
+    const router = makeRouter()
+    await router.push('/settings/providers')
+    await router.isReady()
+    const mod = await import('../SettingsView.vue')
+    const wrapper = mount(mod.default as never, { global: { plugins: [router], stubs: { Teleport: true } } })
+    await flushPromises()
+    tasks.markModelCatalogUncertain('opencode')
+    vi.mocked(api.get).mockResolvedValueOnce({
+      models: ['claude-sonnet'], default: 'claude-sonnet',
+      provider_models: { claude: ['claude-sonnet'], opencode: ['stale/model'] },
+      provider_defaults: { claude: 'claude-sonnet', opencode: 'stale/model' },
+    } as never)
+    const state = (wrapper.vm as unknown as { $: { setupState: unknown } }).$.setupState as {
+      fetchWorkspaceModels: () => Promise<string>
+      workspaceModelsError: string
+      workspaceModels: { provider_models: Record<string, string[]> } | null
+    }
+
+    await state.fetchWorkspaceModels()
+
+    expect(state.workspaceModels?.provider_models.opencode).toBeUndefined()
+    expect(state.workspaceModelsError).toContain('uncertain for opencode')
+    expect(wrapper.text()).toContain('uncertain for opencode')
+    wrapper.unmount()
+  })
+
   it.each(['success', 'failure'] as const)('coalesces logout rereads across an A-B-A transition on %s', async (outcome) => {
     const project = (await import('../../stores/projects')).useProjectStore()
     const { pendingConfirm } = await import('../../lib/confirm')
@@ -1509,7 +1567,38 @@ describe('component mount smoke', () => {
     wrapper.unmount()
   })
 
+  it('leaves model readers untouched when logout confirmation is cancelled', async () => {
+    const { pendingConfirm } = await import('../../lib/confirm')
+    const tasks = (await import('../../stores/tasks')).useTaskStore()
+    const router = makeRouter()
+    await router.push('/settings/providers')
+    await router.isReady()
+    const mod = await import('../SettingsView.vue')
+    const wrapper = mount(mod.default as never, { global: { plugins: [router], stubs: { Teleport: true } } })
+    await flushPromises()
+    const state = (wrapper.vm as unknown as { $: { setupState: unknown } }).$.setupState as {
+      providerConnectionAction: (provider: string, action: 'logout') => Promise<void>
+    }
+    const modelReads = vi.mocked(api.get).mock.calls.filter(([path]) => String(path).startsWith('/api/models')).length
+    const postCalls = vi.mocked(api.post).mock.calls.length
+
+    const logout = state.providerConnectionAction('claude', 'logout')
+    pendingConfirm.value!.resolve(false)
+    await logout
+
+    expect(vi.mocked(api.post)).toHaveBeenCalledTimes(postCalls)
+    expect(vi.mocked(api.get).mock.calls.filter(([path]) => String(path).startsWith('/api/models'))).toHaveLength(modelReads)
+    expect(tasks.uncertainModelProviders).toEqual([])
+    wrapper.unmount()
+  })
+
   it.each(['success', 'failure'] as const)('preserves the current logout result while rereads are queued on %s', async (outcome) => {
+    const project = (await import('../../stores/projects')).useProjectStore()
+    const tasks = (await import('../../stores/tasks')).useTaskStore()
+    project.workspaces = [{ name: 'work', vault_root: 'work' }] as never
+    project.activeWorkspace = 'work'
+    const shared = vi.fn().mockResolvedValue({ status: 'success', workspace: 'work', generation: 2 })
+    tasks.fetchModels = shared as never
     const { pendingConfirm } = await import('../../lib/confirm')
     let settle!: (value: unknown) => void
     let fail!: (reason: Error) => void
@@ -1537,6 +1626,11 @@ describe('component mount smoke', () => {
     expect(vi.mocked(api.get).mock.calls.filter(([path]) => path === '/api/settings/providers')).toHaveLength(before + 1)
     expect(wrapper.text()).toContain(outcome === 'success' ? 'Logged out.' : 'Could not update provider status')
     expect(wrapper.text()).not.toContain('private logout error')
+    expect(shared).toHaveBeenCalledTimes(outcome === 'success' ? 1 : 0)
+    if (outcome === 'failure') {
+      expect(tasks.modelCatalogUncertain).toBe(true)
+      expect(tasks.models?.provider_models.claude).toBeUndefined()
+    }
     wrapper.unmount()
   })
 
@@ -1559,7 +1653,7 @@ describe('component mount smoke', () => {
     first.unmount()
     const before = vi.mocked(api.get).mock.calls.filter(([path]) => path === '/api/settings/providers').length
     const second = mount(mod.default as never, options)
-    await nextTick()
+    await flushPromises()
     expect(vi.mocked(api.get).mock.calls.filter(([path]) => path === '/api/settings/providers')).toHaveLength(before)
     if (outcome === 'success') settle({ ok: true })
     else fail(new Error('private logout error'))
@@ -1576,7 +1670,12 @@ describe('component mount smoke', () => {
     const tasks = (await import('../../stores/tasks')).useTaskStore()
     project.workspaces = [{ name: 'A', vault_root: 'A' }] as never
     project.activeWorkspace = 'A'
-    tasks.fetchModels = vi.fn().mockResolvedValue({ status: 'success', workspace: 'A', generation: 1 }) as never
+    const shared = vi.fn().mockResolvedValue({ status: 'success', workspace: 'A', generation: 1 })
+    tasks.fetchModels = shared as never
+    tasks.models = {
+      models: ['old-model'], default: 'old-model', provider_models: { opencode: ['old-model'] },
+      provider_defaults: { opencode: 'old-model' },
+    }
     let settle!: (value: unknown) => void
     let fail!: (reason: Error) => void
     vi.mocked(api.post).mockImplementationOnce(() => new Promise((resolve, reject) => { settle = resolve; fail = reject }))
@@ -1599,6 +1698,11 @@ describe('component mount smoke', () => {
     await Promise.all([verify, ...reads])
     await flushPromises()
     expect(vi.mocked(api.get).mock.calls.filter(([path]) => path === '/api/settings/providers')).toHaveLength(before + 1)
+    expect(shared).toHaveBeenCalledTimes(outcome === 'success' ? 1 : 0)
+    if (outcome === 'failure') {
+      expect(tasks.modelCatalogUncertain).toBe(true)
+      expect(tasks.models?.provider_models.opencode).toBeUndefined()
+    }
     expect(wrapper.text()).toContain(outcome === 'success' ? 'Catalog availability and credential verification are unknown' : 'Could not update provider status')
     expect(wrapper.text()).not.toContain('private verify error')
     wrapper.unmount()

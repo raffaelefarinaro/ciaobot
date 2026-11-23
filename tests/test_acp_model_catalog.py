@@ -109,6 +109,40 @@ async def test_catalog_cached_until_force(monkeypatch, tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
+async def test_invalidation_discards_in_flight_probe_without_crossing_provider_or_workspace(
+    monkeypatch, tmp_path: Path
+) -> None:
+    _install(monkeypatch, tmp_path, config_options=_OPTIONS)
+    workspace = _workspace(tmp_path)
+    entered = asyncio.Event()
+    release = asyncio.Event()
+
+    async def held_probe(cls, root):
+        entered.set()
+        await release.wait()
+        return _ROWS
+
+    monkeypatch.setattr(FakeCatalogProvider, "_probe_catalog", classmethod(held_probe))
+    pending = asyncio.create_task(FakeCatalogProvider.model_catalog(workspace))
+    await entered.wait()
+    other_key = ("other", str(workspace))
+    provider_module._catalog_cache[other_key] = (0.0, [{"model": "other-model"}])
+    other_workspace_key = ("fake", str(tmp_path / "another-workspace"))
+    provider_module._catalog_cache[other_workspace_key] = (0.0, [{"model": "old-workspace-model"}])
+    try:
+        FakeCatalogProvider.invalidate_model_catalog()
+        release.set()
+
+        assert await pending == []
+        assert provider_module._catalog_cache[other_key][1] == [{"model": "other-model"}]
+        assert other_workspace_key not in provider_module._catalog_cache
+        assert await FakeCatalogProvider.model_catalog(workspace) == _ROWS
+    finally:
+        provider_module._catalog_cache.pop(other_key, None)
+        provider_module._catalog_cache.pop(other_workspace_key, None)
+
+
+@pytest.mark.asyncio
 async def test_catalog_failure_yields_empty_list(monkeypatch, tmp_path: Path, caplog) -> None:
     calls = _install(monkeypatch, tmp_path, config_options=_OPTIONS, new_error="secret-token boom")
     workspace = _workspace(tmp_path)
@@ -243,6 +277,47 @@ def test_list_models_keeps_an_acp_provider_empty_when_its_probe_fails(
     assert body["provider_models"]["fake"] == []
     assert body["provider_catalog_evidence"]["fake"]["status"] == "unknown"
     assert "opencode" in body["provider_models"]  # the route still answers for the others
+
+
+@pytest.mark.asyncio
+async def test_models_response_rechecks_cached_provider_after_a_peer_probe_waits(
+    monkeypatch, tmp_path: Path
+) -> None:
+    _install(monkeypatch, tmp_path, config_options=_OPTIONS)
+    workspace = _workspace(tmp_path)
+    fresh = {"model": "opencode/fresh", "label": "Fresh", "variants": []}
+    stale = {"model": "opencode/stale", "label": "Stale", "variants": []}
+    state = {"row": stale}
+    fake_entered = asyncio.Event()
+    release_fake = asyncio.Event()
+
+    async def fake_opencode_probe(cls, root):
+        return [dict(state["row"])]
+
+    async def held_fake_probe(cls, root):
+        fake_entered.set()
+        await release_fake.wait()
+        return _ROWS
+
+    monkeypatch.setattr(OpencodeAcpProvider, "_probe_catalog", classmethod(fake_opencode_probe))
+    monkeypatch.setattr(FakeCatalogProvider, "_probe_catalog", classmethod(held_fake_probe))
+    monkeypatch.setattr(
+        provider_registry,
+        "descriptors",
+        lambda: tuple(item for item in provider_registry._DESCRIPTORS if item.id in {"fake", "opencode"}),
+    )
+    await OpencodeAcpProvider.model_catalog(workspace)
+    request = _models_request(_route_config(tmp_path))
+    pending = asyncio.create_task(list_models(request))
+    await fake_entered.wait()
+    state["row"] = fresh
+    provider_module.invalidate_acp_catalog("opencode")
+    release_fake.set()
+
+    response = await pending
+    body = json.loads(response.body)
+    assert body["provider_models"]["opencode"] == ["opencode/fresh"]
+    assert body["provider_models"]["fake"] == ["m-a", "m-b"]
 
 
 _DELETE_ADVERTISED = {"sessionCapabilities": {"delete": {}, "close": {}}}

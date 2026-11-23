@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import os
 import json
 import logging
@@ -1536,7 +1537,9 @@ async def test_opencode_verify_invalidates_models_before_probe(monkeypatch, tmp_
 
     calls = []
     from ciao.providers.acp.agents import OpencodeAcpProvider
+    from ciao.providers.acp.agents import ClaudeAcpProvider
     monkeypatch.setattr(OpencodeAcpProvider, "invalidate_model_catalog", classmethod(lambda cls: calls.append("invalidate")))
+    monkeypatch.setattr(ClaudeAcpProvider, "invalidate_model_catalog", classmethod(lambda cls: calls.append("claude-invalidate")))
     monkeypatch.setattr(mod, "opencode_credential_inventory",
                         lambda: (calls.append("inventory") or {"status": "complete", "providers": []}))
     monkeypatch.setattr(routes_api, "_provider_config_payload",
@@ -1546,12 +1549,12 @@ async def test_opencode_verify_invalidates_models_before_probe(monkeypatch, tmp_
     request = SimpleNamespace(path_params={"provider": "opencode", "action": "verify"},
                               app=SimpleNamespace(state=SimpleNamespace(config=_config(tmp_path))))
     await provider_connection_action(request)
-    assert calls == ["invalidate", "payload", "inventory"]
+    assert calls == ["invalidate", "payload", "inventory", "invalidate"]
     calls.clear()
     request.path_params["provider"] = "claude"
     response = await provider_connection_action(request)
     assert json.loads(response.body) == {"ready": True}
-    assert calls == ["claude-clear", "payload"]
+    assert calls == ["claude-invalidate", "claude-clear", "payload", "claude-invalidate"]
     calls.clear()
     await routes_api.provider_config_settings(request)
     assert calls == ["payload", "inventory"]
@@ -1566,7 +1569,102 @@ async def test_opencode_verify_invalidates_models_before_probe(monkeypatch, tmp_
                         lambda *args, **kwargs: SimpleNamespace(returncode=0, stdout="", stderr=""))
     request.path_params["action"] = "logout"
     await provider_connection_action(request)
-    assert calls == []
+    assert calls == ["invalidate", "invalidate"]
+
+
+async def test_provider_verify_waits_for_logout_completion_and_reports_timeout(monkeypatch, tmp_path):
+    import asyncio
+
+    from ciao.web import routes_api
+
+    entered = asyncio.Event()
+    release = asyncio.Event()
+    payload_calls = []
+
+    async def wait_for_logout(provider):
+        assert provider == "opencode"
+        entered.set()
+        await release.wait()
+        return True
+
+    monkeypatch.setattr("ciao.providers.acp.provider.wait_for_catalog_logouts", wait_for_logout)
+    monkeypatch.setattr(routes_api, "_provider_config_payload_with_inventory",
+                        lambda _config: (payload_calls.append("payload") or {
+                            "connections": {"opencode": {"auth": "logged-out"}},
+                        }))
+    request = SimpleNamespace(
+        path_params={"provider": "opencode", "action": "verify"},
+        app=SimpleNamespace(state=SimpleNamespace(config=_config(tmp_path))),
+    )
+    verify = asyncio.create_task(provider_connection_action(request))
+    await asyncio.wait_for(entered.wait(), timeout=1)
+    assert payload_calls == []
+    release.set()
+    response = await asyncio.wait_for(verify, timeout=1)
+    assert json.loads(response.body) == {"auth": "logged-out"}
+    assert payload_calls == ["payload"]
+
+    async def timed_out(_provider):
+        return False
+
+    monkeypatch.setattr("ciao.providers.acp.provider.wait_for_catalog_logouts", timed_out)
+    response = await provider_connection_action(request)
+    assert response.status_code == 503
+    assert json.loads(response.body) == {
+        "error": "Provider logout is still running; status was not verified."
+    }
+    assert payload_calls == ["payload"]
+
+
+async def test_logout_start_during_verify_probe_prevents_stale_status_response(monkeypatch, tmp_path):
+    import asyncio
+    import threading
+    import subprocess
+
+    from ciao.web import routes_api
+
+    probe_started = threading.Event()
+    release_probe = threading.Event()
+    logout_started = threading.Event()
+    release_logout = threading.Event()
+
+    def delayed_payload(_config):
+        probe_started.set()
+        if not release_probe.wait(timeout=2):
+            raise TimeoutError("test probe was not released")
+        return {"connections": {"opencode": {"auth": "stale-signed-in"}}}
+
+    def delayed_logout(*_args, **_kwargs):
+        logout_started.set()
+        if not release_logout.wait(timeout=2):
+            raise TimeoutError("test logout was not released")
+        return subprocess.CompletedProcess(args=["fake", "auth", "logout"], returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr(routes_api, "_provider_config_payload_with_inventory", delayed_payload)
+    monkeypatch.setattr(routes_api, "_auth_command_for_provider", lambda _provider: ["fake", "auth", "login"])
+    monkeypatch.setattr(routes_api.subprocess, "run", delayed_logout)
+    config = _config(tmp_path)
+    request = SimpleNamespace(
+        path_params={"provider": "opencode", "action": "verify"},
+        app=SimpleNamespace(state=SimpleNamespace(config=config)),
+    )
+    verify = asyncio.create_task(provider_connection_action(request))
+    assert await asyncio.to_thread(probe_started.wait, 1)
+
+    request.path_params["action"] = "logout"
+    logout = asyncio.create_task(provider_connection_action(request))
+    assert await asyncio.to_thread(logout_started.wait, 1)
+    release_probe.set()
+    response = await asyncio.wait_for(verify, timeout=1)
+    assert response.status_code == 503
+    assert response.headers["Cache-Control"] == "no-store"
+    assert json.loads(response.body) == {
+        "error": "Provider status changed during verification; status was not verified."
+    }
+
+    release_logout.set()
+    logout_response = await asyncio.wait_for(logout, timeout=1)
+    assert json.loads(logout_response.body) == {"ok": True}
 
 
 async def test_provider_logout_action_runs_auth_logout(monkeypatch, tmp_path) -> None:
@@ -1602,6 +1700,250 @@ async def test_provider_logout_action_runs_auth_logout(monkeypatch, tmp_path) ->
 
     assert json.loads(response.body) == {"ok": True}
     assert captured["cmd"][1:] == ["auth", "logout"]
+
+
+@pytest.mark.asyncio
+async def test_failed_provider_verify_invalidates_before_and_after_attempt(monkeypatch, tmp_path):
+    from ciao.providers.acp.agents import ClaudeAcpProvider
+    from ciao.web import routes_api
+
+    calls = 0
+
+    def invalidate(cls):
+        nonlocal calls
+        calls += 1
+
+    def failed_payload(_config):
+        raise RuntimeError("private verify detail")
+
+    monkeypatch.setattr(ClaudeAcpProvider, "invalidate_model_catalog", classmethod(invalidate))
+    monkeypatch.setattr("ciao.setup_status.clear_claude_discovery_cache", lambda: None)
+    monkeypatch.setattr(routes_api, "_provider_config_payload", failed_payload)
+    request = SimpleNamespace(
+        path_params={"provider": "claude", "action": "verify"},
+        app=SimpleNamespace(state=SimpleNamespace(config=_config(tmp_path))),
+    )
+
+    with pytest.raises(RuntimeError, match="private verify detail"):
+        await routes_api.provider_connection_action(request)
+    assert calls == 2
+
+
+@pytest.mark.asyncio
+async def test_failed_logout_invalidates_before_and_after_attempt(monkeypatch, tmp_path):
+    from ciao.providers.acp.agents import ClaudeAcpProvider
+    from ciao.web import routes_api
+
+    calls = 0
+
+    def invalidate(cls):
+        nonlocal calls
+        calls += 1
+
+    monkeypatch.setattr(ClaudeAcpProvider, "invalidate_model_catalog", classmethod(invalidate))
+    monkeypatch.setattr(routes_api, "_auth_command_for_provider", lambda provider: ["fake", "auth", "login"])
+    monkeypatch.setattr(
+        routes_api.subprocess, "run",
+        lambda *_args, **_kwargs: SimpleNamespace(returncode=1, stdout="", stderr="private logout failure"),
+    )
+    request = SimpleNamespace(
+        path_params={"provider": "claude", "action": "logout"},
+        app=SimpleNamespace(state=SimpleNamespace(config=_config(tmp_path))),
+    )
+
+    response = await routes_api.provider_connection_action(request)
+    await asyncio.sleep(0)
+
+    assert response.status_code == 400
+    assert json.loads(response.body) == {"error": "private logout failure"}
+    assert calls == 2  # before the attempt and after the worker exits
+
+
+@pytest.mark.asyncio
+async def test_cancelled_logout_invalidates_when_subprocess_worker_finishes(monkeypatch, tmp_path):
+    import threading
+    from ciao.providers.acp.agents import ClaudeAcpProvider
+    from ciao.web import routes_api
+
+    calls = 0
+    worker_started = threading.Event()
+    release_worker = threading.Event()
+
+    def invalidate(cls):
+        nonlocal calls
+        calls += 1
+
+    def blocked_logout(*_args, **_kwargs):
+        worker_started.set()
+        assert release_worker.wait(5)
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr(ClaudeAcpProvider, "invalidate_model_catalog", classmethod(invalidate))
+    monkeypatch.setattr(routes_api, "_auth_command_for_provider", lambda provider: ["fake", "auth", "login"])
+    monkeypatch.setattr(routes_api.subprocess, "run", blocked_logout)
+    request = SimpleNamespace(
+        path_params={"provider": "claude", "action": "logout"},
+        app=SimpleNamespace(state=SimpleNamespace(config=_config(tmp_path))),
+    )
+
+    pending = asyncio.create_task(routes_api.provider_connection_action(request))
+    assert await asyncio.to_thread(worker_started.wait, 5)
+    pending.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await pending
+    assert calls == 1  # only the pre-attempt invalidation runs before worker completion
+
+    release_worker.set()
+    for _ in range(100):
+        if calls == 3:
+            break
+        await asyncio.sleep(0.01)
+    assert calls == 2
+
+
+@pytest.mark.asyncio
+async def test_cancelled_logout_blocks_remounted_catalog_until_exit_but_not_peer_verify(
+    monkeypatch, tmp_path
+):
+    import threading
+    from ciao.providers.acp.agents import OpencodeAcpProvider
+    from ciao.providers.acp.provider import invalidate_acp_catalog
+    from ciao.web import routes_api
+
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    worker_started = threading.Event()
+    release_worker = threading.Event()
+    worker_finished = threading.Event()
+    probe_rows: list[str] = []
+
+    def blocked_logout(*_args, **_kwargs):
+        worker_started.set()
+        assert release_worker.wait(5)
+        worker_finished.set()
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    async def probe(cls, _root):
+        row = "opencode/fresh" if worker_finished.is_set() else "opencode/stale"
+        probe_rows.append(row)
+        return [{"model": row, "label": row, "variants": []}]
+
+    monkeypatch.setattr(OpencodeAcpProvider, "_probe_catalog", classmethod(probe))
+    monkeypatch.setattr(routes_api, "_auth_command_for_provider", lambda provider: ["fake", "auth", "login"])
+    monkeypatch.setattr(routes_api.subprocess, "run", blocked_logout)
+    monkeypatch.setattr(routes_api, "_provider_config_payload", lambda _config: {
+        "connections": {"claude": {"ok": True}},
+    })
+    logout_request = SimpleNamespace(
+        path_params={"provider": "opencode", "action": "logout"},
+        app=SimpleNamespace(state=SimpleNamespace(config=_config(tmp_path))),
+    )
+    verify_request = SimpleNamespace(
+        path_params={"provider": "claude", "action": "verify"},
+        app=SimpleNamespace(state=SimpleNamespace(config=_config(tmp_path))),
+    )
+    invalidate_acp_catalog("opencode")
+
+    pending_logout = asyncio.create_task(routes_api.provider_connection_action(logout_request))
+    pending_catalog = None
+    try:
+        assert await asyncio.to_thread(worker_started.wait, 5)
+        pending_logout.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await pending_logout
+
+        # A second client/remounted picker blocks behind the same provider's live worker.
+        pending_catalog = asyncio.create_task(OpencodeAcpProvider.model_catalog(workspace))
+        await asyncio.sleep(0.05)
+        assert not pending_catalog.done()
+        assert probe_rows == []
+
+        # A peer-provider verify has no dependency on OpenCode's logout worker.
+        response = await asyncio.wait_for(
+            routes_api.provider_connection_action(verify_request), timeout=1,
+        )
+        assert json.loads(response.body) == {"ok": True}
+
+        release_worker.set()
+        rows = await asyncio.wait_for(pending_catalog, timeout=2)
+        assert [row["model"] for row in rows] == ["opencode/fresh"]
+        assert probe_rows == ["opencode/fresh"]
+    finally:
+        release_worker.set()
+        if pending_catalog is not None and not pending_catalog.done():
+            await pending_catalog
+        invalidate_acp_catalog("opencode")
+
+
+@pytest.mark.asyncio
+async def test_catalog_waits_for_all_overlapping_same_provider_logouts(monkeypatch, tmp_path):
+    import threading
+    from ciao.providers.acp.agents import OpencodeAcpProvider
+    from ciao.providers.acp.provider import invalidate_acp_catalog
+    from ciao.web import routes_api
+
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    starts = [threading.Event(), threading.Event()]
+    releases = [threading.Event(), threading.Event()]
+    finished = [False, False]
+    next_call = 0
+    count_lock = threading.Lock()
+    probes: list[str] = []
+
+    def blocked_logout(*_args, **_kwargs):
+        nonlocal next_call
+        with count_lock:
+            index = next_call
+            next_call += 1
+        starts[index].set()
+        assert releases[index].wait(5)
+        with count_lock:
+            finished[index] = True
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    async def probe(cls, _root):
+        row = "opencode/fresh" if all(finished) else "opencode/stale"
+        probes.append(row)
+        return [{"model": row, "label": row, "variants": []}]
+
+    monkeypatch.setattr(OpencodeAcpProvider, "_probe_catalog", classmethod(probe))
+    monkeypatch.setattr(routes_api, "_auth_command_for_provider", lambda provider: ["fake", "auth", "login"])
+    monkeypatch.setattr(routes_api.subprocess, "run", blocked_logout)
+    app = SimpleNamespace(state=SimpleNamespace(config=_config(tmp_path)))
+
+    def request():
+        return SimpleNamespace(path_params={"provider": "opencode", "action": "logout"}, app=app)
+    invalidate_acp_catalog("opencode")
+
+    first = asyncio.create_task(routes_api.provider_connection_action(request()))
+    pending_catalog = None
+    try:
+        assert await asyncio.to_thread(starts[0].wait, 5)
+        second = asyncio.create_task(routes_api.provider_connection_action(request()))
+        assert await asyncio.to_thread(starts[1].wait, 5)
+        pending_catalog = asyncio.create_task(OpencodeAcpProvider.model_catalog(workspace))
+        await asyncio.sleep(0.05)
+        assert not pending_catalog.done()
+        assert probes == []
+
+        releases[0].set()
+        await asyncio.wait_for(first, timeout=2)
+        await asyncio.sleep(0.05)
+        assert not pending_catalog.done()
+        assert probes == []
+
+        releases[1].set()
+        await asyncio.wait_for(second, timeout=2)
+        rows = await asyncio.wait_for(pending_catalog, timeout=2)
+        assert [row["model"] for row in rows] == ["opencode/fresh"]
+        assert probes == ["opencode/fresh"]
+    finally:
+        for release in releases:
+            release.set()
+        if pending_catalog is not None and not pending_catalog.done():
+            await pending_catalog
+        invalidate_acp_catalog("opencode")
 
 
 def test_discover_claude_system_skills_filters_enabled_and_caches(
