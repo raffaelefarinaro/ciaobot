@@ -354,6 +354,14 @@ _DATE_ATTEMPT_RE = re.compile(r"\d{4}-\d{1,2}-\d{1,2}|\d{1,2}/\d{1,2}/\d{2,4}")
 _IDENTIFIER_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:/#-]*$")
 MAX_LEARNING_SOURCE_CHARS = 128
 
+
+def is_learning_source_id(value: str) -> bool:
+    """Whether *value* is a source id the structured learning format can retain."""
+    return (
+        len(value) <= MAX_LEARNING_SOURCE_CHARS
+        and _IDENTIFIER_RE.fullmatch(value) is not None
+    )
+
 #: What a request identifier may contain. Narrow on purpose: it is cited on a
 #: learnings line as ``req:<id>`` and has to survive a round trip through a
 #: one-line Markdown bullet's ``_(request: …)_`` tail, so a newline, a ``)`` or a
