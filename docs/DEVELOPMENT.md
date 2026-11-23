@@ -1808,7 +1808,10 @@ any version below 2.3.2. Provider changes replay the ACP fixtures under `tests/f
 and run one tiny real turn against the installed `opencode acp`. Keep V2 internal
 credential resources covered in both absolute and workspace-relative spellings
 when a custom runtime root is configured. Keep form constraints and explicit
-empty-versus-cancel semantics in the provider/PWA contract. Native form and
+empty-versus-cancel semantics in the provider/PWA contract. Permission cards
+may choose only an unambiguous `allow_once`; shell approvals display the
+exact validated command the provider submitted, bounded at 4096 characters.
+Native form and
 permission cards stay mounted until a matching `(chat_id, session_id,
 request_id)` response is acknowledged. Permission and form requests from
 task/subagent child sessions (known from `session.created.parentID`, or the

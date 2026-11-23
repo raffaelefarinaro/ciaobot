@@ -35,6 +35,8 @@ from ciao.models import (
     AssistantTextDelta,
     BridgeMode,
     ContextCompactedEvent,
+    PermissionRequestEvent,
+    PermissionResolvedEvent,
     ResultEvent,
     LATE_WAKE_NOTICE,
     ShellFinishedEvent,
@@ -641,6 +643,10 @@ class AcpSession:
         return event
 
     def _journal_event(self, event: StreamEvent) -> None:
+        if isinstance(event, PermissionResolvedEvent) or (
+            isinstance(event, PermissionRequestEvent) and event.shell_command
+        ):
+            return
         # Lazy: the providers package must not import ciao.web at module load.
         from ciao.web.chat_broker import event_to_json
 

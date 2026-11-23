@@ -17,6 +17,7 @@ from ciao.models import (
     AssistantTextDelta,
     ImageAttachment,
     PermissionRequestEvent,
+    PermissionResolvedEvent,
     ResultEvent,
     StreamEvent,
     ThinkingEvent,
@@ -192,7 +193,6 @@ class _PassHost:
         del reason
         self.saves += 1
 
-
 @pytest.mark.asyncio
 async def test_provider_pass_keeps_stream_events_and_terminal_outcome() -> None:
     events: list[StreamEvent] = [
@@ -285,6 +285,31 @@ class _DriveHost:
     def _save(self, *, reason: str = "registry_mutation") -> None:
         del reason
         self.saves += 1
+
+    def _notify_permission(self, chat_id: str, event: PermissionRequestEvent) -> None:
+        del chat_id
+        self.chat.pending_permission = json.dumps({
+            "request_id": event.request_id,
+            "session_id": event.session_id,
+            "tool_name": "Shell" if event.shell_command else event.tool_name,
+            "message": "Shell command needs approval" if event.shell_command else event.message,
+            **({"shell_command": True} if event.shell_command else {}),
+        })
+        self._save()
+
+    def _clear_permission_state(
+        self, chat_id: str, request_id: str, session_id: str = ""
+    ) -> bool:
+        del chat_id
+        stored = json.loads(self.chat.pending_permission or "{}")
+        cleared = stored.get("request_id") == request_id
+        if cleared:
+            self.chat.pending_permission = ""
+            self._save()
+        stream = self._broker.get(self.chat.chat_id)
+        if stream is not None:
+            stream.resolve_permission(request_id, session_id)
+        return cleared
 
     async def refresh_repo_location(self, chat_id, hints):
         return None
@@ -485,6 +510,57 @@ async def test_drive_keeps_websocket_payloads_and_lifecycle_events(
     assert host._broker.get("chat-1") is None
     assert host.chat.last_response == "done"
     assert host.chat.last_response_status == "success"
+
+
+@pytest.mark.asyncio
+async def test_refused_replacement_clears_registry_replay_and_live_card(
+    tmp_path: Path,
+) -> None:
+    old_id = "old-host-request"
+    host = _DriveHost([
+        PermissionRequestEvent(
+            type="permission_request",
+            message="Shell command needs approval",
+            tool_name="Shell",
+            tool_input="echo old",
+            request_id=old_id,
+            session_id="session-1",
+            shell_command=True,
+            shell_cwd="/workspace/project",
+        ),
+        # The broker emits this while refusing a same-provider-ID replacement
+        # because its current rawInput has no usable command.
+        PermissionResolvedEvent(
+            type="permission_resolved", request_id=old_id, session_id="session-1"
+        ),
+        ResultEvent(type="result", result="done"),
+    ], tmp_path)
+    stream = ChatStream(prompt_text="hello")
+    live: asyncio.Queue[dict | None] = asyncio.Queue()
+    stream._subs.add(live)
+    host._broker.register("chat-1", stream)
+
+    await ChatStreaming(cast(ChatStreamingHost, host)).drive(
+        chat_id="chat-1",
+        project_id="project-1",
+        prompt="hello",
+        images=None,
+        turn_index=None,
+        chat_meta=host.chat,
+        stream=stream,
+        is_retry=False,
+        unattended=False,
+    )
+
+    assert host.chat.pending_permission == ""
+    assert not any(event.get("type") == "permission_request" for event in stream.buffered_events())
+    assert live.get_nowait()["type"] == "permission_request"
+    assert live.get_nowait() == {
+        "type": "permission_resolved",
+        "request_id": old_id,
+        "session_id": "session-1",
+    }
+    stream._subs.discard(live)
 
 
 _INTERIM = "Interim **working** narration."

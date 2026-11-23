@@ -38,6 +38,16 @@ _FILE_REF_MAX_ENTRIES = 256
 _FILE_REF_PATTERN = re.compile(r"ciao-drop:(drop_[0-9a-f]{32})")
 
 
+def _shell_permission_marker(raw: object) -> bool:
+    if not isinstance(raw, str) or not raw:
+        return False
+    try:
+        value = json.loads(raw)
+    except json.JSONDecodeError:
+        return False
+    return isinstance(value, dict) and value.get("shell_command") is True
+
+
 class _RegistryCommittedError(OSError):
     """The registry was replaced, but a subsequent operation failed."""
 
@@ -1547,8 +1557,13 @@ class ProjectChatManager:
                 kind=pd.get("kind", ""),
                 repo_path=pd.get("repo_path", ""),
             )
+        stale_shell_permissions: dict[str, str] = {}
         for cid, cd in data.get("chats", {}).items():
             cd = _drop_retired_retry(cd)
+            pending_permission = cd.get("pending_permission", "")
+            if _shell_permission_marker(pending_permission):
+                stale_shell_permissions[cid] = pending_permission
+                pending_permission = ""
             chat_model = cd.get("model", self._config.claude_default_model)
             self._chats[cid] = ChatInfo(
                 chat_id=cid,
@@ -1612,7 +1627,7 @@ class ProjectChatManager:
                 instructions_session_id=cd.get("instructions_session_id", ""),
                 instructions_repo=str(cd.get("instructions_repo", "") or ""),
                 pending_question=cd.get("pending_question", ""),
-                pending_permission=cd.get("pending_permission", ""),
+                pending_permission=pending_permission,
                 pending_queue=list(cd.get("pending_queue", [])),
                 forked_from_chat_id=cd.get("forked_from_chat_id", ""),
                 forked_from_turn_index=cd.get("forked_from_turn_index"),
@@ -1654,6 +1669,12 @@ class ProjectChatManager:
                 row = self._last_local_payload.get("chats", {}).get(cid)
                 if isinstance(row, dict):
                     row["grants_data_root"] = cd["grants_data_root"]
+        for cid, previous in stale_shell_permissions.items():
+            row = self._last_local_payload.get("chats", {}).get(cid)
+            if isinstance(row, dict):
+                row["pending_permission"] = previous
+        if stale_shell_permissions:
+            self._save(reason="clear_stale_shell_permissions")
 
     def _migrate_remove_claude_code_cli_project(self) -> None:
         """Remove the retired CLI-import project from persisted PWA state."""
@@ -9795,7 +9816,9 @@ class ProjectChatManager:
         the PWA's attention state — home banner, sidebar dot, menu bar — see a
         chat blocked on Approve/Deny even when it isn't the foreground chat
         receiving the live WS stream; before this the prompt only reached the
-        OS push and the open ChatPanel's ephemeral `pendingPermissions`.
+        OS push and the open ChatPanel's ephemeral `pendingPermissions`. A
+        shell request stores only an attention marker; the full prompt stays
+        in the current stream's in-memory replay buffer.
 
         Callback errors are swallowed: a broken push subscription or a transient
         send failure must never kill the turn (the user can still answer via
@@ -9812,12 +9835,20 @@ class ProjectChatManager:
                 )
                 or ""
             )
-            permission_payload: dict[str, object] = {
-                "request_id": event.request_id,
-                "tool_name": event.tool_name,
-                "message": event.message,
-                "tool_input": event.tool_input,
-            }
+            if event.shell_command:
+                permission_payload: dict[str, object] = {
+                    "request_id": event.request_id,
+                    "tool_name": "Shell",
+                    "message": "Shell command needs approval",
+                    "shell_command": True,
+                }
+            else:
+                permission_payload = {
+                    "request_id": event.request_id,
+                    "tool_name": event.tool_name,
+                    "message": event.message,
+                    "tool_input": event.tool_input,
+                }
             if session_id:
                 permission_payload["session_id"] = session_id
             payload = json.dumps(permission_payload, ensure_ascii=False)
@@ -9833,7 +9864,10 @@ class ProjectChatManager:
         if cb is None:
             return
         try:
-            cb(chat_id, event.tool_name, event.message, event.request_id)
+            if event.shell_command:
+                cb(chat_id, "Shell", "Shell command needs approval", event.request_id)
+            else:
+                cb(chat_id, event.tool_name, event.message, event.request_id)
         except Exception:
             logger.exception("notify_permission_cb failed for %s", chat_id)
 

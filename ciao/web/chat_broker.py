@@ -665,6 +665,10 @@ def event_to_json(event: StreamEvent) -> dict | None:
             "message": event.message,
             "request_id": event.request_id,
         }
+        if event.shell_command:
+            payload["shell_command"] = True
+            if event.shell_cwd:
+                payload["shell_cwd"] = event.shell_cwd
         if event.session_id:
             payload["session_id"] = event.session_id
         return payload

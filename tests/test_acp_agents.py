@@ -1313,13 +1313,14 @@ async def test_opencode_permission_option_ids_once_always_reject() -> None:
     for approved, expected in ((True, "once"), (False, "reject")):
         broker = PermissionBroker(lambda _event: None)
         task = asyncio.create_task(broker.request(
-            "ses_root", {"toolCallId": "call-1", "title": "bash"}, options,
+            "ses_root", {"toolCallId": "call-1", "title": "Tool"}, options,
         ))
         for _ in range(20):
-            if broker.has("call-1"):
+            request_id = broker._tool_call_pending.get(("ses_root", "call-1"), "")
+            if request_id and broker.has(request_id):
                 break
             await asyncio.sleep(0)
-        assert broker.respond("call-1", approved, session_id="ses_root") == QuestionResponseResult(ok=True)
+        assert broker.respond(request_id, approved, session_id="ses_root") == QuestionResponseResult(ok=True)
         assert await task == {"outcome": "selected", "optionId": expected}
 
 

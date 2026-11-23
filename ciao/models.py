@@ -488,14 +488,23 @@ class PermissionRequestEvent(StreamEvent):
     """Emitted when the provider subprocess needs permission approval.
 
     ``request_id`` correlates this prompt to the client's eventual
-    ``permission_response`` reply. Set to the SDK's ``tool_use_id`` when
-    available (stable across retries) and falls back to a freshly-minted
-    UUID for synthetic prompts.
+    ``permission_response`` reply. It is host-generated per prompt so a
+    provider reusing a tool-call id cannot make an old card answer a new one.
     """
 
     message: str = ""
     tool_name: str = ""
     tool_input: str = ""
+    request_id: str = ""
+    session_id: str = ""
+    shell_command: bool = False
+    shell_cwd: str = ""
+
+
+@dataclass(slots=True)
+class PermissionResolvedEvent(StreamEvent):
+    """An in-memory pending permission was replaced or otherwise retracted."""
+
     request_id: str = ""
     session_id: str = ""
 

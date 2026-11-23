@@ -89,12 +89,13 @@ def test_notify_permission_invokes_callback(tmp_path: Path) -> None:
         type="permission_request",
         tool_name="Bash",
         tool_input='{"command": "rm -rf /"}',
+        shell_command=True,
         message="Run risky shell?",
         request_id="req-42",
     )
     pcm._notify_permission(chat.chat_id, event)
 
-    assert calls == [(chat.chat_id, "Bash", "Run risky shell?", "req-42")]
+    assert calls == [(chat.chat_id, "Shell", "Shell command needs approval", "req-42")]
 
 
 def test_notify_permission_persists_pending_permission_on_chat(tmp_path: Path) -> None:
@@ -110,20 +111,43 @@ def test_notify_permission_persists_pending_permission_on_chat(tmp_path: Path) -
 
     event = PermissionRequestEvent(
         type="permission_request",
-        tool_name="Bash",
-        tool_input='{"command": "rm -rf /"}',
-        message="Approve use of Bash?",
+        tool_name="Bash: echo REGISTRY_SECRET",
+        tool_input='{"command": "echo REGISTRY_SECRET"}',
+        shell_command=True,
+        message="REGISTRY_SECRET in title too",
         request_id="req-42",
     )
     pcm._notify_permission(chat.chat_id, event)
 
     stored = pcm._chats[chat.chat_id].pending_permission
-    assert json.loads(stored) == {
+    marker = json.loads(stored)
+    assert marker == {
         "request_id": "req-42",
-        "tool_name": "Bash",
-        "message": "Approve use of Bash?",
-        "tool_input": '{"command": "rm -rf /"}',
+        "tool_name": "Shell",
+        "message": "Shell command needs approval",
+        "shell_command": True,
     }
+    assert "REGISTRY_SECRET" not in stored
+
+
+def test_shell_marker_is_cleared_after_engine_restart(tmp_path: Path) -> None:
+    pcm = _make_manager(tmp_path)
+    project = pcm.create_project("General", workspace="personal")
+    chat = pcm.create_chat(project.project_id, title="t")
+    pcm._notify_permission(chat.chat_id, PermissionRequestEvent(
+        type="permission_request",
+        tool_name="Shell",
+        tool_input="echo PRIVATE_COMMAND",
+        message="PRIVATE_COMMAND",
+        request_id="restart-request",
+        session_id="restart-session",
+        shell_command=True,
+    ))
+
+    restarted = _make_manager(tmp_path)
+    assert restarted._chats[chat.chat_id].pending_permission == ""
+    saved = json.loads((tmp_path / ".runtime" / "web_projects.json").read_text())
+    assert saved["chats"][chat.chat_id]["pending_permission"] == ""
 
 
 def test_notify_permission_is_no_op_without_callback(tmp_path: Path) -> None:

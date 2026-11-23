@@ -865,7 +865,7 @@ export const useProjectStore = defineStore('projects', () => {
       }
       return
     }
-    let parsed: { request_id?: string; session_id?: string; tool_name?: string; message?: string; tool_input?: string }
+    let parsed: { request_id?: string; session_id?: string; tool_name?: string; message?: string; tool_input?: string; shell_command?: boolean }
     try {
       parsed = JSON.parse(raw)
     } catch {
@@ -874,6 +874,7 @@ export const useProjectStore = defineStore('projects', () => {
     if (!parsed.request_id) return
     const list = pendingPermissions.value[chatId] || []
     if (list.some(p => p.request_id === parsed.request_id)) return
+    if (parsed.shell_command === true) return
     pendingPermissions.value[chatId] = [
       ...list.filter(p => p.request_id !== parsed.request_id),
       {
@@ -7081,6 +7082,8 @@ export const useProjectStore = defineStore('projects', () => {
             session_id: event.session_id,
             tool_name: event.tool_name,
             tool_input: event.tool_input || '',
+            shell_command: event.shell_command === true,
+            shell_cwd: event.shell_cwd,
             message: event.message,
             received_at: Date.now(),
           },
@@ -7096,8 +7099,8 @@ export const useProjectStore = defineStore('projects', () => {
         ) {
           pushToast({
             chat_id: chatId,
-            title: 'ciaobot needs approval',
-            body: `${event.tool_name}: ${event.message}`,
+            title: event.shell_command ? 'Shell command needs approval' : 'ciaobot needs approval',
+            body: event.shell_command ? 'Review the command in the active chat.' : `${event.tool_name}: ${event.message}`,
           })
         }
         break
