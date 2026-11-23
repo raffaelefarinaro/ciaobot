@@ -2,7 +2,7 @@
 """Report which upstream projects Ciaobot depends on have gone quiet.
 
 `/ciao-upkeep` compared each pin with upstream's latest release and never asked
-how old that release was, so `gws` sat dormant for eight months while its row
+how old that release was, so `gws` sat dormant for nearly eight months while its row
 read "installed = latest". This script asks that question.
 
 It reads the dependency list from the files that declare it (``pyproject.toml``,
@@ -145,10 +145,11 @@ def check_npm(name: str) -> Health:
 
 
 def _gh(path: str) -> dict | list:
-    out = subprocess.run(["gh", "api", path], capture_output=True, text=True, timeout=30)
-    if out.returncode != 0:
-        raise RuntimeError(out.stderr.strip() or f"gh api {path} failed")
-    return json.loads(out.stdout)
+    for attempt in range(2):  # one retry: parallel gh calls hit transient errors
+        out = subprocess.run(["gh", "api", path], capture_output=True, text=True, timeout=30)
+        if out.returncode == 0:
+            return json.loads(out.stdout)
+    raise RuntimeError(out.stderr.strip() or f"gh api {path} failed")
 
 
 def check_github(repo: str) -> Health:
@@ -184,7 +185,7 @@ def recent_work(repo: str) -> int:
 
 def judge(h: Health) -> Health:
     stale = h.age_days is not None and h.age_days > STALE_DAYS
-    if not (stale or h.flags):
+    if not (stale or h.flags) or any(f.startswith("lookup failed") for f in h.flags):
         return h
     if not h.repo:
         h.verdict = "check by hand (no GitHub repo found)"
@@ -219,14 +220,16 @@ def main(argv: list[str] | None = None) -> int:
     with ThreadPoolExecutor(max_workers=8) as pool:
         results = list(pool.map(lambda j: judge(_safe(*j)), jobs))
 
-    dormant = slow = 0
+    dormant = slow = errors = 0
     for h in sorted(results, key=lambda r: -(r.age_days or 0)):
         stale = h.age_days is not None and h.age_days > STALE_DAYS
         notes = list(h.flags) + ([f"no release in {h.age_days} days"] if stale else [])
         if h.verdict:
             notes.append(h.verdict)
         mark = "ok"
-        if h.verdict.startswith("slow"):
+        if any(f.startswith("lookup failed") for f in h.flags) or h.verdict.startswith("activity lookup failed"):
+            mark, errors = "ERR", errors + 1
+        elif h.verdict.startswith("slow"):
             mark, slow = "slow", slow + 1
         elif notes:
             mark, dormant = "FLAG", dormant + 1
@@ -235,7 +238,7 @@ def main(argv: list[str] | None = None) -> int:
             print(f"{mark:4}  {h.source:6}  {h.name:42} {h.latest:16} {day}  {'; '.join(notes)}")
     print(
         f"\n{len(results)} upstreams checked: {dormant} FLAG (decide in docs/UPKEEP.md), "
-        f"{slow} slow (old release, repo still active)."
+        f"{slow} slow (old release, repo still active), {errors} ERR (lookup failed; re-run)."
     )
     return 0
 
