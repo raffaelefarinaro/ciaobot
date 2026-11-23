@@ -148,43 +148,6 @@ individually and write reports to a disposable directory. Normal pytest and CI
 coverage for the eval framework mocks provider execution and requires no
 provider credentials.
 
-### `gws`: Google Workspace CLI
-
-Required by `gws-*` and `recipe-*` skills (Gmail, Drive, Docs, Sheets, Slides, Calendar, Tasks, Forms).
-
-```bash
-# Install: https://github.com/googleworkspace/cli
-# npm 12 blocks install scripts by default and the postinstall is what downloads
-# the gws binary, so allow it for this package:
-npm install -g --allow-scripts=@googleworkspace/cli @googleworkspace/cli
-# Authenticate (two profiles):
-GOOGLE_WORKSPACE_CLI_CONFIG_DIR=~/.config/gws-personal gws auth login   # personal
-gws auth login                                                           # work
-```
-
-Use `ciao gws <profile> <gws-args>` to switch between accounts (`$GWS_PROFILE` holds the chat's own account). Never source the wrapper: it ends with `exec`. (`scripts/gws-profile.sh` remains as a thin back-compat shim that forwards to `ciao gws`.) The retired top-level `GWS_PROFILE` setting is no longer an operator default: on the first upgraded server start, a value naming an account this install knows is copied once into every workspace whose stored `gws_profile` is blank. Explicit workspace links are preserved, and later blank links are not backfilled; remove `GWS_PROFILE` from `.env` after the migration marker appears in `.runtime/`.
-
-**PWA-native OAuth (no terminal required).** The Settings → Overview → Google account row (Connect Google account opens a dialog) can upload a GCP `client_secret.json` and drive the full OAuth code-exchange from the browser. The server generates the Google authorization URL, opens it in a new tab, and exchanges the returned authorization code for a refresh token. Accounts are created per workspace from that dialog and named from the workspace (there are no built-in ones); credentials are written to `<workspace>/secrets/gws-<account>/`, except the two pre-registry names, which keep `<workspace>/secrets/gws-personal/` (personal) and `<workspace>/secrets/gws/` (work). Scopes granted: every account requests the same set — Gmail, Calendar, Drive, Sheets, Docs, Slides, Tasks, Contacts, Forms, plus `openid` and the user's email/profile (`ciao/gws_auth.py`). Disconnect and remove in the row's ··· menu deletes the account's stored credentials and OAuth client and unlinks the workspace. Note: these paths (`<workspace>/secrets/gws-*/`) are separate from `~/.config/gws-*/`, which the `gws` CLI uses by default when invoked directly via `ciao gws`. An account that no workspace links to is not shown in Settings. It stays under `<workspace>/secrets/gws-<name>/` and in `.runtime/gws_profiles.json`, and `ciao gws <name> ...` still works with it (the CLI does not list accounts). Opening Connect on a workspace whose name matches such an account reuses it; to delete one by hand, remove its `secrets/gws-<name>/` folder and its entry in `.runtime/gws_profiles.json`. The health monitor keeps checking every account with credentials, but only an account that at least one active workspace links raises a login warning; an unlinked account (including one linked only by an archived workspace) never does.
-
-**Getting `client_secret.json`.** In [Google Cloud Console → Credentials](https://console.cloud.google.com/apis/credentials): create or pick a project, enable the APIs you need (Gmail, Calendar, Drive, Docs, Sheets, Slides, Tasks, People for Contacts, Forms), then create an OAuth 2.0 client ID of type **Desktop app**. The one-click Google sign-in requires a Desktop app client; Web application clients are not supported for that flow. Download the JSON credentials file and upload it in Settings → Overview → Google account → Connect Google account. The Connect dialog repeats these steps for end users. Stock `gws-*` skills ship with the app once `gws` is installed and authenticated.
-
-**Auth + scope gotchas.** Use `gws auth login --full` for complete scopes. `gws auth login --services calendar` has produced tokens that still lack the calendar scope. `ciao gws` already execs `gws`, so `ciao gws personal gws calendar ...` doubles the command and fails with `Unknown service 'gws'`; pass the subcommand directly: `ciao gws personal calendar ...`. If auth fails despite a fresh login, `credentials.enc` (AES-256-GCM) may hold the valid refresh token while `credentials.json` carries a stale one. The work gcloud account only has `openid`/`cloud-platform` scopes and returns 403 on Drive uploads, so do not substitute `gcloud auth print-access-token` for `gws` auth in Drive flows.
-
-**Headless re-auth.** When `gws auth login` fails on a headless server, run `ciao gws-auth-helper <profile>`. It prints the auth URL, waits for the redirect URL to be pasted back, and saves fresh credentials.
-
-**Token expiry.** Symptom: `"token_error": "Token has been expired or revoked."`. Fix: `ciao gws <profile> auth login` (or the headless helper above). If `GOOGLE_WORKSPACE_CLI_CLIENT_ID` is set in `.env`, it can override the OAuth client to a wrong project; comment it out, or run `env -u GOOGLE_WORKSPACE_CLI_CLIENT_ID gws auth login --profile <profile>`.
-
-**Token-health monitoring (automatic).** A background loop checks each configured profile's token validity every 900 seconds. On a transition to invalid it sends one PWA notification (only linked profiles raise the notification) and publishes an in-app `gws_health` status event naming the profile, so a revoked login surfaces instead of GWS-dependent schedules failing silently. The alert is debounced (one notification per breakage) and re-arms after the token recovers. The result also appears per profile in `GET /api/integrations/gws` as `token_valid` / `token_error` / `needs_relogin`, which Settings → Overview → Google account renders as Sign-in expired.
-
-**Server-managed re-login (reliable from chat).** `POST /api/integrations/gws/relogin/start` (body `{"profile":"personal"|"work"}`) runs the OAuth flow **inside the long-lived engine process**: it binds a loopback callback listener on `127.0.0.1:<ephemeral-port>`, returns the Google consent URL, captures the redirect, and exchanges the code server-side into the profile's `credentials.json`. Because the listener lives in the server (not a background bash task that dies between chat turns), the redirect is always captured. Poll `GET /api/integrations/gws/relogin/status?profile=<profile>` for `pending`/`completed`/`error`; `POST /api/integrations/gws/relogin/cancel` aborts. This reuses the same server-side scope, token-exchange, and credential-write code as the PWA-native upload flow. Tokens, client secrets, and authorization codes are never logged or returned in any response. Requires a Desktop-type OAuth client (loopback redirect on an arbitrary port).
-
-**Credentials persistence.** GWS configs (`secrets/gws/` and `secrets/gws-personal/`) are gitignored and can be lost during git cleans or device migrations. Public installs should treat those directories as local secrets and back them up with an external secret manager if needed.
-
-
-**Output parsing.** Strip the leading `Using keyring backend: file` banner from `gws` stdout before passing it to `jq`.
-
-**PWA-only auth recovery.** When a token expires while the user is on the PWA with no shell, use the localhost-callback-relay flow: start the auth listener in the background, capture the sign-in URL, have the user open it on their phone, paste the redirect URL back, then `curl` it to the localhost listener.
-
 ### `notebooklm`: Google NotebookLM CLI
 
 This is an optional, workspace-specific integration. It is not installed by
@@ -274,6 +237,12 @@ To add an OpenCode server, run `opencode mcp add <name> --url <url>` from the wo
 
 Keep secrets in provider-supported credential stores or environment variables referenced by provider configuration. Do not put bearer tokens directly in `.mcp.json` or `opencode.json`.
 
+**Google Workspace.** Ciaobot has no built-in Google integration since 2.0.
+Connect Google through the agent CLI: Claude's and Codex's hosted Google
+connectors, or a Google Workspace MCP server such as `workspace-mcp` that the
+CLI starts. An existing `secrets/gws-<account>/` folder from 1.x is left as
+is; its OAuth client can be reused there or the folder deleted.
+
 The one-line macOS installer preserves a configured workspace discovered from
 the current LaunchAgent. On a clean installation it starts the packaged
 engine without creating a workspace or random dashboard password; the PWA then
@@ -315,8 +284,6 @@ The agent control plane runs inside `ciao/mcp_server.py` (the shared operation t
 
 Workspace-specific integrations can still be set in `.env`, but the public `.env.example` does not ship private/work examples. Use user-owned credentials for each integration:
 
-**GWS:** `GOOGLE_WORKSPACE_CLI_CLIENT_ID`, `GOOGLE_WORKSPACE_CLI_CLIENT_SECRET`
-
 **Airtable:** `AIRTABLE_API_KEY` (get from https://airtable.com/create/tokens, scopes: data.records:read/write, schema.bases:read)
 
 **Zendesk:** `ZENDESK_EMAIL`, `ZENDESK_API_TOKEN` (Admin Center > APIs > Zendesk API), `ZENDESK_SUBDOMAIN`
@@ -346,15 +313,6 @@ in `.ciao/custom_providers.json`. All three worked by pointing the Claude Code o
 provider CLI at a third-party upstream through `ANTHROPIC_BASE_URL` /
 `OPENAI_BASE_URL` env injection. Those variables and that file are no longer
 read; leftover values are ignored rather than erroring.
-
-## Google Tasks Reference
-
-| List | ID |
-|---|---|
-| Backlog | `MTM3MDY3ODI0NjY2ODE2Mzg1ODk6MDow` |
-| In Progress | `VWVEMHZCMkhuaGVpcG0yUQ` |
-| On Hold | `OUVaZExIdDA3b3JBeUpMVA` |
-| Automate | `Z2pjblpMd2NrNTlYRlVjQQ` |
 
 ## Skill-owned reference data
 
@@ -389,7 +347,6 @@ Runtime config for the Ciaobot server itself (PWA, schedules, deploy).
 - `CIAO_OPENCODE_BIN` (optional): absolute path to an OpenCode CLI installed
   outside the login-shell `PATH`. The path is used for provider startup and
   authentication; an invalid path is reported as unavailable.
-- `CIAO_GWS_BIN` (test isolation only): absolute path to an executable that `ciao gws` and the Google token health check run instead of `gws`. Set by `ciao eval tasks` for tasks requiring `gws_fake`, so evals never reach Google. When set it is used as-is, with no lookup and no fallback. It is read from the process environment only, unlike `CIAO_OPENCODE_BIN`, which is read from the workspace configuration. A value that is not an absolute path is an error: `ciao gws` exits 2 with `CIAO_GWS_BIN must be an absolute path`, and the token health check reports the token as invalid with that message. Whitespace-only counts as unset. POSIX only.
 - `CIAO_ENGINE_PATH` (internal): legacy override for the engine executable the
   CLI runs. It is still read by `ciao/cli.py`, but nothing sets it any more
   (the bundled launcher that used to is gone), so an operator never needs to.
@@ -420,9 +377,8 @@ See [Linux hosting](docs/LINUX.md) for provisioning, HTTPS, updates, and recover
 - `CIAO_VAULT_ROOT`: durable memory/vault root. Default `<CIAO_WORKSPACE>/memory-vault`. Set this to an external notes folder when operational state should stay out of synced notes.
 - `CIAO_VAULT_DIR`: legacy vault-directory key that the Mac takeover plan still recognises in an old service definition; do not inherit it when starting a genuinely fresh install.
 - `CIAO_WORKSPACES`: **retired and no longer read as a workspace source.** It used to override `.runtime/workspaces.json` on every start, so a workspace created, edited or archived in Settings could silently revert on the next restart. The workspace list is now runtime state owned by the app: Settings → Overview → All workspaces writes `.runtime/workspaces.json`, and that file is the only source. On the first server start after upgrading, an install that still sets the variable has its workspaces imported into the registry once (every one when no registry file exists, otherwise only names the registry does not already define; existing entries are never overwritten, a workspace with an archive in `.archived-workspaces/` is skipped rather than re-registered). A `.runtime/workspaces-env-imported.json` marker makes that import one-shot, so a workspace later removed in Settings stays removed. After that the variable is inert: startup logs a warning and the `legacy-env-ignored` operator tile asks you to remove it from `.env`; Ciaobot does not edit `.env` for you.
-- `.runtime/workspaces.json` (not an environment variable): the workspace registry, a JSON list of objects with `name`, `vault_root`, `default_provider`, `disallowed_tools`, `claude_trim` (sparse map of trim-option key → bool, see `ciao/claude_trim.py`; `setting:claude_ai_connectors` hides the Claude account's connectors), `gws_profile` and `color`. `vault_root` is relative to `CIAO_WORKSPACE` unless absolute. Fresh setup and ordinary PWA workspace creation derive `<CIAO_VAULT_ROOT>/<name>`, while existing-folder setup preserves the selected root until a model-guided migration updates the registry. Later Settings updates preserve the stored path. If the file is missing, Ciaobot bootstraps one registry entry per directory in the vault that looks like a workspace (a folder containing `People/`, `Projects/`, `journal/` or a `MEMORY.md`), falling back to a single `personal` workspace when none do. It used to manufacture `personal` and `work` unconditionally, which left an install unable to re-root: a registered workspace with no vault directory refuses the plan. Schedules assigned to a workspace inherit its current `default_provider` on every run unless an explicit override is stored; the model comes from that provider's operator default (Settings → Providers) — a workspace no longer pins one, and a `default_model` key in the registry is ignored. Example: `[{"name":"default","vault_root":"memory-vault/default","default_provider":"claude","gws_profile":"personal"}]`.
+- `.runtime/workspaces.json` (not an environment variable): the workspace registry, a JSON list of objects with `name`, `vault_root`, `default_provider`, `disallowed_tools`, `claude_trim` (sparse map of trim-option key → bool, see `ciao/claude_trim.py`; `setting:claude_ai_connectors` hides the Claude account's connectors), `color`. `vault_root` is relative to `CIAO_WORKSPACE` unless absolute. Fresh setup and ordinary PWA workspace creation derive `<CIAO_VAULT_ROOT>/<name>`, while existing-folder setup preserves the selected root until a model-guided migration updates the registry. Later Settings updates preserve the stored path. If the file is missing, Ciaobot bootstraps one registry entry per directory in the vault that looks like a workspace (a folder containing `People/`, `Projects/`, `journal/` or a `MEMORY.md`), falling back to a single `personal` workspace when none do. It used to manufacture `personal` and `work` unconditionally, which left an install unable to re-root: a registered workspace with no vault directory refuses the plan. Schedules assigned to a workspace inherit its current `default_provider` on every run unless an explicit override is stored; the model comes from that provider's operator default (Settings → Providers) — a workspace no longer pins one, and a `default_model` key in the registry is ignored. Example: `[{"name":"default","vault_root":"memory-vault/default","default_provider":"claude"}]`.
 - File viewer path policy: the file/binary/image viewers and the in-PWA editor have **no workspace sandbox**. They read (and, for the editor and snapshot-restore, write) any path on disk. Relative paths still anchor to the workspace root. The extension allowlist (no `.env`, no key files) and the size caps are the only remaining guards, so secrets in allowlisted files elsewhere on the machine are reachable from an authenticated PWA session.
-- `GOOGLE_WORKSPACE_CLI_KEYRING_BACKEND`: optional override for `gws`; the server defaults it to `file` at startup for headless auth.
 
 Session insights models are chosen per provider in Settings → Providers.
 Automatic uses the source chat's model for archive memory, chat titles and
@@ -432,7 +388,6 @@ imports without a recorded source model use the workspace/provider default.
 Chat file links use the chat's agent root for relative-path resolution. A
 resolved absolute identity is shared by previews and pins; this is anchoring,
 not a new filesystem sandbox. Existing viewer extension and size guards remain.
-- `ciao gws-auth-helper <profile>`: interactive headless OAuth re-authentication when `gws auth login` cannot open a browser.
 - `CLAUDE_DEFAULT_MODEL_PERSONAL` / `CLAUDE_DEFAULT_MODEL_WORK` / `CIAO_DISALLOWED_TOOLS_PERSONAL` / `CIAO_DISALLOWED_TOOLS_WORK`: **removed 2026-08-20 and no longer read.** They configured the two hardcoded `personal`/`work` entries of the bootstrap registry, which now derives its workspaces from the vault instead, so they could not describe a workspace named anything else. Put `disallowed_tools` on the workspace in `.runtime/workspaces.json`, which works for any name; the default model is now a per-provider operator setting (Settings → Providers), not a per-workspace one.
 - `CIAO_MEMORY_DIR`: legacy override for the old `~/.ciao/memory.md` + `user.md` directory during the one-release migration window. Default `~/.ciao`. Not used for new writes; safe to unset after migration.
 - **Image-capability pre-flight**: before dispatch, a turn that carries images checks whether the chat's agent accepts images. Gating is agent-level under ACP: `promptCapabilities.image` from the agent's `initialize` response. Only an explicit `false` refuses, so an agent that has not stated it, or has no connection yet, never blocks a turn. A non-vision model pauses the turn on a `model_capability_question` (30s window): the PWA offers the candidates `_capability_candidates` returns, an "Open picker" escape hatch, and Cancel. Switch re-dispatches on the picked model; cancel/timeout close the turn with a `status` bubble; the images are never silently dropped. Text-only and unattended (loop/schedule) turns skip the question. Implemented in `ciao/providers/acp/provider.py::agent_accepts_images`, `ProjectChatManager._agent_accepts_images`, and the pre-flight in `ciao/web/chat_streaming.py`.
@@ -445,7 +400,6 @@ not a new filesystem sandbox. Existing viewer extension and size guards remain.
 - `CIAO_EVAL_MAX_COST_USD`: hard estimated-cost ceiling (USD) for one `ciao eval run`. Default `2.0`. `run_oneshot` returns text rather than a cost, so cost is enforced as a declared per-call upper bound (`calls × CIAO_EVAL_COST_PER_CALL_USD`); the report records the estimate used.
 - `CIAO_EVAL_COST_PER_CALL_USD`: the declared per-call upper-bound cost used to enforce `CIAO_EVAL_MAX_COST_USD`. Default `0.05`. Raise it when the evaluated model is materially more expensive per call so the ceiling stays honest.
 
-**Note:** `ciao gws-auth-helper` is the helper for headless `gws` auth when the keyring backend fails.
 
 ### Injected CLI context variables
 
@@ -457,16 +411,9 @@ The Ciaobot server injects the following environment variables into every spawne
 - `CIAO_MODEL`: the model ID configured for the chat.
 - `CIAO_PROVIDER`: the provider name (`claude` or `opencode`).
 - `CIAO_CHAT_ID`: the ID of the active chat.
-- `GWS_PROFILE`: resolved from the active workspace's `gws_profile`, falling back to the `personal` profile.
 - `CLAUDE_CODE_DISABLE_AUTO_MEMORY`: set to `1` to disable Claude Code's native auto-memory system since Ciaobot implements its own memory layer.
 
 These variables let package commands (like `ciao create-chat`) or custom skills auto-detect the current chat's context and preferences.
-
-### Google OAuth client files
-
-- Do not commit Google OAuth client JSON files. `client_secret_gws.json` is ignored and should live only as a local/operator file when needed.
-- Prefer `gws` profile config directories for active tokens: `~/.config/gws-personal/` and `~/.config/gws/`.
-- If a client secret was ever committed, rotate that OAuth client in Google Cloud. Removing the file from the repo does not remove it from git history.
 
 ### Deploy
 
