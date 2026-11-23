@@ -512,6 +512,15 @@ def coerce_provider_overrides(raw: object) -> dict[str, dict[str, str]]:
     return cleaned
 
 
+@dataclass(frozen=True, slots=True)
+class SharedBrainLink:
+    """One linked shared brain: a local Git checkout a workspace reads."""
+
+    name: str  # stable local name, unique per workspace
+    path: str  # absolute path of the Git checkout
+    identity: str  # canonical "host/owner/repo" read from origin, unique per workspace
+
+
 @dataclass(slots=True)
 class WorkspaceConfig:
     """Config for one logical chat workspace."""
@@ -527,6 +536,8 @@ class WorkspaceConfig:
     # Whether Workspace care may act on its own [memory]/[profile] verdicts
     # (off, dismiss, all). Operator-only: never set from an agent surface.
     memory_handover: str = DEFAULT_MEMORY_HANDOVER
+    # Operator-only: the workspace's shared brains (empty = none), in the order the operator gave.
+    shared_brains: list[SharedBrainLink] = field(default_factory=list)
     # Sparse per-kind acceptance (MEMORY_APPROVAL_KINDS -> MEMORY_APPROVAL_MODES).
     # A kind with no key inherits memory_handover. Operator-only, like the above.
     memory_approval: dict[str, str] = field(default_factory=dict)
@@ -546,6 +557,19 @@ def _coerce_workspace_disallowed(raw: object) -> list[str] | None:
     if isinstance(raw, list):
         return [str(item).strip() for item in raw if str(item).strip()]
     return None
+
+
+def _shared_brains_from_rows(raw: object) -> list[SharedBrainLink]:
+    if not isinstance(raw, list):
+        return []
+    links: list[SharedBrainLink] = []
+    for row in raw:
+        if not isinstance(row, dict):
+            continue
+        name, path, identity = row.get("name"), row.get("path"), row.get("identity")
+        if isinstance(name, str) and isinstance(path, str) and isinstance(identity, str):
+            links.append(SharedBrainLink(name=name, path=path, identity=identity))
+    return links
 
 
 def _workspace_from_mapping(data: dict) -> WorkspaceConfig | None:
@@ -586,6 +610,7 @@ def _workspace_from_mapping(data: dict) -> WorkspaceConfig | None:
         gws_profile=str(data.get("gws_profile", "")).strip(),
         color=color,
         memory_handover=memory_handover,
+        shared_brains=_shared_brains_from_rows(data.get("shared_brains")),
         memory_approval=memory_approval,
         provider_overrides=provider_overrides,
     )
@@ -1303,6 +1328,11 @@ class CiaoConfig:
                 row["claude_trim"] = workspace.claude_trim
             if workspace.memory_handover != DEFAULT_MEMORY_HANDOVER:
                 row["memory_handover"] = workspace.memory_handover
+            if workspace.shared_brains:
+                row["shared_brains"] = [
+                    {"name": link.name, "path": link.path, "identity": link.identity}
+                    for link in workspace.shared_brains
+                ]
             if workspace.memory_approval:
                 row["memory_approval"] = dict(workspace.memory_approval)
             if workspace.provider_overrides:

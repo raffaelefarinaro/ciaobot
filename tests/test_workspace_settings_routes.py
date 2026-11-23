@@ -24,6 +24,7 @@ from ciao.web.routes_api import (
     provider_config_settings,
     reorder_workspaces,
     upsert_workspace_setting,
+    workspace_shared_brains,
 )
 from ciao.os_support.private import is_private
 
@@ -242,6 +243,11 @@ def _client(
                 "/api/workspaces/{name}",
                 upsert_workspace_setting,
                 methods=["PATCH"],
+            ),
+            Route(
+                "/api/workspaces/{name}/shared-brains",
+                workspace_shared_brains,
+                methods=["GET"],
             ),
             Route(
                 "/api/workspaces/{name}",
@@ -2549,3 +2555,104 @@ def test_creating_a_workspace_with_a_kind_choice_stores_it_sparse(tmp_path):
     stored = {w["name"]: w for w in json.loads(registry.read_text())}
     assert stored["research"]["memory_approval"] == {"memory": "approve"}
     assert "memory_approval" not in stored["personal"]
+
+
+def _away(tmp_path: Path) -> Path:
+    """A folder outside the test install (its root is tmp_path), where a shared brain may live."""
+    return tmp_path.parent / f"away-{tmp_path.name}"
+
+
+def _checkout(path: Path, origin: str) -> Path:
+    import subprocess
+
+    path.mkdir(parents=True)
+    subprocess.run(["git", "init", "-q", "-b", "main", str(path)], check=True)
+    subprocess.run(["git", "-C", str(path), "remote", "add", "origin", origin], check=True)
+    return path
+
+
+def test_workspace_shared_brains_default_empty_persist_validate_and_unlink(tmp_path, monkeypatch):
+    """The list is operator-set per workspace, whole-list, stored sparsely and validated."""
+    from ciao.web import routes_api  # noqa: F401  (route module loaded by the helper)
+    from ciao import shared_brain
+
+    scheduled: list[str] = []
+    monkeypatch.setattr(shared_brain, "schedule_update", lambda path: scheduled.append(path))
+    client, config, _pcm = _client(tmp_path)
+    registry = tmp_path / ".runtime" / "workspaces.json"
+    acme = _checkout(_away(tmp_path) / "acme", "https://github.com/acme/notes")
+    other = _checkout(_away(tmp_path) / "other", "https://github.com/other/notes")
+
+    assert config.workspace("personal").shared_brains == []
+    listed = client.get("/api/workspaces").json()
+    assert next(w for w in listed["workspaces"] if w["name"] == "personal")["shared_brains"] == []
+
+    saved = client.patch(
+        "/api/workspaces/personal",
+        json={"shared_brains": [{"path": str(acme)}, {"path": str(other), "name": "team"}]},
+    )
+    assert saved.status_code == 200, saved.text
+    rows = next(w for w in json.loads(registry.read_text()) if w["name"] == "personal")["shared_brains"]
+    assert [(r["name"], r["identity"]) for r in rows] == [
+        ("notes", "github.com/acme/notes"),
+        ("team", "github.com/other/notes"),
+    ]
+    assert len(scheduled) == 2
+
+    reloaded = _client(tmp_path)[1]
+    assert [link.name for link in reloaded.workspace("personal").shared_brains] == ["notes", "team"]
+
+    bad = client.patch(
+        "/api/workspaces/personal",
+        json={"shared_brains": [{"path": str(acme)}, {"path": str(tmp_path / "missing")}]},
+    )
+    assert bad.status_code == 400
+    assert [link.name for link in config.workspace("personal").shared_brains] == ["notes", "team"]
+
+    removed_one = client.patch("/api/workspaces/personal", json={"shared_brains": [{"path": str(other)}]})
+    assert removed_one.status_code == 200
+    assert [link.name for link in config.workspace("personal").shared_brains] == ["team"]
+    assert acme.is_dir() and (acme / ".git").is_dir()
+
+    cleared = client.patch("/api/workspaces/personal", json={"shared_brains": []})
+    assert cleared.status_code == 200
+    assert config.workspace("personal").shared_brains == []
+    row = next(w for w in json.loads(registry.read_text()) if w["name"] == "personal")
+    assert "shared_brains" not in row
+
+
+def test_saving_a_new_path_schedules_one_update(tmp_path, monkeypatch):
+    from ciao import shared_brain
+
+    scheduled: list[str] = []
+    monkeypatch.setattr(shared_brain, "schedule_update", lambda path: scheduled.append(path))
+    client, _config, _pcm = _client(tmp_path)
+    acme = _checkout(_away(tmp_path) / "acme", "https://github.com/acme/notes")
+    body = {"shared_brains": [{"path": str(acme)}]}
+
+    assert client.patch("/api/workspaces/personal", json=body).status_code == 200
+    assert scheduled == [str(acme.resolve())]
+    assert client.patch("/api/workspaces/personal", json=body).status_code == 200
+    assert scheduled == [str(acme.resolve())]
+    assert client.patch("/api/workspaces/personal", json={"shared_brains": []}).status_code == 200
+    assert scheduled == [str(acme.resolve())]
+
+
+def test_workspace_shared_brains_route_lists_states_empty_and_404(tmp_path, monkeypatch):
+    from ciao import shared_brain
+
+    monkeypatch.setattr(shared_brain, "schedule_update", lambda path: None)
+    client, _config, _pcm = _client(tmp_path)
+    empty = client.get("/api/workspaces/personal/shared-brains")
+    assert empty.status_code == 200 and empty.json() == {"shared_brains": []}
+    assert client.get("/api/workspaces/nope/shared-brains").status_code == 404
+
+    acme = _checkout(_away(tmp_path) / "acme", "https://github.com/acme/notes")
+    assert client.patch(
+        "/api/workspaces/personal", json={"shared_brains": [{"path": str(acme)}]}
+    ).status_code == 200
+    states = client.get("/api/workspaces/personal/shared-brains").json()["shared_brains"]
+    assert [s["name"] for s in states] == ["notes"]
+    assert states[0]["identity"] == "github.com/acme/notes"
+    assert states[0]["missing"] is False and states[0]["last_update"] is None
+

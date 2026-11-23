@@ -175,6 +175,7 @@ from ciao.web.routes_api import (
     status_endpoint,
     reorder_workspaces,
     upsert_workspace_setting,
+    workspace_shared_brains,
     vault_backlinks,
     vault_delete_note,
     vault_graph,
@@ -415,6 +416,7 @@ def create_app(config, app_settings=None, mcp_service=None) -> Starlette:
         Route("/api/workspaces", upsert_workspace_setting, methods=["POST"]),
         Route("/api/workspaces/reorder", reorder_workspaces, methods=["POST"]),
         Route("/api/workspaces/{name}", upsert_workspace_setting, methods=["PATCH"]),
+        Route("/api/workspaces/{name}/shared-brains", workspace_shared_brains, methods=["GET"]),
         # Literal `archived` paths precede the {name} pattern. DELETE is kept as
         # an alias of archive for existing scripts: it no longer deletes.
         Route("/api/workspaces/archived", list_archived_workspaces, methods=["GET"]),

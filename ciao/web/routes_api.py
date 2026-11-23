@@ -47,6 +47,7 @@ from ciao import host_terminal
 from ciao import proposal_actions
 from ciao import proposal_kinds
 from ciao import proposal_predictions
+from ciao import shared_brain
 from ciao import service_backend
 from ciao import transcripts
 from ciao import backup_service
@@ -337,6 +338,18 @@ def _rename_import_store(request: Request) -> Any:
     return ImportStore(engine_store_path(request.app.state.config))
 
 
+async def workspace_shared_brains(request: Request) -> JSONResponse:
+    """Live state of each shared brain a workspace links (read-only)."""
+    config = request.app.state.config
+    workspace = config.workspace(str(request.path_params.get("name", "")))
+    if workspace is None:
+        return JSONResponse({"error": "unknown workspace"}, status_code=404)
+    states = []
+    for link in list(workspace.shared_brains):
+        states.append(await asyncio.to_thread(shared_brain.brain_state, link))
+    return JSONResponse({"shared_brains": states})
+
+
 async def upsert_workspace_setting(request: Request) -> JSONResponse:
     config = request.app.state.config
     try:
@@ -425,6 +438,11 @@ async def upsert_workspace_setting(request: Request) -> JSONResponse:
             if created:
                 config.workspaces.pop(workspace.name, None)
             raise
+        # A newly linked folder gets its first update now, not at the next loop pass.
+        linked_before = {link.path for link in getattr(existing, "shared_brains", [])}
+        for link in workspace.shared_brains:
+            if link.path not in linked_before:
+                shared_brain.schedule_update(link.path)
         _refresh_project_manager_workspaces(request)
         payload = _workspaces_payload(config)
         if renamed is not None:
