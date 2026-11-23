@@ -1111,10 +1111,10 @@ describe('ProjectSidebar update badge', () => {
   it('marks the settings nav item for a blocking housekeeping action', async () => {
     const housekeeping = useHousekeepingStore()
     housekeeping.actions = [{
-      id: 'gws-login',
-      kind: 'gws_health',
+      id: 'update-login',
+      kind: 'update',
       severity: 1,
-      title: 'Sign in to gws',
+      title: 'Sign in again',
       detail: 'The token needs attention.',
       glyph: '!',
       workspace: '',

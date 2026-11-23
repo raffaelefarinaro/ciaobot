@@ -660,7 +660,6 @@ export type EventsWsMessage =
   | { type: 'workspaces_changed'; from?: string; to?: string }
   | { type: 'server_restarting'; message?: string }
   | { type: 'server_restart_cancelled' }
-  | { type: 'gws_health'; profile: string; token_valid: boolean; token_error: string; title: string; body: string }
   | { type: 'auth_required'; message?: string }
 
 export interface InAppToast {
@@ -669,8 +668,6 @@ export interface InAppToast {
   chat_id: string
   // Result events can arrive before the chat list has been reconciled.
   project_id?: string
-  // Account alerts belong only to workspaces linked to this profile.
-  gwsProfile?: string
   title: string
   body: string
   // 'error' toasts persist until dismissed and show a "Fix" action.

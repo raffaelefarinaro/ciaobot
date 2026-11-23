@@ -48,22 +48,6 @@ describe('workspace scope', () => {
     expect(wrapper.findAll('.toast-title').map(el => el.text())).toEqual(['Work result', 'Global notice'])
     wrapper.unmount()
   })
-
-  it('scopes Google account alerts to workspaces using that account', async () => {
-    const { wrapper, store } = mountToast()
-    store.workspaces = [
-      { name: 'personal', gws_profile: 'personal-account' },
-      { name: 'work', gws_profile: 'work-account' },
-    ] as typeof store.workspaces
-    store.activeWorkspace = 'personal'
-    store.pushToast({ chat_id: '', title: 'Work account', body: 'expired', gwsProfile: 'work-account' })
-    await wrapper.vm.$nextTick()
-    expect(wrapper.find('.toast').exists()).toBe(false)
-    store.activeWorkspace = 'work'
-    await wrapper.vm.$nextTick()
-    expect(wrapper.get('.toast-title').text()).toBe('Work account')
-    wrapper.unmount()
-  })
 })
 
 describe('info toast action', () => {
@@ -87,7 +71,7 @@ describe('error toast Fix action', () => {
   it('routes to the configured settings page instead of seeding a fix chat', async () => {
     const { wrapper, store } = mountToast()
     const fixError = vi.spyOn(store, 'fixError')
-    store.pushErrorToast('Google Workspace login needs attention', 're-auth', {
+    store.pushErrorToast('Settings need attention', 're-auth', {
       fixRoute: '/settings/workspace',
       fixLabel: 'Fix in Settings',
     })
