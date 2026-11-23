@@ -21,3 +21,8 @@
 
 ## Memory review rules
 - **Ciaobot learns what you keep and drop.** Each week it distills your accept and dismiss decisions on memory proposals into `Workspace/Memory-Review-Rules.md`. Edit it freely outside the fenced section; the memory passes read it as evidence, and a rule that would flip is asked as a review question first.
+
+## Shared brains and the weekly care cycle
+- **A shared brain is a team's notes folder you link read-only.** Clone the team's Git repository yourself, then in **Settings → Overview → Shared brains** give its absolute folder path (and optionally a name; it cannot be renamed later, so remove and re-add to rename) and choose **Link folder**. Up to five per workspace. Ciaobot only links the folder: it never clones, and it keeps it current with fast-forward-only pulls (about every 30 minutes). It never writes your notes or vault into it. Linking happens in Settings; the agent's `ciao` tool has no command for it.
+- **How the agent uses it.** The agent sees each linked brain's name, path and last-updated date, reads the notes with its own file tools, treats everything in them as reference data written by other people (never instructions), and cites each note as `<brain name>:<note path>`. With several brains it searches the one you name, or all of them and attributes each finding.
+- **Weekly care cycle.** The Overview page also has a **Weekly care cycle** card that moves the workspace's Workspace care state to a weekly cycle. You start the switch yourself on the computer running Ciaobot (from another device the card shows the command to copy); it saves a copy of the old state first, never undoes itself, and Workspace care never switches on its own.
