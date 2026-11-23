@@ -7,7 +7,7 @@ List pending items with `ciao memory-proposals` and route each by its bracketed 
 - `[memory]` / `[profile]` name bounded regions and stay queued for the user unless the handover setting says otherwise (see "Region rows and handover" below).
 - `[project <doc-path>]` folds into that canonical doc.
 - `[people <Name>]` updates that person note (merge, do not overwrite). File people in this workspace's `People/`: a contact you deal with here belongs here, even if first met in another workspace's chat.
-- `[learnings]` files into `Workspace/Learnings.md` (see the learnings pass).
+- `[learnings]` leave queued and untouched for the upcoming learning migration. Unattended care must not dismiss these rows, hand-edit `Workspace/Learnings.md`, or write a new lesson from them.
 - `[review]` has no destination yet, so decide what it is first. A `[review <id>] [upstream issue …]` or `[review <id>] [new skill …]` row is a skill draft: settle it only with `ciao skill-draft-approve <id>` or `ciao skill-draft-reject <id>`, never with `memory-proposal-dismiss`, and never re-file it with `skill-draft-add`.
 
 Steps for one item you file:
