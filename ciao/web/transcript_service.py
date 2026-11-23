@@ -32,9 +32,12 @@ expanded row.
 from __future__ import annotations
 
 import asyncio
+import base64
 import json
 import logging
+import os
 import re
+import stat
 from collections import Counter
 from pathlib import Path
 from typing import Any
@@ -47,6 +50,263 @@ from ciao.rate_limits import is_rate_limit_telemetry
 from ciao.web.chat_broker import extract_file_touches, normalize_file_touch_paths
 
 logger = logging.getLogger(__name__)
+
+CHAT_SEARCH_MAX_TRANSCRIPT_BYTES = 512 * 1024
+CHAT_SEARCH_MAX_READ_BYTES = 8 * 1024 * 1024
+CHAT_SEARCH_MAX_CANDIDATES = 100
+CHAT_SEARCH_PAGE_SIZE = 30
+
+
+def _read_search_file(path: Path, limit: int) -> bytes | None:
+    """Read one regular file without following any path component symlink."""
+    if not hasattr(os, "O_NOFOLLOW") or not hasattr(os, "O_DIRECTORY"):
+        return None
+    parts = path.absolute().parts
+    descriptors: list[int] = []
+    try:
+        flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+        fd = os.open(parts[0], flags)
+        descriptors.append(fd)
+        for part in parts[1:-1]:
+            fd = os.open(part, flags, dir_fd=fd)
+            descriptors.append(fd)
+        file_fd = os.open(parts[-1], os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=fd)
+        descriptors.append(file_fd)
+        if not stat.S_ISREG(os.fstat(file_fd).st_mode):
+            return None
+        with os.fdopen(os.dup(file_fd), "rb") as stream:
+            return stream.read(limit + 1)
+    except OSError:
+        return None
+    finally:
+        for descriptor in reversed(descriptors):
+            os.close(descriptor)
+
+
+def _casefold_match(text: str, query: str) -> tuple[int, int] | None:
+    """Return source character offsets for a casefolded literal match."""
+    folded_parts: list[str] = []
+    offsets: list[int] = []
+    for index, character in enumerate(text):
+        folded = character.casefold()
+        folded_parts.append(folded)
+        offsets.extend([index] * len(folded))
+    folded_text = "".join(folded_parts)
+    start = folded_text.find(query.casefold())
+    if start < 0:
+        return None
+    end = start + len(query.casefold())
+    return offsets[start], offsets[end - 1] + 1
+
+
+def _search_archive_path(pcm, workspace: str, chat) -> Path | None:
+    """Return an archive only from this workspace/shared root's exact chat folder."""
+    if not chat.archive_path:
+        return None
+    path: Path | None = pcm._locate_archive(chat.chat_id, chat.archive_path)
+    if path is None:
+        return None
+    config = pcm._config
+    for root in (config.chats_root(workspace), config.logs_root / "Chats"):
+        expected_chat_root = (root / chat.chat_id).absolute()
+        try:
+            relative = path.absolute().relative_to(expected_chat_root)
+        except ValueError:
+            continue
+        if relative.parts and all(part not in {".", ".."} for part in relative.parts):
+            return path
+    return None
+
+
+def _workspace_search_root_identity(pcm, workspace: str) -> tuple[object, ...] | None:
+    """Snapshot workspace roots and directory identities for post-read checks."""
+    config = pcm._config
+    try:
+        workspace_config = config.workspace(workspace)
+        roots = (
+            config.workspace_root,
+            config.vault_root,
+            config.workspace_vault_root(workspace),
+            config.agent_root(workspace),
+            config.chats_root(workspace),
+            config.logs_root / "Chats",
+            Path(pcm._transcripts._runtime_root) / "transcripts",
+        )
+    except (OSError, ValueError):
+        return None
+    root_identity: list[tuple[object, ...]] = []
+    for root in dict.fromkeys(Path(path).absolute() for path in roots):
+        try:
+            info = os.stat(root, follow_symlinks=False)
+            identity: tuple[object, ...] = (
+                str(root), info.st_dev, info.st_ino, stat.S_IFMT(info.st_mode)
+            )
+        except OSError:
+            identity = (str(root), None, None, None)
+        root_identity.append(identity)
+    return (
+        config.workspace_root.absolute(),
+        workspace,
+        getattr(workspace_config, "vault_root", None),
+        tuple(root_identity),
+    )
+
+
+def _search_visible_rows(rows: list[dict]) -> list[str]:
+    """Extract the text rows the normal transcript renderer makes visible."""
+    visible: list[str] = []
+    for row in rows:
+        role = row.get("role")
+        content = str(row.get("content") or "")
+        if role == "user":
+            content = _strip_injected_context(content)
+            if cli_envelopes.is_hidden_continuation(content):
+                continue
+        elif role != "assistant" or row.get("is_error"):
+            continue
+        if content:
+            visible.append(content)
+    return visible
+
+
+def _search_handover_text(messages: object, limit: int) -> tuple[str, int, bool]:
+    """Bound handover scanning and apply the same visibility rules as transcripts."""
+    if not isinstance(messages, list):
+        return "", 0, False
+    rows: list[dict] = []
+    consumed = 0
+    for row in messages:
+        if not isinstance(row, dict) or row.get("role") not in {"user", "assistant"} or row.get("is_error"):
+            continue
+        content = row.get("content")
+        if not isinstance(content, str) or not content:
+            continue
+        # Truncate before encoding so even one maliciously large in-memory row
+        # allocates at most a few times the configured byte budget.
+        remaining = limit - consumed
+        encoded = content[:remaining + 1].encode("utf-8")
+        if len(encoded) > remaining:
+            return "", limit, True
+        consumed += len(encoded)
+        rows.append({"role": row["role"], "content": content, "is_error": row.get("is_error")})
+    return "\n".join(_search_visible_rows(rows)), consumed, False
+
+
+def search_workspace_chats(pcm, workspace: str, query: str, cursor: str | None) -> dict:
+    """Search a bounded projection of saved chat text in one registered workspace."""
+    normalized = query.casefold()
+    anchor: tuple[str, str] | None = None
+    if cursor:
+        try:
+            raw_cursor = base64.urlsafe_b64decode(cursor + "=" * (-len(cursor) % 4))
+            payload = json.loads(raw_cursor)
+            if (not isinstance(payload, dict) or payload.get("w") != workspace
+                    or payload.get("q") != normalized or not isinstance(payload.get("t"), str)
+                    or not isinstance(payload.get("id"), str)):
+                raise ValueError
+            anchor = (payload["t"], payload["id"])
+        except (ValueError, TypeError, json.JSONDecodeError):
+            raise ValueError("invalid cursor") from None
+
+    _project_ids, chat_ids = pcm.workspace_scope(workspace)
+    root_identity = _workspace_search_root_identity(pcm, workspace)
+    candidates = []
+    for chat_id in chat_ids:
+        chat = pcm._chats.get(chat_id)
+        project = pcm._projects.get(chat.project_id) if chat else None
+        if (chat is None or project is None or project.workspace != workspace
+                or project.is_system or chat.helper):
+            continue
+        key = (chat.last_activity_at or chat.created_at or "", chat.chat_id)
+        if anchor is not None and key >= anchor:
+            continue
+        candidates.append((key, chat, project))
+    candidates.sort(key=lambda item: item[0], reverse=True)
+    items: list[dict] = []
+    examined = consumed = 0
+    skipped_large = False
+    next_key = anchor
+    for key, chat, project in candidates:
+        if examined >= CHAT_SEARCH_MAX_CANDIDATES or len(items) >= CHAT_SEARCH_PAGE_SIZE:
+            break
+        if consumed >= CHAT_SEARCH_MAX_READ_BYTES:
+            break
+        examined += 1
+        original_identity = (chat.project_id, chat.archived, chat.archive_path, chat.provider)
+        original_project_identity = (project.workspace, project.kind, project.name)
+        title_match = normalized in chat.title.casefold()
+        if chat.archived:
+            path = _search_archive_path(pcm, workspace, chat)
+        else:
+            path = pcm._transcripts.current_path(ChatContext.for_web(chat.chat_id), chat.provider or "claude")
+        allowance = min(CHAT_SEARCH_MAX_TRANSCRIPT_BYTES, CHAT_SEARCH_MAX_READ_BYTES - consumed)
+        text, handover_bytes, handover_too_large = _search_handover_text(
+            getattr(chat, "handover_messages", []), allowance
+        )
+        if handover_too_large:
+            if allowance < CHAT_SEARCH_MAX_TRANSCRIPT_BYTES:
+                examined -= 1
+                break
+            consumed += allowance
+            skipped_large = True
+            text = ""
+        else:
+            consumed += handover_bytes
+        if path is not None:
+            allowance = min(CHAT_SEARCH_MAX_TRANSCRIPT_BYTES, CHAT_SEARCH_MAX_READ_BYTES - consumed)
+            if allowance <= 0:
+                examined -= 1
+                break
+            raw = _read_search_file(path, allowance)
+            if raw is not None:
+                consumed += min(len(raw), allowance)
+                if len(raw) > allowance:
+                    if allowance == CHAT_SEARCH_MAX_TRANSCRIPT_BYTES:
+                        skipped_large = True
+                    else:
+                        examined -= 1
+                        break
+                else:
+                    try:
+                        source = raw.decode("utf-8")
+                        rows = (pcm._parse_transcript_messages(source) if chat.archived else
+                                pcm._transcripts.current_messages_from_data(json.loads(source)))
+                        visible = _search_visible_rows(rows)
+                        text = "\n".join([text, *visible]).strip()
+                    except (UnicodeDecodeError, json.JSONDecodeError, ValueError):
+                        pass
+        if (pcm._chats.get(chat.chat_id) is not chat
+                or pcm._projects.get(chat.project_id) is not project
+                or project.workspace != workspace
+                or project.is_system
+                or chat.helper
+                or (project.workspace, project.kind, project.name) != original_project_identity
+                or (chat.project_id, chat.archived, chat.archive_path, chat.provider) != original_identity
+                or chat.chat_id not in pcm.workspace_scope(workspace)[1]
+                or root_identity is None
+                or _workspace_search_root_identity(pcm, workspace) != root_identity):
+            next_key = key
+            continue
+        match = _casefold_match(text, normalized)
+        if title_match or match is not None:
+            snippet = ""
+            if match is not None:
+                match_start, match_end = match
+                start = max(0, match_start - 65)
+                snippet = " ".join(text[start:match_end + 80].split())[:160]
+            items.append({"chat_id": chat.chat_id, "title": chat.title,
+                          "project_title": project.name, "archived": bool(chat.archived),
+                          "last_activity_at": chat.last_activity_at or chat.created_at,
+                          "snippet": snippet})
+        next_key = key
+    more = next_key is not None and any(item[0] < next_key for item in candidates)
+    next_cursor = None
+    if more and next_key is not None:
+        payload = json.dumps({"w": workspace, "q": normalized, "t": next_key[0],
+                              "id": next_key[1]}, separators=(",", ":")).encode()
+        next_cursor = base64.urlsafe_b64encode(payload).decode().rstrip("=")
+    return {"items": items, "next_cursor": next_cursor,
+            "skipped_large_transcripts": skipped_large}
 
 
 # `build_prompt()` in ciao/providers/base.py appends an image manifest block

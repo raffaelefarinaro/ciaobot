@@ -106,6 +106,7 @@ from ciao.web.routes_api import (
     local_backup_settings,
     local_backup_status,
     list_all_chats,
+    search_chats,
     list_models,
     archive_workspace_setting,
     list_archived_workspaces,
@@ -434,6 +435,7 @@ def create_app(config, app_settings=None, mcp_service=None) -> Starlette:
         Route("/api/desktop-drop", desktop_drop_import, methods=["POST"]),
         # Chats
         Route("/api/chats", list_all_chats, methods=["GET"]),
+        Route("/api/chats/search", search_chats, methods=["POST"]),
         # /read-all must precede /{chat_id} so the literal isn't swallowed.
         Route("/api/chats/read-all", chats_mark_all_read, methods=["POST"]),
         Route("/api/chats/{chat_id}", chat_detail, methods=["GET", "PATCH", "DELETE"]),

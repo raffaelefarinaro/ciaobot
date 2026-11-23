@@ -673,6 +673,11 @@ class TranscriptStore:
     ) -> list[dict[str, Any]]:
         """Render the durable in-progress transcript as PWA message rows."""
         transcript = self._load_current(ctx, provider)
+        return self.current_messages_from_data(transcript)
+
+    @staticmethod
+    def current_messages_from_data(transcript: object) -> list[dict[str, Any]]:
+        """Render already-decoded durable transcript data as PWA message rows."""
         turns = transcript.get("turns") if isinstance(transcript, dict) else None
         if not isinstance(turns, list):
             return []

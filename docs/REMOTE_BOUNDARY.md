@@ -263,6 +263,8 @@ What each CLI still enforces:
 - OpenCode: the session ruleset from `_MODE_PERMISSIONS` (plan asks except read/glob/grep; normal asks everything; auto allows all but shell; bypass allows all) and the user's own `opencode.json` `permission` config.
 - Ciaobot's own surfaces keep their guards: the `ciao` control plane (mode gates, `unattended_forbidden`, workspace confinement of its verbs), `is_credential_adjacent` on `ciao` CLI file flags, `/api/*` session auth, and loopback-only routes.
 
+`POST /api/chats/search` is a signed-session, same-origin, no-store read. Its body scopes a literal query to one registered workspace. The engine filters internal helper chats and system projects before scanning, then reads only registered active-chat transcripts and located archives through no-follow regular-file descriptors. Each request examines at most 100 chats, reads at most 8 MiB total and 512 KiB per transcript, and returns bounded plain-text excerpts; it stores no index or excerpts.
+
 ## Verification
 
 - `PYTHONPATH=$PWD python -m pytest -n auto tests/`
