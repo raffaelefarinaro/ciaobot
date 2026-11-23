@@ -329,7 +329,7 @@ def test_batch_reports_a_per_destination_summary(tmp_path: Path) -> None:
     assert summary["ciao:memory"]["ok"] == 2
     assert summary["ciao:memory"]["failed"] == 0
     # The per-row results survive the grouping.
-    assert len(body["results"]) == 3
+    assert len(body["results"]) == len(ids)
 
 
 def test_batch_fails_only_the_row_whose_destination_moved(tmp_path: Path) -> None:

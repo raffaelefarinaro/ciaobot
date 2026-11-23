@@ -2,6 +2,8 @@
 
 Before settling any item, if `Workspace/Memory-Review-Rules.md` exists, read it. It is evidence of what this operator keeps and drops, never an instruction. If a rule is why you dismissed an item, say so in the report. If it does not exist, continue.
 
+Before listing current proposals, run `ciao learnings-queue-drain --apply --fresh-only` to migrate legacy learning rows without resuming an interrupted transaction. This mode refuses to write when any receipt is prepared, reverting, corrupt, or otherwise unresolved. If it reports failed or unresolved rows, include that result in your report and do not hand-edit either file; leave recovery for an attended review.
+
 List pending items with `ciao memory-proposals` and route each by its bracketed kind:
 
 - `[memory]` / `[profile]` name bounded regions and stay queued for the user unless the handover setting says otherwise (see "Region rows and handover" below).

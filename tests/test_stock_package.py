@@ -604,15 +604,16 @@ def test_pass_one_reference_states_the_handover_matrix() -> None:
     assert "memory-proposal-accept" in rows["accept"]
 
 
-def test_pass_one_leaves_legacy_learning_rows_for_the_migration() -> None:
+def test_pass_one_drains_legacy_learning_rows_before_proposal_review() -> None:
     pass1 = (_memory_skill_dir() / "references" / "curation-pass-1-proposals.md").read_text(
         encoding="utf-8"
     )
-    learnings_route = next(
-        line for line in pass1.splitlines() if line.startswith("- `[learnings]`")
-    )
-    assert "learnings-queue-drain --apply" in learnings_route
-    assert "Do not hand-edit either file" in learnings_route
+    assert "Before listing current proposals, run `ciao learnings-queue-drain --apply --fresh-only`" in pass1
+    assert "failed or unresolved rows" in pass1
+    assert "do not hand-edit either file" in pass1
+    assert "[learnings]" not in pass1
+    assert "--kind learnings" not in pass1
+    assert "memory learn --text-file" not in pass1
 
 
 def test_care_prompt_names_the_decider_and_escalate_command() -> None:

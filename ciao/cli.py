@@ -2758,6 +2758,9 @@ def _learnings_migration_status(summary: dict[str, Any]) -> int:
 def _learnings_queue_drain_command(args: argparse.Namespace) -> int:
     from ciao.learnings_queue_drain import drain, revert
 
+    if args.fresh_only and (not args.apply or args.revert):
+        print("--fresh-only requires --apply and cannot be used with --revert", file=sys.stderr)
+        return 2
     try:
         vault, workspace, runtime = _learnings_workspace(args)
     except ValueError as exc:
@@ -2766,7 +2769,13 @@ def _learnings_queue_drain_command(args: argparse.Namespace) -> int:
     summary = (
         revert(vault, args.revert, workspace=workspace, runtime_root=runtime, apply=args.apply)
         if args.revert
-        else drain(vault, workspace=workspace, runtime_root=runtime, apply=args.apply)
+        else drain(
+            vault,
+            workspace=workspace,
+            runtime_root=runtime,
+            apply=args.apply,
+            fresh_only=args.fresh_only,
+        )
     )
     if args.json:
         print(json.dumps(summary, ensure_ascii=False, indent=2))
@@ -8990,6 +8999,11 @@ def build_parser() -> argparse.ArgumentParser:
     drain_parser.add_argument("--workspace", default=None)
     drain_parser.add_argument("--runtime-root", type=Path, default=None)
     drain_parser.add_argument("--apply", action="store_true")
+    drain_parser.add_argument(
+        "--fresh-only",
+        action="store_true",
+        help="With --apply, refuse recovery and apply only a new batch (for unattended care).",
+    )
     drain_parser.add_argument("--revert", type=Path, default=None)
     drain_parser.add_argument("--json", action="store_true")
     drain_parser.set_defaults(func=_learnings_queue_drain_command)

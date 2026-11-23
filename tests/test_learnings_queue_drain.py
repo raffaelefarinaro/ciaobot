@@ -325,6 +325,79 @@ def test_tampered_receipt_blocks_preview_and_apply_before_any_write(
     assert queue.read_bytes() == queue_before
 
 
+def test_fresh_only_refuses_interrupted_revert_without_any_transaction_writes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    vault, runtime = _vault(tmp_path)
+    queue = vault / "Workspace" / "Memory-Proposals.md"
+    queue.write_text("- [learnings] preserve this lesson\n", encoding="utf-8")
+    applied = drain.drain(vault, workspace="main", runtime_root=runtime, apply=True)
+    receipt_path = Path(applied["receipts"][0])
+
+    original_revert = drain._resume_revert
+    monkeypatch.setattr(
+        drain,
+        "_resume_revert",
+        lambda *args, **kwargs: (_ for _ in ()).throw(OSError("interrupted revert")),
+    )
+    interrupted = drain.revert(
+        vault, receipt_path, workspace="main", runtime_root=runtime, apply=True
+    )
+    assert interrupted["failed"]
+    monkeypatch.setattr(drain, "_resume_revert", original_revert)
+
+    receipt_before = receipt_path.read_bytes()
+    queue_before = queue.read_bytes()
+    learning_path = vault / "Workspace" / "Learnings.md"
+    learning_before = learning_path.read_bytes()
+    history_path = vault / "Workspace" / "Memory-Proposals.dismissed.jsonl"
+    history_before = history_path.read_bytes()
+    assert json.loads(receipt_before)["status"] == "reverting"
+
+    result = drain.drain(
+        vault, workspace="main", runtime_root=runtime, apply=True, fresh_only=True
+    )
+
+    assert result["failed"] == result["unresolved"]
+    assert "transaction is reverting" in result["failed"][0]
+    assert receipt_path.read_bytes() == receipt_before
+    assert queue.read_bytes() == queue_before
+    assert learning_path.read_bytes() == learning_before
+    assert history_path.read_bytes() == history_before
+
+
+def test_fresh_only_refuses_prepared_receipt_instead_of_resuming_it(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    vault, runtime = _vault(tmp_path)
+    queue = vault / "Workspace" / "Memory-Proposals.md"
+    queue.write_text("- [learnings] keep prepared\n", encoding="utf-8")
+    monkeypatch.setattr(
+        drain,
+        "_resume_forward",
+        lambda *args, **kwargs: (_ for _ in ()).throw(OSError("interrupted apply")),
+    )
+    prepared = drain.drain(vault, workspace="main", runtime_root=runtime, apply=True)
+    receipt_path = Path(prepared["receipts"][0])
+    receipt_before = receipt_path.read_bytes()
+    queue_before = queue.read_bytes()
+    learning_path = vault / "Workspace" / "Learnings.md"
+    assert not learning_path.exists()
+    history_path = vault / "Workspace" / "Memory-Proposals.dismissed.jsonl"
+    assert not history_path.exists()
+
+    result = drain.drain(
+        vault, workspace="main", runtime_root=runtime, apply=True, fresh_only=True
+    )
+
+    assert result["failed"] == result["unresolved"]
+    assert "transaction is prepared" in result["failed"][0]
+    assert receipt_path.read_bytes() == receipt_before
+    assert queue.read_bytes() == queue_before
+    assert not learning_path.exists()
+    assert not history_path.exists()
+
+
 @pytest.mark.parametrize("broken", [7, {"row": "bad"}, None])
 def test_malformed_receipt_rows_are_reported_without_crashing(tmp_path: Path, broken: object) -> None:
     vault, runtime = _vault(tmp_path)

@@ -791,8 +791,11 @@ def recover(vault_root: Path, *, workspace: str, runtime_root: Path) -> list[str
             pin.__exit__(None, None, None)
 
 
-def drain(vault_root: Path, *, workspace: str, runtime_root: Path, apply: bool = False) -> dict[str, Any]:
-    """Preview without writes, or apply one receipt-backed batch."""
+def drain(
+    vault_root: Path, *, workspace: str, runtime_root: Path, apply: bool = False,
+    fresh_only: bool = False,
+) -> dict[str, Any]:
+    """Preview, apply one batch, or apply only when no receipt needs recovery."""
     vault = Path(vault_root).resolve()
     if not apply:
         result = inspect(vault, workspace=workspace, runtime_root=runtime_root)
@@ -818,6 +821,29 @@ def drain(vault_root: Path, *, workspace: str, runtime_root: Path, apply: bool =
         pinned = True
         with queue_lock(queue_path):
             with queue_lock(learning_path):
+                if fresh_only:
+                    receipts, receipt_errors = _read_receipt_set(
+                        runtime_root, workspace=workspace, vault=vault
+                    )
+                    unresolved = list(receipt_errors)
+                    for path, existing in receipts:
+                        if (
+                            existing.get("workspace") == workspace
+                            and existing.get("vault_identity") == str(vault)
+                            and existing.get("status") in {"prepared", "reverting"}
+                        ):
+                            unresolved.append(
+                                f"{path.name}: transaction is {existing['status']}; "
+                                "fresh-only mode leaves recovery untouched"
+                            )
+                    if unresolved:
+                        return {
+                            "workspace": workspace,
+                            "rows": [],
+                            "receipts": [],
+                            "failed": unresolved,
+                            "unresolved": unresolved,
+                        }
                 errors, recovered = _recover_locked(
                     vault, workspace=workspace, runtime_root=runtime_root
                 )
