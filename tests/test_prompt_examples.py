@@ -7,6 +7,7 @@ import re
 
 import pytest
 
+from ciao import import_extract
 from ciao.import_extract import (
     EXTRACTION_SYSTEM_PROMPT,
     _admit_row,
@@ -88,9 +89,37 @@ def test_extraction_examples_parse_with_the_production_parser() -> None:
             admitted_all.append((row, proposal))
     assert any(_parse_rows(o) == [] for _, o in examples)
     by_destination = {proposal.target: proposal for _, proposal in admitted_all}
-    assert set(by_destination) == {"project", "people", "profile", "learnings"}
+    assert set(by_destination) == {"project", "people", "profile", "review"}
     assert by_destination["project"].payload == "Projects/Billing/Billing.md"
     assert by_destination["people"].payload == "Dana Reyes"
+    assert by_destination["review"].text.startswith("A CI job")
+
+
+def test_an_imported_learning_is_admitted_to_review_after_legacy_kind_removal(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        import_extract,
+        "DESTINATIONS",
+        tuple(destination for destination in import_extract.DESTINATIONS if destination != "learnings"),
+    )
+    session = _session_from("[msg_0001] user: Re-run the suite after changing the cache.")
+    message = session.messages[0]
+    proposal, reason, _ = _admit_row(
+        {
+            "text": "Re-run the suite after changing the cache.",
+            "destination": "learnings",
+            "payload": "",
+            "source_anchor": "[msg_0001]",
+            "as_of": None,
+        },
+        session,
+        {message.anchor: message},
+        known_own_ids=(),
+        known_chat_ids=(),
+    )
+    assert proposal is not None, reason
+    assert proposal.target == "review"
 
 
 def test_reconcile_examples_parse_with_the_production_parser() -> None:

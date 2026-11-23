@@ -16,8 +16,8 @@ describe('NewChatPicker', () => {
     setActivePinia(createPinia())
     store = useProjectStore()
     store.workspaces = [
-      { name: 'home', vault_root: '', default_provider: 'claude', gws_profile: '' },
-      { name: 'client', vault_root: '', default_provider: 'claude', gws_profile: '' },
+      { name: 'home', vault_root: '', default_provider: 'claude' },
+      { name: 'client', vault_root: '', default_provider: 'claude' },
     ]
     store.projects = [
       { project_id: 'p-home', name: 'General', workspace: 'home', is_auto: true, context: '', created_at: '', order: 0, vault_folder: '' },

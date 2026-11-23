@@ -48,6 +48,7 @@
         <li><a href="#awake">Keeping the computer awake</a></li>
         <li><a href="#browser">A browser for the agent</a></li>
         <li><a href="#usage">How much usage is left</a></li>
+        <li><a href="#google">Google Workspace</a></li>
       </ul>
     </section>
 
@@ -97,6 +98,23 @@
         <p>Shows how much of each AI subscription you have used and how much is left, so you can see a limit coming.</p>
         <p class="note ask">Ask Ciaobot: <code>Install OpenUsage from https://github.com/robinebers/openusage</code></p>
       </div>
+    </section>
+
+    <section id="google">
+      <h2>Google Workspace</h2>
+      <p>Gmail, Calendar, Drive, Docs and Sheets are the services people most often want their agent to reach. Ciaobot doesn't connect to them itself: your agent does, the same way it connects to any other service.</p>
+      <div class="grid">
+        <div class="card">
+          <h3>Claude and Codex: the built-in connectors</h3>
+          <p>Claude and Codex each offer Google connectors you sign in to once. Turn on Gmail, Google Calendar and Google Drive in your claude.ai connector settings (they reach Claude Code too), or add the Gmail, Google Calendar and Google Drive plugins from Codex's plugin catalog. Nothing to install on the computer running Ciaobot.</p>
+        </div>
+        <div class="card">
+          <h3><a href="https://github.com/taylorwilsdon/google_workspace_mcp">Google Workspace MCP</a></h3>
+          <p>An open-source MCP server for Gmail, Calendar, Drive, Docs, Sheets, Slides, Tasks and more, which works with OpenCode and every other agent, and can also send mail. It needs an OAuth client from your own Google Cloud project; its quick-start guide walks through that in a few minutes. Add it once per workspace, with that workspace's Google account, so each workspace sees only its own account.</p>
+          <p class="note ask">Ask Ciaobot: <code>Add the Google Workspace MCP server from https://github.com/taylorwilsdon/google_workspace_mcp to this agent for this workspace, using my Google Cloud OAuth client</code></p>
+        </div>
+      </div>
+      <p>Running Ciaobot on a server? The Google sign-in ends on a page that won't load on your phone, at an address starting with <code>http://localhost</code>. Copy that whole address from the address bar and paste it into the chat: the agent opens it on the server, which finishes the sign-in.</p>
     </section>
 
     <nav class="next-page" aria-label="Next pages">

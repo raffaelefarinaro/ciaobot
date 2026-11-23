@@ -17,8 +17,6 @@ import pytest
 from ciao import adapter_install, host_terminal, setup_status
 from ciao import opencode_cli as opencode
 
-REPO_ROOT = Path(__file__).resolve().parents[1]
-
 
 class _Spawns:
     def __init__(self) -> None:
@@ -77,15 +75,20 @@ def test_actions_map_to_the_commands_ciaobot_already_shows(monkeypatch: pytest.M
     )
     assert host_terminal.action_command("opencode-install") == opencode.opencode_install_command()
     assert host_terminal.action_command("opencode-login") == opencode.OPENCODE_LOGIN_COMMAND
-    assert host_terminal.action_command("gws-install") == host_terminal.GWS_INSTALL_COMMAND
     assert host_terminal.action_command("skills-update") == host_terminal.SKILLS_UPDATE_COMMAND
     assert set(host_terminal.ACTION_IDS) == {
         "claude-install", "claude-login", "opencode-install",
-        "opencode-login", "codex-install", "codex-login", "gws-install", "skills-update",
+        "opencode-login", "codex-install", "codex-login", "skills-update",
         "opencode-update", "claude-update",
     }
     with pytest.raises(KeyError):
         host_terminal.action_command("rm")
+
+
+def test_gws_install_is_not_an_action() -> None:
+    assert "gws-install" not in host_terminal.ACTION_IDS
+    with pytest.raises(KeyError):
+        host_terminal.action_command("gws-install")
 
 
 @pytest.mark.parametrize("provider", ["opencode", "claude"])
@@ -113,19 +116,6 @@ def test_update_actions_resolve_from_current_checks(
     assert not isinstance(excinfo.value, (KeyError, LookupError))
 
 
-def test_frontend_copy_names_the_gws_install_command() -> None:
-    assert host_terminal.GWS_INSTALL_COMMAND == (
-        "npm install -g --allow-scripts=@googleworkspace/cli @googleworkspace/cli"
-    )
-    text = (REPO_ROOT / "web/src/lib/gwsInstall.ts").read_text(encoding="utf-8")
-    assert f"'{host_terminal.GWS_INSTALL_COMMAND}'" in text
-    # The dialog and the chat prompt read the one constant, never a literal.
-    for rel in ("web/src/components/settings/GoogleConnectDialog.vue", "web/src/composables/useGwsAccounts.ts"):
-        text = (REPO_ROOT / rel).read_text(encoding="utf-8")
-        assert "GWS_INSTALL_COMMAND" in text, rel
-        assert "npm install -g @googleworkspace/cli" not in text, rel
-
-
 def test_macos_opens_terminal_at_a_folder(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     spawns = _setup(monkeypatch, "darwin")
     folder = tmp_path / "proj"
@@ -141,7 +131,7 @@ def test_macos_runs_a_command_through_a_self_deleting_script(
     folder = tmp_path / "proj"
     folder.mkdir()
     runtime = tmp_path / "rt"
-    host_terminal.launch(folder, action="gws-install", runtime_dir=runtime)
+    host_terminal.launch(folder, action="skills-update", runtime_dir=runtime)
     argv = spawns.calls[0][0]
     assert argv[:3] == ["/usr/bin/open", "-a", "Terminal"]
     script = Path(argv[3])
@@ -149,7 +139,7 @@ def test_macos_runs_a_command_through_a_self_deleting_script(
     text = script.read_text(encoding="utf-8")
     assert 'rm -f -- "$0"' in text
     assert f"cd -- {shlex.quote(str(folder))}" in text
-    assert host_terminal.GWS_INSTALL_COMMAND + "\n" in text
+    assert host_terminal.SKILLS_UPDATE_COMMAND + "\n" in text
     if os.name == "posix":
         assert script.stat().st_mode & 0o777 == 0o700
 
@@ -188,12 +178,12 @@ def test_linux_terminal_argv(
 ) -> None:
     spawns = _setup(monkeypatch, "linux", found={name})
     assert host_terminal.launch(
-        tmp_path, action="gws-install" if with_command else None, runtime_dir=tmp_path
+        tmp_path, action="skills-update" if with_command else None, runtime_dir=tmp_path
     ) == name
     b, f, q = f"/bin/{name}", str(tmp_path), shlex.quote(str(tmp_path))
     shell = '"${SHELL:-/bin/bash}" -l'
     if with_command:
-        s = f"cd -- {q} && {host_terminal.GWS_INSTALL_COMMAND}; exec {shell}"
+        s = f"cd -- {q} && {host_terminal.SKILLS_UPDATE_COMMAND}; exec {shell}"
     else:
         s = f"cd -- {q} && exec {shell}"
     expected: dict[str, list[str]] = {
@@ -382,7 +372,7 @@ def test_macos_removes_the_script_when_the_spawn_fails(
     monkeypatch.setattr(host_terminal, "_spawn", boom)
     runtime = tmp_path / "rt"
     with pytest.raises(OSError):
-        host_terminal.launch(tmp_path, action="gws-install", runtime_dir=runtime)
+        host_terminal.launch(tmp_path, action="skills-update", runtime_dir=runtime)
     assert list(runtime.glob("terminal-*.command")) == []
 
 
@@ -390,7 +380,7 @@ def test_linux_quotes_a_hostile_folder_name(monkeypatch: pytest.MonkeyPatch, tmp
     spawns = _setup(monkeypatch, "linux", found={"x-terminal-emulator"})
     folder = tmp_path / "a'b $(x) ;c"
     folder.mkdir()
-    host_terminal.launch(folder, action="gws-install", runtime_dir=tmp_path)
+    host_terminal.launch(folder, action="skills-update", runtime_dir=tmp_path)
     script = spawns.calls[0][0][-1]
     assert script.startswith(f"cd -- {shlex.quote(str(folder))} && ")
 

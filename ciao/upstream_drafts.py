@@ -1803,7 +1803,7 @@ def _sync_after_create(
             return
         from ciao.sync_skills import sync_workspace_skills
 
-        sync_workspace_skills(config.agent_root(workspace), workspace_name=workspace)
+        sync_workspace_skills(config.agent_root(workspace))
 
     captured = io.StringIO()
     try:

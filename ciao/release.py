@@ -824,61 +824,6 @@ def _apply_auto_dependency_updates(
     return auto_update_paths(root)
 
 
-def _stock_skills_dir(root: Path) -> Path:
-    return root / "ciao" / "stock" / "skills"
-
-
-def _gws_skills_versions(root: Path) -> tuple[str | None, str | None]:
-    """Return ``(installed_gws_cli_version, pinned_stock_version)``."""
-    try:
-        from ciao.gws_skills import installed_gws_version, pinned_gws_version
-
-        return installed_gws_version(), pinned_gws_version(_stock_skills_dir(root))
-    except Exception as exc:  # noqa: BLE001 - never block a release on this
-        print(f"gws skills version check skipped: {exc}")
-        return None, None
-
-
-def _print_gws_skills_status(installed: str | None, pinned: str | None) -> None:
-    print()
-    if installed is None:
-        print("Stock gws skills: `gws` CLI not found; packaged skills left as-is.")
-        return
-    if pinned and installed != pinned:
-        print(
-            f"Stock gws skills: gws CLI {installed} != pinned {pinned}; "
-            "will regenerate from the CLI on --apply."
-        )
-    else:
-        print(
-            f"Stock gws skills: pinned at {pinned or 'unknown'} (gws CLI {installed}); "
-            "--apply still refreshes any upstream doc drift."
-        )
-
-
-def _refresh_stock_gws_skills(root: Path) -> list[Path]:
-    """Regenerate the packaged ``gws-*`` skills from the CLI.
-
-    Returns the list of ``SKILL.md`` paths that changed so the caller can add
-    them to the release commit. Never raises: a missing/failed ``gws`` CLI just
-    leaves the packaged skills untouched.
-    """
-    try:
-        from ciao.gws_skills import regenerate_stock_gws_skills
-
-        result = regenerate_stock_gws_skills(_stock_skills_dir(root), write=True)
-    except Exception as exc:  # noqa: BLE001 - never block a release on this
-        print(f"Stock gws skills refresh skipped: {exc}")
-        return []
-    if result.missing:
-        print(f"WARN: gws CLI no longer generates: {', '.join(result.missing)}")
-    if result.updated:
-        print(f"Regenerated stock gws skills: {', '.join(result.updated)}")
-    else:
-        print("Stock gws skills already current.")
-    return [_stock_skills_dir(root) / name / "SKILL.md" for name in result.updated]
-
-
 _PROVIDER_LABELS = {"opencode": "OpenCode", "claude": "Claude"}
 _OPENCODE_PACKAGE = "@opencode/cli"
 _CLAUDE_PACKAGE = "@anthropic-ai/claude-code"
@@ -1213,15 +1158,6 @@ def main(argv: list[str] | None = None) -> int:
         ),
     )
     parser.add_argument(
-        "--skip-gws-skills",
-        action="store_true",
-        help=(
-            "Do not regenerate the packaged gws-* stock skills from the "
-            "installed gws CLI."
-        ),
-    )
-
-    parser.add_argument(
         "--untested-provider",
         action="append",
         choices=["opencode"],
@@ -1336,10 +1272,6 @@ def main(argv: list[str] | None = None) -> int:
         dep_updates = _check_dependency_updates(root)
         _print_dependency_updates(dep_updates)
 
-    if not args.skip_gws_skills:
-        gws_installed, gws_pinned = _gws_skills_versions(root)
-        _print_gws_skills_status(gws_installed, gws_pinned)
-
     if not args.skip_provider_versions:
         _print_provider_versions(_probe_opencode(), _probe_claude())
 
@@ -1366,9 +1298,6 @@ def main(argv: list[str] | None = None) -> int:
                 root, dep_updates, reinstall=not args.skip_checks
             ),
         ]
-
-    if not args.skip_gws_skills:
-        touched = [*touched, *_refresh_stock_gws_skills(root)]
 
     provider_record: dict | None = None
     if not args.skip_provider_versions:

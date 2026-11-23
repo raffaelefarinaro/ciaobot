@@ -77,7 +77,6 @@ export interface WorkspaceInfo {
   // Per-kind acceptance, sparse. Read: only the kinds the operator set. In a
   // save, null resets that kind to inherited from memory_handover.
   memory_approval?: MemoryApprovalPatch
-  gws_profile: string
   // PWA accent preset: amber | pink | cyan | emerald | violet | blue | teal | lime | fuchsia. Missing → amber (Ciao orange).
   color?: string
   // Operator-only; sparse: {provider: {field: value}}. Missing = engine default.
@@ -158,7 +157,6 @@ export interface ArchivedWorkspace {
   layout: string
   color: string
   default_provider: string
-  gws_profile: string
   // What a restore applies, after server-side validation. `null` means unset:
   // no MCP server is reachable, and the default tool deny-list applies.
   disallowed_tools?: string[] | null
@@ -368,7 +366,7 @@ export interface ChatPinState {
 }
 
 /** A needs-you kind the engine can raise on a chat. */
-export type ChatActionKind = 'command' | 'gws_auth' | 'permission_mode' | 'device_code' | 'system_setting' | 'restart' | 'limit'
+export type ChatActionKind = 'command' | 'permission_mode' | 'device_code' | 'system_setting' | 'restart' | 'limit'
 
 /** Where a needs-you action is in its life. */
 export type ChatActionState = 'open' | 'working' | 'waiting' | 'done' | 'failed'
@@ -406,6 +404,7 @@ export interface ChatRetryInfo {
   last_error: string
   attempts: number
   interval_seconds: number
+  kind?: string
   mode?: 'continue_recovery' | 'literal'
   schedule_id?: string
 }
@@ -616,7 +615,7 @@ export type WsEvent =
   // Server is draining for restart; client should show RestartNotice, not
   // treat this as a chat failure.
   | { type: 'server_restarting'; message: string }
-  | { type: 'chat_retry'; status: 'pending' | 'stopped' | ''; next_at?: string; last_error?: string; attempts?: number; interval_seconds?: number; mode?: 'continue_recovery' | 'literal'; schedule_id?: string }
+  | { type: 'chat_retry'; status: 'pending' | 'stopped' | ''; next_at?: string; last_error?: string; attempts?: number; interval_seconds?: number; kind?: string; mode?: 'continue_recovery' | 'literal'; schedule_id?: string }
   // Idle heartbeat from the broker / events hub. Clients treat it as a
   // liveness signal only and must not mutate chat UI state.
   | { type: 'keepalive' }
@@ -642,7 +641,7 @@ export type EventsWsMessage =
   | { type: 'chat_archived'; chat_id: string; project_id: string; archive_path?: string }
   | { type: 'chat_postprocess'; chat_id: string; project_id: string; postprocess: ChatPostprocess | null }
   | { type: 'chat_deleted'; chat_id: string; project_id: string; reason?: string }
-  | { type: 'chat_retry'; chat_id: string; project_id: string; status: 'pending' | 'stopped' | ''; next_at?: string; last_error?: string; attempts?: number; interval_seconds?: number; mode?: 'continue_recovery' | 'literal'; schedule_id?: string }
+  | { type: 'chat_retry'; chat_id: string; project_id: string; status: 'pending' | 'stopped' | ''; next_at?: string; last_error?: string; attempts?: number; interval_seconds?: number; kind?: string; mode?: 'continue_recovery' | 'literal'; schedule_id?: string }
   | { type: 'project_created'; project: ProjectInfo }
   | { type: 'project_updated'; project: ProjectInfo }
   | { type: 'project_deleted'; project_id: string }
@@ -660,7 +659,6 @@ export type EventsWsMessage =
   | { type: 'workspaces_changed'; from?: string; to?: string }
   | { type: 'server_restarting'; message?: string }
   | { type: 'server_restart_cancelled' }
-  | { type: 'gws_health'; profile: string; token_valid: boolean; token_error: string; title: string; body: string }
   | { type: 'auth_required'; message?: string }
 
 export interface InAppToast {
@@ -669,8 +667,6 @@ export interface InAppToast {
   chat_id: string
   // Result events can arrive before the chat list has been reconciled.
   project_id?: string
-  // Account alerts belong only to workspaces linked to this profile.
-  gwsProfile?: string
   title: string
   body: string
   // 'error' toasts persist until dismissed and show a "Fix" action.
@@ -974,7 +970,6 @@ export type HostTerminalAction =
   | 'opencode-login'
   | 'codex-install'
   | 'codex-login'
-  | 'gws-install'
   | 'skills-update'
   | 'opencode-update'
   | 'claude-update'
@@ -1059,39 +1054,6 @@ export interface ProviderConnection {
 
 export interface ProviderConfigSettings {
   connections?: Record<string, ProviderConnection>
-}
-
-export interface GwsIntegrationProfile {
-  name: string
-  label: string
-  purpose: string
-  examples: string[]
-  configured: boolean
-  credentials_present: boolean
-  client_secret_present: boolean
-  config_dir: string
-  workspaces: string[]
-  setup_command: string
-  headless_auth_command: string
-  email: string
-  // Cached token-health snapshot from the periodic monitor (issue #145).
-  // `token_valid` is null when no health check has run yet for this profile.
-  token_valid: boolean | null
-  token_error: string
-  needs_relogin: boolean
-  // Whether the OAuth client accepts the random-port loopback redirect used by
-  // the one-click sign-in flow (false for web-type clients, which need an
-  // exact authorized redirect URI and therefore the manual paste flow).
-  loopback_eligible: boolean
-}
-
-export interface GwsIntegrationSettings {
-  installed: boolean
-  binary_path: string
-  cli_available: boolean
-  /** Set when the npm package is present but its binary is not; empty otherwise. */
-  install_problem?: string
-  profiles: GwsIntegrationProfile[]
 }
 
 export interface AdminStatus {

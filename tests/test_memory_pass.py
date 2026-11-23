@@ -1173,6 +1173,7 @@ def test_lesson_routing_prompt_says_how_to_recover_from_a_sibling_refusal() -> N
         routing=memory_pass.DRAFT_COMMAND,
         source="conversation",
         evidence="transcript",
+        sighting="Run `ciao memory learn --text-file FILE --source chat-1` using the exact source chat id; do not use it as a completion id or invent another id.",
     )
     assert "already has drafts" in prompt
     assert '"same_as"' in prompt
@@ -1186,6 +1187,7 @@ def _rendered_chat_lesson_routing() -> str:
         routing=memory_pass.DRAFT_COMMAND,
         source="conversation",
         evidence="transcript",
+        sighting="Run `ciao memory learn --text-file FILE --source chat-1` using the exact source chat id; do not use it as a completion id or invent another id.",
     )
 
 
@@ -1214,10 +1216,13 @@ def test_chat_pass_lesson_routing_names_the_conversation(
         routing=memory_pass.DRAFT_COMMAND,
         source="conversation",
         evidence="transcript",
+        sighting=f"Run `ciao memory learn --text-file FILE --source {source.chat_id}` using the exact source chat id; do not use it as a completion id or invent another id.",
     )
     assert prompt.endswith(expected)
     section = prompt[prompt.index("A lesson is a different kind") :]
     assert "resolution" not in section
+    assert f"ciao memory learn --text-file FILE --source {source.chat_id}" in section
+    assert "--kind learnings" not in prompt
 
 
 def test_task_completion_pass_lesson_routing_names_the_resolution_not_a_conversation(
@@ -1246,6 +1251,53 @@ def test_task_completion_pass_lesson_routing_names_the_resolution_not_a_conversa
     assert "whether or not this resolution happened to load it" in section
     assert "conversation" not in section
     assert "transcript" not in section
+    assert f"ciao memory learn --text-file FILE --source {_COMPLETION_ID}" in section
+    assert "post-write revision" in section
+
+
+def test_agent_relayed_completion_uses_its_real_completion_provenance(
+    tmp_path: Path, passes_enabled: None, streams: _FakeStreams
+) -> None:
+    _register_work_workspace(tmp_path)
+    _write_learnings(tmp_path)
+    manager = _make_manager(tmp_path)
+    manager.enqueue_task_completion(
+        workspace="work", task_path=_TASK_PATH, completion_id=_COMPLETION_ID,
+        resolution=_RESOLUTION, completed_at="2026-10-08T10:00:00+00:00",
+        relayed_by_agent=True,
+    )
+    prompt = str(streams.calls[0]["prompt"])
+    assert "recorded by the agent, relaying" in prompt
+    assert f"ciao memory learn --text-file FILE --source {_COMPLETION_ID}" in prompt
+    assert "invent" in prompt
+
+
+def test_manual_completion_prompt_drops_an_invalid_completion_id(
+    tmp_path: Path, passes_enabled: None, streams: _FakeStreams
+) -> None:
+    _register_work_workspace(tmp_path)
+    _write_learnings(tmp_path)
+    manager = _make_manager(tmp_path)
+    source = _source(manager)
+    archive = _archive_file(tmp_path)
+    pass_id = manager.enqueue_memory_pass(
+        source, manager.get_project(source.project_id), archive, ""
+    )
+    assert pass_id is not None
+    chat = manager.get_chat(pass_id)
+    assert chat is not None
+    invalid_id = "bad`\nid"
+    helper = {
+        **chat.helper,
+        "source_kind": chat_service.TASK_COMPLETION_SOURCE,
+        "completion_id": invalid_id,
+        "source_chat_id": "",
+        "task_path": _TASK_PATH,
+    }
+    section = manager._memory_pass._skill_review_section(chat, helper)
+    assert invalid_id not in section
+    assert "without `--source`" in section
+    assert "bad`" not in section
 
 
 def test_a_lesson_with_an_applicable_but_unused_skill_reaches_the_pass(
@@ -1306,6 +1358,8 @@ def test_the_lesson_path_needs_a_learnings_document_to_route_out_of(
     assert "own skills in use: notes." in prompt
     assert "These are the skills this workspace owns" not in prompt
     assert memory_pass.DRAFT_COMMAND not in prompt
+    assert f"ciao memory learn --text-file FILE --source {source.chat_id}" in prompt
+    assert "This is its first record, so do not file a recurrence draft" in prompt
 
 
 def test_a_workspace_with_no_owned_skills_still_gets_the_two_draft_paths(
@@ -1435,6 +1489,7 @@ def test_pass_reviews_the_owned_skills_the_conversation_used(
     conversation used, is the failure this section must not introduce.
     """
     _register_work_workspace(tmp_path)
+    _write_learnings(tmp_path)
     _write_owned_skill(tmp_path, "notes")
     _write_owned_skill(tmp_path, "unused-skill")
     manager = _make_manager(tmp_path)
@@ -1450,10 +1505,12 @@ def test_pass_reviews_the_owned_skills_the_conversation_used(
     assert "**Categories** section of the vault's `VOCABULARY.md`" in prompt
     assert "marked as automated (unattended) are not the user's" in prompt
     assert "Finish with a short list of what you changed." in prompt
-    # The candidates are the skills the turn used, resolved against the
-    # workspace's own catalog: `unused-skill` is owned but was not used.
+    assert f"ciao memory learn --text-file FILE --source {source.chat_id}" in prompt
+    assert "--kind learnings" not in prompt
+    # Correction candidates include only used skills; lesson routing also lists
+    # the wider inventory because a lesson may apply to an unused owned skill.
     assert "own skills in use: notes." in prompt
-    assert "unused-skill" not in prompt
+    assert "unused-skill" in prompt
     # The rules the section exists to state.
     # Positional, because that is what the parser takes: naming a `--skill`
     # flag the parser has never heard of exits 2 and files nothing.
@@ -2635,6 +2692,8 @@ def test_an_approved_task_pass_extracts_the_procedure_and_is_its_own_pass(
     told so, handed both skill routes, and is not deduped against an ordinary
     pass of the same chat."""
     _register_work_workspace(tmp_path)
+    _write_learnings(tmp_path)
+    _write_owned_skill(tmp_path, "notes")
     manager = _make_manager(tmp_path)
     source = _source(manager)
     archive = _archive_using(tmp_path, "notes")
@@ -2643,11 +2702,21 @@ def test_an_approved_task_pass_extracts_the_procedure_and_is_its_own_pass(
     ordinary = manager.enqueue_memory_pass(source, project, archive, "")
     focused = manager.enqueue_memory_pass(
         source, project, archive, "",
-        {"focus": "approved_task", "task_title": "Ship the runbook", "task_summary": "Wrote docs/run.md."},
+        {
+            "focus": "approved_task",
+            "task_title": "Ship the runbook",
+            "task_summary": "Wrote docs/run.md.",
+            "completion_id": _COMPLETION_ID,
+        },
     )
     again = manager.enqueue_memory_pass(
         source, project, archive, "",
-        {"focus": "approved_task", "task_title": "Ship the runbook", "task_summary": "x"},
+        {
+            "focus": "approved_task",
+            "task_title": "Ship the runbook",
+            "task_summary": "x",
+            "completion_id": _COMPLETION_ID,
+        },
     )
 
     assert ordinary and focused and focused != ordinary
@@ -2659,6 +2728,12 @@ def test_an_approved_task_pass_extracts_the_procedure_and_is_its_own_pass(
     assert "APPROVED as done correctly" in prompt
     assert "Wrote docs/run.md." in prompt
     assert "ciao skill-proposal-add" in prompt and "ciao skill-draft-add" in prompt
+    combined = manager._memory_pass._prompt_for(manager.get_chat(focused))
+    command = f"ciao memory learn --text-file FILE --source {_COMPLETION_ID}"
+    assert combined.count(command) == 2
+    assert f"ciao memory learn --text-file FILE --source {source.chat_id}" not in combined
+    assert "one learning write; run it once" in combined
+    assert "same completion id seen again is not a new occurrence" in combined
     # An ordinary pass carries no such section.
     assert memory_pass.MemoryPassCoordinator._focus_section(manager.get_chat(ordinary).helper) == ""
 
@@ -2869,6 +2944,25 @@ def test_task_completion_and_closure_prompts_have_no_observation_section(
         assert "observation-add" not in manager._memory_pass._prompt_for(chat)
 
 
+def test_project_closure_lesson_write_does_not_invent_a_source_id(
+    tmp_path: Path, passes_enabled: None, streams: _FakeStreams
+) -> None:
+    _register_work_workspace(tmp_path)
+    _write_learnings(tmp_path)
+    _write_owned_skill(tmp_path, "notes")
+    manager = _make_manager(tmp_path)
+    manager.enqueue_project_closure(
+        workspace="work", vault_folder="closed", project_name="Closed",
+        outcome="completed", note="Use the release checklist.",
+        recorded_at="2026-10-11T10:00:00+00:00",
+    )
+    prompt = str(streams.calls[0]["prompt"])
+    section = prompt[prompt.index("A lesson is a different kind") :]
+    assert "ciao memory learn --text-file FILE" in section
+    assert "without `--source`; no source id is recorded for this closure" in section
+    assert "--source chat-" not in section
+
+
 def test_observation_section_is_skipped_without_a_chat_id() -> None:
     assert memory_pass.MemoryPassCoordinator._observation_section({}) == ""
 
@@ -2905,6 +2999,8 @@ def _linked_pass(tmp_path: Path, repo: Path | None) -> tuple[ProjectChatManager,
 
 
 def test_pass_for_linked_project_carries_repo_section(tmp_path: Path) -> None:
+    _register_work_workspace(tmp_path)
+    _write_learnings(tmp_path)
     repo = tmp_path / "app"
     repo.mkdir()
     (repo / "AGENTS.md").write_text("use make test\n", encoding="utf-8")
@@ -2914,6 +3010,8 @@ def test_pass_for_linked_project_carries_repo_section(tmp_path: Path) -> None:
 
     assert memory_pass.REPO_PROPOSAL_COMMAND in prompt
     assert str(repo) in prompt
+    assert f"ciao memory learn --text-file FILE --source {pass_chat.helper['source_chat_id']}" in prompt
+    assert "--kind learnings" not in prompt
     assert "use make test" in prompt
     assert memory_pass.REPO_DOC_FENCE_OPEN in prompt
 
@@ -3073,13 +3171,40 @@ def test_approved_task_section_names_the_completion_id() -> None:
         "completion_id": _COMPLETION_ID,
     }
     section = memory_pass.MemoryPassCoordinator._focus_section(helper)
-    assert f"Cite this completion id as the sighting: {_COMPLETION_ID}." in section
+    assert f"ciao memory learn --text-file FILE --source {_COMPLETION_ID}" in section
+
+
+def test_approved_task_prompt_uses_only_valid_learning_source_ids() -> None:
+    helper = {
+        "focus": "approved_task",
+        "task_title": "Ship it",
+        "task_summary": "Did the work.",
+        "completion_id": "bad`\nid",
+        "source_chat_id": "chat-real",
+    }
+    section = memory_pass.MemoryPassCoordinator._focus_section(helper)
+    assert "--source chat-real" in section
+    assert "bad`" not in section
+
+    oversized = {**helper, "completion_id": "x" * 129, "source_chat_id": "chat-real"}
+    section = memory_pass.MemoryPassCoordinator._focus_section(oversized)
+    assert "--source chat-real" in section
+    assert "x" * 129 not in section
+
+    boundary = {**helper, "completion_id": "", "source_chat_id": "x" * 128}
+    section = memory_pass.MemoryPassCoordinator._focus_section(boundary)
+    assert f"--source {'x' * 128}" in section
+
+    invalid = {**helper, "completion_id": "bad`\nid", "source_chat_id": "bad`\nid"}
+    section = memory_pass.MemoryPassCoordinator._focus_section(invalid)
+    assert "--source bad`" not in section
+    assert "bad`" not in section
 
 
 def test_approved_task_section_without_a_completion_id_cites_the_task_file() -> None:
     helper = {"focus": "approved_task", "task_title": "Ship it", "task_summary": "x"}
     section = memory_pass.MemoryPassCoordinator._focus_section(helper)
-    assert "No completion id is recorded for this task; cite the task file instead." in section
+    assert "Run `ciao memory learn --text-file FILE` without `--source`; no valid source id is available" in section
     assert "none recorded" not in section
 
 
@@ -3093,18 +3218,14 @@ def test_approved_task_section_states_the_three_task_recurrence_rule() -> None:
     }
     section = memory_pass.MemoryPassCoordinator._focus_section(helper)
     assert "second independent" not in section
-    assert (
-        "three distinct completed tasks already recorded in Learnings as sightings "
-        "of one learning, not counting what you are filing now"
-    ) in section
-    assert "When Learnings already holds three, file the new-skill draft" in section
+    assert "Three distinct completed tasks must already be recorded for this learning before the current write" in section
+    assert "post-write canonical-line revision" in section
     assert "`recurrence` block" in section
-    assert "`entry_revision` (the sha256 of that learning's canonical line" in section
-    assert "each new sighting changes it" in section
-    assert "exactly those three completion ids from Learnings" in section
-    assert "file the learning now and the draft in a later pass" in section
+    assert "post-write canonical-line revision as `entry_revision`" in section
+    assert "exactly the three preexisting completion ids" in section
+    assert "record the learning and wait for a later pass" in section
     assert "A direct correction of an owned skill can be proposed from this one occurrence." in section
-    assert "Everything you file waits for the user to accept" in section
+    assert "The learning is recorded directly" in section
     assert "The same completion id seen again is not a new occurrence." in section
 
 
@@ -3148,7 +3269,9 @@ def test_lesson_step_three_requires_origins_and_the_draft_ends_the_turn_in_step_
     assert "Include an `origins` list; it is the only link to the learning" in text
     step6, step7 = text.split("\n7. ")
     assert "the draft is where your turn ends" in step6
-    assert step7 == "Report. Mention each filed proposal or draft in your closing list."
+    assert step7 == "Report. Mention the learning write and each filed proposal or draft."
+    assert "ciao skill-draft-add --input-file FILE" in step6
+    assert "same command" not in step6
 
 
 def test_pass_prompt_requires_a_decider_on_every_queued_item() -> None:

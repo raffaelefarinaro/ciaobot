@@ -107,7 +107,7 @@ export function seedPanelStores(pinia: Pinia, seed: PanelSeed = {}): void {
   }
   for (const key of stale) localStorage.removeItem(key)
   const projects = useProjectStore(pinia)
-  projects.workspaces = [{ name: 'storybook-alpha', vault_root: 'storybook-alpha', default_provider: 'claude', gws_profile: '' }]
+  projects.workspaces = [{ name: 'storybook-alpha', vault_root: 'storybook-alpha', default_provider: 'claude' }]
   projects.projects = [{
     project_id: 'storybook-p1',
     name: 'Synthetic project storybook-p1',

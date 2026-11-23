@@ -18,7 +18,7 @@ from typing import Any
 
 import pytest
 
-from ciao import adapter_install, dag, gws_wrapper, host_terminal, package_version, schedule_command
+from ciao import adapter_install, dag, host_terminal, package_version, schedule_command
 from ciao.os_support.child_env import BUNDLED_ENGINE_SCRUBBED_KEYS, child_env
 from ciao.providers.acp import connection as connection_module
 
@@ -143,19 +143,6 @@ def test_scheduled_command_env_is_scrubbed_in_the_bundle(
     assert os.environ["SSL_CERT_FILE"].endswith("cacert.pem")
 
 
-def test_gws_environment_is_scrubbed_in_the_bundle(
-    monkeypatch: pytest.MonkeyPatch, launcher_env: None, tmp_path: Path
-) -> None:
-    _mode(monkeypatch, "bundled_app")
-    monkeypatch.setattr(gws_wrapper, "login_shell_path", lambda: "/usr/bin")
-    monkeypatch.setattr(gws_wrapper, "profile_config_dir", lambda *_a: tmp_path, raising=False)
-
-    env = gws_wrapper._gws_environment(tmp_path, "default")
-
-    assert not (set(SCRUBBED) & set(env))
-    assert env["CHILD_ENV_PROBE_KEEP"] == "keep-sentinel"
-
-
 
 def test_npm_for_adapter_installs_is_scrubbed_in_the_bundle(
     monkeypatch: pytest.MonkeyPatch, launcher_env: None
@@ -223,30 +210,6 @@ def test_auth_login_child_gets_the_child_env(
 
     _check_env(capture_runs[0], bundled)
     assert dict(os.environ) == before
-
-
-@pytest.mark.parametrize(("mode", "bundled"), [("bundled_app", True), ("editable", False)])
-def test_gws_profile_status_child_gets_the_child_env(
-    monkeypatch: pytest.MonkeyPatch, launcher_env: None, tmp_path: Path, mode: str, bundled: bool
-) -> None:
-    from types import SimpleNamespace
-
-    import ciao.tool_path as tool_path
-    from ciao import gws_auth
-
-    _mode(monkeypatch, mode)
-    monkeypatch.setattr(gws_auth, "gws_bin_override", lambda: "/bin/gws")
-    monkeypatch.setattr(gws_auth, "profile_config_dir", lambda *_a: tmp_path)
-    monkeypatch.setattr(tool_path, "login_shell_path", lambda: "/usr/bin")
-    seen: list[dict[str, Any]] = []
-
-    def runner(argv: Any, **kwargs: Any) -> subprocess.CompletedProcess[str]:
-        seen.append(kwargs)
-        return subprocess.CompletedProcess(argv, 0, "{}", "")
-
-    gws_auth.auth_status(SimpleNamespace(workspace_root=str(tmp_path)), "default", runner=runner)
-
-    _check_env(seen[0], bundled)
 
 
 @pytest.mark.parametrize(("mode", "bundled"), [("bundled_app", True), ("editable", False)])

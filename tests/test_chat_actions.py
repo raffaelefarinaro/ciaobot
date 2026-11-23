@@ -131,7 +131,4 @@ def test_the_reason_set_is_the_whole_run() -> None:
         "invalid_body",
         "invalid_state",
         "not_local",
-        "no_pending_sign_in",
-        "bad_callback_url",
-        "state_mismatch",
     }

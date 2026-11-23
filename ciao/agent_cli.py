@@ -35,8 +35,6 @@ from ciao.execution_modes import is_credential_adjacent
 from ciao.schedules import DEFAULT_TIMEZONE, FREQUENCIES
 
 #: Top-level words ``ciao.cli.main`` hands to this module unconditionally.
-#: ``run`` and ``gws`` are operator commands too (the server launcher and the
-#: gws passthrough), so those route only for the verbs in ``_SHARED_NOUN_VERBS``.
 AGENT_NOUNS: frozenset[str] = frozenset(
     {
         "memory", "vault", "note", "file", "chat", "project", "task", "schedule",
@@ -47,9 +45,6 @@ AGENT_NOUNS: frozenset[str] = frozenset(
 #: (not imported: this module stays import-light).
 STATS_RANGES: tuple[int, ...] = (7, 30, 90, 365)
 _REPO_HELP = "Absolute path (or one relative to this shell) of a local git checkout's top level; \"\" unlinks."
-_SHARED_NOUN_VERBS: dict[str, frozenset[str]] = {
-    "gws": frozenset({"status"}),
-}
 
 _SKILL_PATH = Path(__file__).resolve().parent / "stock" / "skills" / "ciao-cli" / "SKILL.md"
 
@@ -69,7 +64,6 @@ _HELP_TOPICS: dict[str, str] = {
     "webhook": "references/automation-and-status.md",
     "context": "references/automation-and-status.md",
     "stats": "references/automation-and-status.md",
-    "gws": "references/automation-and-status.md",
     "workspace": "references/automation-and-status.md",
     "repo": "references/automation-and-status.md",
     "examples": "reference.md",
@@ -177,19 +171,10 @@ _PATH_FAILURES = (OSError, RuntimeError, ValueError)
 def is_agent_invocation(argv: list[str]) -> bool:
     """True when ``argv`` (without the program name) is an agent command.
 
-    ``ciao run`` is the operator's server launcher and ``ciao gws
-    <profile> <service>`` the gws passthrough; only a bare ``gws status``
-    belongs to the agent surface among the shared nouns.
+    ``ciao run`` is the operator's server launcher and stays outside this surface.
     """
     argv = _strip_json_flag(argv)
-    if not argv:
-        return False
-    if argv[0] in AGENT_NOUNS:
-        return True
-    verbs = _SHARED_NOUN_VERBS.get(argv[0])
-    if verbs is None or len(argv) < 2 or argv[1] not in verbs:
-        return False
-    return argv[0] != "gws" or len(argv) == 2
+    return bool(argv) and argv[0] in AGENT_NOUNS
 
 
 def _emit(envelope: dict[str, Any]) -> int:
@@ -217,14 +202,13 @@ def _verbs(parent: argparse.ArgumentParser, dest: str = "verb") -> argparse._Sub
 
 #: Every flag `chat needs-action` takes, and the param it fills.
 _NEEDS_ACTION_FLAG_PARAMS: tuple[tuple[str, str], ...] = (
-    ("--command-file", "command"), ("--note", "note"), ("--profile", "profile"),
+    ("--command-file", "command"), ("--note", "note"),
     ("--mode", "mode"), ("--tool", "tool"), ("--setting", "setting"),
     ("--reason", "reason"),
 )
 #: The flags each agent-raisable kind accepts. Values are checked by the engine.
 _NEEDS_ACTION_FLAGS: dict[str, frozenset[str]] = {
     "command": frozenset({"--command-file", "--note"}),
-    "gws_auth": frozenset({"--profile"}),
     "permission_mode": frozenset({"--mode", "--note"}),
     "device_code": frozenset({"--tool"}),
     "system_setting": frozenset({"--setting", "--note"}),
@@ -390,7 +374,6 @@ def build_parser() -> argparse.ArgumentParser:
         "and never presses Enter.",
     )
     needs.add_argument("--note", default=None, help="One short line shown on the card.")
-    needs.add_argument("--profile", default=None, help="gws_auth: the gws profile to sign in again.")
     needs.add_argument("--mode", default=None, help="permission_mode: the mode to ask for.")
     needs.add_argument("--tool", default=None, help="device_code: gh or az.")
     needs.add_argument("--setting", default=None, help="system_setting: the macOS privacy setting.")
@@ -565,9 +548,6 @@ def build_parser() -> argparse.ArgumentParser:
         sub = webhook.add_parser(verb, help=verb_help)
         sub.add_argument("trigger_id")
         sub.add_argument("--revision", required=True)
-
-    gws = _verbs(nouns.add_parser("gws", help="Google Workspace connection status."))
-    gws.add_parser("status", help="Report whether the Google Workspace login is valid.")
 
     workspace = _verbs(nouns.add_parser("workspace", help="Configured logical workspaces."))
     workspace.add_parser("list", help="List the configured workspaces.")
@@ -1052,8 +1032,6 @@ def resolve(args: argparse.Namespace) -> tuple[str, dict[str, Any]] | None:
             "trigger_id": args.trigger_id,
             "expected_revision": args.revision,
         }
-    if noun == "gws":
-        return "gws_status", {}
     if noun == "workspace":
         return "workspaces_list", {}
     if noun == "repo":

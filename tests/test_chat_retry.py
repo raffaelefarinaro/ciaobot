@@ -6,6 +6,7 @@ import json
 from pathlib import Path
 import subprocess
 import sys
+from datetime import UTC, datetime, timedelta
 from threading import Barrier, Event
 from types import SimpleNamespace
 
@@ -2878,6 +2879,180 @@ async def test_quota_retry_armed_below_cap(tmp_path: Path) -> None:
     updated = pcm.get_chat(chat.chat_id)
     assert updated is not None
     assert updated.retry_status == "pending"
+    pcm.stop_chat_retry(chat.chat_id)
+
+
+async def test_structured_quota_deadline_arms_existing_retry(tmp_path: Path) -> None:
+    from ciao.models import ImageAttachment
+
+    pcm = _make_manager(tmp_path)
+    project = pcm.create_project("retry", workspace="personal")
+    chat = pcm.create_chat(project.project_id, title="retry-test")
+    reset = datetime.now(UTC) + timedelta(hours=5)
+
+    async def fake_stream_chat(chat_id, prompt, images=None, **_kwargs):
+        yield ResultEvent(
+            type="result", result="Provider quota limit reached.", session_id="session",
+            is_error=True, effective_model=chat.model, usage={}, quota={},
+            quota_limited=True, quota_reset_at=reset,
+        )
+
+    pcm.stream_chat = fake_stream_chat  # type: ignore[assignment]
+    subscription = pcm._events.attach()
+    stream = pcm.start_stream(
+        chat.chat_id, "do the thing",
+        images=[ImageAttachment(path=tmp_path / "shot.png", mime_type="image/png", original_filename="shot.png")],
+    )
+    events = await asyncio.wait_for(_consume(stream), timeout=10.0)
+
+    updated = pcm.get_chat(chat.chat_id)
+    assert updated is not None
+    assert updated.retry_status == "pending"
+    assert updated.retry_kind == "quota"
+    assert updated.retry_prompt == "do the thing"
+    assert updated.retry_image_refs == ["shot.png"]
+    assert datetime.fromisoformat(updated.retry_next_at) == reset
+    assert updated.to_dict()["retry"]["kind"] == "quota"
+    pending = next(e for e in events if e.get("type") == "chat_retry" and e.get("status") == "pending")
+    assert pending["next_at"] == updated.retry_next_at
+    assert pending["kind"] == "quota"
+    global_pending = None
+    iterator = subscription.__aiter__()
+    for _ in range(30):
+        candidate = await asyncio.wait_for(anext(iterator), timeout=2.0)
+        if candidate.get("type") == "chat_retry" and candidate.get("chat_id") == chat.chat_id:
+            global_pending = candidate
+            break
+    assert global_pending is not None
+    assert global_pending["next_at"] == updated.retry_next_at
+    assert global_pending["kind"] == "quota"
+    subscription.close()
+    reloaded = _make_manager(tmp_path).get_chat(chat.chat_id)
+    assert reloaded is not None and reloaded.retry_next_at == updated.retry_next_at
+    pcm.stop_chat_retry(chat.chat_id)
+
+
+async def test_structured_quota_after_progress_continues_without_images(tmp_path: Path) -> None:
+    from ciao.models import AssistantTextDelta, ImageAttachment
+    from ciao.web.project_chats import _RESUME_CONTINUE_PROMPT
+
+    pcm = _make_manager(tmp_path)
+    project = pcm.create_project("retry", workspace="personal")
+    chat = pcm.create_chat(project.project_id, title="retry-test")
+    chat.session_id = "sess-live"
+    pcm._save()
+    reset = datetime.now(UTC) + timedelta(hours=5)
+    calls: list[tuple[str, object]] = []
+
+    async def fake_stream_chat(chat_id, prompt, images=None, **_kwargs):
+        calls.append((prompt, images))
+        if len(calls) == 1:
+            yield AssistantTextDelta(type="assistant", text="partial work")
+            yield ResultEvent(
+                type="result", result="Provider quota limit reached.", session_id="sess-live",
+                is_error=True, effective_model=chat.model, usage={}, quota={},
+                quota_limited=True, quota_reset_at=reset,
+            )
+        else:
+            yield ResultEvent(
+                type="result", result="continued", session_id="sess-live",
+                is_error=False, effective_model=chat.model, usage={}, quota={},
+            )
+
+    pcm.stream_chat = fake_stream_chat  # type: ignore[assignment]
+    images = [ImageAttachment(path=tmp_path / "shot.png", mime_type="image/png", original_filename="shot.png")]
+    await asyncio.wait_for(_consume(pcm.start_stream(chat.chat_id, "do the thing", images=images)), timeout=10.0)
+    pending = pcm.get_chat(chat.chat_id)
+    assert pending is not None
+    assert pending.retry_status == "pending"
+    assert pending.retry_prompt == "continue"
+    assert pending.retry_image_refs == []
+    assert pending.retry_next_at == reset.isoformat()
+
+    retried = pcm.try_chat_retry_now(chat.chat_id)
+    assert retried is not None
+    await asyncio.wait_for(_consume(retried), timeout=10.0)
+    assert calls == [("do the thing", images), (_RESUME_CONTINUE_PROMPT, None)]
+    pcm.stop_chat_retry(chat.chat_id)
+
+
+async def test_stopped_structured_quota_result_does_not_arm_retry(tmp_path: Path) -> None:
+    pcm = _make_manager(tmp_path)
+    project = pcm.create_project("retry", workspace="personal")
+    chat = pcm.create_chat(project.project_id, title="retry-test")
+
+    async def fake_stream_chat(chat_id, prompt, images=None, **_kwargs):
+        yield ResultEvent(
+            type="result", result="Provider quota limit reached.", session_id="session",
+            is_error=True, stopped=True, effective_model=chat.model, usage={}, quota={},
+            quota_limited=True, quota_reset_at=datetime.now(UTC) + timedelta(hours=5),
+        )
+
+    pcm.stream_chat = fake_stream_chat  # type: ignore[assignment]
+    events = await asyncio.wait_for(_consume(pcm.start_stream(chat.chat_id, "do the thing")), timeout=10.0)
+    updated = pcm.get_chat(chat.chat_id)
+    assert updated is not None and updated.retry_status != "pending"
+    assert not any(event.get("type") == "chat_retry" and event.get("status") == "pending" for event in events)
+
+
+@pytest.mark.parametrize("offset", [-timedelta(seconds=1), timedelta(days=31, seconds=1)])
+async def test_untrusted_quota_deadline_uses_hourly_retry(tmp_path: Path, offset: timedelta) -> None:
+    pcm = _make_manager(tmp_path)
+    project = pcm.create_project("retry", workspace="personal")
+    chat = pcm.create_chat(project.project_id, title="retry-test")
+    deadline = datetime.now(UTC) + offset
+
+    async def fake_stream_chat(chat_id, prompt, images=None, **_kwargs):
+        yield ResultEvent(
+            type="result", result="Provider quota limit reached.", session_id="session",
+            is_error=True, effective_model=chat.model, usage={}, quota={},
+            quota_limited=True, quota_reset_at=deadline,
+        )
+
+    pcm.stream_chat = fake_stream_chat  # type: ignore[assignment]
+    await asyncio.wait_for(_consume(pcm.start_stream(chat.chat_id, "do the thing")), timeout=10.0)
+    updated = pcm.get_chat(chat.chat_id)
+    assert updated is not None and updated.retry_kind == "quota"
+    due = datetime.fromisoformat(updated.retry_next_at)
+    assert timedelta(minutes=59) < due - datetime.now(UTC) < timedelta(minutes=61)
+    pcm.stop_chat_retry(chat.chat_id)
+
+
+@pytest.mark.parametrize(("days", "accepted"), [(0, False), (31, True)])
+async def test_quota_deadline_boundaries(
+    tmp_path: Path, monkeypatch, days: int, accepted: bool,
+) -> None:
+    from ciao.web import project_chats
+
+    fixed_now = datetime(2030, 1, 1, tzinfo=UTC)
+
+    class FrozenDateTime(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return fixed_now if tz else fixed_now.replace(tzinfo=None)
+
+    monkeypatch.setattr(project_chats, "datetime", FrozenDateTime)
+    pcm = _make_manager(tmp_path)
+    project = pcm.create_project("retry", workspace="personal")
+    chat = pcm.create_chat(project.project_id, title="retry-test")
+    deadline = fixed_now + timedelta(days=days)
+
+    async def fake_stream_chat(chat_id, prompt, images=None, **_kwargs):
+        yield ResultEvent(
+            type="result", result="Provider quota limit reached.", session_id="session",
+            is_error=True, effective_model=chat.model, usage={}, quota={},
+            quota_limited=True, quota_reset_at=deadline,
+        )
+
+    pcm.stream_chat = fake_stream_chat  # type: ignore[assignment]
+    await asyncio.wait_for(_consume(pcm.start_stream(chat.chat_id, "do the thing")), timeout=10.0)
+    updated = pcm.get_chat(chat.chat_id)
+    assert updated is not None
+    if accepted:
+        assert updated.retry_next_at == deadline.isoformat()
+    else:
+        due = datetime.fromisoformat(updated.retry_next_at)
+        assert timedelta(minutes=59) < due - datetime.now(UTC) < timedelta(minutes=61)
     pcm.stop_chat_retry(chat.chat_id)
 
 

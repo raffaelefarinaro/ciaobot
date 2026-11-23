@@ -47,7 +47,7 @@ function mountCompose(props: { anchor?: { top: number; left: number } | null; mo
 }
 
 function workspace(name: string, color?: string): WorkspaceInfo {
-  return { name, vault_root: '', default_provider: 'claude', gws_profile: '', ...(color ? { color } : {}) }
+  return { name, vault_root: '', default_provider: 'claude', ...(color ? { color } : {}) }
 }
 
 function composeEl(): HTMLElement | null {

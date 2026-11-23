@@ -188,7 +188,6 @@ def test_guidance_cites_the_official_provider_mcp_sources() -> None:
     guidance = _reference("install-and-settings.md")
     assert "https://code.claude.com/docs/en/mcp" in guidance
     assert "https://opencode.ai/v2/docs/mcp-servers" in guidance
-    assert "https://github.com/googleworkspace/cli" in guidance
 
 
 def test_google_workspace_oauth_docs_match_supported_client_type() -> None:

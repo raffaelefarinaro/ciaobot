@@ -24,7 +24,7 @@ from typing import TYPE_CHECKING, Any, cast
 import urllib.error
 import urllib.request
 
-from ciao import dev, gws_wrapper, package_smoke, package_version, proposal_kinds, public_release, release, service_backend
+from ciao import dev, package_smoke, package_version, proposal_kinds, public_release, release, service_backend
 from ciao.learning_records import REQUEST_ID_RE
 from ciao.workspace_discovery import trusted_registry
 from ciao.server_host import (
@@ -1532,9 +1532,6 @@ def setup_workspace(
                     "name": name,
                     "vault_root": stored_vault_root,
                     "default_provider": default_provider,
-                    # No Google account is linked at scaffold time; the user
-                    # chooses in Settings → Overview after setup.
-                    "gws_profile": "",
                 }],
                 indent=2,
             ) + "\n",
@@ -1581,7 +1578,6 @@ def setup_workspace(
             sync_result = sync_workspace_skills(
                 asset_root,
                 refresh_upstream=False,
-                workspace_name=_name or None,
             )
         except Exception as exc:  # noqa: BLE001 — a scaffold step, never fatal
             print(f"skill sync failed for {asset_root}: {exc}", file=sys.stderr)
@@ -1634,10 +1630,6 @@ def setup_workspace(
                     "name": ws_name,
                     "vault_root": stored_root,
                     "default_provider": provider,
-                    # No Google account is linked at scaffold time: which
-                    # accounts exist is the user's choice, made in Settings →
-                    # Workspaces after setup.
-                    "gws_profile": "",
                 }
             )
             _write_if_missing(
@@ -1672,7 +1664,6 @@ def setup_workspace(
                         "name": name,
                         "vault_root": stored_root,
                         "default_provider": provider,
-                        "gws_profile": "",
                     }
                 ],
                 indent=2,
@@ -2750,6 +2741,38 @@ def _learnings_migration_status(summary: dict[str, Any]) -> int:
     if summary.get("failed") or summary.get("diagnostics"):
         return 1
     return 0
+
+
+def _learnings_queue_drain_command(args: argparse.Namespace) -> int:
+    from ciao.learnings_queue_drain import drain, revert
+
+    try:
+        vault, workspace, runtime = _learnings_workspace(args)
+    except ValueError as exc:
+        print(str(exc), file=sys.stderr)
+        return 1
+    summary = (
+        revert(vault, args.revert, workspace=workspace, runtime_root=runtime, apply=args.apply)
+        if args.revert
+        else drain(vault, workspace=workspace, runtime_root=runtime, apply=args.apply)
+    )
+    if args.json:
+        print(json.dumps(summary, ensure_ascii=False, indent=2))
+    else:
+        if args.revert:
+            if summary.get("reverted"):
+                print(f"Reverted the batch of {summary.get('rows', 0)} learning row(s).")
+            elif summary.get("would_revert"):
+                print("This receipt can restore its row; pass --apply to write it.")
+        else:
+            print(f"{len(summary.get('rows', []))} pending learnings row(s).")
+        for error in summary.get("failed", []):
+            print(f"Could not complete drain: {error}", file=sys.stderr)
+        for receipt in summary.get("receipts", []):
+            print(f"Receipt: {receipt}")
+        if summary.get("not_applicable"):
+            print("No pending learnings rows.")
+    return 1 if summary.get("failed") else 0
 
 
 # ── learnings-cleanup ───────────────────────────────────────────────────────
@@ -8928,6 +8951,23 @@ def build_parser() -> argparse.ArgumentParser:
     )
     learnings_parser.set_defaults(func=_learnings_migrate_command)
 
+    drain_parser = subparsers.add_parser(
+        "learnings-queue-drain",
+        help="Move pending [learnings] rows into Learnings.md, reversibly.",
+        description=(
+            "Moves all pending [learnings] rows into Workspace/Learnings.md "
+            "under one write-ahead batch receipt. Dry-run unless --apply is "
+            "passed; --revert RECEIPT --apply restores that whole batch."
+        ),
+    )
+    drain_parser.add_argument("--vault-root", type=Path, default=None)
+    drain_parser.add_argument("--workspace", default=None)
+    drain_parser.add_argument("--runtime-root", type=Path, default=None)
+    drain_parser.add_argument("--apply", action="store_true")
+    drain_parser.add_argument("--revert", type=Path, default=None)
+    drain_parser.add_argument("--json", action="store_true")
+    drain_parser.set_defaults(func=_learnings_queue_drain_command)
+
     cleanup_parser = subparsers.add_parser(
         "learnings-cleanup",
         help="Retire Learnings.md entries whose findings are durably settled.",
@@ -10580,32 +10620,6 @@ def build_parser() -> argparse.ArgumentParser:
     )
     scaffold_parser.set_defaults(func=_scaffold_command)
 
-    # Help-only stub: `main()` intercepts `gws` before build_parser() runs, so
-    # this parser is never parsed against. It exists so `ciao --help` still
-    # lists the subcommand; the interception is what makes `ciao gws --version`
-    # reach the real CLI instead of being eaten by argparse. Do not give it a
-    # `func` — nothing can dispatch through it.
-    subparsers.add_parser(
-        "gws",
-        help="Profile-aware passthrough to the gws CLI (replaces scripts/gws-profile.sh).",
-        add_help=False,
-    )
-
-    gws_helper_parser = subparsers.add_parser(
-        "gws-auth-helper",
-        help="Interactive headless GWS OAuth re-auth (replaces scripts/gws-auth-helper.py).",
-    )
-    gws_helper_parser.add_argument("profile", help="GWS profile (Google account name) to authenticate")
-    gws_helper_parser.add_argument(
-        "--redirect-url",
-        help="Full redirect URL from the browser; skip the interactive prompt.",
-    )
-    gws_helper_parser.add_argument(
-        "--scopes",
-        help="Space-separated OAuth scopes to request instead of the full default set.",
-    )
-    gws_helper_parser.set_defaults(func=_gws_auth_helper_command)
-
     return parser
 
 
@@ -10622,17 +10636,6 @@ def _scaffold_command(args: argparse.Namespace) -> int:
         print(f"Unknown scaffold target type: {target_type}", file=sys.stderr)
         return 1
     return 0
-
-
-def _gws_auth_helper_command(args: argparse.Namespace) -> int:
-    from ciao import gws_auth_helper
-
-    argv = [args.profile]
-    if getattr(args, "redirect_url", None):
-        argv += ["--redirect-url", args.redirect_url]
-    if getattr(args, "scopes", None):
-        argv += ["--scopes", args.scopes]
-    return gws_auth_helper.main_entry(argv)
 
 
 # EX_NOPERM.
@@ -10698,10 +10701,6 @@ def _dispatch(argv_list: list[str]) -> int:
 
             return run_update(rest)
         return update_main(rest)
-    if argv_list[:1] == ["gws"]:
-        # Passthrough: forward everything (including leading gws options such as
-        # `--version`) untouched, keeping argparse out of the way.
-        return gws_wrapper.main(argv_list[1:])
     parser = build_parser()
     args = parser.parse_args(argv_list)
     if not hasattr(args, "func"):

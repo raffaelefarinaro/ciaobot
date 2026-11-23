@@ -418,22 +418,14 @@ def test_the_memory_skill_never_edits_or_settles_unattended() -> None:
 
 
 def test_the_remember_command_states_the_provenance_rule() -> None:
-    """A `/remember` of a lesson has to keep the origin it really has.
-
-    The command is the one surface that produces a learning from a chat nobody
-    archived, so the rule that a request id replaces a manufactured turn has to
-    be where the model reads it, and the negative has to be explicit: a citation
-    to a conversation that never happened is what the whole field exists to stop.
-    """
+    """A direct lesson write carries only provenance ids that actually exist."""
     command = _stock("commands/remember.md")
-    assert "A lesson keeps the origin it really has" in command
-    assert "there is no transcript turn to cite" in command
-    assert "--request <id>" in command
-    assert "cites it as `req:<id>`" in command
-    assert "Never manufacture a turn, a chat id, an archive path or an `excerpt`" in command
-    assert "`--request` is only accepted for `--kind learnings`" in command
-    # And the immediate-write path says the same, so the two agree.
-    assert "carrying the same `--request <id>` the queued copy used" in command
+    lesson_write = command.split("**For a reusable lesson**", 1)[1].split("\n4.", 1)[0]
+    assert "ciao memory learn --text-file <file>" in lesson_write
+    assert "`--source <chat-id>` only when the actual source chat id is available" in lesson_write
+    assert "`--request <id>` only when the actual request id is available" in lesson_write
+    assert "Never invent ids, turns, archive paths or excerpts" in lesson_write
+    assert "dedupes repeated sightings" in lesson_write
 
 
 def test_the_capabilities_catalog_describes_the_memory_backup() -> None:

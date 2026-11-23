@@ -186,19 +186,6 @@ def test_cli_prepare_release_dispatches_module(monkeypatch: pytest.MonkeyPatch) 
     assert called == [["--version", "0.3.0"]]
 
 
-def test_cli_gws_passthrough_forwards_leading_options(monkeypatch: pytest.MonkeyPatch) -> None:
-    """`ciao gws --version` must forward the option untouched, not reject it."""
-    called = []
-
-    monkeypatch.setattr(cli.gws_wrapper, "main", lambda argv: called.append(argv) or 0)
-
-    assert cli.main(["gws", "--version"]) == 0
-    assert called == [["--version"]]
-
-    assert cli.main(["gws", "--profile", "work", "calendar", "list"]) == 0
-    assert called[-1] == ["--profile", "work", "calendar", "list"]
-
-
 def test_cli_dev_dispatches_module(monkeypatch: pytest.MonkeyPatch) -> None:
     called = []
 
@@ -252,18 +239,6 @@ def test_cli_vault_lint_dispatches_command(monkeypatch: pytest.MonkeyPatch) -> N
 
     assert cli.main(["vault-lint", "--vault-root", str(Path("/tmp/vault"))]) == 0
     assert str(called[0].vault_root) == str(Path("/tmp/vault"))
-
-
-def test_cli_gws_auth_helper_dispatches(monkeypatch: pytest.MonkeyPatch) -> None:
-    called = []
-
-    monkeypatch.setattr(
-        cli, "_gws_auth_helper_command", lambda args: called.append(args) or 0
-    )
-
-    assert cli.main(["gws-auth-helper", "work", "--redirect-url", "http://x"]) == 0
-    assert called[0].profile == "work"
-    assert called[0].redirect_url == "http://x"
 
 
 def test_cli_workspace_census_dispatches_command(
@@ -5022,15 +4997,17 @@ def test_cli_root_version_module_entry(tmp_path: Path) -> None:
 
 
 def test_cli_version_flag_after_subcommand_keeps_routing(monkeypatch: pytest.MonkeyPatch) -> None:
-    gws: list[list[str]] = []
     rel: list[list[str]] = []
-    monkeypatch.setattr(cli.gws_wrapper, "main", lambda argv: gws.append(argv) or 0)
     monkeypatch.setattr(cli.release, "main", lambda argv: rel.append(argv) or 0)
 
-    assert cli.main(["gws", "--version"]) == 0
     assert cli.main(["prepare-release", "--version", "1.2.3"]) == 0
-    assert gws == [["--version"]]
     assert rel == [["--version", "1.2.3"]]
+
+
+def test_gws_is_not_a_cli_command() -> None:
+    with pytest.raises(SystemExit) as excinfo:
+        cli.main(["gws", "work", "gmail"])
+    assert excinfo.value.code == 2
 
 
 # ── curation-log-append (#3101, A1) ───────────────────────────────────────

@@ -163,7 +163,7 @@ from ciao import cli_envelopes, repo_link, repo_location, vault_review
 from ciao.agent_surface import AGENT_TOKEN_ENV, AGENT_URL_ENV
 from ciao.config import (
     CLAUDE_MODELS,
-    GWS_DEFAULT_PROFILE,
+    DEFAULT_WORKSPACE_NAME,
     MAX_IMAGE_SIZE_BYTES,
     BridgeConfig,
 )
@@ -334,9 +334,8 @@ _RESUME_CONTINUE_PROMPT = "continue"
 # persistently flaky connection cannot loop forever burning quota. Once hit,
 # the turn is left for the user to continue manually.
 _MAX_CONNECTION_DROP_RETRIES = 6
-# Cap on quota retries: every usage-limit retry is hourly (_RETRY_INTERVAL_SECONDS),
-# so a week of attempts covers a weekly limit, and a limit that never clears
-# still stops.
+# Cap on quota retries: a week of attempts covers weekly limits; confirmed
+# provider resets can schedule an individual attempt sooner or later.
 _MAX_QUOTA_RETRIES = 7 * 24
 # A retry that comes due while the chat is running a turn waits this long and
 # checks again, not a whole retry interval.
@@ -1150,6 +1149,7 @@ class ChatInfo:
                 "last_error": self.retry_last_error,
                 "attempts": self.retry_attempts,
                 "interval_seconds": self.retry_interval_seconds,
+                "kind": self.retry_kind,
                 "mode": "continue_recovery" if isinstance(self.retry_recovery, dict) and self.retry_recovery.get("mode") == "continue" else "literal",
                 "recovery_state": _recovery_state(self.retry_recovery),
                 "schedule_id": self.retry_schedule_id if self.retry_recovery == "" else "",
@@ -6145,23 +6145,6 @@ class ProjectChatManager:
             return {"state": "unavailable"}
         return result
 
-    def _gws_config_dir(self, workspace: str | None) -> tuple[Path, bool]:
-        """The workspace's gws credential directory and whether an account is linked.
-
-        An unlinked workspace gets a per-workspace directory that never holds
-        credentials, so credentials an agent logs in to one unlinked workspace
-        never serve another.
-        """
-        from ciao.gws_auth import profile_config_dir  # noqa: PLC0415
-
-        gws_profile = self._workspace_gws_profile(workspace)
-        config_dir = profile_config_dir(self._config, gws_profile) if gws_profile else None
-        if config_dir is not None:
-            return config_dir, True
-        slug = re.sub(r"[^a-z0-9_-]+", "-", (workspace or GWS_DEFAULT_PROFILE).lower()).strip("-")
-        return Path(self._config.state_path).parent / "gws-unlinked" / (slug or GWS_DEFAULT_PROFILE), False
-
-
     def _revoke_mcp_chat(self, chat_id: str) -> None:
         service = self._mcp_service
         registry = getattr(service, "registry", None)
@@ -6254,7 +6237,6 @@ class ProjectChatManager:
         """
         project = self._projects.get(chat.project_id)
         workspace = project.workspace if project else ""
-        gws_profile = self._workspace_gws_profile(workspace) if workspace else ""
         project_name = project.name if project else ""
         project_context = project.context if project else ""
         canonical_doc = project.vault_doc_path if project else ""
@@ -6283,7 +6265,6 @@ class ProjectChatManager:
         handover = self._format_handover_context(chat)
         capsule = build_context_capsule(
             workspace=workspace,
-            gws_profile=gws_profile,
             project_name=project_name,
             project_context=project_context,
             canonical_doc=canonical_doc,
@@ -6322,7 +6303,6 @@ class ProjectChatManager:
     def _stable_context_marker(self, chat: ChatInfo) -> tuple[str, str]:
         project = self._projects.get(chat.project_id)
         workspace = project.workspace if project else ""
-        gws_profile = self._workspace_gws_profile(workspace) if workspace else ""
         project_name = project.name if project else ""
         project_context = project.context if project else ""
         canonical_doc = project.vault_doc_path if project else ""
@@ -6331,7 +6311,6 @@ class ProjectChatManager:
         return (
             stable_context_digest(
                 workspace=workspace,
-                gws_profile=gws_profile,
                 project_name=project_name,
                 project_context=project_context,
                 canonical_doc=canonical_doc,
@@ -6346,7 +6325,6 @@ class ProjectChatManager:
         """Build a held-aside capsule for a provider resume fallback."""
         project = self._projects.get(chat.project_id)
         workspace = project.workspace if project else ""
-        gws_profile = self._workspace_gws_profile(workspace) if workspace else ""
         project_name = project.name if project else ""
         project_context = project.context if project else ""
         canonical_doc = project.vault_doc_path if project else ""
@@ -6354,7 +6332,6 @@ class ProjectChatManager:
         shared_block, _shared_fp = self._shared_brain_context(chat, project)
         capsule = build_context_capsule(
             workspace=workspace,
-            gws_profile=gws_profile,
             project_name=project_name,
             project_context=project_context,
             canonical_doc=canonical_doc,
@@ -6682,22 +6659,6 @@ class ProjectChatManager:
         self._ensure_defaults()
         self._discover_vault_projects()
 
-    def _workspace_gws_profile(self, workspace: str | None) -> str:
-        """The Google account this workspace uses, or "" when none is linked.
-
-        Resolved through ``gws_auth.workspace_gws_profile`` so skill sync and
-        the chat runtime agree on the same effective profile: only an explicit
-        link counts, and only when it names an account that actually exists (a
-        bootstrap-synthetic or stale link points at a credential directory
-        nobody created, which just produces auth errors mid-task). An unlinked
-        workspace has no Google access.
-        """
-        try:
-            from ciao.gws_auth import workspace_gws_profile
-        except Exception:
-            return ""
-        return workspace_gws_profile(self._config, workspace)
-
     def _model_for_provider(
         self, model: str, provider: str, workspace: str | None = None
     ) -> str:
@@ -6768,11 +6729,10 @@ class ProjectChatManager:
         """The workspace-scoped environment a process run for ``workspace`` gets.
 
         Shared by a chat turn (``_build_extra_env``) and a schedule's shell
-        command, so a ``ciao`` or ``gws`` call behaves the same in both: the
-        engine's CLI leads PATH, the vault is the workspace's own agent vault,
-        and the Google profile is the workspace's. Chat-only keys (the chat id,
-        model, provider, agent tokens) are not part of it, and CIAO_WORKSPACE
-        (the install root) is set by the caller.
+        command, so a ``ciao`` call behaves the same in both: the engine's CLI
+        leads PATH, and the vault is the workspace's own agent vault. Chat-only
+        keys (the chat id, model, provider, agent tokens) are not part of it,
+        and CIAO_WORKSPACE (the install root) is set by the caller.
         """
         env: dict[str, str] = {}
         # The running engine's own executable directory goes at the front of the
@@ -6796,18 +6756,7 @@ class ProjectChatManager:
                 env["CIAO_VAULT_ROOT"] = str(self._config.agent_vault_root(workspace))
         except (AttributeError, ValueError, OSError):
             logger.debug("could not resolve the agent vault root for %r", workspace)
-        gws_profile = self._workspace_gws_profile(workspace)
-        env["GWS_PROFILE"] = gws_profile
-        # Point a bare `gws` at the same credential dir `ciao gws` would use.
-        # Without it, an agent that skips the wrapper reads `~/.config/gws`
-        # (often a stale keyring-encrypted login) and reports Google as
-        # unauthenticated while the workspace account is connected. A workspace
-        # with no linked account must not fall through to that login either (it
-        # is the operator's own account), so it gets a directory that never
-        # holds credentials and a bare `gws` finds none.
-        config_dir, _linked = self._gws_config_dir(workspace)
-        env["GOOGLE_WORKSPACE_CLI_CONFIG_DIR"] = str(config_dir)
-        env["CIAO_ACTIVE_WORKSPACE"] = workspace or GWS_DEFAULT_PROFILE
+        env["CIAO_ACTIVE_WORKSPACE"] = workspace or DEFAULT_WORKSPACE_NAME
         if project:
             env["CIAO_ACTIVE_PROJECT"] = project.project_id
         return env
@@ -7711,6 +7660,7 @@ class ProjectChatManager:
         had_progress: bool,
         reason: str,
         unattended: bool,
+        quota_reset_at: datetime | None = None,
     ) -> bool:
         """Arm a deferred retry for a quota/connection/auth failure.
 
@@ -7780,18 +7730,32 @@ class ProjectChatManager:
             interval = _RETRY_CONNECTION_INTERVAL_SECONDS
         else:
             interval = _RETRY_INTERVAL_SECONDS
+        next_at = None
+        if kind == "quota" and quota_reset_at is not None:
+            now = datetime.now(UTC)
+            if now < quota_reset_at <= now + timedelta(days=31):
+                next_at = quota_reset_at.isoformat()
         armed = self.set_chat_retry(
             chat_id,
             prompt,
             image_refs=image_refs,
             reason=reason,
+            next_at=next_at,
             interval_seconds=interval,
             unattended=unattended,
             _owner=stream,
         )
         if armed is None:
             return False
-        stream.publish({"type": "chat_retry", "status": "pending"})
+        stream.publish({
+            "type": "chat_retry", "status": armed.retry_status,
+            "next_at": armed.retry_next_at, "last_error": armed.retry_last_error,
+            "attempts": armed.retry_attempts,
+            "interval_seconds": armed.retry_interval_seconds,
+            "kind": armed.retry_kind,
+            "mode": "continue_recovery" if isinstance(armed.retry_recovery, dict) and armed.retry_recovery.get("mode") == "continue" else "literal",
+            "schedule_id": armed.retry_schedule_id if armed.retry_recovery == "" else "",
+        })
         self._park_pending_for_retry(chat_id, stream)
         return True
 
@@ -8431,6 +8395,7 @@ class ProjectChatManager:
             "last_error": chat.retry_last_error,
             "attempts": chat.retry_attempts,
             "interval_seconds": chat.retry_interval_seconds,
+            "kind": chat.retry_kind,
             "mode": "continue_recovery" if isinstance(chat.retry_recovery, dict) and chat.retry_recovery.get("mode") == "continue" else "literal",
             "recovery_state": _recovery_state(chat.retry_recovery),
             "schedule_id": chat.retry_schedule_id if chat.retry_recovery == "" else "",
@@ -8584,7 +8549,7 @@ class ProjectChatManager:
                         return
                     continue
                 # The retry stream now owns success/failure state. A failed
-                # retry re-arms `retry_next_at` (a bucket reset, or 30s after a
+                # retry re-arms `retry_next_at` (a provider reset, or 30s after a
                 # dropped connection), so wait for the stream to end and re-read
                 # the chat at the top of the loop. Sleeping for the interval
                 # would ignore the re-armed time (a five-hour bucket reset).

@@ -34,14 +34,6 @@ vi.mock('../../lib/api', () => {
       })
     }
     if (path.startsWith('/api/update-tasks')) return Promise.resolve({ tasks: [] })
-    if (path === '/api/integrations/gws') {
-      return Promise.resolve({
-        installed: false,
-        binary_path: '',
-        cli_available: false,
-        profiles: [],
-      })
-    }
     // The Overview's Chats and models card reads the engine defaults.
     if (path === '/api/settings/routines') return Promise.resolve({ model_options: { anthropic: [] } })
     return Promise.resolve({})
@@ -101,7 +93,6 @@ function workspaces(entryExtra: Record<string, unknown> = {}, withCatalog = true
     name: 'personal',
     vault_root: 'personal/memory-vault',
     default_provider: 'claude',
-    gws_profile: '',
     color: 'pink',
     ...entryExtra,
   }

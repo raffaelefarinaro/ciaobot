@@ -26,11 +26,6 @@ from ciao.tool_path import terminal_path
 
 PLATFORM_MACOS, PLATFORM_LINUX, PLATFORM_OTHER = ("macos", "linux", "other")
 
-# npm 12 blocks install scripts by default, and the package's postinstall is what
-# downloads the `gws` binary, so a bare install "succeeds" with no binary. npm 11.x
-# also accepts the flag (documented under `allow-scripts`); an npm that predates it
-# only warns about an unknown config key and runs the scripts anyway.
-GWS_INSTALL_COMMAND = "npm install -g --allow-scripts=@googleworkspace/cli @googleworkspace/cli"
 SKILLS_UPDATE_COMMAND = "npx skills update -g -y"
 
 
@@ -49,7 +44,6 @@ ACTION_IDS: tuple[str, ...] = (
     "opencode-login",
     "codex-install",
     "codex-login",
-    "gws-install",
     "skills-update",
     "opencode-update",
     "claude-update",
@@ -235,8 +229,6 @@ def action_command(action: str) -> str:
         except FileNotFoundError as exc:
             raise NotInstalled(str(exc)) from exc
         return shlex.join(argv)
-    if action == "gws-install":
-        return GWS_INSTALL_COMMAND
     return SKILLS_UPDATE_COMMAND
 
 

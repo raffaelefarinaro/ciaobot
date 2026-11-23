@@ -40,7 +40,7 @@ export function route(
 export function seedWorkspace(pinia: Pinia): void {
   const store = useProjectStore(pinia)
   store.workspaces = [
-    { name: WORKSPACE, vault_root: '/storybook/alpha', default_provider: 'claude', gws_profile: '' },
+    { name: WORKSPACE, vault_root: '/storybook/alpha', default_provider: 'claude' },
   ]
   store.activeWorkspace = WORKSPACE
 }

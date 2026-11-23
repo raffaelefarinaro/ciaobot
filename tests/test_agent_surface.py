@@ -289,11 +289,12 @@ def test_rare_admin_operations_dispatch_on_cli_only(tmp_path: Path) -> None:
     """S2 removed the rare-admin group from the MCP catalog but the dispatcher
     must still run them as `ciao <noun> <verb>` commands."""
     removed = {
-        "context_get", "gws_status", "projects_list", "project_get",
+        "context_get", "projects_list", "project_get",
         "project", "project_action", "workspaces_list",
     }
     service, _ = _service(tmp_path)
     assert removed <= set(service.operation_table)
+    assert "gws_status" not in service.operation_table
 
 
 def test_chat_operations_dispatch_on_cli_only(tmp_path: Path) -> None:
@@ -934,7 +935,6 @@ def test_plan_mode_cannot_delete_task(tmp_path: Path) -> None:
             ["task", "link-chat", "a" * 32, "--revision", "r", "--chat", "c", "--remove"],
             ("task_link_chat", {"task_id": "a" * 32, "expected_revision": "r", "chat_id": "c", "remove": True}),
         ),
-        (["gws", "status"], ("gws_status", {})),
         (["workspace", "list"], ("workspaces_list", {})),
         (["repo", "candidates"], ("repo_candidates", {})),
     ],
@@ -1066,13 +1066,11 @@ def test_every_agent_command_is_in_the_telemetry_table() -> None:
     assert unlisted == [], f"agent commands missing from ciao-cli/commands.json: {unlisted}"
 
 
-def test_shared_nouns_route_only_their_agent_verbs() -> None:
-    assert agent_cli.is_agent_invocation(["gws", "status"])
-    # `ciao run` is the operator's server launcher; `ciao gws <profile> …` the passthrough.
+def test_only_agent_nouns_route_to_the_agent_surface() -> None:
+    assert not agent_cli.is_agent_invocation(["gws", "status"])
     assert not agent_cli.is_agent_invocation(["run"])
     assert not agent_cli.is_agent_invocation(["run", "--port", "8443"])
-    assert not agent_cli.is_agent_invocation(["gws", "status", "gmail"])
-    assert not agent_cli.is_agent_invocation(["gws", "work", "gmail", "list"])
+    assert agent_cli.is_agent_invocation(["workspace", "list"])
     assert not agent_cli.is_agent_invocation([])
 
 
@@ -1175,7 +1173,6 @@ _CLI_TOPIC_REFERENCES = {
     "webhook": "references/automation-and-status.md",
     "context": "references/automation-and-status.md",
     "stats": "references/automation-and-status.md",
-    "gws": "references/automation-and-status.md",
     "workspace": "references/automation-and-status.md",
     "repo": "references/automation-and-status.md",
     "examples": "reference.md",
@@ -1468,7 +1465,7 @@ def test_ciao_cli_skill_is_not_synced_into_workspaces_yet(tmp_path: Path) -> Non
     from ciao.sync_skills import TRANSITIONAL_SKILLS, _install_stock_skills
 
     assert "ciao-cli" in TRANSITIONAL_SKILLS
-    _install_stock_skills(tmp_path, gws_profile="")
+    _install_stock_skills(tmp_path)
     installed = {p.name for p in (tmp_path / ".claude" / "skills").iterdir()}
     assert "ciao-cli" not in installed
     assert "ciao-capabilities" in installed

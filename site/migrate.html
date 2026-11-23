@@ -1,0 +1,142 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <script>try{var t=localStorage.getItem("ciao-site-theme");if(t)document.documentElement.dataset.theme=t}catch(e){}</script>
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Moving from 1.x to 2.0 · Ciaobot</title>
+  <meta name="description" content="How to move a Ciaobot 1.x install to 2.0, what happens to your workspace, and what changed.">
+  <link rel="canonical" href="https://www.raffaelefarinaro.com/ciaobot/migrate.html">
+  <meta property="og:type" content="website">
+  <meta property="og:site_name" content="Ciaobot">
+  <meta property="og:title" content="Moving from 1.x to 2.0 · Ciaobot">
+  <meta property="og:description" content="How to move a Ciaobot 1.x install to 2.0, what happens to your workspace, and what changed.">
+  <meta property="og:url" content="https://www.raffaelefarinaro.com/ciaobot/migrate.html">
+  <meta property="og:image" content="https://www.raffaelefarinaro.com/ciaobot/assets/img/og.png">
+  <meta property="og:image:type" content="image/png">
+  <meta property="og:image:width" content="1200">
+  <meta property="og:image:height" content="630">
+  <meta property="og:image:alt" content="Ciaobot — a personal assistant that remembers.">
+  <meta name="twitter:card" content="summary_large_image">
+  <meta name="twitter:title" content="Moving from 1.x to 2.0 · Ciaobot">
+  <meta name="twitter:description" content="How to move a Ciaobot 1.x install to 2.0, what happens to your workspace, and what changed.">
+  <meta name="twitter:image" content="https://www.raffaelefarinaro.com/ciaobot/assets/img/og.png">
+  <link rel="icon" href="assets/img/favicon.png">
+  <link rel="stylesheet" href="assets/style.css">
+</head>
+<body>
+  <header class="site-header">
+    <div class="inner">
+      <a class="brand" href="./" aria-label="Ciaobot home"><svg class="brand-c" viewBox="260 250 720 720" aria-hidden="true" focusable="false" data-brand-ring><g data-ring-spin><path d="M718.7 334.7A295 295 0 1 0 768.5 876.5" fill="none" stroke="currentColor" stroke-width="110" stroke-linecap="round"/><g fill="var(--primary)"><path data-ring-a fill="none" stroke="var(--primary)" stroke-width="110" stroke-linecap="round"/><path data-ring-b fill="none" stroke="var(--primary)" stroke-width="110" stroke-linecap="round"/><circle data-dot-a cx="870" cy="346" r="91"/><circle data-dot-b cx="863" cy="800" r="56"/></g></g></svg><img class="wm-on-dark" src="assets/img/ciaobot-iaobot-light.png" alt="" width="90" height="26" loading="lazy"><img class="wm-on-light" src="assets/img/ciaobot-iaobot-ink.png" alt="" width="90" height="26" loading="lazy"></a>
+      <nav class="site-nav" id="site-nav" aria-label="Main">
+        <a href="memory.html">Memory</a>
+        <a href="features.html">Features</a>
+        <a href="https://github.com/raffaelefarinaro/ciaobot">GitHub</a>
+      </nav>
+      <button class="theme-toggle" type="button" data-theme-toggle aria-label="Switch colour theme"><svg width="20" height="20" viewBox="0 0 20 20" aria-hidden="true" focusable="false"><circle cx="10" cy="10" r="7" fill="none" stroke="currentColor" stroke-width="1.6"/><path d="M10 3a7 7 0 0 1 0 14z" fill="currentColor"/></svg></button>
+      <button class="menu-toggle" type="button" data-menu-toggle aria-controls="site-nav" aria-expanded="false" aria-label="Open menu"><svg width="20" height="20" viewBox="0 0 20 20" aria-hidden="true" focusable="false"><path d="M3 5.5h14M3 10h14M3 14.5h14" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/></svg></button>
+    </div>
+  </header>
+
+  <main class="narrow">
+    <section>
+      <h1>Moving from 1.x to 2.0</h1>
+      <p class="lead">Ciaobot 2.0 is one app on the Mac and a one-line install on Linux, and it talks to Claude, Codex and OpenCode the same way. Your workspace folder, notes, vault and chats come along unchanged. This page covers how to get there and what is different once you have.</p>
+      <ul class="toc" aria-label="On this page">
+        <li><a href="#mac">On a Mac</a></li>
+        <li><a href="#linux">On Linux</a></li>
+        <li><a href="#windows">On Windows</a></li>
+        <li><a href="#agents">Your agents</a></li>
+        <li><a href="#removed">What was removed, and what replaces it</a></li>
+        <li><a href="#changed">What behaves differently</a></li>
+        <li><a href="#new">What's new</a></li>
+      </ul>
+    </section>
+
+    <section id="mac">
+      <h2>On a Mac</h2>
+      <p>2.0 runs on Apple silicon Macs with macOS 13 or newer. An Intel Mac can still use Ciaobot by connecting to a server running elsewhere.</p>
+      <ol>
+        <li><strong>Update the engine once more from Settings.</strong> A 1.x engine finds 2.0.0 in Settings → Update, as usual. This works while 2.0.0 is the latest release; an install that is still on 1.x after 2.0.1 ships has to be reinstalled by hand.</li>
+        <li><strong>Download the Ciaobot app.</strong> After the update, Home shows where to get it, or take the DMG from the <a href="https://github.com/raffaelefarinaro/ciaobot/releases/latest">latest release</a>. From then on the app updates itself.</li>
+        <li><strong>Open it.</strong> On first launch the app finds your 1.x engine and offers to move it. If chats are still running it asks first, and you can choose <em>Later</em>. It then stops the old background service, starts its own engine on the same workspace and port, and moves the old engine's files to the Trash. If anything fails it puts the old engine back.</li>
+      </ol>
+      <p><strong>Kept:</strong> your workspace folder with its <code>.env</code>, notes, vault and chats, every other workspace, <code>~/.ciao</code>, and any source checkout. <strong>Moved to the Trash:</strong> the old engine's tool environment and install record, its <code>uv</code> copy and the <code>~/.local/bin/ciao</code> command (or the old <code>Ciaobot Server.app</code>).</p>
+      <p>Two things work differently after the move. There is no <code>ciao</code> command in the terminal any more. And the engine runs while the app runs: turn on <strong>Start at Login</strong>, and on a Mac mini with nobody at the keyboard also turn on automatic login, or nothing answers after a restart.</p>
+      <p>Using the older Ciaobot for Mac app (0.5)? It is offered 2.0.0 once through its own updates, then keeps itself up to date.</p>
+    </section>
+
+    <section id="linux">
+      <h2>On Linux</h2>
+      <p>A source install keeps working: update it with git as before. For a managed install, run the one-line installer as the account that owns Ciaobot:</p>
+      <pre><code>curl -fsSL https://github.com/raffaelefarinaro/ciaobot/releases/latest/download/install.sh | sh</code></pre>
+      <p>It installs the engine with uv and a systemd service, and <code>ciao update</code> runs it again to update. To move a source install's service over to it, see <a href="https://github.com/raffaelefarinaro/ciaobot/blob/main/docs/LINUX.md">Linux hosting</a>.</p>
+    </section>
+
+    <section id="windows">
+      <h2>On Windows</h2>
+      <p>2.0 does not run on Windows. Windows installs stay on 1.10 and do not update. To keep going, move your workspace folder to a Mac or a Linux machine and install 2.0 there; you can still open Ciaobot from a browser on the Windows computer.</p>
+    </section>
+
+    <section id="agents">
+      <h2>Your agents</h2>
+      <p>Ciaobot now talks to every agent through the Agent Client Protocol, using the CLI already installed on the computer. Nothing is bundled.</p>
+      <ul>
+        <li><strong>Claude:</strong> Claude Code, signed in as usual. Ciaobot installs its small adapter on first use, which needs Node 22 or newer.</li>
+        <li><strong>Codex:</strong> new in 2.0. Install the Codex CLI and run <code>codex login</code>.</li>
+        <li><strong>OpenCode:</strong> needs 2.3.2 or newer. Older versions are refused with a message that says so.</li>
+      </ul>
+      <p>One gap to know about: when the agent wants to ask you a multiple-choice question, 2.0 does not show the question card; the agent asks in plain text instead.</p>
+    </section>
+
+    <section id="removed">
+      <h2>What was removed, and what replaces it</h2>
+      <div class="table-wrap">
+        <table>
+          <thead><tr><th>In 1.x</th><th>In 2.0</th></tr></thead>
+          <tbody>
+            <tr><td>Google Workspace built in (the Google account card, <code>ciao gws</code> and the Google skills)</td><td>Your agent connects to Google like any other service. <a href="companions.html#google">How to add it</a>. Existing <code>secrets/gws*</code> folders are left alone; the OAuth client in them can be reused.</td></tr>
+            <tr><td>Steering a reply while it runs</td><td>Messages always queue and run as the next turn.</td></tr>
+            <tr><td>The background panel (running list, Move to background, Stop for a shell, subagent pages)</td><td>Subagents show inside the chat as a nested card, and a finished background shell posts a notice in the chat.</td></tr>
+            <tr><td>"File access: Workspace only" and blocking <code>.env</code> and <code>secrets/</code></td><td>The agent has your account's file access, within its permission mode. Limit it in the agent's own settings (Claude Code <code>permissions</code>, OpenCode <code>permission</code>).</td></tr>
+            <tr><td>MCP sign-in cards and on/off toggles</td><td>Settings → MCP servers opens <code>claude mcp</code> or <code>opencode mcp</code> in the terminal.</td></tr>
+            <tr><td>Settings → Update, Repair and the native installer</td><td>The Mac app updates itself; on Linux, <code>ciao update</code>.</td></tr>
+            <tr><td>The Code mode switch</td><td>A chat works in code mode when its project has a linked repository.</td></tr>
+            <tr><td>A permission mode per schedule</td><td>Scheduled runs use the agent's default mode.</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </section>
+
+    <section id="changed">
+      <h2>What behaves differently</h2>
+      <ul>
+        <li>Restarts and updates no longer wait for background work, and work cut off by an update restart is not picked up again.</li>
+        <li>A schedule is judged on its turn's own reply; background agents that report later may arrive after the chat is archived.</li>
+        <li>A turn stopped by a usage limit is retried automatically every hour, for up to a week.</li>
+        <li>The Anthropic section of Settings is now called Claude, and has a card for trimming what Claude Code loads into every chat.</li>
+        <li>Ciaobot is MIT-licensed from 2.0.</li>
+      </ul>
+    </section>
+
+    <section id="new">
+      <h2>What's new</h2>
+      <p>Besides the Mac app and the Linux installer: Codex as a third agent, loops that a chat owns and you can see under Automations, shared brains, a Usage page, a folder browser, a terminal in the browser, and a weekly Workspace care summary. <a href="features.html">All features →</a></p>
+    </section>
+
+    <nav class="next-page" aria-label="Next pages">
+      <a class="btn" href="./">← Home</a>
+      <a class="btn btn-primary" href="features.html">Features →</a>
+    </nav>
+  </main>
+
+  <footer class="site-footer">
+    <div class="inner">
+      <span>Ciaobot is open source under the MIT License. No telemetry, and this site runs no analytics.</span>
+      <span>Last updated 23 November 2026</span>
+      <span><a href="https://github.com/raffaelefarinaro/ciaobot">GitHub</a> · <a href="https://github.com/raffaelefarinaro/ciaobot/releases">Release notes</a> · <a href="https://github.com/raffaelefarinaro/ciaobot/issues">Report an issue</a></span>
+    </div>
+  </footer>
+  <script src="assets/site.js" defer></script>
+</body>
+</html>

@@ -30,15 +30,12 @@ async function mountSettings(routines?: unknown, tab = '') {
     if (url === '/api/workspaces') {
       return {
         workspaces: ['personal', 'work'].map(name => ({
-          name, vault_root: name, default_provider: 'claude', gws_profile: '', color: 'pink',
+          name, vault_root: name, default_provider: 'claude', color: 'pink',
         })),
         active: 'work',
         primary: 'personal',
         provider_options: [{ value: 'claude', label: 'Claude' }],
       } as never
-    }
-    if (url === '/api/integrations/gws') {
-      return { installed: false, binary_path: '', cli_available: false, profiles: [] } as never
     }
     if (url.startsWith('/api/proposals/handover')) {
       return {
@@ -110,7 +107,6 @@ it('lists Overview cards on the rail', async () => {
     expect(labels).toEqual([
       'Workspace',
       'Chats and models',
-      'Google account',
       'Memory handover',
       'Shared brains',
       'Weekly care cycle',

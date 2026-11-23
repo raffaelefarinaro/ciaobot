@@ -2016,6 +2016,7 @@ def _decided_with(workspace_vault_root: Path, text: str, key: str) -> bool:
     if not out_path.exists():
         return False
     wanted = dedupe_key(text)
+    reversed_operations = _reversed_operation_ids(out_path)
     for suffix in (_DISMISSED_LOG_SUFFIX, *_DISMISSED_LOG_LEGACY_SUFFIXES):
         try:
             raw = out_path.with_suffix(suffix).read_text(encoding="utf-8")
@@ -2040,7 +2041,11 @@ def _decided_with(workspace_vault_root: Path, text: str, key: str) -> bool:
                 # queue" when no queue row existed.
                 if key != "dismissed_at" or "promoted_at" in entry:
                     continue
-            if entry.get("history_only"):
+            if entry.get("operation_id") in reversed_operations:
+                continue
+            if entry.get("history_only") and not (
+                entry.get("outcome") == "accepted" and entry.get("via") == "migration"
+            ):
                 # Ledger-only row; it decided nothing, so it must not report
                 # the fact as promoted or dismissed.
                 continue
@@ -2064,6 +2069,18 @@ def was_promoted(workspace_vault_root: Path, text: str) -> bool:
     all, it is in its destination.
     """
     return _decided_with(workspace_vault_root, text, "promoted_at")
+
+
+def _reversed_operation_ids(proposals_path: Path) -> set[str]:
+    """Return accepted operation ids explicitly reversed in append-only History."""
+    reversed_ids: set[str] = set()
+    for path in _sidecar_paths(proposals_path):
+        for entry in _sidecar_entries(path):
+            if entry.get("outcome") == "reverted":
+                operation_id = entry.get("reverses_operation_id")
+                if isinstance(operation_id, str) and operation_id:
+                    reversed_ids.add(operation_id)
+    return reversed_ids
 
 
 def append_proposals(
@@ -2249,6 +2266,9 @@ def record_promotion(
     kind: str = "",
     via: str = "",
     source: str = "",
+    request: str = "",
+    decider: str = "",
+    decide_reason: str = "",
     destination: str = "",
     outcome: str = "",
     proposal_id: str = "",
@@ -2259,6 +2279,9 @@ def record_promotion(
     once: bool = False,
     history_only: bool = False,
     operation_id: str = "",
+    reverses_operation_id: str = "",
+    workspace_dir_fd: int | None = None,
+    decision_at: str = "",
     run_id: str = "",
     item_key: str = "",
 ) -> bool:
@@ -2278,6 +2301,9 @@ def record_promotion(
         key="promoted_at",
         via=via,
         source=source,
+        request=request,
+        decider=decider,
+        decide_reason=decide_reason,
         destination=destination,
         outcome=outcome,
         proposal_id=proposal_id,
@@ -2288,6 +2314,9 @@ def record_promotion(
         once=once,
         history_only=history_only,
         operation_id=operation_id,
+        reverses_operation_id=reverses_operation_id,
+        workspace_dir_fd=workspace_dir_fd,
+        decision_at=decision_at,
         run_id=run_id,
         item_key=item_key,
     )
@@ -2301,6 +2330,9 @@ def _record_decision(
     key: str,
     via: str = "",
     source: str = "",
+    request: str = "",
+    decider: str = "",
+    decide_reason: str = "",
     destination: str = "",
     outcome: str = "",
     proposal_id: str = "",
@@ -2311,6 +2343,9 @@ def _record_decision(
     once: bool = False,
     history_only: bool = False,
     operation_id: str = "",
+    reverses_operation_id: str = "",
+    workspace_dir_fd: int | None = None,
+    decision_at: str = "",
     run_id: str = "",
     item_key: str = "",
 ) -> bool:
@@ -2327,7 +2362,7 @@ def _record_decision(
         return False
     log_path.parent.mkdir(parents=True, exist_ok=True)
     entry: dict[str, Any] = {
-        key: datetime.now(UTC).isoformat(timespec="seconds"),
+        key: decision_at or datetime.now(UTC).isoformat(timespec="seconds"),
         "kind": kind,
         "text": cleaned,
     }
@@ -2338,6 +2373,12 @@ def _record_decision(
         entry["via"] = via
     if source:
         entry["source"] = source
+    if request:
+        entry["request"] = request
+    if decider:
+        entry["decider"] = decider
+    if decide_reason:
+        entry["decide_reason"] = decide_reason
     if destination:
         entry["destination"] = destination
     if outcome:
@@ -2358,6 +2399,8 @@ def _record_decision(
         # The managed operation (see :mod:`ciao.curation_apply`) that wrote this
         # decision. It owns both receipts it links to, and finds them by this id.
         entry["operation_id"] = operation_id
+    if reverses_operation_id:
+        entry["reverses_operation_id"] = reverses_operation_id
     if run_id:
         # The curation lease holder that made this decision. Read back for the
         # care report's counts; never sent to the History payload.
@@ -2384,8 +2427,69 @@ def _record_decision(
         # re-queued. ``_has_decision`` still sees it, which is what keeps
         # ``once=True`` idempotent.
         entry["history_only"] = True
-    with log_path.open("a", encoding="utf-8", newline="") as handle:
-        handle.write(json.dumps(entry, ensure_ascii=False) + "\n")
+    line = (json.dumps(entry, ensure_ascii=False) + "\n").encode("utf-8")
+    # The queue lock also serializes every managed append to its History file.
+    # An operation id makes a retried write idempotent; if a crash left exactly
+    # a prefix of that same final JSONL row, finish the row instead of duplicating it.
+    from ciao.memory_receipts import queue_lock
+    from ciao.os_support.private import open_private
+
+    with queue_lock(proposals_path):
+        if workspace_dir_fd is None:
+            existing = log_path.read_bytes() if log_path.exists() else b""
+        else:
+            try:
+                read_fd = os.open(log_path.name, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0), dir_fd=workspace_dir_fd)
+            except FileNotFoundError:
+                existing = b""
+            else:
+                try:
+                    if not stat.S_ISREG(os.fstat(read_fd).st_mode):
+                        raise ValueError("History must be a regular file")
+                    with os.fdopen(os.dup(read_fd), "rb") as history_file:
+                        existing = history_file.read()
+                finally:
+                    os.close(read_fd)
+        if operation_id:
+            for raw in existing.splitlines():
+                try:
+                    prior = json.loads(raw)
+                except (UnicodeError, json.JSONDecodeError):
+                    continue
+                if isinstance(prior, dict) and prior.get("operation_id") == operation_id:
+                    if prior != entry:
+                        raise ValueError("history operation id already names different content")
+                    return False
+        payload = line
+        if existing and not existing.endswith(b"\n"):
+            partial = existing.rsplit(b"\n", 1)[-1]
+            if operation_id and line.startswith(partial):
+                payload = line[len(partial) :]
+            else:
+                payload = b"\n" + line
+        log_path.parent.mkdir(parents=True, exist_ok=True)
+        if workspace_dir_fd is None:
+            fd = open_private(log_path, os.O_WRONLY | os.O_APPEND, follow_symlinks=False)
+        else:
+            try:
+                current = os.stat(log_path.parent, follow_symlinks=False)
+            except OSError as exc:
+                raise ValueError("Workspace was replaced before History publication") from exc
+            pinned = os.fstat(workspace_dir_fd)
+            if (current.st_dev, current.st_ino) != (pinned.st_dev, pinned.st_ino):
+                raise ValueError("Workspace was replaced before History publication")
+            fd = os.open(log_path.name, os.O_WRONLY | os.O_APPEND | os.O_CREAT | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0), 0o600, dir_fd=workspace_dir_fd)
+            if not stat.S_ISREG(os.fstat(fd).st_mode):
+                os.close(fd)
+                raise ValueError("History must be a regular file")
+        try:
+            view = memoryview(payload)
+            while view:
+                written = os.write(fd, view)
+                view = view[written:]
+            os.fsync(fd)
+        finally:
+            os.close(fd)
     return True
 
 
@@ -2472,11 +2576,16 @@ def _promoted_texts(proposals_path: Path) -> set[str]:
 
 def _decision_texts(proposals_path: Path, *, keys: tuple[str, ...]) -> set[str]:
     out: set[str] = set()
+    reversed_operations = _reversed_operation_ids(proposals_path)
     for path in _sidecar_paths(proposals_path):
         for entry in _sidecar_entries(path):
             if keys and not any(key in entry for key in keys):
                 continue
-            if entry.get("history_only"):
+            if entry.get("operation_id") in reversed_operations:
+                continue
+            if entry.get("history_only") and not (
+                entry.get("outcome") == "accepted" and entry.get("via") == "migration"
+            ):
                 # Ledger-only row; it decided nothing, so it must not dedupe.
                 continue
             text = _one_line(str(entry.get("text", "")))

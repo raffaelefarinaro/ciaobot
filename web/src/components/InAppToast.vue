@@ -55,9 +55,6 @@ const store = useProjectStore()
 const router = useRouter()
 const modalOpen = useModalOpen()
 const visibleToasts = computed(() => store.toasts.filter((toast) => {
-  if (toast.gwsProfile) {
-    return store.workspaces.some(w => w.name === store.activeWorkspace && w.gws_profile === toast.gwsProfile)
-  }
   if (toast.restoreDraft?.workspace && toast.restoreDraft.workspace !== store.activeWorkspace) return false
   if (!toast.chat_id) return true
   const project = toast.project_id
@@ -154,8 +151,8 @@ async function onFix(toast: InAppToast) {
     return
   }
   store.dismissToast(toast.id)
-  // Errors whose fix lives in Settings (e.g. GWS re-auth) route there instead
-  // of seeding a fix chat that can only restate the error.
+  // Errors whose fix lives in Settings route there instead of seeding a fix
+  // chat that can only restate the error.
   if (toast.fixRoute) {
     await router.push(toast.fixRoute)
     return

@@ -19,9 +19,6 @@ vi.mock('../../lib/api', () => {
   const get = vi.fn((path: string) => {
     if (path === '/api/workspaces') return Promise.resolve(state.workspaces)
     if (path === '/api/workspaces/archived') return Promise.resolve({ archived: [] })
-    if (path === '/api/integrations/gws') {
-      return Promise.resolve({ installed: false, binary_path: '', cli_available: false, profiles: [] })
-    }
     if (path.startsWith('/api/proposals/handover')) {
       const workspace = decodeURIComponent(path.split('workspace=')[1] ?? '')
       return Promise.resolve({
@@ -71,7 +68,6 @@ function workspaces(names: string[], primary = 'personal'): WorkspacesResponse {
       name,
       vault_root: `${name}/memory-vault`,
       default_provider: 'claude',
-      gws_profile: '',
       color: 'pink',
     })),
     active: names[0] ?? null,
@@ -121,7 +117,6 @@ describe('Settings > Workspace Overview', () => {
       expect(titles).toEqual([
         'Workspace',
         'Chats and models',
-        'Google account',
         'Memory handover',
         'Shared brains',
         'Weekly care cycle',
@@ -238,14 +233,12 @@ describe('Settings > Workspace Overview', () => {
     }
   })
 
-  it('the Google account card is one row, and Save sits in the Chats and models card', async () => {
+  it('Save sits in the Chats and models card', async () => {
     const { wrapper } = await mountOverview('work')
     try {
       const cards = wrapper.findAll('.card')
       const card = (title: string) => cards.find(c => c.find('.section-title').text() === title)!
-      const google = card('Google account')
-      expect(google.find('.gws-account').exists()).toBe(true)
-      expect(google.find('select').exists()).toBe(false)
+      expect(wrapper.text()).not.toContain('Google account')
       expect(card('Workspace').text()).not.toContain('both cards')
       expect(card('Workspace').find('.workspace-save').exists()).toBe(false)
 
@@ -255,7 +248,6 @@ describe('Settings > Workspace Overview', () => {
       expect(wrapper.findAll('.workspace-save')).toHaveLength(1)
       expect(card('Workspace').find('.workspace-save').exists()).toBe(false)
       expect(card('Chats and models').find('.workspace-save').exists()).toBe(true)
-      expect(google.find('.workspace-save').exists()).toBe(false)
     } finally {
       wrapper.unmount()
     }

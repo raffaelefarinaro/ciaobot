@@ -144,7 +144,7 @@ describe('ItemPeekHost and the Back button', () => {
     pendingConfirm.value = null
     const store = useProjectStore()
     store.workspaces = [
-      { name: 'personal', vault_root: '/tmp/vault', default_provider: 'claude', gws_profile: '' },
+      { name: 'personal', vault_root: '/tmp/vault', default_provider: 'claude' },
     ]
     store.activeWorkspace = 'personal'
   })
