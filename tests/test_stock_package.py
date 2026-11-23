@@ -611,11 +611,8 @@ def test_pass_one_leaves_legacy_learning_rows_for_the_migration() -> None:
     learnings_route = next(
         line for line in pass1.splitlines() if line.startswith("- `[learnings]`")
     )
-    assert "leave queued and untouched" in learnings_route
-    assert "upcoming learning migration" in learnings_route
-    assert "must not dismiss" in learnings_route
-    assert "hand-edit `Workspace/Learnings.md`" in learnings_route
-    assert "write a new lesson" in learnings_route
+    assert "learnings-queue-drain --apply" in learnings_route
+    assert "Do not hand-edit either file" in learnings_route
 
 
 def test_care_prompt_names_the_decider_and_escalate_command() -> None:

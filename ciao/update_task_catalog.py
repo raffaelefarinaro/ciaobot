@@ -104,6 +104,7 @@ TASK_FIELDS: frozenset[str] = frozenset(
 DETECTORS: frozenset[str] = frozenset(
     {
         "learnings-cleanup-review-needed",
+        "learnings-queue-drain-needed",
         "unrehomed-people-review-needed",
         "vault-relocate-review-needed",
     }
@@ -116,6 +117,7 @@ DETECTORS: frozenset[str] = frozenset(
 COMPLETION_CHECKS: frozenset[str] = frozenset(
     {
         "learnings-cleanup-review-recorded",
+        "learnings-queue-drain-recorded",
         "unrehomed-people-rehome-recorded",
         "vault-relocate-recorded",
     }

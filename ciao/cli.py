@@ -2751,6 +2751,38 @@ def _learnings_migration_status(summary: dict[str, Any]) -> int:
     return 0
 
 
+def _learnings_queue_drain_command(args: argparse.Namespace) -> int:
+    from ciao.learnings_queue_drain import drain, revert
+
+    try:
+        vault, workspace, runtime = _learnings_workspace(args)
+    except ValueError as exc:
+        print(str(exc), file=sys.stderr)
+        return 1
+    summary = (
+        revert(vault, args.revert, workspace=workspace, runtime_root=runtime, apply=args.apply)
+        if args.revert
+        else drain(vault, workspace=workspace, runtime_root=runtime, apply=args.apply)
+    )
+    if args.json:
+        print(json.dumps(summary, ensure_ascii=False, indent=2))
+    else:
+        if args.revert:
+            if summary.get("reverted"):
+                print(f"Reverted the batch of {summary.get('rows', 0)} learning row(s).")
+            elif summary.get("would_revert"):
+                print("This receipt can restore its row; pass --apply to write it.")
+        else:
+            print(f"{len(summary.get('rows', []))} pending learnings row(s).")
+        for error in summary.get("failed", []):
+            print(f"Could not complete drain: {error}", file=sys.stderr)
+        for receipt in summary.get("receipts", []):
+            print(f"Receipt: {receipt}")
+        if summary.get("not_applicable"):
+            print("No pending learnings rows.")
+    return 1 if summary.get("failed") else 0
+
+
 # ── learnings-cleanup ───────────────────────────────────────────────────────
 
 #: The width of the two text columns that are allowed to be truncated. The key
@@ -8926,6 +8958,23 @@ def build_parser() -> argparse.ArgumentParser:
         help="Output the raw summary as JSON.",
     )
     learnings_parser.set_defaults(func=_learnings_migrate_command)
+
+    drain_parser = subparsers.add_parser(
+        "learnings-queue-drain",
+        help="Move pending [learnings] rows into Learnings.md, reversibly.",
+        description=(
+            "Moves all pending [learnings] rows into Workspace/Learnings.md "
+            "under one write-ahead batch receipt. Dry-run unless --apply is "
+            "passed; --revert RECEIPT --apply restores that whole batch."
+        ),
+    )
+    drain_parser.add_argument("--vault-root", type=Path, default=None)
+    drain_parser.add_argument("--workspace", default=None)
+    drain_parser.add_argument("--runtime-root", type=Path, default=None)
+    drain_parser.add_argument("--apply", action="store_true")
+    drain_parser.add_argument("--revert", type=Path, default=None)
+    drain_parser.add_argument("--json", action="store_true")
+    drain_parser.set_defaults(func=_learnings_queue_drain_command)
 
     cleanup_parser = subparsers.add_parser(
         "learnings-cleanup",
