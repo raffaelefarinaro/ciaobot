@@ -67,6 +67,7 @@ from ciao import (
     transcripts,
     upstream_drafts,
 )
+from ciao.context.capsule import shared_brain_pass_line
 from ciao.prompt_fence import fence
 from ciao.task_attempts import TaskAttemptError, TaskAttemptStore
 from ciao.web import chat_service
@@ -1246,22 +1247,18 @@ class MemoryPassCoordinator:
         )
 
     def _shared_brain_section(self, helper: dict) -> str:
-        """The shared-brain section, or nothing when the source workspace links no brain."""
+        """The shared-brain section, or nothing when no listed brain has an exact path."""
         chat = self._host._chats.get(str(helper.get("source_chat_id") or ""))
         if chat is None:
             return ""
-        project = self._host._projects.get(chat.project_id)
         record = self._host._config.workspace(self._workspace_of(chat))
-        links = getattr(record, "shared_brains", None) or []
-        if not links:
-            return ""
         lines = [
-            "- {}: {}".format(
-                link.name.replace("{", "(").replace("}", ")"),
-                link.path.replace("{", "(").replace("}", ")"),
-            )
-            for link in links
+            line
+            for link in getattr(record, "shared_brains", None) or []
+            if (line := shared_brain_pass_line(link.name, link.path)) is not None
         ]
+        if not lines:
+            return ""
         return SHARED_BRAIN_SECTION_PROMPT.format(brains="\n".join(lines))
 
     @staticmethod

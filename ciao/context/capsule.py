@@ -120,9 +120,47 @@ _SHARED_BRAIN_OPEN = "[Shared brains]"
 _SHARED_BRAIN_CLOSE = "[End shared brains]"
 
 
-def _brain_text(value: str, *, limit: int) -> str:
-    """A brain name or path as one bounded field that cannot open or close a fence."""
-    return _field(value, limit=limit).replace("[", "(").replace("]", ")")
+def _brain_name(value: str) -> str:
+    """A brain name as one bounded field; names are validated to a-z, 0-9 and '-' already."""
+    return _field(value, limit=32).replace("[", "(").replace("]", ")")
+
+
+def exact_brain_path(path: str) -> str | None:
+    """The brain path exactly as the agent should search it, or None.
+
+    None when showing the path would change it: a bracket (it could imitate a
+    fence), a control or Unicode whitespace character, a double space, a leading or
+    trailing space, or more than 300 characters. A brain whose path is altered is
+    listed without its path, so the agent never searches a wrong or widened folder.
+    """
+    if "[" in path or "]" in path:
+        return None
+    flat = _field(path, limit=300)
+    return flat if flat == path else None
+
+
+def shared_brain_line(name: str, path: str, *, missing: bool = False, updated: str = "") -> str:
+    """One brain's line in the ``[Shared brains]`` block.
+
+    ``path=`` is always last, so a path that contains the words ``unavailable`` or
+    ``updated=`` cannot be read as a marker. An altered path is replaced by
+    ``unavailable`` alone (see ``exact_brain_path``).
+    """
+    head = f"name={_brain_name(name)}"
+    shown = exact_brain_path(path)
+    if shown is None:
+        return f"{head} unavailable"
+    if missing:
+        return f"{head} unavailable path={shown}"
+    if updated:
+        return f"{head} updated={_field(updated, limit=10)} path={shown}"
+    return f"{head} path={shown}"
+
+
+def shared_brain_pass_line(name: str, path: str) -> str | None:
+    """One ``- <name>: <path>`` line for the memory pass, or None when the path is altered."""
+    shown = exact_brain_path(path)
+    return None if shown is None else f"- {_brain_name(name)}: {shown}"
 
 
 def render_shared_brain_block(brains: Sequence[tuple[str, str, bool, str]]) -> str:
@@ -130,30 +168,27 @@ def render_shared_brain_block(brains: Sequence[tuple[str, str, bool, str]]) -> s
 
     ``updated`` is the date of the brain's last fetch (``YYYY-MM-DD``) or "". A
     missing folder is listed as ``unavailable`` so the agent can say so instead of
-    guessing. Brain lines are dropped from the end until the block fits
-    ``SHARED_BRAIN_BLOCK_MAX_CHARS``; the rules and the closing fence always stay.
-    Empty when there are no brains.
+    guessing. When the block would exceed ``SHARED_BRAIN_BLOCK_MAX_CHARS``, brain
+    lines are dropped from the end, the first ones in workspace order are kept, and
+    a ``+N more brains not listed`` line is added before the rules. The rules and the
+    closing fence always stay. Empty when there are no brains.
     """
     if not brains:
         return ""
-    lines: list[str] = []
-    for name, path, missing, updated in brains:
-        shown = f"name={_brain_text(name, limit=32)} path={_brain_text(path, limit=300)}"
-        if missing:
-            lines.append(f"{shown} unavailable")
-        elif updated:
-            lines.append(f"{shown} updated={_brain_text(updated, limit=10)}")
-        else:
-            lines.append(shown)
+    all_lines = [shared_brain_line(name, path, missing=missing, updated=updated)
+                 for name, path, missing, updated in brains]
 
     def assemble(kept: list[str]) -> str:
-        head = [_SHARED_BRAIN_OPEN, *kept, SHARED_BRAIN_RULES, _SHARED_BRAIN_CLOSE]
-        return "\n".join(head)
+        head = [_SHARED_BRAIN_OPEN, *kept]
+        if len(kept) < len(all_lines):
+            head.append(f"+{len(all_lines) - len(kept)} more brains not listed")
+        return "\n".join([*head, SHARED_BRAIN_RULES, _SHARED_BRAIN_CLOSE])
 
-    block = assemble(lines)
-    while len(block) > SHARED_BRAIN_BLOCK_MAX_CHARS and lines:
-        lines.pop()
-        block = assemble(lines)
+    kept = list(all_lines)
+    block = assemble(kept)
+    while len(block) > SHARED_BRAIN_BLOCK_MAX_CHARS and kept:
+        kept.pop()
+        block = assemble(kept)
     return block
 
 
