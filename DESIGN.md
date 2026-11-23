@@ -235,6 +235,8 @@ Structured question cards keep their header and Cancel/Send answer actions visib
 
 Long or implementation-oriented content must not dominate a mobile page. Collapse long prompts and diagnostics behind Preview/Expand/Copy controls, preserve the page title, and move secondary or destructive actions into an overflow menu or bottom sheet.
 
+The chat Repository section offers **View changes** for active chats. Opening it fetches one bounded snapshot on demand; **Refresh**, loading, clean, unavailable, truncation and retry states are explicit. Patch text and untracked filenames stay selectable plain text in a bounded scroll area on both the desktop rail and phone drawer. The section never stages files, opens a shell or changes the composer.
+
 ## Elevation & Depth
 
 Hierarchy comes primarily from tonal layers, one-pixel borders, and spacing. Cards sit on the page background; inputs may use the deeper canvas; modals and popovers use the elevated surface. Use stronger borders for focus and separation before adding shadows.

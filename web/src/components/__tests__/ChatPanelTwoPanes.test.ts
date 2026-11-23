@@ -251,7 +251,7 @@ describe('the rails of two panes', () => {
     // two separate mounts would repeat its generated ids and prove nothing.
     const bothPanes = defineComponent({
       setup: () => () => h('div', [0, 1].flatMap(() => [
-        h(ChatRepoSection, { repo, location: null, chatId: 'chat-1' }),
+        h(ChatRepoSection, { repo, location: null, chatId: 'chat-1', eligible: false }),
         h(TaskOriginNote, { chat: delegated as never }),
       ])),
     })
