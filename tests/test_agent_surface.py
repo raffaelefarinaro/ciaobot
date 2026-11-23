@@ -1468,7 +1468,7 @@ def test_ciao_cli_skill_is_not_synced_into_workspaces_yet(tmp_path: Path) -> Non
     from ciao.sync_skills import TRANSITIONAL_SKILLS, _install_stock_skills
 
     assert "ciao-cli" in TRANSITIONAL_SKILLS
-    _install_stock_skills(tmp_path, gws_profile="")
+    _install_stock_skills(tmp_path)
     installed = {p.name for p in (tmp_path / ".claude" / "skills").iterdir()}
     assert "ciao-cli" not in installed
     assert "ciao-capabilities" in installed

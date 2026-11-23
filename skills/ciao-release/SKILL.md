@@ -230,8 +230,7 @@ What `--apply` does, in order: bumps `pyproject.toml`, `ciao/__init__.py`,
 `web/package.json`, `web/package-lock.json` and the service-worker cache names
 in both `web/public/sw.js` and `ciao/web/static/sw.js`; writes the notes into
 `CHANGELOG.md` (or, without `--notes-file`, the commit list);
-auto-bumps `auto` dependencies; regenerates the packaged `gws-*` skills if the
-installed `gws` CLI differs from the pin; records the tested OpenCode and Claude
+auto-bumps `auto` dependencies; records the tested OpenCode and Claude
 CLI versions in `ciao/stock/provider-versions.json` (fails on a missing,
 dev, unpublished or unsupported OpenCode unless `--untested-provider opencode`);
 runs the full check suite; commits
