@@ -4,8 +4,9 @@ The user clones a team's notes folder; Ciaobot only links it (by absolute path),
 names it, reads its state and keeps it current with a fast-forward-only pull.
 The engine never clones, never connects to a URL itself and never rewrites a
 folder: no reset, rebase, stash, checkout, clean or push. Every update first
-re-checks that the folder is still a real checkout of its own (not a symlink,
-not a parent repository's subfolder) and still outside the install and vaults.
+vets the folder's own git config, then that it is still its own checkout, still
+outside the install and vaults, and still fetches from the identity it was linked
+with.
 """
 
 from __future__ import annotations
@@ -43,26 +44,31 @@ Outcome = Literal["updated", "up_to_date", "skipped", "failed"]
 _NAME_RE = re.compile(NAME_PATTERN)
 #: Prepended to every git call here. ``core.hooksPath`` points at the null device
 #: so a checkout's own hooks never run; the credential helper is emptied so no
-#: helper from the checkout's config runs; maintenance and gc never start.
+#: helper from the checkout's config runs; maintenance and gc never start; only
+#: https and ssh transports are allowed, so ext::, fd:: and file:// never run.
 _HARDEN: tuple[str, ...] = (
     "-c", "protocol.ext.allow=never",
+    "-c", "protocol.allow=never",
+    "-c", "protocol.https.allow=always",
+    "-c", "protocol.ssh.allow=always",
     "-c", "core.fsmonitor=false",
     "-c", f"core.hooksPath={os.devnull}",
     "-c", "maintenance.auto=false",
     "-c", "gc.auto=0",
     "-c", "credential.helper=",
 )
-#: Settings a checkout's own config (local or worktree scope) may hold. Anything
-#: else can run a program, redirect a URL or read more config on git's behalf, and
-#: the folder is refused. The allowlist is deliberate: a denylist missed
-#: worktree-scoped and insteadOf keys. Real-world LFS clones (filter.lfs.*) are
-#: refused by this list; that is the trade-off.
-_SAFE_KEYS = frozenset({
+#: The only settings a folder's own config (local or worktree scope) may hold.
+#: Anything else can run a program, redirect a URL or read more config on git's
+#: behalf, and the folder is refused. Exact-case keys: git keeps subsection case,
+#: so ``remote.ORIGIN.url`` is a different remote and is refused.
+_SAFE_PLAIN = frozenset({
     "core.repositoryformatversion", "core.filemode", "core.bare", "core.logallrefupdates",
     "core.ignorecase", "core.precomposeunicode", "core.symlinks",
-    "remote.origin.url", "remote.origin.fetch", "fetch.prune",
+    "fetch.prune",
+    "extensions.worktreeconfig", "extensions.objectformat", "extensions.refstorage",
 })
-_SAFE_PREFIXES = ("branch.", "user.", "init.", "pull.", "extensions.")
+_ORIGIN_FETCH = "+refs/heads/*:refs/remotes/origin/*"
+_BRANCH_KEY_RE = re.compile(r"branch\..+\.(remote|merge)")
 
 _locks: dict[str, asyncio.Lock] = {}
 _last_update: dict[str, dict[str, Any]] = {}
@@ -73,13 +79,13 @@ _cursor = 0
 def _git_env(folder: Path) -> dict[str, str]:
     """Child environment for git on a shared brain.
 
+    Every inherited ``GIT_*`` variable is dropped first (GIT_DIR, GIT_WORK_TREE,
+    GIT_CONFIG_*, ...): they would point git at another repository or config.
     ``GIT_CEILING_DIRECTORIES`` stops discovery at the folder's parent, so a
     folder whose own ``.git`` is gone is not read as part of a parent repository.
     ``GIT_SSH_COMMAND`` outranks a checkout's ``core.sshCommand``; prompts are off.
     """
     env = child_env()
-    # An inherited GIT_DIR, GIT_WORK_TREE, GIT_CONFIG_* and friends would point
-    # git at another repository or config than the folder being updated.
     for name in [key for key in env if key.startswith("GIT_")]:
         del env[name]
     env["GIT_CEILING_DIRECTORIES"] = str(folder.parent)
@@ -119,27 +125,34 @@ def _now() -> str:
     return datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
-def _origin_url(path: str) -> str:
-    code, out = _git(Path(path), "remote", "get-url", "origin")
-    return out.strip() if code == 0 else ""
+_SCP_RE = re.compile(r"(?:[^@/\\:\s]+@)?[^@/\\:\s]+:[^\s]+")
 
 
 def canonical_identity(remote_url: str) -> str:
-    """``host/owner/repo`` for a remote address; the same repository gives the same string."""
-    text = remote_url.strip().lower()
+    """``host/owner/repo`` for a remote address; the same repository gives the same string.
+
+    Only ``https://``, ``ssh://`` and scp-like ``[user@]host:path`` are accepted.
+    Anything with ``::`` (remote helpers such as ext:: and fd::), any other
+    scheme (file://, http://, git://) and a bare local path are refused.
+    """
+    text = remote_url.strip()
     if not text:
         raise ValueError("shared brain has no remote called origin")
-    shown = redact_text(remote_url.strip())
-    if "://" in text:
-        rest = text.split("://", 1)[1]
+    shown = redact_text(text)
+    if "::" in text:
+        raise ValueError(f"unsupported remote address: {shown}")
+    lowered = text.lower()
+    if "://" in lowered:
+        scheme, _, rest = lowered.partition("://")
+        if scheme not in ("https", "ssh"):
+            raise ValueError(f"unsupported remote address: {shown}")
         authority, _, path = rest.partition("/")
         host = authority.rsplit("@", 1)[-1]
     else:
-        # scp-like: [user@]host:owner/repo
-        rest = text.rsplit("@", 1)[-1]
-        host, sep, path = rest.partition(":")
-        if not sep:
-            raise ValueError(f"unrecognised remote address: {shown}")
+        if not _SCP_RE.fullmatch(lowered):
+            raise ValueError(f"unsupported remote address: {shown}")
+        rest = lowered.rsplit("@", 1)[-1]
+        host, _, path = rest.partition(":")
     path = path.rstrip("/")
     if path.endswith(".git"):
         path = path[: -len(".git")]
@@ -180,21 +193,52 @@ def validate_brain_path(config: Any, raw: str) -> str:
     return resolved
 
 
-def _first_unsafe_key(listing: str) -> str | None:
-    """The first local or worktree setting outside the allowlist, or None.
-
-    Global, system and command-line scopes are not the folder's own and are skipped.
-    """
+def _own_entries(listing: str) -> list[tuple[str, str]]:
+    """(key, value) of every local and worktree setting; global, system and -c are not the folder's own."""
+    entries: list[tuple[str, str]] = []
     for line in listing.splitlines():
         scope, _, entry = line.partition("\t")
-        if scope not in ("local", "worktree"):
-            continue
-        key = entry.split("=", 1)[0]
-        lowered = key.lower()
-        if lowered in _SAFE_KEYS or lowered.startswith(_SAFE_PREFIXES):
-            continue
-        return key
+        if scope in ("local", "worktree"):
+            key, eq, value = entry.partition("=")
+            entries.append((key, value if eq else ""))
+    return entries
+
+
+def _entry_allowed(key: str, value: str) -> bool:
+    if key == "remote.origin.url":
+        return True  # its value is checked against the identity, not here
+    if key == "remote.origin.fetch":
+        return value == _ORIGIN_FETCH
+    return key in _SAFE_PLAIN or _BRANCH_KEY_RE.fullmatch(key) is not None
+
+
+def _first_unsafe_key(listing: str) -> str | None:
+    """The first of the folder's own settings outside the allowlist, or None."""
+    for key, value in _own_entries(listing):
+        if not _entry_allowed(key, value):
+            return key
     return None
+
+
+def _origin_from_listing(listing: str) -> str:
+    """The folder's own ``remote.origin.url``, or "" when missing or ambiguous."""
+    urls = [value for key, value in _own_entries(listing) if key == "remote.origin.url"]
+    return urls[0] if len(urls) == 1 else ""
+
+
+def _safe_identity(url: str) -> str:
+    try:
+        return canonical_identity(url)
+    except ValueError:
+        return ""
+
+
+def _branch_remote_ok(listing: str, branch: str) -> bool:
+    """A branch whose remote is set must fetch from ``origin`` and nothing else."""
+    for key, value in _own_entries(listing):
+        if key == f"branch.{branch}.remote":
+            return value == "origin"
+    return True
 
 
 def _refusal_message(key: str) -> str:
@@ -210,8 +254,8 @@ def _require_own_git_dir(path: str) -> None:
         raise ValueError("this folder is a linked worktree or submodule; use a fresh clone")
 
 
-def _refuse_program_config(path: str) -> None:
-    """Refuse a new link whose own git config (any local or worktree scope) is outside the allowlist."""
+def _link_origin(path: str) -> str:
+    """Vet a new link's own config and return its origin URL (``ValueError`` on refusal)."""
     _require_own_git_dir(path)
     code, listing = _git(Path(path), "config", "--list", "--show-scope")
     if code != 0:
@@ -219,6 +263,7 @@ def _refuse_program_config(path: str) -> None:
     key = _first_unsafe_key(listing)
     if key is not None:
         raise ValueError(_refusal_message(key))
+    return _origin_from_listing(listing)
 
 
 def _derived_name(identity: str, taken: set[str]) -> str:
@@ -264,9 +309,9 @@ def resolve_links(
             out.append(kept)
             continue
         path = validate_brain_path(config, raw_path)
-        _refuse_program_config(path)
+        origin = _link_origin(path)
         try:
-            identity = canonical_identity(_origin_url(path))
+            identity = canonical_identity(origin)
         except ValueError as exc:
             raise ValueError(f"{path}: {exc}") from exc
         if identity in identities:
@@ -311,9 +356,8 @@ def _path_problem(config: Any, path: str) -> str:
         return "outside_install"
     if not os.path.isdir(path):
         return "missing"
-    git_entry = os.path.join(path, ".git")
-    if os.path.exists(git_entry) and not os.path.isdir(git_entry):
-        return "not_a_checkout"
+    if not os.path.isdir(os.path.join(path, ".git")):
+        return "not_a_checkout"  # a pointer file, or no repository of its own
     return ""
 
 
@@ -322,7 +366,7 @@ def _is_own_checkout(folder: Path, top: str) -> bool:
 
 
 def brain_state(link: SharedBrainLink, config: Any) -> dict[str, Any]:
-    """Live state of one linked folder, read synchronously with short git calls."""
+    """Live state of one linked folder. Its own config is vetted before any other git call."""
     state: dict[str, Any] = {
         "name": link.name,
         "identity": link.identity,
@@ -344,21 +388,22 @@ def brain_state(link: SharedBrainLink, config: Any) -> dict[str, Any]:
         state["missing"] = problem == "missing"
         return state
     folder = Path(link.path)
-    code, top = _git(folder, "rev-parse", "--show-toplevel")
-    if code != 0 or not _is_own_checkout(folder, top):
-        state["problem"] = "not_a_checkout"
-        return state
     code, listing = _git(folder, "config", "--list", "--show-scope")
     if code != 0 or _first_unsafe_key(listing) is not None:
         state["problem"] = "unsafe_config"
         return state
-    try:
-        origin_now = canonical_identity(_origin_url(link.path))
-    except ValueError:
-        origin_now = ""
-    state["origin_changed"] = origin_now != link.identity
+    code, top = _git(folder, "rev-parse", "--show-toplevel")
+    if code != 0 or not _is_own_checkout(folder, top):
+        state["problem"] = "not_a_checkout"
+        return state
     _code, branch = _git(folder, "branch", "--show-current")
     state["branch"] = branch.strip()
+    if not _branch_remote_ok(listing, state["branch"]):
+        state["problem"] = "unsafe_config"
+        return state
+    state["origin_changed"] = _safe_identity(_origin_from_listing(listing)) != link.identity
+    if state["origin_changed"]:
+        state["problem"] = "origin_changed"
     code, head = _git(folder, "log", "-1", "--format=%h%x00%cs")
     if code == 0 and head.strip():
         sha, _, day = head.strip().partition("\x00")
@@ -384,31 +429,35 @@ def _lock_key(path: str) -> str:
     return os.path.abspath(os.path.expanduser(path))
 
 
-async def update_brain(path: str, config: Any) -> dict[str, Any]:
-    """Fetch and fast-forward one folder, one case from the matrix (see the issue)."""
-    key = _lock_key(path)
+async def update_brain(link: SharedBrainLink, config: Any) -> dict[str, Any]:
+    """Fetch and fast-forward one linked folder, one case from the matrix (see the issue)."""
+    key = _lock_key(link.path)
     lock = _locks.setdefault(key, asyncio.Lock())
     async with lock:
-        result = await _update_unlocked(config, Path(key))
+        result = await _update_unlocked(config, Path(key), link.identity)
     _last_update[key] = result
     return result
 
 
-async def _update_unlocked(config: Any, folder: Path) -> dict[str, Any]:
+async def _update_unlocked(config: Any, folder: Path, identity: str) -> dict[str, Any]:
     if not folder.is_dir():
         return _result("failed", "missing")
     problem = _path_problem(config, str(folder))
     if problem:
         return _result("failed", problem)
-    code, top, _ = await _git_async(folder, "rev-parse", "--show-toplevel")
-    if code != 0 or not _is_own_checkout(folder, top):
-        return _result("failed", "not_a_checkout")
     code, listing, _ = await _git_async(folder, "config", "--list", "--show-scope")
     if code != 0 or _first_unsafe_key(listing) is not None:
         return _result("failed", "unsafe_config")
+    if _safe_identity(_origin_from_listing(listing)) != identity:
+        return _result("failed", "origin_changed")
+    code, top, _ = await _git_async(folder, "rev-parse", "--show-toplevel")
+    if code != 0 or not _is_own_checkout(folder, top):
+        return _result("failed", "not_a_checkout")
     code, branch, _ = await _git_async(folder, "branch", "--show-current")
     if code != 0 or not branch.strip():
         return _result("skipped", "detached")
+    if not _branch_remote_ok(listing, branch.strip()):
+        return _result("failed", "unsafe_config")
     code, _, _ = await _git_async(
         folder, "rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}"
     )
@@ -443,22 +492,22 @@ async def _update_unlocked(config: Any, folder: Path) -> dict[str, Any]:
     return _result("updated")
 
 
-def schedule_update(path: str, config: Any) -> None:
-    """Start one background update for ``path`` unless one is already pending."""
-    key = _lock_key(path)
+def schedule_update(link: SharedBrainLink, config: Any) -> None:
+    """Start one background update for ``link`` unless one is already pending."""
+    key = _lock_key(link.path)
     if key in _pending:
         return
-    task = asyncio.create_task(update_brain(key, config))
+    task = asyncio.create_task(update_brain(link, config))
     _pending[key] = task
     task.add_done_callback(lambda _done: _pending.pop(key, None))
 
 
-async def _run_pass(config: Any, paths: list[str]) -> dict[str, int]:
-    """Update each path once, one after another; a failure counts and moves on."""
+async def _run_pass(config: Any, links: list[SharedBrainLink]) -> dict[str, int]:
+    """Update each link once, one after another; a failure counts and moves on."""
     counts: dict[str, int] = {}
-    for path in paths:
+    for link in links:
         try:
-            outcome = (await update_brain(path, config))["outcome"]
+            outcome = (await update_brain(link, config))["outcome"]
         except Exception:
             logger.exception("Shared brain update failed")
             outcome = "failed"
@@ -466,14 +515,14 @@ async def _run_pass(config: Any, paths: list[str]) -> dict[str, int]:
     return counts
 
 
-def _linked_paths(config: Any) -> list[str]:
-    """Distinct linked paths the loop should update; links into the install or a vault are kept but skipped."""
-    seen: dict[str, None] = {}
+def _linked_links(config: Any) -> list[SharedBrainLink]:
+    """One link per distinct path; links into the install or a vault are kept but not updated."""
+    seen: dict[str, SharedBrainLink] = {}
     for workspace in getattr(config, "workspaces", {}).values():
         for link in getattr(workspace, "shared_brains", []):
             if not overlaps_protected(config, link.path):
-                seen[link.path] = None
-    return list(seen)
+                seen.setdefault(link.path, link)
+    return list(seen.values())
 
 
 def _forget_unlinked(keep: set[str]) -> None:
@@ -487,15 +536,15 @@ def _forget_unlinked(keep: set[str]) -> None:
         _last_update.pop(key, None)
 
 
-def _next_batch(paths: list[str]) -> list[str]:
-    """Up to MAX_BRAINS_PER_PASS paths, continuing where the last pass stopped."""
+def _next_batch(links: list[SharedBrainLink]) -> list[SharedBrainLink]:
+    """Up to MAX_BRAINS_PER_PASS links, continuing where the last pass stopped."""
     global _cursor
-    if not paths:
+    if not links:
         return []
-    _cursor %= len(paths)
-    count = min(MAX_BRAINS_PER_PASS, len(paths))
-    batch = [paths[(_cursor + i) % len(paths)] for i in range(count)]
-    _cursor = (_cursor + count) % len(paths)
+    _cursor %= len(links)
+    count = min(MAX_BRAINS_PER_PASS, len(links))
+    batch = [links[(_cursor + i) % len(links)] for i in range(count)]
+    _cursor = (_cursor + count) % len(links)
     return batch
 
 
@@ -507,9 +556,9 @@ async def update_loop(config: Any) -> None:
             async with job_runs.track(
                 "shared_brain_update", "Shared brain update", category="system",
             ) as run:
-                paths = _linked_paths(config)
-                _forget_unlinked({_lock_key(p) for p in paths})
-                counts = await _run_pass(config, _next_batch(paths))
+                links = _linked_links(config)
+                _forget_unlinked({_lock_key(link.path) for link in links})
+                counts = await _run_pass(config, _next_batch(links))
                 run.extra["outcomes"] = counts
         except asyncio.CancelledError:
             break

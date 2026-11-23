@@ -457,7 +457,7 @@ async def upsert_workspace_setting(request: Request) -> JSONResponse:
         linked_before = {link.path for link in getattr(existing, "shared_brains", [])}
         for link in workspace.shared_brains:
             if link.path not in linked_before:
-                shared_brain.schedule_update(link.path, config)
+                shared_brain.schedule_update(link, config)
         _refresh_project_manager_workspaces(request)
         payload = _workspaces_payload(config)
         if renamed is not None:

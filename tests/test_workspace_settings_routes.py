@@ -2577,7 +2577,7 @@ def test_workspace_shared_brains_default_empty_persist_validate_and_unlink(tmp_p
     from ciao import shared_brain
 
     scheduled: list[str] = []
-    monkeypatch.setattr(shared_brain, "schedule_update", lambda path, config: scheduled.append(path))
+    monkeypatch.setattr(shared_brain, "schedule_update", lambda link, config: scheduled.append(link.path))
     client, config, _pcm = _client(tmp_path)
     registry = tmp_path / ".runtime" / "workspaces.json"
     acme = _checkout(_away(tmp_path) / "acme", "https://github.com/acme/notes")
@@ -2625,7 +2625,7 @@ def test_saving_a_new_path_schedules_one_update(tmp_path, monkeypatch):
     from ciao import shared_brain
 
     scheduled: list[str] = []
-    monkeypatch.setattr(shared_brain, "schedule_update", lambda path, config: scheduled.append(path))
+    monkeypatch.setattr(shared_brain, "schedule_update", lambda link, config: scheduled.append(link.path))
     client, _config, _pcm = _client(tmp_path)
     acme = _checkout(_away(tmp_path) / "acme", "https://github.com/acme/notes")
     body = {"shared_brains": [{"path": str(acme)}]}
@@ -2641,7 +2641,7 @@ def test_saving_a_new_path_schedules_one_update(tmp_path, monkeypatch):
 def test_workspace_shared_brains_route_lists_states_empty_and_404(tmp_path, monkeypatch):
     from ciao import shared_brain
 
-    monkeypatch.setattr(shared_brain, "schedule_update", lambda path, config: None)
+    monkeypatch.setattr(shared_brain, "schedule_update", lambda link, config: None)
     client, _config, _pcm = _client(tmp_path)
     empty = client.get("/api/workspaces/personal/shared-brains")
     assert empty.status_code == 200 and empty.json() == {"shared_brains": []}

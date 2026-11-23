@@ -22,6 +22,7 @@ from ciao.config import SharedBrainLink
 from ciao.git_proc import GIT_TIMEOUT_DETAIL, run_git as real_run_git
 
 IDENT = ("-c", "user.name=Test", "-c", "user.email=test@example.com")
+GITHUB_URL = "https://github.com/x/notes"
 
 
 def git(cwd: Path, *args: str) -> str:
@@ -60,7 +61,7 @@ def root(tmp_path: Path) -> Path:
 
 
 @pytest.fixture
-def pair(root: Path) -> SimpleNamespace:
+def pair(root: Path, monkeypatch) -> SimpleNamespace:
     """A bare origin, a seed that pushes to it, and a clone (the checkout under test)."""
     origin = root / "origin.git"
     subprocess.run(["git", "init", "-q", "--bare", "-b", "main", str(origin)], check=True)
@@ -71,6 +72,16 @@ def pair(root: Path) -> SimpleNamespace:
     git(seed, "push", "-q", "-u", "origin", "main")
     clone = root / "clone"
     subprocess.run(["git", "clone", "-q", str(origin), str(clone)], check=True)
+    # The clone's origin reads as a hosted address (identity needs one). Fetch and
+    # merge are steered back to the local bare repository on the command line, which
+    # the config vetting does not read, so the tests run without a network.
+    git(clone, "remote", "set-url", "origin", GITHUB_URL)
+    monkeypatch.setattr(
+        sb,
+        "_HARDEN",
+        sb._HARDEN
+        + ("-c", f"url.{origin}.insteadOf={GITHUB_URL}", "-c", "protocol.file.allow=always"),
+    )
     return SimpleNamespace(origin=origin, seed=seed, clone=clone, root=root)
 
 
@@ -83,6 +94,11 @@ def push_from_seed(pair: SimpleNamespace, filename: str) -> str:
 
 
 ENVS: list = []
+
+
+def link_of(path: Path | str) -> SharedBrainLink:
+    """A link to a pair fixture's clone; its hosted origin reads as github.com/x/notes."""
+    return SharedBrainLink(name="notes", path=str(Path(path)), identity="github.com/x/notes")
 
 
 def record_git(monkeypatch) -> list[list[str]]:
@@ -260,7 +276,7 @@ def _assert_result(result: dict, outcome: str, reason: str) -> None:
 @pytest.mark.asyncio
 async def test_update_row1_missing(root: Path, monkeypatch) -> None:
     calls = record_git(monkeypatch)
-    result = await sb.update_brain(str(root / "nowhere"), FakeConfig(root))
+    result = await sb.update_brain(link_of(root / "nowhere"), FakeConfig(root))
     _assert_result(result, "failed", "missing")
     assert calls == []
 
@@ -269,7 +285,7 @@ async def test_update_row1_missing(root: Path, monkeypatch) -> None:
 async def test_update_row2_detached(pair: SimpleNamespace) -> None:
     git(pair.clone, "checkout", "-q", "--detach")
     head = git(pair.clone, "rev-parse", "HEAD")
-    _assert_result(await sb.update_brain(str(pair.clone), FakeConfig(pair.root)), "skipped", "detached")
+    _assert_result(await sb.update_brain(link_of(pair.clone), FakeConfig(pair.root)), "skipped", "detached")
     assert git(pair.clone, "rev-parse", "HEAD") == head
 
 
@@ -277,7 +293,7 @@ async def test_update_row2_detached(pair: SimpleNamespace) -> None:
 async def test_update_row3_no_upstream(pair: SimpleNamespace) -> None:
     git(pair.clone, "checkout", "-q", "-b", "local-only")
     head = git(pair.clone, "rev-parse", "HEAD")
-    _assert_result(await sb.update_brain(str(pair.clone), FakeConfig(pair.root)), "skipped", "no_upstream")
+    _assert_result(await sb.update_brain(link_of(pair.clone), FakeConfig(pair.root)), "skipped", "no_upstream")
     assert git(pair.clone, "rev-parse", "HEAD") == head
 
 
@@ -289,7 +305,7 @@ async def test_update_row4_fetch_failed_redacts_and_caps(pair: SimpleNamespace, 
         return await real_run_git(workspace, *args, timeout=timeout, env=env)
 
     monkeypatch.setattr(sb, "run_git", failing)
-    result = await sb.update_brain(str(pair.clone), FakeConfig(pair.root))
+    result = await sb.update_brain(link_of(pair.clone), FakeConfig(pair.root))
     _assert_result(result, "failed", "fetch_failed")
     assert "SECRETVALUE123" not in result["detail"]
     assert len(result["detail"]) <= sb.MAX_REASON_CHARS
@@ -303,7 +319,7 @@ async def test_update_row5_fetch_timeout(pair: SimpleNamespace, monkeypatch) -> 
         return await real_run_git(workspace, *args, timeout=timeout, env=env)
 
     monkeypatch.setattr(sb, "run_git", timing_out)
-    _assert_result(await sb.update_brain(str(pair.clone), FakeConfig(pair.root)), "failed", "timeout")
+    _assert_result(await sb.update_brain(link_of(pair.clone), FakeConfig(pair.root)), "failed", "timeout")
 
 
 @pytest.mark.asyncio
@@ -315,7 +331,7 @@ async def test_update_row6_ahead_or_equal_is_up_to_date(pair: SimpleNamespace, d
     if dirty:
         (pair.clone / "a.md").write_text("uncommitted\n", encoding="utf-8")
     head = git(pair.clone, "rev-parse", "HEAD")
-    _assert_result(await sb.update_brain(str(pair.clone), FakeConfig(pair.root)), "up_to_date", "")
+    _assert_result(await sb.update_brain(link_of(pair.clone), FakeConfig(pair.root)), "up_to_date", "")
     assert git(pair.clone, "rev-parse", "HEAD") == head
     assert (git(pair.clone, "status", "--porcelain") != "") is dirty
 
@@ -327,7 +343,7 @@ async def test_update_row7_diverged(pair: SimpleNamespace) -> None:
     git(pair.clone, "commit", "-q", "-m", "local")
     push_from_seed(pair, "remote.md")
     head = git(pair.clone, "rev-parse", "HEAD")
-    _assert_result(await sb.update_brain(str(pair.clone), FakeConfig(pair.root)), "failed", "diverged")
+    _assert_result(await sb.update_brain(link_of(pair.clone), FakeConfig(pair.root)), "failed", "diverged")
     assert git(pair.clone, "rev-parse", "HEAD") == head
 
 
@@ -336,7 +352,7 @@ async def test_update_row8_behind_with_local_changes_is_skipped(pair: SimpleName
     push_from_seed(pair, "remote.md")
     (pair.clone / "a.md").write_text("edited\n", encoding="utf-8")
     head = git(pair.clone, "rev-parse", "HEAD")
-    _assert_result(await sb.update_brain(str(pair.clone), FakeConfig(pair.root)), "skipped", "local_changes")
+    _assert_result(await sb.update_brain(link_of(pair.clone), FakeConfig(pair.root)), "skipped", "local_changes")
     assert git(pair.clone, "rev-parse", "HEAD") == head
     assert (pair.clone / "a.md").read_text(encoding="utf-8") == "edited\n"
 
@@ -347,7 +363,7 @@ async def test_update_row9_behind_clean_fast_forwards(pair: SimpleNamespace) -> 
     (pair.clone / ".obsidian").mkdir()
     (pair.clone / ".obsidian" / "app.json").write_text("{}", encoding="utf-8")
     (pair.clone / ".DS_Store").write_text("x", encoding="utf-8")
-    _assert_result(await sb.update_brain(str(pair.clone), FakeConfig(pair.root)), "updated", "")
+    _assert_result(await sb.update_brain(link_of(pair.clone), FakeConfig(pair.root)), "updated", "")
     assert git(pair.clone, "rev-parse", "HEAD") == new_head
     assert git(pair.clone, "status", "--porcelain", "--untracked-files=no") == ""
     assert (pair.clone / ".obsidian" / "app.json").exists()
@@ -358,7 +374,7 @@ async def test_update_row10_merge_failed_leaves_head(pair: SimpleNamespace) -> N
     push_from_seed(pair, "collide.md")
     (pair.clone / "collide.md").write_text("untracked local\n", encoding="utf-8")
     head = git(pair.clone, "rev-parse", "HEAD")
-    result = await sb.update_brain(str(pair.clone), FakeConfig(pair.root))
+    result = await sb.update_brain(link_of(pair.clone), FakeConfig(pair.root))
     _assert_result(result, "failed", "merge_failed")
     assert git(pair.clone, "rev-parse", "HEAD") == head
     assert (pair.clone / "collide.md").read_text(encoding="utf-8") == "untracked local\n"
@@ -368,10 +384,10 @@ async def test_update_row10_merge_failed_leaves_head(pair: SimpleNamespace) -> N
 async def test_update_never_runs_a_rewriting_git_command(pair: SimpleNamespace, monkeypatch) -> None:
     calls = record_git(monkeypatch)
     push_from_seed(pair, "remote.md")
-    await sb.update_brain(str(pair.clone), FakeConfig(pair.root))
+    await sb.update_brain(link_of(pair.clone), FakeConfig(pair.root))
     (pair.clone / "a.md").write_text("edited\n", encoding="utf-8")
     push_from_seed(pair, "more.md")
-    await sb.update_brain(str(pair.clone), FakeConfig(pair.root))
+    await sb.update_brain(link_of(pair.clone), FakeConfig(pair.root))
     forbidden = {"reset", "rebase", "stash", "checkout", "clean", "push", "--force"}
     assert calls, "the update should have run git"
     for argv in calls:
@@ -389,7 +405,7 @@ async def test_update_serializes_per_path(pair: SimpleNamespace, monkeypatch) ->
         return (0, "", "")
 
     monkeypatch.setattr(sb, "run_git", slow)
-    await asyncio.gather(sb.update_brain(str(pair.clone), FakeConfig(pair.root)), sb.update_brain(str(pair.clone), FakeConfig(pair.root)))
+    await asyncio.gather(sb.update_brain(link_of(pair.clone), FakeConfig(pair.root)), sb.update_brain(link_of(pair.clone), FakeConfig(pair.root)))
     assert [e.split()[0] for e in events] == ["start", "end", "start", "end"]
 
 
@@ -399,8 +415,8 @@ async def test_update_loop_updates_each_distinct_path_once(root: Path, monkeypat
     monkeypatch.setattr(sb, "UPDATE_INTERVAL_S", 3600)
     seen: list[str] = []
 
-    async def record(path: str, config=None) -> dict:
-        seen.append(path)
+    async def record(link, config=None) -> dict:
+        seen.append(link.path)
         return {"outcome": "up_to_date", "reason": "", "detail": "", "at": ""}
 
     monkeypatch.setattr(sb, "update_brain", record)
@@ -431,8 +447,8 @@ async def test_update_loop_caps_each_pass_and_rotates(monkeypatch) -> None:
     monkeypatch.setattr(sb, "MAX_BRAINS_PER_PASS", 2)
     seen: list[str] = []
 
-    async def record(path: str, config=None) -> dict:
-        seen.append(path)
+    async def record(link, config=None) -> dict:
+        seen.append(link.path)
         return {"outcome": "up_to_date", "reason": "", "detail": "", "at": ""}
 
     monkeypatch.setattr(sb, "update_brain", record)
@@ -453,6 +469,7 @@ async def test_update_loop_caps_each_pass_and_rotates(monkeypatch) -> None:
 async def test_one_failing_brain_does_not_block_the_others(pair: SimpleNamespace, monkeypatch) -> None:
     fine = pair.root / "fine-clone"
     subprocess.run(["git", "clone", "-q", str(pair.origin), str(fine)], check=True)
+    git(fine, "remote", "set-url", "origin", GITHUB_URL)
     push_from_seed(pair, "remote.md")  # both clones are now behind
 
     real = sb.run_git
@@ -463,19 +480,19 @@ async def test_one_failing_brain_does_not_block_the_others(pair: SimpleNamespace
         return await real(workspace, *args, timeout=timeout, env=env)
 
     monkeypatch.setattr(sb, "run_git", timing_out_first)
-    counts = await sb._run_pass(FakeConfig(pair.root), [str(pair.clone), str(fine)])
+    counts = await sb._run_pass(FakeConfig(pair.root), [link_of(pair.clone), link_of(fine)])
     assert counts == {"failed": 1, "updated": 1}
     assert git(fine, "rev-parse", "HEAD") == git(pair.seed, "rev-parse", "HEAD")
 
 
 def test_schedule_update_keeps_a_reference_until_done(monkeypatch) -> None:
-    async def quick(path: str, config=None) -> dict:
+    async def quick(link, config=None) -> dict:
         return {"outcome": "up_to_date", "reason": "", "detail": "", "at": ""}
 
     monkeypatch.setattr(sb, "update_brain", quick)
 
     async def run() -> None:
-        sb.schedule_update("/p/x", FakeConfig(Path("/p")))
+        sb.schedule_update(SharedBrainLink("x", "/p/x", "github.com/x/x"), FakeConfig(Path("/p")))
         assert len(sb._pending) == 1
         await asyncio.sleep(0)
         await asyncio.sleep(0)
@@ -536,11 +553,12 @@ async def test_folder_whose_git_was_removed_under_a_parent_repo_is_not_updated(
     git(parent, "commit", "-q", "-m", "parent")
     brain = parent / "brain"
     subprocess.run(["git", "clone", "-q", str(pair.origin), str(brain)], check=True)
+    git(brain, "remote", "set-url", "origin", GITHUB_URL)
     shutil.rmtree(brain / ".git")
     parent_head = git(parent, "rev-parse", "HEAD")
     calls = record_git(monkeypatch)
 
-    result = await sb.update_brain(str(brain), FakeConfig(pair.root))
+    result = await sb.update_brain(link_of(brain), FakeConfig(pair.root))
 
     assert result["outcome"] == "failed" and result["reason"] == "not_a_checkout"
     assert not [a for a in calls if "fetch" in a or "merge" in a]
@@ -556,7 +574,7 @@ async def test_symlink_swapped_in_after_linking_is_refused(pair: SimpleNamespace
     os.symlink(pair.clone, linked)  # a checkout that lives where a vault could be
     calls = record_git(monkeypatch)
 
-    result = await sb.update_brain(stored, FakeConfig(pair.root))
+    result = await sb.update_brain(SharedBrainLink(name='notes', path=stored, identity='github.com/x/notes'), FakeConfig(pair.root))
 
     assert result["reason"] == "moved"
     assert calls == []
@@ -569,7 +587,7 @@ async def test_runtime_refuses_a_folder_that_moved_into_a_vault(pair: SimpleName
     vault.mkdir(parents=True)
     brain = vault / "notes"
     subprocess.run(["git", "clone", "-q", str(pair.origin), str(brain)], check=True)
-    result = await sb.update_brain(str(brain), config)
+    result = await sb.update_brain(link_of(brain), config)
     assert result == {**result, "outcome": "failed", "reason": "outside_install"}
 
 
@@ -623,7 +641,7 @@ async def test_fetch_and_merge_run_hardened(pair: SimpleNamespace, monkeypatch) 
         return await real(workspace, *args, timeout=timeout, env=env)
 
     monkeypatch.setattr(sb, "run_git", recording)
-    assert (await sb.update_brain(str(pair.clone), FakeConfig(pair.root)))["outcome"] == "updated"
+    assert (await sb.update_brain(link_of(pair.clone), FakeConfig(pair.root)))["outcome"] == "updated"
     fetch = next(c for c in calls if "fetch" in c[0])
     merge = next(c for c in calls if "merge" in c[0])
     for argv, env in (fetch, merge):
@@ -678,16 +696,16 @@ async def test_resolution_does_not_block_the_event_loop(monkeypatch, tmp_path: P
 def test_schedule_update_skips_a_path_already_pending(monkeypatch, tmp_path: Path) -> None:
     started: list[str] = []
 
-    async def slow(path, config=None):
-        started.append(path)
+    async def slow(link, config=None):
+        started.append(link.path)
         await asyncio.sleep(0.05)
         return {"outcome": "up_to_date", "reason": "", "detail": "", "at": ""}
 
     monkeypatch.setattr(sb, "update_brain", slow)
 
     async def run() -> None:
-        sb.schedule_update(str(tmp_path / "x"), FakeConfig(tmp_path))
-        sb.schedule_update(str(tmp_path / "x"), FakeConfig(tmp_path))
+        sb.schedule_update(SharedBrainLink("x", str(tmp_path / "x"), "github.com/x/x"), FakeConfig(tmp_path))
+        sb.schedule_update(SharedBrainLink("x", str(tmp_path / "x"), "github.com/x/x"), FakeConfig(tmp_path))
         await asyncio.sleep(0.1)
 
     asyncio.run(run())
@@ -742,7 +760,7 @@ async def test_update_refuses_config_tampered_after_linking(pair: SimpleNamespac
     push_from_seed(pair, "remote.md")
     git(pair.clone, "config", "core.sshCommand", "/bin/evil")
     calls = record_git(monkeypatch)
-    result = await sb.update_brain(str(pair.clone), FakeConfig(pair.root))
+    result = await sb.update_brain(link_of(pair.clone), FakeConfig(pair.root))
     assert result["outcome"] == "failed" and result["reason"] == "unsafe_config"
     assert not [a for a in calls if "fetch" in a or "merge" in a]
 
@@ -758,7 +776,7 @@ async def test_restored_row_with_hostile_config_is_refused_at_update(
     row = {"name": "notes", "path": str(pair.clone.resolve()), "identity": "github.com/x/notes"}
     (link,) = shared_brains_from_rows([row])
     calls = record_git(monkeypatch)
-    result = await sb.update_brain(link.path, FakeConfig(pair.root))
+    result = await sb.update_brain(link, FakeConfig(pair.root))
     assert result["reason"] == "unsafe_config"
     assert not [a for a in calls if "fetch" in a or "merge" in a]
 
@@ -777,7 +795,7 @@ async def test_git_dir_pointer_is_refused_at_update_and_link(pair: SimpleNamespa
     with pytest.raises(ValueError, match="fresh clone"):
         sb.resolve_links(FakeConfig(pair.root), "work", [{"path": str(worktree)}], [])
     calls = record_git(monkeypatch)
-    result = await sb.update_brain(str(worktree), FakeConfig(pair.root))
+    result = await sb.update_brain(link_of(worktree), FakeConfig(pair.root))
     assert result["reason"] == "not_a_checkout"
     assert not [a for a in calls if "fetch" in a or "merge" in a]
 
@@ -792,7 +810,7 @@ async def test_engine_git_dir_does_not_redirect_the_update(pair: SimpleNamespace
     new_head = push_from_seed(pair, "remote.md")
     monkeypatch.setenv("GIT_DIR", str(other / ".git"))
     monkeypatch.setenv("GIT_WORK_TREE", str(other))
-    result = await sb.update_brain(str(pair.clone), FakeConfig(pair.root))
+    result = await sb.update_brain(link_of(pair.clone), FakeConfig(pair.root))
     assert result["outcome"] == "updated", result
     clean = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
 
@@ -836,4 +854,152 @@ def test_load_keeps_a_brain_pointing_into_the_install_and_reports_it(tmp_path: P
     (link,) = config.workspace("personal").shared_brains
     assert link.name == "inside"
     assert sb.brain_state(link, config)["problem"] == "outside_install"
-    assert sb._linked_paths(config) == []
+    assert sb._linked_links(config) == []
+
+
+# --- third review: origin identity at update, scheme allowlist, order, narrow allowlist ---
+
+SCHEME_REFUSED = [
+    "ext::sh -c touch% /tmp/pwned",
+    "fd::17",
+    "file:///tmp/evil.git",
+    "foo::bar",
+    "http://github.com/x/notes",
+    "git://github.com/x/notes",
+    "/abs/local/bare.git",
+    "https://github.com/x::y",
+]
+
+
+@pytest.mark.parametrize("url", SCHEME_REFUSED)
+def test_canonical_identity_refuses_unlisted_schemes(url: str) -> None:
+    with pytest.raises(ValueError, match="unsupported remote address|unrecognised remote address"):
+        sb.canonical_identity(url)
+
+
+@pytest.mark.parametrize(
+    "url,identity",
+    [
+        ("https://github.com/acme/notes.git", "github.com/acme/notes"),
+        ("ssh://git@github.com/acme/notes", "github.com/acme/notes"),
+        ("git@github.com:acme/notes.git", "github.com/acme/notes"),
+    ],
+)
+def test_canonical_identity_accepts_the_three_shapes(url: str, identity: str) -> None:
+    assert sb.canonical_identity(url) == identity
+
+
+@pytest.mark.parametrize("url", SCHEME_REFUSED)
+def test_link_refuses_an_unlisted_scheme_origin(root: Path, url: str) -> None:
+    checkout = make_checkout(root / "scheme-origin")
+    git(checkout, "remote", "add", "origin", url)
+    with pytest.raises(ValueError, match="unsupported remote address|unrecognised remote address"):
+        sb.resolve_links(FakeConfig(root), "work", [{"path": str(checkout)}], [])
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("url", SCHEME_REFUSED)
+async def test_update_refuses_origin_moved_to_an_unlisted_scheme(
+    pair: SimpleNamespace, monkeypatch, url: str
+) -> None:
+    git(pair.clone, "remote", "set-url", "origin", url)
+    calls = record_git(monkeypatch)
+    result = await sb.update_brain(link_of(pair.clone), FakeConfig(pair.root))
+    assert result["reason"] == "origin_changed"
+    assert not [a for a in calls if "fetch" in a or "merge" in a]
+
+
+@pytest.mark.asyncio
+async def test_update_refuses_origin_pointing_at_another_repository(
+    pair: SimpleNamespace, monkeypatch
+) -> None:
+    git(pair.clone, "remote", "set-url", "origin", "https://github.com/x/elsewhere")
+    calls = record_git(monkeypatch)
+    result = await sb.update_brain(link_of(pair.clone), FakeConfig(pair.root))
+    assert result["reason"] == "origin_changed"
+    assert not [a for a in calls if "fetch" in a or "merge" in a]
+
+
+@pytest.mark.asyncio
+async def test_case_variant_remote_subsection_is_refused_with_no_fetch(
+    pair: SimpleNamespace, monkeypatch
+) -> None:
+    git(pair.clone, "config", "remote.ORIGIN.url", "https://evil/x.git")
+    git(pair.clone, "config", "branch.main.remote", "ORIGIN")
+    git(pair.clone, "config", "branch.main.merge", "refs/heads/main")
+    calls = record_git(monkeypatch)
+    result = await sb.update_brain(link_of(pair.clone), FakeConfig(pair.root))
+    assert result["reason"] == "unsafe_config"
+    assert not [a for a in calls if "fetch" in a or "merge" in a]
+    with pytest.raises(ValueError, match="can run programs"):
+        sb.resolve_links(FakeConfig(pair.root), "work", [{"path": str(pair.clone)}], [])
+
+
+@pytest.mark.asyncio
+async def test_branch_remote_other_than_origin_is_refused(pair: SimpleNamespace, monkeypatch) -> None:
+    git(pair.clone, "config", "branch.main.remote", "elsewhere")
+    calls = record_git(monkeypatch)
+    result = await sb.update_brain(link_of(pair.clone), FakeConfig(pair.root))
+    assert result["reason"] == "unsafe_config"
+    assert not [a for a in calls if "fetch" in a or "merge" in a]
+
+
+@pytest.mark.asyncio
+async def test_config_is_vetted_before_any_other_git_command(pair: SimpleNamespace, monkeypatch) -> None:
+    calls = record_git(monkeypatch)
+    await sb.update_brain(link_of(pair.clone), FakeConfig(pair.root))
+    assert calls and "--show-scope" in calls[0]
+
+
+def test_brain_state_vets_config_before_other_git(pair: SimpleNamespace, monkeypatch) -> None:
+    seen: list[list[str]] = []
+    real = sb._git
+
+    def spy(path, *args):
+        seen.append(list(args))
+        return real(path, *args)
+
+    monkeypatch.setattr(sb, "_git", spy)
+    sb.brain_state(link_of(pair.clone), FakeConfig(pair.root))
+    assert seen and "--show-scope" in seen[0]
+
+
+def test_hardening_pins_the_protocol_allowlist() -> None:
+    hardened = " ".join(sb._HARDEN)
+    for flag in ("protocol.allow=never", "protocol.https.allow=always", "protocol.ssh.allow=always"):
+        assert flag in hardened
+
+
+@pytest.mark.parametrize(
+    "key,value",
+    [
+        ("user.name", "Mallory"),
+        ("init.defaultBranch", "main"),
+        ("pull.rebase", "true"),
+        ("branch.main.mergeOptions", "--no-ff"),
+        ("remote.origin.fetch", "+refs/*:refs/*"),
+        ("remote.origin.pushurl", "https://github.com/x/elsewhere"),
+        ("extensions.partialClone", "origin"),
+        ("core.autocrlf", "true"),
+    ],
+)
+def test_narrowed_allowlist_refuses_newly_dropped_keys(root: Path, key: str, value: str) -> None:
+    checkout = make_checkout(root / "narrow", "https://github.com/x/narrow")
+    git(checkout, "config", key, value)
+    with pytest.raises(ValueError, match="can run programs"):
+        sb.resolve_links(FakeConfig(root), "work", [{"path": str(checkout)}], [])
+
+
+def test_clone_of_a_local_bare_repo_with_https_origin_still_links(root: Path) -> None:
+    origin = root / "bare.git"
+    subprocess.run(["git", "init", "-q", "--bare", "-b", "main", str(origin)], check=True)
+    seed = make_checkout(root / "seed2")
+    (seed / "a.md").write_text("a\n", encoding="utf-8")
+    git(seed, "add", ".")
+    git(seed, "commit", "-q", "-m", "a")
+    git(seed, "push", "-q", str(origin), "main")
+    clone = root / "clone2"
+    subprocess.run(["git", "clone", "-q", str(origin), str(clone)], check=True)
+    git(clone, "remote", "set-url", "origin", "https://github.com/acme/notes.git")
+    (link,) = sb.resolve_links(FakeConfig(root), "work", [{"path": str(clone)}], [])
+    assert link.identity == "github.com/acme/notes"
