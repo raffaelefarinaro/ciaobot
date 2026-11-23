@@ -28,6 +28,7 @@ from ciao.config import (
     coerce_workspace_color,
     merge_memory_approval,
 )
+from ciao import shared_brain
 from ciao.model_tiers import is_tier
 from ciao.provider_service import capabilities_for
 
@@ -129,7 +130,28 @@ def workspace_to_dict(workspace: WorkspaceConfig, config: Any) -> dict:
         "memory_handover": memory_handover,
         "memory_approval": memory_approval,
         "provider_overrides": provider_overrides,
+        "shared_brains": [
+            {"name": link.name, "path": link.path, "identity": link.identity}
+            for link in getattr(workspace, "shared_brains", [])
+        ],
     }
+
+
+_SHARED_BRAINS_SHAPE = "shared_brains must be a list of {path, name}"
+
+
+def _shared_brain_rows(raw: object) -> list[dict[str, str]]:
+    if not isinstance(raw, list):
+        raise ValueError(_SHARED_BRAINS_SHAPE)
+    rows: list[dict[str, str]] = []
+    for item in raw:
+        if not isinstance(item, dict) or not isinstance(item.get("path"), str):
+            raise ValueError(_SHARED_BRAINS_SHAPE)
+        name = item.get("name")
+        if name is not None and not isinstance(name, str):
+            raise ValueError(_SHARED_BRAINS_SHAPE)
+        rows.append({"path": item["path"], "name": name} if name is not None else {"path": item["path"]})
+    return rows
 
 
 def parse_disallowed_tools_value(raw: object) -> list[str] | None:
@@ -253,6 +275,18 @@ def workspace_from_request(
         provider_overrides = existing.provider_overrides
     else:
         provider_overrides = {}
+    if "shared_brains" in data:
+        # Whole-list replacement; git runs only for rows that are new.
+        shared_brains = shared_brain.resolve_links(
+            config,
+            name,
+            _shared_brain_rows(data.get("shared_brains")),
+            list(getattr(existing, "shared_brains", [])) if existing is not None else [],
+        )
+    elif existing is not None:
+        shared_brains = list(getattr(existing, "shared_brains", []))
+    else:
+        shared_brains = []
     if "gws_profile" in data:
         # Imported here: gws_auth pulls in the HTTP and subprocess stack.
         from ciao.gws_auth import slugify_profile
@@ -283,6 +317,7 @@ def workspace_from_request(
         gws_profile=gws_profile,
         color=color,
         memory_handover=memory_handover,
+        shared_brains=shared_brains,
         memory_approval=memory_approval,
         provider_overrides=provider_overrides,
     )

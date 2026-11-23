@@ -15,6 +15,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Awaitable, Callable, Literal, Mapping
 
+from ciao import shared_brain
 from ciao.config import RESTART_EXIT_CODE, CiaoConfig
 from ciao.legacy_node_state import (
     LegacyNodeState,
@@ -1518,6 +1519,7 @@ async def _run_server_locked(
 
     if not getattr(config, "bootstrap_mode", False):
         asyncio.create_task(_gws_health_loop())
+        asyncio.create_task(shared_brain.update_loop(config))
 
 
     import uvicorn

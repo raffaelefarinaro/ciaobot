@@ -2493,10 +2493,16 @@ class CiaoControlPlane:
 
     def workspaces_list(self, principal: AgentPrincipal) -> dict[str, Any]:
         """All configured logical workspaces, not just the active one."""
+        from ciao.shared_brain import OPERATOR_ONLY_KEYS
         from ciao.workspaces import workspace_to_dict
 
         return _ok(
-            {"workspaces": [workspace_to_dict(item, self.config) for item in self.config.workspaces.values()]}
+            {
+                "workspaces": [
+                    {k: v for k, v in workspace_to_dict(item, self.config).items() if k not in OPERATOR_ONLY_KEYS}
+                    for item in self.config.workspaces.values()
+                ]
+            }
         )
 
     def repo_candidates(self, principal: AgentPrincipal) -> dict[str, Any]:

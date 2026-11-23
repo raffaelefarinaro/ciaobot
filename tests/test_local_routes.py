@@ -208,6 +208,7 @@ def test_workspaces_endpoint_lists_configured_workspaces(tmp_path: Path) -> None
                 "memory_handover": "off",
                 "memory_approval": {},
                 "provider_overrides": {},
+                "shared_brains": [],
             },
             {
                 "name": "work",
@@ -220,6 +221,7 @@ def test_workspaces_endpoint_lists_configured_workspaces(tmp_path: Path) -> None
                 "memory_handover": "off",
                 "memory_approval": {},
                 "provider_overrides": {},
+                "shared_brains": [],
             },
         ],
         "active": "personal",

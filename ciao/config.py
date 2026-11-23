@@ -512,6 +512,19 @@ def coerce_provider_overrides(raw: object) -> dict[str, dict[str, str]]:
     return cleaned
 
 
+#: Local name of a shared brain: a-z, 0-9 and "-", 1 to 32 characters.
+SHARED_BRAIN_NAME_PATTERN = r"^[a-z0-9](?:[a-z0-9-]{0,30}[a-z0-9])?$"
+
+
+@dataclass(frozen=True, slots=True)
+class SharedBrainLink:
+    """One linked shared brain: a local Git checkout a workspace reads."""
+
+    name: str  # stable local name, unique per workspace
+    path: str  # absolute path of the Git checkout
+    identity: str  # canonical "host/owner/repo" read from origin, unique per workspace
+
+
 @dataclass(slots=True)
 class WorkspaceConfig:
     """Config for one logical chat workspace."""
@@ -527,6 +540,8 @@ class WorkspaceConfig:
     # Whether Workspace care may act on its own [memory]/[profile] verdicts
     # (off, dismiss, all). Operator-only: never set from an agent surface.
     memory_handover: str = DEFAULT_MEMORY_HANDOVER
+    # Operator-only: the workspace's shared brains (empty = none), in the order the operator gave.
+    shared_brains: list[SharedBrainLink] = field(default_factory=list)
     # Sparse per-kind acceptance (MEMORY_APPROVAL_KINDS -> MEMORY_APPROVAL_MODES).
     # A kind with no key inherits memory_handover. Operator-only, like the above.
     memory_approval: dict[str, str] = field(default_factory=dict)
@@ -546,6 +561,46 @@ def _coerce_workspace_disallowed(raw: object) -> list[str] | None:
     if isinstance(raw, list):
         return [str(item).strip() for item in raw if str(item).strip()]
     return None
+
+
+def _has_control(text: str) -> bool:
+    return any(ord(ch) < 32 or ord(ch) == 127 for ch in text)
+
+
+def shared_brains_from_rows(raw: object) -> list[SharedBrainLink]:
+    """Shared-brain rows from a registry or archive, with bad rows dropped.
+
+    A hand-edited file must not smuggle in a brain the setting could never have
+    saved: a row needs a valid name, an absolute path with no control characters
+    and a non-empty identity, and no two rows may share a name, path or
+    identity. Overlap with the install or a vault is checked where the config is
+    built (``CiaoConfig``), because only it knows those roots.
+    """
+    if not isinstance(raw, list):
+        return []
+    log = logging.getLogger(__name__)
+    links: list[SharedBrainLink] = []
+    seen: set[str] = set()
+    for row in raw:
+        if not isinstance(row, dict):
+            continue
+        name, path, identity = row.get("name"), row.get("path"), row.get("identity")
+        if not (isinstance(name, str) and isinstance(path, str) and isinstance(identity, str)):
+            continue
+        sound = (
+            re.fullmatch(SHARED_BRAIN_NAME_PATTERN, name) is not None
+            and os.path.isabs(path)
+            and not _has_control(path)
+            and not _has_control(identity)
+            and bool(identity.strip())
+        )
+        clash = {f"name:{name}", f"path:{path}", f"id:{identity}"} & seen
+        if not sound or clash:
+            log.warning("Dropping an invalid shared brain row %r", name)
+            continue
+        seen |= {f"name:{name}", f"path:{path}", f"id:{identity}"}
+        links.append(SharedBrainLink(name=name, path=path, identity=identity))
+    return links
 
 
 def _workspace_from_mapping(data: dict) -> WorkspaceConfig | None:
@@ -586,6 +641,7 @@ def _workspace_from_mapping(data: dict) -> WorkspaceConfig | None:
         gws_profile=str(data.get("gws_profile", "")).strip(),
         color=color,
         memory_handover=memory_handover,
+        shared_brains=shared_brains_from_rows(data.get("shared_brains")),
         memory_approval=memory_approval,
         provider_overrides=provider_overrides,
     )
@@ -844,6 +900,26 @@ class CiaoConfig:
         if not self.workspaces:
             self.workspaces = _bootstrap_registry(self.vault_root)
         self._workspace_registry_changed = self._normalize_workspace_vault_roots()
+        self._note_unsafe_shared_brains()
+
+    def _note_unsafe_shared_brains(self) -> None:
+        """Log shared brains that point into the install, a vault or the runtime dir.
+
+        They are kept, not dropped: ``brain_state`` reports them as
+        ``problem: outside_install`` and the update loop skips them, so the
+        operator sees them and can remove them in Settings.
+        """
+        from ciao.shared_brain import overlaps_protected  # noqa: PLC0415
+
+        for workspace in self.workspaces.values():
+            for link in getattr(workspace, "shared_brains", None) or []:
+                if overlaps_protected(self, link.path):
+                    logging.getLogger(__name__).warning(
+                        "Shared brain %r of workspace %r points into the install or a vault; "
+                        "it is kept and reported, not updated",
+                        link.name,
+                        workspace.name,
+                    )
 
     def workspace(self, name: str | None) -> WorkspaceConfig | None:
         if not name:
@@ -1303,6 +1379,11 @@ class CiaoConfig:
                 row["claude_trim"] = workspace.claude_trim
             if workspace.memory_handover != DEFAULT_MEMORY_HANDOVER:
                 row["memory_handover"] = workspace.memory_handover
+            if workspace.shared_brains:
+                row["shared_brains"] = [
+                    {"name": link.name, "path": link.path, "identity": link.identity}
+                    for link in workspace.shared_brains
+                ]
             if workspace.memory_approval:
                 row["memory_approval"] = dict(workspace.memory_approval)
             if workspace.provider_overrides:

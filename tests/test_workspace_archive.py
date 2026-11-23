@@ -1688,3 +1688,18 @@ def test_carry_skips_a_symlink_without_moving_or_following_it(tmp_path):
     assert link.is_symlink(), "the symlink stays where it was"
     assert outside.read_text(encoding="utf-8") == "# outside\n", "the target is not touched"
 
+
+
+def test_archive_restore_carries_shared_brains(tmp_path):
+    from ciao.config import SharedBrainLink
+
+    client, config, _pcm, _store = _app(tmp_path, rerooted=True)
+    away = tmp_path.parent / f"brain-away-{tmp_path.name}"
+    link = SharedBrainLink(name="notes", path=str(away), identity="github.com/acme/notes")
+    config.workspaces["work"].shared_brains = [link]
+    archived = client.post("/api/workspaces/work/archive").json()["archived"]
+
+    restored = client.post("/api/workspaces/archived/restore", json={"id": archived["id"]})
+
+    assert restored.status_code == 200, restored.json()
+    assert config.workspaces["work"].shared_brains == [link]
