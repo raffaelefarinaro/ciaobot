@@ -200,6 +200,9 @@
             <span v-if="hasBlockingHousekeeping" class="nav-item-alert" aria-hidden="true"><ActivityGlyph kind="alert" /></span>
           </router-link>
         </nav>
+        <div class="sidebar-search-utility">
+          <button type="button" class="sidebar-search-button" @click="chatSearchOpen = true">Search chats</button>
+        </div>
 
       </template>
     </div>
@@ -229,7 +232,11 @@
       <!-- 'chat-selected' is a misnomer here: it is the event ChatLayout already
            maps to collapsing the mobile drawer. -->
       <NotificationBell class="sidebar-rail-bell" @navigate="emit('chat-selected')" />
+      <button type="button" class="sidebar-search-rail touch-hit" aria-label="Search chats" title="Search chats" @click="chatSearchOpen = true">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><circle cx="10.5" cy="10.5" r="6.5" /><path d="m16 16 5 5" /></svg>
+      </button>
     </div>
+    <ChatSearchDialog :open="chatSearchOpen" :workspace="store.activeWorkspace" @close="chatSearchOpen = false" @select="openSearchedChat" />
 
     <div v-if="!collapsed" ref="contextListEl" class="sidebar-context">
     <!-- No section title here: the nav pill above already names this view.
@@ -1046,6 +1053,7 @@ import { sidebarCodeBadgeTitle } from '../lib/repoLocation'
 import { inCodeMode } from '../lib/repo'
 import BrandMark from './BrandMark.vue'
 import NotificationBell from './NotificationBell.vue'
+import ChatSearchDialog from './ChatSearchDialog.vue'
 import { isApplePlatform } from '../lib/platform'
 import { scheduleInWorkspace, scheduleNeedsAttention } from '../lib/automationWorkspace'
 import { useWorkspaceSchedules } from '../composables/useWorkspaceSchedules'
@@ -1086,6 +1094,12 @@ function canOpenChatBeside(chat: { chat_id: string; local?: boolean }): boolean 
 }
 
 const store = useProjectStore()
+const chatSearchOpen = ref(false)
+async function openSearchedChat(chatId: string) {
+  chatSearchOpen.value = false
+  await store.openChatFromDeepLink(chatId)
+  emit('chat-selected')
+}
 const { archiveChatWithTaskCheck } = useArchiveChat()
 const taskStore = useTaskStore()
 const housekeeping = useHousekeepingStore()
@@ -2290,6 +2304,11 @@ async function confirmDeleteChat(chatId: string) {
   margin: 12px 0 0;
   min-width: 0;
 }
+
+.sidebar-search-utility { padding: 4px 0 8px; }
+.sidebar-search-button { width: 100%; min-height: 44px; padding: 0 10px; color: var(--fg2); background: transparent; border: 1px solid var(--border); border-radius: var(--radius); text-align: left; cursor: pointer; }
+.sidebar-search-button:hover, .sidebar-search-rail:hover { background: var(--bg2); color: var(--fg); }
+.sidebar-search-rail { display: flex; align-items: center; justify-content: center; width: 44px; color: var(--fg2); background: transparent; border: 0; border-radius: var(--radius); }
 
 .nav-item {
   position: relative;

@@ -1,5 +1,7 @@
 # PWA frontend
 
+The sidebar's **Search chats** dialog searches saved titles and visible transcript text in the selected workspace. It sends the query only in a bounded JSON body, shows literal plain-text excerpts, and opens archived results through the existing read-only chat flow. Search results are fetched a page at a time.
+
 Vue 3 + Vite + Pinia + TypeScript. Built output goes to `ciao/web/static/`, served by the same Starlette server as the API. See `../README.md` for the repo-wide layout and `../PWA_API.md` for backend routes.
 
 The file viewer is Vue-first. Text, Markdown, CSV, PDF/PPTX (via a binary preview), and HTML artifacts all render through native Vue components (`HtmlArtifactViewer.vue`, `CsvViewer.vue`, plus text/iframe previews). Diagrams live inside HTML artifacts as inline SVG; `.excalidraw` is no longer a viewer type. History and Diff operate on the raw file snapshots.
@@ -62,6 +64,8 @@ identity representation.
 The chat rail uses Option/Alt+Left and Right to move through the current workspace's chats, including from the composer. Matching chords are consumed at the ends; the title's unmodified arrow-key navigation remains available. Configured Option shortcuts work in editable fields, including keys reported as dead keys; unbound dead keys, IME composition, AltGr, unmodified workspace digits and controls that claim their keys retain precedence. Explicit custom and disabled bindings are preserved.
 
 ## Dev workflow
+
+The Repository section in Chat details reads `/api/chats/{chat_id}/worktree-changes` only after **View changes** is opened; **Refresh** is explicit. It shows staged and unstaged patches, untracked filenames, a clean state, unavailable and retry states, and a truncation notice. A response is discarded when its chat or checkout changes. The view is read-only and uses Vue text interpolation for paths and patches.
 
 The embedded LoginView keeps terminal guidance and the six-item product tour for the CLI bootstrap.
 

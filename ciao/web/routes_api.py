@@ -65,6 +65,7 @@ from ciao.web.auth import (
     LOOPBACK_HOST_NAMES,
     _localhost_request,
     _same_origin,
+    _state_change_origin_allowed,
     _setup_finish_origin_allowed,
     _setup_finish_refusal,
     is_loopback_client,
@@ -1895,6 +1896,54 @@ async def list_all_chats(request: Request) -> JSONResponse:
     return JSONResponse(pcm.list_chats_dicts())
 
 
+async def search_chats(request: Request) -> JSONResponse:
+    """Search bounded saved transcript text in one registered workspace."""
+    if not _state_change_origin_allowed(request):
+        return JSONResponse({"error": "forbidden origin"}, status_code=403)
+    raw = bytearray()
+    async for chunk in request.stream():
+        raw.extend(chunk)
+        if len(raw) > 4096:
+            return JSONResponse({"error": "request body too large"}, status_code=413,
+                                headers={"Cache-Control": "no-store"})
+    try:
+        body = json.loads(raw)
+    except (json.JSONDecodeError, UnicodeDecodeError):
+        return JSONResponse({"error": "invalid JSON body"}, status_code=400,
+                            headers={"Cache-Control": "no-store"})
+    if not isinstance(body, dict):
+        return JSONResponse({"error": "body must be a JSON object"}, status_code=400,
+                            headers={"Cache-Control": "no-store"})
+    workspace, query, cursor = body.get("workspace"), body.get("q"), body.get("cursor")
+    if (not isinstance(workspace, str) or not isinstance(query, str)
+            or (cursor is not None and not isinstance(cursor, str))):
+        return JSONResponse({"error": "workspace, q, and cursor must be text"}, status_code=400,
+                            headers={"Cache-Control": "no-store"})
+    query = query.strip()
+    if not 2 <= len(query) <= 200:
+        return JSONResponse({"error": "q must be 2 to 200 characters"}, status_code=400,
+                            headers={"Cache-Control": "no-store"})
+    if cursor is not None and (not cursor or len(cursor) > 2048):
+        return JSONResponse({"error": "invalid cursor"}, status_code=400,
+                            headers={"Cache-Control": "no-store"})
+    config = request.app.state.config
+    if config.workspace(workspace) is None:
+        return JSONResponse({"error": "workspace not found"}, status_code=404,
+                            headers={"Cache-Control": "no-store"})
+    pcm = request.app.state.project_chat_manager
+    try:
+        result = await run_read(
+            "chat-search:" + hashlib.sha256(
+                json.dumps([workspace, query.casefold(), cursor], separators=(",", ":")).encode()
+            ).hexdigest(),
+            lambda: transcript_service.search_workspace_chats(pcm, workspace, query, cursor),
+        )
+    except ValueError:
+        return JSONResponse({"error": "invalid cursor"}, status_code=400,
+                            headers={"Cache-Control": "no-store"})
+    return JSONResponse(result, headers={"Cache-Control": "no-store"})
+
+
 async def chat_detail(request: Request) -> Response:
     pcm = request.app.state.project_chat_manager
     chat_id = request.path_params["chat_id"]
@@ -2617,6 +2666,24 @@ async def chat_message_part(request: Request) -> JSONResponse:
     row = dict(rows[idx])
     row["i"] = idx
     return JSONResponse(row)
+
+
+async def chat_worktree_changes(request: Request) -> Response:
+    """Return one bounded, read-only Git snapshot for this authenticated chat."""
+    pcm = request.app.state.project_chat_manager
+    chat_id = request.path_params["chat_id"]
+    if pcm.get_chat(chat_id) is None:
+        return JSONResponse({"error": "not found"}, status_code=404,
+                            headers={"Cache-Control": "no-store"})
+    try:
+        result = await pcm.worktree_changes_for_chat(chat_id)
+    except Exception:
+        return JSONResponse({"error": "unable to read checkout changes"}, status_code=503,
+                            headers={"Cache-Control": "no-store"})
+    if result is None:
+        return JSONResponse({"error": "not found"}, status_code=404,
+                            headers={"Cache-Control": "no-store"})
+    return JSONResponse(result, headers={"Cache-Control": "no-store"})
 
 
 # ── Images ───────────────────────────────────────────────────────────────

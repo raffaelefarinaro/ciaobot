@@ -49,6 +49,10 @@ carried by the session.
   `/share-target` do not pass through it. Malformed or excessively nested JSON
   is refused as 400 before handler dispatch; application errors are not
   translated as parse failures.
+- `GET /api/chats/{chat_id}/worktree-changes` is session and same-origin gated,
+  accepts no repository or command input, and reads only the registered chat
+  checkout. Git runs with isolated metadata and configuration; the endpoint
+  exposes bounded patch text and untracked names, never a write operation.
 - `_LOOPBACK_ONLY_API` is the only peer-scoped surface: the loopback-only
   local feed (`/api/menubar-chats`; legacy route
   name, no native client), the update
@@ -258,6 +262,8 @@ What each CLI still enforces:
 - Claude Code: the permission mode passed per chat (`permission_mode`); `can_use_tool` routes asks to Ciaobot's permission cards with unattended auto-deny. The user's own `~/.claude/settings.json` and project `.claude/settings*.json` `permissions.deny` rules and its own `sandbox` settings still load because `setting_sources=["user","project","local"]` and Ciaobot no longer passes a `sandbox` value. In default mode, reads outside the working directory and all Bash commands ask; `auto` uses the CLI's classifier; `bypass` enforces nothing.
 - OpenCode: the session ruleset from `_MODE_PERMISSIONS` (plan asks except read/glob/grep; normal asks everything; auto allows all but shell; bypass allows all) and the user's own `opencode.json` `permission` config.
 - Ciaobot's own surfaces keep their guards: the `ciao` control plane (mode gates, `unattended_forbidden`, workspace confinement of its verbs), `is_credential_adjacent` on `ciao` CLI file flags, `/api/*` session auth, and loopback-only routes.
+
+`POST /api/chats/search` is a signed-session, same-origin, no-store read. Its body scopes a literal query to one registered workspace. The engine filters internal helper chats and system projects before scanning, then reads only registered active-chat transcripts and located archives through no-follow regular-file descriptors. Each request examines at most 100 chats, reads at most 8 MiB total and 512 KiB per transcript, and returns bounded plain-text excerpts; it stores no index or excerpts.
 
 ## Verification
 

@@ -25,6 +25,8 @@ from __future__ import annotations
 import asyncio
 import logging
 import subprocess
+from collections.abc import Awaitable, Callable
+from dataclasses import dataclass
 from pathlib import Path
 
 from ciao.os_support.child_env import child_env
@@ -49,6 +51,196 @@ GIT_TIMEOUT_DETAIL = "git command timed out"
 # the child is wedged in uninterruptible I/O; returning anyway beats hanging the
 # caller, and the transport is closed either way.
 _REAP_TIMEOUT = 5.0
+
+
+@dataclass(frozen=True)
+class GitCapture:
+    returncode: int
+    stdout: bytes
+    stderr: bytes
+    truncated: bool = False
+
+
+async def run_git_bounded(
+    workspace: Path,
+    *args: str,
+    timeout: float,
+    max_output: int,
+    env: dict[str, str],
+    stdin: bytes | None = None,
+) -> GitCapture:
+    """Run a fixed Git read with a cap enforced while its pipes are read."""
+    proc = await asyncio.create_subprocess_exec(
+        "git", *args, cwd=str(workspace), env=env,
+        stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+        stdin=asyncio.subprocess.PIPE if stdin is not None else asyncio.subprocess.DEVNULL,
+        **tree_spawn_options(),
+    )
+    try:
+        tree = ProcessTree(proc.pid)
+    except OSError:
+        proc.kill()
+        await proc.wait()
+        raise
+    if max_output <= 0:
+        await asyncio.shield(_reap(proc, tree))
+        return GitCapture(-1, b"", b"", True)
+    assert proc.stdout is not None and proc.stderr is not None
+    assert stdin is None or proc.stdin is not None
+    captured = [bytearray(), bytearray()]
+    total = 0
+    exceeded = asyncio.Event()
+
+    async def drain(stream: asyncio.StreamReader, slot: int) -> None:
+        nonlocal total
+        while True:
+            chunk = await stream.read(8192)
+            if not chunk:
+                return
+            room = max_output + 1 - total
+            if room > 0:
+                take = chunk[:room]
+                captured[slot].extend(take)
+                total += len(take)
+            if total > max_output:
+                exceeded.set()
+                return
+
+    readers = [asyncio.create_task(drain(proc.stdout, 0)), asyncio.create_task(drain(proc.stderr, 1))]
+    wait_task = asyncio.create_task(proc.wait())
+    cap_task = asyncio.create_task(exceeded.wait())
+
+    async def send_input() -> None:
+        if stdin is None or proc.stdin is None:
+            return
+        try:
+            proc.stdin.write(stdin)
+            await proc.stdin.drain()
+        except (BrokenPipeError, ConnectionResetError):
+            pass
+        finally:
+            proc.stdin.close()
+            try:
+                await proc.stdin.wait_closed()
+            except (BrokenPipeError, ConnectionResetError):
+                pass
+
+    input_task = asyncio.create_task(send_input()) if stdin is not None else None
+    try:
+        done, _ = await asyncio.wait(
+            [wait_task, cap_task],
+            timeout=timeout, return_when=asyncio.FIRST_COMPLETED,
+        )
+        if not done:
+            await asyncio.shield(_reap(proc, tree))
+            return GitCapture(-1, b"", b"git command timed out")
+        if exceeded.is_set():
+            await asyncio.shield(_reap(proc, tree))
+            return GitCapture(-1, bytes(captured[0][:max_output]), bytes(captured[1]), True)
+        await asyncio.gather(*readers)
+        if exceeded.is_set():
+            tree.close()
+            return GitCapture(-1, bytes(captured[0][:max_output]), bytes(captured[1]), True)
+        if input_task is not None:
+            await input_task
+        tree.close()
+        return GitCapture(proc.returncode or 0, bytes(captured[0]), bytes(captured[1]))
+    except BaseException:
+        await asyncio.shield(_reap(proc, tree))
+        raise
+    finally:
+        cleanup_tasks = (wait_task, cap_task)
+        for task in cleanup_tasks:
+            if not task.done():
+                task.cancel()
+        await asyncio.gather(*cleanup_tasks, return_exceptions=True)
+        if input_task is not None:
+            if not input_task.done():
+                input_task.cancel()
+            await asyncio.gather(input_task, return_exceptions=True)
+        for reader in readers:
+            if not reader.done():
+                reader.cancel()
+        await asyncio.gather(*readers, return_exceptions=True)
+
+
+async def run_git_stream(
+    workspace: Path,
+    *args: str,
+    timeout: float,
+    max_stderr: int,
+    env: dict[str, str],
+    on_stdout: Callable[[bytes], Awaitable[None]],
+) -> GitCapture:
+    """Drain stdout incrementally without retaining it; stderr remains capped."""
+    proc = await asyncio.create_subprocess_exec(
+        "git", *args, cwd=str(workspace), env=env,
+        stdin=asyncio.subprocess.DEVNULL,
+        stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+        **tree_spawn_options(),
+    )
+    try:
+        tree = ProcessTree(proc.pid)
+    except OSError:
+        proc.kill()
+        await proc.wait()
+        raise
+    assert proc.stdout is not None and proc.stderr is not None
+    stdout, stderr = proc.stdout, proc.stderr
+    stderr_data = bytearray()
+    exceeded = asyncio.Event()
+
+    async def stream_stdout() -> None:
+        while chunk := await stdout.read(8192):
+            await on_stdout(chunk)
+
+    async def drain_stderr() -> None:
+        while chunk := await stderr.read(8192):
+            room = max_stderr + 1 - len(stderr_data)
+            if room > 0:
+                stderr_data.extend(chunk[:room])
+            if len(stderr_data) > max_stderr:
+                exceeded.set()
+                return
+
+    stdout_task = asyncio.create_task(stream_stdout())
+    stderr_task = asyncio.create_task(drain_stderr())
+    wait_task = asyncio.create_task(proc.wait())
+    cap_task = asyncio.create_task(exceeded.wait())
+    try:
+        deadline = asyncio.get_running_loop().time() + timeout
+        while not wait_task.done():
+            remaining = deadline - asyncio.get_running_loop().time()
+            if remaining <= 0:
+                await asyncio.shield(_reap(proc, tree))
+                return GitCapture(-1, b"", b"git command timed out")
+            done, _ = await asyncio.wait(
+                [wait_task, stdout_task, cap_task], timeout=remaining,
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+            if not done:
+                await asyncio.shield(_reap(proc, tree))
+                return GitCapture(-1, b"", b"git command timed out")
+            if exceeded.is_set():
+                await asyncio.shield(_reap(proc, tree))
+                return GitCapture(-1, b"", bytes(stderr_data[:max_stderr]), True)
+            if stdout_task.done() and (error := stdout_task.exception()) is not None:
+                await asyncio.shield(_reap(proc, tree))
+                raise error
+        await asyncio.gather(stdout_task, stderr_task)
+        if exceeded.is_set():
+            tree.close()
+            return GitCapture(-1, b"", bytes(stderr_data[:max_stderr]), True)
+        tree.close()
+        return GitCapture(proc.returncode or 0, b"", bytes(stderr_data))
+    except BaseException:
+        await asyncio.shield(_reap(proc, tree))
+        raise
+    finally:
+        for task in (wait_task, cap_task, stdout_task, stderr_task):
+            if not task.done():
+                task.cancel()
+        await asyncio.gather(wait_task, cap_task, stdout_task, stderr_task, return_exceptions=True)
 
 
 async def _reap(proc: asyncio.subprocess.Process, tree: ProcessTree) -> None:

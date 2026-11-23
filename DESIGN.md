@@ -235,6 +235,8 @@ Structured question cards keep their header and Cancel/Send answer actions visib
 
 Long or implementation-oriented content must not dominate a mobile page. Collapse long prompts and diagnostics behind Preview/Expand/Copy controls, preserve the page title, and move secondary or destructive actions into an overflow menu or bottom sheet.
 
+The chat Repository section offers **View changes** for active chats. Opening it fetches one bounded snapshot on demand; **Refresh**, loading, clean, unavailable, truncation and retry states are explicit. Patch text and untracked filenames stay selectable plain text in a bounded scroll area on both the desktop rail and phone drawer. The section never stages files, opens a shell or changes the composer.
+
 ## Elevation & Depth
 
 Hierarchy comes primarily from tonal layers, one-pixel borders, and spacing. Cards sit on the page background; inputs may use the deeper canvas; modals and popovers use the elevated surface. Use stronger borders for focus and separation before adding shadows.
@@ -340,3 +342,7 @@ The journey is a route, not a modal: `/onboarding` resumes at the recorded step,
 return path as an internal route, and leaves completed or legacy installs alone. Home carries a
 quiet resume row while setup is unfinished, because a new operator should never have to remember
 a URL.
+
+## Chat search
+
+The expanded sidebar's utility row carries a neutral **Search chats** action; the collapsed rail keeps a magnifying-glass button with the same accessible name. The focused dialog searches only the selected workspace, with title and project/archive state above a plain-text excerpt. Results are native buttons and open through the regular chat navigation, including archived read-only loading. The dialog is a mobile bottom sheet, preserves keyboard focus and gives its controls at least 44px targets.
