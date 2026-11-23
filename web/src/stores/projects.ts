@@ -1122,12 +1122,11 @@ export const useProjectStore = defineStore('projects', () => {
         name,
         vault_root: '',
         default_provider: 'claude',
-        gws_profile: '',
       }))
     }
     return [
-      { name: 'personal', vault_root: 'personal', default_provider: 'claude', gws_profile: 'personal' },
-      { name: 'work', vault_root: 'work', default_provider: 'claude', gws_profile: 'work' },
+      { name: 'personal', vault_root: 'personal', default_provider: 'claude' },
+      { name: 'work', vault_root: 'work', default_provider: 'claude' },
     ]
   })
 

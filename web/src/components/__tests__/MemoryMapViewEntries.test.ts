@@ -127,7 +127,7 @@ describe('MemoryMapView entry coverage', () => {
       return Promise.resolve({})
     })
     const store = useProjectStore()
-    store.workspaces = [{ name: 'personal', vault_root: '/tmp/vault', default_provider: 'claude', gws_profile: '' }]
+    store.workspaces = [{ name: 'personal', vault_root: '/tmp/vault', default_provider: 'claude' }]
     store.activeWorkspace = 'personal'
     vi.stubGlobal('ResizeObserver', class { observe() {} unobserve() {} disconnect() {} })
     HTMLCanvasElement.prototype.getContext = vi.fn(() => null) as never

@@ -646,7 +646,7 @@ async def test_schedule_command_env_matches_a_chat_in_the_same_workspace(
     chat_env = manager._build_extra_env(chat)
 
     shared = (
-        "CIAO_WORKSPACE", "PATH", "CIAO_VAULT_ROOT", "GWS_PROFILE",
+        "CIAO_WORKSPACE", "PATH", "CIAO_VAULT_ROOT",
         "CIAO_ACTIVE_WORKSPACE", "CIAO_ACTIVE_PROJECT",
     )
     for key in shared:

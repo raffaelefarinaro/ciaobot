@@ -12,7 +12,6 @@ function info(name: string, color?: string): WorkspaceInfo {
     name,
     vault_root: `${name}/memory-vault`,
     default_provider: 'claude',
-    gws_profile: '',
     color,
   } as WorkspaceInfo
 }

@@ -16,7 +16,6 @@ const registry: WorkspaceInfo[] = [
   name: `storybook-${suffix}`,
   vault_root: `storybook-${suffix}`,
   default_provider: 'claude',
-  gws_profile: `storybook-${suffix}`,
   color: presetColors[index],
 }))
 

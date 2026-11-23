@@ -141,8 +141,7 @@ async function updateBadge(state) {
   return total
 }
 
-// Not every push belongs to a chat — the Google Workspace token-health push has
-// no chat_id — so unread counts for those live under one shared key.
+// A push without a chat_id counts its unread under one shared key.
 function unreadKey(chatId) {
   return chatId || '_'
 }

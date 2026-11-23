@@ -67,7 +67,7 @@ const readRoute = (respond: () => Response | Promise<never>) =>
   route('GET', `/api/proposals/handover?workspace=${WORKSPACE}`, respond)
 const saveRoute = (respond: () => Response | Promise<never>) =>
   route('PATCH', `/api/workspaces/${WORKSPACE}`, respond)
-const savedWorkspaces = () => json({ workspaces: [{ name: WORKSPACE, vault_root: '/storybook/alpha', default_provider: 'claude', gws_profile: '' }], active: WORKSPACE })
+const savedWorkspaces = () => json({ workspaces: [{ name: WORKSPACE, vault_root: '/storybook/alpha', default_provider: 'claude' }], active: WORKSPACE })
 // A saved or refused workspace write re-reads the registry, so both answers are declared.
 const registryRoute = () => route('GET', '/api/workspaces', savedWorkspaces)
 

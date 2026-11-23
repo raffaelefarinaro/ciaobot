@@ -670,7 +670,6 @@ describe('component mount smoke', () => {
         name: 'legacy',
         vault_root: 'memory-vault/legacy',
         default_provider: 'ollama',
-        gws_profile: '',
       }],
       active: 'legacy',
       provider_options: [
@@ -715,7 +714,6 @@ describe('component mount smoke', () => {
         name: 'personal',
         vault_root: 'memory-vault/personal',
         default_provider: 'claude',
-        gws_profile: '',
       }],
       active: 'personal',
       provider_options: [

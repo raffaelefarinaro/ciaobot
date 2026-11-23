@@ -258,9 +258,3 @@ describe('safeExternalUrl', () => {
     expect(safeExternalUrl(undefined)).toBeNull()
   })
 })
-
-describe('retired gws_auth kind', () => {
-  it('has no card copy for the retired gws_auth kind', () => {
-    expect(actionCopy(action({ kind: 'gws_auth', params: { profile: 'work' } }))).toBeNull()
-  })
-})

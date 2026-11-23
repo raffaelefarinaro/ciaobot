@@ -103,7 +103,7 @@ describe('MemoryMapView keyboard and touch access', () => {
       return Promise.resolve({})
     })
     const store = useProjectStore()
-    store.workspaces = [{ name: 'personal', vault_root: '/tmp/vault', default_provider: 'claude', gws_profile: '' }]
+    store.workspaces = [{ name: 'personal', vault_root: '/tmp/vault', default_provider: 'claude' }]
     store.activeWorkspace = 'personal'
     // jsdom has neither, and attachCanvas constructs both.
     vi.stubGlobal('ResizeObserver', class { observe() {} unobserve() {} disconnect() {} })
@@ -452,7 +452,7 @@ describe('MemoryMapView list sorting', () => {
       return Promise.resolve({})
     })
     const store = useProjectStore()
-    store.workspaces = [{ name: 'personal', vault_root: '/tmp/vault', default_provider: 'claude', gws_profile: '' }]
+    store.workspaces = [{ name: 'personal', vault_root: '/tmp/vault', default_provider: 'claude' }]
     store.activeWorkspace = 'personal'
     vi.stubGlobal('ResizeObserver', class { observe() {} unobserve() {} disconnect() {} })
     HTMLCanvasElement.prototype.getContext = vi.fn(() => null) as never
@@ -616,7 +616,7 @@ describe('MemoryMapView sections', () => {
       return Promise.resolve({})
     })
     const store = useProjectStore()
-    store.workspaces = [{ name: 'personal', vault_root: '/tmp/vault', default_provider: 'claude', gws_profile: '' }]
+    store.workspaces = [{ name: 'personal', vault_root: '/tmp/vault', default_provider: 'claude' }]
     store.activeWorkspace = 'personal'
     vi.stubGlobal('ResizeObserver', class { observe() {} unobserve() {} disconnect() {} })
     HTMLCanvasElement.prototype.getContext = vi.fn(() => null) as never
@@ -813,7 +813,7 @@ describe('MemoryMapView verification state', () => {
       return Promise.resolve({})
     })
     const store = useProjectStore()
-    store.workspaces = [{ name: 'personal', vault_root: '/tmp/vault', default_provider: 'claude', gws_profile: '' }]
+    store.workspaces = [{ name: 'personal', vault_root: '/tmp/vault', default_provider: 'claude' }]
     store.activeWorkspace = 'personal'
     vi.stubGlobal('ResizeObserver', class { observe() {} unobserve() {} disconnect() {} })
     HTMLCanvasElement.prototype.getContext = vi.fn(() => null) as never
@@ -957,8 +957,8 @@ describe('MemoryMapView proposal links', () => {
     })
     const store = useProjectStore()
     store.workspaces = [
-      { name: 'personal', vault_root: '/tmp/vault', default_provider: 'claude', gws_profile: '' },
-      { name: 'work', vault_root: '/tmp/work', default_provider: 'claude', gws_profile: '' },
+      { name: 'personal', vault_root: '/tmp/vault', default_provider: 'claude' },
+      { name: 'work', vault_root: '/tmp/work', default_provider: 'claude' },
     ]
     store.activeWorkspace = 'personal'
     store.bootstrapped = true
@@ -1291,7 +1291,7 @@ describe('MemoryMapView proposal links', () => {
 
   it('a manual workspace switch while the resolver is switching stops it and keeps the reader\'s scope', async () => {
     const store = useProjectStore()
-    store.workspaces = [...store.workspaces, { name: 'third', vault_root: '/tmp/third', default_provider: 'claude', gws_profile: '' }]
+    store.workspaces = [...store.workspaces, { name: 'third', vault_root: '/tmp/third', default_provider: 'claude' }]
     const release = deferred<boolean>()
     store.registerWorkspaceSwitchGuard(() => release.promise)
     await open(linkTo('c', 'work'))

@@ -84,6 +84,7 @@ RETIRED_JOBS: frozenset[str] = frozenset({
     # the memory pass files through the same queue and the same owner, and is
     # the sole producer now.
     "skill_evolution",
+    "gws_health",  # Google token-health monitor, removed with the gws integration in #3535
     # Trajectory capture, the last archive stage: nothing read its records.
     "trajectory",
     # Engine-owned ``ciao run`` background commands, removed in #2205: the

@@ -112,8 +112,8 @@ async function mountLayout(seed: { questions?: ReturnType<typeof makeQuestion>[]
   }] as unknown as typeof store.chats
   store.activeChatId = CHAT_ID
   store.workspaces = [
-    { name: 'personal', vault_root: '', default_provider: 'claude', gws_profile: '' },
-    { name: 'work', vault_root: '', default_provider: 'claude', gws_profile: '' },
+    { name: 'personal', vault_root: '', default_provider: 'claude' },
+    { name: 'work', vault_root: '', default_provider: 'claude' },
   ]
   store.activeWorkspace = 'personal'
   store.bootstrapped = true

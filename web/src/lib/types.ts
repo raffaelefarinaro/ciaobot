@@ -77,7 +77,6 @@ export interface WorkspaceInfo {
   // Per-kind acceptance, sparse. Read: only the kinds the operator set. In a
   // save, null resets that kind to inherited from memory_handover.
   memory_approval?: MemoryApprovalPatch
-  gws_profile: string
   // PWA accent preset: amber | pink | cyan | emerald | violet | blue | teal | lime | fuchsia. Missing → amber (Ciao orange).
   color?: string
   // Operator-only; sparse: {provider: {field: value}}. Missing = engine default.
@@ -158,7 +157,6 @@ export interface ArchivedWorkspace {
   layout: string
   color: string
   default_provider: string
-  gws_profile: string
   // What a restore applies, after server-side validation. `null` means unset:
   // no MCP server is reachable, and the default tool deny-list applies.
   disallowed_tools?: string[] | null
@@ -368,7 +366,7 @@ export interface ChatPinState {
 }
 
 /** A needs-you kind the engine can raise on a chat. */
-export type ChatActionKind = 'command' | 'gws_auth' | 'permission_mode' | 'device_code' | 'system_setting' | 'restart' | 'limit'
+export type ChatActionKind = 'command' | 'permission_mode' | 'device_code' | 'system_setting' | 'restart' | 'limit'
 
 /** Where a needs-you action is in its life. */
 export type ChatActionState = 'open' | 'working' | 'waiting' | 'done' | 'failed'

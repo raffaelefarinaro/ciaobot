@@ -39,7 +39,7 @@ class MemoryStorage {
 }
 
 const ws = (name: string): WorkspaceInfo =>
-  ({ name, vault_root: '', default_provider: 'claude', gws_profile: '' }) as WorkspaceInfo
+  ({ name, vault_root: '', default_provider: 'claude' }) as WorkspaceInfo
 
 const original = ['alpha', 'beta', 'gamma']
 const reordered = ['gamma', 'alpha', 'beta']

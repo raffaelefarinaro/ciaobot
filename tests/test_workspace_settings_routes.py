@@ -1,9 +1,7 @@
 from __future__ import annotations
 
 import json
-import sys
 from pathlib import Path
-from urllib.parse import urlparse
 
 import pytest
 from starlette.applications import Starlette
@@ -14,19 +12,12 @@ from ciao.claude_trim import trim_tool_denies
 from ciao.config import CiaoConfig
 from ciao.web.routes_api import (
     archive_workspace_setting,
-    gws_integration_settings,
-    gws_save_client_secret,
-    gws_auth_url,
-    gws_exchange_code,
-    gws_add_profile,
-    gws_remove_profile,
     list_workspaces,
     provider_config_settings,
     reorder_workspaces,
     upsert_workspace_setting,
     workspace_shared_brains,
 )
-from ciao.os_support.private import is_private
 
 
 @pytest.fixture(autouse=True)
@@ -259,36 +250,6 @@ def _client(
                 provider_config_settings,
                 methods=["GET"],
             ),
-            Route(
-                "/api/integrations/gws",
-                gws_integration_settings,
-                methods=["GET"],
-            ),
-            Route(
-                "/api/integrations/gws/client-secret",
-                gws_save_client_secret,
-                methods=["POST"],
-            ),
-            Route(
-                "/api/integrations/gws/auth-url",
-                gws_auth_url,
-                methods=["POST"],
-            ),
-            Route(
-                "/api/integrations/gws/exchange",
-                gws_exchange_code,
-                methods=["POST"],
-            ),
-            Route(
-                "/api/integrations/gws/profiles/add",
-                gws_add_profile,
-                methods=["POST"],
-            ),
-            Route(
-                "/api/integrations/gws/profiles/remove",
-                gws_remove_profile,
-                methods=["POST"],
-            ),
         ]
     )
     app.state.config = config
@@ -338,7 +299,6 @@ def test_post_workspace_persists_runtime_registry_and_updates_live_config(tmp_pa
         "vault_root": "memory-vault/client-a",
         "default_provider": "claude",
         "disallowed_tools": ["mcp__claude_ai_Slack", "Bash"],
-        "gws_profile": "work",
         "color": "amber",
         "memory_handover": "all",
     }
@@ -371,32 +331,25 @@ def test_patch_and_delete_workspace_update_runtime_registry(tmp_path):
             "vault_root": "memory-vault/personal",
             "default_provider": "claude",
             "disallowed_tools": None,
-            "gws_profile": "personal",
             "color": "amber",
         },
     ]
     assert pcm.refresh_count == 3
 
 
-def test_workspace_gws_profile_must_be_a_profile_id(tmp_path):
-    client, config, _pcm = _client(tmp_path)
+def test_workspace_patch_ignores_a_gws_profile_field(tmp_path):
+    client, _, _pcm = _client(tmp_path)
     client.post("/api/workspaces", json={"name": "client-a"})
+    registry = tmp_path / ".runtime" / "workspaces.json"
+    before = next(w for w in json.loads(registry.read_text()) if w["name"] == "client-a")
 
-    bad = client.patch("/api/workspaces/client-a", json={"gws_profile": "x\ncurl"})
-    assert bad.status_code == 400
-    assert "gws_profile must be a profile id" in bad.json()["error"]
-    assert config.workspace("client-a").gws_profile != "x\ncurl"
+    patched = client.patch("/api/workspaces/client-a", json={"gws_profile": "x\ncurl"})
 
-    ok = client.patch("/api/workspaces/client-a", json={"gws_profile": "acme"})
-    assert ok.status_code == 200
-    assert config.workspace("client-a").gws_profile == "acme"
-
-    # A save that leaves the key out keeps the stored link; an empty one unlinks.
-    client.patch("/api/workspaces/client-a", json={"color": "cyan"})
-    assert config.workspace("client-a").gws_profile == "acme"
-    cleared = client.patch("/api/workspaces/client-a", json={"gws_profile": ""})
-    assert cleared.status_code == 200
-    assert config.workspace("client-a").gws_profile == ""
+    assert patched.status_code == 200
+    stored = next(w for w in json.loads(registry.read_text()) if w["name"] == "client-a")
+    assert stored["color"] == before["color"]
+    assert stored["default_provider"] == before["default_provider"]
+    assert "gws_profile" not in stored
 
 
 def test_workspace_save_never_accepts_a_request_body_vault_path(tmp_path):
@@ -553,13 +506,11 @@ def test_stale_stored_provider_serializes_coerced_and_saves(tmp_path):
                     "vault_root": "memory-vault/personal",
                     "default_provider": "ollama",
                     "model_bucket": "big",
-                    "gws_profile": "personal",
                 },
                 {
                     "name": "work",
                     "vault_root": "memory-vault/work",
                     "default_provider": "claude",
-                    "gws_profile": "work",
                 },
             ]
         )
@@ -579,7 +530,7 @@ def test_stale_stored_provider_serializes_coerced_and_saves(tmp_path):
     # A save that omits the provider keeps working despite the stale record.
     untouched = client.patch(
         "/api/workspaces/personal",
-        json={"gws_profile": "personal"},
+        json={"color": "amber"},
     )
     assert untouched.status_code == 200
 
@@ -776,7 +727,7 @@ def test_workspace_color_defaults_persists_and_validates(tmp_path):
     # Other fields can update without resetting color.
     keep = client.patch(
         "/api/workspaces/client-a",
-        json={"gws_profile": "work"},
+        json={"disallowed_tools": "Bash"},
     )
     assert keep.status_code == 200
     assert config.workspace("client-a").color == "emerald"
@@ -816,794 +767,6 @@ def test_provider_config_offers_no_api_keys(tmp_path, monkeypatch):
     assert "sk-anthropic" not in json.dumps(data)
     assert set(data["connections"]) == {"claude", "opencode", "codex"}
     assert client.patch("/api/settings/providers", json={}).status_code == 405
-
-
-def test_gws_integration_reports_profile_status_and_usage(tmp_path, monkeypatch):
-    from ciao.web import routes_api
-
-    monkeypatch.setattr(
-        routes_api,
-        "resolve_command",
-        lambda name: ["/usr/local/bin/gws"] if name == "gws" else [],
-    )
-    personal_dir = tmp_path / "secrets" / "gws-personal"
-    personal_dir.mkdir(parents=True)
-    (personal_dir / "credentials.json").write_text("{}", encoding="utf-8")
-    (personal_dir / "client_secret.json").write_text("{}", encoding="utf-8")
-
-    client, _config, _pcm = _client(tmp_path)
-
-    data = client.get("/api/integrations/gws").json()
-    assert data["installed"] is True
-    assert data["binary_path"] == "/usr/local/bin/gws"
-    assert "default_profile" not in data
-
-    profiles = {profile["name"]: profile for profile in data["profiles"]}
-    assert profiles["personal"]["configured"] is True
-    assert profiles["personal"]["client_secret_present"] is True
-    assert profiles["personal"]["workspaces"] == ["personal"]
-    assert profiles["personal"]["setup_command"] == "ciao gws personal auth login --full"
-
-    assert str(personal_dir) in profiles["personal"]["config_dir"]
-    # Accounts are the user's: only the connected one is listed. "work" has no
-    # credentials on disk and was never added, so it is not invented here.
-    assert "work" not in profiles
-
-
-def _fake_gws_package(root, *, with_binary: bool):
-    package = root / "lib" / "node_modules" / "@googleworkspace" / "cli"
-    (package / "bin").mkdir(parents=True)
-    launcher = package / "run.js"
-    launcher.write_text("#!/usr/bin/env node\n", encoding="utf-8")
-    if with_binary:
-        (package / "bin" / "gws").write_text("x", encoding="utf-8")
-    shim = root / "bin-shim-gws"
-    shim.symlink_to(launcher)
-    return shim
-
-
-@pytest.mark.parametrize("with_binary", [False, True])
-def test_gws_integration_reports_a_package_whose_binary_is_missing(tmp_path, monkeypatch, with_binary):
-    """npm 12 blocks the postinstall that downloads gws: the launcher is on PATH, the binary is not."""
-    from ciao.web import routes_api
-
-    shim = _fake_gws_package(tmp_path, with_binary=with_binary)
-    monkeypatch.setattr(routes_api, "resolve_command", lambda name: [str(shim)] if name == "gws" else [])
-    client, _config, _pcm = _client(tmp_path)
-
-    data = client.get("/api/integrations/gws").json()
-
-    assert data["installed"] is with_binary
-    assert data["cli_available"] is with_binary
-    if with_binary:
-        assert data["install_problem"] == ""
-    else:
-        assert data["install_problem"] == (
-            "The gws package is installed but its binary is missing: re-run the install command above "
-            f"({routes_api.host_terminal.GWS_INSTALL_COMMAND})."
-        )
-
-
-def test_gws_integration_starts_with_no_google_accounts(tmp_path, monkeypatch):
-    """A fresh install shows an empty account list, not a personal/work pair."""
-    from ciao.web import routes_api
-
-    monkeypatch.setattr(routes_api, "resolve_command", lambda name: [])
-    client, _config, _pcm = _client(tmp_path)
-
-    data = client.get("/api/integrations/gws").json()
-
-    assert data["profiles"] == []
-
-
-def test_gws_profile_add_and_remove_round_trip(tmp_path, monkeypatch):
-    from ciao.web import routes_api
-
-    monkeypatch.setattr(routes_api, "resolve_command", lambda name: [])
-    client, config, _pcm = _client(tmp_path)
-
-    added = client.post(
-        "/api/integrations/gws/profiles/add",
-        json={"name": "Acme Corp", "label": "Acme (work)"},
-    )
-    assert added.status_code == 200
-    profiles = {profile["name"]: profile for profile in added.json()["profiles"]}
-    assert list(profiles) == ["acme-corp"]
-    assert profiles["acme-corp"]["label"] == "Acme (work)"
-    assert profiles["acme-corp"]["configured"] is False
-    assert (
-        profiles["acme-corp"]["setup_command"]
-        == "ciao gws acme-corp auth login --full"
-    )
-
-    # Adding the same account twice is a user error, not a silent duplicate.
-    duplicate = client.post("/api/integrations/gws/profiles/add", json={"name": "acme-corp"})
-    assert duplicate.status_code == 400
-
-    # Credentials written by the OAuth flow are deleted along with the account.
-    config_dir = tmp_path / "secrets" / "gws-acme-corp"
-    config_dir.mkdir(parents=True)
-    (config_dir / "credentials.json").write_text("{}", encoding="utf-8")
-
-    removed = client.post(
-        "/api/integrations/gws/profiles/remove", json={"profile": "acme-corp"}
-    )
-    assert removed.status_code == 200
-    assert removed.json()["profiles"] == []
-    assert not config_dir.exists()
-
-
-def test_gws_profile_remove_unlinks_workspaces(tmp_path, monkeypatch):
-    from ciao.web import routes_api
-
-    monkeypatch.setattr(routes_api, "resolve_command", lambda name: [])
-    client, config, _pcm = _client(tmp_path)
-    client.post("/api/integrations/gws/profiles/add", json={"name": "acme"})
-    workspace = next(iter(config.workspaces.values()))
-    workspace.gws_profile = "acme"
-
-    body = client.post(
-        "/api/integrations/gws/profiles/remove", json={"profile": "acme"}
-    ).json()
-
-    assert body["profiles"] == []
-    assert config.workspaces[workspace.name].gws_profile == ""
-
-
-def test_gws_profile_add_rejects_an_unusable_name(tmp_path, monkeypatch):
-    from ciao.web import routes_api
-
-    monkeypatch.setattr(routes_api, "resolve_command", lambda name: [])
-    client, _config, _pcm = _client(tmp_path)
-
-    resp = client.post("/api/integrations/gws/profiles/add", json={"name": "///"})
-
-    assert resp.status_code == 400
-
-
-def test_gws_profile_add_rejects_gws_service_names(tmp_path, monkeypatch):
-    from ciao.web import routes_api
-
-    monkeypatch.setattr(routes_api, "resolve_command", lambda name: [])
-    client, _config, _pcm = _client(tmp_path)
-
-    service_names = (
-        "Gmail",
-        "calendar",
-        "Drive",
-        "docs",
-        "sheets",
-        "slides",
-        "tasks",
-        "contacts",
-        "forms",
-        "auth",
-    )
-    for name in service_names:
-        resp = client.post("/api/integrations/gws/profiles/add", json={"name": name})
-
-        assert resp.status_code == 400
-        assert "reserved" in resp.json()["error"]
-
-
-def test_gws_setup_endpoints(tmp_path, monkeypatch):
-    import json
-
-    client, _config, _pcm = _client(tmp_path)
-
-    # 1. Test save client secret
-    valid_secret = {
-        "installed": {
-            "client_id": "test-client-id",
-            "client_secret": "test-client-secret",
-            "redirect_uris": ["http://localhost"]
-        }
-    }
-    resp = client.post(
-        "/api/integrations/gws/client-secret",
-        json={"profile": "personal", "client_secret": json.dumps(valid_secret)}
-    )
-    assert resp.status_code == 200
-    data = resp.json()
-    profiles = {p["name"]: p for p in data["profiles"]}
-    assert profiles["personal"]["client_secret_present"] is True
-    assert profiles["personal"]["configured"] is False
-
-    # The uploaded file carries the Google client secret, so both it and its
-    # containing profile dir must be owner-only.
-    secret_path = tmp_path / "secrets" / "gws-personal" / "client_secret.json"
-    assert is_private(secret_path)
-    assert is_private(secret_path.parent)
-
-    # Check validation error
-    resp = client.post(
-        "/api/integrations/gws/client-secret",
-        json={"profile": "personal", "client_secret": "{invalid json"}
-    )
-    assert resp.status_code == 400
-
-    resp = client.post(
-        "/api/integrations/gws/client-secret",
-        json={"profile": "personal", "client_secret": json.dumps({"wrong": "format"})}
-    )
-    assert resp.status_code == 400
-
-    # 2. Test get auth URL
-    resp = client.post(
-        "/api/integrations/gws/auth-url",
-        json={"profile": "personal"}
-    )
-    assert resp.status_code == 200
-    assert "accounts.google.com/o/oauth2/auth" in resp.json()["auth_url"]
-    assert "client_id=test-client-id" in resp.json()["auth_url"]
-    flow_id = resp.json()["flow_id"]
-    assert flow_id
-
-    # PKCE (issue #354): the manual/paste flow cannot validate `state` on
-    # paste-back, so the auth URL must carry a code_challenge, and the
-    # verifier that produced it must be the one sent at exchange time below.
-    from urllib.parse import parse_qs, urlparse
-
-    from ciao import gws_auth
-
-    auth_query = parse_qs(urlparse(resp.json()["auth_url"]).query)
-    assert auth_query["code_challenge_method"] == ["S256"]
-    challenge = auth_query["code_challenge"][0]
-
-    # 3. Test exchange code
-    # Mock urllib.request.urlopen to return tokens
-    class MockResponse:
-        def read(self):
-            import base64
-            payload = base64.urlsafe_b64encode(b'{"email": "test-email@example.com"}').decode("utf-8")
-            id_token_val = f"header.{payload}.signature"
-            return f'{{"refresh_token": "mock-refresh-token", "id_token": "{id_token_val}"}}'.encode("utf-8")
-        def __enter__(self):
-            return self
-        def __exit__(self, exc_type, exc_val, exc_tb):
-            pass
-
-    mock_called = False
-    captured_body = {}
-    def mock_urlopen(req, *args, **kwargs):
-        nonlocal mock_called
-        mock_called = True
-        assert req.full_url == "https://oauth2.googleapis.com/token"
-        captured_body["data"] = req.data.decode("utf-8")
-        return MockResponse()
-
-    import urllib.request
-    monkeypatch.setattr(urllib.request, "urlopen", mock_urlopen)
-
-    # Use a redirect URL as input
-    resp = client.post(
-        "/api/integrations/gws/exchange",
-        json={"profile": "personal", "code": "http://localhost/?code=test-code", "flow_id": flow_id}
-    )
-    assert resp.status_code == 200
-    assert mock_called is True
-
-    # The verifier generated for the auth-url call above must be the one
-    # actually sent to the token endpoint, and it must derive the same
-    # challenge that was on the auth URL.
-    sent_verifier = parse_qs(captured_body["data"])["code_verifier"][0]
-    assert gws_auth.code_challenge_s256(sent_verifier) == challenge
-
-    data = resp.json()
-    profiles = {p["name"]: p for p in data["profiles"]}
-    assert profiles["personal"]["configured"] is True
-    assert profiles["personal"]["email"] == "test-email@example.com"
-
-
-def test_gws_exchange_refreshes_health_monitor(tmp_path, monkeypatch):
-    """A successful code exchange must trigger GwsHealthMonitor.check_once
-    so the Settings UI clears the 'Login expired' banner immediately
-    instead of waiting for the next periodic check.
-    """
-    from ciao.web import routes_api
-
-    client, _config, _pcm = _client(tmp_path)
-
-    # Seed a client_secret so load_client_secret succeeds.
-    config_dir = routes_api._gws_profile_config_dir(_config, "personal")
-    config_dir.mkdir(parents=True, exist_ok=True)
-    (config_dir / "client_secret.json").write_text(
-        json.dumps(
-            {
-                "installed": {
-                    "client_id": "cid",
-                    "client_secret": "csecret",
-                    "redirect_uris": ["http://localhost"],
-                }
-            }
-        ),
-        encoding="utf-8",
-    )
-
-    # Replace the network-bound exchange with a no-op so the test stays offline.
-    import ciao.gws_auth
-    monkeypatch.setattr(
-        ciao.gws_auth, "exchange_and_store",
-        lambda config, profile, *, code, redirect_uri, code_verifier=None: {"ok": True, "email": "x@y"},
-    )
-
-    class _FakeMonitor:
-        def __init__(self) -> None:
-            self.calls = 0
-
-        def check_once(self) -> None:
-            self.calls += 1
-
-    monitor = _FakeMonitor()
-    client.app.state.gws_health_monitor = monitor
-
-    resp = client.post(
-        "/api/integrations/gws/exchange",
-        json={"profile": "personal", "code": "test-code"},
-    )
-
-    assert resp.status_code == 200, resp.text
-    assert monitor.calls == 1
-
-    # If the exchange itself raises, the health monitor must NOT be called.
-    def boom(*args, **kwargs):
-        raise ValueError("simulated exchange failure")
-
-    monkeypatch.setattr(
-        ciao.gws_auth, "exchange_and_store", boom
-    )
-
-    resp = client.post(
-        "/api/integrations/gws/exchange",
-        json={"profile": "personal", "code": "test-code"},
-    )
-    assert resp.status_code == 400
-    assert monitor.calls == 1  # unchanged after failed exchange
-
-    # If the health monitor itself raises, the exchange still succeeds and
-    # the response is returned (best-effort refresh, never blocks the user).
-    def loud(_self) -> None:
-        raise RuntimeError("monitor blew up")
-
-    monitor_cls = type(monitor)
-    monkeypatch.setattr(monitor_cls, "check_once", loud)
-    monkeypatch.setattr(
-        ciao.gws_auth, "exchange_and_store",
-        lambda config, profile, *, code, redirect_uri, code_verifier=None: {"ok": True, "email": "x@y"},
-    )
-
-    resp = client.post(
-        "/api/integrations/gws/exchange",
-        json={"profile": "personal", "code": "test-code"},
-    )
-    assert resp.status_code == 200
-
-
-def test_gws_exchange_rejects_expired_pkce_flow_with_actionable_error(tmp_path, monkeypatch):
-    """A verifier that expired between auth-url and paste-back must fail
-    loudly with a "restart the flow" message (issue #354 code review) —
-    Google is still holding a code_challenge for this profile, so silently
-    omitting code_verifier would surface a confusing invalid_grant instead.
-    """
-    from ciao import gws_auth
-    from ciao.web import routes_api
-
-    client, _config, _pcm = _client(tmp_path)
-    config_dir = routes_api._gws_profile_config_dir(_config, "personal")
-    config_dir.mkdir(parents=True, exist_ok=True)
-    (config_dir / "client_secret.json").write_text(
-        json.dumps(
-            {
-                "installed": {
-                    "client_id": "cid",
-                    "client_secret": "csecret",
-                    "redirect_uris": ["http://localhost"],
-                }
-            }
-        ),
-        encoding="utf-8",
-    )
-
-    resp = client.post("/api/integrations/gws/auth-url", json={"profile": "personal"})
-    assert resp.status_code == 200
-    flow_id = resp.json()["flow_id"]
-
-    # Simulate the TTL elapsing before the user pastes the code back.
-    store = client.app.state.gws_manual_pkce_store
-    for flow_id, (profile, verifier, _expires_at, _status) in list(store._pending.items()):
-        store._pending[flow_id] = (profile, verifier, 0.0, "active")
-
-    exchange_called = False
-
-    def unexpected_exchange(*args, **kwargs):
-        nonlocal exchange_called
-        exchange_called = True
-        return {"ok": True, "email": "should-not-be-reached@example.com"}
-
-    monkeypatch.setattr(gws_auth, "exchange_and_store", unexpected_exchange)
-
-    resp = client.post(
-        "/api/integrations/gws/exchange",
-        json={
-            "profile": "personal",
-            "code": "http://localhost/?code=stale-code",
-            "flow_id": flow_id,
-        },
-    )
-    assert resp.status_code == 400
-    assert "expired" in resp.json()["error"].lower()
-    assert exchange_called is False
-
-
-def test_a_successful_exchange_retires_its_pkce_flow(tmp_path, monkeypatch):
-    """`peek` is non-destructive so a mistyped paste can be retried, which
-    means nothing retired a flow that actually succeeded — it stayed "active"
-    for the rest of its TTL. That held a spent secret, and because
-    `status_for_profile` still reported "active" it also refused any later
-    flow-ID-less exchange for the profile (the cached pre-PKCE client path).
-    """
-    from ciao import gws_auth
-    from ciao.web import routes_api
-
-    client, _config, _pcm = _client(tmp_path)
-    config_dir = routes_api._gws_profile_config_dir(_config, "personal")
-    config_dir.mkdir(parents=True, exist_ok=True)
-    (config_dir / "client_secret.json").write_text(
-        json.dumps(
-            {
-                "installed": {
-                    "client_id": "cid",
-                    "client_secret": "csecret",
-                    "redirect_uris": ["http://localhost"],
-                }
-            }
-        ),
-        encoding="utf-8",
-    )
-
-    monkeypatch.setattr(
-        gws_auth, "exchange_and_store",
-        lambda config, profile, *, code, redirect_uri, code_verifier=None: {
-            "ok": True, "email": "x@y"
-        },
-    )
-
-    flow_id = client.post(
-        "/api/integrations/gws/auth-url", json={"profile": "personal"}
-    ).json()["flow_id"]
-    store = client.app.state.gws_manual_pkce_store
-    assert store.status_for_profile("personal") == "active"
-
-    resp = client.post(
-        "/api/integrations/gws/exchange",
-        json={
-            "profile": "personal",
-            "code": "http://localhost/?code=good",
-            "flow_id": flow_id,
-        },
-    )
-    assert resp.status_code == 200
-
-    # Spent: verifier gone, and no longer blocking the profile.
-    assert store.peek(flow_id, "personal") is None
-    assert store.status_for_profile("personal") != "active"
-    # A legacy client with no flow_id can exchange again straight away.
-    assert client.post(
-        "/api/integrations/gws/exchange",
-        json={"profile": "personal", "code": "http://localhost/?code=legacy"},
-    ).status_code == 200
-
-
-def test_a_failed_exchange_keeps_its_pkce_flow_for_a_retry(tmp_path, monkeypatch):
-    """The other half: only success retires the flow."""
-    from ciao import gws_auth
-    from ciao.web import routes_api
-
-    client, _config, _pcm = _client(tmp_path)
-    config_dir = routes_api._gws_profile_config_dir(_config, "personal")
-    config_dir.mkdir(parents=True, exist_ok=True)
-    (config_dir / "client_secret.json").write_text(
-        json.dumps(
-            {
-                "installed": {
-                    "client_id": "cid",
-                    "client_secret": "csecret",
-                    "redirect_uris": ["http://localhost"],
-                }
-            }
-        ),
-        encoding="utf-8",
-    )
-
-    def _boom(config, profile, *, code, redirect_uri, code_verifier=None):
-        raise ValueError("wrong code")
-
-    monkeypatch.setattr(gws_auth, "exchange_and_store", _boom)
-
-    flow_id = client.post(
-        "/api/integrations/gws/auth-url", json={"profile": "personal"}
-    ).json()["flow_id"]
-    store = client.app.state.gws_manual_pkce_store
-    verifier = store.peek(flow_id, "personal")
-
-    resp = client.post(
-        "/api/integrations/gws/exchange",
-        json={
-            "profile": "personal",
-            "code": "http://localhost/?code=typo",
-            "flow_id": flow_id,
-        },
-    )
-    assert resp.status_code == 400
-    assert store.peek(flow_id, "personal") == verifier
-
-
-def test_gws_exchange_rejects_an_explicit_but_unknown_flow_id(tmp_path, monkeypatch):
-    """A restart between auth-url and paste-back must not exchange blindly.
-
-    The client only holds a flow_id because the auth URL it came from carried
-    a PKCE challenge, so an id the store no longer knows cannot mean "this flow
-    never used PKCE" — that reading is only safe when no id was sent at all.
-    Exchanging anyway sends a challenged code with no verifier, which Google
-    must reject, and the user sees `invalid_grant` instead of what to do next.
-    """
-    from ciao import gws_auth
-    from ciao.web import routes_api
-
-    client, _config, _pcm = _client(tmp_path)
-    config_dir = routes_api._gws_profile_config_dir(_config, "personal")
-    config_dir.mkdir(parents=True, exist_ok=True)
-    (config_dir / "client_secret.json").write_text(
-        json.dumps(
-            {
-                "installed": {
-                    "client_id": "cid",
-                    "client_secret": "csecret",
-                    "redirect_uris": ["http://localhost"],
-                }
-            }
-        ),
-        encoding="utf-8",
-    )
-
-    resp = client.post("/api/integrations/gws/auth-url", json={"profile": "personal"})
-    flow_id = resp.json()["flow_id"]
-
-    # What a server restart looks like to the next request: the browser still
-    # has its flow_id, the new in-memory store has nothing.
-    client.app.state.gws_manual_pkce_store._pending.clear()
-
-    exchange_called = False
-
-    def unexpected_exchange(*args, **kwargs):
-        nonlocal exchange_called
-        exchange_called = True
-        return {"ok": True, "email": "should-not-be-reached@example.com"}
-
-    monkeypatch.setattr(gws_auth, "exchange_and_store", unexpected_exchange)
-
-    resp = client.post(
-        "/api/integrations/gws/exchange",
-        json={
-            "profile": "personal",
-            "code": "http://localhost/?code=challenged-code",
-            "flow_id": flow_id,
-        },
-    )
-
-    assert resp.status_code == 400
-    assert "start manual connect again" in resp.json()["error"].lower()
-    assert exchange_called is False
-
-
-def test_gws_exchange_without_a_pending_pkce_flow_omits_verifier(tmp_path, monkeypatch):
-    """A profile that never called auth-url through this store (legacy
-    client, or a flow superseded by a later start) must still exchange
-    normally, with no code_verifier sent — the same behavior as before PKCE
-    existed."""
-    from ciao import gws_auth
-    from ciao.web import routes_api
-
-    client, _config, _pcm = _client(tmp_path)
-    config_dir = routes_api._gws_profile_config_dir(_config, "personal")
-    config_dir.mkdir(parents=True, exist_ok=True)
-    (config_dir / "client_secret.json").write_text(
-        json.dumps(
-            {
-                "installed": {
-                    "client_id": "cid",
-                    "client_secret": "csecret",
-                    "redirect_uris": ["http://localhost"],
-                }
-            }
-        ),
-        encoding="utf-8",
-    )
-
-    captured: dict = {}
-
-    def fake_exchange(config, profile, *, code, redirect_uri, code_verifier=None):
-        captured["code_verifier"] = code_verifier
-        return {"ok": True, "email": "x@example.com"}
-
-    monkeypatch.setattr(gws_auth, "exchange_and_store", fake_exchange)
-
-    # No prior call to /auth-url for this profile.
-    resp = client.post(
-        "/api/integrations/gws/exchange",
-        json={"profile": "personal", "code": "http://localhost/?code=some-code"},
-    )
-    assert resp.status_code == 200
-    assert captured["code_verifier"] is None
-
-
-def test_gws_profile_payload_uses_granted_scopes_for_chips_and_purpose(tmp_path):
-    client, config, _ = _client(tmp_path)
-    config_dir = config.workspace_root / "secrets" / "gws-personal"
-    config_dir.mkdir(parents=True, exist_ok=True)
-    (config_dir / "credentials.json").write_text(
-        json.dumps(
-            {
-                "client_id": "cid",
-                "client_secret": "csecret",
-                "refresh_token": "rtok",
-                "type": "authorized_user",
-                "email": "me@example.com",
-                "scopes": [
-                    "https://www.googleapis.com/auth/gmail.modify",
-                    "https://www.googleapis.com/auth/calendar",
-                    "https://www.googleapis.com/auth/drive",
-                ],
-            }
-        ),
-        encoding="utf-8",
-    )
-
-    resp = client.get("/api/integrations/gws")
-    assert resp.status_code == 200
-    payload = resp.json()
-    personal = next(p for p in payload["profiles"] if p["name"] == "personal")
-    assert personal["examples"] == ["Gmail", "Calendar", "Drive"]
-    assert "Gmail" in personal["purpose"]
-    assert "Calendar" in personal["purpose"]
-    assert "Drive" in personal["purpose"]
-    # Singular list of one scope collapses to a single-clause sentence.
-    (config_dir / "credentials.json").write_text(
-        json.dumps(
-            {
-                "client_id": "cid",
-                "client_secret": "csecret",
-                "refresh_token": "rtok",
-                "type": "authorized_user",
-                "scopes": ["https://www.googleapis.com/auth/tasks"],
-            }
-        ),
-        encoding="utf-8",
-    )
-    resp = client.get("/api/integrations/gws")
-    personal = next(p for p in resp.json()["profiles"] if p["name"] == "personal")
-    assert personal["examples"] == ["Tasks"]
-    assert personal["purpose"].endswith("Connected to Tasks.")
-
-
-def test_gws_profile_payload_never_shows_a_raw_scope_url(tmp_path):
-    """Feed the payload the scopes production actually requests.
-
-    The other scope tests hand-pick URLs that happen to be in the label
-    catalogue, so they pass whether or not the catalogue is complete. Every
-    profile also requests `openid` and the two `userinfo.*` scopes, which had
-    no labels and fell through as verbatim googleapis.com URLs in the sentence
-    shown under the account name. Drive this from `scopes_for_profile` so
-    adding a scope without naming it fails here.
-    """
-    from ciao.gws_auth import scopes_for_profile
-
-    client, config, _ = _client(tmp_path)
-    config_dir = config.workspace_root / "secrets" / "gws-personal"
-    config_dir.mkdir(parents=True, exist_ok=True)
-    (config_dir / "credentials.json").write_text(
-        json.dumps(
-            {
-                "client_id": "cid",
-                "client_secret": "csecret",
-                "refresh_token": "rtok",
-                "type": "authorized_user",
-                "scopes": scopes_for_profile("personal"),
-            }
-        ),
-        encoding="utf-8",
-    )
-
-    resp = client.get("/api/integrations/gws")
-    assert resp.status_code == 200
-    personal = next(p for p in resp.json()["profiles"] if p["name"] == "personal")
-
-    # Chips must render as human labels: no chip may parse as a URL at all,
-    # which is stricter than the old "googleapis.com appears nowhere" check
-    # that a hostile URL could satisfy by hiding the host in a query param.
-    for chip in personal["examples"]:
-        parsed_chip = urlparse(chip)
-        assert parsed_chip.scheme not in ("http", "https"), chip
-    assert "googleapis.com" not in personal["purpose"]
-    assert "openid" not in personal["purpose"]
-    # The services the user actually recognises still appear.
-    assert "Gmail" in personal["examples"]
-    assert "Forms" in personal["examples"]
-
-
-def test_gws_profile_payload_falls_back_to_static_meta_when_no_scopes(tmp_path):
-    client, config, _ = _client(tmp_path)
-    client.post("/api/integrations/gws/profiles/add", json={"name": "personal"})
-    # No credentials.json on disk -> configured is false, but the static
-    # purpose should still be sent so the user sees something before connecting.
-    resp = client.get("/api/integrations/gws")
-    payload = resp.json()
-    personal = next(p for p in payload["profiles"] if p["name"] == "personal")
-    assert personal["configured"] is False
-    # The curated chips describe what the profile is for, before there is any
-    # connection to report.
-    assert personal["examples"] == ["Gmail", "Calendar", "Tasks"]
-    assert "Private Google account" in personal["purpose"]
-
-
-def test_gws_profile_payload_keeps_chips_for_a_connection_predating_scopes(tmp_path):
-    """An account connected before scopes were recorded must not lose its chips.
-
-    credentials.json written by an older release has no `scopes` key, and
-    re-running OAuth consent is the only way to add one. Deriving chips purely
-    from granted scopes therefore blanked the card for every already-connected
-    user on upgrade.
-    """
-    client, config, _ = _client(tmp_path)
-    # `work` maps to secrets/gws, not secrets/gws-work (gws_auth.profile_config_dir).
-    config_dir = config.workspace_root / "secrets" / "gws"
-    config_dir.mkdir(parents=True, exist_ok=True)
-    (config_dir / "credentials.json").write_text(
-        json.dumps(
-            {
-                "client_id": "cid",
-                "client_secret": "csecret",
-                "refresh_token": "rtok",
-                "type": "authorized_user",
-                "email": "me@work.example",
-            }
-        ),
-        encoding="utf-8",
-    )
-
-    resp = client.get("/api/integrations/gws")
-    work = next(p for p in resp.json()["profiles"] if p["name"] == "work")
-    assert work["configured"] is True
-    assert work["examples"] == ["Drive", "Docs", "Sheets", "Slides", "Gmail", "Calendar"]
-    assert "Company Google account" in work["purpose"]
-
-
-def test_gws_personal_purpose_keeps_the_separation_warning_once_connected(tmp_path):
-    """The "keep this separate" guidance matters most after connecting.
-
-    Recomposing the sentence from the label alone dropped it exactly when the
-    account went live, which is the only moment it is actionable.
-    """
-    client, config, _ = _client(tmp_path)
-    config_dir = config.workspace_root / "secrets" / "gws-personal"
-    config_dir.mkdir(parents=True, exist_ok=True)
-    (config_dir / "credentials.json").write_text(
-        json.dumps(
-            {
-                "client_id": "cid",
-                "client_secret": "csecret",
-                "refresh_token": "rtok",
-                "type": "authorized_user",
-                "scopes": ["https://www.googleapis.com/auth/gmail.modify"],
-            }
-        ),
-        encoding="utf-8",
-    )
-
-    resp = client.get("/api/integrations/gws")
-    personal = next(p for p in resp.json()["profiles"] if p["name"] == "personal")
-    assert "Keep this separate from company systems." in personal["purpose"]
-    assert personal["purpose"].endswith("Connected to Gmail.")
 
 
 def test_creating_a_workspace_seeds_its_agent_root(tmp_path, monkeypatch):

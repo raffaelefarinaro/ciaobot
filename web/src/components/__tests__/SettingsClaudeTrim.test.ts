@@ -93,7 +93,6 @@ function workspaces(entryExtra: Record<string, unknown> = {}, withCatalog = true
     name: 'personal',
     vault_root: 'personal/memory-vault',
     default_provider: 'claude',
-    gws_profile: '',
     color: 'pink',
     ...entryExtra,
   }

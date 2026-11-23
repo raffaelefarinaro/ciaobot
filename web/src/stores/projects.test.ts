@@ -4203,7 +4203,7 @@ describe('needs-you chat actions', () => {
     },
   )
 
-  test.each(['command', 'gws_auth', 'permission_mode', 'device_code', 'system_setting', 'restart', 'limit'] as const)(
+  test.each(['command', 'permission_mode', 'device_code', 'system_setting', 'restart', 'limit'] as const)(
     'a %s action creates attention',
     (kind) => {
       const store = useProjectStore()
@@ -7954,8 +7954,8 @@ describe('workspace and chat transitions', () => {
       if (path === '/api/workspaces') {
         return Promise.resolve({
           workspaces: [
-            { name: 'home', vault_root: 'memory-vault/home', default_provider: 'opencode', gws_profile: 'personal' },
-            { name: 'client', vault_root: 'vaults/client', default_provider: 'claude', gws_profile: 'work' },
+            { name: 'home', vault_root: 'memory-vault/home', default_provider: 'opencode' },
+            { name: 'client', vault_root: 'vaults/client', default_provider: 'claude' },
           ],
           active: 'home',
           provider_options: [

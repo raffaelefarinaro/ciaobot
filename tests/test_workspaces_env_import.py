@@ -9,17 +9,12 @@ from pathlib import Path
 import pytest
 
 from ciao.config import (
-    LEGACY_GWS_PROFILE_IMPORT_MARKER,
     LEGACY_WORKSPACES_IMPORT_MARKER,
     CiaoConfig,
 )
 
 
-def _config(
-    tmp_path: Path,
-    legacy: object | None = None,
-    gws_profile: str = "",
-) -> CiaoConfig:
+def _config(tmp_path: Path, legacy: object | None = None) -> CiaoConfig:
     env = {
         "PWA_AUTH_TOKEN": "test-token",
         "CIAO_WORKSPACE": str(tmp_path),
@@ -27,8 +22,6 @@ def _config(
     }
     if legacy is not None:
         env["CIAO_WORKSPACES"] = legacy if isinstance(legacy, str) else json.dumps(legacy)
-    if gws_profile:
-        env["GWS_PROFILE"] = gws_profile
     return CiaoConfig.from_env(env)
 
 
@@ -42,16 +35,8 @@ def _write_registry(tmp_path: Path, entries: list[dict]) -> None:
     (runtime / "workspaces.json").write_text(json.dumps(entries), encoding="utf-8")
 
 
-def _connect_profile(tmp_path: Path, profile: str) -> None:
-    directory = tmp_path / "secrets" / f"gws-{profile}"
-    directory.mkdir(parents=True)
-    (directory / "credentials.json").write_text(
-        '{"refresh_token":"must-not-be-copied"}', encoding="utf-8"
-    )
-
-
 LEGACY = [
-    {"name": "home", "default_provider": "opencode", "gws_profile": "personal"},
+    {"name": "home", "default_provider": "opencode", "color": "cyan"},
     {"name": "client", "disallowed_tools": ["Bash"]},
 ]
 
@@ -83,7 +68,7 @@ def test_import_when_registry_missing_replaces_bootstrap_list(tmp_path: Path) ->
     entries = {e["name"]: e for e in _registry(tmp_path)}
     assert list(entries) == ["home", "client"]
     assert entries["home"]["default_provider"] == "opencode"
-    assert entries["home"]["gws_profile"] == "personal"
+    assert entries["home"]["color"] == "cyan"
     assert entries["client"]["disallowed_tools"] == ["Bash"]
     assert (tmp_path / ".runtime" / LEGACY_WORKSPACES_IMPORT_MARKER).is_file()
 
@@ -94,7 +79,7 @@ def test_import_when_registry_missing_replaces_bootstrap_list(tmp_path: Path) ->
 def test_import_never_overwrites_existing_registry_entries(tmp_path: Path) -> None:
     _write_registry(
         tmp_path,
-        [{"name": "home", "default_provider": "claude", "gws_profile": "work"}],
+        [{"name": "home", "default_provider": "claude", "color": "violet"}],
     )
     config = _config(tmp_path, LEGACY)
 
@@ -104,7 +89,7 @@ def test_import_never_overwrites_existing_registry_entries(tmp_path: Path) -> No
     entries = {e["name"]: e for e in _registry(tmp_path)}
     assert list(entries) == ["home", "client"]
     assert entries["home"]["default_provider"] == "claude"
-    assert entries["home"]["gws_profile"] == "work"
+    assert entries["home"]["color"] == "violet"
 
 
 def test_import_is_idempotent_and_does_not_resurrect_removed_workspaces(
@@ -206,48 +191,18 @@ def test_an_archived_workspace_is_not_reimported(tmp_path: Path) -> None:
     assert {e["name"] for e in _registry(tmp_path)} == {"personal", "home"}
 
 
-def test_legacy_gws_profile_migrates_only_blank_workspace_links(tmp_path: Path) -> None:
-    _write_registry(
-        tmp_path,
-        [
-            {"name": "home", "future_field": "kept"},
-            {"name": "client", "gws_profile": "personal"},
-        ],
-    )
-    _connect_profile(tmp_path, "acme")
-    config = _config(tmp_path, gws_profile="acme")
-
-    imported = config.import_legacy_gws_profile_env()
-
-    assert imported == ["home"]
-    entries = {entry["name"]: entry for entry in _registry(tmp_path)}
-    assert entries["home"]["gws_profile"] == "acme"
-    assert entries["home"]["future_field"] == "kept"
-    assert entries["client"]["gws_profile"] == "personal"
-    assert config.workspaces["home"].gws_profile == "acme"
-    marker = tmp_path / ".runtime" / LEGACY_GWS_PROFILE_IMPORT_MARKER
-    assert marker.is_file()
-    assert "must-not-be-copied" not in marker.read_text(encoding="utf-8")
-
-
-def test_unknown_legacy_gws_profile_is_not_imported_or_consumed(tmp_path: Path) -> None:
+def test_a_gws_profile_env_line_is_not_read(tmp_path: Path) -> None:
     _write_registry(tmp_path, [{"name": "home"}])
-    before = (tmp_path / ".runtime" / "workspaces.json").read_text(encoding="utf-8")
-    config = _config(tmp_path, gws_profile="../acme")
+    registry = tmp_path / ".runtime" / "workspaces.json"
+    before = registry.read_text(encoding="utf-8")
+    config = CiaoConfig.from_env({
+        "PWA_AUTH_TOKEN": "test-token",
+        "CIAO_WORKSPACE": str(tmp_path),
+        "CIAO_RUNTIME_ROOT": str(tmp_path / ".runtime"),
+        "GWS_PROFILE": "acme",
+    })
 
-    assert config.import_legacy_gws_profile_env() == []
-    assert (tmp_path / ".runtime" / "workspaces.json").read_text(encoding="utf-8") == before
-    assert not (tmp_path / ".runtime" / LEGACY_GWS_PROFILE_IMPORT_MARKER).exists()
+    config.import_legacy_workspaces_env()
 
-
-def test_legacy_gws_profile_marker_does_not_fill_later_blank_links(tmp_path: Path) -> None:
-    _write_registry(tmp_path, [{"name": "home"}])
-    _connect_profile(tmp_path, "acme")
-    config = _config(tmp_path, gws_profile="acme")
-    assert config.import_legacy_gws_profile_env() == ["home"]
-
-    _write_registry(tmp_path, [{"name": "home", "gws_profile": ""}])
-    reloaded = _config(tmp_path, gws_profile="acme")
-
-    assert reloaded.import_legacy_gws_profile_env() == []
-    assert _registry(tmp_path)[0]["gws_profile"] == ""
+    assert registry.read_text(encoding="utf-8") == before
+    assert not hasattr(config, "legacy_gws_profile")

@@ -206,7 +206,6 @@ PERMISSION_MODE_HINTS = {
 def build_context_capsule(
     *,
     workspace: str = "",
-    gws_profile: str = "",
     project_name: str = "",
     project_context: str = "",
     canonical_doc: str = "",
@@ -262,8 +261,6 @@ def build_context_capsule(
         # contact back into the wrong workspace. Naming the path is what stops
         # the misfiling recurring at the write step.
         stable.append(f"vault={_field(workspace_vault_root, limit=300)}")
-    if gws_profile:
-        stable.append(f"gws_profile={_field(gws_profile, limit=120)}")
     if project_name and project_name != "General":
         stable.append(f'project="{_field(project_name, limit=180)}"')
     if project_context:
@@ -300,7 +297,6 @@ def build_context_capsule(
 def context_digest(
     *,
     workspace: str,
-    gws_profile: str,
     project_name: str,
     project_context: str,
     canonical_doc: str,
@@ -316,7 +312,7 @@ def context_digest(
     follows the same rule, and is hashed as its own digest: editing the core
     re-sends it on the next turn.
     """
-    parts = [workspace, gws_profile, project_name, project_context, canonical_doc]
+    parts = [workspace, project_name, project_context, canonical_doc]
     if linked_repo:
         parts.append(linked_repo)
     if shared_brain:

@@ -125,7 +125,6 @@ def workspace_to_dict(workspace: WorkspaceConfig, config: Any) -> dict:
             else None
         ),
         "claude_trim": dict(getattr(workspace, "claude_trim", None) or {}),
-        "gws_profile": getattr(workspace, "gws_profile", ""),
         "color": color,
         "memory_handover": memory_handover,
         "memory_approval": memory_approval,
@@ -287,17 +286,6 @@ def workspace_from_request(
         shared_brains = list(getattr(existing, "shared_brains", []))
     else:
         shared_brains = []
-    if "gws_profile" in data:
-        # Imported here: gws_auth pulls in the HTTP and subprocess stack.
-        from ciao.gws_auth import slugify_profile
-
-        gws_profile = str(data["gws_profile"]).strip()
-        if gws_profile and slugify_profile(gws_profile) != gws_profile:
-            raise ValueError(
-                "gws_profile must be a profile id (lowercase letters, digits, - and _)"
-            )
-    else:
-        gws_profile = existing.gws_profile if existing else ""
     return WorkspaceConfig(
         name=name,
         # Vault locations are not an editable Settings field. Updating a
@@ -314,7 +302,6 @@ def workspace_from_request(
         default_provider=provider,
         disallowed_tools=disallowed_tools,
         claude_trim=claude_trim,
-        gws_profile=gws_profile,
         color=color,
         memory_handover=memory_handover,
         shared_brains=shared_brains,
