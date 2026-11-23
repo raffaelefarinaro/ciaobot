@@ -48,7 +48,6 @@ _REROOTED_CACHE: dict[str, bool] = {}
 # Runtime-root file recording that the retired ``CIAO_WORKSPACES`` variable
 # was imported into ``workspaces.json``. Its presence makes the import one-shot.
 LEGACY_WORKSPACES_IMPORT_MARKER = "workspaces-env-imported.json"
-LEGACY_GWS_PROFILE_IMPORT_MARKER = "gws-profile-env-imported.json"
 
 # Keys ``from_env`` has injected into ``os.environ`` from a workspace ``.env``.
 #
@@ -534,7 +533,6 @@ class WorkspaceConfig:
     default_provider: str = "claude"
     # Extra tools to deny on top of the trim catalog. None, [] and 'none' all mean no extras.
     disallowed_tools: list[str] | None = None
-    gws_profile: str = ""
     # PWA accent preset id. Defaults to Ciao orange (amber).
     color: str = DEFAULT_WORKSPACE_COLOR
     # Whether Workspace care may act on its own [memory]/[profile] verdicts
@@ -638,7 +636,6 @@ def _workspace_from_mapping(data: dict) -> WorkspaceConfig | None:
         claude_trim=absorb_legacy_claude_ai_connectors(
             data, load_claude_trim(data.get("claude_trim"))
         ),
-        gws_profile=str(data.get("gws_profile", "")).strip(),
         color=color,
         memory_handover=memory_handover,
         shared_brains=shared_brains_from_rows(data.get("shared_brains")),
@@ -756,16 +753,11 @@ def _bootstrap_registry(vault_root: Path | None = None) -> dict[str, WorkspaceCo
         )
     if not names:
         names = ["personal"]
-    profile = GWS_DEFAULT_PROFILE
     return {
         name: WorkspaceConfig(
             name=name,
             vault_root=name,
             default_provider="claude",
-            # The configured profile belongs to the workspace it was configured
-            # for; anything else derived from a directory name would be a guess
-            # about someone's Google account.
-            gws_profile=profile if name == "personal" else name,
         )
         for name in names
     }
@@ -815,8 +807,8 @@ def _read_or_create_secret(path: Path) -> str:
 # place. Fixed: the shell loop hardcodes the same number.
 RESTART_EXIT_CODE = 75
 
-# Google account a workspace falls back to when it links none.
-GWS_DEFAULT_PROFILE = "personal"
+# The workspace name used when a chat or project names none.
+DEFAULT_WORKSPACE_NAME = "personal"
 
 # Upload size caps for chat attachments.
 MAX_IMAGE_SIZE_BYTES = 10 * 1024 * 1024
@@ -853,7 +845,6 @@ class CiaoConfig:
     # still sets it. Never used as a workspace source; server startup imports
     # it into ``.runtime/workspaces.json`` once and then ignores it.
     legacy_workspaces_env: str = field(default="", repr=False)
-    legacy_gws_profile: str = field(default="", repr=False)
     # Raw values of the retired `.env` server variables
     # (`app_settings.LEGACY_ENV_SETTINGS`) this install still sets. Never read
     # as settings; server startup imports them into Settings once.
@@ -1371,7 +1362,6 @@ class CiaoConfig:
                     workspace.name
                 ),
                 "disallowed_tools": workspace.disallowed_tools,
-                "gws_profile": workspace.gws_profile,
                 "color": workspace.color,
             }
             # Sparse: a workspace on the catalog defaults keeps no key.
@@ -1506,76 +1496,6 @@ class CiaoConfig:
             registry_path,
         )
         return list(imported)
-
-    def import_legacy_gws_profile_env(self) -> list[str]:
-        profile = self.legacy_gws_profile.strip()
-        if not profile:
-            return []
-        runtime_root = self.state_path.parent
-        marker = runtime_root / LEGACY_GWS_PROFILE_IMPORT_MARKER
-        if marker.exists():
-            return []
-        registry_path = runtime_root / "workspaces.json"
-        if not registry_path.is_file():
-            return []
-        try:
-            entries = json.loads(registry_path.read_text(encoding="utf-8"))
-        except (OSError, ValueError, TypeError):
-            return []
-        if not isinstance(entries, list) or not entries:
-            return []
-        from ciao.gws_auth import known_profiles
-
-        try:
-            if profile not in set(known_profiles(self)):
-                return []
-        except Exception:
-            return []
-        imported: list[str] = []
-        for entry in entries:
-            if not isinstance(entry, dict):
-                continue
-            if str(entry.get("gws_profile", "") or "").strip():
-                continue
-            name = str(entry.get("name", "") or "").strip()
-            workspace = self.workspaces.get(name)
-            if workspace is None or workspace.gws_profile.strip():
-                continue
-            entry["gws_profile"] = profile
-            imported.append(name)
-        if imported:
-            tmp = registry_path.with_suffix(".json.tmp")
-            try:
-                tmp.write_text(json.dumps(entries, indent=2) + "\n", encoding="utf-8", newline="")
-                tmp.replace(registry_path)
-            except OSError:
-                logger.warning("Could not migrate the legacy GWS profile", exc_info=True)
-                return []
-            for name in imported:
-                self.workspaces[name].gws_profile = profile
-        try:
-            marker.write_text(
-                json.dumps(
-                    {
-                        "imported_at": datetime.now(UTC).isoformat(),
-                        "profile": profile,
-                        "workspaces": imported,
-                    },
-                    indent=2,
-                )
-                + "\n",
-                encoding="utf-8", newline="",
-            )
-        except OSError:
-            logger.warning("Could not record the legacy GWS profile migration", exc_info=True)
-        if imported:
-            logger.warning(
-                "GWS_PROFILE is no longer read; migrated %s to account %r once. "
-                "Google accounts are managed in Settings; remove GWS_PROFILE from .env.",
-                ", ".join(imported),
-                profile,
-            )
-        return imported
 
     def default_model_for_workspace(
         self, workspace: str | None, provider: str | None = None
@@ -1935,7 +1855,6 @@ class CiaoConfig:
             legacy_env_settings=legacy_env_settings,
             workspaces=workspaces,
             legacy_workspaces_env=str(source.get("CIAO_WORKSPACES", "") or "").strip(),
-            legacy_gws_profile=str(source.get("GWS_PROFILE", "") or "").strip(),
         )
 
 

@@ -33,7 +33,6 @@ Example `.runtime/workspaces.json`:
     "name": "default",
     "vault_root": "memory-vault",
     "default_provider": "claude",
-    "gws_profile": "personal",
     "color": "amber",
     "disallowed_tools": []
   },
@@ -41,7 +40,6 @@ Example `.runtime/workspaces.json`:
     "name": "client-a",
     "vault_root": "vaults/client-a",
     "default_provider": "opencode",
-    "gws_profile": "work",
     "color": "cyan",
     "disallowed_tools": ["mcp__claude_ai_Slack", "mcp__claude_ai_Salesforce"]
   }

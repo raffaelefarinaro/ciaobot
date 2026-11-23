@@ -213,30 +213,6 @@ def test_auth_login_child_gets_the_child_env(
 
 
 @pytest.mark.parametrize(("mode", "bundled"), [("bundled_app", True), ("editable", False)])
-def test_gws_profile_status_child_gets_the_child_env(
-    monkeypatch: pytest.MonkeyPatch, launcher_env: None, tmp_path: Path, mode: str, bundled: bool
-) -> None:
-    from types import SimpleNamespace
-
-    import ciao.tool_path as tool_path
-    from ciao import gws_auth
-
-    _mode(monkeypatch, mode)
-    monkeypatch.setattr(gws_auth, "gws_bin_override", lambda: "/bin/gws")
-    monkeypatch.setattr(gws_auth, "profile_config_dir", lambda *_a: tmp_path)
-    monkeypatch.setattr(tool_path, "login_shell_path", lambda: "/usr/bin")
-    seen: list[dict[str, Any]] = []
-
-    def runner(argv: Any, **kwargs: Any) -> subprocess.CompletedProcess[str]:
-        seen.append(kwargs)
-        return subprocess.CompletedProcess(argv, 0, "{}", "")
-
-    gws_auth.auth_status(SimpleNamespace(workspace_root=str(tmp_path)), "default", runner=runner)
-
-    _check_env(seen[0], bundled)
-
-
-@pytest.mark.parametrize(("mode", "bundled"), [("bundled_app", True), ("editable", False)])
 def test_claude_auth_status_child_gets_the_child_env(
     monkeypatch: pytest.MonkeyPatch, launcher_env: None, capture_runs: list[dict[str, Any]],
     mode: str, bundled: bool,
