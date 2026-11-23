@@ -37,16 +37,13 @@ describe('changeFor', () => {
   })
 
   it('reads an append to an existing file as adding a line, and to an empty one as a new note', () => {
-    const learnings = { action: 'append_learnings', destination: 'Workspace/Learnings.md', separator: '\n' }
-    expect(changeFor(row({ kind: 'learnings' }), preview({ ...learnings, before: '## Active\n' })))
-      .toMatchObject({ type: 'add', verb: 'Add to Learnings.md', qualifier: '' })
-    expect(changeFor(row({ kind: 'learnings' }), preview({ ...learnings, before: '' })).type).toBe('new')
+    const project = { action: 'fold_doc', destination: 'Projects/Ciao.md', separator: '\n' }
+    expect(changeFor(row({ kind: 'project' }), preview({ ...project, before: '# Ciao\n' })))
+      .toMatchObject({ type: 'add', verb: 'Add to Ciao.md', qualifier: '' })
+    expect(changeFor(row({ kind: 'project' }), preview({ ...project, before: '' })).type).toBe('new')
   })
 
   it('tells an exact update from a merge a model decides', () => {
-    expect(changeFor(row({ kind: 'learnings' }), preview({
-      action: 'append_learnings', operation: 'update', destination: 'Workspace/Learnings.md', exact: true,
-    }))).toMatchObject({ type: 'update', label: 'Update a line', verb: 'Update line' })
     expect(changeFor(row({ kind: 'project' }), preview({
       action: 'fold_doc', operation: 'update', destination: 'Projects/Ciao.md', exact: false,
     }))).toMatchObject({ type: 'merge', label: 'Merge into a note', verb: 'Merge', qualifier: 'a model folds it in when you accept' })

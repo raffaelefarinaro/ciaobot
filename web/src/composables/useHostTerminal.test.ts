@@ -66,7 +66,7 @@ describe('useHostTerminal', () => {
     const host = useHostTerminal()
     await host.ensureCapabilities()
     expect(host.canRun('claude-install')).toBe(true)
-    expect(host.canRun('gws-install')).toBe(false)
+    expect(host.canRun('opencode-install')).toBe(false)
   })
 
   it('posts an action id, never a command', async () => {

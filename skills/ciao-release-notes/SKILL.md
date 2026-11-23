@@ -95,6 +95,9 @@ the bullets after it. Any later release follows the rules above.
 - **Schedules are judged on the turn's own reply.** A run whose background agents report later may be archived first.
 - **Ciaobot no longer limits what the agent can touch.** "File access: Workspace only" is gone. Every workspace has the same file access as your user account, within the agent's permission mode, and bypass means full access, including for schedules and webhook runs. The agent CLI's own permission settings (Claude Code `permissions`, OpenCode `permission`) are the only limit. Ciaobot no longer blocks agent file tools from `.env`, `.runtime/` and `secrets/`.
 - **MCP is managed in each agent's CLI.** Settings → MCP servers and Chat details → MCP open `claude mcp` or `opencode mcp`. There are no Ciaobot sign-in cards, on/off toggles or automatic reloads; servers you turned off stay off. A running chat picks up changes after `ciao chat reload` or in a new chat.
+- **Google Workspace is no longer built in.** The Google account card, `ciao gws` and the Google skills are gone. Connect Google through your agent instead: Claude's and Codex's own Google connectors, or the Google Workspace MCP server (see https://www.raffaelefarinaro.com/ciaobot/companions.html#google). Existing `secrets/gws*` folders are left in place.
+- **Question cards are not shown.** When the agent asks a multiple-choice question, it asks in plain text; 2.0 has no question card yet.
+- **Moving from 1.x:** https://www.raffaelefarinaro.com/ciaobot/migrate.html
 ```
 
 ## How to gather the material

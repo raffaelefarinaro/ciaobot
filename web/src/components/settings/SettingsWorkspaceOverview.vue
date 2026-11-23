@@ -41,18 +41,6 @@
 
     <SettingsWorkspaceModels />
 
-    <div class="card">
-      <div class="settings-card-header">
-        <p class="section-title">Google account</p>
-        <p class="hint">
-          Used by this workspace's chats and schedules for Gmail, Calendar, Drive, Docs, Sheets, Slides and Tasks. One account per workspace.
-        </p>
-      </div>
-      <div class="overview-body">
-        <WorkspaceGoogleAccount />
-      </div>
-    </div>
-
     <div v-if="workspacesResult" class="action-result action-result--error" role="alert">{{ workspacesResult }}</div>
 
     <SettingsMemoryHandover />
@@ -91,7 +79,6 @@ import SettingsMemoryHandover from './SettingsMemoryHandover.vue'
 import SettingsSharedBrains from './SettingsSharedBrains.vue'
 import SettingsCareCycle from './SettingsCareCycle.vue'
 import SettingsUpdateTasks from './SettingsUpdateTasks.vue'
-import WorkspaceGoogleAccount from './WorkspaceGoogleAccount.vue'
 import WorkspaceColorPicker from './WorkspaceColorPicker.vue'
 import { WORKSPACE_ADMIN_KEY } from '../../composables/useWorkspaceAdmin'
 

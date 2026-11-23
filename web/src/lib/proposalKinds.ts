@@ -144,16 +144,6 @@ function memoryMergePrompt(row: ProposalRow, errorMsg: string): string {
   )
 }
 
-function learningsMergePrompt(row: ProposalRow, errorMsg: string): string {
-  const where = `queued in the ${row.workspace} workspace`
-  return (
-    `A \`[learnings]\` proposal is queued (${where}) but direct accept refused: ${errorMsg}\n\nWork in this chat only; do not delegate this helper task.\n\n` +
-    `Fact to merge: ${row.text}\n\n` +
-    `Read \`Workspace/Learnings.md\` in the ${row.workspace} vault, append this fact under \`## Active\` without duplication, and write it back.\n\n` +
-    `After the file is updated, dismiss the queued proposal that contains this exact text by running \`ciao memory-proposal-dismiss --text-file <file> --promoted\` (do not delete the bullet from the file directly — that skips the outcome log). If the fact is already present, just dismiss. Leave other proposals untouched.`
-  )
-}
-
 // ---- destinations ----------------------------------------------------------
 
 /** The generic form: the ciao region an accept would write into. */
@@ -284,20 +274,6 @@ export const PROPOSAL_KINDS: Record<string, ProposalKindDescriptor> = {
       when: ALWAYS,
     },
     discussLabel: () => 'a `project` proposal',
-  },
-
-  learnings: {
-    label: 'learnings',
-    destination: () => 'Workspace/Learnings.md',
-    consequence: () => 'Added to this workspace’s list of learnings',
-    canAccept: ALWAYS,
-    fallback: {
-      chatTitle: () => 'Merge learning',
-      toastDetail: () => 'Learning — click to open the chat',
-      prompt: learningsMergePrompt,
-      when: ALWAYS,
-    },
-    discussLabel: () => 'a `learnings` proposal',
   },
 
   // A note the verification pass could not settle on its own. The accept

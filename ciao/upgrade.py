@@ -83,7 +83,7 @@ async def run_upgrade(
     )
 
 
-def install_custom_skills(cwd: str, workspace_name: str | None = None) -> int:
+def install_custom_skills(cwd: str) -> int:
     """Install and mirror Ciaobot skills through the packaged sync command.
 
     Returns the number of skills installed.
@@ -91,22 +91,20 @@ def install_custom_skills(cwd: str, workspace_name: str | None = None) -> int:
     try:
         from ciao.sync_skills import sync_workspace_skills
 
-        result = sync_workspace_skills(cwd, workspace_name=workspace_name)
+        result = sync_workspace_skills(cwd)
         return result.custom_installed
     except Exception:
         logger.exception("Custom skills install failed")
         return 0
 
 
-def update_skills(cwd: str, workspace_name: str | None = None) -> str | None:
+def update_skills(cwd: str) -> str | None:
     """Install the curated skill set from ``skills/``.
 
     The package command mirrors skills, commands, and agents into the Claude
     catalog. Skills are local folders under ``skills/<name>/SKILL.md``.
-    ``workspace_name`` lets the caller tie a root to its registered workspace so
-    the ``gws-*`` stock skills are gated on that workspace's Google account.
     """
-    n_custom = install_custom_skills(cwd, workspace_name=workspace_name)
+    n_custom = install_custom_skills(cwd)
     if n_custom:
         logger.info("Installed %d custom skill(s).", n_custom)
     return None

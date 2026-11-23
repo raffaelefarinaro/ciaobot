@@ -198,7 +198,6 @@ def test_destination_accepts_report_where_the_fact_landed() -> None:
     for kind, action, destination in (
         ("project", "fold_doc", "Projects/Alpha.md"),
         ("people", "write_people_note", "People/Mo.md"),
-        ("learnings", "append_learnings", "Workspace/Learnings.md"),
     ):
         payload = proposal_actions.build_accept_result(
             "abc",

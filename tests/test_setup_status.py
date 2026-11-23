@@ -728,9 +728,7 @@ def test_setup_finish_autodetects_scratch_for_empty_folder(tmp_path) -> None:
     registry = _json.loads((ws / ".runtime" / "workspaces.json").read_text(encoding="utf-8"))
     assert [w["name"] for w in registry] == ["life"]
     assert registry[0]["vault_root"] == "life/memory-vault"
-    # Setup links no Google account: which accounts exist is the user's choice,
-    # made in Settings → Overview → All workspaces after onboarding.
-    assert registry[0]["gws_profile"] == ""
+    assert "gws_profile" not in registry[0]
 
 
 def test_setup_finish_rejects_a_traversal_workspace_name(tmp_path) -> None:

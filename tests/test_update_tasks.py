@@ -28,6 +28,7 @@ import json
 import os
 import threading
 from collections.abc import Iterator
+from dataclasses import replace
 from datetime import UTC, date, datetime
 from pathlib import Path
 from typing import Any
@@ -36,7 +37,7 @@ import pytest
 
 from ciao import async_reads, fts_search, update_task_catalog, update_tasks, vault_index
 from ciao.config import CiaoConfig, WorkspaceConfig
-from ciao.update_task_catalog import CATALOG_FILENAME, UpdateTask, load_catalog
+from ciao.update_task_catalog import CATALOG_FILENAME, TaskCatalog, UpdateTask, load_catalog
 from ciao.update_tasks import (
     APPLICABILITY_TTL_S,
     APPLICABLE,
@@ -972,6 +973,7 @@ def test_the_shipped_catalog_ships_its_tasks_and_both_probes_exist(
         "learnings-cleanup",
         "unrehomed-people",
         "vault-relocate",
+        "learnings-queue-drain",
     ]
     assert update_task_catalog.DETECTORS == set(update_tasks.DETECTOR_FUNCTIONS)
     assert update_task_catalog.COMPLETION_CHECKS == set(
@@ -991,6 +993,86 @@ def test_the_shipped_catalog_ships_its_tasks_and_both_probes_exist(
         )
         assert result.status == NOT_APPLICABLE, result.evidence
         assert "detector_not_implemented" not in result.evidence.values()
+
+
+def test_learnings_queue_drain_detector_only_applies_to_legacy_rows(tmp_path: Path) -> None:
+    catalog = load_catalog()
+    task = next(task for task in catalog.tasks if task.id == "learnings-queue-drain")
+    config = _config(tmp_path)
+    vault = Path(config.workspace_vault_root("personal"))
+    workspace = vault / "Workspace"
+    workspace.mkdir(parents=True)
+    queue = workspace / "Memory-Proposals.md"
+    queue.write_text("- [memory] learnings as ordinary prose\n")
+    absent = update_tasks.apply_detector(task, config=config, workspace="personal")
+    assert absent.status == NOT_APPLICABLE
+    queue.write_text("- [learnings] a pending lesson _(request: req-1)_\n")
+    present = update_tasks.apply_detector(task, config=config, workspace="personal")
+    assert present.status == APPLICABLE
+    assert present.evidence["rows"] == 1
+
+
+async def test_reverted_drain_reopens_only_its_completed_workspace_task(tmp_path: Path) -> None:
+    from ciao import learnings_queue_drain as drain
+
+    config = _config(tmp_path)
+    vault = Path(config.workspace_vault_root("personal"))
+    workspace = vault / "Workspace"
+    workspace.mkdir(parents=True)
+    queue = workspace / "Memory-Proposals.md"
+    queue.write_text("- [learnings] repeat this lesson\n", encoding="utf-8")
+    task = load_catalog().by_id["learnings-queue-drain"]
+    runtime = Path(config.state_path).parent
+
+    applied = drain.drain(vault, workspace="personal", runtime_root=runtime, apply=True)
+    assert applied.get("applied") is True
+    completed = update_tasks.record_completion(task, config=config, workspace="personal")
+    assert completed is not None and completed.lifecycle == "completed"
+
+    after_drain = await update_tasks.evaluate(
+        config, workspace="personal", installed_version="1.0.0"
+    )
+    drain_status = next(status for status in after_drain if status.task.id == task.id)
+    assert drain_status.state is not None and drain_status.state.lifecycle == "completed"
+
+    reverted = drain.revert(
+        vault,
+        Path(applied["receipts"][0]),
+        workspace="personal",
+        runtime_root=runtime,
+        apply=True,
+    )
+    assert reverted.get("reverted") is True
+
+    after_revert = await update_tasks.evaluate(
+        config, workspace="personal", installed_version="1.0.0"
+    )
+    drain_status = next(status for status in after_revert if status.task.id == task.id)
+    assert drain_status.state is not None and drain_status.state.lifecycle == "offered"
+    assert drain_status.offered
+
+    ordinary = replace(task, id="ordinary-completed")
+    update_tasks.write_task_state(
+        update_tasks.TaskState(
+            task_id=ordinary.id,
+            revision=ordinary.revision,
+            scope=ordinary.scope,
+            lifecycle="completed",
+            updated_at="2026-11-23T00:00:00Z",
+        ),
+        config=config,
+        workspace="personal",
+    )
+    unrelated = await update_tasks.evaluate(
+        config,
+        workspace="personal",
+        installed_version="1.0.0",
+        catalog=TaskCatalog(tasks=(ordinary,)),
+        change_token="unrelated-completed",
+    )
+    ordinary_status = unrelated[0]
+    assert ordinary_status.state is not None and ordinary_status.state.lifecycle == "completed"
+    assert ordinary_status.suppressed
 
 
 async def test_a_test_injected_catalog_proves_the_layer_end_to_end(

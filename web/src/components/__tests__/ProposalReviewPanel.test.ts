@@ -1242,8 +1242,8 @@ describe('workspace scoping', () => {
     })
     const projects = useProjectStore()
     projects.workspaces = [
-      { name: 'personal', vault_root: '/p', default_provider: 'claude', gws_profile: '' },
-      { name: 'work', vault_root: '/w', default_provider: 'claude', gws_profile: '' },
+      { name: 'personal', vault_root: '/p', default_provider: 'claude' },
+      { name: 'work', vault_root: '/w', default_provider: 'claude' },
     ] as never
     const wrapper = mount(ProposalReviewPanel, { global: { plugins: [pinia] } })
     await flushPromises()
@@ -1588,65 +1588,6 @@ describe('decision card', () => {
     const added = card.findAll('.pr-card-diff-line--added').map(l => l.text())
     expect(added.join(' ')).toContain('Remember the thing [2026-09-19]')
     // Nothing has been written yet.
-    expect(apiPost).not.toHaveBeenCalled()
-    wrapper.unmount()
-  })
-
-  it('renders an Update as a replacement, not a second copy', async () => {
-    // The other branch of the operation badge. Every card exercised so far has
-    // been an Add, because a region accept always appends; an Update is what a
-    // `[learnings]` bullet produces when the destination already holds that
-    // learning and accepting bumps its recurrence count instead of filing it
-    // twice. That is exactly the case the bullet's own text cannot describe,
-    // so the card has to show the line it replaces beside the line it writes.
-    const filed =
-      '- [thing] [2026-09-01 → 2026-09-01] (x1) Remember the thing. — sources: chat-1'
-    const bumped =
-      '- [thing] [2026-09-01 → 2026-09-19] (x2) Remember the thing. — sources: chat-1, chat-42'
-    apiGet.mockImplementation((url: string) => {
-      if (url.startsWith('/api/proposals/history')) {
-        return Promise.resolve({ rows: [], total: 0, truncated: false })
-      }
-      if (url.startsWith('/api/proposals/row-1/preview')) {
-        return Promise.resolve({
-          ok: true,
-          preview: preview({
-            kind: 'learnings',
-            action: 'append_learnings',
-            operation: 'update',
-            destination: 'Workspace/Learnings.md',
-            destination_path: '/v/Workspace/Learnings.md',
-            before: `## Active\n\n${filed}\n`,
-            after: `## Active\n\n${bumped}\n`,
-            reason: 'this learning is already filed; accepting bumps its recurrence count',
-          }),
-        })
-      }
-      return Promise.resolve({ rows: [row({ kind: 'learnings', source: 'chat-42' })] })
-    })
-    const wrapper = await openCard()
-
-    const card = wrapper.find('.pr-card')
-    expect(card.find('.pr-card-op').text()).toBe('Update')
-    expect(card.find('.pr-card-op').classes()).toContain('pr-card-op--update')
-    expect(card.find('.pr-card-dest').text()).toBe('Workspace/Learnings.md')
-    // One line out, one line in — the untouched heading is not reported.
-    expect(card.findAll('.pr-card-diff-line--removed').map(l => l.text())).toEqual([
-      expect.stringContaining(filed),
-    ])
-    expect(card.findAll('.pr-card-diff-line--added').map(l => l.text())).toEqual([
-      expect.stringContaining(bumped),
-    ])
-    expect(card.text()).toContain('accepting bumps its recurrence count')
-    expect(card.find('.pr-actions--card .btn-primary').text()).toBe(
-      'Continue without a reason',
-    )
-    expect(card.find('.pr-confirm-action').text())
-      .toBe('This will save to Workspace/Learnings.md.')
-    // A learnings row is not reconcilable, so the check-first chip stays away.
-    expect(wrapper.findAll('.pr-actions--card button').map(b => b.text())).not.toContain(
-      'Check first',
-    )
     expect(apiPost).not.toHaveBeenCalled()
     wrapper.unmount()
   })
@@ -2492,7 +2433,7 @@ describe('the change on the row', () => {
   })
 
   const person = row({ id: 'p', kind: 'people', target: 'Mo', text: 'Leads the pilot.' })
-  const decision = row({ id: 'd', kind: 'learnings', text: 'Order OCR moves out.' })
+  const decision = row({ id: 'd', kind: 'project', target: 'Projects/Decision.md', text: 'Order OCR moves out.' })
   const fold = row({ id: 'f', kind: 'project', target: 'Projects/Ciao.md', text: 'Ships on Fridays.' })
   const region = row({ id: 'm', kind: 'memory', region: 'memory', text: 'Prefers short PRs.' })
 
@@ -2503,10 +2444,10 @@ describe('the change on the row', () => {
       separator: '\n', revision: 'rev-p', text: 'Leads the pilot.',
     }),
     d: preview({
-      id: 'd', kind: 'learnings', action: 'append_learnings', operation: 'add',
-      destination: 'Workspace/Learnings.md',
-      before: '# Learnings\n## Decisions\n- one\n',
-      after: '# Learnings\n## Decisions\n- one\n- Order OCR moves out.\n',
+      id: 'd', kind: 'project', action: 'fold_doc', operation: 'add',
+      destination: 'Projects/Decision.md',
+      before: '# Decisions\n',
+      after: '# Decisions\n- Order OCR moves out.\n',
       separator: '\n', revision: 'rev-d', text: 'Order OCR moves out.',
     }),
     f: preview({
@@ -2549,10 +2490,10 @@ describe('the change on the row', () => {
 
     const d = rowFor(wrapper, 'Order OCR moves out.')
     expect(d.get('.pr-op').text()).toBe('Add to a note')
-    expect(d.get('.pr-where').text()).toBe('· under ## Decisions')
-    expect(d.get('.pr-diff .pr-diff-head').text()).toBe('· 1 line added after line 3')
-    expect(d.findAll('.pr-diff .mr-box-line').map(l => l.get('.mr-box-num').text())).toEqual(['3', '4'])
-    expect(d.get('.pr-row-accept').text()).toBe('Add to Learnings.md')
+    expect(d.get('.pr-where').text()).toBe('· under # Decisions')
+    expect(d.get('.pr-diff .pr-diff-head').text()).toBe('· 1 line added after line 1')
+    expect(d.findAll('.pr-diff .mr-box-line').map(l => l.get('.mr-box-num').text())).toEqual(['1', '2'])
+    expect(d.get('.pr-row-accept').text()).toBe('Add to Decision.md')
 
     const f = rowFor(wrapper, 'Ships on Fridays.')
     expect(f.get('.pr-op').text()).toBe('Merge into a note')
@@ -2655,7 +2596,7 @@ describe('the change on the row', () => {
   describe('the proposal row layout', () => {
     const agentsBefore = '# Old\n\ntext'
     const agentsPreview = preview({
-      id: 'x', kind: 'memory', action: 'append_learnings', operation: 'add',
+      id: 'x', kind: 'repo', action: 'append_repo_doc', operation: 'add',
       destination: '/Users/me/repos/stazionesmart/AGENTS.md',
       before: agentsBefore, after: `${agentsBefore}\n\n## Agent learnings\n\n- fact`,
       separator: '\n', revision: 'rev-x', text: 'fact', reason: 'Nothing to add.',

@@ -294,6 +294,39 @@ Probe = Callable[..., Detection]
 # ── The Learnings cleanup probes (#728-E) ───────────────────────────────────
 
 
+def _learnings_queue_drain_needed(
+    *, config: Any, workspace: str = "", today: date | None = None
+) -> Detection:
+    """Whether the legacy pending queue contains rows the drain understands."""
+    vault = _workspace_vault(config, workspace)
+    if vault is None:
+        raise ValueError("no workspace vault is registered for this task")
+    from ciao.learnings_queue_drain import inspect
+
+    result = inspect(vault, workspace=workspace, runtime_root=_runtime_root(config))
+    if result["failed"]:
+        raise ValueError("could not inspect pending learning drain state")
+    rows = len(result["rows"])
+    unresolved = len(result["unresolved"])
+    return Detection(rows > 0 or unresolved > 0, {"rows": rows, "unresolved": result["unresolved"]})
+
+
+def _learnings_queue_drain_recorded(
+    *, config: Any, workspace: str = "", today: date | None = None
+) -> Detection:
+    """Whether a drain receipt exists for this registered vault."""
+    vault = _workspace_vault(config, workspace)
+    if vault is None:
+        raise ValueError("no workspace vault is registered for this task")
+    from ciao.learnings_queue_drain import inspect
+
+    result = inspect(vault, workspace=workspace, runtime_root=_runtime_root(config))
+    pending = len(result["rows"])
+    recorded = bool(result["applied_receipts"])
+    complete = recorded and pending == 0 and not result["unresolved"] and not result["failed"]
+    return Detection(complete, {"receipt_recorded": recorded, "pending": pending, "unresolved": result["unresolved"]})
+
+
 def _learnings_cleanup_review_needed(
     *, config: Any, workspace: str = "", today: date | None = None
 ) -> Detection:
@@ -764,6 +797,7 @@ def _learnings_revision(vault_root: Path) -> str | None:
 #: bodies import lazily, because a Home render that does not touch Learnings or
 #: a vault should not pay for either module.
 DETECTOR_FUNCTIONS: dict[str, Probe] = {
+    "learnings-queue-drain-needed": _learnings_queue_drain_needed,
     "learnings-cleanup-review-needed": _learnings_cleanup_review_needed,
     "unrehomed-people-review-needed": _unrehomed_people_rehome_needed,
     "vault-relocate-review-needed": _vault_relocate_needed,
@@ -773,6 +807,7 @@ DETECTOR_FUNCTIONS: dict[str, Probe] = {
 #: means :func:`record_completion` records nothing, which is the point: a task is
 #: never marked done because nobody wrote the check that would prove it.
 COMPLETION_FUNCTIONS: dict[str, Probe] = {
+    "learnings-queue-drain-recorded": _learnings_queue_drain_recorded,
     "learnings-cleanup-review-recorded": _learnings_cleanup_review_recorded,
     "unrehomed-people-rehome-recorded": _unrehomed_people_rehome_recorded,
     "vault-relocate-recorded": _vault_relocate_recorded,
@@ -1755,7 +1790,10 @@ def _evaluate_off_loop(
                 },
             )
             continue
-        hit = cached.get(key)
+        # A reverted drain restores its source rows after the task was marked
+        # complete. Re-scan this small queue on each listing so that reversal
+        # makes the workspace task actionable again without waiting out the TTL.
+        hit = None if task.id == "learnings-queue-drain" else cached.get(key)
         if hit is not None:
             results[identity] = hit
             continue
@@ -1767,10 +1805,30 @@ def _evaluate_off_loop(
         # is on disk can be settled even on the turn where its detector is
         # unwell.
         fresh.add(identity)
-        if _is_cacheable(answer):
+        if _is_cacheable(answer) and task.id != "learnings-queue-drain":
             computed[key] = answer
     if computed:
         _store_results(computed, token, instant)
+    for task in tasks:
+        identity = (task.id, task.revision)
+        state = states.get(identity)
+        if (
+            task.id == "learnings-queue-drain"
+            and state is not None
+            and state.lifecycle == "completed"
+            and results[identity].status == APPLICABLE
+        ):
+            try:
+                _reopen_completed_drain_task(task, config=config, workspace=workspace)
+            except (UpdateTaskStateError, OSError) as exc:
+                logger.warning(
+                    "update task %s@%s: work became applicable again but the completed record "
+                    "could not be reopened (%s)",
+                    task.id,
+                    task.revision,
+                    exc,
+                )
+            states[identity] = read_task_state(task, config=config, workspace=workspace)
     _settle(tasks, states, config, workspace, fresh)
     return [
         TaskStatus(
@@ -1780,6 +1838,28 @@ def _evaluate_off_loop(
         )
         for task in tasks
     ]
+
+
+def _reopen_completed_drain_task(
+    task: UpdateTask, *, config: Any, workspace: str
+) -> TaskState | None:
+    """Re-offer only a completed drain whose fresh detector found work again."""
+    with _record_lock(task, config, workspace) as (path, previous):
+        if previous is None or previous.lifecycle != "completed":
+            return previous
+        state = TaskState(
+            task_id=task.id,
+            revision=task.revision,
+            scope=task.scope,
+            lifecycle="offered",
+            updated_at=_stamp(datetime.now(UTC)),
+            attempted_fingerprint="",
+            evidence={"completion_reversed": True},
+            chat_id=previous.chat_id,
+            prompt_digest=previous.prompt_digest,
+        )
+        _write_record(path, state)
+    return state
 
 
 def _settle(

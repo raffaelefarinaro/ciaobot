@@ -1130,83 +1130,57 @@ def test_the_preview_renders_the_same_provenance_the_accept_writes(
     assert "req:req-3" in rendered
 
 
-# ── The bullet grammar's `request` tail ────────────────────────────────────
+# ── Legacy learning rows use the migration grammar, not proposal kinds ─────
 
 
-def test_a_bullet_round_trips_its_request_through_the_queue(tmp_path: Path) -> None:
-    """The `_(request: …)_` tail is a field, not more text in the source.
-
-    Folding it into the source would make a request id read back as a chat id,
-    which is the invented-citation failure this field exists to remove — so the
-    two are parsed apart and both survive the round trip.
-    """
+def test_legacy_learning_request_tail_is_parsed_only_by_the_drain() -> None:
+    """The proposal registry rejects this removed kind while migration retains provenance."""
+    from ciao.learnings_queue_drain import _parse_row
     from ciao.proposal_kinds import parse_bullet
 
-    bullet = mp.MemoryProposal(
-        target="learnings",
-        text="Pin the Node version before running the suite.",
-        source_section="/remember",
-        request="req-7",
-    ).as_bullet()
-    parsed = parse_bullet(bullet)
-    assert parsed is not None
-    assert parsed.kind == "learnings"
-    assert parsed.text == "Pin the Node version before running the suite."
-    assert parsed.source == "/remember"
-    assert parsed.request == "req-7"
-
-    vault = tmp_path / "vault"
-    mp.append_proposals([mp.MemoryProposal(
-        target="learnings",
-        text="Pin the Node version before running the suite.",
-        source_section="/remember",
-        request="req-7",
-    )], vault)
-    queue = vault / "Workspace" / "Memory-Proposals.md"
-    row = next(
-        row
-        for row in mp.list_proposals(queue)
-        if row["kind"] == "learnings"
-    )
-    assert row["source"] == "/remember"
-    assert row["request"] == "req-7"
+    line = "- [learnings] Pin the Node version.  _(from: /remember)_  _(request: req-7)_"
+    assert parse_bullet(line) is None
+    assert _parse_row(line) == {
+        "target": "",
+        "text": "Pin the Node version.",
+        "source": "/remember",
+        "request": "req-7",
+        "decider": "",
+        "decide_reason": "",
+    }
 
 
-def test_a_bullet_written_before_the_request_field_parses_unchanged(
-    tmp_path: Path,
-) -> None:
-    """Every bullet already in an installed vault has no request tail."""
+def test_old_learning_rows_are_not_regular_proposals_but_remain_drainable() -> None:
+    """Ordinary legacy bullets keep parsing; the removed kind belongs to migration."""
     from ciao.proposal_kinds import parse_bullet
+    from ciao.learnings_queue_drain import _parse_row
 
     for line in (
         "- [memory] Prefers short answers.  _(from: curation)_",
         "- [project ./projects/x/doc.md] Ships on Friday.  _(from: chat-1)_",
-        "- [learnings] No tail at all",
         "- [note_edit abc123] Retire this.  _(from: /remember)_",
     ):
         parsed = parse_bullet(line)
         assert parsed is not None, line
         assert parsed.request == "", line
+    legacy = "- [learnings] No tail at all"
+    assert parse_bullet(legacy) is None
+    assert _parse_row(legacy) == {
+        "target": "", "text": "No tail at all", "source": "", "request": "",
+        "decider": "", "decide_reason": "",
+    }
 
 
-def test_a_closing_paren_in_a_request_cannot_end_the_tail_early() -> None:
-    """The bullet is one line with its own delimiters, so a `)` is stripped.
+def test_a_closing_paren_in_legacy_request_does_not_end_the_drain_tail_early() -> None:
+    """Only `)_` closes a legacy tail; inner parentheses survive migration parsing."""
+    from ciao.learnings_queue_drain import _parse_row
 
-    Left in, it would close the tail early and the rest of the line would read
-    as body text — a row that stops parsing without anything looking wrong.
-    """
-    from ciao.proposal_kinds import parse_bullet
-
-    bullet = mp.MemoryProposal(
-        target="learnings",
-        text="A lesson.",
-        source_section="/remember",
-        request="req) and then some prose",
-    ).as_bullet()
-    parsed = parse_bullet(bullet)
+    parsed = _parse_row(
+        "- [learnings] A lesson. _(request: req) and then some prose)_"
+    )
     assert parsed is not None
-    assert parsed.text == "A lesson."
-    assert parsed.request == "req and then some prose"
+    assert parsed["text"] == "A lesson."
+    assert parsed["request"] == "req) and then some prose"
 
 
 # ── accept_region_fact: the UI accept path's guards ───────────────────────
@@ -1689,18 +1663,18 @@ def test_add_command_repo_refuses_a_path_with_a_closing_bracket(tmp_path: Path) 
 
 
 def test_as_bullet_renders_the_decide_tail_last() -> None:
-    """The decide tail follows from and request, loses ')' and round-trips."""
+    """The decide tail follows the source and round-trips on a registered kind."""
     from ciao.proposal_kinds import parse_bullet
 
     proposal = mp.MemoryProposal(
-        target="learnings", text="x", source_section="s", request="r",
+        target="memory", text="x", source_section="s",
         decider="you", decide_reason="why (really)",
     )
     line = proposal.as_bullet()
-    assert line.endswith("  _(from: s)_  _(request: r)_  _(decide: you; why really)_")
+    assert line.endswith("  _(from: s)_  _(decide: you; why really)_")
     bullet = parse_bullet(line)
     assert bullet is not None
-    assert (bullet.text, bullet.source, bullet.request) == ("x", "s", "r")
+    assert (bullet.text, bullet.source, bullet.request) == ("x", "s", "")
     assert (bullet.decider, bullet.decide_reason) == ("you", "why really")
 
 

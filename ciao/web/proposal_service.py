@@ -1020,11 +1020,7 @@ def _scan_proposal_rows(config) -> tuple[list[dict[str, Any]], dict[str, dict[st
                     # and rehome carry none.
                     row["target"] = bullet.target
                 if bullet.request:
-                    # The user-request id a `/remember` of a lesson carries. It
-                    # rides on the row because the `[learnings]` accept and its
-                    # preview both need it, and they must be given the same one:
-                    # a preview rendered without the request shows a line with no
-                    # citation that the accept then writes with one.
+                    # Older queue rows may retain a user-request provenance tail.
                     row["request"] = bullet.request
                 if bullet.decider:
                     # Absent for rows with no decider, like `target` and `request`.
@@ -1789,49 +1785,6 @@ async def _accept_people_row(config, row: dict[str, Any]) -> AcceptOutcome:
             error=f"{destination} appeared while accepting; try again to merge into it",
         )
     return AcceptOutcome(ok=True, destination=destination)
-
-
-def _accept_learnings_row(config, row: dict[str, Any]) -> AcceptOutcome:
-    """Append an accepted `[learnings]` fact to Workspace/Learnings.md.
-
-    A lock this write could not take is a row that did not happen, not a
-    request that blew up: `append_learning` serializes against the care run and
-    the migration on the same file, and while either of them holds it every
-    accept for that vault waits and then gives up. `QueueLockError` is a
-    `RuntimeError`, so catching only `OSError` turned a held lock into a 500 —
-    on the single accept and, worse, half way down the batch loop, where the
-    rows after it were abandoned with nothing to say why.
-    """
-    from ciao.memory_proposals import append_learning
-    from ciao.memory_receipts import QueueLockError
-
-    try:
-        vault = config.workspace_vault_root(row["workspace"])
-    except (AttributeError, ValueError) as exc:
-        return AcceptOutcome(ok=False, error=f"could not resolve the vault: {exc}")
-    try:
-        # The source and the request go in. `_learnings_preview` renders the
-        # replacement with them, and the whole point of the card is that the
-        # preview and the write cannot disagree — dropping the source here made
-        # an accepted recurrence bump land with a shorter sources list than the
-        # card had just shown, and left a review-accepted learning with no
-        # provenance at all, which the archive path has always recorded. The
-        # request is the same argument for a `/remember` that has no archived
-        # turn: it is the only honest citation that sighting can carry, so the
-        # write has to keep it and the card has to show it.
-        append_learning(
-            Path(vault),
-            row["text"],
-            # The same registry name the vault was resolved under above: the
-            # identity is minted under it too, so the preview and this write
-            # cannot differ about which learning the line is.
-            workspace=row["workspace"],
-            source=str(row.get("source") or ""),
-            request=str(row.get("request") or ""),
-        )
-    except (OSError, QueueLockError) as exc:
-        return AcceptOutcome(ok=False, error=f"could not append the learning: {exc}")
-    return AcceptOutcome(ok=True, destination="Workspace/Learnings.md")
 
 
 def linked_repo_paths(pcm: Any, workspace: str) -> list[str]:
@@ -2654,7 +2607,7 @@ def _decision_destination(accept_action: str, row: dict[str, Any], outcome: Acce
         return f"ciao:{region}" if region else ""
     if accept_action == "move_file":
         return str(outcome.destination or "")
-    # fold_doc, write_people_note, append_learnings and add_category all set
+    # fold_doc, write_people_note and add_category all set
     # "destination".
     return str(outcome.destination or "")
 
@@ -2814,59 +2767,6 @@ def _region_preview(config, row: dict[str, Any], text: str) -> dict[str, Any]:
     out["exact"] = True
     out["can_accept"] = True
     out["added"] = [stamped]
-    return out
-
-
-def _learnings_preview(config, row: dict[str, Any], text: str) -> dict[str, Any]:
-    """What accepting one `[learnings]` bullet would leave in Learnings.md."""
-    from ciao.memory_proposals import (
-        learnings_path,
-        read_learnings,
-        render_learning_append,
-    )
-    from ciao.memory_receipts import content_revision
-
-    out = _base_preview(row)
-    out["destination"] = "Workspace/Learnings.md"
-    try:
-        vault = Path(config.workspace_vault_root(row["workspace"]))
-    except (AttributeError, ValueError) as exc:
-        out["reason"] = f"could not resolve the vault: {exc}"
-        return out
-    out["destination_path"] = str(learnings_path(vault))
-    try:
-        before = read_learnings(vault)
-    except OSError as exc:
-        out["reason"] = f"could not read Workspace/Learnings.md: {exc}"
-        return out
-    after, operation = render_learning_append(
-        before,
-        text,
-        # The registered name, not the vault directory's: the id the accept will
-        # mint is minted under it, and a preview that computed the identity
-        # differently would show a line the write never produces.
-        workspace=row["workspace"],
-        source=str(row.get("source") or ""),
-        # A `/remember` of a lesson carries a user-request id rather than an
-        # archive turn, and the preview has to render the replacement with
-        # exactly the provenance the accept will write — otherwise the card shows
-        # a shorter sources list than the line it is about to produce, which is
-        # the same preview/write disagreement the source itself was fixed for.
-        request=str(row.get("request") or ""),
-    )
-    before_clip, before_cut = _clip(before)
-    after_clip, after_cut = _clip(after)
-    out["revision"] = content_revision(before)
-    out["before"] = before_clip
-    out["after"] = after_clip
-    out["truncated"] = before_cut or after_cut
-    out["operation"] = operation
-    out["exact"] = True
-    out["can_accept"] = True
-    if operation == "update":
-        out["reason"] = "this learning is already filed; accepting bumps its recurrence count"
-    elif operation == "none":
-        out["reason"] = "already recorded; accepting only clears the row"
     return out
 
 
@@ -3254,8 +3154,6 @@ def preview_row(
         return out
     if accept.action == "edit_region":
         out = _region_preview(config, row, fact)
-    elif accept.action == "append_learnings":
-        out = _learnings_preview(config, row, fact)
     elif accept.action == "append_repo_doc":
         out = _repo_preview(config, row, fact, linked_repos)
     elif accept.action == "write_people_note":
@@ -3308,11 +3206,6 @@ def destination_revision(
             if diags:
                 return ""
             return region_revision(entries)
-        if accept.action == "append_learnings":
-            from ciao.memory_proposals import read_learnings
-
-            vault = Path(config.workspace_vault_root(row["workspace"]))
-            return content_revision(read_learnings(vault))
         if accept.action == "append_repo_doc":
             doc, _reason = _resolve_repo_doc(row, linked_repos)
             if doc is None:

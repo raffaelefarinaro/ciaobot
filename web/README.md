@@ -52,6 +52,10 @@ is available, these controls are disabled and it can still run on schedule.
 Recovery rejects model and thinking changes until the server can atomically
 guard them against a newer failure, and rejects provider handovers.
 
+Automatic quota retries show the persisted next-attempt date and time in local
+time. Confirmed Claude reset times are used when valid; recognized quota errors
+without a trustworthy reset keep the hourly schedule.
+
 Production hashed JavaScript and CSS under `/assets` use negotiated gzip above
 500 bytes. Other static files, API responses, and chat streams keep their
 existing response path. Conditional and ranged asset requests retain their
@@ -60,6 +64,8 @@ identity representation.
 The chat rail uses Option/Alt+Left and Right to move through the current workspace's chats, including from the composer. Matching chords are consumed at the ends; the title's unmodified arrow-key navigation remains available. Configured Option shortcuts work in editable fields, including keys reported as dead keys; unbound dead keys, IME composition, AltGr, unmodified workspace digits and controls that claim their keys retain precedence. Explicit custom and disabled bindings are preserved.
 
 ## Dev workflow
+
+The Repository section in Chat details reads `/api/chats/{chat_id}/worktree-changes` only after **View changes** is opened; **Refresh** is explicit. It shows staged and unstaged patches, untracked filenames, a clean state, unavailable and retry states, and a truncation notice. A response is discarded when its chat or checkout changes. The view is read-only and uses Vue text interpolation for paths and patches.
 
 The embedded LoginView keeps terminal guidance and the six-item product tour for the CLI bootstrap.
 
@@ -222,8 +228,6 @@ web/
                            SettingsWorkspaceModels.vue is its Chats and models card;
                            SettingsCareCycle.vue is its Weekly care cycle card: the dry run and the host-only, checkbox-gated switch of the workspace's care state (`/api/care/cycle`; pure helpers in lib/careCycle.ts);
                            SettingsClaudeTrim.vue is its Claude context trimming card (catalog from the engine, pure helpers in lib/claudeTrim.ts; edits the same draft, saved by Chats and models' Save changes);
-                           WorkspaceGoogleAccount.vue is its Google account row and
-                           GoogleConnectDialog.vue the Connect dialog;
                            SettingsAllWorkspaces.vue is Overview's last card: boxed
                            rows, the short New workspace form and Archived; rows reorder by
                            drag, Alt/Option+Up/Down on the handle, or Move up / Move down in
@@ -264,7 +268,7 @@ web/
                           useChatRail, useScheduleRail and useProjectRail (the chat, automation and project rails over it), usePullToClose (pull a title down to close),
                           useModalFocus, useOverlayBackEntry (one history entry per open
                           overlay; Back closes it), useWorkspaceAdmin, useProviderChoices,
-                          useGwsAccounts, useHomeNoticeWindows, useDragSort: the pointer drag-sort engine
+                          useHomeNoticeWindows, useDragSort: the pointer drag-sort engine
                           for the task lanes and the sidebar's project list; there is no drag handle, so
                           `surfaceHandlers` lets a row's own non-interactive content drag on a fine pointer (a
                           `data-drag-primary` name control keeps its click below the threshold), while the row menu's
@@ -275,7 +279,7 @@ web/
                           replay its neighbours in either lane; it persists nothing and calls `onCommit`;
                           useMenuFocusReturn keeps a menu action's trigger focus without stealing it back after
                           the user has focused or pressed elsewhere)
-    lib/                  pure helpers (api, time, safeMarkdown, contrast, gwsProfileId, chatActions, permissionModes, notificationInbox, sourceHealth,
+    lib/                  pure helpers (api, time, safeMarkdown, contrast, chatActions, permissionModes, notificationInbox, sourceHealth,
                           updateTasks, etc.) — no Vue imports; `taskOrder.ts` (the server order, lane derivation,
                           placement anchors and the preview mirror of the server's insertion) and `dragSort.ts`
                           (drop-slot geometry, settled order, auto-scroll step, announcement wording);
@@ -668,7 +672,7 @@ Prefer the utility classes over re-inventing the same button/badge/card per comp
   second `defineStore` would have put a proxy and a second `$state` in between.
   `stores/chatAnnotations.test.ts` drives it with a bare `ref` for the active
   chat — no Pinia, no mount.
-  **Needs-you actions are engine-owned and transient** (`ChatInfo.actions`, `chat_actions_changed`, the snapshot's `chat_actions`, kept in `stores/projects.ts`'s `chatActions` under the same read-start watermark and clock as the chat reads; `startChatAction`/`dismissChatAction`/`continueChatAction`/`submitChatActionCallback`; a 409 adopts the engine's list). ChatPanel renders every action in the bounded keyed `NeedsYouStack.vue`, and any held action counts as attention along with failed turns, questions, permission and task blockers. When a card appears or changes state the stack scrolls itself (never the page, never the focus) to that card's `data-needs-you-primary` element, else its `.needs-you-btn--primary`; `CallbackPasteField` and the device code carry the marker. `NeedsYouCard.vue` owns Not now and Continue, a per-kind body in `components/needs-you/` owns the primary control, and `CallbackPasteField.vue` is the shared paste-back field for a sign-in that ends on an unreachable loopback page, and `lib/chatActions.ts` owns the copy (`actionCopy` returns null for a kind with no UI yet, and such actions are not shown).
+  **Needs-you actions are engine-owned and transient** (`ChatInfo.actions`, `chat_actions_changed`, the snapshot's `chat_actions`, kept in `stores/projects.ts`'s `chatActions` under the same read-start watermark and clock as the chat reads; `startChatAction`/`dismissChatAction`/`continueChatAction`; a 409 adopts the engine's list). ChatPanel renders every action in the bounded keyed `NeedsYouStack.vue`, and any held action counts as attention along with failed turns, questions, permission and task blockers. When a card appears or changes state the stack scrolls itself (never the page, never the focus) to that card's `data-needs-you-primary` element, else its `.needs-you-btn--primary`; the device code carries the marker. `NeedsYouCard.vue` owns Not now and Continue, a per-kind body in `components/needs-you/` owns the primary control, and `lib/chatActions.ts` owns the copy (`actionCopy` returns null for a kind with no UI yet, and such actions are not shown).
 
   Pure logic the store hands over whole lives in `lib/`, Vue-free and directly
   testable: `lib/chatHistory.ts` (history normalising, server-row mapping, turn
@@ -722,8 +726,8 @@ Prefer the utility classes over re-inventing the same button/badge/card per comp
   opener's own ×; Back only leaves it.
 - **Workspace > Overview (`/settings/workspace`).** The first item of the
   workspace rail group is the page for `projectStore.activeWorkspace`:
-  `SettingsWorkspaceOverview.vue` draws the Workspace, Claude context trimming,
-  Chats and models and Google account cards (one editor, one Save changes /
+  `SettingsWorkspaceOverview.vue` draws the Workspace, Claude context trimming and
+  Chats and models cards (one editor, one Save changes /
   Discard row, in the last form card, Chats and models), then Memory handover, Update
   task history and, for an archivable workspace, Archive this workspace. The
   editor state is not in the component: `composables/useWorkspaceAdmin.ts` owns
@@ -744,17 +748,6 @@ Prefer the utility classes over re-inventing the same button/badge/card per comp
   `lib/workspaceOverrides.ts` (`normalizeOverrides`, `setOverride`) so
   `JSON.stringify(form)` stays a stable dirty check;
   `effectiveWorkspaceDefaultModel` feeds the schedule forms' "Inherit" label.
-  The Google account card is one row for the active workspace
-  (`WorkspaceGoogleAccount.vue`: connected, sign-in expired, or none) and the
-  `GoogleConnectDialog.vue` modal sheet behind its Connect / Sign in again
-  buttons. Both `inject` `useGwsAccounts` (`GWS_ACCOUNTS_KEY`), which holds every
-  Google account call and sign-in flow; `SettingsView.vue` calls it once. The
-  account id is derived from the workspace name (`lib/gwsProfileId.ts`, a mirror
-  of `gws_auth.slugify_profile`; `tests/test_gws_auth.py` pins only its reserved-name list) and never
-  typed. The workspace is linked when the account connects, through
-  `useWorkspaceAdmin.setWorkspaceGwsLink`; saving the form cards never sends
-  `gws_profile`. All workspaces has no Google card: an account no
-  workspace links to has no screen.
 - **`SettingsView.vue` ownership boundary.** Settings is being split the same
   way, one tab at a time, into `components/settings/`. General is split
   into four pages. General begins with the Updates section (compact to a title
@@ -915,6 +908,7 @@ above still has to be walked by hand on a real phone before a release.
 
 Onboarding's care stage (`components/onboarding/OnboardingCareStage.vue`) asks when the host is usually available, then lets the operator edit the installed workspace-care routine's local time and IANA timezone. It updates only that existing row through the schedules API, and only for a time or zone the operator edited, when Continue commits it through the stage's exposed `save()`; unchanged fields write nothing. No routine is created when the workspace has none.
 
+- A persistent workspace-scoped notice above To decide reports older learning proposals that still need migration, an unfinished migration receipt, or a workspace that could not be checked safely. It is independent of the dismissible update-task card. Pending and blocked notices link separately to Home (to start or reopen the workspace task) and Workspace settings (to reopen a dismissed task); unknown status links only to Workspace settings and advises preserving a linked Workspace and its contents while asking Ciaobot in that workspace to guide a reviewed repair. The links are separate stacked controls with 44px targets and wrap on narrow or zoomed layouts. The API supplies status for the active workspace without exposing host paths.
 - The To decide filter chips are by change type, by reason, and *Needs you* (`decideFilter` in the proposals store, separate from `kindFilter` because History shares that one). *Needs you* keeps rows whose `decider` is not `nightly`, so rows with no decider count, and the chip shows only when at least one row is marked `nightly`. A row shows its `decider` and a one-line `decide_reason`, rendered as text.
 - An optional reason is asked for before every individual accept and dismissal in the queue: the row's accept opens the decision card with the reason on it (`Why keep this? (optional)`), and every Dismiss opens an inline confirmation naming the proposal (`Why dismiss this? (optional)`). Picking the workspace for a re-home is the exception — the destination is the answer — and the batch bar never asks. There is no *Why?* disclosure left on a row or a card. The shared `DecisionReason` with the memory chips from `lib/memoryDecisionReasons.ts` holds the answer per row in the panel (`reasonById`), and it is discarded on Cancel, on a switch to another card, and after a successful decision; a failed dismissal keeps it so the retry does not lose the sentence. It is sent as `reason` only when non-empty, with that row's accept (and the retry of a deferred accept) or its dismissal, never on the batch bar; a refused accept clears it, the deferral keeping its own copy for the retry. With no reason typed the confirmation's button reads *Continue without a reason* and the card names the action above it (*This will save to ciao:memory.*, *This will dismiss the proposal.*); with a reason the accept button names the destination again. History renders a row's `reason` as text (`.ph-reason`), never markup.
 - History shows a row's `prediction` under its text as predicted against decided, with a muted *Matched* or *Missed* badge (a miss is information, never an error) and the prediction `reason` as text. A `[memory]`/`[profile]` row the nightly run settled itself (`via: agent`) reads *Filed by Workspace care* (accepted) or *Dismissed by Workspace care* (dismissed), badges *Acted on prediction*, and offers *Undo* from the row when its change is undoable. The To decide queue never shows a prediction on a pending row, so the agreement rate stays unbiased.

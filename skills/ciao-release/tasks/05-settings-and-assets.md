@@ -26,14 +26,13 @@ Access & devices, Providers, Advanced) and the active workspace (Overview, Skill
 `/settings` (General) carries Updates, What can Ciaobot do?, app install,
 notifications, keyboard shortcuts, start at sign-in, insights and open
 source. `/settings/workspace` (Overview) is the active workspace's page: the
-Workspace and Google account cards, memory handover, update task history and,
+Workspace card, memory handover, update task history and,
 for an archivable workspace, Archive this workspace. `/settings/advanced` carries This
 host, memory backup, the Ciaobot folder, workspace health and Developer (and
 Debug only in dev mode). `/settings/access` carries the PWA password card,
 Other devices and Network access. `/settings/appearance` is the Appearance card
 alone. Watch for:
 
-- Google account card on `/settings/workspace`: one row (Connect Google account when none; Connected with a ··· menu when linked); open Connect and confirm Escape closes it and focus returns.
 - The online backup card shows state and last successful upload; scope,
   repository and raw diagnostics sit behind a native `<details>` disclosure.
 - The "What can Ciaobot do?" card links out to the public
@@ -57,7 +56,7 @@ Open `/settings/providers`. Under each available provider, the Permission mode
 select is followed by a note that bypass gives the agent full access to
 everything this user account can reach, and a link to that CLI's own permission
 docs. The note must render and the link must open the CLI's docs. Each
-workspace row's summary line (`provider · Google email or no Google`) must not
+workspace row's summary line (the provider label) must not
 mention file access. Do not change the mode.
 
 ## Step 2 — the three asset lists are scoped to one workspace

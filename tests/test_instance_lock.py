@@ -74,7 +74,7 @@ async def test_startup_persists_normalized_registry_only_after_lock(
     )
 
     def persist() -> None:
-        assert events == ["lock", "import", "gws"]
+        assert events == ["lock", "import"]
         # Persistence creates durable legacy evidence only after startup has
         # initialized the fresh receipt; it cannot retroactively exempt it.
         config.state_path.parent.mkdir(parents=True, exist_ok=True)
@@ -95,13 +95,6 @@ async def test_startup_persists_normalized_registry_only_after_lock(
 
     config.import_legacy_workspaces_env = import_legacy
 
-    def import_legacy_gws() -> list[str]:
-        assert events == ["lock", "import"]
-        events.append("gws")
-        return []
-
-    config.import_legacy_gws_profile_env = import_legacy_gws
-
     async def run_server_locked(_config, *, supervised: bool = False, startup_id=None, engine_pid=None) -> int:
         assert startup_id == "test-startup-id"
         assert engine_pid == os.getpid()
@@ -113,7 +106,7 @@ async def test_startup_persists_normalized_registry_only_after_lock(
     monkeypatch.setattr(main, "_run_server_locked", run_server_locked)
 
     assert await main._async_main() == 0
-    assert events == ["lock", "import", "gws", "persist", "run", "unlock"]
+    assert events == ["lock", "import", "persist", "run", "unlock"]
     from ciao.onboarding import read_receipt
 
     receipt = read_receipt(config.state_path.parent)

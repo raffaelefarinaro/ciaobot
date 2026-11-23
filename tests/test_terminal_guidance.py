@@ -188,14 +188,6 @@ def test_guidance_cites_the_official_provider_mcp_sources() -> None:
     guidance = _reference("install-and-settings.md")
     assert "https://code.claude.com/docs/en/mcp" in guidance
     assert "https://opencode.ai/v2/docs/mcp-servers" in guidance
-    assert "https://github.com/googleworkspace/cli" in guidance
-
-
-def test_google_workspace_oauth_docs_match_supported_client_type() -> None:
-    integrations = (REPO / "INTEGRATIONS.md").read_text(encoding="utf-8")
-    oauth_setup = integrations.split("**Getting `client_secret.json`.**", 1)[1].split("\n\n", 1)[0]
-    assert "Desktop app" in oauth_setup
-    assert "Web application clients are not supported" in oauth_setup
 
 
 def test_terminal_guidance_avoids_misleading_claims() -> None:

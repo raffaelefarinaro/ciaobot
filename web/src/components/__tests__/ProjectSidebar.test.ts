@@ -55,7 +55,6 @@ describe('ProjectSidebar chat actions', () => {
       name: 'personal',
       vault_root: '/tmp/vault',
       default_provider: 'claude',
-      gws_profile: '',
     }]
     store.projects = [{
       project_id: 'project-1',
@@ -668,7 +667,7 @@ describe('ProjectSidebar global new chat', () => {
     setActivePinia(createPinia())
     const store = useProjectStore()
     store.workspaces = [{
-      name: 'personal', vault_root: '/tmp/vault', default_provider: 'claude', gws_profile: '',
+      name: 'personal', vault_root: '/tmp/vault', default_provider: 'claude',
     }]
     store.activeWorkspace = 'personal'
     store.projects = [{
@@ -1111,10 +1110,10 @@ describe('ProjectSidebar update badge', () => {
   it('marks the settings nav item for a blocking housekeeping action', async () => {
     const housekeeping = useHousekeepingStore()
     housekeeping.actions = [{
-      id: 'gws-login',
-      kind: 'gws_health',
+      id: 'update-login',
+      kind: 'update',
       severity: 1,
-      title: 'Sign in to gws',
+      title: 'Sign in again',
       detail: 'The token needs attention.',
       glyph: '!',
       workspace: '',
@@ -1157,7 +1156,7 @@ describe('ProjectSidebar update badge', () => {
   function seedWorkspaces() {
     const store = useProjectStore()
     store.workspaces = ['personal', 'work'].map(name => ({
-      name, vault_root: `/tmp/${name}`, default_provider: 'claude', gws_profile: '',
+      name, vault_root: `/tmp/${name}`, default_provider: 'claude',
     }))
     store.activeWorkspace = 'personal'
   }
@@ -1213,7 +1212,7 @@ describe('ProjectSidebar accessible context menus', () => {
     setActivePinia(createPinia())
     const store = useProjectStore()
     store.workspaces = [{
-      name: 'personal', vault_root: '/tmp/vault', default_provider: 'claude', gws_profile: '',
+      name: 'personal', vault_root: '/tmp/vault', default_provider: 'claude',
     }]
     store.projects = [{
       project_id: 'project-1', name: 'Notes', workspace: 'personal', context: '',
@@ -1448,7 +1447,7 @@ describe('ProjectSidebar project ordering', () => {
     setActivePinia(createPinia())
     const store = useProjectStore()
     store.workspaces = [{
-      name: 'personal', vault_root: '/tmp/vault', default_provider: 'claude', gws_profile: '',
+      name: 'personal', vault_root: '/tmp/vault', default_provider: 'claude',
     }]
     store.activeWorkspace = 'personal'
     store.projects = [

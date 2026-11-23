@@ -618,7 +618,7 @@ second `--apply` finds nothing to change and writes no second receipt.
 
 `Learnings.md` is bookkeeping rather than an entity note, so this is deliberately
 *not* a `commit_note_change` — see `ciao/learnings_migrate.py` for why, and for
-the lock it takes against a concurrent `[learnings]` accept.
+the lock it takes against concurrent learning writes.
 
 One consequence worth knowing when reading a vault mid-migration: a line that was
 *read* rather than witnessed keeps its unknown recurrence. A plain bullet renders
@@ -626,10 +626,9 @@ One consequence worth knowing when reading a vault mid-migration: a line that wa
 and both stay there. `curation_run` skips an entry whose count is unknown rather than
 treating it as `x1`, so it is not promotable until attributable evidence
 accumulates — a bullet nobody can attribute has no recurrence, and inventing one
-would be a decision nobody made. A `[learnings]` accept is the one exception, because
-the writer witnessed that sighting: it files the entry at today's date and `(x1)`
-with no citation, and every source it is given from then on counts on top of that.
-The migration is what gives the read lines an identity to accumulate evidence against.
+would be a decision nobody made. A learning recorded through the direct
+`ciao memory learn` operation carries its own source or request identity. The
+migration is what gives older read lines an identity to accumulate evidence against.
 
 ### Learnings cleanup
 
@@ -1787,11 +1786,9 @@ follow-up.
 
 ## Skills, subagents, and slash commands
 
-Packaged generic skills live in `ciao/stock/skills/` and are installed into every workspace's `.claude/skills/` by `ciao sync-skills` on startup. This includes Ciaobot-specific skills (`ciao-capabilities`, `ciao-memory`, `ciao-support`, `workspace-authoring`, …) and the upstream **`gws-*` skills** for Google Workspace (Gmail, Calendar, Drive, Docs, Sheets, Slides, Tasks, Forms). The `gws-*` skills are gated on the workspace having a Google account linked: `sync_workspace_skills` resolves each agent root's effective profile (its `gws_profile`, else the operator default only when that account actually exists) and skips the GWS skills when the workspace has no profile connected — shipping wrappers that name a credential directory nobody created just produces auth errors. In a **workspace**, user-owned skills live in `skills/`, project agents in `subagents/`, and slash commands in `commands/`; `ciao sync-skills` mirrors them into the generated `.claude/` directories. A workspace skill with the same name as a packaged one overrides it.
+Packaged generic skills live in `ciao/stock/skills/` and are installed into every workspace's `.claude/skills/` by `ciao sync-skills` on startup. This includes Ciaobot-specific skills (`ciao-capabilities`, `ciao-memory`, `ciao-support`, `workspace-authoring`, …). In a **workspace**, user-owned skills live in `skills/`, project agents in `subagents/`, and slash commands in `commands/`; `ciao sync-skills` mirrors them into the generated `.claude/` directories. A workspace skill with the same name as a packaged one overrides it.
 
-No subagents are packaged by default. Attended vault writes and proposal handling use `ciao-memory`; the Workspace care schedule carries the unattended lease, worklist, and approval rules and runs vault writes sequentially in its own chat. Reading and Google Workspace tasks use the provider's own web-fetch and the `gws-*` skills directly. Startup sync prunes retired stock-managed `memory`, `researcher`, and `secretary` from generated Claude/OpenCode inventories; custom subagents and unmanaged agent files are left alone.
-
-The `gws-*` stock skills are regenerated from the installed `gws` CLI via `ciao/gws_skills.py` on release (`python -m ciao.release --apply`). The generator output is passed through Ciaobot curation: profile-wrapper command examples, integration auth notes in `gws-shared`, stripped upstream `openclaw` metadata and See Also boilerplate. Ciaobot-specific gws conventions live in `gws-shared`; only the short profile-wrapper routing rule belongs in the compact core (`ciao/system_prompt.md`).
+No subagents are packaged by default. Attended vault writes and proposal handling use `ciao-memory`; the Workspace care schedule carries the unattended lease, worklist, and approval rules and runs vault writes sequentially in its own chat. Reading tasks use the provider's own web-fetch. Startup sync prunes retired stock-managed `memory`, `researcher`, and `secretary` from generated Claude/OpenCode inventories; custom subagents and unmanaged agent files are left alone.
 
 ### Provider context and native memory
 
@@ -1804,7 +1801,7 @@ The `AGENTS.md` guide loaders remain the only source of bounded memory.
 `memory_tool.py` prunes valid expired entries before provider startup and
 exposes `memory_status`/`memory_update` without creating a second memory store.
 
-Edit canonical sources, not the generated `.claude/` or `.agents/` dirs. Do not run `npx skills update` ad-hoc (it re-expands the lockfile and repopulates bloat); regenerate the `gws-*` skills through `ciao/release.py` rather than calling `gws generate-skills` by hand.
+Edit canonical sources, not the generated `.claude/` or `.agents/` dirs. Do not run `npx skills update` ad-hoc (it re-expands the lockfile and repopulates bloat).
 
 OpenCode runs as `opencode acp` (`ciao/providers/acp/agents.py`), and its start gate refuses
 any version below 2.3.2. Provider changes replay the ACP fixtures under `tests/fixtures/acp/`

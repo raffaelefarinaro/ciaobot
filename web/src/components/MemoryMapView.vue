@@ -33,6 +33,25 @@
     <div v-else-if="mm.section !== 'map'" class="mm-review-wrap">
       <div class="page-grid mm-review-grid">
       <div class="page-main">
+      <div
+        v-if="mm.section === 'review' && proposals.legacyLearningQueues?.[store.activeWorkspace]"
+        class="mm-link-notice mm-migration-notice"
+        role="status"
+      >
+        <span v-if="proposals.legacyLearningQueues[store.activeWorkspace]?.state === 'pending'" class="mm-migration-notice-copy">
+          This workspace has {{ proposals.legacyLearningQueues[store.activeWorkspace]?.rows }} older learning proposal(s) that need migration. Start the workspace task to preview the changes and approve any application. If dismissed, reopen it from Workspace settings.
+        </span>
+        <span v-else-if="proposals.legacyLearningQueues[store.activeWorkspace]?.state === 'blocked'" class="mm-migration-notice-copy">
+          A legacy learning migration has an unfinished receipt. Start the workspace task to review recovery; it asks before applying changes. If dismissed, reopen it from Workspace settings.
+        </span>
+        <span v-else class="mm-migration-notice-copy">
+          Ciaobot could not safely check older learning proposals in this workspace. Check the vault location in Settings → Workspace → Overview. If `Workspace` is linked or unsafe, preserve the link and its contents; do not replace or follow it. In a chat in this workspace, ask Ciaobot to inspect the situation and guide a repair for you to review before authorizing. Migration checks never follow an external `Workspace` symlink.
+        </span>
+        <div class="mm-migration-notice-actions">
+          <router-link v-if="proposals.legacyLearningQueues[store.activeWorkspace]?.state !== 'unknown'" class="mm-link-notice-action" to="/">Open Home</router-link>
+          <router-link class="mm-link-notice-action" to="/settings/workspace">Workspace settings</router-link>
+        </div>
+      </div>
       <!-- To decide holds both queues, narrowed by one filter; each queue keeps
            its own heading and its own finer chips under it. -->
       <div
@@ -1829,6 +1848,29 @@ onBeforeUnmount(() => {
 .mm-link-notice-action {
   min-height: 44px;
   min-width: 44px;
+}
+.mm-migration-notice {
+  display: block;
+}
+.mm-migration-notice-copy {
+  display: block;
+}
+.mm-migration-notice-actions {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: var(--space-1);
+  margin-top: var(--space-2);
+}
+.mm-migration-notice-actions .mm-link-notice-action {
+  display: flex;
+  align-items: center;
+  box-sizing: border-box;
+  width: fit-content;
+  max-width: 100%;
+  padding: var(--space-1) var(--space-2);
+  line-height: 1.35;
+  overflow-wrap: anywhere;
 }
 
 .mm-body {

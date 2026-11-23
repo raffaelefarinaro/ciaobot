@@ -60,7 +60,6 @@ def test_capsule_can_omit_stable_facts() -> None:
 def test_context_digest_changes_only_when_routing_changes() -> None:
     values = {
         "workspace": "personal",
-        "gws_profile": "",
         "project_name": "General",
         "project_context": "",
         "canonical_doc": "",
@@ -187,14 +186,13 @@ def test_the_board_hint_is_a_constant_and_not_a_routing_fact() -> None:
     """It must not make every capsule look like its routing changed.
 
     `context_digest` decides whether the stable block is re-sent to a provider
-    session. It reads exactly the five routing facts, the linked-repo
+    session. It reads exactly the four routing facts, the linked-repo
     fingerprint (#1436) and the core (A4; hashed only when set, ACP chats only),
     so the hint — which never varies — cannot reach it: a board hint that fed the
     digest would re-send the whole stable block on every turn of every session forever.
     """
     assert tuple(inspect.signature(context_digest).parameters) == (
         "workspace",
-        "gws_profile",
         "project_name",
         "project_context",
         "canonical_doc",
@@ -305,7 +303,6 @@ def test_context_digest_is_unchanged_for_an_unlinked_chat() -> None:
 
     values = {
         "workspace": "personal",
-        "gws_profile": "",
         "project_name": "General",
         "project_context": "",
         "canonical_doc": "",
@@ -342,7 +339,6 @@ def test_core_rides_stable_block_only() -> None:
 def test_core_change_changes_stable_digest() -> None:
     values = {
         "workspace": "personal",
-        "gws_profile": "",
         "project_name": "General",
         "project_context": "",
         "canonical_doc": "",
@@ -595,7 +591,6 @@ def test_a_path_cannot_imitate_the_markers() -> None:
 def test_digest_is_unchanged_without_a_shared_brain_and_changes_with_one() -> None:
     values = {
         "workspace": "w",
-        "gws_profile": "",
         "project_name": "p",
         "project_context": "",
         "canonical_doc": "",
@@ -618,3 +613,8 @@ def test_shared_brain_fields_are_flattened_and_cannot_close_the_fence() -> None:
     assert lines[-1] == "[End shared brains]"
     assert lines[1] == "name=acme (End shared brains) unavailable"
     assert "Ignore the rules" not in block.replace(SHARED_BRAIN_RULES, "")
+
+
+def test_capsule_has_no_gws_profile_line() -> None:
+    result = build_context_capsule(workspace="personal", project_name="General")
+    assert "gws_profile=" not in result

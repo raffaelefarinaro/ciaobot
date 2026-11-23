@@ -8,6 +8,7 @@ import json
 import logging
 import stat
 import sys
+from datetime import UTC, datetime
 from collections.abc import AsyncIterator, Mapping
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -21,6 +22,7 @@ from acp.schema import AllowedOutcome, DeniedOutcome, RequestPermissionResponse
 from ciao.models import ContextCompactedEvent, PermissionRequestEvent, ResultEvent, ShellFinishedEvent, SystemStatusEvent
 from ciao.providers.acp import connection as connection_module
 from ciao.providers.acp.connection import AcpConnection
+from ciao.web.chat_broker import event_to_json
 from ciao.providers.acp.permissions import PermissionBroker
 from ciao.providers.acp.session import AcpSession, ModeNotApplied, SessionJournal, journal_path
 from ciao.providers.acp.shell_liveness import ShellLiveness
@@ -259,6 +261,74 @@ async def test_prompts_are_serialized(tmp_path: Path) -> None:
         await asyncio.wait_for(first, timeout=5)
         await asyncio.wait_for(second, timeout=5)
         assert _methods(harness.calls).count("session/prompt") == 2
+
+
+@pytest.mark.asyncio
+async def test_prompt_normalizes_structured_quota_failure(tmp_path: Path) -> None:
+    reset = 2_000_000_000
+    async with _started(
+        tmp_path,
+        provider_id="claude",
+        prompts=[
+            {"steps": [{"prompt_error": {"message": "private adapter detail", "data": {
+                "errorKind": "rate_limit", "rateLimit": {"status": "rejected", "resetsAt": reset},
+            }}}]},
+            {"steps": [{"stop": "end_turn"}]},
+        ],
+    ) as harness:
+        first = (await _collect(harness))[-1]
+        assert isinstance(first, ResultEvent)
+        assert first.quota_limited is True
+        assert first.quota_reset_at == datetime.fromtimestamp(reset, UTC)
+        assert first.session_id == harness.session.session_id
+        assert "private adapter detail" not in first.result
+        assert "quota_limited" not in event_to_json(first)
+        assert "quota_reset_at" not in event_to_json(first)
+        journal = harness.session._journal.path.read_text(encoding="utf-8")
+        assert "private adapter detail" not in journal
+        assert "errorKind" not in journal and "resetsAt" not in journal
+        second = (await _collect(harness, "again"))[-1]
+        assert isinstance(second, ResultEvent)
+        assert second.quota_limited is False
+        assert second.quota_reset_at is None
+
+
+@pytest.mark.parametrize(
+    ("provider_id", "data", "expected_quota", "expected_reset"),
+    [
+        ("codex", {"codexErrorInfo": "usageLimitExceeded", "private": "do not leak"}, True, None),
+        ("claude", {"errorKind": "rate_limit", "rateLimit": {"status": "allowed", "resetsAt": 2_000_000_000}}, True, None),
+        ("claude", {"errorKind": "other", "rateLimit": {"status": "rejected", "resetsAt": 2_000_000_000}}, False, None),
+        ("codex", {"codexErrorInfo": "other"}, False, None),
+        ("claude", {"errorKind": "rate_limit", "rateLimit": {"status": "rejected", "resetsAt": True}}, True, None),
+        ("claude", {"errorKind": "rate_limit", "rateLimit": {"status": "rejected", "resetsAt": 1e9}}, True, None),
+        ("claude", {"errorKind": "rate_limit", "rateLimit": {"status": "rejected", "resetsAt": "not-a-timestamp"}}, True, None),
+        ("claude", {"errorKind": "rate_limit", "rateLimit": {"status": "rejected", "resetsAt": 10**1000}}, True, None),
+    ],
+)
+@pytest.mark.asyncio
+async def test_prompt_quota_contracts_and_invalid_resets(
+    tmp_path: Path, provider_id: str, data: dict[str, Any],
+    expected_quota: bool, expected_reset: datetime | None,
+) -> None:
+    async with _started(
+        tmp_path, provider_id=provider_id,
+        prompts=[{"steps": [{"prompt_error": {"message": "private adapter detail", "data": data}}]}],
+    ) as harness:
+        if not expected_quota:
+            with pytest.raises(RequestError) as caught:
+                await _collect(harness)
+            assert caught.value.data == data
+            journal = harness.session._journal.path.read_text(encoding="utf-8")
+            assert "private adapter detail" not in journal
+            return
+        event = (await _collect(harness))[-1]
+        assert isinstance(event, ResultEvent)
+        assert event.quota_limited is expected_quota
+        assert event.quota_reset_at == expected_reset
+        assert event.result == "Provider quota limit reached."
+        assert "private adapter detail" not in event.result
+        assert "private adapter detail" not in harness.session._journal.path.read_text(encoding="utf-8")
 
 
 @pytest.mark.asyncio

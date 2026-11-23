@@ -43,6 +43,7 @@ async function mountView(path = '/memory/map') {
     history: createMemoryHistory(),
     routes: [
       { path: '/', component: Stub },
+      { path: '/settings/workspace', component: Stub },
       { path: '/memory/:section?', component: Stub },
     ],
   })
@@ -103,7 +104,7 @@ describe('MemoryMapView keyboard and touch access', () => {
       return Promise.resolve({})
     })
     const store = useProjectStore()
-    store.workspaces = [{ name: 'personal', vault_root: '/tmp/vault', default_provider: 'claude', gws_profile: '' }]
+    store.workspaces = [{ name: 'personal', vault_root: '/tmp/vault', default_provider: 'claude' }]
     store.activeWorkspace = 'personal'
     // jsdom has neither, and attachCanvas constructs both.
     vi.stubGlobal('ResizeObserver', class { observe() {} unobserve() {} disconnect() {} })
@@ -452,7 +453,7 @@ describe('MemoryMapView list sorting', () => {
       return Promise.resolve({})
     })
     const store = useProjectStore()
-    store.workspaces = [{ name: 'personal', vault_root: '/tmp/vault', default_provider: 'claude', gws_profile: '' }]
+    store.workspaces = [{ name: 'personal', vault_root: '/tmp/vault', default_provider: 'claude' }]
     store.activeWorkspace = 'personal'
     vi.stubGlobal('ResizeObserver', class { observe() {} unobserve() {} disconnect() {} })
     HTMLCanvasElement.prototype.getContext = vi.fn(() => null) as never
@@ -616,7 +617,7 @@ describe('MemoryMapView sections', () => {
       return Promise.resolve({})
     })
     const store = useProjectStore()
-    store.workspaces = [{ name: 'personal', vault_root: '/tmp/vault', default_provider: 'claude', gws_profile: '' }]
+    store.workspaces = [{ name: 'personal', vault_root: '/tmp/vault', default_provider: 'claude' }]
     store.activeWorkspace = 'personal'
     vi.stubGlobal('ResizeObserver', class { observe() {} unobserve() {} disconnect() {} })
     HTMLCanvasElement.prototype.getContext = vi.fn(() => null) as never
@@ -666,6 +667,72 @@ describe('MemoryMapView sections', () => {
     // Hidden, not unmounted: flipping back must not refetch the queue.
     expect(wrapper.get('.proposal-review').isVisible()).toBe(false)
     expect(wrapper.get('.vault-review').isVisible()).toBe(true)
+    wrapper.unmount()
+  })
+
+  it.each([
+    ['pending', 'older learning proposal(s) that need migration'],
+    ['blocked', 'unfinished receipt'],
+    ['unknown', 'could not safely check older learning proposals'],
+  ] as const)('shows the %s migration status on To decide independently of update tasks', async (state, text) => {
+    const queues = {
+      personal: {
+        state,
+        rows: state === 'pending' ? 2 : 0,
+      },
+    } as const
+    useProposalsStore().legacyLearningQueues = queues
+    apiGet.mockImplementation((url: string) => {
+      if (url.includes('/api/vault/graph')) return Promise.resolve(graphPayload())
+      if (url === '/api/proposals') {
+        return Promise.resolve({
+          rows: [],
+          legacy_learning_queues: queues,
+        })
+      }
+      return Promise.resolve({})
+    })
+
+    const { wrapper } = await mountSection('review')
+
+    expect(wrapper.get('[role="status"]').text()).toContain(text)
+    const actions = wrapper.get('.mm-migration-notice-actions').findAll('a')
+    expect(actions.map(action => action.attributes('href'))).toEqual(
+      state === 'unknown' ? ['/settings/workspace'] : ['/', '/settings/workspace'],
+    )
+    expect(actions.every(action => action.classes().includes('mm-link-notice-action'))).toBe(true)
+    expect(wrapper.get('a[href="/settings/workspace"]').text()).toBe('Workspace settings')
+    if (state !== 'unknown') {
+      expect(wrapper.get('[role="status"]').get('a[href="/"]').text()).toBe('Open Home')
+    } else {
+      expect(wrapper.get('[role="status"]').text()).toContain('In a chat in this workspace, ask Ciaobot to inspect the situation')
+    }
+    if (state === 'unknown') {
+      expect(wrapper.get('[role="status"]').text()).toContain('preserve the link and its contents')
+      expect(wrapper.get('[role="status"]').text()).toContain('guide a repair for you to review before authorizing')
+      expect(wrapper.get('[role="status"]').text()).toContain('Migration checks never follow an external')
+    }
+    expect(apiGet).not.toHaveBeenCalledWith(expect.stringContaining('/api/update-tasks'))
+    wrapper.unmount()
+  })
+
+  it('does not show another workspace legacy queue notice', async () => {
+    const queues = {
+      personal: { state: 'pending' as const, rows: 1 },
+    }
+    useProposalsStore().legacyLearningQueues = queues
+    apiGet.mockImplementation((url: string) => {
+      if (url === '/api/proposals') return Promise.resolve({ rows: [], legacy_learning_queues: queues })
+      if (url.includes('/api/vault/graph')) return Promise.resolve(graphPayload())
+      return Promise.resolve({})
+    })
+
+    const { wrapper } = await mountSection('review')
+
+    expect(wrapper.get('[role="status"]').text()).toContain('older learning proposal')
+    useProjectStore().activeWorkspace = 'work'
+    await nextTick()
+    expect(wrapper.findAll('[role="status"]').some(el => el.text().includes('older learning proposal'))).toBe(false)
     wrapper.unmount()
   })
 
@@ -813,7 +880,7 @@ describe('MemoryMapView verification state', () => {
       return Promise.resolve({})
     })
     const store = useProjectStore()
-    store.workspaces = [{ name: 'personal', vault_root: '/tmp/vault', default_provider: 'claude', gws_profile: '' }]
+    store.workspaces = [{ name: 'personal', vault_root: '/tmp/vault', default_provider: 'claude' }]
     store.activeWorkspace = 'personal'
     vi.stubGlobal('ResizeObserver', class { observe() {} unobserve() {} disconnect() {} })
     HTMLCanvasElement.prototype.getContext = vi.fn(() => null) as never
@@ -957,8 +1024,8 @@ describe('MemoryMapView proposal links', () => {
     })
     const store = useProjectStore()
     store.workspaces = [
-      { name: 'personal', vault_root: '/tmp/vault', default_provider: 'claude', gws_profile: '' },
-      { name: 'work', vault_root: '/tmp/work', default_provider: 'claude', gws_profile: '' },
+      { name: 'personal', vault_root: '/tmp/vault', default_provider: 'claude' },
+      { name: 'work', vault_root: '/tmp/work', default_provider: 'claude' },
     ]
     store.activeWorkspace = 'personal'
     store.bootstrapped = true
@@ -1291,7 +1358,7 @@ describe('MemoryMapView proposal links', () => {
 
   it('a manual workspace switch while the resolver is switching stops it and keeps the reader\'s scope', async () => {
     const store = useProjectStore()
-    store.workspaces = [...store.workspaces, { name: 'third', vault_root: '/tmp/third', default_provider: 'claude', gws_profile: '' }]
+    store.workspaces = [...store.workspaces, { name: 'third', vault_root: '/tmp/third', default_provider: 'claude' }]
     const release = deferred<boolean>()
     store.registerWorkspaceSwitchGuard(() => release.promise)
     await open(linkTo('c', 'work'))

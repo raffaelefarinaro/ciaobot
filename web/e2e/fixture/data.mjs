@@ -10,9 +10,9 @@
  * needs a stable 1/2/3 mapping to assert against.
  */
 export const WORKSPACES = [
-  { name: 'alpha', vault_root: '/synthetic/alpha', default_provider: 'claude', gws_profile: 'alpha' },
-  { name: 'beta', vault_root: '/synthetic/beta', default_provider: 'claude', gws_profile: 'beta' },
-  { name: 'gamma', vault_root: '/synthetic/gamma', default_provider: 'claude', gws_profile: 'gamma' },
+  { name: 'alpha', vault_root: '/synthetic/alpha', default_provider: 'claude' },
+  { name: 'beta', vault_root: '/synthetic/beta', default_provider: 'claude' },
+  { name: 'gamma', vault_root: '/synthetic/gamma', default_provider: 'claude' },
 ]
 
 export const PROJECTS = WORKSPACES.flatMap((workspace, wi) => ([

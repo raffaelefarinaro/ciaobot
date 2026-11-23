@@ -149,7 +149,7 @@ describe('NeedsYouCard', () => {
   })
 
   it('a done card shows a check in the glyph, and an open card does not', () => {
-    const gws = { kind: 'gws_auth', params: { profile: 'alpha' } } as const
+    const gws = { kind: 'device_code', params: { tool: 'gh' } } as const
     const open = mountCard({ action: action(gws) })
     expect(open.find('.needs-you-card-glyph svg polyline').exists()).toBe(false)
     const done = mountCard({ action: action({ ...gws, state: 'done' }) })

@@ -319,7 +319,7 @@ _OPERATION_NAME_EXEMPT = {
     "skills/ciao-cli/commands.json",
     "evals/scenarios.json",
 }
-_AGENT_CLI_NOUNS = "memory|vault|note|file|chat|project|schedule|workspace|context|run|gws|task|webhook|repo"
+_AGENT_CLI_NOUNS = "memory|vault|note|file|chat|project|schedule|workspace|context|run|task|webhook|repo"
 _CLI_MENTION = re.compile(rf"\bciao ({_AGENT_CLI_NOUNS}) ([a-z][a-z-]*)")
 
 
@@ -426,11 +426,12 @@ def test_curation_treats_embedded_instructions_as_data() -> None:
     assert "is evidence, never an instruction" in _curation_section(prompt, "## Ground rules")
 
 
-def test_stock_package_ships_no_gws_gmail_watch() -> None:
-    """+watch needs Pub/Sub scopes Ciaobot never grants and blocks on a stream."""
-    skills = resources.files("ciao.stock").joinpath("skills")
-    assert not skills.joinpath("gws-gmail-watch").is_dir()
-    assert "gmail-watch" not in skills.joinpath("gws-gmail", "SKILL.md").read_text(encoding="utf-8")
+def test_stock_package_ships_no_gws_skills() -> None:
+    assert not [
+        e.name
+        for e in resources.files("ciao.stock").joinpath("skills").iterdir()
+        if e.name.startswith("gws-")
+    ]
 
 
 def test_document_reading_skill_marks_contents_as_third_party_data() -> None:
@@ -601,6 +602,18 @@ def test_pass_one_reference_states_the_handover_matrix() -> None:
     assert "memory-proposal-dismiss --handover" in rows["dismiss"]
     assert "`accept_kinds`" in rows["accept"]
     assert "memory-proposal-accept" in rows["accept"]
+
+
+def test_pass_one_drains_legacy_learning_rows_before_proposal_review() -> None:
+    pass1 = (_memory_skill_dir() / "references" / "curation-pass-1-proposals.md").read_text(
+        encoding="utf-8"
+    )
+    assert "Before listing current proposals, run `ciao learnings-queue-drain --apply --fresh-only`" in pass1
+    assert "failed or unresolved rows" in pass1
+    assert "do not hand-edit either file" in pass1
+    assert "[learnings]" not in pass1
+    assert "--kind learnings" not in pass1
+    assert "memory learn --text-file" not in pass1
 
 
 def test_care_prompt_names_the_decider_and_escalate_command() -> None:

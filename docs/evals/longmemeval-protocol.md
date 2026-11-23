@@ -532,7 +532,7 @@ operator did not choose.
   refuses to start without it. A proposal waits for a person, so the run has to
   say what that person does, after every pass:
   - `accept` — accept every queued row whose accept is a deterministic write:
-    `[memory]`, `[profile]` (and legacy `[user]`), `[people]`, `[learnings]`.
+    `[memory]`, `[profile]` (and legacy `[user]`), `[people]`.
     Everything else (`[project]` folds a doc with a model call; `[review]`,
     `[category]`, `[rehome]`, `[note_edit]`, `[repo]` and skill proposals need a
     person's choice) stays queued and is counted as `unaccepted` by kind. Rows

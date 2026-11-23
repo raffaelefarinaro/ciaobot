@@ -57,7 +57,7 @@ Rules:
 - A bullet tagged `[project: <name>]` belongs to a different project, not
   this one: never fold it into this doc.
 - Strip `[idx=N]` citations and bracketed destination tags (`[memory]`,
-  `[project]`, `[people: <Name>]`, `[learnings]`, `[review]`) from anything
+  `[project]`, `[people: <Name>]`, `[review]`) from anything
   you carry over.
 - Reply with one JSON object and nothing else — no code fences, no commentary:
   - {"action":"covered"} when the entries already say it all.
@@ -408,7 +408,7 @@ Rules:
 - Do not invent facts, and do not drop or reword anything already there
   except to correct what the new fact directly supersedes.
 - Strip `[idx=N]` citations and bracketed destination tags (`[memory]`,
-  `[project]`, `[people: <Name>]`, `[learnings]`, `[review]`) from the fact.
+  `[project]`, `[people: <Name>]`, `[review]`) from the fact.
 - Reply with one JSON object and nothing else — no code fences, no commentary:
   - {"action":"covered"} when the entries already say what the fact says.
   - {"action":"add","section":"Notes","text":"- one bullet"} to file the fact

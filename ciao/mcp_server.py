@@ -626,18 +626,6 @@ async def _op_note_create(
     )
 
 
-async def _op_gws_status(service: CiaoMcpService) -> dict[str, Any]:
-    """Report whether the active workspace's Google Workspace account is
-    connected and its token is valid.
-
-    Returns the linked profile name, whether credentials are present,
-    the last health-monitor token reading, and whether a re-login is
-    needed. Read-only: never runs ``gws auth status``. Use this before
-    promising a Google call will work, and to tell the user their Google
-    login has expired."""
-    return await service._invoke("gws_status", lambda cp, p: cp.gws_status(p))
-
-
 async def _op_projects_list(service: CiaoMcpService, include_completed: bool = False) -> dict[str, Any]:
     """List projects in the active workspace."""
     return await service._invoke("projects_list", lambda cp, p: cp.projects_list(p, include_completed))
@@ -838,7 +826,7 @@ async def _op_chat_needs_action(
 ) -> dict[str, Any]:
     """Ask the user, in the calling chat, to do something only they can do.
 
-    ``kind`` is one of command, gws_auth, permission_mode, device_code,
+    ``kind`` is one of command, permission_mode, device_code,
     system_setting, restart. ``params`` holds that kind's values as
     strings (for command: ``command``, optional ``note``). Nothing is executed:
     the request becomes a card the user acts on. There is no chat argument; the
@@ -1652,7 +1640,6 @@ OPERATIONS: tuple[Operation, ...] = (
     Operation("verify_note", _WRITE, _op_verify_note.__doc__ or "", _op_verify_note),
     Operation("note_related", _READ, _op_note_related.__doc__ or "", _op_note_related),
     Operation("note_create", _WRITE, _op_note_create.__doc__ or "", _op_note_create),
-    Operation("gws_status", _READ, _op_gws_status.__doc__ or "", _op_gws_status),
     Operation("projects_list", _READ, _op_projects_list.__doc__ or "", _op_projects_list),
     Operation("project_get", _READ, _op_project_get.__doc__ or "", _op_project_get),
     Operation("project", _WRITE, _op_project.__doc__ or "", _op_project),

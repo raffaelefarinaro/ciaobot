@@ -1062,7 +1062,6 @@ class HeadlessEngine:
             sync_workspace_skills(
                 config.agent_root(self.workspace),
                 refresh_upstream=False,
-                workspace_name=self.workspace,
             )
         self.guide = guide_path(config.agent_root(self.workspace))
         self.vault = Path(config.workspace_vault_root(self.workspace))

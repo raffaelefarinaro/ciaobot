@@ -12,7 +12,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, ClassVar
 
-from ciao.chat_actions import ChatAction, ChatActionError
+from ciao.chat_actions import ChatAction
 from ciao.provider_service import ProviderImpl
 
 if TYPE_CHECKING:
@@ -54,9 +54,6 @@ class ActionHandler:
     async def cancel(self, ctx: ActionContext, action: ChatAction) -> None:
         """Release what the action holds: dismiss, continue, timeout or a lifecycle clear."""
         return None
-
-    async def callback(self, ctx: ActionContext, action: ChatAction, url: str) -> None:
-        raise ChatActionError("unsupported_kind")
 
     def wake_prompt(self, action: ChatAction) -> str:
         raise NotImplementedError

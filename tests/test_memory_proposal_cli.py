@@ -7,6 +7,10 @@ History tab reads, with ``via: "agent"``.
 
 from __future__ import annotations
 
+import os
+import shlex
+import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -52,7 +56,7 @@ def test_cli_promote_then_dismiss_records_a_promotion(tmp_path: Path) -> None:
     queue = vault / "Workspace" / "Memory-Proposals.md"
     queue.parent.mkdir(parents=True)
     queue.write_text(
-        "# Memory Proposals\n\n- [learnings] reuse the retry helper\n",
+        "# Memory Proposals\n\n- [review] reuse the retry helper\n",
         encoding="utf-8",
     )
 
@@ -683,18 +687,11 @@ def test_cli_dismiss_still_refuses_an_ambiguous_needle(
     assert queue.read_text(encoding="utf-8").count("- [memory]") == 2
 
 
-# ── `/remember` provenance (--request) ─────────────────────────────────────
+# ── Removed queue kind and request option ─────────────────────────────────
 
 
-def test_cli_request_records_the_lesson_provenance(tmp_path: Path) -> None:
-    """`/remember` in an unarchived chat files with a request, not a chat.
-
-    The two are separate fields on the bullet and separate arguments here,
-    because a request id folded into `--source` would read back as a chat id —
-    the invented citation the field exists to remove.
-    """
+def test_cli_refuses_removed_learnings_kind(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
     from ciao import cli
-    from ciao.memory_proposals import list_proposals
 
     vault = tmp_path / "memory-vault"
     fact = tmp_path / "fact.md"
@@ -704,76 +701,167 @@ def test_cli_request_records_the_lesson_provenance(tmp_path: Path) -> None:
         "memory-proposal-add",
         "--kind", "learnings",
         "--source", "/remember",
-        "--request", "req-7",
         "--text-file", str(fact),
         "--json",
         "--workspace", str(tmp_path),
         "--vault-root", str(vault),
     ])
 
-    assert rc == 0
+    assert rc == 2
+    assert "unknown kind 'learnings'" in capsys.readouterr().err
+    assert not (vault / "Workspace" / "Memory-Proposals.md").exists()
+
+
+def test_legacy_drain_guidance_quotes_vault_path_for_shell(tmp_path: Path, capsys) -> None:
+    from ciao import cli
+
+    install = tmp_path / "install with spaces; echo unsafe"
+    root, vault, _queue = _handover_install(
+        install, None, "- [learnings] keep this lesson"
+    )
+
+    assert cli.main([
+        "memory-proposals",
+        "--workspace", str(root),
+        "--vault-root", str(vault),
+    ]) == 0
+
+    warning = capsys.readouterr().err
+    assert f"--workspace work --vault-root {shlex.quote(str(vault))}" in warning
+    assert "echo unsafe" in warning
+    start = warning.index("run `") + len("run `")
+    command = warning[start:warning.index("`", start)]
+    env = os.environ.copy()
+    env.pop("CIAO_WORKSPACE", None)
+    env.pop("CIAO_ACTIVE_WORKSPACE", None)
+    env["PWA_AUTH_TOKEN"] = "test-token"
+    env["PATH"] = str(Path(sys.executable).parent) + os.pathsep + env.get("PATH", "")
+    env["PYTHONPATH"] = str(Path(__file__).resolve().parents[1]) + os.pathsep + env.get("PYTHONPATH", "")
+    other_cwd = tmp_path / "different cwd"
+    other_cwd.mkdir()
+    result = subprocess.run(
+        command,
+        shell=True,
+        cwd=other_cwd,
+        env=env,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr
+    assert "1 pending learnings row(s)." in result.stdout
+
+
+def test_unregistered_vault_guidance_command_runs_without_workspace_flag(
+    tmp_path: Path, capsys
+) -> None:
+    from ciao import cli
+
+    root = tmp_path / "unregistered install"
+    vault = root / "vault with spaces; echo unsafe"
     queue = vault / "Workspace" / "Memory-Proposals.md"
-    row = next(row for row in list_proposals(queue) if row["kind"] == "learnings")
-    assert row["source"] == "/remember"
-    assert row["request"] == "req-7"
-    # The citation a person reads on the queue line is the request, not prose.
-    assert "_(request: req-7)_" in queue.read_text(encoding="utf-8")
+    queue.parent.mkdir(parents=True)
+    queue.write_text("- [learnings] a legacy row\n")
+    (root / ".runtime").mkdir()
+    (root / ".runtime" / "workspaces.json").write_text("[]")
+
+    assert cli.main([
+        "memory-proposals",
+        "--workspace", str(root),
+        "--vault-root", str(vault),
+    ]) == 0
+
+    warning = capsys.readouterr().err
+    command = (
+        f"CIAO_WORKSPACE={shlex.quote(str(root))} "
+        f"CIAO_RUNTIME_ROOT={shlex.quote(str(root / '.runtime'))} "
+        "ciao learnings-queue-drain --vault-root "
+        f"{shlex.quote(str(vault))}"
+    )
+    assert f"`{command}`" in warning
+    env = os.environ.copy()
+    env.pop("CIAO_WORKSPACE", None)
+    env.pop("CIAO_ACTIVE_WORKSPACE", None)
+    env["PWA_AUTH_TOKEN"] = "test-token"
+    env["PATH"] = str(Path(sys.executable).parent) + os.pathsep + env.get("PATH", "")
+    env["PYTHONPATH"] = str(Path(__file__).resolve().parents[1]) + os.pathsep + env.get("PYTHONPATH", "")
+    other_cwd = tmp_path / "different cwd"
+    other_cwd.mkdir()
+    result = subprocess.run(command, shell=True, cwd=other_cwd, env=env, text=True, capture_output=True)
+    assert result.returncode == 0, result.stderr
+    assert "1 pending learnings row(s)." in result.stdout
+
+
+def test_legacy_notice_uses_configured_runtime_root_for_receipt_inspection(
+    tmp_path: Path, capsys, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from argparse import Namespace
+
+    from ciao import cli, learnings_queue_drain as drain
+
+    root, vault, queue = _handover_install(
+        tmp_path, None, "- [learnings] prepared row"
+    )
+    custom_runtime = root / "state-store"
+    custom_runtime.mkdir()
+    registry = root / ".runtime" / "workspaces.json"
+    (custom_runtime / "workspaces.json").write_bytes(registry.read_bytes())
+    registry.unlink()
+    monkeypatch.setenv("CIAO_RUNTIME_ROOT", "state-store")
+    monkeypatch.setenv("PWA_AUTH_TOKEN", "test-token")
+
+    prepared = drain._prepare_batch(
+        vault,
+        workspace="work",
+        queue_text=queue.read_text(encoding="utf-8"),
+        learning_exists=False,
+        learning_text="",
+    )
+    assert prepared is not None
+    receipt_folder = drain._receipt_dir(custom_runtime)
+    drain._private_dir(receipt_folder, create=True)
+    drain._write_receipt(
+        receipt_folder / f"{drain.RECEIPT_PREFIX}{prepared['run_id']}.json",
+        prepared,
+        create=True,
+    )
+    queue.write_text("# no pending learning rows\n", encoding="utf-8")
+
+    resolved_vault, resolved_name, runtime = cli._learnings_workspace(
+        Namespace(workspace="work", vault_root=vault, runtime_root=None),
+        workspace_root=root,
+    )
+    assert (resolved_vault, resolved_name, runtime) == (vault.resolve(), "work", custom_runtime.resolve())
+    assert drain.inspect(vault, workspace="work", runtime_root=runtime)["unresolved"]
+
+    assert cli.main([
+        "memory-proposals",
+        "--workspace", str(root),
+        "--vault-root", str(vault),
+    ]) == 0
+    warning = capsys.readouterr().err
+    assert "Legacy learning proposals need attention" in warning
+
 
 
 def test_cli_request_is_refused_on_a_kind_that_never_records_it(tmp_path: Path) -> None:
-    """Only the `[learnings]` accept hands a request to the writer.
-
-    Storing one anywhere else would be a field no accept reads, which is a
-    citation that looks real and is not — so it is refused by name rather than
-    quietly written where nothing consumes it.
-    """
     from ciao import cli
 
     fact = tmp_path / "fact.md"
     fact.write_text("Prefers short answers.", encoding="utf-8")
 
-    rc = cli.main([
-        "memory-proposal-add",
-        "--kind", "memory",
-        "--request", "req-7",
-        "--text-file", str(fact),
-        "--workspace", str(tmp_path),
-        "--vault-root", str(tmp_path / "memory-vault"),
-    ])
-
-    assert rc == 2
-    assert not (tmp_path / "memory-vault" / "Workspace" / "Memory-Proposals.md").exists()
-
-
-def test_cli_request_must_be_a_plain_identifier(tmp_path: Path) -> None:
-    """It is cited on a one-line bullet, so a delimiter in it would break parsing.
-
-    `)` closes the `_(request: …)_` tail, so a request carrying one would make
-    the rest of the line read as body text — a row that stops parsing without
-    anything looking wrong.
-    """
-    from ciao import cli
-
-    fact = tmp_path / "fact.md"
-    fact.write_text("Pin the Node version before running the suite.", encoding="utf-8")
-
-    for bad in ("req) prose", "a b", "req\n7", "", "x" * 65):
-        rc = cli.main([
+    with pytest.raises(SystemExit) as exc:
+        cli.main([
             "memory-proposal-add",
-            "--kind", "learnings",
-            "--request", bad,
+            "--kind", "memory",
+            "--request", "req-7",
             "--text-file", str(fact),
             "--workspace", str(tmp_path),
             "--vault-root", str(tmp_path / "memory-vault"),
         ])
-        # An empty request is simply absent, so it is accepted with no tail.
-        assert rc == (0 if not bad else 2), bad
 
-    queue = tmp_path / "memory-vault" / "Workspace" / "Memory-Proposals.md"
-    from ciao.memory_proposals import list_proposals
-
-    rows = [row for row in list_proposals(queue) if row["kind"] == "learnings"]
-    assert len(rows) == 1 and rows[0]["request"] == ""
+    assert exc.value.code == 2
+    assert not (tmp_path / "memory-vault" / "Workspace" / "Memory-Proposals.md").exists()
 
 
 # ── decider: add flag and escalate ────────────────────────────────────────
@@ -1842,7 +1930,7 @@ def _write_skill_record(config, change: str) -> None:  # noqa: ANN001
     )
 
 
-def test_review_key_distinguishes_target_and_request(tmp_path: Path) -> None:
+def test_review_key_distinguishes_target(tmp_path: Path) -> None:
     from ciao.proposal_tracking import proposal_review_key, skill_review_key
     from ciao.web.proposal_service import _scan_proposal_rows
 
@@ -1851,8 +1939,8 @@ def test_review_key_distinguishes_target_and_request(tmp_path: Path) -> None:
         None,
         "- [people Mo] Mo likes tea.  _(from: Chat)_",
         "- [people Ada] Mo likes tea.  _(from: Chat)_",
-        "- [learnings] Retry with backoff.  _(from: Chat)_  _(request: req-1)_",
-        "- [learnings] Retry with backoff.  _(from: Chat)_  _(request: req-2)_",
+        "- [project Projects/One.md] Retry with backoff.  _(from: Chat)_",
+        "- [project Projects/Two.md] Retry with backoff.  _(from: Chat)_",
         "- [note_edit sidecar-1] Tighten the intro.  _(from: Chat)_",
     )
     config = _scan_config(root)
@@ -1862,6 +1950,7 @@ def test_review_key_distinguishes_target_and_request(tmp_path: Path) -> None:
     keys = [row["review_key"] for row in rows]
     assert len(set(keys)) == 5
     assert keys[0] == proposal_review_key("work", "people", "Mo likes tea.", "Chat", "Mo", "")
+    assert keys[2] != keys[3]
     # A note_edit row with no sidecar on file has its target blanked, so the
     # key must come from the bullet's own sidecar id, never the enriched path.
     assert rows[4]["target"] != "sidecar-1"

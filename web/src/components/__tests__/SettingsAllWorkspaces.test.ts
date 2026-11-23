@@ -18,20 +18,6 @@ vi.mock('../../lib/api', () => {
     if (path === '/api/workspaces') return Promise.resolve(state.workspaces)
     if (path === '/api/workspaces/archived') return Promise.resolve({ archived: [] })
     if (path === '/api/settings/routines') return Promise.resolve({ model_options: { anthropic: [] } })
-    if (path === '/api/integrations/gws') {
-      return Promise.resolve({
-        installed: true,
-        binary_path: '/usr/bin/gws',
-        cli_available: true,
-        profiles: [{
-          name: 'p', label: 'Personal', purpose: '', examples: [], configured: true,
-          credentials_present: true, client_secret_present: true, config_dir: '/x',
-          workspaces: ['personal'], setup_command: '', headless_auth_command: '',
-          email: 'p@example.com', token_valid: true, token_error: '', needs_relogin: false,
-          loopback_eligible: true,
-        }],
-      })
-    }
     if (path.startsWith('/api/proposals/handover')) {
       return Promise.resolve({
         workspace: 'personal',
@@ -74,7 +60,6 @@ function registry(names: string[]): WorkspacesResponse {
       name,
       vault_root: `${name}/memory-vault`,
       default_provider: 'claude',
-      gws_profile: name === 'personal' ? 'p' : '',
       color: 'pink',
     })),
     active: names[0] ?? null,
@@ -139,10 +124,10 @@ describe('Settings > All workspaces', () => {
       expect(first.get('.workspace-tile').text()).toBe('1')
       expect(first.get('.workspace-title').text()).toBe('personal')
       expect(first.get('.set-tag').text()).toBe('Main workspace')
-      expect(first.get('.set-row-sub').text()).toBe('Anthropic (via Claude Code) · p@example.com')
+      expect(first.get('.set-row-sub').text()).toBe('Anthropic (via Claude Code)')
       expect(second.get('.workspace-tile').text()).toBe('2')
       expect(second.find('.set-tag').exists()).toBe(false)
-      expect(second.get('.set-row-sub').text()).toBe('Anthropic (via Claude Code) · no Google')
+      expect(second.get('.set-row-sub').text()).toBe('Anthropic (via Claude Code)')
     } finally {
       wrapper.unmount()
     }
@@ -292,7 +277,8 @@ describe('Settings > All workspaces', () => {
 
       const call = vi.mocked(api.post).mock.calls.find(c => c[0] === '/api/workspaces')
       const body = call?.[1] as Record<string, unknown>
-      expect(body).toMatchObject({ name: 'side', vault_root: 'side', gws_profile: '' })
+      expect(body).toMatchObject({ name: 'side', vault_root: 'side' })
+      expect(body).not.toHaveProperty('gws_profile')
       expect(store.activeWorkspace).toBe('side')
       expect(router.currentRoute.value.path).toBe('/settings/workspace')
     } finally {
@@ -355,15 +341,12 @@ describe('Settings > All workspaces', () => {
     }
   })
 
-  it('has no Google Workspace card but keeps the Google email in each row summary', async () => {
+  it('has no Google text anywhere, and each row summary is the provider label only', async () => {
     const { wrapper } = await mountManage()
     try {
       expect(wrapper.findAll('.section-title').map(t => t.text())).not.toContain('Google Workspace')
-      expect(wrapper.text()).not.toContain('Upload client_secret.json')
-      expect(wrapper.text()).not.toContain('Add a Google account')
-      const [first, second] = rows(wrapper)
-      expect(first.get('.set-row-sub').text()).toContain('p@example.com')
-      expect(second.get('.set-row-sub').text()).toContain('no Google')
+      expect(wrapper.text()).not.toContain('Google')
+      for (const row of rows(wrapper)) expect(row.get('.set-row-sub').text()).toBe('Anthropic (via Claude Code)')
     } finally {
       wrapper.unmount()
     }

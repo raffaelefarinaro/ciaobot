@@ -62,7 +62,6 @@
   "context get": "context_get",
   "context logs": "context_logs",
   "stats": "usage_stats",
-  "gws status": "gws_status",
   "workspace list": "workspaces_list",
   "repo candidates": "repo_candidates",
   "task delegate": "task_delegate",

@@ -7,6 +7,7 @@ import os
 import re
 from collections.abc import Mapping
 from dataclasses import dataclass, field
+from datetime import datetime
 from pathlib import Path
 from typing import Any, Literal
 
@@ -448,6 +449,10 @@ class ResultEvent(StreamEvent):
     effective_model: str = ""
     usage: dict[str, str] = field(default_factory=dict)
     quota: dict[str, str] = field(default_factory=dict)
+    # Internal prompt failure metadata. These fields are deliberately omitted
+    # from chat stream and journal serialization.
+    quota_limited: bool = False
+    quota_reset_at: datetime | None = None
     cost_usd: float | None = None
     # True when the turn ended because the user pressed Stop and the provider's
     # terminal frame carried no answer. It is a cancellation, not a failure:

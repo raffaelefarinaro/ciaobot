@@ -16,10 +16,10 @@ def test_update_skills_uses_packaged_sync(monkeypatch, caplog, tmp_path) -> None
     monkeypatch.setattr("ciao.sync_skills.sync_workspace_skills", _sync)
 
     with caplog.at_level(logging.INFO):
-        result = update_skills(str(tmp_path), workspace_name="work")
+        result = update_skills(str(tmp_path))
 
     assert result is None
-    assert called == [(str(tmp_path), {"workspace_name": "work"})]
+    assert called == [(str(tmp_path), {})]
     assert "Installed 2 custom skill(s)." in caplog.text
 
 

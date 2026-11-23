@@ -73,7 +73,7 @@ type DialogArgs = { open: boolean }
 
 const meta = {
   id: 'custom-colors-dialog',
-  title: 'Settings appearance and Google/CustomColorsDialog',
+  title: 'Settings appearance/CustomColorsDialog',
   component: CustomColorsDialog as unknown as ConcreteComponent<DialogArgs>,
   tags: ['!autodocs'],
   parameters: {

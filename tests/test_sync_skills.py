@@ -714,35 +714,20 @@ def test_main_returns_zero_on_the_normal_path(
     assert "Warning" not in capsys.readouterr().err
 
 
-def test_unlinked_workspace_gets_no_gws_skills_even_when_personal_exists(tmp_path: Path) -> None:
-    """The gate resolves through ``workspace_gws_profile``: an unlinked
-    workspace is not handed the ``personal`` account just because one exists."""
-    from types import SimpleNamespace
+def test_retired_gws_stock_copies_are_pruned_on_sync(tmp_path: Path) -> None:
+    """A 2.0 upgrade removes the packaged gws-* skills; the marked copies a
+    workspace already holds are pruned on the first sync, user-owned ones kept."""
+    workspace = tmp_path / "workspace"
+    skills = workspace / ".claude" / "skills"
+    for name in ("gws-gmail", "gws-shared"):
+        (skills / name).mkdir(parents=True)
+        (skills / name / "SKILL.md").write_text("stock", encoding="utf-8")
+        (skills / name / sync_skills.STOCK_SKILL_MARKER).touch()
+    (skills / "gws-custom").mkdir(parents=True)
+    (skills / "gws-custom" / "SKILL.md").write_text("mine", encoding="utf-8")
 
-    from ciao import gws_auth
+    sync_skills.sync_workspace_skills(workspace, refresh_upstream=False)
 
-    install = tmp_path / "install"
-    (install / ".runtime").mkdir(parents=True)
-    creds = install / "secrets" / "gws-personal"
-    creds.mkdir(parents=True)
-    (creds / "client_secret.json").write_text("{}", encoding="utf-8")
-    workspace = install / "work"
-    workspace.mkdir()
-    config = SimpleNamespace(
-        workspace_root=install,
-        state_path=install / ".runtime" / "state.json",
-        workspaces={"work": SimpleNamespace(name="work", gws_profile="")},
-        _workspace_registry_changed=False,
-        agent_root=lambda name: workspace,
-        workspace=lambda name: config.workspaces.get(name),
-    )
-    assert "personal" in gws_auth.known_profiles(config)
-
-    gate = sync_skills.resolve_workspace_skills_gws_gate(config, workspace, "work")
-    assert gate == ""
-
-    sync_skills.sync_workspace_skills(
-        workspace, refresh_upstream=False, gws_profile=gate, workspace_name="work"
-    )
-    installed = {p.name for p in (workspace / ".claude" / "skills").iterdir()}
-    assert not any(name.startswith("gws-") for name in installed)
+    assert not (skills / "gws-gmail").exists()
+    assert not (skills / "gws-shared").exists()
+    assert (skills / "gws-custom" / "SKILL.md").is_file()
