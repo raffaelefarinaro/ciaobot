@@ -740,6 +740,9 @@ def test_release_notes_skill_carries_the_fixed_2_0_0_heads_up() -> None:
         "**Messages always queue.**",
         "**No background panel.**",
         "**MCP is managed in each agent's CLI.**",
+        "**Google Workspace is no longer built in.**",
+        "**Question cards are not shown.**",
+        "https://www.raffaelefarinaro.com/ciaobot/migrate.html",
     ):
         assert label in notes, label
 

@@ -41,7 +41,7 @@ def markdown_ids(text: str) -> set[str]:
 
 @pytest.mark.parametrize(
     "relative",
-    ["README.md", "docs/README.md", "site/index.html", "site/models.html", "site/memory.html"],
+    ["README.md", "docs/README.md", "site/index.html", "site/models.html", "site/memory.html", "site/migrate.html"],
 )
 def test_documentation_entry_links_resolve(relative: str) -> None:
     source = ROOT / relative
@@ -124,3 +124,17 @@ def test_site_install_offers_the_mac_app_and_the_linux_one_liner() -> None:
     assert "ciaobot-mac" not in script
     assert r"/^Ciaobot-.*\.dmg$/" in script and "browser_download_url" in script
     assert "[data-install-os]" not in script and "'windows'" not in script
+
+
+def test_migration_page_exists_and_is_linked() -> None:
+    page = (ROOT / "site/migrate.html").read_text(encoding="utf-8")
+    assert "<h1>Moving from 1.x to 2.0</h1>" in page
+    assert 'href="companions.html#google"' in page
+    assert "migrate.html" in (ROOT / "site/index.html").read_text(encoding="utf-8")
+    assert "migrate.html" in (ROOT / "README.md").read_text(encoding="utf-8")
+
+
+def test_old_guide_redirects_to_the_migration_page() -> None:
+    guide = (ROOT / "site/guide.html").read_text(encoding="utf-8")
+    assert 'http-equiv="refresh"' in guide
+    assert "url=migrate.html" in guide
