@@ -61,7 +61,7 @@ _ATTENTION_EXAMPLES: tuple[tuple[str, bool, str], ...] = (
         '{"needs_user": false, "reason": "routine curation; files updated automatically"}',
     ),
     (
-        "Run stopped with an authentication error: the Google Workspace token expired.",
+        "Run stopped with an authentication error: an MCP server's sign-in token expired.",
         True,
         '{"needs_user": true, "reason": "auth error blocks the run until the user signs in again"}',
     ),

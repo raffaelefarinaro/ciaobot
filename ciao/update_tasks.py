@@ -1790,7 +1790,10 @@ def _evaluate_off_loop(
                 },
             )
             continue
-        hit = cached.get(key)
+        # A reverted drain restores its source rows after the task was marked
+        # complete. Re-scan this small queue on each listing so that reversal
+        # makes the workspace task actionable again without waiting out the TTL.
+        hit = None if task.id == "learnings-queue-drain" else cached.get(key)
         if hit is not None:
             results[identity] = hit
             continue
@@ -1802,10 +1805,30 @@ def _evaluate_off_loop(
         # is on disk can be settled even on the turn where its detector is
         # unwell.
         fresh.add(identity)
-        if _is_cacheable(answer):
+        if _is_cacheable(answer) and task.id != "learnings-queue-drain":
             computed[key] = answer
     if computed:
         _store_results(computed, token, instant)
+    for task in tasks:
+        identity = (task.id, task.revision)
+        state = states.get(identity)
+        if (
+            task.id == "learnings-queue-drain"
+            and state is not None
+            and state.lifecycle == "completed"
+            and results[identity].status == APPLICABLE
+        ):
+            try:
+                _reopen_completed_drain_task(task, config=config, workspace=workspace)
+            except (UpdateTaskStateError, OSError) as exc:
+                logger.warning(
+                    "update task %s@%s: work became applicable again but the completed record "
+                    "could not be reopened (%s)",
+                    task.id,
+                    task.revision,
+                    exc,
+                )
+            states[identity] = read_task_state(task, config=config, workspace=workspace)
     _settle(tasks, states, config, workspace, fresh)
     return [
         TaskStatus(
@@ -1815,6 +1838,28 @@ def _evaluate_off_loop(
         )
         for task in tasks
     ]
+
+
+def _reopen_completed_drain_task(
+    task: UpdateTask, *, config: Any, workspace: str
+) -> TaskState | None:
+    """Re-offer only a completed drain whose fresh detector found work again."""
+    with _record_lock(task, config, workspace) as (path, previous):
+        if previous is None or previous.lifecycle != "completed":
+            return previous
+        state = TaskState(
+            task_id=task.id,
+            revision=task.revision,
+            scope=task.scope,
+            lifecycle="offered",
+            updated_at=_stamp(datetime.now(UTC)),
+            attempted_fingerprint="",
+            evidence={"completion_reversed": True},
+            chat_id=previous.chat_id,
+            prompt_digest=previous.prompt_digest,
+        )
+        _write_record(path, state)
+    return state
 
 
 def _settle(

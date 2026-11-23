@@ -263,10 +263,6 @@ What each CLI still enforces:
 - OpenCode: the session ruleset from `_MODE_PERMISSIONS` (plan asks except read/glob/grep; normal asks everything; auto allows all but shell; bypass allows all) and the user's own `opencode.json` `permission` config.
 - Ciaobot's own surfaces keep their guards: the `ciao` control plane (mode gates, `unattended_forbidden`, workspace confinement of its verbs), `is_credential_adjacent` on `ciao` CLI file flags, `/api/*` session auth, and loopback-only routes.
 
-### Sign-in paste-back (needs-you cards)
-
-`POST /api/chats/{chat_id}/actions/{action_id}/callback` is a normal signed-session route with the usual same-origin rule, not a loopback-only one. It dispatches to the card kind's handler and nothing else, and only `gws_auth` implements a callback; every other kind answers `unsupported_kind`. For `gws_auth` the route makes no HTTP request: the pasted URL goes to `GwsReloginManager.complete_from_redirect`, which requires `http://127.0.0.1:<the pending session's port>/` and the session's `state` (constant time) before it runs the same exchange as the loopback listener. A refused paste leaves the sign-in pending and may be retried; the session itself finishes at most once.
-
 ## Verification
 
 - `PYTHONPATH=$PWD python -m pytest -n auto tests/`

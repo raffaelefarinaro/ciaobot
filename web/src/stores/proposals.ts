@@ -30,6 +30,7 @@ export function needsYou(row: ProposalRow): boolean {
  */
 export const useProposalsStore = defineStore('proposals', () => {
   const rows = ref<ProposalRow[]>([])
+  const legacyLearningQueues = ref<ProposalsResponse['legacy_learning_queues']>({})
   const loading = ref(false)
   const busyIds = ref<Set<string>>(new Set())
   const busy = computed(() => busyIds.value.size > 0)
@@ -456,6 +457,7 @@ export const useProposalsStore = defineStore('proposals', () => {
         const data = await api.get<ProposalsResponse>('/api/proposals')
         if (seq !== fetchSeq) return
         rows.value = data.rows ?? []
+        legacyLearningQueues.value = data.legacy_learning_queues ?? {}
         loaded.value = true
         loadError.value = ''
         pruneSelected()
@@ -777,7 +779,7 @@ export const useProposalsStore = defineStore('proposals', () => {
   }
 
   return {
-    rows, loading, loaded, busy, busyIds, isBusy, setBusy, setBusyMany, error, loadError, fetch, ensureLoaded, act, acceptSkill, batch, dismissOlderThan,
+    rows, legacyLearningQueues, loading, loaded, busy, busyIds, isBusy, setBusy, setBusyMany, error, loadError, fetch, ensureLoaded, act, acceptSkill, batch, dismissOlderThan,
     previews, previewErrors, isPreviewLoading, loadPreview, prefetchPreviews, dropPreview, conflictIds, lastBatchSummary,
     receipts, receiptErrors, receiptKey, isReceiptLoading, loadReceipt, undoReceipt,
     kindFilter, decideFilter, search, selected, revealedRowId, revealRow,

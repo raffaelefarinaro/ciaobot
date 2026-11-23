@@ -42,7 +42,7 @@ describe('descriptorFor', () => {
   })
 
   it('resolves every kind the server can send', () => {
-    for (const kind of ['memory', 'profile', 'user', 'people', 'project', 'learnings', 'review', 'rehome', 'skill', 'category', 'note_edit']) {
+    for (const kind of ['memory', 'profile', 'user', 'people', 'project', 'review', 'rehome', 'skill', 'category', 'note_edit']) {
       expect(descriptorFor(row({ kind }))).not.toBe(GENERIC)
     }
   })
@@ -187,7 +187,6 @@ describe('destination', () => {
       [{ kind: 'people' }, 'People/?.md'],
       [{ kind: 'project', target: 'Projects/Thing.md' }, 'Projects/Thing.md'],
       [{ kind: 'project' }, 'no project doc named'],
-      [{ kind: 'learnings' }, 'Workspace/Learnings.md'],
       [{ kind: 'review' }, 'no destination yet — decide what it is'],
       [{ kind: 'note_edit', target: 'notes/office.md' }, 'notes/office.md'],
       [{ kind: 'note_edit' }, 'no note named'],
@@ -241,7 +240,7 @@ describe('canAccept', () => {
   })
 
   it('allows the destination and region kinds', () => {
-    for (const kind of ['memory', 'profile', 'user', 'people', 'project', 'learnings', 'category', 'note_edit']) {
+    for (const kind of ['memory', 'profile', 'user', 'people', 'project', 'category', 'note_edit']) {
       const r = row({ kind })
       expect(descriptorFor(r).canAccept(r)).toBe(true)
     }
@@ -295,7 +294,7 @@ describe('accept fallback', () => {
   })
 
   it('the fold/cap kinds fall back on any refusal', () => {
-    for (const kind of ['project', 'memory', 'profile', 'user', 'learnings']) {
+    for (const kind of ['project', 'memory', 'profile', 'user']) {
       const fallback = PROPOSAL_KINDS[kind].fallback
       expect(fallback, kind).not.toBeNull()
       expect(fallback!.when('anything at all')).toBe(true)
@@ -321,7 +320,6 @@ describe('accept fallback', () => {
     expect(PROPOSAL_KINDS.people.fallback!.chatTitle(anon)).toBe('Merge person fact')
 
     expect(PROPOSAL_KINDS.project.fallback!.chatTitle(row({ kind: 'project' }))).toBe('Merge project fact')
-    expect(PROPOSAL_KINDS.learnings.fallback!.chatTitle(row({ kind: 'learnings' }))).toBe('Merge learning')
     expect(PROPOSAL_KINDS.memory.fallback!.chatTitle(row())).toBe('Merge memory fact')
   })
 
@@ -392,7 +390,7 @@ describe('consequence', () => {
   }
 
   it('answers for every kind the server can send, naming no file', () => {
-    for (const kind of ['memory', 'profile', 'user', 'people', 'project', 'learnings', 'review', 'rehome', 'skill', 'category', 'note_edit']) {
+    for (const kind of ['memory', 'profile', 'user', 'people', 'project', 'review', 'rehome', 'skill', 'category', 'note_edit']) {
       const text = consequenceFor({ kind, target: 'Mo', path: 'skills/x.md' })
       expect(text, kind).toBeTruthy()
       expect(text, kind).not.toMatch(/\.md\b/)

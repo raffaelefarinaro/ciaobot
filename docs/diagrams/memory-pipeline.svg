@@ -43,7 +43,7 @@
 <text x="310" y="36" class="label label-bold">3 · Destination</text>
 <text x="310" y="48" class="mono-dark">[memory] → ciao:memory</text>
 <text x="310" y="60" class="mono-dark">[project] → project doc</text>
-<text x="310" y="72" class="mono-dark">[learnings] → Learnings.md</text>
+<text x="310" y="72" class="mono-dark">[review] → proposal queue</text>
 <text x="310" y="84" class="mono">[expires: YYYY-MM-DD]</text>
 
 <line x1="426" y1="54" x2="450" y2="54" class="arrow"/>

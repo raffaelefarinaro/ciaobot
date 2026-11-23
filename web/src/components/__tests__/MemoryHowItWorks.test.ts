@@ -6,7 +6,7 @@
  * What a mount can decide: that it starts collapsed and says so to assistive
  * tech, that the toggle is a native button wired to its body, that the open
  * choice is remembered per browser and a blocked store never throws, that the
- * tag table reads the six kinds through `kindLabel`, that the copy names only
+ * tag table reads the five remaining kinds through `kindLabel`, that the copy names only
  * the things it is allowed to name, and that it makes no request at all.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
@@ -115,12 +115,12 @@ describe('MemoryHowItWorks disclosure', () => {
     expect(button.attributes('aria-expanded')).toBe('true')
   })
 
-  it('has the six tag rows in order, labelled through kindLabel', async () => {
+  it('has the five remaining tag rows in order, labelled through kindLabel', async () => {
     const wrapper = await mountCard()
     const rows = wrapper.findAll('table.mhw-table tbody tr')
 
-    expect(rows).toHaveLength(6)
-    const kinds = ['project', 'people', 'learnings', 'review', 'memory', 'profile']
+    expect(rows).toHaveLength(5)
+    const kinds = ['project', 'people', 'review', 'memory', 'profile']
     kinds.forEach((kind, i) => {
       expect(rows[i].find('.mhw-tag').text()).toBe(kindLabel(kind))
     })
@@ -131,7 +131,6 @@ describe('MemoryHowItWorks disclosure', () => {
     const whoCells = wrapper.findAll('table.mhw-table tbody tr').map(r => r.findAll('td')[2].text())
 
     expect(whoCells).toEqual([
-      'Nightly files it.',
       'Nightly files it.',
       'Nightly files it.',
       'Nightly decides. A judgement call comes back to you as a yes or no.',
