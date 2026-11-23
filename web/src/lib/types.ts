@@ -543,7 +543,7 @@ export type WsEvent =
   // never carries it. The partial text still renders, but the turn is not an
   // answer, so it must not raise an unread badge on a backgrounded tab.
   | { type: 'result'; text: string; is_error: boolean; effective_model: string; usage: Record<string, string>; quota?: Record<string, unknown>; session_id: string; stopped?: boolean; fallback_final?: boolean; sent_at?: string; completed_at?: string; duration_ms?: number }
-  | { type: 'permission_request'; tool_name: string; tool_input?: string; message: string; request_id: string; session_id?: string }
+  | { type: 'permission_request'; tool_name: string; tool_input?: string; shell_command?: boolean; shell_cwd?: string; message: string; request_id: string; session_id?: string }
   | {
       type: 'permission_response_result';
       request_id: string;
@@ -703,6 +703,8 @@ export interface PendingPermission {
   session_id?: string
   tool_name: string
   tool_input: string
+  shell_command?: boolean
+  shell_cwd?: string
   message: string
   // Epoch ms when the request arrived — used by the UI to grey out very old
   // pending prompts that were likely cancelled server-side on a stream end.

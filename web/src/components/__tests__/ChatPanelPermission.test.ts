@@ -58,12 +58,13 @@ class MemoryStorage {
   clear(): void { this.values.clear() }
 }
 
-function makePermission(overrides: Partial<{ request_id: string; tool_name: string; message: string; tool_input: string }> = {}) {
+function makePermission(overrides: Partial<{ request_id: string; session_id: string; tool_name: string; message: string; tool_input: string; shell_command: boolean; shell_cwd: string }> = {}) {
   return {
     request_id: 'approval-1',
     tool_name: 'Bash',
     message: 'Approve use of Bash?',
     tool_input: 'rm x',
+    shell_command: false,
     received_at: Date.now(),
     ...overrides,
   }
@@ -149,6 +150,29 @@ afterEach(() => {
 })
 
 describe('permission card keyboard shortcuts', () => {
+  test('renders a long multiline shell command exactly without JSON formatting', async () => {
+    const command = 'printf "{\\"x\\":1}"\n' + '# ' + 'x'.repeat(300) + ' unique-tail'
+    const { wrapper } = await mountLayout({
+      permissions: [makePermission({ shell_command: true, shell_cwd: '/workspace/project', tool_input: command })],
+    })
+    const pre = wrapper.get('.permission-input')
+    expect(pre.text()).toBe(command)
+    expect(pre.attributes('aria-label')).toBe('Exact shell command awaiting approval')
+    expect(pre.attributes('tabindex')).toBe('0')
+    expect(wrapper.find('.permission-args').exists()).toBe(false)
+    expect(wrapper.get('.permission-cwd').text()).toContain('/workspace/project')
+    expect(wrapper.get('.permission-cwd code').text()).toBe('/workspace/project')
+    wrapper.unmount()
+  })
+
+  test('shows unknown when a shell provider omits its working directory', async () => {
+    const { wrapper } = await mountLayout({
+      permissions: [makePermission({ shell_command: true, tool_input: 'echo ok' })],
+    })
+    expect(wrapper.get('.permission-cwd code').text()).toBe('Unknown')
+    wrapper.unmount()
+  })
+
   test('renders 1 (deny) and 2 (approve) badges on the first card', async () => {
     const { wrapper } = await mountLayout({ permissions: [makePermission()] })
 
@@ -222,6 +246,18 @@ describe('permission card keyboard shortcuts', () => {
     await nextTick()
     expect(respondPermission).toHaveBeenCalledWith(CHAT_ID, 'approval-1', false, 'User denied', '')
 
+    wrapper.unmount()
+  })
+
+  test('a click responds to the exact session and request on the card', async () => {
+    const respondPermission = vi.spyOn(useProjectStore(), 'respondPermission')
+    const { wrapper } = await mountLayout({
+      permissions: [makePermission({ request_id: 'request-22', session_id: 'session-9' })],
+    })
+    await wrapper.get('.btn-approve').trigger('click')
+    expect(respondPermission).toHaveBeenCalledWith(
+      CHAT_ID, 'request-22', true, '', 'session-9',
+    )
     wrapper.unmount()
   })
 

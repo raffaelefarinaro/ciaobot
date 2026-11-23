@@ -5415,16 +5415,13 @@ describe('provider-neutral input state', () => {
       created_at: '',
       archived: false,
       pending_permission: JSON.stringify({
-        request_id: 'req-42', tool_name: 'Bash', message: 'Approve use of Bash?', tool_input: 'rm x',
+        request_id: 'req-42', tool_name: 'Bash', message: 'Approve use of Bash?', tool_input: 'rm x', shell_command: true,
       }),
     }]
 
     await store.loadMessages(chatId)
 
-    expect(store.pendingPermissions[chatId]).toHaveLength(1)
-    expect(store.pendingPermissions[chatId][0]).toMatchObject({
-      request_id: 'req-42', tool_name: 'Bash',
-    })
+    expect(store.pendingPermissions[chatId] || []).toHaveLength(0)
   })
 
   test('parses alternate text/type AskUserQuestion payloads', () => {
@@ -5710,6 +5707,7 @@ describe('provider-neutral input state', () => {
       pending_permission: JSON.stringify({
         request_id: 'permission-live',
         session_id: 'session-1',
+        shell_command: true,
       }),
     }]
     store.connectWs(chatId)
@@ -5718,9 +5716,10 @@ describe('provider-neutral input state', () => {
       type: 'permission_request',
       request_id: 'permission-live',
       session_id: 'session-1',
-      tool_name: 'shell',
-      tool_input: 'echo ok',
-      message: 'Approve?',
+      tool_name: 'Shell',
+      tool_input: 'printf "{\\"x\\":1}"\n' + '# ' + 'x'.repeat(300) + ' unique-tail',
+      shell_command: true,
+      message: 'Shell command needs approval',
     }) })
     socket.onmessage?.({ data: JSON.stringify({
       type: 'result',
@@ -5732,6 +5731,10 @@ describe('provider-neutral input state', () => {
     }) })
 
     expect(store.pendingPermissions[chatId]?.[0]?.request_id).toBe('permission-live')
+    expect(store.pendingPermissions[chatId]?.[0]).toMatchObject({
+      shell_command: true,
+      tool_input: 'printf "{\\"x\\":1}"\n' + '# ' + 'x'.repeat(300) + ' unique-tail',
+    })
   })
 
   test('queues a permission verdict while the socket is down and flushes it on reconnect', () => {

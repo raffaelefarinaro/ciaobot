@@ -195,10 +195,26 @@ async def test_permission_round_trip_reaches_agent(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
+async def test_shell_permission_command_is_not_written_to_acp_journal(tmp_path: Path) -> None:
+    async with _started(tmp_path) as harness:
+        before = SessionJournal.read(harness.session._journal.path)
+        harness.session._journal_event(PermissionRequestEvent(
+            type="permission_request",
+            tool_name="Shell",
+            tool_input="echo JOURNAL_SECRET",
+            shell_command=True,
+            message="JOURNAL_SECRET",
+            request_id="journal-request",
+            session_id=harness.session.session_id,
+        ))
+        assert SessionJournal.read(harness.session._journal.path) == before
+
+
+@pytest.mark.asyncio
 async def test_cancel_answers_pending_permission_cancelled_then_cancels_session(tmp_path: Path) -> None:
     steps = [{
         "permission": {
-            "toolCall": {"toolCallId": "call-1", "title": "Bash"},
+            "toolCall": {"toolCallId": "call-1", "title": "Tool"},
             "options": [
                 {"optionId": "once", "name": "Once", "kind": "allow_once"},
                 {"optionId": "reject", "name": "Reject", "kind": "reject_once"},
@@ -208,7 +224,8 @@ async def test_cancel_answers_pending_permission_cancelled_then_cancels_session(
     async with _started(tmp_path, prompts=[{"steps": steps}]) as harness:
         task = asyncio.create_task(_collect(harness))
         for _ in range(1000):
-            if harness.broker.has("call-1"):
+            request_id = harness.broker._tool_call_pending.get((harness.session.session_id, "call-1"), "")
+            if request_id and harness.broker.has(request_id):
                 break
             await asyncio.sleep(0.01)
         else:
@@ -442,7 +459,7 @@ async def test_update_while_result_is_consumed_opens_late_turn(tmp_path: Path) -
                 })
                 permission = asyncio.create_task(harness.broker.request(
                     harness.session.session_id,
-                    {"toolCallId": "late-call", "title": "Bash"},
+                    {"toolCallId": "late-call", "title": "Tool"},
                     [{"optionId": "once", "kind": "allow_once", "name": "Once"}],
                 ))
                 # Run the permission emit while the prompt generator is still

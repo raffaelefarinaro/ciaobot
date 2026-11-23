@@ -69,6 +69,11 @@ The Repository section in Chat details reads `/api/chats/{chat_id}/worktree-chan
 
 The embedded LoginView keeps terminal guidance and the six-item product tour for the CLI bootstrap.
 
+Shell permission cards display the provider's exact bounded command and its
+validated working directory (or **Unknown** when omitted). The command is kept
+only in the live stream for reconnect replay; approval actions are at least
+44px high and the command block can be focused and scrolled by keyboard.
+
 ```bash
 cd web
 npm install          # first-time only
@@ -401,6 +406,8 @@ iOS Safari suspends JS and WebSockets when the PWA is backgrounded. On resume, `
 ### Chat permission mode picker
 
 The normal chat composer model picker changes the saved permission mode for that chat through the existing chat update API. Changes apply to subsequent turns, not a reply already running; queued or external turns may start before the write settles. While pending, ordinary sends from that composer are paused without clearing the draft, while `/mcp`, Stop and recovery remain available. `touch-targets.spec.ts` covers the picker at constrained viewport sizes and touch targets; component coverage lives in `ChatPanelRetry.test.ts` and `ModelSelector.test.ts`.
+
+An attended shell permission card displays the exact current command submitted by the provider, bounded at 4096 characters. It stays unformatted, pre-wrapped and keyboard-scrollable so multiline and JSON-looking commands remain literal on mobile. Approve and Deny are distinct controls with 44px minimum height; Approve grants only once. The full command is held by the current stream for authenticated reconnect replay, not persisted in the chat registry. A shell attention marker alone never rebuilds an actionable card, and engine startup clears stale markers.
 
 ### The browser terminal
 

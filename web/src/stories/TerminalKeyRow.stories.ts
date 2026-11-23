@@ -46,7 +46,7 @@ export const Default: Story = {
 }
 
 export const Disabled: Story = {
-  args: { disabled: true },
+  args: { disabled: true, onPress: fn() },
   play: async ({ args, canvas, userEvent }) => {
     const escape = canvas.getByRole('button', { name: 'Escape' })
     expect(escape).toBeDisabled()

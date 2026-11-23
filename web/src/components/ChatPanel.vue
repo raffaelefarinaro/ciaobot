@@ -866,13 +866,14 @@
              instead of a JSON wall that gets clipped by the scroll box and
              looks like the request failed to parse. Nested payloads and bare
              strings fall back to the raw text. -->
-        <dl v-if="permissionArgs(p.tool_input)" class="permission-args">
+        <dl v-if="!p.shell_command && permissionArgs(p.tool_input)" class="permission-args">
           <template v-for="f in permissionArgs(p.tool_input)" :key="f.key">
             <dt>{{ f.key }}</dt>
             <dd>{{ f.value }}</dd>
           </template>
         </dl>
-        <pre v-else-if="p.tool_input" class="permission-input">{{ formatToolInput(p.tool_input) }}</pre>
+        <pre v-else-if="p.tool_input" class="permission-input" tabindex="0" :aria-label="p.shell_command ? 'Exact shell command awaiting approval' : 'Permission request details'">{{ p.shell_command ? p.tool_input : formatToolInput(p.tool_input) }}</pre>
+        <div v-if="p.shell_command" class="permission-cwd"><span>Working directory</span><code>{{ p.shell_cwd || 'Unknown' }}</code></div>
         <div class="permission-actions">
           <button
             class="btn-deny"
@@ -7743,6 +7744,22 @@ details[open] > .activity-summary::before {
   word-break: break-word;
 }
 
+.permission-cwd {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 4px 8px;
+  color: var(--fg2);
+  font-size: var(--text-xs);
+}
+
+.permission-cwd code {
+  min-width: 0;
+  color: var(--fg);
+  font-family: var(--font-mono);
+  overflow-wrap: anywhere;
+}
+
 /* Labelled argument rows. Key column is sized to content and clamped so a
    long `prompt` value keeps most of the width; the whole block scrolls as one
    unit rather than each value clipping on its own. */
@@ -7782,7 +7799,7 @@ details[open] > .activity-summary::before {
 }
 
 .btn-approve, .btn-deny {
-  min-height: 36px;
+  min-height: 44px;
   padding: 8px 16px;
   border: 1px solid var(--border);
   border-radius: var(--radius);

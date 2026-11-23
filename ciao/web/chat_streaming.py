@@ -35,6 +35,7 @@ from ciao.models import (
     ModelCapabilityQuestionEvent,
     ModelChangedEvent,
     PermissionRequestEvent,
+    PermissionResolvedEvent,
     PromptCancelledEvent,
     LATE_WAKE_NOTICE,
     WakeNoticeEvent,
@@ -220,6 +221,10 @@ class ChatStreamingHost(Protocol):
     def _notify_permission(
         self, chat_id: str, event: PermissionRequestEvent
     ) -> None: ...
+
+    def _clear_permission_state(
+        self, chat_id: str, request_id: str, session_id: str = ""
+    ) -> bool: ...
 
     def _notify_question(self, chat_id: str, question_json: str) -> None: ...
 
@@ -705,6 +710,11 @@ class ChatStreaming:
                                 chat_id, stream, run_prompt, run_images, run_turn_index
                             )
                             prompt_cancelled = True
+                            continue
+                        if isinstance(event, PermissionResolvedEvent):
+                            self._host._clear_permission_state(
+                                chat_id, event.request_id, event.session_id
+                            )
                             continue
                         payload = event_to_json(event)
                         if payload and isinstance(
@@ -2217,6 +2227,11 @@ class ChatStreaming:
                 # gave it up already, so a drain a foreground turn replaces must not lose it.
                 if isinstance(event, ShellFinishedEvent):
                     self._host._note_shell_finished(chat_id, event)
+                    continue
+                if isinstance(event, PermissionResolvedEvent):
+                    self._host._clear_permission_state(
+                        chat_id, event.request_id, event.session_id
+                    )
                     continue
                 if isinstance(event, WakeNoticeEvent):
                     # A claimed notice: its card goes out right before the continuation's reply.

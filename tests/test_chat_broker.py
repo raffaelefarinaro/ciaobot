@@ -309,6 +309,23 @@ def test_event_to_json_permission_request_includes_request_id() -> None:
     }
 
 
+def test_event_to_json_marks_an_exact_shell_command() -> None:
+    command = 'printf "{\\"x\\":1}"\n' + "# " + "x" * 300 + " tail-unique"
+    payload = event_to_json(PermissionRequestEvent(
+        type="permission_request",
+        tool_name="shell",
+        tool_input=command,
+        shell_command=True,
+        shell_cwd="/workspace/project",
+        message="Approve shell?",
+        request_id="shell-1",
+    ))
+    assert payload is not None
+    assert payload["tool_input"] == command
+    assert payload["shell_command"] is True
+    assert payload["shell_cwd"] == "/workspace/project"
+
+
 def test_event_to_json_result_includes_session_id() -> None:
     assert event_to_json(
         ResultEvent(
@@ -477,11 +494,13 @@ def test_resolve_permission_strips_event_from_replay_buffer() -> None:
     stream.publish({"type": "text_delta", "text": "thinking..."})
     stream.publish({
         "type": "permission_request",
-        "tool_name": "Bash",
-        "tool_input": "ls",
-        "message": "Approve use of Bash?",
+        "tool_name": "Shell",
+        "tool_input": 'printf "{\\"x\\":1}"\n' + "# " + "x" * 300 + " unique-tail",
+        "shell_command": True,
+        "message": "Shell command needs approval",
         "request_id": "req-A",
     })
+    assert stream.buffered_events()[1]["tool_input"].endswith("unique-tail")
     stream.publish({"type": "text_delta", "text": "more"})
 
     removed = stream.resolve_permission("req-A")

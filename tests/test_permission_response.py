@@ -20,6 +20,7 @@ from types import SimpleNamespace
 import pytest
 
 from ciao.config import CiaoConfig
+from ciao.models import PermissionRequestEvent
 from ciao.sessions import StateStore
 from ciao.transcripts import TranscriptStore
 from ciao.providers.acp.agents import OpencodeAcpProvider
@@ -1027,7 +1028,8 @@ class _AcpPermissionProvider(_MinimalProvider):
 
     def __init__(self, root: Path, session_id: str = "s1") -> None:
         super().__init__(root)
-        self.broker = PermissionBroker(lambda _event: None)
+        self.events: list[object] = []
+        self.broker = PermissionBroker(self.events.append)
         self._session_id = session_id
         self.calls: list[tuple[str, bool, str]] = []  # (request_id, approved, session_id)
         self.fail_with = ""
@@ -1045,7 +1047,13 @@ class _AcpPermissionProvider(_MinimalProvider):
         return self.broker.session_of(request_id)
 
     def tool_use_id_for_request(self, request_id: str, session_id: str = "") -> str:
-        return request_id
+        event = next((
+            event for event in self.events
+            if isinstance(event, PermissionRequestEvent)
+            and event.request_id == request_id
+            and (not session_id or event.session_id == session_id)
+        ), None)
+        return event.tool_name if event is not None else ""
 
     async def respond_permission(
         self, request_id: str, approved: bool, reason: str = "", *,
@@ -1086,26 +1094,46 @@ def _persist(pcm: ProjectChatManager, chat_id: str, request_id: str, session_id:
     })
 
 
+def _host_request_id(
+    provider: _AcpPermissionProvider, provider_tool_id: str, session_id: str = "s1"
+) -> str:
+    return next(
+        event.request_id
+        for event in provider.events
+        if isinstance(event, PermissionRequestEvent)
+        and event.tool_name == provider_tool_id
+        and event.session_id == session_id
+    )
+
+
 def _agent(provider: _AcpPermissionProvider, request_id: str, session_id: str = "s1") -> asyncio.Task:
     return asyncio.create_task(
-        provider.broker.request(session_id, {"toolCallId": request_id}, _OPTIONS)
+        provider.broker.request(
+            session_id, {"toolCallId": request_id, "title": request_id}, _OPTIONS
+        )
     )
 
 
 @pytest.mark.asyncio
 async def test_two_parallel_permissions_are_each_answered_by_their_id(tmp_path: Path) -> None:
-    pcm, chat_id, provider, _stream = _acp_chat(tmp_path)
+    pcm, chat_id, provider, stream = _acp_chat(tmp_path)
+    stream.publish({"type": "tool_use", "tool_name": "write", "tool_use_id": "t1"})
     first, second = _agent(provider, "t1"), _agent(provider, "t2")
     await _settle()
-    _persist(pcm, chat_id, "t2", "s1")
+    first_id, second_id = _host_request_id(provider, "t1"), _host_request_id(provider, "t2")
+    _persist(pcm, chat_id, second_id, "s1")
 
-    approved = await pcm.respond_permission(chat_id, request_id="t2", approved=True, session_id="s1")
-    denied = await pcm.respond_permission(chat_id, request_id="t1", approved=False, session_id="s1")
+    approved = await pcm.respond_permission(chat_id, request_id=second_id, approved=True, session_id="s1")
+    denied = await pcm.respond_permission(chat_id, request_id=first_id, approved=False, session_id="s1")
 
     assert approved.ok and denied.ok
     assert await second == _ALLOW
     assert await first == _REJECT
-    assert provider.calls == [("t2", True, "s1"), ("t1", False, "s1")]
+    assert provider.calls == [(second_id, True, "s1"), (first_id, False, "s1")]
+    assert any(
+        event.get("type") == "tool_denied" and event.get("tool_use_id") == "t1"
+        for event in stream.buffered_events()
+    )
 
 
 @pytest.mark.asyncio
@@ -1113,14 +1141,15 @@ async def test_older_reply_does_not_clear_the_newer_persisted_slot(tmp_path: Pat
     pcm, chat_id, provider, _stream = _acp_chat(tmp_path)
     older, newer = _agent(provider, "t1"), _agent(provider, "t2")
     await _settle()
-    _persist(pcm, chat_id, "t2", "s1")
+    older_id, newer_id = _host_request_id(provider, "t1"), _host_request_id(provider, "t2")
+    _persist(pcm, chat_id, newer_id, "s1")
 
-    result = await pcm.respond_permission(chat_id, request_id="t1", approved=True, session_id="s1")
+    result = await pcm.respond_permission(chat_id, request_id=older_id, approved=True, session_id="s1")
 
     assert result.ok is True
     assert await older == _ALLOW
-    assert json.loads(pcm._chats[chat_id].pending_permission)["request_id"] == "t2"
-    assert provider.broker.has("t2")
+    assert json.loads(pcm._chats[chat_id].pending_permission)["request_id"] == newer_id
+    assert provider.broker.has(newer_id)
     provider.broker.cancel_all()
     assert await newer == {"outcome": "cancelled"}
 
@@ -1134,11 +1163,12 @@ async def test_deny_losing_to_approve_is_already_resolved_and_keeps_the_card(tmp
     })
     agent = _agent(provider, "t1")
     await _settle()
-    _persist(pcm, chat_id, "t1", "s1")
+    request_id = _host_request_id(provider, "t1")
+    _persist(pcm, chat_id, request_id, "s1")
 
     approve, deny = await asyncio.gather(
-        pcm.respond_permission(chat_id, request_id="t1", approved=True, session_id="s1"),
-        pcm.respond_permission(chat_id, request_id="t1", approved=False, session_id="s1"),
+        pcm.respond_permission(chat_id, request_id=request_id, approved=True, session_id="s1"),
+        pcm.respond_permission(chat_id, request_id=request_id, approved=False, session_id="s1"),
     )
 
     assert approve.ok is True and approve.already_resolved is False
@@ -1152,10 +1182,11 @@ async def test_reply_for_an_already_settled_request_is_already_resolved(tmp_path
     pcm, chat_id, provider, stream = _acp_chat(tmp_path)
     agent = _agent(provider, "t1")
     await _settle()
-    _persist(pcm, chat_id, "t1", "s1")
-    assert (await pcm.respond_permission(chat_id, request_id="t1", approved=True, session_id="s1")).ok
+    request_id = _host_request_id(provider, "t1")
+    _persist(pcm, chat_id, request_id, "s1")
+    assert (await pcm.respond_permission(chat_id, request_id=request_id, approved=True, session_id="s1")).ok
 
-    again = await pcm.respond_permission(chat_id, request_id="t1", approved=False, session_id="s1")
+    again = await pcm.respond_permission(chat_id, request_id=request_id, approved=False, session_id="s1")
 
     assert again.ok is True and again.already_resolved is True
     assert await agent == _ALLOW
@@ -1167,17 +1198,18 @@ async def test_subagent_permission_is_answered_on_its_own_session(tmp_path: Path
     pcm, chat_id, provider, _stream = _acp_chat(tmp_path, session_id="parent")
     agent = _agent(provider, "c1", session_id="child")
     await _settle()
-    _persist(pcm, chat_id, "c1", "child")
+    request_id = _host_request_id(provider, "c1", "child")
+    _persist(pcm, chat_id, request_id, "child")
 
-    wrong = await pcm.respond_permission(chat_id, request_id="c1", approved=True, session_id="parent")
+    wrong = await pcm.respond_permission(chat_id, request_id=request_id, approved=True, session_id="parent")
     assert wrong.ok is True
     assert provider.calls == []
-    assert provider.broker.has("c1")
+    assert provider.broker.has(request_id)
 
-    right = await pcm.respond_permission(chat_id, request_id="c1", approved=True, session_id="child")
+    right = await pcm.respond_permission(chat_id, request_id=request_id, approved=True, session_id="child")
 
     assert right.ok is True
-    assert provider.calls == [("c1", True, "child")]
+    assert provider.calls == [(request_id, True, "child")]
     assert await agent == _ALLOW
 
 
@@ -1190,12 +1222,13 @@ async def test_reply_and_cancel_race_resolves_the_agent_exactly_once(
     pcm, chat_id, provider, _stream = _acp_chat(tmp_path)
     agent = _agent(provider, "t1")
     await _settle()
-    _persist(pcm, chat_id, "t1", "s1")
+    request_id = _host_request_id(provider, "t1")
+    _persist(pcm, chat_id, request_id, "s1")
 
     if cancel_mid_reply:
         provider.gate = asyncio.Event()
         reply_task = asyncio.create_task(
-            pcm.respond_permission(chat_id, request_id="t1", approved=True, session_id="s1")
+            pcm.respond_permission(chat_id, request_id=request_id, approved=True, session_id="s1")
         )
         await provider.entered.wait()  # the reply is held inside its provider call
         cancelled = provider.broker.cancel_all()
@@ -1203,13 +1236,13 @@ async def test_reply_and_cancel_race_resolves_the_agent_exactly_once(
         reply = await reply_task
     else:
         cancelled = provider.broker.cancel_all()
-        reply = await pcm.respond_permission(chat_id, request_id="t1", approved=True, session_id="s1")
+        reply = await pcm.respond_permission(chat_id, request_id=request_id, approved=True, session_id="s1")
 
     assert cancelled == 1
     assert reply.ok is True and reply.already_resolved is True
     assert len(provider.calls) == 1
     assert await agent == {"outcome": "cancelled"}
-    assert not provider.broker.has("t1")
+    assert not provider.broker.has(request_id)
 
 
 @pytest.mark.asyncio
@@ -1219,11 +1252,12 @@ async def test_failed_reply_log_omits_the_error_text(
     pcm, chat_id, provider, _stream = _acp_chat(tmp_path)
     agent = _agent(provider, "t1")
     await _settle()
-    _persist(pcm, chat_id, "t1", "s1")
+    request_id = _host_request_id(provider, "t1")
+    _persist(pcm, chat_id, request_id, "s1")
     provider.fail_with = "adapter wrote /secret/path with token abc123"
 
     caplog.set_level("INFO")
-    result = await pcm.respond_permission(chat_id, request_id="t1", approved=True, session_id="s1")
+    result = await pcm.respond_permission(chat_id, request_id=request_id, approved=True, session_id="s1")
 
     assert result.ok is False
     assert "failed" in caplog.text
