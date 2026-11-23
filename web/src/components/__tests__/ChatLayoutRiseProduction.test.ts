@@ -102,7 +102,7 @@ describe('production ChatLayout + ChatPanel: the rise never reaches a replacemen
       chat_id: 'chat-1', project_id: 'project-1', title: 'rise production', archived: false,
       provider: 'claude', mode: 'bypass',
     }] as unknown as typeof store.chats
-    store.workspaces = [{ name: 'personal', vault_root: '', default_provider: 'claude', gws_profile: '' }]
+    store.workspaces = [{ name: 'personal', vault_root: '', default_provider: 'claude' }]
     store.activeWorkspace = 'personal'
     store.bootstrapped = true
     vi.spyOn(store, 'fetchAll').mockResolvedValue()

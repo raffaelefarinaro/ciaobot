@@ -40,7 +40,7 @@ describe('HomeIntake slash commands', () => {
     const store = useProjectStore()
     store.activeWorkspace = 'personal'
     store.workspaces = [
-      { name: 'personal', vault_root: '', default_provider: 'claude', gws_profile: '' },
+      { name: 'personal', vault_root: '', default_provider: 'claude' },
     ] as unknown as typeof store.workspaces
     store.projects = [
       { project_id: 'general', name: 'General', workspace: 'personal', order: 0 },

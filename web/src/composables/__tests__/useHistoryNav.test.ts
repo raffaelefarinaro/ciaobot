@@ -64,7 +64,7 @@ describe('useHistoryNav', () => {
     const pinia = createPinia()
     setActivePinia(pinia)
     const store = useProjectStore()
-    store.workspaces = [{ name: 'personal', vault_root: '', default_provider: 'claude', gws_profile: '' }]
+    store.workspaces = [{ name: 'personal', vault_root: '', default_provider: 'claude' }]
 
     const router = makeRouter()
     await router.push('/stats')
@@ -82,7 +82,7 @@ describe('useHistoryNav', () => {
     const pinia = createPinia()
     setActivePinia(pinia)
     const store = useProjectStore()
-    store.workspaces = [{ name: 'personal', vault_root: '', default_provider: 'claude', gws_profile: '' }]
+    store.workspaces = [{ name: 'personal', vault_root: '', default_provider: 'claude' }]
 
     const router = makeRouter()
     await router.push('/tasks')

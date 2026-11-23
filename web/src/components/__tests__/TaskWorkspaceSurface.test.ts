@@ -183,8 +183,8 @@ describe('TaskWorkspaceSurface overlay mode', () => {
 
     const store = useProjectStore()
     store.workspaces = [
-      { name: 'personal', vault_root: '/tmp/vault', default_provider: 'claude', gws_profile: '' },
-      { name: 'work', vault_root: '/tmp/work', default_provider: 'claude', gws_profile: '' },
+      { name: 'personal', vault_root: '/tmp/vault', default_provider: 'claude' },
+      { name: 'work', vault_root: '/tmp/work', default_provider: 'claude' },
     ]
     store.activeWorkspace = 'personal'
     store.projects = [

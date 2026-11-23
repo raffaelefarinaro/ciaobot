@@ -64,7 +64,6 @@ function workspaces(names: string[], primary = 'personal'): WorkspacesResponse {
       name,
       vault_root: `${name}/memory-vault`,
       default_provider: 'claude',
-      gws_profile: '',
       color: 'pink',
     })),
     active: names[0] ?? null,

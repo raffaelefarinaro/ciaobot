@@ -692,9 +692,9 @@ describe('ChatLayout', () => {
 
     const store = useProjectStore()
     store.workspaces = [
-      { name: 'personal', vault_root: '', default_provider: 'claude', gws_profile: '' },
-      { name: 'work', vault_root: '', default_provider: 'claude', gws_profile: '' },
-      { name: 'client', vault_root: '', default_provider: 'claude', gws_profile: '' },
+      { name: 'personal', vault_root: '', default_provider: 'claude' },
+      { name: 'work', vault_root: '', default_provider: 'claude' },
+      { name: 'client', vault_root: '', default_provider: 'claude' },
     ]
     store.activeWorkspace = 'personal'
     store.bootstrapped = true
@@ -746,8 +746,8 @@ describe('ChatLayout', () => {
 
     const store = useProjectStore()
     store.workspaces = [
-      { name: 'personal', vault_root: '', default_provider: 'claude', gws_profile: '' },
-      { name: 'work', vault_root: '', default_provider: 'claude', gws_profile: '' },
+      { name: 'personal', vault_root: '', default_provider: 'claude' },
+      { name: 'work', vault_root: '', default_provider: 'claude' },
     ]
     store.activeWorkspace = 'personal'
     store.bootstrapped = true
@@ -1152,8 +1152,8 @@ describe('ChatLayout', () => {
     const wrapper = await mountOpenChat()
     const store = useProjectStore()
     store.workspaces = [
-      { name: 'personal', vault_root: '', default_provider: 'claude', gws_profile: '' },
-      { name: 'work', vault_root: '', default_provider: 'claude', gws_profile: '' },
+      { name: 'personal', vault_root: '', default_provider: 'claude' },
+      { name: 'work', vault_root: '', default_provider: 'claude' },
     ]
     const switchWorkspace = vi.spyOn(store, 'switchWorkspace').mockResolvedValue(true)
     const input = document.createElement('textarea')
@@ -1185,8 +1185,8 @@ describe('ChatLayout', () => {
     const wrapper = await mountOpenChat()
     const store = useProjectStore()
     store.workspaces = [
-      { name: 'personal', vault_root: '', default_provider: 'claude', gws_profile: '' },
-      { name: 'work', vault_root: '', default_provider: 'claude', gws_profile: '' },
+      { name: 'personal', vault_root: '', default_provider: 'claude' },
+      { name: 'work', vault_root: '', default_provider: 'claude' },
     ]
     const switchWorkspace = vi.spyOn(store, 'switchWorkspace').mockResolvedValue(true)
     handleQuestionShortcut.mockReturnValue(false)
@@ -1206,8 +1206,8 @@ describe('ChatLayout', () => {
     const wrapper = await mountOpenChat()
     const store = useProjectStore()
     store.workspaces = [
-      { name: 'personal', vault_root: '', default_provider: 'claude', gws_profile: '' },
-      { name: 'work', vault_root: '', default_provider: 'claude', gws_profile: '' },
+      { name: 'personal', vault_root: '', default_provider: 'claude' },
+      { name: 'work', vault_root: '', default_provider: 'claude' },
     ]
     const switchWorkspace = vi.spyOn(store, 'switchWorkspace').mockResolvedValue(true)
     const layer = document.createElement('div')
@@ -1227,8 +1227,8 @@ describe('ChatLayout', () => {
     const wrapper = await mountOpenChat()
     const store = useProjectStore()
     store.workspaces = [
-      { name: 'personal', vault_root: '', default_provider: 'claude', gws_profile: '' },
-      { name: 'work', vault_root: '', default_provider: 'claude', gws_profile: '' },
+      { name: 'personal', vault_root: '', default_provider: 'claude' },
+      { name: 'work', vault_root: '', default_provider: 'claude' },
     ]
     const switchWorkspace = vi.spyOn(store, 'switchWorkspace').mockResolvedValue(true)
     if (owner === 'question') handleQuestionShortcut.mockReturnValue(true)
@@ -1272,8 +1272,8 @@ describe('ChatLayout', () => {
     const wrapper = await mountOpenChat()
     const store = useProjectStore()
     store.workspaces = [
-      { name: 'personal', vault_root: '', default_provider: 'claude', gws_profile: '' },
-      { name: 'work', vault_root: '', default_provider: 'claude', gws_profile: '' },
+      { name: 'personal', vault_root: '', default_provider: 'claude' },
+      { name: 'work', vault_root: '', default_provider: 'claude' },
     ]
     const switchWorkspace = vi.spyOn(store, 'switchWorkspace').mockResolvedValue(true)
     const input = document.createElement('textarea')
@@ -1293,8 +1293,8 @@ describe('ChatLayout', () => {
     try {
       const store = useProjectStore()
       store.workspaces = [
-        { name: 'personal', vault_root: '', default_provider: 'claude', gws_profile: '' },
-        { name: 'work', vault_root: '', default_provider: 'claude', gws_profile: '' },
+        { name: 'personal', vault_root: '', default_provider: 'claude' },
+        { name: 'work', vault_root: '', default_provider: 'claude' },
       ]
       const switchWorkspace = vi.spyOn(store, 'switchWorkspace').mockResolvedValue(true)
       const digit = new KeyboardEvent('keydown', { key: '2', code: 'Digit2', keyCode: 229, bubbles: true, cancelable: true })
@@ -2747,8 +2747,8 @@ describe('ChatLayout home arrow navigation', () => {
 
     const store = useProjectStore()
     store.workspaces = [
-      { name: 'personal', vault_root: '', default_provider: 'claude', gws_profile: '' },
-      { name: 'work', vault_root: '', default_provider: 'claude', gws_profile: '' },
+      { name: 'personal', vault_root: '', default_provider: 'claude' },
+      { name: 'work', vault_root: '', default_provider: 'claude' },
     ]
     store.projects = [
       { project_id: 'personal-project', name: 'General', workspace: 'personal' },

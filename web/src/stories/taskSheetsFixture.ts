@@ -232,7 +232,7 @@ export function sheetAnswers<T>(answers: readonly T[]): () => T {
 export function seedSheetStore(pinia: Pinia): void {
   const store = useProjectStore(pinia)
   store.workspaces = [
-    { name: sheetWorkspace, vault_root: '/tmp/storybook-sheet', default_provider: 'claude', gws_profile: '' },
+    { name: sheetWorkspace, vault_root: '/tmp/storybook-sheet', default_provider: 'claude' },
   ]
   store.activeWorkspace = sheetWorkspace
   store.projects = [

@@ -93,8 +93,8 @@ describe('ProjectSidebar review section', () => {
     setActivePinia(createPinia())
     const store = useProjectStore()
     store.workspaces = [
-      { name: 'personal', vault_root: '/tmp/p', default_provider: 'claude', gws_profile: '' },
-      { name: 'work', vault_root: '/tmp/w', default_provider: 'claude', gws_profile: '' },
+      { name: 'personal', vault_root: '/tmp/p', default_provider: 'claude' },
+      { name: 'work', vault_root: '/tmp/w', default_provider: 'claude' },
     ]
     store.activeWorkspace = 'personal'
     const proposals = useProposalsStore()
@@ -554,7 +554,7 @@ describe('notifications bell', () => {
     setActivePinia(createPinia())
     const store = useProjectStore()
     store.workspaces = [
-      { name: 'personal', vault_root: '/tmp/p', default_provider: 'claude', gws_profile: '' },
+      { name: 'personal', vault_root: '/tmp/p', default_provider: 'claude' },
     ]
     store.activeWorkspace = 'personal'
   })

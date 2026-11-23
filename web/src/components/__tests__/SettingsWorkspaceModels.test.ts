@@ -79,8 +79,8 @@ beforeEach(async () => {
   store = useProjectStore()
   store.activeWorkspace = 'work'
   store.workspaces = [
-    { name: 'work', vault_root: 'work', default_provider: 'claude', gws_profile: '' },
-    { name: 'home', vault_root: 'home', default_provider: 'claude', gws_profile: '' },
+    { name: 'work', vault_root: 'work', default_provider: 'claude' },
+    { name: 'home', vault_root: 'home', default_provider: 'claude' },
   ]
   store.workspaceProviderOptions = [
     { value: 'claude', label: 'Claude Code' },
