@@ -17,11 +17,17 @@ export interface SharedBrainStatus {
   detail: string
 }
 
-const PROBLEM_TEXT: Record<string, { text: string; tone: SharedBrainTone }> = {
-  moved: { text: 'The folder is a link that moved', tone: 'error' },
-  not_a_checkout: { text: 'The folder is not a git checkout', tone: 'error' },
-  outside_install: { text: 'The folder is outside the Ciaobot install', tone: 'error' },
-  unsafe_config: { text: "The folder's git settings are not allowed", tone: 'error' },
+/**
+ * Words for a folder the engine cannot use, keyed by its problem code. The same
+ * codes can also arrive as a stale `last_update.reason`, so both read this one map.
+ */
+const PROBLEM_TEXT: Record<string, SharedBrainStatus> = {
+  missing: { text: 'Folder not found', tone: 'error', detail: '' },
+  origin_changed: { text: "The folder's remote address changed", tone: 'warn', detail: '' },
+  moved: { text: 'The folder is a link that moved', tone: 'error', detail: '' },
+  not_a_checkout: { text: 'The folder is not a git checkout', tone: 'error', detail: '' },
+  outside_install: { text: 'The folder is outside the Ciaobot install', tone: 'error', detail: '' },
+  unsafe_config: { text: "The folder's git settings are not allowed", tone: 'error', detail: '' },
 }
 
 const SKIPPED_TEXT: Record<string, string> = {
@@ -37,27 +43,28 @@ function localTime(at: string): string {
 
 /** One plain-words status line per brain, so the state never rests on colour alone. */
 export function sharedBrainStatus(state: SharedBrainState): SharedBrainStatus {
-  if (state.problem === 'missing' || state.missing) {
-    return { text: 'Folder not found', tone: 'error', detail: '' }
-  }
-  if (state.origin_changed || state.problem === 'origin_changed') {
-    return { text: "The folder's remote address changed", tone: 'warn', detail: '' }
-  }
+  if (state.missing) return PROBLEM_TEXT.missing
+  if (state.origin_changed) return PROBLEM_TEXT.origin_changed
   const problem = PROBLEM_TEXT[state.problem]
-  if (problem) return { ...problem, detail: '' }
+  if (problem) return problem
 
   const last = state.last_update
   if (!last) return { text: 'Linked. First update pending.', tone: 'ok', detail: '' }
   if (last.outcome === 'updated') return { text: `Updated ${localTime(last.at)}`, tone: 'ok', detail: '' }
   if (last.outcome === 'up_to_date') return { text: 'Up to date', tone: 'ok', detail: '' }
+  // A stale reason that names a problem code reads as that problem.
+  if (PROBLEM_TEXT[last.reason]) return PROBLEM_TEXT[last.reason]
   if (last.outcome === 'skipped' && SKIPPED_TEXT[last.reason]) {
     return { text: SKIPPED_TEXT[last.reason], tone: 'warn', detail: '' }
   }
   if (last.outcome === 'failed' && last.reason === 'diverged') {
     return { text: 'Not updated: local and team history have diverged', tone: 'warn', detail: '' }
   }
+  if (last.outcome === 'failed' && last.reason === 'merge_failed') {
+    return { text: 'Not updated: the update could not be applied', tone: 'warn', detail: last.detail }
+  }
   if (last.outcome === 'failed' && (last.reason === 'fetch_failed' || last.reason === 'timeout')) {
     return { text: 'Could not reach the remote', tone: 'error', detail: last.detail }
   }
-  return { text: 'Not updated', tone: 'warn', detail: last.reason }
+  return { text: 'Not updated', tone: 'warn', detail: last.detail || last.reason }
 }

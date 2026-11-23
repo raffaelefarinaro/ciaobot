@@ -96,8 +96,20 @@ describe('sharedBrainStatus', () => {
       .toMatchObject({ text: 'Could not reach the remote', tone: 'error', detail: 'network down' })
   })
 
-  it('falls back to the reason code for any other failure', () => {
-    expect(sharedBrainStatus(brain({ last_update: update('failed', 'merge_failed') })))
-      .toMatchObject({ text: 'Not updated', tone: 'warn', detail: 'merge_failed' })
+  it('says an update could not be applied, with the redacted engine detail', () => {
+    expect(sharedBrainStatus(brain({ last_update: update('failed', 'merge_failed', 'conflict in notes.md') })))
+      .toMatchObject({ text: 'Not updated: the update could not be applied', tone: 'warn', detail: 'conflict in notes.md' })
+  })
+
+  it('shows the engine detail, never a raw code, for an unknown failure', () => {
+    expect(sharedBrainStatus(brain({ last_update: update('failed', 'zzz_unknown', 'engine said no') })))
+      .toMatchObject({ text: 'Not updated', tone: 'warn', detail: 'engine said no' })
+    expect(sharedBrainStatus(brain({ last_update: update('failed', 'zzz_unknown') })))
+      .toMatchObject({ text: 'Not updated', tone: 'warn', detail: 'zzz_unknown' })
+  })
+
+  it('reads a stale problem code in last_update as the same words as the problem', () => {
+    expect(sharedBrainStatus(brain({ last_update: update('failed', 'moved') })))
+      .toEqual(sharedBrainStatus(brain({ problem: 'moved' })))
   })
 })

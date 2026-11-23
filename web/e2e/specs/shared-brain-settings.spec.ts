@@ -11,6 +11,8 @@ const OVERVIEW = '/settings/workspace'
 const TEAM = '/synthetic/team-notes'
 const OTHER = '/synthetic/other-notes'
 const DIRTY = '/synthetic/team-notes-dirty'
+const COPY = '/synthetic/team-notes-copy'
+const LIMIT_SENTENCE = 'You can connect up to 5 shared brains. Remove one to add another.'
 
 test.use({ viewport: { width: 390, height: 844 }, isMobile: true, hasTouch: true })
 
@@ -29,7 +31,7 @@ async function openCard(page: Page): Promise<Locator> {
 
 async function link(panel: Locator, path: string, name = ''): Promise<void> {
   await panel.getByLabel('Folder path', { exact: true }).fill(path)
-  if (name) await panel.getByLabel('Name (optional)', { exact: true }).fill(name)
+  await panel.getByLabel('Name (optional)', { exact: true }).fill(name)
   await panel.getByRole('button', { name: 'Link folder' }).click()
 }
 
@@ -62,7 +64,7 @@ test.describe('shared brains card', () => {
     await expect(card(page).getByText('team-notes', { exact: true })).toBeVisible()
   })
 
-  test("a refused folder shows the engine's words inline and changes nothing", async ({ page }) => {
+  test("the engine's refusals show inline, in its own words, and change nothing", async ({ page }) => {
     const panel = await openCard(page)
     await link(panel, TEAM)
     await expect(panel.getByText('team-notes', { exact: true })).toBeVisible()
@@ -72,8 +74,32 @@ test.describe('shared brains card', () => {
     await expect(panel.getByLabel('Folder path', { exact: true })).toHaveValue('/synthetic/not-a-checkout')
 
     await link(panel, TEAM)
-    await expect(panel.getByRole('alert')).toContainText('Already linked')
+    await expect(panel.getByRole('alert')).toContainText(`Shared brain folder is listed twice: ${TEAM}`)
+
+    await link(panel, COPY)
+    await expect(panel.getByRole('alert')).toContainText(`${COPY} is the same repository as shared brain 'team-notes'`)
+
+    await link(panel, OTHER, 'Bad Name')
+    await expect(panel.getByRole('alert')).toContainText('shared brain name must be 1 to 32 lowercase letters, digits or dashes')
+
+    await link(panel, OTHER, 'team-notes')
+    await expect(panel.getByRole('alert')).toContainText("shared brain name 'team-notes' is already used in this workspace")
+
     await expect(panel.getByText('team-notes', { exact: true })).toHaveCount(1)
+    await expect(panel.getByText('other-notes', { exact: true })).toHaveCount(0)
+  })
+
+  test('the engine refuses a sixth row, and five folders show the replacement sentence', async ({ page }) => {
+    const panel = await openCard(page)
+    for (const n of [1, 2, 3, 4, 5]) await link(panel, `/synthetic/brain-${n}`)
+    await expect(panel.getByText('brain-5', { exact: true })).toBeVisible()
+    await expect(panel.getByText(LIMIT_SENTENCE)).toBeVisible()
+    await expect(panel.getByLabel('Folder path', { exact: true })).toHaveCount(0)
+
+    const rows = [1, 2, 3, 4, 5, 6].map((n) => ({ path: `/synthetic/brain-${n}` }))
+    const sixth = await page.request.patch('/api/workspaces/alpha', { data: { shared_brains: rows } })
+    expect(sixth.status()).toBe(400)
+    expect(await sixth.json()).toEqual({ error: 'A workspace can link at most 5 shared brains' })
   })
 
   test('a folder with local changes says so in words', async ({ page }) => {

@@ -21,9 +21,14 @@
     </template>
 
     <template v-else>
-      <p v-if="loadError" class="hint hint--warn" role="alert">
-        Could not refresh: {{ loadError }}. Showing the last known list.
-      </p>
+      <div v-if="listStale" class="hint hint--warn" role="alert">
+        <p class="shared-brain-stale">
+          Could not refresh the list: {{ loadError }}. Showing the last known list. Adding and removing wait until it is read again.
+        </p>
+        <button type="button" class="btn-secondary btn-small" :disabled="loading" @click="load()">
+          {{ loading ? 'Checking...' : 'Try again' }}
+        </button>
+      </div>
 
       <ul v-if="brains.length" class="shared-brain-list" aria-label="Linked shared brains">
         <li v-for="brain in brains" :key="brain.name" class="shared-brain-row">
@@ -32,7 +37,7 @@
             <button
               type="button"
               class="set-link"
-              :disabled="saving"
+              :disabled="saving || listStale"
               :aria-label="`Remove ${brain.name}`"
               @click="removeBrain(brain)"
             >Remove</button>
@@ -57,18 +62,17 @@
 
       <p v-if="saveError" class="action-result action-result--error" role="alert">{{ saveError }}</p>
 
-      <form v-if="brains.length < MAX_SHARED_BRAINS || !brains.length" class="shared-brain-form" @submit.prevent="linkFolder">
+      <form v-if="brains.length < MAX_SHARED_BRAINS" class="shared-brain-form" @submit.prevent="linkFolder">
         <label class="shared-brain-field">
           <span class="shared-brain-label">Folder path</span>
           <input
             v-model="pathDraft"
             type="text"
             class="routine-input shared-brain-input"
-            aria-label="Folder path"
             autocomplete="off"
             spellcheck="false"
             placeholder="/absolute/path/to/team-notes"
-            :disabled="saving"
+            :disabled="saving || listStale"
           />
         </label>
         <label class="shared-brain-field">
@@ -77,11 +81,10 @@
             v-model="nameDraft"
             type="text"
             class="routine-input shared-brain-input"
-            aria-label="Name (optional)"
             autocomplete="off"
             spellcheck="false"
-            :placeholder="'taken from the repository'"
-            :disabled="saving"
+            placeholder="taken from the repository"
+            :disabled="saving || listStale"
           />
         </label>
         <p class="hint hint--compact">The name cannot be changed later. Remove the brain and add it again to rename it.</p>
@@ -89,7 +92,7 @@
           <button
             type="submit"
             class="btn-small"
-            :disabled="saving || !pathDraft.trim()"
+            :disabled="saving || listStale || !pathDraft.trim()"
             :aria-busy="saving ? 'true' : undefined"
           >{{ saving ? 'Linking...' : 'Link folder' }}</button>
         </div>
@@ -108,7 +111,7 @@ import { askConfirm } from '../../lib/confirm'
 import { apiErrorMessage } from '../../lib/errorMessage'
 import { MAX_SHARED_BRAINS, SHARED_BRAIN_PRIVACY, sharedBrainStatus } from '../../lib/sharedBrain'
 import { useProjectStore } from '../../stores/projects'
-import type { SharedBrainLink, SharedBrainRow, SharedBrainState, SharedBrainsResponse } from '../../lib/types'
+import type { SharedBrainRow, SharedBrainState, SharedBrainsResponse } from '../../lib/types'
 
 // The card owns its data: it reads the linked brains on mount and whenever the
 // active workspace changes, and saves the whole list through the workspace
@@ -121,6 +124,9 @@ const brains = ref<SharedBrainState[] | null>(null)
 const loading = ref(false)
 const loadError = ref('')
 const saving = ref(false)
+// True from a successful save until a re-read succeeds: the list on screen is then
+// older than the workspace, so adding or removing from it would resend a stale list.
+const listStale = ref(false)
 const saveError = ref('')
 const pathDraft = ref('')
 const nameDraft = ref('')
@@ -144,6 +150,7 @@ async function load(): Promise<void> {
     if (mine !== ticket) return
     brains.value = res?.shared_brains ?? []
     loadError.value = ''
+    listStale.value = false
   } catch (e) {
     if (mine !== ticket) return
     loadError.value = apiErrorMessage(e, 'The request failed.')
@@ -156,22 +163,23 @@ async function save(rows: SharedBrainRow[]): Promise<boolean> {
   const ws = workspace.value
   saving.value = true
   saveError.value = ''
+  let ok = false
   try {
-    await projectStore.updateWorkspace(ws, { shared_brains: rows as SharedBrainLink[] })
-    if (ws !== workspace.value) return false
-    return true
+    await projectStore.updateWorkspace(ws, { shared_brains: rows })
+    ok = true
   } catch (e) {
-    if (ws !== workspace.value) return false
-    saveError.value = apiErrorMessage(e, 'The shared brains could not be saved.')
-    return false
+    if (ws === workspace.value) saveError.value = apiErrorMessage(e, 'The shared brains could not be saved.')
   } finally {
-    if (ws === workspace.value) saving.value = false
+    // Unconditional: a save that outlives its workspace must not leave the new one disabled.
+    saving.value = false
   }
+  if (ok && ws === workspace.value) listStale.value = true
+  return ok && ws === workspace.value
 }
 
 async function linkFolder(): Promise<void> {
   const path = pathDraft.value.trim()
-  if (!path || saving.value) return
+  if (!path || saving.value || listStale.value) return
   const name = nameDraft.value.trim()
   const row: SharedBrainRow = name ? { path, name } : { path }
   const ok = await save([...currentRows(), row])
@@ -182,12 +190,12 @@ async function linkFolder(): Promise<void> {
 }
 
 async function removeBrain(brain: SharedBrainState): Promise<void> {
-  if (saving.value) return
+  if (saving.value || listStale.value) return
   const ok = await askConfirm(
     `Disconnect ${brain.name}? Only this brain is disconnected. The folder, the other shared brains and your private notes are left untouched.`,
     { title: 'Disconnect this shared brain?', confirmLabel: 'Remove', destructive: true },
   )
-  if (!ok || saving.value) return
+  if (!ok || saving.value || listStale.value) return
   const rows = currentRows().filter((row) => row.path !== brain.path)
   const ok2 = await save(rows)
   if (ok2) await load()
@@ -198,6 +206,8 @@ watch(workspace, () => {
   // Another workspace's list must never stand in for this one's.
   brains.value = null
   loadError.value = ''
+  listStale.value = false
+  saving.value = false
   saveError.value = ''
   pathDraft.value = ''
   nameDraft.value = ''
@@ -220,7 +230,7 @@ watch(workspace, () => {
 .shared-brain-identity,
 .shared-brain-path {
   margin: var(--space-1) 0 0;
-  color: var(--fg-muted, var(--fg));
+  color: var(--fg2);
   font-size: var(--text-sm);
   overflow-wrap: anywhere;
 }
@@ -229,6 +239,7 @@ watch(workspace, () => {
 .shared-brain-status--ok { color: var(--fg); }
 .shared-brain-status--warn { color: var(--warning); }
 .shared-brain-status--error { color: var(--error); }
+.shared-brain-stale { margin: 0 0 var(--space-2); }
 .shared-brain-form { display: grid; gap: var(--space-3); margin-top: var(--space-3); min-width: 0; }
 .shared-brain-field { display: grid; gap: var(--space-1); min-width: 0; }
 .shared-brain-label { color: var(--fg); font-size: var(--text-sm); }

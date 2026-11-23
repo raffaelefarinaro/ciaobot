@@ -68,7 +68,8 @@ function button(view: VueWrapper, label: string) {
 }
 
 function field(view: VueWrapper, label: string) {
-  return view.find(`input[aria-label="${label}"]`)
+  const row = view.findAll('label').find((l) => l.find('.shared-brain-label').text() === label)
+  return row ? row.find('input') : view.find('input[data-absent]')
 }
 
 let projectStore: ReturnType<typeof useProjectStore>
@@ -203,5 +204,64 @@ describe('SettingsSharedBrains listed brains', () => {
     await flushPromises()
     expect(view.text()).toContain('other-notes')
     expect(view.text()).not.toContain('team-notes')
+  })
+
+  it('removing the middle of three sends the other two rows in order, by name', async () => {
+    const third = state({ name: 'third-notes', identity: 'github.com/acme/third-notes', path: '/Users/me/third-notes' })
+    apiGet.mockResolvedValueOnce({ shared_brains: [TEAM, OTHER, third] })
+    const view = await mountCard()
+    askConfirm.mockResolvedValueOnce(true)
+    apiGet.mockResolvedValueOnce({ shared_brains: [TEAM, third] })
+    await view.findAll('.shared-brain-row')[1].find('button').trigger('click')
+    await flushPromises()
+    expect(updateWorkspace).toHaveBeenCalledTimes(1)
+    expect(updateWorkspace).toHaveBeenCalledWith('personal', {
+      shared_brains: [
+        { path: TEAM.path, name: 'team-notes' },
+        { path: third.path, name: 'third-notes' },
+      ],
+    })
+  })
+})
+
+describe('SettingsSharedBrains workspace switch and stale lists', () => {
+  it('a save still pending when the workspace changes does not leave the new one disabled', async () => {
+    let finishSave: (v: unknown) => void = () => {}
+    updateWorkspace.mockReturnValueOnce(new Promise((resolve) => { finishSave = resolve }))
+    apiGet.mockResolvedValueOnce({ shared_brains: [TEAM] })
+    const view = await mountCard()
+    await field(view, 'Folder path').setValue('/x/y')
+    void view.find('form').trigger('submit')
+    await flushPromises()
+
+    apiGet.mockResolvedValueOnce({ shared_brains: [OTHER] })
+    projectStore.activeWorkspace = 'other'
+    await flushPromises()
+    finishSave({ workspaces: [] })
+    await flushPromises()
+
+    await field(view, 'Folder path').setValue('/z/w')
+    expect(button(view, 'Link folder')!.attributes('disabled')).toBeUndefined()
+    expect(view.find('.shared-brain-row button').attributes('disabled')).toBeUndefined()
+  })
+
+  it('after a save whose re-read fails, Remove and add stay off until a re-read succeeds', async () => {
+    apiGet.mockResolvedValueOnce({ shared_brains: [TEAM] })
+    const view = await mountCard()
+    await field(view, 'Folder path').setValue('/x/y')
+    apiGet.mockRejectedValueOnce(apiError('engine blip'))
+    await view.find('form').trigger('submit')
+    await flushPromises()
+    expect(updateWorkspace).toHaveBeenCalledWith('personal', { shared_brains: [{ path: TEAM.path, name: TEAM.name }, { path: '/x/y' }] })
+
+    expect(view.find('.shared-brain-row button').attributes('disabled')).toBeDefined()
+    expect(button(view, 'Link folder')!.attributes('disabled')).toBeDefined()
+
+    updateWorkspace.mockClear()
+    apiGet.mockResolvedValueOnce({ shared_brains: [TEAM] })
+    await button(view, 'Try again')!.trigger('click')
+    await flushPromises()
+    expect(view.find('.shared-brain-row button').attributes('disabled')).toBeUndefined()
+    expect(updateWorkspace).not.toHaveBeenCalled()
   })
 })

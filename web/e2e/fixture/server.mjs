@@ -308,7 +308,7 @@ function workspacesPayload(state) {
   return {
     workspaces: ordered.map(w => {
       let row = state.handover[w.name] ? { ...w, memory_handover: state.handover[w.name] } : w
-      row = { ...row, shared_brains: (state.sharedBrains?.[w.name] ?? []).map(({ name, path }) => ({ name, path, identity: sharedBrainIdentity(name) })) }
+      row = { ...row, shared_brains: state.sharedBrains?.[w.name] ?? [] }
       if (state.memoryApproval[w.name] && Object.keys(state.memoryApproval[w.name]).length) {
         row = { ...row, memory_approval: { ...state.memoryApproval[w.name] } }
       }
@@ -359,38 +359,84 @@ function reorderWorkspaces(state, order) {
   return true
 }
 
-// Shared-brain folders the fixture accepts. Anything else is "not a git repository", as the engine refuses it.
-const SHARED_BRAIN_PATHS = ['/synthetic/team-notes', '/synthetic/team-notes-dirty', '/synthetic/other-notes']
+// Synthetic checkouts the fixture accepts, with the repository each one points to.
+// Anything else is "Not a git repository", as the engine says for a folder with no checkout.
+const SHARED_BRAIN_FOLDERS = {
+  '/synthetic/team-notes': 'github.com/acme/team-notes',
+  '/synthetic/team-notes-dirty': 'github.com/acme/team-notes-dirty',
+  '/synthetic/other-notes': 'github.com/acme/other-notes',
+  // The same repository as team-notes, in another folder: the engine refuses a second copy.
+  '/synthetic/team-notes-copy': 'github.com/acme/team-notes',
+  '/synthetic/brain-1': 'github.com/acme/brain-1',
+  '/synthetic/brain-2': 'github.com/acme/brain-2',
+  '/synthetic/brain-3': 'github.com/acme/brain-3',
+  '/synthetic/brain-4': 'github.com/acme/brain-4',
+  '/synthetic/brain-5': 'github.com/acme/brain-5',
+  '/synthetic/brain-6': 'github.com/acme/brain-6',
+}
+// ciao/config.py SHARED_BRAIN_NAME_PATTERN, and the engine's cap (MAX_BRAINS_PER_WORKSPACE).
+const SHARED_BRAIN_NAME_RE = /^[a-z0-9](?:[a-z0-9-]{0,30}[a-z0-9])?$/
 const SHARED_BRAIN_LIMIT = 5
 
-function sharedBrainIdentity(name) {
-  return `github.com/acme/${name}`
+/** A name from the repository, as ciao/shared_brain.py _derived_name makes it, suffixed when taken. */
+function derivedSharedBrainName(identity, taken) {
+  const repo = identity.split('/').pop()
+  const base = repo.replace(/[^a-z0-9-]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 32).replace(/-+$/, '') || 'brain'
+  let candidate = base
+  for (let n = 2; taken.has(candidate); n += 1) {
+    const suffix = `-${n}`
+    candidate = `${base.slice(0, 32 - suffix.length).replace(/-+$/, '')}${suffix}`
+  }
+  return candidate
 }
 
-/** Store a workspace's whole shared-brain list, as the engine validates it; returns an error message or null. */
+/**
+ * Store a workspace's whole shared-brain list the way resolve_links validates it,
+ * with the engine's own messages. Returns the error message, or null when stored.
+ */
 function saveSharedBrains(state, name, rows) {
   if (rows.length > SHARED_BRAIN_LIMIT) return `A workspace can link at most ${SHARED_BRAIN_LIMIT} shared brains`
-  const seenPaths = new Set()
-  const seenNames = new Set()
-  const stored = []
+  const existing = state.sharedBrains?.[name] ?? []
+  const byPath = new Map(existing.map(link => [link.path, link]))
+  const names = new Set()
+  const identities = new Map()
+  const paths = new Set()
+  const out = []
   for (const row of rows) {
+    const requested = typeof row?.name === 'string' ? row.name.trim() : ''
     const path = typeof row?.path === 'string' ? row.path.trim() : ''
-    if (!SHARED_BRAIN_PATHS.includes(path)) return `Not a git repository: ${path}`
-    if (seenPaths.has(path)) return `Already linked: ${path}`
-    const brainName = typeof row.name === 'string' && row.name.trim() ? row.name.trim() : path.split('/').pop()
-    if (seenNames.has(brainName)) return `A shared brain named ${brainName} is already linked`
-    seenPaths.add(path)
-    seenNames.add(brainName)
-    stored.push({ name: brainName, path })
+    if (paths.has(path)) return `Shared brain folder is listed twice: ${path}`
+    paths.add(path)
+    const kept = byPath.get(path)
+    if (kept) {
+      if (requested && requested !== kept.name) {
+        return `Shared brain '${kept.name}' is already linked; remove and add it again to rename it`
+      }
+      names.add(kept.name)
+      identities.set(kept.identity, kept.name)
+      out.push(kept)
+      continue
+    }
+    const identity = SHARED_BRAIN_FOLDERS[path]
+    if (!identity) return `Not a git repository: ${path}`
+    if (identities.has(identity)) return `${path} is the same repository as shared brain '${identities.get(identity)}'`
+    if (requested) {
+      if (!SHARED_BRAIN_NAME_RE.test(requested)) return 'shared brain name must be 1 to 32 lowercase letters, digits or dashes'
+      if (names.has(requested)) return `shared brain name '${requested}' is already used in this workspace`
+    }
+    const brainName = requested || derivedSharedBrainName(identity, names)
+    names.add(brainName)
+    identities.set(identity, brainName)
+    out.push({ name: brainName, path, identity })
   }
-  state.sharedBrains = { ...(state.sharedBrains || {}), [name]: stored }
+  state.sharedBrains = { ...(state.sharedBrains || {}), [name]: out }
   return null
 }
 
 /** Live state of each linked brain: two are up to date, one has local changes. */
 function sharedBrainStates(state, name) {
-  return (state.sharedBrains?.[name] ?? []).map(({ name: brain, path }) => {
-    const base = { name: brain, identity: sharedBrainIdentity(brain), path, origin_changed: false, missing: false, problem: '', branch: 'main', head: 'abc1234', head_date: '2026-11-20', dirty: false, upstream: true, fetched_at: '2026-11-22T10:00:00Z' }
+  return (state.sharedBrains?.[name] ?? []).map(({ name: brain, path, identity }) => {
+    const base = { name: brain, identity, path, origin_changed: false, missing: false, problem: '', branch: 'main', head: 'abc1234', head_date: '2026-11-20', dirty: false, upstream: true, fetched_at: '2026-11-22T10:00:00Z' }
     const at = '2026-11-22T10:00:00Z'
     if (path === '/synthetic/team-notes-dirty') return { ...base, dirty: true, last_update: { outcome: 'skipped', reason: 'local_changes', detail: '', at } }
     return { ...base, last_update: { outcome: 'up_to_date', reason: '', detail: '', at } }

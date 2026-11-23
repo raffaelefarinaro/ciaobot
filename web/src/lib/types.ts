@@ -84,16 +84,21 @@ export interface WorkspaceInfo {
   provider_overrides?: ProviderOverrides
   // Sparse Claude context-trim overrides: option key -> trimmed. Missing = catalog defaults.
   claude_trim?: Record<string, boolean>
-  // Operator-only; absent or empty = no shared brains. Read: the linked folders.
-  // Save: the whole list as { path, name? } rows (a name is set once, at link time).
-  shared_brains?: SharedBrainLink[] | SharedBrainRow[]
+  // Operator-only; absent or empty = no shared brains.
+  shared_brains?: SharedBrainLink[]
 }
 
-/** A save row for one shared-brain folder; the name is optional and taken from the repository when absent. */
+/**
+ * A save row for one shared-brain folder. The name is optional and taken from the
+ * repository when absent; it is set once, at link time.
+ */
 export interface SharedBrainRow {
   path: string
   name?: string
 }
+
+/** The payload of a workspace PATCH: a shared-brain save sends rows, not the read links. */
+export type WorkspacePatch = Omit<Partial<WorkspaceInfo>, 'shared_brains'> & { shared_brains?: SharedBrainRow[] }
 
 /** One linked shared-brain folder, as the workspace registry lists it. */
 export interface SharedBrainLink {
