@@ -972,6 +972,7 @@ def test_the_shipped_catalog_ships_its_tasks_and_both_probes_exist(
         "learnings-cleanup",
         "unrehomed-people",
         "vault-relocate",
+        "learnings-queue-drain",
     ]
     assert update_task_catalog.DETECTORS == set(update_tasks.DETECTOR_FUNCTIONS)
     assert update_task_catalog.COMPLETION_CHECKS == set(
@@ -991,6 +992,23 @@ def test_the_shipped_catalog_ships_its_tasks_and_both_probes_exist(
         )
         assert result.status == NOT_APPLICABLE, result.evidence
         assert "detector_not_implemented" not in result.evidence.values()
+
+
+def test_learnings_queue_drain_detector_only_applies_to_legacy_rows(tmp_path: Path) -> None:
+    catalog = load_catalog()
+    task = next(task for task in catalog.tasks if task.id == "learnings-queue-drain")
+    config = _config(tmp_path)
+    vault = Path(config.workspace_vault_root("personal"))
+    workspace = vault / "Workspace"
+    workspace.mkdir(parents=True)
+    queue = workspace / "Memory-Proposals.md"
+    queue.write_text("- [memory] learnings as ordinary prose\n")
+    absent = update_tasks.apply_detector(task, config=config, workspace="personal")
+    assert absent.status == NOT_APPLICABLE
+    queue.write_text("- [learnings] a pending lesson _(request: req-1)_\n")
+    present = update_tasks.apply_detector(task, config=config, workspace="personal")
+    assert present.status == APPLICABLE
+    assert present.evidence["rows"] == 1
 
 
 async def test_a_test_injected_catalog_proves_the_layer_end_to_end(

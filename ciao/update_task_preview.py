@@ -4,7 +4,7 @@ import logging
 from pathlib import Path
 from typing import Any
 
-from ciao import learnings_cleanup, vault_rehome, vault_relocate
+from ciao import learnings_cleanup, learnings_queue_drain, vault_rehome, vault_relocate
 from ciao.update_task_catalog import UpdateTask
 
 logger = logging.getLogger(__name__)
@@ -28,7 +28,23 @@ def prepare(task: UpdateTask, *, config: Any, workspace: str) -> dict[str, Any]:
     if not workspace or workspace not in names:
         raise ValueError("workspace must be registered")
     try:
-        if task.id == "learnings-cleanup":
+        if task.id == "learnings-queue-drain":
+            vault = Path(config.workspace_vault_root(workspace))
+            plan = learnings_queue_drain.drain(
+                vault, workspace=workspace, runtime_root=Path(config.state_path).parent
+            )
+            rows = plan["rows"]
+            blocked = bool(plan["failed"] or plan["unresolved"])
+            result.update(
+                state="blocked" if blocked else "review" if rows else "not_applicable",
+                plan=plan,
+                summary=(
+                    f"Blocked: {len(plan['unresolved'])} drain transaction(s) need recovery or inspection."
+                    if blocked
+                    else f"{len(rows)} pending learning row(s) are ready to drain. Review and apply the receipt-backed command."
+                ),
+            )
+        elif task.id == "learnings-cleanup":
             plan = learnings_cleanup.plan_cleanup(
                 Path(config.workspace_vault_root(workspace)),
                 workspace=workspace,
