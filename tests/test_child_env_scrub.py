@@ -18,7 +18,7 @@ from typing import Any
 
 import pytest
 
-from ciao import adapter_install, dag, gws_wrapper, host_terminal, package_version, schedule_command
+from ciao import adapter_install, dag, host_terminal, package_version, schedule_command
 from ciao.os_support.child_env import BUNDLED_ENGINE_SCRUBBED_KEYS, child_env
 from ciao.providers.acp import connection as connection_module
 
@@ -141,19 +141,6 @@ def test_scheduled_command_env_is_scrubbed_in_the_bundle(
     assert not (set(SCRUBBED) & set(env))
     assert env["EXTRA"] == "1"
     assert os.environ["SSL_CERT_FILE"].endswith("cacert.pem")
-
-
-def test_gws_environment_is_scrubbed_in_the_bundle(
-    monkeypatch: pytest.MonkeyPatch, launcher_env: None, tmp_path: Path
-) -> None:
-    _mode(monkeypatch, "bundled_app")
-    monkeypatch.setattr(gws_wrapper, "login_shell_path", lambda: "/usr/bin")
-    monkeypatch.setattr(gws_wrapper, "profile_config_dir", lambda *_a: tmp_path, raising=False)
-
-    env = gws_wrapper._gws_environment(tmp_path, "default")
-
-    assert not (set(SCRUBBED) & set(env))
-    assert env["CHILD_ENV_PROBE_KEEP"] == "keep-sentinel"
 
 
 

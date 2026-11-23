@@ -256,7 +256,7 @@ def test_route_is_in_neither_middleware_allowlist() -> None:
 def test_loopback_without_a_session_is_refused(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     client, rec, _ = _client(tmp_path, monkeypatch)
     assert client.get(PATH).status_code == 401
-    assert client.post(PATH, json={"action": "gws-install"}, headers={"Origin": BASE}).status_code == 401
+    assert client.post(PATH, json={"action": "skills-update"}, headers={"Origin": BASE}).status_code == 401
     assert rec.launches == []
 
 
@@ -270,7 +270,7 @@ def test_remote_signed_in_browser_sees_not_on_host(tmp_path: Path, monkeypatch: 
 
 def test_remote_signed_in_browser_cannot_launch(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     client, rec, _ = _client(tmp_path, monkeypatch, peer="100.64.0.7")
-    response = client.post(PATH, json={"action": "gws-install"}, headers=_signed(client))
+    response = client.post(PATH, json={"action": "skills-update"}, headers=_signed(client))
     assert response.status_code == 403
     assert response.json()["reason"] == "not_on_host"
     assert rec.launches == []
@@ -279,7 +279,7 @@ def test_remote_signed_in_browser_cannot_launch(tmp_path: Path, monkeypatch: pyt
 def test_rebound_host_header_is_not_on_host(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     origin = "http://evil.example:8443"
     client, rec, _ = _client(tmp_path, monkeypatch, base_url=origin)
-    response = client.post(PATH, json={"action": "gws-install"}, headers=_signed(client, origin))
+    response = client.post(PATH, json={"action": "skills-update"}, headers=_signed(client, origin))
     assert response.status_code == 403
     assert response.json()["reason"] == "not_on_host"
     assert rec.launches == []
@@ -288,7 +288,7 @@ def test_rebound_host_header_is_not_on_host(tmp_path: Path, monkeypatch: pytest.
 def test_loopback_peer_behind_a_proxy_is_not_on_host(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     client, rec, _ = _client(tmp_path, monkeypatch)
     headers = {**_signed(client), "X-Forwarded-For": "203.0.113.9"}
-    response = client.post(PATH, json={"action": "gws-install"}, headers=headers)
+    response = client.post(PATH, json={"action": "skills-update"}, headers=headers)
     assert response.status_code == 403
     assert rec.launches == []
 
@@ -296,7 +296,7 @@ def test_loopback_peer_behind_a_proxy_is_not_on_host(tmp_path: Path, monkeypatch
 def test_cross_origin_post_is_refused(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     client, rec, _ = _client(tmp_path, monkeypatch)
     response = client.post(
-        PATH, json={"action": "gws-install"}, headers=_signed(client, "https://evil.example")
+        PATH, json={"action": "skills-update"}, headers=_signed(client, "https://evil.example")
     )
     assert response.status_code == 403
     assert rec.launches == []
@@ -311,10 +311,10 @@ def test_status_on_the_host_reports_capabilities(tmp_path: Path, monkeypatch: py
 
 def test_action_launches_in_the_workspace_root(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     client, rec, _ = _client(tmp_path, monkeypatch)
-    response = client.post(PATH, json={"action": "gws-install"}, headers=_signed(client))
+    response = client.post(PATH, json={"action": "skills-update"}, headers=_signed(client))
     assert response.status_code == 200
     assert response.json()["ok"] is True and response.json()["launched"] == "Terminal"
-    assert rec.launches == [(tmp_path, "gws-install", tmp_path / ".runtime")]
+    assert rec.launches == [(tmp_path, "skills-update", tmp_path / ".runtime")]
 
 
 @pytest.mark.parametrize(
@@ -323,12 +323,12 @@ def test_action_launches_in_the_workspace_root(tmp_path: Path, monkeypatch: pyte
         {"action": "rm -rf"},
         {"action": 5},
         {"command": "ls"},
-        {"action": "gws-install", "command": "ls"},
-        {"action": "gws-install", "path": "/etc"},
+        {"action": "skills-update", "command": "ls"},
+        {"action": "skills-update", "path": "/etc"},
         {"open": "folder"},
         {"open": "/etc", "chat_id": "c1"},
         {"open": "folder", "chat_id": "c1", "path": "/etc"},
-        ["gws-install"],
+        ["skills-update"],
     ],
 )
 def test_unknown_action_and_free_text_command_are_rejected(
@@ -364,7 +364,7 @@ def test_unknown_chat_is_404(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) ->
 def test_headless_host_is_409_with_reason(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     client, rec, _ = _client(tmp_path, monkeypatch)
     rec.launch_error = host_terminal.TerminalUnavailable("unavailable_headless")
-    response = client.post(PATH, json={"action": "gws-install"}, headers=_signed(client))
+    response = client.post(PATH, json={"action": "skills-update"}, headers=_signed(client))
     assert response.status_code == 409
     assert response.json()["reason"] == "unavailable_headless"
 
@@ -394,13 +394,13 @@ def test_a_lookup_error_from_launch_is_not_reported_as_not_applicable(
     client, rec, _ = _client(tmp_path, monkeypatch)
     rec.launch_error = LookupError("something else")
     with pytest.raises(LookupError):
-        client.post(PATH, json={"action": "gws-install"}, headers=_signed(client))
+        client.post(PATH, json={"action": "skills-update"}, headers=_signed(client))
 
 
 def test_launch_oserror_is_500(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     client, rec, _ = _client(tmp_path, monkeypatch)
     rec.launch_error = OSError("boom")
-    response = client.post(PATH, json={"action": "gws-install"}, headers=_signed(client))
+    response = client.post(PATH, json={"action": "skills-update"}, headers=_signed(client))
     assert response.status_code == 500
     assert response.json()["reason"] == "launch_failed"
 
@@ -458,7 +458,7 @@ def test_cross_port_post_cannot_launch_a_terminal(tmp_path: Path, monkeypatch: p
     """The state-changing middleware refuses a cross-port Origin before the handler."""
     client, rec, _ = _client(tmp_path, monkeypatch)
     response = client.post(
-        PATH, json={"action": "gws-install"}, headers=_signed(client, "http://localhost:3000")
+        PATH, json={"action": "skills-update"}, headers=_signed(client, "http://localhost:3000")
     )
     assert response.status_code == 403
     assert rec.launches == []

@@ -5,8 +5,8 @@ launchd jobs with a stripped-down PATH — typically ``/usr/bin:/bin:/usr/sbin:
 /sbin`` — that omits Homebrew (``/opt/homebrew/bin``), nvm's node bin, and
 ``~/.local/bin``. A tool installed with ``npm install -g`` or ``brew install``
 then works fine in the user's terminal but is invisible to ``shutil.which`` in
-the server process, so features like the Google Workspace ``gws`` CLI report as
-"missing" even though they are installed.
+the server process, so a provider CLI such as ``opencode`` reports as "missing"
+even though it is installed.
 
 This module recovers the PATH the user's own terminal would use, merges it with
 the process PATH and a curated directory list, and resolves tools against the

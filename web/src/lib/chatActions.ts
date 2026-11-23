@@ -8,9 +8,8 @@
 import { isBridgeMode, PERMISSION_MODE_COPY } from './permissionModes'
 import type { ChatAction, ChatActionKind, ChatActionState } from './types'
 
-// 'gws_auth' leaves with the engine kind (#3535); it has no card.
 export const CHAT_ACTION_KINDS: readonly ChatActionKind[] = [
-  'command', 'gws_auth', 'permission_mode', 'device_code', 'system_setting', 'restart', 'limit',
+  'command', 'permission_mode', 'device_code', 'system_setting', 'restart', 'limit',
 ]
 
 export const CHAT_ACTION_STATES: readonly ChatActionState[] = ['open', 'working', 'waiting', 'done', 'failed']

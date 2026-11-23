@@ -20,7 +20,6 @@ import re
 import secrets
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
-from types import MappingProxyType
 from typing import Literal, get_args
 from urllib.parse import urlsplit
 
@@ -28,7 +27,6 @@ from ciao.execution_modes import MODE_RANK
 
 ActionKind = Literal[
     "command",
-    "gws_auth",
     "permission_mode",
     "device_code",
     "system_setting",
@@ -44,28 +42,24 @@ ACTION_STATES: tuple[str, ...] = get_args(ActionState)
 #: The kinds an agent may raise with `ciao chat needs-action`. `limit` is the
 #: engine's own and is never agent-raisable.
 AGENT_ACTION_KINDS: frozenset[str] = frozenset(
-    {"command", "gws_auth", "permission_mode", "device_code", "system_setting", "restart"}
+    {"command", "permission_mode", "device_code", "system_setting", "restart"}
 )
 
 ChatActionErrorReason = Literal[
     "invalid_kind",          # not one of ACTION_KINDS
-    "unsupported_kind",      # a known kind with no validator/handler (or no callback) registered yet
+    "unsupported_kind",      # a known kind with no validator/handler registered yet
     "invalid_type",          # a param value (or the body) has the wrong type
     "invalid_encoding",      # E1 command: not valid UTF-8 text
     "missing_param", "unknown_param",   # unknown_param also covers an engine-only key raised by the agent
     "invalid_param",         # the generic bad value: a str outside a kind's closed set (provider, mode, setting, reason, tool, ...)
     "empty",                 # E1 command: empty after normalization
     "too_long", "invalid_characters", "invalid_url",
-    "invalid_body",          # a start/callback body the kind does not accept (E1 command steps)
-    "invalid_state",         # start/continue/callback in the wrong state
+    "invalid_body",          # a start body the kind does not accept (E1 command steps)
+    "invalid_state",         # start/continue in the wrong state
     "not_local",             # J: a host-only start from a non-loopback caller
-    "no_pending_sign_in",    # F: gws paste-back with no pending sign-in
-    "bad_callback_url",      # F: gws paste-back address with the wrong scheme/host/port
-    "state_mismatch",        # F: gws paste-back address from a different sign-in
 ]
 
-#: Free-text bounds. A URL may be long.
-_URL_MAX = 4096
+#: Free-text bounds.
 _SESSION_ID_MAX = 64
 _NOTE_MAX = 200
 _ERROR_MAX = 300
@@ -309,58 +303,22 @@ def _validate_device_code(raw: Mapping[str, object]) -> dict[str, str]:
     return params
 
 
-_GOOGLE_CONSENT_HOST = "accounts.google.com"
-_PROFILE_MAX = 64
-
-
-def _validate_gws_auth(raw: Mapping[str, object]) -> dict[str, str]:
-    """The `gws_auth` kind: sign the workspace's Google account in again.
-
-    ``url`` is engine-only (the consent URL ``GwsReloginManager.start`` returned) and is
-    checked too, because ``update_action`` revalidates the merged params.
-    """
-    from ciao.gws_auth import slugify_profile
-
-    if set(raw) - {"profile", "note", "url"}:
-        raise ChatActionError("unknown_param")
-    if "profile" not in raw:
-        raise ChatActionError("missing_param")
-    profile = raw["profile"]
-    if not isinstance(profile, str):
-        raise ChatActionError("invalid_type")
-    if not profile or len(profile) > _PROFILE_MAX or slugify_profile(profile) != profile:
-        raise ChatActionError("invalid_param")
-    params = {"profile": profile}
-    if raw.get("note") is not None:
-        params["note"] = normalize_note(raw["note"])
-    url = _text(raw, "url", required=False, limit=_URL_MAX)
-    if url is not None:
-        parts = urlsplit(url)
-        if parts.scheme != "https" or parts.hostname != _GOOGLE_CONSENT_HOST:
-            raise ChatActionError("invalid_url")
-        params["url"] = url
-    return params
-
-
 _VALIDATORS: dict[str, Callable[[Mapping[str, object]], dict[str, str]]] = {
     "command": _validate_command,
     "restart": _validate_restart,
     "permission_mode": _validate_permission_mode,
     "system_setting": _validate_system_setting,
     "device_code": _validate_device_code,
-    "gws_auth": _validate_gws_auth,
 }
 _KEY_PARAMS: dict[str, tuple[str, ...]] = {
     "system_setting": ("setting",),
     "device_code": ("tool",),
-    "gws_auth": ("profile",),
 }
 
 #: Params only the engine writes (through ``update_action``). The kind's
 #: validator accepts them; an agent raise may never carry them.
 ENGINE_ONLY_PARAMS: dict[str, frozenset[str]] = {
     "device_code": frozenset({"session_id", "code", "url", "entered"}),
-    "gws_auth": frozenset({"url"}),
 }
 
 

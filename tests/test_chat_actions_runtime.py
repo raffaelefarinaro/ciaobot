@@ -229,13 +229,6 @@ async def test_continue_cancels_before_removing(
 
 
 @pytest.mark.asyncio
-async def test_the_base_handler_refuses_a_callback() -> None:
-    with pytest.raises(ChatActionError) as info:
-        await ActionHandler().callback(cast(Any, None), cast(Any, None), "x")
-    assert info.value.reason == "unsupported_kind"
-
-
-@pytest.mark.asyncio
 async def test_start_of_an_unknown_action_conflicts(tmp_path: Path) -> None:
     manager = make_manager(tmp_path)
     chat = manager.create_chat(manager.create_project("P", workspace="work").project_id)
