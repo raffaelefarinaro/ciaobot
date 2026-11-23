@@ -12,7 +12,6 @@ Catalog: ``ciao/stock/evals/tasks/<task_id>/task.json`` (plus an optional
 
 from __future__ import annotations
 
-import base64
 import contextlib
 import hashlib
 import json
@@ -32,7 +31,6 @@ import urllib.error
 import urllib.request
 from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 from concurrent.futures import ThreadPoolExecutor
-from email.parser import BytesParser
 from functools import partial
 from dataclasses import asdict, dataclass, field
 from datetime import UTC, date, datetime
