@@ -265,6 +265,11 @@ def build_parser() -> argparse.ArgumentParser:
     update.add_argument("--action", required=True, choices=["add", "replace", "remove"])
     update.add_argument("--entry", default="", help="New text for add/replace.")
     update.add_argument("--match", default="", help="Existing entry text for replace/remove.")
+    learn = memory.add_parser("learn", help="Record one reusable lesson in Workspace/Learnings.md.")
+    learn.add_argument("--text-file", required=True, help="File holding the lesson, one line.")
+    learn.add_argument("--source", default="", help="Chat or archive id the lesson came from.")
+    learn.add_argument("--request", default="", help="User-request id, for a /remember with no archived turn.")
+    learn.add_argument("--allow-dismissed", action="store_true", help="Record a lesson the user dismissed before.")
 
     vault = _verbs(nouns.add_parser("vault", help="Vault search and review."))
     search = vault.add_parser("search", help="Full-text search of the active vault.")
@@ -736,6 +741,27 @@ def _command_file_text(raw: str) -> str:
         raise UsageError("--command-file holds text a command may not contain.") from None
 
 
+_LEARNING_TEXT_MAX_BYTES = 4096
+
+
+def _learning_text_file(raw: str) -> str:
+    """The lesson text read from ``--text-file``: an ordinary, bounded UTF-8 file."""
+    try:
+        path = Path(raw).expanduser().resolve()
+        if is_credential_adjacent(path) or not stat.S_ISREG(path.stat().st_mode):
+            raise UsageError("--text-file must name an ordinary non-credential file.")
+        with path.open("rb") as handle:
+            payload = handle.read(_LEARNING_TEXT_MAX_BYTES + 1)
+    except _PATH_FAILURES:
+        raise UsageError("--text-file could not be read.") from None
+    if len(payload) > _LEARNING_TEXT_MAX_BYTES:
+        raise UsageError("--text-file is larger than a learning can be.")
+    try:
+        return payload.decode("utf-8").strip()
+    except UnicodeDecodeError as exc:
+        raise UsageError("--text-file must be UTF-8 text.") from exc
+
+
 def _recall_claims_file(raw: str) -> str:
     try:
         path = Path(raw).expanduser().resolve()
@@ -772,6 +798,13 @@ def resolve(args: argparse.Namespace) -> tuple[str, dict[str, Any]] | None:
     if noun == "memory":
         if verb == "status":
             return "memory_status", {}
+        if verb == "learn":
+            return "memory_learn", {
+                "text": _learning_text_file(args.text_file),
+                "source": args.source,
+                "request": args.request,
+                "allow_dismissed": args.allow_dismissed,
+            }
         return "memory_update", {"region": args.region, "action": args.action, "entry": args.entry, "match": args.match}
     if noun == "vault":
         if verb == "search":

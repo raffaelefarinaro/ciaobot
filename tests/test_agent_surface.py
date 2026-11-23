@@ -107,6 +107,42 @@ def test_managed_recall_cli_file_reader_is_bounded_and_strict(tmp_path: Path, mo
         agent_cli._recall_claims_file(str(credential))
 
 
+def test_memory_learn_cli_file_reader_reports_filesystem_errors(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from ciao.agent_cli import UsageError
+
+    missing = tmp_path / "missing-lesson.txt"
+    with pytest.raises(UsageError, match="could not be read"):
+        agent_cli._learning_text_file(str(missing))
+
+    unreadable = tmp_path / "unreadable-lesson.txt"
+    unreadable.write_text("A lesson.\n", encoding="utf-8")
+    real_open = Path.open
+
+    def refuse_open(path: Path, *args, **kwargs):
+        if path == unreadable:
+            raise PermissionError("denied")
+        return real_open(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "open", refuse_open)
+    with pytest.raises(UsageError, match="could not be read"):
+        agent_cli._learning_text_file(str(unreadable))
+
+
+def test_memory_learn_cli_file_reader_reports_symlink_loops_as_usage_errors(
+    tmp_path: Path,
+) -> None:
+    from ciao.agent_cli import UsageError
+
+    first = tmp_path / "first.txt"
+    second = tmp_path / "second.txt"
+    first.symlink_to(second)
+    second.symlink_to(first)
+    with pytest.raises(UsageError, match="could not be read"):
+        agent_cli._learning_text_file(str(first))
+
+
 def test_managed_recall_cli_reader_observes_stat_guards_and_read_limit(tmp_path: Path, monkeypatch) -> None:
     import stat as stat_module
 
@@ -954,8 +990,11 @@ def test_every_documented_command_parses(tmp_path: Path) -> None:
     command.write_text("ls -la\n", encoding="utf-8")
     claims = tmp_path / "claims.json"
     claims.write_text("[]", encoding="utf-8")
+    lesson = tmp_path / "lesson.txt"
+    lesson.write_text("A lesson.\n", encoding="utf-8")
     required = {
         "memory update": ["--region", "memory", "--action", "add"],
+        "memory learn": ["--text-file", str(lesson), "--source", "chat-a"],
         "vault search": ["q"], "vault review show": ["p"],
         "vault recall-check": ["--claims-file", str(claims)],
         "vault review keep": ["--candidate", "c"], "vault review trash": ["--candidate", "c"],

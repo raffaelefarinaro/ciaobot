@@ -42,10 +42,13 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import re
+import secrets
+import stat
 import unicodedata
-from collections.abc import Callable
-from contextlib import AbstractContextManager
+from collections.abc import Callable, Iterator
+from contextlib import AbstractContextManager, contextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime, date
 from pathlib import Path
@@ -68,6 +71,242 @@ from ciao.learning_records import (
 
 
 logger = logging.getLogger(__name__)
+_rename_at = os.rename
+_LEARNING_DIR_FD_OPERATIONS = frozenset(os.supports_dir_fd)
+_LEARNING_RENAME_HAS_DIR_FD = _rename_at in _LEARNING_DIR_FD_OPERATIONS
+
+
+class LearningPathError(ValueError):
+    """The canonical learnings file is not a regular file in this vault."""
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        code: str = "learning_path_forbidden",
+        retryable: bool = False,
+    ) -> None:
+        super().__init__(message)
+        self.code = code
+        self.retryable = retryable
+
+
+@dataclass(frozen=True, slots=True)
+class _LearningWorkspace:
+    root_fd: int
+    workspace_fd: int
+
+
+def validated_learnings_path(vault_root: Path) -> Path:
+    """Return the learnings path after refusing symlinks and non-files."""
+    try:
+        root = vault_root.resolve()
+    except (OSError, RuntimeError) as exc:
+        raise LearningPathError("cannot resolve the vault root") from exc
+    relative = Path(LEARNINGS_RELATIVE)
+    workspace = root / relative.parent
+    path = root / relative
+    try:
+        workspace_info = workspace.lstat()
+    except FileNotFoundError:
+        workspace_info = None
+    except OSError as exc:
+        raise LearningPathError("cannot inspect Workspace") from exc
+    if workspace_info is not None and (
+        stat.S_ISLNK(workspace_info.st_mode) or not stat.S_ISDIR(workspace_info.st_mode)
+    ):
+        raise LearningPathError("Workspace must be a directory inside the vault")
+    try:
+        file_info = path.lstat()
+    except FileNotFoundError:
+        file_info = None
+    except OSError as exc:
+        raise LearningPathError("cannot inspect Learnings.md") from exc
+    if file_info is not None and (
+        stat.S_ISLNK(file_info.st_mode) or not stat.S_ISREG(file_info.st_mode)
+    ):
+        raise LearningPathError("Learnings.md must be a regular file inside the vault")
+    try:
+        if not workspace.resolve().is_relative_to(root):
+            raise LearningPathError("Workspace resolves outside the vault")
+        if path.exists() and not path.resolve().is_relative_to(root):
+            raise LearningPathError("Learnings.md resolves outside the vault")
+    except (OSError, RuntimeError) as exc:
+        raise LearningPathError("cannot resolve the learnings path") from exc
+    return path
+
+
+@contextmanager
+def _learning_workspace_fd(
+    vault_root: Path, *, create: bool
+) -> Iterator[_LearningWorkspace | None]:
+    """Open Workspace without following a swapped symlink; fail closed if unsupported."""
+    required = (os.open, os.mkdir, os.stat, os.unlink)
+    if (
+        not hasattr(os, "O_NOFOLLOW")
+        or not hasattr(os, "O_DIRECTORY")
+        or not hasattr(os, "O_NONBLOCK")
+        or not _LEARNING_RENAME_HAS_DIR_FD
+        or any(operation not in _LEARNING_DIR_FD_OPERATIONS for operation in required)
+    ):
+        raise LearningPathError(
+            "safe descriptor-relative learning writes are unavailable",
+            code="learning_write_unavailable",
+        )
+    try:
+        root = vault_root.resolve()
+        root_fd = os.open(
+            root, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+        )
+    except (OSError, RuntimeError) as exc:
+        raise LearningPathError("cannot safely open the vault root") from exc
+    workspace_fd = -1
+    try:
+        try:
+            workspace_fd = os.open(
+                "Workspace",
+                os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW,
+                dir_fd=root_fd,
+            )
+        except FileNotFoundError:
+            if not create:
+                yield None
+                return
+            try:
+                os.mkdir("Workspace", dir_fd=root_fd)
+            except FileExistsError:
+                pass
+            workspace_fd = os.open(
+                "Workspace",
+                os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW,
+                dir_fd=root_fd,
+            )
+        yield _LearningWorkspace(root_fd=root_fd, workspace_fd=workspace_fd)
+    except (OSError, RuntimeError) as exc:
+        raise LearningPathError("Workspace changed or is not a real directory") from exc
+    finally:
+        if workspace_fd >= 0:
+            os.close(workspace_fd)
+        os.close(root_fd)
+
+
+def _read_learning_file_fd(workspace: _LearningWorkspace) -> str:
+    try:
+        fd = os.open(
+            "Learnings.md",
+            os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK,
+            dir_fd=workspace.workspace_fd,
+        )
+    except FileNotFoundError:
+        return LEARNINGS_STUB
+    except OSError as exc:
+        raise LearningPathError("Learnings.md is not safely readable") from exc
+    try:
+        with os.fdopen(fd, "rb") as handle:
+            if not stat.S_ISREG(os.fstat(handle.fileno()).st_mode):
+                raise LearningPathError("Learnings.md must be a regular file")
+            return handle.read().decode("utf-8")
+    except OSError as exc:
+        raise LearningPathError("Learnings.md is not safely readable") from exc
+
+
+def read_learning_file(
+    vault_root: Path,
+    *,
+    secure_destination: bool = False,
+    workspace_handle: _LearningWorkspace | None = None,
+) -> str:
+    """Read Learnings.md, optionally using a no-follow Workspace descriptor."""
+    if workspace_handle is not None:
+        return _read_learning_file_fd(workspace_handle)
+    if not secure_destination:
+        path = learnings_path(vault_root)
+        return path.read_bytes().decode("utf-8") if path.exists() else LEARNINGS_STUB
+    with _learning_workspace_fd(vault_root, create=False) as workspace_fd:
+        if workspace_fd is None:
+            return LEARNINGS_STUB
+        return _read_learning_file_fd(workspace_fd)
+
+
+def _assert_learning_workspace_current(workspace: _LearningWorkspace) -> None:
+    """Refuse to publish if the opened directory no longer occupies Workspace."""
+    try:
+        current = os.stat("Workspace", dir_fd=workspace.root_fd, follow_symlinks=False)
+        opened = os.fstat(workspace.workspace_fd)
+    except OSError as exc:
+        raise LearningPathError(
+            "Workspace changed during the learning write",
+            code="learning_path_changed",
+            retryable=True,
+        ) from exc
+    if (
+        not stat.S_ISDIR(current.st_mode)
+        or (current.st_dev, current.st_ino) != (opened.st_dev, opened.st_ino)
+    ):
+        raise LearningPathError(
+            "Workspace changed during the learning write",
+            code="learning_path_changed",
+            retryable=True,
+        )
+
+
+def _write_learning_for_memory_learn(workspace: _LearningWorkspace, text: str) -> None:
+    """Atomically write via the same opened Workspace used for the read."""
+    try:
+        previous = os.stat(
+            "Learnings.md", dir_fd=workspace.workspace_fd, follow_symlinks=False
+        )
+    except FileNotFoundError:
+        mode = 0o600
+    except OSError as exc:
+        raise LearningPathError("Learnings.md is not safely writable") from exc
+    else:
+        if not stat.S_ISREG(previous.st_mode):
+            raise LearningPathError("Learnings.md must be a regular file")
+        mode = stat.S_IMODE(previous.st_mode)
+
+    for _ in range(10):
+        temp_name = f".Learnings.md.{secrets.token_hex(12)}.write.tmp"
+        try:
+            fd = os.open(
+                temp_name,
+                os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
+                0o600,
+                dir_fd=workspace.workspace_fd,
+            )
+        except FileExistsError:
+            continue
+        break
+    else:
+        raise LearningPathError("could not allocate a private learning temp file")
+
+    try:
+        with os.fdopen(fd, "wb") as handle:
+            os.fchmod(handle.fileno(), mode)
+            handle.write(text.encode("utf-8"))
+        _assert_learning_workspace_current(workspace)
+        _rename_at(
+            temp_name,
+            "Learnings.md",
+            src_dir_fd=workspace.workspace_fd,
+            dst_dir_fd=workspace.workspace_fd,
+        )
+    except OSError as exc:
+        try:
+            os.unlink(temp_name, dir_fd=workspace.workspace_fd)
+        except OSError:
+            pass
+        raise LearningPathError(
+            "the learning could not be published; retry",
+            code="learning_write_failed",
+            retryable=True,
+        ) from exc
+    except BaseException:
+        try:
+            os.unlink(temp_name, dir_fd=workspace.workspace_fd)
+        except OSError:
+            pass
+        raise
 
 
 _PROPOSALS_RELATIVE = "Workspace/Memory-Proposals.md"
@@ -1370,6 +1609,8 @@ def append_learning(
     workspace: str,
     source: str = "",
     request: str = "",
+    _secure_destination: bool = False,
+    _workspace_handle: _LearningWorkspace | None = None,
 ) -> bool:
     """File one learning under the Active section of Workspace/Learnings.md.
 
@@ -1381,7 +1622,7 @@ def append_learning(
     observed again, counted mechanically rather than judged from prose.
 
     The read, the render and the write all happen under
-    :func:`ciao.memory_receipts.queue_lock`, and the write goes through
+    :func:`ciao.memory_receipts.queue_lock`, and the default write goes through
     :func:`ciao.memory_receipts.write_queue_atomically`. Both are the same ones
     ``ciao learnings-migrate`` takes on this file, and both are load-bearing: the
     unattended care run, a ``[learnings]`` accept and the migration are three
@@ -1392,6 +1633,10 @@ def append_learning(
     back rewritten in every line the writer did not mean to touch — which also
     invalidates the migration's ``--revert`` receipt, whose spans address exact
     offsets.
+
+    The control-plane ``memory_learn`` verb opts into a no-follow,
+    descriptor-relative destination and unique temp file. The default keeps
+    the existing writer behavior for proposal acceptance and other callers.
 
     Public because accepting a ``[learnings]`` proposal from the review queue
     performs exactly this write.
@@ -1409,22 +1654,90 @@ def append_learning(
     """
     from ciao.memory_receipts import queue_lock, write_queue_atomically
 
-    path = learnings_path(vault_root)
-    with queue_lock(path):
-        # Read inside the lock, not before it: read-then-lock would leave a
-        # window in which the text being replaced is not the text on disk.
-        existing = (
-            path.read_bytes().decode("utf-8") if path.exists() else LEARNINGS_STUB
-        )
-        updated, operation = render_learning_append(
-            existing,
+    if _workspace_handle is not None:
+        if not _secure_destination:
+            raise ValueError("a Workspace descriptor requires secure_destination")
+        return _append_learning_locked(
+            vault_root,
             text,
+            workspace=workspace,
             source=source,
             request=request,
-            workspace=workspace,
+            path=learnings_path(vault_root),
+            secure_destination=True,
+            workspace_handle=_workspace_handle,
+            write_queue_atomically=write_queue_atomically,
         )
-        if operation == "none":
-            return True
+
+    path = (
+        validated_learnings_path(vault_root)
+        if _secure_destination
+        else learnings_path(vault_root)
+    )
+    with queue_lock(path):
+        if _secure_destination:
+            path = validated_learnings_path(vault_root)
+        if _secure_destination:
+            with _learning_workspace_fd(vault_root, create=True) as workspace_fd:
+                assert workspace_fd is not None
+                return _append_learning_locked(
+                    vault_root,
+                    text,
+                    workspace=workspace,
+                    source=source,
+                    request=request,
+                    path=path,
+                    secure_destination=True,
+                    workspace_handle=workspace_fd,
+                    write_queue_atomically=write_queue_atomically,
+                )
+        else:
+            return _append_learning_locked(
+                vault_root,
+                text,
+                workspace=workspace,
+                source=source,
+                request=request,
+                path=path,
+                secure_destination=False,
+                workspace_handle=None,
+                write_queue_atomically=write_queue_atomically,
+            )
+
+
+def _append_learning_locked(
+    vault_root: Path,
+    text: str,
+    *,
+    workspace: str,
+    source: str,
+    request: str,
+    path: Path,
+    secure_destination: bool,
+    workspace_handle: _LearningWorkspace | None,
+    write_queue_atomically: Callable[..., None],
+) -> bool:
+    """Render and write while the caller holds the queue lock."""
+    existing = (
+        read_learning_file(
+            vault_root, secure_destination=True, workspace_handle=workspace_handle
+        )
+        if secure_destination
+        else (path.read_bytes().decode("utf-8") if path.exists() else LEARNINGS_STUB)
+    )
+    updated, operation = render_learning_append(
+        existing,
+        text,
+        source=source,
+        request=request,
+        workspace=workspace,
+    )
+    if operation == "none":
+        return True
+    if secure_destination:
+        assert workspace_handle is not None
+        _write_learning_for_memory_learn(workspace_handle, updated)
+    else:
         write_queue_atomically(path, updated)
     return True
 

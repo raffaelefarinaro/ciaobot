@@ -1,6 +1,7 @@
 {
   "memory status": "memory_status",
   "memory update": "memory_update",
+  "memory learn": "memory_learn",
   "vault search": "vault_search",
   "vault recall-check": "vault_recall_check",
   "vault review list": "vault_review",

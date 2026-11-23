@@ -4,6 +4,7 @@
 |---|---|---|
 | `memory status` | Report bounded native-guide (AGENTS.md) memory usage and diagnostics. | — |
 | `memory update --region {memory,profile} --action {add,replace,remove} [--entry TEXT] [--match TEXT]` | Add, replace, or remove one entry in native `memory`/`profile` memory. | `--match` targets replace/remove; `--entry` is the new text for add/replace. The region cap is advisory: the write always lands and the reply carries `over_cap`, `used_chars` and `char_limit` when exceeded. Consolidation bounds a region, not refusal. |
+| `memory learn --text-file FILE [--source ID] [--request ID] [--allow-dismissed] [--json]` | Record one reusable lesson in `Workspace/Learnings.md`. | One line in the file, at most 240 characters. `--source` and `--request` identify evidence when available; a first source-less filing keeps the append behavior, and a repeated source-less filing is a no-op. Replayed sightings write nothing and a lesson at 64 sightings is refused. Allowed on person-typed turns and trusted post-archive memory passes; refused on unattended turns and other engine origins. Never hand-edit `Learnings.md`. |
 
 ## Vault
 

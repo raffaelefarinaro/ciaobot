@@ -2026,6 +2026,175 @@ class CiaoControlPlane:
             raise ControlPlaneError("memory_update_invalid", str(exc)) from exc
         return _ok(result)
 
+    def memory_learn(
+        self,
+        principal: AgentPrincipal,
+        *,
+        text: str,
+        source: str = "",
+        request: str = "",
+        allow_dismissed: bool = False,
+    ) -> dict[str, Any]:
+        """Record one reusable lesson directly in ``Workspace/Learnings.md``.
+
+        A person-typed turn or a trusted post-archive memory-pass turn only.
+        Other engine origins and helpers are refused even when their unattended
+        flag is absent. The text is flattened, redacted and bounded before
+        :func:`ciao.memory_proposals.append_learning` writes it. A sighting needs
+        a ``source`` or a ``request`` to count as evidence. A source-less first
+        filing keeps the append writer's behavior, but a no-op is reported as
+        such. At
+        :data:`ciao.learning_records.MAX_LEARNING_OBSERVATIONS` a new sighting is
+        refused (``evidence_full``) rather than folded in. A replayed sighting is
+        ``already_recorded``: nothing is written.
+
+        The check and the write run under the queue lock, so a held lock is a
+        retryable error and never an unlocked write.
+        """
+        from ciao import learning_records as lr
+        from ciao import memory_proposals
+        from ciao.memory_receipts import QueueLockError, queue_lock
+        from ciao.redact import redact_text
+
+        if not self._memory_learning_turn(principal):
+            raise ControlPlaneError(
+                "unattended_forbidden",
+                "Recording a learning requires a person-typed turn or a post-archive memory pass.",
+            )
+        workspace = self._workspace(principal)
+        if source and (
+            len(source) > lr.MAX_LEARNING_SOURCE_CHARS
+            or not lr._IDENTIFIER_RE.fullmatch(source)
+        ):
+            raise ControlPlaneError("invalid_source", "source must be a plain identifier.")
+        if request and not lr.REQUEST_ID_RE.match(request):
+            raise ControlPlaneError("invalid_request", "request must be a plain request identifier.")
+        statement = redact_text(" ".join(text.split()))
+        if not statement:
+            raise ControlPlaneError("learning_text_empty", "The learning text is empty.")
+        if len(statement) > lr.MAX_LEARNING_CHARS:
+            raise ControlPlaneError(
+                "learning_too_long",
+                f"A learning is at most {lr.MAX_LEARNING_CHARS} characters; shorten it.",
+            )
+        refusal = lr.learning_text_refusal(statement)
+        if refusal:
+            raise ControlPlaneError(
+                "learning_text_refused", f"A learning cannot carry {refusal}."
+            )
+        vault_root = self._vault_root(principal)
+        if not allow_dismissed and memory_proposals.was_dismissed(vault_root, statement):
+            raise ControlPlaneError(
+                "learning_dismissed",
+                "The user dismissed this text before; ask them before recording it again.",
+            )
+
+        observation = lr.LearningObservation(source=source, request=request)
+        wanted = lr.normalized_statement(statement)
+        try:
+            path = memory_proposals.validated_learnings_path(vault_root)
+            with queue_lock(path):
+                with memory_proposals._learning_workspace_fd(
+                    vault_root, create=True
+                ) as workspace_handle:
+                    assert workspace_handle is not None
+                    existing = memory_proposals.read_learning_file(
+                        vault_root,
+                        secure_destination=True,
+                        workspace_handle=workspace_handle,
+                    )
+                    document = lr.parse_learnings(existing, workspace=workspace)
+                    for entry in document.entries:
+                        record = entry.record
+                        if record is None or lr.normalized_statement(record.text) != wanted:
+                            continue
+                        if observation.identity is not None and any(
+                            seen.identity == observation.identity for seen in record.observations
+                        ):
+                            return _ok({"outcome": "none", "reason": "already_recorded"})
+                        if (
+                            observation.identity is not None
+                            and len(record.observations) >= lr.MAX_LEARNING_OBSERVATIONS
+                        ):
+                            return _ok({"outcome": "none", "reason": "evidence_full"})
+                    _, operation = memory_proposals.render_learning_append(
+                        existing,
+                        statement,
+                        workspace=workspace,
+                        source=source,
+                        request=request,
+                    )
+                    if operation == "none":
+                        reason = (
+                            "no_identity" if observation.identity is None else "already_recorded"
+                        )
+                        return _ok({"outcome": "none", "reason": reason})
+                    memory_proposals.append_learning(
+                        vault_root,
+                        statement,
+                        workspace=workspace,
+                        source=source,
+                        request=request,
+                        _secure_destination=True,
+                        _workspace_handle=workspace_handle,
+                    )
+        except memory_proposals.LearningPathError as exc:
+            message = (
+                "Learnings.md must stay inside the selected vault."
+                if exc.code == "learning_path_forbidden"
+                else (
+                    "Workspace changed while recording; retry the learning."
+                    if exc.code == "learning_path_changed"
+                    else (
+                        "The learning could not be published; retry."
+                        if exc.code == "learning_write_failed"
+                        else "Safe learning writes are unavailable on this platform."
+                    )
+                )
+            )
+            raise ControlPlaneError(
+                exc.code, message, retryable=exc.retryable
+            ) from exc
+        except QueueLockError as exc:
+            raise ControlPlaneError(
+                "learning_busy", f"learnings are busy; retry: {exc}", retryable=True
+            ) from exc
+        return _ok({"outcome": "recorded", "reason": ""})
+
+    def _memory_learning_turn(self, principal: AgentPrincipal) -> bool:
+        """Allow a person-typed turn or a validated archived-chat memory pass."""
+        if self._unattended_turn(principal):
+            return False
+        chat = self.pcm.get_chat(principal.chat_id) if principal.chat_id else None
+        if chat is None:
+            return True
+
+        current_turn = str(max(0, int(chat.user_turn_count) - 1))
+        origin = str(chat.user_turn_origin.get(current_turn) or "")
+        if origin not in self._PERSON_TURN_ORIGINS:
+            return False
+
+        from ciao.web.chat_service import _normalize_chat_helper
+
+        raw_helper = chat.helper if isinstance(chat.helper, dict) else {}
+        if not raw_helper:
+            return True
+        if raw_helper.get("kind") != "memory_pass":
+            return False
+        helper = _normalize_chat_helper(raw_helper)
+        if helper.get("kind") == "memory_pass":
+            if helper.get("source_kind") in {"task_completion", "project_closure"}:
+                # These are attended memory passes too, but their normalized,
+                # hashed task resolution or closure note is the source instead
+                # of an archived chat and transcript path.
+                return True
+            return bool(
+                helper.get("source_chat_id")
+                and helper.get("archive_path")
+                and helper.get("archive_policy") == "when_clean"
+            )
+        return False
+
     # ---- note verification ---------------------------------------------
 
     async def note_related(

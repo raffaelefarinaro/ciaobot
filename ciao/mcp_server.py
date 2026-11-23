@@ -405,6 +405,33 @@ async def _op_memory_status(service: CiaoMcpService) -> dict[str, Any]:
     return await service._invoke("memory_status", lambda cp, p: cp.memory_status(p))
 
 
+async def _op_memory_learn(
+    service: CiaoMcpService,
+    text: str,
+    source: str = "",
+    request: str = "",
+    allow_dismissed: bool = False,
+) -> dict[str, Any]:
+    """Record one reusable lesson in the workspace's Learnings file.
+
+    ``text`` is one line, at most 240 characters. A sighting is counted
+    against ``source`` (a chat or archive id) or ``request`` (a user-request
+    id); one of them is required. A replayed sighting records nothing, and a
+    lesson at its sighting cap is refused. Refused on an unattended turn.
+    """
+    return await service._invoke(
+        "memory_learn",
+        lambda cp, p: cp.memory_learn(
+            p,
+            text=text,
+            source=source,
+            request=request,
+            allow_dismissed=allow_dismissed,
+        ),
+        mutating=True,
+    )
+
+
 async def _op_memory_update(service: CiaoMcpService, region: str, action: str, entry: str = "", match: str = "") -> dict[str, Any]:
     """Add, replace, or remove one entry in the native guide's memory.
 
@@ -1618,6 +1645,7 @@ OPERATIONS: tuple[Operation, ...] = (
     Operation("usage_stats", _READ, _op_usage_stats.__doc__ or "", _op_usage_stats),
     Operation("memory_status", _READ, _op_memory_status.__doc__ or "", _op_memory_status),
     Operation("memory_update", _WRITE, _op_memory_update.__doc__ or "", _op_memory_update),
+    Operation("memory_learn", _WRITE, _op_memory_learn.__doc__ or "", _op_memory_learn),
     Operation("vault_search", _READ, _op_vault_search.__doc__ or "", _op_vault_search),
     Operation("vault_recall_check", _READ, _op_vault_recall_check.__doc__ or "", _op_vault_recall_check),
     Operation("vault_review", _DESTRUCTIVE, _op_vault_review.__doc__ or "", _op_vault_review),
