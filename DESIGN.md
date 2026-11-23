@@ -343,3 +343,7 @@ The journey is a route, not a modal: `/onboarding` resumes at the recorded step,
 return path as an internal route, and leaves completed or legacy installs alone. Home carries a
 quiet resume row while setup is unfinished, because a new operator should never have to remember
 a URL.
+
+## Chat search
+
+The expanded sidebar's utility row carries a neutral **Search chats** action; the collapsed rail keeps a magnifying-glass button with the same accessible name. The focused dialog searches only the selected workspace, with title and project/archive state above a plain-text excerpt. Results are native buttons and open through the regular chat navigation, including archived read-only loading. The dialog is a mobile bottom sheet, preserves keyboard focus and gives its controls at least 44px targets.

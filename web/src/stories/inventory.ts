@@ -594,6 +594,23 @@ export const inventory: InventoryEntry[] = [
     }
   },
   {
+    id: 'components-chat-search-dialog',
+    name: 'ChatSearchDialog',
+    family: 'Chat, messages, composer, activity and context',
+    kind: 'component',
+    owner: { path: 'web/src/components/ChatSearchDialog.vue', anchor: 'class="chat-search"' },
+    sources: [],
+    consumers: ['web/src/components/ProjectSidebar.vue'],
+    variants: ['workspace', 'query', 'results', 'pagination', 'failure'],
+    variantNotes: 'Workspace scoped dialog with literal search, paged results, retry and keyboard dismissal; detailed data-state coverage remains unassessed.',
+    states: [
+      { name: 'keyboard-dismissal', coverage: 'covered', storyIds: ['chat-search-dialog--keyboard-dismissal'], note: 'The real dialog opens from its trigger, Escape dismisses it, and focus returns to that trigger.' },
+      { name: 'search states', coverage: 'uncovered', storyIds: [], note: 'Loading, empty, populated, paged and failed states are covered by component tests; no Storybook data fixture story exists.' },
+    ],
+    loading: { status: 'known', detail: 'Search starts on submit or after the query debounce; failure has a retry action and oversized transcripts are reported.' },
+    migration: { status: 'unassessed', note: 'Inventory admission does not approve a design migration.' },
+  },
+  {
     "id": "components-chat-header-more-menu",
     "name": "ChatHeaderMoreMenu",
     "family": "Root, navigation and common presentation",

@@ -1199,3 +1199,5 @@ Workspaces are archived the same way rather than deleted (`ciao/workspace_archiv
 - `docs/BEHAVIORAL_EVAL.md`: versioned behavioral evaluations for prompts, providers, and guides (`ciao eval`); scenario catalog and baseline/candidate reports.
 - `docs/AGENT_CLI.md`: agent control-plane trust model, transport, telemetry, and the D-05/D-13 permission model.
 - `web/README.md`: PWA frontend dev workflow, iOS Safari gotchas, design system tokens.
+
+Chat search (`POST /api/chats/search`) is a bounded, workspace-scoped projection in `transcript_service.py`. It reads only registered non-system project chats, uses bounded no-follow reads for current and archived transcripts, and returns plain excerpts without retaining an index or snippets. The route owns request validation and off-loop execution; the usual archive/session transcript assembly is not used.

@@ -1,5 +1,7 @@
 # PWA frontend
 
+The sidebar's **Search chats** dialog searches saved titles and visible transcript text in the selected workspace. It sends the query only in a bounded JSON body, shows literal plain-text excerpts, and opens archived results through the existing read-only chat flow. Search results are fetched a page at a time.
+
 Vue 3 + Vite + Pinia + TypeScript. Built output goes to `ciao/web/static/`, served by the same Starlette server as the API. See `../README.md` for the repo-wide layout and `../PWA_API.md` for backend routes.
 
 The file viewer is Vue-first. Text, Markdown, CSV, PDF/PPTX (via a binary preview), and HTML artifacts all render through native Vue components (`HtmlArtifactViewer.vue`, `CsvViewer.vue`, plus text/iframe previews). Diagrams live inside HTML artifacts as inline SVG; `.excalidraw` is no longer a viewer type. History and Diff operate on the raw file snapshots.

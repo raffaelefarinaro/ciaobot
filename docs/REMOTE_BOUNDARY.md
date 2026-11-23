@@ -263,6 +263,8 @@ What each CLI still enforces:
 
 `POST /api/chats/{chat_id}/actions/{action_id}/callback` is a normal signed-session route with the usual same-origin rule, not a loopback-only one. It dispatches to the card kind's handler and nothing else, and only `gws_auth` implements a callback; every other kind answers `unsupported_kind`. For `gws_auth` the route makes no HTTP request: the pasted URL goes to `GwsReloginManager.complete_from_redirect`, which requires `http://127.0.0.1:<the pending session's port>/` and the session's `state` (constant time) before it runs the same exchange as the loopback listener. A refused paste leaves the sign-in pending and may be retried; the session itself finishes at most once.
 
+`POST /api/chats/search` is a signed-session, same-origin, no-store read. Its body scopes a literal query to one registered workspace. The engine filters internal helper chats and system projects before scanning, then reads only registered active-chat transcripts and located archives through no-follow regular-file descriptors. Each request examines at most 100 chats, reads at most 8 MiB total and 512 KiB per transcript, and returns bounded plain-text excerpts; it stores no index or excerpts.
+
 ## Verification
 
 - `PYTHONPATH=$PWD python -m pytest -n auto tests/`
