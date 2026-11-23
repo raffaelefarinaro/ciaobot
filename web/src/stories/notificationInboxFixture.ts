@@ -26,7 +26,7 @@ export const unavailable: SourceHealth = { status: 'unavailable', lastSuccessAt:
 export const checking = checkingHealth()
 
 function workspace(name: string): WorkspaceInfo {
-  return { name, vault_root: name, default_provider: 'claude', gws_profile: '' }
+  return { name, vault_root: name, default_provider: 'claude' }
 }
 
 function project(projectId: string, workspaceName: string): ProjectInfo {

@@ -59,7 +59,7 @@ export function intakeRoutes(options: { models?: ModelsVariant, starting?: boole
 }
 
 function workspaceInfo(name: string): WorkspaceInfo {
-  return { name, default_provider: 'claude', vault_root: '', gws_profile: '' } as WorkspaceInfo
+  return { name, default_provider: 'claude', vault_root: '' } as WorkspaceInfo
 }
 
 function projectInfo(workspace: string): ProjectInfo {

@@ -91,7 +91,7 @@ describe('the open task as a page', () => {
     // Reduced motion: a keyboard step switches at once instead of after the slide.
     vi.stubGlobal('matchMedia', (q: string) => ({ matches: q.includes('reduce'), addEventListener() {}, removeEventListener() {} }))
     const store = useProjectStore()
-    store.workspaces = [{ name: 'personal', vault_root: '/tmp/vault', default_provider: 'claude', gws_profile: '' }]
+    store.workspaces = [{ name: 'personal', vault_root: '/tmp/vault', default_provider: 'claude' }]
     store.activeWorkspace = 'personal'
     store.projects = []
   })

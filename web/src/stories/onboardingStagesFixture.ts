@@ -89,7 +89,7 @@ export function careRoutine(overrides: Partial<Schedule> = {}): Schedule {
 /** The synthetic workspace registry body the registry re-read after a write answers. */
 export function workspacesBody(): unknown {
   return {
-    workspaces: [{ name: WORKSPACE, vault_root: '/storybook/alpha', default_provider: 'claude', gws_profile: '' }],
+    workspaces: [{ name: WORKSPACE, vault_root: '/storybook/alpha', default_provider: 'claude' }],
     active: WORKSPACE,
   }
 }

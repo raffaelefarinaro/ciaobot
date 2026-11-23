@@ -90,7 +90,7 @@ describe('MemoryCategoriesPanel', () => {
     apiGet.mockReset()
     apiPatch.mockReset()
     const store = useProjectStore()
-    store.workspaces = [{ name: 'personal', vault_root: '/tmp/vault', default_provider: 'claude', gws_profile: '' }]
+    store.workspaces = [{ name: 'personal', vault_root: '/tmp/vault', default_provider: 'claude' }]
     store.activeWorkspace = 'personal'
   })
 
