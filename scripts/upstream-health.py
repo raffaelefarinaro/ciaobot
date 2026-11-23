@@ -47,7 +47,7 @@ _HOUSEKEEPING = re.compile(r"^(ci|chore|build|docs|style|test)(\(.*?\))?!?:|^(bu
 
 #: Upstreams no manifest in this repo declares: CLIs installed on the user's
 #: machine that Ciaobot drives or shells out to.
-EXTRA_GITHUB = ("anomalyco/opencode", "googleworkspace/cli")
+EXTRA_GITHUB = ("anomalyco/opencode",)
 
 
 @dataclass

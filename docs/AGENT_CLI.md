@@ -130,7 +130,7 @@ bounded memory (`ciao memory status|update`), vault (`ciao vault search`,
 (`ciao workspace list`), chats (`ciao chat …`), schedules (`ciao schedule …`), chat loops (`ciao loop …`), the task board
 (`ciao task …`, including `task delegate` and `task report`), notes
 (`ciao note create|related|verify`), webhook triggers (`ciao webhook …`),
-Google Workspace (`ciao gws status`), context and Ciaobot's own logs (`ciao context get|logs`), usage statistics (`ciao stats`), file
+context and Ciaobot's own logs (`ciao context get|logs`), usage statistics (`ciao stats`), file
 surfacing (`ciao file surface`), and the suggested terminal command
 (`ciao chat needs-action`). Browser-session administration,
 login/OAuth secrets, and raw server deploy endpoints remain PWA/operator-only.
@@ -219,13 +219,11 @@ wake-up, because stopping is the point.
 
 `ciao chat needs-action KIND [flags]` puts a request in front of the user in
 the calling chat: a card the user acts on. The kinds are the engine's
-`AGENT_ACTION_KINDS` in `ciao/chat_actions.py`: `command`, `gws_auth`,
-`permission_mode`, `device_code`, `system_setting` and `restart`.
+`AGENT_ACTION_KINDS` in `ciao/chat_actions.py`: `command`, `permission_mode`, `device_code`, `system_setting` and `restart`.
 `limit` is the engine's own and is never agent-raisable.
 
 ```
 ciao chat needs-action command --command-file FILE [--note TEXT]
-ciao chat needs-action gws_auth --profile NAME
 ciao chat needs-action permission_mode --mode MODE [--note TEXT]
 ciao chat needs-action device_code --tool gh|az
 ciao chat needs-action system_setting --setting NAME [--note TEXT]
@@ -292,7 +290,7 @@ skill is not installed in workspace catalogs. Bare `ciao help` prints the full
 reference; a topic prints the shared entry and one grouped reference, bounded
 to 16,000 UTF-8 bytes. Topics are `memory`, `vault`, `queues` (memory and
 review); `note`, `file`, `chat`, `project` (workspace operations); `task`;
-`schedule`, `loop`, `webhook`, `context`, `stats`, `gws`, `workspace`, `repo`
+`schedule`, `loop`, `webhook`, `context`, `stats`, `workspace`, `repo`
 (automation and status); and `examples`. Use topic help for detailed lookups;
 `ciao <noun> --help` gives group syntax. Agent-surface commands use JSON envelopes; the top-level review-queue
 commands have their own documented output conventions.
