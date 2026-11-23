@@ -16,7 +16,7 @@ Ciaobot is a persistent personal workspace for Claude Code and OpenCode: your ag
 
 - [Models and agents](https://www.raffaelefarinaro.com/ciaobot/models.html): why Ciaobot uses existing harnesses and what stays portable when you switch.
 - [Built-in skills and extensions](https://www.raffaelefarinaro.com/ciaobot/builtin.html#extend): skills, subagents, commands, and MCP.
-- [Google Workspace](https://www.raffaelefarinaro.com/ciaobot/features.html#google): Gmail, Calendar, Drive, and other Google workflows.
+- [Google Workspace](https://www.raffaelefarinaro.com/ciaobot/companions.html#google): connecting Gmail, Calendar, Drive and other Google services through your agent.
 - [Integration reference](../INTEGRATIONS.md): provider setup, OAuth, MCP configuration, and runtime settings.
 
 ## Operating Ciaobot
