@@ -512,6 +512,10 @@ def coerce_provider_overrides(raw: object) -> dict[str, dict[str, str]]:
     return cleaned
 
 
+#: Local name of a shared brain: a-z, 0-9 and "-", 1 to 32 characters.
+SHARED_BRAIN_NAME_PATTERN = r"^[a-z0-9](?:[a-z0-9-]{0,30}[a-z0-9])?$"
+
+
 @dataclass(frozen=True, slots=True)
 class SharedBrainLink:
     """One linked shared brain: a local Git checkout a workspace reads."""
@@ -559,16 +563,43 @@ def _coerce_workspace_disallowed(raw: object) -> list[str] | None:
     return None
 
 
-def _shared_brains_from_rows(raw: object) -> list[SharedBrainLink]:
+def _has_control(text: str) -> bool:
+    return any(ord(ch) < 32 or ord(ch) == 127 for ch in text)
+
+
+def shared_brains_from_rows(raw: object) -> list[SharedBrainLink]:
+    """Shared-brain rows from a registry or archive, with bad rows dropped.
+
+    A hand-edited file must not smuggle in a brain the setting could never have
+    saved: a row needs a valid name, an absolute path with no control characters
+    and a non-empty identity, and no two rows may share a name, path or
+    identity. Overlap with the install or a vault is checked where the config is
+    built (``CiaoConfig``), because only it knows those roots.
+    """
     if not isinstance(raw, list):
         return []
+    log = logging.getLogger(__name__)
     links: list[SharedBrainLink] = []
+    seen: set[str] = set()
     for row in raw:
         if not isinstance(row, dict):
             continue
         name, path, identity = row.get("name"), row.get("path"), row.get("identity")
-        if isinstance(name, str) and isinstance(path, str) and isinstance(identity, str):
-            links.append(SharedBrainLink(name=name, path=path, identity=identity))
+        if not (isinstance(name, str) and isinstance(path, str) and isinstance(identity, str)):
+            continue
+        sound = (
+            re.fullmatch(SHARED_BRAIN_NAME_PATTERN, name) is not None
+            and os.path.isabs(path)
+            and not _has_control(path)
+            and not _has_control(identity)
+            and bool(identity.strip())
+        )
+        clash = {f"name:{name}", f"path:{path}", f"id:{identity}"} & seen
+        if not sound or clash:
+            log.warning("Dropping an invalid shared brain row %r", name)
+            continue
+        seen |= {f"name:{name}", f"path:{path}", f"id:{identity}"}
+        links.append(SharedBrainLink(name=name, path=path, identity=identity))
     return links
 
 
@@ -610,7 +641,7 @@ def _workspace_from_mapping(data: dict) -> WorkspaceConfig | None:
         gws_profile=str(data.get("gws_profile", "")).strip(),
         color=color,
         memory_handover=memory_handover,
-        shared_brains=_shared_brains_from_rows(data.get("shared_brains")),
+        shared_brains=shared_brains_from_rows(data.get("shared_brains")),
         memory_approval=memory_approval,
         provider_overrides=provider_overrides,
     )
@@ -869,6 +900,24 @@ class CiaoConfig:
         if not self.workspaces:
             self.workspaces = _bootstrap_registry(self.vault_root)
         self._workspace_registry_changed = self._normalize_workspace_vault_roots()
+        self._drop_unsafe_shared_brains()
+
+    def _drop_unsafe_shared_brains(self) -> None:
+        """Drop any shared brain that points into the install, a vault or the runtime dir."""
+        from ciao.shared_brain import overlaps_protected  # noqa: PLC0415
+
+        for workspace in self.workspaces.values():
+            links = getattr(workspace, "shared_brains", None)
+            if not links:
+                continue
+            kept = [link for link in links if not overlaps_protected(self, link.path)]
+            if len(kept) != len(links):
+                logging.getLogger(__name__).warning(
+                    "Dropped %d shared brain(s) of workspace %r that point into the install or a vault",
+                    len(links) - len(kept),
+                    workspace.name,
+                )
+                workspace.shared_brains = kept
 
     def workspace(self, name: str | None) -> WorkspaceConfig | None:
         if not name:

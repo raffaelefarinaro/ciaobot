@@ -124,19 +124,23 @@ def run_git_sync(
 
 
 async def run_git(
-    workspace: Path, *args: str, timeout: float | None = None
+    workspace: Path,
+    *args: str,
+    timeout: float | None = None,
+    env: dict[str, str] | None = None,
 ) -> tuple[int, str, str]:
     """Run ``git *args`` in ``workspace``; return (returncode, stdout, stderr).
 
     On timeout returns ``(-1, "", GIT_TIMEOUT_DETAIL)``. Output is decoded but
-    not trimmed — callers apply their own whitespace convention.
+    not trimmed — callers apply their own whitespace convention. ``env`` replaces
+    the default child environment when given.
     """
     proc = await asyncio.create_subprocess_exec(
         "git",
         *EXACT_BYTES,
         *args,
         cwd=str(workspace),
-        env=child_env(),
+        env=child_env() if env is None else env,
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
         **tree_spawn_options(),

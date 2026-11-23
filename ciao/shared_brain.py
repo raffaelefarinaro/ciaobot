@@ -3,7 +3,9 @@
 The user clones a team's notes folder; Ciaobot only links it (by absolute path),
 names it, reads its state and keeps it current with a fast-forward-only pull.
 The engine never clones, never connects to a URL itself and never rewrites a
-folder: no reset, rebase, stash, checkout, clean or push.
+folder: no reset, rebase, stash, checkout, clean or push. Every update first
+re-checks that the folder is still a real checkout of its own (not a symlink,
+not a parent repository's subfolder) and still outside the install and vaults.
 """
 
 from __future__ import annotations
@@ -18,8 +20,9 @@ from pathlib import Path
 from typing import Any, Literal
 
 from ciao import job_runs
-from ciao.config import SharedBrainLink
+from ciao.config import SHARED_BRAIN_NAME_PATTERN, SharedBrainLink
 from ciao.git_proc import EXACT_BYTES, GIT_TIMEOUT_DETAIL, run_git
+from ciao.os_support.child_env import child_env
 from ciao.redact import redact_text
 from ciao.repo_link import validate_repo_path
 
@@ -32,24 +35,47 @@ GIT_TIMEOUT_S = 5.0
 MAX_REASON_CHARS = 300
 MAX_BRAINS_PER_WORKSPACE = 5
 MAX_BRAINS_PER_PASS = 20
-NAME_PATTERN = r"^[a-z0-9](?:[a-z0-9-]{0,30}[a-z0-9])?$"
+NAME_PATTERN = SHARED_BRAIN_NAME_PATTERN
 OPERATOR_ONLY_KEYS = ("shared_brains",)
 
 Outcome = Literal["updated", "up_to_date", "skipped", "failed"]
 
 _NAME_RE = re.compile(NAME_PATTERN)
-#: Hardening every git call in this module starts with. ``core.hooksPath`` points
-#: at the null device so a checkout's own hooks never run.
+#: Prepended to every git call here. ``core.hooksPath`` points at the null device
+#: so a checkout's own hooks never run; the credential helper is emptied so no
+#: helper from the checkout's config runs; maintenance and gc never start.
 _HARDEN: tuple[str, ...] = (
     "-c", "protocol.ext.allow=never",
     "-c", "core.fsmonitor=false",
     "-c", f"core.hooksPath={os.devnull}",
+    "-c", "maintenance.auto=false",
+    "-c", "gc.auto=0",
+    "-c", "credential.helper=",
 )
+#: Keys a checkout's own config may hold that would let git run a program (or
+#: read more config) on our behalf. A folder with one is refused at link time.
+_UNSAFE_KEYS_EXACT = frozenset({"core.sshcommand", "core.gitproxy", "core.fsmonitor"})
 
 _locks: dict[str, asyncio.Lock] = {}
-_last_update: dict[str, dict[str, str]] = {}
-_tasks: set[asyncio.Task[Any]] = set()
+_last_update: dict[str, dict[str, Any]] = {}
+_pending: dict[str, asyncio.Task[Any]] = {}
 _cursor = 0
+
+
+def _git_env(folder: Path) -> dict[str, str]:
+    """Child environment for git on a shared brain.
+
+    ``GIT_CEILING_DIRECTORIES`` stops discovery at the folder's parent, so a
+    folder whose own ``.git`` is gone is not read as part of a parent repository.
+    ``GIT_SSH_COMMAND`` outranks a checkout's ``core.sshCommand``; prompts are off.
+    """
+    env = child_env()
+    env["GIT_CEILING_DIRECTORIES"] = str(folder.parent)
+    env["GIT_TERMINAL_PROMPT"] = "0"
+    env["GIT_SSH_COMMAND"] = "ssh -o BatchMode=yes"
+    env["GIT_ASKPASS"] = ""
+    env.pop("SSH_ASKPASS", None)
+    return env
 
 
 def _git(path: Path, *args: str) -> tuple[int, str]:
@@ -62,12 +88,19 @@ def _git(path: Path, *args: str) -> tuple[int, str]:
             encoding="utf-8",
             errors="replace",
             stdin=subprocess.DEVNULL,
+            env=_git_env(path),
             timeout=GIT_TIMEOUT_S,
             check=False,
         )
     except (OSError, subprocess.TimeoutExpired):
         return 1, ""
     return proc.returncode, proc.stdout
+
+
+async def _git_async(folder: Path, *args: str, timeout: float = GIT_TIMEOUT_S) -> tuple[int, str, str]:
+    return await run_git(
+        folder, *_HARDEN, *args, timeout=timeout, env=_git_env(folder)
+    )
 
 
 def _now() -> str:
@@ -84,6 +117,7 @@ def canonical_identity(remote_url: str) -> str:
     text = remote_url.strip().lower()
     if not text:
         raise ValueError("shared brain has no remote called origin")
+    shown = redact_text(remote_url.strip())
     if "://" in text:
         rest = text.split("://", 1)[1]
         authority, _, path = rest.partition("/")
@@ -93,24 +127,20 @@ def canonical_identity(remote_url: str) -> str:
         rest = text.rsplit("@", 1)[-1]
         host, sep, path = rest.partition(":")
         if not sep:
-            raise ValueError(f"unrecognised remote address: {remote_url.strip()}")
+            raise ValueError(f"unrecognised remote address: {shown}")
     path = path.rstrip("/")
     if path.endswith(".git"):
         path = path[: -len(".git")]
     path = path.strip("/")
     if not host or not path:
-        raise ValueError(f"unrecognised remote address: {remote_url.strip()}")
+        raise ValueError(f"unrecognised remote address: {shown}")
     return f"{host}/{path}"
 
 
-def validate_brain_path(config: Any, raw: str) -> str:
-    """The resolved checkout path, or ValueError when it cannot be a shared brain."""
-    if any(ord(ch) < 32 or ord(ch) == 127 for ch in raw):
-        raise ValueError("Shared brain path contains a control character")
-    resolved = validate_repo_path(raw)
-    if not resolved:
-        return ""
-    target = Path(resolved)
+def overlaps_protected(config: Any, path: str) -> bool:
+    """True when ``path`` (after following symlinks) is, holds, or sits inside the
+    install, a vault or the runtime directory. Pure path arithmetic, no git call."""
+    target = Path(os.path.realpath(path))
     protected = [Path(config.workspace_root), Path(config.state_path).parent]
     for name in config.workspace_names():
         try:
@@ -120,10 +150,46 @@ def validate_brain_path(config: Any, raw: str) -> str:
     for root in protected:
         root = root.resolve()
         if target == root or target.is_relative_to(root) or root.is_relative_to(target):
-            raise ValueError(
-                f"Shared brain folder must be outside the Ciaobot install and its vaults: {resolved}"
-            )
+            return True
+    return False
+
+
+def validate_brain_path(config: Any, raw: str) -> str:
+    """The resolved checkout path, or ValueError when it cannot be a shared brain."""
+    if any(ord(ch) < 32 or ord(ch) == 127 for ch in raw):
+        raise ValueError("Shared brain path contains a control character")
+    resolved = validate_repo_path(raw)
+    if not resolved:
+        return ""
+    if overlaps_protected(config, resolved):
+        raise ValueError(
+            f"Shared brain folder must be outside the Ciaobot install and its vaults: {resolved}"
+        )
     return resolved
+
+
+def _unsafe_config_key(key: str) -> bool:
+    lowered = key.lower()
+    section = lowered.split(".", 1)[0]
+    return (
+        lowered.startswith("filter.")
+        or lowered in _UNSAFE_KEYS_EXACT
+        or section in ("include", "includeif")
+        or "uploadpack" in lowered
+        or (lowered.startswith("credential") and lowered.endswith(".helper"))
+    )
+
+
+def _refuse_program_config(path: str) -> None:
+    """Refuse a new link whose own git config can run programs (see ``_UNSAFE_KEYS_EXACT``)."""
+    code, out = _git(Path(path), "config", "--local", "--list")
+    if code != 0:
+        raise ValueError(f"could not read the git settings of {path}")
+    for line in out.splitlines():
+        if _unsafe_config_key(line.split("=", 1)[0]):
+            raise ValueError(
+                "this folder's git settings can run programs; use a fresh clone"
+            )
 
 
 def _derived_name(identity: str, taken: set[str]) -> str:
@@ -169,10 +235,11 @@ def resolve_links(
             out.append(kept)
             continue
         path = validate_brain_path(config, raw_path)
+        _refuse_program_config(path)
         try:
             identity = canonical_identity(_origin_url(path))
         except ValueError as exc:
-            raise ValueError(f"Shared brain {path} has no remote called origin: {exc}") from exc
+            raise ValueError(f"{path}: {exc}") from exc
         if identity in identities:
             raise ValueError(
                 f"{path} is the same repository as shared brain '{identities[identity]}'"
@@ -203,7 +270,26 @@ def fetched_at(path: str) -> str | None:
     return datetime.fromtimestamp(mtime, UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
-def brain_state(link: SharedBrainLink) -> dict[str, Any]:
+def _path_problem(config: Any, path: str) -> str:
+    """Why the folder cannot be used right now, or "" (no git call).
+
+    ``path`` is the stored absolute path, not resolved, so a symlink swapped in
+    after linking shows up as ``moved``.
+    """
+    if os.path.islink(path) or os.path.realpath(path) != path:
+        return "moved"
+    if not os.path.isdir(path):
+        return "missing"
+    if overlaps_protected(config, path):
+        return "outside_install"
+    return ""
+
+
+def _is_own_checkout(folder: Path, top: str) -> bool:
+    return bool(top.strip()) and os.path.realpath(top.strip()) == os.path.realpath(folder)
+
+
+def brain_state(link: SharedBrainLink, config: Any) -> dict[str, Any]:
     """Live state of one linked folder, read synchronously with short git calls."""
     state: dict[str, Any] = {
         "name": link.name,
@@ -211,17 +297,24 @@ def brain_state(link: SharedBrainLink) -> dict[str, Any]:
         "path": link.path,
         "origin_changed": False,
         "missing": False,
+        "problem": "",
         "branch": "",
         "head": "",
         "head_date": "",
         "dirty": False,
         "upstream": False,
         "fetched_at": fetched_at(link.path),
-        "last_update": _last_update.get(link.path),
+        "last_update": _last_update.get(_lock_key(link.path)),
     }
+    problem = _path_problem(config, link.path)
+    if problem:
+        state["problem"] = problem
+        state["missing"] = problem == "missing"
+        return state
     folder = Path(link.path)
-    if not folder.is_dir():
-        state["missing"] = True
+    code, top = _git(folder, "rev-parse", "--show-toplevel")
+    if code != 0 or not _is_own_checkout(folder, top):
+        state["problem"] = "not_a_checkout"
         return state
     try:
         origin_now = canonical_identity(_origin_url(link.path))
@@ -251,26 +344,29 @@ def _result(outcome: Outcome, reason: str = "", detail: str = "") -> dict[str, A
 
 
 def _lock_key(path: str) -> str:
-    return str(Path(path).resolve())
+    """Absolute path with ``~`` expanded but symlinks NOT followed: a swapped link must show."""
+    return os.path.abspath(os.path.expanduser(path))
 
 
-async def update_brain(path: str) -> dict[str, Any]:
+async def update_brain(path: str, config: Any) -> dict[str, Any]:
     """Fetch and fast-forward one folder, one case from the matrix (see the issue)."""
     key = _lock_key(path)
     lock = _locks.setdefault(key, asyncio.Lock())
     async with lock:
-        result = await _update_unlocked(Path(key))
+        result = await _update_unlocked(config, Path(key))
     _last_update[key] = result
     return result
 
 
-async def _git_async(folder: Path, *args: str, timeout: float = GIT_TIMEOUT_S) -> tuple[int, str, str]:
-    return await run_git(folder, *_HARDEN, *args, timeout=timeout)
-
-
-async def _update_unlocked(folder: Path) -> dict[str, Any]:
+async def _update_unlocked(config: Any, folder: Path) -> dict[str, Any]:
     if not folder.is_dir():
         return _result("failed", "missing")
+    problem = _path_problem(config, str(folder))
+    if problem:
+        return _result("failed", problem)
+    code, top, _ = await _git_async(folder, "rev-parse", "--show-toplevel")
+    if code != 0 or not _is_own_checkout(folder, top):
+        return _result("failed", "not_a_checkout")
     code, branch, _ = await _git_async(folder, "branch", "--show-current")
     if code != 0 or not branch.strip():
         return _result("skipped", "detached")
@@ -308,19 +404,22 @@ async def _update_unlocked(folder: Path) -> dict[str, Any]:
     return _result("updated")
 
 
-def schedule_update(path: str) -> None:
-    """Start one update in the background; the task is kept until it finishes."""
-    task = asyncio.create_task(update_brain(path))
-    _tasks.add(task)
-    task.add_done_callback(_tasks.discard)
+def schedule_update(path: str, config: Any) -> None:
+    """Start one background update for ``path`` unless one is already pending."""
+    key = _lock_key(path)
+    if key in _pending:
+        return
+    task = asyncio.create_task(update_brain(key, config))
+    _pending[key] = task
+    task.add_done_callback(lambda _done: _pending.pop(key, None))
 
 
-async def _run_pass(paths: list[str]) -> dict[str, int]:
+async def _run_pass(config: Any, paths: list[str]) -> dict[str, int]:
     """Update each path once, one after another; a failure counts and moves on."""
     counts: dict[str, int] = {}
     for path in paths:
         try:
-            outcome = (await update_brain(path))["outcome"]
+            outcome = (await update_brain(path, config))["outcome"]
         except Exception:
             logger.exception("Shared brain update failed")
             outcome = "failed"
@@ -334,6 +433,13 @@ def _linked_paths(config: Any) -> list[str]:
         for link in getattr(workspace, "shared_brains", []):
             seen[link.path] = None
     return list(seen)
+
+
+def _forget_unlinked(keep: set[str]) -> None:
+    """Drop lock and result entries for folders no workspace links any more."""
+    for table in (_locks, _last_update):
+        for key in [k for k in table if k not in keep]:
+            table.pop(key, None)
 
 
 def _next_batch(paths: list[str]) -> list[str]:
@@ -356,7 +462,9 @@ async def update_loop(config: Any) -> None:
             async with job_runs.track(
                 "shared_brain_update", "Shared brain update", category="system",
             ) as run:
-                counts = await _run_pass(_next_batch(_linked_paths(config)))
+                paths = _linked_paths(config)
+                _forget_unlinked({_lock_key(p) for p in paths})
+                counts = await _run_pass(config, _next_batch(paths))
                 run.extra["outcomes"] = counts
         except asyncio.CancelledError:
             break

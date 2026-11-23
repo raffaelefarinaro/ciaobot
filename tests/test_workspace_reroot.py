@@ -3975,3 +3975,23 @@ def test_apply_bumps_the_revision_of_a_rewritten_row(tmp_path: Path) -> None:
     store = _schedule_store(runtime, [{"schedule_id": "target", "prompt": "memory-vault/work", "_rev": 4}])
     assert apply(install, vault, ["personal", "work"], runtime, primary="personal")["status"] == "migrated"
     assert json.loads(store.read_text(encoding="utf-8"))["schedules"][0]["_rev"] == 5
+
+
+def test_reroot_registry_rewrite_keeps_shared_brains(tmp_path):
+    import json as _json
+    from types import SimpleNamespace
+
+    from ciao import workspace_reroot
+
+    runtime = tmp_path / ".runtime"
+    runtime.mkdir()
+    links = [{"name": "notes", "path": "/away/notes", "identity": "github.com/acme/notes"}]
+    rows = [{"name": "work", "vault_root": "old", "shared_brains": links}]
+    workspace_reroot.registry_file(runtime).write_text(_json.dumps(rows), encoding="utf-8")
+    plan = SimpleNamespace(moves=[SimpleNamespace(workspace="work", destination="/new/work")])
+
+    workspace_reroot._rewrite_registry(runtime, plan)
+
+    written = _json.loads(workspace_reroot.registry_file(runtime).read_text(encoding="utf-8"))
+    assert written[0]["vault_root"] == "/new/work"
+    assert written[0]["shared_brains"] == links

@@ -201,6 +201,10 @@ def _registry_entry(config: Any, workspace: WorkspaceConfig) -> dict[str, Any]:
         "claude_trim": workspace.claude_trim,
         "gws_profile": workspace.gws_profile,
         "color": workspace.color,
+        "shared_brains": [
+            {"name": link.name, "path": link.path, "identity": link.identity}
+            for link in workspace.shared_brains
+        ],
     }
 
 
@@ -600,12 +604,23 @@ def restored_settings(config: Any, metadata: dict[str, Any]) -> dict[str, Any]:
         color = coerce_workspace_color(entry.get("color"))
     except ValueError:
         color = DEFAULT_WORKSPACE_COLOR
+    # Links come back only if they are still well formed and still outside the
+    # install and the vaults; a folder that moved is a state, shown after restore.
+    from ciao.config import shared_brains_from_rows  # noqa: PLC0415
+    from ciao.shared_brain import overlaps_protected  # noqa: PLC0415
+
+    shared_brains = [
+        link
+        for link in shared_brains_from_rows(entry.get("shared_brains"))
+        if not overlaps_protected(config, link.path)
+    ]
     return {
         "default_provider": provider,
         "disallowed_tools": disallowed,
         "claude_trim": {k: v for k, v in claude_trim.items() if v},
         "gws_profile": profile,
         "color": color,
+        "shared_brains": shared_brains,
     }
 
 
@@ -894,6 +909,7 @@ def register_restored(
         claude_trim=settings["claude_trim"],
         gws_profile=settings["gws_profile"],
         color=settings["color"],
+        shared_brains=settings["shared_brains"],
     )
     from ciao.workspaces import persist_workspaces  # noqa: PLC0415
 

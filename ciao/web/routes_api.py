@@ -338,6 +338,21 @@ def _rename_import_store(request: Request) -> Any:
     return ImportStore(engine_store_path(request.app.state.config))
 
 
+async def _workspace_from_request_async(
+    data: dict, *, config, existing: WorkspaceConfig | None = None
+) -> WorkspaceConfig:
+    """``_workspace_from_request`` off the event loop when it resolves shared brains.
+
+    Resolving a new folder runs git (several short subprocesses per row), which
+    must not freeze every other request while it runs.
+    """
+    if "shared_brains" in data:
+        return await asyncio.to_thread(
+            _workspace_from_request, data, config=config, existing=existing
+        )
+    return _workspace_from_request(data, config=config, existing=existing)
+
+
 async def workspace_shared_brains(request: Request) -> JSONResponse:
     """Live state of each shared brain a workspace links (read-only)."""
     config = request.app.state.config
@@ -346,7 +361,7 @@ async def workspace_shared_brains(request: Request) -> JSONResponse:
         return JSONResponse({"error": "unknown workspace"}, status_code=404)
     states = []
     for link in list(workspace.shared_brains):
-        states.append(await asyncio.to_thread(shared_brain.brain_state, link))
+        states.append(await asyncio.to_thread(shared_brain.brain_state, link, config))
     return JSONResponse({"shared_brains": states})
 
 
@@ -381,7 +396,7 @@ async def upsert_workspace_setting(request: Request) -> JSONResponse:
             old_existing = config.workspace(str(route_name))
             if old_existing is not None:
                 try:
-                    _workspace_from_request(
+                    await _workspace_from_request_async(
                         {**body, "name": requested},
                         config=config,
                         existing=preview_renamed_config(
@@ -409,7 +424,7 @@ async def upsert_workspace_setting(request: Request) -> JSONResponse:
             body = {**body, "name": requested}
         existing = config.workspace(str(body.get("name", "")).strip())
         try:
-            workspace = _workspace_from_request(body, config=config, existing=existing)
+            workspace = await _workspace_from_request_async(body, config=config, existing=existing)
         except ValueError as exc:
             return JSONResponse({"error": str(exc)}, status_code=400)
         created = workspace.name not in config.workspaces
@@ -442,7 +457,7 @@ async def upsert_workspace_setting(request: Request) -> JSONResponse:
         linked_before = {link.path for link in getattr(existing, "shared_brains", [])}
         for link in workspace.shared_brains:
             if link.path not in linked_before:
-                shared_brain.schedule_update(link.path)
+                shared_brain.schedule_update(link.path, config)
         _refresh_project_manager_workspaces(request)
         payload = _workspaces_payload(config)
         if renamed is not None:
