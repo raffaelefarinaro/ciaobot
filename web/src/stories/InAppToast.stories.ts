@@ -189,13 +189,11 @@ export const WorkspaceScope: Story = {
   render: () => renderStack([
     toast(1, { chat_id: '', title: INFO, body: INFO_BODY }),
     toast(2, { chat_id: 'storybook-other-workspace', title: OTHER, body: 'Belongs to another workspace.' }),
-    toast(3, { chat_id: '', gwsProfile: 'synthetic-profile', title: 'Synthetic account alert', body: 'Belongs to another account.' }),
   ]),
   play: async ({ canvas, canvasElement }) => {
     await assertQuietFence(canvas)
     expect(canvasElement.querySelectorAll('.toast')).toHaveLength(1)
     expect(canvas.getByText(INFO)).toBeTruthy()
     expect(canvas.queryByText(OTHER)).toBeNull()
-    expect(canvas.queryByText('Synthetic account alert')).toBeNull()
   },
 }

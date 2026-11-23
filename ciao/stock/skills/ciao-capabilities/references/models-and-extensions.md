@@ -1,4 +1,4 @@
-# Skills, models and providers, Google Workspace
+# Skills, models and providers
 
 ## Skills, subagents, and commands (extensibility)
 
@@ -17,10 +17,4 @@
 - Per-provider default model and thinking level for new chats (**Settings → Providers**, the chat providers card, which also shows each CLI's connection and lets you reconnect, verify, or log out) — no cross-provider tier mapping; each provider resolves `opus`/`sonnet`/`haiku`/`fable`-style aliases against its own catalog. Per-chat override in the picker, with Automatic resolving to the chat's own model.
 - Per-provider default **permission mode** for new chats (**Settings → Providers**): *manual* asks before every action, *auto* (the default) runs safe reads and edits silently and asks before destructive ones, *bypass* allows everything. The normal chat model picker also lets the user change that chat's mode (Manual, Auto, Bypass or Plan); it applies to subsequent turns, not the reply already running, and queued or external turns may start before a change is saved. An agent that needs a different mode asks with `ciao chat needs-action permission_mode --mode plan|normal|auto|bypass --note "why"`; the user sees what that mode allows and approves it in the chat, and it applies from the next turn. The agent can never apply a mode itself. `ciao chat update --mode` can still lower a mode, never raise it above the calling chat's own.
 - Beyond per-chat routing, one chat can **reach another model without leaving the conversation**: a handover moves the whole chat to another provider.
-
-## Google Workspace (`gws`)
-
-- Ciaobot integrates with Gmail, Calendar, Drive, Docs, Sheets, Slides, and Tasks through the [`gws` CLI](https://github.com/googleworkspace/cli).
-- **Settings → Overview → Google account**: install `gws`, upload a GCP OAuth `client_secret.json` or create one with gcloud, and connect from the browser (no terminal required); each workspace has its own account. Terminal and headless commands sit under Advanced. In-chat, `ciao gws status` reports whether the active workspace's Google account is connected and its token valid before you promise a Google call will work. When a Google login expires, the agent can put a **Sign in to Google again** card in the chat; it opens Google's consent page, and from a phone you paste back the address the browser could not load.
-- One Google account per workspace, set up in that workspace's Overview.
-- Stock **`gws-*` skills** ship with the app (Gmail, Calendar, Drive, Docs, Sheets, Slides, Tasks, Forms). Setup details: `gws-shared` skill and the Connect dialog's steps.
+- **Google Workspace** is not built in: connect it through the agent, like any MCP server or connector (Claude's or Codex's Google connectors, or the Google Workspace MCP server). See the site's companions page.

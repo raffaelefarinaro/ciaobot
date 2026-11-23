@@ -29,12 +29,6 @@ vi.mock('../../lib/api', () => {
   }
   const responses: Record<string, unknown> = {
     '/api/settings': {},
-    '/api/integrations/gws': {
-      installed: false,
-      binary_path: '',
-      cli_available: false,
-      profiles: [],
-    },
     '/api/settings/providers': {
       connections: {
         claude: {
@@ -653,7 +647,7 @@ describe('component mount smoke', () => {
     const providerOptions = wrapper.findAll('select.routine-input option').map((option) => option.text())
     expect(providerOptions).toContain('Anthropic (via Claude Code)')
     expect(providerOptions).toContain('OpenCode')
-    // Provider is a native select (Google is set on Overview);
+    // Provider is a native select;
     // Default model uses the custom ModelSelector component, not a second <select>.
     expect(wrapper.findAll('select.workspace-select')).toHaveLength(1)
 

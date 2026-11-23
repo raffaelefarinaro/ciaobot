@@ -8,6 +8,7 @@
 import { isBridgeMode, PERMISSION_MODE_COPY } from './permissionModes'
 import type { ChatAction, ChatActionKind, ChatActionState } from './types'
 
+// 'gws_auth' leaves with the engine kind (#3535); it has no card.
 export const CHAT_ACTION_KINDS: readonly ChatActionKind[] = [
   'command', 'gws_auth', 'permission_mode', 'device_code', 'system_setting', 'restart', 'limit',
 ]
@@ -142,43 +143,6 @@ function restartCopy(action: ChatAction): ActionCopy {
   }
 }
 
-function gwsAuthCopy(action: ChatAction): ActionCopy {
-  const profile = action.params.profile ?? ''
-  const meta = 'Google · gws'
-  switch (action.state) {
-    case 'working':
-      return { title: 'Starting the Google sign-in…', why: 'Getting the sign-in page.', primaryLabel: '', meta }
-    case 'waiting':
-      return {
-        title: 'Waiting for Google…',
-        why: `Finish signing in to ${profile} on Google's page. This card updates by itself.`,
-        primaryLabel: 'Open Google sign-in',
-        meta,
-      }
-    case 'done':
-      return {
-        title: 'Signed in to Google',
-        why: 'Signed in. Continue to let the agent retry.',
-        primaryLabel: 'Continue the chat',
-        meta,
-      }
-    case 'failed':
-      return {
-        title: "Couldn't sign in to Google",
-        why: action.error || 'The sign-in did not finish.',
-        primaryLabel: 'Try again',
-        meta,
-      }
-    default:
-      return {
-        title: 'Sign in to Google again',
-        why: `The ${profile} Google account's sign-in expired. Gmail, Calendar and Drive stop working in this workspace until you sign in.`,
-        primaryLabel: 'Sign in with Google',
-        meta,
-      }
-  }
-}
-
 const PERMISSION_MODE_META = 'Permission mode'
 
 function permissionModeCopy(action: ChatAction): ActionCopy {
@@ -273,8 +237,6 @@ export function actionCopy(action: ChatAction): ActionCopy | null {
       return systemSettingCopy(action)
     case 'device_code':
       return deviceCodeCopy(action)
-    case 'gws_auth':
-      return gwsAuthCopy(action)
     default:
       return null
   }
@@ -294,58 +256,5 @@ export function safeExternalUrl(raw: unknown): string | null {
     return url.protocol === 'https:' || url.protocol === 'http:' ? url.href : null
   } catch {
     return null
-  }
-}
-
-/** A pasted address that could be a sign-in redirect to a listener on the engine's computer. The engine validates it fully. */
-export function looksLikeLoopbackCallback(text: string): boolean {
-  return /^http:\/\/(localhost|127\.0\.0\.1):\d{2,5}\//i.test(text.trim())
-}
-
-/** A Google consent URL the card may link to: https on accounts.google.com, nothing else. */
-export function isGoogleConsentUrl(raw: unknown): raw is string {
-  if (typeof raw !== 'string') return false
-  try {
-    const url = new URL(raw)
-    return url.protocol === 'https:' && url.hostname === 'accounts.google.com'
-  } catch {
-    return false
-  }
-}
-
-/** Plain-language copy for a refused paste-back. F adds its gws_auth reasons here. */
-export function callbackRefusalCopy(reason: string): string {
-  switch (reason) {
-    case 'state_mismatch':
-      return 'That address belongs to a different sign-in. Start again.'
-    case 'wrong_scheme':
-    case 'wrong_host':
-    case 'wrong_port':
-    case 'wrong_path':
-    case 'not_a_url':
-    case 'bad_query':
-      return 'That is not the address this sign-in is waiting for. Copy the address of the page that failed to load.'
-    case 'too_long':
-    case 'too_large':
-      return 'That address is too long. Copy only the address of the page that failed to load.'
-    case 'missing_code':
-      return 'That address has no sign-in code. Finish signing in first.'
-    case 'provider_error':
-      return 'The sign-in page reported an error. Start again.'
-    case 'already_used':
-      return 'This sign-in already received an address.'
-    case 'invalid_state':
-      return 'This sign-in is no longer waiting.'
-    case 'bad_authorize_url':
-    case 'unsupported_kind':
-      return 'This sign-in cannot take a pasted address. Start again.'
-    case 'no_pending_sign_in':
-      return 'No Google sign-in is waiting. Start again.'
-    case 'bad_callback_url':
-      return "Paste the full address from the browser's address bar. It starts with http://127.0.0.1:"
-    case 'chat_action_conflict':
-      return 'This card changed. The newer state is shown.'
-    default:
-      return 'That address could not be used.'
   }
 }

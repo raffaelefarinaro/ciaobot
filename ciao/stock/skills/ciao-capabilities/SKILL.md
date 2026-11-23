@@ -51,7 +51,7 @@ Each area has a reference file next to this one. Open only the file the question
 | Memory and the vault | the memory pass, what is automatic vs yours, To decide, History and Undo, the optional reason on every decision, Memory Map, Vault Review, retirement candidates, conversation import, memory backup, shared brains, weekly care cycle | `references/memory.md` |
 | Automations | schedules, interval runs, project vs chat targets, catch-up, webhook triggers | `references/automations.md` |
 | Files | viewer and pinned panel, folder browser and folder pins, annotations, drafts, previews, document conversion, HTML artifacts, CSV tables, backlinks, keyboard shortcuts | `references/files.md` |
-| Skills, models, Google Workspace | skills, subagents, slash commands, skill proposals, providers, permission modes, message queue, `gws` | `references/models-and-extensions.md` |
+| Skills, models | skills, subagents, slash commands, skill proposals, providers, permission modes, message queue | `references/models-and-extensions.md` |
 | Task board | the Tasks page, Delegate to agent, Approve Done, "After this update" tasks | `references/tasks.md` |
 | Terminal | the browser terminal panel: where it runs, the grant and the session it rides on, sessions, the socket protocol, how to offer a suggested command, and what an agent can and cannot do | `references/terminal.md` |
 | App and system | Settings page, MCP, installing and updating, other devices, forgotten password, Linux, local API | `references/install-and-settings.md` |

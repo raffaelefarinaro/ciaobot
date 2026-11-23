@@ -4310,38 +4310,6 @@ describe('needs-you chat actions', () => {
     expect(apiPost).toHaveBeenCalledWith('/api/chats/c-1/actions/a1/continue', {})
   })
 
-  test('submitChatActionCallback posts the url to the callback route and adopts the action', async () => {
-    const store = useProjectStore()
-    apiPost.mockResolvedValueOnce({ action: action('a1', { state: 'waiting', params: { url: 'https://x/authorize', callback_used: '1' } }) })
-    await expect(store.submitChatActionCallback('c-1', 'a1', 'http://127.0.0.1:5/cb?code=x')).resolves.toEqual({ ok: true })
-    expect(apiPost).toHaveBeenCalledWith('/api/chats/c-1/actions/a1/callback', { url: 'http://127.0.0.1:5/cb?code=x' })
-    expect(store.chatActions['c-1']?.[0]?.params.callback_used).toBe('1')
-  })
-
-  test('a refused callback adopts the action and returns the reason', async () => {
-    const store = useProjectStore()
-    apiPost.mockRejectedValueOnce(Object.assign(new Error('state_mismatch'), {
-      status: 400,
-      payload: { error: 'state_mismatch', action: action('a1', { state: 'waiting' }) },
-    }))
-    await expect(store.submitChatActionCallback('c-1', 'a1', 'http://127.0.0.1:5/cb?code=x'))
-      .resolves.toEqual({ ok: false, reason: 'state_mismatch' })
-    expect(store.chatActions['c-1']?.[0]?.state).toBe('waiting')
-  })
-
-  test('a callback conflict adopts the engine list', async () => {
-    const store = useProjectStore()
-    const sock = events(store)
-    sock.onmessage?.(frame(actionsChanged('c-1', [action('a1')])))
-    apiPost.mockRejectedValueOnce(Object.assign(new Error('chat_action_conflict'), {
-      status: 409,
-      payload: { error: 'chat_action_conflict', actions: [action('a9')] },
-    }))
-    await expect(store.submitChatActionCallback('c-1', 'a1', 'http://127.0.0.1:5/cb?code=x'))
-      .resolves.toEqual({ ok: false, reason: 'chat_action_conflict' })
-    expect(store.chatActions['c-1']?.map(a => a.id)).toEqual(['a9'])
-  })
-
   test('a chat id with a slash is encoded in the action path', async () => {
     const store = useProjectStore()
     apiPost.mockResolvedValueOnce({ action: action('a1') })
@@ -8912,29 +8880,12 @@ describe('update-available notification', () => {
   })
 })
 
-describe('gws health toast', () => {
-  test('surfaces an error toast whose Fix action routes to Settings → Overview', () => {
-    const store = useProjectStore()
-    store.connectEventsWs()
-    const sock = fakeSockets[fakeSockets.length - 1]
-    sock.onmessage?.({
-      data: JSON.stringify({
-        type: 'gws_health',
-        profile: 'personal',
-        token_valid: false,
-        token_error: 'expired',
-        title: 'Google Workspace login needs attention',
-        body: 'The personal Google login may have expired or been revoked. Re-authenticate in Settings → Overview → Google account (open the workspace that uses it).',
-      }),
-    })
-
-    const toast = store.toasts.find(t => t.variant === 'error' && t.title.includes('Google Workspace'))
-    expect(toast).toBeTruthy()
-    expect(toast?.fixRoute).toBe('/settings/workspace')
-    expect(toast?.fixLabel).toBe('Fix in Settings')
-    expect(toast?.gwsProfile).toBe('personal')
-    expect(toast?.chat_id).toBe('')
-  })
+test('a gws_health event is ignored', () => {
+  const store = useProjectStore()
+  store.connectEventsWs()
+  const sock = fakeSockets[fakeSockets.length - 1]
+  sock.onmessage?.({ data: JSON.stringify({ type: 'gws_health', profile: 'p', token_valid: false, token_error: '', title: 't', body: 'b' }) })
+  expect(store.toasts).toHaveLength(0)
 })
 
 describe('conversation forks', () => {

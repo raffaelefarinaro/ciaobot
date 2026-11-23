@@ -1,4 +1,4 @@
-import { computed, nextTick, onScopeDispose, ref, watch, type ComputedRef, type InjectionKey, type Ref } from 'vue'
+import { computed, nextTick, onScopeDispose, ref, watch, type InjectionKey, type Ref } from 'vue'
 import { useRouter } from 'vue-router'
 import { apiErrorMessage, errorMessage } from '../lib/errorMessage'
 import { askConfirm } from '../lib/confirm'
@@ -22,7 +22,6 @@ export type WorkspaceForm = {
   name: string
   vault_root: string
   default_provider: WorkspaceProvider
-  gws_profile: string
   disallowed_tools: string
   color: WorkspaceColorId
   // Sparse per-provider overrides of the engine defaults; always built with
@@ -33,15 +32,11 @@ export type WorkspaceForm = {
   claude_trim: ClaudeTrimOverrides
 }
 
-export type GwsProfileOption = { name: string; label: string; email: string }
-
 export function useWorkspaceAdmin(deps: {
   notifySaved: (body: string, title?: string) => void
   notifyFailed: (title: string, detail: string) => void
-  gwsProfileOptions: ComputedRef<GwsProfileOption[]>
-  fetchGwsIntegration: () => Promise<void>
 }) {
-  const { notifySaved, notifyFailed, gwsProfileOptions, fetchGwsIntegration } = deps
+  const { notifySaved, notifyFailed } = deps
   const projectStore = useProjectStore()
   const router = useRouter()
   const workspaceProviderFieldLabel = 'Agent CLI/Runtime'
@@ -67,7 +62,6 @@ export function useWorkspaceAdmin(deps: {
       name: '',
       vault_root: '',
       default_provider: defaultWorkspaceProvider(),
-      gws_profile: '',
       disallowed_tools: '',
       color: DEFAULT_WORKSPACE_COLOR,
       provider_overrides: {},
@@ -90,7 +84,6 @@ export function useWorkspaceAdmin(deps: {
       name: ws.name,
       vault_root: ws.vault_root || '',
       default_provider: normalizeWorkspaceProvider(ws.default_provider),
-      gws_profile: ws.gws_profile || '',
       disallowed_tools: Array.isArray(ws.disallowed_tools) ? ws.disallowed_tools.join(', ') : '',
       color: normalizeWorkspaceColor(ws.color),
       provider_overrides: normalizeOverrides(ws.provider_overrides),
@@ -129,17 +122,10 @@ export function useWorkspaceAdmin(deps: {
     workspaceNameDraft.value = name
   }
 
-  // `provider · Google email`, the one-line summary on the All workspaces rows.
+  // The provider label, the one-line summary on the All workspaces rows.
   function workspaceSummary(form: WorkspaceForm): string {
-    const provider = workspaceProviderOptions.value.find((option) => option.value === form.default_provider)?.label
+    return workspaceProviderOptions.value.find((option) => option.value === form.default_provider)?.label
       || form.default_provider
-    const linked = form.gws_profile
-      ? gwsProfileOptions.value.find((option) => option.name === form.gws_profile)
-      : undefined
-    const google = form.gws_profile
-      ? linked?.email || linked?.label || linked?.name || form.gws_profile
-      : 'no Google'
-    return [provider, google].filter(Boolean).join(' · ')
   }
 
   const workspaceProviderOptions = computed(() =>
@@ -226,7 +212,6 @@ export function useWorkspaceAdmin(deps: {
       })
       notifySaved(renaming ? `Workspace "${name}" renamed to "${target}".` : `Workspace "${name}" saved.`, 'Workspaces')
       await fetchWorkspacesList()
-      void fetchGwsIntegration()
     } catch (e) {
       const detail = apiErrorMessage(e, 'The workspace could not be saved.')
       workspacesResult.value = `Error: ${detail}`
@@ -234,32 +219,6 @@ export function useWorkspaceAdmin(deps: {
     } finally {
       workspacesSaving.value = null
     }
-  }
-
-  // Mirrors a link made outside the Overview form (the Connect dialog, Stop
-  // using, Disconnect) into the form AND its baseline, so an unsaved edit is
-  // neither reset nor does the form turn dirty because of the link.
-  function mirrorGwsLink(name: string, profile: string): void {
-    const form = workspaceForms.value.find((f) => f.name === name)
-    if (!form) return
-    form.gws_profile = profile
-    const saved = workspaceBaseline.value[name]
-    if (saved !== undefined) {
-      workspaceBaseline.value[name] = JSON.stringify({ ...JSON.parse(saved), gws_profile: profile })
-    }
-  }
-
-  // PATCH { gws_profile } through projectStore.updateWorkspace. Throws on failure.
-  async function setWorkspaceGwsLink(name: string, profile: string): Promise<void> {
-    await projectStore.updateWorkspace(name, { gws_profile: profile })
-    mirrorGwsLink(name, profile)
-  }
-
-  // After profiles/remove, which unlinks every workspace that used the profile.
-  // Not fetchWorkspacesList: that rebuilds the forms and would drop a draft.
-  async function refreshGwsLinks(): Promise<void> {
-    await projectStore.fetchWorkspaces()
-    for (const ws of projectStore.workspaces) mirrorGwsLink(ws.name, ws.gws_profile || '')
   }
 
   async function createNewWorkspace() {
@@ -276,8 +235,6 @@ export function useWorkspaceAdmin(deps: {
         name: form.name.trim(),
         vault_root: form.name.trim(),
         default_provider: form.default_provider,
-        // Google is linked afterwards, in the new workspace's cards.
-        gws_profile: '',
         disallowed_tools: disallowedToolsPayload(form.disallowed_tools),
         color: form.color,
       })
@@ -286,7 +243,6 @@ export function useWorkspaceAdmin(deps: {
       showNewWorkspace.value = false
       newWorkspaceForm.value = blankWorkspaceForm()
       await fetchWorkspacesList()
-      void fetchGwsIntegration()
       created = createdName
     } catch (e) {
       const detail = apiErrorMessage(e, 'The workspace could not be created.')
@@ -457,9 +413,6 @@ export function useWorkspaceAdmin(deps: {
     fetchArchivedWorkspaces,
     formatArchivedAt,
     restoreWorkspace,
-    gwsProfileOptions,
-    setWorkspaceGwsLink,
-    refreshGwsLinks,
   }
 }
 

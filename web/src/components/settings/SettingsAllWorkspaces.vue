@@ -5,7 +5,7 @@
       <div>
         <p class="section-title">All workspaces</p>
         <p class="hint">
-          Each workspace keeps its own projects, chats, memory, model defaults and Google account. Add, reorder or archive them here; the cards above edit the current one.
+          Each workspace keeps its own projects, chats, memory and model defaults. Add, reorder or archive them here; the cards above edit the current one.
         </p>
       </div>
       <button class="btn-small" :aria-expanded="showNewWorkspace" @click="showNewWorkspace = !showNewWorkspace">
@@ -18,7 +18,7 @@
         <div>
           <p class="workspace-title">New workspace</p>
           <p class="hint hint--compact">
-            Saved to <code>.runtime/workspaces.json</code> and applied immediately. Google and Claude context trimming are set afterwards in the cards above, once the new workspace is open.
+            Saved to <code>.runtime/workspaces.json</code> and applied immediately. Claude context trimming is set afterwards in the cards above, once the new workspace is open.
           </p>
         </div>
       </div>

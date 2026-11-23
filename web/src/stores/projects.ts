@@ -61,7 +61,7 @@ import type {
   WorkspaceProviderOption,
   WorkspacesResponse,
 } from '../lib/types'
-import { chatActionErrorReason, isChatAction, normalizeChatActions } from '../lib/chatActions'
+import { isChatAction, normalizeChatActions } from '../lib/chatActions'
 import { checkingHealth, failedHealth, readyHealth, type SourceHealth } from '../lib/sourceHealth'
 
 /** Model/provider a new chat should start on instead of the workspace default. */
@@ -1388,7 +1388,7 @@ export const useProjectStore = defineStore('projects', () => {
   function pushErrorToast(
     title: string,
     errorText: string,
-    opts?: { fixRoute?: string; fixLabel?: string; gwsProfile?: string },
+    opts?: { fixRoute?: string; fixLabel?: string },
   ): InAppToast {
     return pushToast({
       chat_id: '',
@@ -2236,7 +2236,7 @@ export const useProjectStore = defineStore('projects', () => {
     return true
   }
 
-  function chatActionPath(chatId: string, actionId: string, verb: 'start' | 'dismiss' | 'continue' | 'callback' | 'turn-off'): string {
+  function chatActionPath(chatId: string, actionId: string, verb: 'start' | 'dismiss' | 'continue' | 'turn-off'): string {
     return `/api/chats/${encodeURIComponent(chatId)}/actions/${encodeURIComponent(actionId)}/${verb}`
   }
 
@@ -2287,27 +2287,6 @@ export const useProjectStore = defineStore('projects', () => {
     } catch (e) {
       if (!adoptChatActionConflict(chatId, e, readStartedAt)) throw e
       return 'conflict'
-    }
-  }
-
-  /**
-   * Send a pasted sign-in address (the page that failed to load) to the
-   * engine. The engine's answer is adopted in every case; a refusal comes
-   * back as its reason word, anything else is rethrown.
-   */
-  async function submitChatActionCallback(
-    chatId: string, actionId: string, url: string,
-  ): Promise<{ ok: true } | { ok: false; reason: string }> {
-    const readStartedAt = chatReadStart()
-    try {
-      const res = await api.post<{ action?: unknown }>(chatActionPath(chatId, actionId, 'callback'), { url })
-      if (isChatAction(res?.action)) upsertChatAction(chatId, res.action, readStartedAt)
-      return { ok: true }
-    } catch (e) {
-      if (adoptChatActionConflict(chatId, e, readStartedAt)) return { ok: false, reason: 'chat_action_conflict' }
-      const reason = chatActionErrorReason(e)
-      if (reason) return { ok: false, reason }
-      throw e
     }
   }
 
@@ -5276,20 +5255,6 @@ export const useProjectStore = defineStore('projects', () => {
         scheduleSchedulesRefetch()
         break
       }
-      case 'gws_health': {
-        // A Google Workspace login went dead (revoked/expired token). The
-        // server debounces to one event per breakage; surface it as a
-        // persistent error toast. The fix is re-authentication in
-        // Settings → Overview → Google account, so the Fix action navigates
-        // there rather than seeding a chat. The PWA push banner is the other
-        // channel (see push.py); this is the live in-app signal.
-        pushErrorToast(msg.title || 'Google Workspace login needs attention', msg.body || '', {
-          fixRoute: '/settings/workspace',
-          fixLabel: 'Fix in Settings',
-          gwsProfile: msg.profile,
-        })
-        break
-      }
     }
   }
 
@@ -7204,7 +7169,7 @@ export const useProjectStore = defineStore('projects', () => {
     fileCommentsFor, removeFileComment, updateFileComment,
     pinFile, unpinFile, pinnedFileFor, applyChatPinState, applyChatPinsSnapshot, dropChatPinState, pruneChatPins, isChatPinPending,
     chatReadStart,
-    startChatAction, dismissChatAction, continueChatAction, submitChatActionCallback,
+    startChatAction, dismissChatAction, continueChatAction,
     removeQueued, removeQueuedById, requestQueuedEdit, ackQueuedEdit, pendingQueueTakes, queueTakeFailures, reorderQueued, clearQueued,
     loadMessages,
     loadOlderMessages, expandMessagePart,

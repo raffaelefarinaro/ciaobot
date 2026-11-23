@@ -3,10 +3,9 @@
  *
  * One engine per install and one origin per browser: there is no second
  * loopback origin to navigate to any more, so the only thing left to ask is
- * whether the origin under the page is this computer's own. Two consumers:
- * the engine-offline curtain, which can then name a terminal command instead
- * of a host, and the GWS one-click re-login, whose consent redirect binds to
- * the engine's own loopback and never arrives from anywhere else.
+ * whether the origin under the page is this computer's own. Used wherever the
+ * PWA offers a device-only control: the engine-offline curtain, opening files
+ * externally, the host terminal and app-install actions.
  */
 
 const LOOPBACK_HOSTS = new Set(['localhost', '127.0.0.1', '::1'])

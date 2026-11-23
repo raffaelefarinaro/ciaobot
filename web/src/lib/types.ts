@@ -661,7 +661,6 @@ export type EventsWsMessage =
   | { type: 'workspaces_changed'; from?: string; to?: string }
   | { type: 'server_restarting'; message?: string }
   | { type: 'server_restart_cancelled' }
-  | { type: 'gws_health'; profile: string; token_valid: boolean; token_error: string; title: string; body: string }
   | { type: 'auth_required'; message?: string }
 
 export interface InAppToast {
@@ -670,8 +669,6 @@ export interface InAppToast {
   chat_id: string
   // Result events can arrive before the chat list has been reconciled.
   project_id?: string
-  // Account alerts belong only to workspaces linked to this profile.
-  gwsProfile?: string
   title: string
   body: string
   // 'error' toasts persist until dismissed and show a "Fix" action.
@@ -975,7 +972,6 @@ export type HostTerminalAction =
   | 'opencode-login'
   | 'codex-install'
   | 'codex-login'
-  | 'gws-install'
   | 'skills-update'
   | 'opencode-update'
   | 'claude-update'
@@ -1060,39 +1056,6 @@ export interface ProviderConnection {
 
 export interface ProviderConfigSettings {
   connections?: Record<string, ProviderConnection>
-}
-
-export interface GwsIntegrationProfile {
-  name: string
-  label: string
-  purpose: string
-  examples: string[]
-  configured: boolean
-  credentials_present: boolean
-  client_secret_present: boolean
-  config_dir: string
-  workspaces: string[]
-  setup_command: string
-  headless_auth_command: string
-  email: string
-  // Cached token-health snapshot from the periodic monitor (issue #145).
-  // `token_valid` is null when no health check has run yet for this profile.
-  token_valid: boolean | null
-  token_error: string
-  needs_relogin: boolean
-  // Whether the OAuth client accepts the random-port loopback redirect used by
-  // the one-click sign-in flow (false for web-type clients, which need an
-  // exact authorized redirect URI and therefore the manual paste flow).
-  loopback_eligible: boolean
-}
-
-export interface GwsIntegrationSettings {
-  installed: boolean
-  binary_path: string
-  cli_available: boolean
-  /** Set when the npm package is present but its binary is not; empty otherwise. */
-  install_problem?: string
-  profiles: GwsIntegrationProfile[]
 }
 
 export interface AdminStatus {

@@ -10,8 +10,8 @@ import { CHAT_ACTION_KINDS, actionCopy } from '../../../lib/chatActions'
 import type { ChatAction, ChatActionKind } from '../../../lib/types'
 import { NEEDS_YOU_BODIES, NEEDS_YOU_ICONS } from '../registry'
 
-/** Deliberate: no card at all. `limit` is reserved for the engine's usage-limit card. */
-const NO_CARD_KINDS: readonly ChatActionKind[] = ['limit']
+/** Deliberate: no card at all. `limit` is reserved for the engine's usage-limit card. `gws_auth` is retired (#3535) and leaves the union with the engine kind. */
+const NO_CARD_KINDS: readonly ChatActionKind[] = ['limit', 'gws_auth']
 /** Deliberate: has a body but shows the default 'activity' icon. */
 const DEFAULT_ICON_KINDS: readonly ChatActionKind[] = ['command']
 

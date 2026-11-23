@@ -520,7 +520,6 @@ def test_main_skip_dependency_check_aligns_and_stages_lock(
             "--commit",
             "--no-branch",
             "--skip-dep-check",
-            "--skip-gws-skills",
             "--skip-provider-versions",
             "--skip-checks",
         ]
@@ -846,7 +845,6 @@ def test_main_apply_writes_and_stages_provider_record(
             "--commit",
             "--no-branch",
             "--skip-dep-check",
-            "--skip-gws-skills",
             "--skip-checks",
         ]
     )
@@ -934,6 +932,11 @@ def test_probe_claude_notes_a_missing_or_unpinned_adapter(
         assert probe.note == adapter_install.describe(adapter_install.CLAUDE_ADAPTER, "adapter_missing")
 
 
+def test_skip_gws_skills_flag_is_gone(tmp_path: Path) -> None:
+    with pytest.raises(SystemExit):
+        release_mod.main([str(tmp_path), "--skip-gws-skills"])
+
+
 def test_main_rejects_refresh_with_skip_provider_versions(tmp_path: Path) -> None:
     with pytest.raises(SystemExit):
         release_mod.main(
@@ -969,7 +972,7 @@ def test_probe_claude_reports_an_unreadable_cli(
 
 
 def _apply_args(tmp_path: Path) -> list[str]:
-    return [str(tmp_path), "--apply", "--skip-dep-check", "--skip-gws-skills",
+    return [str(tmp_path), "--apply", "--skip-dep-check",
             "--skip-provider-versions", "--allow-dirty", "--no-branch"]
 
 

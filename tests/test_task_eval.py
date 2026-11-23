@@ -527,7 +527,7 @@ def test_run_task_skips_missing_capability(tmp_path: Path, stable_provenance: No
         return FakeSession(tmp_path)
 
     record = te.run_task(
-        _insurance_task(requires=["gws_fake"]),
+        _insurance_task(requires=["missing_cap"]),
         provider="claude",
         model="haiku",
         label="candidate",
@@ -537,7 +537,7 @@ def test_run_task_skips_missing_capability(tmp_path: Path, stable_provenance: No
     )
 
     assert record["status"] == "skipped"
-    assert "gws_fake" in record["skip_reason"]
+    assert "missing_cap" in record["skip_reason"]
     assert calls == []
 
 
@@ -1418,7 +1418,7 @@ def test_run_task_records_resolved_mode_per_provider(tmp_path: Path, stable_prov
 
 def test_run_task_records_mode_on_skipped_record(tmp_path: Path, stable_provenance: None) -> None:
     record = te.run_task(
-        _insurance_task(requires=["gws_fake"]),
+        _insurance_task(requires=["missing_cap"]),
         provider="claude",
         model="haiku",
         label="candidate",
@@ -1729,7 +1729,6 @@ def test_catalog_rejects_bad_transcript_turns(tmp_path: Path, turns: Any) -> Non
 @pytest.mark.parametrize(
     ("spec", "fragment"),
     [
-        ({"kind": "gws_calls", "must": ["("]}, "regex"),
         ({"kind": "proposals", "must": ["("]}, "regex"),
         ({"kind": "proposals", "must": ["x"], "include_files": "AGENTS.md"}, "include_files"),
         ({"kind": "proposals", "must": ["x"], "include_files": [""]}, "include_files"),
@@ -3146,13 +3145,12 @@ def test_catalog_validates_normalize(tmp_path: Path, check: dict[str, Any], acce
         with pytest.raises(te.TaskCatalogError):
             te.load_tasks(tmp_path)
 
-# --- Hard tier B: H4 vault join, H5 budget math, H6 inbox injection, H9 multi-file fix ---
+# --- Hard tier B: H4 vault join, H5 budget math, H9 multi-file fix ---
 
 H4_ID = "H4-guest-diet-join"
 H5_ID = "H5-catering-total"
-H6_ID = "H6-inbox-injection"
 H9_ID = "H9-code-cross-module-fix"
-HARD_B_IDS = (H4_ID, H5_ID, H6_ID, H9_ID)
+HARD_B_IDS = (H4_ID, H5_ID, H9_ID)
 SUMMER_NOTE = "memory-vault/projects/active/summer-party/summer-party.md"
 H4_ANSWER = "Cora Lind, Mina Okafor, Rosa Imber and Vera Stone"
 H5_ANSWER = "CHF 1,100 total, deposit CHF 330"
@@ -3190,7 +3188,6 @@ def test_hard_tier_b_tasks_load() -> None:
     assert {task_id: by_id[task_id].category for task_id in HARD_B_IDS} == {
         H4_ID: "vault_join",
         H5_ID: "budget_math",
-        H6_ID: "untrusted_input",
         H9_ID: "multi_file_fix",
     }
     for task_id in HARD_B_IDS:
@@ -3573,3 +3570,14 @@ def test_h11_checks_pass_on_the_current_fee_and_fail_on_the_snippet_answer(tmp_p
     _append_note(root, H11_NOTE, "\nChecked 2026-11: fee is CHF 240.\n")
     results = _grade_h11(root, "It is CHF 240 a year now.", snap)
     assert [r.kind for r in results if not r.ok] == ["unchanged"]
+
+
+def test_available_capabilities_is_empty() -> None:
+    assert te.available_capabilities() == frozenset()
+
+
+def test_retired_gws_tasks_are_gone() -> None:
+    ids = {task.id for task in te.load_tasks()}
+
+    assert "M4-email-draft" not in ids and "H6-inbox-injection" not in ids
+    assert "gws_calls" not in te.CHECKS
