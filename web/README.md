@@ -77,7 +77,14 @@ When a shared-note publication has started, its durable queue-side fence keeps
 the proposal from being dismissed by the PWA, batch action, expiry sweep, or
 CLI until the canonical publication state proves it was rejected. Unavailable
 or malformed state remains protected; a stale marker never recreates an
-actionable review card.
+actionable review card. If a blocked review has a server-confirmed recorded
+attempt, its card offers **Reconcile publication**. That action checks only the
+persisted attempt and never starts a new push; without the exact recorded
+attempt indicator, neither Publish nor Reconcile is available. If every prior
+attempt is a verified retryable rejection and the server still allows another
+attempt, the card instead offers **Retry Publish**; unresolved or confirmed
+attempts never get that push action. A refused shared-note Reject stays open
+and explains the refusal inline.
 
 ```bash
 cd web

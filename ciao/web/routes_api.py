@@ -9289,6 +9289,111 @@ async def _proposal_share_accept(
         )
 
 
+async def _proposal_share_reconcile(
+    request: Request, ctx: dict[str, Any], body: dict[str, Any],
+) -> JSONResponse:
+    """Reconcile one recorded attempt without entering the publisher path."""
+    from ciao import share_publish
+
+    config = request.app.state.config
+    pid = str(ctx["row"].get("id") or "")
+    workspace = str(ctx.get("workspace") or "")
+    expected_workspace = body.get("workspace")
+    expected_revision = body.get("expected_revision")
+    if expected_workspace != workspace:
+        return JSONResponse(
+            {"error": "workspace does not own this share proposal", "id": pid},
+            status_code=409,
+        )
+    if not isinstance(expected_revision, str) or not expected_revision:
+        return JSONResponse(
+            {"error": "expected_revision is required", "id": pid}, status_code=409
+        )
+    if body.get("text") not in (None, ""):
+        return JSONResponse(
+            {"error": "shared-note reconciliation does not accept text", "id": pid},
+            status_code=400,
+        )
+
+    async with _workspace_archive_lock(request):
+        if not await asyncio.to_thread(_share_context_is_current, config, ctx):
+            return JSONResponse({
+                "error": "the share workspace or queue changed; reload the review",
+                "id": pid, "share_status": "stale_review",
+            }, status_code=409)
+        preview = await asyncio.to_thread(proposal_service.preview_row, config, ctx)
+        if preview.get("revision") != expected_revision:
+            return JSONResponse({
+                "error": "the shared-note review changed; refresh before reconciling",
+                "id": pid, "share_status": "stale_review", "preview": preview,
+            }, status_code=409)
+        if not preview.get("reconcile_available"):
+            return JSONResponse({
+                "error": "there is no recorded publication attempt to reconcile",
+                "id": pid, "share_status": "no_recorded_attempt",
+            }, status_code=409)
+
+        # This dedicated call is the consent boundary: reconcile_share only
+        # verifies persisted commit attempts and has no fresh-push path.
+        outcome = await share_publish.reconcile_share(
+            config, workspace=workspace, proposal_id=pid,
+            expected_revision=expected_revision,
+        )
+        if outcome.outcome not in {"published", "already_published"}:
+            return JSONResponse({
+                "error": outcome.message or "the recorded publication is unresolved",
+                "id": pid, "share_status": outcome.outcome,
+            }, status_code=503 if outcome.outcome == "indeterminate" else 409)
+        receipt = await asyncio.to_thread(
+            share_publish.get_share_receipt,
+            config, workspace=workspace, proposal_id=pid,
+            expected_revision=expected_revision,
+        )
+        if receipt is None:
+            return JSONResponse({
+                "error": "the publication receipt needs recovery",
+                "id": pid, "share_status": "indeterminate",
+            }, status_code=503)
+        try:
+            removed = await _settle_share_accept(config, ctx, receipt)
+        except QueueReceiptUnavailable:
+            return JSONResponse({
+                "error": "the publication is confirmed; queue settlement needs retry",
+                "id": pid, "share_status": "published", "receipt": receipt,
+            }, status_code=503)
+        return JSONResponse({
+            "ok": True,
+            "result": {
+                "id": pid, "action": "reconcile", "dismissed": False,
+                "promoted": True,
+                "destination": f"{preview.get('brain', '')}:{preview.get('path', '')}",
+            },
+            "share_status": "published", "receipt": receipt,
+            "settled": removed,
+        })
+
+
+async def proposal_reconcile_action(request: Request) -> JSONResponse:
+    """Explicit `/reconcile` route, resolved independently of the `{action}` route."""
+    config = request.app.state.config
+    pid = request.path_params["id"]
+    try:
+        raw_body = await request.json()
+    except Exception:  # noqa: BLE001 — an absent body becomes a typed refusal below
+        raw_body = {}
+    body = raw_body if isinstance(raw_body, dict) else {}
+    _rows, by_id = proposal_service._scan_proposal_rows(config)
+    ctx = by_id.get(pid)
+    if ctx is None:
+        return JSONResponse({"error": f"unknown proposal id: {pid}"}, status_code=404)
+    if ctx["row"].get("kind") != "share":
+        return JSONResponse({
+            "error": "reconcile is only available for shared-note proposals",
+            "id": pid,
+        }, status_code=400)
+    return await _proposal_share_reconcile(request, ctx, body)
+
+
 async def _refresh_legacy_share_review(
     request: Request, *, pid: str, workspace: str,
     expected_revision: str, preview: dict[str, Any],
@@ -10406,9 +10511,9 @@ async def proposal_action(request: Request) -> JSONResponse:
     # below but still fell through to the bullet removal and returned the
     # dismiss-shaped success payload: a typo in the path, or a stale client,
     # silently discarded a queued fact nobody had asked to dismiss.
-    if action not in {"accept", "dismiss"}:
+    if action not in {"accept", "dismiss", "reconcile"}:
         return JSONResponse(
-            {"error": "action must be accept|dismiss", "id": pid}, status_code=400
+            {"error": "action must be accept|dismiss|reconcile", "id": pid}, status_code=400
         )
     # Raw value, no str() coercion: a list or number must be refused, and the
     # refusal has to precede every write below.
@@ -10417,6 +10522,13 @@ async def proposal_action(request: Request) -> JSONResponse:
     except ValueError as exc:
         return JSONResponse({"error": str(exc), "id": pid}, status_code=400)
     row = ctx["row"]
+    if action == "reconcile":
+        if row.get("kind") != "share":
+            return JSONResponse(
+                {"error": "reconcile is only available for shared-note proposals", "id": pid},
+                status_code=400,
+            )
+        return await _proposal_share_reconcile(request, ctx, body)
     if action == "accept" and row.get("kind") == "share":
         return await _proposal_share_accept(request, ctx, body)
 

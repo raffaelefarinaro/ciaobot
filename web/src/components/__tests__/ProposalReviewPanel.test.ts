@@ -906,6 +906,184 @@ describe('shared-note review', () => {
     wrapper.unmount()
   })
 
+  it('shows a canonical publication refusal when rejecting a share review', async () => {
+    const share = row({ id: 'share-pending', kind: 'share', workspace: 'research' })
+    const sharePreview = preview({
+      id: share.id, workspace: share.workspace, kind: 'share',
+      operation: 'replace', before: 'before\n', after: 'after\n',
+      brain: 'Team', identity: 'https://example.test/team.git',
+      branch: 'main', path: 'note.md', revision: 'share-token',
+      blocked_reason: '',
+    })
+    apiGet.mockImplementation((url: string) => {
+      if (url.startsWith('/api/proposals/history')) return Promise.resolve({ rows: [], total: 0, truncated: false })
+      if (url.includes('/preview')) return Promise.resolve({ ok: true, preview: sharePreview })
+      return Promise.resolve({ rows: [share] })
+    })
+    apiPost.mockRejectedValue(Object.assign(new Error('The publication state is pending.'), {
+      payload: { conflict: true, error: 'The publication state is pending.' },
+    }))
+
+    const wrapper = mount(ProposalReviewPanel, { global: { plugins: [pinia] } })
+    await flushPromises()
+    await wrapper.find('.pr-row-action').trigger('click')
+    await flushPromises()
+    await wrapper.find('.pr-card button.btn-chip').trigger('click')
+    await flushPromises()
+    const dismissCard = wrapper.find('.pr-card--dismiss')
+    await dismissCard.find('.btn-primary').trigger('click')
+    await flushPromises()
+
+    expect(wrapper.find('.pr-card--dismiss').exists()).toBe(true)
+    expect(wrapper.find('.pr-card--dismiss [role="alert"]').text()).toContain('The publication state is pending.')
+    expect(apiPost).toHaveBeenCalledWith('/api/proposals/share-pending/dismiss?workspace=research', { workspace: 'research' })
+    await dismissCard.findAll('button').find(button => button.text() === 'Cancel')!.trigger('click')
+    await wrapper.find('.pr-row-action').trigger('click')
+    await flushPromises()
+    expect(wrapper.find('.pr-card-conflict').exists()).toBe(false)
+    wrapper.unmount()
+  })
+
+  it('reconciles only the server-recorded attempt from a blocked share preview', async () => {
+    const share = row({ id: 'share-indeterminate', kind: 'share', workspace: 'research' })
+    const sharePreview = preview({
+      id: share.id, workspace: share.workspace, kind: 'share',
+      operation: 'replace', before: 'before\n', after: 'after\n',
+      brain: 'Team', identity: 'https://example.test/team.git',
+      branch: 'main', path: 'note.md', revision: 'share-token',
+      blocked_reason: 'brain_unavailable', reconcile_available: true,
+    })
+    apiGet.mockImplementation((url: string) => {
+      if (url.startsWith('/api/proposals/history')) return Promise.resolve({ rows: [], total: 0, truncated: false })
+      if (url.includes('/preview')) return Promise.resolve({ ok: true, preview: sharePreview })
+      return Promise.resolve({ rows: [share] })
+    })
+    apiPost.mockRejectedValue(Object.assign(new Error('The recorded attempt remains unresolved.'), {
+      payload: {
+        conflict: true, error: 'The recorded attempt remains unresolved.',
+        share_status: 'indeterminate',
+      },
+    }))
+
+    const wrapper = mount(ProposalReviewPanel, { global: { plugins: [pinia] } })
+    await flushPromises()
+    await wrapper.find('.pr-row-action').trigger('click')
+    await flushPromises()
+    const card = wrapper.find('.pr-card')
+    expect(card.find('button').text()).toBe('Reconcile publication')
+    expect(card.text()).toContain('It cannot start a new publish.')
+    await card.find('button.btn-primary').trigger('click')
+    await flushPromises()
+
+    expect(apiPost).toHaveBeenCalledTimes(1)
+    expect(apiPost).toHaveBeenCalledWith('/api/proposals/share-indeterminate/reconcile?workspace=research', {
+      expected_revision: 'share-token', workspace: 'research',
+    })
+    expect(apiPost.mock.calls[0][0]).not.toContain('/accept')
+    expect(wrapper.findAll('.pr-card [role="alert"]').map(alert => alert.text()).join(' '))
+      .toContain('The recorded attempt remains unresolved.')
+    wrapper.unmount()
+  })
+
+  it('does not offer reconcile or publish without a server-recorded attempt', async () => {
+    const share = row({ id: 'share-no-attempt', kind: 'share', workspace: 'research' })
+    const sharePreview = preview({
+      id: share.id, workspace: share.workspace, kind: 'share',
+      revision: 'share-token', blocked_reason: 'brain_unavailable',
+      reconcile_available: false,
+    })
+    apiGet.mockImplementation((url: string) => {
+      if (url.startsWith('/api/proposals/history')) return Promise.resolve({ rows: [], total: 0, truncated: false })
+      if (url.includes('/preview')) return Promise.resolve({ ok: true, preview: sharePreview })
+      return Promise.resolve({ rows: [share] })
+    })
+    const wrapper = mount(ProposalReviewPanel, { global: { plugins: [pinia] } })
+    await flushPromises()
+    await wrapper.find('.pr-row-action').trigger('click')
+    await flushPromises()
+
+    expect(wrapper.find('.pr-card button.btn-primary').exists()).toBe(false)
+    expect(wrapper.find('.pr-card').text()).not.toContain('Reconcile publication')
+    wrapper.unmount()
+  })
+
+  it('shows friendly blocked reasons and never exposes internal reason codes', async () => {
+    const share = row({ id: 'share-blocked-copy', kind: 'share', workspace: 'research' })
+    const sharePreview = preview({
+      id: share.id, workspace: share.workspace, kind: 'share',
+      revision: 'share-token', blocked_reason: 'brain_unavailable',
+      reconcile_available: false,
+    })
+    apiGet.mockImplementation((url: string) => {
+      if (url.startsWith('/api/proposals/history')) return Promise.resolve({ rows: [], total: 0, truncated: false })
+      if (url.includes('/preview')) return Promise.resolve({ ok: true, preview: sharePreview })
+      return Promise.resolve({ rows: [share] })
+    })
+    const wrapper = mount(ProposalReviewPanel, { global: { plugins: [pinia] } })
+    await flushPromises()
+    await wrapper.find('.pr-row-action').trigger('click')
+    await flushPromises()
+
+    const alert = wrapper.find('.pr-card [role="alert"]')
+    expect(alert.text()).toBe('The original shared brain link is no longer active. Restore it if possible, or create a new proposal for the current destination.')
+    expect(alert.text()).not.toContain('brain_unavailable')
+    expect(wrapper.find('.pr-card button.btn-primary').exists()).toBe(false)
+
+    wrapper.unmount()
+  })
+
+  it('uses safe fallback copy for an unknown blocked reason', async () => {
+    const share = row({ id: 'share-unknown-block', kind: 'share', workspace: 'research' })
+    const sharePreview = preview({
+      id: share.id, workspace: share.workspace, kind: 'share',
+      revision: 'share-token', blocked_reason: 'future_internal_reason',
+      reconcile_available: false,
+    })
+    apiGet.mockImplementation((url: string) => {
+      if (url.startsWith('/api/proposals/history')) return Promise.resolve({ rows: [], total: 0, truncated: false })
+      if (url.includes('/preview')) return Promise.resolve({ ok: true, preview: sharePreview })
+      return Promise.resolve({ rows: [share] })
+    })
+    const wrapper = mount(ProposalReviewPanel, { global: { plugins: [pinia] } })
+    await flushPromises()
+    await wrapper.find('.pr-row-action').trigger('click')
+    await flushPromises()
+
+    const alert = wrapper.find('.pr-card [role="alert"]')
+    expect(alert.text()).toBe('This shared note cannot be published right now. Refresh the review or check its destination.')
+    expect(alert.text()).not.toContain('future_internal_reason')
+    wrapper.unmount()
+  })
+
+  it('offers Publish retry only when the server confirms retryable rejection', async () => {
+    const share = row({ id: 'share-retryable', kind: 'share', workspace: 'research' })
+    const sharePreview = preview({
+      id: share.id, workspace: share.workspace, kind: 'share',
+      revision: 'share-token', blocked_reason: '',
+      reconcile_available: false, publish_retry_available: true,
+    })
+    apiGet.mockImplementation((url: string) => {
+      if (url.startsWith('/api/proposals/history')) return Promise.resolve({ rows: [], total: 0, truncated: false })
+      if (url.includes('/preview')) return Promise.resolve({ ok: true, preview: sharePreview })
+      return Promise.resolve({ rows: [share] })
+    })
+    apiPost.mockResolvedValue({ share_status: 'published' })
+    const wrapper = mount(ProposalReviewPanel, { global: { plugins: [pinia] } })
+    await flushPromises()
+    await wrapper.find('.pr-row-action').trigger('click')
+    await flushPromises()
+
+    const card = wrapper.find('.pr-card')
+    expect(card.find('.btn-primary').text()).toBe('Retry Publish')
+    await card.find('.btn-primary').trigger('click')
+    await flushPromises()
+    expect(apiPost).toHaveBeenCalledWith('/api/proposals/share-retryable/accept?workspace=research', {
+      expected_revision: 'share-token', workspace: 'research',
+    })
+    expect(apiPost.mock.calls[0][0]).not.toContain('/reconcile')
+    wrapper.unmount()
+  })
+
   it('moves keyboard focus into shared-note review and restores it on Cancel', async () => {
     const share = row({ id: 'share-focus', kind: 'share', workspace: 'research' })
     const sharePreview = preview({
@@ -1011,7 +1189,8 @@ describe('shared-note review', () => {
     await wrapper.get('.pr-row-action').trigger('click')
     await flushPromises()
     expect(wrapper.find('.pr-card button.btn-primary').exists()).toBe(false)
-    expect(wrapper.text()).toContain('Cannot publish: brain_unavailable')
+    expect(wrapper.text()).toContain('The original shared brain link is no longer active.')
+    expect(wrapper.text()).not.toContain('brain_unavailable')
     wrapper.unmount()
   })
 
@@ -1107,8 +1286,9 @@ describe('shared-note review', () => {
     await flushPromises()
 
     expect(wrapper.find('.pr-card button.btn-primary').exists()).toBe(false)
-    expect(wrapper.text()).toContain('Cannot publish: brain_changed')
-    expect(wrapper.text()).toContain('The selected shared brain changed; this note was not published. (brain_changed)')
+    expect(wrapper.text()).toContain('The shared brain destination changed since this proposal was created.')
+    expect(wrapper.text()).toContain('The selected shared brain changed; this note was not published.')
+    expect(wrapper.text()).not.toContain('brain_changed')
     wrapper.unmount()
   })
 })

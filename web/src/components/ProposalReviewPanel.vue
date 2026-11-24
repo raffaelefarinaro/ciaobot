@@ -184,6 +184,7 @@ function isDismissOpen(row: ProposalRow): boolean {
  *  back to it. */
 const previewTrigger = ref('accept')
 const shareActionErrors = ref<Record<string, string>>({})
+const shareDismissErrors = ref<Record<string, string>>({})
 
 async function reviewAccept(row: ProposalRow, trigger = 'accept') {
   // Moving to another row's card walks away from this one: close it the same
@@ -324,6 +325,19 @@ function operationLabel(operation: string): string {
   return OPERATION_LABELS[operation] ?? 'Change'
 }
 
+const SHARE_BLOCKED_MESSAGES: Record<string, string> = {
+  brain_unavailable: 'The original shared brain link is no longer active. Restore it if possible, or create a new proposal for the current destination.',
+  brain_changed: 'The shared brain destination changed since this proposal was created. Restore the original destination if possible, or create a new proposal for the current one.',
+  draft_unavailable: 'This shared-note review is unavailable. Refresh the proposal before continuing.',
+  draft_corrupt: 'This shared-note review could not be verified. Refresh the proposal before continuing.',
+  share_text_edits_not_supported: 'Shared-note proposals cannot be edited here.',
+}
+
+function shareBlockedMessage(reason: string): string {
+  return SHARE_BLOCKED_MESSAGES[reason]
+    ?? 'This shared note cannot be published right now. Refresh the review or check its destination.'
+}
+
 /** The exact lines the accept would add or remove, from the server's bodies. */
 function previewChanges(preview: ProposalPreview): LineChange[] {
   return lineChanges(preview.before ?? '', preview.after ?? '', preview.separator || '\n')
@@ -346,8 +360,10 @@ async function confirmPreview(row: ProposalRow, workspace = '', reconcile = fals
   const preview = store.previews[row.id]
   if (!preview) return
   if (row.kind === 'share') {
-    if (preview.kind !== 'share' || preview.blocked_reason || !preview.revision) return
-    const result = await store.act(row.id, 'accept', row.workspace, {
+    if (preview.kind !== 'share' || !preview.revision) return
+    const reconcile = Boolean(preview.reconcile_available)
+    if (preview.blocked_reason && !reconcile) return
+    const result = await store.act(row.id, reconcile ? 'reconcile' : 'accept', row.workspace, {
       expectedRevision: preview.revision,
     })
     if (result.replacementId) {
@@ -357,11 +373,12 @@ async function confirmPreview(row: ProposalRow, workspace = '', reconcile = fals
       if (replacement) await reviewAccept(replacement, 'review')
       return
     }
-    if (result.conflict) return
+    if (result.conflict && !reconcile) return
     if (!result.ok) {
-      const status = (result.payload as { share_status?: string } | undefined)?.share_status
-      const message = result.error || 'The shared note was not published.'
-      shareActionErrors.value = { ...shareActionErrors.value, [row.id]: status ? `${message} (${status})` : message }
+      const message = result.error || (reconcile
+        ? 'The recorded publication could not be reconciled.'
+        : 'The shared note was not published.')
+      shareActionErrors.value = { ...shareActionErrors.value, [row.id]: message }
       return
     }
     const next = { ...shareActionErrors.value }
@@ -1386,7 +1403,12 @@ function doDismiss(row: ProposalRow) {
 function closeDismiss() {
   const id = dismissId.value
   dismissId.value = ''
-  if (id) clearReason(id)
+  if (id) {
+    clearReason(id)
+    const next = { ...shareDismissErrors.value }
+    delete next[id]
+    shareDismissErrors.value = next
+  }
 }
 
 /** Cancel: no write, and the focus goes back to the row action that opened
@@ -1407,7 +1429,15 @@ async function confirmDismiss(row: ProposalRow) {
   if (store.isBusy(row.id)) return
   const reason = reasonFor(row.id)
   const result = await store.act(row.id, 'dismiss', row.kind === 'share' ? row.workspace : '', { reason })
-  if (!result.ok) return
+  if (!result.ok) {
+    if (row.kind === 'share' && result.error) {
+      shareDismissErrors.value = {
+        ...shareDismissErrors.value,
+        [row.id]: result.error,
+      }
+    }
+    return
+  }
   closeDismiss()
 }
 
@@ -2087,17 +2117,23 @@ watch(
                   Sharing publishes this text to everyone with access to {{ store.previews[row.id].identity }}. It stays in the repository’s history even if it is later removed.
                 </p>
                 <p v-if="store.previews[row.id].blocked_reason" class="pr-card-error" role="alert">
-                  Cannot publish: {{ store.previews[row.id].blocked_reason }}
+                  {{ shareBlockedMessage(store.previews[row.id].blocked_reason!) }}
+                </p>
+                <p v-if="store.previews[row.id].reconcile_available" class="hint">
+                  This checks a previously recorded publication attempt. It cannot start a new publish.
+                </p>
+                <p v-if="store.previews[row.id].publish_retry_available" class="hint">
+                  The previous attempt was rejected as retryable. Publish will verify the destination again before retrying.
                 </p>
                 <p v-if="shareActionErrors[row.id]" class="pr-card-error" role="alert">{{ shareActionErrors[row.id] }}</p>
                 <div class="pr-actions pr-actions--card">
                   <button
-                    v-if="!store.previews[row.id].blocked_reason && store.previews[row.id].revision"
+                    v-if="store.previews[row.id].revision && (store.previews[row.id].reconcile_available || store.previews[row.id].publish_retry_available || !store.previews[row.id].blocked_reason)"
                     type="button"
                     class="btn-small btn-primary"
-                    :disabled="store.isBusy(row.id) || store.isPreviewLoading(row.id) || Boolean(store.previews[row.id].blocked_reason)"
+                    :disabled="store.isBusy(row.id) || store.isPreviewLoading(row.id)"
                     @click="confirmPreview(row)"
-                  >{{ store.isBusy(row.id) ? 'publishing…' : 'Publish' }}</button>
+                  >{{ store.isBusy(row.id) ? (store.previews[row.id].reconcile_available ? 'checking…' : 'publishing…') : (store.previews[row.id].reconcile_available ? 'Reconcile publication' : store.previews[row.id].publish_retry_available ? 'Retry Publish' : 'Publish') }}</button>
                   <button type="button" class="btn-small btn-chip" :disabled="store.isBusy(row.id)" @click="doDismiss(row)">Reject</button>
                   <button type="button" class="btn-small btn-chip" @click="cancelPreview">Cancel</button>
                 </div>
@@ -2237,6 +2273,9 @@ watch(
               />
             </div>
             <p class="pr-confirm-action">This will dismiss the proposal.</p>
+            <p v-if="row.kind === 'share' && shareDismissErrors[row.id]" class="pr-card-error" role="alert">
+              {{ shareDismissErrors[row.id] }}
+            </p>
             <div class="pr-actions pr-actions--card">
               <button
                 type="button"

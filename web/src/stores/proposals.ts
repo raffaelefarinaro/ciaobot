@@ -499,7 +499,7 @@ export const useProposalsStore = defineStore('proposals', () => {
    */
   async function act(
     id: string,
-    action: 'accept' | 'dismiss',
+    action: 'accept' | 'dismiss' | 'reconcile',
     workspace = '',
     opts?: { expectedRevision?: string; text?: string; reconcile?: boolean; reason?: string },
   ): Promise<{ ok: boolean; error?: string; conflict?: boolean; payload?: unknown; replacementId?: string }> {
@@ -526,14 +526,23 @@ export const useProposalsStore = defineStore('proposals', () => {
       // Single-row decisions only: the batch bar never sends one.
       if (opts?.reason) body.reason = opts.reason
       const reply = await api.post<ProposalBatchResponse>(`/api/proposals/${id}/${action}${query}`, body)
-      const stale = action === 'accept' ? dropSiblingPreviews([id]) : []
+      const stale = action !== 'dismiss' ? dropSiblingPreviews([id]) : []
       await fetch({ force: true })
       refetchPreviews(stale)
       invalidateHistory()
       return { ok: true, payload: reply }
     } catch (e) {
-      const conflict = adoptConflict(id, e)
       const payload = (e as { payload?: unknown } | null)?.payload
+      const payloadConflict = Boolean((payload as { conflict?: boolean } | undefined)?.conflict)
+      const shareDismissConflict = action === 'dismiss'
+        && rows.value.find(row => row.id === id)?.kind === 'share'
+        && payloadConflict
+      const inlineShareError = action === 'reconcile' || shareDismissConflict
+      // These share outcomes have their own card-level message. Do not mark a
+      // publication refusal as a destination-preview conflict.
+      const conflict = action === 'reconcile'
+        ? payloadConflict
+        : shareDismissConflict ? true : adoptConflict(id, e)
       const sharePayload = payload as {
         error?: string
         share_status?: string
@@ -568,7 +577,7 @@ export const useProposalsStore = defineStore('proposals', () => {
             error.value = message
           }
         }
-        conflictIds.value = new Set(conflictIds.value).add(id)
+        if (action !== 'reconcile') conflictIds.value = new Set(conflictIds.value).add(id)
         return { ok: false, error: message, conflict: true, payload }
       }
       if (sharePayload?.preview) {
@@ -583,7 +592,7 @@ export const useProposalsStore = defineStore('proposals', () => {
       // same thing twice in two places. Nor is a deferral: the caller renders
       // it on the row, with the entries it was weighed against and a retry, and
       // a toast would take all three away the moment they became relevant.
-      if (!conflict && !deferred) error.value = msg
+      if (!conflict && !deferred && !inlineShareError) error.value = msg
       return { ok: false, error: msg, conflict, payload }
     } finally {
       setBusy(id, false)

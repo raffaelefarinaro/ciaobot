@@ -1434,6 +1434,7 @@ Routes: `GET /api/proposals`, `GET /api/proposals/history`,
 `GET /api/proposals/{id}/preview`,
 `POST /api/proposals/{id}/implement`,
 `POST /api/proposals/{id}/{action}` (action is `accept` or `dismiss`),
+`POST /api/proposals/{id}/reconcile` (recorded share attempt only),
 `POST /api/proposals/batch`, `POST /api/proposals/dismiss-older-than`,
 `POST /api/proposals/legacy-learning-dismiss`.
 
@@ -1464,7 +1465,14 @@ reason.
 
 A `kind: "share"` preview is the exact private draft projection:
 `{before, after, operation, brain, identity, branch, path, revision,
-blocked_reason}`. `before` and `after` are exact text or `null` when the file
+blocked_reason, reconcile_available, publish_retry_available}`.
+`reconcile_available` is true only when the exact canonical review token has a
+persisted attempt that must be inspected without pushing.
+`publish_retry_available` is true only when every persisted attempt is a
+validated retryable rejection and the attempt limit allows another push.
+Clients should expose only the action indicated by these server fields for
+blocked or previously attempted reviews.
+`before` and `after` are exact text or `null` when the file
 is absent; `revision` is the full-artifact consent token. Share previews cannot
 be edited. Accept requires `{workspace, expected_revision}` for the owning
 workspace and that exact token. A stale token returns 409 with
@@ -1474,6 +1482,12 @@ proposal pending. A confirmed accept settles the queue and records one
 decision. Retrying a confirmed accept with the same workspace and token
 replays its private receipt without another push. Batch accept still refuses
 share rows.
+
+`POST /api/proposals/{id}/reconcile` also requires `{workspace,
+expected_revision}`. Use it only when the preview says `reconcile_available:
+true`. The server checks that same canonical attempt and calls the reconcile-only
+path; it never starts a new push. An unresolved or rejected attempt stays queued
+and returns its status so the operator can decide what to do next.
 
 Share publication receipts are projected into proposal history and
 `/api/memory/receipts` as `kind: "share_publish"`, with commit, branch, path,
@@ -1716,6 +1730,12 @@ curl -sS -b /tmp/ciao.jar -X POST "http://localhost:${PWA_PORT:-8443}/api/propos
 # compare a re-extracted fact against. Both fields are optional, so a client
 # that shows no preview behaves exactly as before.
 curl -sS -b /tmp/ciao.jar -X POST "http://localhost:${PWA_PORT:-8443}/api/proposals/$ID/accept"
+
+# Reconcile a shared-note attempt only when its exact preview returned
+# reconcile_available: true. This checks the recorded commit and cannot push.
+curl -sS -b /tmp/ciao.jar -X POST "http://localhost:${PWA_PORT:-8443}/api/proposals/$ID/reconcile" \
+  -H 'content-type: application/json' \
+  -d '{"workspace":"personal","expected_revision":"<preview revision>"}'
 
 # Accept a region row, reconciling it against that region's CURRENT entries
 # first, so a fact that supersedes one already there replaces it (undo-logged)

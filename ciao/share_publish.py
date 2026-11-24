@@ -121,6 +121,45 @@ def has_publication_attempt(config: Any, *, workspace: str, proposal_id: str, ex
     return isinstance(attempts, list) and bool(attempts)
 
 
+def can_retry_publication(
+    config: Any, *, workspace: str, proposal_id: str, expected_revision: str,
+) -> bool:
+    """Whether every persisted attempt was definitively rejected as retryable."""
+    artifact = _artifact_for(config, workspace, proposal_id)
+    if artifact is None or artifact.get("review_token") != expected_revision:
+        return False
+    fields = artifact.get("immutable")
+    publication = artifact.get("publication")
+    if not isinstance(fields, dict) or not isinstance(publication, dict):
+        return False
+    attempts = publication.get("attempts")
+    receipts = publication.get("receipts")
+    if (
+        not isinstance(attempts, list) or not attempts
+        or len(attempts) >= MAX_ATTEMPTS
+        or not isinstance(receipts, list) or receipts
+    ):
+        return False
+    for index, attempt in enumerate(attempts, start=1):
+        if not isinstance(attempt, dict):
+            return False
+        commit_oid = attempt.get("commit_oid")
+        parent_oid = attempt.get("parent_oid")
+        if (
+            type(attempt.get("attempt")) is not int or attempt["attempt"] != index
+            or not isinstance(commit_oid, str) or not _OID.fullmatch(commit_oid)
+            or not isinstance(parent_oid, str) or not _OID.fullmatch(parent_oid)
+            or attempt.get("proposal_id") != fields.get("proposal_id")
+            or attempt.get("revision") != fields.get("revision")
+            or attempt.get("destination_fingerprint") != fields.get("destination_fingerprint")
+            or attempt.get("ref") != fields.get("upstream_ref")
+            or attempt.get("status") != "rejected"
+            or attempt.get("retryable") is not True
+        ):
+            return False
+    return True
+
+
 def refresh_legacy_draft(
     config: Any, *, workspace: str, proposal_id: str, expected_revision: str,
 ) -> drafts.ShareDraft | drafts.ShareRefusal | None:
