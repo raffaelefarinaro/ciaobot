@@ -505,7 +505,7 @@ def test_the_shared_brain_block_rides_the_stable_block_only() -> None:
     block = render_shared_brain_block([("acme", "/brains/acme", False, "2026-11-20")])
     first = build_context_capsule(workspace="w", shared_brain_block=block)
     later = build_context_capsule(workspace="w", shared_brain_block=block, include_stable=False)
-    assert "name=acme updated=2026-11-20 path=/brains/acme" in first
+    assert "name=acme fetched=2026-11-20 path=/brains/acme" in first
     assert "[Shared brains]" not in later
 
 
@@ -524,8 +524,9 @@ def test_shared_brain_block_for_a_missing_folder_has_no_read_recipe() -> None:
     )
     assert "name=gone unavailable" in block
     assert "name=gone unavailable path=/brains/gone" not in block
-    assert "name=gone updated" not in block
-    assert "name=acme updated=2026-11-19 path=/brains/acme" in block
+    assert "name=gone fetched" not in block
+    assert "updated=" not in block
+    assert "name=acme fetched=2026-11-19 path=/brains/acme" in block
 
 
 def test_block_lists_each_brain_by_name_and_fits_the_cap_with_the_rules() -> None:
@@ -583,8 +584,8 @@ def test_an_altered_path_is_listed_without_the_path() -> None:
 def test_a_path_cannot_imitate_the_markers() -> None:
     """The path is the last field, so words in it are read as path, never as a marker."""
     assert shared_brain_line("acme", "/a unavailable") == "name=acme path=/a unavailable"
-    assert shared_brain_line("acme", "/a updated=2030-01-01", updated="2026-11-20") == (
-        "name=acme updated=2026-11-20 path=/a updated=2030-01-01"
+    assert shared_brain_line("acme", "/a fetched=2030-01-01", fetched="2026-11-20") == (
+        "name=acme fetched=2026-11-20 path=/a fetched=2030-01-01"
     )
     assert shared_brain_line("acme", "/a", missing=True) == "name=acme unavailable"
 

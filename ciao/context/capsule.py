@@ -139,11 +139,11 @@ def exact_brain_path(path: str) -> str | None:
     return flat if flat == path else None
 
 
-def shared_brain_line(name: str, path: str, *, missing: bool = False, updated: str = "") -> str:
+def shared_brain_line(name: str, path: str, *, missing: bool = False, fetched: str = "") -> str:
     """One brain's line in the ``[Shared brains]`` block.
 
     ``path=`` is always last, so a path that contains the words ``unavailable`` or
-    ``updated=`` cannot be read as a marker. An altered path is replaced by
+    ``fetched=`` cannot be read as a marker. An altered path is replaced by
     ``unavailable`` alone (see ``exact_brain_path``).
     """
     head = f"name={_brain_name(name)}"
@@ -152,8 +152,8 @@ def shared_brain_line(name: str, path: str, *, missing: bool = False, updated: s
         return f"{head} unavailable"
     if missing:
         return f"{head} unavailable"
-    if updated:
-        return f"{head} updated={_field(updated, limit=10)} path={shown}"
+    if fetched:
+        return f"{head} fetched={_field(fetched, limit=10)} path={shown}"
     return f"{head} path={shown}"
 
 
@@ -164,9 +164,9 @@ def shared_brain_pass_line(name: str, path: str) -> str | None:
 
 
 def render_shared_brain_block(brains: Sequence[tuple[str, str, bool, str]]) -> str:
-    """The ``[Shared brains]`` block for ``(name, path, missing, updated)`` brains.
+    """The ``[Shared brains]`` block for ``(name, path, missing, fetched)`` brains.
 
-    ``updated`` is the date of the brain's last fetch (``YYYY-MM-DD``) or "". A
+    ``fetched`` is the date of the brain's last fetch (``YYYY-MM-DD``) or "". A
     missing folder is listed as ``unavailable`` so the agent can say so instead of
     guessing. When the block would exceed ``SHARED_BRAIN_BLOCK_MAX_CHARS``, brain
     lines are dropped from the end, the first ones in workspace order are kept, and
@@ -175,8 +175,8 @@ def render_shared_brain_block(brains: Sequence[tuple[str, str, bool, str]]) -> s
     """
     if not brains:
         return ""
-    all_lines = [shared_brain_line(name, path, missing=missing, updated=updated)
-                 for name, path, missing, updated in brains]
+    all_lines = [shared_brain_line(name, path, missing=missing, fetched=fetched)
+                 for name, path, missing, fetched in brains]
 
     def assemble(kept: list[str]) -> str:
         head = [_SHARED_BRAIN_OPEN, *kept]

@@ -104,6 +104,26 @@ describe('SettingsSharedBrains loading and failures', () => {
     expect(listed.text()).toContain(SHARED_BRAIN_PRIVACY)
   })
 
+  it('shows the checked-out commit and dirty state separately from a skipped update', async () => {
+    apiGet.mockResolvedValueOnce({ shared_brains: [state({
+      dirty: true,
+      last_update: { outcome: 'skipped', reason: 'local_changes', detail: '', at: '2026-11-22T10:00:00Z' },
+    })] })
+    const view = await mountCard()
+    const row = view.find('.shared-brain-row')
+    expect(row.text()).toContain('Branch main')
+    expect(row.text()).toContain('Checked-out commit abc1234')
+    expect(row.text()).toContain('Local changes')
+    expect(row.find('.shared-brain-status').text()).toBe('Not updated: local changes in the folder')
+  })
+
+  it('shows an unknown commit without a branch and no leading separator when dirty', async () => {
+    apiGet.mockResolvedValueOnce({ shared_brains: [state({ branch: '', head: '', dirty: true })] })
+    const view = await mountCard()
+    const metadata = view.find('.shared-brain-row p.hint--compact')
+    expect(metadata.text()).toBe('Checked-out commit unknown · Local changes')
+  })
+
   it('shows a pending read as its own status, never as an empty claim', async () => {
     apiGet.mockReturnValue(new Promise(() => {}))
     const view = mount(SettingsSharedBrains)
