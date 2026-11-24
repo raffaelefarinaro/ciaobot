@@ -64,6 +64,20 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
+def _may_archive_completed_learning_drain(
+    verification: Mapping[str, Any], state_record: Any
+) -> bool:
+    """Require a clean, settled queue before archiving its completed helper chat."""
+    return (
+        not verification.get("failed")
+        and not verification.get("unresolved")
+        and not verification.get("automatic_rows")
+        and not verification.get("suppressed_rows")
+        and getattr(state_record, "lifecycle", None) == "completed"
+        and bool(getattr(state_record, "chat_id", ""))
+    )
+
+
 _PhaseStatus = Literal["pending", "in_progress", "done", "failed", "skipped"]
 
 @dataclass
@@ -1097,14 +1111,14 @@ async def _run_server_locked(
                     workspace=workspace,
                     runtime_root=Path(config.state_path).parent,
                 )
-                if verification["failed"] or verification["unresolved"] or verification["automatic_rows"]:
-                    continue
                 await evaluate(config, workspace=workspace, installed_version=__version__)
                 task = load_catalog().by_id.get("learnings-queue-drain")
                 if task is None:
                     continue
                 state_record = read_task_state(task, config=config, workspace=workspace)
-                if state_record is None or state_record.lifecycle != "completed" or not state_record.chat_id:
+                if state_record is None or not _may_archive_completed_learning_drain(
+                    verification, state_record
+                ):
                     continue
                 chat = next(
                     (item for item in pcm.list_chats() if item.chat_id == state_record.chat_id),

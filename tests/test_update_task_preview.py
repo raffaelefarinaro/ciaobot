@@ -132,6 +132,41 @@ def test_prepared_drain_receipt_with_empty_queue_is_blocked_not_no_work(tmp_path
     assert "with `--apply`" in prompt_text
 
 
+def test_reverted_drain_preview_keeps_undo_visible_without_offering_retry(
+    tmp_path: Path,
+) -> None:
+    from ciao import learnings_queue_drain as drain, update_task_preview as preview
+
+    config = config_for(tmp_path)
+    vault = Path(config.workspace_vault_root("personal"))
+    workspace = vault / "Workspace"
+    workspace.mkdir(parents=True)
+    queue = workspace / "Memory-Proposals.md"
+    original = "- [learnings] lesson the user put back\n"
+    queue.write_text(original, encoding="utf-8")
+    runtime = Path(config.state_path).parent
+
+    applied = drain.drain(vault, workspace="personal", runtime_root=runtime, apply=True)
+    reverted = drain.revert(
+        vault,
+        Path(applied["receipts"][0]),
+        workspace="personal",
+        runtime_root=runtime,
+        apply=True,
+    )
+    assert reverted["reverted"]
+
+    result = preview.prepare(task("learnings-queue-drain"), config=config, workspace="personal")
+
+    assert result["state"] == "review"
+    assert result["plan"]["automatic_rows"] == 0
+    assert len(result["plan"]["suppressed_rows"]) == 1
+    assert result["plan"]["suppressed_rows"][0]["text"] == "lesson the user put back"
+    assert "deliberately restored" in result["summary"]
+    assert "will not move automatically" in result["summary"]
+    assert queue.read_text(encoding="utf-8") == original
+
+
 def test_applied_receipt_preview_redacts_all_host_paths(tmp_path: Path) -> None:
     from ciao import learnings_queue_drain as drain, update_task_preview as preview
 

@@ -939,6 +939,7 @@ def inspect(vault_root: Path, *, workspace: str, runtime_root: Path) -> dict[str
         "applied_receipts": [],
         "reverted_receipts": [],
         "automatic_rows": 0,
+        "suppressed_rows": [],
         "failed": [],
         "unresolved": [],
     }
@@ -981,6 +982,12 @@ def inspect(vault_root: Path, *, workspace: str, runtime_root: Path) -> dict[str
         summary["automatic_rows"] = sum(
             1 for raw in queue_raw_rows if _parse_row(raw) is not None and raw not in reverted_raw
         )
+        summary["suppressed_rows"] = [
+            parsed
+            for raw in queue_raw_rows
+            if raw in reverted_raw
+            if (parsed := _parse_row(raw)) is not None
+        ]
         summary["not_applicable"] = not summary["automatic_rows"] and not summary["unresolved"]
     except (OSError, UnicodeError, ValueError) as exc:
         summary["failed"].append(str(exc))

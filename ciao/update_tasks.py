@@ -307,8 +307,12 @@ def _learnings_queue_drain_needed(
     if result["failed"]:
         raise ValueError("could not inspect pending learning drain state")
     rows = int(result["automatic_rows"])
+    suppressed = len(result["suppressed_rows"])
     unresolved = len(result["unresolved"])
-    return Detection(rows > 0 or unresolved > 0, {"rows": rows, "unresolved": result["unresolved"]})
+    return Detection(
+        rows > 0 or suppressed > 0 or unresolved > 0,
+        {"rows": rows, "suppressed": suppressed, "unresolved": result["unresolved"]},
+    )
 
 
 def _learnings_queue_drain_recorded(
@@ -322,9 +326,24 @@ def _learnings_queue_drain_recorded(
 
     result = inspect(vault, workspace=workspace, runtime_root=_runtime_root(config))
     pending = int(result["automatic_rows"])
+    suppressed = len(result["suppressed_rows"])
     recorded = bool(result["applied_receipts"] or result["reverted_receipts"])
-    complete = recorded and pending == 0 and not result["unresolved"] and not result["failed"]
-    return Detection(complete, {"receipt_recorded": recorded, "pending": pending, "unresolved": result["unresolved"]})
+    complete = (
+        recorded
+        and pending == 0
+        and suppressed == 0
+        and not result["unresolved"]
+        and not result["failed"]
+    )
+    return Detection(
+        complete,
+        {
+            "receipt_recorded": recorded,
+            "pending": pending,
+            "suppressed": suppressed,
+            "unresolved": result["unresolved"],
+        },
+    )
 
 
 def _learnings_cleanup_review_needed(

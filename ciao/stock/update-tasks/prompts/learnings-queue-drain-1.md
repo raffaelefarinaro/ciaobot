@@ -2,8 +2,13 @@
 
 This workspace's older learning rows are migrated automatically in the
 background. Do not ask the user to approve a dry run or explain internal
-receipts. The user can ask to remove one specific queued row; use the exact
-row and revision shown in Memory → To decide. If migration already moved it,
+receipts. Check that `unresolved` and `failed` are empty before taking any
+action. If either contains an item, explain that migration needs attention and
+ask the user before running any command to inspect or repair it. Never run the
+drain command with `--apply` automatically. Rows deliberately restored by the
+user stay queued; do not migrate them again automatically. Explain that they
+remain in Memory → To decide, where the user can ask to remove one exact queued
+row using its current revision. If migration already moved it,
 inspect `ciao learnings-cleanup --json` and match the exact learning ID and
 entry revision. Use the attended `--apply --approval-file` flow with the user's
 reason and evidence. That flow removes the whole canonical learning entry. If
