@@ -144,6 +144,38 @@ def _corrupt_guide(config: CiaoConfig, workspace: str) -> None:
     guide.parent.mkdir(parents=True, exist_ok=True)
     guide.write_text(_DUPLICATED_REGION_GUIDE, encoding="utf-8")
 
+
+def test_share_accept_is_refused_before_single_or_mixed_batch_mutation(tmp_path: Path) -> None:
+    config = _default_vault(tmp_path)
+    queue = _queue_text(config, "personal")
+    queue.write_text(
+        "# Queue\n- [memory] Keep the office open\n"
+        "- [share opaque123] Shared note change proposal opaque123\n",
+        encoding="utf-8",
+    )
+    client = _client(config)
+    rows = client.get("/api/proposals").json()["rows"]
+    share = next(row for row in rows if row["kind"] == "share")
+    memory = next(row for row in rows if row["kind"] == "memory")
+    guide = config.agent_root("personal") / "AGENTS.md"
+    guide.write_text("# Existing guide\n", encoding="utf-8")
+    before = guide.read_bytes()
+
+    response = client.post(f"/api/proposals/{share['id']}/accept")
+    assert response.status_code == 409
+    assert guide.read_bytes() == before
+    assert "opaque123" in queue.read_text(encoding="utf-8")
+
+    response = client.post("/api/proposals/batch", json={"action": "accept", "ids": [memory["id"], share["id"]]})
+    assert response.status_code == 409
+    assert guide.read_bytes() == before
+    assert "Keep the office open" in queue.read_text(encoding="utf-8")
+    assert "opaque123" in queue.read_text(encoding="utf-8")
+
+    response = client.post(f"/api/proposals/{share['id']}/dismiss")
+    assert response.status_code == 200
+    assert "opaque123" not in queue.read_text(encoding="utf-8")
+
 def test_list_returns_rows_with_workspace_path_and_kind(tmp_path: Path) -> None:
     config = _default_vault(tmp_path)
     resp = _client(config).get("/api/proposals")

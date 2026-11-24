@@ -9219,6 +9219,11 @@ async def proposals_batch(request: Request) -> JSONResponse:
     resolved, error = proposal_service._resolve_batch(config, ids)
     if error or resolved is None:
         return JSONResponse({"error": error}, status_code=404)
+    if action == "accept" and any(ctx["row"].get("kind") == "share" for ctx in resolved):
+        return JSONResponse(
+            {"error": "publishing a shared note requires its attended consent flow"},
+            status_code=409,
+        )
 
     # An accept mutates every destination first - region writes, project-doc
     # folds, people notes, learnings counts - and only then rewrites the queue,
@@ -9793,6 +9798,11 @@ async def proposal_action(request: Request) -> JSONResponse:
     except ValueError as exc:
         return JSONResponse({"error": str(exc), "id": pid}, status_code=400)
     row = ctx["row"]
+    if action == "accept" and row.get("kind") == "share":
+        return JSONResponse(
+            {"error": "publishing a shared note requires its attended consent flow", "id": pid},
+            status_code=409,
+        )
 
     if action == "dismiss" and row.get("kind") == "category":
         # Recorded BEFORE the bullet is removed, because the row IS the proposal:
