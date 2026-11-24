@@ -14,7 +14,7 @@ The route source of truth is `ciao/web/app.py`. This file is kept in sync by `te
 - Password protection is always on; nothing turns it off. `PWA_AUTH_TOKEN` in the workspace `.env` is the dashboard password: the first-run wizard asks for it and `POST /api/auth/settings` changes it (the current password is required, except from a browser on the host: loopback TCP peer with no reverse-proxy headers, loopback `Host`, exact same-origin `Origin`/`Referer` - the session is still required; `tailscale serve` callers are not the host). A change re-keys the session signer: every other device is signed out, and only the browser that made the change gets a new cookie. A successful change also ends **every** terminal grant, on every browser, and clears the `ciao_terminal` cookie: the grant is bound to the signed session, and the change re-keys the session behind it, so every browser has to sign in again and ask for a new grant — including the browser that made the change. A refused change (a missing or wrong current password, a too-short new password) ends no grant and clears no terminal cookie. A missing current password is 400 `current_password_required`, a wrong one 403 `wrong_current_password`; neither is 401, which is reserved for a missing session. After 5 wrong current passwords from one client IP within 15 minutes, further changes from that IP are 429 `rate_limited` (even with the right password) until the window passes; a successful change clears the count, a missing current password does not count, and host browsers, which send no current password, are never limited. A forgotten password is read back from `.env`, or bypassed once with a `ciao setup-url` localhost login or the login page's *Sign in on this computer*.
 - `POST /api/auth` accepts `{"token": "<PWA_AUTH_TOKEN>"}` and returns an HttpOnly `ciao_session` cookie.
 - `GET /?setup=<token>` is the local first-launch shortcut path. It is accepted only on `localhost`, `127.0.0.1`, or `::1`; when the token matches `.runtime/setup-token`, the server sets the same signed `ciao_session` cookie, deletes the token file, and redirects to `/`.
-- `POST /api/auth/host-sign-in` is loopback-only and needs no session (it is in `_LOOPBACK_ONLY_API`): a browser on the host's login page calls it to mint a fresh setup token, which the engine writes into an owner-only `.runtime/sign-in-*.html` and opens in the host's default browser; that page redirects to `/?setup=<token>`. The response is `{"ok": true}` and never carries the token. The redirect port is the socket's own listening port, never the Host header's, and the token file is recreated owner-only on every mint. A request relayed by `tailscale serve` or any local proxy, a signed-in remote browser, a cross-origin page or a rebound host is refused. Errors: 403 `not_on_host`, 409 `setup_required`/`no_desktop`/`no_workspace`/`open_failed`, 429 `cooldown`.
+- `POST /api/auth/host-sign-in` is loopback-only and needs no session (it is in `_LOOPBACK_ONLY_API`): a browser on the host's login page calls it to mint a fresh setup token, which the engine writes into an owner-only `.runtime/sign-in-*.html` and opens in the host's default browser; that page redirects to `/?setup=<token>`. The response is `{"ok": true}` and never carries the token. The redirect uses a port the engine actually bound. From the Mac app's private HTTPS listener it targets the engine's loopback HTTP origin so the default browser can open it. If that origin is unavailable, the route returns 409 `no_loopback_http` before minting a token. The token file is recreated owner-only on every mint. A request relayed by `tailscale serve` or any local proxy, a signed-in remote browser, a cross-origin page or a rebound host is refused. Errors: 403 `not_on_host`, 409 `setup_required`/`no_desktop`/`no_loopback_http`/`no_workspace`/`open_failed`, 429 `cooldown`.
 - Production cookies are `Secure`, `SameSite=Lax`, and host-only (scoped to the exact host that served them).
 - `POST /api/auth/logout` clears the same host-only cookie, and ends **this browser's** terminal grant: the `ciao_terminal` cookie it presents is revoked, and the cookie is cleared with the shape the unlock gave it (host-only, `Path=/`, HttpOnly, `SameSite=Strict`, `Secure` over HTTPS). Other browsers' terminal grants are untouched even when their login cookies are byte-identical — the login cookie is not a browser identity, so the grant is revoked by the bearer, not by the session. A logout that presents no terminal cookie revokes no grant.
 - All `/api/*` routes except `POST /api/auth`, `GET /api/auth/check`, `GET /api/startup-status`, `GET /api/setup-status`, `POST /api/setup/finish`, `GET /api/setup/list-dirs`, and `POST /api/setup/mkdir` require the signed session cookie. (`GET /api/setup/inspect-folder` is not middleware-exempt, and it only answers in bootstrap mode.) All `/ws/*` routes require the signed session cookie.
@@ -1434,21 +1434,29 @@ Routes: `GET /api/proposals`, `GET /api/proposals/history`,
 `GET /api/proposals/{id}/preview`,
 `POST /api/proposals/{id}/implement`,
 `POST /api/proposals/{id}/{action}` (action is `accept` or `dismiss`),
-`POST /api/proposals/batch`, `POST /api/proposals/dismiss-older-than`.
+`POST /api/proposals/{id}/reconcile` (recorded share attempt only),
+`POST /api/proposals/batch`, `POST /api/proposals/dismiss-older-than`,
+`POST /api/proposals/legacy-learning-dismiss`.
 
 `GET /api/proposals` also returns `legacy_learning_queues`, a map keyed by
-registered workspace. A present entry has `state` (`pending`, `blocked`, or
-`unknown`) and `rows`. It reports legacy `[learnings]` bullets even though they
-are no longer review rows. The response contains no host paths or shell
-commands. To inspect or recover the queue, start the workspace's **Move pending
-learning proposals into Learnings.md** task from Home. If you dismissed the
-task, reopen it in Settings → Workspace → Overview → Update task history. These
-actions are scoped to the active workspace and ask before applying changes. For
-an unknown scan result, check the vault location in that workspace's Overview.
-Preserve any linked `Workspace` and its contents; do not replace or follow it.
-Ask Ciaobot in that workspace to inspect the situation and guide a repair for
-you to review before authorizing. Migration checks never follow an external
+registered workspace. A present entry has `state` (`pending`, `blocked`,
+`unknown`, `clear`, or `completed`) and `rows`. Pending legacy `[learnings]`
+bullets include `pending_rows` with an id and queue revision; deliberately
+undone entries are listed as `suppressed_rows` and excluded from automatic
+migration. Eligible rows are moved automatically at startup, including when
+Workspace care is disabled. A blocked migration is paused because an earlier
+change needs review. In Memory → To decide, Remove dismisses one queued row and
+preserves every other row. It requires the exact revision shown by the list; a
+stale action is refused. If a learning has already moved, use the attended
+`ciao learnings-cleanup` review for the exact entry. That action removes the
+whole entry, so independent evidence must be preserved unless the user clearly
+asks to retire the whole learning. Migration checks never follow an external
 `Workspace` symlink.
+
+`POST /api/proposals/legacy-learning-dismiss` takes
+`{workspace, row_id, expected_revision}`. The server rechecks
+the exact queue revision while holding the writer lock; 409 means the row
+changed or is no longer queued.
 
 `POST /api/proposals/{id}/{action}` also takes an optional `reason` (a string,
 trimmed, at most 1000 characters; 400 if longer or not a string) that is stored
@@ -1457,7 +1465,14 @@ reason.
 
 A `kind: "share"` preview is the exact private draft projection:
 `{before, after, operation, brain, identity, branch, path, revision,
-blocked_reason}`. `before` and `after` are exact text or `null` when the file
+blocked_reason, reconcile_available, publish_retry_available}`.
+`reconcile_available` is true only when the exact canonical review token has a
+persisted attempt that must be inspected without pushing.
+`publish_retry_available` is true only when every persisted attempt is a
+validated retryable rejection and the attempt limit allows another push.
+Clients should expose only the action indicated by these server fields for
+blocked or previously attempted reviews.
+`before` and `after` are exact text or `null` when the file
 is absent; `revision` is the full-artifact consent token. Share previews cannot
 be edited. Accept requires `{workspace, expected_revision}` for the owning
 workspace and that exact token. A stale token returns 409 with
@@ -1467,6 +1482,12 @@ proposal pending. A confirmed accept settles the queue and records one
 decision. Retrying a confirmed accept with the same workspace and token
 replays its private receipt without another push. Batch accept still refuses
 share rows.
+
+`POST /api/proposals/{id}/reconcile` also requires `{workspace,
+expected_revision}`. Use it only when the preview says `reconcile_available:
+true`. The server checks that same canonical attempt and calls the reconcile-only
+path; it never starts a new push. An unresolved or rejected attempt stays queued
+and returns its status so the operator can decide what to do next.
 
 Share publication receipts are projected into proposal history and
 `/api/memory/receipts` as `kind: "share_publish"`, with commit, branch, path,
@@ -1710,6 +1731,12 @@ curl -sS -b /tmp/ciao.jar -X POST "http://localhost:${PWA_PORT:-8443}/api/propos
 # that shows no preview behaves exactly as before.
 curl -sS -b /tmp/ciao.jar -X POST "http://localhost:${PWA_PORT:-8443}/api/proposals/$ID/accept"
 
+# Reconcile a shared-note attempt only when its exact preview returned
+# reconcile_available: true. This checks the recorded commit and cannot push.
+curl -sS -b /tmp/ciao.jar -X POST "http://localhost:${PWA_PORT:-8443}/api/proposals/$ID/reconcile" \
+  -H 'content-type: application/json' \
+  -d '{"workspace":"personal","expected_revision":"<preview revision>"}'
+
 # Accept a region row, reconciling it against that region's CURRENT entries
 # first, so a fact that supersedes one already there replaces it (undo-logged)
 # instead of being appended beside it. This is the way out of a deferral. Opt-in because it is one model call per row — the plain accept above
@@ -1746,6 +1773,12 @@ curl -sS -b /tmp/ciao.jar -X POST "http://localhost:${PWA_PORT:-8443}/api/propos
 curl -sS -b /tmp/ciao.jar -X POST "http://localhost:${PWA_PORT:-8443}/api/proposals/batch" \
   -H 'content-type: application/json' \
   -d '{"action":"accept","ids":["<id1>","<id2>"]}'
+
+# Explicitly remove one legacy learning row using the id and revision from
+# `legacy_learning_queues[workspace].pending_rows[]`.
+curl -sS -b /tmp/ciao.jar -X POST "http://localhost:${PWA_PORT:-8443}/api/proposals/legacy-learning-dismiss" \
+  -H 'content-type: application/json' \
+  -d '{"workspace":"personal","row_id":"<id>","expected_revision":"<revision>"}'
 
 # Dismiss every row dated strictly before a cutoff (YYYY-MM-DD), atomically.
 # A July proposal about a forgotten chat is not worth promoting.

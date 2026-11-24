@@ -2514,10 +2514,16 @@ class ScheduleStore:
         except json.JSONDecodeError:
             logger.exception("Failed to parse stock system schedules")
             return []
+        from ciao.core_prompt import resolve_prompt_asset_paths
+
         definitions = [
             item for item in data.get("schedules", [])
             if isinstance(item, dict) and item.get("scope") == "system"
         ]
+        for item in definitions:
+            prompt = item.get("prompt")
+            if isinstance(prompt, str):
+                item["prompt"] = resolve_prompt_asset_paths(prompt)
         self._system_definitions = definitions
         return definitions
 

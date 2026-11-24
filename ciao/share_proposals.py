@@ -110,6 +110,12 @@ def _write_private(path: Path, data: bytes) -> None:
             handle.flush()
             os.fsync(handle.fileno())
         os.replace(tmp_name, path)
+        if hasattr(os, "O_DIRECTORY"):
+            directory_fd = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY)
+            try:
+                os.fsync(directory_fd)
+            finally:
+                os.close(directory_fd)
     except BaseException:
         Path(tmp_name).unlink(missing_ok=True)
         raise
@@ -290,6 +296,73 @@ def _load_sidecar(path: Path) -> dict[str, Any]:
         _refuse("draft_corrupt", "The private share draft is missing or corrupt.")
 
 
+def share_dismissal_block(
+    config: Any, *, workspace: str, bullet: Any, proposal_id: str = ""
+) -> str | None:
+    """Return a reason a share row cannot be dismissed, reading canonical state only.
+
+    Callers must hold the proposal queue lock while checking and removing the row;
+    this sidecar-only read deliberately does not acquire either queue lock.
+    """
+    if getattr(bullet, "kind", None) != KIND:
+        return None
+    sidecar_id = getattr(bullet, "target", "")
+    if not isinstance(sidecar_id, str) or not sidecar_id:
+        return "The shared-note publication state is unavailable."
+    path = _store_dir(config) / (
+        hashlib.sha256((workspace + "\0sidecar\0" + sidecar_id).encode()).hexdigest() + ".json"
+    )
+    try:
+        data = _load_sidecar(path)
+    except ShareDraftError:
+        return "The shared-note publication state is unavailable."
+    fields = data.get("immutable")
+    expected_proposal_id = proposal_tracking.stable_proposal_id(
+        workspace, (PurePosixPath(workspace) / _QUEUE).as_posix(), KIND,
+        getattr(bullet, "text", ""), "", 0,
+    )
+    if (
+        not isinstance(fields, dict)
+        or fields.get("workspace") != workspace
+        or fields.get("sidecar_id") != sidecar_id
+        or fields.get("proposal_id") != expected_proposal_id
+        or (proposal_id and fields.get("proposal_id") != proposal_id)
+        or getattr(bullet, "text", "") != f"Shared note change proposal {sidecar_id}"
+    ):
+        return "The shared-note publication state does not match this proposal."
+    if "publication" not in data:
+        return None
+    publication = data.get("publication")
+    if not isinstance(publication, dict):
+        return "The shared-note publication state is indeterminate."
+    if "attempts" not in publication or "receipts" not in publication:
+        return "The shared-note publication state is indeterminate."
+    attempts = publication.get("attempts", [])
+    receipts = publication.get("receipts", [])
+    if not isinstance(attempts, list) or not isinstance(receipts, list):
+        return "The shared-note publication state is indeterminate."
+    if receipts:
+        return "A shared-note publication is already confirmed."
+    for attempt in attempts:
+        if (
+            not isinstance(attempt, dict)
+            or attempt.get("status") != "rejected"
+            or attempt.get("retryable") is not False
+            or type(attempt.get("attempt")) is not int
+            or attempt.get("attempt", 0) < 1
+            or not isinstance(attempt.get("commit_oid"), str)
+            or not re.fullmatch(r"[0-9a-f]{40}", attempt.get("commit_oid", ""))
+            or not isinstance(attempt.get("parent_oid"), str)
+            or not re.fullmatch(r"[0-9a-f]{40}", attempt.get("parent_oid", ""))
+            or attempt.get("proposal_id") != fields.get("proposal_id")
+            or attempt.get("revision") != fields.get("revision")
+            or attempt.get("destination_fingerprint") != fields.get("destination_fingerprint")
+            or attempt.get("ref") != fields.get("upstream_ref")
+        ):
+            return "A shared-note publication attempt needs reconciliation."
+    return None
+
+
 def _draft_share(
     config: Any, *, workspace: str, brain: str = "", relative_path: str,
     operation: str | None, proposed: bytes | None, request_key: str,
@@ -337,19 +410,43 @@ def _draft_share(
             _refuse("request_conflict", "This request key was already used for different content.")
         fields = previous["immutable"]
         id_path = store / (hashlib.sha256((workspace + "\0sidecar\0" + fields["sidecar_id"]).encode()).hexdigest() + ".json")
-        _write_private(id_path, json.dumps(previous, ensure_ascii=False, sort_keys=True).encode("utf-8"))
         vault = Path(config.workspace_vault_root(workspace))
         queue = vault / _QUEUE
         rel_queue = (PurePosixPath(workspace) / _QUEUE).as_posix()
         with _thread_queue_lock(queue), memory_receipts.queue_lock(queue):
             queue_text = queue.read_text(encoding="utf-8") if queue.exists() else "# Memory Proposals\n"
             rows = list(proposal_tracking.walk_proposal_queue(workspace, rel_queue, queue_text))
-            if any(row.proposal_id == fields["proposal_id"] for row in rows):
-                return ShareDraft(fields["proposal_id"], previous, proposal_review_path(workspace, fields["review_key"]))
+            visible = any(row.proposal_id == fields["proposal_id"] for row in rows)
+            if id_path.exists():
+                canonical = _load_sidecar(id_path)
+                canonical_fields = canonical["immutable"]
+                if (
+                    canonical_fields.get("workspace") != workspace
+                    or canonical_fields.get("sidecar_id") != fields["sidecar_id"]
+                    or canonical_fields.get("proposal_id") != fields["proposal_id"]
+                ):
+                    _refuse("draft_corrupt", "The canonical share artifact does not match its request index.")
+            else:
+                _refuse(
+                    "draft_corrupt",
+                    "The canonical share artifact is missing; request replay cannot safely recover it.",
+                )
+            canonical_fields = canonical["immutable"]
+            if visible:
+                return ShareDraft(fields["proposal_id"], canonical, proposal_review_path(workspace, canonical_fields["review_key"]))
             from ciao.memory_proposals import _dismissed_texts
             summary = f"Shared note change proposal {fields['sidecar_id']}"
             if summary in _dismissed_texts(queue):
                 _refuse("request_conflict", "This share proposal has already been settled.")
+            publication = canonical.get("publication", {})
+            if not isinstance(publication, dict):
+                _refuse("draft_corrupt", "The canonical share publication state is corrupt.")
+            attempts = publication.get("attempts", [])
+            receipts = publication.get("receipts", [])
+            if not isinstance(attempts, list) or not isinstance(receipts, list):
+                _refuse("draft_corrupt", "The canonical share publication state is corrupt.")
+            if attempts or receipts:
+                _refuse("request_conflict", "This share proposal already has a publication attempt or receipt.")
             count = sum(
                 row.bullet.kind == KIND and row.proposal_id != retiring_proposal_id
                 for row in rows
@@ -374,7 +471,10 @@ def _draft_share(
                 queue_text.rstrip() + f"\n\n- [share {fields['sidecar_id']}] {summary}\n",
                 publish_guard=publish_guard,
             )
-        return ShareDraft(fields["proposal_id"], previous, proposal_review_path(workspace, fields["review_key"]))
+        return ShareDraft(
+            fields["proposal_id"], canonical,
+            proposal_review_path(workspace, canonical_fields["review_key"]),
+        )
     sidecar_id = secrets.token_urlsafe(18)
     text = f"Shared note change proposal {sidecar_id}"
     rel_queue = (PurePosixPath(workspace) / _QUEUE).as_posix()

@@ -1253,7 +1253,7 @@ def test_a_proposal_without_learnings_has_no_verification_step(
 @pytest.mark.parametrize(
     "doc",
     [
-        "ciao/stock/skills/ciao-memory/SKILL.md",
+        "ciao/stock/skills/ciao-capabilities/references/memory-operations/guide.md",
         "docs/AGENT_CLI.md",
     ],
 )

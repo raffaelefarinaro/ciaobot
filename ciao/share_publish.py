@@ -15,7 +15,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Callable, Iterator, Literal, TypeVar
 
-from ciao import share_proposals as drafts, shared_brain
+from ciao import memory_receipts, share_proposals as drafts, shared_brain
 from ciao.config import SharedBrainLink
 from ciao.git_proc import run_git_sync_bounded
 from ciao.os_support.files import open_fd
@@ -29,6 +29,7 @@ OutcomeCode = Literal[
     "brain_unavailable", "upstream_unavailable", "draft_unavailable", "reconcile_after_unlink",
 ]
 MAX_ATTEMPTS = 3
+PUSH_TIMEOUT_S = 20.0
 _OID = re.compile(r"^[0-9a-f]{40,64}$")
 _T = TypeVar("_T")
 
@@ -41,7 +42,11 @@ class PublishOutcome:
     message: str = ""
 
 
-def _safe_git(folder: Path, *args: str, limit: int = 16_384, env: dict[str, str] | None = None) -> tuple[int, bytes, bytes]:
+def _safe_git(
+    folder: Path, *args: str, limit: int = 16_384,
+    timeout_s: float = shared_brain.FETCH_TIMEOUT_S,
+    env: dict[str, str] | None = None,
+) -> tuple[int, bytes, bytes]:
     child = shared_brain._git_env(folder)
     child["GIT_NO_REPLACE_OBJECTS"] = "1"
     child["GIT_NO_LAZY_FETCH"] = "1"
@@ -50,7 +55,7 @@ def _safe_git(folder: Path, *args: str, limit: int = 16_384, env: dict[str, str]
     try:
         result = run_git_sync_bounded(
             folder, *shared_brain.EXACT_BYTES, *shared_brain._HARDEN, *args,
-            timeout=shared_brain.FETCH_TIMEOUT_S, max_output=limit,
+            timeout=timeout_s, max_output=limit,
             env=child,
         )
     except OSError:
@@ -58,9 +63,12 @@ def _safe_git(folder: Path, *args: str, limit: int = 16_384, env: dict[str, str]
     return result.returncode, result.stdout, result.stderr[:limit]
 
 
-def _network_git(folder: Path, *args: str, limit: int = 4096) -> tuple[int, bytes, bytes]:
+def _network_git(
+    folder: Path, *args: str, limit: int = 4096,
+    timeout_s: float = shared_brain.FETCH_TIMEOUT_S,
+) -> tuple[int, bytes, bytes]:
     """The only injectable seam for bounded remote I/O in isolated Git tests."""
-    return _safe_git(folder, *args, limit=limit)
+    return _safe_git(folder, *args, limit=limit, timeout_s=timeout_s)
 
 
 def _hash_blob(folder: Path, content: bytes) -> str | None:
@@ -99,7 +107,7 @@ def _artifact_for(config: Any, workspace: str, proposal_id: str) -> dict[str, An
             try:
                 return drafts._load_sidecar(canonical)
             except drafts.ShareDraftError:
-                return data
+                return None
     return None
 
 
@@ -111,6 +119,45 @@ def has_publication_attempt(config: Any, *, workspace: str, proposal_id: str, ex
     publication = artifact.get("publication")
     attempts = publication.get("attempts", []) if isinstance(publication, dict) else []
     return isinstance(attempts, list) and bool(attempts)
+
+
+def can_retry_publication(
+    config: Any, *, workspace: str, proposal_id: str, expected_revision: str,
+) -> bool:
+    """Whether every persisted attempt was definitively rejected as retryable."""
+    artifact = _artifact_for(config, workspace, proposal_id)
+    if artifact is None or artifact.get("review_token") != expected_revision:
+        return False
+    fields = artifact.get("immutable")
+    publication = artifact.get("publication")
+    if not isinstance(fields, dict) or not isinstance(publication, dict):
+        return False
+    attempts = publication.get("attempts")
+    receipts = publication.get("receipts")
+    if (
+        not isinstance(attempts, list) or not attempts
+        or len(attempts) >= MAX_ATTEMPTS
+        or not isinstance(receipts, list) or receipts
+    ):
+        return False
+    for index, attempt in enumerate(attempts, start=1):
+        if not isinstance(attempt, dict):
+            return False
+        commit_oid = attempt.get("commit_oid")
+        parent_oid = attempt.get("parent_oid")
+        if (
+            type(attempt.get("attempt")) is not int or attempt["attempt"] != index
+            or not isinstance(commit_oid, str) or not _OID.fullmatch(commit_oid)
+            or not isinstance(parent_oid, str) or not _OID.fullmatch(parent_oid)
+            or attempt.get("proposal_id") != fields.get("proposal_id")
+            or attempt.get("revision") != fields.get("revision")
+            or attempt.get("destination_fingerprint") != fields.get("destination_fingerprint")
+            or attempt.get("ref") != fields.get("upstream_ref")
+            or attempt.get("status") != "rejected"
+            or attempt.get("retryable") is not True
+        ):
+            return False
+    return True
 
 
 def refresh_legacy_draft(
@@ -136,6 +183,41 @@ def refresh_legacy_draft(
     key_hash = hashlib.sha256((workspace + "\0" + request_key).encode()).hexdigest()
     index_path = drafts._store_dir(config) / (key_hash + ".json")
     with drafts._thread_queue_lock(queue), drafts.memory_receipts.queue_lock(queue):
+        # The initial read above only routes obvious non-legacy requests. The
+        # canonical sidecar and exact old row must be re-read under the queue
+        # lock: publication reserves its attempt under that same lock.
+        rel_path = (Path(workspace) / drafts._QUEUE).as_posix()
+        try:
+            queue_text = queue.read_text(encoding="utf-8")
+            current = drafts._load_sidecar(
+                drafts._store_dir(config) / (
+                    hashlib.sha256((workspace + "\0sidecar\0" + str(fields.get("sidecar_id", ""))).encode()).hexdigest() + ".json"
+                )
+            )
+        except (OSError, drafts.ShareDraftError):
+            return drafts.ShareRefusal("draft_corrupt", "The legacy review state changed; refresh it before replacing.")
+        current_fields = current.get("immutable")
+        if current_fields != fields or current.get("review_token") != expected_revision:
+            return drafts.ShareRefusal("stale_review", "The legacy review changed; refresh it before replacing.")
+        old_row = next((entry for entry in drafts.proposal_tracking.walk_proposal_queue(workspace, rel_path, queue_text)
+                        if entry.proposal_id == proposal_id and entry.bullet.kind == "share"), None)
+        if old_row is None:
+            return drafts.ShareRefusal("legacy_missing", "The old shared-note review is no longer queued.")
+        block = drafts.share_dismissal_block(
+            config, workspace=workspace, bullet=old_row.bullet, proposal_id=proposal_id
+        )
+        if block:
+            return drafts.ShareRefusal("publication_pending", block)
+        publication_now = current.get("publication")
+        if publication_now is not None:
+            if (not isinstance(publication_now, dict)
+                    or not isinstance(publication_now.get("attempts"), list)
+                    or not isinstance(publication_now.get("receipts"), list)
+                    or publication_now.get("attempts")
+                    or publication_now.get("receipts")):
+                return drafts.ShareRefusal(
+                    "publication_pending", "Publication state changed; reconcile it before replacing this review."
+                )
         with workspace_registry_lock(config):
             link = _active_legacy_link(config, workspace, fields)
             if link is None:
@@ -165,7 +247,8 @@ def refresh_legacy_draft(
 
                     summary = f"Shared note change proposal {replacement_fields['sidecar_id']}"
                     if summary in _dismissed_texts(queue):
-                        _retire_legacy_queue_row(config, workspace, proposal_id, fields)
+                        if not _retire_legacy_queue_row(config, workspace, proposal_id, fields):
+                            return drafts.ShareRefusal("publication_pending", "The old review could not be safely retired.")
                         return drafts.ShareRefusal("legacy_replaced", "The replacement proposal was already settled; the old review was removed.")
                     # The process may have stopped after writing the private
                     # idempotency artifact but before appending its queue row.
@@ -192,7 +275,8 @@ def refresh_legacy_draft(
                 else:
                     return created
             if isinstance(replacement, drafts.ShareDraft):
-                _retire_legacy_queue_row(config, workspace, proposal_id, fields)
+                if not _retire_legacy_queue_row(config, workspace, proposal_id, fields):
+                    return drafts.ShareRefusal("publication_pending", "The old review could not be safely retired.")
             return replacement
 
 
@@ -213,7 +297,7 @@ def _active_legacy_link(config: Any, workspace: str, fields: dict[str, Any]) -> 
 
 def _retire_legacy_queue_row(config: Any, workspace: str, proposal_id: str, fields: dict[str, Any]) -> bool:
     """Remove only the exact legacy queue row after its replacement is durable."""
-    from ciao.web.proposal_service import _rewrite_queue_single
+    from ciao.web.proposal_service import ShareDismissalRefused, _rewrite_queue_single
 
     queue = Path(config.workspace_vault_root(workspace)) / drafts._QUEUE
     text = queue.read_text(encoding="utf-8") if queue.exists() else ""
@@ -225,9 +309,13 @@ def _retire_legacy_queue_row(config: Any, workspace: str, proposal_id: str, fiel
     if row is None:
         return False
     vault = Path(config.workspace_vault_root(workspace))
-    return _rewrite_queue_single(
-        queue, row.line, row.raw, row.bullet.text, "share", False, workspace, vault,
-    )
+    try:
+        return _rewrite_queue_single(
+            queue, row.line, row.raw, row.bullet.text, "share", False, workspace, vault,
+            config=config, proposal_id=proposal_id,
+        )
+    except ShareDismissalRefused:
+        return False
 
 
 def _active_link(config: Any, workspace: str, fields: dict[str, Any]) -> SharedBrainLink | None:
@@ -726,9 +814,6 @@ def _publish_locked(config: Any, workspace: str, folder: Path, link: SharedBrain
             return PublishOutcome("push_refused", message="The shared brain rejected the recorded publish attempt.")
         return PublishOutcome("indeterminate", message="A recorded publish attempt is unresolved; reconcile before retrying.")
     for number in range(len(attempts), MAX_ATTEMPTS):
-        visible = drafts.load_share(config, workspace=workspace, proposal_id=fields["proposal_id"])
-        if isinstance(visible, drafts.ShareRefusal) or visible.get("review_token") != artifact.get("review_token"):
-            return PublishOutcome("draft_corrupt", message="The share proposal is no longer active in its queue.")
         fetched, _raw, fetch_error = _fetch(folder, origin, ref)
         if fetched != "ok":
             return PublishOutcome("upstream_unavailable", message="The shared brain upstream could not be read.")
@@ -752,11 +837,28 @@ def _publish_locked(config: Any, workspace: str, folder: Path, link: SharedBrain
             "ref": ref, "status": "pending",
         }
         attempts = [*attempts, record]
+        queue = Path(config.workspace_vault_root(workspace)) / drafts._QUEUE
+        # Persist the reservation under the same queue lock used by dismissal.
+        # Dismissal checks this pending attempt after the lock is released.
         try:
-            _write_state(config, workspace, fields, {"attempts": attempts})
-        except (OSError, ValueError, drafts.ShareDraftError):
-            return PublishOutcome("draft_unavailable", message="The publication attempt could not be recorded safely.")
-        code, push_stdout, stderr = _network_git(folder, "push", "--porcelain", origin, f"{commit}:{ref}", limit=4096)
+            with drafts._thread_queue_lock(queue), memory_receipts.queue_lock(queue):
+                visible = drafts.load_share(config, workspace=workspace, proposal_id=fields["proposal_id"])
+                if (
+                    isinstance(visible, drafts.ShareRefusal)
+                    or visible.get("review_token") != artifact.get("review_token")
+                    or visible.get("immutable") != fields
+                ):
+                    return PublishOutcome("draft_corrupt", message="The share proposal is no longer active in its queue.")
+                try:
+                    _write_state(config, workspace, fields, {"attempts": attempts})
+                except (OSError, ValueError, drafts.ShareDraftError):
+                    return PublishOutcome("draft_unavailable", message="The publication attempt could not be recorded safely.")
+        except memory_receipts.QueueLockError:
+            return PublishOutcome("draft_unavailable", message="The share proposal queue could not be locked safely.")
+        code, push_stdout, stderr = _network_git(
+            folder, "push", "--porcelain", origin, f"{commit}:{ref}",
+            limit=4096, timeout_s=PUSH_TIMEOUT_S,
+        )
         fetched, _raw, _fetch_error = _fetch(folder, origin, ref)
         if fetched != "ok":
             return PublishOutcome("indeterminate", commit, message="The push response could not be reconciled.")
@@ -816,8 +918,10 @@ def _set_attempt_status(
     return updated
 
 
-def list_share_receipts(config: Any, *, workspace: str) -> list[dict[str, Any]]:
-    """List confirmed publication receipts for one workspace only."""
+def list_share_receipt_details(
+    config: Any, *, workspace: str | None = None,
+) -> list[dict[str, Any]]:
+    """Read canonical, validated publication receipts and their immutable drafts once."""
     store = drafts._store_dir(config)
     rows: dict[str, dict[str, Any]] = {}
     if not store.is_dir():
@@ -825,23 +929,69 @@ def list_share_receipts(config: Any, *, workspace: str) -> list[dict[str, Any]]:
     for path in store.glob("*.json"):
         try:
             artifact = drafts._load_sidecar(path)
-        except drafts.ShareDraftError:
+        except (drafts.ShareDraftError, OSError, ValueError):
             continue
-        if artifact["immutable"].get("workspace") != workspace:
+        fields = artifact.get("immutable")
+        if not isinstance(fields, dict):
             continue
-        fields = artifact["immutable"]
-        canonical = store / (hashlib.sha256((workspace + "\0sidecar\0" + fields["sidecar_id"]).encode()).hexdigest() + ".json")
-        try:
-            artifact = drafts._load_sidecar(canonical)
-        except drafts.ShareDraftError:
+        owner = fields.get("workspace")
+        sidecar_id = fields.get("sidecar_id")
+        required_strings = (
+            "workspace", "sidecar_id", "proposal_id", "destination_fingerprint",
+            "operation", "brain", "origin_identity", "path", "upstream_ref",
+        )
+        if (
+            any(not isinstance(fields.get(key), str) or not fields.get(key) for key in required_strings)
+            or type(fields.get("revision")) is not int
+            or fields.get("revision", 0) < 1
+            or (workspace is not None and owner != workspace)
+        ):
+            continue
+        canonical_name = hashlib.sha256(
+            (str(owner) + "\0sidecar\0" + str(sidecar_id)).encode()
+        ).hexdigest() + ".json"
+        # Request-key index files carry the same document, but only this
+        # deterministic path is authoritative for publication state.
+        if path.name != canonical_name:
             continue
         publication = artifact.get("publication")
         if not isinstance(publication, dict):
             continue
-        for receipt in publication.get("receipts", []):
-            if isinstance(receipt, dict) and receipt.get("workspace") == workspace and _valid_receipt(fields, receipt):
-                rows[receipt["id"]] = _receipt_with_metadata(fields, receipt)
-    return sorted(rows.values(), key=lambda row: (row.get("proposal_id", ""), row["id"]))
+        receipts = publication.get("receipts")
+        if not isinstance(receipts, list):
+            continue
+        for receipt in receipts:
+            try:
+                if (
+                    not isinstance(receipt, dict)
+                    or not isinstance(receipt.get("id"), str)
+                    or receipt.get("workspace") != owner
+                    or not _valid_receipt(fields, receipt)
+                ):
+                    continue
+                enriched = _receipt_with_metadata(fields, receipt)
+            except (KeyError, TypeError, ValueError):
+                continue
+            rows[str(receipt["id"])] = {
+                "receipt": enriched,
+                "immutable": dict(fields),
+            }
+    return sorted(
+        rows.values(),
+        key=lambda detail: (
+            str(detail["receipt"].get("ts", "")),
+            str(detail["receipt"].get("id", "")),
+        ),
+        reverse=True,
+    )
+
+
+def list_share_receipts(config: Any, *, workspace: str) -> list[dict[str, Any]]:
+    """List confirmed publication receipts for one workspace only."""
+    return [
+        detail["receipt"]
+        for detail in list_share_receipt_details(config, workspace=workspace)
+    ]
 
 
 def get_share_receipt(
@@ -865,30 +1015,13 @@ def get_share_receipt_detail(
     config: Any, *, workspace: str, receipt_id: str,
 ) -> dict[str, Any] | None:
     """Return one private receipt and its immutable review artifact by id."""
-    store = drafts._store_dir(config)
-    for path in store.glob("*.json") if store.is_dir() else ():
-        try:
-            data = drafts._load_sidecar(path)
-        except drafts.ShareDraftError:
-            continue
-        fields = data["immutable"]
-        if fields.get("workspace") != workspace:
-            continue
-        canonical = store / (hashlib.sha256((workspace + "\0sidecar\0" + fields["sidecar_id"]).encode()).hexdigest() + ".json")
-        try:
-            data = drafts._load_sidecar(canonical)
-        except drafts.ShareDraftError:
-            continue
-        publication = data.get("publication")
-        if not isinstance(publication, dict):
-            continue
-        for receipt in publication.get("receipts", []):
-            if isinstance(receipt, dict) and receipt.get("id") == receipt_id and _valid_receipt(data["immutable"], receipt):
-                return {
-                    "receipt": _receipt_with_metadata(data["immutable"], receipt),
-                    "immutable": dict(data["immutable"]),
-                }
-    return None
+    return next(
+        (
+            detail for detail in list_share_receipt_details(config, workspace=workspace)
+            if detail["receipt"].get("id") == receipt_id
+        ),
+        None,
+    )
 
 
 async def draft_share_reversal(

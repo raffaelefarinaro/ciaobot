@@ -1006,6 +1006,7 @@ def queue_resolution(
     item_key: str = "",
     proposal_id: str = "",
     proposal_source: str = "",
+    undoable: bool = True,
 ):
     """Bracket a queue rewrite with ``prepared`` then ``applied`` receipts.
 
@@ -1056,6 +1057,10 @@ def queue_resolution(
             "before_revision": content_revision(before),
             "before_text": _image(before),
         }
+        if not undoable:
+            # A share publish is an external write: re-adding its local queue
+            # row cannot reverse the remote commit.
+            base["undoable"] = False
         if operation_id:
             base["operation_id"] = operation_id
         if run_id:
@@ -1098,6 +1103,7 @@ def queue_resolution(
                 status=APPLIED,
                 receipt_id=rid,
                 prepared=True,
+                undoable=undoable,
                 operation_id=operation_id,
                 run_id=run_id,
                 item_key=item_key,
@@ -1774,6 +1780,15 @@ def _complete_outcome(receipt: dict[str, Any]) -> bool:
     decision, so a terminal row can record the outcome as durably completed.
     """
     if receipt.get("outcome_recorded"):
+        return True
+    if (
+        str(receipt.get("kind", "")) == "queue_resolve"
+        and str(receipt.get("proposal_kind", "")) == "share"
+        and str(receipt.get("operation_id", "")).startswith("shrpub_")
+    ):
+        # Share publication has its own canonical, receipt-backed History row.
+        # A generic queue outcome would invent a second accepted decision
+        # without the remote publication receipt or a reversible local change.
         return True
     fact = str(receipt.get("fact_text", "")).strip() or str(
         receipt.get("removed_text", "")

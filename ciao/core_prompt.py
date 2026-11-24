@@ -4,11 +4,28 @@ from __future__ import annotations
 
 import functools
 import logging
+from importlib import resources
 from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
 _SYSTEM_PROMPT_PATH = Path(__file__).resolve().parent / "system_prompt.md"
+_MEMORY_GUIDE_PARTS = ("skills", "ciao-capabilities", "references", "memory-operations", "guide.md")
+MEMORY_GUIDE_PATH_TOKEN = "{{DURABLE_MEMORY_GUIDE_PATH}}"
+MEMORY_PROCEDURES_PATH_TOKEN = "{{DURABLE_MEMORY_PROCEDURES_PATH}}"
+
+
+def durable_memory_guide_path() -> Path:
+    """Return the installed engine copy, independent of workspace skill overrides."""
+    return Path(str(resources.files("ciao.stock").joinpath(*_MEMORY_GUIDE_PARTS))).resolve()
+
+
+def resolve_prompt_asset_paths(text: str) -> str:
+    """Expand packaged asset tokens in prompts before they reach an agent."""
+    guide = durable_memory_guide_path()
+    return text.replace(MEMORY_GUIDE_PATH_TOKEN, str(guide)).replace(
+        MEMORY_PROCEDURES_PATH_TOKEN, str(guide.parent)
+    )
 
 
 @functools.lru_cache(maxsize=2)
@@ -22,7 +39,7 @@ def _system_instructions() -> str:
     so a missing or malformed file never kills a chat.
     """
     try:
-        return _SYSTEM_PROMPT_PATH.read_text(encoding="utf-8").strip()
+        return resolve_prompt_asset_paths(_SYSTEM_PROMPT_PATH.read_text(encoding="utf-8")).strip()
     except Exception:  # noqa: BLE001
         logger.exception("core_prompt: failed to load %s", _SYSTEM_PROMPT_PATH)
         return ""

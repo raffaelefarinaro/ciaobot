@@ -1,4 +1,6 @@
 import XCTest
+import AppKit
+import SwiftUI
 @testable import CiaobotMac
 
 /// #3129 S5b: local mode is wired into the app. The app delegate starts the
@@ -79,6 +81,7 @@ final class LocalEngineWiringTests: XCTestCase {
     private var defaults: UserDefaults!
     private var lastServer: UserDefaultsLastServerStore!
     private var hostStore: UserDefaultsHostListStore!
+    private var localSessionRegistry: SessionStoreRegistry!
 
     override func setUp() {
         super.setUp()
@@ -208,12 +211,21 @@ final class LocalEngineWiringTests: XCTestCase {
     func testRunningOriginConnectsWithoutBeingSaved() throws {
         let probe = StubProbe(responds: true)
         let session = AppSessionStatus()
-        let view = makeLocalView(probe: probe, session: session)
+        let hooks = ConnectionViewTestHooks()
+        let view = try makeLocalView(probe: probe, session: session, testHooks: hooks)
+        let (_, window) = mount(view)
+        defer { window.orderOut(nil); window.close() }
+        XCTAssertTrue(localSessionRegistry.isAvailable, "Registry URL: \(String(describing: localSessionRegistry.fileURL)); reason: \(String(describing: localSessionRegistry.storageUnavailableReason))")
 
-        view.connectRunningEngine(Origin("http://127.0.0.1:8777")!)
+        let origin = Origin("https://127.0.0.1:8778")!
+        try XCTUnwrap(hooks.connectRunningEngine)(origin, testTLSIdentity(origin))
 
-        XCTAssertEqual(probe.checked.map(\.canonicalKey), ["http://127.0.0.1:8777"])
-        XCTAssertEqual(session.currentOrigin?.canonicalKey, "http://127.0.0.1:8777")
+        XCTAssertTrue(probe.checked.isEmpty, "The supervisor already verified the candidate with its pipe pin.")
+        XCTAssertEqual(session.currentOrigin, origin)
+        XCTAssertTrue(view.persistenceAvailableForTesting)
+        XCTAssertEqual(session.dataStore?.isPersistent, true)
+        XCTAssertNotNil(localSessionRegistry.identifierIfPresent(for: .localEngine),
+                        "Local HTTPS persistence follows the verified candidate even though the address field starts as HTTP.")
         XCTAssertNil(lastServer.savedOrigin, "The engine's ephemeral loopback origin is not a saved server.")
         XCTAssertTrue(hostStore.hosts.isEmpty, "...and not a saved host.")
     }
@@ -221,37 +233,36 @@ final class LocalEngineWiringTests: XCTestCase {
     func testARepeatedRunningOriginKeepsTheSession() throws {
         let probe = StubProbe(responds: true)
         let session = AppSessionStatus()
-        let view = makeLocalView(probe: probe, session: session)
-        let origin = try XCTUnwrap(Origin("http://127.0.0.1:8777"))
+        let hooks = ConnectionViewTestHooks()
+        let (_, window) = mount(try makeLocalView(probe: probe, session: session, testHooks: hooks))
+        defer { window.orderOut(nil); window.close() }
+        let origin = try XCTUnwrap(Origin("https://127.0.0.1:8778"))
 
-        view.connectRunningEngine(origin)
-        view.connectRunningEngine(origin)
+        let connect = try XCTUnwrap(hooks.connectRunningEngine)
+        connect(origin, testTLSIdentity(origin, startupID: "one"))
+        connect(origin, testTLSIdentity(origin, startupID: "two"))
 
-        XCTAssertEqual(probe.checked.count, 1, "An engine restart that kept its port re-publishes the same origin.")
+        XCTAssertTrue(probe.checked.isEmpty)
         XCTAssertEqual(session.currentOrigin, origin, "The session stays.")
     }
 
     func testAChangedRunningOriginReplacesTheSession() throws {
         let probe = StubProbe(responds: true)
         let session = AppSessionStatus()
-        let view = makeLocalView(probe: probe, session: session)
-        let first = try XCTUnwrap(Origin("http://127.0.0.1:8777"))
-        let second = try XCTUnwrap(Origin("http://127.0.0.1:9001"))
+        let hooks = ConnectionViewTestHooks()
+        let (_, window) = mount(try makeLocalView(probe: probe, session: session, testHooks: hooks))
+        defer { window.orderOut(nil); window.close() }
+        let first = try XCTUnwrap(Origin("https://127.0.0.1:8778"))
+        let second = try XCTUnwrap(Origin("https://127.0.0.1:9002"))
 
-        view.connectRunningEngine(first)
+        let connect = try XCTUnwrap(hooks.connectRunningEngine)
+        connect(first, testTLSIdentity(first))
         XCTAssertEqual(session.currentOrigin, first)
-
-        // The probe for the second origin stays in flight, so the only thing
-        // that can have cleared the first session is the replacement itself.
-        let deferred = DeferredProbe()
-        let replacing = makeLocalView(probe: deferred, session: session)
-        replacing.connectRunningEngine(first)
-        deferred.answer(0, ok: true)
-        replacing.connectRunningEngine(second)
-        XCTAssertNil(session.currentOrigin, "A changed origin tears the old session down before probing.")
-        deferred.answer(1, ok: true)
+        let firstStore = localSessionRegistry.identifierIfPresent(for: .localEngine)
+        connect(second, testTLSIdentity(second))
         XCTAssertEqual(session.currentOrigin, second)
-        XCTAssertEqual(deferred.checked, [first, second])
+        XCTAssertEqual(localSessionRegistry.identifierIfPresent(for: .localEngine), firstStore,
+                       "Port rotation reuses the app-owned store namespace.")
     }
 
     /// A probe for the old origin is in flight when the engine publishes a new
@@ -259,40 +270,33 @@ final class LocalEngineWiringTests: XCTestCase {
     func testAnOriginPublishedDuringAnInFlightProbeIsNotLost() throws {
         let probe = DeferredProbe()
         let session = AppSessionStatus()
-        let view = makeLocalView(probe: probe, session: session)
-        let old = try XCTUnwrap(Origin("http://127.0.0.1:8777"))
-        let new = try XCTUnwrap(Origin("http://127.0.0.1:9001"))
-
-        view.connectRunningEngine(old)
-        view.connectRunningEngine(new)
-        XCTAssertEqual(probe.checked, [old], "One probe at a time.")
-
-        probe.answer(0, ok: true)
-        XCTAssertNil(session.currentOrigin, "The stale probe must not connect the old origin.")
-        XCTAssertEqual(probe.checked, [old, new], "The newer origin is probed once the old probe ends.")
-        probe.answer(1, ok: true)
-        XCTAssertEqual(session.currentOrigin, new)
+        let view = try makeLocalView(probe: probe, session: session)
+        let old = try XCTUnwrap(Origin("https://127.0.0.1:8778"))
+        let new = try XCTUnwrap(Origin("https://127.0.0.1:9002"))
+        let model = LocalConnectionModel()
+        XCTAssertEqual(model.engineRunning(old), [.probe(old)])
+        XCTAssertEqual(model.engineRunning(new), [])
+        XCTAssertEqual(model.probeFinished(old, ok: true), [.probe(new)], "The stale origin never establishes.")
+        XCTAssertEqual(model.probeFinished(new, ok: true), [.establish(new)])
     }
 
     // MARK: Failure is a state, not a retry trigger
 
     func testAFailedProbeShowsFailureAndDoesNotRetryByItself() throws {
         let probe = StubProbe(responds: false)
-        let view = makeLocalView(probe: probe)
-        let origin = try XCTUnwrap(Origin("http://127.0.0.1:8777"))
-
-        view.connectRunningEngine(origin)
-        guard case .failed(let failed, let message) = view.localConnectionPhase else {
-            return XCTFail("a failed probe is a visible failure state")
-        }
+        _ = try makeLocalView(probe: probe)
+        let origin = try XCTUnwrap(Origin("https://127.0.0.1:8778"))
+        let model = LocalConnectionModel()
+        _ = model.engineRunning(origin)
+        _ = model.probeFinished(origin, ok: false)
+        guard case .failed(let failed, let message) = model.phase else { return XCTFail("a failed probe is visible") }
         XCTAssertEqual(failed, origin)
         XCTAssertFalse(message.isEmpty)
-        view.connectRunningEngine(origin) // the screen re-appearing, or a republish
-        XCTAssertEqual(probe.checked.count, 1, "No automatic retry loop.")
+        XCTAssertEqual(model.engineRunning(origin), [], "No automatic retry loop.")
     }
 
     func testManualRetryIsBounded() throws {
-        let origin = try XCTUnwrap(Origin("http://127.0.0.1:8777"))
+        let origin = try XCTUnwrap(Origin("https://127.0.0.1:8778"))
         let model = LocalConnectionModel()
         _ = model.engineRunning(origin)
         _ = model.probeFinished(origin, ok: false)
@@ -305,20 +309,20 @@ final class LocalEngineWiringTests: XCTestCase {
     }
 
     func testAWebViewFailureBecomesAFailureStateWithoutReconnecting() throws {
-        let origin = try XCTUnwrap(Origin("http://127.0.0.1:8777"))
+        let origin = try XCTUnwrap(Origin("https://127.0.0.1:8778"))
         let model = LocalConnectionModel()
         _ = model.engineRunning(origin)
         XCTAssertEqual(model.probeFinished(origin, ok: true), [.establish(origin)])
         XCTAssertEqual(model.sessionFailed("load failed"), [.dropSession])
         XCTAssertEqual(model.phase, .failed(origin: origin, message: "load failed"))
         XCTAssertEqual(model.engineRunning(origin), [], "Re-appearing with the same origin does not loop.")
-        let moved = try XCTUnwrap(Origin("http://127.0.0.1:9001"))
+        let moved = try XCTUnwrap(Origin("https://127.0.0.1:9002"))
         XCTAssertEqual(model.engineRunning(moved), [.probe(moved)], "A moved engine is a new attempt.")
     }
 
     func testModelReplacesAndKeepsSessions() throws {
-        let a = try XCTUnwrap(Origin("http://127.0.0.1:8777"))
-        let b = try XCTUnwrap(Origin("http://127.0.0.1:9001"))
+        let a = try XCTUnwrap(Origin("https://127.0.0.1:8778"))
+        let b = try XCTUnwrap(Origin("https://127.0.0.1:9002"))
         let model = LocalConnectionModel()
         XCTAssertEqual(model.engineRunning(a), [.probe(a)])
         _ = model.probeFinished(a, ok: true)
@@ -329,7 +333,7 @@ final class LocalEngineWiringTests: XCTestCase {
     // MARK: Status screen mapping
 
     func testStatusScreenButtonsFollowTheState() throws {
-        let origin = try XCTUnwrap(Origin("http://127.0.0.1:8777"))
+        let origin = try XCTUnwrap(Origin("https://127.0.0.1:8778"))
         let all = LocalEnginePresentation.allActions
         func make(_ engine: EngineState, _ phase: LocalConnectionModel.Phase = .idle, retry: Bool = true) -> LocalEnginePresentation {
             LocalEnginePresentation.make(engine: engine, connection: phase, canRetry: retry)
@@ -375,19 +379,22 @@ final class LocalEngineWiringTests: XCTestCase {
         let store = TransientEngineModeStore()
         store.mode = .local
         let session = AppSessionStatus()
-        let view = ConnectionView(
+        let hooks = ConnectionViewTestHooks()
+        let (view, window) = mount(ConnectionView(
             probe: StubProbe(responds: true), session: session,
             lastServer: lastServer, hostStore: hostStore,
-            supervisor: supervisor, engineMode: .local, modeStore: store)
-        view.connectRunningEngine(try XCTUnwrap(Origin("http://127.0.0.1:8777")))
+            supervisor: supervisor, engineMode: .local, modeStore: store, testHooks: hooks))
+        defer { window.orderOut(nil); window.close() }
+        let origin = try XCTUnwrap(Origin("https://127.0.0.1:8778"))
+        try XCTUnwrap(hooks.connectRunningEngine)(origin, testTLSIdentity(origin))
         XCTAssertNotNil(session.currentOrigin)
 
-        view.connectToAnotherServer()
+        try XCTUnwrap(hooks.connectToAnotherServer)()
 
         XCTAssertEqual(store.mode, .external, "The choice is saved for the next launch.")
         XCTAssertEqual(processes.terminated, [5100], "The engine is stopped.")
         XCTAssertNil(session.currentOrigin, "The dead session is dropped.")
-        XCTAssertEqual(view.localConnectionPhase, .idle)
+        XCTAssertEqual(try XCTUnwrap(hooks.localConnectionPhase)(), .idle)
     }
 
     // MARK: The 1.x takeover in the connection screen (S7)
@@ -833,25 +840,48 @@ final class LocalEngineWiringTests: XCTestCase {
 extension LocalEngineWiringTests {
     /// A local-mode view driving the engine's own origin through the ordinary
     /// connect path, with isolated stores and an isolated sign-in registry.
-    private func makeLocalView(probe: ProbeChecking, session: AppSessionStatus? = nil) -> CiaobotMac.ConnectionView {
-        ConnectionView(
+    private func makeLocalView(probe: ProbeChecking, session: AppSessionStatus? = nil,
+                               testHooks: ConnectionViewTestHooks? = nil) throws -> CiaobotMac.ConnectionView {
+        let registryDirectory = try makeTempDirectory("registry")
+        localSessionRegistry = SessionStoreRegistry(fileURL: registryDirectory.appendingPathComponent("session-stores.json"))
+        return ConnectionView(
             probe: probe,
             signIn: SessionSignIn(
-                registry: SessionStoreRegistry(fileURL: FileManager.default.temporaryDirectory
-                    .appendingPathComponent("LocalEngineWiring-Registry-\(UUID().uuidString).json")),
+                registry: localSessionRegistry,
                 eraser: LocalEngineWiringNoopEraser(),
-                persistentAvailable: false
+                persistentAvailable: true
             ),
             session: session,
             lastServer: lastServer,
             hostStore: hostStore,
-            engineMode: .local
+            engineMode: .local,
+            testHooks: testHooks
         )
     }
+
+    private func testTLSIdentity(_ origin: Origin, startupID: String = "fixture") -> LocalEngineTLSIdentity {
+        LocalEngineTLSIdentity(pid: 502, startupID: startupID, port: origin.portNumber,
+                               sha256: String(repeating: "a", count: 64))!
+    }
+
+    private func mount(_ view: ConnectionView) -> (ConnectionView, NSWindow) {
+        let hostingView = NSHostingView(rootView: view)
+        hostingView.frame = NSRect(x: 0, y: 0, width: 800, height: 600)
+        let window = NSWindow(contentRect: hostingView.frame, styleMask: [.titled], backing: .buffered, defer: false)
+        window.isReleasedWhenClosed = false
+        window.contentView = hostingView
+        window.makeKeyAndOrderFront(nil)
+        hostingView.layoutSubtreeIfNeeded()
+        RunLoop.main.run(until: Date().addingTimeInterval(0.05))
+        return (hostingView.rootView, window)
+    }
+
 }
 
 private final class LocalEngineWiringNoopEraser: WebsiteDataStoreErasing {
+    private(set) var removed: [UUID] = []
     func remove(identifier: UUID, completion: @escaping (Error?) -> Void) {
+        removed.append(identifier)
         completion(nil)
     }
 }

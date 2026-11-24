@@ -62,7 +62,6 @@ def test_cli_reference_links_resolve_to_packaged_files() -> None:
 
 
 @pytest.mark.parametrize(("path", "topics"), [
-    ("ciao-memory/SKILL.md", ("note",)),
     ("ciao-capabilities/SKILL.md", ("schedule", "webhook")),
     ("ciao-capabilities/references/automations.md", ("schedule", "webhook")),
     ("ciao-capabilities/references/memory.md", ("vault", "project", "chat")),
@@ -78,11 +77,14 @@ def test_stock_skill_help_lookups_use_bounded_topics(path: str, topics: tuple[st
         assert args.noun == "help" and args.topic == topic
 
 
-def test_stock_package_contains_memory_skill_commands_and_schedules() -> None:
+def test_stock_package_contains_memory_procedures_commands_and_schedules() -> None:
     stock = resources.files("ciao.stock")
 
     assert not stock.joinpath("agents").is_dir() or not list(stock.joinpath("agents").glob("*.md"))
-    assert stock.joinpath("skills", "ciao-memory", "SKILL.md").is_file()
+    assert not stock.joinpath("skills", "ciao-memory").exists()
+    guide = stock.joinpath("skills", "ciao-capabilities", "references", "memory-operations", "guide.md")
+    assert guide.is_file()
+    assert not guide.read_text(encoding="utf-8").startswith("---")
     assert {path.name for path in stock.joinpath("commands").iterdir() if path.name.endswith(".md")} == EXPECTED_COMMANDS
     assert stock.joinpath("skills").is_dir()
     assert not list(stock.joinpath("skills").glob("*.md"))
@@ -105,13 +107,13 @@ def _curation_prompt() -> str:
     return next(entry["prompt"] for entry in schedules["schedules"] if entry["schedule_id"] == "system-memory-curation")
 
 
-def _memory_skill_dir() -> Path:
-    return Path(str(resources.files("ciao.stock"))) / "skills" / "ciao-memory"
+def _memory_operations_dir() -> Path:
+    return Path(str(resources.files("ciao.stock"))) / "skills" / "ciao-capabilities" / "references" / "memory-operations"
 
 
 def _reference(name: str) -> str:
-    """One file from the `ciao-memory` skill's `references/` folder."""
-    return (_memory_skill_dir() / "references" / name).read_text(encoding="utf-8")
+    """One durable-memory procedure reference."""
+    return (_memory_operations_dir() / "references" / name).read_text(encoding="utf-8")
 
 
 def _curation_text() -> str:
@@ -120,16 +122,18 @@ def _curation_text() -> str:
     The per-pass procedure moved out of the prompt (#1462), so a test that pins
     a procedure sentence reads the prompt and the references together.
     """
-    refs = sorted((_memory_skill_dir() / "references").glob("*.md"))
+    refs = sorted((_memory_operations_dir() / "references").rglob("*.md"))
     return "\n\n".join([_curation_prompt(), *(path.read_text(encoding="utf-8") for path in refs)])
 
 
 def test_stock_curation_prompt_contains_the_procedure() -> None:
-    """The packaged schedule is the only copy of the nightly procedure."""
+    """The schedule links to the packaged lifecycle and pass procedures."""
     prompt = _curation_prompt()
-    assert "one-line no-op" in prompt
-    assert "## 0. Start the run" in prompt
-    assert "## 10. Report" in prompt
+    assert "Before any durable edit, read `{{DURABLE_MEMORY_GUIDE_PATH}}`" in prompt
+    assert "references/curation-run-lifecycle.md" in prompt
+    assert "one-line no-op" in _curation_text()
+    assert "## 0. Start the run" in _curation_text()
+    assert "## 10. Report" in _curation_text()
     assert not resources.files("ciao.stock").joinpath("skills/memory-curation/SKILL.md").is_file()
 
 
@@ -139,8 +143,22 @@ def test_baseline_authoring_does_not_ship_as_optional_skills() -> None:
     assert not skills.joinpath("sop-authoring/SKILL.md").is_file()
 
 
-def test_support_names_the_scoped_evidence_command() -> None:
-    support = resources.files("ciao.stock").joinpath("skills/ciao-support/SKILL.md").read_text(encoding="utf-8")
+def test_capabilities_routes_app_support_without_catching_project_errors() -> None:
+    skill = resources.files("ciao.stock").joinpath("skills/ciao-capabilities/SKILL.md").read_text(encoding="utf-8")
+    for example in (
+        '"Ciaobot stopped responding"',
+        '"file a Ciaobot bug"',
+        '"what can you do?"',
+        '"my Python script crashed"',
+    ):
+        assert example in skill
+    assert "references/support.md" in skill
+    assert "errors in the user's own project do not trigger Ciaobot support" in skill
+
+
+def test_support_reference_has_no_skill_frontmatter_and_names_scoped_evidence() -> None:
+    support = resources.files("ciao.stock").joinpath("skills/ciao-capabilities/references/support.md").read_text(encoding="utf-8")
+    assert not support.startswith("---\n")
     assert "ciao context logs" in support
     assert "file_access=" not in support
     assert "workspace-only" not in support.lower().replace(" ", "-")
@@ -149,12 +167,20 @@ def test_support_names_the_scoped_evidence_command() -> None:
 
 
 def test_support_checks_for_a_released_fix_before_new_issue() -> None:
-    support = resources.files("ciao.stock").joinpath("skills/ciao-support/SKILL.md").read_text(encoding="utf-8")
+    support = resources.files("ciao.stock").joinpath("skills/ciao-capabilities/references/support.md").read_text(encoding="utf-8")
     assert "https://github.com/raffaelefarinaro/ciaobot/releases" in support
     assert "https://github.com/raffaelefarinaro/ciaobot/blob/main/CHANGELOG.md" in support
     assert "https://github.com/raffaelefarinaro/ciaobot/issues" in support
     assert "not merely\nmerged or closed" in support
     assert "suggest updating and\nretesting first" in support
+    assert "operator has approved creating an issue" in support
+    assert "redact secrets" in support
+
+
+def test_packaged_support_skill_is_retired_in_favor_of_reference() -> None:
+    skills = resources.files("ciao.stock").joinpath("skills")
+    assert not skills.joinpath("ciao-support").exists()
+    assert skills.joinpath("ciao-capabilities/references/support.md").is_file()
 
 
 def test_stock_curation_skill_consolidation_contract() -> None:
@@ -218,9 +244,9 @@ def test_stock_curation_skill_carries_the_new_passes() -> None:
     assert "Never delete it unattended" in skill
 
 
-def test_stock_memory_skill_matches_curator_contract() -> None:
+def test_stock_memory_procedure_matches_curator_contract() -> None:
     """The skill and scheduled curation must agree on guarded consolidation."""
-    role = resources.files("ciao.stock").joinpath("skills/ciao-memory/SKILL.md").read_text(
+    role = resources.files("ciao.stock").joinpath("skills/ciao-capabilities/references/memory-operations/guide.md").read_text(
         encoding="utf-8"
     )
 
@@ -231,7 +257,7 @@ def test_stock_memory_skill_matches_curator_contract() -> None:
     # consolidation is allowed: the memory pass can promote a confident
     # state-shaped fact, but the unattended curator never promotes a new one.
     assert "An unattended curation run never promotes a new fact" in role
-    assert "Load the `ciao-memory` skill" in _curation_prompt()
+    assert "Before any durable edit, read `{{DURABLE_MEMORY_GUIDE_PATH}}`" in _curation_prompt()
     assert "Use one memory agent" not in _curation_prompt()
 
 
@@ -456,7 +482,7 @@ def test_curation_prompt_fits_its_budget_and_every_reference_it_names_ships() ->
     assert named, "the prompt names no pass reference file"
     shipped = {
         item.name
-        for item in resources.files("ciao.stock").joinpath("skills", "ciao-memory", "references").iterdir()
+        for item in resources.files("ciao.stock").joinpath("skills", "ciao-capabilities", "references", "memory-operations", "references").iterdir()
     }
     assert named <= shipped, sorted(named - shipped)
     # Setuptools ships `skills/**/*`, so a reference is in the wheel when that glob stays.
@@ -487,8 +513,8 @@ def test_curation_references_keep_every_command_and_flag_of_the_old_prompt() -> 
 
 
 def test_every_memory_reference_is_named_by_the_prompt_skill_or_another_reference() -> None:
-    roots = _curation_prompt() + (_memory_skill_dir() / "SKILL.md").read_text(encoding="utf-8")
-    refs = {path.name: path.read_text(encoding="utf-8") for path in (_memory_skill_dir() / "references").glob("*.md")}
+    roots = _curation_prompt() + (_memory_operations_dir() / "guide.md").read_text(encoding="utf-8")
+    refs = {path.name: path.read_text(encoding="utf-8") for path in (_memory_operations_dir() / "references").rglob("*.md")}
     for name in refs:
         others = roots + "\n".join(text for other, text in refs.items() if other != name)
         assert name in others, f"{name} is an orphan"
@@ -581,7 +607,7 @@ def test_stale_entry_items_record_their_progress_key() -> None:
 
 
 def test_pass_one_reference_states_the_handover_matrix() -> None:
-    pass1 = (_memory_skill_dir() / "references" / "curation-pass-1-proposals.md").read_text(
+    pass1 = (_memory_operations_dir() / "references" / "curation-pass-1-proposals.md").read_text(
         encoding="utf-8"
     )
     for phrase in (
@@ -605,12 +631,12 @@ def test_pass_one_reference_states_the_handover_matrix() -> None:
 
 
 def test_pass_one_drains_legacy_learning_rows_before_proposal_review() -> None:
-    pass1 = (_memory_skill_dir() / "references" / "curation-pass-1-proposals.md").read_text(
+    pass1 = (_memory_operations_dir() / "references" / "curation-pass-1-proposals.md").read_text(
         encoding="utf-8"
     )
-    assert "Before listing current proposals, run `ciao learnings-queue-drain --apply --fresh-only`" in pass1
-    assert "failed or unresolved rows" in pass1
-    assert "do not hand-edit either file" in pass1
+    assert "Older learning rows are migrated automatically when the workspace starts." in pass1
+    assert "Do not run the migration again during proposal review." in pass1
+    assert "do not edit either file" in pass1
     assert "[learnings]" not in pass1
     assert "--kind learnings" not in pass1
     assert "memory learn --text-file" not in pass1
@@ -625,7 +651,7 @@ def test_care_prompt_names_the_decider_and_escalate_command() -> None:
         "skill proposal or a guide-body proposal",
     ):
         assert phrase in prompt, phrase
-    pass1 = (_memory_skill_dir() / "references" / "curation-pass-1-proposals.md").read_text(
+    pass1 = (_memory_operations_dir() / "references" / "curation-pass-1-proposals.md").read_text(
         encoding="utf-8"
     )
     assert "memory-proposal-escalate" in pass1

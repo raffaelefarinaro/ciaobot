@@ -147,11 +147,13 @@ from ciao.web.routes_api import (
     project_files_list,
     repo_candidates,
     dismiss_older_than,
+    dismiss_legacy_learning,
     memory_receipt_undo,
     memory_receipt_detail,
     memory_receipts,
     memory_entity_types,
     proposal_action,
+    proposal_reconcile_action,
     proposal_implement,
     proposal_preview,
     proposals_batch,
@@ -562,6 +564,7 @@ def create_app(config, app_settings=None, mcp_service=None) -> Starlette:
         Route("/api/agent-assets", agent_assets_endpoint, methods=["GET"]),
         Route("/api/agent-assets/audit", os_audit_endpoint, methods=["GET"]),
         Route("/api/proposals", list_proposals, methods=["GET"]),
+        Route("/api/proposals/legacy-learning-dismiss", dismiss_legacy_learning, methods=["POST"]),
         Route("/api/proposals/history", proposals_history, methods=["GET"]),
         Route("/api/proposals/handover", proposals_handover, methods=["GET"]),
         # host-only: session + host_browser_request; never in _LOOPBACK_ONLY_API
@@ -573,6 +576,8 @@ def create_app(config, app_settings=None, mcp_service=None) -> Starlette:
         # `/api/proposals/{id}/implement` would otherwise be read as an `accept`
         # or `dismiss` action and refused.
         Route("/api/proposals/{id}/implement", proposal_implement, methods=["POST"]),
+        # Reconciliation checks a persisted share attempt and cannot publish.
+        Route("/api/proposals/{id}/reconcile", proposal_reconcile_action, methods=["POST"]),
         Route("/api/proposals/dismiss-older-than", dismiss_older_than, methods=["POST"]),
         Route("/api/proposals/{id}/{action}", proposal_action, methods=["POST"]),
         Route("/api/memory/receipts", memory_receipts, methods=["GET"]),
