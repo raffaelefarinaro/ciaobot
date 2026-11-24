@@ -3,7 +3,7 @@
 ## Skills, subagents, and commands (extensibility)
 
 - **Stock skills** ship with the app and are synced into `.claude/skills/` (`ciao sync-skills`, runs at startup). A same-named skill in the workspace's `skills/` folder overrides the packaged copy.
-- **When Ciaobot itself is failing**: the bundled `ciao-support` skill reads the local logs, checks whether a released version already fixes it, and files a GitHub issue with this repo's labels. A log tail is not a fix.
+- **When Ciaobot itself is failing**: `ciao-capabilities` routes to its `references/support.md` procedure, which reads scoped local logs, checks whether a released version already fixes the problem, and explains how to prepare a GitHub issue with this repo's labels. Public reporting still requires the operator's approval; a log tail is not a fix.
 - **Plan mode**: writes are refused, so give the plan in the chat and say it can be saved as a file once the mode changes. Routine working docs (notes, analyses) follow the core prompt's file-routing rules.
 - **Reloading changes**: after an MCP server, plugin or skill is added or changed, a running chat picks it up when the agent runs `ciao chat reload` (same conversation, continues on its own); new chats load it automatically.
 - **Custom** skills, subagents, and slash commands are authored in the workspace (`skills/`, `subagents/`, `commands/`) and mirrored automatically.
