@@ -180,16 +180,40 @@ final class DownloadCoordinator: NSObject, WKDownloadDelegate {
     }
 
     private let origin: Origin
+    private let tlsIdentity: LocalEngineTLSIdentity?
     private let destination: DownloadDestination
     private let failure: DownloadFailureHandler
     private var pending: [ObjectIdentifier: PendingDownload] = [:]
     private var abandoned = false
     var onFinish: (() -> Void)?
 
-    init(origin: Origin, destination: @escaping DownloadDestination, failure: @escaping DownloadFailureHandler) {
+    init(origin: Origin, tlsIdentity: LocalEngineTLSIdentity? = nil, destination: @escaping DownloadDestination, failure: @escaping DownloadFailureHandler) {
         self.origin = origin
+        self.tlsIdentity = tlsIdentity
         self.destination = destination
         self.failure = failure
+    }
+
+    func download(_ download: WKDownload, didReceive challenge: URLAuthenticationChallenge,
+                  completionHandler: @escaping (URLSession.AuthChallengeDisposition, URLCredential?) -> Void) {
+        guard let tlsIdentity else {
+            completionHandler(.performDefaultHandling, nil)
+            return
+        }
+        if LocalEngineTLSIdentity.usesPlatformTrust(authenticationMethod: challenge.protectionSpace.authenticationMethod,
+                                                    host: challenge.protectionSpace.host) {
+            completionHandler(.performDefaultHandling, nil)
+            return
+        }
+        guard challenge.protectionSpace.host == "127.0.0.1" else {
+            completionHandler(.cancelAuthenticationChallenge, nil)
+            return
+        }
+        guard tlsIdentity.accepts(challenge), let trust = challenge.protectionSpace.serverTrust else {
+            completionHandler(.cancelAuthenticationChallenge, nil)
+            return
+        }
+        completionHandler(.useCredential, URLCredential(trust: trust))
     }
 
     func download(_ download: WKDownload, decideDestinationUsing response: URLResponse, suggestedFilename: String, completionHandler: @escaping (URL?) -> Void) {
@@ -311,6 +335,8 @@ final class DownloadCoordinator: NSObject, WKDownloadDelegate {
 
 final class ChildCoordinator: NSObject, WKNavigationDelegate, WKUIDelegate {
     let origin: Origin
+    let tlsIdentity: LocalEngineTLSIdentity?
+    let cookieRuleList: WKContentRuleList?
     let mode: ChildMode
     let filePanel: FilePanelHandler
     let openExternal: ExternalOpener
@@ -324,12 +350,38 @@ final class ChildCoordinator: NSObject, WKNavigationDelegate, WKUIDelegate {
     private(set) var testNavigationDecisionCount = 0
     #endif
 
-    init(origin: Origin, mode: ChildMode, filePanel: @escaping FilePanelHandler, downloadDestination: @escaping DownloadDestination, downloadFailure: @escaping DownloadFailureHandler, openExternal: @escaping ExternalOpener) {
+    init(origin: Origin, tlsIdentity: LocalEngineTLSIdentity? = nil, cookieRuleList: WKContentRuleList? = nil, mode: ChildMode, filePanel: @escaping FilePanelHandler, downloadDestination: @escaping DownloadDestination, downloadFailure: @escaping DownloadFailureHandler, openExternal: @escaping ExternalOpener) {
         self.origin = origin
+        self.tlsIdentity = tlsIdentity
+        self.cookieRuleList = cookieRuleList
         self.mode = mode
         self.filePanel = filePanel
         self.openExternal = openExternal
-        self.downloads = DownloadCoordinator(origin: origin, destination: downloadDestination, failure: downloadFailure)
+        self.downloads = DownloadCoordinator(origin: origin, tlsIdentity: tlsIdentity,
+                                             destination: downloadDestination, failure: downloadFailure)
+    }
+
+    func webView(_ webView: WKWebView, didReceive challenge: URLAuthenticationChallenge,
+                 completionHandler: @escaping (URLSession.AuthChallengeDisposition, URLCredential?) -> Void) {
+        guard let tlsIdentity else {
+            completionHandler(.performDefaultHandling, nil)
+            return
+        }
+        if LocalEngineTLSIdentity.usesPlatformTrust(authenticationMethod: challenge.protectionSpace.authenticationMethod,
+                                                    host: challenge.protectionSpace.host) {
+            completionHandler(.performDefaultHandling, nil)
+            return
+        }
+        guard challenge.protectionSpace.host == "127.0.0.1" else {
+            completionHandler(.cancelAuthenticationChallenge, nil)
+            return
+        }
+        guard tlsIdentity.origin == origin, tlsIdentity.accepts(challenge),
+              let trust = challenge.protectionSpace.serverTrust else {
+            completionHandler(.cancelAuthenticationChallenge, nil)
+            return
+        }
+        completionHandler(.useCredential, URLCredential(trust: trust))
     }
 
     func webView(_ webView: WKWebView, decidePolicyFor action: WKNavigationAction, decisionHandler: @escaping (WKNavigationActionPolicy) -> Void) {
@@ -499,7 +551,7 @@ final class ChildWindowController: NSObject, NSWindowDelegate {
     var testNavigationDecisionCount: Int { coordinator.testNavigationDecisionCount }
     #endif
 
-    init(origin: Origin, mode: ChildMode, configuration providedConfiguration: WKWebViewConfiguration, initialURL: URL, loadsInitialURL: Bool = true, unshownTimeout: TimeInterval = 60, filePanel: @escaping FilePanelHandler, downloadDestination: @escaping DownloadDestination, downloadFailure: @escaping DownloadFailureHandler, openExternal: @escaping ExternalOpener) {
+    init(origin: Origin, tlsIdentity: LocalEngineTLSIdentity? = nil, cookieRuleList: WKContentRuleList? = nil, mode: ChildMode, configuration providedConfiguration: WKWebViewConfiguration, initialURL: URL, loadsInitialURL: Bool = true, unshownTimeout: TimeInterval = 60, filePanel: @escaping FilePanelHandler, downloadDestination: @escaping DownloadDestination, downloadFailure: @escaping DownloadFailureHandler, openExternal: @escaping ExternalOpener) {
         self.mode = mode
         self.initialURL = initialURL
         self.loadsInitialURL = loadsInitialURL
@@ -513,10 +565,13 @@ final class ChildWindowController: NSObject, NSWindowDelegate {
         // See docs/reference.md: JS popup windows cannot be cookie-isolated with public API.
         let configuration = providedConfiguration.copy() as! WKWebViewConfiguration
         configuration.userContentController = WKUserContentController()
+        if let cookieRuleList { configuration.userContentController.add(cookieRuleList) }
         let webView = WKWebView(frame: .zero, configuration: configuration)
         self.webView = webView
         self.coordinator = ChildCoordinator(
             origin: origin,
+            tlsIdentity: tlsIdentity,
+            cookieRuleList: cookieRuleList,
             mode: mode,
             filePanel: filePanel,
             downloadDestination: downloadDestination,
@@ -625,6 +680,7 @@ final class ChildWindowController: NSObject, NSWindowDelegate {
 
 struct WebWindow: NSViewRepresentable {
     let origin: Origin
+    var tlsIdentity: LocalEngineTLSIdentity? = nil
     var storage: SessionStorage = .ephemeral
     /// The connection's already-created store. Passing it here (rather than
     /// calling `.nonPersistent()` a second time) keeps the tray's cookie reads
@@ -656,20 +712,35 @@ struct WebWindow: NSViewRepresentable {
             openExternal: openExternal,
             viewTracker: viewTracker,
             navigationProfile: navigationProfile,
-            appSettings: appSettings
+            appSettings: appSettings,
+            tlsIdentity: tlsIdentity
         )
     }
 
     func makeNSView(context: Context) -> WKWebView {
-        let view = Coordinator.makeWebView(
-            origin: origin,
-            coordinator: context.coordinator,
-            storage: storage,
-            websiteDataStore: websiteDataStore
-        )
+        let view = Coordinator.makeWebView(origin: origin, coordinator: context.coordinator,
+                                           storage: storage, websiteDataStore: websiteDataStore)
         context.coordinator.viewTracker?.attach(view)
-        onWebViewReady?(view)
-        view.load(URLRequest(url: origin.url))
+        guard let tlsIdentity else {
+            onWebViewReady?(view)
+            view.load(URLRequest(url: origin.url))
+            return view
+        }
+        guard tlsIdentity.origin == origin else {
+            onFailure?("The local engine identity changed. Reconnect to continue.")
+            return view
+        }
+        LocalEngineWebSecurity.compileRules(for: tlsIdentity) { list in
+            guard !context.coordinator.isReleased else { return }
+            guard let list else {
+                onFailure?("Ciaobot could not install the local session security policy. Restart the app to try again.")
+                return
+            }
+            context.coordinator.cookieRuleList = list
+            view.configuration.userContentController.add(list)
+            onWebViewReady?(view)
+            view.load(URLRequest(url: origin.url))
+        }
         return view
     }
 
@@ -772,6 +843,8 @@ struct WebWindow: NSViewRepresentable {
         """
 
         let origin: Origin
+        let tlsIdentity: LocalEngineTLSIdentity?
+        var cookieRuleList: WKContentRuleList?
         let onFailure: ((String) -> Void)?
         let filePanel: FilePanelHandler
         let downloadDestination: DownloadDestination
@@ -827,8 +900,9 @@ struct WebWindow: NSViewRepresentable {
         var testCrossOriginFrameObserver: ((WKFrameInfo) -> Void)?
         #endif
 
-        init(origin: Origin, onFailure: ((String) -> Void)?, downloadFailure: @escaping DownloadFailureHandler, filePanel: @escaping FilePanelHandler, downloadDestination: @escaping DownloadDestination, openExternal: @escaping ExternalOpener, viewTracker: SessionViewTracker? = nil, navigationProfile: WebWindowNavigationProfile = .main, appSettings: AppSettingsBridge? = nil) {
+        init(origin: Origin, onFailure: ((String) -> Void)?, downloadFailure: @escaping DownloadFailureHandler, filePanel: @escaping FilePanelHandler, downloadDestination: @escaping DownloadDestination, openExternal: @escaping ExternalOpener, viewTracker: SessionViewTracker? = nil, navigationProfile: WebWindowNavigationProfile = .main, appSettings: AppSettingsBridge? = nil, tlsIdentity: LocalEngineTLSIdentity? = nil) {
             self.origin = origin
+            self.tlsIdentity = tlsIdentity
             self.onFailure = onFailure
             self.downloadFailure = downloadFailure
             self.filePanel = filePanel
@@ -837,7 +911,31 @@ struct WebWindow: NSViewRepresentable {
             self.viewTracker = viewTracker
             self.navigationProfile = navigationProfile
             self.appSettings = appSettings
-            self.downloads = DownloadCoordinator(origin: origin, destination: downloadDestination, failure: downloadFailure)
+            self.downloads = DownloadCoordinator(origin: origin, tlsIdentity: tlsIdentity,
+                                                 destination: downloadDestination, failure: downloadFailure)
+        }
+
+        func webView(_ webView: WKWebView, didReceive challenge: URLAuthenticationChallenge,
+                     completionHandler: @escaping (URLSession.AuthChallengeDisposition, URLCredential?) -> Void) {
+            guard let tlsIdentity else {
+                completionHandler(.performDefaultHandling, nil)
+                return
+            }
+            if LocalEngineTLSIdentity.usesPlatformTrust(authenticationMethod: challenge.protectionSpace.authenticationMethod,
+                                                        host: challenge.protectionSpace.host) {
+                completionHandler(.performDefaultHandling, nil)
+                return
+            }
+            guard challenge.protectionSpace.host == "127.0.0.1" else {
+                completionHandler(.cancelAuthenticationChallenge, nil)
+                return
+            }
+            guard tlsIdentity.origin == origin, tlsIdentity.accepts(challenge),
+                  let trust = challenge.protectionSpace.serverTrust else {
+                completionHandler(.cancelAuthenticationChallenge, nil)
+                return
+            }
+            completionHandler(.useCredential, URLCredential(trust: trust))
         }
 
         deinit {
@@ -1405,6 +1503,8 @@ struct WebWindow: NSViewRepresentable {
             guard let configuration = configuration ?? webView?.configuration else { return nil }
             let child = ChildWindowController(
                 origin: origin,
+                tlsIdentity: tlsIdentity,
+                cookieRuleList: cookieRuleList,
                 mode: mode,
                 configuration: configuration,
                 initialURL: url,
@@ -1425,7 +1525,7 @@ struct WebWindow: NSViewRepresentable {
         }
 
         private func reportFailure(_ error: Error) {
-            guard !reportedFailure, !isPolicyCancellation(error) else { return }
+            guard !isReleased, !reportedFailure, !isPolicyCancellation(error) else { return }
             reportedFailure = true
             onFailure?("Could not load the server’s interface. Check that the server is still running and try again.")
         }

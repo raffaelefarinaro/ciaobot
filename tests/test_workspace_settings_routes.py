@@ -1806,6 +1806,62 @@ def test_saving_a_new_path_schedules_one_update(tmp_path, monkeypatch):
     assert scheduled == [str(acme.resolve())]
 
 
+def test_workspace_save_retries_when_registry_changes_while_claims_wait(tmp_path, monkeypatch):
+    from contextlib import asynccontextmanager
+    from dataclasses import replace
+
+    from ciao import shared_brain
+    from ciao.workspaces import workspace_registry_lock
+
+    client, config, _pcm = _client(tmp_path)
+    acme = _checkout(_away(tmp_path) / "acme", "https://github.com/acme/notes")
+    other = _checkout(_away(tmp_path) / "other", "https://github.com/other/notes")
+    link_response = client.patch(
+        "/api/workspaces/personal", json={"shared_brains": [{"path": str(acme)}]}
+    )
+    assert link_response.status_code == 200
+    original_link = config.workspace("personal").shared_brains[0]
+    original_claim = shared_brain._checkout_claim
+    claim_paths: list[str] = []
+    unlinked = False
+
+    @asynccontextmanager
+    async def interleaved_claim(path: str, claim_config):
+        nonlocal unlinked
+        claim_paths.append(path)
+        if path == str(other.resolve()) and not unlinked:
+            # A competing registry writer removes the old link while this save
+            # is waiting only on the newly-added checkout. The stale candidate
+            # still carries the original lifetime ID for `acme`.
+            async with shared_brain._checkout_lock(str(acme.resolve())):
+                async with original_claim(str(acme.resolve()), claim_config):
+                    with workspace_registry_lock(claim_config):
+                        current = claim_config.workspace("personal")
+                        claim_config.workspaces["personal"] = replace(
+                            current, shared_brains=[]
+                        )
+                        claim_config.persist_workspace_registry()
+            unlinked = True
+        async with original_claim(path, claim_config):
+            yield
+
+    monkeypatch.setattr(shared_brain, "_checkout_claim", interleaved_claim)
+    saved = client.patch(
+        "/api/workspaces/personal",
+        json={"shared_brains": [{"path": str(acme)}, {"path": str(other)}]},
+    )
+
+    assert saved.status_code == 200, saved.text
+    links = config.workspace("personal").shared_brains
+    assert {link.path for link in links} == {str(acme.resolve()), str(other.resolve())}
+    refreshed_link = next(link for link in links if link.path == str(acme.resolve()))
+    assert refreshed_link.lifetime_id != original_link.lifetime_id
+    assert claim_paths.count(str(acme.resolve())) >= 2
+    registry = json.loads((tmp_path / ".runtime" / "workspaces.json").read_text())
+    saved_links = next(row for row in registry if row["name"] == "personal")["shared_brains"]
+    assert next(link for link in saved_links if link["path"] == refreshed_link.path)["lifetime_id"] == refreshed_link.lifetime_id
+
+
 def test_workspace_shared_brains_route_lists_states_empty_and_404(tmp_path, monkeypatch):
     from ciao import shared_brain
 

@@ -1,15 +1,12 @@
----
-name: ciao-memory
-description: "Use for writing or curating Ciaobot's durable vault memory: updating people or project notes, organizing learnings, processing memory or skill proposals, consolidating bounded memory, and the scheduled Workspace care run. Not for read-only recall or questions about what Ciaobot can do."
----
-
 # Durable memory and vault care
+
+For writing or curating durable vault memory, read [Writing documents and regions](references/writing.md) before document writes or bounded-region edits. For the unattended Workspace care run, follow the [Workspace care procedure](references/curation-run-lifecycle.md) and the pass references it names. Read-only recall stays on the ordinary vault search path.
 
 Write only under the `vault=<path>` root in `<ciao-context>`. Existing notes may have been misfiled by an older curator; their location never overrides the configured vault.
 
 Read-only recall is handled inline by the system prompt (`ciao vault search`, answer from vault evidence only). This skill covers writes and curation. The nightly Workspace care schedule owns its own lease, worklist, budget, and unattended rules; follow that prompt for the run. Perform mutating vault passes sequentially.
 
-Before document writes or bounded-region edits, read [Writing documents and regions](references/writing.md) for file placement, frontmatter, canonical paths and region syntax.
+The writing procedure covers file placement, frontmatter, canonical paths and region syntax.
 
 ## Destinations and categories
 

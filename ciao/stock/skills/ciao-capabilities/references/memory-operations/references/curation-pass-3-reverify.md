@@ -72,7 +72,7 @@ The `uncovered` count in the audit is a finding too. It is the note text this sy
 
 ## Writing notes
 
-The rules for writing person and project notes (one fact per bullet, which stamps you may add, when `updated:` moves) live in the `ciao-memory` skill under "Writing entity notes". Follow them whenever this pass edits a note.
+The rules for writing person and project notes (one fact per bullet, which stamps you may add, when `updated:` moves) live in the durable-memory guide under "Writing entity notes". Follow them whenever this pass edits a note.
 
 ## `event_shaped_entries` and `superseded_state_candidates`
 

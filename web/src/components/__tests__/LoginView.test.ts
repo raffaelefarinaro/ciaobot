@@ -736,6 +736,27 @@ describe('LoginView setup wizard tests', () => {
       expect(region.text()).toContain('If your Ciaobot folder is somewhere else, put its path after --workspace.')
     })
 
+    it('offers password login when the HTTP service does not listen on loopback', async () => {
+      mockApiGet.mockResolvedValue(configured)
+      mockApiPost.mockRejectedValueOnce(Object.assign(new Error('x'), {
+        status: 409,
+        payload: { reason: 'no_loopback_http' },
+      }))
+      const wrapper = await mountLoginView()
+      await wrapper.get('.login-host-signin').trigger('click')
+      await flushPromises()
+
+      const status = wrapper.get('.login-host-status')
+      expect(status.text()).toBe('Browser sign-in is unavailable. Sign in here with your password.')
+      expect(status.find('.login-host-command').exists()).toBe(false)
+
+      mockApiPost.mockRejectedValueOnce(Object.assign(new Error('invalid token'), { status: 401 }))
+      await wrapper.get('#login-token').setValue('example-password')
+      await wrapper.get('form.login-form').trigger('submit')
+      await flushPromises()
+      expect(mockApiPost).toHaveBeenLastCalledWith('/api/auth', { token: 'example-password' })
+    })
+
     it('says plainly when the page is not on the computer running Ciaobot', async () => {
       mockApiGet.mockResolvedValue(configured)
       mockApiPost.mockRejectedValueOnce(Object.assign(new Error('x'), { status: 403, payload: { reason: 'not_on_host' } }))

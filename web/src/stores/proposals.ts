@@ -13,6 +13,7 @@ import type {
   ProposalPreview,
   ProposalPreviewResponse,
   ProposalSkillAcceptResponse,
+  LegacyLearningDismissResponse,
   MemoryReceiptDetail,
 } from '../lib/types'
 
@@ -707,6 +708,29 @@ export const useProposalsStore = defineStore('proposals', () => {
     }
   }
 
+  async function dismissLegacyLearning(
+    workspace: string,
+    rowId: string,
+    revision: string,
+  ) {
+    const key = `legacy-learning:${rowId}`
+    setBusy(key, true)
+    error.value = ''
+    try {
+      await api.post<LegacyLearningDismissResponse>('/api/proposals/legacy-learning-dismiss', {
+        workspace,
+        row_id: rowId,
+        expected_revision: revision,
+      })
+      await fetch({ force: true })
+      invalidateHistory()
+    } catch (e) {
+      error.value = e instanceof Error ? e.message : 'Could not remove this learning'
+    } finally {
+      setBusy(key, false)
+    }
+  }
+
   /**
    * Load the decision history. Same de-dup/ticket shape as `fetch`: a plain
    * mount joins an in-flight request, but the refresh a mutation triggers
@@ -827,7 +851,7 @@ export const useProposalsStore = defineStore('proposals', () => {
   }
 
   return {
-    rows, legacyLearningQueues, loading, loaded, busy, busyIds, isBusy, setBusy, setBusyMany, error, loadError, fetch, ensureLoaded, act, acceptSkill, batch, dismissOlderThan,
+    rows, legacyLearningQueues, loading, loaded, busy, busyIds, isBusy, setBusy, setBusyMany, error, loadError, fetch, ensureLoaded, act, acceptSkill, batch, dismissOlderThan, dismissLegacyLearning,
     previews, previewErrors, isPreviewLoading, loadPreview, prefetchPreviews, dropPreview, conflictIds, lastBatchSummary,
     receipts, receiptErrors, receiptKey, isReceiptLoading, loadReceipt, undoReceipt,
     kindFilter, decideFilter, search, selected, revealedRowId, revealRow,

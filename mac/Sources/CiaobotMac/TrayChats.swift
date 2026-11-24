@@ -448,6 +448,7 @@ final class ChatActivityModel: ObservableObject, ChatActivityProviding {
         opening = false
         let opened = transport.open(
             origin: origin,
+            tlsIdentity: context.tlsIdentity,
             cookieHeader: cookieHeader,
             onEvent: { [weak self] event in
                 self?.receive(event, origin: origin, generation: generation)

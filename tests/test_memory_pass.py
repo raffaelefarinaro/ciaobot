@@ -891,6 +891,40 @@ def test_recent_decisions_are_workspace_scoped_and_fenced(
     assert "<recent-decisions>" not in manager._memory_pass._prompt_for(closure_chat)
 
 
+def test_memory_pass_prompt_resolves_packaged_guide_with_workspace_override(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _register_work_workspace(tmp_path)
+    manager = _make_manager(tmp_path)
+    chat = _pass_chat(manager)
+    agent_root = manager._agent_root_for_chat(chat.chat_id)
+    override = agent_root / "skills/ciao-capabilities/SKILL.md"
+    override.parent.mkdir(parents=True)
+    override.write_text("workspace-owned capabilities override", encoding="utf-8")
+    from ciao import sync_skills
+
+    sync_skills.sync_workspace_skills(agent_root, refresh_upstream=False)
+    sync_skills.sync_workspace_skills(agent_root, refresh_upstream=False)
+    installed = agent_root / ".claude/skills/ciao-capabilities"
+    assert installed.is_symlink() and installed.resolve() == override.parent.resolve()
+    assert not (installed / "references/memory-operations/guide.md").exists()
+    from importlib import resources
+
+    guide_path = Path(str(resources.files("ciao.stock").joinpath(
+        "skills/ciao-capabilities/references/memory-operations/guide.md"
+    ))).resolve()
+    elsewhere = tmp_path / "unrelated-cwd"
+    elsewhere.mkdir()
+    monkeypatch.chdir(elsewhere)
+
+    prompt = manager._memory_pass._prompt_for(chat)
+
+    assert str(guide_path) in prompt
+    assert str(override) not in prompt
+    assert str(elsewhere) not in prompt
+    assert "Read-only recall does not need this procedure" in prompt
+
+
 def test_recent_decisions_filter_sort_and_bound_before_fencing(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -969,7 +1003,7 @@ def test_superseded_guidance_is_rewritten_not_annotated() -> None:
 
     skill = (
         resources.files("ciao.stock")
-        .joinpath("skills/ciao-memory/SKILL.md")
+        .joinpath("skills/ciao-capabilities/references/memory-operations/guide.md")
         .read_text(encoding="utf-8")
     )
     architecture = (
@@ -995,7 +1029,7 @@ def _ciao_memory_skill() -> str:
 
     return (
         resources.files("ciao.stock")
-        .joinpath("skills/ciao-memory/SKILL.md")
+        .joinpath("skills/ciao-capabilities/references/memory-operations/guide.md")
         .read_text(encoding="utf-8")
     )
 
@@ -3033,28 +3067,96 @@ def test_pass_for_a_missing_linked_repo_has_no_repo_section(tmp_path: Path) -> N
     assert memory_pass.REPO_PROPOSAL_COMMAND not in prompt
 
 
-def _brains_on(manager: ProjectChatManager, workspace: str, *paths: str) -> None:
+def _brains_on(manager: ProjectChatManager, workspace: str, *paths: str) -> list[Path]:
     from ciao.config import SharedBrainLink, WorkspaceConfig
 
     record = manager._config.workspaces.setdefault(workspace, WorkspaceConfig(name=workspace, vault_root=f"memory-vault/{workspace}"))
-    record.shared_brains = [
-        SharedBrainLink(name=f"brain-{i}", path=path, identity=f"github.com/acme/notes-{i}")
-        for i, path in enumerate(paths)
-    ]
+    roots = []
+    links = []
+    for i, path in enumerate(paths):
+        folder = manager._config.workspace_root.parent / f"{manager._config.workspace_root.name}-brains" / Path(path).name
+        (folder / ".git").mkdir(parents=True, exist_ok=True)
+        roots.append(folder)
+        links.append(SharedBrainLink(name=f"brain-{i}", path=str(folder), identity=f"github.com/acme/notes-{i}"))
+    record.shared_brains = links
+    return roots
 
 
 def test_pass_for_workspace_with_two_shared_brains_carries_both_names_and_paths(
     tmp_path: Path,
 ) -> None:
     manager, pass_chat = _linked_pass(tmp_path, None)
-    _brains_on(manager, "work", "/brains/acme", "/brains/ops")
+    brains = _brains_on(manager, "work", "/brains/acme", "/brains/ops")
 
     prompt = manager._memory_pass._prompt_for(pass_chat)
 
     assert "This workspace has shared team folders:" in prompt
-    assert "- brain-0: /brains/acme" in prompt
-    assert "- brain-1: /brains/ops" in prompt
+    assert f"- brain-0: {brains[0]}" in prompt
+    assert f"- brain-1: {brains[1]}" in prompt
     assert "do not propose it as a memory" in prompt
+
+
+
+def test_memory_pass_omits_unusable_shared_brain_paths(tmp_path: Path) -> None:
+    manager, pass_chat = _linked_pass(tmp_path, None)
+    usable, unusable = _brains_on(manager, "work", "/brains/usable", "/brains/unusable")
+    (unusable / ".git").rmdir()
+
+    prompt = manager._memory_pass._prompt_for(pass_chat)
+
+    assert f"- brain-0: {usable}" in prompt
+    assert str(unusable) not in prompt
+
+
+
+
+def test_memory_pass_helper_hides_missing_shared_brain_path(tmp_path: Path) -> None:
+    manager, pass_chat = _linked_pass(tmp_path, None)
+    (brain,) = _brains_on(manager, "work", "/brains/missing")
+    brain.rename(brain.with_name("removed-brain"))
+
+    prompt = manager._memory_pass._prompt_for(pass_chat)
+
+    assert "shared team folders" not in prompt
+    assert str(brain) not in prompt
+
+
+def test_memory_pass_helper_hides_symlink_and_redirected_destination(tmp_path: Path) -> None:
+    manager, pass_chat = _linked_pass(tmp_path, None)
+    (brain,) = _brains_on(manager, "work", "/brains/acme")
+    redirected = brain.parent / "redirected-target"
+    (redirected / ".git").mkdir(parents=True)
+    brain.rename(brain.with_name("original-brain"))
+    brain.symlink_to(redirected, target_is_directory=True)
+
+    prompt = manager._memory_pass._prompt_for(pass_chat)
+
+    assert "shared team folders" not in prompt
+    assert str(brain) not in prompt
+    assert str(redirected) not in prompt
+
+
+def test_memory_pass_helper_hides_shared_brain_under_protected_root(tmp_path: Path) -> None:
+    manager, pass_chat = _linked_pass(tmp_path, None)
+    (brain,) = _brains_on(manager, "work", "/brains/acme")
+    manager._config.workspace_root = brain.parent
+
+    prompt = manager._memory_pass._prompt_for(pass_chat)
+
+    assert "shared team folders" not in prompt
+    assert str(brain) not in prompt
+
+
+def test_memory_pass_omits_section_when_all_shared_brain_paths_are_unusable(tmp_path: Path) -> None:
+    manager, pass_chat = _linked_pass(tmp_path, None)
+    brains = _brains_on(manager, "work", "/brains/acme", "/brains/ops")
+    for brain in brains:
+        (brain / ".git").rmdir()
+
+    prompt = manager._memory_pass._prompt_for(pass_chat)
+
+    assert "shared team folders" not in prompt
+    assert all(str(brain) not in prompt for brain in brains)
 
 
 def test_pass_without_a_shared_brain_has_no_section(tmp_path: Path) -> None:

@@ -349,11 +349,17 @@ async def test_update_row7_diverged(pair: SimpleNamespace) -> None:
 
 @pytest.mark.asyncio
 async def test_update_row8_behind_with_local_changes_is_skipped(pair: SimpleNamespace) -> None:
-    push_from_seed(pair, "remote.md")
+    remote_head = push_from_seed(pair, "remote.md")
     (pair.clone / "a.md").write_text("edited\n", encoding="utf-8")
     head = git(pair.clone, "rev-parse", "HEAD")
     _assert_result(await sb.update_brain(link_of(pair.clone), FakeConfig(pair.root)), "skipped", "local_changes")
     assert git(pair.clone, "rev-parse", "HEAD") == head
+    assert git(pair.clone, "rev-parse", "origin/main") == remote_head
+    state = sb.brain_state(link_of(pair.clone), FakeConfig(pair.root))
+    assert state["head"] == head[:7]
+    assert state["fetched_at"]
+    assert state["last_update"]["outcome"] == "skipped"
+    assert state["last_update"]["reason"] == "local_changes"
     assert (pair.clone / "a.md").read_text(encoding="utf-8") == "edited\n"
 
 

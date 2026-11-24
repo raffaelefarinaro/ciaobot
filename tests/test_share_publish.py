@@ -70,12 +70,20 @@ def linked(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> tuple[Config, Pat
     vault = tmp_path / "vault"
     vault.mkdir()
     config = Config(tmp_path, vault, link)
+    monkeypatch.setattr(
+        share_publish.shared_brain,
+        "_HARDEN",
+        share_publish.shared_brain._HARDEN + ("-c", "user.name=Test", "-c", "user.email=test@example.com"),
+    )
 
-    def transport(folder: Path, *args: str, limit: int = 4096) -> tuple[int, bytes, bytes]:
+    def transport(
+        folder: Path, *args: str, limit: int = 4096,
+        timeout_s: float = shared_brain.FETCH_TIMEOUT_S,
+    ) -> tuple[int, bytes, bytes]:
         rewritten = tuple(str(origin) if arg == "origin" else arg for arg in args)
         proc = subprocess.run(
             ["git", *IDENT, "-c", "protocol.file.allow=always", "-C", str(folder), *rewritten],
-            check=False, capture_output=True, timeout=5,
+            check=False, capture_output=True, timeout=min(timeout_s, 5),
         )
         return proc.returncode, proc.stdout[:limit], proc.stderr[:limit]
 
@@ -109,6 +117,48 @@ def test_publish_uses_reviewed_bytes_and_is_idempotent(linked: tuple[Config, Pat
     assert len(share_publish.list_share_receipts(config, workspace="home")) == 1
     receipt = share_publish.get_share_receipt(config, workspace="home", proposal_id=draft.proposal_id, expected_revision=token)
     assert receipt and receipt["commit_oid"] == result.commit_oid and receipt["published_blob_oid"]
+
+
+def test_receipt_enumeration_skips_malformed_canonical_and_index(linked, monkeypatch) -> None:
+    config, _clone, _origin = linked
+    valid = share_proposals.draft_share(
+        config, workspace="home", relative_path="n.md", operation="replace",
+        proposed=b"one", request_key="receipt-valid-one",
+    )
+    assert isinstance(valid, share_proposals.ShareDraft)
+    one = asyncio.run(share_publish.publish_share(
+        config, workspace="home", proposal_id=valid.proposal_id,
+        expected_revision=valid.artifact["review_token"],
+    ))
+    assert one.receipt_id
+    store = share_proposals._store_dir(config)
+    canonical = store / (
+        hashlib.sha256(("home\0sidecar\0" + valid.artifact["immutable"]["sidecar_id"]).encode()).hexdigest() + ".json"
+    )
+    artifact = json.loads(canonical.read_text(encoding="utf-8"))
+    malformed_fields = dict(artifact["immutable"])
+    malformed_fields["sidecar_id"] = "malformed-canonical"
+    malformed_artifact = dict(artifact, immutable=malformed_fields)
+    malformed_artifact["review_token"] = share_proposals._review_token(malformed_fields)
+    malformed_canonical = store / (
+        hashlib.sha256(("home\0sidecar\0malformed-canonical").encode()).hexdigest() + ".json"
+    )
+    share_proposals._write_private(malformed_canonical, json.dumps(malformed_artifact, sort_keys=True).encode())
+    malformed_canonical_artifact = json.loads(malformed_canonical.read_text(encoding="utf-8"))
+    malformed_canonical_artifact["immutable"].pop("sidecar_id")
+    malformed_canonical_artifact["review_token"] = share_proposals._review_token(
+        malformed_canonical_artifact["immutable"]
+    )
+    share_proposals._write_private(
+        malformed_canonical, json.dumps(malformed_canonical_artifact, sort_keys=True).encode()
+    )
+    malformed_index = store / "request-index-malformed.json"
+    malformed_index_artifact = dict(artifact, publication={"receipts": None})
+    share_proposals._write_private(
+        malformed_index, json.dumps(malformed_index_artifact, sort_keys=True).encode()
+    )
+    listed = share_publish.list_share_receipts(config, workspace="home")
+    assert [receipt["id"] for receipt in listed] == [one.receipt_id]
 
 
 def test_publish_rechecks_link_after_waiting_for_checkout_claim(linked, monkeypatch) -> None:
@@ -598,7 +648,48 @@ def test_legacy_refresh_waits_for_queue_before_registry_lock(linked, monkeypatch
     assert result and isinstance(result[0], share_proposals.ShareDraft)
 
 
-def test_legacy_refresh_recovers_crash_after_idempotency_index_write_at_capacity(linked, monkeypatch) -> None:
+def test_legacy_refresh_rechecks_publication_reservation_under_queue_lock(linked, monkeypatch) -> None:
+    config, _clone, _origin = linked
+    legacy = share_proposals.draft_share(
+        config, workspace="home", relative_path="n.md", operation="replace",
+        proposed=b"legacy", request_key="legacy-reservation-race",
+    )
+    assert isinstance(legacy, share_proposals.ShareDraft)
+    artifact = share_publish._artifact_for(config, "home", legacy.proposal_id)
+    assert artifact is not None
+    artifact["immutable"].pop("link_lifetime_id")
+    artifact["review_token"] = share_proposals._review_token(artifact["immutable"])
+    sidecar = share_proposals._store_dir(config) / (
+        hashlib.sha256(("home\0sidecar\0" + artifact["immutable"]["sidecar_id"]).encode()).hexdigest() + ".json"
+    )
+    share_proposals._write_private(sidecar, json.dumps(artifact, sort_keys=True).encode())
+    original_lookup = share_publish._artifact_for
+    reserved = False
+
+    def reserve_after_initial_read(*args, **kwargs):
+        nonlocal reserved
+        visible = original_lookup(*args, **kwargs)
+        if visible is not None and not reserved:
+            reserved = True
+            current = share_proposals._load_sidecar(sidecar)
+            current["publication"] = {"attempts": [{"status": "pending"}], "receipts": []}
+            share_proposals._write_private(sidecar, json.dumps(current, sort_keys=True).encode())
+        return visible
+
+    monkeypatch.setattr(share_publish, "_artifact_for", reserve_after_initial_read)
+    result = share_publish.refresh_legacy_draft(
+        config, workspace="home", proposal_id=legacy.proposal_id,
+        expected_revision=artifact["review_token"],
+    )
+    assert isinstance(result, share_proposals.ShareRefusal)
+    assert result.code == "publication_pending"
+    queue = config.vault / "Workspace" / "Memory-Proposals.md"
+    text = queue.read_text(encoding="utf-8")
+    assert text.count("Shared note change proposal") == 1
+    assert artifact["immutable"]["sidecar_id"] in text
+
+
+def test_legacy_refresh_fails_closed_after_index_write_without_canonical(linked, monkeypatch) -> None:
     config, _clone, _origin = linked
     legacy = share_proposals.draft_share(
         config, workspace="home", relative_path="n.md", operation="replace",
@@ -609,7 +700,6 @@ def test_legacy_refresh_recovers_crash_after_idempotency_index_write_at_capacity
     assert artifact is not None
     artifact["immutable"].pop("link_lifetime_id")
     artifact["review_token"] = share_proposals._review_token(artifact["immutable"])
-    sidecar_hash = hashlib.sha256(("home\0sidecar\0" + artifact["immutable"]["sidecar_id"]).encode()).hexdigest()
     for path in share_proposals._store_dir(config).glob("*.json"):
         stored = share_proposals._load_sidecar(path)
         if stored["immutable"]["sidecar_id"] == artifact["immutable"]["sidecar_id"]:
@@ -639,15 +729,25 @@ def test_legacy_refresh_recovers_crash_after_idempotency_index_write_at_capacity
     assert f"Shared note change proposal {artifact['immutable']['sidecar_id']}" in queue.read_text(encoding="utf-8")
 
     monkeypatch.setattr(share_proposals, "_write_private", original_write)
-    recovered = share_publish.refresh_legacy_draft(
+    retried = share_publish.refresh_legacy_draft(
         config, workspace="home", proposal_id=legacy.proposal_id,
         expected_revision=artifact["review_token"],
     )
-    assert isinstance(recovered, share_proposals.ShareDraft)
+    assert isinstance(retried, share_proposals.ShareRefusal)
+    assert retried.code == "draft_corrupt"
     after = queue.read_text(encoding="utf-8")
-    assert f"Shared note change proposal {artifact['immutable']['sidecar_id']}" not in after
     assert after.count("Shared note change proposal") == 1
-    assert share_proposals._store_dir(config).joinpath(f"{sidecar_hash}.json").exists()
+    assert f"Shared note change proposal {artifact['immutable']['sidecar_id']}" in after
+    new_artifact = share_proposals._load_sidecar(
+        share_proposals._store_dir(config) / f"{index_hash}.json"
+    )
+    new_fields = new_artifact["immutable"]
+    new_canonical = share_proposals._store_dir(config) / (
+        hashlib.sha256(
+            ("home\0sidecar\0" + new_fields["sidecar_id"]).encode()
+        ).hexdigest() + ".json"
+    )
+    assert not new_canonical.exists()
 
 
 def test_legacy_refresh_can_replace_a_row_at_share_capacity(linked, monkeypatch) -> None:
@@ -739,9 +839,12 @@ def test_publish_reconciles_lost_ack_and_serializes_duplicate_accepts(
     transport = share_publish._network_git
     push_count = 0
 
-    def lose_ack(folder: Path, *args: str, limit: int = 4096) -> tuple[int, bytes, bytes]:
+    def lose_ack(
+        folder: Path, *args: str, limit: int = 4096,
+        timeout_s: float = share_publish.shared_brain.FETCH_TIMEOUT_S,
+    ) -> tuple[int, bytes, bytes]:
         nonlocal push_count
-        result = transport(folder, *args, limit=limit)
+        result = transport(folder, *args, limit=limit, timeout_s=timeout_s)
         if args and args[0] == "push":
             push_count += 1
             return 1, b"", b"connection timed out after remote accepted update"
@@ -762,6 +865,183 @@ def test_publish_reconciles_lost_ack_and_serializes_duplicate_accepts(
     assert first.receipt_id == second.receipt_id
     assert push_count == 1
     assert len(share_publish.list_share_receipts(config, workspace="home")) == 1
+
+
+def test_dismissal_during_fetch_prevents_new_push(
+    linked: tuple[Config, Path, Path], monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config, _clone, _origin = linked
+    draft = share_proposals.draft_share(
+        config, workspace="home", relative_path="n.md", operation="replace",
+        proposed=b"dismissed while fetching", request_key="publish-dismiss-race",
+    )
+    assert isinstance(draft, share_proposals.ShareDraft)
+    fetch_started = threading.Event()
+    resume_fetch = threading.Event()
+    push_count = 0
+    real_fetch = share_publish._fetch
+    real_transport = share_publish._network_git
+
+    def suspended_fetch(*args, **kwargs):
+        fetch_started.set()
+        assert resume_fetch.wait(5)
+        return real_fetch(*args, **kwargs)
+
+    def count_push(
+        folder: Path, *args: str, limit: int = 4096,
+        timeout_s: float = share_publish.shared_brain.FETCH_TIMEOUT_S,
+    ):
+        nonlocal push_count
+        if args and args[0] == "push":
+            push_count += 1
+        return real_transport(folder, *args, limit=limit, timeout_s=timeout_s)
+
+    monkeypatch.setattr(share_publish, "_fetch", suspended_fetch)
+    monkeypatch.setattr(share_publish, "_network_git", count_push)
+
+    async def race():
+        publishing = asyncio.create_task(share_publish.publish_share(
+            config, workspace="home", proposal_id=draft.proposal_id,
+            expected_revision=draft.artifact["review_token"],
+        ))
+        assert await asyncio.to_thread(fetch_started.wait, 5)
+        from ciao.web import proposal_service
+
+        _rows, by_id = proposal_service._scan_proposal_rows(config)
+        ctx = by_id[draft.proposal_id]
+        try:
+            await asyncio.to_thread(
+                proposal_service._rewrite_queue_single,
+                Path(ctx["path"]), ctx["line"], ctx["row"]["raw"],
+                ctx["row"]["text"], ctx["row"]["kind"], False,
+                ctx["workspace"], Path(config.workspace_vault_root(ctx["workspace"])),
+                config=config, proposal_id=draft.proposal_id,
+            )
+        finally:
+            resume_fetch.set()
+        return await asyncio.wait_for(publishing, timeout=5)
+
+    result = asyncio.run(race())
+    assert result.outcome == "draft_corrupt"
+    assert push_count == 0
+
+
+def test_pending_attempt_precedes_bounded_unlocked_push_timeout(
+    linked: tuple[Config, Path, Path], monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config, _clone, _origin = linked
+    draft = share_proposals.draft_share(
+        config, workspace="home", relative_path="n.md", operation="replace",
+        proposed=b"reserved before bounded push", request_key="publish-bounded-unlocked-push",
+    )
+    assert isinstance(draft, share_proposals.ShareDraft)
+    transport = share_publish._network_git
+    queue = Path(config.workspace_vault_root("home")) / share_proposals._QUEUE
+    observed_timeout: list[float] = []
+
+    def timeout_push(
+        folder: Path, *args: str, limit: int = 4096,
+        timeout_s: float = share_publish.shared_brain.FETCH_TIMEOUT_S,
+    ):
+        if args and args[0] == "push":
+            observed_timeout.append(timeout_s)
+            artifact = share_publish._artifact_for(config, "home", draft.proposal_id)
+            assert artifact is not None
+            assert artifact["publication"]["attempts"][-1]["status"] == "pending"
+
+            acquired = threading.Event()
+            lock_error: list[Exception] = []
+
+            def inspect_queue_lock():
+                try:
+                    with share_proposals._thread_queue_lock(queue), share_publish.memory_receipts.queue_lock(queue, timeout_s=0.2):
+                        acquired.set()
+                except Exception as exc:
+                    lock_error.append(exc)
+
+            contender = threading.Thread(target=inspect_queue_lock)
+            contender.start()
+            contender.join(timeout=2)
+            assert not contender.is_alive()
+            assert not lock_error
+            assert acquired.is_set()
+            return -1, b"", b"git command timed out"
+        return transport(folder, *args, limit=limit, timeout_s=timeout_s)
+
+    monkeypatch.setattr(share_publish, "_network_git", timeout_push)
+    result = asyncio.run(share_publish.publish_share(
+        config, workspace="home", proposal_id=draft.proposal_id,
+        expected_revision=draft.artifact["review_token"],
+    ))
+
+    assert result.outcome == "indeterminate"
+    assert observed_timeout == [share_publish.PUSH_TIMEOUT_S]
+    assert share_publish.PUSH_TIMEOUT_S <= share_publish.memory_receipts.QUEUE_LOCK_TIMEOUT_S - 5
+    artifact = share_publish._artifact_for(config, "home", draft.proposal_id)
+    assert artifact is not None
+    assert artifact["publication"]["attempts"][-1]["status"] == "pending"
+
+
+def test_directory_sync_failure_aborts_before_push(
+    linked: tuple[Config, Path, Path], monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config, _clone, _origin = linked
+    draft = share_proposals.draft_share(
+        config, workspace="home", relative_path="n.md", operation="replace",
+        proposed=b"directory sync must complete", request_key="publish-directory-sync-failure",
+    )
+    assert isinstance(draft, share_proposals.ShareDraft)
+    real_fsync = os.fsync
+    calls = 0
+    push_count = 0
+    real_transport = share_publish._network_git
+
+    def fail_directory_sync(fd: int) -> None:
+        nonlocal calls
+        calls += 1
+        if calls == 2:
+            raise OSError("simulated directory fsync failure")
+        real_fsync(fd)
+
+    def count_push(folder: Path, *args: str, limit: int = 4096, timeout_s: float = 60.0):
+        nonlocal push_count
+        if args and args[0] == "push":
+            push_count += 1
+        return real_transport(folder, *args, limit=limit, timeout_s=timeout_s)
+
+    monkeypatch.setattr(share_proposals.os, "fsync", fail_directory_sync)
+    monkeypatch.setattr(share_publish, "_network_git", count_push)
+    result = asyncio.run(share_publish.publish_share(
+        config, workspace="home", proposal_id=draft.proposal_id,
+        expected_revision=draft.artifact["review_token"],
+    ))
+
+    assert result.outcome == "draft_unavailable"
+    assert calls == 2
+    assert push_count == 0
+
+
+def test_publish_fails_closed_when_canonical_sidecar_is_missing(
+    linked: tuple[Config, Path, Path],
+) -> None:
+    config, _clone, _origin = linked
+    draft = share_proposals.draft_share(
+        config, workspace="home", relative_path="n.md", operation="replace",
+        proposed=b"canonical artifact is required", request_key="publish-missing-canonical",
+    )
+    assert isinstance(draft, share_proposals.ShareDraft)
+    fields = draft.artifact["immutable"]
+    canonical = share_proposals._store_dir(config) / (
+        hashlib.sha256(("home\0sidecar\0" + fields["sidecar_id"]).encode()).hexdigest() + ".json"
+    )
+    canonical.unlink()
+
+    assert share_publish._artifact_for(config, "home", draft.proposal_id) is None
+    result = asyncio.run(share_publish.publish_share(
+        config, workspace="home", proposal_id=draft.proposal_id,
+        expected_revision=draft.artifact["review_token"],
+    ))
+    assert result.outcome == "draft_corrupt"
 
 
 def test_recorded_attempt_reconciles_after_link_removal(linked: tuple[Config, Path, Path], monkeypatch: pytest.MonkeyPatch) -> None:
@@ -802,9 +1082,12 @@ def test_lost_ack_with_misleading_rejection_stderr_never_retries_after_rewrite(
     transport = share_publish._network_git
     push_count = 0
 
-    def accept_then_rewrite(folder: Path, *args: str, limit: int = 4096) -> tuple[int, bytes, bytes]:
+    def accept_then_rewrite(
+        folder: Path, *args: str, limit: int = 4096,
+        timeout_s: float = share_publish.shared_brain.FETCH_TIMEOUT_S,
+    ) -> tuple[int, bytes, bytes]:
         nonlocal push_count
-        result = transport(folder, *args, limit=limit)
+        result = transport(folder, *args, limit=limit, timeout_s=timeout_s)
         if args and args[0] == "push":
             push_count += 1
             assert result[0] == 0
@@ -859,7 +1142,10 @@ def test_push_attempt_limit_persists_across_racing_tips(linked: tuple[Config, Pa
     transport = share_publish._network_git
     push_count = 0
 
-    def race(folder: Path, *args: str, limit: int = 4096) -> tuple[int, bytes, bytes]:
+    def race(
+        folder: Path, *args: str, limit: int = 4096,
+        timeout_s: float = share_publish.shared_brain.FETCH_TIMEOUT_S,
+    ) -> tuple[int, bytes, bytes]:
         nonlocal push_count
         if args and args[0] == "push":
             push_count += 1
@@ -868,7 +1154,7 @@ def test_push_attempt_limit_persists_across_racing_tips(linked: tuple[Config, Pa
             git(racer, "add", ".")
             git(racer, "commit", "--quiet", "-m", f"racer {push_count}")
             git(racer, "push", "--quiet", "origin", "main")
-        return transport(folder, *args, limit=limit)
+        return transport(folder, *args, limit=limit, timeout_s=timeout_s)
 
     monkeypatch.setattr(share_publish, "_network_git", race)
     result = asyncio.run(share_publish.publish_share(config, workspace="home", proposal_id=draft.proposal_id, expected_revision=draft.artifact["review_token"]))

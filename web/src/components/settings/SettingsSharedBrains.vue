@@ -51,10 +51,12 @@
             {{ statusOf(brain).text }}
           </p>
           <p v-if="statusOf(brain).detail" class="hint hint--compact">{{ statusOf(brain).detail }}</p>
-          <p v-if="brain.branch || brain.head_date" class="hint hint--compact">
+          <p class="hint hint--compact">
             <span v-if="brain.branch">Branch {{ brain.branch }}</span>
-            <span v-if="brain.branch && brain.head_date"> · </span>
-            <span v-if="brain.head_date">Latest change {{ brain.head_date }}</span>
+            <span v-if="brain.branch"> · </span>
+            <span v-if="brain.head">Checked-out commit {{ brain.head }}</span>
+            <span v-else>Checked-out commit unknown</span>
+            <span v-if="brain.dirty"> · Local changes</span>
           </p>
         </li>
       </ul>

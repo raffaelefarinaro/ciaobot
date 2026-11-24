@@ -8,6 +8,10 @@ private final class FakeProcesses: EngineProcessRunning {
     var killed: [Int32] = []
     var alive: [Int32: EngineProcessInfo] = [:]
     var nextPID: Int32 = 5000
+    var testTLSIdentity: LocalEngineTLSIdentity?
+    func tlsIdentity(_ pid: Int32) -> LocalEngineTLSIdentity? {
+        testTLSIdentity?.pid == pid ? testTLSIdentity : nil
+    }
     /// Pids that disappear when terminated.
     var diesOnTerminate = true
 
@@ -94,9 +98,11 @@ final class EngineSupervisorTests: XCTestCase {
         )
     }
 
-    private func writeReady(pid: Int32, port: Int = 8777, startupID: String = "abc123") throws {
-        let json = #"{"schema":1,"pid":\#(pid),"port":\#(port),"startup_id":"\#(startupID)","workspace":"/w","bootstrap":false}"#
+    private func writeReady(pid: Int32, port: Int = 8777, tlsPort: Int = 8778, startupID: String = "abc123") throws {
+        let json = #"{"schema":1,"pid":\#(pid),"port":\#(port),"tls_port":\#(tlsPort),"startup_id":"\#(startupID)","workspace":"/w","bootstrap":false}"#
         try json.write(to: home.readyRecord, atomically: true, encoding: .utf8)
+        processes.testTLSIdentity = LocalEngineTLSIdentity(pid: pid, startupID: startupID, port: tlsPort,
+                                                           sha256: String(repeating: "a", count: 64))
     }
 
     private func writeLog(_ text: String) throws {
@@ -189,7 +195,7 @@ final class EngineSupervisorTests: XCTestCase {
         guard case .running(let origin, _, _) = supervisor.state else {
             return XCTFail("expected running, got \(supervisor.state)")
         }
-        XCTAssertEqual(origin.url.absoluteString, "http://127.0.0.1:9100")
+        XCTAssertEqual(origin.url.absoluteString, "https://127.0.0.1:8778")
     }
 
     func testLogOverTwentyMegabytesRotatesBeforeSpawn() throws {
@@ -231,8 +237,8 @@ final class EngineSupervisorTests: XCTestCase {
         XCTAssertEqual(supervisor.state, .starting, "a different pid is a different engine")
         identity.answer = EngineIdentity(pid: pid, startupID: "abc123")
         time.advance(1)
-        XCTAssertEqual(supervisor.state, .running(origin: Origin("http://127.0.0.1:8777")!, pid: pid, startupID: "abc123"))
-        XCTAssertEqual(identity.origins.first?.url.absoluteString, "http://127.0.0.1:8777")
+        XCTAssertEqual(supervisor.state, .running(origin: Origin("https://127.0.0.1:8778")!, pid: pid, startupID: "abc123"))
+        XCTAssertEqual(identity.origins.first?.url.absoluteString, "https://127.0.0.1:8778")
     }
 
     func testReadyRecordForAnotherPidIsIgnored() throws {
@@ -652,7 +658,20 @@ final class EngineSupervisorTests: XCTestCase {
         let pid = try bringUp(supervisor)
         supervisor.start()
         XCTAssertEqual(processes.spawns.count, 1)
-        XCTAssertEqual(supervisor.state, .running(origin: Origin("http://127.0.0.1:8777")!, pid: pid, startupID: "abc123"))
+        XCTAssertEqual(supervisor.state, .running(origin: Origin("https://127.0.0.1:8778")!, pid: pid, startupID: "abc123"))
+    }
+
+    func testRunningTLSIdentityIsUnavailableWhileTheEngineStops() throws {
+        let supervisor = makeSupervisor()
+        let pid = try bringUp(supervisor)
+        XCTAssertNotNil(supervisor.runningTLSIdentity)
+        processes.diesOnTerminate = false
+        supervisor.stop {}
+        XCTAssertEqual(supervisor.state, .stopping)
+        XCTAssertNil(supervisor.runningTLSIdentity,
+                     "a quit or Forget flow must not trust an identity from a stopping generation")
+        processes.onExit?(pid, 0)
+        XCTAssertNil(supervisor.runningTLSIdentity)
     }
 
     // MARK: Running
@@ -660,10 +679,10 @@ final class EngineSupervisorTests: XCTestCase {
     func testPortChangePublishesANewOrigin() throws {
         let supervisor = makeSupervisor()
         let pid = try bringUp(supervisor)
-        try writeReady(pid: pid, port: 9001)
+        try writeReady(pid: pid, port: 9001, tlsPort: 9002)
         identity.answer = EngineIdentity(pid: pid, startupID: "abc123")
         time.advance(5.5)
-        XCTAssertEqual(supervisor.state, .running(origin: Origin("http://127.0.0.1:9001")!, pid: pid, startupID: "abc123"))
+        XCTAssertEqual(supervisor.state, .running(origin: Origin("https://127.0.0.1:9002")!, pid: pid, startupID: "abc123"))
     }
 
     func testNewStartupIDIsProbedAgainBeforeItIsPublished() throws {
@@ -672,10 +691,10 @@ final class EngineSupervisorTests: XCTestCase {
         try writeReady(pid: pid, startupID: "second")
         identity.answer = EngineIdentity(pid: pid, startupID: "abc123")  // still the old engine answering
         time.advance(5.5)
-        XCTAssertEqual(supervisor.state, .running(origin: Origin("http://127.0.0.1:8777")!, pid: pid, startupID: "abc123"))
+        XCTAssertEqual(supervisor.state, .running(origin: Origin("https://127.0.0.1:8778")!, pid: pid, startupID: "abc123"))
         identity.answer = EngineIdentity(pid: pid, startupID: "second")
         time.advance(5.5)
-        XCTAssertEqual(supervisor.state, .running(origin: Origin("http://127.0.0.1:8777")!, pid: pid, startupID: "second"))
+        XCTAssertEqual(supervisor.state, .running(origin: Origin("https://127.0.0.1:8778")!, pid: pid, startupID: "second"))
     }
 
     // MARK: Real process inspection

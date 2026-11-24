@@ -7,10 +7,6 @@ History tab reads, with ``via: "agent"``.
 
 from __future__ import annotations
 
-import os
-import shlex
-import subprocess
-import sys
 from pathlib import Path
 
 import pytest
@@ -712,47 +708,7 @@ def test_cli_refuses_removed_learnings_kind(tmp_path: Path, capsys: pytest.Captu
     assert not (vault / "Workspace" / "Memory-Proposals.md").exists()
 
 
-def test_legacy_drain_guidance_quotes_vault_path_for_shell(tmp_path: Path, capsys) -> None:
-    from ciao import cli
-
-    install = tmp_path / "install with spaces; echo unsafe"
-    root, vault, _queue = _handover_install(
-        install, None, "- [learnings] keep this lesson"
-    )
-
-    assert cli.main([
-        "memory-proposals",
-        "--workspace", str(root),
-        "--vault-root", str(vault),
-    ]) == 0
-
-    warning = capsys.readouterr().err
-    assert f"--workspace work --vault-root {shlex.quote(str(vault))}" in warning
-    assert "echo unsafe" in warning
-    start = warning.index("run `") + len("run `")
-    command = warning[start:warning.index("`", start)]
-    env = os.environ.copy()
-    env.pop("CIAO_WORKSPACE", None)
-    env.pop("CIAO_ACTIVE_WORKSPACE", None)
-    env["PWA_AUTH_TOKEN"] = "test-token"
-    env["PATH"] = str(Path(sys.executable).parent) + os.pathsep + env.get("PATH", "")
-    env["PYTHONPATH"] = str(Path(__file__).resolve().parents[1]) + os.pathsep + env.get("PYTHONPATH", "")
-    other_cwd = tmp_path / "different cwd"
-    other_cwd.mkdir()
-    result = subprocess.run(
-        command,
-        shell=True,
-        cwd=other_cwd,
-        env=env,
-        text=True,
-        capture_output=True,
-        check=False,
-    )
-    assert result.returncode == 0, result.stderr
-    assert "1 pending learnings row(s)." in result.stdout
-
-
-def test_unregistered_vault_guidance_command_runs_without_workspace_flag(
+def test_legacy_learning_notice_uses_plain_automatic_migration_guidance(
     tmp_path: Path, capsys
 ) -> None:
     from ciao import cli
@@ -772,24 +728,8 @@ def test_unregistered_vault_guidance_command_runs_without_workspace_flag(
     ]) == 0
 
     warning = capsys.readouterr().err
-    command = (
-        f"CIAO_WORKSPACE={shlex.quote(str(root))} "
-        f"CIAO_RUNTIME_ROOT={shlex.quote(str(root / '.runtime'))} "
-        "ciao learnings-queue-drain --vault-root "
-        f"{shlex.quote(str(vault))}"
-    )
-    assert f"`{command}`" in warning
-    env = os.environ.copy()
-    env.pop("CIAO_WORKSPACE", None)
-    env.pop("CIAO_ACTIVE_WORKSPACE", None)
-    env["PWA_AUTH_TOKEN"] = "test-token"
-    env["PATH"] = str(Path(sys.executable).parent) + os.pathsep + env.get("PATH", "")
-    env["PYTHONPATH"] = str(Path(__file__).resolve().parents[1]) + os.pathsep + env.get("PYTHONPATH", "")
-    other_cwd = tmp_path / "different cwd"
-    other_cwd.mkdir()
-    result = subprocess.run(command, shell=True, cwd=other_cwd, env=env, text=True, capture_output=True)
-    assert result.returncode == 0, result.stderr
-    assert "1 pending learnings row(s)." in result.stdout
+    assert "Older learning proposals are handled automatically" in warning
+    assert "ask Ciaobot to inspect the migration" in warning
 
 
 def test_legacy_notice_uses_configured_runtime_root_for_receipt_inspection(
@@ -840,8 +780,8 @@ def test_legacy_notice_uses_configured_runtime_root_for_receipt_inspection(
         "--vault-root", str(vault),
     ]) == 0
     warning = capsys.readouterr().err
-    assert "Legacy learning proposals need attention" in warning
-
+    assert "Older learning proposals are handled automatically" in warning
+    assert "ask Ciaobot to inspect the migration" in warning
 
 
 def test_cli_request_is_refused_on_a_kind_that_never_records_it(tmp_path: Path) -> None:

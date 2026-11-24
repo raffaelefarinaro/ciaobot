@@ -81,6 +81,29 @@ final class SessionOriginKeyTests: XCTestCase {
 
 @MainActor
 final class SessionStoragePolicyTests: XCTestCase {
+    func testLocalEngineStoreIsPortStableAndCannotCollideWithEnteredOrigins() throws {
+        let (registry, file) = try makeRegistry()
+        let localOne = Origin("https://127.0.0.1:8643")!
+        let localTwo = Origin("https://127.0.0.1:9765")!
+        let lookalike = Origin("https://ciaobot-local-engine.invalid")!
+        let localStore = try XCTUnwrap(registry.identifier(for: .localEngine))
+        let remoteStore = try XCTUnwrap(registry.identifier(for: .origin(lookalike)))
+        XCTAssertNotEqual(localStore, remoteStore)
+
+        let reloaded = SessionStoreRegistry(fileURL: file)
+        XCTAssertEqual(reloaded.identifier(for: .localEngine), localStore)
+        let signIn = SessionSignIn(registry: reloaded, eraser: RecordingEraser(), persistentAvailable: true)
+        XCTAssertEqual(signIn.storage(for: localOne, keepSignedIn: true, registryKey: .localEngine), .persistent(localStore))
+        XCTAssertEqual(signIn.storage(for: localTwo, keepSignedIn: true, registryKey: .localEngine), .persistent(localStore))
+        XCTAssertTrue(signIn.hasSavedSignIn(for: localOne, registryKey: .localEngine))
+
+        var result: Result<Void, ForgetFailure>?
+        signIn.forget(origin: localTwo, registryKey: .localEngine, releaseWebViews: { $0() }) { result = $0 }
+        assertForgetSucceeded(result)
+        XCTAssertNil(reloaded.identifierIfPresent(for: .localEngine))
+        XCTAssertEqual(reloaded.identifierIfPresent(for: lookalike), remoteStore)
+    }
+
     func testPersistentSignInIsOffByDefault() throws {
         let (registry, file) = try makeRegistry()
         let signIn = SessionSignIn(registry: registry, eraser: RecordingEraser(), persistentAvailable: true)

@@ -2210,7 +2210,10 @@ def record_dismissal(
     learning_id: str = "",
     finding: str = "",
     reason: str = "",
+    operation_id: str = "",
+    decision_at: str = "",
     once: bool = False,
+    workspace_dir_fd: int | None = None,
 ) -> bool:
     """Record a decided proposal so the queue stops re-asking about it.
 
@@ -2253,7 +2256,10 @@ def record_dismissal(
         learning_id=learning_id,
         finding=finding,
         reason=reason,
+        operation_id=operation_id,
         once=once,
+        workspace_dir_fd=workspace_dir_fd,
+        decision_at=decision_at,
     )
 
 
@@ -2900,6 +2906,11 @@ def remove_proposal_by_substring(
             return None
         bullet = parse_bullet(lines[candidates[0]])
         if bullet is None:
+            return None
+        # This low-level helper has no trusted runtime config with which to
+        # validate canonical publication state. Refuse rather than erase a
+        # published or indeterminate share proposal.
+        if bullet.kind == "share":
             return None
         del lines[candidates[0]]
         lines = _sweep_empty_batches(lines)

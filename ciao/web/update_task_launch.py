@@ -221,6 +221,27 @@ def update_task_helper(task: UpdateTask, digest: str) -> dict[str, Any]:
     }
 
 
+def may_archive_completed_task_chat(chat: Any, project: Any, *, task: UpdateTask, workspace: str) -> bool:
+    """Only hide the exact, untouched helper conversation after completion."""
+    helper = getattr(chat, "helper", {})
+    return bool(
+        project
+        and project.workspace == workspace
+        and not chat.archived
+        and chat.user_turn_count == 1
+        and chat.user_turn_origin.get("0") == "update_task"
+        and helper.get("kind") == UPDATE_TASK_KIND
+        and helper.get("task_id") == task.id
+        and helper.get("revision") == task.revision
+        and helper.get("scope") == task.scope
+        and not chat.pending_question
+        and not chat.pending_permission
+        and not chat.turn_owner
+        and not chat.last_error
+        and "waiting" not in chat.last_response_status.lower()
+    )
+
+
 def resolve_task(task_id: str, *, installed_version: str) -> UpdateTask:
     """The packaged definition of ``task_id`` that this engine supports.
 

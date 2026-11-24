@@ -69,6 +69,7 @@ from ciao import (
     upstream_drafts,
 )
 from ciao.context.capsule import shared_brain_pass_line
+from ciao.shared_brain import path_problem as shared_brain_path_problem
 from ciao.prompt_fence import fence
 from ciao.task_attempts import TaskAttemptError, TaskAttemptStore
 from ciao.web import chat_service
@@ -192,6 +193,13 @@ MEMORY_PASS_PROMPT = (
     "find related notes with one search, and batch independent reads and edits. "
     "Finish with a short "
     "list of what you changed."
+)
+
+MEMORY_PROCEDURE_PROMPT = (
+    "Before making any durable vault or bounded-region edit, read the "
+    "procedure at `{guide}`. This is the installed capabilities reference "
+    "for this workspace; use the full path even if this session's working "
+    "directory differs. Read-only recall does not need this procedure.\n\n"
 )
 
 #: How a lesson that is not an owned-skill edit gets filed, spelled the way
@@ -1211,6 +1219,10 @@ class MemoryPassCoordinator:
 
     def _prompt_for(self, chat: ChatInfo) -> str:
         helper = self._helper(chat)
+        from ciao.core_prompt import durable_memory_guide_path
+
+        guide = durable_memory_guide_path()
+        procedure = MEMORY_PROCEDURE_PROMPT.format(guide=guide)
         if helper.get("source_kind") == chat_service.TASK_COMPLETION_SOURCE:
             template = (
                 TASK_COMPLETION_AGENT_PROMPT
@@ -1225,7 +1237,8 @@ class MemoryPassCoordinator:
                 else "unavailable"
             )
             return (
-                template.format(
+                procedure
+                + template.format(
                     task_path=helper.get("task_path") or "",
                     completion_id=completion_id,
                     completed_at=helper.get("completed_at") or "unknown",
@@ -1236,7 +1249,8 @@ class MemoryPassCoordinator:
             )
         if helper.get("source_kind") == chat_service.PROJECT_CLOSURE_SOURCE:
             return (
-                PROJECT_CLOSURE_PROMPT.format(
+                procedure
+                + PROJECT_CLOSURE_PROMPT.format(
                     name=helper.get("project_name") or "this project",
                     folder=helper.get("vault_folder") or "",
                     outcome=helper.get("outcome") or "completed",
@@ -1246,7 +1260,7 @@ class MemoryPassCoordinator:
                 + self._skill_review_section(chat, helper)
                 + self._rules_section(chat)
             )
-        return MEMORY_PASS_PROMPT.format(
+        return procedure + MEMORY_PASS_PROMPT.format(
             archive=helper.get("archive_path") or "",
             title=helper.get("source_title") or chat.title,
             project=helper.get("source_project") or "no project",
@@ -1302,6 +1316,7 @@ class MemoryPassCoordinator:
         lines = [
             line
             for link in getattr(record, "shared_brains", None) or []
+            if not shared_brain_path_problem(self._host._config, link.path)
             if (line := shared_brain_pass_line(link.name, link.path)) is not None
         ]
         if not lines:
