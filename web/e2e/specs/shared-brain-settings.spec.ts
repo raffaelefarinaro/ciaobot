@@ -43,7 +43,7 @@ test.describe('shared brains card', () => {
 
   test('links two folders, shows their status, keeps them after a reload, and fits a phone', async ({ page }) => {
     const panel = await openCard(page)
-    await expect(panel.getByText('Folder path')).toBeVisible()
+    await expect(panel.getByText('Folder path', { exact: true })).toBeVisible()
     const { overflow, culprits } = await horizontalOverflow(page)
     expect(overflow, JSON.stringify(culprits)).toBeLessThanOrEqual(0)
 
