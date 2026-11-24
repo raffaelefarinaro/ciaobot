@@ -287,6 +287,85 @@ def test_share_retry_after_dismissal_does_not_resurrect_row(linked: tuple[Config
     assert sidecar_id not in queue.read_text()
 
 
+@pytest.mark.parametrize("publication", [
+    {"attempts": [{"attempt": 1, "status": "pending", "commit_oid": "a" * 40}], "receipts": []},
+    {"attempts": [], "receipts": [{"id": "shrpub_confirmed"}]},
+])
+def test_share_request_replay_never_replaces_attempted_canonical_or_resurrects_row(
+    linked: tuple[Config, Path], publication: dict[str, object],
+) -> None:
+    config, _ = linked
+    args = dict(config=config, workspace="home", relative_path="new.md", operation="create", proposed=b"draft", request_key="canonical-replay")
+    draft = sp.draft_share(**args)
+    assert isinstance(draft, sp.ShareDraft)
+    fields = draft.artifact["immutable"]
+    store = sp._store_dir(config)
+    canonical = store / (hashlib.sha256(("home\0sidecar\0" + fields["sidecar_id"]).encode()).hexdigest() + ".json")
+    artifact = dict(draft.artifact)
+    artifact["publication"] = publication
+    sp._write_private(canonical, json.dumps(artifact).encode())
+
+    queue = config.vault / "Workspace" / "Memory-Proposals.md"
+    with sp._thread_queue_lock(queue), sp.memory_receipts.queue_lock(queue):
+        sp.memory_receipts.write_queue_atomically(queue, "# Memory Proposals\n")
+
+    replay = sp.draft_share(**args)
+
+    assert isinstance(replay, sp.ShareRefusal) and replay.code == "request_conflict"
+    assert "[share " not in queue.read_text()
+    preserved = sp._load_sidecar(canonical)
+    assert preserved["publication"] == publication
+
+
+def test_share_request_replay_fails_closed_on_corrupt_canonical_sidecar(
+    linked: tuple[Config, Path],
+) -> None:
+    config, _ = linked
+    args = dict(config=config, workspace="home", relative_path="new.md", operation="create", proposed=b"draft", request_key="corrupt-canonical-replay")
+    draft = sp.draft_share(**args)
+    assert isinstance(draft, sp.ShareDraft)
+    sidecar_id = draft.artifact["immutable"]["sidecar_id"]
+    canonical = sp._store_dir(config) / (hashlib.sha256(("home\0sidecar\0" + sidecar_id).encode()).hexdigest() + ".json")
+    canonical.write_text("not json", encoding="utf-8")
+    queue = config.vault / "Workspace" / "Memory-Proposals.md"
+    queue_before = queue.read_bytes()
+
+    replay = sp.draft_share(**args)
+
+    assert isinstance(replay, sp.ShareRefusal) and replay.code == "draft_corrupt"
+    assert canonical.read_text(encoding="utf-8") == "not json"
+    assert queue.read_bytes() == queue_before
+
+
+@pytest.mark.parametrize("had_attempt", [False, True])
+def test_share_request_replay_fails_closed_when_canonical_and_queue_row_are_missing(
+    linked: tuple[Config, Path], had_attempt: bool,
+) -> None:
+    config, _ = linked
+    args = dict(config=config, workspace="home", relative_path="new.md", operation="create", proposed=b"draft", request_key=f"missing-canonical-{had_attempt}")
+    draft = sp.draft_share(**args)
+    assert isinstance(draft, sp.ShareDraft)
+    fields = draft.artifact["immutable"]
+    canonical = sp._store_dir(config) / (hashlib.sha256(("home\0sidecar\0" + fields["sidecar_id"]).encode()).hexdigest() + ".json")
+    if had_attempt:
+        artifact = dict(draft.artifact)
+        artifact["publication"] = {"attempts": [{"attempt": 1, "status": "pending", "commit_oid": "b" * 40}], "receipts": []}
+        sp._write_private(canonical, json.dumps(artifact).encode())
+
+    queue = config.vault / "Workspace" / "Memory-Proposals.md"
+    with sp._thread_queue_lock(queue), sp.memory_receipts.queue_lock(queue):
+        sp.memory_receipts.write_queue_atomically(queue, "# Memory Proposals\n")
+    canonical.unlink()
+    queue_before = queue.read_bytes()
+
+    replay = sp.draft_share(**args)
+
+    assert isinstance(replay, sp.ShareRefusal) and replay.code == "draft_corrupt"
+    assert "canonical share artifact is missing" in replay.message
+    assert not canonical.exists()
+    assert queue.read_bytes() == queue_before
+
+
 def test_share_limits_apply_during_orphan_recovery_and_across_brains(linked: tuple[Config, Path], monkeypatch: pytest.MonkeyPatch) -> None:
     config, clone = linked
     monkeypatch.setattr(sp, "MAX_PER_BRAIN", 1)

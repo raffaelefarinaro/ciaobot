@@ -14,7 +14,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Iterator, Literal, TypeVar
 
-from ciao import share_proposals as drafts, shared_brain
+from ciao import memory_receipts, share_proposals as drafts, shared_brain
 from ciao.config import SharedBrainLink
 from ciao.git_proc import run_git_sync_bounded
 from ciao.os_support.files import open_fd
@@ -28,6 +28,7 @@ OutcomeCode = Literal[
     "brain_unavailable", "upstream_unavailable", "draft_unavailable",
 ]
 MAX_ATTEMPTS = 3
+PUSH_TIMEOUT_S = 20.0
 _OID = re.compile(r"^[0-9a-f]{40,64}$")
 _T = TypeVar("_T")
 
@@ -40,7 +41,11 @@ class PublishOutcome:
     message: str = ""
 
 
-def _safe_git(folder: Path, *args: str, limit: int = 16_384, env: dict[str, str] | None = None) -> tuple[int, bytes, bytes]:
+def _safe_git(
+    folder: Path, *args: str, limit: int = 16_384,
+    timeout_s: float = shared_brain.FETCH_TIMEOUT_S,
+    env: dict[str, str] | None = None,
+) -> tuple[int, bytes, bytes]:
     child = shared_brain._git_env(folder)
     child["GIT_NO_REPLACE_OBJECTS"] = "1"
     child["GIT_NO_LAZY_FETCH"] = "1"
@@ -49,7 +54,7 @@ def _safe_git(folder: Path, *args: str, limit: int = 16_384, env: dict[str, str]
     try:
         result = run_git_sync_bounded(
             folder, *shared_brain.EXACT_BYTES, *shared_brain._HARDEN, *args,
-            timeout=shared_brain.FETCH_TIMEOUT_S, max_output=limit,
+            timeout=timeout_s, max_output=limit,
             env=child,
         )
     except OSError:
@@ -57,9 +62,12 @@ def _safe_git(folder: Path, *args: str, limit: int = 16_384, env: dict[str, str]
     return result.returncode, result.stdout, result.stderr[:limit]
 
 
-def _network_git(folder: Path, *args: str, limit: int = 4096) -> tuple[int, bytes, bytes]:
+def _network_git(
+    folder: Path, *args: str, limit: int = 4096,
+    timeout_s: float = shared_brain.FETCH_TIMEOUT_S,
+) -> tuple[int, bytes, bytes]:
     """The only injectable seam for bounded remote I/O in isolated Git tests."""
-    return _safe_git(folder, *args, limit=limit)
+    return _safe_git(folder, *args, limit=limit, timeout_s=timeout_s)
 
 
 def _hash_blob(folder: Path, content: bytes) -> str | None:
@@ -98,7 +106,7 @@ def _artifact_for(config: Any, workspace: str, proposal_id: str) -> dict[str, An
             try:
                 return drafts._load_sidecar(canonical)
             except drafts.ShareDraftError:
-                return data
+                return None
     return None
 
 
@@ -514,9 +522,6 @@ def _publish_locked(config: Any, workspace: str, folder: Path, link: SharedBrain
             return PublishOutcome("push_refused", message="The shared brain rejected the recorded publish attempt.")
         return PublishOutcome("indeterminate", message="A recorded publish attempt is unresolved; reconcile before retrying.")
     for number in range(len(attempts), MAX_ATTEMPTS):
-        visible = drafts.load_share(config, workspace=workspace, proposal_id=fields["proposal_id"])
-        if isinstance(visible, drafts.ShareRefusal) or visible.get("review_token") != artifact.get("review_token"):
-            return PublishOutcome("draft_corrupt", message="The share proposal is no longer active in its queue.")
         fetched, _raw, fetch_error = _fetch(folder, origin, ref)
         if fetched != "ok":
             return PublishOutcome("upstream_unavailable", message="The shared brain upstream could not be read.")
@@ -540,11 +545,28 @@ def _publish_locked(config: Any, workspace: str, folder: Path, link: SharedBrain
             "ref": ref, "status": "pending",
         }
         attempts = [*attempts, record]
+        queue = Path(config.workspace_vault_root(workspace)) / drafts._QUEUE
+        # Persist the reservation under the same queue lock used by dismissal.
+        # Dismissal checks this pending attempt after the lock is released.
         try:
-            _write_state(config, workspace, fields, {"attempts": attempts})
-        except (OSError, ValueError, drafts.ShareDraftError):
-            return PublishOutcome("draft_unavailable", message="The publication attempt could not be recorded safely.")
-        code, push_stdout, stderr = _network_git(folder, "push", "--porcelain", origin, f"{commit}:{ref}", limit=4096)
+            with drafts._thread_queue_lock(queue), memory_receipts.queue_lock(queue):
+                visible = drafts.load_share(config, workspace=workspace, proposal_id=fields["proposal_id"])
+                if (
+                    isinstance(visible, drafts.ShareRefusal)
+                    or visible.get("review_token") != artifact.get("review_token")
+                    or visible.get("immutable") != fields
+                ):
+                    return PublishOutcome("draft_corrupt", message="The share proposal is no longer active in its queue.")
+                try:
+                    _write_state(config, workspace, fields, {"attempts": attempts})
+                except (OSError, ValueError, drafts.ShareDraftError):
+                    return PublishOutcome("draft_unavailable", message="The publication attempt could not be recorded safely.")
+        except memory_receipts.QueueLockError:
+            return PublishOutcome("draft_unavailable", message="The share proposal queue could not be locked safely.")
+        code, push_stdout, stderr = _network_git(
+            folder, "push", "--porcelain", origin, f"{commit}:{ref}",
+            limit=4096, timeout_s=PUSH_TIMEOUT_S,
+        )
         fetched, _raw, _fetch_error = _fetch(folder, origin, ref)
         if fetched != "ok":
             return PublishOutcome("indeterminate", commit, message="The push response could not be reconciled.")
