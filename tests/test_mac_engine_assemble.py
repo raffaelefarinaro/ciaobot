@@ -832,9 +832,13 @@ def test_launcher_sanitises_the_environment(launcher):
     names = UNSET
     assert set(names) <= set(_unset_names())
     given = [f"{name}=/x" for name in names] + ["SSL_CERT_FILE=/evil", "KEEP=1"]
-    # DYLD_* is also removed by SIP for /bin/sh on macOS; the unset list is what protects non-SIP hosts
-    # (the Linux CI run), so that part of this test is mutation-effective there.
-    subprocess.run(["/usr/bin/env", "-i", *given, str(launcher / "bin/ciao")], check=True)
+    if sys.platform == "darwin":
+        # macOS strips DYLD_* before starting /bin/sh, so set it after the clean shell starts.
+        exports = " ".join(f"{name}=/x" for name in names) + " SSL_CERT_FILE=/evil KEEP=1"
+        subprocess.run(["/usr/bin/env", "-i", "/bin/sh", "-c", f"export {exports}; . \"$0\"",
+                        str(launcher / "bin/ciao")], check=True)
+    else:
+        subprocess.run(["/usr/bin/env", "-i", *given, str(launcher / "bin/ciao")], check=True)
     _python, _args, env = _captured(launcher)
     assert not [name for name in names if name in env]
     root = os.path.realpath(launcher)
