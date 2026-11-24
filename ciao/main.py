@@ -527,6 +527,7 @@ def _restart_watchdog(
     restart_code: int,
     *,
     supervised: bool,
+    app_engine_ready_fd: int | None = None,
     sleep: Callable[[float], None] = time.sleep,
     execv: Callable[[str, list[str]], object] = os.execv,
     exit_now: Callable[[int], object] = os._exit,
@@ -557,7 +558,13 @@ def _restart_watchdog(
         from ciao.os_support.processes import python_isolation_flags
 
         reset_exported_dotenv()
-        execv(sys.executable, [sys.executable, *python_isolation_flags(), "-m", "ciao.cli", *sys.argv[1:]])
+        argv = [sys.executable, *python_isolation_flags(), "-m", "ciao.cli", *sys.argv[1:]]
+        if app_engine_ready_fd is not None:
+            from ciao.app_engine import exec_with_ready_fd
+
+            exec_with_ready_fd(app_engine_ready_fd, sys.executable, argv, execv)
+        else:
+            execv(sys.executable, argv)
     except OSError:
         exit_now(restart_code)
 
@@ -567,6 +574,7 @@ async def _async_main(
     supervised: bool = False,
     app_engine: bool = False,
     app_engine_port: int | None = None,
+    app_engine_ready_fd: int | None = None,
 ) -> int:
     _ensure_tool_dirs_on_path()
     config = CiaoConfig.from_env()
@@ -608,6 +616,7 @@ async def _async_main(
                 startup_id=lock.startup_id or "",
                 workspace=config.workspace_root,
                 bootstrap=config.bootstrap_mode,
+                tls_port=app_engine_module.remembered_tls_port(),
             )
             app_engine_module.watch_parent(lambda: os.kill(os.getpid(), signal.SIGTERM))
         if app_engine:
@@ -617,6 +626,7 @@ async def _async_main(
                 startup_id=lock.startup_id,
                 engine_pid=os.getpid(),
                 app_engine=True,
+                app_engine_ready_fd=app_engine_ready_fd,
             )
         return await _run_server_locked(
             config,
@@ -778,6 +788,7 @@ async def _run_server_locked(
     startup_id: str | None = None,
     engine_pid: int | None = None,
     app_engine: bool = False,
+    app_engine_ready_fd: int | None = None,
 ) -> int:
     """Server implementation; caller owns the workspace instance lock."""
 
@@ -1563,7 +1574,35 @@ async def _run_server_locked(
     import uvicorn
 
     uvi_config = uvicorn.Config(app, **_uvicorn_config_kwargs(config))
-    server = uvicorn.Server(uvi_config)
+    server: uvicorn.Server
+    if app_engine:
+        from ciao.app_engine import (
+            AppEngineServer,
+            LocalTLSEndpoint,
+            publish_tls_endpoint,
+            remembered_tls_port,
+            write_ready_record,
+        )
+
+        if app_engine_ready_fd is None or startup_id is None:
+            raise RuntimeError("The app engine requires a readiness pipe and startup ID")
+        ready_fd = app_engine_ready_fd
+        ready_startup_id = startup_id
+
+        def publish(endpoint: LocalTLSEndpoint) -> None:
+            write_ready_record(
+                pid=os.getpid(),
+                port=config.pwa_port,
+                startup_id=ready_startup_id,
+                workspace=config.workspace_root,
+                bootstrap=config.bootstrap_mode,
+                tls_port=endpoint.port,
+            )
+            publish_tls_endpoint(ready_fd, ready_startup_id, endpoint)
+
+        server = AppEngineServer(uvi_config, app, publish, preferred_port=remembered_tls_port())
+    else:
+        server = uvicorn.Server(uvi_config)
     tracker.start(BIND_PHASE)
     logger.info("Starting Ciaobot server on %s:%d", config.pwa_host, config.pwa_port)
     if getattr(config, "bootstrap_mode", False):
@@ -1628,7 +1667,7 @@ async def _run_server_locked(
             threading.Thread(
                 target=_restart_watchdog,
                 args=(restart_code,),
-                kwargs={"supervised": supervised},
+                kwargs={"supervised": supervised, "app_engine_ready_fd": app_engine_ready_fd},
                 daemon=True,
                 name="ciao-restart-watchdog",
             ).start()
@@ -1750,6 +1789,15 @@ async def _run_server_locked(
         await server.serve()
     except RestartRequested as exc:
         return int(exc.args[0]) if exc.args else RESTART_EXIT_CODE
+    except OSError as exc:
+        if not app_engine:
+            raise
+        from ciao.app_engine import TLS_PORT_IN_USE_EXIT_CODE, LocalTLSPortInUse
+
+        if not isinstance(exc, LocalTLSPortInUse):
+            raise
+        logger.error("%s", exc)
+        return TLS_PORT_IN_USE_EXIT_CODE
     finally:
         bind_watch.cancel()
     if restart_flag[0] is not None:
@@ -1762,6 +1810,7 @@ def main(
     supervised: bool = False,
     app_engine: bool = False,
     app_engine_port: int | None = None,
+    app_engine_ready_fd: int | None = None,
 ) -> None:
     """CLI entrypoint."""
     # INFO until the workspace's own log level (Settings) is known, which
@@ -1771,7 +1820,12 @@ def main(
 
     try:
         code = asyncio.run(
-            _async_main(supervised=supervised, app_engine=app_engine, app_engine_port=app_engine_port)
+            _async_main(
+                supervised=supervised,
+                app_engine=app_engine,
+                app_engine_port=app_engine_port,
+                app_engine_ready_fd=app_engine_ready_fd,
+            )
         )
     except WorkspaceAlreadyRunningError as exc:
         print(f"Ciaobot did not start: {exc}", file=sys.stderr)

@@ -380,10 +380,20 @@ async def auth_host_sign_in(request: Request) -> JSONResponse:
             },
             status_code=403,
         )
-    if name in ("", "0.0.0.0"):
-        name = "localhost"
-    host = f"[{name}]" if ":" in name else name
-    url_base = f"http://{host}:{server[1]}"
+    if request.url.scheme == "https" and server[1] == getattr(request.app.state, "app_local_tls_port", None):
+        # The default browser does not trust the private TLS endpoint. Only
+        # hand it a token when the engine itself bound a loopback HTTP socket.
+        url_base = getattr(request.app.state, "app_browser_http_origin", None)
+        if url_base is None:
+            return JSONResponse(
+                {"error": "Ciaobot is not serving HTTP on loopback.", "reason": "no_loopback_http"},
+                status_code=409,
+            )
+    else:
+        if name in ("", "0.0.0.0"):
+            name = "localhost"
+        host = f"[{name}]" if ":" in name else name
+        url_base = f"http://{host}:{server[1]}"
     now = time.monotonic()
     if now - _last_host_sign_in < _HOST_SIGN_IN_COOLDOWN_SECONDS:
         return JSONResponse(

@@ -1,7 +1,7 @@
 """Label-hygiene audit for open GitHub issues.
 
 Checks open issues on ``raffaelefarinaro/ciaobot`` against the title-prefix
-to classification-label convention in the ``ciao-support`` skill and adds
+to classification-label convention in ``ciao-capabilities``' support reference and adds
 missing classification labels. Never removes or replaces a label: removal
 would risk overriding intentional human labeling.
 
@@ -34,7 +34,7 @@ DEFAULT_REPO = "raffaelefarinaro/ciaobot"
 DEFAULT_LIMIT = 100
 
 # Title-prefix -> classification label, from the "GitHub issue labels" section of
-# ciao/stock/skills/ciao-support/SKILL.md. Keys are normalized (lowercased, stripped) bracket tokens.
+# ciao/stock/skills/ciao-capabilities/references/support.md. Keys are normalized (lowercased, stripped) bracket tokens.
 PREFIX_LABELS: dict[str, str] = {
     "bug": "bug",
     "feature": "enhancement",
@@ -128,7 +128,7 @@ class LabelHygieneReport:
 def plan_label_actions(issues: Iterable[Issue]) -> LabelHygieneReport:
     """Pure decision: map each issue to planned actions, no side effects.
 
-    Rules (from the ciao-support skill's GitHub issue-label table and
+    Rules (from the capabilities support reference's GitHub issue-label table and
     issue #235):
     - Known prefix -> add the expected classification label if missing.
     - ``[Agent]`` -> needs human; never auto-apply.

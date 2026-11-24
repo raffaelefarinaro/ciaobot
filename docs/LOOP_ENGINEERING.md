@@ -35,7 +35,7 @@ Verification in `AGENTS.md`.
 - Before planning, read `docs/DEVELOPMENT.md`, plus `web/README.md` and
   `DESIGN.md` for anything under `web/`.
 - New issues: `[Bug]` → label `bug`, `[Feature]` → `enhancement` (see the
-  `ciao-support` skill). `report`-labelled issues are auto-opened and may be
+  support reference in `ciao-capabilities`). `report`-labelled issues are auto-opened and may be
   noise: flag, don't drop. `not_ready` issues are skipped by the backlog loop.
 - No CI runs on develop pushes. The full suites run on the release PR into
   `main`, and `/ciao-release` merges
