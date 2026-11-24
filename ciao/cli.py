@@ -5556,6 +5556,9 @@ def _memory_proposal_accept_command(args: argparse.Namespace) -> int:
         # before the decision or the progress key. Finish that operation.
         return _resume_memory_accept(args, workspace, vault, name, needle, no_match)
     bullet, _removal_needle = matched
+    if bullet.kind == "share":
+        print("handover refused: publishing to a shared brain requires an attended decision", file=sys.stderr)
+        return 1
     holder = _curation_holder(args)
     if not holder:
         return 1

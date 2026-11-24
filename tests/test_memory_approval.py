@@ -255,3 +255,23 @@ def test_an_unknown_kind_is_never_accepted(kind: str, policy_mode: str | None) -
     policy = HandoverPolicy(memory_handover="all", memory_approval=approval)
 
     assert accept_allowed(policy, kind) is False
+
+
+def test_shared_brain_publication_is_never_an_unattended_accept() -> None:
+    policy = HandoverPolicy(memory_handover="all", memory_approval={"memory": "auto", "profile": "auto", "share": "auto"})
+    assert accept_allowed(policy, "share") is False
+
+
+def test_workspace_care_never_plans_shared_note_rows(tmp_path: Path) -> None:
+    vault = _queue_vault(
+        tmp_path,
+        "- [memory] A region fact.",
+        "- [share opaque] Shared note change proposal opaque",
+    )
+    queue = vault / QUEUE
+    record_prediction(queue, kind="memory", text="A region fact.", verdict="accept", reason="r")
+    policy = HandoverPolicy(memory_handover="all", memory_approval={"memory": "auto", "share": "auto"})
+
+    items = curation_run._proposal_items(vault, policy)
+
+    assert len(items) == 1 and len(items[0].keys) == 1
