@@ -228,7 +228,7 @@ function closePreview() {
   // operator walked away from, so the row goes back to the original bullet's.
   const row = store.rows.find(r => r.id === id)
   const shown = store.previews[id]
-  if (row && shown && shown.text !== row.text) {
+  if (row && row.kind !== 'share' && shown && shown.text !== row.text) {
     store.dropPreview(id)
     void store.loadPreview(id)
   }
@@ -805,6 +805,7 @@ function changeQualifier(row: ProposalRow): string {
 
 function computeQualifier(row: ProposalRow): string {
   const change = rowChange(row)
+  if (row.kind === 'share') return change.qualifier
   const preview = store.previews[row.id]
   if (preview && (change.type === 'add' || change.type === 'update') && !isRegionPreview(preview)) {
     // The first added line with text: a blank separator ahead of a new heading
@@ -848,6 +849,7 @@ function rowDiff(row: ProposalRow): RowDiff | null {
 }
 
 function computeDiff(row: ProposalRow): RowDiff | null {
+  if (row.kind === 'share') return null
   const preview = store.previews[row.id]
   if (!preview) return null
   const change = rowChange(row)

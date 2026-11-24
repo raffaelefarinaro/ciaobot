@@ -331,7 +331,10 @@ function withExternalLinkAttrs(html: string): string {
     // So is a link into the app (lib/appLinks.ts): a new tab would open a
     // second copy of the app instead of the task.
     const href = /\bhref\s*=\s*"([^"]*)"/i.exec(attrs)?.[1] ?? ''
-    if (isAppRouteHref(href)) return match
+    // Marked HTML-escapes ampersands in query strings (`&amp;`). Decode only
+    // that serialization detail for route classification; keep the escaped
+    // href in the rendered HTML for the browser and sanitizer.
+    if (isAppRouteHref(href.replace(/&amp;/gi, '&'))) return match
     return `<a ${attrs} target="_blank" rel="noopener noreferrer">`
   })
 }

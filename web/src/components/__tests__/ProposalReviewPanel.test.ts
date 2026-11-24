@@ -942,6 +942,62 @@ describe('shared-note review', () => {
     wrapper.unmount()
   })
 
+  it('keeps a shared-note row rendered when the server preview omits generic destination fields', async () => {
+    const share = row({ id: 'share-server-shape', kind: 'share', workspace: 'research' })
+    const serverPreview = {
+      id: share.id,
+      workspace: share.workspace,
+      kind: 'share',
+      operation: 'replace',
+      revision: 'server-share-token',
+      before: 'old note\n',
+      after: 'replacement note\n',
+      brain: 'Team',
+      identity: 'https://example.test/team.git',
+      branch: 'main',
+      path: 'notes/shared.md',
+      blocked_reason: '',
+    } as unknown as ProposalPreview
+    const runtimeErrors: unknown[] = []
+    let previewRequests = 0
+    apiGet.mockImplementation((url: string) => {
+      if (url.startsWith('/api/proposals/history')) return Promise.resolve({ rows: [], total: 0, truncated: false })
+      if (url.includes('/preview')) {
+        previewRequests += 1
+        return Promise.resolve({ ok: true, preview: serverPreview })
+      }
+      return Promise.resolve({ rows: [share] })
+    })
+
+    const wrapper = mount(ProposalReviewPanel, {
+      global: {
+        plugins: [pinia],
+        config: { errorHandler: error => runtimeErrors.push(error) },
+      },
+    })
+    await flushPromises()
+    await flushPromises()
+
+    expect(runtimeErrors).toEqual([])
+    expect(wrapper.find('.pr-row').exists()).toBe(true)
+    expect(wrapper.text()).toContain('Team/notes/shared.md')
+    expect(useProposalsStore(pinia).previews[share.id]).toEqual(serverPreview)
+
+    await wrapper.get('.pr-row-action').trigger('click')
+    await flushPromises()
+    expect(wrapper.find('.pr-card').exists()).toBe(true)
+    expect(wrapper.get('.pr-card').text()).toContain('replacement note')
+    await wrapper.get('.pr-card button:last-child').trigger('click')
+    await flushPromises()
+    expect(previewRequests).toBe(1)
+
+    await wrapper.get('.pr-row-action').trigger('click')
+    await flushPromises()
+    expect(wrapper.find('.pr-card').exists()).toBe(true)
+    expect(previewRequests).toBe(1)
+    wrapper.unmount()
+  })
+
   it('keeps Publish unavailable for a blocked preview', async () => {
     const share = row({ id: 'share-a', kind: 'share', workspace: 'research' })
     const initial = preview({ id: 'share-a', kind: 'share', operation: 'create', before: null, after: '# note\n', brain: 'Team', identity: 'https://example.test/team.git', branch: 'main', path: 'note.md', revision: 'old', blocked_reason: 'brain_unavailable' })
