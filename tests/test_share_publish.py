@@ -67,6 +67,11 @@ def linked(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> tuple[Config, Pat
     vault = tmp_path / "vault"
     vault.mkdir()
     config = Config(tmp_path, vault, link)
+    monkeypatch.setattr(
+        share_publish.shared_brain,
+        "_HARDEN",
+        share_publish.shared_brain._HARDEN + ("-c", "user.name=Test", "-c", "user.email=test@example.com"),
+    )
 
     def transport(folder: Path, *args: str, limit: int = 4096) -> tuple[int, bytes, bytes]:
         rewritten = tuple(str(origin) if arg == "origin" else arg for arg in args)
