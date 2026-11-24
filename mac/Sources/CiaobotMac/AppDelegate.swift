@@ -614,8 +614,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
         // A starting engine has no origin yet, so it shows the dialog with no
         // count rather than fetching one.
-        if case .running(let origin, _, _) = supervisor.state {
-            blockers.activeChats(of: origin, completion: decide)
+        if case .running = supervisor.state, let identity = supervisor.runningTLSIdentity {
+            blockers.activeChats(of: identity, completion: decide)
         } else {
             decide(nil)
         }

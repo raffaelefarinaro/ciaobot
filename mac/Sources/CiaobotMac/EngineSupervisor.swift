@@ -93,12 +93,19 @@ struct EngineProcessInfo: Equatable {
 protocol EngineProcessRunning: AnyObject {
     /// Starts the launch with stdout and stderr appended to `log`; returns the pid.
     func spawn(_ launch: BundledEngineLaunch, log: URL) throws -> Int32
+    /// The most recent authenticated TLS binding sent by this exact child over
+    /// its inherited readiness pipe. Disk readiness records are discovery only.
+    func tlsIdentity(_ pid: Int32) -> LocalEngineTLSIdentity?
     func terminate(_ pid: Int32)
     func kill(_ pid: Int32)
     /// nil when no such process is alive.
     func inspect(_ pid: Int32) -> EngineProcessInfo?
     /// Called on the main thread with (pid, exit status) for a process this object spawned.
     var onExit: ((Int32, Int32) -> Void)? { get set }
+}
+
+extension EngineProcessRunning {
+    func tlsIdentity(_ pid: Int32) -> LocalEngineTLSIdentity? { nil }
 }
 
 /// The identity `/api/startup-status` reports. `ProbeChecking` answers only
@@ -110,6 +117,13 @@ struct EngineIdentity: Equatable {
 
 protocol EngineIdentityChecking {
     func identity(of origin: Origin, completion: @escaping (EngineIdentity?) -> Void)
+    func identity(of origin: Origin, pin: String, completion: @escaping (EngineIdentity?) -> Void)
+}
+
+extension EngineIdentityChecking {
+    func identity(of origin: Origin, pin: String, completion: @escaping (EngineIdentity?) -> Void) {
+        identity(of: origin, completion: completion)
+    }
 }
 
 /// A JSON integer. Booleans (which bridge to 1 and 0) and fractions are not integers.
@@ -143,7 +157,7 @@ final class EngineSupervisor: ObservableObject {
     /// The loopback port of the engine while it is running, else nil. The update
     /// gate drains only what this reports: no running engine means nothing to drain.
     var runningPort: Int? {
-        if case .running(let origin, _, _) = state { return origin.portNumber }
+        if case .running = state { return lastPort }
         return nil
     }
 
@@ -153,7 +167,7 @@ final class EngineSupervisor: ObservableObject {
     /// running, so there is nothing to drain.
     var updateLocalState: LocalEngineState {
         switch state {
-        case .running(let origin, _, _): return .running(port: origin.portNumber)
+        case .running: return .running(port: lastPort)
         case .starting, .stopping: return .transitioning
         case .stopped, .failed, .portInUse: return .external
         }
@@ -182,6 +196,11 @@ final class EngineSupervisor: ObservableObject {
     private var killToken = 0
     private var failures: [Date] = []
     private var lastPort = 0
+    private var activeTLSIdentity: LocalEngineTLSIdentity?
+    var runningTLSIdentity: LocalEngineTLSIdentity? {
+        guard case .running = state else { return nil }
+        return activeTLSIdentity
+    }
     private var stopCompletions: [() -> Void] = []
 
     init(
@@ -306,6 +325,7 @@ final class EngineSupervisor: ObservableObject {
     // MARK: Start
 
     private func begin() {
+        activeTLSIdentity = nil
         guard engine != nil else {
             state = .failed(Self.unavailableMessage)
             return
@@ -437,12 +457,13 @@ final class EngineSupervisor: ObservableObject {
             terminateChild(pid, grace: Self.terminationGrace)
             return
         }
-        if let record = readRecord(), record.pid == pid, let port = record.port, let id = record.startupID {
+        if let record = readRecord(), record.pid == pid, let port = record.port, let id = record.startupID,
+           let tls = processes.tlsIdentity(pid), tls.startupID == id {
             lastPort = port
-            verify(pid: pid, port: port, startupID: id, token: token) { [weak self] ok in
+            verify(pid: pid, startupID: id, tls: tls, token: token) { [weak self] ok in
                 guard let self else { return }
                 if ok {
-                    self.markRunning(pid: pid, port: port, startupID: id, token: token)
+                    self.markRunning(pid: pid, startupID: id, tls: tls, token: token)
                 } else {
                     self.schedule(Self.readyPollInterval) {
                         self.pollReady(pid: pid, deadline: deadline, token: token)
@@ -456,16 +477,18 @@ final class EngineSupervisor: ObservableObject {
         }
     }
 
-    private func verify(pid: Int32, port: Int, startupID: String, token: Int, completion: @escaping (Bool) -> Void) {
-        guard let origin = Origin("http://127.0.0.1:\(port)") else { completion(false); return }
-        identityChecker.identity(of: origin) { [weak self] found in
+    private func verify(pid: Int32, startupID: String, tls: LocalEngineTLSIdentity, token: Int, completion: @escaping (Bool) -> Void) {
+        guard tls.pid == pid, tls.startupID == startupID, let origin = tls.origin else { completion(false); return }
+        identityChecker.identity(of: origin, pin: tls.sha256) { [weak self] found in
             guard let self, self.generation == token, self.child == pid else { return }
             completion(found == EngineIdentity(pid: pid, startupID: startupID))
         }
     }
 
-    private func markRunning(pid: Int32, port: Int, startupID: String, token: Int) {
-        guard generation == token, child == pid, let origin = Origin("http://127.0.0.1:\(port)") else { return }
+    private func markRunning(pid: Int32, startupID: String, tls: LocalEngineTLSIdentity, token: Int) {
+        guard generation == token, child == pid, tls.pid == pid,
+              tls.startupID == startupID, let origin = tls.origin else { return }
+        activeTLSIdentity = tls
         state = .running(origin: origin, pid: pid, startupID: startupID)
         schedule(Self.runningPollInterval) { [weak self] in self?.watch(pid: pid, token: token) }
     }
@@ -475,11 +498,13 @@ final class EngineSupervisor: ObservableObject {
     private func watch(pid: Int32, token: Int) {
         guard generation == token, child == pid, case .running(let origin, _, let currentID) = state else { return }
         if let record = readRecord(), record.pid == pid, let port = record.port, let id = record.startupID,
-           id != currentID || Origin("http://127.0.0.1:\(port)") != origin {
+           let tls = processes.tlsIdentity(pid), tls.startupID == id,
+           id != currentID || tls.origin != origin || activeTLSIdentity != tls {
             lastPort = port
-            verify(pid: pid, port: port, startupID: id, token: token) { [weak self] ok in
+            verify(pid: pid, startupID: id, tls: tls, token: token) { [weak self] ok in
                 guard let self else { return }
-                if ok, let newOrigin = Origin("http://127.0.0.1:\(port)") {
+                if ok, let newOrigin = tls.origin {
+                    self.activeTLSIdentity = tls
                     self.state = .running(origin: newOrigin, pid: pid, startupID: id)
                 }
                 self.schedule(Self.runningPollInterval) { self.watch(pid: pid, token: token) }
@@ -494,6 +519,7 @@ final class EngineSupervisor: ObservableObject {
     private func handleExit(pid: Int32, status: Int32) {
         guard pid == child else { return }
         child = nil
+        activeTLSIdentity = nil
         generation += 1
         if state == .stopping || failedChildExiting {
             childReleased()
@@ -502,6 +528,10 @@ final class EngineSupervisor: ObservableObject {
         if status == Self.portInUseStatus {
             // The record's port, else the last port probed; 0 when neither was ever read.
             state = .portInUse(readRecord()?.port ?? lastPort)
+            return
+        }
+        if status == Self.privateTLSPortInUseStatus {
+            state = .failed(lastLogLine() ?? Self.privateTLSPortInUseMessage)
             return
         }
         let now = clock()
@@ -519,6 +549,8 @@ final class EngineSupervisor: ObservableObject {
     }
 
     static let portInUseStatus: Int32 = 69
+    static let privateTLSPortInUseStatus: Int32 = 73
+    static let privateTLSPortInUseMessage = "The Ciaobot app's private HTTPS port is already in use. Close the process using that port, then choose Try Again."
 
     private func lastLogLine() -> String? {
         guard let handle = try? FileHandle(forReadingFrom: home.logFile) else { return nil }
@@ -550,11 +582,33 @@ struct EngineSpawnError: Error, Equatable { let code: Int32 }
 final class FoundationEngineProcesses: EngineProcessRunning {
     var onExit: ((Int32, Int32) -> Void)?
     private var sources: [Int32: DispatchSourceProcess] = [:]
+    private var tlsIdentities: [Int32: LocalEngineTLSIdentity] = [:]
+    private let tlsLock = NSLock()
+
+    func tlsIdentity(_ pid: Int32) -> LocalEngineTLSIdentity? {
+        tlsLock.lock()
+        defer { tlsLock.unlock() }
+        return tlsIdentities[pid]
+    }
 
     func spawn(_ launch: BundledEngineLaunch, log: URL) throws -> Int32 {
+        var readyPipe = [Int32](repeating: 0, count: 2)
+        guard Darwin.pipe(&readyPipe) == 0 else { throw EngineSpawnError(code: errno) }
+        _ = fcntl(readyPipe[0], F_SETFD, FD_CLOEXEC)
+        _ = fcntl(readyPipe[1], F_SETFD, FD_CLOEXEC)
+        let readyRead = readyPipe[0]
+        let readyWrite = readyPipe[1]
+        let inheritedReadyFD = max(readyRead, readyWrite) + 10
+        var pipeTransferred = false
         var actions: posix_spawn_file_actions_t?
         posix_spawn_file_actions_init(&actions)
-        defer { posix_spawn_file_actions_destroy(&actions) }
+        defer {
+            posix_spawn_file_actions_destroy(&actions)
+            if !pipeTransferred {
+                close(readyRead)
+                close(readyWrite)
+            }
+        }
         var attributes: posix_spawnattr_t?
         posix_spawnattr_init(&attributes)
         defer { posix_spawnattr_destroy(&attributes) }
@@ -562,17 +616,51 @@ final class FoundationEngineProcesses: EngineProcessRunning {
         posix_spawn_file_actions_addopen(&actions, 0, "/dev/null", O_RDONLY, 0)
         posix_spawn_file_actions_addopen(&actions, 1, log.path, O_WRONLY | O_CREAT | O_APPEND, 0o600)
         posix_spawn_file_actions_adddup2(&actions, 1, 2)
+        let duplicateReadyFD = posix_spawn_file_actions_adddup2(&actions, readyWrite, inheritedReadyFD)
+        let closeChildReadFD = posix_spawn_file_actions_addclose(&actions, readyRead)
+        let closeChildWriteFD = posix_spawn_file_actions_addclose(&actions, readyWrite)
+        guard duplicateReadyFD == 0, closeChildReadFD == 0, closeChildWriteFD == 0 else {
+            throw EngineSpawnError(code: duplicateReadyFD != 0 ? duplicateReadyFD : (closeChildReadFD != 0 ? closeChildReadFD : closeChildWriteFD))
+        }
         let chdir = posix_spawn_file_actions_addchdir_np(&actions, launch.workingDirectory.path)
         guard chdir == 0 else { throw EngineSpawnError(code: chdir) }
         posix_spawnattr_setflags(&attributes, Int16(POSIX_SPAWN_SETSID))
 
-        let argv = ([launch.executable.path] + launch.arguments).map { strdup($0) } + [nil]
+        let argv = ([launch.executable.path] + launch.arguments + ["--app-engine-ready-fd", String(inheritedReadyFD)]).map { strdup($0) } + [nil]
         let envp = launch.environment.map { strdup("\($0.key)=\($0.value)") } + [nil]
         defer { argv.forEach { free($0) }; envp.forEach { free($0) } }
 
         var pid: pid_t = 0
         let status = posix_spawn(&pid, launch.executable.path, &actions, &attributes, argv, envp)
         guard status == 0 else { throw EngineSpawnError(code: status) }
+
+        close(readyWrite)
+        pipeTransferred = true
+        let readSource = DispatchSource.makeReadSource(fileDescriptor: readyRead, queue: .global(qos: .utility))
+        var frame = Data()
+        readSource.setEventHandler { [weak self] in
+            var bytes = [UInt8](repeating: 0, count: 1024)
+            let count = Darwin.read(readyRead, &bytes, bytes.count)
+            if count <= 0 {
+                readSource.cancel()
+                return
+            }
+            frame.append(contentsOf: bytes.prefix(count))
+            while let newline = frame.firstIndex(of: 10) {
+                let line = Data(frame[..<newline])
+                if line.count <= 512, let identity = Self.parseTLSIdentity(line), identity.pid == pid {
+                    if let self {
+                        self.tlsLock.lock()
+                        self.tlsIdentities[pid] = identity
+                        self.tlsLock.unlock()
+                    }
+                }
+                frame.removeSubrange(...newline)
+            }
+            if frame.count > 512 { frame.removeAll(keepingCapacity: false) }
+        }
+        readSource.setCancelHandler { close(readyRead) }
+        readSource.resume()
 
         let source = DispatchSource.makeProcessSource(identifier: pid, eventMask: .exit, queue: .main)
         source.setEventHandler { [weak self] in
@@ -582,11 +670,30 @@ final class FoundationEngineProcesses: EngineProcessRunning {
             let code: Int32 = (raw & 0x7f) == 0 ? (raw >> 8) & 0xff : 128 + (raw & 0x7f)
             self?.sources[pid]?.cancel()
             self?.sources[pid] = nil
+            self?.tlsSources[pid]?.cancel()
+            self?.tlsSources[pid] = nil
+            if let self {
+                self.tlsLock.lock()
+                self.tlsIdentities[pid] = nil
+                self.tlsLock.unlock()
+            }
             self?.onExit?(pid, code)
         }
         sources[pid] = source
+        tlsSources[pid] = readSource
         source.resume()
         return pid
+    }
+
+    private var tlsSources: [Int32: DispatchSourceRead] = [:]
+
+    private static func parseTLSIdentity(_ data: Data) -> LocalEngineTLSIdentity? {
+        guard let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let rawPID = jsonInteger(object["pid"]), let pid = Int32(exactly: rawPID),
+              let startupID = object["startup_id"] as? String,
+              let port = jsonInteger(object["tls_port"]),
+              let pin = object["tls_cert_sha256"] as? String else { return nil }
+        return LocalEngineTLSIdentity(pid: pid, startupID: startupID, port: port, sha256: pin)
     }
 
     func terminate(_ pid: Int32) {
@@ -636,6 +743,10 @@ final class EngineIdentityProbe: EngineIdentityChecking {
     }
 
     func identity(of origin: Origin, completion: @escaping (EngineIdentity?) -> Void) {
+        identity(of: origin, pin: "", completion: completion)
+    }
+
+    func identity(of origin: Origin, pin: String, completion: @escaping (EngineIdentity?) -> Void) {
         let config = configuration.copy() as! URLSessionConfiguration
         config.httpShouldSetCookies = false
         config.httpCookieAcceptPolicy = .never
@@ -644,7 +755,7 @@ final class EngineIdentityProbe: EngineIdentityChecking {
         config.httpAdditionalHeaders = nil
         config.timeoutIntervalForRequest = timeout
         config.timeoutIntervalForResource = timeout
-        let request = IdentityRequest(completion: completion)
+        let request = IdentityRequest(origin: origin, pin: pin, completion: completion)
         let session = URLSession(configuration: config, delegate: request, delegateQueue: nil)
         var urlRequest = URLRequest(url: origin.url.appendingPathComponent("api/startup-status"))
         urlRequest.httpShouldHandleCookies = false
@@ -657,8 +768,14 @@ final class EngineIdentityProbe: EngineIdentityChecking {
 private final class IdentityRequest: NSObject, URLSessionDataDelegate {
     private var body = Data()
     private var completion: ((EngineIdentity?) -> Void)?
+    private let origin: Origin
+    private let pin: String
 
-    init(completion: @escaping (EngineIdentity?) -> Void) { self.completion = completion }
+    init(origin: Origin, pin: String, completion: @escaping (EngineIdentity?) -> Void) {
+        self.origin = origin
+        self.pin = pin
+        self.completion = completion
+    }
 
     func urlSession(_ session: URLSession, task: URLSessionTask, willPerformHTTPRedirection response: HTTPURLResponse,
                     newRequest request: URLRequest, completionHandler: @escaping (URLRequest?) -> Void) {
@@ -667,7 +784,15 @@ private final class IdentityRequest: NSObject, URLSessionDataDelegate {
 
     func urlSession(_ session: URLSession, task: URLSessionTask, didReceive challenge: URLAuthenticationChallenge,
                     completionHandler: @escaping (URLSession.AuthChallengeDisposition, URLCredential?) -> Void) {
-        completionHandler(.cancelAuthenticationChallenge, nil)
+        guard challenge.protectionSpace.authenticationMethod == NSURLAuthenticationMethodServerTrust,
+              challenge.protectionSpace.host == origin.url.host,
+              challenge.protectionSpace.port == origin.portNumber,
+              LocalEngineTLSIdentity.certificateMatches(challenge.protectionSpace.serverTrust, pin: pin),
+              let trust = challenge.protectionSpace.serverTrust else {
+            completionHandler(.cancelAuthenticationChallenge, nil)
+            return
+        }
+        completionHandler(.useCredential, URLCredential(trust: trust))
     }
 
     func urlSession(_ session: URLSession, dataTask: URLSessionDataTask, didReceive data: Data) {

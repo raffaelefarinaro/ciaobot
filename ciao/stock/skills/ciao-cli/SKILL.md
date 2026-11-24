@@ -1,6 +1,6 @@
 ---
 name: ciao-cli
-description: "Exact syntax, flags, guards and error codes for the `ciao <noun> <verb>` commands that read or change Ciaobot's own state: chats, projects, the task board, schedules, webhook triggers, surfacing a file in the pinned panel, and filing into the review queues. Use when a chat needs the exact form of one of those commands. What to write to memory or the vault, and when, is the `ciao-memory` skill's policy, not this one's."
+description: "Exact syntax, flags, guards and error codes for the `ciao <noun> <verb>` commands that read or change Ciaobot's own state: chats, projects, the task board, schedules, webhook triggers, surfacing a file in the pinned panel, and filing into the review queues. Use when a chat needs the exact form of one of those commands. What to write to memory or the vault, and when, is the durable-memory guide's policy, not this one's."
 ---
 
 # ciao CLI
@@ -10,7 +10,7 @@ Use `ciao` for Ciaobot's managed operations. Most use `<noun> <verb>` and return
 ## When to use / when not to
 
 Use it for:
-- Reading or changing Ciaobot's own state: chats, projects, the task board, schedules, webhook triggers, and the memory, vault and review-queue commands (syntax only; their write policy is `ciao-memory`).
+- Reading or changing Ciaobot's own state: chats, projects, the task board, schedules, webhook triggers, and the memory, vault and review-queue commands (write policy: system memory guide).
 - Surfacing a file you produced in the user's pinned preview panel.
 - Suggesting a terminal command the user can review and run themselves.
 
@@ -18,7 +18,7 @@ Not for:
 - Editing ordinary workspace files — use the provider's native Read/Write/Edit/Glob, same as today.
 - Third-party MCP connectors (any integration) — those keep their own tool surface.
 - Git — use the shell's `git` directly; `ciao` has no source-control verbs.
-- Deciding what is worth remembering or where it belongs: follow `ciao-memory`.
+- Deciding what is worth remembering or where it belongs: follow the engine-packaged durable-memory guide path named in system instructions.
 
 ## Calling convention
 

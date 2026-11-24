@@ -1,8 +1,3 @@
----
-name: ciao-support
-description: Use when Ciaobot itself is failing, or the user wants to report a problem to the project. Diagnoses failures from the local logs, checks whether a released version already fixes them, and applies the repository's GitHub issue-label convention. Trigger on "ciaobot is broken", "ciaobot is not responding", "error", "crash", "it stopped working", "file a bug", "open an issue", "report a bug".
----
-
 # Ciaobot support
 
 Use this skill when the user reports that Ciaobot itself is failing or asks to

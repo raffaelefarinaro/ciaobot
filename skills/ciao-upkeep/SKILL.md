@@ -243,7 +243,8 @@ for anything `high`/`critical` that has a fix.
 
 Triage, on the same pass: `gh issue list --state open` and
 `gh pr list --state open`. Close what is fixed or dead, label what is not
-(`[Bug]` → `bug`, `[Feature]` → `enhancement`, per `ciao-support`), and surface
+(`[Bug]` → `bug`, `[Feature]` → `enhancement`, per the support reference in
+`ciao-capabilities`), and surface
 the rest. A stale open-issue list is how a two-year-old report gets rediscovered
 as new.
 

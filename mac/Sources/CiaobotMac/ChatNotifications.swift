@@ -562,6 +562,7 @@ final class ChatNotificationController: ObservableObject, NotificationMenuProvid
     private func open(origin: Origin, cookieHeader: String, generation: Int) {
         let opened = transport.open(
             origin: origin,
+            tlsIdentity: status.tlsIdentity,
             cookieHeader: cookieHeader,
             onEvent: { [weak self] event in
                 self?.receive(event, origin: origin, generation: generation)
