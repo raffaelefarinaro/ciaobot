@@ -18,7 +18,7 @@ import unicodedata
 import uuid
 from collections import deque
 from collections.abc import AsyncGenerator, Callable, Coroutine, Iterable, Iterator, Sequence
-from contextlib import ExitStack, contextmanager
+from contextlib import ExitStack, contextmanager, nullcontext
 from dataclasses import dataclass, field
 from types import MappingProxyType
 from datetime import UTC, datetime, timedelta
@@ -7381,25 +7381,26 @@ class ProjectChatManager:
         cancelled_origin = ""
         cancelled_send_ids: list[str] = []
         if turn_index is not None:
-            if chat.user_turn_count == turn_index + 1:
-                chat.user_turn_count = turn_index
-                key = str(turn_index)
-                chat.user_turn_timings.pop(key, None)
-                chat.user_turn_images.pop(key, None)
-                chat.user_turn_unattended.pop(key, None)
-                chat.user_turn_steered.pop(key, None)
-                chat.turn_verification.pop(key, None)
-                cancelled_send_ids = chat.user_turn_send_ids.pop(key, [])
-                if isinstance(cancelled_send_ids, str):
-                    cancelled_send_ids = [cancelled_send_ids]
-                cancelled_origin = str(chat.user_turn_origin.pop(key, "") or "")
-                self._streaming.discard_turn_perf(chat_id, turn_index)
-            else:
-                logger.warning(
-                    "Chat %s cancelled turn %d but a later turn exists "
-                    "(count=%d); keeping its history indexes",
-                    chat_id, turn_index, chat.user_turn_count,
-                )
+            with stream.publish_lock:
+                if chat.user_turn_count == turn_index + 1:
+                    chat.user_turn_count = turn_index
+                    key = str(turn_index)
+                    chat.user_turn_timings.pop(key, None)
+                    chat.user_turn_images.pop(key, None)
+                    chat.user_turn_unattended.pop(key, None)
+                    chat.user_turn_steered.pop(key, None)
+                    chat.turn_verification.pop(key, None)
+                    cancelled_send_ids = chat.user_turn_send_ids.pop(key, [])
+                    if isinstance(cancelled_send_ids, str):
+                        cancelled_send_ids = [cancelled_send_ids]
+                    cancelled_origin = str(chat.user_turn_origin.pop(key, "") or "")
+                    self._streaming.discard_turn_perf(chat_id, turn_index)
+                else:
+                    logger.warning(
+                        "Chat %s cancelled turn %d but a later turn exists "
+                        "(count=%d); keeping its history indexes",
+                        chat_id, turn_index, chat.user_turn_count,
+                    )
             stream.publish({"type": "prompt_cancelled", "turn_index": turn_index})
         # The capsule rode on the prompt that never ran; the resend carries it.
         chat.context_digest = ""
@@ -8812,22 +8813,23 @@ class ProjectChatManager:
                     self._release_shell_finished_waiting(chat_id)
                     chat_meta.last_error = ""
                     chat_meta.failure_id = ""
-                    turn_index = chat_meta.user_turn_count
-                    chat_meta.user_turn_count = turn_index + 1
-                    self._unattended_denials.discard(chat_id)
-                    chat_meta.turn_owner = restart_resume.PROCESS_TOKEN
-                    if image_refs:
-                        chat_meta.user_turn_images[str(turn_index)] = list(image_refs)
-                    sent_at_iso = chat_service._now_iso()
-                    chat_meta.last_activity_at = sent_at_iso
-                    chat_meta.last_read_at = sent_at_iso
-                    chat_meta.user_turn_timings[str(turn_index)] = {"sent_at": sent_at_iso}
-                    if unattended:
-                        chat_meta.user_turn_unattended[str(turn_index)] = True
-                    if origin:
-                        chat_meta.user_turn_origin[str(turn_index)] = origin
-                    if send_id:
-                        chat_meta.record_send_id(turn_index, send_id)
+                    with stream.publish_lock:
+                        turn_index = chat_meta.user_turn_count
+                        chat_meta.user_turn_count = turn_index + 1
+                        self._unattended_denials.discard(chat_id)
+                        chat_meta.turn_owner = restart_resume.PROCESS_TOKEN
+                        if image_refs:
+                            chat_meta.user_turn_images[str(turn_index)] = list(image_refs)
+                        sent_at_iso = chat_service._now_iso()
+                        chat_meta.last_activity_at = sent_at_iso
+                        chat_meta.last_read_at = sent_at_iso
+                        chat_meta.user_turn_timings[str(turn_index)] = {"sent_at": sent_at_iso}
+                        if unattended:
+                            chat_meta.user_turn_unattended[str(turn_index)] = True
+                        if origin:
+                            chat_meta.user_turn_origin[str(turn_index)] = origin
+                        if send_id:
+                            chat_meta.record_send_id(turn_index, send_id)
                 if not is_retry and not compact:
                     if not self._save_checked(reason="registry_mutation", _unrelated_turn=chat_id):
                         raise ValueError("recovery is in flight")
@@ -10342,11 +10344,14 @@ class ProjectChatManager:
             if started_perf is not None:
                 duration_ms = int((time.perf_counter() - started_perf) * 1000)
             if chat_now is not None:
-                rec = chat_now.user_turn_timings.setdefault(str(turn_index), {})
-                rec["completed_at"] = completed_at
-                if duration_ms is not None:
-                    rec["duration_ms"] = duration_ms
-                sent_at_rec = rec.get("sent_at", "")
+                stream = self._broker.get(chat_id)
+                lock = stream.publish_lock if stream is not None else nullcontext()
+                with lock:
+                    rec = chat_now.user_turn_timings.setdefault(str(turn_index), {})
+                    rec["completed_at"] = completed_at
+                    if duration_ms is not None:
+                        rec["duration_ms"] = duration_ms
+                    sent_at_rec = rec.get("sent_at", "")
                 self._save()
         payload: dict[str, object] = {
             "type": "result",
@@ -10427,7 +10432,7 @@ class ProjectChatManager:
             self.stop_chat_retry(chat_id)
         stream = self._broker.get(chat_id)
         if stream is not None:
-            stream.user_stopped = True
+            stream.stop_publish_turn()
             if stream.background:
                 # No active handle exists between turns; stopping means
                 # ending the drain (its cleanup finishes the stream). The drain
@@ -11280,9 +11285,12 @@ class ProjectChatManager:
                         attachment.path.unlink(missing_ok=True)
                     except OSError:
                         logger.exception("Failed to unlink image %s", ref)
-        chat.user_turn_images = {}
-        chat.user_turn_send_ids = {}
-        chat.user_turn_count = 0
+        stream = self._broker.get(chat.chat_id)
+        lock = stream.publish_lock if stream is not None else nullcontext()
+        with lock:
+            chat.user_turn_images = {}
+            chat.user_turn_send_ids = {}
+            chat.user_turn_count = 0
 
     def resolve_image_ref(self, ref: str) -> ImageAttachment | None:
         """Resolve an image reference (filename) to an ImageAttachment."""

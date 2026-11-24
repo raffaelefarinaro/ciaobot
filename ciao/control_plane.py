@@ -16,6 +16,7 @@ import json
 import logging
 import math
 import os
+import stat
 import sqlite3
 import sys
 import threading
@@ -2224,6 +2225,148 @@ class CiaoControlPlane:
             f"note-create:{notes_root}:{title}", _run, coalesce=False
         )
         return _ok(reported)
+
+    def _share_body_bytes(self, workspace: str, relative: str) -> bytes:
+        """Read one regular file beneath this workspace's vault through its descriptor."""
+        from ciao.share_proposals import MAX_BYTES
+
+        if not relative or Path(relative).is_absolute() or "\\" in relative or "\x00" in relative:
+            raise ControlPlaneError("note_file_invalid", "--body-file must be a relative path inside this workspace vault.")
+        parts = relative.split("/")
+        if any(part in {"", ".", ".."} for part in parts):
+            raise ControlPlaneError("note_file_invalid", "--body-file must be a relative path inside this workspace vault.")
+        root = Path(self.config.workspace_vault_root(workspace)).resolve()
+        directory_flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
+        file_flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
+        descriptor = -1
+        try:
+            descriptor = os.open(root, directory_flags)
+            for component in parts[:-1]:
+                next_descriptor = os.open(component, directory_flags, dir_fd=descriptor)
+                os.close(descriptor)
+                descriptor = next_descriptor
+            file_descriptor = os.open(parts[-1], file_flags, dir_fd=descriptor)
+            with os.fdopen(file_descriptor, "rb") as handle:
+                if not stat.S_ISREG(os.fstat(handle.fileno()).st_mode):
+                    raise ControlPlaneError("note_file_invalid", "--body-file must name an ordinary file.")
+                data = handle.read(MAX_BYTES + 1)
+                if len(data) > MAX_BYTES:
+                    raise ControlPlaneError("note_file_invalid", f"--body-file exceeds the {MAX_BYTES}-byte limit.")
+                return data
+        except ControlPlaneError:
+            raise
+        except (OSError, ValueError) as exc:
+            raise ControlPlaneError("note_file_invalid", f"--body-file cannot be read inside this workspace vault: {exc}") from exc
+        finally:
+            if descriptor >= 0:
+                os.close(descriptor)
+
+    async def note_share(
+        self, principal: AgentPrincipal, *, path: str, body_file: str, brain: str = ""
+    ) -> dict[str, Any]:
+        """Queue an exact note body for a human to review before it reaches a shared brain."""
+        import hashlib
+        from ciao import share_proposals as sp
+
+        workspace = self._workspace(principal)
+        chat, project = self._chat_scope(principal)
+        if (
+            project.workspace != workspace
+            or str(chat.chat_id) != principal.chat_id
+            or str(chat.project_id) != principal.project_id
+            or str(chat.provider) != principal.provider
+        ):
+            raise ControlPlaneError("chat_required", "Sharing a note requires an attributable chat in this workspace.")
+        stream = self.pcm.get_active_stream(principal.chat_id)
+        if stream is None:
+            raise ControlPlaneError("note_share_inactive", "Sharing a note requires the active foreground user turn.")
+        with stream.publish_lock:
+            turn_count = int(getattr(chat, "user_turn_count", 0) or 0)
+            if turn_count < 1:
+                raise ControlPlaneError("chat_required", "Sharing a note requires an attributable user turn in this chat.")
+            turn_index = turn_count - 1
+            turn_key = str(turn_index)
+            publish_generation = stream.publish_generation
+            origins = getattr(chat, "user_turn_origin", None)
+            timings = getattr(chat, "user_turn_timings", None)
+            # Ordinary typed turns intentionally have no origin-map entry:
+            # streaming persists only truthy engine origins. The per-turn send
+            # time proves this is a recorded user turn; absent means typed.
+            if not isinstance(timings, dict) or not isinstance(timings.get(turn_key), dict):
+                raise ControlPlaneError(
+                    "note_share_inactive", "Sharing a note requires the active foreground user turn."
+                )
+            if not isinstance(origins, dict) or (
+                turn_key in origins and not isinstance(origins[turn_key], str)
+            ):
+                raise ControlPlaneError("unattended_forbidden", "Sharing a note requires a verifiable user turn.")
+
+        def _require_active_turn_locked() -> None:
+            current_count = int(getattr(chat, "user_turn_count", 0) or 0)
+            origins = getattr(chat, "user_turn_origin", None)
+            timings = getattr(chat, "user_turn_timings", None)
+            if (
+                self.pcm.get_chat(principal.chat_id) is not chat
+                or self.pcm.get_project(principal.project_id) is not project
+                or current_count != turn_index + 1
+                or stream.publish_generation != publish_generation
+                or not stream.publish_active
+                or stream.publish_turn_index != turn_index
+                or not isinstance(origins, dict)
+                or not isinstance(timings, dict)
+                or not isinstance(timings.get(turn_key), dict)
+                or (turn_key in origins and not isinstance(origins[turn_key], str))
+                or self.pcm.get_active_stream(principal.chat_id) is not stream
+                or getattr(stream, "background", False)
+                or getattr(stream, "done", False)
+                or getattr(stream, "user_stopped", False)
+                or getattr(stream, "running_turn_index", None) != turn_index
+            ):
+                raise ControlPlaneError(
+                    "note_share_inactive", "Sharing a note requires the active foreground user turn."
+                )
+            self._require_person_typed_turn(principal, "Sharing a note")
+
+        @contextlib.contextmanager
+        def _queue_publish_guard() -> Iterator[None]:
+            # Turn start/end, count changes, Stop, and stream finish publish
+            # their lifecycle generation under this lock. The queue writer
+            # stages first and holds it only around atomic replace.
+            with stream.publish_lock:
+                try:
+                    _require_active_turn_locked()
+                except ControlPlaneError as exc:
+                    raise sp.ShareDraftError(sp.ShareRefusal(exc.code, str(exc))) from exc
+                yield
+
+        with stream.publish_lock:
+            _require_active_turn_locked()
+
+        def _run() -> dict[str, Any]:
+            with stream.publish_lock:
+                _require_active_turn_locked()
+            proposed = self._share_body_bytes(workspace, body_file)
+            with stream.publish_lock:
+                _require_active_turn_locked()
+            identity = json.dumps(
+                [principal.chat_id, turn_index, brain, path, hashlib.sha256(proposed).hexdigest()],
+                ensure_ascii=False, separators=(",", ":"),
+            )
+            draft = sp.draft_share(
+                self.config, workspace=workspace, brain=brain, relative_path=path,
+                operation=None, proposed=proposed,
+                request_key="chat-share:" + hashlib.sha256(identity.encode("utf-8")).hexdigest(),
+                publish_guard=_queue_publish_guard,
+            )
+            if isinstance(draft, sp.ShareRefusal):
+                error = ControlPlaneError(draft.code, draft.message)
+                if draft.eligible_brains:
+                    error.suggestions = ["Choose one linked shared brain: " + ", ".join(draft.eligible_brains)]
+                raise error
+            return {"status": "queued", "proposal_id": draft.proposal_id, "review_path": draft.review_path}
+
+        key = f"note-share:{self._search_runtime_dir()}:{workspace}:{principal.chat_id}:{turn_index}:{brain}:{path}"
+        return _ok(await run_read(key, _run, coalesce=False))
 
     def _workspace_text_file(self, workspace: str, relative: str, *, flag: str) -> str:
         """One UTF-8 prose file confined to the caller's workspace root, or a refusal."""

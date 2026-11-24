@@ -12,9 +12,10 @@ import os
 import re
 import secrets
 import threading
+from contextlib import AbstractContextManager
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
-from typing import Any, NoReturn
+from typing import Any, Callable, NoReturn
 from urllib.parse import urlsplit, urlunsplit
 
 from ciao import memory_receipts, proposal_tracking, shared_brain
@@ -293,6 +294,7 @@ def _draft_share(
     config: Any, *, workspace: str, brain: str = "", relative_path: str,
     operation: str | None, proposed: bytes | None, request_key: str,
     request_fingerprint: str, retiring_proposal_id: str | None = None,
+    publish_guard: Callable[[], AbstractContextManager[object]] | None = None,
 ) -> ShareDraft:
     """Qualify and privately file one immutable shared-note proposal."""
     if operation not in (None, "create", "replace", "delete"):
@@ -367,7 +369,11 @@ def _draft_share(
                     brain_count += 1
             if brain_count >= MAX_PER_BRAIN:
                 _refuse("capacity", "The shared brain share proposal limit is reached.", limit=MAX_PER_BRAIN, count=brain_count)
-            memory_receipts.write_queue_atomically(queue, queue_text.rstrip() + f"\n\n- [share {fields['sidecar_id']}] {summary}\n")
+            memory_receipts.write_queue_atomically(
+                queue,
+                queue_text.rstrip() + f"\n\n- [share {fields['sidecar_id']}] {summary}\n",
+                publish_guard=publish_guard,
+            )
         return ShareDraft(fields["proposal_id"], previous, proposal_review_path(workspace, fields["review_key"]))
     sidecar_id = secrets.token_urlsafe(18)
     text = f"Shared note change proposal {sidecar_id}"
@@ -425,7 +431,15 @@ def _draft_share(
         _write_private(index_path, json.dumps(artifact, ensure_ascii=False, sort_keys=True).encode("utf-8"))
         id_path = store / (hashlib.sha256((workspace + "\0sidecar\0" + sidecar_id).encode()).hexdigest() + ".json")
         _write_private(id_path, json.dumps(artifact, ensure_ascii=False, sort_keys=True).encode("utf-8"))
-        memory_receipts.write_queue_atomically(queue, existing_text.rstrip() + "\n\n" + bullet + "\n")
+        try:
+            memory_receipts.write_queue_atomically(
+                queue, existing_text.rstrip() + "\n\n" + bullet + "\n",
+                publish_guard=publish_guard,
+            )
+        except ShareDraftError:
+            index_path.unlink(missing_ok=True)
+            id_path.unlink(missing_ok=True)
+            raise
     return ShareDraft(proposal_id, artifact, proposal_tracking.proposal_review_path(workspace, token_fields["review_key"]))
 
 
@@ -433,6 +447,7 @@ def draft_share(
     config: Any, *, workspace: str, brain: str = "", relative_path: str,
     operation: str | None, proposed: bytes | None, request_key: str,
     retiring_proposal_id: str | None = None,
+    publish_guard: Callable[[], AbstractContextManager[object]] | None = None,
 ) -> ShareDraft | ShareRefusal:
     """Return a draft or its safe, typed refusal without exposing input data."""
     try:
@@ -482,6 +497,7 @@ def draft_share(
                 request_key=request_key,
                 request_fingerprint=request_fingerprint,
                 retiring_proposal_id=retiring_proposal_id,
+                publish_guard=publish_guard,
             )
     except ShareDraftError as exc:
         return exc.refusal

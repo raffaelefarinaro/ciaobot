@@ -12,9 +12,10 @@ import asyncio
 import logging
 import re
 import shlex
+import threading
 import uuid
 from pathlib import Path
-from typing import AsyncIterator, Callable
+from typing import Any, AsyncIterator, Callable, Coroutine
 
 from ciao.models import (
     AssistantTextDelta,
@@ -697,6 +698,12 @@ class ChatStream:
         "_pending_id_seq",
         # The user-turn index of the turn now running.
         "running_turn_index",
+        # Serializes the human Stop/stream-finish transition with a managed
+        # proposal's final queue replacement. Held only across os.replace.
+        "publish_lock",
+        "publish_generation",
+        "publish_turn_index",
+        "publish_active",
         # Returns the chat's waiting (parked) entries, which stay visible in
         # this stream's ``queue_state`` but are never flushed by it.
         "waiting",
@@ -744,6 +751,10 @@ class ChatStream:
         self._draining: list[dict] = []
         self._pending_id_seq = 0
         self.running_turn_index: int | None = None
+        self.publish_lock = threading.Lock()
+        self.publish_generation = 0
+        self.publish_turn_index: int | None = None
+        self.publish_active = False
         self.waiting: Callable[[], list[dict]] | None = None
         # Set by `stop_chat()` when the user hits the Stop button. Stop holds
         # the whole queue: the drive loop parks every queued message on the
@@ -1069,14 +1080,64 @@ class ChatStream:
 
     def finish(self) -> None:
         """Mark the stream complete and notify subscribers."""
-        if self._done:
-            return
-        self._done = True
+        with self.publish_lock:
+            if self._done:
+                return
+            self._done = True
+            self.publish_generation += 1
+            self.publish_active = False
+            self.publish_turn_index = None
+            self.running_turn_index = None
         for queue in list(self._subs):
             try:
                 queue.put_nowait(None)  # sentinel
             except asyncio.QueueFull:
                 pass
+
+    def begin_publish_turn(self, turn_index: int | None) -> int:
+        """Publish a new active-turn generation while holding the Stop fence."""
+        with self.publish_lock:
+            self.publish_generation += 1
+            self.publish_turn_index = turn_index
+            self.publish_active = turn_index is not None
+            self.running_turn_index = turn_index
+            return self.publish_generation
+
+    def end_publish_turn(self, generation: int) -> None:
+        """Invalidate only the turn generation that is actually ending."""
+        with self.publish_lock:
+            if generation != self.publish_generation:
+                return
+            self.publish_generation += 1
+            self.publish_active = False
+            self.publish_turn_index = None
+            self.running_turn_index = None
+
+    def create_turn_task(
+        self,
+        coroutine_factory: Callable[[], Coroutine[Any, Any, Any]],
+        *,
+        generation: int,
+        name: str,
+    ) -> asyncio.Task[Any]:
+        """Run a turn with lifecycle invalidation before its Task is complete."""
+
+        async def run() -> Any:
+            try:
+                return await coroutine_factory()
+            finally:
+                self.end_publish_turn(generation)
+
+        return asyncio.create_task(run(), name=name)
+
+    def stop_publish_turn(self) -> None:
+        """Fence active share publication before a stop cancels the turn."""
+        with self.publish_lock:
+            self.user_stopped = True
+            self.publish_generation += 1
+            self.publish_active = False
+            self.publish_turn_index = None
+            self.running_turn_index = None
 
     async def subscribe(self) -> AsyncIterator[dict]:
         """Iterate buffered + future events until the stream finishes."""
