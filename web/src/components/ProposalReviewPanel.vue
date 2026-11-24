@@ -183,6 +183,7 @@ function isDismissOpen(row: ProposalRow): boolean {
 /** Which row action opened the card now open, so Cancel can give the focus
  *  back to it. */
 const previewTrigger = ref('accept')
+const shareActionErrors = ref<Record<string, string>>({})
 
 async function reviewAccept(row: ProposalRow, trigger = 'accept') {
   // Moving to another row's card walks away from this one: close it the same
@@ -204,7 +205,15 @@ async function reviewAccept(row: ProposalRow, trigger = 'accept') {
   // with the reason still typed — so freshness does not depend on this call.
   if (!store.previews[row.id]) await store.loadPreview(row.id)
   await nextTick()
-  focusField(acceptCards.get(row.id))
+  const card = acceptCards.get(row.id)
+  if (row.kind === 'share') {
+    const publish = card?.querySelector<HTMLButtonElement>('.btn-primary:not(:disabled)')
+    const safeAction = card?.querySelector<HTMLButtonElement>('.pr-actions--card button:last-child')
+    if (publish) publish.focus()
+    else safeAction?.focus()
+  } else {
+    focusField(card)
+  }
 }
 
 function closePreview() {
@@ -317,7 +326,14 @@ function operationLabel(operation: string): string {
 
 /** The exact lines the accept would add or remove, from the server's bodies. */
 function previewChanges(preview: ProposalPreview): LineChange[] {
-  return lineChanges(preview.before, preview.after, preview.separator || '\n')
+  return lineChanges(preview.before ?? '', preview.after ?? '', preview.separator || '\n')
+}
+
+function shareTextFormat(text: string | null): string {
+  if (text === null) return 'No note exists'
+  const endings = text.match(/\r\n|\n|\r/g) ?? []
+  const ending = endings.some(value => value === '\r\n') ? 'CRLF' : endings.some(value => value === '\r') ? 'CR' : 'LF'
+  return `${text.endsWith('\n') || text.endsWith('\r') ? 'ends with newline' : 'no trailing newline'} · ${ending}`
 }
 
 /** Confirm the change the card is showing, pinned to the revision it was
@@ -329,6 +345,32 @@ async function confirmPreview(row: ProposalRow, workspace = '', reconcile = fals
   if (store.isBusy(row.id)) return
   const preview = store.previews[row.id]
   if (!preview) return
+  if (row.kind === 'share') {
+    if (preview.kind !== 'share' || preview.blocked_reason || !preview.revision) return
+    const result = await store.act(row.id, 'accept', row.workspace, {
+      expectedRevision: preview.revision,
+    })
+    if (result.replacementId) {
+      closePreview()
+      await nextTick()
+      const replacement = store.rows.find(item => item.id === result.replacementId)
+      if (replacement) await reviewAccept(replacement, 'review')
+      return
+    }
+    if (result.conflict) return
+    if (!result.ok) {
+      const status = (result.payload as { share_status?: string } | undefined)?.share_status
+      const message = result.error || 'The shared note was not published.'
+      shareActionErrors.value = { ...shareActionErrors.value, [row.id]: status ? `${message} (${status})` : message }
+      return
+    }
+    const next = { ...shareActionErrors.value }
+    delete next[row.id]
+    shareActionErrors.value = next
+    if (previewId.value === row.id) closePreview()
+    store.dropPreview(row.id)
+    return
+  }
   const edited = preview.text !== row.text ? preview.text : ''
   // Read before the card can close: a refusal closes it, and the deferral
   // below keeps the reason for the retry (as `decisionReason`: a deferral already
@@ -681,7 +723,7 @@ function rowChange(row: ProposalRow): ProposalChange {
 /** Whether this row gets a preview at all: a skill is built in a chat, and a
  * row with no accept has nothing to preview. */
 function wantsPreview(row: ProposalRow): boolean {
-  return !isSkill(row) && canAccept(row)
+  return row.kind === 'share' || (!isSkill(row) && canAccept(row))
 }
 
 const changeFilter = ref<'all' | ProposalChangeType>('all')
@@ -767,10 +809,10 @@ function computeQualifier(row: ProposalRow): string {
   if (preview && (change.type === 'add' || change.type === 'update') && !isRegionPreview(preview)) {
     // The first added line with text: a blank separator ahead of a new heading
     // would otherwise name the heading above the insertion.
-    const first = diffWithContext(preview.before, preview.after, '\n', 0)
+    const first = diffWithContext(preview.before ?? '', preview.after ?? '', '\n', 0)
       .find(l => l.op === 'added' && l.text.trim())
     if (first && /^\s{0,3}#{1,6}\s/.test(first.text)) return `new section ${first.text.replace(/^\s*#+\s*/, '')}`
-    const heading = first ? headingAbove(preview.after, first.line) : ''
+    const heading = first ? headingAbove(preview.after ?? '', first.line) : ''
     if (heading) return `under ${heading}`
   }
   return change.qualifier
@@ -812,7 +854,7 @@ function computeDiff(row: ProposalRow): RowDiff | null {
   const cap = (lines: DiffLine[]) => ({ lines: lines.slice(0, DIFF_MAX_LINES), more: Math.max(0, lines.length - DIFF_MAX_LINES) })
   const truncatedNote = preview.truncated ? 'The destination is too large to show in full.' : ''
   if (change.type === 'new') {
-    const lines = diffWithContext('', preview.after, '\n', 0)
+    const lines = diffWithContext('', preview.after ?? '', '\n', 0)
     return { head: `New file, ${plural(lines.length, 'line')}`, numbered: true, note: truncatedNote, ...cap(lines) }
   }
   if (change.type === 'merge') {
@@ -821,7 +863,7 @@ function computeDiff(row: ProposalRow): RowDiff | null {
   }
   if (change.type === 'add' || change.type === 'update') {
     const region = isRegionPreview(preview)
-    const lines = diffWithContext(preview.before, preview.after, preview.separator || '\n', 1)
+    const lines = diffWithContext(preview.before ?? '', preview.after ?? '', preview.separator || '\n', 1)
     if (!lines.length) return null
     const unit = region ? 'entry' : 'line'
     const added = lines.filter(l => l.op === 'added')
@@ -1108,7 +1150,7 @@ const selectedVisible = computed(() => filtered.value.filter(r => selected.value
  * and `accept_for('skill')` raises on the server.
  */
 const selectedAcceptable = computed(
-  () => selectedVisible.value.filter(canAccept).map(r => r.id),
+  () => selectedVisible.value.filter(r => r.kind !== 'share' && canAccept(r)).map(r => r.id),
 )
 
 function isRehome(row: ProposalRow): boolean {
@@ -1127,7 +1169,7 @@ function isNoteEdit(row: ProposalRow): boolean {
  * `note_edit` cannot, because its accept reads the replacement from the record
  * and the preview ignores the wording. */
 function isEditable(row: ProposalRow): boolean {
-  return descriptorFor(row).editable !== false
+  return row.kind !== 'share' && descriptorFor(row).editable !== false
 }
 
 /** The sessions behind a skill finding, as the record holds them.
@@ -1362,7 +1404,7 @@ async function cancelDismiss() {
 async function confirmDismiss(row: ProposalRow) {
   if (store.isBusy(row.id)) return
   const reason = reasonFor(row.id)
-  const result = await store.act(row.id, 'dismiss', '', { reason })
+  const result = await store.act(row.id, 'dismiss', row.kind === 'share' ? row.workspace : '', { reason })
   if (!result.ok) return
   closeDismiss()
 }
@@ -2013,6 +2055,53 @@ watch(
               </div>
             </div>
 
+            <template v-else-if="store.previews[row.id]?.kind === 'share'">
+              <template v-if="store.previews[row.id]">
+                <p v-if="store.conflictIds.has(row.id)" class="pr-card-conflict" role="alert">
+                  The shared-note review changed. This refreshed preview must be reviewed before publishing.
+                </p>
+                <div class="pr-share-destination">
+                  <strong>{{ store.previews[row.id].brain || 'Shared brain' }}</strong>
+                  <span>{{ store.previews[row.id].identity }}</span>
+                  <span>{{ store.previews[row.id].branch }}</span>
+                  <code>{{ store.previews[row.id].path }}</code>
+                </div>
+                <p class="pr-share-operation">{{ store.previews[row.id].operation }} this note</p>
+                <div class="pr-share-images">
+                  <section>
+                    <h3>Before · {{ shareTextFormat(store.previews[row.id].before) }}</h3>
+                    <p v-if="store.previews[row.id].before === null" class="pr-share-absent">No note exists.</p>
+                    <p v-else-if="store.previews[row.id].before === ''" class="pr-share-absent">Empty note.</p>
+                    <pre v-else>{{ store.previews[row.id].before }}</pre>
+                  </section>
+                  <section>
+                    <h3>After · {{ shareTextFormat(store.previews[row.id].after) }}</h3>
+                    <p v-if="store.previews[row.id].after === null" class="pr-share-absent">The note will be removed.</p>
+                    <p v-else-if="store.previews[row.id].after === ''" class="pr-share-absent">Empty note.</p>
+                    <pre v-else>{{ store.previews[row.id].after }}</pre>
+                  </section>
+                </div>
+                <p class="pr-share-warning hint hint--warn">
+                  Sharing publishes this text to everyone with access to {{ store.previews[row.id].identity }}. It stays in the repository’s history even if it is later removed.
+                </p>
+                <p v-if="store.previews[row.id].blocked_reason" class="pr-card-error" role="alert">
+                  Cannot publish: {{ store.previews[row.id].blocked_reason }}
+                </p>
+                <p v-if="shareActionErrors[row.id]" class="pr-card-error" role="alert">{{ shareActionErrors[row.id] }}</p>
+                <div class="pr-actions pr-actions--card">
+                  <button
+                    v-if="!store.previews[row.id].blocked_reason && store.previews[row.id].revision"
+                    type="button"
+                    class="btn-small btn-primary"
+                    :disabled="store.isBusy(row.id) || store.isPreviewLoading(row.id) || Boolean(store.previews[row.id].blocked_reason)"
+                    @click="confirmPreview(row)"
+                  >{{ store.isBusy(row.id) ? 'publishing…' : 'Publish' }}</button>
+                  <button type="button" class="btn-small btn-chip" :disabled="store.isBusy(row.id)" @click="doDismiss(row)">Reject</button>
+                  <button type="button" class="btn-small btn-chip" @click="cancelPreview">Cancel</button>
+                </div>
+              </template>
+            </template>
+
             <template v-else-if="store.previews[row.id]">
               <p v-if="store.conflictIds.has(row.id)" class="pr-card-conflict" role="alert">
                 The destination changed since this preview, so nothing was written.
@@ -2249,7 +2338,7 @@ watch(
                  that loads it. No accept at all when nothing backs a
                  destination. -->
             <button
-              v-if="canAccept(row) && store.previews[row.id] && rowChange(row).verb"
+              v-if="row.kind !== 'share' && canAccept(row) && store.previews[row.id] && rowChange(row).verb"
               type="button"
               class="mr-btn mr-btn--primary pr-row-accept"
               data-pr-action="accept"
@@ -2257,13 +2346,13 @@ watch(
               @click="reviewAccept(row, 'accept')"
             >{{ store.isBusy(row.id) ? 'working…' : rowChange(row).verb }}</button>
             <button
-              v-else-if="canAccept(row) && !store.previews[row.id]"
+              v-else-if="row.kind === 'share' || (canAccept(row) && !store.previews[row.id])"
               type="button"
               class="mr-btn pr-row-action"
               data-pr-action="review"
-              :disabled="store.isBusy(row.id)"
+              :disabled="store.isBusy(row.id) || (row.kind === 'share' && store.isPreviewLoading(row.id))"
               @click="reviewAccept(row, 'review')"
-            >{{ store.isBusy(row.id) ? 'working…' : (isRehome(row) ? `Move to ${rehomeTarget(row)}` : 'Review') }}</button>
+            >{{ store.isBusy(row.id) ? 'working…' : row.kind === 'share' ? 'Review to publish' : (isRehome(row) ? `Move to ${rehomeTarget(row)}` : 'Review') }}</button>
             <button
               v-if="canAccept(row) && !isRehome(row) && isEditable(row)"
               type="button"
@@ -2588,6 +2677,52 @@ watch(
   display: flex;
   flex-direction: column;
   gap: var(--space-1);
+}
+
+.pr-share-destination,
+.pr-share-images {
+  display: grid;
+  gap: 0.5rem;
+}
+
+.pr-share-destination {
+  padding: 0.75rem;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm, 6px);
+  overflow-wrap: anywhere;
+}
+
+.pr-share-destination span,
+.pr-share-operation,
+.pr-share-images h3,
+.pr-share-absent {
+  color: var(--fg2);
+  font-size: 0.875rem;
+}
+
+.pr-share-images {
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 19rem), 1fr));
+}
+
+.pr-share-images section {
+  min-width: 0;
+}
+
+.pr-share-images pre {
+  max-height: 24rem;
+  overflow: auto;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  font: inherit;
+  font-family: var(--font-mono);
+  padding: 0.75rem;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm, 6px);
+}
+
+.pr-share-warning {
+  margin: 0;
+  overflow-wrap: anywhere;
 }
 
 .pr-card-diff-label {

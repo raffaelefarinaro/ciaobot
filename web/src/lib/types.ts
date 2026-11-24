@@ -1950,7 +1950,7 @@ export interface ProposalPreview {
    * `note_edit` rewrites a whole vault note from the verification's exact
    * replacement, and `retire_note` is the one operation that removes it — it
    * moves the note to the reversible review trash and writes no body at all. */
-  operation: 'add' | 'update' | 'move' | 'add_category' | 'note_edit' | 'retire_note' | 'none' | ''
+  operation: 'add' | 'update' | 'move' | 'add_category' | 'note_edit' | 'retire_note' | 'none' | 'create' | 'replace' | 'delete' | ''
   /**
    * `note` or `entry` — the unit the accept writes.
    *
@@ -1978,8 +1978,8 @@ export interface ProposalPreview {
   destination: string
   destination_path: string
   revision: string
-  before: string
-  after: string
+  before: string | null
+  after: string | null
   exact: boolean
   truncated: boolean
   can_accept: boolean
@@ -2000,6 +2000,12 @@ export interface ProposalPreview {
     notes: string[]
     missing?: string[]
   }
+  /** Revision-bound shared-note publication projection (#3576). */
+  brain?: string
+  identity?: string
+  branch?: string
+  path?: string
+  blocked_reason?: string | null
 }
 
 export interface ProposalPreviewResponse {
@@ -2186,6 +2192,12 @@ export interface ProposalHistoryRow {
   run_id?: string
   /** The decision's own timestamp, the same value as `ts`. ABSENT from an older engine. */
   decided_at?: string
+  /** Share publication is successful only when the server attached its receipt. */
+  share_status?: string
+  commit_oid?: string
+  branch?: string
+  path?: string
+  operation?: string
 }
 
 export type ProposalApplyStatus =
@@ -2261,6 +2273,8 @@ export interface ProposalHistoryChange {
    * Empty for a receipt that cited nothing. Optional because a payload written
    * before this field existed carries none. */
   source_turns?: number[]
+  commit_oid?: string
+  branch?: string
 }
 
 /** One line of a receipt's before/after. Context lines are not sent: what a
@@ -2290,11 +2304,18 @@ export interface MemoryReceiptDetail {
   changed: boolean
   error: string
   reason?: string
-  before?: string
-  after?: string
+  before?: string | null
+  after?: string | null
   diff?: MemoryReceiptDiffLine[]
   truncated?: boolean
   diff_truncated?: boolean
+  share_status?: string
+  operation?: string
+  branch?: string
+  path?: string
+  identity?: string
+  commit_oid?: string
+  review_path?: string
 }
 
 export interface ProposalHistoryResponse {
