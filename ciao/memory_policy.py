@@ -239,6 +239,10 @@ UNATTENDED_DEFERRED_ACTIONS: tuple[DeferredAction, ...] = (
         "ciao vault review mutations require an attended turn (unattended_forbidden).",
     ),
     DeferredAction(
+        "Publish a note to the shared brain",
+        "Publishing discloses the exact reviewed note to a shared destination and requires an attended decision.",
+    ),
+    DeferredAction(
         "Retire a note a verification found wrong",
         "A verification may re-stamp a note it read in full, or apply a cited "
         "whole-note replacement, but retirement is a human decision: note_verification "

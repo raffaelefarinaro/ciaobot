@@ -23,7 +23,7 @@ from pathlib import Path
 import pytest
 
 from ciao import git_proc
-from ciao.git_proc import GIT_TIMEOUT_DETAIL, run_git, run_git_sync
+from ciao.git_proc import GIT_TIMEOUT_DETAIL, run_git, run_git_sync, run_git_sync_bounded
 from tests.test_os_support_processes import _beats_stopped, _leader
 
 def _open_fd_count() -> int:
@@ -52,6 +52,28 @@ def _alive(pid: int) -> bool:
     except PermissionError:
         return True
     return True
+
+
+def test_sync_bounded_git_enforces_timeout_while_stdout_is_open(tmp_path: Path) -> None:
+    env = _fake_git(tmp_path, "/bin/sleep 1; printf late")
+
+    result = run_git_sync_bounded(
+        tmp_path, "ignored", timeout=0.1, max_output=32, env=env
+    )
+
+    assert result.returncode == -1
+    assert result.truncated
+
+
+def test_sync_bounded_git_stops_at_output_limit(tmp_path: Path) -> None:
+    env = _fake_git(tmp_path, "while :; do printf 123456789; done")
+
+    result = run_git_sync_bounded(
+        tmp_path, "ignored", timeout=2, max_output=16, env=env
+    )
+
+    assert result.returncode == -1
+    assert result.truncated
 
 
 #: Wall-clock budget for the fake git shell to start its grandchild. Timeouts

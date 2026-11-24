@@ -524,6 +524,42 @@ def test_stale_stock_skill_copy_is_pruned(tmp_path: Path) -> None:
     assert result.stock_pruned == 1
 
 
+def test_upgrade_prunes_managed_support_and_preserves_workspace_override(tmp_path: Path) -> None:
+    workspace = tmp_path / "workspace"
+    old_managed = workspace / ".claude" / "skills" / "ciao-support"
+    _write(old_managed / "SKILL.md", "# Old packaged support\n")
+    (old_managed / sync_skills.STOCK_SKILL_MARKER).touch()
+    override = workspace / "skills" / "ciao-support" / "SKILL.md"
+    _write(override, "# Workspace-owned support\n")
+
+    first = sync_skills.sync_workspace_skills(workspace, refresh_upstream=False)
+    installed = workspace / ".claude" / "skills" / "ciao-support"
+    assert old_managed.is_symlink()
+    assert not (old_managed / sync_skills.STOCK_SKILL_MARKER).exists()
+    assert is_link(installed)
+    assert installed.resolve() == override.parent.resolve()
+    assert override.read_text(encoding="utf-8") == "# Workspace-owned support\n"
+    assert first.stock_pruned == 1
+    assert (workspace / ".claude" / "skills" / "ciao-capabilities" / "SKILL.md").is_file()
+
+    managed_skills = workspace / ".claude" / "skills"
+    before_second_sync = {
+        path.relative_to(managed_skills): path.read_bytes()
+        for path in managed_skills.rglob("*")
+        if path.is_file()
+    }
+    second = sync_skills.sync_workspace_skills(workspace, refresh_upstream=False)
+    after_second_sync = {
+        path.relative_to(managed_skills): path.read_bytes()
+        for path in managed_skills.rglob("*")
+        if path.is_file()
+    }
+    assert second.stock_pruned == 0
+    assert second.custom_installed == 1
+    assert after_second_sync == before_second_sync
+    assert override.read_text(encoding="utf-8") == "# Workspace-owned support\n"
+
+
 def test_sync_ignores_skills_lock(tmp_path: Path) -> None:
     # skills-lock.json is now inert; sync must not touch .agents/skills for lock entries
     workspace = tmp_path / "workspace"

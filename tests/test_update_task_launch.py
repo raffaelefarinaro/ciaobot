@@ -33,6 +33,7 @@ import threading
 from collections.abc import Iterator
 from datetime import datetime
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -1351,6 +1352,49 @@ def test_update_task_helper_survives_the_store_normalizer(packaged: Any) -> None
         "prompt_digest": update_task_launch.prompt_digest(PROMPT_R1),
     }
     assert chat_service._normalize_chat_helper(helper) == helper
+
+
+def test_task_chat_autoarchive_preserves_any_user_followup() -> None:
+    task = _task()
+    project = SimpleNamespace(workspace=WORKSPACE)
+    chat = SimpleNamespace(
+        archived=False,
+        user_turn_count=1,
+        user_turn_origin={"0": "update_task"},
+        helper=update_task_launch.update_task_helper(task, "digest"),
+        pending_question="",
+        pending_permission="",
+        turn_owner="",
+        last_error="",
+        last_response_status="ok",
+    )
+
+    assert update_task_launch.may_archive_completed_task_chat(
+        chat, project, task=task, workspace=WORKSPACE
+    )
+    chat.user_turn_count = 2
+    chat.user_turn_origin["1"] = "user"
+    assert not update_task_launch.may_archive_completed_task_chat(
+        chat, project, task=task, workspace=WORKSPACE
+    )
+
+
+def test_stale_completed_state_cannot_archive_chat_after_migration_undo() -> None:
+    from ciao import main
+
+    stale_state = SimpleNamespace(lifecycle="completed", chat_id="migration-helper")
+    clean = {
+        "failed": [],
+        "unresolved": [],
+        "automatic_rows": 0,
+        "suppressed_rows": [],
+    }
+    reverted = {**clean, "suppressed_rows": [{"text": "the user's restored row"}]}
+
+    assert main._may_archive_completed_learning_drain(clean, stale_state)
+    # evaluate() can fail to persist the reopened state. The independent queue
+    # inspection still has veto power over the stale completed state.
+    assert not main._may_archive_completed_learning_drain(reverted, stale_state)
 
 
 def test_real_app_registers_the_update_task_routes(tmp_path: Path) -> None:

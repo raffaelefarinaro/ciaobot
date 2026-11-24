@@ -804,6 +804,26 @@ final class WebKitDelegateTests: XCTestCase {
         XCTAssertEqual(server.requests(for: "/child").first?.cookie, "session=secret")
     }
 
+    func testWebKitSendsLoopbackCookieToSameHostOnAnotherPortAsSubresource() throws {
+        let server = try makeServer()
+        let otherPort = try makeServer()
+        let origin = Origin(server.origin)!
+        let (_, webView) = try makeHarness(origin: origin)
+        webView.load(URLRequest(url: origin.url.appendingPathComponent("cookie-page")))
+        try waitForReady(webView)
+
+        // Ports do not scope HTTP cookies. This real WebKit fetch models an
+        // untrusted local listener embedded as a subresource by the signed-in
+        // engine page; CORS can hide the response from script, but cannot undo
+        // the request or its Cookie header.
+        webView.evaluateJavaScript(
+            "fetch('http://127.0.0.1:\(otherPort.port)/cross-port', {mode: 'no-cors', credentials: 'include'})"
+        )
+        XCTAssertTrue(otherPort.waitForRequest("/cross-port", timeout: 8))
+        XCTAssertEqual(otherPort.requests(for: "/cross-port").first?.cookie, "session=secret")
+        XCTAssertTrue(server.hasRequest("/cookie-page"))
+    }
+
     func testActualWindowOpenPreservesOpenerAndProvidedStore() throws {
         let server = try makeServer()
         let origin = Origin(server.origin)!
@@ -936,6 +956,16 @@ final class WebKitDelegateTests: XCTestCase {
         coordinator.webView(webView, didFail: nil,
                             withError: NSError(domain: NSURLErrorDomain, code: NSURLErrorNotConnectedToInternet))
         XCTAssertEqual(failures.count, 1)
+    }
+
+    func testLateNavigationFailureAfterViewReleaseIsIgnored() throws {
+        let origin = try XCTUnwrap(Origin("https://example.com"))
+        var failures: [String] = []
+        let (coordinator, webView) = try makeHarness(origin: origin, onFailure: { failures.append($0) })
+        coordinator.prepareForRelease()
+        coordinator.webView(webView, didFail: nil,
+                            withError: NSError(domain: NSURLErrorDomain, code: NSURLErrorNotConnectedToInternet))
+        XCTAssertTrue(failures.isEmpty, "a released generation must not move the app back to an error screen")
     }
 
     func testGenuineNavigationErrorReportsFailure() throws {

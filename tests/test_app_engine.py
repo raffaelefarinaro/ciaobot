@@ -379,6 +379,224 @@ def test_write_ready_record_shape_and_permission(tmp_path: Path) -> None:
     }
 
 
+@pytest.mark.asyncio
+async def test_app_engine_serves_the_same_app_over_a_separate_pinned_tls_port(tmp_path: Path) -> None:
+    import asyncio
+    import hashlib
+    import ssl
+    from contextlib import asynccontextmanager
+
+    import uvicorn
+    import websockets
+    from starlette.applications import Starlette
+    from starlette.responses import PlainTextResponse
+    from starlette.routing import Route, WebSocketRoute
+
+    lifespan_events: list[str] = []
+
+    @asynccontextmanager
+    async def lifespan(app):
+        lifespan_events.append("startup")
+        yield
+        lifespan_events.append("shutdown")
+
+    async def echo_scheme(request):
+        return PlainTextResponse(request.url.scheme)
+
+    async def echo_socket(websocket):
+        await websocket.accept()
+        await websocket.send_text(websocket.url.scheme)
+        await websocket.close()
+
+    app = Starlette(
+        routes=[Route("/", echo_scheme), WebSocketRoute("/ws", echo_socket)],
+        lifespan=lifespan,
+    )
+    published = asyncio.get_running_loop().create_future()
+    server = app_engine.AppEngineServer(
+        uvicorn.Config(app, host="127.0.0.1", port=0, lifespan="on"),
+        app,
+        lambda endpoint: published.set_result(endpoint),
+    )
+
+    async def request(port: int, context: ssl.SSLContext | None = None):
+        reader, writer = await asyncio.open_connection("127.0.0.1", port, ssl=context)
+        try:
+            tls = writer.get_extra_info("ssl_object")
+            cert = tls.getpeercert(binary_form=True) if tls else None
+            writer.write(b"GET / HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n")
+            await writer.drain()
+            return await asyncio.wait_for(reader.read(), 3), cert
+        finally:
+            writer.close()
+            await writer.wait_closed()
+
+    task = asyncio.create_task(server.serve())
+    try:
+        endpoint = await asyncio.wait_for(published, 3)
+        plain_port = server.servers[0].sockets[0].getsockname()[1]
+        assert endpoint.port != plain_port
+        assert app.state.app_browser_http_origin == f"http://127.0.0.1:{plain_port}"
+        context = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+        context.check_hostname = False
+        context.verify_mode = ssl.CERT_NONE
+        response, cert = await request(endpoint.port, context)
+        assert cert
+        assert endpoint.cert_sha256 == hashlib.sha256(cert).hexdigest()
+        assert response.endswith(b"https")
+        assert (
+            f"content-security-policy: connect-src https://127.0.0.1:{endpoint.port} "
+            f"wss://127.0.0.1:{endpoint.port}"
+        ).encode() in response
+        plain_response, _ = await request(plain_port)
+        assert plain_response.endswith(b"http")
+        assert b"content-security-policy:" not in plain_response
+        async with websockets.connect(
+            f"wss://127.0.0.1:{endpoint.port}/ws", ssl=context, proxy=None, open_timeout=3,
+        ) as websocket:
+            assert await asyncio.wait_for(websocket.recv(), 3) == "wss"
+
+        target = app_engine.write_ready_record(
+            pid=os.getpid(), port=plain_port, startup_id="id", workspace=tmp_path,
+            bootstrap=False, tls_port=endpoint.port,
+        )
+        record = app_engine.read_private_json(target, label="TLS ready fixture")
+        assert record is not None
+        assert record["port"] == plain_port
+        assert record["tls_port"] == endpoint.port
+        assert "tls_cert_sha256" not in record
+        assert app_engine.remembered_tls_port() == endpoint.port
+    finally:
+        server.should_exit = True
+        await asyncio.wait_for(task, 3)
+
+    assert lifespan_events == ["startup", "shutdown"]
+
+
+@pytest.mark.asyncio
+async def test_app_engine_preserves_lifespan_startup_failure(caplog: pytest.LogCaptureFixture) -> None:
+    from contextlib import asynccontextmanager
+
+    import uvicorn
+    from starlette.applications import Starlette
+    from uvicorn.server import STARTUP_FAILURE
+
+    @asynccontextmanager
+    async def lifespan(_app):
+        raise RuntimeError("app lifespan startup failed")
+        yield
+
+    app = Starlette(lifespan=lifespan)
+    published = []
+    server = app_engine.AppEngineServer(
+        uvicorn.Config(app, host="127.0.0.1", port=0, lifespan="on", log_config=None),
+        app,
+        published.append,
+    )
+
+    with pytest.raises(SystemExit) as failure:
+        await server.serve()
+
+    assert failure.value.code == STARTUP_FAILURE
+    assert "app lifespan startup failed" in caplog.text
+    assert not server.started
+    assert published == []
+
+
+@pytest.mark.parametrize(
+    ("bound_address", "expected"),
+    [
+        (("0.0.0.0", 8443), "http://127.0.0.1:8443"),
+        (("127.0.0.1", 8443), "http://127.0.0.1:8443"),
+        (("::", 8443, 0, 0), "http://[::1]:8443"),
+        (("::1", 8443, 0, 0), "http://[::1]:8443"),
+        (("192.0.2.1", 8443), None),
+        (("2001:db8::1", 8443, 0, 0), None),
+    ],
+)
+def test_browser_sign_in_uses_only_bound_loopback_http_sockets(bound_address, expected) -> None:
+    listener = SimpleNamespace(sockets=[SimpleNamespace(getsockname=lambda: bound_address)])
+    assert app_engine._loopback_http_origin([listener]) == expected
+
+
+@pytest.fixture
+def ready_pipe():
+    reader, writer = os.pipe()
+    try:
+        yield reader, writer
+    finally:
+        os.close(reader)
+        os.close(writer)
+
+
+def test_ready_pipe_publishes_a_frame_per_generation(ready_pipe) -> None:
+    reader, writer = ready_pipe
+    app_engine.protect_ready_fd(writer)
+    with pytest.raises(ValueError, match="pipe writer"):
+        app_engine.protect_ready_fd(reader)
+    app_engine.publish_tls_endpoint(writer, "first", app_engine.LocalTLSEndpoint(8444, "a" * 64))
+    app_engine.publish_tls_endpoint(writer, "second", app_engine.LocalTLSEndpoint(8445, "b" * 64))
+
+    frames = [json.loads(line) for line in os.read(reader, 1024).splitlines()]
+    assert frames == [
+        {"pid": os.getpid(), "startup_id": "first", "tls_port": 8444, "tls_cert_sha256": "a" * 64},
+        {"pid": os.getpid(), "startup_id": "second", "tls_port": 8445, "tls_cert_sha256": "b" * 64},
+    ]
+
+
+def test_ready_fd_is_inherited_only_on_engine_exec(ready_pipe) -> None:
+    _, writer = ready_pipe
+    os.set_inheritable(writer, True)
+    app_engine.protect_ready_fd(writer)
+    assert not os.get_inheritable(writer)
+    normal_child = subprocess.run(
+        [sys.executable, "-c", f"import os; os.fstat({writer})"],
+        capture_output=True, close_fds=False,
+    )
+    assert normal_child.returncode != 0
+
+    def failed_exec(executable, argv):
+        assert os.get_inheritable(writer)
+        assert executable == sys.executable
+        assert argv == [sys.executable]
+        raise OSError("exec failed")
+
+    with pytest.raises(OSError, match="exec failed"):
+        app_engine.exec_with_ready_fd(writer, sys.executable, [sys.executable], failed_exec)
+    assert not os.get_inheritable(writer)
+
+
+@pytest.mark.asyncio
+async def test_app_engine_keeps_the_saved_tls_port_on_bind_failure() -> None:
+    import asyncio
+    import errno
+    import socket
+
+    import uvicorn
+    from starlette.applications import Starlette
+
+    with socket.socket() as occupied:
+        occupied.bind(("127.0.0.1", 0))
+        occupied.listen()
+        port = occupied.getsockname()[1]
+        app = Starlette()
+        published = []
+        server = app_engine.AppEngineServer(
+            uvicorn.Config(app, host="127.0.0.1", port=0, lifespan="on"),
+            app,
+            published.append,
+            preferred_port=port,
+        )
+
+        with pytest.raises(app_engine.LocalTLSPortInUse, match=f"HTTPS port {port} is in use") as failure:
+            await asyncio.wait_for(server.serve(), 3)
+
+        assert isinstance(failure.value.__cause__, OSError)
+        assert failure.value.__cause__.errno == errno.EADDRINUSE
+        assert not published
+        assert all(not listener.is_serving() for listener in server.servers)
+
+
 # --- the parent watchdog -------------------------------------------------------
 
 
@@ -537,7 +755,7 @@ def test_app_engine_refused_outside_the_bundle(
 
 
 def test_app_engine_dispatch_carries_the_app_engine_kwarg(
-    monkeypatch: pytest.MonkeyPatch,
+    monkeypatch: pytest.MonkeyPatch, ready_pipe,
 ) -> None:
     from ciao import cli, package_version
 
@@ -547,9 +765,13 @@ def test_app_engine_dispatch_carries_the_app_engine_kwarg(
         cli, "_run_server", lambda **kwargs: dispatched.append(kwargs) or 0
     )
 
-    assert cli.main(["run", "--app-engine"]) == 0
+    _, writer = ready_pipe
+    assert cli.main(["run", "--app-engine", "--app-engine-ready-fd", str(writer)]) == 0
 
-    assert dispatched == [{"supervised": False, "app_engine": True}]
+    assert dispatched == [{
+        "supervised": False, "app_engine": True, "app_engine_port": None,
+        "app_engine_ready_fd": writer,
+    }]
 
 
 # --- setup under the app ---------------------------------------------------------
@@ -696,16 +918,20 @@ def test_port_flag_is_hidden_and_parses() -> None:
     assert "--port" not in help_text
 
 
-def test_port_dispatch_carries_the_port(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_port_dispatch_carries_the_port(monkeypatch: pytest.MonkeyPatch, ready_pipe) -> None:
     from ciao import cli, package_version
 
     monkeypatch.setattr(package_version, "running_from_app_bundle", lambda: True)
     dispatched: list[dict[str, object]] = []
     monkeypatch.setattr(cli, "_run_server", lambda **kwargs: dispatched.append(kwargs) or 0)
 
-    assert cli.main(["run", "--app-engine", "--port", "9100"]) == 0
+    _, writer = ready_pipe
+    assert cli.main(["run", "--app-engine", "--port", "9100", "--app-engine-ready-fd", str(writer)]) == 0
 
-    assert dispatched == [{"supervised": False, "app_engine": True, "app_engine_port": 9100}]
+    assert dispatched == [{
+        "supervised": False, "app_engine": True, "app_engine_port": 9100,
+        "app_engine_ready_fd": writer,
+    }]
 
 
 def test_port_is_refused_without_app_engine(
@@ -750,8 +976,8 @@ def test_run_server_hands_the_port_to_the_server_main(monkeypatch: pytest.Monkey
     cli._run_server(app_engine=True)
 
     assert seen == [
-        {"supervised": False, "app_engine": True, "app_engine_port": 9100},
-        {"supervised": False, "app_engine": True},
+        {"supervised": False, "app_engine": True, "app_engine_port": 9100, "app_engine_ready_fd": None},
+        {"supervised": False, "app_engine": True, "app_engine_ready_fd": None},
     ]
 
 
