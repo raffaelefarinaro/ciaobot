@@ -159,7 +159,7 @@ enum EngineLifecycle {
 /// (`ciao service` reads it the same way). nil on any failure — the dialog
 /// then simply says nothing about chats.
 protocol RestartBlockersFetching: AnyObject {
-    func activeChats(of origin: Origin, completion: @escaping (Int?) -> Void)
+    func activeChats(of identity: LocalEngineTLSIdentity, completion: @escaping (Int?) -> Void)
 }
 
 /// Reads the blockers count with a one-second bound. The count is display
@@ -173,6 +173,7 @@ final class RestartBlockersProbe: NSObject, URLSessionDataDelegate, RestartBlock
 
     private var body = Data()
     private var completion: ((Int?) -> Void)?
+    private var identity: LocalEngineTLSIdentity?
 
     /// The count in a blockers answer, or nil for anything else.
     static func activeChats(status: Int, data: Data) -> Int? {
@@ -182,7 +183,8 @@ final class RestartBlockersProbe: NSObject, URLSessionDataDelegate, RestartBlock
         return blockers.count
     }
 
-    func activeChats(of origin: Origin, completion: @escaping (Int?) -> Void) {
+    func activeChats(of identity: LocalEngineTLSIdentity, completion: @escaping (Int?) -> Void) {
+        guard let origin = identity.origin else { completion(nil); return }
         let configuration = URLSessionConfiguration.ephemeral
         configuration.httpShouldSetCookies = false
         configuration.httpCookieAcceptPolicy = .never
@@ -198,6 +200,7 @@ final class RestartBlockersProbe: NSObject, URLSessionDataDelegate, RestartBlock
         // prefix this one's.
         self.body = Data()
         self.completion = completion
+        self.identity = identity
         var request = URLRequest(url: origin.url.appendingPathComponent("api/admin/restart-blockers"))
         request.httpShouldHandleCookies = false
         request.cachePolicy = .reloadIgnoringLocalCacheData
@@ -209,6 +212,15 @@ final class RestartBlockersProbe: NSObject, URLSessionDataDelegate, RestartBlock
     func urlSession(_ session: URLSession, task: URLSessionTask, willPerformHTTPRedirection response: HTTPURLResponse,
                     newRequest request: URLRequest, completionHandler: @escaping (URLRequest?) -> Void) {
         completionHandler(nil)
+    }
+
+    func urlSession(_ session: URLSession, task: URLSessionTask, didReceive challenge: URLAuthenticationChallenge,
+                    completionHandler: @escaping (URLSession.AuthChallengeDisposition, URLCredential?) -> Void) {
+        guard let identity, identity.accepts(challenge), let trust = challenge.protectionSpace.serverTrust else {
+            completionHandler(.cancelAuthenticationChallenge, nil)
+            return
+        }
+        completionHandler(.useCredential, URLCredential(trust: trust))
     }
 
     func urlSession(_ session: URLSession, dataTask: URLSessionDataTask, didReceive data: Data) {
@@ -224,6 +236,7 @@ final class RestartBlockersProbe: NSObject, URLSessionDataDelegate, RestartBlock
         let found = error == nil ? Self.activeChats(status: status, data: body) : nil
         let callback = completion
         completion = nil
+        identity = nil
         session.finishTasksAndInvalidate()
         DispatchQueue.main.async { callback?(found) }
     }

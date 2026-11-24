@@ -344,7 +344,7 @@ def fetched_at(path: str) -> str | None:
     return datetime.fromtimestamp(mtime, UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
-def _path_problem(config: Any, path: str) -> str:
+def path_problem(config: Any, path: str) -> str:
     """Why the folder cannot be used right now, or "" (no git call).
 
     ``path`` is the stored absolute path, not resolved, so a symlink swapped in
@@ -382,7 +382,7 @@ def brain_state(link: SharedBrainLink, config: Any) -> dict[str, Any]:
         "fetched_at": fetched_at(link.path),
         "last_update": _last_update.get(_lock_key(link.path)),
     }
-    problem = _path_problem(config, link.path)
+    problem = path_problem(config, link.path)
     if problem:
         state["problem"] = problem
         state["missing"] = problem == "missing"
@@ -442,7 +442,7 @@ async def update_brain(link: SharedBrainLink, config: Any) -> dict[str, Any]:
 async def _update_unlocked(config: Any, folder: Path, identity: str) -> dict[str, Any]:
     if not folder.is_dir():
         return _result("failed", "missing")
-    problem = _path_problem(config, str(folder))
+    problem = path_problem(config, str(folder))
     if problem:
         return _result("failed", problem)
     code, listing, _ = await _git_async(folder, "config", "--list", "--show-scope")

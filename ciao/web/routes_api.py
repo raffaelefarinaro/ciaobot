@@ -7942,7 +7942,10 @@ async def list_proposals(request: Request) -> JSONResponse:
     # Off the event loop: the scan is blocking file I/O.
     rows, _by_id = await asyncio.to_thread(proposal_service._scan_proposal_rows, config)
     legacy_learning_queues: dict[str, dict[str, Any]] = {}
-    from ciao.learnings_queue_drain import inspect as inspect_learning_queue
+    from ciao.learnings_queue_drain import (
+        inspect as inspect_learning_queue,
+        pending_rows as inspect_pending_rows,
+    )
 
     for workspace in config.workspace_names():
         try:
@@ -7952,17 +7955,35 @@ async def list_proposals(request: Request) -> JSONResponse:
                 workspace=workspace,
                 runtime_root=Path(config.state_path).parent,
             )
+            pending = await asyncio.to_thread(
+                inspect_pending_rows,
+                Path(config.workspace_vault_root(workspace)),
+                workspace=workspace,
+                runtime_root=Path(config.state_path).parent,
+            )
+            pending_items = pending.get("rows", [])
+            suppressed_items = pending.get("suppressed_rows", [])
             status = (
-                "unknown" if state["failed"]
-                else "blocked" if state["unresolved"]
-                else "pending" if state["rows"]
+                "blocked" if state["unresolved"]
+                else "unknown" if state["failed"] or pending.get("failed")
+                else "pending" if pending_items
+                else "completed" if state["applied_receipts"]
                 else "clear"
             )
-            if status != "clear":
-                legacy_learning_queues[workspace] = {
+            # Use the identity-bearing queue snapshot for row status. The
+            # separate inspection can race with a newly added or removed row.
+            # Completed migrations disappear unless the queue snapshot still
+            # has a deliberately restored row to handle.
+            if status in {"pending", "blocked", "unknown"} or suppressed_items:
+                detail: dict[str, Any] = {
                     "state": status,
-                    "rows": len(state["rows"]),
+                    "rows": len(pending_items) + len(suppressed_items),
                 }
+                if pending_items:
+                    detail["pending_rows"] = pending_items
+                if suppressed_items:
+                    detail["suppressed_rows"] = suppressed_items
+                legacy_learning_queues[workspace] = detail
         except Exception:
             # A failed safety scan is itself visible; it must never look clean.
             legacy_learning_queues[workspace] = {
@@ -7970,6 +7991,52 @@ async def list_proposals(request: Request) -> JSONResponse:
                 "rows": 0,
             }
     return JSONResponse({"rows": rows, "legacy_learning_queues": legacy_learning_queues})
+
+
+async def dismiss_legacy_learning(request: Request) -> JSONResponse:
+    """Remove one exact legacy queue row from the exact queue revision."""
+    try:
+        body = await request.json()
+    except (json.JSONDecodeError, ValueError):
+        body = None
+    if not isinstance(body, dict):
+        return JSONResponse({"error": "a JSON object is required"}, status_code=400)
+    workspace = body.get("workspace")
+    row_id = body.get("row_id")
+    revision = body.get("expected_revision")
+    if (
+        not isinstance(workspace, str)
+        or not workspace
+        or request.app.state.config.workspace(workspace) is None
+        or not isinstance(row_id, str)
+        or not row_id
+        or not isinstance(revision, str)
+        or not revision
+    ):
+        return JSONResponse({"error": "workspace, row_id and expected_revision are required"}, status_code=400)
+    from ciao import learnings_queue_drain
+
+    config = request.app.state.config
+    vault = Path(config.workspace_vault_root(workspace))
+    result = await asyncio.to_thread(
+        learnings_queue_drain.dismiss_pending_row,
+        vault,
+        workspace=workspace,
+        runtime_root=Path(config.state_path).parent,
+        row_id=row_id,
+        expected_revision=revision,
+    )
+    changed = bool(result.get("dismissed"))
+    if result.get("failed"):
+        return JSONResponse({"error": result["failed"][0]}, status_code=409)
+    if result.get("conflict"):
+        return JSONResponse({"error": "This row changed. Refresh the list and try again."}, status_code=409)
+    if not changed:
+        return JSONResponse(
+            {"error": str(result.get("reason") or "This row is no longer queued. Refresh the list and try again.")},
+            status_code=409,
+        )
+    return JSONResponse({"ok": True, "row_id": row_id})
 
 
 _HISTORY_DEFAULT_LIMIT = 200

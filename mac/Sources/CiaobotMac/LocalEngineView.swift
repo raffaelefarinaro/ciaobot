@@ -16,6 +16,9 @@ struct LocalEngineView: View {
     /// confirmation (S6) and then stops the engine, saves the external choice
     /// and shows the ordinary connection screen.
     let onConnectExternal: () -> Void
+    /// Retry releasing the local WebKit view before clearing its saved store.
+    var onForgetSavedSignIn: (() -> Void)? = nil
+    var forgetMessage: String? = nil
     /// Opens the engine log. The default opens it with the system handler.
     var openLog: (URL) -> Void = { NSWorkspace.shared.open($0) }
 
@@ -54,6 +57,23 @@ struct LocalEngineView: View {
                     }
                 }
             }
+            if let onForgetSavedSignIn {
+                VStack(alignment: .leading, spacing: 8) {
+                    if let forgetMessage {
+                        Text(forgetMessage)
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                    Button("Retry Forget saved sign-in", action: onForgetSavedSignIn)
+                        .accessibilityHint("Retries removing the saved sign-in after the session view closes.")
+                }
+            } else if let forgetMessage {
+                Text(forgetMessage)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
         }
         .padding(32)
         .frame(maxWidth: 520)
@@ -83,8 +103,8 @@ struct EngineRunningWatcher: View {
         Color.clear
             .frame(width: 0, height: 0)
             .accessibilityHidden(true)
-            .onChange(of: runningOrigin) { origin in
-                guard let origin else { return }
+            .onChange(of: supervisor.state) { _ in
+                guard let origin = runningOrigin else { return }
                 onRunning(origin)
             }
             .onChange(of: isDown) { onEngineDown($0) }

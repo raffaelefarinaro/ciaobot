@@ -424,6 +424,13 @@ final class TestWindowReporter {
 #endif
 
 @MainActor
+final class ConnectionViewTestHooks {
+    var connectRunningEngine: ((Origin, LocalEngineTLSIdentity) -> Void)?
+    var connectToAnotherServer: (() -> Void)?
+    var localConnectionPhase: (() -> LocalConnectionModel.Phase)?
+}
+
+@MainActor
 struct ConnectionView: View {
     private static let defaultAddress = "http://127.0.0.1:8443"
 
@@ -431,11 +438,13 @@ struct ConnectionView: View {
     @State private var origin: Origin?
     @State private var storage: SessionStorage = .ephemeral
     @State private var dataStore: WKWebsiteDataStore?
+    @State private var activeLocalTLSIdentity: LocalEngineTLSIdentity?
     @State private var storageNotice: String?
     @State private var keepSignedInChoice: Bool?
     @State private var tasks = ConnectionTaskGate()
     @State private var error: String?
     @State private var forgetMessage: String?
+    @State private var canRetryLocalForget = false
     @State private var didAutoConnect = false
     @State private var viewTracker = SessionViewTracker()
     /// The engine mode this connection session runs in. Initialized from the
@@ -487,6 +496,7 @@ struct ConnectionView: View {
     /// never reads the saved origin: the operator's real defaults stay out of
     /// the fixture run.
     private let isTestLaunch: Bool
+    private let testHooks: ConnectionViewTestHooks?
     private var checking: Bool { tasks.task == .checking }
     private var forgetting: Bool { tasks.task == .forgetting }
     /// Connection controls are disabled while a connection task runs.
@@ -509,10 +519,12 @@ struct ConnectionView: View {
         modeStore: EngineModeStoring? = nil,
         modeSwitchDialog: (@MainActor (EngineLifecycle.ModeSwitchDialog) -> Bool)? = nil,
         onModeChange: (@MainActor (EngineMode) -> Void)? = nil,
+        testHooks: ConnectionViewTestHooks? = nil,
         hostIsArm64: Bool = EngineSupervisor.hostIsArm64
     ) {
         self.onModeChange = onModeChange
         self.hostIsArm64 = hostIsArm64
+        self.testHooks = testHooks
         self.probe = probe
         self.signIn = signIn ?? .live
         self.session = session
@@ -575,6 +587,8 @@ struct ConnectionView: View {
     }
 
     var body: some View {
+        let expectedEngineMode = engineMode
+        let expectedLocalTLSIdentity = activeLocalTLSIdentity
         Group {
             if let local = localEngineScreen {
                 VStack(alignment: .leading, spacing: 0) {
@@ -591,7 +605,9 @@ struct ConnectionView: View {
                         connection: localPhase,
                         canRetry: localModel.canRetry,
                         onTryAgain: { self.tryAgainLocal() },
-                        onConnectExternal: { self.confirmAndConnectToAnotherServer() }
+                        onConnectExternal: { self.confirmAndConnectToAnotherServer() },
+                        onForgetSavedSignIn: canRetryLocalForget ? { self.forgetLocalSavedSignIn() } : nil,
+                        forgetMessage: forgetMessage
                     )
                 }
             } else if let origin {
@@ -614,11 +630,36 @@ struct ConnectionView: View {
                             .padding(.horizontal, 12)
                             .padding(.vertical, 6)
                     }
+                    if engineMode == .local, signIn.hasSavedSignIn(for: origin, registryKey: .localEngine) {
+                        HStack {
+                            Spacer()
+                            Button(forgetting ? "Forgetting…" : "Forget saved sign-in") {
+                                forgetLocalSavedSignIn()
+                            }
+                            .disabled(busy)
+                            .accessibilityHint("Removes the saved sign-in for Ciaobot running on this Mac.")
+                        }
+                    }
+                    if let forgetMessage {
+                        Text(forgetMessage)
+                            .font(.caption).foregroundStyle(.secondary)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .padding(.horizontal, 12).padding(.vertical, 6)
+                    }
                     WebWindow(
                         origin: origin,
+                        tlsIdentity: engineMode == .local ? activeLocalTLSIdentity : nil,
                         storage: storage,
                         websiteDataStore: dataStore,
                         onFailure: { message in
+                            guard LocalEngineTLSIdentity.acceptsConnectionCallback(
+                                expectedMode: expectedEngineMode,
+                                currentMode: self.engineMode,
+                                expectedOrigin: origin,
+                                currentOrigin: self.origin,
+                                expectedIdentity: expectedLocalTLSIdentity,
+                                currentIdentity: self.activeLocalTLSIdentity
+                            ) else { return }
                             if self.engineMode == .local {
                                 // A failed load is shown on the status screen
                                 // with its own actions; it never reconnects
@@ -635,10 +676,21 @@ struct ConnectionView: View {
                         },
                         viewTracker: viewTracker,
                         onWebViewReady: { view in
+                            guard LocalEngineTLSIdentity.acceptsConnectionCallback(
+                                expectedMode: expectedEngineMode,
+                                currentMode: self.engineMode,
+                                expectedOrigin: origin,
+                                currentOrigin: self.origin,
+                                expectedIdentity: expectedLocalTLSIdentity,
+                                currentIdentity: self.activeLocalTLSIdentity
+                            ) else { return }
                             self.session?.attachWebView(view, for: origin)
                         },
                         appSettings: appSettings
                     )
+                    .id(engineMode == .local
+                        ? activeLocalTLSIdentity.map { "local-\($0.pid)-\($0.startupID)-\($0.sha256)" } ?? "local-unpinned"
+                        : origin.canonicalKey)
                 }
             } else {
                 VStack(alignment: .leading, spacing: 16) {
@@ -682,7 +734,7 @@ struct ConnectionView: View {
                     Text(persistenceExplanation)
                         .font(.caption).foregroundStyle(.secondary)
                     if let error { Text(error).foregroundStyle(.red) }
-                    if let candidate = addressOrigin, signIn.hasSavedSignIn(for: candidate) {
+                    if let candidate = addressOrigin, signIn.hasSavedSignIn(for: candidate, registryKey: sessionRegistryKey) {
                         Button(forgetting ? "Forgetting…" : "Forget saved sign-in") { forget() }
                             .disabled(busy)
                     }
@@ -706,6 +758,9 @@ struct ConnectionView: View {
         .background(alignment: .center) { engineRunningWatcher }
         .frame(minWidth: 480, minHeight: 320)
         .onAppear {
+            testHooks?.connectRunningEngine = { self.connectRunningEngine($0, tlsIdentity: $1) }
+            testHooks?.connectToAnotherServer = { self.connectToAnotherServer() }
+            testHooks?.localConnectionPhase = { self.localConnectionPhase }
             launchOnAppear()
             // A tray request posted while this window had no view waits in the
             // queue; the view takes it when it appears.
@@ -787,7 +842,7 @@ struct ConnectionView: View {
         if engineMode == .local, let supervisor {
             EngineRunningWatcher(
                 supervisor: supervisor,
-                onRunning: connectRunningEngine,
+                onRunning: { self.connectRunningEngine($0) },
                 onEngineDown: { self.engineDown = $0 }
             )
         }
@@ -795,17 +850,25 @@ struct ConnectionView: View {
 
     private var addressOrigin: Origin? { Origin(address) }
 
+    /// Local app sign-in belongs to the app-owned engine across private-port
+    /// rotations, in a registry namespace user-entered origins cannot address.
+    private var sessionRegistryKey: SessionStoreKey? {
+        engineMode == .local ? .localEngine : nil
+    }
+
     /// Persistence starts on where it can work. `canPersistSignIn` includes a
     /// usable registry, so an HTTPS address on a Mac with a broken mapping
     /// file stays off and the toggle stays disabled. An explicit click is
     /// stored separately and wins for this address only.
-    private var keepSignedIn: Bool {
+    private func keepSignedIn(for origin: Origin?) -> Bool {
         PersistentSignInDefault.isEnabled(
-            origin: addressOrigin,
+            origin: origin,
             persistentAvailable: signIn.canPersistSignIn,
             explicitChoice: keepSignedInChoice
         )
     }
+
+    private var keepSignedIn: Bool { keepSignedIn(for: addressOrigin) }
 
     private var persistentOptionAvailable: Bool {
         guard let candidate = addressOrigin else { return false }
@@ -833,7 +896,8 @@ struct ConnectionView: View {
                 self.forgetMessage = "The session view has not finished closing. Try Forget again in a moment."
                 return
             }
-            self.signIn.forget(origin: candidate, releaseWebViews: { $0() }) { result in
+            self.signIn.forget(origin: candidate, registryKey: sessionRegistryKey,
+                               releaseWebViews: { $0() }) { result in
                 self.tasks.endForget()
                 switch result {
                 case .success:
@@ -848,6 +912,57 @@ struct ConnectionView: View {
                 case .failure(.mappingNotSaved):
                     self.forgetMessage = "WebKit reported the saved sign-in store removed, but its record could not be updated. This session stays in memory; try again or restart Ciaobot to finish."
                 }
+            }
+        }
+    }
+
+    /// Erases the local engine store from the connected app view. WebKit must
+    /// release the store before removal, so the session is briefly torn down
+    /// and re-established after the bounded forget operation completes.
+    func forgetLocalSavedSignIn() {
+        guard engineMode == .local, let candidate = origin ?? activeLocalTLSIdentity?.origin,
+              let identity = activeLocalTLSIdentity, identity.origin == candidate,
+              tasks.beginForget() else { return }
+        canRetryLocalForget = false
+        forgetMessage = nil
+        localModel.reset()
+        dropSession()
+        LocalSignInForgetFlow.perform(
+            origin: candidate,
+            releaseView: { completion in self.viewTracker.whenReleased(timeout: 2, completion: completion) },
+            eraseStore: { origin, key, completion in
+                self.signIn.forget(origin: origin, registryKey: key,
+                                   releaseWebViews: { $0() }, completion: completion)
+            },
+            currentIdentity: { self.supervisor?.runningTLSIdentity },
+            reconnect: { currentIdentity in
+                guard self.engineMode == .local, let currentOrigin = currentIdentity.origin else { return }
+                self.tasks.endForget()
+                self.connectRunningEngine(currentOrigin, tlsIdentity: currentIdentity)
+            }
+        ) { result in
+            self.tasks.endForget()
+            guard let result else {
+                self.canRetryLocalForget = true
+                self.forgetMessage = "The session view has not finished closing. Try Forget again in a moment."
+                return
+            }
+            switch result {
+            case .success:
+                self.canRetryLocalForget = false
+                self.forgetMessage = "Saved sign-in removed for Ciaobot on this Mac."
+                case .failure(.registryUnavailable):
+                    self.canRetryLocalForget = true
+                self.forgetMessage = "Could not use the saved sign-in list. Persistent sign-in is disabled."
+                case .failure(.registryChangedElsewhere):
+                    self.canRetryLocalForget = true
+                self.forgetMessage = "Another copy of the app changed the saved sign-in list. Restart Ciaobot to reload it before forgetting."
+                case .failure(.storeStillPresent):
+                    self.canRetryLocalForget = true
+                self.forgetMessage = "Could not remove the saved sign-in. Nothing was forgotten; try again."
+                case .failure(.mappingNotSaved):
+                    self.canRetryLocalForget = true
+                self.forgetMessage = "WebKit reported the saved sign-in store removed, but its record could not be updated. This session stays in memory; try again or restart Ciaobot to finish."
             }
         }
     }
@@ -891,17 +1006,21 @@ struct ConnectionView: View {
         // cannot create a persistent mapping or empty store. If the
         // user opted in but cannot get a persistent store, say so
         // instead of silently using memory only.
-        storage = signIn.storage(for: candidate, keepSignedIn: keepSignedIn)
-        storageNotice = signIn.fallback(for: candidate, keepSignedIn: keepSignedIn)?.userMessage
+        let persistSession = keepSignedIn(for: candidate)
+        let resolvedStorage = signIn.storage(for: candidate, keepSignedIn: persistSession, registryKey: sessionRegistryKey)
+        storage = resolvedStorage
+        storageNotice = signIn.fallback(for: candidate, keepSignedIn: persistSession,
+                                        registryKey: sessionRegistryKey)?.userMessage
         // Create the one store this connection uses. The web view and
         // the menu-bar chat feed share it; no second nonpersistent
         // store and never the default shared store.
-        let store = WebKitSessionStores.make(storage)
+        let store = WebKitSessionStores.make(resolvedStorage)
         dataStore = store
         origin = candidate
         // The probe verified the protocol shape, not an identity or a
         // signed-in session. The menu bar says only this much.
-        session?.reportConnected(candidate, dataStore: store)
+        session?.reportConnected(candidate, dataStore: store,
+                                 tlsIdentity: engineMode == .local ? activeLocalTLSIdentity : nil)
     }
 
     /// Tears down the live session the way Change Server does.
@@ -1097,21 +1216,37 @@ struct ConnectionView: View {
     /// host or the last server. The decisions (connect once per origin,
     /// replace the session on a changed origin, no retry after a failure) are
     /// `LocalConnectionModel`'s; this only executes them.
-    func connectRunningEngine(_ candidate: Origin) {
-        apply(localModel.engineRunning(candidate))
+    func connectRunningEngine(_ candidate: Origin, tlsIdentity: LocalEngineTLSIdentity? = nil) {
+        guard !forgetting else { return }
+        guard let identity = tlsIdentity ?? supervisor?.runningTLSIdentity,
+              identity.origin == candidate else { return }
+        if activeLocalTLSIdentity != identity {
+            localModel.reset()
+            dropSession()
+            activeLocalTLSIdentity = identity
+        }
+        apply(localModel.engineRunning(candidate), verifiedTLSIdentity: identity)
     }
 
     /// The decision model's current phase. Internal for tests.
     var localConnectionPhase: LocalConnectionModel.Phase { localModel.phase }
+    var currentSessionStorageForTesting: SessionStorage { storage }
+    var persistenceAvailableForTesting: Bool { signIn.canPersistSignIn }
 
-    private func apply(_ effects: [LocalConnectionModel.Effect]) {
+    private func apply(_ effects: [LocalConnectionModel.Effect],
+                       verifiedTLSIdentity: LocalEngineTLSIdentity? = nil) {
         for effect in effects {
             switch effect {
             case .dropSession:
                 dropSession()
             case .probe(let target):
-                probe.check(target) { ok in
-                    self.apply(self.localModel.probeFinished(target, ok: ok))
+                if engineMode == .local,
+                   (verifiedTLSIdentity ?? activeLocalTLSIdentity ?? supervisor?.runningTLSIdentity)?.origin == target {
+                    self.apply(localModel.probeFinished(target, ok: true), verifiedTLSIdentity: verifiedTLSIdentity)
+                } else {
+                    probe.check(target) { ok in
+                        self.apply(self.localModel.probeFinished(target, ok: ok))
+                    }
                 }
             case .establish(let target):
                 establishSession(target)
@@ -1139,7 +1274,7 @@ struct ConnectionView: View {
     /// running session exactly as they were. External mode never shows this
     /// dialog, so its surfaces keep their shipped behaviour.
     func confirmAndConnectToAnotherServer() {
-        guard engineMode == .local else { return }
+        guard engineMode == .local, !forgetting else { return }
         guard presentModeSwitchDialog(EngineLifecycle.modeSwitchDialog) else { return }
         connectToAnotherServer()
     }
@@ -1148,6 +1283,7 @@ struct ConnectionView: View {
     /// confirmation): stop the engine, save the external choice, and show the
     /// ordinary connection screen. Internal for tests.
     func connectToAnotherServer() {
+        guard !forgetting else { return }
         if let supervisor { supervisor.stop {} }
         modeStore?.mode = .external
         modeStore?.rolledBackTakeovers = 0
