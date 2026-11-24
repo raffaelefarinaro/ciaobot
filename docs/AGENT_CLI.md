@@ -295,7 +295,7 @@ review); `note`, `file`, `chat`, `project` (workspace operations); `task`;
 `ciao <noun> --help` gives group syntax. Agent-surface commands use JSON envelopes; the top-level review-queue
 commands have their own documented output conventions.
 
-Durable writes must load `ciao-memory` for destinations, frontmatter,
+Durable writes must read the engine-packaged guide path named in the Ciaobot system instructions for destinations, frontmatter,
 verification stamps and consolidation. Integration and provider mechanics stay
 in their relevant skills or CLI help. The core requires the managed interface
 and forbids routing around its checks or refusals; it does not blacklist HTTP
