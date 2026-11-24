@@ -151,7 +151,7 @@ def shared_brain_line(name: str, path: str, *, missing: bool = False, updated: s
     if shown is None:
         return f"{head} unavailable"
     if missing:
-        return f"{head} unavailable path={shown}"
+        return f"{head} unavailable"
     if updated:
         return f"{head} updated={_field(updated, limit=10)} path={shown}"
     return f"{head} path={shown}"

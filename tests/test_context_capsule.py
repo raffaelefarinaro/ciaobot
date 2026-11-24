@@ -522,7 +522,8 @@ def test_shared_brain_block_for_a_missing_folder_has_no_read_recipe() -> None:
     block = render_shared_brain_block(
         [("gone", "/brains/gone", True, "2026-11-20"), ("acme", "/brains/acme", False, "2026-11-19")]
     )
-    assert "name=gone unavailable path=/brains/gone" in block
+    assert "name=gone unavailable" in block
+    assert "name=gone unavailable path=/brains/gone" not in block
     assert "name=gone updated" not in block
     assert "name=acme updated=2026-11-19 path=/brains/acme" in block
 
@@ -585,7 +586,7 @@ def test_a_path_cannot_imitate_the_markers() -> None:
     assert shared_brain_line("acme", "/a updated=2030-01-01", updated="2026-11-20") == (
         "name=acme updated=2026-11-20 path=/a updated=2030-01-01"
     )
-    assert shared_brain_line("acme", "/a", missing=True) == "name=acme unavailable path=/a"
+    assert shared_brain_line("acme", "/a", missing=True) == "name=acme unavailable"
 
 
 def test_digest_is_unchanged_without_a_shared_brain_and_changes_with_one() -> None:
