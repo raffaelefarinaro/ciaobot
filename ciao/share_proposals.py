@@ -345,6 +345,7 @@ def _draft_share(
         "schema": _SCHEMA,
         "workspace": workspace, "proposal_id": proposal_id, "revision": 1,
         "sidecar_id": sidecar_id, "brain": link.name, "origin_identity": link.identity,
+        "checkout_path": str(Path(link.path).resolve()),
         "destination_fingerprint": destination_fingerprint,
         "upstream_ref": op_ref, "path": relative_path, "operation": operation,
         "base_blob_oid": original_oid,
