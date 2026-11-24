@@ -12,6 +12,7 @@ protocol ConnectionContext: AnyObject {
     var isConnected: Bool { get }
     var currentOrigin: Origin? { get }
     var dataStore: WKWebsiteDataStore? { get }
+    var tlsIdentity: LocalEngineTLSIdentity? { get }
     /// Fires whenever `currentOrigin`/`dataStore` may have changed. Subscribers
     /// must re-read those properties; the signal carries no payload because a
     /// disconnect and a move to another origin look the same here.
@@ -38,6 +39,7 @@ extension AppSessionStatus: ConnectionContext {
 final class StaticHostContext: ConnectionContext {
     let currentOrigin: Origin?
     let dataStore: WKWebsiteDataStore?
+    let tlsIdentity: LocalEngineTLSIdentity? = nil
 
     var isConnected: Bool { true }
 
@@ -101,6 +103,31 @@ enum PersistentSignInDefault {
     static func isEnabled(origin: Origin?, persistentAvailable: Bool, explicitChoice: Bool?) -> Bool {
         guard let origin, origin.usesTLS, persistentAvailable else { return false }
         return explicitChoice ?? true
+    }
+}
+
+/// Orders local-store erasure after view release and reconciles the currently
+/// verified engine generation after erasure finishes.
+@MainActor
+enum LocalSignInForgetFlow {
+    static func perform(
+        origin: Origin,
+        releaseView: @escaping (@escaping (Bool) -> Void) -> Void,
+        eraseStore: @escaping (Origin, SessionStoreKey, @escaping (Result<Void, ForgetFailure>) -> Void) -> Void,
+        currentIdentity: @escaping () -> LocalEngineTLSIdentity?,
+        reconnect: @escaping (LocalEngineTLSIdentity) -> Void,
+        completion: @escaping (Result<Void, ForgetFailure>?) -> Void
+    ) {
+        releaseView { released in
+            guard released else {
+                completion(nil)
+                return
+            }
+            eraseStore(origin, .localEngine) { result in
+                if let currentIdentity = currentIdentity() { reconnect(currentIdentity) }
+                completion(result)
+            }
+        }
     }
 }
 

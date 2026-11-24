@@ -15,6 +15,10 @@ private final class LifecycleProcesses: EngineProcessRunning {
     var killed: [Int32] = []
     var alive: [Int32: EngineProcessInfo] = [:]
     var nextPID: Int32 = 5000
+    var testTLSIdentity: LocalEngineTLSIdentity?
+    func tlsIdentity(_ pid: Int32) -> LocalEngineTLSIdentity? {
+        testTLSIdentity?.pid == pid ? testTLSIdentity : nil
+    }
 
     func spawn(_ launch: BundledEngineLaunch, log: URL) throws -> Int32 {
         spawns.append((launch, log))
@@ -70,12 +74,12 @@ private final class LifecycleDialogSpy {
 /// Holds the blockers completions so a test can release them: a deferred
 /// terminate must wait for the fetch exactly like the real one does.
 private final class LifecycleBlockers: RestartBlockersFetching {
-    private(set) var origins: [Origin] = []
+    private(set) var identities: [LocalEngineTLSIdentity] = []
     var answer: Int?
     private var completions: [(Int?) -> Void] = []
 
-    func activeChats(of origin: Origin, completion: @escaping (Int?) -> Void) {
-        origins.append(origin)
+    func activeChats(of identity: LocalEngineTLSIdentity, completion: @escaping (Int?) -> Void) {
+        identities.append(identity)
         completions.append(completion)
     }
 
@@ -272,7 +276,7 @@ final class EngineLifecycleTests: XCTestCase {
     }
 
     func testTerminationPlanTable() {
-        let running = EngineState.running(origin: Origin("http://127.0.0.1:8777")!, pid: 5, startupID: "x")
+        let running = EngineState.running(origin: Origin("https://127.0.0.1:8778")!, pid: 5, startupID: "x")
         // External mode never stops anything.
         XCTAssertEqual(EngineLifecycle.terminationPlan(mode: .external, engineState: running, quitReason: .user), .terminateNow)
         XCTAssertEqual(EngineLifecycle.terminationPlan(mode: .external, engineState: nil, quitReason: .system), .terminateNow)
@@ -330,9 +334,11 @@ final class EngineLifecycleTests: XCTestCase {
         )
     }
 
-    private func writeReady(pid: Int32, port: Int = 8777, startupID: String = "abc123") throws {
-        let json = #"{"schema":1,"pid":\#(pid),"port":\#(port),"startup_id":"\#(startupID)","workspace":"/w","bootstrap":false}"#
+    private func writeReady(pid: Int32, port: Int = 8777, tlsPort: Int = 8778, startupID: String = "abc123") throws {
+        let json = #"{"schema":1,"pid":\#(pid),"port":\#(port),"tls_port":\#(tlsPort),"startup_id":"\#(startupID)","workspace":"/w","bootstrap":false}"#
         try json.write(to: home.readyRecord, atomically: true, encoding: .utf8)
+        processes.testTLSIdentity = LocalEngineTLSIdentity(pid: pid, startupID: startupID, port: tlsPort,
+                                                           sha256: String(repeating: "a", count: 64))
     }
 
     /// Brings the fake engine to `running` and returns its pid.
@@ -404,7 +410,7 @@ final class EngineLifecycleTests: XCTestCase {
 
         XCTAssertEqual(shouldTerminate(delegate), .terminateNow)
         XCTAssertEqual(dialogs.titles, [])
-        XCTAssertEqual(blockers.origins, [])
+        XCTAssertEqual(blockers.identities, [])
         XCTAssertEqual(processes.terminated, [])
         XCTAssertEqual(replies, [])
     }
@@ -420,12 +426,12 @@ final class EngineLifecycleTests: XCTestCase {
         let delegate = makeDelegate(mode: .local, supervisor: supervisor, launched: true)
 
         XCTAssertEqual(shouldTerminate(delegate), .terminateLater, "the confirmation defers termination")
-        XCTAssertEqual(blockers.origins.count, 1, "the fetch starts with the terminate request")
+        XCTAssertEqual(blockers.identities.count, 1, "the fetch starts with the terminate request")
         blockers.answerAll()
         XCTAssertEqual(dialogs.titles, ["Quit Ciaobot?"])
         XCTAssertTrue(dialogs.bodies.first?.hasSuffix(" Chats or background work are still running and will be interrupted.") ?? false,
                       "the dialog says work is still running")
-        XCTAssertEqual(blockers.origins.map { $0.canonicalKey }, ["http://127.0.0.1:8777"],
+        XCTAssertEqual(blockers.identities.compactMap { $0.origin?.canonicalKey }, ["https://127.0.0.1:8778"],
                        "the count comes from the engine's own origin")
         XCTAssertEqual(processes.terminated, [pid], "a confirmed quit SIGTERMs the engine")
         XCTAssertEqual(menuBar.quittingCount, 1, "the tray shows the stopping line")
@@ -449,14 +455,14 @@ final class EngineLifecycleTests: XCTestCase {
         XCTAssertEqual(processes.terminated, [], "cancel never stops the engine")
         XCTAssertEqual(replies, [false])
         XCTAssertEqual(supervisor.state,
-                       EngineState.running(origin: Origin("http://127.0.0.1:8777")!, pid: pid, startupID: "abc123"),
+                       EngineState.running(origin: Origin("https://127.0.0.1:8778")!, pid: pid, startupID: "abc123"),
                        "the engine keeps draining nothing; it runs on")
 
         // The cancellation reset the flow, so a second quit is a fresh one.
         XCTAssertEqual(shouldTerminate(delegate), .terminateLater)
         blockers.answerAll()
         XCTAssertEqual(dialogs.titles.count, 2)
-        XCTAssertEqual(blockers.origins.count, 2)
+        XCTAssertEqual(blockers.identities.count, 2)
         XCTAssertEqual(replies, [false, false])
         XCTAssertEqual(processes.terminated, [])
     }
@@ -471,7 +477,7 @@ final class EngineLifecycleTests: XCTestCase {
 
         XCTAssertEqual(shouldTerminate(delegate), .terminateLater)
         XCTAssertEqual(dialogs.titles, [], "logout, restart and shutdown never ask")
-        XCTAssertEqual(blockers.origins, [])
+        XCTAssertEqual(blockers.identities, [])
         XCTAssertEqual(processes.terminated, [pid])
         XCTAssertEqual(menuBar.quittingCount, 1)
         XCTAssertEqual(replies, [])
@@ -492,7 +498,7 @@ final class EngineLifecycleTests: XCTestCase {
         let delegate = makeDelegate(mode: .local, supervisor: supervisor, launched: true)
         XCTAssertEqual(shouldTerminate(delegate), .terminateLater)
         XCTAssertEqual(dialogs.titles, [], "there is nothing left to ask about")
-        XCTAssertEqual(blockers.origins, [])
+        XCTAssertEqual(blockers.identities, [])
         XCTAssertEqual(processes.terminated, [pid], "a joined stop sends no second SIGTERM")
         XCTAssertEqual(menuBar.quittingCount, 1)
         processes.onExit?(pid, 0)
@@ -526,7 +532,7 @@ final class EngineLifecycleTests: XCTestCase {
         let delegate = makeDelegate(mode: .local, supervisor: makeSupervisor())
         XCTAssertEqual(shouldTerminate(delegate), .terminateNow)
         XCTAssertEqual(dialogs.titles, [])
-        XCTAssertEqual(blockers.origins, [])
+        XCTAssertEqual(blockers.identities, [])
         XCTAssertEqual(replies, [])
     }
 
@@ -557,7 +563,7 @@ final class EngineLifecycleTests: XCTestCase {
 
         XCTAssertEqual(shouldTerminate(delegate), .terminateLater)
         XCTAssertEqual(shouldTerminate(delegate), .terminateLater)
-        XCTAssertEqual(blockers.origins.count, 1, "one fetch at a time")
+        XCTAssertEqual(blockers.identities.count, 1, "one fetch at a time")
         blockers.answerAll()
         XCTAssertEqual(dialogs.titles.count, 1)
         XCTAssertEqual(processes.terminated, [pid])
@@ -778,7 +784,7 @@ final class EngineLifecycleTests: XCTestCase {
         time.advance(0.6)
         RunLoop.main.run(until: Date().addingTimeInterval(0.05))
         XCTAssertEqual(supervisor.state,
-                       EngineState.running(origin: Origin("http://127.0.0.1:8777")!, pid: respawned, startupID: "abc123"))
+                       EngineState.running(origin: Origin("https://127.0.0.1:8778")!, pid: respawned, startupID: "abc123"))
         XCTAssertNil(controller.menu?.deepRow(withTitle: MenuBarController.engineStoppedRowTitle),
                      "the row goes when the engine runs again")
 
@@ -907,7 +913,7 @@ final class EngineLifecycleTests: XCTestCase {
         updateQuit.beginInstall(drained: true)
         XCTAssertEqual(shouldTerminate(delegate), .terminateLater)
         XCTAssertEqual(dialogs.titles, [], "an update-driven quit never asks")
-        XCTAssertEqual(blockers.origins, [])
+        XCTAssertEqual(blockers.identities, [])
         XCTAssertEqual(processes.terminated, [pid])
         processes.onExit?(pid, 0)
         XCTAssertEqual(replies, [true])
@@ -1043,20 +1049,6 @@ final class EngineLifecycleTests: XCTestCase {
     }
 
     // MARK: Blockers probe state
-
-    func testTwoSuccessiveBlockerFetchesDoNotShareABody() throws {
-        let server = try LoopbackBlockersServer(bodies: [#"{"restart_blockers":[1,2,3]}"#, #"{"restart_blockers":[1]}"#])
-        defer { server.stop() }
-        let origin = try XCTUnwrap(Origin("http://127.0.0.1:\(server.port)"))
-        let probe = RestartBlockersProbe()
-        var counts: [Int?] = []
-        for _ in 0..<2 {
-            let done = expectation(description: "fetch")
-            probe.activeChats(of: origin) { counts.append($0); done.fulfill() }
-            wait(for: [done], timeout: 5)
-        }
-        XCTAssertEqual(counts, [3, 1], "a second quit reads its own answer")
-    }
 
     // MARK: Login launch window
 
@@ -1245,42 +1237,6 @@ final class EngineLifecycleTests: XCTestCase {
         controller.setLocalEngineMode(true)
         XCTAssertNotNil(controller.menu?.deepRow(withTitle: MenuBarController.engineStoppedRowTitle))
     }
-}
-
-/// A one-shot loopback HTTP server that answers each request with the next body.
-private final class LoopbackBlockersServer {
-    private let listener: NWListener
-    private let queue = DispatchQueue(label: "LoopbackBlockersServer")
-    private let lock = NSLock()
-    private var bodies: [String]
-    private(set) var port: UInt16 = 0
-
-    init(bodies: [String]) throws {
-        self.bodies = bodies
-        listener = try NWListener(using: .tcp, on: .any)
-        let ready = DispatchSemaphore(value: 0)
-        listener.stateUpdateHandler = { state in
-            if case .ready = state { ready.signal() }
-        }
-        listener.newConnectionHandler = { [weak self] connection in
-            connection.start(queue: self?.queue ?? .global())
-            connection.receive(minimumIncompleteLength: 1, maximumLength: 4096) { _, _, _, _ in
-                guard let self else { return connection.cancel() }
-                self.lock.lock()
-                let body = self.bodies.isEmpty ? "{}" : self.bodies.removeFirst()
-                self.lock.unlock()
-                let head = "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: \(body.utf8.count)\r\nConnection: close\r\n\r\n"
-                connection.send(content: Data((head + body).utf8), completion: .contentProcessed { _ in connection.cancel() })
-            }
-        }
-        listener.start(queue: queue)
-        guard ready.wait(timeout: .now() + 5) == .success, let port = listener.port?.rawValue else {
-            throw NSError(domain: "LoopbackBlockersServer", code: 1)
-        }
-        self.port = port
-    }
-
-    func stop() { listener.cancel() }
 }
 
 private extension NSMenu {

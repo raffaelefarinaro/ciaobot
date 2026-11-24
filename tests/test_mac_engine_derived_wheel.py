@@ -143,9 +143,12 @@ def backend_bytes(source: str | None = None, entries=None, name="setuptools", ve
         with zipfile.ZipFile(raw, "w", zipfile.ZIP_DEFLATED) as zf:
             for entry in entries:
                 if isinstance(entry, zipfile.ZipInfo):
+                    entry.date_time = (1980, 1, 1, 0, 0, 0)
                     zf.writestr(entry, b"x")
                 else:
-                    zf.writestr(entry[0], entry[1])
+                    info = zipfile.ZipInfo(entry[0], date_time=(1980, 1, 1, 0, 0, 0))
+                    info.compress_type = zipfile.ZIP_DEFLATED
+                    zf.writestr(info, entry[1])
     return raw.getvalue()
 
 

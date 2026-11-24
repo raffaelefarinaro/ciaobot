@@ -3033,28 +3033,96 @@ def test_pass_for_a_missing_linked_repo_has_no_repo_section(tmp_path: Path) -> N
     assert memory_pass.REPO_PROPOSAL_COMMAND not in prompt
 
 
-def _brains_on(manager: ProjectChatManager, workspace: str, *paths: str) -> None:
+def _brains_on(manager: ProjectChatManager, workspace: str, *paths: str) -> list[Path]:
     from ciao.config import SharedBrainLink, WorkspaceConfig
 
     record = manager._config.workspaces.setdefault(workspace, WorkspaceConfig(name=workspace, vault_root=f"memory-vault/{workspace}"))
-    record.shared_brains = [
-        SharedBrainLink(name=f"brain-{i}", path=path, identity=f"github.com/acme/notes-{i}")
-        for i, path in enumerate(paths)
-    ]
+    roots = []
+    links = []
+    for i, path in enumerate(paths):
+        folder = manager._config.workspace_root.parent / f"{manager._config.workspace_root.name}-brains" / Path(path).name
+        (folder / ".git").mkdir(parents=True, exist_ok=True)
+        roots.append(folder)
+        links.append(SharedBrainLink(name=f"brain-{i}", path=str(folder), identity=f"github.com/acme/notes-{i}"))
+    record.shared_brains = links
+    return roots
 
 
 def test_pass_for_workspace_with_two_shared_brains_carries_both_names_and_paths(
     tmp_path: Path,
 ) -> None:
     manager, pass_chat = _linked_pass(tmp_path, None)
-    _brains_on(manager, "work", "/brains/acme", "/brains/ops")
+    brains = _brains_on(manager, "work", "/brains/acme", "/brains/ops")
 
     prompt = manager._memory_pass._prompt_for(pass_chat)
 
     assert "This workspace has shared team folders:" in prompt
-    assert "- brain-0: /brains/acme" in prompt
-    assert "- brain-1: /brains/ops" in prompt
+    assert f"- brain-0: {brains[0]}" in prompt
+    assert f"- brain-1: {brains[1]}" in prompt
     assert "do not propose it as a memory" in prompt
+
+
+
+def test_memory_pass_omits_unusable_shared_brain_paths(tmp_path: Path) -> None:
+    manager, pass_chat = _linked_pass(tmp_path, None)
+    usable, unusable = _brains_on(manager, "work", "/brains/usable", "/brains/unusable")
+    (unusable / ".git").rmdir()
+
+    prompt = manager._memory_pass._prompt_for(pass_chat)
+
+    assert f"- brain-0: {usable}" in prompt
+    assert str(unusable) not in prompt
+
+
+
+
+def test_memory_pass_helper_hides_missing_shared_brain_path(tmp_path: Path) -> None:
+    manager, pass_chat = _linked_pass(tmp_path, None)
+    (brain,) = _brains_on(manager, "work", "/brains/missing")
+    brain.rename(brain.with_name("removed-brain"))
+
+    prompt = manager._memory_pass._prompt_for(pass_chat)
+
+    assert "shared team folders" not in prompt
+    assert str(brain) not in prompt
+
+
+def test_memory_pass_helper_hides_symlink_and_redirected_destination(tmp_path: Path) -> None:
+    manager, pass_chat = _linked_pass(tmp_path, None)
+    (brain,) = _brains_on(manager, "work", "/brains/acme")
+    redirected = brain.parent / "redirected-target"
+    (redirected / ".git").mkdir(parents=True)
+    brain.rename(brain.with_name("original-brain"))
+    brain.symlink_to(redirected, target_is_directory=True)
+
+    prompt = manager._memory_pass._prompt_for(pass_chat)
+
+    assert "shared team folders" not in prompt
+    assert str(brain) not in prompt
+    assert str(redirected) not in prompt
+
+
+def test_memory_pass_helper_hides_shared_brain_under_protected_root(tmp_path: Path) -> None:
+    manager, pass_chat = _linked_pass(tmp_path, None)
+    (brain,) = _brains_on(manager, "work", "/brains/acme")
+    manager._config.workspace_root = brain.parent
+
+    prompt = manager._memory_pass._prompt_for(pass_chat)
+
+    assert "shared team folders" not in prompt
+    assert str(brain) not in prompt
+
+
+def test_memory_pass_omits_section_when_all_shared_brain_paths_are_unusable(tmp_path: Path) -> None:
+    manager, pass_chat = _linked_pass(tmp_path, None)
+    brains = _brains_on(manager, "work", "/brains/acme", "/brains/ops")
+    for brain in brains:
+        (brain / ".git").rmdir()
+
+    prompt = manager._memory_pass._prompt_for(pass_chat)
+
+    assert "shared team folders" not in prompt
+    assert all(str(brain) not in prompt for brain in brains)
 
 
 def test_pass_without_a_shared_brain_has_no_section(tmp_path: Path) -> None:

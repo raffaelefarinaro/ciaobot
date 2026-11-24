@@ -1,6 +1,6 @@
 ---
 name: ciao-capabilities
-description: Use for questions about what Ciaobot can do or how one of its features works, and for tours and onboarding of new users. Covers memory and the vault, Memory Map, vault review, shared brains, schedules and webhook triggers, workspaces, projects, chats, forks, subagents, files and pinned panels, permission mode, slash commands, keyboard shortcuts, document conversion, HTML artifacts and CSV tables, the task board, the browser terminal, skills, MCP, models and providers, permission modes, notifications, updates, importing past conversations, and installing on macOS or Linux. Not for performing the action itself (scheduling, remembering, adding a task). Trigger on "what can you do", "what can ciaobot do", "help me get started", "give me a tour", "where are my agents", "is the subagent still running", "can ciaobot / can you / can I ...", "how does ... work in ciaobot", even when the word Ciaobot is not mentioned.
+description: Use for questions about Ciaobot's features, tours and onboarding, or troubleshooting when Ciaobot itself is failing. Covers memory, the vault, schedules, webhooks, workspaces, projects, chats, tasks, files, terminal, skills, MCP, models, providers, settings, updates and conversation imports. For Ciaobot failures or explicit Ciaobot bug reports, read `references/support.md`; errors in the user's own project do not trigger Ciaobot support. Not for performing actions such as scheduling or adding tasks. Trigger on "what can you do", "what can ciaobot do", "help me get started", "give me a tour", "where are my agents", "is the subagent still running", "can ciaobot / can you / can I ...", "how does ... work in ciaobot", or reports that Ciaobot stopped responding, crashed, or is broken, even without its name.
 ---
 
 # Ciaobot Capabilities
@@ -8,6 +8,8 @@ description: Use for questions about what Ciaobot can do or how one of its featu
 You are running inside Ciaobot. The app's feature surface is not otherwise visible from a chat session — the system prompt covers behavior, not features — so answer capability questions from this catalog instead of guessing from generic Claude knowledge. If the running app visibly disagrees with something here (features evolve), trust the app and say so.
 
 ## How to answer
+
+- **Ciaobot-specific trouble** (for example, "Ciaobot stopped responding") or an explicit request such as "file a Ciaobot bug" → read `references/support.md` and follow its evidence, release-check, privacy, and consent steps. A generic error in the user's project (for example, "my Python script crashed") stays with that project; do not select Ciaobot support.
 
 - **Specific question** ("can you schedule things?", "where do my archived chats go?") → answer from the relevant reference file only. Don't recite the whole catalog.
 - **Broad question** ("what can you do?") → give the one-paragraph pitch plus the capability areas below in a few lines each, then offer to go deeper on any of them.

@@ -12,7 +12,7 @@ Ciaobot is your **second brain and personal assistant**: a persistent personal w
 
 ## Install
 
-**macOS 13+ on Apple Silicon (M1 or newer):** download the [Ciaobot app](https://github.com/raffaelefarinaro/ciaobot/releases/latest) (DMG). The app includes the engine: open it and follow its first-use steps, and on a machine updating from an older install Home shows where to get it. Your workspace defaults to `~/Ciaobot`, and Ciaobot uses Claude Code as the AI tool unless you change it.
+**macOS 14+ on Apple Silicon (M1 or newer):** download the [Ciaobot app](https://github.com/raffaelefarinaro/ciaobot/releases/latest) (DMG). The app includes the engine: open it and follow its first-use steps, and on a machine updating from an older install Home shows where to get it. Your workspace defaults to `~/Ciaobot`, and Ciaobot uses Claude Code as the AI tool unless you change it.
 
 **Linux (Ubuntu 24.04 or similar):** run this as the account that will own Ciaobot. It installs the engine in your account with uv and asks once for `sudo` to install and start the systemd service, then prints the one-time login link for opening Ciaobot in a browser.
 

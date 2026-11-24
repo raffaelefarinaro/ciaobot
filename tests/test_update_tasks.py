@@ -1012,7 +1012,9 @@ def test_learnings_queue_drain_detector_only_applies_to_legacy_rows(tmp_path: Pa
     assert present.evidence["rows"] == 1
 
 
-async def test_reverted_drain_reopens_only_its_completed_workspace_task(tmp_path: Path) -> None:
+async def test_reverted_drain_reopens_only_its_workspace_task_without_auto_retry(
+    tmp_path: Path,
+) -> None:
     from ciao import learnings_queue_drain as drain
 
     config = _config(tmp_path)
@@ -1050,6 +1052,17 @@ async def test_reverted_drain_reopens_only_its_completed_workspace_task(tmp_path
     drain_status = next(status for status in after_revert if status.task.id == task.id)
     assert drain_status.state is not None and drain_status.state.lifecycle == "offered"
     assert drain_status.offered
+
+    # The reopened task makes the deliberate undo visible for attended action,
+    # while the startup mode continues to suppress this exact reverted row.
+    queue_before_startup = queue.read_text(encoding="utf-8")
+    startup = drain.drain(
+        vault, workspace="personal", runtime_root=runtime, apply=True, fresh_only=True
+    )
+    assert startup.get("not_applicable") is True
+    assert queue.read_text(encoding="utf-8") == queue_before_startup
+    learning = workspace / "Learnings.md"
+    assert not learning.exists() or "repeat this lesson" not in learning.read_text(encoding="utf-8")
 
     ordinary = replace(task, id="ordinary-completed")
     update_tasks.write_task_state(

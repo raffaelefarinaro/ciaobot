@@ -6,6 +6,6 @@ A native Mac app for Ciaobot. Connect to a Ciaobot server on your Mac or another
 
 [Download the latest release](https://github.com/raffaelefarinaro/ciaobot-mac/releases/latest)
 
-Requires an Apple silicon Mac running macOS 13 or later. Open the downloaded DMG, drag **Ciaobot** into **Applications**, and launch it from there.
+Requires an Apple silicon Mac running macOS 14 or later. Open the downloaded DMG, drag **Ciaobot** into **Applications**, and launch it from there.
 
 Build, release, and implementation details are in the [technical reference](docs/reference.md).
