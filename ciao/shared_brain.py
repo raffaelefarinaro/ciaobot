@@ -12,17 +12,22 @@ with.
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import logging
 import os
 import re
 import subprocess
 from datetime import UTC, datetime
 from pathlib import Path
+from contextlib import asynccontextmanager
 from typing import Any, Literal
 
 from ciao import job_runs
 from ciao.config import SHARED_BRAIN_NAME_PATTERN, SharedBrainLink
 from ciao.git_proc import EXACT_BYTES, GIT_TIMEOUT_DETAIL, run_git
+from ciao.os_support.files import open_fd
+from ciao.os_support.locks import lock_exclusive, unlock
+from ciao.os_support.private import is_private_descriptor_strict, make_private_dir
 from ciao.os_support.child_env import child_env
 from ciao.redact import redact_text
 from ciao.repo_link import validate_repo_path
@@ -429,12 +434,50 @@ def _lock_key(path: str) -> str:
     return os.path.abspath(os.path.expanduser(path))
 
 
+def _checkout_lock(path: str) -> asyncio.Lock:
+    """One in-process lock for every operation that changes a shared checkout."""
+    key = _lock_key(path)
+    return _locks.setdefault(key, asyncio.Lock())
+
+
+@asynccontextmanager
+async def _checkout_claim(path: str, config: Any):
+    """Serialize checkout network and ref changes across engine processes."""
+    root = Path(config.state_path).parent / "locks" / "shared-brains"
+    root.mkdir(parents=True, exist_ok=True, mode=0o700)
+    make_private_dir(root)
+    key = _lock_key(path)
+    lock_path = root / (hashlib.sha256(key.encode()).hexdigest() + ".lock")
+    fd = open_fd(lock_path, os.O_CREAT | os.O_RDWR, 0o600, follow_symlinks=False)
+    try:
+        if not is_private_descriptor_strict(fd):
+            raise OSError("shared brain lock is not private")
+        loop = asyncio.get_running_loop()
+        acquire = loop.run_in_executor(None, lock_exclusive, fd)
+        try:
+            await asyncio.shield(acquire)
+        except asyncio.CancelledError:
+            await acquire
+            await asyncio.shield(loop.run_in_executor(None, unlock, fd))
+            raise
+        try:
+            yield
+        finally:
+            await asyncio.shield(loop.run_in_executor(None, unlock, fd))
+    finally:
+        os.close(fd)
+
+
 async def update_brain(link: SharedBrainLink, config: Any) -> dict[str, Any]:
     """Fetch and fast-forward one linked folder, one case from the matrix (see the issue)."""
     key = _lock_key(link.path)
-    lock = _locks.setdefault(key, asyncio.Lock())
+    lock = _checkout_lock(key)
     async with lock:
-        result = await _update_unlocked(config, Path(key), link.identity)
+        try:
+            async with _checkout_claim(key, config):
+                result = await _update_unlocked(config, Path(key), link.identity)
+        except OSError:
+            result = _result("failed", "lock_unavailable")
     _last_update[key] = result
     return result
 
