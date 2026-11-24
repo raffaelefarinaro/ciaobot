@@ -894,7 +894,7 @@ def test_the_authoring_guidance_names_the_entry_contract() -> None:
 
     skill = (
         resources.files("ciao.stock")
-        .joinpath("skills/ciao-memory/SKILL.md")
+        .joinpath("skills/ciao-capabilities/references/memory-operations/guide.md")
         .read_text(encoding="utf-8")
     )
     command = (
@@ -908,11 +908,27 @@ def test_the_authoring_guidance_names_the_entry_contract() -> None:
     assert "after actually going and checking" in skill
     assert "you did not earn" not in command  # not restated in the command
     assert "updated:" in skill
-    assert 'follow the "Writing entity notes" steps in the `ciao-memory` skill' in command
+    assert 'follow the "Writing entity notes" steps in the durable-memory guide' in command
     reverify = (
         resources.files("ciao.stock")
-        .joinpath("skills/ciao-memory/references/curation-pass-3-reverify.md")
+        .joinpath("skills/ciao-capabilities/references/memory-operations/references/curation-pass-3-reverify.md")
         .read_text(encoding="utf-8")
     )
     assert '"Writing entity notes"' in reverify
     assert "uncovered" in reverify
+
+
+def test_remember_command_uses_the_engine_resolved_guide_from_core_prompt() -> None:
+    from importlib import resources
+    from pathlib import Path
+
+    from ciao.core_prompt import unified_core
+
+    command = resources.files("ciao.stock").joinpath("commands/remember.md").read_text(encoding="utf-8")
+    guide = Path(str(resources.files("ciao.stock").joinpath(
+        "skills/ciao-capabilities/references/memory-operations/guide.md"
+    ))).resolve()
+    actual_prompt = unified_core()
+    assert "engine-packaged durable-memory guide named in the Ciaobot system instructions" in command
+    assert str(guide) in actual_prompt
+    assert "relative to the installed `ciao-capabilities`" not in command
