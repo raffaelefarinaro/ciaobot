@@ -891,6 +891,40 @@ def test_recent_decisions_are_workspace_scoped_and_fenced(
     assert "<recent-decisions>" not in manager._memory_pass._prompt_for(closure_chat)
 
 
+def test_memory_pass_prompt_resolves_packaged_guide_with_workspace_override(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _register_work_workspace(tmp_path)
+    manager = _make_manager(tmp_path)
+    chat = _pass_chat(manager)
+    agent_root = manager._agent_root_for_chat(chat.chat_id)
+    override = agent_root / "skills/ciao-capabilities/SKILL.md"
+    override.parent.mkdir(parents=True)
+    override.write_text("workspace-owned capabilities override", encoding="utf-8")
+    from ciao import sync_skills
+
+    sync_skills.sync_workspace_skills(agent_root, refresh_upstream=False)
+    sync_skills.sync_workspace_skills(agent_root, refresh_upstream=False)
+    installed = agent_root / ".claude/skills/ciao-capabilities"
+    assert installed.is_symlink() and installed.resolve() == override.parent.resolve()
+    assert not (installed / "references/memory-operations/guide.md").exists()
+    from importlib import resources
+
+    guide_path = Path(str(resources.files("ciao.stock").joinpath(
+        "skills/ciao-capabilities/references/memory-operations/guide.md"
+    ))).resolve()
+    elsewhere = tmp_path / "unrelated-cwd"
+    elsewhere.mkdir()
+    monkeypatch.chdir(elsewhere)
+
+    prompt = manager._memory_pass._prompt_for(chat)
+
+    assert str(guide_path) in prompt
+    assert str(override) not in prompt
+    assert str(elsewhere) not in prompt
+    assert "Read-only recall does not need this procedure" in prompt
+
+
 def test_recent_decisions_filter_sort_and_bound_before_fencing(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -969,7 +1003,7 @@ def test_superseded_guidance_is_rewritten_not_annotated() -> None:
 
     skill = (
         resources.files("ciao.stock")
-        .joinpath("skills/ciao-memory/SKILL.md")
+        .joinpath("skills/ciao-capabilities/references/memory-operations/guide.md")
         .read_text(encoding="utf-8")
     )
     architecture = (
@@ -995,7 +1029,7 @@ def _ciao_memory_skill() -> str:
 
     return (
         resources.files("ciao.stock")
-        .joinpath("skills/ciao-memory/SKILL.md")
+        .joinpath("skills/ciao-capabilities/references/memory-operations/guide.md")
         .read_text(encoding="utf-8")
     )
 

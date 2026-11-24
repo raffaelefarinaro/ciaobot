@@ -1144,7 +1144,7 @@ def _stale_entry_items(
     The reason carries every value the operation needs and cannot rederive
     without reimplementing a hash and guessing wrong, all of them **whole**:
     the entry's :func:`ciao.note_entries.entry_identity` itself (the ``entry``
-    the schedule prompt and the ``ciao-memory`` skill tell the agent to add to
+    the schedule prompt and the durable-memory guide tell the agent to add to
     the payload file, and which :func:`ciao.entry_verification` refuses
     anything but a full 64-hex digest of — so printing the twelve characters the
     label shows would plan work the operation cannot be handed), the note's

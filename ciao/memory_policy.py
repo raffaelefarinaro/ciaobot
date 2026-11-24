@@ -15,7 +15,7 @@ promotes a new region fact with no reviewer present; the rows that write one
 live are attended turns a person can steer.
 
 This module is the single machine-readable statement of that policy. The prose
-lives in the stock assets (``ciao/stock/skills/ciao-memory/SKILL.md``,
+lives in the stock assets (``ciao/stock/skills/ciao-capabilities/references/memory-operations/guide.md``,
 ``ciao/stock/commands/remember.md``, ``ciao/stock/schedules.json``) and
 in ``docs/ARCHITECTURE.md``; tests pin every copy here so they cannot drift
 apart again. It is deliberately behavior-free: the accept path in

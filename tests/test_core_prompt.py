@@ -8,6 +8,9 @@ covered in ``test_memory_tool.py``.
 
 from __future__ import annotations
 
+from importlib import resources
+from pathlib import Path
+
 from ciao import core_prompt as mi
 
 SHELL_BAN = "Do not start background shells"
@@ -118,7 +121,7 @@ def test_system_prompt_includes_native_memory_and_vault_routing() -> None:
     assert "private working evidence" in append
     assert "internal sentinels" in append
     assert "memory update" in append
-    assert "read `ciao-memory`" in append
+    assert "references/memory-operations/guide.md" in append
     assert "memory_update" not in append
 
 
@@ -251,9 +254,19 @@ def test_core_uses_guard_boundaries_not_a_curl_or_github_login_ban() -> None:
     assert "check its authentication" in text
 
 
-def test_core_routes_write_procedures_out_of_the_always_loaded_prompt() -> None:
+def test_core_routes_write_procedures_out_of_the_always_loaded_prompt(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    override = tmp_path / ".claude/skills/ciao-capabilities/references/memory-operations/guide.md"
+    override.parent.mkdir(parents=True)
+    override.write_text("workspace override", encoding="utf-8")
+    monkeypatch.chdir(tmp_path)
     text = mi._system_instructions()
-    assert "Before durable writes or proposal curation, read `ciao-memory`" in text
+    packaged_guide = Path(str(resources.files("ciao.stock").joinpath(
+        "skills/ciao-capabilities/references/memory-operations/guide.md"
+    ))).resolve()
+    assert f"Before durable writes or proposal curation, read `{packaged_guide}`" in text
+    assert str(override) not in text
     assert "Separate entries with" not in text
     assert "[expires:" not in text
     assert "A note without frontmatter cannot be indexed" not in text
@@ -275,11 +288,9 @@ def test_core_synopsis_only_offers_agent_allowed_task_move_columns() -> None:
 
 
 def test_disclosed_memory_procedures_remain_available() -> None:
-    from pathlib import Path
-
-    root = Path(mi.__file__).parent / "stock/skills/ciao-memory"
-    skill = (root / "SKILL.md").read_text(encoding="utf-8")
-    assert "Before document writes or bounded-region edits, read" in skill
+    root = Path(mi.__file__).parent / "stock/skills/ciao-capabilities/references/memory-operations"
+    skill = (root / "guide.md").read_text(encoding="utf-8")
+    assert "For writing or curating durable vault memory, read [Writing documents and regions]" in skill
     assert "(references/writing.md)" in skill
     procedures = (root / "references/writing.md").read_text(encoding="utf-8")
     for instruction in (

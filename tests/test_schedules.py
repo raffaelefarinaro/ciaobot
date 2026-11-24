@@ -112,15 +112,16 @@ def test_system_schedules_load_from_stock_not_runtime(tmp_path: Path) -> None:
     schedules = store.list_entries()
 
     assert store.get("sched-user") is not None
+    assert store.get("sched-user").prompt == "user routine"
     assert store.get("system-old-copy") is None
     assert any(item.schedule_id == "system-memory-curation" for item in schedules)
 
 
 def _curation_text(prompt: str) -> str:
-    """The schedule prompt plus the `ciao-memory` curation reference files it points at (#1462)."""
+    """The schedule prompt plus the durable-memory curation reference files it points at (#1462)."""
     from importlib import resources
 
-    refs = resources.files("ciao.stock").joinpath("skills", "ciao-memory", "references")
+    refs = resources.files("ciao.stock").joinpath("skills", "ciao-capabilities", "references", "memory-operations", "references")
     return "\n\n".join([prompt, *(item.read_text(encoding="utf-8") for item in sorted(refs.iterdir(), key=lambda i: i.name) if item.name.endswith(".md"))])
 
 
@@ -159,6 +160,50 @@ def test_system_schedule_state_persists_separately(tmp_path: Path) -> None:
     assert reloaded.enabled is False
     assert reloaded.last_triggered_on == "2026-07-05"
     assert reloaded.workspace == "work"
+    assert "references/memory-operations/guide.md" in reloaded.prompt
+    assert "references/curation-run-lifecycle.md" in reloaded.prompt
+
+
+def test_upgraded_store_resolves_packaged_care_paths_and_keeps_saved_state(tmp_path: Path) -> None:
+    from importlib import resources
+
+    old_state = {
+        "schedules": {
+            "system-memory-curation": {
+                "enabled": False,
+                "last_triggered_on": "2026-11-20",
+                "workspace": "work",
+            }
+        }
+    }
+    (tmp_path / "system_schedules_state.json").write_text(json.dumps(old_state), encoding="utf-8")
+    (tmp_path / "schedules.json").write_text(json.dumps({"schedules": [{
+        "schedule_id": "user-routine",
+        "daily_time_utc": "08:00",
+        "prompt": "user-authored prompt stays intact",
+        "chat_id": 0,
+        "created_at": "2026-01-01T00:00:00Z",
+    }]}), encoding="utf-8")
+
+    upgraded = ScheduleStore(tmp_path, include_system=True)
+    care = upgraded.get("system-memory-curation")
+    user_routine = upgraded.get("user-routine")
+    guide = Path(str(resources.files("ciao.stock").joinpath(
+        "skills/ciao-capabilities/references/memory-operations/guide.md"
+    ))).resolve()
+    procedures = guide.parent
+
+    assert care is not None
+    assert str(guide) in care.prompt
+    assert str(procedures) in care.prompt
+    assert "ciao-memory" not in care.prompt
+    assert "references/curation-run-lifecycle.md" in care.prompt
+    assert care.enabled is False
+    assert care.last_triggered_on == "2026-11-20"
+    assert care.workspace == "work"
+    assert user_routine is not None
+    assert user_routine.prompt == "user-authored prompt stays intact"
+    assert json.loads((tmp_path / "system_schedules_state.json").read_text(encoding="utf-8")) == old_state
 
 
 async def test_catch_up_fires_past_due_schedule(store: ScheduleStore):

@@ -5,6 +5,8 @@ argument-hint: <what to remember>
 
 # Remember: $ARGUMENTS
 
+Before writing, read the engine-packaged durable-memory guide named in the Ciaobot system instructions. It contains the durable-memory policy and entity-note procedure.
+
 Turn `$ARGUMENTS` into one durable, present-tense fact — never "User said X → assistant did Y". Queue ordinary facts for review; a reusable lesson is recorded directly in `Workspace/Learnings.md` with `ciao memory learn`.
 
 1. **Shape the fact.** One sentence, present tense, stating what IS true from now on. If it is only true from or until a date, append `[as-of: YYYY-MM-DD]` or `[expires: YYYY-MM-DD]`.
@@ -27,9 +29,9 @@ If the user explicitly wants it live immediately, write it where step 2 routed i
 - `memory`/`profile` → edit the `ciao:memory` / `ciao:profile` bounded region in the workspace guide with your file-edit tool. The region cap is advisory on every path — the write goes through and reports `over_cap`; nothing refuses it and nothing shrinks the region, which is what consolidation is for. Search the region for a superseded entry first and replace it rather than appending; separate entries with `§`.
 - `project` → the project's canonical doc.
 - `people` → that person's note, in the folder its line in the **Categories** section names (`People/` for `person`). Give the note the `type:` that category lists, or `ciao vault-lint` reports it.
-- `learnings` → `ciao memory learn`. A reusable workflow lesson also deserves a destination: a skill this workspace owns under `skills/` gets a proposal from `ciao skill-proposal-add NAME --input-file FILE`, and a lesson no skill covers gets a `[review]` draft from `ciao skill-draft-add --input-file FILE`. Read the `ciao-memory` skill for the routing contract; never create or edit a skill file here.
+- `learnings` → `ciao memory learn`. A reusable workflow lesson also deserves a destination: a skill this workspace owns under `skills/` gets a proposal from `ciao skill-proposal-add NAME --input-file FILE`, and a lesson no skill covers gets a `[review]` draft from `ciao skill-draft-add --input-file FILE`. Follow the durable-memory guide for the routing contract; never create or edit a skill file here.
 
-**When you write into a `project` or `people` note, follow the "Writing entity notes" steps in the `ciao-memory` skill.** They cover one fact per bullet, which `[verified:]` stamps you may add, leaving `updated:` alone, and re-reading the note after every write.
+**When you write into a `project` or `people` note, follow the "Writing entity notes" steps in the durable-memory guide.** They cover one fact per bullet, which `[verified:]` stamps you may add, leaving `updated:` alone, and re-reading the note after every write.
 
 Then dismiss the queued copy with `ciao memory-proposal-dismiss --text-file <fact-file> --promoted` if one exists, reusing the same file from step 3. The fact never becomes a shell argument in either direction — a substring is only safe if you have read it and know it holds no metacharacter at all, and `;`, `&`, `|`, `<`, `>`, `*` and parentheses are as dangerous as quotes.
 

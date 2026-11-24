@@ -41,7 +41,7 @@ def _capabilities() -> str:
     parts = [root.joinpath("SKILL.md").read_text(encoding="utf-8")]
     parts += [
         f.read_text(encoding="utf-8")
-        for f in sorted(root.joinpath("references").iterdir(), key=lambda f: f.name)
+        for f in sorted(root.joinpath("references").rglob("*.md"), key=lambda f: str(f))
     ]
     return "\n".join(parts)
 
@@ -213,7 +213,7 @@ def test_vault_note_mutation_is_refused_on_an_unattended_turn(tmp_path: Path) ->
 
 
 def test_stock_memory_skill_states_the_advisory_cap() -> None:
-    role = _stock("skills/ciao-memory/SKILL.md")
+    role = _stock("skills/ciao-capabilities/references/memory-operations/guide.md")
     assert "The cap is advisory on every path" in role
     assert "reports `over_cap`" in role
     assert "enforces the cap" not in role
@@ -236,7 +236,7 @@ def test_stock_prompts_route_categories_to_the_vocabulary_block() -> None:
     owner instead of a coined `type:`.
     """
     for relative in (
-        "skills/ciao-memory/SKILL.md",
+        "skills/ciao-capabilities/references/memory-operations/guide.md",
         "commands/remember.md",
         "commands/interrogation.md",
     ):
@@ -246,7 +246,7 @@ def test_stock_prompts_route_categories_to_the_vocabulary_block() -> None:
 
 
 def test_the_memory_skill_says_where_a_note_goes_and_who_adds_a_category() -> None:
-    role = _stock("skills/ciao-memory/SKILL.md")
+    role = _stock("skills/ciao-capabilities/references/memory-operations/guide.md")
     assert "Make each new note with `ciao note create" in role
     assert "files it in the category's folder" in role
     assert "queue a new-category question in `Workspace/Memory-Proposals.md`" in role
@@ -259,8 +259,8 @@ def test_the_core_prompt_routes_categories_through_the_memory_skill() -> None:
     from ciao.core_prompt import _system_instructions
 
     core = _system_instructions()
-    assert "Before durable writes or proposal curation, read `ciao-memory`" in core
-    skill = _stock("skills/ciao-memory/SKILL.md")
+    assert "Before durable writes or proposal curation, read `" in core and "memory-operations/guide.md`" in core
+    skill = _stock("skills/ciao-capabilities/references/memory-operations/guide.md")
     assert "**Categories** section of `<vault>/VOCABULARY.md`" in skill
     assert "If no category fits, queue a new-category question" in skill
 
@@ -401,12 +401,12 @@ def test_the_care_schedule_ground_rules_list_the_new_deferrals() -> None:
 def test_the_memory_skill_never_edits_or_settles_unattended() -> None:
     """The skill a run loads has to say the same thing the schedule does.
 
-    The schedule prompt and the `ciao-memory` skill are read by the same
+    The schedule prompt and durable-memory guide are read by the same
     unattended turn; a rule stated in only one of them is a rule the other
     surface can contradict, which is how the old "promote it yourself"
     instruction survived in one copy after the other had moved on.
     """
-    skill = _stock("skills/ciao-memory/SKILL.md")
+    skill = _stock("skills/ciao-capabilities/references/memory-operations/guide.md")
     assert "Propose a skill; never edit or settle one unattended" in skill
     assert "it may **not** edit a skill, edit the `AGENTS.md` body, or settle a proposal or draft" in skill
     assert "A recurring learning is a *routing* priority" in skill
@@ -501,13 +501,13 @@ def test_the_development_doc_covers_the_draft_commands() -> None:
 
 
 def _care_prompt() -> str:
-    """The schedule prompt plus the `ciao-memory` curation references it points at (#1462)."""
+    """The schedule prompt plus the durable-memory curation references it points at (#1462)."""
     prompt = next(
         entry["prompt"]
         for entry in json.loads(_stock("schedules.json"))["schedules"]
         if entry["schedule_id"] == "system-memory-curation"
     )
-    refs = resources.files("ciao.stock").joinpath("skills", "ciao-memory", "references")
+    refs = resources.files("ciao.stock").joinpath("skills", "ciao-capabilities", "references", "memory-operations", "references")
     return "\n\n".join(
         [prompt, *(item.read_text(encoding="utf-8") for item in sorted(refs.iterdir(), key=lambda i: i.name) if item.name.endswith(".md"))]
     )
