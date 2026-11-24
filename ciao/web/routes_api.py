@@ -263,6 +263,14 @@ def _persist_workspaces(config, candidate_workspaces=None) -> None:
         persist_workspaces(config, candidate_workspaces)
 
 
+def _workspace_registry_snapshot(config) -> tuple[tuple[str, dict[str, Any]], ...]:
+    """Comparable snapshot for detecting registry edits across claim awaits."""
+    return tuple(
+        (name, dataclasses.asdict(workspace))
+        for name, workspace in config.workspaces.items()
+    )
+
+
 def _refresh_project_manager_workspaces(request: Request) -> None:
     pcm = getattr(request.app.state, "project_chat_manager", None)
     refresh = getattr(pcm, "refresh_workspaces", None)
@@ -384,46 +392,61 @@ async def upsert_workspace_setting(request: Request) -> JSONResponse:
             except ValueError as exc:
                 return JSONResponse({"error": str(exc)}, status_code=400)
             body = {**body, "name": requested}
-        existing = config.workspace(str(body.get("name", "")).strip())
-        try:
-            workspace = await _workspace_from_request_async(body, config=config, existing=existing)
-        except ValueError as exc:
-            return JSONResponse({"error": str(exc)}, status_code=400)
-        created = workspace.name not in config.workspaces
-        onboarding_target = None
-        if created:
-            # Validate receipt access before mutating the live registry. A
-            # corrupt/unreadable receipt must not leave a half-created
-            # workspace. Installs predating receipt initialization retain the
-            # existing workspace-save behavior until startup initializes it.
-            from ciao.onboarding import read_receipt  # noqa: PLC0415
-            from ciao.onboarding_progress import register_new_workspace  # noqa: PLC0415
+        from ciao.workspaces import workspace_registry_lock  # noqa: PLC0415
 
-            if read_receipt(Path(config.state_path).parent) is not None:
-                register_new_workspace(config, workspace.name)
-                onboarding_target = {"kind": "workspace", "name": workspace.name}
-        previous_workspaces = dict(config.workspaces)
-        previous_links = {
-            link.path: link.lifetime_id
-            for name, item in previous_workspaces.items()
-            if name == workspace.name
-            for link in getattr(item, "shared_brains", [])
-        }
-        next_links = {link.path: link.lifetime_id for link in workspace.shared_brains}
-        affected_paths = sorted(
-            path for path in set(previous_links) | set(next_links)
-            if previous_links.get(path) != next_links.get(path)
-        )
-        candidate_workspaces = dict(previous_workspaces)
-        candidate_workspaces[workspace.name] = workspace
-        async with contextlib.AsyncExitStack() as claims:
-            for path in affected_paths:
-                await claims.enter_async_context(shared_brain._checkout_lock(path))
-                await claims.enter_async_context(shared_brain._checkout_claim(path, config))
-            from ciao.workspaces import workspace_registry_lock  # noqa: PLC0415
+        while True:
+            # Resolve omitted settings against a stable snapshot. The link list
+            # may be edited by another registry writer while Git resolution or
+            # checkout-claim acquisition yields, so the snapshot is rechecked
+            # under the same lock used for the final save.
             with workspace_registry_lock(config):
-                _persist_workspaces(config, candidate_workspaces)
-                config.workspaces[workspace.name] = workspace
+                previous_workspaces = dict(config.workspaces)
+                registry_snapshot = _workspace_registry_snapshot(config)
+                existing = config.workspace(str(body.get("name", "")).strip())
+            try:
+                workspace = await _workspace_from_request_async(
+                    body, config=config, existing=existing
+                )
+            except ValueError as exc:
+                return JSONResponse({"error": str(exc)}, status_code=400)
+            created = workspace.name not in previous_workspaces
+            previous_links = {
+                link.path: link.lifetime_id
+                for name, item in previous_workspaces.items()
+                if name == workspace.name
+                for link in getattr(item, "shared_brains", [])
+            }
+            next_links = {link.path: link.lifetime_id for link in workspace.shared_brains}
+            affected_paths = sorted(
+                path for path in set(previous_links) | set(next_links)
+                if previous_links.get(path) != next_links.get(path)
+            )
+            candidate_workspaces = dict(previous_workspaces)
+            candidate_workspaces[workspace.name] = workspace
+            retry = False
+            async with contextlib.AsyncExitStack() as claims:
+                for path in affected_paths:
+                    await claims.enter_async_context(shared_brain._checkout_lock(path))
+                    await claims.enter_async_context(shared_brain._checkout_claim(path, config))
+                with workspace_registry_lock(config):
+                    if _workspace_registry_snapshot(config) != registry_snapshot:
+                        retry = True
+                    else:
+                        onboarding_target = None
+                        if created:
+                            # Validate receipt access before mutating the live registry.
+                            # Installs without onboarding retain their old save behavior.
+                            from ciao.onboarding import read_receipt  # noqa: PLC0415
+                            from ciao.onboarding_progress import register_new_workspace  # noqa: PLC0415
+
+                            if read_receipt(Path(config.state_path).parent) is not None:
+                                register_new_workspace(config, workspace.name)
+                                onboarding_target = {"kind": "workspace", "name": workspace.name}
+                        _persist_workspaces(config, candidate_workspaces)
+                        config.workspaces[workspace.name] = workspace
+            if retry:
+                continue
+            break
         # A newly linked folder gets its first update now, not at the next loop pass.
         linked_before = {link.path for link in getattr(existing, "shared_brains", [])}
         for link in workspace.shared_brains:
