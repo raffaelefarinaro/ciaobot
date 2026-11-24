@@ -1567,10 +1567,6 @@ async def _run_server_locked(
     app.state.backup_stop = backup_stop
     asyncio.create_task(app.state.backup_service.backup_loop(stop=backup_stop))
 
-    if not getattr(config, "bootstrap_mode", False):
-        asyncio.create_task(shared_brain.update_loop(config))
-
-
     import uvicorn
 
     uvi_config = uvicorn.Config(app, **_uvicorn_config_kwargs(config))
@@ -1786,7 +1782,7 @@ async def _run_server_locked(
 
     bind_watch = asyncio.create_task(_mark_bound_when_serving(server, tracker))
     try:
-        await server.serve()
+        await _serve_with_shared_brain(server, config)
     except RestartRequested as exc:
         return int(exc.args[0]) if exc.args else RESTART_EXIT_CODE
     except OSError as exc:
@@ -1803,6 +1799,19 @@ async def _run_server_locked(
     if restart_flag[0] is not None:
         return restart_flag[0]
     return 0
+
+
+async def _serve_with_shared_brain(server: Any, config: Any) -> None:
+    """Own shared brain update tasks for exactly one server serving lifetime."""
+    try:
+        # This runs after the engine's early bind check. Bootstrap accepts
+        # scheduled updates but has no periodic updater, matching existing boot.
+        shared_brain.begin_update_lifecycle()
+        if not getattr(config, "bootstrap_mode", False):
+            shared_brain.start_update_loop(config)
+        await server.serve()
+    finally:
+        await shared_brain.shutdown_updates()
 
 
 def main(
