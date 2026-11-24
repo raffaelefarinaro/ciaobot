@@ -67,17 +67,30 @@ def prepare(task: UpdateTask, *, config: Any, workspace: str) -> dict[str, Any]:
                 vault, workspace=workspace, runtime_root=Path(config.state_path).parent
             )
             rows = plan["rows"]
+            automatic_rows = int(plan["automatic_rows"])
+            suppressed_rows = plan["suppressed_rows"]
             blocked = bool(plan["failed"] or plan["unresolved"])
             plan = _reviewable_drain_plan(
                 plan, vault=vault, runtime_root=Path(config.state_path).parent
             )
             result.update(
-                state="blocked" if blocked else "review" if rows else "not_applicable",
+                state=(
+                    "blocked"
+                    if blocked
+                    else "review"
+                    if automatic_rows or suppressed_rows
+                    else "not_applicable"
+                ),
                 plan=plan,
                 summary=(
                     f"Blocked: {len(plan['unresolved'])} drain transaction(s) need recovery or inspection."
                     if blocked
-                    else f"{len(rows)} pending learning row(s) are ready to drain. Review and apply the receipt-backed command."
+                    else (
+                        f"{len(suppressed_rows)} learning row(s) were deliberately restored and remain queued. "
+                        "They will not move automatically; review or remove an exact row only if the user asks."
+                        if suppressed_rows and not automatic_rows
+                        else f"{automatic_rows} pending learning row(s) are moving automatically in the background."
+                    )
                 ),
             )
         elif task.id == "learnings-cleanup":

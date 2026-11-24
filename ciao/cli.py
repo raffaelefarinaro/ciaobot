@@ -4663,26 +4663,6 @@ def _decision_rules_write_command(args: argparse.Namespace) -> int:
     return 0
 
 
-def _learnings_queue_drain_command_text(
-    workspace: str | None,
-    vault: Path,
-    *,
-    workspace_root: Path,
-    runtime_root: Path,
-    apply: bool,
-) -> str:
-    """Copyable command bound to one registered workspace and vault."""
-    command = (
-        f"CIAO_WORKSPACE={shlex.quote(str(workspace_root))} "
-        f"CIAO_RUNTIME_ROOT={shlex.quote(str(runtime_root))} "
-        "ciao learnings-queue-drain"
-    )
-    if workspace:
-        command += f" --workspace {shlex.quote(workspace)}"
-    command += f" --vault-root {shlex.quote(str(vault))}"
-    return command + (" --apply" if apply else "")
-
-
 def _memory_proposals_command(args: argparse.Namespace) -> int:
     """List pending memory proposals in a workspace's review queue.
 
@@ -4714,9 +4694,8 @@ def _memory_proposals_command(args: argparse.Namespace) -> int:
         )
         if legacy["rows"] or legacy["failed"] or legacy["unresolved"]:
             print(
-                "Legacy learning proposals need attention: run `"
-                f"{_learnings_queue_drain_command_text(name, vault, workspace_root=workspace, runtime_root=runtime, apply=False)}` to inspect, "
-                "then add `--apply` to migrate them.",
+                "Older learning proposals are handled automatically. This workspace still has rows needing review; "
+                "check Memory → To decide or ask Ciaobot to inspect the migration.",
                 file=sys.stderr,
             )
     except Exception:

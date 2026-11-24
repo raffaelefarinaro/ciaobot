@@ -630,9 +630,9 @@ def test_pass_one_drains_legacy_learning_rows_before_proposal_review() -> None:
     pass1 = (_memory_skill_dir() / "references" / "curation-pass-1-proposals.md").read_text(
         encoding="utf-8"
     )
-    assert "Before listing current proposals, run `ciao learnings-queue-drain --apply --fresh-only`" in pass1
-    assert "failed or unresolved rows" in pass1
-    assert "do not hand-edit either file" in pass1
+    assert "Older learning rows are migrated automatically when the workspace starts." in pass1
+    assert "Do not run the migration again during proposal review." in pass1
+    assert "do not edit either file" in pass1
     assert "[learnings]" not in pass1
     assert "--kind learnings" not in pass1
     assert "memory learn --text-file" not in pass1
