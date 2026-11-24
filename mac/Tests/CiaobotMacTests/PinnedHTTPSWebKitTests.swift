@@ -138,6 +138,9 @@ private final class PinnedHTTPSFixture {
         } else if path == "/cookie" {
             let body = "<!doctype html><script>fetch('/same-origin').catch(()=>{});</script>"
             response = Self.response(body: body, extra: ["Set-Cookie": "ciaobot_session=secret; Secure; HttpOnly; SameSite=Lax; Path=/"])
+        } else if path == "/ordinary-cookie" {
+            let body = "<!doctype html><script>fetch('/same-origin').catch(()=>{});</script>"
+            response = Self.response(body: body, extra: ["Set-Cookie": "ciaobot_control=plain; HttpOnly; Path=/"])
         } else if path == "/login" {
             response = Self.response(body: "<!doctype html><script>fetch('/same-origin').catch(()=>{});</script>",
                                      extra: ["Set-Cookie": "ciao_session=secret; Secure; HttpOnly; SameSite=Lax; Path=/"])
@@ -620,8 +623,8 @@ final class PinnedHTTPSWebKitTests: XCTestCase {
         XCTAssertTrue(trusted.waitForRequest("/http-probes"))
 
         XCTAssertTrue(http.waitForPath("/image"))
-        XCTAssertTrue(http.observed.contains(where: { $0.cookie == "ciaobot_session=secret" }),
-                      "This negative control documents WebKit's loopback Secure-cookie exception")
+        let secureCookieCrossedHTTP = http.observed.contains { cookie($0, named: "ciaobot_session") == "secret" }
+        recordSecureCookieObservation(secureCookieCrossedHTTP, testName: #function)
     }
 
     func testCookieRuleFenceSuppressesPlainHTTPAndCrossPortWebSocketCookies() async throws {
@@ -644,14 +647,21 @@ final class PinnedHTTPSWebKitTests: XCTestCase {
         XCTAssertTrue(sawSameOrigin, "Allowed origin requests: \(trusted.observed.map(\.path)); rejected challenges: \(delegate.rejectedHosts); navigation failures: \(delegate.navigationFailures)")
         XCTAssertEqual(trusted.requests(for: "/same-origin").first?.cookie, "ciaobot_session=secret",
                        "The exact TLS listener must retain the session cookie")
+        webView.load(URLRequest(url: URL(string: "\(trusted.origin)/ordinary-cookie")!))
+        let sawControlCookie = await waitForRequestCount(trusted, "/same-origin", count: 2)
+        XCTAssertTrue(sawControlCookie)
+        XCTAssertEqual(cookie(trusted.requests(for: "/same-origin").last, named: "ciaobot_control"), "plain",
+                       "The ordinary-cookie control must be present at its allowed origin")
         webView.load(URLRequest(url: URL(string: "\(trusted.origin)/http-probes")!))
         let sawProbePage = await waitForRequest(trusted, "/http-probes")
         XCTAssertTrue(sawProbePage)
 
         try await Task.sleep(nanoseconds: 3_000_000_000)
         XCTAssertFalse(http.observed.isEmpty, "The control listener did not receive any probe request")
-        XCTAssertTrue(http.observed.allSatisfy { $0.cookie != "ciaobot_session=secret" },
-                      "The content rule failed to strip the Secure cookie from HTTP image requests: \(http.observed)")
+        XCTAssertTrue(http.observed.allSatisfy { cookie($0, named: "ciaobot_control") != "plain" },
+                      "The content rule failed to strip an ordinary cookie at the HTTP wire: \(http.observed)")
+        XCTAssertTrue(http.observed.allSatisfy { cookie($0, named: "ciaobot_session") != "secret" },
+                      "The content rule failed to strip the Secure cookie from HTTP requests: \(http.observed)")
         let observedPaths = Set(http.observed.map(\.path))
         for requiredPath in ["/image"] {
             XCTAssertTrue(observedPaths.contains(requiredPath), "The fixture did not observe \(requiredPath); requests were \(http.observed)")
@@ -675,15 +685,19 @@ final class PinnedHTTPSWebKitTests: XCTestCase {
         source.setRedirect("/redirect-image", to: "http://127.0.0.1:\(target.port)/redirect-target")
         let paths = ["/image", "/fetch", "/socket", "/redirect-target"]
 
-        // Negative control: the same stored Secure cookie crosses ports on
-        // loopback when no network rule is installed, including the WebSocket
-        // handshake header.
+        // Negative control: an ordinary host cookie crosses ports on
+        // loopback when no network rule is installed, including the
+        // WebSocket handshake header. Secure-cookie behavior is observed
+        // separately because it differs by macOS release.
         let openStore = WKWebsiteDataStore.nonPersistent()
         let openDelegate = PinningNavigationDelegate(certificate: tls.certificate)
         let openView = makeWebView(delegate: openDelegate, dataStore: openStore)
         openView.load(URLRequest(url: URL(string: "\(tls.origin)/cookie")!))
         let openCookieSet = await waitForRequest(tls, "/same-origin")
         XCTAssertTrue(openCookieSet)
+        openView.load(URLRequest(url: URL(string: "\(tls.origin)/ordinary-cookie")!))
+        let openOrdinaryCookieSet = await waitForRequestCount(tls, "/same-origin", count: 2)
+        XCTAssertTrue(openOrdinaryCookieSet)
         openView.load(URLRequest(url: URL(string: "\(source.origin)/probe")!))
         let openPageLoaded = await waitForRequest(source, "/probe")
         XCTAssertTrue(openPageLoaded)
@@ -691,8 +705,10 @@ final class PinnedHTTPSWebKitTests: XCTestCase {
             let observed = await waitForRequest(target, path)
             XCTAssertTrue(observed, "Unfenced request \(path) was not observed")
         }
-        XCTAssertTrue(target.observed.allSatisfy { $0.cookie == "ciaobot_session=secret" },
-                      "The negative control did not expose loopback cookie sharing: \(target.observed)")
+        XCTAssertTrue(target.observed.allSatisfy { cookie($0, named: "ciaobot_control") == "plain" },
+                      "The negative control did not expose ordinary loopback cookie sharing: \(target.observed)")
+        let secureCookieCrossedHTTP = target.observed.contains { cookie($0, named: "ciaobot_session") == "secret" }
+        recordSecureCookieObservation(secureCookieCrossedHTTP, testName: #function)
 
         source.resetRequests()
         target.resetRequests()
@@ -707,7 +723,11 @@ final class PinnedHTTPSWebKitTests: XCTestCase {
         protectedView.load(URLRequest(url: URL(string: "\(tls.origin)/cookie")!))
         let protectedCookieSet = await waitForRequest(tls, "/same-origin")
         XCTAssertTrue(protectedCookieSet)
-        XCTAssertEqual(tls.requests(for: "/same-origin").last?.cookie, "ciaobot_session=secret")
+        protectedView.load(URLRequest(url: URL(string: "\(tls.origin)/ordinary-cookie")!))
+        let protectedOrdinaryCookieSet = await waitForRequestCount(tls, "/same-origin", count: 2)
+        XCTAssertTrue(protectedOrdinaryCookieSet)
+        XCTAssertEqual(cookie(tls.requests(for: "/same-origin").last, named: "ciaobot_session"), "secret")
+        XCTAssertEqual(cookie(tls.requests(for: "/same-origin").last, named: "ciaobot_control"), "plain")
         protectedView.load(URLRequest(url: URL(string: "\(source.origin)/probe")!))
         let protectedPageLoaded = await waitForRequest(source, "/probe")
         XCTAssertTrue(protectedPageLoaded)
@@ -715,8 +735,10 @@ final class PinnedHTTPSWebKitTests: XCTestCase {
             let observed = await waitForRequest(target, path)
             XCTAssertTrue(observed, "Fenced request \(path) was not observed")
         }
-        XCTAssertTrue(target.observed.allSatisfy { $0.cookie != "ciaobot_session=secret" },
-                      "A cookie crossed the fence to an HTTP resource or WebSocket: \(target.observed)")
+        XCTAssertTrue(target.observed.allSatisfy { cookie($0, named: "ciaobot_control") != "plain" },
+                      "The content rule failed to strip an ordinary cookie at the HTTP/WebSocket wire: \(target.observed)")
+        XCTAssertTrue(target.observed.allSatisfy { cookie($0, named: "ciaobot_session") != "secret" },
+                      "A Secure session cookie crossed the fence to an HTTP resource or WebSocket: \(target.observed)")
     }
 
     func testExactOriginCSPBlocksCrossPortImageFetchRedirectAndWebSocket() async throws {
@@ -770,6 +792,30 @@ final class PinnedHTTPSWebKitTests: XCTestCase {
         window.makeKeyAndOrderFront(nil)
         windows.append(window)
         return view
+    }
+
+    private func cookie(_ request: PinnedHTTPSFixture.Request?, named name: String) -> String? {
+        cookie(request?.cookie, named: name)
+    }
+
+    private func cookie(_ request: LoopbackHTTPProbe.Request, named name: String) -> String? {
+        cookie(request.cookie, named: name)
+    }
+
+    private func cookie(_ header: String?, named name: String) -> String? {
+        guard let header else { return nil }
+        for pair in header.split(separator: ";") {
+            let parts = pair.trimmingCharacters(in: .whitespaces).split(separator: "=", maxSplits: 1)
+            if parts.count == 2, parts[0] == name { return String(parts[1]) }
+        }
+        return nil
+    }
+
+    private func recordSecureCookieObservation(_ crossedHTTP: Bool, testName: String) {
+        let version = ProcessInfo.processInfo.operatingSystemVersion
+        XCTContext.runActivity(named: "Secure cookie loopback observation: \(testName)") { activity in
+            activity.add(XCTAttachment(string: "macOS \(version.majorVersion).\(version.minorVersion).\(version.patchVersion); Secure cookie reached HTTP: \(crossedHTTP)"))
+        }
     }
 
     private func waitForRequest(_ fixture: LoopbackHTTPProbe, _ path: String, timeout: TimeInterval = 8) async -> Bool {
