@@ -521,6 +521,8 @@ def _proposal_items(vault_root: Path, policy: HandoverPolicy) -> list[WorklistIt
     for entry in walk_proposal_queue("", PROPOSALS_RELATIVE, text):
         bullet = entry.bullet
         subject = _proposal_subject(bullet, entry.dup)
+        if bullet.kind == "share":
+            continue
         if bullet.kind in REGION_KINDS:
             predicted = predictions.get(prediction_key(bullet.kind, bullet.text))
             if predicted is None:

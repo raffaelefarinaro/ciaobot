@@ -191,7 +191,7 @@ final class PackagingTests: XCTestCase {
         XCTAssertEqual(config["UPDATE_FEED_URL"],
                        "https://github.com/raffaelefarinaro/ciaobot/releases/download/updates/appcast.xml")
         XCTAssertEqual(config["UPDATE_PUBLIC_ED_KEY"], "uLLvdsFBrO33Zb9zLZ+m/ZUun3D9vUf+9t1ufoa2guM=")
-        XCTAssertEqual(config["UPDATE_MIN_SYSTEM_VERSION"], "13.0")
+        XCTAssertEqual(config["UPDATE_MIN_SYSTEM_VERSION"], "14.0")
 
         let guardIndex = try XCTUnwrap(text.range(of: "CIAOBOT_RELEASE_UPDATES"))
         let heredocIndex = try XCTUnwrap(text.range(of: "cat > \"$bundle/Contents/Info.plist\""))
@@ -221,6 +221,16 @@ final class PackagingTests: XCTestCase {
         XCTAssertTrue(text.contains("$update_plist\n</dict></plist>"),
                       "the default plist template must interpolate the fragment instead of embedding keys")
         XCTAssertFalse(text.contains("SUPublicEDKey</key><string>uLL"), "the key is read from the config")
+    }
+
+    func testMacOSMinimumIsFourteenAcrossPackageBundleAndSparkle() throws {
+        let package = try String(contentsOf: packageRoot.appendingPathComponent("Package.swift"), encoding: .utf8)
+        let build = try readScript("build-app.sh")
+        let config = try readUpdateConfig()
+
+        XCTAssertTrue(package.contains("platforms: [.macOS(.v14)]"), "SwiftPM must reject older deployment targets")
+        XCTAssertTrue(build.contains("minimum_system_version=14.0"), "the app bundle must declare macOS 14")
+        XCTAssertEqual(config["UPDATE_MIN_SYSTEM_VERSION"], "14.0", "Sparkle must advertise the bundle minimum")
     }
 
     func testDefaultBuildEmitsNoUpdaterConfiguration() throws {

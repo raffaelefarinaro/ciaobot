@@ -30,6 +30,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from ciao.os_support.child_env import child_env
+from ciao.os_support.processes import bounded_output
 from ciao.os_support.processes import ProcessTree, tree_spawn_options
 
 logger = logging.getLogger(__name__)
@@ -59,6 +60,7 @@ class GitCapture:
     stdout: bytes
     stderr: bytes
     truncated: bool = False
+    output_limited: bool = False
 
 
 async def run_git_bounded(
@@ -313,6 +315,29 @@ def run_git_sync(
     except OSError as exc:
         return 1, "", str(exc)
     return proc.returncode, proc.stdout, proc.stderr
+
+
+def run_git_sync_bounded(
+    workspace: Path,
+    *args: str,
+    timeout: float,
+    max_output: int,
+    env: dict[str, str],
+) -> GitCapture:
+    """Run a synchronous Git read with a pipe-timeout and a hard stdout cap."""
+    result = bounded_output(
+        ["git", *EXACT_BYTES, *args],
+        timeout=timeout,
+        max_stdout=max_output,
+        cwd=workspace,
+        env=env,
+        report_limit=True,
+    )
+    if result is None:
+        return GitCapture(-1, b"", b"git command timed out or exceeded its output limit", True)
+    if len(result) == 3:
+        return GitCapture(result[0], result[1], b"git output exceeded its limit", True, result[2])
+    return GitCapture(result[0], result[1], b"")
 
 
 async def run_git(

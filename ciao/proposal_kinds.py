@@ -61,6 +61,7 @@ KINDS: tuple[str, ...] = (
     "category",
     "note_edit",
     "repo",
+    "share",
 )
 """Ordered registry of proposal kinds. Adding a kind here is the only edit a
 new producer needs; the regex below derives from this table."""
@@ -265,6 +266,15 @@ class RepoDocAccept:
     repo_path: str = ""
 
 
+@dataclass(frozen=True, slots=True)
+class ShareAccept:
+    """A shared-note proposal can only be published by its consent flow."""
+
+    action: Literal["publish_share"] = "publish_share"
+    sidecar_id: str = ""
+    review_token: str = ""
+
+
 AcceptDescriptor = (
     RegionAccept
     | RehomeAccept
@@ -274,6 +284,7 @@ AcceptDescriptor = (
     | CategoryAccept
     | NoteEditAccept
     | RepoDocAccept
+    | ShareAccept
 )
 
 _ACCEPT: dict[str, AcceptDescriptor] = {
@@ -291,6 +302,7 @@ _ACCEPT: dict[str, AcceptDescriptor] = {
     "category": CategoryAccept(),
     "note_edit": NoteEditAccept(),
     "repo": RepoDocAccept(),
+    "share": ShareAccept(),
 }
 
 
