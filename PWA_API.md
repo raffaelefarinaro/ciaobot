@@ -1455,6 +1455,28 @@ trimmed, at most 1000 characters; 400 if longer or not a string) that is stored
 on the decision row. `/api/proposals/batch` and `dismiss-older-than` take no
 reason.
 
+A `kind: "share"` preview is the exact private draft projection:
+`{before, after, operation, brain, identity, branch, path, revision,
+blocked_reason}`. `before` and `after` are exact text or `null` when the file
+is absent; `revision` is the full-artifact consent token. Share previews cannot
+be edited. Accept requires `{workspace, expected_revision}` for the owning
+workspace and that exact token. A stale token returns 409 with
+`share_status: "stale_review"` and a refreshed preview. The publisher records
+and reconciles remote attempts before confirming success; refusals leave the
+proposal pending. A confirmed accept settles the queue and records one
+decision. Retrying a confirmed accept with the same workspace and token
+replays its private receipt without another push. Batch accept still refuses
+share rows.
+
+Share publication receipts are projected into proposal history and
+`/api/memory/receipts` as `kind: "share_publish"`, with commit, branch, path,
+operation and undoability metadata. The exact before/after text remains in the
+private runtime artifact and is returned only by receipt detail. Undo checks
+the original link lifetime, destination ref and currently published blob (or
+absence), then queues an inverse share proposal and returns
+`{ok: true, workspace, review_path}`. It never publishes; the inverse needs a
+separate preview and approval.
+
 Each `GET /api/proposals` row may carry `decider` (`nightly` or `you`, absent
 when the bullet carries none) and `decide_reason` (one line).
 

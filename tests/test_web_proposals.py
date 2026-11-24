@@ -174,6 +174,74 @@ def test_share_accept_is_refused_before_single_or_mixed_batch_mutation(tmp_path:
     assert response.status_code == 200
     assert "opaque123" not in queue.read_text(encoding="utf-8")
 
+
+def test_share_accept_requires_workspace_and_exact_review_token(tmp_path: Path, monkeypatch) -> None:
+    from types import SimpleNamespace
+
+    from ciao import share_publish
+    from ciao.web import routes_api
+    from ciao.web import proposal_service
+
+    config = _default_vault(tmp_path)
+    queue = _queue_text(config, "personal")
+    queue.write_text(
+        "# Queue\n- [share opaque123] Shared note change proposal opaque123\n",
+        encoding="utf-8",
+    )
+    client = _client(config)
+    share = next(row for row in client.get("/api/proposals").json()["rows"] if row["kind"] == "share")
+    edited_preview = client.post(f"/api/proposals/{share['id']}/preview?text=edited")
+    assert edited_preview.status_code == 400
+    preview = {"revision": "shr_exact-token", "blocked_reason": None, "brain": "notes", "path": "n.md"}
+    monkeypatch.setattr(proposal_service, "preview_row", lambda *args, **kwargs: dict(preview))
+    calls = []
+
+    async def publish(_config, *, workspace, proposal_id, expected_revision):
+        calls.append((workspace, proposal_id, expected_revision))
+        return SimpleNamespace(outcome="published")
+
+    monkeypatch.setattr(share_publish, "publish_share", publish)
+    monkeypatch.setattr(
+        share_publish, "get_share_receipt",
+        lambda *_args, **_kwargs: {"id": "shrpub_receipt", "brain": "notes", "path": "n.md"},
+    )
+    async def settled(*_args, **_kwargs):
+        return True
+    monkeypatch.setattr(routes_api, "_settle_share_accept", settled)
+
+    missing = client.post(f"/api/proposals/{share['id']}/accept", json={"workspace": "personal"})
+    wrong_workspace = client.post(
+        f"/api/proposals/{share['id']}/accept",
+        json={"workspace": "work", "expected_revision": "shr_exact-token"},
+    )
+    stale = client.post(
+        f"/api/proposals/{share['id']}/accept",
+        json={"workspace": "personal", "expected_revision": "shr_stale"},
+    )
+    assert missing.status_code == wrong_workspace.status_code == stale.status_code == 409
+    assert stale.json()["share_status"] == "stale_review"
+    assert stale.json()["preview"] == preview
+    assert calls == []
+
+    accepted = client.post(
+        f"/api/proposals/{share['id']}/accept",
+        json={"workspace": "personal", "expected_revision": "shr_exact-token"},
+    )
+    assert accepted.status_code == 200, accepted.text
+    assert calls == [("personal", share["id"], "shr_exact-token")]
+
+    preview["blocked_reason"] = "brain_unavailable"
+    monkeypatch.setattr(share_publish, "has_publication_attempt", lambda *_a, **_k: True)
+    recovered = client.post(
+        f"/api/proposals/{share['id']}/accept",
+        json={"workspace": "personal", "expected_revision": "shr_exact-token"},
+    )
+    assert recovered.status_code == 200, recovered.text
+    assert calls == [
+        ("personal", share["id"], "shr_exact-token"),
+        ("personal", share["id"], "shr_exact-token"),
+    ]
+
 def test_list_returns_rows_with_workspace_path_and_kind(tmp_path: Path) -> None:
     config = _default_vault(tmp_path)
     resp = _client(config).get("/api/proposals")
@@ -3356,19 +3424,78 @@ def _undo_client(config: CiaoConfig) -> TestClient:
     drove one over HTTP and the other as a function would not prove the pair
     works: the receipt is the only thing between them.
     """
-    from ciao.web.routes_api import memory_receipt_undo
+    from ciao.web.routes_api import memory_receipt_detail, memory_receipt_undo, memory_receipts
 
     app = Starlette(
         routes=[
             Route("/api/proposals", list_proposals, methods=["GET"]),
+            Route("/api/proposals/history", proposals_history, methods=["GET"]),
             Route("/api/proposals/{id}/{action}", proposal_action, methods=["POST"]),
             Route(
                 "/api/memory/receipts/{id}/undo", memory_receipt_undo, methods=["POST"]
             ),
+            Route("/api/memory/receipts/{id}", memory_receipt_detail, methods=["GET"]),
+            Route("/api/memory/receipts", memory_receipts, methods=["GET"]),
         ]
     )
     app.state.config = config
     return TestClient(app)
+
+
+def test_share_publication_receipts_project_private_text_and_queue_undo(
+    tmp_path: Path, monkeypatch,
+) -> None:
+    from ciao import proposal_actions, share_publish
+
+    config = _default_vault(tmp_path)
+    queue = _queue_text(config, "personal")
+    receipt = {
+        "id": "shrpub_private", "workspace": "personal", "proposal_id": "share-id",
+        "ts": "2026-11-24T10:00:00+00:00", "brain": "notes", "path": "n.md",
+        "operation": "replace", "branch": "main", "commit_oid": "a" * 40,
+        "published_blob_oid": "b" * 40,
+    }
+    fields = {
+        "sidecar_id": "opaque", "workspace": "personal", "proposal_id": "share-id",
+        "brain": "notes", "path": "n.md", "operation": "replace",
+        "origin_identity": "github.com/acme/notes", "original": "private before\n",
+        "proposed": "private after\n",
+    }
+    monkeypatch.setattr(
+        share_publish, "list_share_receipts",
+        lambda _config, *, workspace: [receipt] if workspace == "personal" else [],
+    )
+    monkeypatch.setattr(
+        share_publish, "get_share_receipt_detail",
+        lambda *_a, **_kw: {"receipt": receipt, "immutable": fields},
+    )
+    async def reverse(_config, *, workspace, receipt_id):
+        assert (workspace, receipt_id) == ("personal", "shrpub_private")
+        return {"workspace": workspace, "review_path": "/memory/review?proposal=undo"}
+    monkeypatch.setattr(share_publish, "draft_share_reversal", reverse)
+
+    proposal_actions.record_decision(
+        queue, action="accept", text="Shared note change proposal opaque", kind="share",
+        via="pwa", destination="notes:n.md", outcome="published",
+        proposal_id="share-id", receipt_id="shrpub_private",
+    )
+    client = _undo_client(config)
+
+    history = client.get("/api/proposals/history").json()["rows"]
+    share_row = next(row for row in history if row.get("kind") == "share")
+    assert share_row["share_status"] == "published"
+    assert share_row["applied"] is True
+    assert share_row["commit_oid"] == "a" * 40
+    assert share_row["change"]["receipt_id"] == "shrpub_private"
+    listed = client.get("/api/memory/receipts").json()["rows"]
+    listed_share = next(row for row in listed if row["id"] == "shrpub_private")
+    assert listed_share["kind"] == "share_publish" and listed_share["undoable"] is True
+    detail = client.get("/api/memory/receipts/shrpub_private?workspace=personal").json()
+    assert detail["before"] == "private before\n"
+    assert detail["after"] == "private after\n"
+    undo = client.post("/api/memory/receipts/shrpub_private/undo?workspace=personal")
+    assert undo.status_code == 200
+    assert undo.json() == {"ok": True, "workspace": "personal", "review_path": "/memory/review?proposal=undo"}
 
 
 def test_undoing_an_accepted_category_restores_the_yaml_and_every_note(

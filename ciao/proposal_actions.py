@@ -231,6 +231,7 @@ def record_decision(
     proposal_id: str = "",
     receipt_id: str = "",
     reason: str = "",
+    once: bool = False,
 ) -> None:
     """Record one resolved proposal in the decision history.
 
@@ -276,4 +277,5 @@ def record_decision(
         proposal_id=proposal_id,
         receipt_id=receipt_id,
         reason=reason,
+        once=once,
     )

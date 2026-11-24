@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import json
 import re
+import threading
 from pathlib import Path
 from typing import Any, Iterable, cast
 
@@ -33,6 +34,15 @@ from ciao.model_tiers import is_tier
 from ciao.provider_service import capabilities_for
 
 WORKSPACE_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$")
+_REGISTRY_LOCKS: dict[int, threading.RLock] = {}
+_REGISTRY_LOCKS_GUARD = threading.Lock()
+
+
+def workspace_registry_lock(config: Any) -> threading.RLock:
+    """Serialize registry snapshots with initialization of legacy link IDs."""
+    key = id(config)
+    with _REGISTRY_LOCKS_GUARD:
+        return _REGISTRY_LOCKS.setdefault(key, threading.RLock())
 
 # Every selectable provider is a runtime provider, so the registry is the only
 # source for labels.
@@ -332,14 +342,33 @@ def _workspaces_path(config: Any) -> Path:
     return Path(config.state_path).resolve().parent / "workspaces.json"
 
 
-def persist_workspaces(config: Any) -> None:
+def persist_workspaces(config: Any, candidate_workspaces: dict[str, Any] | None = None) -> None:
     persist = getattr(config, "persist_workspace_registry", None)
-    if callable(persist):
+    if candidate_workspaces is None and callable(persist):
         persist()
         return
     path = _workspaces_path(config)
     path.parent.mkdir(parents=True, exist_ok=True)
-    payload = [workspace_to_dict(workspace, config) for workspace in config.workspaces.values()]
+    workspaces = candidate_workspaces if candidate_workspaces is not None else config.workspaces
+    payload = [workspace_to_dict(workspace, config) for workspace in workspaces.values()]
+    for row, workspace in zip(payload, workspaces.values()):
+        if candidate_workspaces is not None:
+            row["default_provider"] = workspace.default_provider
+            if not workspace.claude_trim:
+                row.pop("claude_trim", None)
+            if workspace.memory_handover == DEFAULT_MEMORY_HANDOVER:
+                row.pop("memory_handover", None)
+            if not workspace.memory_approval:
+                row.pop("memory_approval", None)
+            if not workspace.provider_overrides:
+                row.pop("provider_overrides", None)
+            if not workspace.shared_brains:
+                row.pop("shared_brains", None)
+        if workspace.shared_brains:
+            row["shared_brains"] = [
+                {"name": link.name, "path": link.path, "identity": link.identity, "lifetime_id": link.lifetime_id}
+                for link in workspace.shared_brains
+            ]
     tmp = path.with_suffix(".json.tmp")
     tmp.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8", newline="")
     tmp.replace(path)

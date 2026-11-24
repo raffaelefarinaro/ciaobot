@@ -522,6 +522,7 @@ class SharedBrainLink:
     name: str  # stable local name, unique per workspace
     path: str  # absolute path of the Git checkout
     identity: str  # canonical "host/owner/repo" read from origin, unique per workspace
+    lifetime_id: str = field(default_factory=lambda: secrets.token_urlsafe(24), compare=False)
 
 
 @dataclass(slots=True)
@@ -583,6 +584,7 @@ def shared_brains_from_rows(raw: object) -> list[SharedBrainLink]:
         if not isinstance(row, dict):
             continue
         name, path, identity = row.get("name"), row.get("path"), row.get("identity")
+        lifetime_id = row.get("lifetime_id")
         if not (isinstance(name, str) and isinstance(path, str) and isinstance(identity, str)):
             continue
         sound = (
@@ -597,7 +599,10 @@ def shared_brains_from_rows(raw: object) -> list[SharedBrainLink]:
             log.warning("Dropping an invalid shared brain row %r", name)
             continue
         seen |= {f"name:{name}", f"path:{path}", f"id:{identity}"}
-        links.append(SharedBrainLink(name=name, path=path, identity=identity))
+        links.append(SharedBrainLink(
+            name=name, path=path, identity=identity,
+            lifetime_id=lifetime_id if isinstance(lifetime_id, str) and lifetime_id else secrets.token_urlsafe(24),
+        ))
     return links
 
 
@@ -1346,6 +1351,13 @@ class CiaoConfig:
 
     def persist_workspace_registry(self) -> None:
         """Atomically persist the live workspace registry."""
+        from ciao.workspaces import workspace_registry_lock  # noqa: PLC0415
+
+        with workspace_registry_lock(self):
+            self._persist_workspace_registry_locked()
+
+    def _persist_workspace_registry_locked(self) -> None:
+        """Write a registry snapshot while its shared serialization lock is held."""
         path = self.state_path.parent / "workspaces.json"
         path.parent.mkdir(parents=True, exist_ok=True)
         payload: list[dict[str, Any]] = []
@@ -1371,7 +1383,7 @@ class CiaoConfig:
                 row["memory_handover"] = workspace.memory_handover
             if workspace.shared_brains:
                 row["shared_brains"] = [
-                    {"name": link.name, "path": link.path, "identity": link.identity}
+                    {"name": link.name, "path": link.path, "identity": link.identity, "lifetime_id": link.lifetime_id}
                     for link in workspace.shared_brains
                 ]
             if workspace.memory_approval:

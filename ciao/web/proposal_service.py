@@ -3138,6 +3138,48 @@ def preview_row(
     """
     row = ctx["row"]
     fact = (text or str(row.get("text") or "")).strip()
+    if str(row.get("kind") or "") == "share":
+        from ciao import share_proposals, shared_brain
+
+        workspace = str(ctx.get("workspace") or row.get("workspace") or "")
+        proposal_id = str(row.get("id") or "")
+        draft = share_proposals.load_share(
+            config, workspace=workspace, proposal_id=proposal_id
+        )
+        if isinstance(draft, share_proposals.ShareRefusal):
+            return {
+                "id": proposal_id, "kind": "share", "workspace": workspace,
+                "operation": "none", "before": None, "after": None,
+                "brain": "", "identity": "", "branch": "", "path": "",
+                "revision": "", "blocked_reason": draft.code,
+            }
+        fields = draft["immutable"]
+        record = config.workspace(workspace) if hasattr(config, "workspace") else None
+        link = next(
+            (item for item in getattr(record, "shared_brains", []) or []
+             if item.name == fields.get("brain")),
+            None,
+        )
+        blocked = None
+        if link is None or getattr(link, "lifetime_id", None) != fields.get("link_lifetime_id"):
+            blocked = "brain_unavailable"
+        else:
+            state = shared_brain.brain_state(link, config)
+            if state.get("problem"):
+                blocked = "brain_changed" if state.get("problem") == "origin_changed" else "brain_unavailable"
+        if text:
+            blocked = "share_text_edits_not_supported"
+        operation = str(fields.get("operation") or "")
+        return {
+            "id": proposal_id, "kind": "share", "workspace": workspace,
+            "operation": operation, "before": fields.get("original"),
+            "after": fields.get("proposed"), "brain": str(fields.get("brain") or ""),
+            "identity": str(fields.get("origin_identity") or ""),
+            "branch": str(fields.get("upstream_ref") or "").removeprefix("refs/heads/"),
+            "path": str(fields.get("path") or ""),
+            "revision": str(draft.get("review_token") or ""),
+            "blocked_reason": blocked,
+        }
     if ctx.get("file"):
         out = _base_preview(row)
         out["text"] = fact
