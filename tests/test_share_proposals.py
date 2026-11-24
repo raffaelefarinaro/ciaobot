@@ -408,4 +408,3 @@ def test_share_refuses_symlink_ancestor_in_tracked_tree(linked: tuple[Config, Pa
     git(clone, "update-ref", "refs/remotes/origin/main", "HEAD")
     refusal = sp.draft_share(config, workspace="home", relative_path="links/n.md", operation="create", proposed=b"unsafe", request_key="symlink")
     assert isinstance(refusal, sp.ShareRefusal) and refusal.code == "unsafe_target"
-
