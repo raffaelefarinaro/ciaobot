@@ -76,20 +76,32 @@ def _run_command(args: argparse.Namespace) -> int:
     if args.port is not None and not args.app_engine:
         print("--port requires --app-engine", file=sys.stderr)
         return 2
+    if args.app_engine_ready_fd is not None and not args.app_engine:
+        print("--app-engine-ready-fd requires --app-engine", file=sys.stderr)
+        return 2
     if args.app_engine:
-        # App-mode: the Mac app owns this engine. The bundle check keeps the
-        # flag out of reach everywhere else.
         if not package_version.running_from_app_bundle():
             print("--app-engine runs only from the engine inside Ciaobot.app", file=sys.stderr)
             return 2
-        if args.port is not None:
-            if not 1024 <= args.port <= 65535:
-                print("--port must be between 1024 and 65535", file=sys.stderr)
-                return 2
-            return _run_server(
-                supervised=args.supervised, app_engine=True, app_engine_port=args.port
-            )
-        return _run_server(supervised=args.supervised, app_engine=True)
+        if args.port is not None and not 1024 <= args.port <= 65535:
+            print("--port must be between 1024 and 65535", file=sys.stderr)
+            return 2
+        if args.app_engine_ready_fd is None:
+            print("--app-engine requires an inherited readiness pipe", file=sys.stderr)
+            return 2
+        from ciao.app_engine import protect_ready_fd
+
+        try:
+            protect_ready_fd(args.app_engine_ready_fd)
+        except (OSError, OverflowError, ValueError):
+            print("Ciaobot app engine readiness pipe is invalid", file=sys.stderr)
+            return 2
+        return _run_server(
+            supervised=args.supervised,
+            app_engine=True,
+            app_engine_port=args.port,
+            app_engine_ready_fd=args.app_engine_ready_fd,
+        )
     # Ordinary `ciao run` keeps its exact call shape.
     return _run_server(supervised=args.supervised)
 
@@ -99,13 +111,19 @@ def _run_server(
     supervised: bool = False,
     app_engine: bool = False,
     app_engine_port: int | None = None,
+    app_engine_ready_fd: int | None = None,
 ) -> int:
     from ciao.config import RESTART_EXIT_CODE
     from ciao.main import main as server_main
 
     try:
         if app_engine and app_engine_port is not None:
-            server_main(supervised=supervised, app_engine=True, app_engine_port=app_engine_port)
+            server_main(
+                supervised=supervised,
+                app_engine=True,
+                app_engine_port=app_engine_port,
+                app_engine_ready_fd=app_engine_ready_fd,
+            )
         elif app_engine:
             # Before any configuration is loaded, no server, threads or locks
             # of its own: the recorded move (this boot is its restart) moves
@@ -114,7 +132,7 @@ def _run_server(
             from ciao import workspace_move_app
 
             workspace_move_app.before_boot()
-            server_main(supervised=supervised, app_engine=True)
+            server_main(supervised=supervised, app_engine=True, app_engine_ready_fd=app_engine_ready_fd)
         else:
             server_main(supervised=supervised)
     except SystemExit as exc:
@@ -147,7 +165,12 @@ def _run_server(
             # os.environ before the pointer — would never boot the new one.
             os.environ.pop("CIAO_WORKSPACE", None)
             os.environ.pop("CIAO_RUNTIME_ROOT", None)
-        os.execv(sys.executable, _relaunch_argv())
+        if app_engine_ready_fd is not None:
+            from ciao.app_engine import exec_with_ready_fd
+
+            exec_with_ready_fd(app_engine_ready_fd, sys.executable, _relaunch_argv(), os.execv)
+        else:
+            os.execv(sys.executable, _relaunch_argv())
     return code
 
 
@@ -8325,6 +8348,7 @@ def build_parser() -> argparse.ArgumentParser:
     # The app's DEBUG test launch picks the engine's port with this; it
     # replaces the default for this process and is refused without --app-engine.
     run_parser.add_argument("--port", type=int, default=None, help=argparse.SUPPRESS)
+    run_parser.add_argument("--app-engine-ready-fd", type=int, help=argparse.SUPPRESS)
     run_parser.set_defaults(func=_run_command)
 
     supervise_parser = subparsers.add_parser(

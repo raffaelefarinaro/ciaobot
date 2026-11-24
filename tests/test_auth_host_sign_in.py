@@ -98,6 +98,39 @@ def test_host_sign_in_opens_a_private_page_with_a_fresh_token(tmp_path, serializ
     assert token not in str(dict(response.headers))
 
 
+@pytest.mark.parametrize("browser_origin", ["http://127.0.0.1:8443", "http://[::1]:8443"])
+def test_private_app_tls_uses_the_bound_http_origin(tmp_path, serializer, opened, browser_origin):
+    app = _make_app(tmp_path, serializer)
+    app.state.config.pwa_port = 8443
+    app.state.app_local_tls_port = 55556
+    app.state.app_browser_http_origin = browser_origin
+    origin = "https://127.0.0.1:55556"
+    client = _client(app, base_url=origin)
+
+    response = client.post("/api/auth/host-sign-in", headers={"Origin": origin})
+
+    assert response.status_code == 200
+    assert len(opened) == 1
+    assert f"{browser_origin}/?setup=" in opened[0].read_text(encoding="utf-8")
+
+
+def test_private_app_tls_refuses_browser_sign_in_without_loopback_http(tmp_path, serializer, opened):
+    app = _make_app(tmp_path, serializer)
+    app.state.config.pwa_port = 8443
+    app.state.app_local_tls_port = 55556
+    app.state.app_browser_http_origin = None
+    origin = "https://127.0.0.1:55556"
+    client = _client(app, base_url=origin)
+
+    response = client.post("/api/auth/host-sign-in", headers={"Origin": origin})
+
+    assert response.status_code == 409
+    assert response.json()["reason"] == "no_loopback_http"
+    assert not opened
+    assert not _token_file(tmp_path).exists()
+    assert not _pages(tmp_path)
+
+
 def test_the_opened_token_signs_the_browser_in(tmp_path, serializer, opened):
     client = _client(_make_app(tmp_path, serializer))
     client.post("/api/auth/host-sign-in", headers=_HOST_ORIGIN)

@@ -10,6 +10,13 @@ enum SessionStorage: Equatable {
     case persistent(UUID)
 }
 
+/// Persistent store ownership uses a disjoint namespace for the bundled
+/// engine, which can never collide with a remote HTTPS origin entered by a user.
+enum SessionStoreKey: Equatable {
+    case origin(Origin)
+    case localEngine
+}
+
 /// Why an explicitly requested persistent sign-in became ephemeral. The UI
 /// shows this instead of silently ignoring the opt-in.
 enum SessionStorageFallback: Equatable {
@@ -85,6 +92,7 @@ final class SessionStoreRegistry {
     private struct Snapshot: Codable {
         let version: Int
         let stores: [Entry]
+        let localEngine: UUID?
     }
 
     private struct Entry: Codable {
@@ -99,6 +107,7 @@ final class SessionStoreRegistry {
     /// A concurrent writer is not a corrupt file, so it gets its own message.
     private(set) var storageUnavailableReason: SessionStoreRegistryError?
     private var identifiers: [String: UUID] = [:]
+    private var localEngineIdentifier: UUID?
     /// The exact bytes this registry last read or wrote. Before every write the
     /// file is re-read; a difference means another process changed it, and the
     /// write is refused instead of silently dropping that process's mappings.
@@ -145,12 +154,20 @@ final class SessionStoreRegistry {
             }
             values[entry.origin] = entry.identifier
         }
+        if let identifier = snapshot.localEngine {
+            guard identifier != Self.zeroIdentifier, seen.insert(identifier).inserted else {
+                isAvailable = false
+                storageUnavailableReason = .unavailable
+                return
+            }
+        }
         identifiers = values
+        localEngineIdentifier = snapshot.localEngine
         lastKnownData = data
         isAvailable = true
     }
 
-    var mappedOriginCount: Int { identifiers.count }
+    var mappedOriginCount: Int { identifiers.count + (localEngineIdentifier == nil ? 0 : 1) }
 
     func contains(_ origin: Origin) -> Bool {
         identifiers[origin.canonicalKey] != nil
@@ -161,6 +178,13 @@ final class SessionStoreRegistry {
     /// instance may have removed this mapping. Use `identifier(for:)`.
     func identifierIfPresent(for origin: Origin) -> UUID? {
         identifiers[origin.canonicalKey]
+    }
+
+    func identifierIfPresent(for key: SessionStoreKey) -> UUID? {
+        switch key {
+        case .origin(let origin): return identifiers[origin.canonicalKey]
+        case .localEngine: return localEngineIdentifier
+        }
     }
 
     /// The only lookup safe for opening a saved store without the caller
@@ -208,44 +232,60 @@ final class SessionStoreRegistry {
     /// another instance may have removed this origin's mapping (and store), in
     /// which case returning the cached id would reopen an orphaned store.
     func identifier(for origin: Origin) -> UUID? {
+        identifier(for: .origin(origin))
+    }
+
+    func identifier(for key: SessionStoreKey) -> UUID? {
         guard isAvailable, fileURL != nil, verifySnapshot() else { return nil }
-        let key = origin.canonicalKey
-        if let existing = identifiers[key] { return existing }
+        if let existing = identifierIfPresent(for: key) { return existing }
 
         var candidate = UUID()
-        while identifiers.values.contains(candidate) { candidate = UUID() }
+        while identifiers.values.contains(candidate) || localEngineIdentifier == candidate { candidate = UUID() }
 
         var next = identifiers
-        next[key] = candidate
+        var nextLocalEngine = localEngineIdentifier
+        switch key {
+        case .origin(let origin): next[origin.canonicalKey] = candidate
+        case .localEngine: nextLocalEngine = candidate
+        }
         do {
-            try save(next)
+            try save(next, localEngine: nextLocalEngine)
         } catch {
             isAvailable = false
             storageUnavailableReason = (error as? SessionStoreRegistryError) ?? .writeFailed
             return nil
         }
         identifiers = next
+        localEngineIdentifier = nextLocalEngine
         return candidate
     }
 
     /// Drops the mapping. The caller must remove the WebKit store first; a
     /// failed write leaves the in-memory mapping intact so forget can retry.
     func remove(_ origin: Origin) throws {
+        try remove(.origin(origin))
+    }
+
+    func remove(_ key: SessionStoreKey) throws {
         guard isAvailable else { throw SessionStoreRegistryError.unavailable }
-        let key = origin.canonicalKey
-        guard identifiers[key] != nil else { return }
+        guard identifierIfPresent(for: key) != nil else { return }
 
         var next = identifiers
-        next.removeValue(forKey: key)
+        var nextLocalEngine = localEngineIdentifier
+        switch key {
+        case .origin(let origin): next.removeValue(forKey: origin.canonicalKey)
+        case .localEngine: nextLocalEngine = nil
+        }
         do {
-            try save(next)
+            try save(next, localEngine: nextLocalEngine)
         } catch {
             throw (error as? SessionStoreRegistryError) ?? .writeFailed
         }
         identifiers = next
+        localEngineIdentifier = nextLocalEngine
     }
 
-    private func save(_ values: [String: UUID]) throws {
+    private func save(_ values: [String: UUID], localEngine: UUID?) throws {
         guard let fileURL else { throw SessionStoreRegistryError.unavailable }
         let directory = fileURL.deletingLastPathComponent()
         do {
@@ -289,7 +329,7 @@ final class SessionStoreRegistry {
                 .sorted { $0.origin < $1.origin }
             let encoder = JSONEncoder()
             encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
-            let data = try encoder.encode(Snapshot(version: 1, stores: entries))
+            let data = try encoder.encode(Snapshot(version: 1, stores: entries, localEngine: localEngine))
             try data.write(to: fileURL, options: [.atomic])
             try fileManager.setAttributes([.posixPermissions: 0o600], ofItemAtPath: fileURL.path)
             lastKnownData = data
@@ -458,11 +498,11 @@ final class SessionSignIn {
         persistentAvailable: SessionStoragePolicy.systemSupportsPersistentStores
     )
 
-    func storage(for origin: Origin, keepSignedIn: Bool) -> SessionStorage {
+    func storage(for origin: Origin, keepSignedIn: Bool, registryKey: SessionStoreKey? = nil) -> SessionStorage {
         guard keepSignedIn else { return .ephemeral }
         guard origin.usesTLS else { return .ephemeral }
         guard canPersistSignIn else { return .ephemeral }
-        guard let identifier = registry.identifier(for: origin) else { return .ephemeral }
+        guard let identifier = registry.identifier(for: registryKey ?? .origin(origin)) else { return .ephemeral }
         guard !retiredIdentifiers.contains(identifier) else { return .ephemeral }
         return .persistent(identifier)
     }
@@ -472,11 +512,11 @@ final class SessionSignIn {
     var canPersistSignIn: Bool { persistentAvailable && registry.isAvailable }
 
     /// Non-nil only when the user opted in but did not get a persistent store.
-    func fallback(for origin: Origin, keepSignedIn: Bool) -> SessionStorageFallback? {
+    func fallback(for origin: Origin, keepSignedIn: Bool, registryKey: SessionStoreKey? = nil) -> SessionStorageFallback? {
         guard keepSignedIn else { return nil }
         guard origin.usesTLS else { return .insecureOrigin }
         guard persistentAvailable else { return .unsupportedSystem }
-        if let identifier = registry.identifierIfPresent(for: origin), retiredIdentifiers.contains(identifier) {
+        if let identifier = registry.identifierIfPresent(for: registryKey ?? .origin(origin)), retiredIdentifiers.contains(identifier) {
             return .erasedRecordNotUpdated
         }
         guard registry.isAvailable else {
@@ -487,8 +527,8 @@ final class SessionSignIn {
         return nil
     }
 
-    func hasSavedSignIn(for origin: Origin) -> Bool {
-        registry.identifierIfPresent(for: origin) != nil
+    func hasSavedSignIn(for origin: Origin, registryKey: SessionStoreKey? = nil) -> Bool {
+        registry.identifierIfPresent(for: registryKey ?? .origin(origin)) != nil
     }
 
     /// Forget is explicit and three-phase. The caller first proves the web
@@ -497,9 +537,10 @@ final class SessionSignIn {
     /// only then is the mapping dropped. Any failure keeps the mapping so the
     /// operation can be retried; a completed erase with a failed mapping write
     /// also retires the identifier so it cannot be reopened in this process.
-    func forget(origin: Origin,
+    func forget(origin: Origin, registryKey: SessionStoreKey? = nil,
                 releaseWebViews: @escaping (@escaping () -> Void) -> Void,
                 completion: @escaping (Result<Void, ForgetFailure>) -> Void) {
+        let registryKey = registryKey ?? .origin(origin)
         guard registry.isAvailable else {
             completion(.failure(.registryUnavailable))
             return
@@ -510,7 +551,7 @@ final class SessionSignIn {
                 : .registryUnavailable))
             return
         }
-        guard let identifier = registry.identifierIfPresent(for: origin) else {
+        guard let identifier = registry.identifierIfPresent(for: registryKey) else {
             completion(.success(()))
             return
         }
@@ -521,7 +562,7 @@ final class SessionSignIn {
                     return
                 }
                 do {
-                    try self.registry.remove(origin)
+                    try self.registry.remove(registryKey)
                     self.retiredIdentifiers.remove(identifier)
                     completion(.success(()))
                 } catch {
