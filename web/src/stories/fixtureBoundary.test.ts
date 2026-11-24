@@ -175,7 +175,11 @@ describe('connected fixture transport boundary', () => {
     const send = socket.prototype.send
     send.call(preview, '{"type":"storyRendered","args":["synthetic-story"]}')
     send.call({ url: `${origin}/?token=synthetic-hmr-token`, protocol: 'vite-hmr' }, '{"type":"ping"}')
-    expect(nativeSend).toHaveBeenCalledTimes(2)
+    // What the dev server's Docs and Interactions addons emit during a render.
+    for (const type of ['storybook/docs/snippet-rendered', 'storybook/instrumenter/call', 'playFunctionThrewException']) {
+      send.call(preview, JSON.stringify({ type, args: [] }))
+    }
+    expect(nativeSend).toHaveBeenCalledTimes(5)
     for (const [target, data] of [
       [preview, '{"type":"custom","event":"saveStory"}'],
       [preview, '{"type":"saveStory"}'],
@@ -185,7 +189,7 @@ describe('connected fixture transport boundary', () => {
       [{ ...preview, url: preview.url.replace(origin, 'wss://example.com') }, '{"type":"storyRendered"}'],
       [{ url: `${origin}/?token=synthetic-hmr-token`, protocol: 'vite-hmr' }, '{"type":"custom"}'],
     ] as const) expect(() => send.call(target, data)).toThrow('Story network violation')
-    expect(nativeSend).toHaveBeenCalledTimes(2)
+    expect(nativeSend).toHaveBeenCalledTimes(5)
     expect(boundary.violations).toHaveLength(7)
   })
 
