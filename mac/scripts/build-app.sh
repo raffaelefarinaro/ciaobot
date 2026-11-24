@@ -177,7 +177,7 @@ iconutil -c icns "$iconset" -o "$resources/AppIcon.icns"
 # committed in release/update-config.env; the EdDSA private key is never read
 # or written here, because it lives only in the operator's keychain.
 update_plist=
-minimum_system_version=13.0
+minimum_system_version=14.0
 if [ "${CIAOBOT_RELEASE_UPDATES:-0}" = "1" ]; then
     update_config=release/update-config.env
     [ -f "$update_config" ] && [ ! -L "$update_config" ] \

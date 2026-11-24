@@ -164,6 +164,92 @@ final class PersistentSignInDefaultTests: XCTestCase {
     }
 }
 
+@MainActor
+final class LocalSignInForgetFlowTests: XCTestCase {
+    func testReleasesErasesOnlyLocalStoreAndReconnectsCurrentGeneration() {
+        let origin = Origin("https://127.0.0.1:8778")!
+        let identity = LocalEngineTLSIdentity(pid: 731, startupID: "new-launch", port: 8778,
+                                              sha256: String(repeating: "b", count: 64))!
+        var steps: [String] = []
+        var erasedOrigin: Origin?
+        var erasedKey: SessionStoreKey?
+        var outcome: Result<Void, ForgetFailure>?
+
+        LocalSignInForgetFlow.perform(
+            origin: origin,
+            releaseView: { completion in
+                steps.append("release")
+                completion(true)
+            },
+            eraseStore: { candidate, key, completion in
+                steps.append("erase")
+                erasedOrigin = candidate
+                erasedKey = key
+                completion(.success(()))
+            },
+            currentIdentity: {
+                steps.append("identity")
+                return identity
+            },
+            reconnect: { current in
+                XCTAssertEqual(current, identity)
+                steps.append("reconnect")
+            },
+            completion: { outcome = $0 }
+        )
+
+        XCTAssertEqual(steps, ["release", "erase", "identity", "reconnect"])
+        XCTAssertEqual(erasedOrigin, origin)
+        XCTAssertEqual(erasedKey, .localEngine)
+        guard case .success? = outcome else { XCTFail("Forget should complete successfully"); return }
+    }
+
+    func testReconnectsTheVerifiedGenerationThatIsRunningAfterErase() {
+        let origin = Origin("https://127.0.0.1:8778")!
+        let replacement = LocalEngineTLSIdentity(pid: 731, startupID: "new-launch", port: 8778,
+                                                  sha256: String(repeating: "c", count: 64))!
+        var reconnectedWith: LocalEngineTLSIdentity?
+
+        LocalSignInForgetFlow.perform(
+            origin: origin,
+            releaseView: { $0(true) },
+            eraseStore: { _, key, completion in
+                XCTAssertEqual(key, .localEngine)
+                completion(.success(()))
+            },
+            currentIdentity: { replacement },
+            reconnect: { reconnectedWith = $0 },
+            completion: { _ in }
+        )
+
+        XCTAssertEqual(reconnectedWith, replacement)
+    }
+
+    func testViewReleaseTimeoutKeepsTheStoreAndOffersACompletionToRetry() {
+        let origin = Origin("https://127.0.0.1:8778")!
+        var erased = false
+        var identityLookups = 0
+        var completion: Result<Void, ForgetFailure>??
+
+        LocalSignInForgetFlow.perform(
+            origin: origin,
+            releaseView: { $0(false) },
+            eraseStore: { _, _, _ in erased = true },
+            currentIdentity: { identityLookups += 1; return nil },
+            reconnect: { _ in XCTFail("must not reconnect after a release timeout") },
+            completion: { completion = $0 }
+        )
+
+        XCTAssertFalse(erased, "store removal must wait until the WebKit view releases it")
+        XCTAssertEqual(identityLookups, 0)
+        guard let completion else { return XCTFail("release timeout did not return control for retry") }
+        switch completion {
+        case nil: break
+        case .some: XCTFail("release timeout must complete with the retryable no-result state")
+        }
+    }
+}
+
 /// Only a connection that actually answered is remembered, and a remembered
 /// origin always comes back prefilled. The probe is injected so the test never
 /// contacts anything.
