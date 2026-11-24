@@ -111,7 +111,7 @@ def test_site_install_offers_the_mac_app_and_the_linux_one_liner() -> None:
     # administrator guide; the one-liner lives there and in the README.
     home = (ROOT / "site/index.html").read_text(encoding="utf-8")
     assert latest in home and "Download Ciaobot for Mac" in home
-    assert "Apple silicon, macOS 13+" in home
+    assert "Apple silicon, macOS 14+" in home
     assert f'href="{linux}"' in home
     assert one_liner not in home
     assert "data-install-os" not in home and "data-cmd" not in home

@@ -33,6 +33,7 @@ from ciao.web.project_chats import ProjectChatManager
 from ciao.web import routes_api
 from ciao.web.proposal_service import _scan_proposal_rows
 from ciao.web.routes_api import (
+    dismiss_legacy_learning,
     dismiss_older_than,
     list_proposals,
     proposal_action,
@@ -85,6 +86,7 @@ def _client(config: CiaoConfig, pcm: Any = None) -> TestClient:
     app = Starlette(
         routes=[
             Route("/api/proposals", list_proposals, methods=["GET"]),
+            Route("/api/proposals/legacy-learning-dismiss", dismiss_legacy_learning, methods=["POST"]),
             Route("/api/proposals/history", proposals_history, methods=["GET"]),
             Route("/api/proposals/handover", proposals_handover, methods=["GET"]),
             Route("/api/proposals/{id}/preview", proposal_preview, methods=["POST"]),
@@ -142,6 +144,38 @@ def _corrupt_guide(config: CiaoConfig, workspace: str) -> None:
     guide.parent.mkdir(parents=True, exist_ok=True)
     guide.write_text(_DUPLICATED_REGION_GUIDE, encoding="utf-8")
 
+
+def test_share_accept_is_refused_before_single_or_mixed_batch_mutation(tmp_path: Path) -> None:
+    config = _default_vault(tmp_path)
+    queue = _queue_text(config, "personal")
+    queue.write_text(
+        "# Queue\n- [memory] Keep the office open\n"
+        "- [share opaque123] Shared note change proposal opaque123\n",
+        encoding="utf-8",
+    )
+    client = _client(config)
+    rows = client.get("/api/proposals").json()["rows"]
+    share = next(row for row in rows if row["kind"] == "share")
+    memory = next(row for row in rows if row["kind"] == "memory")
+    guide = config.agent_root("personal") / "AGENTS.md"
+    guide.write_text("# Existing guide\n", encoding="utf-8")
+    before = guide.read_bytes()
+
+    response = client.post(f"/api/proposals/{share['id']}/accept")
+    assert response.status_code == 409
+    assert guide.read_bytes() == before
+    assert "opaque123" in queue.read_text(encoding="utf-8")
+
+    response = client.post("/api/proposals/batch", json={"action": "accept", "ids": [memory["id"], share["id"]]})
+    assert response.status_code == 409
+    assert guide.read_bytes() == before
+    assert "Keep the office open" in queue.read_text(encoding="utf-8")
+    assert "opaque123" in queue.read_text(encoding="utf-8")
+
+    response = client.post(f"/api/proposals/{share['id']}/dismiss")
+    assert response.status_code == 200
+    assert "opaque123" not in queue.read_text(encoding="utf-8")
+
 def test_list_returns_rows_with_workspace_path_and_kind(tmp_path: Path) -> None:
     config = _default_vault(tmp_path)
     resp = _client(config).get("/api/proposals")
@@ -166,12 +200,297 @@ def test_list_keeps_legacy_learning_notice_scoped_to_pending_workspace(tmp_path:
         "personal": {
             "state": "pending",
             "rows": 1,
+            "pending_rows": [
+                {
+                    "id": data["legacy_learning_queues"]["personal"]["pending_rows"][0]["id"],
+                    "revision": data["legacy_learning_queues"]["personal"]["pending_rows"][0]["revision"],
+                    "target": "",
+                    "text": "old lesson",
+                    "source": "",
+                    "request": "",
+                    "decider": "",
+                    "decide_reason": "",
+                }
+            ],
         }
     }
     response_text = json.dumps(data)
     assert str(config.workspace_root) not in response_text
     assert str(Path(config.state_path).parent) not in response_text
     assert not [row for row in data["rows"] if row["kind"] == "learnings"]
+
+
+def test_list_hides_cleanly_completed_automatic_migration(
+    tmp_path: Path,
+) -> None:
+    from ciao import learnings_queue_drain
+
+    config = _default_vault(tmp_path)
+    _write_queue(config, "personal", "- [learnings] already moved _(from: old-chat)_\n")
+    learnings_queue_drain.drain(
+        config.workspace_vault_root("personal"),
+        workspace="personal",
+        runtime_root=Path(config.state_path).parent,
+        apply=True,
+    )
+
+    data = _client(config).get("/api/proposals").json()
+
+    assert "personal" not in data["legacy_learning_queues"]
+
+
+def test_list_uses_actionable_queue_snapshot_when_a_row_arrives_after_completion_scan(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from ciao import learnings_queue_drain
+
+    config = _default_vault(tmp_path)
+    new_row = {
+        "id": "new-row-id",
+        "revision": "new-revision",
+        "target": "",
+        "text": "arrived during listing",
+        "source": "",
+        "request": "",
+        "decider": "",
+        "decide_reason": "",
+    }
+    monkeypatch.setattr(
+        learnings_queue_drain,
+        "inspect",
+        lambda *_args, **_kwargs: {
+            "unresolved": [],
+            "failed": [],
+            "automatic_rows": 0,
+            "applied_receipts": ["completed-receipt"],
+            "rows": [],
+        },
+    )
+    monkeypatch.setattr(
+        learnings_queue_drain,
+        "pending_rows",
+        lambda *_args, **_kwargs: {
+            "revision": new_row["revision"],
+            "rows": [new_row],
+            "suppressed_rows": [],
+        },
+    )
+
+    data = _client(config).get("/api/proposals").json()
+
+    assert data["legacy_learning_queues"]["personal"] == {
+        "state": "pending",
+        "rows": 1,
+        "pending_rows": [new_row],
+    }
+
+
+def test_list_does_not_keep_stale_pending_state_after_queue_snapshot_clears(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from ciao import learnings_queue_drain
+
+    config = _default_vault(tmp_path)
+    monkeypatch.setattr(
+        learnings_queue_drain,
+        "inspect",
+        lambda *_args, **_kwargs: {
+            "unresolved": [],
+            "failed": [],
+            "automatic_rows": 1,
+            "applied_receipts": [],
+            "rows": [{"text": "already removed"}],
+        },
+    )
+    monkeypatch.setattr(
+        learnings_queue_drain,
+        "pending_rows",
+        lambda *_args, **_kwargs: {
+            "revision": "current-revision",
+            "rows": [],
+            "suppressed_rows": [],
+        },
+    )
+
+    data = _client(config).get("/api/proposals").json()
+
+    assert "personal" not in data["legacy_learning_queues"]
+
+
+def test_list_keeps_reverted_rows_visible_when_another_batch_completed(
+    tmp_path: Path,
+) -> None:
+    from ciao import learnings_queue_drain as drain
+
+    config = _default_vault(tmp_path)
+    vault = config.workspace_vault_root("personal")
+    queue = _queue_text(config, "personal")
+    runtime = Path(config.state_path).parent
+    queue.write_text("- [learnings] completed lesson\n", encoding="utf-8")
+    first = drain.drain(vault, workspace="personal", runtime_root=runtime, apply=True)
+    queue.write_text("- [learnings] restored lesson\n", encoding="utf-8")
+    second = drain.drain(vault, workspace="personal", runtime_root=runtime, apply=True)
+    reverted = drain.revert(
+        vault,
+        Path(second["receipts"][0]),
+        workspace="personal",
+        runtime_root=runtime,
+        apply=True,
+    )
+    assert first["applied"] and reverted["reverted"]
+
+    listing = _client(config).get("/api/proposals").json()["legacy_learning_queues"]["personal"]
+
+    assert listing["state"] == "completed"
+    assert [row["text"] for row in listing["suppressed_rows"]] == ["restored lesson"]
+
+
+def test_explicit_legacy_learning_dismiss_removes_one_exact_queued_row(tmp_path: Path) -> None:
+    config = _default_vault(tmp_path)
+    _write_queue(
+        config,
+        "personal",
+        "# Queue\n- [memory] keep this\n- [learnings] discard this one\n- [review] keep this too\n",
+    )
+    queue = _queue_text(config, "personal")
+    client = _client(config)
+    listed = client.get("/api/proposals").json()["legacy_learning_queues"]["personal"]
+    row = listed["pending_rows"][0]
+
+    response = client.post(
+        "/api/proposals/legacy-learning-dismiss",
+        json={
+            "workspace": "personal",
+            "phase": "queued",
+            "row_id": row["id"],
+            "expected_revision": row["revision"],
+        },
+    )
+
+    assert response.status_code == 200
+    assert queue.read_text(encoding="utf-8") == (
+        "# Queue\n- [memory] keep this\n- [review] keep this too\n"
+    )
+
+
+def test_explicit_legacy_learning_dismiss_refuses_a_stale_queue_revision(tmp_path: Path) -> None:
+    config = _default_vault(tmp_path)
+    _write_queue(config, "personal", "- [learnings] discard this one\n")
+    queue = _queue_text(config, "personal")
+    client = _client(config)
+    row = client.get("/api/proposals").json()["legacy_learning_queues"]["personal"]["pending_rows"][0]
+    queue.write_text("- [learnings] discard this one\n- [memory] new row\n", encoding="utf-8")
+
+    response = client.post(
+        "/api/proposals/legacy-learning-dismiss",
+        json={
+            "workspace": "personal",
+            "phase": "queued",
+            "row_id": row["id"],
+            "expected_revision": row["revision"],
+        },
+    )
+
+    assert response.status_code == 409
+    assert "discard this one" in queue.read_text(encoding="utf-8")
+
+
+def test_list_exposes_undo_suppressed_rows_for_exact_queue_removal(tmp_path: Path) -> None:
+    from ciao import learnings_queue_drain as drain
+
+    config = _default_vault(tmp_path)
+    _write_queue(config, "personal", "- [learnings] obsolete after undo\n")
+    vault = config.workspace_vault_root("personal")
+    runtime = Path(config.state_path).parent
+    applied = drain.drain(vault, workspace="personal", runtime_root=runtime, apply=True)
+    drain.revert(
+        vault,
+        Path(applied["receipts"][0]),
+        workspace="personal",
+        runtime_root=runtime,
+        apply=True,
+    )
+    client = _client(config)
+
+    listing = client.get("/api/proposals").json()["legacy_learning_queues"]["personal"]
+    assert listing["state"] == "clear"
+    row = listing["suppressed_rows"][0]
+    removed = client.post(
+        "/api/proposals/legacy-learning-dismiss",
+        json={"workspace": "personal", "phase": "queued", "row_id": row["id"], "expected_revision": row["revision"]},
+    )
+    assert removed.status_code == 200
+    assert "obsolete after undo" not in _queue_text(config, "personal").read_text()
+
+
+def test_same_text_removals_keep_distinct_sources_and_replay_exactly_once(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from ciao import learnings_queue_drain as drain
+
+    config = _default_vault(tmp_path)
+    _write_queue(
+        config,
+        "personal",
+        "- [learnings] same text _(from: source-a)_\n"
+        "- [learnings] same text _(from: source-b)_\n",
+    )
+    client = _client(config)
+    initial = client.get("/api/proposals").json()["legacy_learning_queues"]["personal"]["pending_rows"]
+    source_a = next(row for row in initial if row["source"] == "source-a")
+
+    original = drain._write_receipt
+
+    def fail_applied(path: Path, receipt: dict[str, Any], **kwargs: Any) -> None:
+        if receipt.get("status") == "applied" and receipt.get("target") == "queue":
+            raise OSError("simulated crash after decision publication")
+        original(path, receipt, **kwargs)
+
+    monkeypatch.setattr(drain, "_write_receipt", fail_applied)
+    interrupted = client.post(
+        "/api/proposals/legacy-learning-dismiss",
+        json={
+            "workspace": "personal",
+            "phase": "queued",
+            "row_id": source_a["id"],
+            "expected_revision": source_a["revision"],
+        },
+    )
+    assert interrupted.status_code == 409
+    recoverable = client.get("/api/proposals").json()["legacy_learning_queues"]["personal"]["pending_rows"]
+    retry_a = next(row for row in recoverable if row["source"] == "source-a")
+    assert retry_a["removal_pending"]
+
+    monkeypatch.setattr(drain, "_write_receipt", original)
+    resumed = client.post(
+        "/api/proposals/legacy-learning-dismiss",
+        json={
+            "workspace": "personal",
+            "phase": "queued",
+            "row_id": retry_a["id"],
+            "expected_revision": retry_a["revision"],
+        },
+    )
+    assert resumed.status_code == 200
+    remaining = client.get("/api/proposals").json()["legacy_learning_queues"]["personal"]["pending_rows"][0]
+    removed_b = client.post(
+        "/api/proposals/legacy-learning-dismiss",
+        json={
+            "workspace": "personal",
+            "phase": "queued",
+            "row_id": remaining["id"],
+            "expected_revision": remaining["revision"],
+        },
+    )
+    assert removed_b.status_code == 200
+
+    history = [
+        json.loads(line)
+        for line in _queue_text(config, "personal").with_suffix(".dismissed.jsonl").read_text().splitlines()
+    ]
+    decisions = [row for row in history if row.get("text") == "same text" and row.get("outcome") == "dismissed"]
+    assert {row.get("source") for row in decisions} == {"source-a", "source-b"}
+    assert len({row.get("operation_id") for row in decisions}) == 2
 
 
 def test_list_marks_an_unfinished_drain_receipt_blocked_for_its_workspace_only(
@@ -599,6 +918,7 @@ def test_the_real_app_serves_every_documented_proposal_route() -> None:
         "/api/proposals/handover",
         "/api/proposals/batch",
         "/api/proposals/dismiss-older-than",
+        "/api/proposals/legacy-learning-dismiss",
         "/api/proposals/{id}/preview",
         "/api/proposals/{id}/implement",
         "/api/proposals/{id}/{action}",
@@ -2328,7 +2648,6 @@ def test_a_live_rehome_row_is_not_marked_stale(tmp_path: Path) -> None:
     assert row["rehome"]["stale"] is False, row["rehome"]
 
 
-
 # ---- Category proposals (issue #647) ----------------------------------------
 #
 # The notes carry the RAW spelling the cluster was detected under and the sidecar
@@ -3557,7 +3876,6 @@ def test_the_registry_is_read_inside_the_lock_that_writes_it(
     assert read_registry.is_set()
     assert accepted["resp"].status_code == 200, accepted["resp"].json()
     assert _CATEGORY_ID in _registry_ids(config)
-
 
 
 # ---- Retry reconciliation from the review path ----------------------------

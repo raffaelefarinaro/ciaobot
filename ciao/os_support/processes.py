@@ -191,21 +191,30 @@ def _reap_process(process: subprocess.Popen[bytes]) -> None:
 
 
 def bounded_output(
-    argv: Sequence[str], *, timeout: float, max_stdout: int
-) -> tuple[int, bytes] | None:
-    """Collect bounded stdout; tree cleanup is best effort, not a sandbox."""
+    argv: Sequence[str], *, timeout: float, max_stdout: int,
+    cwd: str | os.PathLike[str] | None = None,
+    env: dict[str, str] | None = None,
+    report_limit: bool = False,
+) -> tuple[int, bytes] | tuple[int, bytes, bool] | None:
+    """Collect bounded stdout; tree cleanup is best effort, not a sandbox.
+
+    With ``report_limit``, output overflow returns ``(returncode, capped_bytes,
+    True)`` so a caller can distinguish it from a timeout (``None``) without
+    overloading any valid process return code.
+    """
     deadline = time.monotonic() + timeout
     process: subprocess.Popen[bytes] | None = None
     tree: ProcessTree | None = None
     selector: selectors.BaseSelector | None = None
-    result: tuple[int, bytes] | None = None
+    result: tuple[int, bytes] | tuple[int, bytes, bool] | None = None
     reaped = False
     live = False
     cleanup_failed = False
     try:
         process = subprocess.Popen(
             argv, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
-            stderr=subprocess.DEVNULL, bufsize=0, **tree_spawn_options(),
+            stderr=subprocess.DEVNULL, bufsize=0, cwd=cwd, env=env,
+            **tree_spawn_options(),
         )
         tree = ProcessTree(process.pid)
         assert process.stdout is not None
@@ -239,6 +248,8 @@ def bounded_output(
             else:
                 data.extend(chunk)
                 if len(data) > max_stdout:
+                    if report_limit:
+                        result = (process.returncode if process.returncode is not None else -1, bytes(data[:max_stdout]), True)
                     break
     except Exception:
         result = None
@@ -301,4 +312,6 @@ def bounded_output(
                 tree.close()
             except Exception:
                 cleanup_failed = True
-    return None if cleanup_failed else result
+    # Once stdout exceeded the cap, cleanup trouble cannot erase that evidence.
+    overflow_observed = result is not None and len(result) == 3 and result[2]
+    return None if cleanup_failed and not overflow_observed else result

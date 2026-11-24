@@ -3,7 +3,7 @@ import PackageDescription
 
 let package = Package(
     name: "CiaobotMac",
-    platforms: [.macOS(.v13)],
+    platforms: [.macOS(.v14)],
     products: [
         .executable(name: "CiaobotMac", targets: ["CiaobotMac"])
     ],

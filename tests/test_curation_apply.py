@@ -18,6 +18,7 @@ import pytest
 
 from ciao import curation_apply as apply
 from ciao import curation_run, memory_proposals, memory_receipts
+from ciao import proposal_tracking
 from ciao.memory_proposals import read_decisions
 from contextlib import contextmanager
 
@@ -115,6 +116,47 @@ def test_accept_writes_the_region_settles_the_row_and_owns_one_decision(install)
     linked = memory_receipts.find_receipt(journal, result.receipt_id)
     assert linked is not None and linked["operation_id"] == intent.operation_id
     assert intent.item_key in curation_run.load_state(install.vault).done_keys
+
+
+def test_managed_accept_refuses_share_even_with_all_and_injected_auto(install) -> None:
+    line = "- [share opaque] Shared note change proposal opaque"
+    install.queue_rows(line)
+    before_guide = install.guide.read_bytes()
+    entry = next(iter(proposal_tracking.walk_proposal_queue(
+        "work", apply.PROPOSALS_RELATIVE, install.queue.read_text(encoding="utf-8")
+    )))
+    intent = apply.ManagedMemoryAcceptIntent(
+        operation_id="cop_share_refusal",
+        workspace="work",
+        item_key="share-item",
+        proposal_id=entry.proposal_id,
+        proposal_revision=apply.proposal_revision(entry.bullet),
+        destination_revision="",
+        prediction_revision="",
+        holder="run",
+    )
+
+    result = apply.apply_memory_accept(intent, vault_root=install.vault)
+
+    assert isinstance(result, apply.Refused) and result.reason == apply.REFUSED_KIND
+    assert install.queue.read_text(encoding="utf-8").strip().endswith(line)
+    assert install.guide.read_bytes() == before_guide
+
+
+def test_managed_cli_refuses_share_accept_before_mutation(install, monkeypatch: pytest.MonkeyPatch) -> None:
+    line = "- [share opaque] Shared note change proposal opaque"
+    install.queue_rows(line)
+    before_guide = install.guide.read_bytes()
+    before_queue = install.queue.read_bytes()
+    monkeypatch.setattr(cli, "_refuse_ambiguous_vault_write", lambda _args: None)
+    monkeypatch.setattr(cli, "_resolve_workspace_and_vaults", lambda _args: ("work", install.vault, install.root, "work"))
+    monkeypatch.setattr(cli, "_proposal_needle", lambda _args: "Shared note change proposal opaque")
+
+    result = cli._memory_proposal_accept_command(SimpleNamespace())
+
+    assert result == 1
+    assert install.queue.read_bytes() == before_queue
+    assert install.guide.read_bytes() == before_guide
 
 
 def test_replay_of_the_same_operation_is_already_done(install) -> None:
