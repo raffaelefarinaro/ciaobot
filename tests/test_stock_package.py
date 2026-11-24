@@ -139,8 +139,22 @@ def test_baseline_authoring_does_not_ship_as_optional_skills() -> None:
     assert not skills.joinpath("sop-authoring/SKILL.md").is_file()
 
 
-def test_support_names_the_scoped_evidence_command() -> None:
-    support = resources.files("ciao.stock").joinpath("skills/ciao-support/SKILL.md").read_text(encoding="utf-8")
+def test_capabilities_routes_app_support_without_catching_project_errors() -> None:
+    skill = resources.files("ciao.stock").joinpath("skills/ciao-capabilities/SKILL.md").read_text(encoding="utf-8")
+    for example in (
+        '"Ciaobot stopped responding"',
+        '"file a Ciaobot bug"',
+        '"what can you do?"',
+        '"my Python script crashed"',
+    ):
+        assert example in skill
+    assert "references/support.md" in skill
+    assert "errors in the user's own project do not trigger Ciaobot support" in skill
+
+
+def test_support_reference_has_no_skill_frontmatter_and_names_scoped_evidence() -> None:
+    support = resources.files("ciao.stock").joinpath("skills/ciao-capabilities/references/support.md").read_text(encoding="utf-8")
+    assert not support.startswith("---\n")
     assert "ciao context logs" in support
     assert "file_access=" not in support
     assert "workspace-only" not in support.lower().replace(" ", "-")
@@ -149,12 +163,20 @@ def test_support_names_the_scoped_evidence_command() -> None:
 
 
 def test_support_checks_for_a_released_fix_before_new_issue() -> None:
-    support = resources.files("ciao.stock").joinpath("skills/ciao-support/SKILL.md").read_text(encoding="utf-8")
+    support = resources.files("ciao.stock").joinpath("skills/ciao-capabilities/references/support.md").read_text(encoding="utf-8")
     assert "https://github.com/raffaelefarinaro/ciaobot/releases" in support
     assert "https://github.com/raffaelefarinaro/ciaobot/blob/main/CHANGELOG.md" in support
     assert "https://github.com/raffaelefarinaro/ciaobot/issues" in support
     assert "not merely\nmerged or closed" in support
     assert "suggest updating and\nretesting first" in support
+    assert "operator has approved creating an issue" in support
+    assert "redact secrets" in support
+
+
+def test_packaged_support_skill_is_retired_in_favor_of_reference() -> None:
+    skills = resources.files("ciao.stock").joinpath("skills")
+    assert not skills.joinpath("ciao-support").exists()
+    assert skills.joinpath("ciao-capabilities/references/support.md").is_file()
 
 
 def test_stock_curation_skill_consolidation_contract() -> None:
