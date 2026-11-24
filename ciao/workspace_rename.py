@@ -199,9 +199,12 @@ def rename_workspace(
             (new, updated) if name == old else (name, record)
             for name, record in config.workspaces.items()
         ]
-        config.workspaces.clear()
-        config.workspaces.update(renamed)
-        config.persist_workspace_registry()
+        from ciao.workspaces import workspace_registry_lock  # noqa: PLC0415
+
+        with workspace_registry_lock(config):
+            config.workspaces.clear()
+            config.workspaces.update(renamed)
+            config.persist_workspace_registry()
         if projects is not None:
             entries = getattr(projects, "_projects", None)
             if isinstance(entries, dict):
@@ -378,23 +381,26 @@ def _roll_back(
             logger.exception(
                 "Could not move the agent root back after a failed rename"
             )
-    config.workspaces.clear()
-    config.workspaces.update(snapshot.get("workspaces", {}))
-    try:
-        config.persist_workspace_registry()
-    except Exception:
-        logger.exception(
-            "Could not restore the workspace registry after a failed rename"
-        )
+    from ciao.workspaces import workspace_registry_lock  # noqa: PLC0415
+
+    with workspace_registry_lock(config):
+        config.workspaces.clear()
+        config.workspaces.update(snapshot.get("workspaces", {}))
         try:
-            registry_path = Path(config.state_path).parent / "workspaces.json"
-            raw = snapshot.get("registry_bytes")
-            if isinstance(raw, bytes):
-                _restore_file(registry_path, raw)
+            config.persist_workspace_registry()
         except Exception:
             logger.exception(
-                "Could not restore the workspace registry file after a failed rename"
+                "Could not restore the workspace registry after a failed rename"
             )
+            try:
+                registry_path = Path(config.state_path).parent / "workspaces.json"
+                raw = snapshot.get("registry_bytes")
+                if isinstance(raw, bytes):
+                    _restore_file(registry_path, raw)
+            except Exception:
+                logger.exception(
+                    "Could not restore the workspace registry file after a failed rename"
+                )
     if projects is not None:
         project_workspaces = snapshot.get("project_workspaces")
         if isinstance(project_workspaces, dict):

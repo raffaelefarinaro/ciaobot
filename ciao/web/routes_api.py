@@ -256,8 +256,19 @@ def _workspace_from_request(
     return workspace_from_request(data, config=config, existing=existing)
 
 
-def _persist_workspaces(config) -> None:
-    persist_workspaces(config)
+def _persist_workspaces(config, candidate_workspaces=None) -> None:
+    if candidate_workspaces is None:
+        persist_workspaces(config)
+    else:
+        persist_workspaces(config, candidate_workspaces)
+
+
+def _workspace_registry_snapshot(config) -> tuple[tuple[str, dict[str, Any]], ...]:
+    """Comparable snapshot for detecting registry edits across claim awaits."""
+    return tuple(
+        (name, dataclasses.asdict(workspace))
+        for name, workspace in config.workspaces.items()
+    )
 
 
 def _refresh_project_manager_workspaces(request: Request) -> None:
@@ -364,47 +375,78 @@ async def upsert_workspace_setting(request: Request) -> JSONResponse:
                 except ValueError as exc:
                     return JSONResponse({"error": str(exc)}, status_code=400)
             try:
-                renamed = rename_workspace(
-                    config,
-                    old=str(route_name),
-                    new=requested,
-                    projects=getattr(
-                        request.app.state, "project_chat_manager", None
-                    ),
-                    schedules=_rename_schedule_store(request),
-                    webhooks=_rename_webhook_store(request),
-                    imports=_rename_import_store(request),
-                )
+                async with _workspace_checkout_claims(config, str(route_name)):
+                    renamed = rename_workspace(
+                        config,
+                        old=str(route_name),
+                        new=requested,
+                        projects=getattr(
+                            request.app.state, "project_chat_manager", None
+                        ),
+                        schedules=_rename_schedule_store(request),
+                        webhooks=_rename_webhook_store(request),
+                        imports=_rename_import_store(request),
+                    )
             except WorkspaceRenameBusy as exc:
                 return JSONResponse({"error": str(exc)}, status_code=409)
             except ValueError as exc:
                 return JSONResponse({"error": str(exc)}, status_code=400)
             body = {**body, "name": requested}
-        existing = config.workspace(str(body.get("name", "")).strip())
-        try:
-            workspace = await _workspace_from_request_async(body, config=config, existing=existing)
-        except ValueError as exc:
-            return JSONResponse({"error": str(exc)}, status_code=400)
-        created = workspace.name not in config.workspaces
-        onboarding_target = None
-        if created:
-            # Validate receipt access before mutating the live registry. A
-            # corrupt/unreadable receipt must not leave a half-created
-            # workspace. Installs predating receipt initialization retain the
-            # existing workspace-save behavior until startup initializes it.
-            from ciao.onboarding import read_receipt  # noqa: PLC0415
-            from ciao.onboarding_progress import register_new_workspace  # noqa: PLC0415
+        from ciao.workspaces import workspace_registry_lock  # noqa: PLC0415
 
-            if read_receipt(Path(config.state_path).parent) is not None:
-                register_new_workspace(config, workspace.name)
-                onboarding_target = {"kind": "workspace", "name": workspace.name}
-        config.workspaces[workspace.name] = workspace
-        try:
-            _persist_workspaces(config)
-        except Exception:
-            if created:
-                config.workspaces.pop(workspace.name, None)
-            raise
+        while True:
+            # Resolve omitted settings against a stable snapshot. The link list
+            # may be edited by another registry writer while Git resolution or
+            # checkout-claim acquisition yields, so the snapshot is rechecked
+            # under the same lock used for the final save.
+            with workspace_registry_lock(config):
+                previous_workspaces = dict(config.workspaces)
+                registry_snapshot = _workspace_registry_snapshot(config)
+                existing = config.workspace(str(body.get("name", "")).strip())
+            try:
+                workspace = await _workspace_from_request_async(
+                    body, config=config, existing=existing
+                )
+            except ValueError as exc:
+                return JSONResponse({"error": str(exc)}, status_code=400)
+            created = workspace.name not in previous_workspaces
+            previous_links = {
+                link.path: link.lifetime_id
+                for name, item in previous_workspaces.items()
+                if name == workspace.name
+                for link in getattr(item, "shared_brains", [])
+            }
+            next_links = {link.path: link.lifetime_id for link in workspace.shared_brains}
+            affected_paths = sorted(
+                path for path in set(previous_links) | set(next_links)
+                if previous_links.get(path) != next_links.get(path)
+            )
+            candidate_workspaces = dict(previous_workspaces)
+            candidate_workspaces[workspace.name] = workspace
+            retry = False
+            async with contextlib.AsyncExitStack() as claims:
+                for path in affected_paths:
+                    await claims.enter_async_context(shared_brain._checkout_lock(path))
+                    await claims.enter_async_context(shared_brain._checkout_claim(path, config))
+                with workspace_registry_lock(config):
+                    if _workspace_registry_snapshot(config) != registry_snapshot:
+                        retry = True
+                    else:
+                        onboarding_target = None
+                        if created:
+                            # Validate receipt access before mutating the live registry.
+                            # Installs without onboarding retain their old save behavior.
+                            from ciao.onboarding import read_receipt  # noqa: PLC0415
+                            from ciao.onboarding_progress import register_new_workspace  # noqa: PLC0415
+
+                            if read_receipt(Path(config.state_path).parent) is not None:
+                                register_new_workspace(config, workspace.name)
+                                onboarding_target = {"kind": "workspace", "name": workspace.name}
+                        _persist_workspaces(config, candidate_workspaces)
+                        config.workspaces[workspace.name] = workspace
+            if retry:
+                continue
+            break
         # A newly linked folder gets its first update now, not at the next loop pass.
         linked_before = {link.path for link in getattr(existing, "shared_brains", [])}
         for link in workspace.shared_brains:
@@ -442,29 +484,32 @@ async def reorder_workspaces(request: Request) -> JSONResponse:
                 status_code=400,
             )
         if order != current:
-            before = config.primary_workspace()
-            previous = dict(config.workspaces)
-            rebuilt = {name: previous[name] for name in order}
-            config.workspaces.clear()
-            config.workspaces.update(rebuilt)
-            if config.primary_workspace() != before:
-                # Without a workspace named "personal" the first entry is the
-                # main workspace; a reorder must not hand that role away.
+            from ciao.workspaces import workspace_registry_lock  # noqa: PLC0415
+
+            with workspace_registry_lock(config):
+                before = config.primary_workspace()
+                previous = dict(config.workspaces)
+                rebuilt = {name: previous[name] for name in order}
                 config.workspaces.clear()
-                config.workspaces.update(previous)
-                return JSONResponse(
-                    {"error": f"'{before}' is the main workspace and stays first"},
-                    status_code=409,
-                )
-            try:
-                _persist_workspaces(config)
-            except OSError as exc:
-                config.workspaces.clear()
-                config.workspaces.update(previous)
-                return JSONResponse(
-                    {"error": f"Failed to save the workspace order: {exc}"},
-                    status_code=500,
-                )
+                config.workspaces.update(rebuilt)
+                if config.primary_workspace() != before:
+                    # Without a workspace named "personal" the first entry is the
+                    # main workspace; a reorder must not hand that role away.
+                    config.workspaces.clear()
+                    config.workspaces.update(previous)
+                    return JSONResponse(
+                        {"error": f"'{before}' is the main workspace and stays first"},
+                        status_code=409,
+                    )
+                try:
+                    _persist_workspaces(config)
+                except OSError as exc:
+                    config.workspaces.clear()
+                    config.workspaces.update(previous)
+                    return JSONResponse(
+                        {"error": f"Failed to save the workspace order: {exc}"},
+                        status_code=500,
+                    )
             _refresh_project_manager_workspaces(request)
             _publish_workspaces_changed(request)
     return JSONResponse(_workspaces_payload(config))
@@ -562,6 +607,35 @@ def _workspace_archive_lock(request: Request) -> asyncio.Lock:
     return lock
 
 
+@contextlib.asynccontextmanager
+async def _checkout_claims_for_paths(config: Any, paths: Iterable[str]):
+    """Claim each affected shared checkout in the same order as Settings saves."""
+    async with contextlib.AsyncExitStack() as claims:
+        for path in sorted(set(paths)):
+            await claims.enter_async_context(shared_brain._checkout_lock(path))
+            await claims.enter_async_context(shared_brain._checkout_claim(path, config))
+        yield
+
+
+@contextlib.asynccontextmanager
+async def _workspace_checkout_claims(config: Any, workspace_name: str):
+    workspace = config.workspace(workspace_name)
+    paths = [link.path for link in getattr(workspace, "shared_brains", []) or []]
+    async with _checkout_claims_for_paths(config, paths):
+        yield
+
+
+@contextlib.asynccontextmanager
+async def _archive_checkout_claims(config: Any, archive_id: str):
+    from ciao import workspace_archive  # noqa: PLC0415
+
+    paths = await asyncio.to_thread(
+        workspace_archive.restored_shared_brain_paths, config, archive_id
+    )
+    async with _checkout_claims_for_paths(config, paths):
+        yield
+
+
 async def archive_workspace_setting(request: Request) -> JSONResponse:
     """Archive a workspace: unregister it and move its folder aside, intact.
 
@@ -579,7 +653,7 @@ async def archive_workspace_setting(request: Request) -> JSONResponse:
 
     config = request.app.state.config
     name = str(request.path_params.get("name", "")).strip()
-    async with _workspace_archive_lock(request):
+    async with _workspace_archive_lock(request), _workspace_checkout_claims(config, name):
         try:
             target = workspace_archive.plan_archive(config, name)
         except workspace_archive.WorkspaceArchiveError as exc:
@@ -815,7 +889,7 @@ async def restore_archived_workspace(request: Request) -> JSONResponse:
     if not isinstance(body, dict):
         return JSONResponse({"error": "expected an object"}, status_code=400)
     archive_id = str(body.get("id") or "").strip()
-    async with _workspace_archive_lock(request):
+    async with _workspace_archive_lock(request), _archive_checkout_claims(config, archive_id):
         try:
             folder, metadata, destination = await asyncio.to_thread(
                 workspace_archive.move_back, config, archive_id
@@ -8356,6 +8430,108 @@ def _attach_change_receipts(vault: Path, rows: list[dict[str, Any]]) -> None:
         row["change"] = _change_payload(found)
 
 
+def _attach_share_history(
+    rows: list[dict[str, Any]], details_by_receipt: dict[str, dict[str, Any]],
+) -> tuple[set[str], set[tuple[str, str]]]:
+    """Join share decisions using one validated, workspace-aware receipt index."""
+    by_summary: dict[str, list[tuple[str, dict[str, Any]]]] = {}
+    for receipt_id, detail in details_by_receipt.items():
+        fields = detail.get("immutable")
+        if not isinstance(fields, dict):
+            continue
+        summary = f"Shared note change proposal {fields.get('sidecar_id', '')}"
+        by_summary.setdefault(summary, []).append((receipt_id, detail))
+    matched_ids: set[str] = set()
+    matched_identities: set[tuple[str, str]] = set()
+    claimed: set[str] = set()
+    for row in rows:
+        receipt_id = str(row.pop("_share_receipt_id", "") or "")
+        if row.get("kind") != "share" or row.get("action") != "accepted":
+            continue
+        selected_detail: dict[str, Any] | None = (
+            details_by_receipt.get(receipt_id) if receipt_id else None
+        )
+        if selected_detail is not None and not _share_history_row_matches(row, selected_detail):
+            selected_detail = None
+        if selected_detail is None:
+            proposal_id = str(row.get("proposal_id") or "")
+            candidates = [
+                (rid, item)
+                for rid, item in by_summary.get(str(row.get("text") or ""), [])
+                if (not proposal_id or proposal_id == str(item["immutable"].get("proposal_id") or ""))
+                and rid not in claimed
+                and _share_history_row_matches(row, item)
+            ]
+            if len(candidates) == 1:
+                selected_detail = candidates[0][1]
+        if selected_detail is None:
+            continue
+        receipt = selected_detail["receipt"]
+        fields = selected_detail["immutable"]
+        canonical_id = str(receipt["id"])
+        if canonical_id in claimed:
+            continue
+        claimed.add(canonical_id)
+        matched_ids.add(canonical_id)
+        matched_identities.add((str(fields["proposal_id"]), str(row.get("text") or "")))
+        row["workspace"] = str(fields["workspace"])
+        _apply_share_history_detail(row, selected_detail)
+    return matched_ids, matched_identities
+
+
+def _is_archived_share_decision(
+    row: dict[str, Any], archived_details: dict[str, dict[str, Any]],
+    archived_by_summary: dict[str, list[dict[str, Any]]],
+) -> bool:
+    """Hide a shared-vault decision when its canonical receipt owner retired."""
+    if row.get("kind") != "share" or row.get("action") != "accepted":
+        return False
+    receipt_id = str(row.get("_share_receipt_id") or "")
+    detail = archived_details.get(receipt_id) if receipt_id else None
+    if detail is not None and _share_history_row_matches(row, detail):
+        return True
+    return any(
+        _share_history_row_matches(row, detail)
+        for detail in archived_by_summary.get(str(row.get("text") or ""), [])
+    )
+
+
+def _share_history_row_matches(row: dict[str, Any], detail: dict[str, Any]) -> bool:
+    fields = detail.get("immutable")
+    receipt = detail.get("receipt")
+    if not isinstance(fields, dict) or not isinstance(receipt, dict):
+        return False
+    summary = f"Shared note change proposal {fields.get('sidecar_id', '')}"
+    proposal_id = str(row.get("proposal_id") or "")
+    return bool(
+        summary != "Shared note change proposal "
+        and row.get("text") == summary
+        and receipt.get("proposal_id") == fields.get("proposal_id")
+        and (not proposal_id or proposal_id == fields.get("proposal_id"))
+        and receipt.get("workspace") == fields.get("workspace")
+    )
+
+
+def _apply_share_history_detail(row: dict[str, Any], detail: dict[str, Any]) -> None:
+    receipt = detail["receipt"]
+    fields = detail["immutable"]
+    receipt_id = str(receipt["id"])
+    destination = f"{fields.get('brain', '')}:{fields.get('path', '')}"
+    row.update({
+        "share_status": "published", "applied": True,
+        "apply_status": "applied", "commit_oid": receipt.get("commit_oid", ""),
+        "branch": receipt.get("branch", ""), "path": fields.get("path", ""),
+        "operation": fields.get("operation", ""),
+        "change": {
+            "receipt_id": receipt_id, "kind": "share_publish",
+            "status": "applied", "destination": destination,
+            "undoable": True, "changed": True, "ts": receipt.get("ts", ""),
+            "source_turns": [], "branch": receipt.get("branch", ""),
+            "commit_oid": receipt.get("commit_oid", ""),
+        },
+    })
+
+
 def _attach_note_edit_detail(
     config: Any, workspace: str, rows: list[dict[str, Any]]
 ) -> None:
@@ -8578,7 +8754,44 @@ async def proposals_history(request: Request) -> JSONResponse:
     requested = max(1, requested)
     limit = min(requested, _HISTORY_MAX_LIMIT)
 
+    registered_workspaces = set(config.workspace_names())
+    share_details_by_receipt: dict[str, dict[str, Any]] = {}
+    archived_share_details_by_receipt: dict[str, dict[str, Any]] = {}
+    archived_share_details_by_summary: dict[str, list[dict[str, Any]]] = {}
+    if action_filter != "dismissed":
+        from ciao import share_publish
+
+        try:
+            details = await asyncio.to_thread(
+                share_publish.list_share_receipt_details, config
+            )
+        except (OSError, ValueError):
+            details = []
+        valid_details = {
+            str(detail["receipt"]["id"]): detail
+            for detail in details
+            if isinstance(detail, dict)
+            and isinstance(detail.get("receipt"), dict)
+            and isinstance(detail["receipt"].get("id"), str)
+        }
+        share_details_by_receipt = {
+            receipt_id: detail
+            for receipt_id, detail in valid_details.items()
+            if detail["immutable"].get("workspace") in registered_workspaces
+        }
+        archived_share_details_by_receipt = {
+            receipt_id: detail
+            for receipt_id, detail in valid_details.items()
+            if detail["immutable"].get("workspace") not in registered_workspaces
+        }
+        for detail in archived_share_details_by_receipt.values():
+            fields = detail["immutable"]
+            summary = f"Shared note change proposal {fields.get('sidecar_id', '')}"
+            archived_share_details_by_summary.setdefault(summary, []).append(detail)
+
     rows: list[dict[str, Any]] = []
+    matched_share_receipt_ids: set[str] = set()
+    matched_share_identities: set[tuple[str, str]] = set()
     # Two registered names can resolve to one vault root (a ``vault_root: "."``
     # entry, or the legacy entity layout), and then they share a sidecar. Read
     # each sidecar once, under the first name that claims it, or every decision
@@ -8633,11 +8846,86 @@ async def proposals_history(request: Request) -> JSONResponse:
         await asyncio.to_thread(
             _attach_apply_state, vault_for_receipts, workspace_rows
         )
+        for row in workspace_rows:
+            if str(row.get("kind", "")) == "share":
+                row["_share_receipt_id"] = row.get("receipt_id", "")
         await asyncio.to_thread(
             _attach_change_receipts, vault_for_receipts, workspace_rows
         )
+        workspace_rows = [
+            row for row in workspace_rows
+            if not _is_archived_share_decision(
+                row, archived_share_details_by_receipt,
+                archived_share_details_by_summary,
+            )
+        ]
+        matched_ids, matched_identities = _attach_share_history(
+            workspace_rows, share_details_by_receipt
+        )
+        matched_share_receipt_ids.update(matched_ids)
+        matched_share_identities.update(matched_identities)
+        if workspace_filter:
+            # A shared queue may contain a decision for a different registered
+            # alias. Receipt attribution is authoritative, so apply the filter
+            # again after the join has assigned the receipt's owning workspace.
+            workspace_rows = [
+                row for row in workspace_rows
+                if row.get("workspace") == workspace_filter
+            ]
         _attach_note_edit_detail(config, workspace, workspace_rows)
         rows.extend(workspace_rows)
+
+    # A process can stop after the remote publication is confirmed but before
+    # the local decision log is written. Canonical publication receipts are
+    # already durable and validated independently of the queue, so project any
+    # missing published share into History without writing during this GET.
+    if action_filter in {"", "accepted"}:
+        known_receipt_ids = set(matched_share_receipt_ids)
+        accepted_share_identities = set(matched_share_identities)
+        for detail in share_details_by_receipt.values():
+            receipt = detail["receipt"]
+            fields = detail["immutable"]
+            workspace = str(fields.get("workspace") or "")
+            if workspace not in registered_workspaces:
+                continue
+            if workspace_filter and workspace != workspace_filter:
+                continue
+            receipt_id = str(receipt.get("id") or "")
+            proposal_id = str(fields.get("proposal_id") or "")
+            sidecar_id = str(fields.get("sidecar_id") or "")
+            summary = f"Shared note change proposal {sidecar_id}"
+            if (
+                not receipt_id or receipt_id in known_receipt_ids
+                or (proposal_id, summary) in accepted_share_identities
+                or ("", summary) in accepted_share_identities
+            ):
+                continue
+            ts = str(receipt.get("ts") or "")
+            destination = f"{fields.get('brain', '')}:{fields.get('path', '')}"
+            row = {
+                "id": "sharepub_" + hashlib.sha256(
+                    (workspace + "\0" + receipt_id).encode("utf-8")
+                ).hexdigest()[:16],
+                "ts": ts, "decided_at": ts, "action": "accepted",
+                "kind": "share", "text": summary, "source": "", "via": "pwa",
+                "actor": "human", "workspace": workspace,
+                "outcome": "published", "proposal_id": proposal_id,
+                "receipt_id": receipt_id, "destination": destination,
+                "reason": "", "share_status": "published", "applied": True,
+                "apply_status": "applied", "commit_oid": receipt.get("commit_oid", ""),
+                "branch": receipt.get("branch", ""), "path": fields.get("path", ""),
+                "operation": fields.get("operation", ""),
+                "change": {
+                    "receipt_id": receipt_id, "kind": "share_publish",
+                    "status": "applied", "destination": destination,
+                    "undoable": True, "changed": True, "ts": ts,
+                    "source_turns": [], "branch": receipt.get("branch", ""),
+                    "commit_oid": receipt.get("commit_oid", ""),
+                },
+            }
+            rows.append(row)
+            known_receipt_ids.add(receipt_id)
+            accepted_share_identities.add((proposal_id, summary))
 
     # Newest first; undated legacy rows (empty ts) sort last within that order.
     rows.sort(key=lambda r: r["ts"], reverse=True)
@@ -8869,6 +9157,8 @@ async def proposal_preview(request: Request) -> JSONResponse:
     if ctx is None:
         return JSONResponse({"error": f"unknown proposal id: {pid}"}, status_code=404)
     text = request.query_params.get("text", "")
+    if str(ctx["row"].get("kind") or "") == "share" and text:
+        return JSONResponse({"error": "shared-note reviews cannot be edited"}, status_code=400)
     # Off the event loop: the preview reads a guide (taking no lock) and a
     # learnings file, and a slow filesystem must not stall every other request.
     linked = _linked_repos_for(request, ctx["row"])
@@ -8878,6 +9168,233 @@ async def proposal_preview(request: Request) -> JSONResponse:
         )
     )
     return JSONResponse({"ok": True, "preview": preview})
+
+
+def _share_context_is_current(config: Any, ctx: dict[str, Any]) -> bool:
+    """Whether the reviewed share still names a registered workspace queue row."""
+    workspace = str(ctx.get("workspace") or "")
+    try:
+        if workspace not in config.workspace_names():
+            return False
+        current_queue = proposal_service._proposals_file(config, workspace).resolve()
+        captured_queue = Path(str(ctx.get("path") or "")).resolve()
+    except (AttributeError, OSError, ValueError):
+        return False
+    if current_queue != captured_queue:
+        return False
+    return bool(proposal_service.bullets_present(
+        captured_queue,
+        [(int(ctx.get("line", -1)), str(ctx.get("row", {}).get("raw") or ""))],
+    ))
+
+
+async def _settle_share_accept(config: Any, ctx: dict[str, Any], receipt: dict[str, Any]) -> bool:
+    """Remove a confirmed share row and record its decision as one worker transaction."""
+    from ciao import share_publish
+
+    queue = Path(ctx["path"])
+    try:
+        vault = Path(config.workspace_vault_root(ctx["workspace"]))
+    except (AttributeError, ValueError):
+        vault = queue.parent.parent
+    return await share_publish._run_locked(
+        functools.partial(_settle_share_accept_sync, ctx, receipt, queue, vault)
+    )
+
+
+def _settle_share_accept_sync(
+    ctx: dict[str, Any], receipt: dict[str, Any],
+    queue: Path, vault: Path,
+) -> bool:
+    """Finish both local settlement writes before releasing lifecycle claims."""
+    from ciao.memory_receipts import queue_lock
+
+    row = ctx["row"]
+    receipt_id = str(receipt.get("id") or "")
+    with queue_lock(queue):
+        # The remote write is already confirmed, so its accepted History row
+        # is true even if local queue cleanup is interrupted. Write it first;
+        # the publication receipt ID makes repeats idempotent at the decision
+        # layer and distinguishes this externally reversible operation.
+        proposal_actions.record_decision(
+            queue, action="accept", text=str(row.get("text") or ""),
+            kind="share", via="pwa", source=str(row.get("source") or ""),
+            destination=f"{receipt.get('brain', '')}:{receipt.get('path', '')}",
+            outcome="published", proposal_id=str(row.get("id") or ""),
+            receipt_id=receipt_id, once=True,
+        )
+        return proposal_service._rewrite_queue_single(
+            queue, ctx["line"], str(row.get("raw") or ""),
+            str(row.get("text") or ""), "share", True,
+            ctx["workspace"], vault, undoable=False, operation_id=receipt_id,
+        )
+
+
+async def _proposal_share_accept(
+    request: Request, ctx: dict[str, Any], body: dict[str, Any],
+) -> JSONResponse:
+    """Human consent boundary for publishing one immutable share artifact."""
+    from ciao import share_publish
+
+    pid = str(ctx["row"].get("id") or "")
+    workspace = str(ctx.get("workspace") or "")
+    raw_workspace = body.get("workspace")
+    raw_revision = body.get("expected_revision")
+    if raw_workspace != workspace:
+        return JSONResponse({"error": "workspace does not own this share proposal", "id": pid}, status_code=409)
+    if not isinstance(raw_revision, str) or not raw_revision:
+        return JSONResponse({"error": "expected_revision is required", "id": pid}, status_code=409)
+    if body.get("text") not in (None, "") or request.query_params.get("text") or body.get("reconcile") or request.query_params.get("reconcile"):
+        return JSONResponse({"error": "shared-note accepts do not support edits or reconcile options", "id": pid}, status_code=400)
+    preview = await asyncio.to_thread(
+        proposal_service.preview_row, request.app.state.config, ctx
+    )
+    if preview.get("revision") != raw_revision:
+        return JSONResponse(
+            {"error": "the shared-note review changed; confirm the refreshed preview", "id": pid,
+             "share_status": "stale_review", "preview": preview},
+            status_code=409,
+        )
+    if preview.get("blocked_reason") and not share_publish.has_publication_attempt(
+        request.app.state.config, workspace=workspace, proposal_id=pid,
+        expected_revision=raw_revision,
+    ):
+        async with _workspace_archive_lock(request):
+            if not await asyncio.to_thread(
+                _share_context_is_current, request.app.state.config, ctx
+            ):
+                return JSONResponse({
+                    "error": "the share workspace or queue changed; reload the review",
+                    "id": pid, "share_status": "stale_review",
+                }, status_code=409)
+            return await _refresh_legacy_share_review(
+                request, pid=pid, workspace=workspace,
+                expected_revision=raw_revision, preview=preview,
+            )
+    # Workspace archive and rename take this same lock before moving its vault.
+    # Keep the workspace identity and queue path stable through publication and
+    # local settlement; publication itself then takes checkout and proposal
+    # claims in its established order.
+    async with _workspace_archive_lock(request):
+        if not await asyncio.to_thread(
+            _share_context_is_current, request.app.state.config, ctx
+        ):
+            return JSONResponse({
+                "error": "the share workspace or queue changed; reload the review",
+                "id": pid, "share_status": "stale_review",
+            }, status_code=409)
+        return await _publish_and_settle_share_accept(
+            request, ctx, pid=pid, workspace=workspace,
+            expected_revision=raw_revision, preview=preview,
+        )
+
+
+async def _refresh_legacy_share_review(
+    request: Request, *, pid: str, workspace: str,
+    expected_revision: str, preview: dict[str, Any],
+) -> JSONResponse:
+    """Refresh a legacy review while holding the workspace lifecycle claim."""
+    from ciao import share_proposals, share_publish
+
+    config = request.app.state.config
+    replacement = await share_publish._run_locked(functools.partial(
+        share_publish.refresh_legacy_draft,
+        config, workspace=workspace, proposal_id=pid,
+        expected_revision=expected_revision,
+    ))
+    if isinstance(replacement, share_proposals.ShareDraft):
+        _replacement_rows, replacement_by_id = proposal_service._scan_proposal_rows(config)
+        replacement_ctx = replacement_by_id.get(replacement.proposal_id)
+        replacement_preview = (
+            await asyncio.to_thread(
+                proposal_service.preview_row, config, replacement_ctx
+            ) if replacement_ctx is not None else None
+        )
+        return JSONResponse(
+            {"error": "the legacy review was replaced; review and accept the new proposal",
+             "id": pid, "share_status": "stale_review",
+             "replacement": {"id": replacement.proposal_id,
+                             "revision": replacement.artifact["review_token"],
+                             "preview": replacement_preview}},
+            status_code=409,
+        )
+    if isinstance(replacement, share_proposals.ShareRefusal):
+        if replacement.code == "legacy_replaced":
+            return JSONResponse(
+                {"error": replacement.message, "id": pid,
+                 "share_status": "stale_review"},
+                status_code=409,
+            )
+        if replacement.code == "draft_unavailable":
+            return JSONResponse(
+                {"error": "the replacement review could not be completed; retry to recover it",
+                 "id": pid, "share_status": replacement.code},
+                status_code=503,
+            )
+        if replacement.code == "capacity":
+            return JSONResponse(
+                {"error": replacement.message, "id": pid,
+                 "share_status": replacement.code},
+                status_code=409,
+            )
+        if replacement.code == "publication_pending":
+            return JSONResponse(
+                {"error": replacement.message, "id": pid,
+                 "share_status": replacement.code},
+                status_code=409,
+            )
+    return JSONResponse(
+        {"error": "the shared-note destination is unavailable", "id": pid,
+         "share_status": preview["blocked_reason"], "preview": preview},
+        status_code=409,
+    )
+
+
+async def _publish_and_settle_share_accept(
+    request: Request,
+    ctx: dict[str, Any],
+    *,
+    pid: str,
+    workspace: str,
+    expected_revision: str,
+    preview: dict[str, Any],
+) -> JSONResponse:
+    """Publish and settle while the caller owns the workspace lifecycle lock."""
+    from ciao import share_publish
+
+    outcome = await share_publish.publish_share(
+        request.app.state.config, workspace=workspace,
+        proposal_id=pid, expected_revision=expected_revision,
+    )
+    if outcome.outcome not in {"published", "already_published"}:
+        payload: dict[str, Any] = {
+            "error": "the shared note was not confirmed as published",
+            "id": pid, "share_status": outcome.outcome,
+        }
+        if outcome.outcome == "stale_review":
+            payload["preview"] = await asyncio.to_thread(
+                proposal_service.preview_row, request.app.state.config, ctx
+            )
+        return JSONResponse(payload, status_code=503 if outcome.outcome == "indeterminate" else 409)
+    receipt = await asyncio.to_thread(
+        share_publish.get_share_receipt,
+        request.app.state.config, workspace=workspace, proposal_id=pid,
+        expected_revision=expected_revision,
+    )
+    if receipt is None:
+        return JSONResponse({"error": "the publication receipt needs recovery", "id": pid,
+                             "share_status": "indeterminate"}, status_code=503)
+    try:
+        removed = await _settle_share_accept(request.app.state.config, ctx, receipt)
+    except QueueReceiptUnavailable:
+        return JSONResponse({"error": "the publication is confirmed; queue settlement needs retry",
+                             "id": pid, "share_status": "published", "receipt": receipt}, status_code=503)
+    return JSONResponse({
+        "ok": True, "result": {"id": pid, "action": "accept", "dismissed": False,
+                               "promoted": True, "destination": f"{preview['brain']}:{preview['path']}"},
+        "share_status": "published", "receipt": receipt,
+        "settled": removed,
+    })
 
 
 async def memory_receipts(request: Request) -> JSONResponse:
@@ -8916,6 +9433,24 @@ async def memory_receipts(request: Request) -> JSONResponse:
         for row in list_receipts(vault, limit=max(1, requested)):
             row["workspace"] = workspace
             rows.append(row)
+        from ciao import share_publish
+
+        for receipt in await asyncio.to_thread(
+            share_publish.list_share_receipts, config, workspace=workspace
+        ):
+            rows.append({
+                "id": receipt["id"], "workspace": workspace,
+                "kind": "share_publish", "status": "applied",
+                "ts": str(receipt.get("ts", "")), "actor": "operator",
+                "source": "pwa", "destination": f"{receipt.get('brain', '')}:{receipt.get('path', '')}",
+                "fact_text": "Shared note publication", "changed": True,
+                "undoable": True, "share_status": "published",
+                "operation": receipt.get("operation", ""),
+                "branch": receipt.get("branch", ""), "path": receipt.get("path", ""),
+                "commit_oid": receipt.get("commit_oid", ""),
+                "published_blob_oid": receipt.get("published_blob_oid"),
+                "proposal_id": receipt.get("proposal_id", ""),
+            })
     rows.sort(key=lambda row: str(row.get("ts", "")), reverse=True)
     return JSONResponse({"rows": rows[: max(1, requested)], "total": len(rows)})
 
@@ -9000,6 +9535,21 @@ def _find_receipt_in_workspaces(
     return None, ""
 
 
+def _find_share_receipt_in_workspaces(
+    config: Any, receipt_id: str, workspace: str = "",
+) -> tuple[dict[str, Any], dict[str, Any], str] | None:
+    from ciao import share_publish
+
+    names = [workspace] if workspace else list(config.workspace_names())
+    for name in names:
+        detail = share_publish.get_share_receipt_detail(
+            config, workspace=name, receipt_id=receipt_id
+        )
+        if detail is not None:
+            return detail["receipt"], detail["immutable"], name
+    return None
+
+
 async def memory_receipt_detail(request: Request) -> JSONResponse:
     """One receipt with its before/after images and a line diff.
 
@@ -9017,6 +9567,29 @@ async def memory_receipt_detail(request: Request) -> JSONResponse:
     receipt, found_in = await asyncio.to_thread(
         _find_receipt_in_workspaces, config, rid, workspace
     )
+    if receipt is None:
+        share_detail = await asyncio.to_thread(
+            _find_share_receipt_in_workspaces, config, rid, workspace
+        )
+        if share_detail is not None:
+            share_receipt, fields, found_in = share_detail
+            before, after = fields.get("original"), fields.get("proposed")
+            share_payload: dict[str, Any] = {
+                "id": rid, "workspace": found_in, "kind": "share_publish",
+                "status": "applied", "share_status": "published",
+                "ts": str(share_receipt.get("ts", "")), "actor": "operator",
+                "source": "pwa", "destination": f"{fields.get('brain', '')}:{fields.get('path', '')}",
+                "operation": fields.get("operation", ""), "branch": share_receipt.get("branch", ""),
+                "path": fields.get("path", ""), "identity": fields.get("origin_identity", ""),
+                "commit_oid": share_receipt.get("commit_oid", ""),
+                "published_blob_oid": share_receipt.get("published_blob_oid"),
+                "undoable": True, "has_snapshot": True, "changed": True,
+                "before": before, "after": after, "truncated": False,
+            }
+            diff, diff_truncated = _receipt_diff(before or "", after or "", "\n")
+            share_payload["diff"] = diff
+            share_payload["diff_truncated"] = diff_truncated
+            return JSONResponse(share_payload)
     if receipt is None:
         return JSONResponse({"error": f"unknown receipt: {rid}"}, status_code=404)
     before = receipt.get("before_text")
@@ -9089,6 +9662,20 @@ async def memory_receipt_undo(request: Request) -> JSONResponse:
     config = request.app.state.config
     rid = request.path_params["id"]
     workspace = request.query_params.get("workspace", "").strip()
+    share_detail = await asyncio.to_thread(
+        _find_share_receipt_in_workspaces, config, rid, workspace
+    )
+    if share_detail is not None:
+        from ciao import share_publish
+
+        _receipt, _fields, found_in = share_detail
+        reversal = await share_publish.draft_share_reversal(
+            config, workspace=found_in, receipt_id=rid
+        )
+        if isinstance(reversal, share_publish.drafts.ShareRefusal):
+            status = 503 if reversal.code in {"draft_unavailable", "upstream_unavailable"} else 409
+            return JSONResponse({"error": reversal.message, "id": rid, "conflict": reversal.code == "changed_upstream"}, status_code=status)
+        return JSONResponse({"ok": True, **reversal})
     try:
         vault = Path(config.workspace_vault_root(workspace)) if workspace else None
     except (AttributeError, ValueError):
@@ -9529,7 +10116,7 @@ async def proposals_batch(request: Request) -> JSONResponse:
                 for row in entry["rows"]
             ]
             try:
-                removed_here = await asyncio.to_thread(
+                removed_here, blocked_here = await asyncio.to_thread(
                     proposal_service._rewrite_queue_batch,
                     queue,
                     entry["rows"],
@@ -9537,6 +10124,7 @@ async def proposals_batch(request: Request) -> JSONResponse:
                     removals,
                     entry["workspace"],
                     vault_for_receipt,
+                    config=config,
                 )
             except QueueReceiptUnavailable as exc:
                 return JSONResponse(
@@ -9547,6 +10135,11 @@ async def proposals_batch(request: Request) -> JSONResponse:
                     },
                     status_code=503,
                 )
+            for blocked_id, blocked_reason in blocked_here.items():
+                results.append(proposal_actions.ProposalActionResult(
+                    id=blocked_id, action="dismiss", dismissed=False,
+                    conflict=True, error=blocked_reason,
+                ).as_dict())
             self_request_removed.update(removed_here)
             # Record THIS queue's outcomes immediately after its rewrite lands: a
             # later file failing to persist must not take already-persisted
@@ -9627,8 +10220,16 @@ async def proposals_batch(request: Request) -> JSONResponse:
                         include_usage=False,
                     ).as_dict())
                 else:
+                    if row["id"] in blocked_here:
+                        continue
                     results.append(proposal_actions.ProposalActionResult(
-                        id=row["id"], action="dismiss", dismissed=True
+                        id=row["id"], action="dismiss",
+                        # Dismiss remains idempotent for ordinary rows: a
+                        # concurrent resolver may already have removed one.
+                        # Guarded shares are the exception and enter
+                        # ``blocked_here`` when their canonical publication
+                        # state refuses removal.
+                        dismissed=True,
                     ).as_dict())
         return JSONResponse(
             {
@@ -9767,19 +10368,37 @@ async def proposal_action(request: Request) -> JSONResponse:
     """
     config = request.app.state.config
     pid = request.path_params["id"]
+    try:
+        raw_body = await request.json()
+    except Exception:  # noqa: BLE001 — body-less legacy requests remain valid
+        raw_body = {}
+    body = raw_body if isinstance(raw_body, dict) else {}
     _rows, by_id = proposal_service._scan_proposal_rows(config)
     ctx = by_id.get(pid)
     if ctx is None:
+        if request.path_params.get("action", "").strip() == "accept":
+            from ciao import share_publish
+
+            workspace = body.get("workspace")
+            revision = body.get("expected_revision")
+            if (isinstance(workspace, str) and workspace in config.workspace_names()
+                    and isinstance(revision, str) and revision):
+                receipt = await asyncio.to_thread(
+                    share_publish.get_share_receipt,
+                    config, workspace=workspace, proposal_id=pid,
+                    expected_revision=revision,
+                )
+                if receipt is not None:
+                    return JSONResponse({
+                        "ok": True,
+                        "result": {"id": pid, "action": "accept", "dismissed": False,
+                                   "promoted": True, "destination": f"{receipt.get('brain', '')}:{receipt.get('path', '')}"},
+                        "share_status": "already_published", "receipt": receipt,
+                    })
         return JSONResponse({"error": f"unknown proposal id: {pid}"}, status_code=404)
     action = request.path_params.get("action", "").strip()
     # A body is optional here and always has been; a client that sends none
-    # (or sends something unparseable) gets the pre-preview behaviour rather
-    # than a 400 for a field it never had to supply.
-    try:
-        raw_body = await request.json()
-    except Exception:  # noqa: BLE001 — no body, or not JSON: both mean "no extras"
-        raw_body = {}
-    body = raw_body if isinstance(raw_body, dict) else {}
+    # gets the pre-preview behaviour unless this is a share accept.
     expected_revision = str(body.get("expected_revision", "") or "").strip()
     edited_text = str(body.get("text", "") or "").strip()
     # Validate BEFORE any file mutation, the same shape the batch endpoint uses.
@@ -9799,10 +10418,7 @@ async def proposal_action(request: Request) -> JSONResponse:
         return JSONResponse({"error": str(exc), "id": pid}, status_code=400)
     row = ctx["row"]
     if action == "accept" and row.get("kind") == "share":
-        return JSONResponse(
-            {"error": "publishing a shared note requires its attended consent flow", "id": pid},
-            status_code=409,
-        )
+        return await _proposal_share_accept(request, ctx, body)
 
     if action == "dismiss" and row.get("kind") == "category":
         # Recorded BEFORE the bullet is removed, because the row IS the proposal:
@@ -10134,7 +10750,11 @@ async def proposal_action(request: Request) -> JSONResponse:
                 action == "accept",
                 ctx["workspace"],
                 vault_for_receipt,
+                config=config,
+                proposal_id=pid,
             )
+        except proposal_service.ShareDismissalRefused as exc:
+            return JSONResponse({"error": str(exc), "id": pid, "conflict": True}, status_code=409)
         except QueueReceiptUnavailable as exc:
             return JSONResponse(
                 {
@@ -10197,6 +10817,8 @@ async def proposal_action(request: Request) -> JSONResponse:
             proposal_id=pid,
             reason=reason,
         )
+    elif row.get("kind") == "share":
+        return JSONResponse({"error": "this proposal was already resolved; reload the queue", "id": pid, "conflict": True}, status_code=409)
     return JSONResponse(
         {
             "ok": True,

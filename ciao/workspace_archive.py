@@ -201,7 +201,8 @@ def _registry_entry(config: Any, workspace: WorkspaceConfig) -> dict[str, Any]:
         "claude_trim": workspace.claude_trim,
         "color": workspace.color,
         "shared_brains": [
-            {"name": link.name, "path": link.path, "identity": link.identity}
+            {"name": link.name, "path": link.path, "identity": link.identity,
+             "lifetime_id": link.lifetime_id}
             for link in workspace.shared_brains
         ],
     }
@@ -375,16 +376,17 @@ def unregister(config: Any, name: str) -> None:
     re-raising, so the running server never disagrees with
     ``workspaces.json`` about which workspaces exist.
     """
-    previous = dict(config.workspaces)
-    config.workspaces.pop(name, None)
-    from ciao.workspaces import persist_workspaces  # noqa: PLC0415
+    from ciao.workspaces import persist_workspaces, workspace_registry_lock  # noqa: PLC0415
 
-    try:
-        persist_workspaces(config)
-    except BaseException:
-        config.workspaces.clear()
-        config.workspaces.update(previous)
-        raise
+    with workspace_registry_lock(config):
+        previous = dict(config.workspaces)
+        config.workspaces.pop(name, None)
+        try:
+            persist_workspaces(config)
+        except BaseException:
+            config.workspaces.clear()
+            config.workspaces.update(previous)
+            raise
 
 
 def undo_move_to_archive(
@@ -873,6 +875,22 @@ def move_back(config: Any, archive_id: str) -> tuple[Path, dict[str, Any], Path]
     return folder, metadata, destination
 
 
+def restored_shared_brain_paths(config: Any, archive_id: str) -> list[str]:
+    """Affected checkout paths for a restore, before its folder is moved back."""
+    try:
+        folder = _archive_folder(config, archive_id)
+    except WorkspaceArchiveError:
+        return []
+    metadata = _read_metadata(folder)
+    if metadata is None or not metadata.get("name"):
+        return []
+    try:
+        settings = restored_settings(config, metadata)
+    except (TypeError, ValueError):
+        return []
+    return sorted({link.path for link in settings["shared_brains"]})
+
+
 def register_restored(
     config: Any, folder: Path, metadata: dict[str, Any], destination: Path
 ) -> dict[str, Any]:
@@ -892,41 +910,42 @@ def register_restored(
         )
     vault_root, _vault = _restored_vault_root(config, metadata, folder)
     settings = restored_settings(config, metadata)
-    config.workspaces[name] = WorkspaceConfig(
-        name=name,
-        vault_root=vault_root,
-        default_provider=settings["default_provider"],
-        disallowed_tools=settings["disallowed_tools"],
-        claude_trim=settings["claude_trim"],
-        color=settings["color"],
-        shared_brains=settings["shared_brains"],
-    )
-    from ciao.workspaces import persist_workspaces  # noqa: PLC0415
+    from ciao.workspaces import persist_workspaces, workspace_registry_lock  # noqa: PLC0415
 
-    try:
-        persist_workspaces(config)
-    except OSError as exc:
-        # Undo both halves so the archive stays restorable: without this the
-        # folder sat at its old path while the registry on disk lacked the
-        # entry, and a retry was refused (content missing, destination exists).
-        config.workspaces.pop(name, None)
-        content_dir = str(metadata.get("content_dir") or "")
-        if content_dir:
-            try:
-                os.rename(destination, folder / content_dir)
-            except OSError as back_exc:
-                raise WorkspaceArchiveError(
-                    f"the workspace registry could not be saved ({exc}), and "
-                    f"moving {_display(config, destination)} back into "
-                    f"{_display(config, folder)} failed too ({back_exc}); move "
-                    "it back by hand to restore it again",
-                    500,
-                ) from exc
-        raise WorkspaceArchiveError(
-            f"could not restore '{name}': the workspace registry could not be "
-            f"saved ({exc}); the archive was left in place",
-            500,
-        ) from exc
+    with workspace_registry_lock(config):
+        config.workspaces[name] = WorkspaceConfig(
+            name=name,
+            vault_root=vault_root,
+            default_provider=settings["default_provider"],
+            disallowed_tools=settings["disallowed_tools"],
+            claude_trim=settings["claude_trim"],
+            color=settings["color"],
+            shared_brains=settings["shared_brains"],
+        )
+        try:
+            persist_workspaces(config)
+        except OSError as exc:
+            # Undo both halves so the archive stays restorable: without this the
+            # folder sat at its old path while the registry on disk lacked the
+            # entry, and a retry was refused (content missing, destination exists).
+            config.workspaces.pop(name, None)
+            content_dir = str(metadata.get("content_dir") or "")
+            if content_dir:
+                try:
+                    os.rename(destination, folder / content_dir)
+                except OSError as back_exc:
+                    raise WorkspaceArchiveError(
+                        f"the workspace registry could not be saved ({exc}), and "
+                        f"moving {_display(config, destination)} back into "
+                        f"{_display(config, folder)} failed too ({back_exc}); move "
+                        "it back by hand to restore it again",
+                        500,
+                    ) from exc
+            raise WorkspaceArchiveError(
+                f"could not restore '{name}': the workspace registry could not be "
+                f"saved ({exc}); the archive was left in place",
+                500,
+            ) from exc
     return {
         **metadata,
         "id": folder.name,

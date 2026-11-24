@@ -237,6 +237,36 @@ def _brain_for(config: Any, workspace: str, name: str) -> SharedBrainLink:
     _refuse("brain_required", "Choose one linked shared brain.", eligible_brains=eligible)
 
 
+def _persist_link_lifetime(config: Any, workspace: str, link: SharedBrainLink) -> None:
+    """Persist generated identities for registries written before lifetimes existed."""
+    from ciao.workspaces import workspace_registry_lock
+
+    with workspace_registry_lock(config):
+        record = config.workspace(workspace) if hasattr(config, "workspace") else None
+        current = next((item for item in getattr(record, "shared_brains", []) or []
+                        if item.name == link.name and item.path == link.path), None)
+        if current is None or current.lifetime_id != link.lifetime_id:
+            _refuse("brain_unavailable", "The selected shared brain link changed while drafting.")
+        registry = Path(config.state_path).parent / "workspaces.json"
+        try:
+            rows = json.loads(registry.read_text(encoding="utf-8"))
+        except (OSError, ValueError, UnicodeError):
+            rows = []
+        for row in rows if isinstance(rows, list) else ():
+            if not isinstance(row, dict) or row.get("name") != workspace:
+                continue
+            links = row.get("shared_brains")
+            if isinstance(links, list) and any(
+                isinstance(item, dict) and item.get("path") == link.path
+                and item.get("lifetime_id") == link.lifetime_id for item in links
+            ):
+                return
+            break
+        persist_registry = getattr(config, "persist_workspace_registry", None)
+        if callable(persist_registry):
+            persist_registry()
+
+
 def _review_token(fields: dict[str, Any]) -> str:
     payload = json.dumps(fields, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
     return "shr_" + hashlib.sha256(payload).hexdigest()
@@ -265,10 +295,77 @@ def _load_sidecar(path: Path) -> dict[str, Any]:
         _refuse("draft_corrupt", "The private share draft is missing or corrupt.")
 
 
+def share_dismissal_block(
+    config: Any, *, workspace: str, bullet: Any, proposal_id: str = ""
+) -> str | None:
+    """Return a reason a share row cannot be dismissed, reading canonical state only.
+
+    Callers must hold the proposal queue lock while checking and removing the row;
+    this sidecar-only read deliberately does not acquire either queue lock.
+    """
+    if getattr(bullet, "kind", None) != KIND:
+        return None
+    sidecar_id = getattr(bullet, "target", "")
+    if not isinstance(sidecar_id, str) or not sidecar_id:
+        return "The shared-note publication state is unavailable."
+    path = _store_dir(config) / (
+        hashlib.sha256((workspace + "\0sidecar\0" + sidecar_id).encode()).hexdigest() + ".json"
+    )
+    try:
+        data = _load_sidecar(path)
+    except ShareDraftError:
+        return "The shared-note publication state is unavailable."
+    fields = data.get("immutable")
+    expected_proposal_id = proposal_tracking.stable_proposal_id(
+        workspace, (PurePosixPath(workspace) / _QUEUE).as_posix(), KIND,
+        getattr(bullet, "text", ""), "", 0,
+    )
+    if (
+        not isinstance(fields, dict)
+        or fields.get("workspace") != workspace
+        or fields.get("sidecar_id") != sidecar_id
+        or fields.get("proposal_id") != expected_proposal_id
+        or (proposal_id and fields.get("proposal_id") != proposal_id)
+        or getattr(bullet, "text", "") != f"Shared note change proposal {sidecar_id}"
+    ):
+        return "The shared-note publication state does not match this proposal."
+    if "publication" not in data:
+        return None
+    publication = data.get("publication")
+    if not isinstance(publication, dict):
+        return "The shared-note publication state is indeterminate."
+    if "attempts" not in publication or "receipts" not in publication:
+        return "The shared-note publication state is indeterminate."
+    attempts = publication.get("attempts", [])
+    receipts = publication.get("receipts", [])
+    if not isinstance(attempts, list) or not isinstance(receipts, list):
+        return "The shared-note publication state is indeterminate."
+    if receipts:
+        return "A shared-note publication is already confirmed."
+    for attempt in attempts:
+        if (
+            not isinstance(attempt, dict)
+            or attempt.get("status") != "rejected"
+            or attempt.get("retryable") is not False
+            or type(attempt.get("attempt")) is not int
+            or attempt.get("attempt", 0) < 1
+            or not isinstance(attempt.get("commit_oid"), str)
+            or not re.fullmatch(r"[0-9a-f]{40}", attempt.get("commit_oid", ""))
+            or not isinstance(attempt.get("parent_oid"), str)
+            or not re.fullmatch(r"[0-9a-f]{40}", attempt.get("parent_oid", ""))
+            or attempt.get("proposal_id") != fields.get("proposal_id")
+            or attempt.get("revision") != fields.get("revision")
+            or attempt.get("destination_fingerprint") != fields.get("destination_fingerprint")
+            or attempt.get("ref") != fields.get("upstream_ref")
+        ):
+            return "A shared-note publication attempt needs reconciliation."
+    return None
+
+
 def _draft_share(
     config: Any, *, workspace: str, brain: str = "", relative_path: str,
     operation: str | None, proposed: bytes | None, request_key: str,
-    request_fingerprint: str,
+    request_fingerprint: str, retiring_proposal_id: str | None = None,
 ) -> ShareDraft:
     """Qualify and privately file one immutable shared-note proposal."""
     if operation not in (None, "create", "replace", "delete"):
@@ -276,6 +373,9 @@ def _draft_share(
     if not isinstance(request_key, str) or not request_key:
         _refuse("request_conflict", "A stable internal request key is required.")
     link = _brain_for(config, workspace, brain)
+    _persist_link_lifetime(config, workspace, link)
+    if not getattr(link, "lifetime_id", ""):
+        _refuse("brain_unavailable", "The selected shared brain link has no persistent lifetime identity.")
     op_ref, base_commit, original, original_oid = _qualify(config, link, relative_path)
     operation = operation or ("replace" if original is not None else "create")
     if operation == "create" and original is not None or operation in ("replace", "delete") and original is None:
@@ -345,12 +445,15 @@ def _draft_share(
                 _refuse("draft_corrupt", "The canonical share publication state is corrupt.")
             if attempts or receipts:
                 _refuse("request_conflict", "This share proposal already has a publication attempt or receipt.")
-            count = sum(1 for row in rows if row.bullet.kind == KIND)
+            count = sum(
+                row.bullet.kind == KIND and row.proposal_id != retiring_proposal_id
+                for row in rows
+            )
             if count >= MAX_PER_WORKSPACE:
                 _refuse("capacity", "The workspace share proposal limit is reached.", limit=MAX_PER_WORKSPACE, count=count)
             brain_count = 0
             for row in rows:
-                if row.bullet.kind != KIND:
+                if row.bullet.kind != KIND or row.proposal_id == retiring_proposal_id:
                     continue
                 prior_path = store / (hashlib.sha256((workspace + "\0sidecar\0" + row.bullet.target).encode()).hexdigest() + ".json")
                 try:
@@ -374,6 +477,7 @@ def _draft_share(
     token_fields: dict[str, Any] = {
         "schema": _SCHEMA,
         "workspace": workspace, "proposal_id": proposal_id, "revision": 1,
+        "link_lifetime_id": link.lifetime_id,
         "sidecar_id": sidecar_id, "brain": link.name, "origin_identity": link.identity,
         "checkout_path": str(Path(link.path).resolve()),
         "destination_fingerprint": destination_fingerprint,
@@ -393,12 +497,16 @@ def _draft_share(
             existing_text = queue.read_text(encoding="utf-8")
         except FileNotFoundError:
             existing_text = "# Memory Proposals\n"
-        count = sum(1 for entry in proposal_tracking.walk_proposal_queue(workspace, rel_queue, existing_text) if entry.bullet.kind == KIND)
+        queued = list(proposal_tracking.walk_proposal_queue(workspace, rel_queue, existing_text))
+        count = sum(
+            1 for entry in queued
+            if entry.bullet.kind == KIND and entry.proposal_id != retiring_proposal_id
+        )
         if count >= MAX_PER_WORKSPACE:
             _refuse("capacity", "The workspace share proposal limit is reached.", limit=MAX_PER_WORKSPACE, count=count)
         brain_count = 0
         for entry in proposal_tracking.walk_proposal_queue(workspace, rel_queue, existing_text):
-            if entry.bullet.kind != KIND:
+            if entry.bullet.kind != KIND or entry.proposal_id == retiring_proposal_id:
                 continue
             prior_path = store / (hashlib.sha256((workspace + "\0sidecar\0" + entry.bullet.target).encode()).hexdigest() + ".json")
             try:
@@ -421,6 +529,7 @@ def _draft_share(
 def draft_share(
     config: Any, *, workspace: str, brain: str = "", relative_path: str,
     operation: str | None, proposed: bytes | None, request_key: str,
+    retiring_proposal_id: str | None = None,
 ) -> ShareDraft | ShareRefusal:
     """Return a draft or its safe, typed refusal without exposing input data."""
     try:
@@ -469,6 +578,7 @@ def draft_share(
                 proposed=proposed,
                 request_key=request_key,
                 request_fingerprint=request_fingerprint,
+                retiring_proposal_id=retiring_proposal_id,
             )
     except ShareDraftError as exc:
         return exc.refusal

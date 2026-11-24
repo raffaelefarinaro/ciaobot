@@ -11,6 +11,7 @@ import subprocess
 import tempfile
 from contextlib import asynccontextmanager, contextmanager
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Callable, Iterator, Literal, TypeVar
 
@@ -25,7 +26,7 @@ from ciao.redact import redact_text
 OutcomeCode = Literal[
     "published", "already_published", "changed_upstream", "brain_changed",
     "push_refused", "indeterminate", "stale_review", "draft_corrupt",
-    "brain_unavailable", "upstream_unavailable", "draft_unavailable",
+    "brain_unavailable", "upstream_unavailable", "draft_unavailable", "reconcile_after_unlink",
 ]
 MAX_ATTEMPTS = 3
 PUSH_TIMEOUT_S = 20.0
@@ -110,9 +111,231 @@ def _artifact_for(config: Any, workspace: str, proposal_id: str) -> dict[str, An
     return None
 
 
+def has_publication_attempt(config: Any, *, workspace: str, proposal_id: str, expected_revision: str) -> bool:
+    """Whether this exact reviewed artifact has a persisted attempt to reconcile."""
+    artifact = _artifact_for(config, workspace, proposal_id)
+    if artifact is None or artifact.get("review_token") != expected_revision:
+        return False
+    publication = artifact.get("publication")
+    attempts = publication.get("attempts", []) if isinstance(publication, dict) else []
+    return isinstance(attempts, list) and bool(attempts)
+
+
+def refresh_legacy_draft(
+    config: Any, *, workspace: str, proposal_id: str, expected_revision: str,
+) -> drafts.ShareDraft | drafts.ShareRefusal | None:
+    """Re-draft an unattempted #3575 review against the same still-linked checkout.
+
+    The replacement gets a new token and queue row. The old token never consents
+    to a publish, and a changed checkout or origin cannot be retargeted.
+    """
+    artifact = _artifact_for(config, workspace, proposal_id)
+    if artifact is None or artifact.get("review_token") != expected_revision:
+        return None
+    fields = artifact["immutable"]
+    publication = artifact.get("publication")
+    attempts = publication.get("attempts", []) if isinstance(publication, dict) else []
+    if "link_lifetime_id" in fields or (isinstance(attempts, list) and attempts):
+        return None
+    from ciao.workspaces import workspace_registry_lock
+
+    queue = Path(config.workspace_vault_root(workspace)) / drafts._QUEUE
+    request_key = "legacy-refresh:" + str(fields.get("sidecar_id", ""))
+    key_hash = hashlib.sha256((workspace + "\0" + request_key).encode()).hexdigest()
+    index_path = drafts._store_dir(config) / (key_hash + ".json")
+    with drafts._thread_queue_lock(queue), drafts.memory_receipts.queue_lock(queue):
+        # The initial read above only routes obvious non-legacy requests. The
+        # canonical sidecar and exact old row must be re-read under the queue
+        # lock: publication reserves its attempt under that same lock.
+        rel_path = (Path(workspace) / drafts._QUEUE).as_posix()
+        try:
+            queue_text = queue.read_text(encoding="utf-8")
+            current = drafts._load_sidecar(
+                drafts._store_dir(config) / (
+                    hashlib.sha256((workspace + "\0sidecar\0" + str(fields.get("sidecar_id", ""))).encode()).hexdigest() + ".json"
+                )
+            )
+        except (OSError, drafts.ShareDraftError):
+            return drafts.ShareRefusal("draft_corrupt", "The legacy review state changed; refresh it before replacing.")
+        current_fields = current.get("immutable")
+        if current_fields != fields or current.get("review_token") != expected_revision:
+            return drafts.ShareRefusal("stale_review", "The legacy review changed; refresh it before replacing.")
+        old_row = next((entry for entry in drafts.proposal_tracking.walk_proposal_queue(workspace, rel_path, queue_text)
+                        if entry.proposal_id == proposal_id and entry.bullet.kind == "share"), None)
+        if old_row is None:
+            return drafts.ShareRefusal("legacy_missing", "The old shared-note review is no longer queued.")
+        block = drafts.share_dismissal_block(
+            config, workspace=workspace, bullet=old_row.bullet, proposal_id=proposal_id
+        )
+        if block:
+            return drafts.ShareRefusal("publication_pending", block)
+        publication_now = current.get("publication")
+        if publication_now is not None:
+            if (not isinstance(publication_now, dict)
+                    or not isinstance(publication_now.get("attempts"), list)
+                    or not isinstance(publication_now.get("receipts"), list)
+                    or publication_now.get("attempts")
+                    or publication_now.get("receipts")):
+                return drafts.ShareRefusal(
+                    "publication_pending", "Publication state changed; reconcile it before replacing this review."
+                )
+        with workspace_registry_lock(config):
+            link = _active_legacy_link(config, workspace, fields)
+            if link is None:
+                return drafts.ShareRefusal("brain_unavailable", "The original shared-brain checkout is no longer linked.")
+            proposed_text = fields.get("proposed")
+            proposed = proposed_text.encode("utf-8") if isinstance(proposed_text, str) else None
+            fingerprint = drafts._request_fingerprint(
+                str(fields.get("brain", "")), str(fields.get("path", "")),
+                str(fields.get("operation", "")), proposed,
+            )
+            if index_path.exists():
+                replacement_artifact = drafts._load_sidecar(index_path)
+                if replacement_artifact.get("request_fingerprint") != fingerprint:
+                    return drafts.ShareRefusal("request_conflict", "The legacy review replacement key is already in use.")
+                replacement_fields = replacement_artifact["immutable"]
+                visible = drafts.load_share(
+                    config, workspace=workspace,
+                    proposal_id=str(replacement_fields.get("proposal_id", "")),
+                )
+                if isinstance(visible, dict):
+                    replacement = drafts.ShareDraft(
+                        str(replacement_fields["proposal_id"]), visible,
+                        drafts.proposal_review_path(workspace, str(replacement_fields["review_key"])),
+                    )
+                else:
+                    from ciao.memory_proposals import _dismissed_texts
+
+                    summary = f"Shared note change proposal {replacement_fields['sidecar_id']}"
+                    if summary in _dismissed_texts(queue):
+                        if not _retire_legacy_queue_row(config, workspace, proposal_id, fields):
+                            return drafts.ShareRefusal("publication_pending", "The old review could not be safely retired.")
+                        return drafts.ShareRefusal("legacy_replaced", "The replacement proposal was already settled; the old review was removed.")
+                    # The process may have stopped after writing the private
+                    # idempotency artifact but before appending its queue row.
+                    # draft_share's recovery path restores that exact row.
+                    recovered = drafts.draft_share(
+                        config, workspace=workspace, brain=str(fields.get("brain", "")),
+                        relative_path=str(fields.get("path", "")),
+                        operation=str(fields.get("operation", "")), proposed=proposed,
+                        request_key=request_key, retiring_proposal_id=proposal_id,
+                    )
+                    if isinstance(recovered, drafts.ShareDraft):
+                        replacement = recovered
+                    else:
+                        return recovered
+            else:
+                created = drafts.draft_share(
+                    config, workspace=workspace, brain=str(fields.get("brain", "")),
+                    relative_path=str(fields.get("path", "")),
+                    operation=str(fields.get("operation", "")), proposed=proposed,
+                    request_key=request_key, retiring_proposal_id=proposal_id,
+                )
+                if isinstance(created, drafts.ShareDraft):
+                    replacement = created
+                else:
+                    return created
+            if isinstance(replacement, drafts.ShareDraft):
+                if not _retire_legacy_queue_row(config, workspace, proposal_id, fields):
+                    return drafts.ShareRefusal("publication_pending", "The old review could not be safely retired.")
+            return replacement
+
+
+def _active_legacy_link(config: Any, workspace: str, fields: dict[str, Any]) -> SharedBrainLink | None:
+    record = config.workspace(workspace) if hasattr(config, "workspace") else None
+    links = getattr(record, "shared_brains", []) or []
+    if not isinstance(links, list):
+        return None
+    for candidate in links:
+        if not isinstance(candidate, SharedBrainLink):
+            continue
+        if (candidate.name == fields.get("brain")
+                and candidate.path == fields.get("checkout_path")
+                and candidate.identity == fields.get("origin_identity")):
+            return candidate
+    return None
+
+
+def _retire_legacy_queue_row(config: Any, workspace: str, proposal_id: str, fields: dict[str, Any]) -> bool:
+    """Remove only the exact legacy queue row after its replacement is durable."""
+    from ciao.web.proposal_service import ShareDismissalRefused, _rewrite_queue_single
+
+    queue = Path(config.workspace_vault_root(workspace)) / drafts._QUEUE
+    text = queue.read_text(encoding="utf-8") if queue.exists() else ""
+    rel_path = (Path(workspace) / drafts._QUEUE).as_posix()
+    summary = f"Shared note change proposal {fields.get('sidecar_id', '')}"
+    row = next((item for item in drafts.proposal_tracking.walk_proposal_queue(workspace, rel_path, text)
+                if item.proposal_id == proposal_id and item.bullet.kind == "share"
+                and item.bullet.text == summary), None)
+    if row is None:
+        return False
+    vault = Path(config.workspace_vault_root(workspace))
+    try:
+        return _rewrite_queue_single(
+            queue, row.line, row.raw, row.bullet.text, "share", False, workspace, vault,
+            config=config, proposal_id=proposal_id,
+        )
+    except ShareDismissalRefused:
+        return False
+
+
+def _active_link(config: Any, workspace: str, fields: dict[str, Any]) -> SharedBrainLink | None:
+    record = config.workspace(workspace) if hasattr(config, "workspace") else None
+    links = getattr(record, "shared_brains", []) or []
+    if not isinstance(links, list):
+        return None
+    for candidate in links:
+        if not isinstance(candidate, SharedBrainLink):
+            continue
+        if (candidate.name == fields.get("brain")
+                and candidate.path == fields.get("checkout_path")
+                and getattr(candidate, "lifetime_id", None) == fields.get("link_lifetime_id")):
+            return candidate
+    return None
+
+
 def _receipt_id(fields: dict[str, Any], commit: str) -> str:
     value = "\0".join((fields["workspace"], fields["proposal_id"], str(fields["revision"]), fields["destination_fingerprint"], commit))
     return "shrpub_" + hashlib.sha256(value.encode()).hexdigest()
+
+
+def _valid_receipt(fields: dict[str, Any], receipt: dict[str, Any]) -> bool:
+    commit = receipt.get("commit_oid")
+    required_matches = (
+        isinstance(commit, str) and _OID.fullmatch(commit) is not None
+        and receipt.get("id") == _receipt_id(fields, commit)
+        and receipt.get("workspace") == fields.get("workspace")
+        and receipt.get("proposal_id") == fields.get("proposal_id")
+        and receipt.get("revision") == fields.get("revision")
+        and receipt.get("destination_fingerprint") == fields.get("destination_fingerprint")
+        and receipt.get("operation") == fields.get("operation")
+    )
+    if not required_matches:
+        return False
+    # #3575 receipts predate destination display metadata. The immutable
+    # artifact and deterministic receipt ID still bind them to this path.
+    return all(
+        receipt.get(key) == fields.get(field)
+        for key, field in (
+            ("path", "path"), ("brain", "brain"), ("identity", "origin_identity"),
+            ("link_lifetime_id", "link_lifetime_id"),
+        )
+        if key in receipt
+    )
+
+
+def _receipt_with_metadata(fields: dict[str, Any], receipt: dict[str, Any]) -> dict[str, Any]:
+    """Project destination metadata omitted by early #3575 receipt records."""
+    enriched = dict(receipt)
+    enriched.setdefault("brain", fields.get("brain", ""))
+    enriched.setdefault("identity", fields.get("origin_identity", ""))
+    enriched.setdefault("path", fields.get("path", ""))
+    upstream_ref = fields.get("upstream_ref")
+    if isinstance(upstream_ref, str):
+        enriched.setdefault("branch", upstream_ref.removeprefix("refs/heads/"))
+    if isinstance(fields.get("link_lifetime_id"), str):
+        enriched.setdefault("link_lifetime_id", fields["link_lifetime_id"])
+    return enriched
 
 
 def _write_state(config: Any, workspace: str, fields: dict[str, Any], update: dict[str, Any]) -> dict[str, Any]:
@@ -130,8 +353,13 @@ def _write_state(config: Any, workspace: str, fields: dict[str, Any], update: di
             publication[key] = value
         elif key == "receipt":
             receipt = value
-            if not any(isinstance(row, dict) and row.get("id") == receipt["id"] for row in publication.get("receipts", [])):
-                publication.setdefault("receipts", []).append(receipt)
+            rows = publication.setdefault("receipts", [])
+            for index, row in enumerate(rows):
+                if isinstance(row, dict) and row.get("id") == receipt["id"]:
+                    rows[index] = {**row, **receipt}
+                    break
+            else:
+                rows.append(receipt)
     data["publication"] = publication
     drafts._write_private(path, json.dumps(data, ensure_ascii=False, sort_keys=True).encode("utf-8"))
     return data
@@ -185,7 +413,14 @@ async def _run_locked(function: Callable[..., _T], *args: Any) -> _T:
         raise
 
 
-def _verify_destination(config: Any, folder: Path, link: SharedBrainLink, fields: dict[str, Any]) -> tuple[str, str] | None:
+def _verify_destination(
+    config: Any, folder: Path, link: SharedBrainLink, fields: dict[str, Any], *,
+    allow_legacy_lifetime: bool = False,
+) -> tuple[str, str] | None:
+    if fields.get("link_lifetime_id") != getattr(link, "lifetime_id", None) and not (
+        allow_legacy_lifetime and "link_lifetime_id" not in fields
+    ):
+        return None
     state = shared_brain.brain_state(link, config)
     if state.get("problem") or state.get("identity") != fields.get("origin_identity"):
         return None
@@ -380,7 +615,7 @@ async def publish_share(config: Any, *, workspace: str, proposal_id: str, expect
     receipts = publication.get("receipts", [])
     if isinstance(receipts, list):
         for receipt in receipts:
-            if isinstance(receipt, dict) and receipt.get("revision") == fields.get("revision"):
+            if isinstance(receipt, dict) and receipt.get("revision") == fields.get("revision") and _valid_receipt(fields, receipt):
                 return PublishOutcome("already_published", receipt.get("commit_oid"), receipt.get("id"))
     visible = drafts.load_share(config, workspace=workspace, proposal_id=proposal_id)
     if isinstance(visible, drafts.ShareRefusal):
@@ -398,15 +633,29 @@ async def publish_share(config: Any, *, workspace: str, proposal_id: str, expect
         if isinstance(prior_publication, dict) and prior_publication.get("attempts"):
             return await reconcile_share(config, workspace=workspace, proposal_id=proposal_id, expected_revision=expected_revision)
         return PublishOutcome("brain_unavailable", message="The selected shared brain is no longer linked.")
+    if getattr(link, "lifetime_id", None) != fields.get("link_lifetime_id"):
+        if publication.get("attempts"):
+            return await reconcile_share(config, workspace=workspace, proposal_id=proposal_id, expected_revision=expected_revision)
+        return PublishOutcome("brain_unavailable", message="The selected shared brain link lifetime has changed.")
     folder = Path(link.path)
     checkout_lock = shared_brain._checkout_lock(link.path)
     try:
         async with checkout_lock:
             async with shared_brain._checkout_claim(link.path, config):
-                async with _locked_proposal(config, workspace, fields):
-                    result = await _run_locked(_publish_locked, config, workspace, folder, link, fields, artifact)
+                active = _active_link(config, workspace, fields)
+                if active is None:
+                    result = PublishOutcome("reconcile_after_unlink" if has_publication_attempt(
+                        config, workspace=workspace, proposal_id=proposal_id,
+                        expected_revision=expected_revision,
+                    ) else "brain_unavailable", message="The selected shared brain link is no longer active.")
+                else:
+                    async with _locked_proposal(config, workspace, fields):
+                        result = await _run_locked(_publish_locked, config, workspace, Path(active.path), active, fields, artifact)
     except (OSError, ValueError, drafts.ShareDraftError):
         return PublishOutcome("draft_unavailable", message="Private publication state is unavailable.")
+    if result.outcome == "reconcile_after_unlink":
+        return await reconcile_share(config, workspace=workspace, proposal_id=proposal_id,
+                                     expected_revision=expected_revision)
     if result.outcome == "published":
         try:
             await shared_brain.update_brain(link, config)
@@ -426,12 +675,16 @@ async def reconcile_share(config: Any, *, workspace: str, proposal_id: str, expe
     if not attempts:
         return PublishOutcome("indeterminate", message="There is no recorded publish attempt to reconcile.")
     for receipt in publication.get("receipts", []) if isinstance(publication, dict) else []:
-        if isinstance(receipt, dict) and receipt.get("revision") == fields.get("revision"):
+        if isinstance(receipt, dict) and receipt.get("revision") == fields.get("revision") and _valid_receipt(fields, receipt):
             return PublishOutcome("already_published", receipt.get("commit_oid"), receipt.get("id"))
     path = fields.get("checkout_path")
     if not isinstance(path, str) or not Path(path).is_absolute():
         return PublishOutcome("indeterminate", message="The recorded checkout cannot be verified.")
-    link = SharedBrainLink(name=str(fields.get("brain", "")), path=path, identity=str(fields.get("origin_identity", "")))
+    link = SharedBrainLink(
+        name=str(fields.get("brain", "")), path=path,
+        identity=str(fields.get("origin_identity", "")),
+        lifetime_id=str(fields.get("link_lifetime_id", "")),
+    )
     checkout_lock = shared_brain._checkout_lock(path)
     try:
         async with checkout_lock:
@@ -444,7 +697,7 @@ async def reconcile_share(config: Any, *, workspace: str, proposal_id: str, expe
 
 
 def _reconcile_locked(config: Any, workspace: str, folder: Path, link: SharedBrainLink, fields: dict[str, Any]) -> PublishOutcome:
-    destination = _verify_destination(config, folder, link, fields)
+    destination = _verify_destination(config, folder, link, fields, allow_legacy_lifetime=True)
     if destination is None:
         return PublishOutcome("indeterminate", message="The recorded destination cannot be verified.")
     origin, ref = destination
@@ -483,7 +736,7 @@ def _publish_locked(config: Any, workspace: str, folder: Path, link: SharedBrain
     publication = artifact.get("publication")
     if isinstance(publication, dict):
         for receipt in publication.get("receipts", []):
-            if isinstance(receipt, dict) and receipt.get("revision") == fields.get("revision"):
+            if isinstance(receipt, dict) and receipt.get("revision") == fields.get("revision") and _valid_receipt(fields, receipt):
                 return PublishOutcome("already_published", receipt.get("commit_oid"), receipt.get("id"))
     destination = _verify_destination(config, folder, link, fields)
     if destination is None:
@@ -598,12 +851,21 @@ def _make_receipt(folder: Path, fields: dict[str, Any], commit: str) -> dict[str
         state, oid, _content, _mode = _blob(folder, commit, fields["path"])
         if state != "blob":
             raise ValueError("published blob could not be verified")
-    return {
+    receipt = {
         "id": _receipt_id(fields, commit), "workspace": fields["workspace"],
+        "ts": datetime.now(UTC).isoformat(),
         "proposal_id": fields["proposal_id"], "revision": fields["revision"],
-        "operation": fields["operation"], "destination_fingerprint": fields["destination_fingerprint"],
+        "brain": fields["brain"], "identity": fields["origin_identity"],
+        "branch": fields["upstream_ref"].removeprefix("refs/heads/"),
+        "path": fields["path"], "operation": fields["operation"],
+        "destination_fingerprint": fields["destination_fingerprint"],
+        "base_commit": fields["base_commit"],
+        "base_blob_oid": fields["base_blob_oid"],
         "commit_oid": commit, "published_blob_oid": oid,
     }
+    if isinstance(fields.get("link_lifetime_id"), str):
+        receipt["link_lifetime_id"] = fields["link_lifetime_id"]
+    return receipt
 
 
 def _set_attempt_status(
@@ -617,8 +879,10 @@ def _set_attempt_status(
     return updated
 
 
-def list_share_receipts(config: Any, *, workspace: str) -> list[dict[str, Any]]:
-    """List confirmed publication receipts for one workspace only."""
+def list_share_receipt_details(
+    config: Any, *, workspace: str | None = None,
+) -> list[dict[str, Any]]:
+    """Read canonical, validated publication receipts and their immutable drafts once."""
     store = drafts._store_dir(config)
     rows: dict[str, dict[str, Any]] = {}
     if not store.is_dir():
@@ -626,23 +890,69 @@ def list_share_receipts(config: Any, *, workspace: str) -> list[dict[str, Any]]:
     for path in store.glob("*.json"):
         try:
             artifact = drafts._load_sidecar(path)
-        except drafts.ShareDraftError:
+        except (drafts.ShareDraftError, OSError, ValueError):
             continue
-        if artifact["immutable"].get("workspace") != workspace:
+        fields = artifact.get("immutable")
+        if not isinstance(fields, dict):
             continue
-        fields = artifact["immutable"]
-        canonical = store / (hashlib.sha256((workspace + "\0sidecar\0" + fields["sidecar_id"]).encode()).hexdigest() + ".json")
-        try:
-            artifact = drafts._load_sidecar(canonical)
-        except drafts.ShareDraftError:
+        owner = fields.get("workspace")
+        sidecar_id = fields.get("sidecar_id")
+        required_strings = (
+            "workspace", "sidecar_id", "proposal_id", "destination_fingerprint",
+            "operation", "brain", "origin_identity", "path", "upstream_ref",
+        )
+        if (
+            any(not isinstance(fields.get(key), str) or not fields.get(key) for key in required_strings)
+            or type(fields.get("revision")) is not int
+            or fields.get("revision", 0) < 1
+            or (workspace is not None and owner != workspace)
+        ):
+            continue
+        canonical_name = hashlib.sha256(
+            (str(owner) + "\0sidecar\0" + str(sidecar_id)).encode()
+        ).hexdigest() + ".json"
+        # Request-key index files carry the same document, but only this
+        # deterministic path is authoritative for publication state.
+        if path.name != canonical_name:
             continue
         publication = artifact.get("publication")
         if not isinstance(publication, dict):
             continue
-        for receipt in publication.get("receipts", []):
-            if isinstance(receipt, dict) and receipt.get("workspace") == workspace and isinstance(receipt.get("id"), str):
-                rows[receipt["id"]] = receipt
-    return sorted(rows.values(), key=lambda row: (row.get("proposal_id", ""), row["id"]))
+        receipts = publication.get("receipts")
+        if not isinstance(receipts, list):
+            continue
+        for receipt in receipts:
+            try:
+                if (
+                    not isinstance(receipt, dict)
+                    or not isinstance(receipt.get("id"), str)
+                    or receipt.get("workspace") != owner
+                    or not _valid_receipt(fields, receipt)
+                ):
+                    continue
+                enriched = _receipt_with_metadata(fields, receipt)
+            except (KeyError, TypeError, ValueError):
+                continue
+            rows[str(receipt["id"])] = {
+                "receipt": enriched,
+                "immutable": dict(fields),
+            }
+    return sorted(
+        rows.values(),
+        key=lambda detail: (
+            str(detail["receipt"].get("ts", "")),
+            str(detail["receipt"].get("id", "")),
+        ),
+        reverse=True,
+    )
+
+
+def list_share_receipts(config: Any, *, workspace: str) -> list[dict[str, Any]]:
+    """List confirmed publication receipts for one workspace only."""
+    return [
+        detail["receipt"]
+        for detail in list_share_receipt_details(config, workspace=workspace)
+    ]
 
 
 def get_share_receipt(
@@ -657,6 +967,82 @@ def get_share_receipt(
         return None
     revision = artifact["immutable"].get("revision")
     for receipt in publication.get("receipts", []):
-        if isinstance(receipt, dict) and receipt.get("workspace") == workspace and receipt.get("proposal_id") == proposal_id and receipt.get("revision") == revision:
-            return receipt
+        if isinstance(receipt, dict) and receipt.get("workspace") == workspace and receipt.get("proposal_id") == proposal_id and receipt.get("revision") == revision and _valid_receipt(artifact["immutable"], receipt):
+            return _receipt_with_metadata(artifact["immutable"], receipt)
     return None
+
+
+def get_share_receipt_detail(
+    config: Any, *, workspace: str, receipt_id: str,
+) -> dict[str, Any] | None:
+    """Return one private receipt and its immutable review artifact by id."""
+    return next(
+        (
+            detail for detail in list_share_receipt_details(config, workspace=workspace)
+            if detail["receipt"].get("id") == receipt_id
+        ),
+        None,
+    )
+
+
+async def draft_share_reversal(
+    config: Any, *, workspace: str, receipt_id: str,
+) -> dict[str, str] | drafts.ShareRefusal:
+    """Queue an inverse proposal only while the published destination is intact."""
+    detail = await asyncio.to_thread(
+        get_share_receipt_detail, config, workspace=workspace, receipt_id=receipt_id
+    )
+    if detail is None:
+        return drafts.ShareRefusal("receipt_unavailable", "The shared-note receipt could not be verified.")
+    receipt, fields = detail["receipt"], detail["immutable"]
+    record = config.workspace(workspace) if hasattr(config, "workspace") else None
+    link = next((item for item in getattr(record, "shared_brains", []) or [] if item.name == fields.get("brain")), None)
+    if link is None or getattr(link, "lifetime_id", None) != fields.get("link_lifetime_id"):
+        return drafts.ShareRefusal("brain_changed", "The original shared-brain link lifetime is no longer active.")
+    path = Path(link.path)
+    try:
+        async with shared_brain._checkout_lock(link.path):
+            async with shared_brain._checkout_claim(link.path, config):
+                active = _active_link(config, workspace, fields)
+                if active is None:
+                    return drafts.ShareRefusal("brain_changed", "The original shared-brain link lifetime is no longer active.")
+                def verify_and_draft() -> dict[str, str] | drafts.ShareRefusal:
+                    destination = _verify_destination(config, path, active, fields)
+                    if destination is None:
+                        return drafts.ShareRefusal("brain_changed", "The original shared-brain destination changed.")
+                    origin, ref = destination
+                    fetched, _raw, _error = _fetch(path, origin, ref)
+                    if fetched != "ok":
+                        return drafts.ShareRefusal("upstream_unavailable", "The published shared note could not be verified.")
+                    tracking = "refs/remotes/origin/" + ref.removeprefix("refs/heads/")
+                    code, tip_raw, _ = _safe_git(path, "rev-parse", "--verify", tracking + "^{commit}", limit=256)
+                    if code:
+                        return drafts.ShareRefusal("upstream_unavailable", "The published shared note could not be verified.")
+                    tip = _text(tip_raw)
+                    state, oid, _content, _mode = _blob(path, tip, fields["path"])
+                    expected_oid = receipt.get("published_blob_oid")
+                    if expected_oid is None:
+                        if state != "absent":
+                            return drafts.ShareRefusal("changed_upstream", "The destination changed after publication; undo was refused.")
+                    elif state != "blob" or oid != expected_oid:
+                        return drafts.ShareRefusal("changed_upstream", "The destination changed after publication; undo was refused.")
+                    prior = fields.get("original")
+                    if fields["operation"] == "create":
+                        inverse, proposed = "delete", None
+                    elif fields["operation"] == "replace":
+                        inverse, proposed = "replace", str(prior).encode("utf-8")
+                    elif fields["operation"] == "delete":
+                        inverse, proposed = "create", str(prior).encode("utf-8")
+                    else:
+                        return drafts.ShareRefusal("receipt_unavailable", "The shared-note receipt has an unsupported operation.")
+                    drafted = drafts.draft_share(
+                        config, workspace=workspace, brain=str(fields["brain"]),
+                        relative_path=str(fields["path"]), operation=inverse,
+                        proposed=proposed, request_key="undo:" + receipt_id,
+                    )
+                    if isinstance(drafted, drafts.ShareRefusal):
+                        return drafted
+                    return {"workspace": workspace, "review_path": drafted.review_path}
+                return await asyncio.to_thread(verify_and_draft)
+    except (OSError, ValueError, drafts.ShareDraftError):
+        return drafts.ShareRefusal("draft_unavailable", "The shared-note reversal could not be queued.")

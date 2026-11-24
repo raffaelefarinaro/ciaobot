@@ -14,6 +14,7 @@ from __future__ import annotations
 import hashlib
 import json
 import sqlite3
+import threading
 from pathlib import Path
 
 import pytest
@@ -1689,7 +1690,7 @@ def test_carry_skips_a_symlink_without_moving_or_following_it(tmp_path):
 
 
 
-def test_archive_restore_carries_shared_brains(tmp_path):
+def test_archive_restore_carries_shared_brains(tmp_path, monkeypatch):
     from ciao.config import SharedBrainLink
 
     client, config, _pcm, _store = _app(tmp_path, rerooted=True)
@@ -1697,8 +1698,113 @@ def test_archive_restore_carries_shared_brains(tmp_path):
     link = SharedBrainLink(name="notes", path=str(away), identity="github.com/acme/notes")
     config.workspaces["work"].shared_brains = [link]
     archived = client.post("/api/workspaces/work/archive").json()["archived"]
+    from ciao import shared_brain
+    original_move_back = workspace_archive.move_back
+    restore_claimed: list[bool] = []
+
+    def check_restore_claim(*args, **kwargs):
+        restore_claimed.append(shared_brain._checkout_lock(link.path).locked())
+        return original_move_back(*args, **kwargs)
+
+    monkeypatch.setattr(workspace_archive, "move_back", check_restore_claim)
 
     restored = client.post("/api/workspaces/archived/restore", json={"id": archived["id"]})
 
     assert restored.status_code == 200, restored.json()
     assert config.workspaces["work"].shared_brains == [link]
+    assert config.workspaces["work"].shared_brains[0].lifetime_id == link.lifetime_id
+    assert restore_claimed == [True]
+
+
+def test_archive_claims_shared_brain_before_moving_workspace(tmp_path, monkeypatch):
+    from ciao import shared_brain
+    from ciao.config import SharedBrainLink
+
+    client, config, _pcm, _store = _app(tmp_path, rerooted=True)
+    link = SharedBrainLink(
+        name="notes", path=str(tmp_path.parent / f"brain-claim-{tmp_path.name}"),
+        identity="github.com/acme/notes",
+    )
+    config.workspaces["work"].shared_brains = [link]
+    original_move = workspace_archive.move_to_archive
+    original_unregister = workspace_archive.unregister
+    observed: list[bool] = []
+
+    def check_claim(*args, **kwargs):
+        observed.append(shared_brain._checkout_lock(link.path).locked())
+        return original_move(*args, **kwargs)
+
+    def check_unregister(*args, **kwargs):
+        observed.append(shared_brain._checkout_lock(link.path).locked())
+        return original_unregister(*args, **kwargs)
+
+    monkeypatch.setattr(workspace_archive, "move_to_archive", check_claim)
+    monkeypatch.setattr(workspace_archive, "unregister", check_unregister)
+    response = client.post("/api/workspaces/work/archive")
+
+    assert response.status_code == 200, response.json()
+    assert observed == [True, True]
+    assert "work" not in config.workspaces
+
+
+def test_archive_registry_write_serializes_with_legacy_lifetime_initialization(tmp_path, monkeypatch):
+    from ciao import workspaces
+    from ciao.config import SharedBrainLink
+    from ciao.share_proposals import ShareDraftError, _persist_link_lifetime
+
+    _client, config, _pcm, _store = _app(tmp_path, rerooted=True)
+    link = SharedBrainLink(
+        name="notes", path=str(tmp_path.parent / f"brain-registry-{tmp_path.name}"),
+        identity="github.com/acme/notes",
+    )
+    config.workspaces["work"].shared_brains = [link]
+    persist_entered = threading.Event()
+    release_persist = threading.Event()
+    init_requested = threading.Event()
+    init_finished = threading.Event()
+    failures: list[BaseException] = []
+    original_persist = workspaces.persist_workspaces
+    original_lock = workspaces.workspace_registry_lock
+
+    def blocking_persist(candidate):
+        persist_entered.set()
+        assert release_persist.wait(timeout=3)
+        return original_persist(candidate)
+
+    def observe_lock(candidate):
+        if threading.current_thread().name == "legacy-lifetime-init":
+            init_requested.set()
+        return original_lock(candidate)
+
+    monkeypatch.setattr(workspaces, "persist_workspaces", blocking_persist)
+    monkeypatch.setattr(workspaces, "workspace_registry_lock", observe_lock)
+
+    def archive_unregister() -> None:
+        try:
+            workspace_archive.unregister(config, "work")
+        except BaseException as exc:
+            failures.append(exc)
+
+    def initialize_legacy_link() -> None:
+        try:
+            _persist_link_lifetime(config, "work", link)
+        except ShareDraftError:
+            pass  # archive won; the workspace is no longer eligible for drafting
+        except BaseException as exc:
+            failures.append(exc)
+        finally:
+            init_finished.set()
+
+    archive_thread = threading.Thread(target=archive_unregister, name="archive-unregister")
+    archive_thread.start()
+    assert persist_entered.wait(timeout=2)
+    initializer = threading.Thread(target=initialize_legacy_link, name="legacy-lifetime-init")
+    initializer.start()
+    assert init_requested.wait(timeout=2)
+    assert not init_finished.wait(timeout=0.05)
+    release_persist.set()
+    archive_thread.join(timeout=3)
+    initializer.join(timeout=3)
+    assert not archive_thread.is_alive() and not initializer.is_alive()
+    assert failures == []
+    assert "work" not in config.workspaces

@@ -47,6 +47,10 @@ _SECTION_DATE_RE = re.compile(r"^##\s+(\d{4}-\d{2}-\d{2})")
 _PROPOSALS_REL = ("Workspace", "Memory-Proposals.md")
 
 
+class ShareDismissalRefused(ValueError):
+    """A share proposal is protected by canonical publication state."""
+
+
 @dataclass(frozen=True)
 class AcceptOutcome:
     """What one promotion attempt did with one accepted row.
@@ -172,6 +176,15 @@ def _sweep_queue_file(
                 continue
             bullet = proposal_kinds.parse_bullet(raw_line)
             if bullet is not None and section_date is not None and section_date < cutoff:
+                if bullet.kind == "share":
+                    from ciao import share_proposals
+
+                    reason = share_proposals.share_dismissal_block(
+                        config, workspace=workspace, bullet=bullet
+                    )
+                    if reason:
+                        keep.append(raw_line)
+                        continue
                 changed = True
                 swept_kinds.append(bullet.kind)
                 swept_texts.append(bullet.text)
@@ -216,6 +229,11 @@ def _rewrite_queue_single(
     promoted: bool,
     workspace: str,
     vault_root: Path,
+    *,
+    undoable: bool = True,
+    config: Any = None,
+    proposal_id: str = "",
+    operation_id: str = "",
 ) -> bool:
     """Remove one bullet under the queue lock and record its receipt.
 
@@ -231,6 +249,17 @@ def _rewrite_queue_single(
 
     with queue_lock(queue):
         lines = queue.read_text(encoding="utf-8").splitlines()
+        bullet = proposal_kinds.parse_bullet(raw)
+        if bullet is not None and bullet.kind == "share" and not promoted:
+            if config is None:
+                raise ShareDismissalRefused("The shared-note publication state is unavailable.")
+            from ciao import share_proposals
+
+            reason = share_proposals.share_dismissal_block(
+                config, workspace=workspace, bullet=bullet, proposal_id=proposal_id
+            )
+            if reason:
+                raise ShareDismissalRefused(reason)
         removed_ours = _remove_bullet_line(lines, line_index, raw)
         if not removed_ours:
             return False
@@ -243,6 +272,8 @@ def _rewrite_queue_single(
             source="pwa",
             workspace=workspace,
             vault_root=vault_root,
+            undoable=undoable,
+            operation_id=operation_id,
         ):
             queue_after = "\n".join(lines).rstrip() + "\n"
             write_queue_atomically(queue, queue_after)
@@ -256,7 +287,9 @@ def _rewrite_queue_batch(
     removals: list[dict[str, Any]],
     workspace: str,
     vault_root: Path,
-) -> set[str]:
+    *,
+    config: Any = None,
+) -> tuple[set[str], dict[str, str]]:
     """Remove batch rows under the queue lock and record the transaction.
 
     Runs in a worker thread: `queue_lock` waits with a synchronous sleep, so
@@ -275,9 +308,23 @@ def _rewrite_queue_batch(
         # verifies the content at that index - a promotion above may have
         # awaited a model call while another request rewrote this same file.
         removed_here: set[str] = set()
+        blocked: dict[str, str] = {}
         for row in sorted(rows, key=lambda r: int(r.get("line", -1)), reverse=True):
             if int(row.get("line", -1)) in keep_lines:
                 continue
+            bullet = proposal_kinds.parse_bullet(str(row.get("raw") or ""))
+            if bullet is not None and bullet.kind == "share":
+                if config is None:
+                    blocked[row["id"]] = "The shared-note publication state is unavailable."
+                    continue
+                from ciao import share_proposals
+
+                reason = share_proposals.share_dismissal_block(
+                    config, workspace=workspace, bullet=bullet, proposal_id=row["id"]
+                )
+                if reason:
+                    blocked[row["id"]] = reason
+                    continue
             if _remove_bullet_line(
                 lines, int(row.get("line", -1)), str(row.get("raw") or "")
             ):
@@ -288,16 +335,17 @@ def _rewrite_queue_batch(
             for item, row in zip(removals, rows)
             if row["id"] in removed_here
         ]
-        with queue_resolution_multi(
-            queue,
-            removed_removals,
-            actor="operator",
-            source="pwa",
-            workspace=workspace,
-            vault_root=vault_root,
-        ):
-            write_queue_atomically(queue, queue_after)
-    return removed_here
+        if removed_here:
+            with queue_resolution_multi(
+                queue,
+                removed_removals,
+                actor="operator",
+                source="pwa",
+                workspace=workspace,
+                vault_root=vault_root,
+            ):
+                write_queue_atomically(queue, queue_after)
+    return removed_here, blocked
 
 
 def _find_bullet_line(lines: list[str], line_index: int, raw: str) -> int | None:
@@ -3138,6 +3186,48 @@ def preview_row(
     """
     row = ctx["row"]
     fact = (text or str(row.get("text") or "")).strip()
+    if str(row.get("kind") or "") == "share":
+        from ciao import share_proposals, shared_brain
+
+        workspace = str(ctx.get("workspace") or row.get("workspace") or "")
+        proposal_id = str(row.get("id") or "")
+        draft = share_proposals.load_share(
+            config, workspace=workspace, proposal_id=proposal_id
+        )
+        if isinstance(draft, share_proposals.ShareRefusal):
+            return {
+                "id": proposal_id, "kind": "share", "workspace": workspace,
+                "operation": "none", "before": None, "after": None,
+                "brain": "", "identity": "", "branch": "", "path": "",
+                "revision": "", "blocked_reason": draft.code,
+            }
+        fields = draft["immutable"]
+        record = config.workspace(workspace) if hasattr(config, "workspace") else None
+        link = next(
+            (item for item in getattr(record, "shared_brains", []) or []
+             if item.name == fields.get("brain")),
+            None,
+        )
+        blocked = None
+        if link is None or getattr(link, "lifetime_id", None) != fields.get("link_lifetime_id"):
+            blocked = "brain_unavailable"
+        else:
+            state = shared_brain.brain_state(link, config)
+            if state.get("problem"):
+                blocked = "brain_changed" if state.get("problem") == "origin_changed" else "brain_unavailable"
+        if text:
+            blocked = "share_text_edits_not_supported"
+        operation = str(fields.get("operation") or "")
+        return {
+            "id": proposal_id, "kind": "share", "workspace": workspace,
+            "operation": operation, "before": fields.get("original"),
+            "after": fields.get("proposed"), "brain": str(fields.get("brain") or ""),
+            "identity": str(fields.get("origin_identity") or ""),
+            "branch": str(fields.get("upstream_ref") or "").removeprefix("refs/heads/"),
+            "path": str(fields.get("path") or ""),
+            "revision": str(draft.get("review_token") or ""),
+            "blocked_reason": blocked,
+        }
     if ctx.get("file"):
         out = _base_preview(row)
         out["text"] = fact

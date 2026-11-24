@@ -73,6 +73,11 @@ Shell permission cards display the provider's exact bounded command and its
 validated working directory (or **Unknown** when omitted). The command is kept
 only in the live stream for reconnect replay; approval actions are at least
 44px high and the command block can be focused and scrolled by keyboard.
+When a shared-note publication has started, its durable queue-side fence keeps
+the proposal from being dismissed by the PWA, batch action, expiry sweep, or
+CLI until the canonical publication state proves it was rejected. Unavailable
+or malformed state remains protected; a stale marker never recreates an
+actionable review card.
 
 ```bash
 cd web

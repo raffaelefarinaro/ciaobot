@@ -4,9 +4,10 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import json
+import threading
 import os
 import subprocess
-import threading
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -118,6 +119,663 @@ def test_publish_uses_reviewed_bytes_and_is_idempotent(linked: tuple[Config, Pat
     assert receipt and receipt["commit_oid"] == result.commit_oid and receipt["published_blob_oid"]
 
 
+def test_receipt_enumeration_skips_malformed_canonical_and_index(linked, monkeypatch) -> None:
+    config, _clone, _origin = linked
+    valid = share_proposals.draft_share(
+        config, workspace="home", relative_path="n.md", operation="replace",
+        proposed=b"one", request_key="receipt-valid-one",
+    )
+    assert isinstance(valid, share_proposals.ShareDraft)
+    one = asyncio.run(share_publish.publish_share(
+        config, workspace="home", proposal_id=valid.proposal_id,
+        expected_revision=valid.artifact["review_token"],
+    ))
+    assert one.receipt_id
+    store = share_proposals._store_dir(config)
+    canonical = store / (
+        hashlib.sha256(("home\0sidecar\0" + valid.artifact["immutable"]["sidecar_id"]).encode()).hexdigest() + ".json"
+    )
+    artifact = json.loads(canonical.read_text(encoding="utf-8"))
+    malformed_fields = dict(artifact["immutable"])
+    malformed_fields["sidecar_id"] = "malformed-canonical"
+    malformed_artifact = dict(artifact, immutable=malformed_fields)
+    malformed_artifact["review_token"] = share_proposals._review_token(malformed_fields)
+    malformed_canonical = store / (
+        hashlib.sha256(("home\0sidecar\0malformed-canonical").encode()).hexdigest() + ".json"
+    )
+    share_proposals._write_private(malformed_canonical, json.dumps(malformed_artifact, sort_keys=True).encode())
+    malformed_canonical_artifact = json.loads(malformed_canonical.read_text(encoding="utf-8"))
+    malformed_canonical_artifact["immutable"].pop("sidecar_id")
+    malformed_canonical_artifact["review_token"] = share_proposals._review_token(
+        malformed_canonical_artifact["immutable"]
+    )
+    share_proposals._write_private(
+        malformed_canonical, json.dumps(malformed_canonical_artifact, sort_keys=True).encode()
+    )
+    malformed_index = store / "request-index-malformed.json"
+    malformed_index_artifact = dict(artifact, publication={"receipts": None})
+    share_proposals._write_private(
+        malformed_index, json.dumps(malformed_index_artifact, sort_keys=True).encode()
+    )
+    listed = share_publish.list_share_receipts(config, workspace="home")
+    assert [receipt["id"] for receipt in listed] == [one.receipt_id]
+
+
+def test_publish_rechecks_link_after_waiting_for_checkout_claim(linked, monkeypatch) -> None:
+    config, clone, _origin = linked
+    draft = share_proposals.draft_share(
+        config, workspace="home", relative_path="n.md", operation="replace",
+        proposed=b"after", request_key="remove-wins",
+    )
+    assert isinstance(draft, share_proposals.ShareDraft)
+    token = draft.artifact["review_token"]
+    lock = shared_brain._checkout_lock(str(clone))
+    waiting = asyncio.Event()
+    original_lock = shared_brain._checkout_lock
+    original_network = share_publish._network_git
+    pushes: list[tuple[str, ...]] = []
+
+    def observe_lock(path: str):
+        waiting.set()
+        return original_lock(path)
+
+    def observe_network(folder: Path, *args: str, limit: int = 4096):
+        if args and args[0] == "push":
+            pushes.append(args)
+        return original_network(folder, *args, limit=limit)
+
+    monkeypatch.setattr(shared_brain, "_checkout_lock", observe_lock)
+    monkeypatch.setattr(share_publish, "_network_git", observe_network)
+
+    async def race():
+        await lock.acquire()
+        task = asyncio.create_task(share_publish.publish_share(
+            config, workspace="home", proposal_id=draft.proposal_id,
+            expected_revision=token,
+        ))
+        await asyncio.wait_for(waiting.wait(), timeout=2)
+        config.links = []  # settings removal wins the checkout claim
+        lock.release()
+        return await task
+
+    result = asyncio.run(race())
+    assert result.outcome == "brain_unavailable"
+    assert pushes == []
+
+
+def test_archive_claim_wins_before_publish_can_push(linked, monkeypatch) -> None:
+    from ciao.web.routes_api import _checkout_claims_for_paths
+    from ciao.workspaces import workspace_registry_lock
+
+    config, _clone, _origin = linked
+    draft = share_proposals.draft_share(
+        config, workspace="home", relative_path="n.md", operation="replace",
+        proposed=b"archive race", request_key="archive-wins-publish",
+    )
+    assert isinstance(draft, share_proposals.ShareDraft)
+    waiting = asyncio.Event()
+    original_lock = shared_brain._checkout_lock
+    original_network = share_publish._network_git
+    lock_calls = 0
+    pushes: list[tuple[str, ...]] = []
+
+    def observe_lock(path: str):
+        nonlocal lock_calls
+        lock_calls += 1
+        if lock_calls == 2:
+            waiting.set()
+        return original_lock(path)
+
+    def observe_network(folder: Path, *args: str, limit: int = 4096):
+        if args and args[0] == "push":
+            pushes.append(args)
+        return original_network(folder, *args, limit=limit)
+
+    monkeypatch.setattr(shared_brain, "_checkout_lock", observe_lock)
+    monkeypatch.setattr(share_publish, "_network_git", observe_network)
+
+    async def race():
+        async with _checkout_claims_for_paths(config, [config.link.path]):
+            publish = asyncio.create_task(share_publish.publish_share(
+                config, workspace="home", proposal_id=draft.proposal_id,
+                expected_revision=draft.artifact["review_token"],
+            ))
+            await asyncio.wait_for(waiting.wait(), timeout=2)
+            # Archive unregisters the workspace while it owns the checkout
+            # claim; publication must re-read this state after waiting.
+            with workspace_registry_lock(config):
+                config.links = []
+        return await publish
+
+    result = asyncio.run(race())
+    assert result.outcome == "brain_unavailable"
+    assert pushes == []
+
+
+def test_publish_claim_wins_before_archive_can_remove_link(linked, monkeypatch) -> None:
+    from ciao.web.routes_api import _checkout_claims_for_paths
+
+    config, _clone, _origin = linked
+    draft = share_proposals.draft_share(
+        config, workspace="home", relative_path="n.md", operation="replace",
+        proposed=b"publish wins", request_key="publish-wins-archive",
+    )
+    assert isinstance(draft, share_proposals.ShareDraft)
+    entered_publish = threading.Event()
+    release_publish = threading.Event()
+    archive_waiting = asyncio.Event()
+    original_publish = share_publish._publish_locked
+    original_lock = shared_brain._checkout_lock
+    calls = 0
+
+    def pause_publish(*args, **kwargs):
+        entered_publish.set()
+        assert release_publish.wait(timeout=5)
+        return original_publish(*args, **kwargs)
+
+    def observe_lock(path: str):
+        nonlocal calls
+        calls += 1
+        if calls == 2:
+            archive_waiting.set()
+        return original_lock(path)
+
+    monkeypatch.setattr(share_publish, "_publish_locked", pause_publish)
+    monkeypatch.setattr(shared_brain, "_checkout_lock", observe_lock)
+
+    async def race():
+        publish = asyncio.create_task(share_publish.publish_share(
+            config, workspace="home", proposal_id=draft.proposal_id,
+            expected_revision=draft.artifact["review_token"],
+        ))
+        assert await asyncio.to_thread(entered_publish.wait, 2)
+
+        async def archive_after_publish():
+            async with _checkout_claims_for_paths(config, [config.link.path]):
+                config.links = []
+
+        archive = asyncio.create_task(archive_after_publish())
+        await asyncio.wait_for(archive_waiting.wait(), timeout=2)
+        release_publish.set()
+        result = await publish
+        await archive
+        return result
+
+    result = asyncio.run(race())
+    assert result.outcome == "published"
+    assert config.links == []
+
+
+@pytest.mark.parametrize("relink", [False, True])
+def test_share_undo_rechecks_link_lifetime_after_waiting_for_claim(linked, monkeypatch, relink: bool) -> None:
+    config, clone, _origin = linked
+    draft = share_proposals.draft_share(
+        config, workspace="home", relative_path="n.md", operation="replace",
+        proposed=b"published", request_key=f"undo-link-race-{relink}",
+    )
+    assert isinstance(draft, share_proposals.ShareDraft)
+    published = asyncio.run(share_publish.publish_share(
+        config, workspace="home", proposal_id=draft.proposal_id,
+        expected_revision=draft.artifact["review_token"],
+    ))
+    assert published.outcome == "published"
+    old = config.link
+    lock = shared_brain._checkout_lock(str(clone))
+    waiting = asyncio.Event()
+    original_lock = shared_brain._checkout_lock
+
+    def observe_lock(path: str):
+        waiting.set()
+        return original_lock(path)
+
+    monkeypatch.setattr(shared_brain, "_checkout_lock", observe_lock)
+
+    async def race():
+        await lock.acquire()
+        task = asyncio.create_task(share_publish.draft_share_reversal(
+            config, workspace="home", receipt_id=published.receipt_id or "",
+        ))
+        await asyncio.wait_for(waiting.wait(), timeout=2)
+        config.links = [SharedBrainLink(name="notes", path=old.path, identity=old.identity)] if relink else []
+        lock.release()
+        return await task
+
+    result = asyncio.run(race())
+    assert isinstance(result, share_proposals.ShareRefusal)
+    assert result.code == "brain_changed"
+
+
+def test_share_receipt_undo_queues_same_inverse_without_publishing(linked: tuple[Config, Path, Path]) -> None:
+    config, clone, _origin = linked
+    draft = share_proposals.draft_share(
+        config, workspace="home", relative_path="n.md", operation="replace",
+        proposed=b"published bytes\n", request_key="undo-source",
+    )
+    assert isinstance(draft, share_proposals.ShareDraft)
+    published = asyncio.run(share_publish.publish_share(
+        config, workspace="home", proposal_id=draft.proposal_id,
+        expected_revision=draft.artifact["review_token"],
+    ))
+    assert published.outcome == "published"
+    detail = share_publish.get_share_receipt_detail(
+        config, workspace="home", receipt_id=published.receipt_id or ""
+    )
+    assert detail and detail["immutable"]["original"] == "before\r\nλ\n"
+    before_pushes = [row for row in share_publish._artifact_for(config, "home", draft.proposal_id)["publication"]["attempts"]]
+
+    first = asyncio.run(share_publish.draft_share_reversal(
+        config, workspace="home", receipt_id=published.receipt_id or ""
+    ))
+    second = asyncio.run(share_publish.draft_share_reversal(
+        config, workspace="home", receipt_id=published.receipt_id or ""
+    ))
+    assert isinstance(first, dict) and isinstance(second, dict)
+    assert first == second
+    # The inverse is a distinct pending replace draft carrying the original bytes.
+    from ciao.proposal_tracking import walk_proposal_queue
+    queue = (config.vault / "Workspace" / "Memory-Proposals.md").read_text(encoding="utf-8")
+    entry = next(row for row in walk_proposal_queue("home", "home/Workspace/Memory-Proposals.md", queue) if row.bullet.kind == "share" and row.bullet.text != f"Shared note change proposal {detail['immutable']['sidecar_id']}")
+    inverse = share_proposals.load_share(config, workspace="home", proposal_id=entry.proposal_id)
+    assert isinstance(inverse, dict)
+    assert inverse["immutable"]["operation"] == "replace"
+    assert inverse["immutable"]["proposed"] == "before\r\nλ\n"
+    assert first["review_path"] == share_proposals.proposal_tracking.proposal_review_path("home", inverse["immutable"]["review_key"])
+    assert len(share_publish._artifact_for(config, "home", draft.proposal_id)["publication"]["attempts"]) == len(before_pushes)
+    remote = subprocess.run(
+        ["git", "--git-dir", str(_origin), "show", f"{published.commit_oid}:n.md"],
+        check=True, capture_output=True,
+    ).stdout
+    assert remote == b"published bytes\n"
+
+
+def test_share_receipt_undo_refuses_a_later_destination_edit(linked: tuple[Config, Path, Path]) -> None:
+    config, clone, origin = linked
+    draft = share_proposals.draft_share(
+        config, workspace="home", relative_path="n.md", operation="replace",
+        proposed=b"published bytes\n", request_key="undo-conflict-source",
+    )
+    assert isinstance(draft, share_proposals.ShareDraft)
+    published = asyncio.run(share_publish.publish_share(
+        config, workspace="home", proposal_id=draft.proposal_id,
+        expected_revision=draft.artifact["review_token"],
+    ))
+    assert published.outcome == "published"
+    git(clone, "reset", "--hard", published.commit_oid or "")
+    (clone / "n.md").write_bytes(b"another writer\n")
+    git(clone, "add", "n.md")
+    git(clone, "commit", "--quiet", "-m", "another writer")
+    subprocess.run(["git", *IDENT, "-C", str(clone), "-c", "protocol.file.allow=always", "push", "--quiet", str(origin), "HEAD:refs/heads/main"], check=True)
+    refusal = asyncio.run(share_publish.draft_share_reversal(
+        config, workspace="home", receipt_id=published.receipt_id or ""
+    ))
+    assert isinstance(refusal, share_proposals.ShareRefusal)
+    assert refusal.code == "changed_upstream"
+
+
+@pytest.mark.parametrize(
+    ("operation", "path", "content", "inverse", "inverse_content"),
+    [
+        ("create", "new.md", b"new note\n", "delete", None),
+        ("delete", "gone.md", None, "create", "remove me\n"),
+    ],
+)
+def test_share_receipt_undo_inverts_create_and_delete(
+    linked: tuple[Config, Path, Path], operation: str, path: str,
+    content: bytes | None, inverse: str, inverse_content: str | None,
+) -> None:
+    from ciao.proposal_tracking import walk_proposal_queue
+
+    config, _clone, _origin = linked
+    source = share_proposals.draft_share(
+        config, workspace="home", relative_path=path, operation=operation,
+        proposed=content, request_key="undo-" + operation,
+    )
+    assert isinstance(source, share_proposals.ShareDraft)
+    published = asyncio.run(share_publish.publish_share(
+        config, workspace="home", proposal_id=source.proposal_id,
+        expected_revision=source.artifact["review_token"],
+    ))
+    assert published.outcome == "published"
+    inverse_result = asyncio.run(share_publish.draft_share_reversal(
+        config, workspace="home", receipt_id=published.receipt_id or ""
+    ))
+    assert isinstance(inverse_result, dict)
+    queue = (config.vault / "Workspace" / "Memory-Proposals.md").read_text(encoding="utf-8")
+    rows = list(walk_proposal_queue("home", "home/Workspace/Memory-Proposals.md", queue))
+    inverse_row = next(row for row in reversed(rows) if row.bullet.kind == "share")
+    artifact = share_proposals.load_share(config, workspace="home", proposal_id=inverse_row.proposal_id)
+    assert isinstance(artifact, dict)
+    assert artifact["immutable"]["operation"] == inverse
+    assert artifact["immutable"]["proposed"] == inverse_content
+
+
+def test_legacy_publication_attempt_reconciles_without_lifetime_or_active_link(linked) -> None:
+    config, _clone, _origin = linked
+    draft = share_proposals.draft_share(
+        config, workspace="home", relative_path="n.md", operation="replace",
+        proposed=b"published legacy", request_key="legacy-reconcile",
+    )
+    assert isinstance(draft, share_proposals.ShareDraft)
+    pushed = asyncio.run(share_publish.publish_share(
+        config, workspace="home", proposal_id=draft.proposal_id,
+        expected_revision=draft.artifact["review_token"],
+    ))
+    assert pushed.outcome == "published"
+    artifact = share_publish._artifact_for(config, "home", draft.proposal_id)
+    assert artifact is not None
+    artifact["immutable"].pop("link_lifetime_id")
+    artifact["review_token"] = share_proposals._review_token(artifact["immutable"])
+    legacy_receipt = dict(artifact["publication"]["receipts"][0])
+    for key in ("link_lifetime_id", "path", "brain", "identity", "branch"):
+        legacy_receipt.pop(key, None)
+    artifact["publication"]["receipts"] = [legacy_receipt]
+    digest = hashlib.sha256(
+        ("home\0sidecar\0" + artifact["immutable"]["sidecar_id"]).encode()
+    ).hexdigest()
+    artifact_path = share_proposals._store_dir(config) / f"{digest}.json"
+    for stored_path in share_proposals._store_dir(config).glob("*.json"):
+        stored_artifact = share_proposals._load_sidecar(stored_path)
+        if stored_artifact["immutable"]["sidecar_id"] == artifact["immutable"]["sidecar_id"]:
+            share_proposals._write_private(stored_path, json.dumps(artifact, sort_keys=True).encode())
+    listed = share_publish.list_share_receipts(config, workspace="home")
+    assert len(listed) == 1 and listed[0]["id"] == legacy_receipt["id"]
+    assert listed[0]["path"] == "n.md" and listed[0]["brain"] == "notes"
+    detail = share_publish.get_share_receipt_detail(
+        config, workspace="home", receipt_id=legacy_receipt["id"]
+    )
+    assert detail is not None and detail["receipt"]["branch"] == "main"
+    enriched = share_publish._make_receipt(
+        _clone, artifact["immutable"], legacy_receipt["commit_oid"]
+    )
+    share_publish._write_state(
+        config, "home", artifact["immutable"], {"receipt": enriched}
+    )
+    stored = share_publish._artifact_for(config, "home", draft.proposal_id)
+    assert stored is not None
+    assert stored["publication"]["receipts"][0]["path"] == "n.md"
+    config.links = []
+    result = asyncio.run(share_publish.reconcile_share(
+        config, workspace="home", proposal_id=draft.proposal_id,
+        expected_revision=artifact["review_token"],
+    ))
+    assert result.outcome == "already_published"
+    receipts = share_publish.list_share_receipts(config, workspace="home")
+    assert len(receipts) == 1
+    assert receipts[0]["id"] == legacy_receipt["id"]
+    assert receipts[0]["path"] == "n.md"
+    assert receipts[0]["brain"] == "notes"
+    assert receipts[0]["branch"] == "main"
+    assert "link_lifetime_id" not in receipts[0]
+
+
+def test_legacy_lifetime_persistence_holds_registry_serialization(linked, monkeypatch) -> None:
+    from ciao.workspaces import workspace_registry_lock
+
+    config, _clone, _origin = linked
+    entered = threading.Event()
+    finish_persist = threading.Event()
+    contender_entered = threading.Event()
+
+    def persist_registry() -> None:
+        entered.set()
+        assert finish_persist.wait(timeout=2)
+        registry = config.workspace_root / ".runtime" / "workspaces.json"
+        registry.parent.mkdir(parents=True, exist_ok=True)
+        registry.write_text("[]", encoding="utf-8")
+
+    monkeypatch.setattr(config, "persist_workspace_registry", persist_registry, raising=False)
+    initializer = threading.Thread(
+        target=share_proposals._persist_link_lifetime,
+        args=(config, "home", config.link),
+    )
+    initializer.start()
+    assert entered.wait(timeout=2)
+
+    def settings_save() -> None:
+        with workspace_registry_lock(config):
+            contender_entered.set()
+
+    saver = threading.Thread(target=settings_save)
+    saver.start()
+    assert not contender_entered.wait(timeout=0.05)
+    finish_persist.set()
+    initializer.join(timeout=2)
+    saver.join(timeout=2)
+    assert not initializer.is_alive() and not saver.is_alive()
+    assert contender_entered.is_set()
+
+
+def test_legacy_unattempted_review_gets_new_consent_token_and_recovers_interrupted_cleanup(linked, monkeypatch) -> None:
+    config, _clone, _origin = linked
+    legacy = share_proposals.draft_share(
+        config, workspace="home", relative_path="n.md", operation="replace",
+        proposed=b"old exact proposal", request_key="legacy-pending",
+    )
+    assert isinstance(legacy, share_proposals.ShareDraft)
+    artifact = share_publish._artifact_for(config, "home", legacy.proposal_id)
+    assert artifact is not None
+    artifact["immutable"].pop("link_lifetime_id")
+    artifact["review_token"] = share_proposals._review_token(artifact["immutable"])
+    digest = hashlib.sha256(
+        ("home\0sidecar\0" + artifact["immutable"]["sidecar_id"]).encode()
+    ).hexdigest()
+    share_proposals._write_private(
+        share_proposals._store_dir(config) / f"{digest}.json",
+        json.dumps(artifact, sort_keys=True).encode(),
+    )
+    original_retire = share_publish._retire_legacy_queue_row
+    def interrupted(*_args, **_kwargs):
+        raise OSError("simulated interruption after replacement was queued")
+    monkeypatch.setattr(share_publish, "_retire_legacy_queue_row", interrupted)
+    with pytest.raises(OSError, match="simulated interruption"):
+        share_publish.refresh_legacy_draft(
+            config, workspace="home", proposal_id=legacy.proposal_id,
+            expected_revision=artifact["review_token"],
+        )
+    queue = config.vault / "Workspace" / "Memory-Proposals.md"
+    queued = queue.read_text(encoding="utf-8")
+    assert f"Shared note change proposal {artifact['immutable']['sidecar_id']}" in queued
+    monkeypatch.setattr(share_publish, "_retire_legacy_queue_row", original_retire)
+    refreshed = share_publish.refresh_legacy_draft(
+        config, workspace="home", proposal_id=legacy.proposal_id,
+        expected_revision=artifact["review_token"],
+    )
+    assert isinstance(refreshed, share_proposals.ShareDraft)
+    assert refreshed.proposal_id != legacy.proposal_id
+    assert refreshed.artifact["review_token"] != artifact["review_token"]
+    assert refreshed.artifact["immutable"]["proposed"] == "old exact proposal"
+    assert refreshed.artifact["immutable"]["link_lifetime_id"] == config.link.lifetime_id
+    queue_after = queue.read_text(encoding="utf-8")
+    assert f"Shared note change proposal {artifact['immutable']['sidecar_id']}" not in queue_after
+    assert queue_after.count("Shared note change proposal") == 1
+    assert share_publish.has_publication_attempt(
+        config, workspace="home", proposal_id=legacy.proposal_id,
+        expected_revision=artifact["review_token"],
+    ) is False
+
+
+def test_legacy_refresh_waits_for_queue_before_registry_lock(linked, monkeypatch) -> None:
+    from ciao.workspaces import workspace_registry_lock
+
+    config, _clone, _origin = linked
+    legacy = share_proposals.draft_share(
+        config, workspace="home", relative_path="n.md", operation="replace",
+        proposed=b"legacy", request_key="legacy-lock-order",
+    )
+    assert isinstance(legacy, share_proposals.ShareDraft)
+    artifact = share_publish._artifact_for(config, "home", legacy.proposal_id)
+    assert artifact is not None
+    artifact["immutable"].pop("link_lifetime_id")
+    artifact["review_token"] = share_proposals._review_token(artifact["immutable"])
+    for path in share_proposals._store_dir(config).glob("*.json"):
+        stored = share_proposals._load_sidecar(path)
+        if stored["immutable"]["sidecar_id"] == artifact["immutable"]["sidecar_id"]:
+            share_proposals._write_private(path, json.dumps(artifact, sort_keys=True).encode())
+
+    queue = config.vault / "Workspace" / "Memory-Proposals.md"
+    original_lock_factory = share_proposals._thread_queue_lock
+    queue_requested = threading.Event()
+    registry_probe_entered = threading.Event()
+    result: list[object] = []
+
+    def observe_queue_lock(path: Path):
+        queue_requested.set()
+        return original_lock_factory(path)
+
+    monkeypatch.setattr(share_proposals, "_thread_queue_lock", observe_queue_lock)
+    held_queue_lock = original_lock_factory(queue)
+    held_queue_lock.acquire()
+    worker = threading.Thread(target=lambda: result.append(share_publish.refresh_legacy_draft(
+        config, workspace="home", proposal_id=legacy.proposal_id,
+        expected_revision=artifact["review_token"],
+    )))
+    worker.start()
+    try:
+        assert queue_requested.wait(timeout=2)
+
+        def probe_registry() -> None:
+            with workspace_registry_lock(config):
+                registry_probe_entered.set()
+
+        probe = threading.Thread(target=probe_registry)
+        probe.start()
+        assert registry_probe_entered.wait(timeout=2), "refresh held registry while waiting for queue"
+        probe.join(timeout=2)
+    finally:
+        held_queue_lock.release()
+    worker.join(timeout=5)
+    assert not worker.is_alive()
+    assert result and isinstance(result[0], share_proposals.ShareDraft)
+
+
+def test_legacy_refresh_rechecks_publication_reservation_under_queue_lock(linked, monkeypatch) -> None:
+    config, _clone, _origin = linked
+    legacy = share_proposals.draft_share(
+        config, workspace="home", relative_path="n.md", operation="replace",
+        proposed=b"legacy", request_key="legacy-reservation-race",
+    )
+    assert isinstance(legacy, share_proposals.ShareDraft)
+    artifact = share_publish._artifact_for(config, "home", legacy.proposal_id)
+    assert artifact is not None
+    artifact["immutable"].pop("link_lifetime_id")
+    artifact["review_token"] = share_proposals._review_token(artifact["immutable"])
+    sidecar = share_proposals._store_dir(config) / (
+        hashlib.sha256(("home\0sidecar\0" + artifact["immutable"]["sidecar_id"]).encode()).hexdigest() + ".json"
+    )
+    share_proposals._write_private(sidecar, json.dumps(artifact, sort_keys=True).encode())
+    original_lookup = share_publish._artifact_for
+    reserved = False
+
+    def reserve_after_initial_read(*args, **kwargs):
+        nonlocal reserved
+        visible = original_lookup(*args, **kwargs)
+        if visible is not None and not reserved:
+            reserved = True
+            current = share_proposals._load_sidecar(sidecar)
+            current["publication"] = {"attempts": [{"status": "pending"}], "receipts": []}
+            share_proposals._write_private(sidecar, json.dumps(current, sort_keys=True).encode())
+        return visible
+
+    monkeypatch.setattr(share_publish, "_artifact_for", reserve_after_initial_read)
+    result = share_publish.refresh_legacy_draft(
+        config, workspace="home", proposal_id=legacy.proposal_id,
+        expected_revision=artifact["review_token"],
+    )
+    assert isinstance(result, share_proposals.ShareRefusal)
+    assert result.code == "publication_pending"
+    queue = config.vault / "Workspace" / "Memory-Proposals.md"
+    text = queue.read_text(encoding="utf-8")
+    assert text.count("Shared note change proposal") == 1
+    assert artifact["immutable"]["sidecar_id"] in text
+
+
+def test_legacy_refresh_fails_closed_after_index_write_without_canonical(linked, monkeypatch) -> None:
+    config, _clone, _origin = linked
+    legacy = share_proposals.draft_share(
+        config, workspace="home", relative_path="n.md", operation="replace",
+        proposed=b"legacy", request_key="legacy-index-crash",
+    )
+    assert isinstance(legacy, share_proposals.ShareDraft)
+    artifact = share_publish._artifact_for(config, "home", legacy.proposal_id)
+    assert artifact is not None
+    artifact["immutable"].pop("link_lifetime_id")
+    artifact["review_token"] = share_proposals._review_token(artifact["immutable"])
+    for path in share_proposals._store_dir(config).glob("*.json"):
+        stored = share_proposals._load_sidecar(path)
+        if stored["immutable"]["sidecar_id"] == artifact["immutable"]["sidecar_id"]:
+            share_proposals._write_private(path, json.dumps(artifact, sort_keys=True).encode())
+    monkeypatch.setattr(share_proposals, "MAX_PER_WORKSPACE", 1)
+    monkeypatch.setattr(share_proposals, "MAX_PER_BRAIN", 1)
+
+    original_write = share_proposals._write_private
+    request_key = "legacy-refresh:" + artifact["immutable"]["sidecar_id"]
+    index_hash = hashlib.sha256(("home\0" + request_key).encode()).hexdigest()
+    failed = False
+
+    def crash_after_index(path: Path, data: bytes) -> None:
+        nonlocal failed
+        original_write(path, data)
+        if path.name == f"{index_hash}.json" and not failed:
+            failed = True
+            raise OSError("simulated crash after index write")
+
+    monkeypatch.setattr(share_proposals, "_write_private", crash_after_index)
+    first = share_publish.refresh_legacy_draft(
+        config, workspace="home", proposal_id=legacy.proposal_id,
+        expected_revision=artifact["review_token"],
+    )
+    assert isinstance(first, share_proposals.ShareRefusal)
+    queue = config.vault / "Workspace" / "Memory-Proposals.md"
+    assert f"Shared note change proposal {artifact['immutable']['sidecar_id']}" in queue.read_text(encoding="utf-8")
+
+    monkeypatch.setattr(share_proposals, "_write_private", original_write)
+    retried = share_publish.refresh_legacy_draft(
+        config, workspace="home", proposal_id=legacy.proposal_id,
+        expected_revision=artifact["review_token"],
+    )
+    assert isinstance(retried, share_proposals.ShareRefusal)
+    assert retried.code == "draft_corrupt"
+    after = queue.read_text(encoding="utf-8")
+    assert after.count("Shared note change proposal") == 1
+    assert f"Shared note change proposal {artifact['immutable']['sidecar_id']}" in after
+    new_artifact = share_proposals._load_sidecar(
+        share_proposals._store_dir(config) / f"{index_hash}.json"
+    )
+    new_fields = new_artifact["immutable"]
+    new_canonical = share_proposals._store_dir(config) / (
+        hashlib.sha256(
+            ("home\0sidecar\0" + new_fields["sidecar_id"]).encode()
+        ).hexdigest() + ".json"
+    )
+    assert not new_canonical.exists()
+
+
+def test_legacy_refresh_can_replace_a_row_at_share_capacity(linked, monkeypatch) -> None:
+    config, _clone, _origin = linked
+    legacy = share_proposals.draft_share(
+        config, workspace="home", relative_path="n.md", operation="replace",
+        proposed=b"legacy", request_key="legacy-capacity",
+    )
+    assert isinstance(legacy, share_proposals.ShareDraft)
+    artifact = share_publish._artifact_for(config, "home", legacy.proposal_id)
+    assert artifact is not None
+    artifact["immutable"].pop("link_lifetime_id")
+    artifact["review_token"] = share_proposals._review_token(artifact["immutable"])
+    for path in share_proposals._store_dir(config).glob("*.json"):
+        stored = share_proposals._load_sidecar(path)
+        if stored["immutable"]["sidecar_id"] == artifact["immutable"]["sidecar_id"]:
+            share_proposals._write_private(path, json.dumps(artifact, sort_keys=True).encode())
+    monkeypatch.setattr(share_proposals, "MAX_PER_WORKSPACE", 1)
+    monkeypatch.setattr(share_proposals, "MAX_PER_BRAIN", 1)
+    replacement = share_publish.refresh_legacy_draft(
+        config, workspace="home", proposal_id=legacy.proposal_id,
+        expected_revision=artifact["review_token"],
+    )
+    assert isinstance(replacement, share_proposals.ShareDraft)
+    queue = config.vault / "Workspace" / "Memory-Proposals.md"
+    assert queue.read_text(encoding="utf-8").count("Shared note change proposal") == 1
+
+
 def test_publish_rejects_stale_review_and_upstream_change(linked: tuple[Config, Path, Path]) -> None:
     config, clone, origin = linked
     draft = share_proposals.draft_share(
@@ -136,6 +794,37 @@ def test_publish_rejects_stale_review_and_upstream_change(linked: tuple[Config, 
     changed = asyncio.run(share_publish.publish_share(config, workspace="home", proposal_id=draft.proposal_id, expected_revision=draft.artifact["review_token"]))
     assert changed.outcome == "changed_upstream"
     assert not share_publish.list_share_receipts(config, workspace="home")
+
+
+def test_share_preview_preserves_exact_text_and_null_for_absent_file(linked: tuple[Config, Path, Path]) -> None:
+    from ciao.web import proposal_service
+
+    config, _clone, _origin = linked
+    draft = share_proposals.draft_share(
+        config, workspace="home", relative_path="n.md", operation="replace",
+        proposed=b"exact\r\nafter\n", request_key="preview-replace",
+    )
+    assert isinstance(draft, share_proposals.ShareDraft)
+    _, by_id = proposal_service._scan_proposal_rows(config)
+    preview = proposal_service.preview_row(config, by_id[draft.proposal_id])
+    assert preview["before"] == "before\r\nλ\n"
+    assert preview["after"] == "exact\r\nafter\n"
+    assert preview["operation"] == "replace"
+    assert preview["branch"] == "main"
+    assert preview["path"] == "n.md"
+    assert preview["revision"] == draft.artifact["review_token"]
+    assert preview["blocked_reason"] is None
+
+    created = share_proposals.draft_share(
+        config, workspace="home", relative_path="new.md", operation="create",
+        proposed=b"created\n", request_key="preview-create",
+    )
+    assert isinstance(created, share_proposals.ShareDraft)
+    _, by_id = proposal_service._scan_proposal_rows(config)
+    create_preview = proposal_service.preview_row(config, by_id[created.proposal_id])
+    assert create_preview["before"] is None
+    assert create_preview["after"] == "created\n"
+    assert create_preview["operation"] == "create"
 
 
 def test_publish_reconciles_lost_ack_and_serializes_duplicate_accepts(
@@ -220,13 +909,16 @@ def test_dismissal_during_fetch_prevents_new_push(
 
         _rows, by_id = proposal_service._scan_proposal_rows(config)
         ctx = by_id[draft.proposal_id]
-        await asyncio.to_thread(
-            proposal_service._rewrite_queue_single,
-            Path(ctx["path"]), ctx["line"], ctx["row"]["raw"],
-            ctx["row"]["text"], ctx["row"]["kind"], False,
-            ctx["workspace"], Path(config.workspace_vault_root(ctx["workspace"])),
-        )
-        resume_fetch.set()
+        try:
+            await asyncio.to_thread(
+                proposal_service._rewrite_queue_single,
+                Path(ctx["path"]), ctx["line"], ctx["row"]["raw"],
+                ctx["row"]["text"], ctx["row"]["kind"], False,
+                ctx["workspace"], Path(config.workspace_vault_root(ctx["workspace"])),
+                config=config, proposal_id=draft.proposal_id,
+            )
+        finally:
+            resume_fetch.set()
         return await asyncio.wait_for(publishing, timeout=5)
 
     result = asyncio.run(race())
