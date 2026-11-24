@@ -18,6 +18,7 @@ class _Chat:
     provider = "claude"
     user_turn_count = 5
     user_turn_unattended: dict[str, bool] = {}
+    user_turn_ids = {"4": "turn-4"}
     user_turn_origin: dict[str, str] = {}
     user_turn_timings = {"4": {"sent_at": "2026-11-24T00:00:00Z"}}
     helper: dict[str, str] = {}
@@ -126,6 +127,44 @@ def test_share_refuses_turn_without_persisted_timing_before_reading_or_filing(
         asyncio.run(_Plane(vault, chat=chat).note_share(_principal(), path="Notes/Idea.md", body_file="missing.md"))
     assert error.value.code == "note_share_inactive"
     assert not called
+
+
+def test_reused_chat_bearer_can_draft_and_request_identity_survives_reset(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    vault = _vault(tmp_path)
+    (vault / "draft.md").write_bytes(b"same body")
+    calls: list[str] = []
+
+    def draft_share(_config, *, request_key, **_kwargs):
+        calls.append(request_key)
+        return sp.ShareDraft("proposal", {}, "/api/proposals/review/opaque")
+
+    monkeypatch.setattr(sp, "draft_share", draft_share)
+    plane = _Plane(vault)
+    plane.chat.user_turn_count = 1
+    plane.chat.user_turn_ids = {"0": "first-session-turn"}
+    plane.chat.user_turn_timings = {"0": {"sent_at": "now"}}
+    plane.stream.begin_publish_turn(0)
+    first = _principal()
+    result = asyncio.run(
+        plane.note_share(first, path="Notes/Idea.md", body_file="draft.md")
+    )
+    assert result["data"]["status"] == "queued"
+
+    # A retained shell/subagent has the same chat bearer during this later
+    # active turn, so it can queue a draft. Individual human approval remains
+    # the publication gate. A reset can reuse index zero, but the durable turn
+    # identity keeps this proposal's request key distinct.
+    plane.stream.begin_publish_turn(0)
+    plane.chat.user_turn_ids = {"0": "second-session-turn"}
+    result = asyncio.run(
+        plane.note_share(first, path="Notes/Idea.md", body_file="draft.md")
+    )
+    assert result["data"]["status"] == "queued"
+
+    assert len(calls) == 2
+    assert calls[0] != calls[1]
 
 
 @pytest.mark.parametrize(

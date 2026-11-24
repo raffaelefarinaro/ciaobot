@@ -60,7 +60,7 @@ class _AdmissionSnapshot:
         "retry_last_error", "retry_attempts", "retry_kind", "retry_interval_seconds",
         "retry_unattended", "pending_question", "pending_permission", "last_error",
         "user_turn_count", "turn_owner", "last_activity_at", "last_read_at",
-        "user_turn_images", "user_turn_timings", "user_turn_unattended",
+        "user_turn_images", "user_turn_ids", "user_turn_timings", "user_turn_unattended",
         "user_turn_origin", "user_turn_send_ids", "helper", "postprocess",
         "failure_id", "retry_recovery", "retry_schedule_id",
     )
@@ -917,6 +917,9 @@ class ChatInfo:
     # media_root). JSON round-trip turns int keys into strings, so lookups
     # must tolerate both.
     user_turn_images: dict = field(default_factory=dict)
+    # Opaque, durable turn identity. Unlike its visible index, this stays
+    # unique across resets and cancelled-turn rollback.
+    user_turn_ids: dict = field(default_factory=dict)
     # Map of user-turn index (as str) → {sent_at, completed_at, duration_ms}.
     # Drives the per-message footer in the PWA (time of send, agent latency).
     # Recorded at the orchestration layer so it stays provider-agnostic.
@@ -1600,6 +1603,7 @@ class ProjectChatManager:
                 user_turn_count=cd.get("user_turn_count", 0),
                 turn_index_base=int(cd.get("turn_index_base", 0) or 0),
                 user_turn_images=dict(cd.get("user_turn_images", {})),
+                user_turn_ids=dict(cd.get("user_turn_ids", {})),
                 user_turn_timings=dict(cd.get("user_turn_timings", {})),
                 user_turn_unattended=dict(cd.get("user_turn_unattended", {})),
                 user_turn_steered=dict(cd.get("user_turn_steered", {})),
@@ -1743,6 +1747,7 @@ class ProjectChatManager:
                     "user_turn_count": c.user_turn_count,
                     "turn_index_base": c.turn_index_base,
                     "user_turn_images": c.user_turn_images,
+                    "user_turn_ids": c.user_turn_ids,
                     "user_turn_timings": c.user_turn_timings,
                     "user_turn_unattended": c.user_turn_unattended,
                     "user_turn_steered": c.user_turn_steered,
@@ -7385,6 +7390,7 @@ class ProjectChatManager:
                 if chat.user_turn_count == turn_index + 1:
                     chat.user_turn_count = turn_index
                     key = str(turn_index)
+                    chat.user_turn_ids.pop(key, None)
                     chat.user_turn_timings.pop(key, None)
                     chat.user_turn_images.pop(key, None)
                     chat.user_turn_unattended.pop(key, None)
@@ -8816,6 +8822,7 @@ class ProjectChatManager:
                     with stream.publish_lock:
                         turn_index = chat_meta.user_turn_count
                         chat_meta.user_turn_count = turn_index + 1
+                        chat_meta.user_turn_ids[str(turn_index)] = uuid.uuid4().hex
                         self._unattended_denials.discard(chat_id)
                         chat_meta.turn_owner = restart_resume.PROCESS_TOKEN
                         if image_refs:
@@ -11289,6 +11296,7 @@ class ProjectChatManager:
         lock = stream.publish_lock if stream is not None else nullcontext()
         with lock:
             chat.user_turn_images = {}
+            chat.user_turn_ids = {}
             chat.user_turn_send_ids = {}
             chat.user_turn_count = 0
 

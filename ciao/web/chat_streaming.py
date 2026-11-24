@@ -1329,6 +1329,7 @@ class ChatStreaming:
                     with stream.publish_lock:
                         turn_index2 = chat_meta2.user_turn_count
                         chat_meta2.user_turn_count = turn_index2 + 1
+                        chat_meta2.user_turn_ids[str(turn_index2)] = uuid.uuid4().hex
                         if merged_image_refs:
                             chat_meta2.user_turn_images[str(turn_index2)] = list(
                                 merged_image_refs

@@ -139,6 +139,36 @@ def test_registry_issues_scoped_reusable_and_revocable_tokens() -> None:
     assert registry.status()["active_sessions"] == 0
 
 
+def test_chat_bearer_and_provider_reuse_key_stay_stable_across_turns(
+    tmp_path: Path,
+) -> None:
+    """A retained shell keeps its chat token, so each proposal needs approval."""
+    from ciao.agent_surface import AGENT_TOKEN_ENV
+    from ciao.models import provider_reuse_key
+
+    service, _ = _service(tmp_path)
+    chat = SimpleNamespace(
+        chat_id="chat-1", project_id="project-1", provider="claude",
+        user_turn_count=1, user_turn_ids={"0": "turn-a"},
+    )
+    project = SimpleNamespace(workspace="personal")
+    _url, first = service.credentials_for_chat(chat, project)
+    first_reuse_key = provider_reuse_key(
+        SimpleNamespace(extra_env={AGENT_TOKEN_ENV: first})
+    )
+
+    chat.user_turn_count = 2
+    chat.user_turn_ids["1"] = "turn-b"
+    _url, second = service.credentials_for_chat(chat, project)
+    second_reuse_key = provider_reuse_key(
+        SimpleNamespace(extra_env={AGENT_TOKEN_ENV: second})
+    )
+
+    assert second == first
+    assert second_reuse_key == first_reuse_key
+    assert asyncio.run(service.registry.verify_token(first)) is not None
+
+
 def test_registry_reissues_when_workspace_or_project_changes() -> None:
     registry = AgentSessionRegistry(ttl_seconds=60)
     token, principal = registry.issue(

@@ -2289,10 +2289,17 @@ class CiaoControlPlane:
             publish_generation = stream.publish_generation
             origins = getattr(chat, "user_turn_origin", None)
             timings = getattr(chat, "user_turn_timings", None)
+            turn_ids = getattr(chat, "user_turn_ids", None)
             # Ordinary typed turns intentionally have no origin-map entry:
             # streaming persists only truthy engine origins. The per-turn send
             # time proves this is a recorded user turn; absent means typed.
-            if not isinstance(timings, dict) or not isinstance(timings.get(turn_key), dict):
+            if (
+                not isinstance(timings, dict)
+                or not isinstance(timings.get(turn_key), dict)
+                or not isinstance(turn_ids, dict)
+                or not isinstance(turn_ids.get(turn_key), str)
+                or not turn_ids.get(turn_key)
+            ):
                 raise ControlPlaneError(
                     "note_share_inactive", "Sharing a note requires the active foreground user turn."
                 )
@@ -2300,11 +2307,14 @@ class CiaoControlPlane:
                 turn_key in origins and not isinstance(origins[turn_key], str)
             ):
                 raise ControlPlaneError("unattended_forbidden", "Sharing a note requires a verifiable user turn.")
+            turn_id = str(turn_ids[turn_key])
 
         def _require_active_turn_locked() -> None:
             current_count = int(getattr(chat, "user_turn_count", 0) or 0)
             origins = getattr(chat, "user_turn_origin", None)
             timings = getattr(chat, "user_turn_timings", None)
+            turn_ids = getattr(chat, "user_turn_ids", None)
+            current_turn_id = turn_ids.get(turn_key) if isinstance(turn_ids, dict) else None
             if (
                 self.pcm.get_chat(principal.chat_id) is not chat
                 or self.pcm.get_project(principal.project_id) is not project
@@ -2315,6 +2325,8 @@ class CiaoControlPlane:
                 or not isinstance(origins, dict)
                 or not isinstance(timings, dict)
                 or not isinstance(timings.get(turn_key), dict)
+                or not isinstance(turn_ids, dict)
+                or current_turn_id != turn_id
                 or (turn_key in origins and not isinstance(origins[turn_key], str))
                 or self.pcm.get_active_stream(principal.chat_id) is not stream
                 or getattr(stream, "background", False)
@@ -2349,7 +2361,7 @@ class CiaoControlPlane:
             with stream.publish_lock:
                 _require_active_turn_locked()
             identity = json.dumps(
-                [principal.chat_id, turn_index, brain, path, hashlib.sha256(proposed).hexdigest()],
+                [principal.chat_id, turn_id, turn_index, brain, path, hashlib.sha256(proposed).hexdigest()],
                 ensure_ascii=False, separators=(",", ":"),
             )
             draft = sp.draft_share(
@@ -2365,7 +2377,7 @@ class CiaoControlPlane:
                 raise error
             return {"status": "queued", "proposal_id": draft.proposal_id, "review_path": draft.review_path}
 
-        key = f"note-share:{self._search_runtime_dir()}:{workspace}:{principal.chat_id}:{turn_index}:{brain}:{path}"
+        key = f"note-share:{self._search_runtime_dir()}:{workspace}:{principal.chat_id}:{turn_id}:{brain}:{path}"
         return _ok(await run_read(key, _run, coalesce=False))
 
     def _workspace_text_file(self, workspace: str, relative: str, *, flag: str) -> str:
