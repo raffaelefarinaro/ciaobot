@@ -64,6 +64,20 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
+def _may_archive_completed_learning_drain(
+    verification: Mapping[str, Any], state_record: Any
+) -> bool:
+    """Require a clean, settled queue before archiving its completed helper chat."""
+    return (
+        not verification.get("failed")
+        and not verification.get("unresolved")
+        and not verification.get("automatic_rows")
+        and not verification.get("suppressed_rows")
+        and getattr(state_record, "lifecycle", None) == "completed"
+        and bool(getattr(state_record, "chat_id", ""))
+    )
+
+
 _PhaseStatus = Literal["pending", "in_progress", "done", "failed", "skipped"]
 
 @dataclass
@@ -513,6 +527,7 @@ def _restart_watchdog(
     restart_code: int,
     *,
     supervised: bool,
+    app_engine_ready_fd: int | None = None,
     sleep: Callable[[float], None] = time.sleep,
     execv: Callable[[str, list[str]], object] = os.execv,
     exit_now: Callable[[int], object] = os._exit,
@@ -543,7 +558,13 @@ def _restart_watchdog(
         from ciao.os_support.processes import python_isolation_flags
 
         reset_exported_dotenv()
-        execv(sys.executable, [sys.executable, *python_isolation_flags(), "-m", "ciao.cli", *sys.argv[1:]])
+        argv = [sys.executable, *python_isolation_flags(), "-m", "ciao.cli", *sys.argv[1:]]
+        if app_engine_ready_fd is not None:
+            from ciao.app_engine import exec_with_ready_fd
+
+            exec_with_ready_fd(app_engine_ready_fd, sys.executable, argv, execv)
+        else:
+            execv(sys.executable, argv)
     except OSError:
         exit_now(restart_code)
 
@@ -553,6 +574,7 @@ async def _async_main(
     supervised: bool = False,
     app_engine: bool = False,
     app_engine_port: int | None = None,
+    app_engine_ready_fd: int | None = None,
 ) -> int:
     _ensure_tool_dirs_on_path()
     config = CiaoConfig.from_env()
@@ -594,6 +616,7 @@ async def _async_main(
                 startup_id=lock.startup_id or "",
                 workspace=config.workspace_root,
                 bootstrap=config.bootstrap_mode,
+                tls_port=app_engine_module.remembered_tls_port(),
             )
             app_engine_module.watch_parent(lambda: os.kill(os.getpid(), signal.SIGTERM))
         if app_engine:
@@ -603,6 +626,7 @@ async def _async_main(
                 startup_id=lock.startup_id,
                 engine_pid=os.getpid(),
                 app_engine=True,
+                app_engine_ready_fd=app_engine_ready_fd,
             )
         return await _run_server_locked(
             config,
@@ -764,6 +788,7 @@ async def _run_server_locked(
     startup_id: str | None = None,
     engine_pid: int | None = None,
     app_engine: bool = False,
+    app_engine_ready_fd: int | None = None,
 ) -> int:
     """Server implementation; caller owns the workspace instance lock."""
 
@@ -1056,6 +1081,75 @@ async def _run_server_locked(
     # The manager cannot hold a store reference in its constructor without
     # reshuffling init order, so it is attached right after both exist.
     pcm.schedule_store = schedule_store
+
+    async def _migrate_legacy_learning_queues() -> None:
+        """Drain only new, unambiguous legacy rows for every registered vault."""
+        from ciao.learnings_queue_drain import drain_registered_workspaces
+
+        try:
+            results = await asyncio.to_thread(drain_registered_workspaces, config)
+        except Exception:
+            logger.exception("Legacy learning migration startup pass failed")
+            return
+        for workspace in config.workspace_names():
+            result = results.get(workspace, {})
+            if result.get("failed") or result.get("unresolved"):
+                logger.error(
+                    "Legacy learning migration for workspace %s needs attention: %s",
+                    workspace,
+                    "; ".join(result.get("failed", []) or result.get("unresolved", [])),
+                )
+            elif result.get("receipts"):
+                logger.info(
+                    "Migrated %s legacy learning row(s) for workspace %s",
+                    len(result.get("rows", [])),
+                    workspace,
+                )
+
+            # Let the task's registered completion check settle its own state.
+            # Archive only that state's exact helper chat, and only when it has
+            # no user follow-up or unfinished interaction to preserve.
+            try:
+                from ciao import __version__
+                from ciao.learnings_queue_drain import inspect as inspect_learning_drain
+                from ciao.update_tasks import evaluate, read_task_state
+                from ciao.web.update_task_launch import may_archive_completed_task_chat
+                from ciao.update_task_catalog import load_catalog
+
+                verification = await asyncio.to_thread(
+                    inspect_learning_drain,
+                    Path(config.workspace_vault_root(workspace)),
+                    workspace=workspace,
+                    runtime_root=Path(config.state_path).parent,
+                )
+                await evaluate(config, workspace=workspace, installed_version=__version__)
+                task = load_catalog().by_id.get("learnings-queue-drain")
+                if task is None:
+                    continue
+                state_record = read_task_state(task, config=config, workspace=workspace)
+                if state_record is None or not _may_archive_completed_learning_drain(
+                    verification, state_record
+                ):
+                    continue
+                chat = next(
+                    (item for item in pcm.list_chats() if item.chat_id == state_record.chat_id),
+                    None,
+                )
+                if chat is None:
+                    continue
+                project = pcm.get_project(chat.project_id)
+                if not may_archive_completed_task_chat(
+                    chat, project, task=task, workspace=workspace
+                ):
+                    continue
+                await pcm.archive_chat(chat.chat_id)
+            except Exception:
+                logger.exception(
+                    "Could not settle or archive the completed learning migration task for %s",
+                    workspace,
+                )
+
+    asyncio.create_task(_migrate_legacy_learning_queues())
 
     def _update_admission_closed() -> bool:
         """Whether a restart drain holds admission closed.
@@ -1480,7 +1574,35 @@ async def _run_server_locked(
     import uvicorn
 
     uvi_config = uvicorn.Config(app, **_uvicorn_config_kwargs(config))
-    server = uvicorn.Server(uvi_config)
+    server: uvicorn.Server
+    if app_engine:
+        from ciao.app_engine import (
+            AppEngineServer,
+            LocalTLSEndpoint,
+            publish_tls_endpoint,
+            remembered_tls_port,
+            write_ready_record,
+        )
+
+        if app_engine_ready_fd is None or startup_id is None:
+            raise RuntimeError("The app engine requires a readiness pipe and startup ID")
+        ready_fd = app_engine_ready_fd
+        ready_startup_id = startup_id
+
+        def publish(endpoint: LocalTLSEndpoint) -> None:
+            write_ready_record(
+                pid=os.getpid(),
+                port=config.pwa_port,
+                startup_id=ready_startup_id,
+                workspace=config.workspace_root,
+                bootstrap=config.bootstrap_mode,
+                tls_port=endpoint.port,
+            )
+            publish_tls_endpoint(ready_fd, ready_startup_id, endpoint)
+
+        server = AppEngineServer(uvi_config, app, publish, preferred_port=remembered_tls_port())
+    else:
+        server = uvicorn.Server(uvi_config)
     tracker.start(BIND_PHASE)
     logger.info("Starting Ciaobot server on %s:%d", config.pwa_host, config.pwa_port)
     if getattr(config, "bootstrap_mode", False):
@@ -1545,7 +1667,7 @@ async def _run_server_locked(
             threading.Thread(
                 target=_restart_watchdog,
                 args=(restart_code,),
-                kwargs={"supervised": supervised},
+                kwargs={"supervised": supervised, "app_engine_ready_fd": app_engine_ready_fd},
                 daemon=True,
                 name="ciao-restart-watchdog",
             ).start()
@@ -1667,6 +1789,15 @@ async def _run_server_locked(
         await server.serve()
     except RestartRequested as exc:
         return int(exc.args[0]) if exc.args else RESTART_EXIT_CODE
+    except OSError as exc:
+        if not app_engine:
+            raise
+        from ciao.app_engine import TLS_PORT_IN_USE_EXIT_CODE, LocalTLSPortInUse
+
+        if not isinstance(exc, LocalTLSPortInUse):
+            raise
+        logger.error("%s", exc)
+        return TLS_PORT_IN_USE_EXIT_CODE
     finally:
         bind_watch.cancel()
     if restart_flag[0] is not None:
@@ -1679,6 +1810,7 @@ def main(
     supervised: bool = False,
     app_engine: bool = False,
     app_engine_port: int | None = None,
+    app_engine_ready_fd: int | None = None,
 ) -> None:
     """CLI entrypoint."""
     # INFO until the workspace's own log level (Settings) is known, which
@@ -1688,7 +1820,12 @@ def main(
 
     try:
         code = asyncio.run(
-            _async_main(supervised=supervised, app_engine=app_engine, app_engine_port=app_engine_port)
+            _async_main(
+                supervised=supervised,
+                app_engine=app_engine,
+                app_engine_port=app_engine_port,
+                app_engine_ready_fd=app_engine_ready_fd,
+            )
         )
     except WorkspaceAlreadyRunningError as exc:
         print(f"Ciaobot did not start: {exc}", file=sys.stderr)

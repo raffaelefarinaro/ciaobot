@@ -20,6 +20,7 @@ final class AppSessionStatus: ObservableObject {
     private(set) var currentOrigin: Origin?
     /// The connection's own WebKit store. Never the default shared store.
     private(set) var dataStore: WKWebsiteDataStore?
+    private(set) var tlsIdentity: LocalEngineTLSIdentity?
     /// The live main web view, used only to open a chat path on the exact
     /// selected origin. Weak: closing or replacing the view clears it naturally.
     private weak var webView: WKWebView?
@@ -44,7 +45,8 @@ final class AppSessionStatus: ObservableObject {
         return false
     }
 
-    func reportConnected(_ origin: Origin, dataStore: WKWebsiteDataStore? = nil) {
+    func reportConnected(_ origin: Origin, dataStore: WKWebsiteDataStore? = nil,
+                         tlsIdentity: LocalEngineTLSIdentity? = nil) {
         if currentOrigin?.canonicalKey != origin.canonicalKey {
             webView = nil
         }
@@ -52,12 +54,14 @@ final class AppSessionStatus: ObservableObject {
         chatNavigationGeneration += 1
         currentOrigin = origin
         self.dataStore = dataStore
+        self.tlsIdentity = tlsIdentity
         connection = .connected(origin.canonicalKey)
     }
 
     func reportDisconnected() {
         currentOrigin = nil
         dataStore = nil
+        tlsIdentity = nil
         webView = nil
         pendingChatID = nil
         chatNavigationGeneration += 1
@@ -139,6 +143,10 @@ final class SessionHostContext: ConnectionContext {
 
     var dataStore: WKWebsiteDataStore? {
         isConnected ? status.dataStore : nil
+    }
+
+    var tlsIdentity: LocalEngineTLSIdentity? {
+        isConnected ? status.tlsIdentity : nil
     }
 
     var connectionPublisher: AnyPublisher<Void, Never> {

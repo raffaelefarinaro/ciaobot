@@ -734,6 +734,8 @@ async function hostSignIn() {
       hostSignInStatus.value = 'This only works in a browser on the computer running Ciaobot.'
     } else if (reason === 'setup_required') {
       hostSignInStatus.value = 'Finish setting up Ciaobot first, then sign in.'
+    } else if (reason === 'no_loopback_http') {
+      hostSignInStatus.value = 'Browser sign-in is unavailable. Sign in here with your password.'
     } else if (reason === 'no_desktop' || reason === 'open_failed' || reason === 'no_workspace') {
       hostSignInFallback.value = true
       hostSignInStatus.value =

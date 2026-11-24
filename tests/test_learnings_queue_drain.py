@@ -10,7 +10,7 @@ from types import SimpleNamespace
 import pytest
 
 from ciao import learnings_queue_drain as drain
-from ciao.memory_proposals import was_promoted
+from ciao.memory_proposals import append_learning, was_promoted
 
 
 def _vault(tmp_path: Path) -> tuple[Path, Path]:
@@ -62,6 +62,208 @@ def test_apply_preserves_unmatched_crlf_rows_and_revert_restores_bytes(tmp_path:
     assert not (vault / "Workspace" / "Learnings.md").exists()
     reverted_history = [json.loads(line) for line in (vault / "Workspace" / "Memory-Proposals.dismissed.jsonl").read_text().splitlines()]
     assert [event["outcome"] for event in reverted_history] == ["accepted", "accepted", "reverted", "reverted"]
+
+
+def test_fresh_only_does_not_reapply_reverted_rows_after_an_unrelated_queue_edit(
+    tmp_path: Path,
+) -> None:
+    vault, runtime = _vault(tmp_path)
+    queue = vault / "Workspace" / "Memory-Proposals.md"
+    original = "# Queue\n- [learnings] keep this undone\n- [memory] keep this too\n"
+    queue.write_text(original, encoding="utf-8")
+
+    applied = drain.drain(
+        vault, workspace="main", runtime_root=runtime, apply=True, fresh_only=True
+    )
+    assert applied["applied"]
+    reverted = drain.revert(
+        vault, Path(applied["receipts"][0]), workspace="main", runtime_root=runtime, apply=True
+    )
+    assert reverted["reverted"]
+
+    queue.write_text(original + "- [learnings] new independent lesson _(from: chat-2)_\n")
+    next_run = drain.drain(
+        vault, workspace="main", runtime_root=runtime, apply=True, fresh_only=True
+    )
+
+    assert [row["text"] for row in next_run["rows"]] == ["new independent lesson"]
+    assert queue.read_text(encoding="utf-8") == original
+    learning_text = (vault / "Workspace" / "Learnings.md").read_text(encoding="utf-8")
+    assert "keep this undone" not in learning_text
+    assert "new independent lesson" in learning_text
+
+    explicit_retry = drain.drain(vault, workspace="main", runtime_root=runtime, apply=True)
+    assert [row["text"] for row in explicit_retry["rows"]] == ["keep this undone"]
+
+
+def test_registered_startup_pass_covers_every_workspace_without_care_and_is_restart_safe(
+    tmp_path: Path,
+) -> None:
+    personal, runtime = _vault(tmp_path / "personal")
+    work, _ = _vault(tmp_path / "work")
+    (personal / "Workspace" / "Memory-Proposals.md").write_text(
+        "- [learnings] move this _(from: personal-chat)_\n- [memory] preserve this\n"
+    )
+    (work / "Workspace" / "Memory-Proposals.md").write_text(
+        "- [learnings] also move this _(from: work-chat)_\n"
+    )
+    config = SimpleNamespace(
+        state_path=runtime / "state.json",
+        workspace_names=lambda: ("personal", "work"),
+        workspace_vault_root=lambda workspace: personal if workspace == "personal" else work,
+    )
+
+    first = drain.drain_registered_workspaces(config)
+    second = drain.drain_registered_workspaces(config)
+
+    assert first["personal"]["applied"] and first["work"]["applied"]
+    assert [row["text"] for row in first["personal"]["rows"]] == ["move this"]
+    assert [row["text"] for row in first["work"]["rows"]] == ["also move this"]
+    assert second["personal"]["not_applicable"] and second["work"]["not_applicable"]
+    assert "preserve this" in (personal / "Workspace" / "Memory-Proposals.md").read_text()
+
+
+def test_registered_startup_lock_failure_does_not_starve_later_workspaces(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    personal, runtime = _vault(tmp_path / "personal")
+    work, _ = _vault(tmp_path / "work")
+    (personal / "Workspace" / "Memory-Proposals.md").write_text(
+        "- [learnings] personal lesson _(from: personal-chat)_\n"
+    )
+    (work / "Workspace" / "Memory-Proposals.md").write_text(
+        "- [learnings] work lesson _(from: work-chat)_\n"
+    )
+    config = SimpleNamespace(
+        state_path=runtime / "state.json",
+        workspace_names=lambda: ("personal", "work"),
+        workspace_vault_root=lambda workspace: personal if workspace == "personal" else work,
+    )
+    original = drain.drain
+
+    def one_locked_workspace(vault, *, workspace, **kwargs):
+        if workspace == "personal":
+            raise RuntimeError("queue lock is held")
+        return original(vault, workspace=workspace, **kwargs)
+
+    monkeypatch.setattr(drain, "drain", one_locked_workspace)
+    results = drain.drain_registered_workspaces(config)
+
+    assert results["personal"]["failed"] == ["queue lock is held"]
+    assert results["work"]["applied"]
+    assert "work lesson" in (work / "Workspace" / "Learnings.md").read_text()
+
+
+def test_foreign_workspace_reverted_receipt_does_not_suppress_same_legacy_row(tmp_path: Path) -> None:
+    personal, runtime = _vault(tmp_path / "personal")
+    foreign, _foreign_runtime = _vault(tmp_path / "foreign")
+    raw = "- [learnings] same words _(from: same-chat)_\n"
+    (foreign / "Workspace" / "Memory-Proposals.md").write_text(raw)
+    applied = drain.drain(foreign, workspace="work", runtime_root=runtime, apply=True)
+    assert applied["applied"]
+    drain.revert(
+        foreign,
+        Path(applied["receipts"][0]),
+        workspace="work",
+        runtime_root=runtime,
+        apply=True,
+    )
+
+    personal_queue = personal / "Workspace" / "Memory-Proposals.md"
+    personal_queue.write_text(raw)
+    result = drain.drain(
+        personal, workspace="main", runtime_root=runtime, apply=True, fresh_only=True
+    )
+
+    assert result["applied"]
+    assert "same words" in (personal / "Workspace" / "Learnings.md").read_text()
+
+
+def test_legacy_row_dismissal_requires_exact_revision_and_preserves_neighbor_bytes(
+    tmp_path: Path,
+) -> None:
+    vault, runtime = _vault(tmp_path)
+    queue = vault / "Workspace" / "Memory-Proposals.md"
+    original = (
+        "# Queue\r\n"
+        "- [memory] leave this row exactly as it is\r\n"
+        "- [learnings] remove only this obsolete row _(from: old-chat)_\r\n"
+        "- [review] leave this other row too\r\n"
+    )
+    queue.write_bytes(original.encode("utf-8"))
+    listed = drain.pending_rows(vault, workspace="main", runtime_root=runtime)
+    target = listed["rows"][0]
+
+    queue.write_bytes((original + "- [learnings] concurrent addition\r\n").encode())
+    stale = drain.dismiss_pending_row(
+        vault,
+        workspace="main",
+        runtime_root=runtime,
+        row_id=target["id"],
+        expected_revision=target["revision"],
+    )
+    assert stale["conflict"]
+    assert "remove only this obsolete row" in queue.read_text(encoding="utf-8")
+
+    current = drain.pending_rows(vault, workspace="main", runtime_root=runtime)["rows"]
+    selected = next(row for row in current if row["text"] == "remove only this obsolete row")
+    dismissed = drain.dismiss_pending_row(
+        vault,
+        workspace="main",
+        runtime_root=runtime,
+        row_id=selected["id"],
+        expected_revision=selected["revision"],
+    )
+    assert dismissed["dismissed"]
+    assert queue.read_bytes().decode("utf-8") == (
+        original.replace(
+            "- [learnings] remove only this obsolete row _(from: old-chat)_\r\n", ""
+        )
+        + "- [learnings] concurrent addition\r\n"
+    )
+    events = [
+        json.loads(line)
+        for line in (vault / "Workspace" / "Memory-Proposals.dismissed.jsonl").read_text().splitlines()
+    ]
+    assert events[-1]["outcome"] == "dismissed"
+
+
+def test_legacy_row_removal_resumes_after_interrupted_queue_publication(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    vault, runtime = _vault(tmp_path)
+    queue = vault / "Workspace" / "Memory-Proposals.md"
+    queue.write_text("- [learnings] discard this _(from: old-chat)_\n- [memory] preserve this\n")
+    row = drain.pending_rows(vault, workspace="main", runtime_root=runtime)["rows"][0]
+    original = drain._atomic_file
+
+    def fail_publication(*args, **kwargs):
+        raise OSError("simulated queue replace failure")
+
+    monkeypatch.setattr(drain, "_atomic_file", fail_publication)
+    first = drain.dismiss_pending_row(
+        vault,
+        workspace="main",
+        runtime_root=runtime,
+        row_id=row["id"],
+        expected_revision=row["revision"],
+    )
+    assert first["failed"]
+
+    monkeypatch.setattr(drain, "_atomic_file", original)
+    pending = next(
+        item for item in drain.pending_rows(vault, workspace="main", runtime_root=runtime)["rows"]
+        if item.get("removal_pending")
+    )
+    second = drain.dismiss_pending_row(
+        vault,
+        workspace="main",
+        runtime_root=runtime,
+        row_id=pending["id"],
+        expected_revision=pending["revision"],
+    )
+    assert second["dismissed"]
+    assert queue.read_text() == "- [memory] preserve this\n"
 
 
 def test_apply_and_revert_preserve_existing_file_modes(tmp_path: Path) -> None:
@@ -435,6 +637,57 @@ def test_corrupt_receipt_scope_uses_requested_workspace_not_prior_receipt(
 
     assert len(summary["unresolved"]) == 1
     assert "z-personal" in summary["unresolved"][0]
+
+
+def test_unidentified_dismissal_receipt_blocks_automatic_migration(
+    tmp_path: Path,
+) -> None:
+    vault, runtime = _vault(tmp_path)
+    queue = vault / "Workspace" / "Memory-Proposals.md"
+    queue.write_text("- [learnings] preserve this lesson\n")
+    folder = drain._receipt_dir(runtime)
+    drain._private_dir(folder, create=True)
+    path = folder / f"{drain.DISMISS_PREFIX}unknown.json"
+    path.write_text("{}", encoding="utf-8")
+    path.chmod(0o600)
+
+    result = drain.drain(
+        vault, workspace="main", runtime_root=runtime, apply=True, fresh_only=True
+    )
+
+    assert result["failed"]
+    assert queue.read_text() == "- [learnings] preserve this lesson\n"
+    assert not (vault / "Learnings.md").exists()
+
+
+def test_foreign_dismissal_receipt_does_not_block_requested_workspace(
+    tmp_path: Path,
+) -> None:
+    vault, runtime = _vault(tmp_path)
+    queue = vault / "Workspace" / "Memory-Proposals.md"
+    queue.write_text("- [learnings] migrate this lesson\n")
+    folder = drain._receipt_dir(runtime)
+    drain._private_dir(folder, create=True)
+    path = folder / f"{drain.DISMISS_PREFIX}foreign.json"
+    path.write_text(
+        json.dumps(
+            {
+                "workspace": "other",
+                "vault_identity": str(vault.resolve()),
+                "malformed_payload": True,
+            }
+        ),
+        encoding="utf-8",
+    )
+    path.chmod(0o600)
+
+    result = drain.drain(
+        vault, workspace="main", runtime_root=runtime, apply=True, fresh_only=True
+    )
+
+    assert not result["failed"]
+    assert queue.read_text() == ""
+    assert (vault / "Workspace" / "Learnings.md").exists()
 
 
 def test_apply_aborts_if_workspace_is_replaced_before_publication(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

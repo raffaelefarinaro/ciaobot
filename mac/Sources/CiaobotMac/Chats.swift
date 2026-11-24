@@ -330,6 +330,17 @@ protocol ChatListTransport: AnyObject {
         cookieHeader: String?,
         completion: @escaping (Result<ChatListPayload, ChatListFailure>) -> Void
     ) -> (() -> Void)?
+    @discardableResult
+    func fetch(origin: Origin, tlsIdentity: LocalEngineTLSIdentity?, limit: Int, cookieHeader: String?,
+               completion: @escaping (Result<ChatListPayload, ChatListFailure>) -> Void) -> (() -> Void)?
+}
+
+extension ChatListTransport {
+    @discardableResult
+    func fetch(origin: Origin, tlsIdentity: LocalEngineTLSIdentity?, limit: Int, cookieHeader: String?,
+               completion: @escaping (Result<ChatListPayload, ChatListFailure>) -> Void) -> (() -> Void)? {
+        fetch(origin: origin, limit: limit, cookieHeader: cookieHeader, completion: completion)
+    }
 }
 
 /// The production transport. It uses an ephemeral URL session with no cookie
@@ -357,6 +368,11 @@ final class URLSessionChatListTransport: NSObject, ChatListTransport {
         cookieHeader: String?,
         completion: @escaping (Result<ChatListPayload, ChatListFailure>) -> Void
     ) -> (() -> Void)? {
+        fetch(origin: origin, tlsIdentity: nil, limit: limit, cookieHeader: cookieHeader, completion: completion)
+    }
+
+    func fetch(origin: Origin, tlsIdentity: LocalEngineTLSIdentity?, limit: Int, cookieHeader: String?,
+               completion: @escaping (Result<ChatListPayload, ChatListFailure>) -> Void) -> (() -> Void)? {
         guard let url = ChatListEndpoint.url(origin: origin, limit: limit) else {
             completion(.failure(.invalidResponse))
             return nil
@@ -374,6 +390,7 @@ final class URLSessionChatListTransport: NSObject, ChatListTransport {
             limit: limit,
             cookieHeader: cookieHeader,
             configuration: configuration,
+            tlsIdentity: tlsIdentity,
             completion: completion
         )
         return request.start()
@@ -386,6 +403,7 @@ private final class ChatListRequest: NSObject, URLSessionDataDelegate {
     private let limit: Int
     private let cookieHeader: String?
     private let configuration: URLSessionConfiguration
+    private let tlsIdentity: LocalEngineTLSIdentity?
     private let completion: (Result<ChatListPayload, ChatListFailure>) -> Void
 
     private var body = Data()
@@ -401,6 +419,7 @@ private final class ChatListRequest: NSObject, URLSessionDataDelegate {
         limit: Int,
         cookieHeader: String?,
         configuration: URLSessionConfiguration,
+        tlsIdentity: LocalEngineTLSIdentity?,
         completion: @escaping (Result<ChatListPayload, ChatListFailure>) -> Void
     ) {
         self.origin = origin
@@ -408,6 +427,7 @@ private final class ChatListRequest: NSObject, URLSessionDataDelegate {
         self.limit = limit
         self.cookieHeader = cookieHeader
         self.configuration = configuration
+        self.tlsIdentity = tlsIdentity
         self.completion = completion
         super.init()
     }
@@ -483,7 +503,14 @@ private final class ChatListRequest: NSObject, URLSessionDataDelegate {
         didReceive challenge: URLAuthenticationChallenge,
         completionHandler: @escaping (URLSession.AuthChallengeDisposition, URLCredential?) -> Void
     ) {
-        if URLSessionChatListTransport.acceptsServerTrust(challenge.protectionSpace.authenticationMethod) {
+        if let tlsIdentity {
+            guard tlsIdentity.origin == origin, tlsIdentity.accepts(challenge),
+                  let trust = challenge.protectionSpace.serverTrust else {
+                completionHandler(.cancelAuthenticationChallenge, nil)
+                return
+            }
+            completionHandler(.useCredential, URLCredential(trust: trust))
+        } else if URLSessionChatListTransport.acceptsServerTrust(challenge.protectionSpace.authenticationMethod) {
             completionHandler(.performDefaultHandling, nil)
         } else {
             completionHandler(.cancelAuthenticationChallenge, nil)
@@ -769,7 +796,8 @@ final class ChatListModel: ObservableObject, ChatListProviding {
     }
 
     private func send(origin: Origin, url: URL, cookieHeader: String?, generation: Int) {
-        let cancel = transport.fetch(origin: origin, limit: limit, cookieHeader: cookieHeader) { [weak self] result in
+        let cancel = transport.fetch(origin: origin, tlsIdentity: context.tlsIdentity,
+                                     limit: limit, cookieHeader: cookieHeader) { [weak self] result in
             Task { @MainActor in
                 self?.finish(result, generation: generation, origin: origin)
             }

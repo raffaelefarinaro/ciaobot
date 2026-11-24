@@ -117,6 +117,17 @@ protocol EventStreamTransport: AnyObject {
         onEvent: @escaping (ChatEvent) -> Void,
         onClose: @escaping (EventStreamCloseReason) -> Void
     ) -> EventStreamConnection?
+    func open(origin: Origin, tlsIdentity: LocalEngineTLSIdentity?, cookieHeader: String,
+              onEvent: @escaping (ChatEvent) -> Void,
+              onClose: @escaping (EventStreamCloseReason) -> Void) -> EventStreamConnection?
+}
+
+extension EventStreamTransport {
+    func open(origin: Origin, tlsIdentity: LocalEngineTLSIdentity?, cookieHeader: String,
+              onEvent: @escaping (ChatEvent) -> Void,
+              onClose: @escaping (EventStreamCloseReason) -> Void) -> EventStreamConnection? {
+        open(origin: origin, cookieHeader: cookieHeader, onEvent: onEvent, onClose: onClose)
+    }
 }
 
 /// The fixed `/ws/events` endpoint on the exact selected origin. The scheme is
@@ -233,12 +244,19 @@ final class URLSessionEventStreamTransport: EventStreamTransport {
         onEvent: @escaping (ChatEvent) -> Void,
         onClose: @escaping (EventStreamCloseReason) -> Void
     ) -> EventStreamConnection? {
+        open(origin: origin, tlsIdentity: nil, cookieHeader: cookieHeader, onEvent: onEvent, onClose: onClose)
+    }
+
+    func open(origin: Origin, tlsIdentity: LocalEngineTLSIdentity?, cookieHeader: String,
+              onEvent: @escaping (ChatEvent) -> Void,
+              onClose: @escaping (EventStreamCloseReason) -> Void) -> EventStreamConnection? {
         guard let request = EventStreamEndpoint.makeRequest(origin: origin, cookieHeader: cookieHeader) else {
             return nil
         }
         let stream = URLSessionEventStreamRequest(
             request: request,
             origin: origin,
+            tlsIdentity: tlsIdentity,
             configuration: configuration,
             onEvent: onEvent,
             onClose: onClose
@@ -252,6 +270,7 @@ final class URLSessionEventStreamRequest: NSObject, URLSessionWebSocketDelegate,
     private let request: URLRequest
     private let expectedURL: URL
     private let origin: Origin
+    private let tlsIdentity: LocalEngineTLSIdentity?
     private let configuration: URLSessionConfiguration
     private let onEvent: (ChatEvent) -> Void
     private let onClose: (EventStreamCloseReason) -> Void
@@ -266,6 +285,7 @@ final class URLSessionEventStreamRequest: NSObject, URLSessionWebSocketDelegate,
     init(
         request: URLRequest,
         origin: Origin,
+        tlsIdentity: LocalEngineTLSIdentity?,
         configuration: URLSessionConfiguration,
         onEvent: @escaping (ChatEvent) -> Void,
         onClose: @escaping (EventStreamCloseReason) -> Void
@@ -273,6 +293,7 @@ final class URLSessionEventStreamRequest: NSObject, URLSessionWebSocketDelegate,
         self.request = request
         self.expectedURL = request.url!
         self.origin = origin
+        self.tlsIdentity = tlsIdentity
         self.configuration = configuration
         self.onEvent = onEvent
         self.onClose = onClose
@@ -456,7 +477,15 @@ final class URLSessionEventStreamRequest: NSObject, URLSessionWebSocketDelegate,
         didReceive challenge: URLAuthenticationChallenge,
         completionHandler: @escaping (URLSession.AuthChallengeDisposition, URLCredential?) -> Void
     ) {
-        if URLSessionEventStreamTransport.acceptsServerTrust(challenge.protectionSpace.authenticationMethod) {
+        if let tlsIdentity {
+            guard tlsIdentity.origin == origin, tlsIdentity.accepts(challenge),
+                  let trust = challenge.protectionSpace.serverTrust else {
+                completionHandler(.cancelAuthenticationChallenge, nil)
+                finish(.authenticationRefused)
+                return
+            }
+            completionHandler(.useCredential, URLCredential(trust: trust))
+        } else if URLSessionEventStreamTransport.acceptsServerTrust(challenge.protectionSpace.authenticationMethod) {
             completionHandler(.performDefaultHandling, nil)
         } else {
             completionHandler(.cancelAuthenticationChallenge, nil)
