@@ -188,7 +188,7 @@ def test_list_keeps_legacy_learning_notice_scoped_to_pending_workspace(tmp_path:
     assert not [row for row in data["rows"] if row["kind"] == "learnings"]
 
 
-def test_list_reports_automatic_migration_as_completed_without_per_row_delete_actions(
+def test_list_hides_cleanly_completed_automatic_migration(
     tmp_path: Path,
 ) -> None:
     from ciao import learnings_queue_drain
@@ -202,10 +202,115 @@ def test_list_reports_automatic_migration_as_completed_without_per_row_delete_ac
         apply=True,
     )
 
-    detail = _client(config).get("/api/proposals").json()["legacy_learning_queues"]["personal"]
+    data = _client(config).get("/api/proposals").json()
 
-    assert detail["state"] == "completed"
-    assert "migrated_rows" not in detail
+    assert "personal" not in data["legacy_learning_queues"]
+
+
+def test_list_uses_actionable_queue_snapshot_when_a_row_arrives_after_completion_scan(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from ciao import learnings_queue_drain
+
+    config = _default_vault(tmp_path)
+    new_row = {
+        "id": "new-row-id",
+        "revision": "new-revision",
+        "target": "",
+        "text": "arrived during listing",
+        "source": "",
+        "request": "",
+        "decider": "",
+        "decide_reason": "",
+    }
+    monkeypatch.setattr(
+        learnings_queue_drain,
+        "inspect",
+        lambda *_args, **_kwargs: {
+            "unresolved": [],
+            "failed": [],
+            "automatic_rows": 0,
+            "applied_receipts": ["completed-receipt"],
+            "rows": [],
+        },
+    )
+    monkeypatch.setattr(
+        learnings_queue_drain,
+        "pending_rows",
+        lambda *_args, **_kwargs: {
+            "revision": new_row["revision"],
+            "rows": [new_row],
+            "suppressed_rows": [],
+        },
+    )
+
+    data = _client(config).get("/api/proposals").json()
+
+    assert data["legacy_learning_queues"]["personal"] == {
+        "state": "pending",
+        "rows": 1,
+        "pending_rows": [new_row],
+    }
+
+
+def test_list_does_not_keep_stale_pending_state_after_queue_snapshot_clears(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from ciao import learnings_queue_drain
+
+    config = _default_vault(tmp_path)
+    monkeypatch.setattr(
+        learnings_queue_drain,
+        "inspect",
+        lambda *_args, **_kwargs: {
+            "unresolved": [],
+            "failed": [],
+            "automatic_rows": 1,
+            "applied_receipts": [],
+            "rows": [{"text": "already removed"}],
+        },
+    )
+    monkeypatch.setattr(
+        learnings_queue_drain,
+        "pending_rows",
+        lambda *_args, **_kwargs: {
+            "revision": "current-revision",
+            "rows": [],
+            "suppressed_rows": [],
+        },
+    )
+
+    data = _client(config).get("/api/proposals").json()
+
+    assert "personal" not in data["legacy_learning_queues"]
+
+
+def test_list_keeps_reverted_rows_visible_when_another_batch_completed(
+    tmp_path: Path,
+) -> None:
+    from ciao import learnings_queue_drain as drain
+
+    config = _default_vault(tmp_path)
+    vault = config.workspace_vault_root("personal")
+    queue = _queue_text(config, "personal")
+    runtime = Path(config.state_path).parent
+    queue.write_text("- [learnings] completed lesson\n", encoding="utf-8")
+    first = drain.drain(vault, workspace="personal", runtime_root=runtime, apply=True)
+    queue.write_text("- [learnings] restored lesson\n", encoding="utf-8")
+    second = drain.drain(vault, workspace="personal", runtime_root=runtime, apply=True)
+    reverted = drain.revert(
+        vault,
+        Path(second["receipts"][0]),
+        workspace="personal",
+        runtime_root=runtime,
+        apply=True,
+    )
+    assert first["applied"] and reverted["reverted"]
+
+    listing = _client(config).get("/api/proposals").json()["legacy_learning_queues"]["personal"]
+
+    assert listing["state"] == "completed"
+    assert [row["text"] for row in listing["suppressed_rows"]] == ["restored lesson"]
 
 
 def test_explicit_legacy_learning_dismiss_removes_one_exact_queued_row(tmp_path: Path) -> None:

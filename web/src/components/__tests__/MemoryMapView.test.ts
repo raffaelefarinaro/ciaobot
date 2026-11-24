@@ -671,17 +671,24 @@ describe('MemoryMapView sections', () => {
   })
 
   it.each([
-    ['pending', 'Ciaobot is moving'],
-    ['blocked', 'Ciaobot paused this learning migration'],
-    ['unknown', 'could not safely check older learning proposals'],
-    ['completed', 'Older proposals have been moved into Learnings'],
+    ['pending', 'Ciaobot is moving older suggestions into Learnings.'],
+    ['blocked', "Ciaobot couldn't finish moving older suggestions."],
+    ['unknown', "Ciaobot couldn't safely check older suggestions."],
+    ['restored', 'You restored these suggestions.'],
+    ['completed', 'Older suggestions have moved to Learnings.'],
   ] as const)('shows the %s migration status on To decide independently of update tasks', async (state, text) => {
     const queues = {
       personal: {
-        state,
+        state: state === 'restored' ? 'completed' : state,
         rows: state === 'pending' ? 2 : 0,
         ...(state === 'pending' ? {
-          pending_rows: [{ id: 'legacy-row-1', revision: 'queue-revision', text: 'Old lesson', source: '', request: '' }],
+          pending_rows: [
+            { id: 'legacy-row-1', revision: 'queue-revision', text: 'Old lesson', source: '', request: '' },
+            { id: 'legacy-row-2', revision: 'queue-revision', text: 'Finishing lesson', source: '', request: '', removal_pending: true },
+          ],
+        } : {}),
+        ...(state === 'restored' ? {
+          suppressed_rows: [{ id: 'legacy-row-3', revision: 'queue-revision', text: 'Restored lesson', source: '', request: '' }],
         } : {}),
       },
     } as const
@@ -702,28 +709,29 @@ describe('MemoryMapView sections', () => {
     expect(wrapper.get('[role="status"]').text()).toContain(text)
     if (state === 'pending') {
       expect(wrapper.get('[role="status"]').text()).toContain('Old lesson')
-      expect(wrapper.get('[role="status"]').get('button').text()).toBe('Remove this row')
+      expect(wrapper.get('[role="status"]').findAll('button').map(button => button.text())).toEqual([
+        'Remove',
+        'Finish removing',
+      ])
     }
-    const actions = wrapper.get('.mm-migration-notice-actions').findAll('a')
+    if (state === 'restored') {
+      expect(wrapper.get('[role="status"]').text()).toContain('Restored lesson')
+      expect(wrapper.get('[role="status"]').find('button').text()).toBe('Remove')
+    }
+    const actionGroup = wrapper.find('.mm-migration-notice-actions')
+    const actions = actionGroup.exists() ? actionGroup.findAll('a') : []
     expect(actions.map(action => action.attributes('href'))).toEqual(
-      state === 'unknown' ? ['/settings/workspace'] : ['/', '/settings/workspace'],
+      state === 'blocked' ? ['/'] : state === 'unknown' ? ['/', '/settings/workspace'] : [],
     )
     expect(actions.every(action => action.classes().includes('mm-link-notice-action'))).toBe(true)
-    expect(wrapper.get('a[href="/settings/workspace"]').text()).toBe('Workspace settings')
-    if (state !== 'unknown') {
-      expect(wrapper.get('[role="status"]').get('a[href="/"]').text()).toBe('Open Home')
-    } else {
-      expect(wrapper.get('[role="status"]').text()).toContain('In a chat in this workspace, ask Ciaobot to inspect the situation')
-    }
     if (state === 'unknown') {
-      expect(wrapper.get('[role="status"]').text()).toContain('preserve the link and its contents')
-      expect(wrapper.get('[role="status"]').text()).toContain('guide a repair for you to review before authorizing')
-      expect(wrapper.get('[role="status"]').text()).toContain('Migration checks never follow an external')
+      expect(wrapper.get('a[href="/settings/workspace"]').text()).toBe('Workspace settings')
     }
-    if (state === 'completed') {
-      expect(wrapper.get('[role="status"]').text()).toContain('removes the whole learning entry, not just the old suggestion')
-      expect(wrapper.get('[role="status"]').text()).toContain('broader removal needs your clear direction')
+    if (state === 'blocked' || state === 'unknown') {
+      expect(wrapper.get('[role="status"]').get('a[href="/"]').text()).toBe('Open Home')
     }
+    if (state === 'blocked') expect(wrapper.get('[role="status"]').text()).toContain("won't retry automatically")
+    if (state === 'completed') expect(wrapper.find('.mm-migration-notice-actions').exists()).toBe(false)
     expect(apiGet).not.toHaveBeenCalledWith(expect.stringContaining('/api/update-tasks'))
     wrapper.unmount()
   })

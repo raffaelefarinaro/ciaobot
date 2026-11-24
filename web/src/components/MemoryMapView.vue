@@ -39,19 +39,19 @@
         role="status"
       >
         <span v-if="proposals.legacyLearningQueues[store.activeWorkspace]?.state === 'pending'" class="mm-migration-notice-copy">
-          Ciaobot is moving {{ proposals.legacyLearningQueues[store.activeWorkspace]?.rows }} older learning proposal(s) into Learnings. You can remove an obsolete row below; changes are recorded so they can be reviewed.
+          Ciaobot is moving older suggestions into Learnings.
         </span>
         <span v-else-if="proposals.legacyLearningQueues[store.activeWorkspace]?.state === 'blocked'" class="mm-migration-notice-copy">
-          Ciaobot paused this learning migration because an earlier change did not finish cleanly. No more rows will be moved automatically until the unfinished change is reviewed.
+          Ciaobot couldn't finish moving older suggestions. It won't retry automatically. Ask Ciaobot for help.
         </span>
         <span v-else-if="proposals.legacyLearningQueues[store.activeWorkspace]?.state === 'unknown'" class="mm-migration-notice-copy">
-          Ciaobot could not safely check older learning proposals in this workspace. Check the vault location in Settings → Workspace → Overview. If `Workspace` is linked or unsafe, preserve the link and its contents; do not replace or follow it. In a chat in this workspace, ask Ciaobot to inspect the situation and guide a repair for you to review before authorizing. Migration checks never follow an external `Workspace` symlink.
+          Ciaobot couldn't safely check older suggestions. Ask Ciaobot for help.
         </span>
         <span v-else-if="proposals.legacyLearningQueues[store.activeWorkspace]?.suppressed_rows?.length" class="mm-migration-notice-copy">
-          These rows were deliberately put back and will stay queued. They will not move again automatically. You can still remove one exact row below if it is obsolete.
+          You restored these suggestions. They won't move again automatically.
         </span>
         <span v-else-if="proposals.legacyLearningQueues[store.activeWorkspace]?.state === 'completed'" class="mm-migration-notice-copy">
-          Older proposals have been moved into Learnings. Ask Ciaobot to inspect the exact learning if one is obsolete. The current cleanup removes the whole learning entry, not just the old suggestion; if other evidence is included, Ciaobot will leave it in place and explain that broader removal needs your clear direction.
+          Older suggestions have moved to Learnings. Ask Ciaobot if you want one removed.
         </span>
         <span v-else class="mm-migration-notice-copy">
           There are no older learning proposals to move in this workspace.
@@ -64,7 +64,7 @@
               class="mr-btn mm-link-notice-action"
               :disabled="proposals.isBusy(`legacy-learning:${row.id}`)"
               @click="removeLegacyLearning(row.id, row.revision)"
-            >{{ row.removal_pending ? 'Finish this removal' : 'Remove this row' }}</button>
+            >{{ row.removal_pending ? 'Finish removing' : 'Remove' }}</button>
           </li>
         </ul>
         <ul v-if="proposals.legacyLearningQueues[store.activeWorkspace]?.suppressed_rows?.length" class="mm-legacy-learning-list">
@@ -75,12 +75,15 @@
               class="mr-btn mm-link-notice-action"
               :disabled="proposals.isBusy(`legacy-learning:${row.id}`)"
               @click="removeLegacyLearning(row.id, row.revision)"
-            >Remove this row</button>
+            >Remove</button>
           </li>
         </ul>
-        <div class="mm-migration-notice-actions">
-          <router-link v-if="proposals.legacyLearningQueues[store.activeWorkspace]?.state !== 'unknown'" class="mm-link-notice-action" to="/">Open Home</router-link>
-          <router-link class="mm-link-notice-action" to="/settings/workspace">Workspace settings</router-link>
+        <div
+          v-if="['blocked', 'unknown'].includes(proposals.legacyLearningQueues[store.activeWorkspace]?.state ?? '')"
+          class="mm-migration-notice-actions"
+        >
+          <router-link class="mm-link-notice-action" to="/">Open Home</router-link>
+          <router-link v-if="proposals.legacyLearningQueues[store.activeWorkspace]?.state === 'unknown'" class="mm-link-notice-action" to="/settings/workspace">Workspace settings</router-link>
         </div>
       </div>
       <!-- To decide holds both queues, narrowed by one filter; each queue keeps

@@ -7961,22 +7961,28 @@ async def list_proposals(request: Request) -> JSONResponse:
                 workspace=workspace,
                 runtime_root=Path(config.state_path).parent,
             )
+            pending_items = pending.get("rows", [])
+            suppressed_items = pending.get("suppressed_rows", [])
             status = (
                 "blocked" if state["unresolved"]
                 else "unknown" if state["failed"] or pending.get("failed")
-                else "pending" if state["automatic_rows"]
+                else "pending" if pending_items
                 else "completed" if state["applied_receipts"]
                 else "clear"
             )
-            if status != "clear" or pending.get("suppressed_rows"):
+            # Use the identity-bearing queue snapshot for row status. The
+            # separate inspection can race with a newly added or removed row.
+            # Completed migrations disappear unless the queue snapshot still
+            # has a deliberately restored row to handle.
+            if status in {"pending", "blocked", "unknown"} or suppressed_items:
                 detail: dict[str, Any] = {
                     "state": status,
-                    "rows": len(state["rows"]),
+                    "rows": len(pending_items) + len(suppressed_items),
                 }
-                if pending.get("rows"):
-                    detail["pending_rows"] = pending["rows"]
-                if pending.get("suppressed_rows"):
-                    detail["suppressed_rows"] = pending["suppressed_rows"]
+                if pending_items:
+                    detail["pending_rows"] = pending_items
+                if suppressed_items:
+                    detail["suppressed_rows"] = suppressed_items
                 legacy_learning_queues[workspace] = detail
         except Exception:
             # A failed safety scan is itself visible; it must never look clean.
