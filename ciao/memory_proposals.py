@@ -2901,6 +2901,11 @@ def remove_proposal_by_substring(
         bullet = parse_bullet(lines[candidates[0]])
         if bullet is None:
             return None
+        # This low-level helper has no trusted runtime config with which to
+        # validate canonical publication state. Refuse rather than erase a
+        # published or indeterminate share proposal.
+        if bullet.kind == "share":
+            return None
         del lines[candidates[0]]
         lines = _sweep_empty_batches(lines)
         from ciao.memory_receipts import write_queue_atomically

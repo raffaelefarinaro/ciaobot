@@ -111,6 +111,48 @@ def test_publish_uses_reviewed_bytes_and_is_idempotent(linked: tuple[Config, Pat
     assert receipt and receipt["commit_oid"] == result.commit_oid and receipt["published_blob_oid"]
 
 
+def test_receipt_enumeration_skips_malformed_canonical_and_index(linked, monkeypatch) -> None:
+    config, _clone, _origin = linked
+    valid = share_proposals.draft_share(
+        config, workspace="home", relative_path="n.md", operation="replace",
+        proposed=b"one", request_key="receipt-valid-one",
+    )
+    assert isinstance(valid, share_proposals.ShareDraft)
+    one = asyncio.run(share_publish.publish_share(
+        config, workspace="home", proposal_id=valid.proposal_id,
+        expected_revision=valid.artifact["review_token"],
+    ))
+    assert one.receipt_id
+    store = share_proposals._store_dir(config)
+    canonical = store / (
+        hashlib.sha256(("home\0sidecar\0" + valid.artifact["immutable"]["sidecar_id"]).encode()).hexdigest() + ".json"
+    )
+    artifact = json.loads(canonical.read_text(encoding="utf-8"))
+    malformed_fields = dict(artifact["immutable"])
+    malformed_fields["sidecar_id"] = "malformed-canonical"
+    malformed_artifact = dict(artifact, immutable=malformed_fields)
+    malformed_artifact["review_token"] = share_proposals._review_token(malformed_fields)
+    malformed_canonical = store / (
+        hashlib.sha256(("home\0sidecar\0malformed-canonical").encode()).hexdigest() + ".json"
+    )
+    share_proposals._write_private(malformed_canonical, json.dumps(malformed_artifact, sort_keys=True).encode())
+    malformed_canonical_artifact = json.loads(malformed_canonical.read_text(encoding="utf-8"))
+    malformed_canonical_artifact["immutable"].pop("sidecar_id")
+    malformed_canonical_artifact["review_token"] = share_proposals._review_token(
+        malformed_canonical_artifact["immutable"]
+    )
+    share_proposals._write_private(
+        malformed_canonical, json.dumps(malformed_canonical_artifact, sort_keys=True).encode()
+    )
+    malformed_index = store / "request-index-malformed.json"
+    malformed_index_artifact = dict(artifact, publication={"receipts": None})
+    share_proposals._write_private(
+        malformed_index, json.dumps(malformed_index_artifact, sort_keys=True).encode()
+    )
+    listed = share_publish.list_share_receipts(config, workspace="home")
+    assert [receipt["id"] for receipt in listed] == [one.receipt_id]
+
+
 def test_publish_rechecks_link_after_waiting_for_checkout_claim(linked, monkeypatch) -> None:
     config, clone, _origin = linked
     draft = share_proposals.draft_share(
@@ -596,6 +638,47 @@ def test_legacy_refresh_waits_for_queue_before_registry_lock(linked, monkeypatch
     worker.join(timeout=5)
     assert not worker.is_alive()
     assert result and isinstance(result[0], share_proposals.ShareDraft)
+
+
+def test_legacy_refresh_rechecks_publication_reservation_under_queue_lock(linked, monkeypatch) -> None:
+    config, _clone, _origin = linked
+    legacy = share_proposals.draft_share(
+        config, workspace="home", relative_path="n.md", operation="replace",
+        proposed=b"legacy", request_key="legacy-reservation-race",
+    )
+    assert isinstance(legacy, share_proposals.ShareDraft)
+    artifact = share_publish._artifact_for(config, "home", legacy.proposal_id)
+    assert artifact is not None
+    artifact["immutable"].pop("link_lifetime_id")
+    artifact["review_token"] = share_proposals._review_token(artifact["immutable"])
+    sidecar = share_proposals._store_dir(config) / (
+        hashlib.sha256(("home\0sidecar\0" + artifact["immutable"]["sidecar_id"]).encode()).hexdigest() + ".json"
+    )
+    share_proposals._write_private(sidecar, json.dumps(artifact, sort_keys=True).encode())
+    original_lookup = share_publish._artifact_for
+    reserved = False
+
+    def reserve_after_initial_read(*args, **kwargs):
+        nonlocal reserved
+        visible = original_lookup(*args, **kwargs)
+        if visible is not None and not reserved:
+            reserved = True
+            current = share_proposals._load_sidecar(sidecar)
+            current["publication"] = {"attempts": [{"status": "pending"}], "receipts": []}
+            share_proposals._write_private(sidecar, json.dumps(current, sort_keys=True).encode())
+        return visible
+
+    monkeypatch.setattr(share_publish, "_artifact_for", reserve_after_initial_read)
+    result = share_publish.refresh_legacy_draft(
+        config, workspace="home", proposal_id=legacy.proposal_id,
+        expected_revision=artifact["review_token"],
+    )
+    assert isinstance(result, share_proposals.ShareRefusal)
+    assert result.code == "publication_pending"
+    queue = config.vault / "Workspace" / "Memory-Proposals.md"
+    text = queue.read_text(encoding="utf-8")
+    assert text.count("Shared note change proposal") == 1
+    assert artifact["immutable"]["sidecar_id"] in text
 
 
 def test_legacy_refresh_recovers_crash_after_idempotency_index_write_at_capacity(linked, monkeypatch) -> None:

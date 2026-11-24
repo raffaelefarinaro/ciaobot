@@ -289,6 +289,73 @@ def _load_sidecar(path: Path) -> dict[str, Any]:
         _refuse("draft_corrupt", "The private share draft is missing or corrupt.")
 
 
+def share_dismissal_block(
+    config: Any, *, workspace: str, bullet: Any, proposal_id: str = ""
+) -> str | None:
+    """Return a reason a share row cannot be dismissed, reading canonical state only.
+
+    Callers must hold the proposal queue lock while checking and removing the row;
+    this sidecar-only read deliberately does not acquire either queue lock.
+    """
+    if getattr(bullet, "kind", None) != KIND:
+        return None
+    sidecar_id = getattr(bullet, "target", "")
+    if not isinstance(sidecar_id, str) or not sidecar_id:
+        return "The shared-note publication state is unavailable."
+    path = _store_dir(config) / (
+        hashlib.sha256((workspace + "\0sidecar\0" + sidecar_id).encode()).hexdigest() + ".json"
+    )
+    try:
+        data = _load_sidecar(path)
+    except ShareDraftError:
+        return "The shared-note publication state is unavailable."
+    fields = data.get("immutable")
+    expected_proposal_id = proposal_tracking.stable_proposal_id(
+        workspace, (PurePosixPath(workspace) / _QUEUE).as_posix(), KIND,
+        getattr(bullet, "text", ""), "", 0,
+    )
+    if (
+        not isinstance(fields, dict)
+        or fields.get("workspace") != workspace
+        or fields.get("sidecar_id") != sidecar_id
+        or fields.get("proposal_id") != expected_proposal_id
+        or (proposal_id and fields.get("proposal_id") != proposal_id)
+        or getattr(bullet, "text", "") != f"Shared note change proposal {sidecar_id}"
+    ):
+        return "The shared-note publication state does not match this proposal."
+    if "publication" not in data:
+        return None
+    publication = data.get("publication")
+    if not isinstance(publication, dict):
+        return "The shared-note publication state is indeterminate."
+    if "attempts" not in publication or "receipts" not in publication:
+        return "The shared-note publication state is indeterminate."
+    attempts = publication.get("attempts", [])
+    receipts = publication.get("receipts", [])
+    if not isinstance(attempts, list) or not isinstance(receipts, list):
+        return "The shared-note publication state is indeterminate."
+    if receipts:
+        return "A shared-note publication is already confirmed."
+    for attempt in attempts:
+        if (
+            not isinstance(attempt, dict)
+            or attempt.get("status") != "rejected"
+            or attempt.get("retryable") is not False
+            or type(attempt.get("attempt")) is not int
+            or attempt.get("attempt", 0) < 1
+            or not isinstance(attempt.get("commit_oid"), str)
+            or not re.fullmatch(r"[0-9a-f]{40}", attempt.get("commit_oid", ""))
+            or not isinstance(attempt.get("parent_oid"), str)
+            or not re.fullmatch(r"[0-9a-f]{40}", attempt.get("parent_oid", ""))
+            or attempt.get("proposal_id") != fields.get("proposal_id")
+            or attempt.get("revision") != fields.get("revision")
+            or attempt.get("destination_fingerprint") != fields.get("destination_fingerprint")
+            or attempt.get("ref") != fields.get("upstream_ref")
+        ):
+            return "A shared-note publication attempt needs reconciliation."
+    return None
+
+
 def _draft_share(
     config: Any, *, workspace: str, brain: str = "", relative_path: str,
     operation: str | None, proposed: bytes | None, request_key: str,

@@ -93,6 +93,88 @@ def test_share_identity_preserves_exact_upstream_bytes_and_private_queue(linked:
     assert sidecar.stat().st_mode & 0o077 == 0
 
 
+def test_dismissal_fence_reads_canonical_publication_state(linked: tuple[Config, Path]) -> None:
+    config, _ = linked
+    draft = sp.draft_share(
+        config, workspace="home", relative_path="new.md", operation="create",
+        proposed=b"draft", request_key="fence",
+    )
+    assert isinstance(draft, sp.ShareDraft)
+    line = (config.vault / "Workspace" / "Memory-Proposals.md").read_text().splitlines()[-1]
+    from ciao.proposal_kinds import parse_bullet
+
+    bullet = parse_bullet(line)
+    assert bullet is not None
+    assert sp.share_dismissal_block(
+        config, workspace="home", bullet=bullet, proposal_id=draft.proposal_id
+    ) is None
+    from ciao.memory_proposals import remove_proposal_by_substring
+
+    queue = config.vault / "Workspace" / "Memory-Proposals.md"
+    assert remove_proposal_by_substring(queue, bullet.target) is None
+    assert bullet.target in queue.read_text()
+    sidecar = sp._store_dir(config) / (
+        hashlib.sha256(("home\0sidecar\0" + bullet.target).encode()).hexdigest() + ".json"
+    )
+    data = sp._load_sidecar(sidecar)
+    data["publication"] = {"attempts": [{"status": "pending"}], "receipts": []}
+    sp._write_private(sidecar, json.dumps(data, ensure_ascii=False).encode())
+    assert sp.share_dismissal_block(
+        config, workspace="home", bullet=bullet, proposal_id=draft.proposal_id
+    )
+    fields = data["immutable"]
+    data["publication"] = {"attempts": [{
+        "attempt": 1, "status": "rejected", "retryable": False,
+        "commit_oid": "a" * 40, "parent_oid": "b" * 40,
+        "proposal_id": fields["proposal_id"], "revision": fields["revision"],
+        "destination_fingerprint": fields["destination_fingerprint"],
+        "ref": fields["upstream_ref"],
+    }], "receipts": []}
+    sp._write_private(sidecar, json.dumps(data, ensure_ascii=False).encode())
+    assert sp.share_dismissal_block(
+        config, workspace="home", bullet=bullet, proposal_id=draft.proposal_id
+    ) is None
+    data["publication"] = {"attempts": [], "receipts": [{"id": "confirmed"}]}
+    sp._write_private(sidecar, json.dumps(data, ensure_ascii=False).encode())
+    assert sp.share_dismissal_block(
+        config, workspace="home", bullet=bullet, proposal_id=draft.proposal_id
+    )
+
+
+def test_legacy_retirement_uses_the_same_canonical_fence(linked: tuple[Config, Path]) -> None:
+    from ciao import share_publish
+    from ciao.proposal_tracking import walk_proposal_queue
+
+    config, _ = linked
+    queue = config.vault / "Workspace" / "Memory-Proposals.md"
+    for label, publication, expected in (
+        ("clean", None, True),
+        ("pending", {"attempts": [{"status": "pending"}], "receipts": []}, False),
+        ("confirmed", {"attempts": [], "receipts": [{"id": "confirmed"}]}, False),
+    ):
+        draft = sp.draft_share(
+            config, workspace="home", relative_path=f"{label}.md", operation="create",
+            proposed=b"draft", request_key=f"legacy-{label}",
+        )
+        assert isinstance(draft, sp.ShareDraft)
+        fields = draft.artifact["immutable"]
+        if publication is not None:
+            data = sp._load_sidecar(
+                sp._store_dir(config) / (
+                    hashlib.sha256(("home\0sidecar\0" + fields["sidecar_id"]).encode()).hexdigest() + ".json"
+                )
+            )
+            data["publication"] = publication
+            sidecar = sp._store_dir(config) / (
+                hashlib.sha256(("home\0sidecar\0" + fields["sidecar_id"]).encode()).hexdigest() + ".json"
+            )
+            sp._write_private(sidecar, json.dumps(data).encode())
+        result = share_publish._retire_legacy_queue_row(
+            config, "home", draft.proposal_id, fields
+        )
+        assert result is expected
+        rows = list(walk_proposal_queue("home", "home/Workspace/Memory-Proposals.md", queue.read_text()))
+        assert any(row.proposal_id == draft.proposal_id for row in rows) is (not expected)
 def test_share_rejects_credentials_and_bad_paths_before_filing(linked: tuple[Config, Path], monkeypatch: pytest.MonkeyPatch) -> None:
     config, _ = linked
     writes: list[bytes] = []
@@ -279,9 +361,12 @@ def test_share_retry_after_dismissal_does_not_resurrect_row(linked: tuple[Config
 
     row = next(iter(walk_proposal_queue("home", "home/Workspace/Memory-Proposals.md", queue.read_text())))
     record_decision(queue, action="dismiss", text=row.bullet.text, kind="share", via="pwa", outcome="dismissed")
-    from ciao.memory_proposals import remove_proposal_by_substring
-
-    remove_proposal_by_substring(queue, row.bullet.target)
+    # The config-less CLI/legacy helper now fails closed for share rows. Model
+    # the PWA's validated dismissal after checking the canonical sidecar.
+    assert sp.share_dismissal_block(
+        config, workspace="home", bullet=row.bullet, proposal_id=draft.proposal_id
+    ) is None
+    queue.write_text("# Proposals\n", encoding="utf-8")
     retried = sp.draft_share(**args)
     assert isinstance(retried, sp.ShareRefusal) and retried.code == "request_conflict"
     assert sidecar_id not in queue.read_text()

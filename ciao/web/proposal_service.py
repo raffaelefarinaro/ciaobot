@@ -47,6 +47,10 @@ _SECTION_DATE_RE = re.compile(r"^##\s+(\d{4}-\d{2}-\d{2})")
 _PROPOSALS_REL = ("Workspace", "Memory-Proposals.md")
 
 
+class ShareDismissalRefused(ValueError):
+    """A share proposal is protected by canonical publication state."""
+
+
 @dataclass(frozen=True)
 class AcceptOutcome:
     """What one promotion attempt did with one accepted row.
@@ -172,6 +176,15 @@ def _sweep_queue_file(
                 continue
             bullet = proposal_kinds.parse_bullet(raw_line)
             if bullet is not None and section_date is not None and section_date < cutoff:
+                if bullet.kind == "share":
+                    from ciao import share_proposals
+
+                    reason = share_proposals.share_dismissal_block(
+                        config, workspace=workspace, bullet=bullet
+                    )
+                    if reason:
+                        keep.append(raw_line)
+                        continue
                 changed = True
                 swept_kinds.append(bullet.kind)
                 swept_texts.append(bullet.text)
@@ -216,6 +229,11 @@ def _rewrite_queue_single(
     promoted: bool,
     workspace: str,
     vault_root: Path,
+    *,
+    undoable: bool = True,
+    config: Any = None,
+    proposal_id: str = "",
+    operation_id: str = "",
 ) -> bool:
     """Remove one bullet under the queue lock and record its receipt.
 
@@ -231,6 +249,17 @@ def _rewrite_queue_single(
 
     with queue_lock(queue):
         lines = queue.read_text(encoding="utf-8").splitlines()
+        bullet = proposal_kinds.parse_bullet(raw)
+        if bullet is not None and bullet.kind == "share" and not promoted:
+            if config is None:
+                raise ShareDismissalRefused("The shared-note publication state is unavailable.")
+            from ciao import share_proposals
+
+            reason = share_proposals.share_dismissal_block(
+                config, workspace=workspace, bullet=bullet, proposal_id=proposal_id
+            )
+            if reason:
+                raise ShareDismissalRefused(reason)
         removed_ours = _remove_bullet_line(lines, line_index, raw)
         if not removed_ours:
             return False
@@ -243,6 +272,8 @@ def _rewrite_queue_single(
             source="pwa",
             workspace=workspace,
             vault_root=vault_root,
+            undoable=undoable,
+            operation_id=operation_id,
         ):
             queue_after = "\n".join(lines).rstrip() + "\n"
             write_queue_atomically(queue, queue_after)
@@ -256,7 +287,9 @@ def _rewrite_queue_batch(
     removals: list[dict[str, Any]],
     workspace: str,
     vault_root: Path,
-) -> set[str]:
+    *,
+    config: Any = None,
+) -> tuple[set[str], dict[str, str]]:
     """Remove batch rows under the queue lock and record the transaction.
 
     Runs in a worker thread: `queue_lock` waits with a synchronous sleep, so
@@ -275,9 +308,23 @@ def _rewrite_queue_batch(
         # verifies the content at that index - a promotion above may have
         # awaited a model call while another request rewrote this same file.
         removed_here: set[str] = set()
+        blocked: dict[str, str] = {}
         for row in sorted(rows, key=lambda r: int(r.get("line", -1)), reverse=True):
             if int(row.get("line", -1)) in keep_lines:
                 continue
+            bullet = proposal_kinds.parse_bullet(str(row.get("raw") or ""))
+            if bullet is not None and bullet.kind == "share":
+                if config is None:
+                    blocked[row["id"]] = "The shared-note publication state is unavailable."
+                    continue
+                from ciao import share_proposals
+
+                reason = share_proposals.share_dismissal_block(
+                    config, workspace=workspace, bullet=bullet, proposal_id=row["id"]
+                )
+                if reason:
+                    blocked[row["id"]] = reason
+                    continue
             if _remove_bullet_line(
                 lines, int(row.get("line", -1)), str(row.get("raw") or "")
             ):
@@ -288,16 +335,17 @@ def _rewrite_queue_batch(
             for item, row in zip(removals, rows)
             if row["id"] in removed_here
         ]
-        with queue_resolution_multi(
-            queue,
-            removed_removals,
-            actor="operator",
-            source="pwa",
-            workspace=workspace,
-            vault_root=vault_root,
-        ):
-            write_queue_atomically(queue, queue_after)
-    return removed_here
+        if removed_here:
+            with queue_resolution_multi(
+                queue,
+                removed_removals,
+                actor="operator",
+                source="pwa",
+                workspace=workspace,
+                vault_root=vault_root,
+            ):
+                write_queue_atomically(queue, queue_after)
+    return removed_here, blocked
 
 
 def _find_bullet_line(lines: list[str], line_index: int, raw: str) -> int | None:
