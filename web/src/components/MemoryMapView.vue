@@ -39,14 +39,45 @@
         role="status"
       >
         <span v-if="proposals.legacyLearningQueues[store.activeWorkspace]?.state === 'pending'" class="mm-migration-notice-copy">
-          This workspace has {{ proposals.legacyLearningQueues[store.activeWorkspace]?.rows }} older learning proposal(s) that need migration. Start the workspace task to preview the changes and approve any application. If dismissed, reopen it from Workspace settings.
+          Ciaobot is moving {{ proposals.legacyLearningQueues[store.activeWorkspace]?.rows }} older learning proposal(s) into Learnings. You can remove an obsolete row below; changes are recorded so they can be reviewed.
         </span>
         <span v-else-if="proposals.legacyLearningQueues[store.activeWorkspace]?.state === 'blocked'" class="mm-migration-notice-copy">
-          A legacy learning migration has an unfinished receipt. Start the workspace task to review recovery; it asks before applying changes. If dismissed, reopen it from Workspace settings.
+          Ciaobot paused this learning migration because an earlier change did not finish cleanly. No more rows will be moved automatically until the unfinished change is reviewed.
         </span>
-        <span v-else class="mm-migration-notice-copy">
+        <span v-else-if="proposals.legacyLearningQueues[store.activeWorkspace]?.state === 'unknown'" class="mm-migration-notice-copy">
           Ciaobot could not safely check older learning proposals in this workspace. Check the vault location in Settings → Workspace → Overview. If `Workspace` is linked or unsafe, preserve the link and its contents; do not replace or follow it. In a chat in this workspace, ask Ciaobot to inspect the situation and guide a repair for you to review before authorizing. Migration checks never follow an external `Workspace` symlink.
         </span>
+        <span v-else-if="proposals.legacyLearningQueues[store.activeWorkspace]?.suppressed_rows?.length" class="mm-migration-notice-copy">
+          These rows were deliberately put back and will stay queued. They will not move again automatically. You can still remove one exact row below if it is obsolete.
+        </span>
+        <span v-else-if="proposals.legacyLearningQueues[store.activeWorkspace]?.state === 'completed'" class="mm-migration-notice-copy">
+          Older proposals have been moved into Learnings. Ask Ciaobot to inspect the exact learning if one is obsolete. The current cleanup removes the whole learning entry, not just the old suggestion; if other evidence is included, Ciaobot will leave it in place and explain that broader removal needs your clear direction.
+        </span>
+        <span v-else class="mm-migration-notice-copy">
+          There are no older learning proposals to move in this workspace.
+        </span>
+        <ul v-if="proposals.legacyLearningQueues[store.activeWorkspace]?.pending_rows?.length" class="mm-legacy-learning-list">
+          <li v-for="row in proposals.legacyLearningQueues[store.activeWorkspace]?.pending_rows" :key="row.id">
+            <span>{{ row.text }}</span>
+            <button
+              type="button"
+              class="mr-btn mm-link-notice-action"
+              :disabled="proposals.isBusy(`legacy-learning:${row.id}`)"
+              @click="removeLegacyLearning(row.id, row.revision)"
+            >{{ row.removal_pending ? 'Finish this removal' : 'Remove this row' }}</button>
+          </li>
+        </ul>
+        <ul v-if="proposals.legacyLearningQueues[store.activeWorkspace]?.suppressed_rows?.length" class="mm-legacy-learning-list">
+          <li v-for="row in proposals.legacyLearningQueues[store.activeWorkspace]?.suppressed_rows" :key="row.id">
+            <span>{{ row.text }}</span>
+            <button
+              type="button"
+              class="mr-btn mm-link-notice-action"
+              :disabled="proposals.isBusy(`legacy-learning:${row.id}`)"
+              @click="removeLegacyLearning(row.id, row.revision)"
+            >Remove this row</button>
+          </li>
+        </ul>
         <div class="mm-migration-notice-actions">
           <router-link v-if="proposals.legacyLearningQueues[store.activeWorkspace]?.state !== 'unknown'" class="mm-link-notice-action" to="/">Open Home</router-link>
           <router-link class="mm-link-notice-action" to="/settings/workspace">Workspace settings</router-link>
@@ -1338,6 +1369,9 @@ function onWheel(e: WheelEvent) {
 // mirrors the shared `mm.view` state, seeding it from the URL on mount.
 const proposals = useProposalsStore()
 const vaultReview = useVaultReviewStore()
+function removeLegacyLearning(rowId: string, revision: string) {
+  void proposals.dismissLegacyLearning(store.activeWorkspace, rowId, revision)
+}
 /** Switch the map's rendering. Graph and List are one section (/memory/map),
  * so there is no route to push — only `mapView` to remember. */
 function setMapView(next: 'graph' | 'list') {
@@ -1870,6 +1904,28 @@ onBeforeUnmount(() => {
   max-width: 100%;
   padding: var(--space-1) var(--space-2);
   line-height: 1.35;
+  overflow-wrap: anywhere;
+}
+.mm-legacy-learning-list {
+  display: grid;
+  gap: var(--space-2);
+  margin: var(--space-2) 0;
+  padding: 0;
+  list-style: none;
+}
+.mm-legacy-learning-list li {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-2);
+  padding: var(--space-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+}
+.mm-legacy-learning-list li > span {
+  min-width: 0;
+  flex: 1 1 18rem;
   overflow-wrap: anywhere;
 }
 

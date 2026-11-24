@@ -1,16 +1,18 @@
 # Drain pending learning proposals
 
-Run `ciao learnings-queue-drain` for this workspace and show the rows it found.
-An empty `rows` list means no rows are currently queued only when both
-`unresolved` and `failed` are empty. If either contains an item, report that a
-prepared or damaged transaction needs recovery or inspection; do not say there
-is no work, and do not treat an empty queue as proof the transaction completed.
-Explain the reported receipt state and ask the user before running any command
-with `--apply`. Applying a pending batch records a reversible receipt. Reverting
-an applied batch restores its queued rows with
-`ciao learnings-queue-drain --revert RECEIPT --apply`.
+This workspace's older learning rows are migrated automatically in the
+background. Do not ask the user to approve a dry run or explain internal
+receipts. The user can ask to remove one specific queued row; use the exact
+row and revision shown in Memory → To decide. If migration already moved it,
+inspect `ciao learnings-cleanup --json` and match the exact learning ID and
+entry revision. Use the attended `--apply --approval-file` flow with the user's
+reason and evidence. That flow removes the whole canonical learning entry. If
+it contains independent evidence or the request does not clearly cover the
+whole entry, leave it intact and explain that a broader removal needs the
+user's direction.
 
-Do not edit `Memory-Proposals.md` or `Learnings.md` by hand. The command carries
+Do not edit `Memory-Proposals.md` or `Learnings.md` by hand. Migration carries
 the source and request identity into Learnings.md and records each accepted row
-in History. If a transaction is unresolved or damaged, explain what the command
-reported and wait for the user's approval before recovery or reversion.
+in History. If migration is blocked or failed, explain plainly that it needs
+attention and do not retry, recover, or revert automatically. Leave any
+interrupted work for an attended review.

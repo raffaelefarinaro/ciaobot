@@ -1434,21 +1434,28 @@ Routes: `GET /api/proposals`, `GET /api/proposals/history`,
 `GET /api/proposals/{id}/preview`,
 `POST /api/proposals/{id}/implement`,
 `POST /api/proposals/{id}/{action}` (action is `accept` or `dismiss`),
-`POST /api/proposals/batch`, `POST /api/proposals/dismiss-older-than`.
+`POST /api/proposals/batch`, `POST /api/proposals/dismiss-older-than`,
+`POST /api/proposals/legacy-learning-dismiss`.
 
 `GET /api/proposals` also returns `legacy_learning_queues`, a map keyed by
-registered workspace. A present entry has `state` (`pending`, `blocked`, or
-`unknown`) and `rows`. It reports legacy `[learnings]` bullets even though they
-are no longer review rows. The response contains no host paths or shell
-commands. To inspect or recover the queue, start the workspace's **Move pending
-learning proposals into Learnings.md** task from Home. If you dismissed the
-task, reopen it in Settings → Workspace → Overview → Update task history. These
-actions are scoped to the active workspace and ask before applying changes. For
-an unknown scan result, check the vault location in that workspace's Overview.
-Preserve any linked `Workspace` and its contents; do not replace or follow it.
-Ask Ciaobot in that workspace to inspect the situation and guide a repair for
-you to review before authorizing. Migration checks never follow an external
+registered workspace. A present entry has `state` (`pending`, `blocked`,
+`unknown`, `clear`, or `completed`) and `rows`. Pending legacy `[learnings]`
+bullets include `pending_rows` with an id and queue revision; deliberately
+undone entries are listed as `suppressed_rows` and excluded from automatic
+migration. Eligible rows are moved automatically at startup, including when
+Workspace care is disabled. A blocked migration is paused because an earlier
+change needs review. In Memory → To decide, Remove dismisses one queued row and
+preserves every other row. It requires the exact revision shown by the list; a
+stale action is refused. If a learning has already moved, use the attended
+`ciao learnings-cleanup` review for the exact entry. That action removes the
+whole entry, so independent evidence must be preserved unless the user clearly
+asks to retire the whole learning. Migration checks never follow an external
 `Workspace` symlink.
+
+`POST /api/proposals/legacy-learning-dismiss` takes
+`{workspace, row_id, expected_revision}`. The server rechecks
+the exact queue revision while holding the writer lock; 409 means the row
+changed or is no longer queued.
 
 `POST /api/proposals/{id}/{action}` also takes an optional `reason` (a string,
 trimmed, at most 1000 characters; 400 if longer or not a string) that is stored
@@ -1724,6 +1731,12 @@ curl -sS -b /tmp/ciao.jar -X POST "http://localhost:${PWA_PORT:-8443}/api/propos
 curl -sS -b /tmp/ciao.jar -X POST "http://localhost:${PWA_PORT:-8443}/api/proposals/batch" \
   -H 'content-type: application/json' \
   -d '{"action":"accept","ids":["<id1>","<id2>"]}'
+
+# Explicitly remove one legacy learning row using the id and revision from
+# `legacy_learning_queues[workspace].pending_rows[]`.
+curl -sS -b /tmp/ciao.jar -X POST "http://localhost:${PWA_PORT:-8443}/api/proposals/legacy-learning-dismiss" \
+  -H 'content-type: application/json' \
+  -d '{"workspace":"personal","row_id":"<id>","expected_revision":"<revision>"}'
 
 # Dismiss every row dated strictly before a cutoff (YYYY-MM-DD), atomically.
 # A July proposal about a forgotten chat is not worth promoting.

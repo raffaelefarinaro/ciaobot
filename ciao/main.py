@@ -1057,6 +1057,75 @@ async def _run_server_locked(
     # reshuffling init order, so it is attached right after both exist.
     pcm.schedule_store = schedule_store
 
+    async def _migrate_legacy_learning_queues() -> None:
+        """Drain only new, unambiguous legacy rows for every registered vault."""
+        from ciao.learnings_queue_drain import drain_registered_workspaces
+
+        try:
+            results = await asyncio.to_thread(drain_registered_workspaces, config)
+        except Exception:
+            logger.exception("Legacy learning migration startup pass failed")
+            return
+        for workspace in config.workspace_names():
+            result = results.get(workspace, {})
+            if result.get("failed") or result.get("unresolved"):
+                logger.error(
+                    "Legacy learning migration for workspace %s needs attention: %s",
+                    workspace,
+                    "; ".join(result.get("failed", []) or result.get("unresolved", [])),
+                )
+            elif result.get("receipts"):
+                logger.info(
+                    "Migrated %s legacy learning row(s) for workspace %s",
+                    len(result.get("rows", [])),
+                    workspace,
+                )
+
+            # Let the task's registered completion check settle its own state.
+            # Archive only that state's exact helper chat, and only when it has
+            # no user follow-up or unfinished interaction to preserve.
+            try:
+                from ciao import __version__
+                from ciao.learnings_queue_drain import inspect as inspect_learning_drain
+                from ciao.update_tasks import evaluate, read_task_state
+                from ciao.web.update_task_launch import may_archive_completed_task_chat
+                from ciao.update_task_catalog import load_catalog
+
+                verification = await asyncio.to_thread(
+                    inspect_learning_drain,
+                    Path(config.workspace_vault_root(workspace)),
+                    workspace=workspace,
+                    runtime_root=Path(config.state_path).parent,
+                )
+                if verification["failed"] or verification["unresolved"] or verification["automatic_rows"]:
+                    continue
+                await evaluate(config, workspace=workspace, installed_version=__version__)
+                task = load_catalog().by_id.get("learnings-queue-drain")
+                if task is None:
+                    continue
+                state_record = read_task_state(task, config=config, workspace=workspace)
+                if state_record is None or state_record.lifecycle != "completed" or not state_record.chat_id:
+                    continue
+                chat = next(
+                    (item for item in pcm.list_chats() if item.chat_id == state_record.chat_id),
+                    None,
+                )
+                if chat is None:
+                    continue
+                project = pcm.get_project(chat.project_id)
+                if not may_archive_completed_task_chat(
+                    chat, project, task=task, workspace=workspace
+                ):
+                    continue
+                await pcm.archive_chat(chat.chat_id)
+            except Exception:
+                logger.exception(
+                    "Could not settle or archive the completed learning migration task for %s",
+                    workspace,
+                )
+
+    asyncio.create_task(_migrate_legacy_learning_queues())
+
     def _update_admission_closed() -> bool:
         """Whether a restart drain holds admission closed.
 

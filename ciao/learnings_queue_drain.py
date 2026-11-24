@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import hashlib
 import os
 import re
 import stat
@@ -23,6 +24,7 @@ from ciao.os_support.private import is_private_descriptor_strict, mkstemp_privat
 
 SCHEMA = 2
 RECEIPT_PREFIX = "learnings-queue-drain-"
+DISMISS_PREFIX = "learnings-row-dismiss-"
 RECEIPT_DIRNAME = "learnings-queue-drain"
 MAX_RECEIPT_BYTES = 12 * 1024 * 1024
 MAX_IMAGE_BYTES = 4 * 1024 * 1024
@@ -51,6 +53,174 @@ _REVERT_FIELDS = {"revert_at", "revert_operation_ids"}
 
 def _queue(vault: Path) -> Path:
     return vault / "Workspace" / "Memory-Proposals.md"
+
+
+def pending_rows(
+    vault_root: Path, *, workspace: str, runtime_root: Path
+) -> dict[str, Any]:
+    """List legacy rows with an identity tied to the exact queue revision."""
+    vault = Path(vault_root).resolve()
+    path = _queue(vault)
+    try:
+        with queue_lock(path):
+            receipts, errors = _read_receipt_set(runtime_root, workspace=workspace, vault=vault)
+            if errors:
+                raise ValueError("could not safely inspect migration receipts: " + "; ".join(errors))
+            reverted_raw = {
+                row["raw"]
+                for _receipt_path, receipt in receipts
+                if receipt.get("workspace") == workspace
+                and receipt.get("vault_identity") == str(vault)
+                and receipt.get("status") == "reverted"
+                for row in receipt["rows"]
+            }
+            exists, text = _safe_file(path)
+            if not exists:
+                return {"revision": content_revision(""), "rows": [], "suppressed_rows": []}
+            revision = content_revision(text)
+            rows: list[dict[str, Any]] = []
+            suppressed: list[dict[str, Any]] = []
+            for index, raw in enumerate(_queue_lines(text)):
+                parsed = _parse_row(raw)
+                if parsed is None:
+                    continue
+                identity = hashlib.sha256(
+                    f"{workspace}\0{revision}\0{index}\0{raw}".encode("utf-8")
+                ).hexdigest()[:24]
+                item = {"id": identity, "revision": revision, **parsed}
+                (suppressed if raw in reverted_raw else rows).append(item)
+            visible_ids = {row["id"] for row in rows}
+            dismissal_receipts, dismissal_errors = _dismissal_receipts(
+                runtime_root, workspace=workspace, vault=vault
+            )
+            if dismissal_errors:
+                raise ValueError("could not safely inspect explicit removal receipts: " + "; ".join(dismissal_errors))
+            for _receipt_path, receipt in dismissal_receipts:
+                if receipt["status"] != "prepared" or receipt["target"] != "queue":
+                    continue
+                if receipt["row_id"] in visible_ids:
+                    for item in rows:
+                        if item["id"] == receipt["row_id"]:
+                            item["removal_pending"] = True
+                    continue
+                else:
+                    rows.append({
+                        "id": receipt["row_id"],
+                        "revision": revision,
+                        **receipt["source_row"],
+                        "removal_pending": True,
+                    })
+            return {"revision": revision, "rows": rows, "suppressed_rows": suppressed}
+    except (OSError, UnicodeError, ValueError, RuntimeError) as exc:
+        return {"revision": "", "rows": [], "failed": [str(exc)]}
+
+
+def dismiss_pending_row(
+    vault_root: Path,
+    *,
+    workspace: str,
+    runtime_root: Path,
+    row_id: str,
+    expected_revision: str,
+) -> dict[str, Any]:
+    """Dismiss one legacy row only from the exact queue version the user saw."""
+    vault = Path(vault_root).resolve()
+    queue = _queue(vault)
+    pin = _pin_workspace(vault)
+    pinned = False
+    try:
+        pin.__enter__()
+        pinned = True
+        workspace_dir = vault / "Workspace"
+        if workspace_dir.is_symlink() or not workspace_dir.is_dir():
+            raise ValueError("Workspace must be a real directory inside the vault")
+        with queue_lock(queue):
+            receipts, receipt_errors = _read_receipt_set(
+                runtime_root, workspace=workspace, vault=vault
+            )
+            unresolved = list(receipt_errors)
+            dismissals, dismissal_errors = _dismissal_receipts(
+                runtime_root, workspace=workspace, vault=vault
+            )
+            unresolved.extend(dismissal_errors)
+            unresolved.extend(
+                f"{path.name}: queued-row removal needs finishing"
+                for path, receipt in dismissals
+                if receipt["status"] == "prepared"
+                and not (receipt.get("target") == "queue" and receipt.get("row_id") == row_id)
+            )
+            unresolved.extend(
+                f"{path.name}: transaction is {receipt['status']}"
+                for path, receipt in receipts
+                if receipt.get("workspace") == workspace
+                and receipt.get("vault_identity") == str(vault)
+                and receipt.get("status") in {"prepared", "reverting"}
+            )
+            if unresolved:
+                return {"dismissed": False, "conflict": False, "failed": unresolved}
+            exists, before = _safe_file(queue, required=True)
+            revision = content_revision(before)
+            if revision != expected_revision:
+                return {"dismissed": False, "conflict": True, "revision": revision}
+            pending = next(
+                (
+                    (path, receipt)
+                    for path, receipt in dismissals
+                    if receipt["status"] == "prepared"
+                    and receipt.get("target") == "queue"
+                    and receipt.get("row_id") == row_id
+                ),
+                None,
+            )
+            if pending is not None:
+                pending_path, pending_receipt = pending
+                _finish_row_dismissal(
+                    pending_path, pending_receipt, vault=vault
+                )
+                return {"dismissed": True, "conflict": False, "revision": pending_receipt["after_revision"]}
+            lines = _queue_lines(before)
+            found: int | None = None
+            selected: dict[str, Any] | None = None
+            for index, raw in enumerate(lines):
+                parsed = _parse_row(raw)
+                if parsed is None:
+                    continue
+                identity = hashlib.sha256(
+                    f"{workspace}\0{revision}\0{index}\0{raw}".encode("utf-8")
+                ).hexdigest()[:24]
+                if identity == row_id:
+                    if found is not None:
+                        raise ValueError("legacy row identity is ambiguous")
+                    found, selected = index, parsed
+            if found is None or selected is None:
+                return {"dismissed": False, "conflict": True, "revision": revision}
+            after = "".join(lines[:found] + lines[found + 1 :])
+            _safe_file(dismissed_log_path(queue))
+            history_at = datetime.now(UTC).isoformat(timespec="microseconds").replace("+00:00", "Z")
+            dismissal = {
+                "schema": 1,
+                "status": "prepared",
+                "workspace": workspace,
+                "vault_identity": str(vault),
+                "operation_id": str(uuid.uuid4()),
+                "row_id": row_id,
+                "target": "queue",
+                "before": before,
+                "after": after,
+                "before_revision": revision,
+                "after_revision": content_revision(after),
+                "history_at": history_at,
+                "source_row": selected,
+            }
+            receipt_path = _receipt_dir(runtime_root) / f"{DISMISS_PREFIX}{uuid.uuid4()}.json"
+            _write_receipt(receipt_path, dismissal, create=True)
+            _finish_row_dismissal(receipt_path, dismissal, vault=vault)
+            return {"dismissed": True, "conflict": False, "revision": content_revision(after)}
+    except (OSError, UnicodeError, ValueError, RuntimeError) as exc:
+        return {"dismissed": False, "conflict": False, "failed": [str(exc)]}
+    finally:
+        if pinned:
+            pin.__exit__(None, None, None)
 
 
 @contextmanager
@@ -270,9 +440,119 @@ def _write_receipt(path: Path, value: dict[str, Any], *, create: bool = False) -
             raise
 
 
+def _dismissal_receipts(
+    runtime_root: Path, *, workspace: str, vault: Path
+) -> tuple[list[tuple[Path, dict[str, Any]]], list[str]]:
+    """Read exact-scope queued-row removal intents; prepared ones need finishing."""
+    folder = _receipt_dir(runtime_root)
+    try:
+        if not _private_dir(folder, create=False):
+            return [], []
+    except (OSError, ValueError) as exc:
+        return [], [str(exc)]
+    receipts: list[tuple[Path, dict[str, Any]]] = []
+    errors: list[str] = []
+    requested_vault = vault.resolve()
+    for path in sorted(folder.glob(f"{DISMISS_PREFIX}*.json")):
+        try:
+            row = _load_receipt(path, runtime_root=runtime_root)
+            receipt_workspace = row.get("workspace")
+            vault_identity = row.get("vault_identity")
+            if not isinstance(receipt_workspace, str) or not receipt_workspace:
+                raise ValueError("queued-row removal workspace identity is invalid")
+            if not isinstance(vault_identity, str):
+                raise ValueError("queued-row removal vault identity is invalid")
+            receipt_vault = Path(vault_identity)
+            if (
+                not receipt_vault.is_absolute()
+                or str(receipt_vault.resolve()) != vault_identity
+            ):
+                raise ValueError("queued-row removal vault identity is not canonical")
+            if receipt_workspace != workspace or vault_identity != str(requested_vault):
+                continue
+            if (
+                set(row) != {
+                    "schema", "status", "workspace", "vault_identity", "operation_id",
+                    "row_id", "target", "before", "after", "before_revision",
+                    "after_revision", "history_at", "source_row",
+                }
+                or type(row.get("schema")) is not int
+                or row.get("schema") != 1
+                or row.get("status") not in {"prepared", "applied"}
+                or row.get("target") != "queue"
+                or not isinstance(row.get("operation_id"), str)
+                or not isinstance(row.get("row_id"), str)
+                or not isinstance(row.get("before"), str)
+                or not isinstance(row.get("after"), str)
+                or not isinstance(row.get("history_at"), str)
+                or not isinstance(row.get("source_row"), dict)
+                or content_revision(row["before"]) != row.get("before_revision")
+                or content_revision(row["after"]) != row.get("after_revision")
+            ):
+                raise ValueError("queued-row removal receipt is malformed")
+            try:
+                uuid.UUID(row["operation_id"])
+                datetime.fromisoformat(row["history_at"].replace("Z", "+00:00"))
+            except (TypeError, ValueError, AttributeError) as exc:
+                raise ValueError("queued-row removal identity or timestamp is invalid") from exc
+            lines = _queue_lines(row["before"])
+            indices = [
+                index for index, raw in enumerate(lines)
+                if hashlib.sha256(
+                    f"{workspace}\0{row['before_revision']}\0{index}\0{raw}".encode("utf-8")
+                ).hexdigest()[:24] == row["row_id"]
+            ]
+            if len(indices) != 1 or _parse_row(lines[indices[0]]) != row["source_row"]:
+                raise ValueError("queued-row removal identity does not match its before image")
+            expected_after = "".join(lines[:indices[0]] + lines[indices[0] + 1 :])
+            if expected_after != row["after"]:
+                raise ValueError("queued-row removal after image is invalid")
+            receipts.append((path, row))
+        except (OSError, UnicodeError, ValueError, TypeError, KeyError, RuntimeError, json.JSONDecodeError) as exc:
+            errors.append(f"{path.name}: {exc}")
+    return receipts, errors
+
+
+def _finish_row_dismissal(
+    path: Path, receipt: dict[str, Any], *, vault: Path
+) -> None:
+    """Finish one exact queued-row removal from its saved file images."""
+    queue = _queue(vault)
+    before = (True, receipt["before"])
+    after = (True, receipt["after"])
+    current = _safe_file(queue, required=True)
+    if current == before:
+        _atomic_file(queue, receipt["after"])
+    elif current != after:
+        raise ValueError("Memory Proposals changed after removal was prepared; refresh and review the row")
+    row = receipt["source_row"]
+    from ciao.memory_proposals import record_dismissal
+
+    record_dismissal(
+        queue,
+        text=row["text"],
+        kind="learnings",
+        via="pwa",
+        source=row["source"],
+        outcome="dismissed",
+        reason="removed this exact queued learning row",
+        operation_id=receipt["operation_id"],
+        decision_at=receipt["history_at"],
+        workspace_dir_fd=(
+            pinned_workspace[1] if (pinned_workspace := _PINNED_WORKSPACE.get()) else None
+        ),
+    )
+    receipt["status"] = "applied"
+    _write_receipt(path, receipt)
+
+
 def _load_receipt(path: Path, *, runtime_root: Path) -> dict[str, Any]:
     folder = _receipt_dir(runtime_root)
-    if path.parent.resolve() != folder.resolve() or not _private_dir(folder, create=False):
+    if (
+        path.parent.resolve() != folder.resolve()
+        or not path.name.startswith((RECEIPT_PREFIX, DISMISS_PREFIX))
+        or not _private_dir(folder, create=False)
+    ):
         raise ValueError("receipt is outside the private drain receipt directory")
     fd = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
     try:
@@ -615,7 +895,8 @@ def _read_receipt_set(
             if not receipt_vault.is_absolute() or str(receipt_vault.resolve()) != vault_identity:
                 raise ValueError("receipt vault identity is not canonical")
             _validate_receipt(receipt, vault=receipt_vault, workspace=receipt_workspace)
-            receipts.append((path, receipt))
+            if receipt_workspace == requested_workspace and vault_identity == str(requested_vault):
+                receipts.append((path, receipt))
         except (OSError, UnicodeError, ValueError, TypeError, KeyError, json.JSONDecodeError) as exc:
             # Preserve an identifiable damaged receipt's scope. An unreadable
             # receipt with no recoverable identity remains globally unknown.
@@ -656,19 +937,32 @@ def inspect(vault_root: Path, *, workspace: str, runtime_root: Path) -> dict[str
         "rows": [],
         "receipts": [],
         "applied_receipts": [],
+        "reverted_receipts": [],
+        "automatic_rows": 0,
         "failed": [],
         "unresolved": [],
     }
     try:
         _assert_workspace_paths(vault)
         queue_exists, queued = _safe_file(_queue(vault))
+        queue_raw_rows = _queue_lines(queued) if queue_exists else []
+        reverted_raw: set[str] = set()
         if queue_exists:
-            for raw in _queue_lines(queued):
+            for raw in queue_raw_rows:
                 row = _parse_row(raw)
                 if row is not None:
                     summary["rows"].append(row)
         receipts, errors = _read_receipt_set(runtime_root, workspace=workspace, vault=vault)
         summary["unresolved"].extend(errors)
+        dismissals, dismissal_errors = _dismissal_receipts(
+            runtime_root, workspace=workspace, vault=vault
+        )
+        summary["unresolved"].extend(dismissal_errors)
+        summary["unresolved"].extend(
+            f"{path.name}: queued-row removal needs finishing"
+            for path, receipt in dismissals
+            if receipt["status"] == "prepared"
+        )
         for path, receipt in receipts:
             if receipt.get("workspace") != workspace or receipt.get("vault_identity") != str(vault):
                 continue
@@ -681,18 +975,32 @@ def inspect(vault_root: Path, *, workspace: str, runtime_root: Path) -> dict[str
                 summary["unresolved"].append(f"{path.name}: transaction is {receipt['status']}")
             elif receipt["status"] == "applied":
                 summary["applied_receipts"].append(str(path))
-        summary["not_applicable"] = not summary["rows"] and not summary["unresolved"]
+            elif receipt["status"] == "reverted":
+                reverted_raw.update(row["raw"] for row in receipt["rows"])
+                summary["reverted_receipts"].append(str(path))
+        summary["automatic_rows"] = sum(
+            1 for raw in queue_raw_rows if _parse_row(raw) is not None and raw not in reverted_raw
+        )
+        summary["not_applicable"] = not summary["automatic_rows"] and not summary["unresolved"]
     except (OSError, UnicodeError, ValueError) as exc:
         summary["failed"].append(str(exc))
     return summary
 
 
-def _prepare_batch(vault: Path, *, workspace: str, queue_text: str, learning_exists: bool, learning_text: str) -> dict[str, Any] | None:
+def _prepare_batch(
+    vault: Path,
+    *,
+    workspace: str,
+    queue_text: str,
+    learning_exists: bool,
+    learning_text: str,
+    excluded_raw: frozenset[str] = frozenset(),
+) -> dict[str, Any] | None:
     lines = _queue_lines(queue_text)
     rows: list[dict[str, Any]] = []
     for index, raw in enumerate(lines):
         parsed = _parse_row(raw)
-        if parsed is None:
+        if parsed is None or raw in excluded_raw:
             continue
         rows.append({"ordinal": len(rows), "queue_index": index, "raw": raw, **parsed})
     if not rows:
@@ -737,6 +1045,19 @@ def _recover_locked(
     vault: Path, *, workspace: str, runtime_root: Path
 ) -> tuple[list[str], list[str]]:
     """Recover while the caller holds queue then Learnings locks."""
+    dismissals, dismissal_errors = _dismissal_receipts(
+        runtime_root, workspace=workspace, vault=vault
+    )
+    if dismissal_errors:
+        return dismissal_errors, []
+    pending_dismissals = [
+        path.name for path, receipt in dismissals if receipt["status"] == "prepared"
+    ]
+    if pending_dismissals:
+        return [
+            f"{name}: queued-row removal needs finishing before migration recovery"
+            for name in pending_dismissals
+        ], []
     receipts, errors = _read_receipt_set(runtime_root, workspace=workspace, vault=vault)
     if errors:
         return errors, []
@@ -825,7 +1146,15 @@ def drain(
                     receipts, receipt_errors = _read_receipt_set(
                         runtime_root, workspace=workspace, vault=vault
                     )
-                    unresolved = list(receipt_errors)
+                    dismissals, dismissal_errors = _dismissal_receipts(
+                        runtime_root, workspace=workspace, vault=vault
+                    )
+                    unresolved = [*receipt_errors, *dismissal_errors]
+                    unresolved.extend(
+                        f"{path.name}: queued-row removal needs finishing"
+                        for path, receipt in dismissals
+                        if receipt["status"] == "prepared"
+                    )
                     for path, existing in receipts:
                         if (
                             existing.get("workspace") == workspace
@@ -844,6 +1173,18 @@ def drain(
                             "failed": unresolved,
                             "unresolved": unresolved,
                         }
+                    # Undo is an operator decision. Keep those exact legacy
+                    # lines out of automatic startup/care runs even if an
+                    # unrelated queue edit changes the file revision later.
+                    # The manual --apply path remains an explicit retry.
+                    excluded_raw = frozenset(
+                        row["raw"]
+                        for _path, receipt in receipts
+                        if receipt.get("status") == "reverted"
+                        for row in receipt["rows"]
+                    )
+                else:
+                    excluded_raw = frozenset()
                 errors, recovered = _recover_locked(
                     vault, workspace=workspace, runtime_root=runtime_root
                 )
@@ -860,6 +1201,7 @@ def drain(
                     queue_text=queue_text,
                     learning_exists=learning_exists,
                     learning_text=learning_text,
+                    excluded_raw=excluded_raw,
                 )
                 rows = [_parse_row(row["raw"]) for row in receipt["rows"]] if receipt else []
                 if receipt is None:
@@ -880,6 +1222,29 @@ def drain(
             pin.__exit__(None, None, None)
 
 
+def drain_registered_workspaces(config: Any) -> dict[str, dict[str, Any]]:
+    """Run one fresh-only migration pass for every registered workspace."""
+    runtime_root = Path(config.state_path).parent
+    results: dict[str, dict[str, Any]] = {}
+    for workspace in config.workspace_names():
+        try:
+            results[workspace] = drain(
+                Path(config.workspace_vault_root(workspace)),
+                workspace=workspace,
+                runtime_root=runtime_root,
+                apply=True,
+                fresh_only=True,
+            )
+        except Exception as exc:
+            results[workspace] = {
+                "workspace": workspace,
+                "rows": [],
+                "receipts": [],
+                "failed": [str(exc)],
+            }
+    return results
+
+
 def revert(vault_root: Path, receipt_path: Path, *, workspace: str, runtime_root: Path, apply: bool = False) -> dict[str, Any]:
     """Revert one whole batch after checking both destination revisions."""
     vault = Path(vault_root).resolve()
@@ -893,6 +1258,7 @@ def revert(vault_root: Path, receipt_path: Path, *, workspace: str, runtime_root
         if not apply:
             receipt = _load_receipt(selected, runtime_root=runtime_root)
             _validate_receipt(receipt, vault=vault, workspace=workspace)
+            _check_revert_dismissals(receipt, vault=vault, workspace=workspace, runtime_root=runtime_root)
             if receipt["status"] != "applied":
                 raise ValueError("receipt is not in the applied state")
             _preflight_files(vault, receipt, forward=False)
@@ -911,6 +1277,7 @@ def revert(vault_root: Path, receipt_path: Path, *, workspace: str, runtime_root
                     return {"failed": errors, "reverted": False}
                 receipt = _load_receipt(selected, runtime_root=runtime_root)
                 _validate_receipt(receipt, vault=vault, workspace=workspace)
+                _check_revert_dismissals(receipt, vault=vault, workspace=workspace, runtime_root=runtime_root)
                 if receipt["status"] == "reverted":
                     return {"reverted": True, "already_reverted": True, "rows": len(receipt["rows"]), "failed": []}
                 if receipt["status"] != "applied":
@@ -931,3 +1298,15 @@ def revert(vault_root: Path, receipt_path: Path, *, workspace: str, runtime_root
     finally:
         if pin is not None and pinned:
             pin.__exit__(None, None, None)
+
+
+def _check_revert_dismissals(
+    receipt: dict[str, Any], *, vault: Path, workspace: str, runtime_root: Path
+) -> None:
+    dismissals, errors = _dismissal_receipts(
+        runtime_root, workspace=workspace, vault=vault
+    )
+    if errors:
+        raise ValueError("queued-row removal history needs review before revert")
+    if any(dismissal["status"] == "prepared" for _path, dismissal in dismissals):
+        raise ValueError("a queued-row removal needs finishing before reverting a batch")

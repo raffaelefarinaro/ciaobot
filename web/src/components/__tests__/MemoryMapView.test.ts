@@ -671,14 +671,18 @@ describe('MemoryMapView sections', () => {
   })
 
   it.each([
-    ['pending', 'older learning proposal(s) that need migration'],
-    ['blocked', 'unfinished receipt'],
+    ['pending', 'Ciaobot is moving'],
+    ['blocked', 'Ciaobot paused this learning migration'],
     ['unknown', 'could not safely check older learning proposals'],
+    ['completed', 'Older proposals have been moved into Learnings'],
   ] as const)('shows the %s migration status on To decide independently of update tasks', async (state, text) => {
     const queues = {
       personal: {
         state,
         rows: state === 'pending' ? 2 : 0,
+        ...(state === 'pending' ? {
+          pending_rows: [{ id: 'legacy-row-1', revision: 'queue-revision', text: 'Old lesson', source: '', request: '' }],
+        } : {}),
       },
     } as const
     useProposalsStore().legacyLearningQueues = queues
@@ -696,6 +700,10 @@ describe('MemoryMapView sections', () => {
     const { wrapper } = await mountSection('review')
 
     expect(wrapper.get('[role="status"]').text()).toContain(text)
+    if (state === 'pending') {
+      expect(wrapper.get('[role="status"]').text()).toContain('Old lesson')
+      expect(wrapper.get('[role="status"]').get('button').text()).toBe('Remove this row')
+    }
     const actions = wrapper.get('.mm-migration-notice-actions').findAll('a')
     expect(actions.map(action => action.attributes('href'))).toEqual(
       state === 'unknown' ? ['/settings/workspace'] : ['/', '/settings/workspace'],
@@ -711,6 +719,10 @@ describe('MemoryMapView sections', () => {
       expect(wrapper.get('[role="status"]').text()).toContain('preserve the link and its contents')
       expect(wrapper.get('[role="status"]').text()).toContain('guide a repair for you to review before authorizing')
       expect(wrapper.get('[role="status"]').text()).toContain('Migration checks never follow an external')
+    }
+    if (state === 'completed') {
+      expect(wrapper.get('[role="status"]').text()).toContain('removes the whole learning entry, not just the old suggestion')
+      expect(wrapper.get('[role="status"]').text()).toContain('broader removal needs your clear direction')
     }
     expect(apiGet).not.toHaveBeenCalledWith(expect.stringContaining('/api/update-tasks'))
     wrapper.unmount()
@@ -729,7 +741,7 @@ describe('MemoryMapView sections', () => {
 
     const { wrapper } = await mountSection('review')
 
-    expect(wrapper.get('[role="status"]').text()).toContain('older learning proposal')
+    expect(wrapper.get('[role="status"]').text()).toContain('Ciaobot is moving')
     useProjectStore().activeWorkspace = 'work'
     await nextTick()
     expect(wrapper.findAll('[role="status"]').some(el => el.text().includes('older learning proposal'))).toBe(false)
