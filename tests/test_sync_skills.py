@@ -560,6 +560,23 @@ def test_upgrade_prunes_managed_support_and_preserves_workspace_override(tmp_pat
     assert override.read_text(encoding="utf-8") == "# Workspace-owned support\n"
 
 
+def test_upgrade_prunes_legacy_memory_skill_and_preserves_capabilities_override(tmp_path: Path) -> None:
+    workspace = tmp_path / "workspace"
+    legacy = workspace / ".claude" / "skills" / "ciao-memory"
+    _write(legacy / "SKILL.md", "---\nname: ciao-memory\n---\n# Old memory entry\n")
+    (legacy / sync_skills.STOCK_SKILL_MARKER).touch()
+    override = workspace / "skills" / "ciao-capabilities" / "SKILL.md"
+    _write(override, "# Workspace-owned capabilities\n")
+
+    sync_skills.sync_workspace_skills(workspace, refresh_upstream=False)
+
+    installed_override = workspace / ".claude" / "skills" / "ciao-capabilities"
+    assert not legacy.exists()
+    assert is_link(installed_override)
+    assert installed_override.resolve() == override.parent.resolve()
+    assert override.read_text(encoding="utf-8") == "# Workspace-owned capabilities\n"
+
+
 def test_sync_ignores_skills_lock(tmp_path: Path) -> None:
     # skills-lock.json is now inert; sync must not touch .agents/skills for lock entries
     workspace = tmp_path / "workspace"
@@ -588,13 +605,14 @@ def test_sync_ignores_skills_lock(tmp_path: Path) -> None:
     assert result.upstream_pruned == 0
 
 
-def test_sync_installs_memory_skill_without_stock_agents(tmp_path: Path) -> None:
+def test_sync_installs_memory_guide_without_stock_agents(tmp_path: Path) -> None:
     workspace = tmp_path / "workspace"
     workspace.mkdir()
 
     result = sync_skills.sync_workspace_skills(workspace, refresh_upstream=False)
 
-    assert (workspace / ".claude" / "skills" / "ciao-memory" / "SKILL.md").is_file()
+    assert not (workspace / ".claude" / "skills" / "ciao-memory" / "SKILL.md").exists()
+    assert (workspace / ".claude" / "skills" / "ciao-capabilities" / "references" / "memory-operations" / "guide.md").is_file()
     assert result.stock_agents_installed == 0
     assert not list((workspace / ".claude" / "agents").glob("*.md"))
 
@@ -615,7 +633,7 @@ def test_sync_prunes_retired_memory_agent_on_upgrade(tmp_path: Path) -> None:
     assert not memory.exists()
     assert not sync_skills._stock_agent_marker(memory).exists()
     assert not (workspace / ".opencode" / "agents" / "memory.md").exists()
-    assert (workspace / ".claude" / "skills" / "ciao-memory" / "SKILL.md").exists()
+    assert not (workspace / ".claude" / "skills" / "ciao-memory" / "SKILL.md").exists()
 
 
 def test_stale_stock_agent_copy_is_pruned(tmp_path: Path) -> None:

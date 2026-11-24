@@ -92,6 +92,8 @@ SHIPPED_STOCK_COMMAND_DIGESTS: dict[str, frozenset[str]] = {
         "efcc5d781e3d4fb04657ba6505b833c56bb07851bac28d7d34f634a745fe7408",
     }),
     "remember.md": frozenset({
+        "bc5c473888f771508cf24092bc396d5ea8f2d4b9e159dc911c475bbee9c40097",
+        "468197c9052a2e866df53d55291ea25d787514f788137aca92aef28f9d6d1ab5",
         "11c15259ef073e84101bbe41d1dfa480cb625711551e1b2b1b25e04e3831a62b",
         "015aee7694fcd85eb27475e84b030c6f871c9da217f7bbaf04cd4caabf8770e0",
         "3d56ae540d634af504816743fd8725db5aa7cea152d29bcf0918c80fcb4ef94b",

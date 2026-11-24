@@ -23,16 +23,17 @@ def _capabilities() -> str:
     parts = [root.joinpath("SKILL.md").read_text(encoding="utf-8")]
     parts += [
         f.read_text(encoding="utf-8")
-        for f in sorted(root.joinpath("references").iterdir(), key=lambda f: f.name)
+        for f in sorted(root.joinpath("references").rglob("*.md"), key=lambda f: str(f))
     ]
     return "\n".join(parts)
 
 
 def test_new_vault_notes_require_frontmatter() -> None:
     text = _system_instructions()
-    assert "read `ciao-memory` for destinations, frontmatter and verification rules" in text
+    assert "Before durable writes or proposal curation, read `" in text
+    assert "; it covers destinations, frontmatter and verification rules" in text
     assert "preserve frontmatter on edits" in text
-    assert "stamps the frontmatter" in _stock("skills", "ciao-memory", "SKILL.md")
+    assert "stamps the frontmatter" in _stock("skills", "ciao-capabilities", "references", "memory-operations", "guide.md")
 
 
 def test_new_vault_notes_come_from_the_create_command() -> None:
@@ -42,7 +43,7 @@ def test_new_vault_notes_come_from_the_create_command() -> None:
 def test_rewrites_preserve_frontmatter() -> None:
     text = _system_instructions()
     assert "use managed verification for re-stamping" in text
-    memory = _stock("skills", "ciao-memory", "references", "writing.md")
+    memory = _stock("skills", "ciao-capabilities", "references", "memory-operations", "references", "writing.md")
     assert "preserve its frontmatter" in memory
     assert "Re-stamp only through a managed `note verify` still_valid/update verdict or `vault review keep`" in memory
 
@@ -53,10 +54,10 @@ def test_notes_are_typed_from_the_vocabularys_categories_block() -> None:
     A `type:` is only writable if the agent knows which list to read it comes
     from, and a category the owner added only reaches its own folder if the
     no-fit case is a question for the owner rather than a coined type. The
-    core points to ciao-memory; that skill points to the vocabulary block.
+    core points to the installed capabilities reference; that guide points to the vocabulary block.
     """
-    assert "Before durable writes or proposal curation, read `ciao-memory`" in _system_instructions()
-    text = _stock("skills", "ciao-memory", "SKILL.md")
+    assert "Before durable writes or proposal curation, read `" in _system_instructions()
+    text = _stock("skills", "ciao-capabilities", "references", "memory-operations", "guide.md")
     assert "**Categories** section of `<vault>/VOCABULARY.md`" in text
     assert "If no category fits, queue a new-category question" in text
 
@@ -66,7 +67,7 @@ def test_working_document_routing_is_always_loaded() -> None:
     assert "durable document" in text
     assert "active vault's `Workspace/`" in text
     assert "Search before creating a durable document" in text
-    assert "relative Markdown links, not wikilinks" in _stock("skills", "ciao-memory", "references", "writing.md")
+    assert "relative Markdown links, not wikilinks" in _stock("skills", "ciao-capabilities", "references", "memory-operations", "references", "writing.md")
     assert "Questions, discussions and exploratory feedback stay in the chat" in text
 
 
@@ -152,17 +153,17 @@ def test_category_fallback_is_one_rule_everywhere() -> None:
     assert "use the closest listed value" not in interrogation
     assert "new-category question" in interrogation
     assert "do not file it under the nearest one" in remember
-    assert "read `ciao-memory`" in _system_instructions()
-    assert "new-category question" in _stock("skills", "ciao-memory", "SKILL.md")
+    assert "read `" in _system_instructions() and "memory-operations/guide.md`" in _system_instructions()
+    assert "new-category question" in _stock("skills", "ciao-capabilities", "references", "memory-operations", "guide.md")
 
 
 def test_core_prompt_routes_facts_through_remember_not_entry_argv() -> None:
     text = _system_instructions()
     assert "`ciao memory update --region … --action … --entry …`" not in text
-    assert "read `ciao-memory`" in text
+    assert "memory-operations/guide.md`" in text
     assert "memory-proposal-add --text-file" in text
     assert "shell argument" in text
-    memory = _stock("skills", "ciao-memory", "references", "writing.md")
+    memory = _stock("skills", "ciao-capabilities", "references", "memory-operations", "references", "writing.md")
     assert "`--entry` argument must contain only text you wrote, never untrusted source text" in memory
 
 
@@ -185,7 +186,7 @@ def test_updated_rule_agrees_across_prompts() -> None:
     assert "refreshes `updated:` to today" not in _system_instructions()
     # One copy of the rule (#1462): the skill owns it, /remember points at it.
     assert "Leave the note's `updated:` alone on an ordinary save" in _stock(
-        "skills", "ciao-memory", "SKILL.md"
+        "skills", "ciao-capabilities", "references", "memory-operations", "guide.md"
     )
     assert '"Writing entity notes"' in _stock("commands", "remember.md")
 

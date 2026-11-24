@@ -2833,10 +2833,10 @@ def _stock(relative: str) -> str:
 
 
 def _care_references() -> str:
-    """Every curation reference file of the `ciao-memory` skill, concatenated (#1462)."""
+    """Every curation reference file of the durable-memory references, concatenated (#1462)."""
     from importlib import resources
 
-    refs = resources.files("ciao.stock").joinpath("skills", "ciao-memory", "references")
+    refs = resources.files("ciao.stock").joinpath("skills", "ciao-capabilities", "references", "memory-operations", "references")
     return "\n\n".join(
         item.read_text(encoding="utf-8")
         for item in sorted(refs.iterdir(), key=lambda i: i.name)
@@ -2896,7 +2896,7 @@ def test_the_schedule_verifies_stale_notes_through_the_managed_operation() -> No
         for entry in json.loads(_stock("schedules.json"))["schedules"]
         if entry["schedule_id"] == "system-memory-curation"
     )
-    reverify = _stock("skills/ciao-memory/references/curation-pass-3-reverify.md")
+    reverify = _stock("skills/ciao-capabilities/references/memory-operations/references/curation-pass-3-reverify.md")
     stale = reverify[reverify.index("## `stale_notes`") : reverify.index("## `stale_entry` items")]
     prompt = prompt + "\n\n" + reverify
 
@@ -2928,7 +2928,7 @@ def test_the_schedule_verifies_stale_notes_through_the_managed_operation() -> No
 def test_the_memory_skill_routes_note_verification_through_the_operation() -> None:
     """The skill is what a curation run loads for durable-vault guidance, so
     leaving the direct-edit instruction there would undo the schedule's own."""
-    skill = _stock("skills/ciao-memory/SKILL.md")
+    skill = _stock("skills/ciao-capabilities/references/memory-operations/guide.md")
 
     assert "ciao note verify --payload-file" in skill
     assert "managed operation" in skill
@@ -2938,7 +2938,7 @@ def test_the_memory_skill_routes_note_verification_through_the_operation() -> No
 
 
 def test_the_schedule_compares_a_stale_note_with_its_related_notes() -> None:
-    reverify = _stock("skills/ciao-memory/references/curation-pass-3-reverify.md")
+    reverify = _stock("skills/ciao-capabilities/references/memory-operations/references/curation-pass-3-reverify.md")
     stale = reverify[reverify.index("## `stale_notes`") : reverify.index("## `stale_entry` items")]
 
     assert "ciao note related" in stale
@@ -2981,15 +2981,15 @@ def test_a_note_verified_outside_the_worklist_is_not_planned(tmp_path: Path) -> 
 
 
 def test_the_memory_skill_points_at_note_related() -> None:
-    assert "ciao note related" in _stock("skills/ciao-memory/SKILL.md")
+    assert "ciao note related" in _stock("skills/ciao-capabilities/references/memory-operations/guide.md")
 
 
 def test_the_memory_skill_points_at_note_create() -> None:
-    assert "ciao note create" in _stock("skills/ciao-memory/SKILL.md")
+    assert "ciao note create" in _stock("skills/ciao-capabilities/references/memory-operations/guide.md")
 
 
 def test_the_memory_skill_did_not_grow() -> None:
-    skill = _stock("skills/ciao-memory/SKILL.md")
+    skill = _stock("skills/ciao-capabilities/references/memory-operations/guide.md")
 
     # 13400 since #2815: the correction, narrative and credential rules.
     assert len(skill.encode()) <= 13400
@@ -4255,7 +4255,7 @@ def test_the_care_prompt_proposes_observations_between_sections_4_and_5() -> Non
 
     assert "## 4b. Propose recurring observations" in prompt
     assert prompt.index("## 4. ") < prompt.index("## 4b. ") < prompt.index("## 5. ")
-    observations = _stock("skills/ciao-memory/references/curation-pass-4b-observations.md")
+    observations = _stock("skills/ciao-capabilities/references/memory-operations/references/curation-pass-4b-observations.md")
     assert "references/curation-pass-4b-observations.md" in prompt
     for command in ("ciao observation-propose", "ciao observation-merge", "ciao observation-prune"):
         assert command in observations

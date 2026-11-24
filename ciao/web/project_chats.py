@@ -6201,8 +6201,8 @@ class ProjectChatManager:
         fingerprint: list[str] = []
         for name, path in pairs:
             unavailable = bool(shared_brain.path_problem(self._config, path))
-            updated = "" if unavailable else (shared_brain.fetched_at(path) or "")[:10]
-            brains.append((name, path, unavailable, updated))
+            fetched = "" if unavailable else (shared_brain.fetched_at(path) or "")[:10]
+            brains.append((name, path, unavailable, fetched))
             fingerprint.append(f"{name}\0{path}\0{'unavailable' if unavailable else 'ok'}")
         return render_shared_brain_block(brains), "\n".join(fingerprint)
 

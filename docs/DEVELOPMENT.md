@@ -1786,9 +1786,9 @@ follow-up.
 
 ## Skills, subagents, and slash commands
 
-Packaged generic skills live in `ciao/stock/skills/` and are installed into every workspace's `.claude/skills/` by `ciao sync-skills` on startup. This includes Ciaobot-specific skills (`ciao-capabilities`, `ciao-memory`, `workspace-authoring`, …); Ciaobot troubleshooting is a reference under `ciao-capabilities`. In a **workspace**, user-owned skills live in `skills/`, project agents in `subagents/`, and slash commands in `commands/`; `ciao sync-skills` mirrors them into the generated `.claude/` directories. A workspace skill with the same name as a packaged one overrides it.
+Packaged generic skills live in `ciao/stock/skills/` and are installed into every workspace's `.claude/skills/` by `ciao sync-skills` on startup. This includes Ciaobot-specific skills (`ciao-capabilities`, `workspace-authoring`, …); Ciaobot troubleshooting is a reference under `ciao-capabilities`. In a **workspace**, user-owned skills live in `skills/`, project agents in `subagents/`, and slash commands in `commands/`; `ciao sync-skills` mirrors them into the generated `.claude/` directories. A workspace skill with the same name as a packaged one overrides it. A workspace-owned `ciao-capabilities` override replaces the installed skill and its references. Durable-memory procedures are loaded separately from the engine-managed package, so the override does not need to copy them.
 
-No subagents are packaged by default. Attended vault writes and proposal handling use `ciao-memory`; the Workspace care schedule carries the unattended lease, worklist, and approval rules and runs vault writes sequentially in its own chat. Reading tasks use the provider's own web-fetch. Startup sync prunes retired stock-managed `memory`, `researcher`, and `secretary` from generated Claude/OpenCode inventories; custom subagents and unmanaged agent files are left alone.
+No subagents are packaged by default. Attended vault writes and proposal handling use the durable-memory guide under `ciao-capabilities`; the Workspace care schedule carries the unattended lease, worklist, and approval rules and runs vault writes sequentially in its own chat. Reading tasks use the provider's own web-fetch. Startup sync prunes retired stock-managed `memory`, `researcher`, and `secretary` from generated Claude/OpenCode inventories; custom subagents and unmanaged agent files are left alone.
 
 ### Provider context and native memory
 
@@ -1800,6 +1800,77 @@ receive the same compact Ciaobot core, while their native
 The `AGENTS.md` guide loaders remain the only source of bounded memory.
 `memory_tool.py` prunes valid expired entries before provider startup and
 exposes `memory_status`/`memory_update` without creating a second memory store.
+
+#### Shared-brain recall acceptance (opt-in)
+
+Run this only against a disposable checkout of the candidate and a disposable
+workspace. Never restart or reconfigure the operator engine, reuse its runtime,
+or use a real workspace or vault. Give the candidate checkout its own approved
+HTTPS/SSH origin identity for the linked brain. Use a free port and keep setup,
+runtime data, memory index, and launch-agent export under one temporary root.
+For example, from a shell with the candidate checkout at `$CANDIDATE_CHECKOUT`:
+
+```bash
+TEST_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/ciao-brain-acceptance.XXXXXX")"
+python3 -m venv "$TEST_ROOT/venv"
+"$TEST_ROOT/venv/bin/python" -m pip install -e "$CANDIDATE_CHECKOUT"
+export CIAO_RUNTIME_ROOT="$TEST_ROOT/workspace/.runtime"
+export CIAO_MEMORY_DIR="$TEST_ROOT/memory"
+export CIAO_LAUNCH_AGENTS_DIR="$TEST_ROOT/LaunchAgents"
+"$TEST_ROOT/venv/bin/ciao" setup \
+  --workspace "$TEST_ROOT/workspace" --port 18543 \
+  --launch-agents-dir "$CIAO_LAUNCH_AGENTS_DIR"
+cd "$TEST_ROOT/workspace"
+"$TEST_ROOT/venv/bin/python" -c 'import json; from pathlib import Path; p = Path(".runtime/app_settings.json"); settings = json.loads(p.read_text()); settings["pwa_host"] = "127.0.0.1"; p.write_text(json.dumps(settings))'
+"$TEST_ROOT/venv/bin/ciao" run
+```
+
+Confirm the selected port is free first; substitute it in setup and use only
+the matching loopback URL. The app setting is required because the engine
+defaults to listening on every interface. `ciao setup` generates the separate
+PWA password; use it only for this session. Do not pass `--load-launchd`. Keep the provider
+CLIs' normal user authentication in place; do not copy credentials into the
+test workspace or its environment. Record the candidate SHA and host, and
+verify each configured CLI and ACP adapter version before testing.
+
+Create a disposable Git checkout linked in Settings as a shared brain named
+`team`, with `decisions/rollout.md` containing a newly generated random
+identifier. Commit the file, then remove any repository-local commit identity
+settings (`user.name`, `user.email`) before linking it; shared-brain checkouts
+reject repository settings outside the safe allowlist. Keep the identifier out
+of the question, the Ciaobot workspace/vault and any model-visible file or
+directory name. For each
+provider in `ciao/providers/acp/agents.py` (`CLAUDE`, `CODEX`, `OPENCODE`), use
+a new ordinary project chat with normal permissions and ask exactly: “What
+rollout identifier did the team choose, and where is that recorded?” Record a
+pass only when the final answer includes both the exact identifier and
+`team:decisions/rollout.md`; also record the provider's file-read/tool evidence
+when exposed. An answer without its source fails.
+
+Then use a fresh identifier in a fresh committed checkout and a new chat for
+each provider. Deny access to that file either with a verified OS-level read
+denial for the provider's effective OS identity, or by denying the provider's
+file-read request at its normal permission prompt. Verify the denial under
+that same effective identity or at that prompt before asking the same
+question. Restore ordinary permissions after the case. Pass only when the
+answer explicitly says it cannot access the source and gives neither the
+identifier nor an invented attribution. If the host cannot enforce and verify
+the denial, mark the case blocked; do not count a missing file or an unverified
+permission setting as a denial.
+
+Keep each provider to these two cases. Record one redacted row per case on the
+issue: candidate SHA, host/OS, provider and CLI version, ACP adapter/version,
+allow or deny result, exact attribution (or `none`), whether tool-read or
+denial evidence was observed, and a short failure/blocker reason. Do not post
+the identifier, prompts from real workspaces, credentials, or private paths.
+Remove the disposable engine, workspace, checkouts, and temporary identity
+afterward, and restore normal file permissions. Stop the foreground engine
+with Ctrl-C, verify `TEST_ROOT` is the acceptance temp directory, then remove
+that directory. Preserve
+`tests/test_chat_shared_brain.py::test_agent_request_carries_no_extra_directory`;
+the linked brain remains a file-tool recall path, not an additional provider
+directory. Unit coverage is a focused check, not a substitute for the three
+providers' allow and deny cases.
 
 Edit canonical sources, not the generated `.claude/` or `.agents/` dirs. Do not run `npx skills update` ad-hoc (it re-expands the lockfile and repopulates bloat).
 
