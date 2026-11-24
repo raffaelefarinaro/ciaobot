@@ -1813,6 +1813,7 @@ def test_workspace_save_retries_when_registry_changes_while_claims_wait(tmp_path
     from ciao import shared_brain
     from ciao.workspaces import workspace_registry_lock
 
+    monkeypatch.setattr(shared_brain, "schedule_update", lambda link, config: None)
     client, config, _pcm = _client(tmp_path)
     acme = _checkout(_away(tmp_path) / "acme", "https://github.com/acme/notes")
     other = _checkout(_away(tmp_path) / "other", "https://github.com/other/notes")
@@ -1856,7 +1857,8 @@ def test_workspace_save_retries_when_registry_changes_while_claims_wait(tmp_path
     assert {link.path for link in links} == {str(acme.resolve()), str(other.resolve())}
     refreshed_link = next(link for link in links if link.path == str(acme.resolve()))
     assert refreshed_link.lifetime_id != original_link.lifetime_id
-    assert claim_paths.count(str(acme.resolve())) >= 2
+    assert claim_paths.count(str(acme.resolve())) >= 1
+    assert claim_paths.count(str(other.resolve())) >= 2
     registry = json.loads((tmp_path / ".runtime" / "workspaces.json").read_text())
     saved_links = next(row for row in registry if row["name"] == "personal")["shared_brains"]
     assert next(link for link in saved_links if link["path"] == refreshed_link.path)["lifetime_id"] == refreshed_link.lifetime_id
