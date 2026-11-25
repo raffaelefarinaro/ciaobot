@@ -2019,8 +2019,8 @@ def test_archive_fences_queued_refresh_of_readable_link(tmp_path, monkeypatch, r
     config.persist_workspace_registry()
     runtime = config.state_path.parent
 
-    def refresh():
-        return fts_search.lookup_connected_entries(nested, "work", runtime, install, refresh=True, link=link)
+    def refresh(selected=link):
+        return fts_search.lookup_connected_entries(nested, "work", runtime, install, refresh=True, link=selected)
 
     if restore_before_release:
         refresh()
@@ -2075,7 +2075,11 @@ def test_archive_fences_queued_refresh_of_readable_link(tmp_path, monkeypatch, r
         with pytest.raises(fts_search.ConnectedWorkspaceChanged):
             refresh()
         assert client.post("/api/workspaces/archived/restore", json={"id": archive_id}).status_code == 200
-    assert [entry.title for entry in refresh()] == ["nextword"]
+    with pytest.raises(fts_search.ConnectedWorkspaceChanged):
+        refresh()
+    restored_link = config.workspaces["work"].shared_brains[0]
+    assert restored_link.lifetime_id != link.lifetime_id
+    assert [entry.title for entry in refresh(restored_link)] == ["nextword"]
 
 
 @pytest.mark.parametrize("change", ["archive-restore", "relink"])
