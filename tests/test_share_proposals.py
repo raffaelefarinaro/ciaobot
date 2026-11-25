@@ -929,7 +929,7 @@ def test_intake_uses_real_checkpoint_and_consent(linked, tmp_path, monkeypatch, 
     manager._save()
     se.checkpoint_completed_memory_pass(config, registry, workspace="home", pass_chat_id=chat.chat_id)
     relation = se.recover_memory_pass_source_relation(config, workspace="home", pass_chat_id=chat.chat_id)
-    if destination_kind == "collection":
+    if destination_kind in {"collection", "section"}:
         registry_lock = config.state_path.parent / "locks" / "workspaces-registry.lock"
         child = subprocess.Popen(
             [sys.executable, "-c", "import fcntl,sys; f=open(sys.argv[1], 'r+'); fcntl.flock(f, fcntl.LOCK_EX); print('ready', flush=True); sys.stdin.read()", str(registry_lock)],
@@ -1005,6 +1005,8 @@ def test_intake_uses_real_checkpoint_and_consent(linked, tmp_path, monkeypatch, 
         assert queue.read_text().count("[share ") == 1
     drafts = sp.draft_evidence_candidates(config, workspace="home", relation=relation)
     assert len(drafts) == 1 and isinstance(drafts[0], sp.ShareDraft)
+    queue = Path(config.workspace_vault_root("home")) / "Workspace" / "Memory-Proposals.md"
+    assert queue.read_text().count("[share ") == 1
     assert "Share this decision" in drafts[0].artifact["immutable"]["proposed"]
     assert "private reason" not in drafts[0].artifact["immutable"]["proposed"]
     if destination_kind == "section":
@@ -1016,6 +1018,7 @@ def test_intake_uses_real_checkpoint_and_consent(linked, tmp_path, monkeypatch, 
             b'```json\n{\n  "decision": "Share this decision"\n}\n```\n\n## Other\r\nKeep\r\n'
         )
     if destination_kind == "collection":
+        se.record_operator_decision(config, workspace="home", project_id=project.project_id, decision="Second candidate", reason="", effective_date="2026-11-22", session="operator")
         program = (
             "import sys; from ciao.config import CiaoConfig; from ciao import share_evidence; "
             "c=CiaoConfig.from_env({'CIAO_WORKSPACE':sys.argv[1], 'CIAO_RUNTIME_ROOT':sys.argv[2], 'PWA_AUTH_TOKEN':'test'}); "
@@ -1030,13 +1033,14 @@ def test_intake_uses_real_checkpoint_and_consent(linked, tmp_path, monkeypatch, 
             original_filer = sp._draft_share
 
             def paused_filer(*args, **kwargs):
-                os.write(ready_write, b"1")
-                os.read(resume_read, 1)
+                if b"Second candidate" in kwargs.get("proposed", b""):
+                    os.write(ready_write, b"1")
+                    os.read(resume_read, 1)
                 return original_filer(*args, **kwargs)
 
             sp._draft_share = paused_filer
             result = sp.draft_evidence_candidates(config, workspace="home", relation=relation)
-            os._exit(0 if len(result) == 1 and isinstance(result[0], sp.ShareDraft) else 1)
+            os._exit(0 if len(result) == 2 and all(isinstance(item, sp.ShareDraft) for item in result) else 1)
         os.close(ready_write)
         os.close(resume_read)
         assert select.select([ready_read], [], [], 10)[0]
@@ -1051,6 +1055,7 @@ def test_intake_uses_real_checkpoint_and_consent(linked, tmp_path, monkeypatch, 
             os.close(ready_read)
         _, status = os.waitpid(pid, 0)
         assert os.waitstatus_to_exitcode(status) == 0
+        assert queue.read_text().count("[share ") == 2
         stdout, stderr = child.communicate(timeout=10)
         assert child.returncode == 0, stderr
         assert stdout.strip() == "done"
