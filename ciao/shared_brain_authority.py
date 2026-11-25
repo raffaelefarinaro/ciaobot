@@ -1,0 +1,985 @@
+"""Steward authority for one shared brain.
+
+A shared brain is an immutable storage resource a workspace links. Reading it
+needs no new authority, but *changing what the team shares* does: a steward is
+the one principal allowed to transfer that role, and a recovery has to be
+possible when the incumbent is gone. This module is that authority core and
+nothing else: no route, no Settings surface, no publisher, no background job.
+It is built so the integration slice can supply a protected, conditional store
+and a trusted connector verifier without this file deciding where either lives.
+
+Five rules shape the design.
+
+* **A connector cannot grant authority by claiming it.** The engine never asks
+  a connector object whether its caller is an administrator. It asks the
+  injected :class:`PrincipalVerifier`, which the connector layer must implement
+  from a trusted backend. Connector attributes such as ``verified_admin`` are
+  ignored: a fake connector is an unverifiable connector, and an unverifiable
+  connector stays member-only.
+* **Authority is conditional.** Bootstrap creates a record only when none
+  exists, and every later transition replaces one only at the exact generation
+  it observed. Two callers that both saw generation *N* cannot both write
+  generation *N+1*: one wins and the other is stale. The store is a protocol,
+  so the integration owner chooses the protected location; the file-backed
+  implementation here shows the conditional and private shape through an
+  injected directory and an owner-only ``0600`` document.
+* **Acceptance is a second signature.** An administrator may nominate a
+  steward, but the nominated principal must accept the invitation itself. Every
+  challenge is bound to the brain, the storage identity, the actor, the
+  successor, the operation, the observed generation and a single-use nonce,
+  with a fixed expiry.
+* **Generation rotation is the fence.** Bootstrap starts at generation 1 and
+  every transfer or recovery increments it. Completing a transition spends its
+  own nonce, invalidates every unspent invitation for that brain, and makes the
+  previous generation immediately unusable. A role in one brain says nothing
+  about another brain.
+* **Ordinary folders are member-only in this slice.** A folder connector cannot
+  verify provider membership and has no conditional authority store, so
+  :class:`ConnectorKind.FOLDER` is refused for every privileged transition even
+  if a verifier were to answer with an administrator role. A generic Git remote
+  lands in the same place because its verifier returns ``None``.
+
+The clock, the store and the verifier are injected, which is how the tests
+reach expiry, races and failure modes without sleeping or touching live data.
+"""
+
+from __future__ import annotations
+
+import hashlib
+import json
+import os
+import secrets
+import threading
+import time
+from contextlib import contextmanager
+from dataclasses import dataclass, field
+from enum import Enum
+from pathlib import Path
+from typing import Any, Callable, Iterator, Protocol
+
+from ciao.os_support.files import open_fd, replace_file
+from ciao.os_support.locks import lock_exclusive, unlock
+from ciao.os_support.private import (
+    is_private,
+    is_private_descriptor_strict,
+    make_private_dir,
+    mkstemp_private,
+    open_private,
+)
+
+#: How long an invitation stays usable. Fixed, not sliding: accepting a
+#: challenge never extends it.
+CHALLENGE_TTL_S = 300.0
+
+#: Invitations retained in memory. They are short-lived and bounded so a caller
+#: that mints without accepting cannot grow the engine without limit.
+MAX_CHALLENGES = 128
+
+#: Transitions retained in the restricted in-process audit. The integration
+#: slice owns durable audit; this keeps the core reviewable and bounded.
+MAX_AUDIT_RECORDS = 256
+
+#: Nonce strength: 32 random bytes, URL-safe.
+_NONCE_BYTES = 32
+
+#: File-backed store schema. A document with any other schema is corrupt and is
+#: refused rather than read as an empty authority.
+SCHEMA_VERSION = 1
+
+
+class ConnectorKind(str, Enum):
+    """The storage kinds this core knows about."""
+
+    GIT = "git"
+    FOLDER = "folder"
+
+
+class Operation(str, Enum):
+    """The three transitions an authority record can admit."""
+
+    BOOTSTRAP = "bootstrap"
+    TRANSFER = "transfer"
+    RECOVERY = "recovery"
+
+
+class AuthorityError(Exception):
+    """A typed refusal from the authority core.
+
+    ``reason`` is a closed vocabulary so a route can map it to a status code
+    without parsing prose. Nothing here echoes a nonce, a principal's evidence
+    or a store path into the message.
+    """
+
+    def __init__(self, reason: str) -> None:
+        super().__init__(reason)
+        self.reason = reason
+
+
+class StoreError(Exception):
+    """The protected store could not be read, verified or written.
+
+    ``reason`` is one of ``corrupt``, ``unsafe_root``, ``unsafe_store``,
+    ``wrong_resource`` or ``invalid_record``. The authority engine turns every
+    one of them into ``store_unavailable``: a store it cannot prove is healthy
+    supplies no authority.
+    """
+
+    def __init__(self, reason: str) -> None:
+        super().__init__(reason)
+        self.reason = reason
+
+
+class BrainConnector(Protocol):
+    """The immutable resource a connector addresses.
+
+    A connector is a value, not a trust decision. The engine reads ``brain``,
+    ``storage`` and ``kind`` and asks the injected verifier for any role; a
+    method or flag on the connector itself is never authority.
+    """
+
+    brain: str
+    storage: str
+    kind: ConnectorKind
+
+
+@dataclass(frozen=True, slots=True)
+class BrainRef:
+    """A concrete :class:`BrainConnector` for callers and tests."""
+
+    brain: str
+    storage: str
+    kind: ConnectorKind = ConnectorKind.GIT
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.brain, str) or not self.brain.strip():
+            raise ValueError("a brain reference needs a non-empty brain identity")
+        if not isinstance(self.storage, str) or not self.storage.strip():
+            raise ValueError("a brain reference needs a non-empty storage identity")
+
+
+@dataclass(frozen=True, slots=True)
+class PrincipalEvidence:
+    """What a trusted connector backend observed about one principal.
+
+    ``member`` and ``admin`` describe the provider's answer *now*. ``revision``
+    and ``source`` name the observation so a caller can tell a fresh answer from
+    a copied one. ``brain`` and ``storage`` bind the answer to exactly one
+    resource: evidence for a repository is not evidence for a folder with the
+    same name.
+    """
+
+    principal: str
+    brain: str
+    storage: str
+    member: bool
+    admin: bool
+    revision: str
+    source: str
+    observed_at: float
+
+    @property
+    def role(self) -> str:
+        """``admin``, ``member`` or ``none`` for a record that grants neither."""
+        if self.admin:
+            return "admin"
+        if self.member:
+            return "member"
+        return "none"
+
+
+class PrincipalVerifier(Protocol):
+    """The trusted seam that answers "who is this, and what may they do here?".
+
+    ``None`` means the backend cannot verify the principal for this resource.
+    That is the correct answer for an ordinary folder, a generic Git remote and
+    any connector without an independently verified authority source, and the
+    engine treats it as member-only rather than as an error to route around.
+    """
+
+    def verify(self, connector: BrainConnector, principal: str) -> PrincipalEvidence | None:
+        ...
+
+
+@dataclass(frozen=True, slots=True)
+class AuthorityRecord:
+    """One brain's protected stewardship record.
+
+    The record names one steward at one generation. It carries no credential:
+    the steward's current role is re-verified on every privileged call through
+    :class:`PrincipalVerifier`, so a copied record alone cannot act.
+    """
+
+    brain: str
+    storage: str
+    connector: str
+    generation: int
+    steward: str
+    created_at: float
+    updated_at: float
+
+    def to_payload(self) -> dict[str, object]:
+        return {
+            "brain": self.brain,
+            "storage": self.storage,
+            "connector": self.connector,
+            "generation": self.generation,
+            "steward": self.steward,
+            "created_at": self.created_at,
+            "updated_at": self.updated_at,
+        }
+
+
+@dataclass(frozen=True, slots=True)
+class Challenge:
+    """A single-use invitation to complete one authority transition.
+
+    ``nonce`` is returned once and is excluded from the repr so a diagnostic
+    dump does not spread an invitation. Every other field is the binding the
+    acceptance must match: a challenge for another brain, storage resource,
+    actor, successor, operation or generation is not this challenge.
+    """
+
+    nonce: str = field(repr=False)
+    brain: str
+    storage: str
+    actor: str
+    successor: str
+    operation: Operation
+    generation: int
+    issued_at: float
+    expires_at: float
+
+
+@dataclass(frozen=True, slots=True)
+class AuthorityTransition:
+    """The restricted audit row a completed transition returns.
+
+    ``actor`` is the principal that began the transition (the administrator for
+    bootstrap and recovery, the incumbent for a transfer); ``previous_steward``
+    and ``steward`` are the old and new holders. It contains no nonce and no
+    evidence.
+    """
+
+    operation: Operation
+    brain: str
+    storage: str
+    actor: str
+    previous_steward: str | None
+    steward: str
+    previous_generation: int
+    generation: int
+    at: float
+
+
+@dataclass
+class _StoredChallenge:
+    """The retained half of a minted challenge: everything but the nonce."""
+
+    brain: str
+    storage: str
+    actor: str
+    successor: str
+    operation: Operation
+    generation: int
+    issued_at: float
+    expires_at: float
+    used: bool = False
+
+
+def _digest(value: str) -> str:
+    """SHA-256 of a UTF-8 string, as lowercase hex.
+
+    A caller can hand over a lone surrogate; that is not a nonce and names
+    nothing, so it raises ``ValueError`` for the claim path to turn into
+    ``challenge_unknown``.
+    """
+    return hashlib.sha256(value.encode("utf-8")).hexdigest()
+
+
+def _required_principal(value: str, reason: str) -> str:
+    """A non-empty principal, or ``AuthorityError(reason)``."""
+    if not isinstance(value, str) or not value.strip():
+        raise AuthorityError(reason)
+    return value
+
+
+class ConditionalAuthorityStore(Protocol):
+    """The protected storage contract.
+
+    The integration owner supplies the location. What this core requires is the
+    conditionality: a create succeeds only when no record exists, and a replace
+    succeeds only at the exact generation the caller observed. A store that
+    cannot promise those two answers cannot back a steward.
+    """
+
+    def load(self, brain: str) -> AuthorityRecord | None:
+        ...
+
+    def create_if_absent(self, record: AuthorityRecord) -> bool:
+        ...
+
+    def replace_if_generation(self, record: AuthorityRecord, expected_generation: int) -> bool:
+        ...
+
+
+def _record_from_payload(payload: dict[str, Any]) -> AuthorityRecord:
+    """A validated record, or ``StoreError("corrupt")``.
+
+    Every field is checked rather than coerced: a generation of ``True`` or a
+    non-string steward is not a record this module will act on.
+    """
+    try:
+        brain = payload["brain"]
+        storage = payload["storage"]
+        connector = payload["connector"]
+        generation = payload["generation"]
+        steward = payload["steward"]
+        created_at = payload["created_at"]
+        updated_at = payload["updated_at"]
+    except KeyError:
+        raise StoreError("corrupt") from None
+    if not all(isinstance(value, str) and value for value in (brain, storage, connector, steward)):
+        raise StoreError("corrupt")
+    if type(generation) is not int or generation < 1:
+        raise StoreError("corrupt")
+    if connector not in {kind.value for kind in ConnectorKind}:
+        raise StoreError("corrupt")
+    if not all(type(value) in (int, float) for value in (created_at, updated_at)):
+        raise StoreError("corrupt")
+    return AuthorityRecord(
+        brain=brain,
+        storage=storage,
+        connector=connector,
+        generation=generation,
+        steward=steward,
+        created_at=float(created_at),
+        updated_at=float(updated_at),
+    )
+
+
+class ProtectedAuthorityStore:
+    """A private, conditional, file-backed authority store.
+
+    ``root`` is injected. The directory is restricted to its owner (``0700``)
+    and the one document to ``0600``; it must sit outside member-editable notes,
+    but that placement is the integration owner's decision, not this module's.
+    Reads use an atomic replace's guarantee and verify the descriptor is private
+    before reading it. Writes take an interprocess ``flock`` as well as a
+    thread lock, re-read the document under the lock, apply one condition, and
+    replace it atomically. A missing document is "no authority yet"; a
+    malformed or unsafe one is refused.
+    """
+
+    def __init__(self, root: str | os.PathLike[str]) -> None:
+        self._root = Path(root)
+        if self._root.is_symlink():
+            raise StoreError("unsafe_root")
+        try:
+            self._root.mkdir(parents=True, exist_ok=True, mode=0o700)
+            make_private_dir(self._root)
+        except OSError:
+            raise StoreError("unsafe_root") from None
+        if not self._root.is_dir() or self._root.is_symlink() or not is_private(self._root):
+            raise StoreError("unsafe_root")
+        self._path = self._root / "authority.json"
+        self._lock_path = self._root / "authority.lock"
+        self._thread_lock = threading.Lock()
+
+    def load(self, brain: str) -> AuthorityRecord | None:
+        return self._read_records().get(brain)
+
+    def create_if_absent(self, record: AuthorityRecord) -> bool:
+        self._validate_new_record(record)
+        with self._locked():
+            records = self._read_records()
+            if record.brain in records:
+                return False
+            records[record.brain] = record
+            self._write_records(records)
+            return True
+
+    def replace_if_generation(
+        self, record: AuthorityRecord, expected_generation: int
+    ) -> bool:
+        self._validate_new_record(record)
+        with self._locked():
+            records = self._read_records()
+            current = records.get(record.brain)
+            if current is None:
+                return False
+            if current.storage != record.storage or current.connector != record.connector:
+                raise StoreError("wrong_resource")
+            if current.generation != expected_generation:
+                return False
+            if record.generation != expected_generation + 1:
+                raise StoreError("invalid_record")
+            records[record.brain] = record
+            self._write_records(records)
+            return True
+
+    def _validate_new_record(self, record: AuthorityRecord) -> None:
+        if (
+            not record.brain
+            or not record.storage
+            or not record.steward
+            or type(record.generation) is not int
+            or record.generation < 1
+            or record.connector not in {kind.value for kind in ConnectorKind}
+        ):
+            raise StoreError("invalid_record")
+
+    @contextmanager
+    def _locked(self) -> Iterator[None]:
+        with self._thread_lock:
+            try:
+                descriptor = open_private(
+                    self._lock_path,
+                    os.O_RDWR,
+                    0o600,
+                    follow_symlinks=False,
+                )
+            except OSError:
+                raise StoreError("unsafe_store") from None
+            try:
+                try:
+                    if not is_private_descriptor_strict(descriptor):
+                        raise StoreError("unsafe_store")
+                except OSError:
+                    raise StoreError("unsafe_store") from None
+                lock_exclusive(descriptor)
+                try:
+                    yield
+                finally:
+                    unlock(descriptor)
+            finally:
+                os.close(descriptor)
+
+    def _read_records(self) -> dict[str, AuthorityRecord]:
+        try:
+            descriptor = open_fd(self._path, os.O_RDONLY, follow_symlinks=False)
+        except FileNotFoundError:
+            return {}
+        except OSError:
+            raise StoreError("unsafe_store") from None
+        try:
+            try:
+                private = is_private_descriptor_strict(descriptor)
+            except OSError:
+                raise StoreError("unsafe_store") from None
+            if not private:
+                raise StoreError("unsafe_store")
+            handle = os.fdopen(descriptor, "r", encoding="utf-8")
+            descriptor = -1
+        except BaseException:
+            # Only the paths before ``fdopen`` still own the raw descriptor;
+            # once it owns the descriptor the ``with`` below closes it.
+            if descriptor >= 0:
+                try:
+                    os.close(descriptor)
+                except OSError:
+                    pass
+            raise
+        try:
+            with handle:
+                raw = handle.read()
+        except (OSError, UnicodeError):
+            raise StoreError("corrupt") from None
+        return self._decode(raw)
+
+    def _decode(self, raw: str) -> dict[str, AuthorityRecord]:
+        try:
+            document = json.loads(raw)
+        except (ValueError, UnicodeError, RecursionError):
+            raise StoreError("corrupt") from None
+        if (
+            not isinstance(document, dict)
+            or type(document.get("schema")) is not int
+            or document.get("schema") != SCHEMA_VERSION
+        ):
+            raise StoreError("corrupt")
+        brains = document.get("brains")
+        if not isinstance(brains, dict):
+            raise StoreError("corrupt")
+        records: dict[str, AuthorityRecord] = {}
+        for key, payload in brains.items():
+            if not isinstance(key, str) or not isinstance(payload, dict):
+                raise StoreError("corrupt")
+            record = _record_from_payload(payload)
+            if record.brain != key or record.brain in records:
+                raise StoreError("corrupt")
+            records[key] = record
+        return records
+
+    def _write_records(self, records: dict[str, AuthorityRecord]) -> None:
+        document = {
+            "schema": SCHEMA_VERSION,
+            "brains": {
+                brain: records[brain].to_payload() for brain in sorted(records)
+            },
+        }
+        text = json.dumps(document, indent=2, sort_keys=True) + "\n"
+        descriptor, temp_name = mkstemp_private(
+            dir=self._root, prefix=".authority.", suffix=".tmp"
+        )
+        temporary = Path(temp_name)
+        try:
+            with os.fdopen(descriptor, "w", encoding="utf-8", newline="") as handle:
+                handle.write(text)
+                handle.flush()
+                os.fsync(handle.fileno())
+            replace_file(temporary, self._path)
+        finally:
+            temporary.unlink(missing_ok=True)
+
+
+class StewardAuthority:
+    """Bootstrap, transfer and recovery for one protected authority store.
+
+    The engine holds only pending invitations and a bounded audit trail; the
+    durable record lives in the injected :class:`ConditionalAuthorityStore`.
+    Every privileged call re-verifies the acting principal through the injected
+    :class:`PrincipalVerifier`, so a stale record, a copied configuration or a
+    connector that merely claims administrator access cannot act.
+    """
+
+    def __init__(
+        self,
+        store: ConditionalAuthorityStore,
+        *,
+        verifier: PrincipalVerifier | None = None,
+        clock: Callable[[], float] = time.monotonic,
+        challenge_ttl_s: float = CHALLENGE_TTL_S,
+    ) -> None:
+        if challenge_ttl_s <= 0:
+            raise ValueError("a challenge needs a positive lifetime")
+        self._store = store
+        self._verifier = verifier
+        self._clock = clock
+        self._challenge_ttl_s = float(challenge_ttl_s)
+        self._lock = threading.Lock()
+        self._challenges: dict[str, _StoredChallenge] = {}
+        self._audit: list[AuthorityTransition] = []
+
+    # ── Transitions ──────────────────────────────────────────────────────
+
+    def begin_bootstrap(self, *, connector: BrainConnector, admin: str, successor: str) -> Challenge:
+        """Nominate the first steward through a verified connector administrator.
+
+        The record must not exist yet. The challenge is bound to the nominated
+        successor; the successor's own authenticated acceptance is what creates
+        the record.
+        """
+        self._kind(connector)
+        admin = _required_principal(admin, "not_member")
+        successor = _required_principal(successor, "invalid_successor")
+        self._verified(connector, admin, admin=True)
+        if self._record(connector) is not None:
+            raise AuthorityError("already_initialized")
+        return self._mint(
+            connector=connector,
+            actor=admin,
+            successor=successor,
+            operation=Operation.BOOTSTRAP,
+            generation=0,
+        )
+
+    def begin_transfer(
+        self,
+        *,
+        connector: BrainConnector,
+        incumbent: str,
+        successor: str,
+        expected_generation: int,
+    ) -> Challenge:
+        """The current steward nominates a successor.
+
+        Before the successor accepts, the incumbent still holds the record and
+        the successor holds nothing. The invitation is pinned to the generation
+        the incumbent observed, so a transfer that loses a race cannot replace a
+        newer steward.
+        """
+        self._kind(connector)
+        incumbent = _required_principal(incumbent, "not_member")
+        successor = _required_principal(successor, "invalid_successor")
+        if successor == incumbent:
+            raise AuthorityError("invalid_successor")
+        record = self._record_required(connector)
+        if record.generation != expected_generation:
+            raise AuthorityError("stale_generation")
+        if record.steward != incumbent:
+            raise AuthorityError("not_steward")
+        self._verified(connector, incumbent, admin=False)
+        return self._mint(
+            connector=connector,
+            actor=incumbent,
+            successor=successor,
+            operation=Operation.TRANSFER,
+            generation=record.generation,
+        )
+
+    def begin_recovery(
+        self,
+        *,
+        connector: BrainConnector,
+        admin: str,
+        successor: str,
+        expected_generation: int,
+        confirmed: bool,
+    ) -> Challenge:
+        """A verified connector administrator starts recovery for an absent incumbent.
+
+        Recovery does not need the incumbent's participation, which is the
+        point: it needs a fresh administrator verification, an explicit
+        confirmation, the exact current generation and the successor's own
+        acceptance.
+        """
+        self._kind(connector)
+        admin = _required_principal(admin, "not_member")
+        successor = _required_principal(successor, "invalid_successor")
+        if not confirmed:
+            raise AuthorityError("confirmation_required")
+        record = self._record_required(connector)
+        if record.generation != expected_generation:
+            raise AuthorityError("stale_generation")
+        if successor == record.steward:
+            raise AuthorityError("invalid_successor")
+        self._verified(connector, admin, admin=True)
+        return self._mint(
+            connector=connector,
+            actor=admin,
+            successor=successor,
+            operation=Operation.RECOVERY,
+            generation=record.generation,
+        )
+
+    def accept_bootstrap(
+        self, nonce: str, *, connector: BrainConnector, successor: str
+    ) -> AuthorityTransition:
+        """The nominated successor accepts, creating generation 1 only if absent."""
+        self._kind(connector)
+        successor = _required_principal(successor, "invalid_successor")
+        stored = self._claim(nonce, connector, Operation.BOOTSTRAP, successor)
+        self._verified(connector, successor, admin=False)
+        self._verified(connector, stored.actor, admin=True)
+        now = self._clock()
+        record = AuthorityRecord(
+            brain=connector.brain,
+            storage=connector.storage,
+            connector=self._kind(connector).value,
+            generation=1,
+            steward=successor,
+            created_at=now,
+            updated_at=now,
+        )
+        if not self._create(record):
+            raise AuthorityError("already_initialized")
+        self._invalidate_brain(connector.brain)
+        return self._record_transition(
+            operation=Operation.BOOTSTRAP,
+            connector=connector,
+            actor=stored.actor,
+            previous_steward=None,
+            steward=successor,
+            previous_generation=0,
+            generation=1,
+            at=now,
+        )
+
+    def accept_transfer(
+        self, nonce: str, *, connector: BrainConnector, successor: str
+    ) -> AuthorityTransition:
+        """The named successor accepts a transfer, rotating the generation."""
+        self._kind(connector)
+        successor = _required_principal(successor, "invalid_successor")
+        stored = self._claim(nonce, connector, Operation.TRANSFER, successor)
+        self._verified(connector, successor, admin=False)
+        record = self._record_required(connector)
+        if record.generation != stored.generation:
+            raise AuthorityError("stale_generation")
+        if record.steward != stored.actor:
+            raise AuthorityError("not_steward")
+        self._verified(connector, stored.actor, admin=False)
+        now = self._clock()
+        updated = AuthorityRecord(
+            brain=record.brain,
+            storage=record.storage,
+            connector=record.connector,
+            generation=record.generation + 1,
+            steward=successor,
+            created_at=record.created_at,
+            updated_at=now,
+        )
+        if not self._replace(updated, record.generation):
+            raise AuthorityError("stale_generation")
+        self._invalidate_brain(connector.brain)
+        return self._record_transition(
+            operation=Operation.TRANSFER,
+            connector=connector,
+            actor=stored.actor,
+            previous_steward=record.steward,
+            steward=successor,
+            previous_generation=record.generation,
+            generation=updated.generation,
+            at=now,
+        )
+
+    def accept_recovery(
+        self, nonce: str, *, connector: BrainConnector, successor: str
+    ) -> AuthorityTransition:
+        """The named successor accepts recovery, rotating the generation."""
+        self._kind(connector)
+        successor = _required_principal(successor, "invalid_successor")
+        stored = self._claim(nonce, connector, Operation.RECOVERY, successor)
+        self._verified(connector, successor, admin=False)
+        record = self._record_required(connector)
+        if record.generation != stored.generation:
+            raise AuthorityError("stale_generation")
+        self._verified(connector, stored.actor, admin=True)
+        now = self._clock()
+        updated = AuthorityRecord(
+            brain=record.brain,
+            storage=record.storage,
+            connector=record.connector,
+            generation=record.generation + 1,
+            steward=successor,
+            created_at=record.created_at,
+            updated_at=now,
+        )
+        if not self._replace(updated, record.generation):
+            raise AuthorityError("stale_generation")
+        self._invalidate_brain(connector.brain)
+        return self._record_transition(
+            operation=Operation.RECOVERY,
+            connector=connector,
+            actor=stored.actor,
+            previous_steward=record.steward,
+            steward=successor,
+            previous_generation=record.generation,
+            generation=updated.generation,
+            at=now,
+        )
+
+    # ── Authorization ────────────────────────────────────────────────────
+
+    def authorize_steward(
+        self,
+        *,
+        connector: BrainConnector,
+        principal: str,
+        generation: int | None = None,
+    ) -> AuthorityRecord:
+        """The current record, when ``principal`` is its steward right now.
+
+        ``generation`` is the fence a caller captured before a privileged
+        effect. Passing it makes a transfer or recovery that landed in between
+        a ``stale_generation`` refusal rather than an effect under old
+        authority. The provider entitlement is re-read on every call, so a
+        revoked or unverifiable connector supplies nothing even when the stored
+        record still names this principal.
+        """
+        self._kind(connector)
+        principal = _required_principal(principal, "not_member")
+        record = self._record_required(connector)
+        if generation is not None and record.generation != generation:
+            raise AuthorityError("stale_generation")
+        if record.steward != principal:
+            raise AuthorityError("not_steward")
+        self._verified(connector, principal, admin=False)
+        return record
+
+    def audit_trail(self) -> tuple[AuthorityTransition, ...]:
+        """The bounded in-process audit, oldest first. Integration owns durable audit."""
+        with self._lock:
+            return tuple(self._audit)
+
+    # ── Internals ────────────────────────────────────────────────────────
+
+    def _kind(self, connector: BrainConnector) -> ConnectorKind:
+        try:
+            kind = ConnectorKind(connector.kind)
+        except (TypeError, ValueError):
+            raise AuthorityError("member_only") from None
+        if not isinstance(connector.brain, str) or not connector.brain.strip():
+            raise AuthorityError("member_only")
+        if not isinstance(connector.storage, str) or not connector.storage.strip():
+            raise AuthorityError("member_only")
+        return kind
+
+    def _verified(
+        self,
+        connector: BrainConnector,
+        principal: str,
+        *,
+        admin: bool,
+    ) -> PrincipalEvidence:
+        """Evidence for ``principal`` at ``connector``, or a typed refusal.
+
+        A folder, a missing verifier and any unverified answer are all
+        ``member_only``: an unverifiable connector keeps the member surface and
+        never gains a privileged one.
+        """
+        if self._kind(connector) is ConnectorKind.FOLDER:
+            raise AuthorityError("member_only")
+        if self._verifier is None:
+            raise AuthorityError("member_only")
+        evidence = self._verifier.verify(connector, principal)
+        if evidence is None:
+            raise AuthorityError("member_only")
+        if evidence.brain != connector.brain or evidence.storage != connector.storage:
+            raise AuthorityError("wrong_resource")
+        if evidence.principal != principal:
+            raise AuthorityError("wrong_principal")
+        if not evidence.revision.strip() or not evidence.source.strip():
+            raise AuthorityError("member_only")
+        if not (evidence.member or evidence.admin):
+            raise AuthorityError("not_member")
+        if admin and not evidence.admin:
+            raise AuthorityError("not_admin")
+        return evidence
+
+    def _record(self, connector: BrainConnector) -> AuthorityRecord | None:
+        try:
+            return self._store.load(connector.brain)
+        except StoreError as exc:
+            raise AuthorityError("store_unavailable") from exc
+
+    def _record_required(self, connector: BrainConnector) -> AuthorityRecord:
+        record = self._record(connector)
+        if record is None:
+            raise AuthorityError("not_initialized")
+        if record.storage != connector.storage or record.connector != self._kind(connector).value:
+            raise AuthorityError("wrong_resource")
+        return record
+
+    def _create(self, record: AuthorityRecord) -> bool:
+        try:
+            return self._store.create_if_absent(record)
+        except StoreError as exc:
+            raise AuthorityError("store_unavailable") from exc
+
+    def _replace(self, record: AuthorityRecord, expected_generation: int) -> bool:
+        try:
+            return self._store.replace_if_generation(record, expected_generation)
+        except StoreError as exc:
+            raise AuthorityError("store_unavailable") from exc
+
+    def _mint(
+        self,
+        *,
+        connector: BrainConnector,
+        actor: str,
+        successor: str,
+        operation: Operation,
+        generation: int,
+    ) -> Challenge:
+        now = self._clock()
+        nonce = secrets.token_urlsafe(_NONCE_BYTES)
+        digest = _digest(nonce)
+        stored = _StoredChallenge(
+            brain=connector.brain,
+            storage=connector.storage,
+            actor=actor,
+            successor=successor,
+            operation=operation,
+            generation=generation,
+            issued_at=now,
+            expires_at=now + self._challenge_ttl_s,
+        )
+        with self._lock:
+            self._make_room_locked(now)
+            self._challenges[digest] = stored
+        return Challenge(
+            nonce=nonce,
+            brain=stored.brain,
+            storage=stored.storage,
+            actor=stored.actor,
+            successor=stored.successor,
+            operation=stored.operation,
+            generation=stored.generation,
+            issued_at=stored.issued_at,
+            expires_at=stored.expires_at,
+        )
+
+    def _claim(
+        self,
+        nonce: str,
+        connector: BrainConnector,
+        operation: Operation,
+        successor: str,
+    ) -> _StoredChallenge:
+        """Check every binding and spend the nonce in one locked step."""
+        digest: str | None
+        try:
+            digest = _digest(nonce) if isinstance(nonce, str) and nonce else None
+        except (UnicodeEncodeError, AttributeError):
+            digest = None
+        now = self._clock()
+        with self._lock:
+            if digest is None:
+                raise AuthorityError("challenge_unknown")
+            stored = self._challenges.get(digest)
+            if stored is None:
+                raise AuthorityError("challenge_unknown")
+            if now >= stored.expires_at:
+                del self._challenges[digest]
+                raise AuthorityError("challenge_expired")
+            if stored.used:
+                raise AuthorityError("challenge_used")
+            if stored.brain != connector.brain or stored.storage != connector.storage:
+                raise AuthorityError("challenge_wrong_resource")
+            if stored.operation is not operation:
+                raise AuthorityError("challenge_wrong_operation")
+            if stored.successor != successor:
+                raise AuthorityError("successor_mismatch")
+            stored.used = True
+            return stored
+
+    def _invalidate_brain(self, brain: str) -> None:
+        """Drop every unspent invitation for ``brain``; a spent one stays spent."""
+        with self._lock:
+            for digest, stored in list(self._challenges.items()):
+                if stored.brain == brain and not stored.used:
+                    del self._challenges[digest]
+
+    def _make_room_locked(self, now: float) -> None:
+        """Keep the pending invitation map bounded without losing a fresh one."""
+        if len(self._challenges) < MAX_CHALLENGES:
+            return
+        for digest, stored in list(self._challenges.items()):
+            if stored.used or now >= stored.expires_at:
+                del self._challenges[digest]
+        while len(self._challenges) >= MAX_CHALLENGES:
+            oldest = min(
+                self._challenges,
+                key=lambda digest: self._challenges[digest].issued_at,
+            )
+            del self._challenges[oldest]
+
+    def _record_transition(
+        self,
+        *,
+        operation: Operation,
+        connector: BrainConnector,
+        actor: str,
+        previous_steward: str | None,
+        steward: str,
+        previous_generation: int,
+        generation: int,
+        at: float,
+    ) -> AuthorityTransition:
+        transition = AuthorityTransition(
+            operation=operation,
+            brain=connector.brain,
+            storage=connector.storage,
+            actor=actor,
+            previous_steward=previous_steward,
+            steward=steward,
+            previous_generation=previous_generation,
+            generation=generation,
+            at=at,
+        )
+        with self._lock:
+            self._audit.append(transition)
+            if len(self._audit) > MAX_AUDIT_RECORDS:
+                del self._audit[0]
+        return transition
