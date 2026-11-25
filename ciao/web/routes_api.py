@@ -6356,14 +6356,17 @@ async def setup_finish_endpoint(request: Request) -> JSONResponse:
     resolved_workspace = Path(workspace).expanduser().resolve()
     vault_root_arg = str(body.get("vault_root", "")).strip() or None
     notes_folder = str(body.get("notes_folder", "")).strip()
+    notes_identity = None
     if notes_folder:
         try:
             notes = validate_external_setup_vault(resolved_workspace, notes_folder)
             if str(notes) != str(body.get("notes_resolved", "")):
                 raise ValueError("notes folder changed since inspection; inspect it again")
             vault_root_arg = str(notes)
+            notes_stat = notes.stat()
+            notes_identity = (notes_stat.st_dev, notes_stat.st_ino)
             vault_mode = "existing"
-        except ValueError as exc:
+        except (OSError, ValueError) as exc:
             return JSONResponse({"error": str(exc)}, status_code=400)
 
     # Read-only preflight: the same selection inspection reported. An ambiguous
@@ -6389,6 +6392,7 @@ async def setup_finish_endpoint(request: Request) -> JSONResponse:
         "port": port,
         "_vault_selection": selection,
         "_adopt_exact_vault": bool(notes_folder),
+        "_external_identity": notes_identity,
     }
     setup_kwargs["python_path"] = str(body.get("python", "")).strip() or None
     setup_kwargs["launch_agents_dir"] = str(body.get("launch_agents_dir", "")).strip() or None

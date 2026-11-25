@@ -5496,7 +5496,38 @@ def test_setup_cli_accepts_existing_separate_notes_without_git(tmp_path, monkeyp
     assert result == 0
     assert (notes / "idea.md").read_text(encoding="utf-8") == "private"
     assert not (notes / ".git").exists()
+    assert sorted(path.name for path in notes.iterdir()) == ["idea.md", "nested"]
     registry = json.loads((workspace / ".runtime" / "workspaces.json").read_text())
     assert registry[0]["vault_root"] == str(notes.resolve())
     assert len(registry) == 1
     assert str(notes.resolve()) in capsys.readouterr().out
+
+
+@pytest.mark.parametrize("replace", [False, True])
+def test_setup_cli_does_not_recreate_disappeared_notes(tmp_path, monkeypatch, replace):
+    from ciao import cli
+
+    workspace = tmp_path / "engine"
+    notes = tmp_path / "notes"
+    notes.mkdir()
+    (notes / "existing.md").write_text("private", encoding="utf-8")
+    moved = tmp_path / "moved-notes"
+    original = cli._write_if_missing
+
+    def remove_notes_during_setup(path, text):
+        if not moved.exists():
+            notes.rename(moved)
+            if replace:
+                notes.mkdir()
+        return original(path, text)
+
+    monkeypatch.setattr(cli, "_write_if_missing", remove_notes_during_setup)
+    result = cli.main(["setup", "--workspace", str(workspace), "--notes-folder", str(notes),
+        "--auth-token", "password", "--launch-agents-dir", str(tmp_path / "agents"),
+        "--app-dir", str(tmp_path / "apps")])
+    assert result != 0
+    assert notes.exists() == replace
+    if replace:
+        assert not list(notes.iterdir())
+    assert moved.is_dir()
+    assert (moved / "existing.md").read_text(encoding="utf-8") == "private"

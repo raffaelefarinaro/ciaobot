@@ -1200,6 +1200,15 @@ def validate_external_setup_vault(workspace: Path | str, vault: Path | str) -> P
     return notes
 
 
+def _check_external_setup_identity(path: Path, expected: tuple[int, int] | None) -> None:
+    try:
+        current = path.stat()
+    except OSError as exc:
+        raise ValueError(f"notes folder is unavailable: {exc}") from exc
+    if expected is None or (current.st_dev, current.st_ino) != expected:
+        raise ValueError("notes folder changed during setup; inspect it again")
+
+
 def select_setup_vault(
     workspace: Path | str,
     *,
@@ -1316,6 +1325,7 @@ def setup_workspace(
     sync_failures: list[str] | None = None,
     _vault_selection: SetupVaultSelection | None = None,
     _adopt_exact_vault: bool = False,
+    _external_identity: tuple[int, int] | None = None,
 ) -> list[Path]:
     requested_name = (workspace_name or "").strip()
     if workspace_name is not None and not _WORKSPACE_NAME_RE.fullmatch(
@@ -1403,6 +1413,9 @@ def setup_workspace(
 
     if _adopt_exact_vault:
         validate_external_setup_vault(root, selection.vault_path)
+        if initialize_git:
+            raise ValueError("separate notes setup cannot initialize Git history")
+        _check_external_setup_identity(selection.vault_path, _external_identity)
 
     from ciao.onboarding import ensure_receipt, read_receipt
     from ciao.setup_marker import is_set_up_workspace
@@ -1720,6 +1733,9 @@ def setup_workspace(
         written.append(workspaces_registry)
 
     for _, scaffold_vault_path in scaffold_vaults:
+        if _adopt_exact_vault:
+            # Setup never creates inside an externally managed notes root.
+            continue
         _write_if_missing(
             scaffold_vault_path / "MEMORY.md",
             "# Memory\n\nDurable workspace memory lives here.\n",
@@ -1831,7 +1847,10 @@ def setup_workspace(
     # A vault outside the workspace (existing notes folder) gets its own
     # repo. Runs after the workspace init so the default nested vault is
     # never double-initialized.
-    ensure_vault_git(vault_path, initialize_if_missing=initialize_git)
+    if _adopt_exact_vault:
+        _check_external_setup_identity(vault_path, _external_identity)
+    else:
+        ensure_vault_git(vault_path, initialize_if_missing=initialize_git)
 
     return written
 
@@ -1944,12 +1963,14 @@ def _setup_command(args: argparse.Namespace) -> int:
     sync_failures: list[str] = []
     try:
         notes = validate_external_setup_vault(root, args.notes_folder) if args.notes_folder else None
+        notes_stat = notes.stat() if notes else None
         written = setup_workspace(
             args.workspace,
             auth_token=args.auth_token,
             vault_root=notes,
             vault_mode="existing" if notes else "scratch",
             _adopt_exact_vault=bool(notes),
+            _external_identity=(notes_stat.st_dev, notes_stat.st_ino) if notes_stat else None,
             workspace_name=args.workspace_name,
             python_path=args.python,
             port=args.port,
@@ -1959,7 +1980,7 @@ def _setup_command(args: argparse.Namespace) -> int:
             initialize_git=args.initialize_git,
             sync_failures=sync_failures,
         )
-    except (RuntimeError, ValueError) as exc:
+    except (OSError, RuntimeError, ValueError) as exc:
         print(f"Error: {exc}", file=sys.stderr)
         return 1
     for path in written:
