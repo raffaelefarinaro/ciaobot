@@ -38,11 +38,14 @@ is prose for people; prose is never interpreted as authority::
     ```
 
 The guide file is bounded before it is read (:data:`MAX_GUIDE_BYTES`), every
-type entry is bounded and validated, and one malformed entry is excluded
-instead of making its valid neighbours unusable. A malformed guide as a whole
-(no fence, two fences, broken JSON, an unsupported version, no usable types)
-is returned as an unusable :class:`GuideLoad` so the caller defers publication
-for fresh review.
+type entry is bounded and validated, and a single malformed entry fails the
+whole guide closed: a guide is either wholly reviewable or unusable, never a
+mix of trusted and dropped type entries. A malformed guide (no fence, two
+fences, broken JSON, an unsupported version, no types, any invalid entry) is
+returned as an unusable :class:`GuideLoad` so the caller defers publication for
+fresh review. Paths, headings and free text must also be encodable as UTF-8:
+an escaped lone surrogate (``"\\ud800"``) cannot become a filesystem path or be
+rendered, so it is malformed rather than accepted or silently replaced.
 
 A guide read is pinned to the brain's identity, the declared guide version and
 the digest of the exact bytes. :func:`resolve_destination` refuses a resolution
@@ -53,6 +56,21 @@ guide and the consent must agree on the type, destination kind, exact relative
 path, section and operation before a destination resolves. A change of kind,
 path, section or operation is ``outside_consent``; a guide for one brain cannot
 use another brain's consent (``consent_brain_mismatch``).
+
+Integration gates this module does not own, kept explicit for the #3615
+persistence and route layer:
+
+* consent is persisted per workspace, brain and link lifetime; unlink/relink,
+  archive restore and registry import convey no grant;
+* :func:`resolve_for_publication` requires the stored pin, so a publication
+  cannot skip guide revalidation; first-time review uses
+  :func:`resolve_destination`, then persists the returned pin and the link
+  lifetime;
+* the writer re-reads the guide and validates the destination through a
+  symlink-safe descriptor immediately before its final write; this module
+  reads safely but performs no write;
+* Settings owns the authenticated operator action, exact permission preview,
+  revoke and the Review default.
 
 This module is deliberately free of Git, the workspace registry, the web layer
 and mutable module state. The caller supplies a root path, a brain identity and
@@ -105,7 +123,6 @@ ResolutionStatus = Literal[
     "guide_unavailable",
     "guide_changed",
     "unknown_type",
-    "excluded_type",
     "not_consented",
     "consent_brain_mismatch",
     "outside_consent",
@@ -138,14 +155,6 @@ class GuidePin:
 
 
 @dataclass(frozen=True, slots=True)
-class ExcludedEntry:
-    """One type entry dropped from the guide because it did not validate."""
-
-    name: str
-    reason: str
-
-
-@dataclass(frozen=True, slots=True)
 class Destination:
     """A typed place a note type may go.
 
@@ -171,18 +180,13 @@ class NoteType:
 
 @dataclass(frozen=True, slots=True)
 class ContentGuide:
-    """A parsed, bounded guide plus everything excluded while parsing it."""
+    """A parsed, bounded guide whose complete type map has been reviewed."""
 
     pin: GuidePin
     text: str
     scope: str
     exclusions: tuple[str, ...]
     types: Mapping[str, NoteType]
-    excluded: tuple[ExcludedEntry, ...] = ()
-
-    def exclusion_for(self, name: str) -> ExcludedEntry | None:
-        """The excluded entry for ``name``, or None when it was never listed."""
-        return next((entry for entry in self.excluded if entry.name == name), None)
 
 
 @dataclass(frozen=True, slots=True)
@@ -299,6 +303,20 @@ def _control_free(value: str, *, allow_layout: bool) -> bool:
     return True
 
 
+def _encodable(value: str) -> bool:
+    """Whether ``value`` can become UTF-8 bytes without replacement or error.
+
+    JSON permits an escaped lone surrogate such as ``"\\ud800"``, which Python
+    decodes into a ``str`` that cannot be encoded or written to a filesystem
+    path. The guide is shared data, so it is refused rather than repaired.
+    """
+    try:
+        value.encode("utf-8", "strict")
+    except UnicodeEncodeError:
+        return False
+    return True
+
+
 def _identity_problem(value: object) -> str:
     if not isinstance(value, str) or not value:
         return "the brain identity is empty"
@@ -308,6 +326,8 @@ def _identity_problem(value: object) -> str:
         return f"the brain identity exceeds {MAX_IDENTITY_CHARS} characters"
     if not _control_free(value, allow_layout=False):
         return "the brain identity contains a control character"
+    if not _encodable(value):
+        return "the brain identity contains a character that cannot be encoded as UTF-8"
     return ""
 
 
@@ -321,6 +341,8 @@ def _relative_parts(value: object, *, suffix: str) -> tuple[tuple[str, ...], str
         return (), "the path must be repository-relative, not absolute"
     if not _control_free(value, allow_layout=False):
         return (), "the path contains a control character"
+    if not _encodable(value):
+        return (), "the path contains a character that cannot be encoded as UTF-8"
     parts = tuple(value.split("/"))
     if len(parts) > MAX_PATH_DEPTH:
         return (), "the path is nested too deeply"
@@ -351,6 +373,8 @@ def _heading_problem(value: object) -> str:
         return f"the section heading exceeds {MAX_SECTION_CHARS} characters"
     if value.startswith("#") or not _control_free(value, allow_layout=False):
         return "the section heading starts with '#' or contains a control character"
+    if not _encodable(value):
+        return "the section heading contains a character that cannot be encoded as UTF-8"
     return ""
 
 
@@ -361,6 +385,8 @@ def _prose_problem(value: object, *, limit: int, label: str) -> str:
         return f"{label} exceeds {limit} characters"
     if not _control_free(value, allow_layout=True):
         return f"{label} contains a control character"
+    if not _encodable(value):
+        return f"{label} contains a character that cannot be encoded as UTF-8"
     return ""
 
 
@@ -373,7 +399,7 @@ def _type_name_ok(value: object) -> bool:
 
 
 def _note_type(name: str, entry: object) -> tuple[NoteType | None, str]:
-    """One type entry, or the reason it is excluded from the guide."""
+    """One type entry, or the reason it makes the whole guide malformed."""
     if not _type_name_ok(name):
         return None, "the type name must use lowercase letters, digits and single dashes"
     if not isinstance(entry, dict):
@@ -411,6 +437,8 @@ def _note_type(name: str, entry: object) -> tuple[NoteType | None, str]:
         return None, f"example exceeds {MAX_EXAMPLE_CHARS} characters"
     if not _control_free(example_raw, allow_layout=True):
         return None, "example contains a control character"
+    if not _encodable(example_raw):
+        return None, "example contains a character that cannot be encoded as UTF-8"
     destination = Destination(
         kind=kind,
         path="/".join(parts),
@@ -465,19 +493,17 @@ def _parse_document(
         return GuideLoad("malformed", reason="types must be an object")
     if len(types_raw) > MAX_TYPES:
         return GuideLoad("malformed", reason=f"the guide lists more than {MAX_TYPES} note types")
+    if not types_raw:
+        return GuideLoad("malformed", reason="the guide lists no note types")
     valid: dict[str, NoteType] = {}
-    excluded: list[ExcludedEntry] = []
     for name, entry in cast(dict[str, object], types_raw).items():
         note_type, reason = _note_type(name, entry)
         if note_type is None:
-            excluded.append(ExcludedEntry(name=_label(name), reason=reason))
-            continue
+            return GuideLoad(
+                "malformed",
+                reason=f"the guide's {_label(name)!r} note type is malformed: {reason}",
+            )
         valid[name] = note_type
-    if not valid:
-        return GuideLoad(
-            "malformed",
-            reason="the guide has no usable note types; every entry was excluded",
-        )
     pin = GuidePin(
         brain_identity=brain_identity,
         version=GUIDE_VERSION,
@@ -491,7 +517,6 @@ def _parse_document(
             scope=scope,
             exclusions=tuple(exclusions),
             types=MappingProxyType(valid),
-            excluded=tuple(excluded),
         ),
     )
 
@@ -499,9 +524,9 @@ def _parse_document(
 def parse_guide(raw: bytes, *, brain_identity: str) -> GuideLoad:
     """Parse bounded guide bytes and pin them to ``brain_identity``.
 
-    A malformed entry is excluded; a malformed guide returns an unusable load.
-    The caller must have bounded ``raw`` already; this function re-checks it so
-    a direct caller cannot bypass the limit.
+    Any malformed type entry fails the whole guide closed; a partially trusted
+    map is never returned. The caller must have bounded ``raw`` already; this
+    function re-checks it so a direct caller cannot bypass the limit.
     """
     identity_problem = _identity_problem(brain_identity)
     if identity_problem:
@@ -633,8 +658,10 @@ def resolve_destination(
 
     ``pinned`` is the guide pin stored in the private link policy. When given,
     any identity, version or byte change refuses with ``guide_changed``. When
-    omitted (first review of a new guide), the returned
-    :class:`ResolvedDestination` carries the pin to persist.
+    omitted, this is a first review of a new guide: the returned
+    :class:`ResolvedDestination` carries the pin to persist. Anything about to
+    publish must call :func:`resolve_for_publication` instead, which makes the
+    pin mandatory.
 
     For a ``section`` destination the guide fixes the note path; a caller may
     repeat it but not choose another. For a ``collection`` destination the
@@ -660,12 +687,6 @@ def resolve_destination(
         return _refuse("unknown_type", "the note type is not a supported slug")
     note = guide.types.get(note_type)
     if note is None:
-        excluded = guide.exclusion_for(note_type)
-        if excluded is not None:
-            return _refuse(
-                "excluded_type",
-                f"the guide's entry for this type was excluded: {excluded.reason}",
-            )
         return _refuse("unknown_type", "the guide does not list this note type")
     grant = consent.for_type(note_type)
     if grant is None:
@@ -730,3 +751,34 @@ def resolve_destination(
         guide=guide.pin,
     )
     return Resolution("ok", destination=resolved)
+
+
+def resolve_for_publication(
+    load: GuideLoad,
+    consent: ConsentMapping,
+    *,
+    note_type: str,
+    pinned: GuidePin | None,
+    relative_path: str = "",
+    operation: str | None = None,
+) -> Resolution:
+    """Resolve a destination for a write, refusing when no guide pin was stored.
+
+    Publication and any other effect must use this entry point. A caller that
+    skipped the first review cannot publish by omitting ``pinned``; the refusal
+    is ``guide_changed`` because the guide needs review and a stored pin before
+    the effect can proceed.
+    """
+    if pinned is None:
+        return _refuse(
+            "guide_changed",
+            "a stored guide pin is required before publication",
+        )
+    return resolve_destination(
+        load,
+        consent,
+        note_type=note_type,
+        relative_path=relative_path,
+        pinned=pinned,
+        operation=operation,
+    )

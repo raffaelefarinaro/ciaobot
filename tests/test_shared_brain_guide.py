@@ -142,7 +142,19 @@ def test_reads_guide_and_pins_identity_version_and_exact_bytes(tmp_path: Path) -
         operation="append",
     )
     assert decision.example == "Use UTC everywhere."
-    assert load.guide.excluded == ()
+
+
+def test_utf8_unicode_is_accepted(tmp_path: Path) -> None:
+    _write(
+        tmp_path,
+        _guide_text(
+            {"decision": _section(path="notes/décisions.md", example="Use 🕒.")}
+        ),
+    )
+    load = _load(tmp_path)
+    assert load.ok
+    assert load.guide is not None
+    assert load.guide.types["decision"].destination.path == "notes/décisions.md"
 
 
 def test_same_bytes_in_two_brains_still_have_distinct_pins(tmp_path: Path) -> None:
@@ -213,6 +225,8 @@ def test_guide_requires_a_brain_identity(tmp_path: Path) -> None:
         guide.read_guide(tmp_path, brain_identity="")
     with pytest.raises(ValueError):
         guide.parse_guide(b"", brain_identity="bad\nidentity")
+    with pytest.raises(ValueError):
+        guide.read_guide(tmp_path, brain_identity="bad\ud800identity")
 
 
 # ---------------------------------------------------------------------------
@@ -300,42 +314,141 @@ def test_unbounded_or_ill_typed_exclusions_make_the_guide_unusable(
     assert _load(tmp_path).status == "malformed"
 
 
-def test_malformed_entries_are_excluded_and_valid_siblings_survive(tmp_path: Path) -> None:
+@pytest.mark.parametrize(
+    ("label", "entry"),
+    [
+        ("traversal", _section(path="../outside.md")),
+        ("absolute", _section(path="/etc/decisions.md")),
+        ("hidden", _section(path=".private/decisions.md")),
+        ("backslash", _section(path="notes\\decisions.md")),
+        (
+            "wrong-kind",
+            {"kind": "folder", "path": "notes/decisions.md", "operation": "append"},
+        ),
+        (
+            "missing-heading",
+            {"kind": "section", "path": "notes/decisions.md", "operation": "append"},
+        ),
+        ("collection-append", _collection(operation="append")),
+        (
+            "list-operation",
+            {"kind": "section", "path": "notes/decisions.md", "operation": []},
+        ),
+        ("extra-field", {**_section(), "extra": True}),
+        ("not-an-object", "notes/decisions.md"),
+        ("surrogate-path", _section(path="notes/\ud800.md")),
+        ("surrogate-heading", _section(section="Dec\ud800isions")),
+        ("surrogate-example", _section(example="x\ud800")),
+    ],
+)
+def test_one_malformed_entry_fails_the_whole_guide_closed(
+    tmp_path: Path, label: str, entry: object
+) -> None:
+    name = "broken"
+    types = {"decision": _section(), name: entry}
+    _write(tmp_path, _guide_text(types))
+    load = _load(tmp_path)
+    assert load.status == "malformed", label
+    assert not load.ok
+    assert name in load.reason, label
+    # Neither the valid sibling nor the malformed entry resolves.
+    assert _resolve(load, note_type="decision").status == "guide_unavailable"
+    assert _resolve(load, note_type=name).status == "guide_unavailable"
+    assert sum(_resolve(load, note_type=t).ok for t in types) == 0
+
+
+def test_invalid_type_name_fails_the_whole_guide_closed(tmp_path: Path) -> None:
+    _write(tmp_path, _guide_text({"decision": _section(), "Bad-Name": _section()}))
+    load = _load(tmp_path)
+    assert load.status == "malformed"
+    assert "Bad-Name" in load.reason
+    assert sum(_resolve(load, note_type=t).ok for t in ("decision", "Bad-Name")) == 0
+
+
+def test_mixed_valid_and_malformed_entries_yield_zero_resolutions(tmp_path: Path) -> None:
     types = {
         "decision": _section(),
+        "glossary-term": _collection(),
         "escape": _section(path="../outside.md"),
-        "absolute": _section(path="/etc/decisions.md"),
-        "hidden": _section(path=".private/decisions.md"),
-        "backslash": _section(path="notes\\decisions.md"),
-        "wrong-kind": {"kind": "folder", "path": "notes/decisions.md", "operation": "append"},
-        "missing-heading": {"kind": "section", "path": "notes/decisions.md", "operation": "append"},
-        "collection-append": _collection(operation="append"),
-        "list-operation": {"kind": "section", "path": "notes/decisions.md", "operation": []},
-        "extra-field": {**_section(), "extra": True},
-        "not-an-object": "notes/decisions.md",
-        "Bad-Name": _section(),
     }
     _write(tmp_path, _guide_text(types))
     load = _load(tmp_path)
-    assert load.ok
-    assert load.guide is not None
-    assert set(load.guide.types) == {"decision"}
-    excluded_names = {entry.name for entry in load.guide.excluded}
-    assert excluded_names == {
-        "escape",
-        "absolute",
-        "hidden",
-        "backslash",
-        "wrong-kind",
-        "missing-heading",
-        "collection-append",
-        "list-operation",
-        "extra-field",
-        "not-an-object",
-        "Bad-Name",
+    assert load.status == "malformed"
+    assert load.guide is None
+    assert [t for t in types if _resolve(load, note_type=t).ok] == []
+
+
+def test_surrogate_collection_path_fails_closed(tmp_path: Path) -> None:
+    types = {"decision": _section(), "broken": _collection(path="notes/\ud800")}
+    _write(tmp_path, _guide_text(types))
+    load = _load(tmp_path)
+    assert load.status == "malformed"
+    assert all(not _resolve(load, note_type=t).ok for t in types)
+
+
+@pytest.mark.parametrize(
+    "path",
+    [
+        "notes/\ud800.md",
+        "notes/\udfff.md",
+        "notes/glossary/\ud800.md",
+    ],
+)
+def test_surrogate_paths_fail_the_guide_with_zero_resolutions(
+    tmp_path: Path, path: str
+) -> None:
+    types = {"decision": _section(), "broken": _section(path=path)}
+    _write(tmp_path, _guide_text(types))
+    load = _load(tmp_path)
+    assert load.status == "malformed"
+    assert "broken" in load.reason
+    assert sum(_resolve(load, note_type=t).ok for t in types) == 0
+
+
+def test_surrogate_metadata_fails_the_guide_closed(tmp_path: Path) -> None:
+    bad_scope = {
+        "version": 1,
+        "scope": "Scope \ud800",
+        "exclusions": [],
+        "types": {"decision": _section()},
     }
-    assert all(entry.reason for entry in load.guide.excluded)
-    assert _resolve(load, note_type="escape").status == "excluded_type"
+    _write(tmp_path, f"# Team notes\n\n```ciao-guide\n{json.dumps(bad_scope)}\n```\n")
+    assert _load(tmp_path).status == "malformed"
+
+    bad_exclusion = {
+        "version": 1,
+        "scope": "Scope",
+        "exclusions": ["personal \ud800"],
+        "types": {"decision": _section()},
+    }
+    _write(tmp_path, f"# Team notes\n\n```ciao-guide\n{json.dumps(bad_exclusion)}\n```\n")
+    assert _load(tmp_path).status == "malformed"
+
+
+def test_surrogate_consent_and_caller_paths_are_refused(tmp_path: Path) -> None:
+    with pytest.raises(ValueError):
+        _consent(path="notes/\ud800.md")
+
+    _write(tmp_path, _guide_text({"glossary-term": _collection()}))
+    load = _load(tmp_path)
+    consent = _consent(
+        note_type="glossary-term",
+        kind="collection",
+        path="notes/glossary",
+        section="",
+        operations=("create",),
+    )
+    resolution = _resolve(
+        load,
+        note_type="glossary-term",
+        relative_path="notes/glossary/\ud800.md",
+        consent=consent,
+    )
+    assert resolution.status == "unsafe_path"
+
+    _write(tmp_path, _guide_text({"decision": _section()}))
+    load = _load(tmp_path)
+    assert _resolve(load, relative_path="notes/\ud800.md").status == "unsafe_path"
 
 
 # ---------------------------------------------------------------------------
@@ -684,6 +797,24 @@ def test_malformed_guide_cannot_be_resolved_even_with_consent(tmp_path: Path) ->
     _write(tmp_path, "```ciao-guide\n{bad}\n```\n")
     load = _load(tmp_path)
     assert _resolve(load, consent=_consent()).status == "guide_unavailable"
+
+
+def test_publication_requires_a_stored_pin(tmp_path: Path) -> None:
+    _write(tmp_path, _guide_text({"decision": _section()}))
+    load = _load(tmp_path)
+    assert load.guide is not None
+    consent = _consent()
+
+    without_pin = guide.resolve_for_publication(
+        load, consent, note_type="decision", pinned=None
+    )
+    assert without_pin.status == "guide_changed"
+    assert "pin" in without_pin.reason
+
+    with_pin = guide.resolve_for_publication(
+        load, consent, note_type="decision", pinned=load.guide.pin
+    )
+    assert with_pin.ok
 
 
 def test_pin_identity_version_and_digest_all_participate_in_matching() -> None:
