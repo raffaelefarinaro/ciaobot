@@ -7,6 +7,8 @@ import subprocess
 import hashlib
 import json
 import os
+import select
+import sys
 import threading
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
@@ -884,7 +886,8 @@ def test_intake_resolves_mapped_destination_and_never_publishes(linked, monkeypa
     assert isinstance(refusal[0], sp.ShareRefusal) and refusal[0].code == "capacity"
 
 
-def test_intake_uses_real_checkpoint_and_consent(linked, tmp_path, monkeypatch):
+@pytest.mark.parametrize("destination_kind", ["collection", "section"])
+def test_intake_uses_real_checkpoint_and_consent(linked, tmp_path, monkeypatch, destination_kind):
     from dataclasses import replace
     from tests.test_share_evidence import _memory_manager
     from ciao import share_evidence as se, shared_brain_guide, shared_brain_mapping
@@ -893,8 +896,15 @@ def test_intake_uses_real_checkpoint_and_consent(linked, tmp_path, monkeypatch):
 
     fixture_config, clone = linked
     config, manager, project, _source = _memory_manager(tmp_path)
-    guide = {"version": 1, "scope": "Decisions", "exclusions": [], "types": {
-        "decision": {"kind": "collection", "path": "decisions", "operation": "create"}}}
+    if destination_kind == "section":
+        (clone / "n.md").write_bytes(b"# Notes\r\n\r\n## Decisions\r\nExisting\r\n\r\n## Other\r\nKeep\r\n")
+        git(clone, "add", "n.md")
+        git(clone, "commit", "--quiet", "-m", "prepare section")
+        git(clone, "update-ref", "refs/remotes/origin/main", "HEAD")
+        destination = {"kind": "section", "path": "n.md", "section": "Decisions", "operation": "append"}
+    else:
+        destination = {"kind": "collection", "path": "decisions", "operation": "create"}
+    guide = {"version": 1, "scope": "Decisions", "exclusions": [], "types": {"decision": destination}}
     (clone / shared_brain_guide.GUIDE_NAME).write_text("```ciao-guide\n" + json.dumps(guide) + "\n```\n")
     load = shared_brain_guide.read_guide(clone, brain_identity=fixture_config.link.identity)
     assert load.guide is not None
@@ -919,9 +929,66 @@ def test_intake_uses_real_checkpoint_and_consent(linked, tmp_path, monkeypatch):
     manager._save()
     se.checkpoint_completed_memory_pass(config, registry, workspace="home", pass_chat_id=chat.chat_id)
     relation = se.recover_memory_pass_source_relation(config, workspace="home", pass_chat_id=chat.chat_id)
+    if destination_kind == "collection":
+        registry_lock = config.state_path.parent / "locks" / "workspaces-registry.lock"
+        child = subprocess.Popen(
+            [sys.executable, "-c", "import fcntl,sys; f=open(sys.argv[1], 'r+'); fcntl.flock(f, fcntl.LOCK_EX); print('ready', flush=True); sys.stdin.read()", str(registry_lock)],
+            stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True,
+        )
+        try:
+            assert child.stdout is not None and child.stdout.readline().strip() == "ready"
+            blocked = sp.draft_evidence_candidates(config, workspace="home", relation=relation)
+            assert len(blocked) == 1 and isinstance(blocked[0], sp.ShareRefusal)
+            assert blocked[0].code == "draft_unavailable"
+        finally:
+            assert child.stdin is not None
+            child.stdin.close()
+            child.wait(timeout=5)
+        pid = os.fork()
+        if pid == 0:
+            sp._write_private = lambda *args, **kwargs: os._exit(23)
+            sp.draft_evidence_candidates(config, workspace="home", relation=relation)
+            os._exit(0)
+        _, status = os.waitpid(pid, 0)
+        assert os.waitstatus_to_exitcode(status) == 23
+        queue = Path(config.workspace_vault_root("home")) / "Workspace" / "Memory-Proposals.md"
+        assert not queue.exists()
+        pid = os.fork()
+        if pid == 0:
+            sp.memory_receipts.write_queue_atomically = lambda *args, **kwargs: os._exit(24)
+            sp.draft_evidence_candidates(config, workspace="home", relation=relation)
+            os._exit(0)
+        _, status = os.waitpid(pid, 0)
+        assert os.waitstatus_to_exitcode(status) == 24
+        assert not queue.exists()
     drafts = sp.draft_evidence_candidates(config, workspace="home", relation=relation)
     assert len(drafts) == 1 and isinstance(drafts[0], sp.ShareDraft)
     assert "Share this decision" in drafts[0].artifact["immutable"]["proposed"]
     assert "private reason" not in drafts[0].artifact["immutable"]["proposed"]
-    se.revoke(config, workspace="home", grant_id=grant["grant_id"])
+    if destination_kind == "section":
+        fields = drafts[0].artifact["immutable"]
+        assert fields["operation"] == "replace"
+        assert fields["original"].encode() == b"# Notes\r\n\r\n## Decisions\r\nExisting\r\n\r\n## Other\r\nKeep\r\n"
+        assert fields["proposed"].encode() == (
+            b"# Notes\r\n\r\n## Decisions\r\nExisting\r\n\r\n"
+            b'```json\n{\n  "decision": "Share this decision"\n}\n```\n\n## Other\r\nKeep\r\n'
+        )
+    if destination_kind == "collection":
+        from ciao.workspaces import workspace_registry_claim
+
+        authorization = se.mint_evidence_authorizations(config, workspace="home", brain_name=link.name, relation=relation)[0]
+        program = (
+            "import sys; from ciao.config import CiaoConfig; from ciao import share_evidence; "
+            "c=CiaoConfig.from_env({'CIAO_WORKSPACE':sys.argv[1], 'CIAO_RUNTIME_ROOT':sys.argv[2], 'PWA_AUTH_TOKEN':'test'}); "
+            "print('ready',flush=True); share_evidence.revoke(c,workspace='home',grant_id=sys.argv[3]); print('done',flush=True)"
+        )
+        with sp.shared_brain.checkout_claims_nowait([link.path], config), workspace_registry_claim(config), se.evidence_authorization_guard(config, workspace="home", authorization=authorization):
+            child = subprocess.Popen([sys.executable, "-c", program, str(config.workspace_root), str(config.state_path.parent), grant["grant_id"]], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+            assert child.stdout is not None and child.stdout.readline().strip() == "ready"
+            assert not select.select([child.stdout], [], [], 0.2)[0]
+        stdout, stderr = child.communicate(timeout=10)
+        assert child.returncode == 0, stderr
+        assert stdout.strip() == "done"
+    else:
+        se.revoke(config, workspace="home", grant_id=grant["grant_id"])
     assert sp.draft_evidence_candidates(config, workspace="home", relation=relation) == []
