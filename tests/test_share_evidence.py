@@ -8,6 +8,7 @@ import json
 import subprocess
 import sys
 import threading
+import time
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
@@ -1259,6 +1260,23 @@ def test_care_checkpoint_stages_only_completed_exact_witness_and_replays_once(
     assert len(receipts) == (0 if crash_before_state else 1)
     assert len(curation_share.settled_witnesses(config, workspace="home", holder=lease.holder)) == (0 if crash_before_state else 1)
     if not crash_before_state:
+        with se.evidence_claim(config, workspace="home") as claim:
+            settled = curation_share.settled_witnesses(config, workspace="home", holder=lease.holder, claim=claim)
+            signature = settled[0]["witness"]["witness_signature"]
+            relation = se.recover_care_source_relation(config, workspace="home", holder=lease.holder, witness_signature=signature, claim=claim)
+            auths = se.mint_evidence_authorizations(config, workspace="home", brain_name="notes", relation=relation, claim=claim)
+            assert len(auths) == 1
+            with se.evidence_authorization_guard(config, workspace="home", authorization=auths[0], claim=claim) as row:
+                assert row["canonical_bytes"] == '{"decision":"Launch"}'
+                assert row["producer"] == "nightly_curation"
+            original_link = config.workspace("home").shared_brains[0]
+            config.workspace("home").shared_brains = [dataclasses.replace(original_link, lifetime_id="brain_lifetime_new0001")]
+            with pytest.raises(se.EvidenceError):
+                with se.evidence_authorization_guard(config, workspace="home", authorization=auths[0], claim=claim):
+                    pass
+            config.workspace("home").shared_brains = [original_link]
+            with pytest.raises(se.EvidenceError):
+                se.recover_care_source_relation(config, workspace="home", holder=lease.holder, witness_signature="0" * 64, claim=claim)
         obtained = threading.Event()
         release = threading.Event()
         finished = threading.Event()
@@ -1286,6 +1304,10 @@ def test_care_checkpoint_stages_only_completed_exact_witness_and_replays_once(
                                 assert foreign_thread_errors == ["invalid_evidence_claim"]
                                 with pytest.raises(se.EvidenceError):
                                     curation_share.settled_witnesses(config, workspace="work", holder=lease.holder, claim=claim)
+                                object.__setattr__(claim, "workspace", "work")
+                                with pytest.raises(se.EvidenceError):
+                                    curation_share.settled_witnesses(config, workspace="work", holder=lease.holder, claim=claim)
+                                object.__setattr__(claim, "workspace", "home")
                                 with pytest.raises(se.EvidenceError, match="existing evidence claim"):
                                     curation_share.settled_witnesses(config, workspace="home", holder=lease.holder)
                                 obtained.set()
@@ -1308,11 +1330,24 @@ def test_care_checkpoint_stages_only_completed_exact_witness_and_replays_once(
         revoker = threading.Thread(target=revoke, daemon=True)
         revoker.start()
         assert not finished.wait(0.1)
+        ready = tmp_path / "revoker-ready"
+        script = "from pathlib import Path; import sys; from ciao.config import CiaoConfig, WorkspaceConfig; from ciao import share_evidence as se; root=Path(sys.argv[1]); cfg=CiaoConfig(pwa_auth_token='t',workspace_root=root,state_path=root / '.runtime/state.json',media_root=root / '.runtime/media',workspaces={'home': WorkspaceConfig(name='home',vault_root=sys.argv[2],lifetime_id=sys.argv[3],_lifetime_persisted=True)}); Path(sys.argv[5]).touch(); se.revoke(cfg,workspace='home',grant_id=sys.argv[4])"
+        child = subprocess.Popen([sys.executable, "-c", script, str(config.workspace_root), str(vault), config.workspace("home").lifetime_id, grant["grant_id"], str(ready)])
+        deadline = time.monotonic() + 5
+        while not ready.exists() and time.monotonic() < deadline:
+            time.sleep(0.01)
+        assert ready.exists()
+        with pytest.raises(subprocess.TimeoutExpired):
+            child.wait(timeout=0.2)
         release.set()
         reader_thread.join(3)
         revoker.join(3)
         assert not reader_thread.is_alive() and not revoker.is_alive()
         assert not errors and finished.is_set()
+        assert child.wait(timeout=10) == 0
+        with pytest.raises(se.EvidenceError):
+            with se.evidence_authorization_guard(config, workspace="home", authorization=auths[0]):
+                pass
     se.revoke(config, workspace="home", grant_id=grant["grant_id"])
     assert curation_share.settled_witnesses(config, workspace="home", holder=lease.holder) == []
     assert curation_share.checkpoint(config, manager, **args) == 0
