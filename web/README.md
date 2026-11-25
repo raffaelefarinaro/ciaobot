@@ -946,6 +946,8 @@ Onboarding's care stage (`components/onboarding/OnboardingCareStage.vue`) asks w
 
 ### Onboarding stages
 
+The bootstrap login setup offers an optional separate existing notes folder. It inspects the location on the host and requires a successful inspection before submitting the resolved location to setup; synchronization remains the cloud client's responsibility.
+
 `components/onboarding/` holds presentation stages that the shell composes; each receives
 `OnboardingStageProps` (`context`, `busy`) and emits only `state`. The shell owns the one sticky
 footer (Back, Leave setup, Continue; Finish setup on the last step) and is the scroll container,

@@ -572,6 +572,25 @@ describe('LoginView setup wizard tests', () => {
     expect(wrapper.text()).toContain('The desktop app is installed, but Ciaobot drives the CLI.')
   })
 
+  it('requires inspection of separate notes before submitting', async () => {
+    mockApiGet.mockImplementation((path: string) => path.includes('notes_folder=')
+      ? Promise.resolve({ notes_resolved: '/notes', notes_identity: '1:2' })
+      : Promise.resolve({ bootstrap: true, providers: { claude: { ok: true } } }))
+    mockApiPost.mockResolvedValue({ ok: true })
+    const wrapper = await mountLoginView()
+    await wrapper.get('#setup-password').setValue('hunter2')
+    await wrapper.get('#setup-password-confirm').setValue('hunter2')
+    await wrapper.get('input[type=checkbox]').setValue(true)
+    expect(wrapper.get('button[type=submit]').attributes('disabled')).toBeDefined()
+    await wrapper.get('#setup-notes-folder').setValue('/notes')
+    await wrapper.get('#setup-notes-folder').trigger('change')
+    await flushPromises()
+    expect(wrapper.text()).toContain('Notes: /notes')
+    await wrapper.get('form').trigger('submit.prevent')
+    await flushPromises()
+    expect(mockApiPost).toHaveBeenCalledWith('/api/setup/finish', expect.objectContaining({ notes_folder: '/notes', notes_resolved: '/notes', notes_identity: '1:2' }))
+  })
+
   it('finishes setup without collecting a notification email', async () => {
     mockApiGet.mockResolvedValue({
       configured: false,

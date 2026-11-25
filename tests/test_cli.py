@@ -5479,3 +5479,67 @@ def _coverage_fixture(**overrides: object):
 )
 def test_stale_coverage_line_names_only_what_was_not_covered(coverage, expected) -> None:
     assert cli._stale_coverage_line(coverage) == expected
+
+
+def test_setup_cli_accepts_existing_separate_notes_without_git(tmp_path, monkeypatch, capsys):
+    from ciao import cli
+    workspace = tmp_path / "engine"
+    notes = tmp_path / "notes"
+    notes.mkdir()
+    (notes / "idea.md").write_text("private", encoding="utf-8")
+    (notes / "nested").mkdir()
+    (notes / "nested" / "MEMORY.md").write_text("nested", encoding="utf-8")
+    monkeypatch.setenv("PATH", str(tmp_path / "no-executables"))
+    result = cli.main(["setup", "--workspace", str(workspace), "--notes-folder", str(notes),
+        "--auth-token", "password", "--launch-agents-dir", str(tmp_path / "agents"),
+        "--app-dir", str(tmp_path / "apps")])
+    assert result == 0
+    assert (notes / "idea.md").read_text(encoding="utf-8") == "private"
+    assert not (notes / ".git").exists()
+    assert sorted(path.name for path in notes.iterdir()) == ["idea.md", "nested"]
+    registry = json.loads((workspace / ".runtime" / "workspaces.json").read_text())
+    assert registry[0]["vault_root"] == str(notes.resolve())
+    assert len(registry) == 1
+    assert str(notes.resolve()) in capsys.readouterr().out
+
+
+@pytest.mark.parametrize("replace", [False, True])
+def test_setup_cli_does_not_recreate_disappeared_notes(tmp_path, monkeypatch, replace):
+    from ciao import cli
+
+    workspace = tmp_path / "engine"
+    notes = tmp_path / "notes"
+    notes.mkdir()
+    (notes / "existing.md").write_text("private", encoding="utf-8")
+    moved = tmp_path / "moved-notes"
+    original = cli.ensure_workspace_git
+
+    def remove_notes_during_setup(*args, **kwargs):
+        if not moved.exists():
+            notes.rename(moved)
+            if replace:
+                notes.mkdir()
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(cli, "ensure_workspace_git", remove_notes_during_setup)
+    result = cli.main(["setup", "--workspace", str(workspace), "--notes-folder", str(notes),
+        "--auth-token", "password", "--launch-agents-dir", str(tmp_path / "agents"),
+        "--app-dir", str(tmp_path / "apps")])
+    assert result != 0
+    assert notes.exists() == replace
+    if replace:
+        assert not list(notes.iterdir())
+    assert moved.is_dir()
+    assert (moved / "existing.md").read_text(encoding="utf-8") == "private"
+    if replace:
+        notes.rmdir()
+    moved.rename(notes)
+    monkeypatch.setattr(cli, "ensure_workspace_git", original)
+    assert cli.main(["setup", "--workspace", str(workspace), "--notes-folder", str(notes),
+        "--auth-token", "different", "--launch-agents-dir", str(tmp_path / "agents"),
+        "--app-dir", str(tmp_path / "apps")]) != 0
+    assert cli.main(["setup", "--workspace", str(workspace), "--notes-folder", str(notes),
+        "--auth-token", "password", "--launch-agents-dir", str(tmp_path / "agents"),
+        "--app-dir", str(tmp_path / "apps")]) == 0
+    assert not (workspace / ".runtime" / "external-setup-pending.json").exists()
+    assert (notes / "existing.md").read_text(encoding="utf-8") == "private"

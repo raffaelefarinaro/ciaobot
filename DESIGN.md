@@ -330,6 +330,8 @@ Borders are structural, not decorative. Active navigation is marked by a slim ac
 
 - **Onboarding location:** Ask for the main Ciaobot folder before the workspace name. Before provisioning, it is a candidate location (empty or existing-notes folders are both valid); after provisioning, show the folder and workspace name as set, with Change leading to the guarded move flow (the name field appears only after Change). Remote browsers explain that the folder belongs on the Ciaobot computer. Typing never creates, moves, or saves anything; Continue in the setup footer is the explicit handoff to the next stage.
 
+- **First-run separate notes:** Offer an optional existing notes folder alongside the Ciaobot operational folder. Show both locations, require a successful local inspection before finishing, and describe synchronization as the cloud client's responsibility.
+
 The onboarding care stage follows the setup shell's calm, compact form rhythm: host availability guides the suggested local time, while the editable time and IANA zone are explicit controls. A status line says whether timing will be written: only a time or zone the person edited is saved, when they press Continue; leaving the fields alone keeps the packaged default and writes nothing. There is no Save or Keep-default button, and a failed save shows an inline error and Continue retries it. Without a care routine Continue is available.
 ## Onboarding finish
 

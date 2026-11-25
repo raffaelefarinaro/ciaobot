@@ -7142,7 +7142,7 @@ async def setup_finish_endpoint(request: Request) -> JSONResponse:
             {"error": f"unknown provider '{default_provider}'"}, status_code=400
         )
 
-    from ciao.cli import detect_vault_mode, select_setup_vault, setup_workspace
+    from ciao.cli import detect_vault_mode, select_setup_vault, setup_workspace, validate_external_setup_vault
 
     # The wizard no longer asks scratch-vs-existing: when the request does
     # not pin a mode, inspect the folder — empty starts from scratch, one
@@ -7180,6 +7180,21 @@ async def setup_finish_endpoint(request: Request) -> JSONResponse:
 
     resolved_workspace = Path(workspace).expanduser().resolve()
     vault_root_arg = str(body.get("vault_root", "")).strip() or None
+    notes_folder = str(body.get("notes_folder", "")).strip()
+    notes_identity = None
+    if notes_folder:
+        try:
+            notes = validate_external_setup_vault(resolved_workspace, notes_folder)
+            if str(notes) != str(body.get("notes_resolved", "")):
+                raise ValueError("notes folder changed since inspection; inspect it again")
+            vault_root_arg = str(notes)
+            notes_stat = notes.stat()
+            notes_identity = (notes_stat.st_dev, notes_stat.st_ino)
+            if str(body.get("notes_identity", "")) != f"{notes_stat.st_dev}:{notes_stat.st_ino}":
+                raise ValueError("notes folder changed since inspection; inspect it again")
+            vault_mode = "existing"
+        except (OSError, ValueError) as exc:
+            return JSONResponse({"error": str(exc)}, status_code=400)
 
     # Read-only preflight: the same selection inspection reported. An ambiguous
     # or unusable location is refused here, before any claim, write or exit.
@@ -7191,6 +7206,8 @@ async def setup_finish_endpoint(request: Request) -> JSONResponse:
         )
     except ValueError as exc:
         return JSONResponse({"error": str(exc)}, status_code=400)
+    if notes_folder and "PWA_AUTH_TOKEN" in selection.existing_env and selection.existing_env["PWA_AUTH_TOKEN"] != password:
+        return JSONResponse({"error": "Use the password chosen when setup began."}, status_code=400)
 
     # setup_workspace only writes workspace files and the bundled-engine
     # LaunchAgent. The release installer owns app downloads, so setup remains
@@ -7203,19 +7220,37 @@ async def setup_finish_endpoint(request: Request) -> JSONResponse:
         "default_provider": default_provider,
         "port": port,
         "_vault_selection": selection,
+        "_adopt_exact_vault": bool(notes_folder),
+        "_external_identity": notes_identity,
+        "_complete_external_setup": not bool(notes_folder),
     }
     setup_kwargs["python_path"] = str(body.get("python", "")).strip() or None
     setup_kwargs["launch_agents_dir"] = str(body.get("launch_agents_dir", "")).strip() or None
     setup_kwargs["app_dir"] = str(body.get("app_dir", "")).strip() or None
+    transaction = None
     try:
+        if notes_folder:
+            from ciao.setup_transaction import SetupTransaction
+
+            transaction = SetupTransaction(resolved_workspace, notes)
+            transaction.begin(password, notes_identity)
+            setup_kwargs["_transaction"] = transaction
+            setup_kwargs["_vault_selection"] = select_setup_vault(
+                resolved_workspace, vault_mode=vault_mode, vault_root=vault_root_arg
+            )
         written = await asyncio.to_thread(
             functools.partial(setup_workspace, str(resolved_workspace), **setup_kwargs)
         )
+        _publish_setup_environment(resolved_workspace, port, password)
+        if transaction is not None:
+            transaction.complete()
     except RuntimeError as exc:
         return JSONResponse({"error": str(exc)}, status_code=409)
-    except ValueError as exc:
+    except (OSError, ValueError) as exc:
         return JSONResponse({"error": str(exc)}, status_code=400)
-    _publish_setup_environment(resolved_workspace, port, password)
+    finally:
+        if transaction is not None:
+            transaction.close()
     # Only the real per-user LaunchAgents dir may be registered with launchd —
     # scripted/test setups pass a custom dir and must not touch it. App mode is
     # the third exclusion: the Mac app owns the bundled engine, so setup must
@@ -7344,7 +7379,7 @@ async def setup_inspect_folder_endpoint(request: Request) -> JSONResponse:
     name that will be assigned to the selected folder.
     """
     from ciao import cli
-    from ciao.cli import detect_vault_mode, select_setup_vault
+    from ciao.cli import detect_vault_mode, select_setup_vault, validate_external_setup_vault
     from ciao.setup_status import (
         cloud_sync_warning,
         detect_nested_workspaces,
@@ -7360,6 +7395,16 @@ async def setup_inspect_folder_endpoint(request: Request) -> JSONResponse:
     target = _resolve_setup_dir(raw)
     if target is None:
         return JSONResponse({"error": f"not a directory: {raw}"}, status_code=400)
+    notes_raw = str(request.query_params.get("notes_folder") or "").strip()
+    if notes_raw:
+        try:
+            notes = validate_external_setup_vault(target, notes_raw)
+            notes_stat = notes.stat()
+        except (OSError, ValueError) as exc:
+            return JSONResponse({"error": str(exc)}, status_code=400)
+        return JSONResponse({"path": str(target), "notes_resolved": str(notes),
+                             "notes_identity": f"{notes_stat.st_dev}:{notes_stat.st_ino}",
+                             "cloud_sync_warning": cloud_sync_warning(target)})
     # The same read-only selection finish and direct setup use, so the wizard
     # reports the location the finish will write. An ambiguous or unusable
     # location is refused here, with the same message finish returns.

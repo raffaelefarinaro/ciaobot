@@ -1179,6 +1179,41 @@ def _preview_legacy_workspaces(
     }
 
 
+def validate_external_setup_vault(workspace: Path | str, vault: Path | str) -> Path:
+    """Validate a first-run notes folder without creating or changing it."""
+    from ciao.setup_marker import is_set_up_workspace
+
+    root = Path(workspace).expanduser().resolve()
+    try:
+        notes = Path(vault).expanduser().resolve(strict=True)
+        if not notes.is_dir() or not os.access(notes, os.R_OK | os.W_OK | os.X_OK):
+            raise ValueError("notes folder must be an accessible, writable directory")
+        with os.scandir(notes) as entries:
+            next(entries, None)
+    except OSError as exc:
+        raise ValueError(f"notes folder is unavailable: {exc}") from exc
+    if notes == root or notes in root.parents or root in notes.parents:
+        raise ValueError("notes folder and Ciaobot folder must be separate")
+    selection = select_setup_vault(root, vault_mode="scratch")
+    from ciao.setup_transaction import pending_matches
+
+    pending = pending_matches(root, notes)
+    if is_set_up_workspace(root) and not pending:
+        raise ValueError("an existing installation cannot be rebound during setup")
+    if selection.source in {"env", "registry", "legacy"} and not pending:
+        raise ValueError("an existing installation cannot be rebound during setup")
+    return notes
+
+
+def _check_external_setup_identity(path: Path, expected: tuple[int, int] | None) -> None:
+    try:
+        current = path.stat()
+    except OSError as exc:
+        raise ValueError(f"notes folder is unavailable: {exc}") from exc
+    if expected is None or (current.st_dev, current.st_ino) != expected:
+        raise ValueError("notes folder changed during setup; inspect it again")
+
+
 def select_setup_vault(
     workspace: Path | str,
     *,
@@ -1294,6 +1329,10 @@ def setup_workspace(
     initialize_git: bool = False,
     sync_failures: list[str] | None = None,
     _vault_selection: SetupVaultSelection | None = None,
+    _adopt_exact_vault: bool = False,
+    _external_identity: tuple[int, int] | None = None,
+    _complete_external_setup: bool = True,
+    _transaction: Any = None,
 ) -> list[Path]:
     requested_name = (workspace_name or "").strip()
     if workspace_name is not None and not _WORKSPACE_NAME_RE.fullmatch(
@@ -1379,6 +1418,17 @@ def setup_workspace(
     else:
         selection = _vault_selection
 
+    if _adopt_exact_vault:
+        validate_external_setup_vault(root, selection.vault_path)
+        if initialize_git:
+            raise ValueError("separate notes setup cannot initialize Git history")
+        _check_external_setup_identity(selection.vault_path, _external_identity)
+        if _transaction is None:
+            raise ValueError("separate notes setup requires a transaction")
+        if auth_token is not None and "PWA_AUTH_TOKEN" in selection.existing_env:
+            if selection.existing_env["PWA_AUTH_TOKEN"] != auth_token:
+                raise ValueError("Use the password chosen when setup began.")
+
     from ciao.workspaces import acquire_registry_at, WorkspaceRegistryConflict
 
     with acquire_registry_at(root / RUNTIME_DIR_NAME) as owner:
@@ -1391,6 +1441,9 @@ def setup_workspace(
             python_path=python_path, port=port, launch_agents_dir=launch_agents_dir,
             app_dir=app_dir, confirm_repoint=confirm_repoint, initialize_git=initialize_git,
             sync_failures=sync_failures, write_launchd=write_launchd, host=host,
+            _adopt_exact_vault=_adopt_exact_vault, _transaction=_transaction,
+            _external_identity=_external_identity,
+            _complete_external_setup=_complete_external_setup,
         )
 
 
@@ -1413,6 +1466,10 @@ def _setup_selected_workspace(
     sync_failures: list[str] | None,
     write_launchd: bool,
     host: HostOwnership | None,
+    _adopt_exact_vault: bool,
+    _transaction: Any,
+    _external_identity: tuple[int, int] | None,
+    _complete_external_setup: bool,
 ) -> list[Path]:
     from ciao.onboarding import ensure_receipt, read_receipt
     from ciao.setup_marker import is_set_up_workspace
@@ -1434,6 +1491,10 @@ def _setup_selected_workspace(
     env_path = root / ".env"
     workspaces_registry = root / ".runtime" / "workspaces.json"
     def create_registry(text: str) -> None:
+        # The setup transaction publishes its own registry copy, so the file may
+        # already exist without this owner having loaded it.
+        if _transaction is not None and workspaces_registry.exists():
+            return
         if owner.current is None:
             owner.replace(text.encode("utf-8"), expected=None)
 
@@ -1463,7 +1524,10 @@ def _setup_selected_workspace(
     )
     name = requested_name or "personal"
 
-    generated_password = not auth_token and "PWA_AUTH_TOKEN" not in existing_env
+    generated_password = (
+        (_transaction is not None and _transaction.data.get("generated_token") is not None)
+        or (not auth_token and "PWA_AUTH_TOKEN" not in existing_env)
+    )
     token = auth_token or secrets.token_urlsafe(32)
     desired_env: list[tuple[str, str]] = [
         ("PWA_AUTH_TOKEN", token),
@@ -1478,7 +1542,15 @@ def _setup_selected_workspace(
         ("PWA_PORT", str(port)),
     ])
     fresh_env = not existing_env and not env_path.exists()
-    if fresh_env:
+    if _transaction is not None:
+        original = env_path.read_text(encoding="utf-8") if env_path.exists() else ""
+        additions = [f"{key}={value}" for key, value in desired_env if key not in existing_env]
+        if additions:
+            prefix = "" if not original or original.endswith("\n") else "\n"
+            suffix = ("# Added by Ciaobot setup\n" if original else "") + "\n".join(additions) + "\n"
+            _transaction.publish("env", original + prefix + suffix)
+            written.append(env_path)
+    elif fresh_env:
         # The password is in here in clear text: owner-only from creation.
         write_private_text(
             env_path, "\n".join(f"{key}={value}" for key, value in desired_env) + "\n"
@@ -1563,7 +1635,7 @@ def _setup_selected_workspace(
         and receipt.installation.status == "in_progress"
         and registered_vaults is None
         and vault_mode == "existing"
-        and not detect_nested_workspaces(vault_path)
+        and (_adopt_exact_vault or not detect_nested_workspaces(vault_path))
     )
     if fresh_per_root or fresh_adopted_notes:
         from ciao.workspace_reroot import mark_born_per_root
@@ -1586,16 +1658,18 @@ def _setup_selected_workspace(
         # attempt at this still put `.claude/`, `commands/` and a stock CLAUDE.md
         # beside the nested vault instead of inside the workspace's own folder.
         # The later branch is `_write_if_missing`, so this does not fight it.
-        create_registry(
-            json.dumps(
+        registry_text = json.dumps(
                 [{
                     "name": name,
                     "vault_root": stored_vault_root,
                     "default_provider": default_provider,
                 }],
                 indent=2,
-            ) + "\n",
-        )
+            ) + "\n"
+        if _transaction is not None:
+            _transaction.publish("registry", registry_text)
+        else:
+            create_registry(registry_text)
         written.append(root / ".runtime" / "workspaces.json")
 
     # `.env` always receives CIAO_VAULT_ROOT, including the generated default,
@@ -1692,7 +1766,7 @@ def _setup_selected_workspace(
         # the vaults it already names.
         scaffold_vaults = registered_vaults
     else:
-        nested = detect_nested_workspaces(vault_path)
+        nested = [] if _adopt_exact_vault else detect_nested_workspaces(vault_path)
         scaffold_vaults = []
     if registered_vaults is None and nested:
         entries: list[dict[str, str]] = []
@@ -1752,6 +1826,9 @@ def _setup_selected_workspace(
 
     owned_indexes = read_vault_index_owned_roots(runtime_root)
     for _, scaffold_vault_path in scaffold_vaults:
+        if _adopt_exact_vault:
+            # Setup never creates inside an externally managed notes root.
+            continue
         _write_if_missing(
             scaffold_vault_path / "MEMORY.md",
             "# Memory\n\nDurable workspace memory lives here.\n",
@@ -1864,7 +1941,12 @@ def _setup_selected_workspace(
     # A vault outside the workspace (existing notes folder) gets its own
     # repo. Runs after the workspace init so the default nested vault is
     # never double-initialized.
-    ensure_vault_git(vault_path, initialize_if_missing=initialize_git)
+    if _adopt_exact_vault:
+        _check_external_setup_identity(vault_path, _external_identity)
+        if _complete_external_setup:
+            _transaction.complete()
+    else:
+        ensure_vault_git(vault_path, initialize_if_missing=initialize_git)
 
     return written
 
@@ -1975,10 +2057,25 @@ def _setup_command(args: argparse.Namespace) -> int:
     except OSError:
         had_token = False
     sync_failures: list[str] = []
+    transaction = None
     try:
+        notes = validate_external_setup_vault(root, args.notes_folder) if args.notes_folder else None
+        notes_stat = notes.stat() if notes else None
+        token = args.auth_token
+        if notes:
+            from ciao.setup_transaction import SetupTransaction
+
+            root.mkdir(parents=True, exist_ok=True)
+            transaction = SetupTransaction(root, notes)
+            token = transaction.begin(args.auth_token, (notes_stat.st_dev, notes_stat.st_ino) if notes_stat else None)
         written = setup_workspace(
             args.workspace,
-            auth_token=args.auth_token,
+            auth_token=token,
+            vault_root=notes,
+            vault_mode="existing" if notes else "scratch",
+            _adopt_exact_vault=bool(notes),
+            _external_identity=(notes_stat.st_dev, notes_stat.st_ino) if notes_stat else None,
+            _transaction=transaction,
             workspace_name=args.workspace_name,
             python_path=args.python,
             port=args.port,
@@ -1988,11 +2085,16 @@ def _setup_command(args: argparse.Namespace) -> int:
             initialize_git=args.initialize_git,
             sync_failures=sync_failures,
         )
-    except RuntimeError as exc:
+    except (OSError, RuntimeError, ValueError) as exc:
         print(f"Error: {exc}", file=sys.stderr)
         return 1
+    finally:
+        if transaction is not None:
+            transaction.close()
     for path in written:
         print(path)
+    if notes:
+        print(f"Ciaobot data: {root}\nNotes: {notes}")
     from ciao.setup_status import macos_access_note
 
     access_note = macos_access_note(root)
@@ -8692,6 +8794,10 @@ def build_parser() -> argparse.ArgumentParser:
         type=Path,
         default=Path("."),
         help="Workspace directory to initialize.",
+    )
+    setup_parser.add_argument(
+        "--notes-folder", type=Path, default=None,
+        help="Use an existing separate notes directory for a new installation.",
     )
     setup_parser.add_argument(
         "--initialize-git",
