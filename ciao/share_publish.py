@@ -1405,6 +1405,8 @@ async def publish_share(config: Any, *, workspace: str, proposal_id: str, expect
     fields = artifact["immutable"]
     if expected_revision != artifact.get("review_token"):
         return PublishOutcome("stale_review", message="The shared-note review has changed.")
+    if "evidence_authorization" in fields:
+        return PublishOutcome("draft_unavailable", message="This candidate is awaiting publication fencing.")
     publication_raw = artifact.get("publication")
     publication: dict[str, Any] = publication_raw if isinstance(publication_raw, dict) else {}
     receipts = publication.get("receipts", [])
