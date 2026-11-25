@@ -14,9 +14,13 @@ from types import SimpleNamespace
 from typing import Any
 
 import pytest
+from starlette.applications import Starlette
+from starlette.routing import Route
+from starlette.testclient import TestClient
 
-from ciao import share_proposals, share_publish, shared_brain
+from ciao import proposal_actions, share_proposals, share_publish, shared_brain
 from ciao.config import SharedBrainLink
+from ciao.web.routes_api import memory_receipt_detail, memory_receipts, proposals_history
 
 IDENT = ("-c", "user.name=Test", "-c", "user.email=test@example.com")
 HOSTED = "https://github.com/x/notes"
@@ -43,6 +47,9 @@ class Config:
 
     def workspace_vault_root(self, name: str) -> Path:
         return self.vaults[name]
+
+    def chats_roots(self) -> list[str]:
+        return []
 
     def workspace(self, name: str | None) -> SimpleNamespace | None:
         return SimpleNamespace(shared_brains=self.links) if name == "home" else self.workspaces.get(name)
@@ -108,6 +115,60 @@ def linked(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> tuple[Config, Pat
     return config, clone, origin
 
 
+def _receipt_client(config: Config) -> TestClient:
+    app = Starlette(routes=[
+        Route("/api/memory/receipts/{id}", memory_receipt_detail, methods=["GET"]),
+        Route("/api/memory/receipts", memory_receipts, methods=["GET"]),
+        Route("/api/proposals/history", proposals_history, methods=["GET"]),
+    ])
+    app.state.config = config
+    return TestClient(app)
+
+
+def test_git_receipt_api_projection_stays_a_confirmed_remote_publication(
+    linked: tuple[Config, Path, Path],
+) -> None:
+    config, _clone, _origin = linked
+    draft = share_proposals.draft_share(
+        config, workspace="home", relative_path="n.md", operation="replace",
+        proposed=b"remote receipt\n", request_key="git-receipt-api",
+    )
+    assert isinstance(draft, share_proposals.ShareDraft)
+    published = asyncio.run(share_publish.publish_share(
+        config, workspace="home", proposal_id=draft.proposal_id,
+        expected_revision=draft.artifact["review_token"],
+    ))
+    assert published.outcome == "published"
+    client = _receipt_client(config)
+    listed = client.get("/api/memory/receipts").json()["rows"]
+    row = next(item for item in listed if item["id"] == published.receipt_id)
+    assert row["kind"] == "share_publish"
+    assert row["undoable"] is True
+    assert row.get("scope") is None
+    assert row.get("local_only") is None
+    assert row.get("sync_claimed") is None
+    detail = client.get(f"/api/memory/receipts/{published.receipt_id}").json()
+    assert detail["undoable"] is True
+    assert detail["commit_oid"] == published.commit_oid
+    assert detail["before"] == "before\r\nλ\n"
+    assert detail["after"] == "remote receipt\n"
+    assert detail.get("scope") is None
+    assert detail.get("local_only") is None
+    assert detail.get("sync_claimed") is None
+    queue = config.vault / "Workspace" / "Memory-Proposals.md"
+    proposal_actions.record_decision(
+        queue, action="accept",
+        text=f"Shared note change proposal {draft.artifact['immutable']['sidecar_id']}",
+        kind="share", via="pwa", outcome="published",
+        proposal_id=draft.proposal_id, receipt_id=str(published.receipt_id),
+    )
+    history = client.get("/api/proposals/history").json()["rows"]
+    row = next(item for item in history if item.get("kind") == "share")
+    assert row["change"]["scope"] is None
+    assert row["change"]["commit_oid"] == published.commit_oid
+    assert row["change"]["undoable"] is True
+
+
 def test_publish_uses_reviewed_bytes_and_is_idempotent(linked: tuple[Config, Path, Path]) -> None:
     config, clone, origin = linked
     (clone / "n.md").write_bytes(b"uncommitted local change")
@@ -134,6 +195,11 @@ def test_publish_uses_reviewed_bytes_and_is_idempotent(linked: tuple[Config, Pat
     assert len(share_publish.list_share_receipts(config, workspace="home")) == 1
     receipt = share_publish.get_share_receipt(config, workspace="home", proposal_id=draft.proposal_id, expected_revision=token)
     assert receipt and receipt["commit_oid"] == result.commit_oid and receipt["published_blob_oid"]
+    # A Git receipt is a confirmed remote publication, not a folder's
+    # historical-local-only record.
+    assert "scope" not in receipt
+    assert "local_only" not in receipt
+    assert "sync_claimed" not in receipt
 
 
 def test_publish_retries_only_after_a_persisted_retryable_rejection(linked, monkeypatch) -> None:

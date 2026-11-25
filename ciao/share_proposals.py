@@ -11,6 +11,7 @@ import json
 import os
 import re
 import secrets
+import stat
 import threading
 from contextlib import AbstractContextManager
 from dataclasses import dataclass
@@ -21,8 +22,9 @@ from urllib.parse import urlsplit, urlunsplit
 from ciao import memory_receipts, proposal_tracking, shared_brain
 from ciao.config import SharedBrainLink
 from ciao.git_proc import run_git_sync_bounded
+from ciao.os_support import folder_io
 from ciao.os_support.files import open_fd
-from ciao.os_support.private import is_private_descriptor_strict, make_private_dir, mkstemp_private
+from ciao.os_support.private import is_private_descriptor_strict, mkstemp_private
 from ciao.proposal_tracking import proposal_review_path
 from ciao.redact import redact_text
 
@@ -92,8 +94,14 @@ def _storage_safe(config: Any, workspace: str) -> Path:
     if any(root == item or root.is_relative_to(item) or item.is_relative_to(root) for item in protected):
         _refuse("draft_unavailable", "Private share storage overlaps workspace data.")
     try:
-        root.mkdir(parents=True, exist_ok=True, mode=0o700)
-        make_private_dir(root)
+        base_fd = folder_io.open_directory_nofollow(str(root.parent.parent))
+        try:
+            for name in ("secrets", "share-proposals"):
+                child_fd, _identity = folder_io.open_or_create_private_dir(base_fd, name)
+                os.close(base_fd)
+                base_fd = child_fd
+        finally:
+            os.close(base_fd)
     except OSError:
         _refuse("draft_unavailable", "Private share storage is unavailable.")
     return root
@@ -170,9 +178,65 @@ def _git_bytes(folder: Path, *args: str, limit: int, overflow_code: str = "") ->
     return result.stdout
 
 
-def _qualify(config: Any, link: SharedBrainLink, relative_path: str) -> tuple[str, str, bytes | None, str | None]:
-    if link.kind != "git":
-        _refuse("upstream_unavailable", "Publishing requires a Git shared brain.")
+def folder_destination_fingerprint(link: SharedBrainLink) -> str:
+    """A stable identity for one folder link lifetime and exact root path.
+
+    ``st_dev``/``st_ino`` and the directory chain are checked separately at
+    draft and publish time; this value binds the approval to the link record
+    the user actually reviewed, so a relink (even to the same path) and a path
+    move cannot reuse it.
+    """
+    payload = json.dumps(
+        ["folder", link.lifetime_id, link.identity, link.path],
+        ensure_ascii=False, separators=(",", ":"),
+    ).encode("utf-8")
+    return "folder:" + hashlib.sha256(payload).hexdigest()
+
+
+def _folder_chain_rows(chain: list[folder_io.DirectoryIdentity]) -> list[dict[str, int]]:
+    return [{"dev": item.dev, "ino": item.ino} for item in chain]
+
+
+def _qualify_folder(
+    config: Any, link: SharedBrainLink, relative_path: str, operation: str | None,
+) -> tuple[str, None, None, None, str, list[dict[str, int]]]:
+    """Qualify a new note in an ordinary folder; existing notes are deferred to #3626."""
+    if operation not in (None, "create"):
+        _refuse(
+            "folder_update_unsupported",
+            "Updating or deleting an existing note in an ordinary folder is not supported yet.",
+        )
+    parts = _safe_path(relative_path)
+    state = shared_brain._brain_state_owned(link, config)
+    if state.get("problem"):
+        _refuse("brain_unavailable", "The selected shared folder is unavailable or has changed.")
+    try:
+        parent_fd, chain = folder_io.open_chain(link.path, parts)
+    except FileNotFoundError:
+        _refuse("invalid_path", "The note's parent folder does not exist in the shared folder.")
+    except folder_io.FolderChanged:
+        _refuse("unsafe_target", "The shared folder or one of its path components changed.")
+    except OSError:
+        _refuse("brain_unavailable", "The selected shared folder could not be read safely.")
+    try:
+        entry = folder_io.stat_entry(parent_fd, parts[-1])
+    finally:
+        os.close(parent_fd)
+    if entry is not None:
+        if stat.S_ISLNK(entry.st_mode):
+            _refuse("unsafe_target", "The note path is a symbolic link.")
+        if not stat.S_ISREG(entry.st_mode):
+            _refuse("unsafe_target", "The note path is not a regular file.")
+        _refuse(
+            "folder_update_unsupported",
+            "Updating or deleting an existing note in an ordinary folder is not supported yet.",
+        )
+    return "", None, None, None, folder_destination_fingerprint(link), _folder_chain_rows(chain)
+
+
+def _qualify_git(
+    config: Any, link: SharedBrainLink, relative_path: str,
+) -> tuple[str, str, bytes | None, str | None, str, None]:
     parts = _safe_path(relative_path)
     state = shared_brain._brain_state_owned(link, config)
     if state.get("problem"):
@@ -221,7 +285,19 @@ def _qualify(config: Any, link: SharedBrainLink, relative_path: str) -> tuple[st
             original.decode("utf-8", "strict")
     except UnicodeDecodeError:
         _refuse("invalid_utf8", "The existing note is not valid UTF-8.")
-    return full_ref, commit, original, original_oid
+    _origin_code, config_listing = shared_brain._git(folder, "config", "--list", "--show-scope")
+    destination_fingerprint = _origin_fingerprint(shared_brain._origin_from_listing(config_listing))
+    if _origin_code != 0 or not destination_fingerprint:
+        _refuse("brain_changed", "The shared brain destination could not be verified.")
+    return full_ref, commit, original, original_oid, destination_fingerprint, None
+
+
+def _qualify(
+    config: Any, link: SharedBrainLink, relative_path: str, operation: str | None = None,
+) -> tuple[str, str | None, bytes | None, str | None, str, list[dict[str, int]] | None]:
+    if link.kind == "folder":
+        return _qualify_folder(config, link, relative_path, operation)
+    return _qualify_git(config, link, relative_path)
 
 
 def _brain_for(config: Any, workspace: str, name: str) -> SharedBrainLink:
@@ -343,19 +419,40 @@ def share_dismissal_block(
     if receipts:
         return "A shared-note publication is already confirmed."
     for attempt in attempts:
+        if not isinstance(attempt, dict):
+            return "A shared-note publication attempt needs reconciliation."
+        common = (
+            type(attempt.get("attempt")) is int
+            and attempt.get("attempt", 0) >= 1
+            and attempt.get("proposal_id") == fields.get("proposal_id")
+            and attempt.get("revision") == fields.get("revision")
+            and attempt.get("destination_fingerprint") == fields.get("destination_fingerprint")
+        )
+        if attempt.get("kind") == "folder":
+            # A rejected folder attempt wrote nothing (either the destination
+            # already existed, or the no-clobber publish failed before the
+            # link). It is safe to dismiss, unlike an unresolved attempt.
+            if (
+                not common
+                or attempt.get("status") != "rejected"
+                or attempt.get("retryable") not in (True, False)
+                or attempt.get("path") != fields.get("path")
+                or not isinstance(attempt.get("token"), str)
+                or not attempt.get("token")
+                or attempt.get("staging_name") != f".ciao-share-{attempt.get('token')}.d"
+                or not isinstance(attempt.get("staging_root"), str)
+                or not os.path.isabs(str(attempt.get("staging_root")))
+            ):
+                return "A shared-note publication attempt needs reconciliation."
+            continue
         if (
-            not isinstance(attempt, dict)
+            not common
             or attempt.get("status") != "rejected"
             or attempt.get("retryable") is not False
-            or type(attempt.get("attempt")) is not int
-            or attempt.get("attempt", 0) < 1
             or not isinstance(attempt.get("commit_oid"), str)
             or not re.fullmatch(r"[0-9a-f]{40}", attempt.get("commit_oid", ""))
             or not isinstance(attempt.get("parent_oid"), str)
             or not re.fullmatch(r"[0-9a-f]{40}", attempt.get("parent_oid", ""))
-            or attempt.get("proposal_id") != fields.get("proposal_id")
-            or attempt.get("revision") != fields.get("revision")
-            or attempt.get("destination_fingerprint") != fields.get("destination_fingerprint")
             or attempt.get("ref") != fields.get("upstream_ref")
         ):
             return "A shared-note publication attempt needs reconciliation."
@@ -374,22 +471,36 @@ def _draft_share(
     if not isinstance(request_key, str) or not request_key:
         _refuse("request_conflict", "A stable internal request key is required.")
     link = _brain_for(config, workspace, brain)
-    from ciao.workspaces import ensure_registry_current, persisted_checkout_links, workspace_registry_claim, WorkspaceRegistryConflict
+    from ciao.workspaces import (
+        ensure_registry_current,
+        persisted_checkout_links,
+        persisted_shared_links,
+        workspace_registry_claim,
+        WorkspaceRegistryConflict,
+    )
 
-    if link.kind != "git":
-        _refuse("upstream_unavailable", "Publishing requires a Git shared brain.")
     try:
         with workspace_registry_claim(config) as owner:
             ensure_registry_current(config)
             if owner.current is None:
                 raise WorkspaceRegistryConflict("workspace registry is missing")
-            persisted_checkout_links(owner.current, link.path)
-            _persist_link_lifetime(config, workspace, link, owner=owner)
-            op_ref, base_commit, original, original_oid = _qualify(config, link, relative_path)
-            _origin_code, listing = shared_brain._git(Path(link.path), "config", "--list", "--show-scope")
-            destination_fingerprint = _origin_fingerprint(shared_brain._origin_from_listing(listing))
-            if _origin_code != 0 or not destination_fingerprint:
-                _refuse("brain_changed", "The shared brain destination could not be verified.")
+            if link.kind == "folder":
+                if not any(
+                    name == workspace
+                    and row.get("name") == link.name
+                    and row.get("path") == link.path
+                    and row.get("identity") == link.identity
+                    and row.get("kind") == "folder"
+                    and row.get("lifetime_id") == link.lifetime_id
+                    for name, row in persisted_shared_links(owner.current, link.path)
+                ):
+                    raise WorkspaceRegistryConflict("the shared folder link changed")
+            else:
+                persisted_checkout_links(owner.current, link.path)
+                _persist_link_lifetime(config, workspace, link, owner=owner)
+            op_ref, base_commit, original, original_oid, destination_fingerprint, folder_chain = _qualify(
+                config, link, relative_path, operation
+            )
     except WorkspaceRegistryConflict:
         _refuse("brain_unavailable", "The shared brain registry changed while drafting.")
     operation = operation or ("replace" if original is not None else "create")
@@ -495,7 +606,7 @@ def _draft_share(
     token_fields: dict[str, Any] = {
         "schema": _SCHEMA,
         "workspace": workspace, "proposal_id": proposal_id, "revision": 1,
-        "link_lifetime_id": link.lifetime_id,
+        "link_lifetime_id": link.lifetime_id, "link_kind": link.kind,
         "sidecar_id": sidecar_id, "brain": link.name, "origin_identity": link.identity,
         "checkout_path": str(Path(link.path).resolve()),
         "destination_fingerprint": destination_fingerprint,
@@ -505,6 +616,8 @@ def _draft_share(
         "proposed_sha256": hashlib.sha256(proposed).hexdigest() if proposed is not None else None,
         "base_commit": base_commit,
     }
+    if link.kind == "folder":
+        token_fields["folder_chain"] = folder_chain
     token_fields["review_key"] = proposal_tracking.proposal_review_key(workspace, KIND, text, "", sidecar_id, "")
     token = _review_token(token_fields)
     artifact = {"schema": _SCHEMA, "immutable": token_fields, "review_token": token, "request_fingerprint": request_fingerprint, "request_key_hash": key_hash}

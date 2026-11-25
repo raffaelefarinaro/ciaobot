@@ -331,6 +331,10 @@ const SHARE_BLOCKED_MESSAGES: Record<string, string> = {
   draft_unavailable: 'This shared-note review is unavailable. Refresh the proposal before continuing.',
   draft_corrupt: 'This shared-note review could not be verified. Refresh the proposal before continuing.',
   share_text_edits_not_supported: 'Shared-note proposals cannot be edited here.',
+  folder_update_unsupported: 'This folder already has a note at that path. Ciaobot cannot safely replace or delete an existing folder file; edit it in the folder instead.',
+  unsafe_target: 'The folder path or one of its components changed since review. Nothing was written; review a fresh proposal.',
+  manual_export_required: 'Ciaobot cannot stage and hard-link into this folder safely from its private storage. Export the approved note manually instead.',
+  folder_unverifiable: 'This volume cannot prove the completed write, so Ciaobot does not claim it.',
 }
 
 function shareBlockedMessage(reason: string): string {
@@ -384,6 +388,23 @@ async function confirmPreview(row: ProposalRow, workspace = '', reconcile = fals
     const next = { ...shareActionErrors.value }
     delete next[row.id]
     shareActionErrors.value = next
+    const receipt = (result.payload as { receipt?: { scope?: string } } | undefined)?.receipt
+    if (preview.link_kind === 'folder' || receipt?.scope === 'historical_local_write') {
+      projectStore.pushToast({
+        chat_id: '',
+        title: `Saved locally to ${preview.brain || 'shared folder'}`,
+        body: `The note was saved to ${preview.path} on this computer. Cloud delivery and current availability are unknown.`,
+        variant: 'info',
+      })
+    } else {
+      const branch = preview.branch ? ` on ${preview.branch}` : ''
+      projectStore.pushToast({
+        chat_id: '',
+        title: `Published to ${preview.brain || 'shared repository'}`,
+        body: `The note was pushed to ${preview.identity || 'the linked repository'}${branch} and the remote commit was confirmed.`,
+        variant: 'info',
+      })
+    }
     if (previewId.value === row.id) closePreview()
     store.dropPreview(row.id)
     return

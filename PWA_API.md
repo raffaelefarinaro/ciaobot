@@ -1008,7 +1008,9 @@ curl -sS -b /tmp/ciao.jar -X DELETE "http://localhost:${PWA_PORT:-8443}/api/chat
 # nothing. Each workspace also reports shared_brains ([{name, path, identity, kind}],
 # always present, [] when none): the Git checkouts or ordinary folders it links as
 # shared brains. A save that omits kind keeps the linked row's kind; a new row
-# defaults to Git for backward compatibility.
+# defaults to Git for backward compatibility. A folder link may receive a
+# reviewed new note (create only); Ciaobot never replaces or deletes an
+# existing folder file and never claims that cloud sync finished.
 # Operator-only: set it with the same PATCH and a whole-list body such as
 # {"shared_brains": [{"path": "<absolute path>", "name": "<optional name>", "kind": "folder"}]}.
 # [] removes all. At most 5; Git paths must be checkouts with an origin remote;
@@ -1468,24 +1470,49 @@ on the decision row. `/api/proposals/batch` and `dismiss-older-than` take no
 reason.
 
 A `kind: "share"` preview is the exact private draft projection:
-`{before, after, operation, brain, identity, branch, path, revision,
+`{before, after, operation, brain, identity, link_kind, branch, path, revision,
 blocked_reason, reconcile_available, publish_retry_available}`.
-`reconcile_available` is true only when the exact canonical review token has a
-persisted attempt that must be inspected without pushing.
-`publish_retry_available` is true only when every persisted attempt is a
-validated retryable rejection and the attempt limit allows another push.
-Clients should expose only the action indicated by these server fields for
-blocked or previously attempted reviews.
+`link_kind` is `git` or `folder`. A folder preview is always a create
+(`before: null`) and is blocked with `folder_update_unsupported` after an
+external note appears at the reviewed path; replacing or deleting an existing
+ordinary-folder note is deferred until a platform can enforce a real
+conditional mutation (#3626). `reconcile_available` is true only when the
+exact canonical review token has a persisted attempt that must be inspected
+without writing. `publish_retry_available` is true only when every persisted
+attempt is a validated retryable rejection and the attempt limit allows
+another attempt. Clients should expose only the action indicated by these
+server fields for blocked or previously attempted reviews.
 `before` and `after` are exact text or `null` when the file
 is absent; `revision` is the full-artifact consent token. Share previews cannot
 be edited. Accept requires `{workspace, expected_revision}` for the owning
 workspace and that exact token. A stale token returns 409 with
 `share_status: "stale_review"` and a refreshed preview. The publisher records
-and reconciles remote attempts before confirming success; refusals leave the
-proposal pending. A confirmed accept settles the queue and records one
-decision. Retrying a confirmed accept with the same workspace and token
-replays its private receipt without another push. Batch accept still refuses
-share rows.
+and reconciles attempts before confirming success; refusals leave the proposal
+pending. A folder create is staged in trusted same-volume storage outside every
+linked/synced tree - engine state when it is already on the destination volume,
+otherwise a private per-volume staging directory - tagged with a random
+operation identity, and published with one no-clobber link without replacing an
+existing file. It is confirmed only after a definitive link, a
+destination-directory flush, and a visible destination that is the live staged
+inode carrying that tag and the approved bytes; matching bytes, a copied tag or
+a reused device/inode alone never count. Ancestor metadata is snapshotted as a
+best-effort move check, the path is revalidated, and the ancestor stamps are
+compared again after the link. A destination without trusted same-volume
+staging, hard-link support or a passing rename-observability probe returns
+`manual_export_required` before effect; Ciaobot does not claim guaranteed
+stable ancestry across mounts or caches. A receipt takes its inode from the
+descriptor that was actually read, never from a later name lookup. The shared
+tree is never used for staging or cleanup.
+A crash before the durable flush marker, any post-syscall link error including
+`EEXIST`, a failed flush or an observed path change stays `indeterminate`, with
+the proposal and staging evidence retained and no automatic retry or sync claim.
+A pending or linked attempt whose destination was replaced also stays
+indeterminate; only a durably flushed attempt may treat a later replacement as a
+conflict/rejection. A confirmed accept
+settles the queue and records one decision. Retrying a confirmed accept with the
+same workspace and token replays its historical private receipt without another
+write; a later external replacement is not rewritten or deleted. Batch accept
+still refuses share rows.
 
 `POST /api/proposals/{id}/reconcile` also requires `{workspace,
 expected_revision}`. Use it only when the preview says `reconcile_available:
@@ -1496,11 +1523,14 @@ and returns its status so the operator can decide what to do next.
 Share publication receipts are projected into proposal history and
 `/api/memory/receipts` as `kind: "share_publish"`, with commit, branch, path,
 operation and undoability metadata. The exact before/after text remains in the
-private runtime artifact and is returned only by receipt detail. Undo checks
-the original link lifetime, destination ref and currently published blob (or
-absence), then queues an inverse share proposal and returns
-`{ok: true, workspace, review_path}`. It never publishes; the inverse needs a
-separate preview and approval.
+private runtime artifact and is returned only by receipt detail. A Git receipt
+is undoable: undo checks the original link lifetime, destination ref and
+currently published blob (or absence), then queues an inverse share proposal and
+returns `{ok: true, workspace, review_path}`. It never publishes; the inverse
+needs a separate preview and approval. A folder receipt is `undoable: false`:
+Ciaobot created a new file and never deletes, replaces or reverts it, so the
+operator edits the folder directly and the undo route returns 400
+`undo_unsupported`.
 
 Each `GET /api/proposals` row may carry `decider` (`nightly` or `you`, absent
 when the bullet carries none) and `decide_reason` (one line).

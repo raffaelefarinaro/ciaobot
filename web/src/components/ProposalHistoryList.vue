@@ -240,6 +240,9 @@ function predictionBadge(row: ProposalHistoryRow): { cls: string; text: string }
  */
 function statusBadge(row: ProposalHistoryRow): { cls: string; text: string } {
   if (row.kind === 'share' && row.action === 'accepted') {
+    if (row.share_status === 'published' && row.change?.scope === 'historical_local_write') {
+      return { cls: 'badge--success', text: 'Saved locally' }
+    }
     return row.share_status === 'published' && row.commit_oid
       ? { cls: 'badge--success', text: 'Published' }
       : { cls: 'badge--error', text: 'Publication not confirmed' }
@@ -407,6 +410,12 @@ const filtersHideEverything = computed(
             <p v-if="row.kind === 'share' && row.share_status === 'published' && row.commit_oid" class="ph-share-commit">
               Published commit <code>{{ row.commit_oid }}</code>
             </p>
+            <p
+              v-if="row.kind === 'share' && row.share_status === 'published' && row.change?.scope === 'historical_local_write'"
+              class="ph-share-commit"
+            >
+              Saved to the folder on {{ formatTime(row.change.ts) }}. This is a historical local record; the file's current availability and any cloud sync are not confirmed.
+            </p>
             <div v-if="row.reason" class="ph-reason-block">
               <p class="ph-reason"><span class="ph-reason-label">Why</span> {{ isReasonOpen(row) ? row.reason : reasonPreview(row.reason).text }}</p>
               <button
@@ -557,8 +566,11 @@ const filtersHideEverything = computed(
                   </p>
                   <template v-else>
                     <p class="ph-change-dest">{{ receiptFor(row)!.destination || row.destination }}</p>
-                    <p v-if="receiptFor(row)!.share_status === 'published'" class="ph-share-commit">
+                    <p v-if="receiptFor(row)!.share_status === 'published' && receiptFor(row)!.commit_oid" class="ph-share-commit">
                       Published commit <code>{{ receiptFor(row)!.commit_oid }}</code>
+                    </p>
+                    <p v-if="receiptFor(row)!.scope === 'historical_local_write'" class="ph-share-commit">
+                      This receipt records the local folder write at the time shown. Current file availability and cloud delivery are unknown.
                     </p>
                     <template v-if="row.kind === 'share' && receiptFor(row)!.has_snapshot">
                       <section class="ph-share-image">
