@@ -870,6 +870,11 @@ def test_intake_resolves_mapped_destination_and_never_publishes(linked, monkeypa
         yield row
 
     monkeypatch.setattr(share_evidence, "evidence_authorization_guard", guard)
+    @contextmanager
+    def claim(*args, **kwargs):
+        yield object()
+
+    monkeypatch.setattr(share_evidence, "evidence_claim", claim)
     monkeypatch.setattr(share_publish, "publish_share", lambda *args, **kwargs: pytest.fail("intake published"))
     first = sp.draft_evidence_candidates(config, workspace="home", relation=relation)
     assert len(first) == 1 and isinstance(first[0], sp.ShareDraft)
@@ -1061,4 +1066,69 @@ def test_intake_uses_real_checkpoint_and_consent(linked, tmp_path, monkeypatch, 
         assert stdout.strip() == "done"
     else:
         se.revoke(config, workspace="home", grant_id=grant["grant_id"])
+    assert sp.draft_evidence_candidates(config, workspace="home", relation=relation) == []
+
+
+def test_intake_uses_settled_care_witness_and_current_consent(linked, tmp_path, monkeypatch):
+    from dataclasses import replace
+    from tests.test_share_evidence import _memory_manager
+    from ciao import curation_run, curation_share, share_evidence as se, share_publish, shared_brain_guide, shared_brain_mapping
+    from ciao.mcp_server import AgentSessionRegistry
+    from ciao.web import memory_pass
+
+    fixture_config, clone = linked
+    config, manager, project, _ = _memory_manager(tmp_path)
+    guide = {"version": 1, "scope": "Decisions", "exclusions": [], "types": {
+        "decision": {"kind": "collection", "path": "decisions", "operation": "create"}}}
+    (clone / shared_brain_guide.GUIDE_NAME).write_text("```ciao-guide\n" + json.dumps(guide) + "\n```\n")
+    load = shared_brain_guide.read_guide(clone, brain_identity=fixture_config.link.identity)
+    assert load.guide is not None
+    mapping = shared_brain_mapping.approve(fixture_config.link, load, ["decision"], expected_pin=load.guide.pin)
+    link = replace(fixture_config.link, guide_mapping=mapping, guide_mapping_generation=mapping.generation)
+    config.workspace("home").shared_brains = [link]
+    config.persist_workspace_registry()
+    project.vault_folder = "alpha"
+    vault = Path(config.workspace_vault_root("home"))
+    directory = vault / "projects" / "active" / "alpha"
+    directory.mkdir(parents=True)
+    (vault / "Workspace").mkdir(parents=True, exist_ok=True)
+    se._reset_project_manager_for_tests()
+    se.bind_project_manager(manager)
+    document = directory / se.DOCUMENT_NAME
+    text = "## Decision\nDecision: Launch\nEffective date: 2026-11-20\n"
+    document.write_text(text)
+    preview = se.preview(config, workspace="home", brain_name=link.name, project_id=project.project_id,
+        project_name="Alpha", project_dir=directory, source_id=se.DOCUMENT_SOURCE, grant_type="snapshot",
+        field_mask=["decision"], producers=["memory_extraction", "nightly_curation"], entry_index=0, session="operator")
+    grant = se.confirm(config, workspace="home", token=preview["preview_token"], session="operator")["grant"]
+    chat = next(item for item in manager.list_chats() if (item.helper or {}).get("kind") == memory_pass.MEMORY_PASS_KIND)
+    chat.last_response = "Completed the pass"
+    chat.last_response_status = "success"
+    registry = AgentSessionRegistry()
+    registry.issue(chat_id=chat.chat_id, project_id=chat.project_id, workspace="home", provider="claude")
+    manager._save()
+    se.checkpoint_completed_memory_pass(config, registry, workspace="home", pass_chat_id=chat.chat_id)
+    memory_relation = se.recover_memory_pass_source_relation(config, workspace="home", pass_chat_id=chat.chat_id, source_id=se.DOCUMENT_SOURCE)
+    relative = document.relative_to(vault).as_posix()
+    key = curation_run.item_key(curation_run.PASS_STALE_NOTE, relative)
+    target = curation_run.StaleNoteTarget(relative_path=relative, revision=se._digest(text.encode()))
+    item = curation_run.WorklistItem(pass_id=curation_run.PASS_STALE_NOTE, label="note", reason="due", keys=(key,), target=target)
+    lease = curation_share.begin(config, workspace="home", chat_id="care", token_id="token", dispatch_id="dispatch", ttl_s=600)
+    curation_run.record_plan(vault, holder=lease.holder, plan=curation_run.lease_plan(curation_run.RunPlan(planned=(item,), deferred=(), budget=curation_run.RunBudget())))
+    curation_run.record_done(vault, [key], holder=lease.holder)
+    assert curation_share.checkpoint(config, manager, workspace="home", chat_id="care", token_id="token", dispatch_id="dispatch", holder=lease.holder, key=key) == 1
+    curation_share.end(config, workspace="home", chat_id="care", token_id="token", dispatch_id="dispatch", holder=lease.holder, status="ok", planned=1, completed=1, deferred=0, reasons=[], live_keys=frozenset({key}), failed=0, counts_complete=True, dispatch_active=lambda: True)
+    with se.evidence_claim(config, workspace="home") as claim:
+        witness = curation_share.settled_witnesses(config, workspace="home", holder=lease.holder, claim=claim)[0]
+        relation = se.recover_care_source_relation(config, workspace="home", holder=lease.holder, witness_signature=witness["witness"]["witness_signature"], claim=claim)
+    monkeypatch.setattr(share_publish, "publish_share", lambda *args, **kwargs: pytest.fail("intake published"))
+    drafts = sp.draft_evidence_candidates(config, workspace="home", relation=relation)
+    assert len(drafts) == 1 and isinstance(drafts[0], sp.ShareDraft)
+    assert "Launch" in drafts[0].artifact["immutable"]["proposed"]
+    assert sp.draft_evidence_candidates(config, workspace="home", relation=relation)[0].proposal_id == drafts[0].proposal_id
+    memory_drafts = sp.draft_evidence_candidates(config, workspace="home", relation=memory_relation)
+    assert len(memory_drafts) == 1 and isinstance(memory_drafts[0], sp.ShareDraft)
+    assert memory_drafts[0].proposal_id == drafts[0].proposal_id
+    assert {item["payload"]["row"]["producer"] for item in memory_drafts[0].artifact["producer_provenance"]} == {"memory_extraction", "nightly_curation"}
+    se.revoke(config, workspace="home", grant_id=grant["grant_id"])
     assert sp.draft_evidence_candidates(config, workspace="home", relation=relation) == []
