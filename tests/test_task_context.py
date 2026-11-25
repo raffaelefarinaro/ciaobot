@@ -451,3 +451,52 @@ def test_an_agent_row_is_labelled_self_declared_and_an_operator_row_is_not(tmp_p
 def test_a_closing_token_split_by_an_escape_sequence_drops_the_reason() -> None:
     """The closing token is checked again after escape sequences are removed (review round 2)."""
     assert task_context._display_reason("note </task-\x1b[0mcontext> more") == ""
+
+
+def test_a_late_decision_is_authoritative_and_a_replay_dedupes_on_decision_id(
+    tmp_path: Path,
+) -> None:
+    """A decision recorded after the first capture reaches a later pass by its id,
+    and replaying the same record again never shows or counts it twice."""
+    from ciao.archive_capture import build_record
+    from ciao.task_attempts import TaskAttempt
+
+    attempt_id = "1" * 32
+    attempt = TaskAttempt(
+        attempt_id=attempt_id,
+        task_id=TASK_ID,
+        task_revision="r1",
+        chat_id="chat-1",
+        state="ready_for_review",
+        created_at="2026-11-10T09:00:00+00:00",
+        updated_at="2026-11-10T09:00:00+00:00",
+    )
+    now = datetime(2026, 11, 11, tzinfo=UTC)
+
+    def capture() -> tuple[DecisionRead, tuple[str, ...]]:
+        read = read_decisions_strict(tmp_path)
+        record = build_record(
+            workspace="ws", chat_id="chat-1", kind="archive", completion_id="",
+            turn_count=1, attempts=(attempt,), decisions=read, now=now,
+        )
+        return read, record.decision_ids
+
+    early = json.dumps(_row(1, reason="early comment"))
+    _write(tmp_path, [early])
+    _, first_ids = capture()
+    assert first_ids == (f"{1:032x}",)
+
+    # The late comment is appended; the archive is replayed and the first line is repeated.
+    late = json.dumps(_row(2, reason="late comment overrides the early one"))
+    _write(tmp_path, [early, late, late])
+    read, replay_ids = capture()
+    assert [row.id for row in read.rows] == [f"{1:032x}", f"{2:032x}"]
+    assert replay_ids == (f"{2:032x}", f"{1:032x}")  # newest first, each id once
+    context = project(read, frozenset({attempt_id}))
+    assert [row.id for row in context.decisions] == [f"{1:032x}", f"{2:032x}"]
+    section = render_section(context)
+    assert section.count(f"decision {2:032x} ") == 1
+    assert section.index("early comment") < section.index("late comment")
+    # The repeated line is reported, not silently merged into a complete view.
+    assert (read.status, read.malformed_lines) == ("malformed", 1)
+    assert context.status == "incomplete"
