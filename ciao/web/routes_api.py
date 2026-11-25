@@ -484,6 +484,82 @@ def _disk_link_state_matches(link: SharedBrainLink, row: dict[str, Any] | None) 
     )
 
 
+async def workspace_shared_brain_guide_mapping(request: Request) -> JSONResponse:
+    """Preview or save a review-only mapping from an authenticated Settings action."""
+    from ciao import shared_brain_guide as guide, shared_brain_mapping as mapping
+    from ciao.workspaces import workspace_registry_lock
+
+    config = request.app.state.config
+    workspace_name = str(request.path_params.get("name") or "")
+    brain_name = str(request.path_params.get("brain") or "")
+    body: Any = None
+    if request.method == "POST":
+        try:
+            body = await request.json()
+        except ValueError:
+            return JSONResponse({"error": "invalid JSON"}, status_code=400)
+        if not isinstance(body, dict) or set(body) != {"identity", "lifetime", "generation", "pin", "types"}:
+            return JSONResponse({"error": "invalid mapping choice"}, status_code=400)
+        if not isinstance(body["identity"], str) or not isinstance(body["lifetime"], str) or type(body["generation"]) is not int or body["generation"] < 0 or not isinstance(body["types"], list) or len(body["types"]) > guide.MAX_TYPES or any(not isinstance(x, str) for x in body["types"]):
+            return JSONResponse({"error": "invalid mapping choice"}, status_code=400)
+
+    async with _workspace_archive_lock(request):
+        with workspace_registry_lock(config):
+            link = _sharing_link(config, workspace_name, brain_name)
+        if link is None:
+            return JSONResponse({"error": "unknown workspace or shared brain"}, status_code=404)
+        try:
+            async with shared_brain._checkout_lock(link.path):
+                async with shared_brain._checkout_claim(link.path, config):
+                    async with _workspace_registry_claim(config) as owner:
+                        with workspace_registry_lock(config):
+                            current = _sharing_link(config, workspace_name, brain_name)
+                            if current is None or not _disk_link_matches(current, _disk_shared_brain_row(config, workspace_name, brain_name)) or current.lifetime_id != link.lifetime_id:
+                                return JSONResponse({"error": "shared brain changed", "code": "brain_changed"}, status_code=409)
+                        if body is not None and (body["identity"] != current.identity or body["lifetime"] != current.lifetime_id or body["generation"] != current.guide_mapping_generation):
+                            return JSONResponse({"error": "mapping changed; reload", "code": "mapping_changed"}, status_code=409)
+                        # Revocation must remain possible when the destination is unavailable.
+                        if body is not None and not body["types"]:
+                            updated = current if current.guide_mapping is None else dataclasses.replace(current, guide_mapping=None, guide_mapping_generation=current.guide_mapping_generation + 1)
+                        else:
+                            if current.kind == "git":
+                                state = await run_while_claimed(shared_brain.probe_under_fence, config, current, owner)
+                                problem = state.get("problem")
+                            else:
+                                problem = shared_brain.link_problem(config, current)
+                            if problem:
+                                if body is None:
+                                    return JSONResponse({"identity": current.identity, "lifetime": current.lifetime_id, "generation": current.guide_mapping_generation, "pin": None, "scope": "", "exclusions": [], "types": [], "selected": [], "guide_status": "unavailable", "audience": {"status": "unknown", "verified": False}, "policy": "review"})
+                                return JSONResponse({"error": "shared brain unavailable", "problem": problem}, status_code=409)
+                            load = await run_while_claimed(guide.read_guide, current.path, brain_identity=current.identity)
+                            if not load.ok or load.guide is None:
+                                if body is None:
+                                    return JSONResponse({"identity": current.identity, "lifetime": current.lifetime_id, "generation": current.guide_mapping_generation, "pin": None, "scope": "", "exclusions": [], "types": [], "selected": [], "guide_status": load.status, "audience": {"status": "unknown", "verified": False}, "policy": "review"})
+                                return JSONResponse({"error": "guide unavailable", "status": load.status}, status_code=409)
+                            pin = {"identity": load.guide.pin.brain_identity, "version": load.guide.pin.version, "digest": load.guide.pin.digest}
+                            if body is None:
+                                return JSONResponse({"identity": current.identity, "lifetime": current.lifetime_id, "generation": current.guide_mapping_generation, "pin": pin, "scope": load.guide.scope, "exclusions": load.guide.exclusions, "types": [{"name": n.name, "kind": n.destination.kind, "path": n.destination.path, "section": n.destination.section, "operation": n.destination.operation, "example": n.example} for n in load.guide.types.values()], "selected": [g.note_type for g in current.guide_mapping.grants] if current.guide_mapping and current.guide_mapping.pin == load.guide.pin else [], "audience": {"status": "unknown", "verified": False}, "policy": "review"})
+                            if body["pin"] != pin:
+                                return JSONResponse({"error": "guide changed; review again", "code": "guide_changed"}, status_code=409)
+                            try:
+                                approved = mapping.approve(current, load, body["types"], expected_pin=load.guide.pin)
+                            except ValueError:
+                                return JSONResponse({"error": "invalid type selection"}, status_code=400)
+                            updated = dataclasses.replace(current, guide_mapping=approved, guide_mapping_generation=approved.generation)
+                        if updated != current:
+                            with workspace_registry_lock(config):
+                                workspace = config.workspace(workspace_name)
+                                links = [updated if item is current else item for item in workspace.shared_brains]
+                                candidate = dataclasses.replace(workspace, shared_brains=links)
+                                workspaces = dict(config.workspaces)
+                                workspaces[workspace_name] = candidate
+                                _persist_workspaces(config, workspaces, owner=owner)
+                                config.workspaces[workspace_name] = candidate
+                        return JSONResponse({"generation": updated.guide_mapping_generation, "policy": "review", "audience": {"status": "unknown", "verified": False}})
+        except (OSError, WorkspaceRegistryConflict):
+            return JSONResponse({"error": "mapping unavailable; reload and retry", "code": "mapping_locked"}, status_code=409)
+
+
 async def set_workspace_shared_brain_sharing(request: Request) -> JSONResponse:
     """Choose one link's sharing policy, explicitly, from authenticated Settings.
 

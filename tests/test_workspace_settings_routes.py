@@ -17,6 +17,7 @@ from ciao.web.routes_api import (
     reorder_workspaces,
     upsert_workspace_setting,
     workspace_shared_brains,
+    workspace_shared_brain_guide_mapping,
     set_workspace_shared_brain_sharing,
 )
 
@@ -241,6 +242,7 @@ def _client(
                 workspace_shared_brains,
                 methods=["GET"],
             ),
+            Route("/api/workspaces/{name}/shared-brains/{brain}/guide-mapping", workspace_shared_brain_guide_mapping, methods=["GET", "POST"]),
             Route(
                 "/api/workspaces/{name}/shared-brains/{brain}/sharing",
                 set_workspace_shared_brain_sharing,
@@ -1938,6 +1940,45 @@ def _sharing_body(
         "lifetime": state["lifetime"] if lifetime is None else lifetime,
         "generation": state["sharing_generation"] if generation is None else generation,
     }
+
+
+def test_guide_mapping_preview_save_stale_and_relink(tmp_path, monkeypatch):
+    from ciao import shared_brain
+    monkeypatch.setattr(shared_brain, "schedule_update", lambda *args: None)
+    client, config, _ = _client(tmp_path)
+    acme = _checkout(_away(tmp_path) / "mapping", "https://github.com/acme/notes")
+    document = {"version": 1, "scope": "Decisions", "exclusions": [], "types": {
+        "decision": {"kind": "section", "path": "notes/decisions.md", "section": "Decisions", "operation": "append"}}}
+    (acme / "CIAO-CONTENT-GUIDE.md").write_text("```ciao-guide\n" + json.dumps(document) + "\n```\n")
+    assert client.patch("/api/workspaces/personal", json={"shared_brains": [{"path": str(acme)}]}).status_code == 200
+    path = "/api/workspaces/personal/shared-brains/notes/guide-mapping"
+    preview = client.get(path)
+    assert preview.status_code == 200, preview.text
+    view = preview.json()
+    assert view["policy"] == "review" and view["audience"]["status"] == "unknown"
+    choice = {k: view[k] for k in ("identity", "lifetime", "generation", "pin")}
+    choice["types"] = ["decision"]
+    other, _, _ = _client(tmp_path)
+    assert client.post(path, json=choice).status_code == 200
+    assert other.post(path, json=choice).status_code == 409
+    assert config.workspace("personal").shared_brains[0].guide_mapping is not None
+    assert client.post(path, json=choice).status_code == 409
+    assert _client(tmp_path)[1].workspace("personal").shared_brains[0].guide_mapping is not None
+    from ciao.shared_brain_mapping import resolve_workspace_destination, revalidate_snapshot
+    from ciao.workspaces import workspace_registry_claim
+    with shared_brain.checkout_claims_nowait([str(acme)], config), workspace_registry_claim(config) as owner:
+        snapshot = resolve_workspace_destination(config, "personal", "notes", note_type="decision", owner=owner)
+        assert snapshot is not None and snapshot.destination.destination.path == "notes/decisions.md"
+        assert revalidate_snapshot(config, snapshot, owner=owner)
+        assert resolve_workspace_destination(config, "personal", "notes", note_type="decision", relative_path="notes/other.md", owner=owner) is None
+    (acme / "CIAO-CONTENT-GUIDE.md").write_text("changed")
+    with shared_brain.checkout_claims_nowait([str(acme)], config), workspace_registry_claim(config) as owner:
+        assert not revalidate_snapshot(config, snapshot, owner=owner)
+    assert client.get(path).json()["guide_status"] == "malformed"
+    assert client.patch("/api/workspaces/personal", json={"shared_brains": []}).status_code == 200
+    assert client.patch("/api/workspaces/personal", json={"shared_brains": [{"path": str(acme)}]}).status_code == 200
+    assert config.workspace("personal").shared_brains[0].guide_mapping is None
+    assert client.post(path, json=choice).status_code == 409
 
 
 def test_shared_brain_sharing_defaults_review_and_grant_survives_healthy_restart(tmp_path, monkeypatch):
