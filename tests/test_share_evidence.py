@@ -6,9 +6,11 @@ import dataclasses
 import json
 import subprocess
 import sys
+import threading
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import patch
 
 import pytest
 from itsdangerous import URLSafeTimedSerializer
@@ -1004,7 +1006,68 @@ def test_completed_memory_checkpoint_survives_registry_restart_and_revocation(tm
     assert relation.project_id == project.project_id
     assert relation.source_id == f"stream:{project.project_id}"
     assert [row["canonical_bytes"] for row in se.eligible_entries(config, workspace="home", brain_name="notes", relation=relation)] == ['{"decision":"Later"}']
-    se.revoke(config, workspace="home", grant_id=grant["grant_id"])
+    authorizations = se.mint_evidence_authorizations(config, workspace="home", brain_name="notes", relation=relation)
+    assert len(authorizations) == 1
+    authorization = authorizations[0]
+    later = se.record_operator_decision(config, workspace="home", project_id=project.project_id, decision="Superseded", reason="", effective_date="2026-11-22", session="operator-one")
+    newer = se.mint_evidence_authorizations(config, workspace="home", brain_name="notes", relation=relation)
+    superseded = next(item for item in newer if item["payload"]["row"]["entry_id"] == later["entry"]["entry_id"])
+    se.supersede_entry(config, workspace="home", project_id=project.project_id, entry_id=later["entry"]["entry_id"])
+    with pytest.raises(se.EvidenceError):
+        with se.evidence_authorization_guard(config, workspace="home", authorization=superseded):
+            pass
+    with patch.object(se, "_now", return_value=datetime.now(UTC) + timedelta(hours=2)):
+        assert se.eligible_entries(config, workspace="home", brain_name="notes", relation=relation) == []
+        with se.evidence_authorization_guard(config, workspace="home", authorization=authorization) as durable:
+            assert durable["entry_revision"] == 2
+    document = project_dir / se.DOCUMENT_NAME
+    document.write_text("## Decision\nDecision: Snapshot\nEffective date: 2026-11-20\n", encoding="utf-8")
+    snapshot = se.preview(config, workspace="home", brain_name="notes", project_id=project.project_id, project_name="Alpha", project_dir=project_dir, source_id=se.DOCUMENT_SOURCE, grant_type="snapshot", field_mask=["decision"], producers=["memory_extraction"], entry_index=0, session="operator-one")
+    snapshot_grant = se.confirm(config, workspace="home", token=snapshot["preview_token"], session="operator-one")["grant"]
+    snapshot_relation = se.recover_memory_pass_source_relation(config, workspace="home", pass_chat_id=chat.chat_id, source_id=se.DOCUMENT_SOURCE)
+    snapshot_authorization = se.mint_evidence_authorizations(config, workspace="home", brain_name="notes", relation=snapshot_relation)[0]
+    document.unlink()
+    with se.evidence_authorization_guard(config, workspace="home", authorization=snapshot_authorization) as snapshot_row:
+        assert snapshot_row["canonical_bytes"] == '{"decision":"Snapshot"}'
+        assert snapshot_row["entry_revision"] is None
+    se.withdraw(config, workspace="home", grant_id=snapshot_grant["grant_id"], reason="withdrawn")
+    with pytest.raises(se.EvidenceError):
+        with se.evidence_authorization_guard(config, workspace="home", authorization=snapshot_authorization):
+            pass
+    with pytest.raises(se.EvidenceError):
+        with se.evidence_authorization_guard(config, workspace="work", authorization=authorization):
+            pass
+    forged = json.loads(json.dumps(authorization))
+    forged["payload"]["row"]["canonical_bytes"] = '{"decision":"forged"}'
+    with pytest.raises(se.EvidenceError):
+        with se.evidence_authorization_guard(config, workspace="home", authorization=forged):
+            pass
+    entered = threading.Event()
+    finished = threading.Event()
+    def revoke() -> None:
+        entered.set()
+        se.revoke(config, workspace="home", grant_id=grant["grant_id"])
+        finished.set()
+    with se.evidence_authorization_guard(config, workspace="home", authorization=authorization) as admitted:
+        assert admitted["entry_revision"] == 2
+        assert admitted["audience"] == "github.com/acme/home"
+        thread = threading.Thread(target=revoke)
+        thread.start()
+        assert entered.wait(2)
+        assert not finished.wait(0.05)
+        lock_path = se._workspace_dir(config, "home") / ".state.lock"
+        marker = tmp_path / "child-acquired"
+        child = subprocess.Popen([sys.executable, "-c", "import fcntl,sys; f=open(sys.argv[1], 'r+'); fcntl.flock(f, fcntl.LOCK_EX); open(sys.argv[2], 'w').close()", str(lock_path), str(marker)])
+        with pytest.raises(subprocess.TimeoutExpired):
+            child.wait(timeout=0.2)
+        assert not marker.exists()
+    assert child.wait(timeout=5) == 0
+    assert marker.exists()
+    thread.join(2)
+    assert finished.is_set()
+    with pytest.raises(se.EvidenceError):
+        with se.evidence_authorization_guard(config, workspace="home", authorization=authorization):
+            pass
     assert se.eligible_entries(config, workspace="home", brain_name="notes", relation=relation) == []
     with pytest.raises(se.EvidenceError):
         se.recover_memory_pass_source_relation(config, workspace="work", pass_chat_id=chat.chat_id)

@@ -2226,6 +2226,7 @@ def eligible_entries(
                     "grant_type": "standing",
                     "entry_id": entry.get("entry_id", ""),
                     "entry_revision": entry.get("revision"),
+                    "snapshot_id": None,
                     "consent_generation": grant.get("consent_generation"),
                     "audience": grant.get("audience", ""),
                     "project_id": project,
@@ -2267,6 +2268,7 @@ def eligible_entries(
                 "grant_type": "snapshot",
                 "entry_id": "",
                 "entry_revision": None,
+                "snapshot_id": evidence_key,
                 "consent_generation": grant.get("consent_generation"),
                 "audience": grant.get("audience", ""),
                 "project_id": project,
@@ -2284,3 +2286,101 @@ def eligible_entries(
             if len(out) >= limit:
                 return out
     return out
+
+
+def _authorization_signature(config: Any, payload: dict[str, Any]) -> str:
+    raw = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    return hmac.new(_relation_secret(config), b"evidence-authorization\0" + raw, hashlib.sha256).hexdigest()
+
+
+def mint_evidence_authorizations(config: Any, *, workspace: str, brain_name: str, relation: SourceRelation) -> list[dict[str, Any]]:
+    """Capture exact eligible rows while the managed producer relation is live.
+
+    Only recovered memory checkpoints currently provide durable source proof.
+    The signed payload is private artifact data, not an operator credential.
+    """
+    if not _relation_is_sealed(config, relation) or relation.kind != "memory_checkpoint":
+        _refuse("invalid_relation", "A durable engine-attested source is required.")
+    with _workspace_guard(config, workspace):
+        link = _link(config, workspace, brain_name)
+        rows = eligible_entries(config, workspace=workspace, brain_name=brain_name, relation=relation)
+        result = []
+        for row in rows:
+            payload = {
+                "workspace": workspace, "workspace_lifetime_id": _workspace_lifetime(config, workspace),
+                "brain_name": link.name, "brain_identity": link.identity, "brain_lifetime_id": link.lifetime_id,
+                "row": row,
+            }
+            result.append({"schema": SCHEMA, "payload": payload, "signature": _authorization_signature(config, payload)})
+        return result
+
+
+@contextmanager
+def evidence_authorization_guard(config: Any, *, workspace: str, authorization: object) -> Iterator[dict[str, Any]]:
+    """Hold evidence consent stable while the caller performs an authorized effect.
+
+    The caller must first hold the checkout and authoritative workspace-registry
+    ownership; this guard alone cannot fence unlink, restore or external edits.
+    """
+    _require_workspace(config, workspace)
+    if not isinstance(authorization, dict) or authorization.get("schema") != SCHEMA:
+        _refuse("authorization_invalid", "The evidence authorization is unavailable.")
+    payload = authorization.get("payload")
+    signature = authorization.get("signature")
+    if (not isinstance(payload, dict) or not isinstance(signature, str)
+            or not re.fullmatch(r"[0-9a-f]{64}", signature)
+            or not hmac.compare_digest(signature, _authorization_signature(config, payload))):
+        _refuse("authorization_invalid", "The evidence authorization is unavailable.")
+    row = payload.get("row")
+    if not isinstance(row, dict):
+        _refuse("authorization_invalid", "The evidence authorization is unavailable.")
+    with _workspace_guard(config, workspace):
+        state = _load_state(config, workspace)
+        if (payload.get("workspace") != workspace
+                or payload.get("workspace_lifetime_id") != state.get("workspace_lifetime_id")):
+            _refuse("authorization_stale", "The evidence workspace changed.")
+        link = _link(config, workspace, str(payload.get("brain_name") or ""))
+        if (link.identity != payload.get("brain_identity") or link.lifetime_id != payload.get("brain_lifetime_id")):
+            _refuse("authorization_stale", "The evidence destination changed.")
+        grants = state.get("grants")
+        grant = grants.get(row.get("grant_id")) if isinstance(grants, dict) else None
+        if (not isinstance(grant, dict) or not grant.get("active") or not _link_matches(link, grant)
+                or grant.get("workspace") != workspace
+                or grant.get("workspace_lifetime_id") != state.get("workspace_lifetime_id")
+                or grant.get("project_id") != row.get("project_id") or grant.get("source_id") != row.get("source_id")
+                or grant.get("type") != row.get("grant_type") or grant.get("consent_generation") != row.get("consent_generation")
+                or grant.get("audience") != row.get("audience") or row.get("producer") not in (grant.get("producers") or [])
+                or grant.get("field_mask") != row.get("field_mask")):
+            _refuse("authorization_stale", "The evidence permission changed.")
+        if row.get("relation_kind") != "memory_checkpoint":
+            _refuse("authorization_stale", "The evidence source is unavailable.")
+        checkpoint = _verified_memory_checkpoint(config, workspace, str(row.get("relation_id") or ""))
+        if checkpoint.get("signature") != row.get("relation_evidence") or checkpoint.get("project_id") != row.get("project_id"):
+            _refuse("authorization_stale", "The evidence source changed.")
+        canonical = row.get("canonical_bytes")
+        if not isinstance(canonical, str) or _digest(canonical.encode("utf-8")) != row.get("digest"):
+            _refuse("authorization_invalid", "The evidence bytes are invalid.")
+        if grant.get("type") == "standing":
+            stream = _stream_for(state, str(grant.get("project_id") or ""))
+            entries = stream.get("entries") if stream else None
+            entry = next((item for item in entries if isinstance(item, dict) and item.get("entry_id") == row.get("entry_id")), None) if isinstance(entries, list) else None
+            if (entry is None or entry.get("superseded") or entry.get("revision") != row.get("entry_revision")
+                    or type(grant.get("start_revision")) is not int or type(entry.get("revision")) is not int
+                    or entry["revision"] <= grant["start_revision"]
+                    or not _operator_event_valid(config, entry, workspace=workspace,
+                        lifetime_id=str(state.get("workspace_lifetime_id", "")), project_id=str(grant.get("project_id", "")))
+                    or _canonical({name: str(entry.get(name, "")) for name in _clean_field_mask(grant.get("field_mask"))}).decode("utf-8") != canonical):
+                _refuse("authorization_stale", "The evidence decision changed.")
+        elif grant.get("type") == "snapshot":
+            key = grant.get("evidence_key")
+            if not isinstance(key, str) or not re.fullmatch(r"[0-9a-f]{64}", key) or key != row.get("snapshot_id"):
+                _refuse("authorization_stale", "The evidence snapshot is unavailable.")
+            evidence = _read_json(_evidence_dir(config, workspace) / (key + ".json"), limit=MAX_EVIDENCE_BYTES, code="evidence_corrupt")
+            if (evidence.get("workspace") != workspace or evidence.get("workspace_lifetime_id") != state.get("workspace_lifetime_id")
+                    or evidence.get("project_id") != grant.get("project_id") or evidence.get("source_id") != grant.get("source_id")
+                    or evidence.get("evidence_key") != key or evidence.get("field_mask") != grant.get("field_mask")
+                    or evidence.get("canonical_bytes") != canonical or evidence.get("digest") != row.get("digest")):
+                _refuse("authorization_stale", "The evidence snapshot changed.")
+        else:
+            _refuse("authorization_stale", "The evidence permission is unavailable.")
+        yield dict(row)
