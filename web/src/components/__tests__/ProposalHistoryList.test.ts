@@ -466,6 +466,73 @@ describe('ProposalHistoryList changes and undo', () => {
     wrapper.unmount()
   })
 
+  it('shows a Git share receipt as a confirmed remote publication, not a local-only write', async () => {
+    mockHistory(
+      [historyRow({
+        kind: 'share', share_status: 'published', commit_oid: 'a'.repeat(40),
+        destination: 'notes:docs/n.md',
+        change: {
+          receipt_id: 'shrpub_git', kind: 'share_publish', status: 'applied',
+          destination: 'notes:docs/n.md', undoable: true, changed: true,
+          ts: '2026-09-01T09:59:00+00:00', commit_oid: 'a'.repeat(40),
+        },
+      })],
+      {
+        id: 'shrpub_git', workspace: 'personal', kind: 'share_publish',
+        status: 'applied', share_status: 'published',
+        ts: '2026-09-01T09:59:00+00:00', actor: 'operator', source: 'pwa',
+        destination: 'notes:docs/n.md', fact_text: 'Shared note publication',
+        undoable: true, has_snapshot: true, changed: true, error: '',
+        operation: 'replace', path: 'docs/n.md', identity: 'github.com/acme/notes',
+        commit_oid: 'a'.repeat(40), published_blob_oid: 'b'.repeat(40),
+        before: 'old\n', after: 'new\n',
+        diff: [{ op: 'added', text: 'new' }], diff_truncated: false,
+      },
+    )
+    const wrapper = await openChanges()
+
+    expect(wrapper.text()).toContain('Published commit')
+    expect(wrapper.text()).toContain('a'.repeat(40))
+    expect(wrapper.text()).toContain('Published')
+    expect(wrapper.text()).not.toContain('Saved locally')
+    expect(wrapper.text()).not.toContain('historical local record')
+    wrapper.unmount()
+  })
+
+  it('scopes a folder share receipt as a historical local write, not current availability or sync', async () => {
+    mockHistory(
+      [historyRow({
+        kind: 'share', share_status: 'published', commit_oid: '',
+        destination: 'folder:notes/n.md',
+        change: {
+          receipt_id: 'shrpub_folder', kind: 'share_publish', status: 'applied',
+          destination: 'folder:notes/n.md', undoable: false, changed: true,
+          ts: '2026-09-01T09:59:00+00:00',
+          scope: 'historical_local_write', local_only: true, sync_claimed: false,
+        },
+      })],
+      {
+        id: 'shrpub_folder', workspace: 'personal', kind: 'share_publish',
+        status: 'applied', share_status: 'published',
+        ts: '2026-09-01T09:59:00+00:00', actor: 'operator', source: 'pwa',
+        destination: 'folder:notes/n.md', fact_text: 'Shared note publication',
+        undoable: false, has_snapshot: true, changed: true, error: '',
+        scope: 'historical_local_write', local_only: true, sync_claimed: false,
+        operation: 'create', path: 'notes/n.md', identity: 'folder:/notes',
+        commit_oid: '', before: null, after: 'new folder note\n',
+        diff: [{ op: 'added', text: 'new folder note' }], diff_truncated: false,
+      },
+    )
+    const wrapper = await openChanges()
+
+    expect(wrapper.text()).toContain('historical local record')
+    expect(wrapper.text()).toContain("file's current availability and any cloud sync are not confirmed")
+    expect(wrapper.text()).toContain('Current file availability and cloud delivery are unknown')
+    expect(wrapper.text()).not.toContain('Published commit')
+    expect(wrapper.find('.ph-change-actions button').exists()).toBe(false)
+    wrapper.unmount()
+  })
+
   it('keeps same-id receipts from two workspaces apart', async () => {
     // Receipt ids are content-derived, so the same id can name different
     // operations in different workspaces. The cache is keyed by workspace +

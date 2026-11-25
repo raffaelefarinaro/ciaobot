@@ -32,6 +32,9 @@ export interface ApplyLine {
  */
 export function applyLine(row: ProposalHistoryRow): ApplyLine | null {
   if (row.kind === 'share') {
+    if (row.share_status === 'published' && row.change?.scope === 'historical_local_write') {
+      return { text: 'Saved locally', tone: 'ok' }
+    }
     if (row.share_status === 'published' && row.commit_oid) {
       return { text: 'Published', tone: 'ok' }
     }

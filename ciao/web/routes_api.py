@@ -8551,6 +8551,11 @@ def _apply_share_history_detail(row: dict[str, Any], detail: dict[str, Any]) -> 
     fields = detail["immutable"]
     receipt_id = str(receipt["id"])
     destination = f"{fields.get('brain', '')}:{fields.get('path', '')}"
+    undoable = (
+        receipt.get("undoable", True) is not False
+        and fields.get("link_kind", "git") != "folder"
+        and bool(receipt.get("commit_oid"))
+    )
     row.update({
         "share_status": "published", "applied": True,
         "apply_status": "applied", "commit_oid": receipt.get("commit_oid", ""),
@@ -8559,9 +8564,13 @@ def _apply_share_history_detail(row: dict[str, Any], detail: dict[str, Any]) -> 
         "change": {
             "receipt_id": receipt_id, "kind": "share_publish",
             "status": "applied", "destination": destination,
-            "undoable": True, "changed": True, "ts": receipt.get("ts", ""),
+            "undoable": undoable,
+            "changed": True, "ts": receipt.get("ts", ""),
             "source_turns": [], "branch": receipt.get("branch", ""),
             "commit_oid": receipt.get("commit_oid", ""),
+            "scope": receipt.get("scope"),
+            "local_only": receipt.get("local_only"),
+            "sync_claimed": receipt.get("sync_claimed"),
         },
     })
 
@@ -8952,9 +8961,13 @@ async def proposals_history(request: Request) -> JSONResponse:
                 "change": {
                     "receipt_id": receipt_id, "kind": "share_publish",
                     "status": "applied", "destination": destination,
-                    "undoable": True, "changed": True, "ts": ts,
+                    "undoable": share_publish.is_share_receipt_undoable(receipt),
+                    "changed": True, "ts": ts,
                     "source_turns": [], "branch": receipt.get("branch", ""),
                     "commit_oid": receipt.get("commit_oid", ""),
+                    "scope": receipt.get("scope"),
+                    "local_only": receipt.get("local_only"),
+                    "sync_claimed": receipt.get("sync_claimed"),
                 },
             }
             rows.append(row)
@@ -9581,11 +9594,15 @@ async def memory_receipts(request: Request) -> JSONResponse:
                 "ts": str(receipt.get("ts", "")), "actor": "operator",
                 "source": "pwa", "destination": f"{receipt.get('brain', '')}:{receipt.get('path', '')}",
                 "fact_text": "Shared note publication", "changed": True,
-                "undoable": True, "share_status": "published",
+                "undoable": share_publish.is_share_receipt_undoable(receipt),
+                "share_status": "published",
                 "operation": receipt.get("operation", ""),
                 "branch": receipt.get("branch", ""), "path": receipt.get("path", ""),
                 "commit_oid": receipt.get("commit_oid", ""),
                 "published_blob_oid": receipt.get("published_blob_oid"),
+                "scope": receipt.get("scope"),
+                "local_only": receipt.get("local_only"),
+                "sync_claimed": receipt.get("sync_claimed"),
                 "proposal_id": receipt.get("proposal_id", ""),
             })
     rows.sort(key=lambda row: str(row.get("ts", "")), reverse=True)
@@ -9696,6 +9713,7 @@ async def memory_receipt_detail(request: Request) -> JSONResponse:
     — comes back with ``has_snapshot: false``, which the UI renders as "No
     change snapshot available" rather than as an empty diff.
     """
+    from ciao import share_publish
     from ciao.memory_receipts import is_undoable
 
     config = request.app.state.config
@@ -9720,9 +9738,18 @@ async def memory_receipt_detail(request: Request) -> JSONResponse:
                 "path": fields.get("path", ""), "identity": fields.get("origin_identity", ""),
                 "commit_oid": share_receipt.get("commit_oid", ""),
                 "published_blob_oid": share_receipt.get("published_blob_oid"),
-                "undoable": True, "has_snapshot": True, "changed": True,
+                "undoable": share_publish.is_share_receipt_undoable(share_receipt),
+                "has_snapshot": True, "changed": True,
+                "scope": share_receipt.get("scope"),
+                "local_only": share_receipt.get("local_only"),
+                "sync_claimed": share_receipt.get("sync_claimed"),
                 "before": before, "after": after, "truncated": False,
             }
+            if not share_payload["undoable"]:
+                share_payload["reason"] = (
+                    "A note published into an ordinary folder is edited there; "
+                    "Ciaobot does not delete or replace it from History."
+                )
             diff, diff_truncated = _receipt_diff(before or "", after or "", "\n")
             share_payload["diff"] = diff
             share_payload["diff_truncated"] = diff_truncated
@@ -9810,7 +9837,12 @@ async def memory_receipt_undo(request: Request) -> JSONResponse:
             config, workspace=found_in, receipt_id=rid
         )
         if isinstance(reversal, share_publish.drafts.ShareRefusal):
-            status = 503 if reversal.code in {"draft_unavailable", "upstream_unavailable"} else 409
+            if reversal.code in {"draft_unavailable", "upstream_unavailable"}:
+                status = 503
+            elif reversal.code == "undo_unsupported":
+                status = 400
+            else:
+                status = 409
             return JSONResponse({"error": reversal.message, "id": rid, "conflict": reversal.code == "changed_upstream"}, status_code=status)
         return JSONResponse({"ok": True, **reversal})
     try:
