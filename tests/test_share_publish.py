@@ -1620,3 +1620,49 @@ def test_drift_repair_restart_keeps_manual_draft_and_publish(
         expected_revision=after.artifact["review_token"],
     ))
     assert result.outcome == "published"
+
+
+def test_divergent_push_url_refuses_draft_then_repairs_and_publishes(
+    linked: tuple[Config, Path, Path]
+) -> None:
+    config, clone, origin = linked
+    git(clone, "remote", "set-url", "--push", "origin", "https://github.com/x/other")
+    refused = share_proposals.draft_share(
+        config, workspace="home", relative_path="n.md", operation="replace",
+        proposed=b"divergent push\n", request_key="divergent-push",
+    )
+    assert isinstance(refused, share_proposals.ShareRefusal)
+    assert refused.code == "brain_changed"
+
+    git(clone, "remote", "set-url", "--push", "origin", HOSTED)
+    draft = share_proposals.draft_share(
+        config, workspace="home", relative_path="n.md", operation="replace",
+        proposed=b"repaired push\n", request_key="repaired-push",
+    )
+    assert isinstance(draft, share_proposals.ShareDraft)
+
+    # Diverge again after review: the publish path must refuse the same draft.
+    git(clone, "remote", "set-url", "--push", "origin", "https://github.com/x/other")
+    refused_publish = asyncio.run(share_publish.publish_share(
+        config, workspace="home", proposal_id=draft.proposal_id,
+        expected_revision=draft.artifact["review_token"],
+    ))
+    assert refused_publish.outcome == "brain_changed"
+
+    git(clone, "remote", "set-url", "--push", "origin", HOSTED)
+    published = asyncio.run(share_publish.publish_share(
+        config, workspace="home", proposal_id=draft.proposal_id,
+        expected_revision=draft.artifact["review_token"],
+    ))
+    assert published.outcome == "published"
+
+
+def test_multiple_configured_or_fetch_urls_refuse_draft(linked: tuple[Config, Path, Path]) -> None:
+    config, clone, _origin = linked
+    git(clone, "remote", "set-url", "--add", "origin", "https://github.com/x/other")
+    refused = share_proposals.draft_share(
+        config, workspace="home", relative_path="n.md", operation="replace",
+        proposed=b"ambiguous origin\n", request_key="ambiguous-origin",
+    )
+    assert isinstance(refused, share_proposals.ShareRefusal)
+    assert refused.code == "brain_changed"

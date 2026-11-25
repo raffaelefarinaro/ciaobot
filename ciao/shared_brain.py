@@ -608,6 +608,10 @@ class SharingObservation:
     origin_identity: str
 
 
+def _origin_urls_from_listing(listing: str) -> tuple[str, ...]:
+    return tuple(value for key, value in _own_entries(listing) if key == "remote.origin.url")
+
+
 def _git_urls(folder: Path, *args: str) -> tuple[str, ...]:
     code, output = _git(folder, *args)
     if code != 0:
@@ -618,17 +622,57 @@ def _git_urls(folder: Path, *args: str) -> tuple[str, ...]:
 def observe_under_fence(
     config: Any, link: SharedBrainLink, owner: Any
 ) -> SharingObservation:
-    """Fence, then capture the exact origin read used by draft and publish."""
-    fence_path, grants = fence_before_origin_read(config, link, owner)
+    """Validate path/config first, fence, then read all three origin identities."""
+    state = _initial_state(link)
+    if link.kind != "git":
+        state["problem"] = "upstream_unavailable"
+        return SharingObservation(state, (), (), (), "")
+    problem = path_problem(config, link.path)
+    if problem:
+        state["problem"] = problem
+        state["missing"] = problem == "missing"
+        return SharingObservation(state, (), (), (), "")
     folder = Path(link.path)
-    configured = _git_urls(folder, "config", "--get-all", "remote.origin.url")
+    # This is the configuration validation read; no origin URL is touched yet.
+    code, listing = _git(folder, "config", "--list", "--show-scope")
+    if code != 0:
+        state["problem"] = "not_a_checkout"
+        return SharingObservation(state, (), (), (), "")
+    if _first_unsafe_key(listing) is not None:
+        state["problem"] = "unsafe_config"
+        return SharingObservation(state, (), (), (), "")
+
+    fence_path, grants = fence_before_origin_read(config, link, owner)
+    configured = _origin_urls_from_listing(listing)
     fetch = _git_urls(folder, "remote", "get-url", "--all", "origin")
     push = _git_urls(folder, "remote", "get-url", "--push", "--all", "origin")
-    live_identity = ""
-    if len(configured) == 1:
-        live_identity = _safe_identity(configured[0])
+    configured_identity = (
+        _safe_identity(configured[0]) if len(configured) == 1 else ""
+    )
+    consistent = bool(configured_identity) and len(fetch) == 1 and len(push) == 1
+    live_identity = configured_identity if consistent else ""
+    if consistent:
+        # A single non-hosted effective URL is a transport alias (for example a
+        # test or insteadOf mirror); publish still refuses it when it verifies
+        # the effective push target. A canonical effective identity that differs
+        # from the configured one is a real destination divergence.
+        fetch_identity = _safe_identity(fetch[0])
+        push_identity = _safe_identity(push[0])
+        if (fetch_identity and fetch_identity != configured_identity) or (
+            push_identity and push_identity != configured_identity
+        ):
+            consistent = False
+            live_identity = ""
     state = _brain_state_owned(link, config)
-    if not state.get("problem") and live_identity:
+    if not consistent or live_identity != link.identity:
+        # Configured, effective fetch and effective push must agree with the
+        # linked identity before the operation may proceed or settle its fence.
+        state["origin_changed"] = True
+        state["problem"] = "origin_changed"
+        state["sharing_policy"] = DEFAULT_SHARING_POLICY
+        state["sharing_granted_at"] = ""
+        state["sharing_grant_pending"] = sharing_grant_stored(link)
+    elif not state.get("problem"):
         settle_fence_after_healthy_probe(fence_path, grants, live_identity)
     return SharingObservation(
         state=state,
@@ -1174,8 +1218,11 @@ def _own_entries(listing: str) -> list[tuple[str, str]]:
 
 
 def _entry_allowed(key: str, value: str) -> bool:
-    if key == "remote.origin.url":
-        return True  # its value is checked against the identity, not here
+    if key in {"remote.origin.url", "remote.origin.pushurl"}:
+        # Their values are checked against the fenced origin observation, not
+        # here. A divergent push URL must be visible so publish can refuse it,
+        # not hidden behind a generic unsafe-config refusal.
+        return True
     if key == "remote.origin.fetch":
         return value == _ORIGIN_FETCH
     return key in _SAFE_PLAIN or _BRANCH_KEY_RE.fullmatch(key) is not None

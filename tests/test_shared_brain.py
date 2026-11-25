@@ -1175,7 +1175,6 @@ def test_link_refuses_worktree_scoped_program_config(root: Path, key: str, value
         ("diff.external", "/bin/evil"),
         ("url.file:///tmp/evil.insteadOf", "https://github.com/x/notes"),
         ("url.file:///tmp/evil.pushInsteadOf", "https://github.com/x/notes"),
-        ("remote.origin.pushurl", "file:///tmp/evil"),
     ],
 )
 def test_link_refuses_more_program_and_redirect_keys(root: Path, key: str, value: str) -> None:
@@ -1408,7 +1407,6 @@ def test_hardening_pins_the_protocol_allowlist() -> None:
         ("pull.rebase", "true"),
         ("branch.main.mergeOptions", "--no-ff"),
         ("remote.origin.fetch", "+refs/*:refs/*"),
-        ("remote.origin.pushurl", "https://github.com/x/elsewhere"),
         ("extensions.partialClone", "origin"),
         ("core.autocrlf", "true"),
     ],
@@ -2045,3 +2043,49 @@ sb.brain_state(link, config, 'home')
         if process.poll() is None:
             process.kill()
             process.wait(5)
+
+
+def test_observation_validates_path_and_config_before_git(tmp_path, monkeypatch) -> None:
+    from ciao.config import SharedBrainLink, WorkspaceConfig
+    from ciao.workspaces import workspace_registry_claim
+
+    link = SharedBrainLink(
+        name="notes", path=str(tmp_path / "missing"), identity="github.com/a/notes",
+        lifetime_id="missing-lifetime", sharing_policy="automatic",
+    )
+    config = FakeConfig(tmp_path)
+    config.workspaces = {"work": WorkspaceConfig(
+        name="work", vault_root="memory-vault/work", shared_brains=[link],
+    )}
+    _install_registry(config, config.workspaces["work"])
+    calls: list[tuple[str, ...]] = []
+    monkeypatch.setattr(sb, "_git", lambda *args: calls.append(tuple(str(a) for a in args)) or (1, ""))
+    with workspace_registry_claim(config) as owner:
+        observation = sb.observe_under_fence(config, link, owner)
+    assert observation.state["problem"] == "missing"
+    assert calls == []
+
+
+def test_observation_refuses_unsafe_config_before_origin_git(pair: SimpleNamespace, tmp_path, monkeypatch) -> None:
+    from ciao.config import WorkspaceConfig
+    from ciao.workspaces import workspace_registry_claim
+
+    link = sb.set_sharing_policy(link_of(pair.clone), "automatic")
+    git(pair.clone, "config", "filter.x.smudge", "cat")
+    config = FakeConfig(tmp_path)
+    config.workspaces = {"work": WorkspaceConfig(
+        name="work", vault_root="memory-vault/work", shared_brains=[link],
+    )}
+    _install_registry(config, config.workspaces["work"])
+    calls: list[tuple[str, ...]] = []
+    original = sb._git
+
+    def record(folder, *args):
+        calls.append(tuple(str(a) for a in args))
+        return original(folder, *args)
+
+    monkeypatch.setattr(sb, "_git", record)
+    with workspace_registry_claim(config) as owner:
+        observation = sb.observe_under_fence(config, link, owner)
+    assert observation.state["problem"] == "unsafe_config"
+    assert calls == [("config", "--list", "--show-scope")]
