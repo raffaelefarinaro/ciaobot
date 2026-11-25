@@ -5259,6 +5259,42 @@ def test_stale_note_checkpoint_rejects_a_replaced_lease(tmp_path: Path) -> None:
     assert cr.load_state(vault).lease["plan"]["completed_stale_notes"] == []
 
 
+def test_partial_stale_note_run_checkpoints_only_planned_completed_revision(tmp_path: Path) -> None:
+    vault = _vault(tmp_path)
+    guide = _guide(tmp_path)
+    _fresh_log(vault, last_full_pass="2026-09-18")
+    first = _note(vault, "People/First.md", updated="2023-01-01")
+    _note(vault, "People/Second.md", updated="2024-01-01")
+    items = _stale_items(vault, guide)
+    plan = cr.plan_run(cr.Worklist(tuple(items), False, "", "now"), cr.RunBudget(max_items=1))
+    assert len(plan.planned) == 1 and len(plan.deferred) == 1
+    lease = cr.begin_run(vault, holder="nightly")
+    cr.record_plan(vault, holder=lease.holder, plan=cr.lease_plan(plan))
+    key = cr.item_key(cr.PASS_STALE_NOTE, "People/First.md")
+    other = cr.item_key(cr.PASS_STALE_NOTE, "People/Second.md")
+    cr.record_done(vault, [other, key, key], holder=lease.holder)
+    stored = cr.load_state(vault).lease["plan"]
+    assert stored["stale_note_targets"] == {
+        key: {"relative_path": "People/First.md", "revision": mr.content_revision(first.read_text())}
+    }
+    assert stored["completed_stale_notes"] == [key]
+    cr.end_run(vault, holder=lease.holder)
+    assert cr.load_state(vault).lease == {}
+
+
+@pytest.mark.parametrize("relative,revision", [("../outside.md", "a" * 64), ("People/A.md", "invalid")])
+def test_lease_plan_rejects_invalid_stale_note_source(tmp_path: Path, relative: str, revision: str) -> None:
+    vault = _vault(tmp_path)
+    lease = cr.begin_run(vault, holder="nightly")
+    key = cr.item_key(cr.PASS_STALE_NOTE, relative)
+    item = cr.WorklistItem(pass_id=cr.PASS_STALE_NOTE, label="note", reason="due", keys=(key,),
+                           target=cr.StaleNoteTarget(relative_path=relative, revision=revision))
+    plan = cr.lease_plan(cr.RunPlan(planned=(item,), deferred=(), budget=cr.RunBudget()))
+    with pytest.raises(cr.CurationStateError):
+        cr.record_plan(vault, holder=lease.holder, plan=plan)
+    assert "plan" not in cr.load_state(vault).lease
+
+
 # ── S2: curation-end derives planned and completed from receipts ──
 
 
