@@ -2,6 +2,8 @@
 
 Shared-brain Settings can preview a content guide and save selected typed destinations for review. The audience is explicitly unknown; this mapping never enables automatic publication.
 
+Sources and consent states that ordinary chat stays private while a protected operator authority is unavailable. The server reports this capability as unavailable on every platform; structured-decision grants do not authorize chat.
+
 The sidebar's **Search chats** dialog searches saved titles and visible transcript text in the selected workspace. It sends the query only in a bounded JSON body, shows literal plain-text excerpts, and opens archived results through the existing read-only chat flow. Search results are fetched a page at a time.
 
 Vue 3 + Vite + Pinia + TypeScript. Built output goes to `ciao/web/static/`, served by the same Starlette server as the API. See `../README.md` for the repo-wide layout and `../PWA_API.md` for backend routes.

@@ -503,6 +503,7 @@ def test_routes_require_a_session_and_scope_every_action(client: TestClient) -> 
     get = client.get("/api/workspaces/home/share-evidence", headers=headers())
     assert get.status_code == 200
     body = get.json()
+    assert body["chat_evidence"] == {"available": False, "reason": "protected_authority_unavailable"}
     assert body["mode"] == "review"
     assert body["fields"] == ["decision", "reason", "effective_date"]
     assert body["producers"] == ["memory_extraction", "nightly_curation"]

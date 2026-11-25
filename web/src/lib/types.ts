@@ -219,6 +219,7 @@ export interface ShareEvidenceGrant {
 }
 
 export interface ShareEvidenceState {
+  chat_evidence: { available: false; reason: 'protected_authority_unavailable' }
   disclosure_tokens: Record<string, string>
   workspace: string
   mode: 'review' | 'automatic'
