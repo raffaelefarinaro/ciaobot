@@ -872,12 +872,12 @@ def draft_evidence_candidates(config: Any, *, workspace: str, relation: Any) -> 
     for link in links:
         if len(results) >= MAX_CANDIDATES_PER_RUN:
             break
-        mapping = getattr(link, "guide_mapping", None)
-        grant = next((item for item in getattr(mapping, "grants", ()) if item.note_type == "decision"), None)
-        if grant is None:
-            continue
         try:
             with shared_brain.checkout_claims_nowait([link.path], config), workspace_registry_claim(config) as owner:
+                mapped = shared_brain_mapping.discover_workspace_destinations(config, workspace, link.name, owner=owner)
+                grant = next((item for item in mapped if item.note_type == "decision"), None)
+                if grant is None:
+                    continue
                 authorizations = share_evidence.mint_evidence_authorizations(
                     config, workspace=workspace, brain_name=link.name, relation=relation,
                 )
@@ -893,7 +893,8 @@ def draft_evidence_candidates(config: Any, *, workspace: str, relation: Any) -> 
                         opaque = hmac.new(share_evidence._relation_secret(config), b"share-candidate-path\0" + encoded, hashlib.sha256).hexdigest()
                         relative_path = f"{grant.path}/{opaque}.md" if grant.kind == "collection" else ""
                         snapshot = shared_brain_mapping.resolve_workspace_destination(
-                            config, workspace, link.name, note_type="decision", relative_path=relative_path, owner=owner,
+                            config, workspace, link.name, note_type="decision", relative_path=relative_path,
+                            operation=grant.operation, owner=owner,
                         )
                         if snapshot is None:
                             continue
