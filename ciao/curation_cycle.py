@@ -67,7 +67,7 @@ _LEASE_OPTIONAL_FIELDS = frozenset({"plan", "chat_id", "proof_hash"})
 _LAST_RUN_FIELDS = frozenset({"status", "finished_at", "planned", "completed", "deferred", "reasons"})
 # Written by curation-end once the run's derived outcome is known. Optional, so
 # a state file from before they existed still decodes (no schema bump).
-_LAST_RUN_OPTIONAL_FIELDS = frozenset({"run_id", "chat_id", "failed", "counts_complete"})
+_LAST_RUN_OPTIONAL_FIELDS = frozenset({"run_id", "chat_id", "failed", "counts_complete", "dispatch_id", "report"})
 _PENDING_FIELDS = frozenset({"cycle_id", "prior", "target_stamp", "target_sha256", "proven_required"})
 
 
@@ -492,7 +492,11 @@ def _check_last_run(last_run: dict[str, Any]) -> None:
 
 def last_run_optional_valid(last_run: Mapping[str, Any]) -> bool:
     """Whether each optional ``last_run`` field that is present has its type. Shared with the v1 loader."""
+    from ciao.care_run_report import MAX_ID_CHARS, report_valid
+
     checks = {
+        "dispatch_id": lambda value: isinstance(value, str) and len(value) <= MAX_ID_CHARS,
+        "report": report_valid,
         "run_id": lambda value: isinstance(value, str),
         "chat_id": lambda value: isinstance(value, str),
         "failed": lambda value: type(value) is int,

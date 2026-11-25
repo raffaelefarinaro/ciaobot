@@ -355,7 +355,8 @@ def _capture_destinations(config: Any, workspace: str, entries: list[dict[str, s
 def end(config: Any, *, workspace: str, chat_id: str, token_id: str, dispatch_id: str,
         holder: str, status: str, planned: int, completed: int, deferred: int,
         reasons: list[str], live_keys: frozenset[str], failed: int,
-        counts_complete: bool, dispatch_active: Callable[[], bool]) -> dict[str, Any]:
+        counts_complete: bool, dispatch_active: Callable[[], bool],
+        report: dict[str, Any] | None = None) -> dict[str, Any]:
     """Settle one engine-owned lease with a recoverable private commit receipt."""
     vault = Path(config.workspace_vault_root(workspace))
     capability = _capability(config, workspace=workspace, chat_id=chat_id, token_id=token_id,
@@ -429,7 +430,7 @@ def end(config: Any, *, workspace: str, chat_id: str, token_id: str, dispatch_id
             vault, holder=holder, status=status, planned=planned, completed=completed,
             deferred=deferred, reasons=reasons, live_keys=live_keys,
             advance_marker=status == "ok", failed=failed, counts_complete=counts_complete,
-            before_settlement=prepare, after_settlement=commit,
+            report=report, dispatch_id=dispatch_id, before_settlement=prepare, after_settlement=commit,
         )
 
 
