@@ -970,6 +970,29 @@ async def test_real_memory_pass_completion_checkpoints_before_archival(tmp_path:
     config, manager, project, source = _memory_manager(tmp_path)
     se._reset_project_manager_for_tests()
     se.bind_project_manager(manager)
+    project.vault_folder = "alpha"
+    project_dir = Path(config.workspace_vault_root("home")) / "projects" / "active" / "alpha"
+    project_dir.mkdir(parents=True)
+    config.workspace("home").shared_brains = [SharedBrainLink(
+        name="notes", path=str(tmp_path / "brain"), identity="github.com/acme/home",
+        lifetime_id="brain_lifetime_fixed01",
+    )]
+    se.record_decision(
+        config, workspace="home", project_id=project.project_id,
+        decision="Baseline", reason="", effective_date="2026-11-20",
+    )
+    preview = se.preview(
+        config, workspace="home", brain_name="notes", project_id=project.project_id,
+        project_name="Alpha", project_dir=project_dir,
+        source_id=f"stream:{project.project_id}", grant_type="standing",
+        field_mask=["decision"], producers=["memory_extraction"], session="operator-one",
+    )
+    se.confirm(config, workspace="home", token=preview["preview_token"], session="operator-one")
+    se.record_operator_decision(
+        config, workspace="home", project_id=project.project_id,
+        decision="Synthetic decision", reason="", effective_date="2026-11-21",
+        session="operator-one",
+    )
     registry = AgentSessionRegistry()
     manager._mcp_service = SimpleNamespace(registry=registry)
     pass_chat = next(chat for chat in manager.list_chats() if (chat.helper or {}).get("kind") == "memory_pass")
@@ -994,6 +1017,11 @@ async def test_real_memory_pass_completion_checkpoints_before_archival(tmp_path:
         assert relation.project_id == project.project_id
         assert relation.relation_id == pass_chat.chat_id
         assert source.chat_id == pass_chat.helper["source_chat_id"]
+        rows = se.eligible_entries(config, workspace="home", brain_name="notes", relation=relation)
+        assert [row["canonical_bytes"] for row in rows] == ['{"decision":"Synthetic decision"}']
+        assert se.eligible_entries(config, workspace="work", brain_name="notes", relation=relation) == []
+        se.revoke(config, workspace="home", grant_id=rows[0]["grant_id"])
+        assert se.eligible_entries(config, workspace="home", brain_name="notes", relation=relation) == []
     finally:
         se._reset_project_manager_for_tests()
 
