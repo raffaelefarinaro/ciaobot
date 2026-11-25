@@ -9,19 +9,20 @@ import os
 import re
 import subprocess
 import tempfile
-from contextlib import asynccontextmanager, contextmanager
+from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any, Callable, Iterator, Literal, TypeVar
+from typing import Any, Literal
 
 from ciao import memory_receipts, share_proposals as drafts, shared_brain
 from ciao.config import SharedBrainLink
 from ciao.git_proc import run_git_sync_bounded
 from ciao.os_support.files import open_fd
-from ciao.os_support.locks import lock_exclusive, unlock
+from ciao.os_support.locks import await_exclusive
 from ciao.os_support.private import is_private_descriptor_strict, make_private_dir
 from ciao.redact import redact_text
+from ciao.workspaces import run_while_claimed
 
 OutcomeCode = Literal[
     "published", "already_published", "changed_upstream", "brain_changed",
@@ -31,7 +32,6 @@ OutcomeCode = Literal[
 MAX_ATTEMPTS = 3
 PUSH_TIMEOUT_S = 20.0
 _OID = re.compile(r"^[0-9a-f]{40,64}$")
-_T = TypeVar("_T")
 
 
 @dataclass(frozen=True, slots=True)
@@ -119,6 +119,45 @@ def has_publication_attempt(config: Any, *, workspace: str, proposal_id: str, ex
     publication = artifact.get("publication")
     attempts = publication.get("attempts", []) if isinstance(publication, dict) else []
     return isinstance(attempts, list) and bool(attempts)
+
+
+def can_retry_publication(
+    config: Any, *, workspace: str, proposal_id: str, expected_revision: str,
+) -> bool:
+    """Whether every persisted attempt was definitively rejected as retryable."""
+    artifact = _artifact_for(config, workspace, proposal_id)
+    if artifact is None or artifact.get("review_token") != expected_revision:
+        return False
+    fields = artifact.get("immutable")
+    publication = artifact.get("publication")
+    if not isinstance(fields, dict) or not isinstance(publication, dict):
+        return False
+    attempts = publication.get("attempts")
+    receipts = publication.get("receipts")
+    if (
+        not isinstance(attempts, list) or not attempts
+        or len(attempts) >= MAX_ATTEMPTS
+        or not isinstance(receipts, list) or receipts
+    ):
+        return False
+    for index, attempt in enumerate(attempts, start=1):
+        if not isinstance(attempt, dict):
+            return False
+        commit_oid = attempt.get("commit_oid")
+        parent_oid = attempt.get("parent_oid")
+        if (
+            type(attempt.get("attempt")) is not int or attempt["attempt"] != index
+            or not isinstance(commit_oid, str) or not _OID.fullmatch(commit_oid)
+            or not isinstance(parent_oid, str) or not _OID.fullmatch(parent_oid)
+            or attempt.get("proposal_id") != fields.get("proposal_id")
+            or attempt.get("revision") != fields.get("revision")
+            or attempt.get("destination_fingerprint") != fields.get("destination_fingerprint")
+            or attempt.get("ref") != fields.get("upstream_ref")
+            or attempt.get("status") != "rejected"
+            or attempt.get("retryable") is not True
+        ):
+            return False
+    return True
 
 
 def refresh_legacy_draft(
@@ -280,6 +319,19 @@ def _retire_legacy_queue_row(config: Any, workspace: str, proposal_id: str, fiel
 
 
 def _active_link(config: Any, workspace: str, fields: dict[str, Any]) -> SharedBrainLink | None:
+    from ciao.workspaces import ensure_registry_current, persisted_checkout_links, WorkspaceRegistryConflict
+    try:
+        ensure_registry_current(config)
+        raw = config._workspace_registry_bytes
+        if raw is None or not any(
+            name == workspace and row.get("name") == fields.get("brain")
+            and row.get("identity") == fields.get("origin_identity")
+            and row.get("lifetime_id") == fields.get("link_lifetime_id")
+            for name, row in persisted_checkout_links(raw, fields["checkout_path"])
+        ):
+            return None
+    except (WorkspaceRegistryConflict, OSError, ValueError):
+        return None
     record = config.workspace(workspace) if hasattr(config, "workspace") else None
     links = getattr(record, "shared_brains", []) or []
     if not isinstance(links, list):
@@ -365,8 +417,8 @@ def _write_state(config: Any, workspace: str, fields: dict[str, Any], update: di
     return data
 
 
-@contextmanager
-def _proposal_lock(config: Any, workspace: str, fields: dict[str, Any]) -> Iterator[None]:
+@asynccontextmanager
+async def _locked_proposal(config: Any, workspace: str, fields: dict[str, Any]):
     lock_root = drafts._store_dir(config) / "locks"
     lock_root.mkdir(parents=True, exist_ok=True, mode=0o700)
     make_private_dir(lock_root)
@@ -376,52 +428,23 @@ def _proposal_lock(config: Any, workspace: str, fields: dict[str, Any]) -> Itera
     try:
         if not is_private_descriptor_strict(fd):
             raise OSError("share publication lock is not private")
-        lock_exclusive(fd)
+        await await_exclusive(fd)
         yield
     finally:
-        try:
-            unlock(fd)
-        finally:
-            os.close(fd)
-
-
-@asynccontextmanager
-async def _locked_proposal(config: Any, workspace: str, fields: dict[str, Any]):
-    """Acquire the cross-process proposal lock without blocking the event loop."""
-    loop = asyncio.get_running_loop()
-    context = _proposal_lock(config, workspace, fields)
-    acquire = loop.run_in_executor(None, context.__enter__)
-    try:
-        await asyncio.shield(acquire)
-    except asyncio.CancelledError:
-        await acquire
-        await asyncio.shield(loop.run_in_executor(None, context.__exit__, None, None, None))
-        raise
-    try:
-        yield
-    finally:
-        await asyncio.shield(loop.run_in_executor(None, context.__exit__, None, None, None))
-
-
-async def _run_locked(function: Callable[..., _T], *args: Any) -> _T:
-    """Keep locks held until a synchronous Git transaction finishes on cancellation."""
-    task = asyncio.create_task(asyncio.to_thread(function, *args))
-    try:
-        return await asyncio.shield(task)
-    except asyncio.CancelledError:
-        await task
-        raise
+        os.close(fd)
 
 
 def _verify_destination(
     config: Any, folder: Path, link: SharedBrainLink, fields: dict[str, Any], *,
     allow_legacy_lifetime: bool = False,
 ) -> tuple[str, str] | None:
+    if link.kind != "git":
+        return None
     if fields.get("link_lifetime_id") != getattr(link, "lifetime_id", None) and not (
         allow_legacy_lifetime and "link_lifetime_id" not in fields
     ):
         return None
-    state = shared_brain.brain_state(link, config)
+    state = shared_brain._brain_state_owned(link, config)
     if state.get("problem") or state.get("identity") != fields.get("origin_identity"):
         return None
     code, out, _ = _safe_git(folder, "config", "--get-all", "remote.origin.url")
@@ -650,7 +673,7 @@ async def publish_share(config: Any, *, workspace: str, proposal_id: str, expect
                     ) else "brain_unavailable", message="The selected shared brain link is no longer active.")
                 else:
                     async with _locked_proposal(config, workspace, fields):
-                        result = await _run_locked(_publish_locked, config, workspace, Path(active.path), active, fields, artifact)
+                        result = await run_while_claimed(_publish_locked, config, workspace, Path(active.path), active, fields, artifact)
     except (OSError, ValueError, drafts.ShareDraftError):
         return PublishOutcome("draft_unavailable", message="Private publication state is unavailable.")
     if result.outcome == "reconcile_after_unlink":
@@ -689,8 +712,14 @@ async def reconcile_share(config: Any, *, workspace: str, proposal_id: str, expe
     try:
         async with checkout_lock:
             async with shared_brain._checkout_claim(path, config):
+                from ciao.workspaces import persisted_checkout_links, WorkspaceRegistryConflict
+                registry_path = Path(config.state_path).parent / "workspaces.json"
+                try:
+                    persisted_checkout_links(registry_path.read_bytes(), path)
+                except (OSError, ValueError, WorkspaceRegistryConflict):
+                    return PublishOutcome("indeterminate", message="The recorded checkout cannot be verified.")
                 async with _locked_proposal(config, workspace, fields):
-                    result = await _run_locked(_reconcile_locked, config, workspace, Path(path), link, fields)
+                    result = await run_while_claimed(_reconcile_locked, config, workspace, Path(path), link, fields)
     except (OSError, ValueError, drafts.ShareDraftError):
         return PublishOutcome("indeterminate", message="The recorded publish attempt could not be reconciled.")
     return result
@@ -742,7 +771,7 @@ def _publish_locked(config: Any, workspace: str, folder: Path, link: SharedBrain
     if destination is None:
         return PublishOutcome("brain_changed", message="The shared brain destination changed after review.")
     origin, ref = destination
-    state = shared_brain.brain_state(link, config)
+    state = shared_brain._brain_state_owned(link, config)
     if state.get("problem"):
         return PublishOutcome("brain_changed", message="The shared brain is unavailable or has changed.")
     code, _out, _err = _safe_git(folder, "config", "--get", "core.repositoryformatversion", limit=256)
@@ -1043,6 +1072,6 @@ async def draft_share_reversal(
                     if isinstance(drafted, drafts.ShareRefusal):
                         return drafted
                     return {"workspace": workspace, "review_path": drafted.review_path}
-                return await asyncio.to_thread(verify_and_draft)
+                return await run_while_claimed(verify_and_draft)
     except (OSError, ValueError, drafts.ShareDraftError):
         return drafts.ShareRefusal("draft_unavailable", "The shared-note reversal could not be queued.")

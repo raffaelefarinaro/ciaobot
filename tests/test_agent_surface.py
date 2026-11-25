@@ -827,6 +827,8 @@ def test_plan_mode_cannot_delete_task(tmp_path: Path) -> None:
         # The payload crosses as a path; the verdict's prose never does.
         (["note", "related", "People/Mo.md"], ("note_related", {"path": "People/Mo.md", "limit": 15})),
         (["note", "verify", "--payload-file", "out/verify.json"], ("verify_note", {"payload_file": "out/verify.json"})),
+        (["note", "share", "--path", "Notes/Idea.md", "--body-file", "draft.md", "--brain", "team"],
+         ("note_share", {"path": "Notes/Idea.md", "body_file": "draft.md", "brain": "team"})),
         (
             ["note", "create", "--type", "person", "--title", "Sofia Rossi"],
             ("note_create", {
@@ -1002,6 +1004,7 @@ def test_every_documented_command_parses(tmp_path: Path) -> None:
         "vault review complete": ["--candidate", "c"], "vault review restore-completed": ["--candidate", "c"],
         "note create": ["--type", "note", "--title", "t"],
         "note related": ["People/Mo.md"], "note verify": ["--payload-file", "p.json"],
+        "note share": ["--path", "Notes/Idea.md", "--body-file", "draft.md"],
         "file surface": ["p"], "chat send": ["--chat", "c", "--prompt", "p"], "chat stop": ["--chat", "c"],
         "chat needs-action": ["command", "--command-file", str(command)],
         "chat continue": ["--chat", "c"], "project create": ["--name", "n"], "project restore": ["s"],

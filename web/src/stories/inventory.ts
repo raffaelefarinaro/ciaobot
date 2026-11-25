@@ -406,18 +406,18 @@ export const inventory: InventoryEntry[] = [
       "web/src/components/ProjectSidebar.vue"
     ],
     "variants": [],
-    "variantNotes": "No configurable variants: a fixed 30px box around the production CiaoMark; the mark's dots follow the accent.",
+    "variantNotes": "No configurable variants: a fixed 30px reload button around the production CiaoMark; the mark's dots follow the accent.",
     "states": [
       {
         "name": "default",
         "coverage": "covered",
         "storyIds": ["brand-mark--default"],
-        "note": "Default renders the 30px brand box with the accessible name Ciaobot around the production CiaoMark."
+        "note": "Default renders the 30px reload button named Reload Ciaobot around the production CiaoMark."
       }
     ],
     "loading": {
       "status": "none",
-      "detail": "BrandMark.vue is static SVG presentation and performs no loading."
+      "detail": "BrandMark.vue performs no loading; clicking it reloads the page."
     },
     "migration": {
       "status": "unassessed",
@@ -1272,7 +1272,7 @@ export const inventory: InventoryEntry[] = [
       "web/src/components/SettingsView.vue"
     ],
     "variants": [],
-    "variantNotes": "No configurable variants: one inline SVG whose C follows currentColor and whose two dots use the accent.",
+    "variantNotes": "No configurable variants beyond an optional progress value (0 resting C, 1 closed ring): one inline SVG whose C follows currentColor and whose two dots use the accent.",
     "states": [
       {
         "name": "default",

@@ -31,6 +31,17 @@ describe('safe markdown rendering', () => {
     expect(html).toContain('href="/tasks/9920898d" target="_blank"')
   })
 
+  it('keeps the canonical proposal review query link in the app', () => {
+    const reviewKey = `prv_${'a'.repeat(64)}`
+    const href = `/memory/review?show=suggested&workspace=personal&proposal=${reviewKey}`
+    const html = renderMarkdown(`[Review this proposal](${href})`)
+    const link = parse(html).querySelector('a')
+
+    expect(link?.getAttribute('href')).toBe(href)
+    expect(link?.hasAttribute('target')).toBe(false)
+    expect(link?.getAttribute('rel')).toBeNull()
+  })
+
   it('keeps supported page and anchor links in the app instead of opening a new tab', () => {
     const html = renderMarkdown(
       '[Tasks](/tasks) [Automations](/schedules) [Memory](/memory/map) ' +

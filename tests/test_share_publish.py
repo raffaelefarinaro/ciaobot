@@ -8,6 +8,7 @@ import json
 import threading
 import os
 import subprocess
+import multiprocessing
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -35,6 +36,7 @@ class Config:
         self.link = link
         self.links = [link]
         self.logs_root = root / "logs"
+        self.workspaces = {"home": SimpleNamespace(shared_brains=self.links)}
 
     def workspace_names(self) -> list[str]:
         return list(self.vaults)
@@ -43,7 +45,16 @@ class Config:
         return self.vaults[name]
 
     def workspace(self, name: str | None) -> SimpleNamespace | None:
-        return SimpleNamespace(shared_brains=self.links) if name in self.vaults else None
+        return SimpleNamespace(shared_brains=self.links) if name == "home" else self.workspaces.get(name)
+
+
+def _save_test_links(config):
+    from dataclasses import asdict
+    rows = [{"name": name, "shared_brains": [asdict(link) for link in item.shared_brains]}
+            for name, item in config.workspaces.items()]
+    path = config.state_path.parent / "workspaces.json"
+    path.write_text(json.dumps(rows))
+    config._workspace_registry_bytes = path.read_bytes()
 
 
 @pytest.fixture
@@ -70,6 +81,12 @@ def linked(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> tuple[Config, Pat
     vault = tmp_path / "vault"
     vault.mkdir()
     config = Config(tmp_path, vault, link)
+    registry = config.state_path.parent / "workspaces.json"
+    registry.parent.mkdir(parents=True)
+    registry.write_text(json.dumps([{"name": "home", "vault_root": str(vault), "shared_brains": [
+        {"name": link.name, "path": link.path, "identity": link.identity}
+    ]}]))
+    config._workspace_registry_bytes = registry.read_bytes()
     monkeypatch.setattr(
         share_publish.shared_brain,
         "_HARDEN",
@@ -117,6 +134,49 @@ def test_publish_uses_reviewed_bytes_and_is_idempotent(linked: tuple[Config, Pat
     assert len(share_publish.list_share_receipts(config, workspace="home")) == 1
     receipt = share_publish.get_share_receipt(config, workspace="home", proposal_id=draft.proposal_id, expected_revision=token)
     assert receipt and receipt["commit_oid"] == result.commit_oid and receipt["published_blob_oid"]
+
+
+def test_publish_retries_only_after_a_persisted_retryable_rejection(linked, monkeypatch) -> None:
+    config, _clone, _origin = linked
+    draft = share_proposals.draft_share(
+        config, workspace="home", relative_path="n.md", operation="replace",
+        proposed=b"retry after a recorded rejection", request_key="retry-rejected-attempt",
+    )
+    assert isinstance(draft, share_proposals.ShareDraft)
+    fields = draft.artifact["immutable"]
+    attempt = {
+        "attempt": 1, "commit_oid": "a" * 40,
+        "parent_oid": fields["base_commit"],
+        "proposal_id": fields["proposal_id"], "revision": fields["revision"],
+        "destination_fingerprint": fields["destination_fingerprint"],
+        "ref": fields["upstream_ref"], "status": "rejected", "retryable": True,
+    }
+    share_publish._write_state(config, "home", fields, {"attempts": [attempt]})
+    token = draft.artifact["review_token"]
+    assert share_publish.can_retry_publication(
+        config, workspace="home", proposal_id=draft.proposal_id,
+        expected_revision=token,
+    )
+    pushes = 0
+    transport = share_publish._network_git
+
+    def count_push(folder: Path, *args: str, limit: int = 4096, timeout_s: float = 60.0):
+        nonlocal pushes
+        if args and args[0] == "push":
+            pushes += 1
+        return transport(folder, *args, limit=limit, timeout_s=timeout_s)
+
+    monkeypatch.setattr(share_publish, "_network_git", count_push)
+    result = asyncio.run(share_publish.publish_share(
+        config, workspace="home", proposal_id=draft.proposal_id,
+        expected_revision=token,
+    ))
+    assert result.outcome == "published"
+    assert pushes == 1
+    assert not share_publish.can_retry_publication(
+        config, workspace="home", proposal_id=draft.proposal_id,
+        expected_revision=token,
+    )
 
 
 def test_receipt_enumeration_skips_malformed_canonical_and_index(linked, monkeypatch) -> None:
@@ -508,6 +568,273 @@ def test_legacy_publication_attempt_reconciles_without_lifetime_or_active_link(l
     assert "link_lifetime_id" not in receipts[0]
 
 
+def test_reconcile_refuses_historical_checkout_adopted_as_folder(linked) -> None:
+    config, clone, _origin = linked
+    draft = share_proposals.draft_share(
+        config, workspace="home", relative_path="n.md", operation="replace",
+        proposed=b"published", request_key="reconcile-folder-adoption",
+    )
+    assert isinstance(draft, share_proposals.ShareDraft)
+    artifact = draft.artifact
+    attempt = {"commit_oid": "a" * 40, "status": "unresolved"}
+    share_publish._write_state(config, "home", artifact["immutable"], {"attempts": [attempt]})
+    # The checkout itself is outside workspace_root, as real linked folders are.
+    folder_link = SharedBrainLink("team", str(clone), f"folder:{clone}", kind="folder")
+    config.links = [folder_link]
+    config.workspaces["home"].shared_brains = [folder_link]
+    _save_test_links(config)
+    result = asyncio.run(share_publish.reconcile_share(
+        config, workspace="home", proposal_id=draft.proposal_id,
+        expected_revision=draft.artifact["review_token"],
+    ))
+    assert result.outcome == "indeterminate"
+
+
+def test_reconcile_checks_folder_relink_after_checkout_claim(linked, monkeypatch) -> None:
+    config, clone, _origin = linked
+    draft = share_proposals.draft_share(
+        config, workspace="home", relative_path="n.md", operation="replace",
+        proposed=b"reconcile race", request_key="reconcile-folder-race",
+    )
+    assert isinstance(draft, share_proposals.ShareDraft)
+    attempt = {"commit_oid": "a" * 40, "status": "unresolved"}
+    share_publish._write_state(config, "home", draft.artifact["immutable"], {"attempts": [attempt]})
+    waiting = asyncio.Event()
+    original_lock = shared_brain._checkout_lock
+
+    def observe_lock(path: str):
+        waiting.set()
+        return original_lock(path)
+
+    monkeypatch.setattr(shared_brain, "_checkout_lock", observe_lock)
+    calls: list[tuple[str, ...]] = []
+    monkeypatch.setattr(share_publish, "_network_git", lambda _folder, *args, **_kwargs: calls.append(args) or (0, b"", b""))
+    monkeypatch.setattr(share_publish, "_safe_git", lambda _folder, *args, **_kwargs: calls.append(args) or (0, b"", b""))
+    monkeypatch.setattr(share_publish, "_git", lambda _folder, *args, **_kwargs: calls.append(args) or (0, b"", b""), raising=False)
+
+    async def race():
+        lock = original_lock(str(clone))
+        await lock.acquire()
+        task = asyncio.create_task(share_publish.reconcile_share(
+            config, workspace="home", proposal_id=draft.proposal_id,
+            expected_revision=draft.artifact["review_token"],
+        ))
+        await asyncio.wait_for(waiting.wait(), timeout=2)
+        # A distinct config object represents another process.  Its registry
+        # snapshot is replaced while reconciliation waits on the checkout claim.
+        other_config = Config(config.workspace_root.parent, config.vault, config.link)
+        other_config.workspaces = {"other": SimpleNamespace(shared_brains=[
+            SharedBrainLink("team", str(clone), f"folder:{clone}", kind="folder")
+        ])}
+        other_config.vaults = {"other": config.vault}
+        from ciao.workspaces import workspace_registry_lock
+        with workspace_registry_lock(config):
+            config.workspaces.update(other_config.workspaces)
+            config.vaults.update(other_config.vaults)
+            _save_test_links(config)
+        lock.release()
+        return await task
+
+    result = asyncio.run(race())
+    assert result.outcome == "indeterminate"
+    assert calls == []
+
+
+def test_reconcile_refuses_cross_workspace_folder_alias_and_runs_no_git(linked, monkeypatch) -> None:
+    config, clone, _origin = linked
+    draft = share_proposals.draft_share(
+        config, workspace="home", relative_path="n.md", operation="replace",
+        proposed=b"cross workspace alias", request_key="reconcile-cross-workspace-alias",
+    )
+    assert isinstance(draft, share_proposals.ShareDraft)
+    share_publish._write_state(config, "home", draft.artifact["immutable"], {
+        "attempts": [{"commit_oid": "a" * 40, "status": "unresolved"}],
+    })
+    alias = clone.parent / "brain-alias"
+    alias.symlink_to(clone, target_is_directory=True)
+    alias_link = SharedBrainLink("team", str(alias), f"folder:{alias}", kind="folder")
+    config.vaults["team"] = config.vault
+    config.workspaces["team"] = SimpleNamespace(shared_brains=[alias_link])
+    _save_test_links(config)
+    calls: list[tuple[object, ...]] = []
+    monkeypatch.setattr(share_publish, "_network_git", lambda *_args, **_kwargs: calls.append(_args) or (0, b"", b""))
+    monkeypatch.setattr(share_publish, "_safe_git", lambda *_args, **_kwargs: calls.append(_args) or (0, b"", b""))
+    monkeypatch.setattr(share_publish, "run_git_sync_bounded", lambda *_args, **_kwargs: calls.append(_args))
+    monkeypatch.setattr(shared_brain, "_git", lambda *_args, **_kwargs: calls.append(_args))
+
+    result = asyncio.run(share_publish.reconcile_share(
+        config, workspace="home", proposal_id=draft.proposal_id,
+        expected_revision=draft.artifact["review_token"],
+    ))
+    assert result.outcome == "indeterminate"
+    assert calls == []
+
+
+def test_reconcile_reads_persisted_registry_from_independent_config(linked, monkeypatch) -> None:
+    from ciao.config import CiaoConfig
+    from ciao.workspaces import persist_workspaces
+
+    config, clone, _origin = linked
+    draft = share_proposals.draft_share(
+        config, workspace="home", relative_path="n.md", operation="replace",
+        proposed=b"disk registry", request_key="reconcile-disk-registry",
+    )
+    assert isinstance(draft, share_proposals.ShareDraft)
+    share_publish._write_state(config, "home", draft.artifact["immutable"], {
+        "attempts": [{"commit_oid": "a" * 40, "status": "unresolved"}],
+    })
+
+    env = {
+        "CIAO_WORKSPACE": str(config.workspace_root),
+        "CIAO_RUNTIME_ROOT": str(config.workspace_root / ".runtime"),
+        "PWA_AUTH_TOKEN": "test-token",
+    }
+    config.workspace_root.mkdir(parents=True, exist_ok=True)
+    folder_link = SharedBrainLink("team", str(clone), f"folder:{clone}", kind="folder")
+    first = CiaoConfig.from_env(env)
+    first.workspaces["team"] = SimpleNamespace(
+        name="team", vault_root=str(config.vault), shared_brains=[folder_link],
+        default_provider="claude", disallowed_tools=None, claude_trim={}, color="blue",
+        memory_handover="always", memory_approval={}, provider_overrides={},
+    )
+    persist_workspaces(first)
+    second = CiaoConfig.from_env(env)
+
+    calls: list[tuple[object, ...]] = []
+    monkeypatch.setattr(share_publish, "_network_git", lambda *_args, **_kwargs: calls.append(_args) or (0, b"", b""))
+    monkeypatch.setattr(share_publish, "_safe_git", lambda *_args, **_kwargs: calls.append(_args) or (0, b"", b""))
+    monkeypatch.setattr(share_publish, "run_git_sync_bounded", lambda *_args, **_kwargs: calls.append(_args))
+    monkeypatch.setattr(shared_brain, "_git", lambda *_args, **_kwargs: calls.append(_args))
+    # Point the exercise config at the same persisted registry snapshot, as a
+    # second process would after loading it.
+    config.state_path = second.state_path
+    result = asyncio.run(share_publish.reconcile_share(
+        config, workspace="home", proposal_id=draft.proposal_id,
+        expected_revision=draft.artifact["review_token"],
+    ))
+    assert result.outcome == "indeterminate"
+    assert calls == []
+
+
+def test_registry_cas_rejects_second_config_without_clobbering_disk(linked) -> None:
+    from ciao.config import CiaoConfig
+    from ciao.workspaces import WorkspaceRegistryConflict
+
+    config, _clone, _origin = linked
+    root = config.workspace_root
+    root.mkdir(parents=True, exist_ok=True)
+    env = {
+        "CIAO_WORKSPACE": str(root),
+        "CIAO_RUNTIME_ROOT": str(root / ".runtime"),
+        "PWA_AUTH_TOKEN": "test-token",
+    }
+    first = CiaoConfig.from_env(env)
+    first.persist_workspace_registry()
+    stale = CiaoConfig.from_env(env)
+    first.workspaces["newer"] = first.workspaces[first.primary_workspace()]
+    first.persist_workspace_registry()
+    disk_before = (root / ".runtime" / "workspaces.json").read_bytes()
+    stale.workspaces.clear()
+    with pytest.raises(WorkspaceRegistryConflict):
+        stale.persist_workspace_registry()
+    assert (root / ".runtime" / "workspaces.json").read_bytes() == disk_before
+
+
+def _registry_process_write(workspace_root: str, runtime_root: str, ready, proceed, result) -> None:
+    from ciao.config import CiaoConfig
+    from ciao.workspaces import WorkspaceRegistryConflict
+
+    config = CiaoConfig.from_env({
+        "CIAO_WORKSPACE": workspace_root,
+        "CIAO_RUNTIME_ROOT": runtime_root,
+        "PWA_AUTH_TOKEN": "test-token",
+    })
+    ready.set()
+    proceed.wait(5)
+    config.workspaces["child"] = config.workspaces[config.primary_workspace()]
+    try:
+        config.persist_workspace_registry()
+        result.put("written")
+    except WorkspaceRegistryConflict:
+        result.put("conflict")
+
+
+def test_registry_multiprocess_stale_writer_cannot_replace_newer_registry(linked) -> None:
+    import multiprocessing
+    from ciao.config import CiaoConfig
+
+    config, _clone, _origin = linked
+    root = config.workspace_root
+    root.mkdir(parents=True, exist_ok=True)
+    runtime = root / ".runtime"
+    env = {"CIAO_WORKSPACE": str(root), "CIAO_RUNTIME_ROOT": str(runtime), "PWA_AUTH_TOKEN": "test-token"}
+    first = CiaoConfig.from_env(env)
+    first.persist_workspace_registry()
+    ready = multiprocessing.Event()
+    proceed = multiprocessing.Event()
+    result = multiprocessing.Queue()
+    process = multiprocessing.Process(
+        target=_registry_process_write,
+        args=(str(root), str(runtime), ready, proceed, result),
+    )
+    process.start()
+    assert ready.wait(5)
+    first.workspaces["parent"] = first.workspaces[first.primary_workspace()]
+    first.persist_workspace_registry()
+    disk = (runtime / "workspaces.json").read_bytes()
+    proceed.set()
+    process.join(5)
+    assert process.exitcode == 0
+    assert result.get(timeout=2) == "conflict"
+    assert (runtime / "workspaces.json").read_bytes() == disk
+
+
+def test_registry_lock_failure_refuses_write(linked, monkeypatch) -> None:
+    import ciao.workspaces as workspaces
+    from ciao.config import CiaoConfig
+
+    config, _clone, _origin = linked
+    root = config.workspace_root
+    root.mkdir(parents=True, exist_ok=True)
+    env = {"CIAO_WORKSPACE": str(root), "CIAO_RUNTIME_ROOT": str(root / ".runtime"), "PWA_AUTH_TOKEN": "t"}
+    config = CiaoConfig.from_env(env)
+    before = (root / ".runtime" / "workspaces.json").read_bytes() if (root / ".runtime" / "workspaces.json").exists() else None
+    monkeypatch.setattr(workspaces, "lock_exclusive", lambda _fd, **_kwargs: (_ for _ in ()).throw(OSError("lock failure")))
+    with pytest.raises(OSError, match="lock failure"):
+        config.persist_workspace_registry()
+    after = (root / ".runtime" / "workspaces.json").read_bytes() if (root / ".runtime" / "workspaces.json").exists() else None
+    assert after == before
+
+
+def test_async_registry_claim_cancellation_closes_acquired_owner(linked, monkeypatch) -> None:
+    from ciao.web.routes_api import _workspace_registry_claim
+    import ciao.workspaces as workspaces
+
+    config, _clone, _origin = linked
+    entered = threading.Event()
+    release = threading.Event()
+    original = workspaces.acquire_workspace_registry
+
+    def slow_acquire(*args, **kwargs):
+        entered.set()
+        assert release.wait(3)
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(workspaces, "acquire_workspace_registry", slow_acquire)
+
+    async def exercise():
+        task = asyncio.create_task(_workspace_registry_claim(config).__aenter__())
+        await asyncio.to_thread(entered.wait, 2)
+        task.cancel()
+        release.set()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        owner = await asyncio.to_thread(original, config, blocking=False)
+        await asyncio.to_thread(owner.close)
+
+    asyncio.run(exercise())
+
+
 def test_legacy_lifetime_persistence_holds_registry_serialization(linked, monkeypatch) -> None:
     from ciao.workspaces import workspace_registry_lock
 
@@ -516,14 +843,15 @@ def test_legacy_lifetime_persistence_holds_registry_serialization(linked, monkey
     finish_persist = threading.Event()
     contender_entered = threading.Event()
 
-    def persist_registry() -> None:
+    from ciao import workspaces
+    original = workspaces.replace_workspace_registry
+
+    def persist_registry(*args, **kwargs):
         entered.set()
         assert finish_persist.wait(timeout=2)
-        registry = config.workspace_root / ".runtime" / "workspaces.json"
-        registry.parent.mkdir(parents=True, exist_ok=True)
-        registry.write_text("[]", encoding="utf-8")
+        return original(*args, **kwargs)
 
-    monkeypatch.setattr(config, "persist_workspace_registry", persist_registry, raising=False)
+    monkeypatch.setattr(workspaces, "replace_workspace_registry", persist_registry)
     initializer = threading.Thread(
         target=share_proposals._persist_link_lifetime,
         args=(config, "home", config.link),
@@ -1189,6 +1517,11 @@ def test_concurrent_workspaces_publish_distinct_notes_and_conflict_on_same_note(
     other_vault = origin.parent / "other-vault"
     other_vault.mkdir()
     config.vaults["other"] = other_vault
+    config.workspaces["other"] = SimpleNamespace(shared_brains=config.links)
+    registry = config.state_path.parent / "workspaces.json"
+    rows = json.loads(registry.read_bytes())
+    registry.write_text(json.dumps([*rows, {**rows[0], "name": "other"}]))
+    config._workspace_registry_bytes = registry.read_bytes()
     other_link = config.links[0]
     config.links = [other_link]
 
@@ -1222,3 +1555,17 @@ def test_concurrent_workspaces_publish_distinct_notes_and_conflict_on_same_note(
     head = git(origin.parent, "--git-dir", str(origin), "rev-parse", "refs/heads/main")
     paths = subprocess.run(["git", "--git-dir", str(origin), "ls-tree", "-r", "--name-only", head], check=True, capture_output=True, text=True).stdout.splitlines()
     assert {"left.md", "right.md"}.issubset(paths)
+
+
+def test_legacy_lifetime_refuses_to_adopt_stale_generation(linked):
+    config, _, _ = linked
+    path = config.state_path.parent / "workspaces.json"
+    loaded = config._workspace_registry_bytes
+    rows = json.loads(loaded)
+    rows.append({"name": "peer", "vault_root": "external"})
+    path.write_text(json.dumps(rows))
+    peer = path.read_bytes()
+    with pytest.raises(share_proposals.ShareDraftError):
+        share_proposals._persist_link_lifetime(config, "home", config.link)
+    assert config._workspace_registry_bytes == loaded
+    assert path.read_bytes() == peer

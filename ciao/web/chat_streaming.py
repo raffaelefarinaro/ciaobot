@@ -675,7 +675,7 @@ class ChatStreaming:
                 turn_succeeded = False
                 # The turn index the answer is filed under.
                 turn_verify_index: int | None = None
-                stream.running_turn_index = current_turn_index
+                turn_publish_generation = stream.begin_publish_turn(current_turn_index)
                 turn_steps = TextStepJoiner()
                 turn_segment = FinalAnswerTracker()
                 turn_result_published = False
@@ -755,14 +755,15 @@ class ChatStreaming:
                                 )
                             cm = self._host._chats.get(chat_id)
                             if cm is not None:
-                                rec = cm.user_turn_timings.setdefault(
-                                    str(run_turn_index), {}
-                                )
-                                rec["completed_at"] = completed_at
-                                if duration_ms is not None:
-                                    rec["duration_ms"] = duration_ms
-                                turn_verify_index = run_turn_index
-                                sent_at_rec = rec.get("sent_at", "")
+                                with stream.publish_lock:
+                                    rec = cm.user_turn_timings.setdefault(
+                                        str(run_turn_index), {}
+                                    )
+                                    rec["completed_at"] = completed_at
+                                    if duration_ms is not None:
+                                        rec["duration_ms"] = duration_ms
+                                    turn_verify_index = run_turn_index
+                                    sent_at_rec = rec.get("sent_at", "")
                                 self._host._save()
                             else:
                                 sent_at_rec = ""
@@ -1030,8 +1031,10 @@ class ChatStreaming:
                             )
                         )
                 else:
-                    turn_task = asyncio.create_task(
-                        _run_turn(), name=f"chat-turn-{chat_id}"
+                    turn_task = stream.create_turn_task(
+                        _run_turn,
+                        generation=turn_publish_generation,
+                        name=f"chat-turn-{chat_id}",
                     )
                 stream.turn_task = turn_task
                 try:
@@ -1189,6 +1192,7 @@ class ChatStreaming:
                                 stream.publish_queue_state(cm_park.pending_queue)
                         break
                 finally:
+                    stream.end_publish_turn(turn_publish_generation)
                     stream.turn_task = None
 
                 if turn_assistant_text:
@@ -1322,22 +1326,24 @@ class ChatStreaming:
                 if chat_meta2 is not None:
                     chat_meta2.pending_question = ""
                     self._host._release_shell_finished_waiting(chat_id)
-                    turn_index2 = chat_meta2.user_turn_count
-                    chat_meta2.user_turn_count = turn_index2 + 1
-                    if merged_image_refs:
-                        chat_meta2.user_turn_images[str(turn_index2)] = list(
-                            merged_image_refs
-                        )
-                    sent_at_iso2 = chat_service._now_iso()
-                    chat_meta2.last_activity_at = sent_at_iso2
-                    chat_meta2.last_read_at = sent_at_iso2
-                    chat_meta2.user_turn_timings[str(turn_index2)] = {
-                        "sent_at": sent_at_iso2,
-                    }
-                    if turn_origin:
-                        chat_meta2.user_turn_origin[str(turn_index2)] = turn_origin
-                    if queued_send_ids:
-                        chat_meta2.record_send_ids(turn_index2, queued_send_ids)
+                    with stream.publish_lock:
+                        turn_index2 = chat_meta2.user_turn_count
+                        chat_meta2.user_turn_count = turn_index2 + 1
+                        chat_meta2.user_turn_ids[str(turn_index2)] = uuid.uuid4().hex
+                        if merged_image_refs:
+                            chat_meta2.user_turn_images[str(turn_index2)] = list(
+                                merged_image_refs
+                            )
+                        sent_at_iso2 = chat_service._now_iso()
+                        chat_meta2.last_activity_at = sent_at_iso2
+                        chat_meta2.last_read_at = sent_at_iso2
+                        chat_meta2.user_turn_timings[str(turn_index2)] = {
+                            "sent_at": sent_at_iso2,
+                        }
+                        if turn_origin:
+                            chat_meta2.user_turn_origin[str(turn_index2)] = turn_origin
+                        if queued_send_ids:
+                            chat_meta2.record_send_ids(turn_index2, queued_send_ids)
                     self.start_turn_perf(chat_id, turn_index2)
                     self._host._save()
                 stream.finish_drain_one(next_pending)
