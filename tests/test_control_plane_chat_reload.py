@@ -74,7 +74,7 @@ async def test_managed_care_acquisition_requires_the_active_scheduler_dispatch(t
     vault = Path(plane.config.workspace_vault_root("work"))
     (vault / "Workspace").mkdir(parents=True)
     with pytest.raises(ControlPlaneError):
-        plane.managed_care_begin(principal, 600.0)
+        plane.managed_care_begin(principal, 600.0, str(vault))
     result: list[dict] = []
     service = CiaoMcpService(plane.config)
     service.bind(plane)
@@ -82,7 +82,12 @@ async def test_managed_care_acquisition_requires_the_active_scheduler_dispatch(t
                                       workspace="work", provider="claude")
 
     async def fake_stream_chat(chat_id, prompt, images=None, **kwargs):
-        status, envelope = await AgentDispatcher(service).dispatch(token, "care_begin", {"ttl_s": 600.0})
+        status, foreign = await AgentDispatcher(service).dispatch(
+            token, "care_begin", {"ttl_s": 600.0, "vault": str(tmp_path / "foreign")}
+        )
+        assert status == 422 and foreign["error"]["code"] == "invalid_workspace"
+        assert curation_run.active_lease(vault) is None
+        status, envelope = await AgentDispatcher(service).dispatch(token, "care_begin", {"ttl_s": 600.0, "vault": str(vault)})
         assert status == 200
         result.append(envelope)
         holder = envelope["data"]["holder"]

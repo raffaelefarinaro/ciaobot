@@ -1088,6 +1088,30 @@ def test_completed_memory_checkpoint_survives_registry_restart_and_revocation(tm
         se.recover_memory_pass_source_relation(config, workspace="home", pass_chat_id=chat.chat_id)
 
 
+def test_atomic_memory_attestation_recovers_after_done_without_live_principal(tmp_path: Path) -> None:
+    config, manager, _project, _source = _memory_manager(tmp_path)
+    se._reset_project_manager_for_tests()
+    se.bind_project_manager(manager)
+    chat = next(item for item in manager.list_chats() if (item.helper or {}).get("kind") == memory_pass.MEMORY_PASS_KIND)
+    chat.helper["state"] = "running"
+    chat.last_response_status = "success"
+    chat.last_response = "settled response"
+    registry = AgentSessionRegistry()
+    registry.issue(chat_id=chat.chat_id, project_id=chat.project_id, workspace="home", provider="claude")
+    attestation = se.prepare_memory_completion(config, registry, workspace="home", pass_chat_id=chat.chat_id)
+    with pytest.raises(se.EvidenceError):
+        se._verified_memory_checkpoint(config, "home", chat.chat_id, checkpoint=attestation)
+    chat.helper["state"] = "done"
+    manager._save()
+    restarted = ProjectChatManager(config, state_store=StateStore(config.state_path, config.workspace_root, config.media_root),
+        transcript_store=TranscriptStore(config.state_path.parent, config.workspace_root / "transcripts"), path=config.state_path.parent / "web_projects.json")
+    se._reset_project_manager_for_tests()
+    se.bind_project_manager(restarted)
+    se._verified_memory_checkpoint(config, "home", chat.chat_id, checkpoint=attestation)
+    se._store_memory_checkpoint(config, "home", chat.chat_id, attestation)
+    assert se.recover_memory_pass_source_relation(config, workspace="home", pass_chat_id=chat.chat_id).relation_id == chat.chat_id
+
+
 @pytest.mark.parametrize("newline", ["\r\n", "\r"])
 def test_care_witness_binds_exact_preview_revision_and_revocation(tmp_path: Path, newline: str) -> None:
     config, manager, project, _source = _memory_manager(tmp_path)
@@ -1146,9 +1170,9 @@ def test_care_witness_binds_exact_preview_revision_and_revocation(tmp_path: Path
 
 
 @pytest.mark.parametrize("cycle", [False, True])
-@pytest.mark.parametrize("crash_before_state", [False, True])
+@pytest.mark.parametrize("crash_point", ["before_state", "before_receipt", "before_ready"])
 def test_care_checkpoint_stages_only_completed_exact_witness_and_replays_once(
-    tmp_path: Path, cycle: bool, crash_before_state: bool
+    tmp_path: Path, cycle: bool, crash_point: str
 ) -> None:
     from ciao import curation_cycle, curation_share
 
@@ -1227,15 +1251,16 @@ def test_care_checkpoint_stages_only_completed_exact_witness_and_replays_once(
         "from pathlib import Path",
         "from ciao.config import CiaoConfig, WorkspaceConfig",
         "from ciao import curation_share",
-        "root, vault, lifetime, holder, key, crash_before = sys.argv[1:]",
+        "root, vault, lifetime, holder, key, crash_point = sys.argv[1:]",
         "root = Path(root)",
         "config = CiaoConfig(pwa_auth_token='t', workspace_root=root, state_path=root / '.runtime/state.json', media_root=root / '.runtime/media', workspaces={'home': WorkspaceConfig(name='home', vault_root=vault, lifetime_id=lifetime, _lifetime_persisted=True)})",
         "write = curation_share._write_record",
         "def interrupted(path, record):",
-        "    if path.parent.name == 'care-settlements': os._exit(42)",
+        "    if path.parent.name == 'care-settlements' and crash_point == 'before_receipt': os._exit(42)",
+        "    if path.parent.name == 'care-ready' and crash_point == 'before_ready': os._exit(44)",
         "    write(path, record)",
         "curation_share._write_record = interrupted",
-        "if crash_before == 'yes':",
+        "if crash_point == 'before_state':",
         "    from ciao import curation_run",
         "    store = curation_run._store",
         "    def before_state(path, state):",
@@ -1246,9 +1271,9 @@ def test_care_checkpoint_stages_only_completed_exact_witness_and_replays_once(
     ])
     crash = subprocess.run([sys.executable, "-c", script, str(config.workspace_root), str(vault),
                             config.workspace("home").lifetime_id, lease.holder, key,
-                            "yes" if crash_before_state else "no"], check=False)
-    assert crash.returncode == (43 if crash_before_state else 42)
-    if crash_before_state:
+                            crash_point], check=False)
+    assert crash.returncode == {"before_state": 43, "before_receipt": 42, "before_ready": 44}[crash_point]
+    if crash_point == "before_state":
         replacement = curation_run.begin_run(
             vault, holder="replacement", chat_id="care", now=datetime.now(UTC) + timedelta(days=1),
             before_acquire=lambda state: curation_share.recover(config, "home", state),
@@ -1257,18 +1282,36 @@ def test_care_checkpoint_stages_only_completed_exact_witness_and_replays_once(
         replacement = curation_share.begin(config, workspace="home", chat_id="care", token_id="token",
                                            dispatch_id="replacement", ttl_s=600)
     receipts = list((config.state_path.parent / "secrets" / "share-evidence").rglob("care-settlements/*.json"))
-    assert len(receipts) == (0 if crash_before_state else 1)
-    assert len(curation_share.settled_witnesses(config, workspace="home", holder=lease.holder)) == (0 if crash_before_state else 1)
-    if not crash_before_state:
+    assert len(receipts) == (0 if crash_point == "before_state" else 1)
+    if receipts:
+        manifest = json.loads(receipts[0].read_text())["payload"]
+        assert manifest["manifest_version"] == 1 and manifest["batch_width"] == 20
+        assert len(manifest["outbox_manifest"]) == 1
+        original = records[0].read_bytes()
+        records[0].unlink()
+        assert curation_share.settled_witnesses(config, workspace="home", holder=lease.holder) == []
+        records[0].write_bytes(original)
+        records[0].chmod(0o600)
+        extra = records[0].with_name("f" * 64 + ".json")
+        extra.write_bytes(original)
+        extra.chmod(0o600)
+        assert curation_share.settled_witnesses(config, workspace="home", holder=lease.holder) == []
+        extra.unlink()
+    assert len(curation_share.settled_witnesses(config, workspace="home", holder=lease.holder)) == (0 if crash_point == "before_state" else 1)
+    if crash_point != "before_state":
         with se.evidence_claim(config, workspace="home") as claim:
             settled = curation_share.settled_witnesses(config, workspace="home", holder=lease.holder, claim=claim)
             signature = settled[0]["witness"]["witness_signature"]
             relation = se.recover_care_source_relation(config, workspace="home", holder=lease.holder, witness_signature=signature, claim=claim)
+            assert relation.batch_index == settled[0]["batch_index"] == 0
+            with pytest.raises(se.EvidenceError):
+                se.mint_evidence_authorizations(config, workspace="home", brain_name="notes", relation=dataclasses.replace(relation, batch_index=1), claim=claim)
             auths = se.mint_evidence_authorizations(config, workspace="home", brain_name="notes", relation=relation, claim=claim)
             assert len(auths) == 1
             with se.evidence_authorization_guard(config, workspace="home", authorization=auths[0], claim=claim) as row:
                 assert row["canonical_bytes"] == '{"decision":"Launch"}'
                 assert row["producer"] == "nightly_curation"
+                assert row["batch_index"] == 0
             original_link = config.workspace("home").shared_brains[0]
             config.workspace("home").shared_brains = [dataclasses.replace(original_link, lifetime_id="brain_lifetime_new0001")]
             with pytest.raises(se.EvidenceError):
@@ -1363,6 +1406,42 @@ def test_document_revision_matches_planner_bytes(tmp_path: Path, newline: str) -
     entries, revision = se._read_document(document)
     assert entries[0]["decision"] == "Launch"
     assert revision == content_revision(document.read_bytes().decode("utf-8"))
+
+
+def test_care_batch_indices_do_not_shift_when_earlier_witness_is_withdrawn(config: Config, monkeypatch: pytest.MonkeyPatch) -> None:
+    from ciao import curation_share
+    import hashlib
+
+    holder = "synthetic-holder"
+    run_id = hashlib.sha256(holder.encode()).hexdigest()
+    witnesses = []
+    with se.evidence_claim(config, workspace="home") as claim:
+        receipts = curation_share._private_dir(claim.directory, "care-settlements", create=True)
+        root = curation_share._private_dir(claim.directory, "care-outbox", create=True)
+        assert receipts is not None and root is not None
+        outbox = curation_share._private_dir(root, run_id, create=True)
+        assert outbox is not None
+        manifest = []
+        for index in range(21):
+            witness = {"project_id": "proj-alpha", "source_path": "p/Decisions.md", "source_revision": str(index), "witness_signature": f"{index:064x}"}
+            item = {"workspace": "home", "holder": holder, "dispatch_id": "dispatch", "lease_started_at": "start", "lease_proof_hash": "proof", "witness": witness}
+            encoded = json.dumps(item, sort_keys=True, separators=(",", ":")).encode()
+            name = hashlib.sha256(encoded).hexdigest() + ".json"
+            curation_share._write_record(outbox / name, curation_share._seal(config, b"care-outbox\0", item))
+            manifest.append({"name": name, "witness_signature": witness["witness_signature"]})
+            witnesses.append(witness)
+        manifest.sort(key=lambda row: row["name"])
+        settlement = {"workspace": "home", "workspace_lifetime_id": config.lifetimes["home"], "holder": holder, "status": "ok", "dispatch_id": "dispatch", "lease_started_at": "start", "lease_proof_hash": "proof", "manifest_version": 1, "batch_width": 20, "outbox_manifest": manifest}
+        curation_share._write_record(receipts / (run_id + ".json"), curation_share._seal(config, b"care-settlement\0", settlement))
+    active = {w["witness_signature"] for w in witnesses}
+    monkeypatch.setattr(se, "care_snapshot_witnesses", lambda _config, **kw: [w for w in witnesses if w["witness_signature"] in active and w["source_revision"] == kw["revision"]])
+    before = curation_share.settled_witnesses(config, workspace="home", holder=holder)
+    assert len(before) == 21 and before[-1]["batch_index"] == 1
+    active.remove(before[0]["witness"]["witness_signature"])
+    after = curation_share.settled_witnesses(config, workspace="home", holder=holder)
+    assert len(after) == 20 and after[-1]["batch_index"] == 1
+    (outbox / manifest[0]["name"]).unlink()
+    assert curation_share.settled_witnesses(config, workspace="home", holder=holder) == []
 
 
 def test_care_private_storage_rejects_a_symlink(tmp_path: Path) -> None:

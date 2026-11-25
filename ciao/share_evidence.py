@@ -155,6 +155,7 @@ class SourceRelation:
     attested_at: str
     expires_at: str
     seal: bytes = field(repr=False, compare=False)
+    batch_index: int | None = None
 
 
 def _relation_payload(relation: SourceRelation) -> bytes:
@@ -173,6 +174,7 @@ def _relation_payload(relation: SourceRelation) -> bytes:
             "nonce": relation.nonce,
             "attested_at": relation.attested_at,
             "expires_at": relation.expires_at,
+            "batch_index": relation.batch_index,
         },
         ensure_ascii=False,
         sort_keys=True,
@@ -199,6 +201,7 @@ def _seal_relation(config: Any, relation: SourceRelation) -> SourceRelation:
         attested_at=relation.attested_at,
         expires_at=relation.expires_at,
         seal=seal,
+        batch_index=relation.batch_index,
     )
 
 
@@ -1823,6 +1826,7 @@ def memory_pass_source_relation(
     pass_chat_id: str,
     source_id: str = "",
     now: datetime | None = None,
+    _precommit: bool = False,
 ) -> SourceRelation:
     """Prove one completed managed memory pass and its verified source chat.
 
@@ -1861,7 +1865,7 @@ def memory_pass_source_relation(
         _refuse("invalid_source_chat", "The memory pass does not belong to this workspace.")
     helper = chat_service._normalize_chat_helper(pass_chat.helper)
     source_chat_id = str(helper.get("source_chat_id") or "")
-    if helper.get("kind") != memory_pass.MEMORY_PASS_KIND or helper.get("state") != "done":
+    if helper.get("kind") != memory_pass.MEMORY_PASS_KIND or helper.get("state") != ("running" if _precommit else "done"):
         _refuse("source_unavailable", "The memory pass is not complete.")
     if not source_chat_id:
         _refuse("source_unavailable", "The memory pass names no source chat.")
@@ -1964,12 +1968,23 @@ def _checkpoint_signature(config: Any, payload: dict[str, Any]) -> str:
     return hmac.new(_relation_secret(config), b"memory-checkpoint\0" + raw, hashlib.sha256).hexdigest()
 
 
-def checkpoint_completed_memory_pass(config: Any, registry: Any, *, workspace: str, pass_chat_id: str) -> None:
-    """Attest a completed pass while its engine-managed principal still exists."""
-    relation = memory_pass_source_relation(config, registry, workspace=workspace, pass_chat_id=pass_chat_id)
+def prepare_memory_completion(config: Any, registry: Any, *, workspace: str, pass_chat_id: str) -> dict[str, Any]:
+    """Create a signed completion intent for the coordinator's atomic done save."""
+    relation = memory_pass_source_relation(config, registry, workspace=workspace, pass_chat_id=pass_chat_id, _precommit=True)
     chat = _project_manager().get_chat(pass_chat_id)
     if chat is None or chat.last_response_status != "success" or not chat.last_response.strip():
         _refuse("source_unavailable", "The memory pass did not complete successfully.")
+    host = _project_manager()
+    if (host._broker.get(pass_chat_id) is not None or chat.pending_question or chat.pending_permission
+            or chat.retry_status == "pending" or host._provider_background_busy(pass_chat_id, host._providers.get(pass_chat_id))):
+        _refuse("source_unavailable", "The memory pass is not settled.")
+    attestation = _memory_attestation(config, workspace=workspace, pass_chat_id=pass_chat_id, relation=relation, chat=chat)
+    if len(json.dumps(attestation, ensure_ascii=False).encode("utf-8")) > 16_384:
+        _refuse("source_unavailable", "The memory completion attestation is too large.")
+    return attestation
+
+
+def _memory_attestation(config: Any, *, workspace: str, pass_chat_id: str, relation: SourceRelation, chat: Any) -> dict[str, Any]:
     payload = {
         "workspace": workspace, "workspace_lifetime_id": relation.workspace_lifetime_id,
         "pass_chat_id": pass_chat_id, "pass_project_id": chat.project_id,
@@ -1979,7 +1994,10 @@ def checkpoint_completed_memory_pass(config: Any, registry: Any, *, workspace: s
         "turn_count": chat.user_turn_count,
         "response_digest": _digest(chat.last_response.encode("utf-8")),
     }
-    checkpoint = {"schema": SCHEMA, "payload": payload, "signature": _checkpoint_signature(config, payload)}
+    return {"schema": SCHEMA, "payload": payload, "signature": _checkpoint_signature(config, payload)}
+
+
+def _store_memory_checkpoint(config: Any, workspace: str, pass_chat_id: str, checkpoint: dict[str, Any]) -> None:
     with _workspace_guard(config, workspace):
         path = _memory_checkpoint_path(config, workspace, pass_chat_id)
         existing = _read_json(path, limit=MAX_EVIDENCE_BYTES, code="private_state_corrupt")
@@ -1989,11 +2007,21 @@ def checkpoint_completed_memory_pass(config: Any, registry: Any, *, workspace: s
             _write_private(path, json.dumps(checkpoint, sort_keys=True).encode("utf-8"), limit=MAX_EVIDENCE_BYTES)
 
 
-def _verified_memory_checkpoint(config: Any, workspace: str, pass_chat_id: str) -> dict[str, Any]:
+def checkpoint_completed_memory_pass(config: Any, registry: Any, *, workspace: str, pass_chat_id: str) -> None:
+    """Attest a completed pass while its engine-managed principal still exists."""
+    relation = memory_pass_source_relation(config, registry, workspace=workspace, pass_chat_id=pass_chat_id)
+    chat = _project_manager().get_chat(pass_chat_id)
+    if chat is None or chat.last_response_status != "success" or not chat.last_response.strip():
+        _refuse("source_unavailable", "The memory pass did not complete successfully.")
+    _store_memory_checkpoint(config, workspace, pass_chat_id, _memory_attestation(config, workspace=workspace, pass_chat_id=pass_chat_id, relation=relation, chat=chat))
+
+
+def _verified_memory_checkpoint(config: Any, workspace: str, pass_chat_id: str, *, checkpoint: dict[str, Any] | None = None) -> dict[str, Any]:
     _require_workspace(config, workspace)
     if not isinstance(pass_chat_id, str) or not pass_chat_id:
         _refuse("source_unavailable", "The memory pass checkpoint is unavailable.")
-    checkpoint = _read_json(_memory_checkpoint_path(config, workspace, pass_chat_id), limit=MAX_EVIDENCE_BYTES, code="private_state_corrupt")
+    if checkpoint is None:
+        checkpoint = _read_json(_memory_checkpoint_path(config, workspace, pass_chat_id), limit=MAX_EVIDENCE_BYTES, code="private_state_corrupt")
     payload = checkpoint.get("payload")
     signature = checkpoint.get("signature")
     if not isinstance(payload, dict) or not isinstance(signature, str) or not re.fullmatch(r"[0-9a-f]{64}", signature) or not hmac.compare_digest(signature, _checkpoint_signature(config, payload)):
@@ -2024,6 +2052,21 @@ def _verified_memory_checkpoint(config: Any, workspace: str, pass_chat_id: str) 
     ):
         _refuse("source_unavailable", "The memory pass checkpoint no longer matches its source.")
     return {**payload, "signature": signature}
+
+
+def checkpoint_completed_memory_pass_from_attestation(config: Any, *, workspace: str, pass_chat_id: str) -> None:
+    """Materialize an atomic done-save attestation, including after restart."""
+    chat = _project_manager().get_chat(pass_chat_id)
+    attestation = getattr(chat, "memory_completion_attestation", None) if chat is not None else None
+    if not isinstance(attestation, dict) or attestation.get("schema") != SCHEMA:
+        _refuse("source_unavailable", "The saved memory completion attestation is unavailable.")
+    try:
+        if len(json.dumps(attestation, ensure_ascii=False).encode("utf-8")) > 16_384:
+            _refuse("source_unavailable", "The saved memory completion attestation is unavailable.")
+    except (TypeError, ValueError, UnicodeError):
+        _refuse("source_unavailable", "The saved memory completion attestation is unavailable.")
+    _verified_memory_checkpoint(config, workspace, pass_chat_id, checkpoint=attestation)
+    _store_memory_checkpoint(config, workspace, pass_chat_id, attestation)
 
 
 def recover_memory_pass_source_relation(config: Any, *, workspace: str, pass_chat_id: str, source_id: str = "", now: datetime | None = None) -> SourceRelation:
@@ -2200,6 +2243,7 @@ def recover_care_source_relation(config: Any, *, workspace: str, holder: str, wi
             source_id=DOCUMENT_SOURCE, relation_id=holder, evidence=witness_signature,
             lease_vault="", lease_proof_hash="", nonce=secrets.token_hex(16),
             attested_at=_iso(moment), expires_at=_iso(moment + RELATION_TTL), seal=b"",
+            batch_index=matches[0]["batch_index"],
         ))
 
 
@@ -2230,6 +2274,7 @@ def _care_settled_row(config: Any, workspace: str, brain_name: str, holder: str,
             "snapshot_id": key, "consent_generation": grant.get("consent_generation"), "audience": grant.get("audience", ""),
             "project_id": witness["project_id"], "source_id": DOCUMENT_SOURCE, "producer": "nightly_curation",
             "relation_kind": "care_settlement", "relation_id": holder, "relation_evidence": signature,
+            "batch_index": matches[0]["batch_index"],
             "field_mask": grant.get("field_mask"), "canonical_bytes": canonical, "digest": witness["masked_digest"],
             "recorded_at": grant.get("issued_at", "")}
 
@@ -2268,7 +2313,7 @@ def eligible_entries(
     if relation.kind == "care_settlement":
         with _claim_scope(config, workspace, claim) as owned:
             row = _care_settled_row(config, workspace, brain_name, relation.relation_id, relation.evidence, owned)
-            if row is None or row["project_id"] != relation.project_id or relation.source_id != DOCUMENT_SOURCE or relation.producer != "nightly_curation":
+            if row is None or row["project_id"] != relation.project_id or row["batch_index"] != relation.batch_index or relation.source_id != DOCUMENT_SOURCE or relation.producer != "nightly_curation":
                 return []
             return [row]
     if relation.kind == "memory_checkpoint":

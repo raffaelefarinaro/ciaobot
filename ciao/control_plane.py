@@ -1718,7 +1718,7 @@ class CiaoControlPlane:
         # callers and no second spelling of the fallback to drift from it.
         return self.workspace_vault_root(self._workspace(principal))
 
-    def managed_care_begin(self, principal: AgentPrincipal, ttl_s: float) -> dict[str, Any]:
+    def managed_care_begin(self, principal: AgentPrincipal, ttl_s: float, vault: str) -> dict[str, Any]:
         """Take a care lease only for the engine's currently running care dispatch."""
         import math  # noqa: PLC0415
         from ciao import curation_run, curation_share  # noqa: PLC0415
@@ -1728,6 +1728,8 @@ class CiaoControlPlane:
         dispatch_id = dispatcher.active_care_dispatch(principal.chat_id, workspace)
         if not dispatch_id or not principal.token_id or not self._unattended_turn(principal):
             raise ControlPlaneError("not_care_dispatch", "A live managed Workspace care dispatch is required.")
+        if not vault or Path(vault).resolve() != self._vault_root(principal).resolve():
+            raise ControlPlaneError("invalid_workspace", "The care vault does not match the managed workspace.")
         if not math.isfinite(ttl_s) or ttl_s < 1 or ttl_s > 86400:
             raise ControlPlaneError("invalid_request", "Care lease duration must be between 1 and 86400 seconds.")
         try:
