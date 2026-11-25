@@ -1237,8 +1237,8 @@ def redraft_evidence_candidate(config: Any, *, workspace: str, proposal_id: str,
                 queue = Path(config.workspace_vault_root(workspace)) / _QUEUE
                 with _thread_queue_lock(queue), memory_receipts.queue_lock(queue, timeout_s=0):
                     text = queue.read_text(encoding="utf-8") if queue.exists() else ""
-                    rows = proposal_tracking.walk_proposal_queue(workspace, (PurePosixPath(workspace) / _QUEUE).as_posix(), text)
-                    if not any(item.proposal_id == proposal_id and item.bullet.kind == KIND for item in rows):
+                    visible_rows = proposal_tracking.walk_proposal_queue(workspace, (PurePosixPath(workspace) / _QUEUE).as_posix(), text)
+                    if not any(item.proposal_id == proposal_id and item.bullet.kind == KIND for item in visible_rows):
                         _refuse("stale_review", "The candidate is no longer pending.")
                 old_id, old_token = pending.get("old_id"), pending.get("old_token")
                 if not isinstance(old_id, str) or not isinstance(old_token, str):
