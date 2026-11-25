@@ -2016,7 +2016,8 @@ def test_first_folder_guide_preview_expires_on_every_restore(tmp_path):
         response = client.get(endpoint)
         assert response.status_code == 200, response.text
         view = response.json()
-        assert view["pin"] and view["policy"] == "review"
+        assert view["pin"] and view["mapping_mode"] == "review"
+        assert config.workspace("work").shared_brains[0].sharing_policy == "review"
         return {key: view[key] for key in ("identity", "lifetime", "pin", "generation")}
 
     def restore():

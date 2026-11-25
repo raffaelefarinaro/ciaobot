@@ -907,6 +907,26 @@ def test_intake_resolves_mapped_destination_and_never_publishes(linked, monkeypa
         yield object()
 
     monkeypatch.setattr(share_evidence, "evidence_claim", claim)
+    from dataclasses import asdict
+    from ciao import curation_share
+    discover = shared_brain_mapping.discover_workspace_destinations
+    captured = {}
+    active = {}
+
+    def tracked_discover(config, workspace, brain, *, owner):
+        result = discover(config, workspace, brain, owner=owner)
+        link = next(item for item in config.links if item.name == brain)
+        active["brain"] = brain
+        if result and brain not in captured:
+            captured[brain] = {"status": "mapped", "brain": brain, "identity": link.identity, **asdict(result[0])}
+        return result
+
+    def settled(*args, **kwargs):
+        return [{"witness": {"witness_signature": relation.evidence},
+                 "settlement_destination": captured[active["brain"]]}]
+
+    monkeypatch.setattr(shared_brain_mapping, "discover_workspace_destinations", tracked_discover)
+    monkeypatch.setattr(curation_share, "_validated_outbox", settled)
     monkeypatch.setattr(share_publish, "publish_share", lambda *args, **kwargs: pytest.fail("intake published"))
     first = sp.draft_evidence_candidates(config, workspace="home", relation=relation)
     assert len(first) == 1 and isinstance(first[0], sp.ShareDraft)
@@ -982,11 +1002,15 @@ def test_intake_resolves_mapped_destination_and_never_publishes(linked, monkeypa
     row["batch_index"] = 0
     row["entry_revision"] = 4
     relation.evidence = "witness-four"
-    monkeypatch.setattr(sp, "MAX_CANDIDATES_PER_RUN", 20)
+    monkeypatch.setattr(sp, "MAX_CANDIDATES_PER_RUN", 2)
     monkeypatch.setattr(sp, "MAX_PER_BRAIN", 10)
     full_ledger = next(path for path in ledgers if first[0].artifact["request_fingerprint"] in json.loads(path.read_text())["fingerprints"])
     ledger = json.loads(full_ledger.read_text())
-    ledger["fingerprints"].extend(f"{number:064x}" for number in range(19))
+    extra_fingerprint = "a" * 64
+    saved = sp._candidate_intent(config, "home", first[0].artifact["request_fingerprint"])
+    assert saved is not None
+    sp._candidate_intent(config, "home", extra_fingerprint, *saved)
+    ledger["fingerprints"].append(extra_fingerprint)
     share_evidence._write_private(full_ledger, json.dumps(ledger).encode(), limit=8192)
     per_destination = sp.draft_evidence_candidates(config, workspace="home", relation=relation)
     assert len(per_destination) == 2
@@ -1082,16 +1106,36 @@ def test_intake_uses_real_checkpoint_and_consent(linked, tmp_path, monkeypatch, 
             assert child.stdin is not None
             child.stdin.close()
             child.wait(timeout=5)
+        for _ in range(1):
+            pid = os.fork()
+            if pid == 0:
+                original_evidence_write = se._write_private
+
+                def die_after_reservation(path, data, *, limit):
+                    original_evidence_write(path, data, limit=limit)
+                    if path.parent.name == "candidate-runs":
+                        os._exit(20)
+
+                se._write_private = die_after_reservation
+                sp.draft_evidence_candidates(config, workspace="home", relation=relation)
+                os._exit(0)
+            _, status = os.waitpid(pid, 0)
+            # The first crash reserves the slot; retry advances to intent.
+            if os.waitstatus_to_exitcode(status) == 0:
+                break
+            assert os.waitstatus_to_exitcode(status) == 20
+        ledgers = list((sp._store_dir(config) / "candidate-runs").glob("*.json"))
+        assert len(ledgers) == 1 and len(json.loads(ledgers[0].read_text())["fingerprints"]) == 1
         pid = os.fork()
         if pid == 0:
             original_evidence_write = se._write_private
 
-            def die_after_ledger(path, data, *, limit):
+            def die_after_intent(path, data, *, limit):
                 original_evidence_write(path, data, limit=limit)
-                if path.parent.name == "candidate-runs":
+                if path.parent.name == "candidate-intents":
                     os._exit(21)
 
-            se._write_private = die_after_ledger
+            se._write_private = die_after_intent
             sp.draft_evidence_candidates(config, workspace="home", relation=relation)
             os._exit(0)
         _, status = os.waitpid(pid, 0)
@@ -1284,6 +1328,22 @@ def test_intake_uses_settled_care_witness_and_current_consent(linked, tmp_path, 
     git(clone, "commit", "--quiet", "-m", "advance upstream")
     git(clone, "update-ref", "refs/remotes/origin/main", "HEAD")
     assert sp.draft_evidence_candidates(config, workspace="home", relation=relation)[0].proposal_id == drafts[0].proposal_id
+    pid = os.fork()
+    if pid == 0:
+        write_queue = sp.memory_receipts.write_queue_atomically
+
+        def crash_after_swap(*args, **kwargs):
+            write_queue(*args, **kwargs)
+            os._exit(27)
+
+        sp.memory_receipts.write_queue_atomically = crash_after_swap
+        sp.redraft_evidence_candidate(config, workspace="home", proposal_id=drafts[0].proposal_id,
+                                      expected_revision=drafts[0].artifact["review_token"])
+        os._exit(0)
+    _, status = os.waitpid(pid, 0)
+    assert os.waitstatus_to_exitcode(status) == 27
+    blocked_replay = sp.draft_evidence_candidates(config, workspace="home", relation=relation)
+    assert isinstance(blocked_replay[0], sp.ShareRefusal) and blocked_replay[0].code == "draft_unavailable"
     replacement = sp.redraft_evidence_candidate(
         config, workspace="home", proposal_id=drafts[0].proposal_id,
         expected_revision=drafts[0].artifact["review_token"],

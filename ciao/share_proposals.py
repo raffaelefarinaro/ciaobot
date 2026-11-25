@@ -37,6 +37,7 @@ MAX_PER_BRAIN = 10
 MAX_PER_WORKSPACE = 30
 MAX_CANDIDATES_PER_RUN = 20
 MAX_CANDIDATE_PROVENANCE = 32
+MAX_CANDIDATE_REDRAFTS = 3
 MAX_SIDECAR_BYTES = 2 * MAX_BYTES * 6 + 16_384
 _SCHEMA = 1
 _QUEUE = PurePosixPath("Workspace/Memory-Proposals.md")
@@ -582,10 +583,21 @@ def _qualify_owned(
     return _qualify(config, link, relative_path, owner, operation)
 
 
+def _replace_queue_row(text: str, workspace: str, proposal_id: str, bullet: str) -> str:
+    rel_queue = (PurePosixPath(workspace) / _QUEUE).as_posix()
+    matches = [row for row in proposal_tracking.walk_proposal_queue(workspace, rel_queue, text)
+               if row.proposal_id == proposal_id and row.bullet.kind == KIND]
+    if len(matches) != 1:
+        _refuse("stale_review", "The candidate is no longer available for re-drafting.")
+    lines = text.splitlines()
+    lines[matches[0].line] = bullet
+    return "\n".join(lines).rstrip() + "\n"
+
+
 def _replay_index(
     config: Any, workspace: str, store: Path, index_path: Path, request_fingerprint: str,
     retiring_proposal_id: str | None, publish_guard: Callable[[], AbstractContextManager[object]] | None,
-    *, is_candidate: bool,
+    *, is_candidate: bool, replace_proposal_id: str | None = None,
 ) -> ShareDraft | None:
     if index_path.exists():
         previous = _load_sidecar(index_path)
@@ -651,11 +663,10 @@ def _replay_index(
                     brain_count += 1
             if brain_count >= MAX_PER_BRAIN:
                 _refuse("capacity", "The shared brain share proposal limit is reached.", limit=MAX_PER_BRAIN, count=brain_count)
-            memory_receipts.write_queue_atomically(
-                queue,
-                queue_text.rstrip() + f"\n\n- [share {fields['sidecar_id']}] {summary}\n",
-                publish_guard=publish_guard,
-            )
+            bullet = f"- [share {fields['sidecar_id']}] {summary}"
+            updated = (_replace_queue_row(queue_text, workspace, replace_proposal_id, bullet)
+                       if replace_proposal_id else queue_text.rstrip() + "\n\n" + bullet + "\n")
+            memory_receipts.write_queue_atomically(queue, updated, publish_guard=publish_guard)
         return ShareDraft(
             fields["proposal_id"], canonical,
             proposal_review_path(workspace, canonical_fields["review_key"]),
@@ -673,6 +684,7 @@ def _draft_share(
     expected_qualification: tuple[Any, ...] | None = None,
     candidate_binding: dict[str, Any] | None = None,
     intent_qualification: tuple[Any, ...] | None = None,
+    replace_proposal_id: str | None = None,
 ) -> ShareDraft:
     """Qualify and privately file one immutable shared-note proposal."""
     if operation not in (None, "create", "replace", "delete"):
@@ -691,7 +703,7 @@ def _draft_share(
     key_hash = hashlib.sha256((workspace + "\0" + request_key).encode()).hexdigest()
     index_path = store / (key_hash + ".json")
     if candidate_binding is not None:
-        replay = _replay_index(config, workspace, store, index_path, request_fingerprint, retiring_proposal_id, publish_guard, is_candidate=True)
+        replay = _replay_index(config, workspace, store, index_path, request_fingerprint, retiring_proposal_id, publish_guard, is_candidate=True, replace_proposal_id=replace_proposal_id)
         if replay is not None:
             return replay
     from ciao.workspaces import workspace_registry_claim, WorkspaceRegistryBusy, WorkspaceRegistryConflict
@@ -744,7 +756,11 @@ def _draft_share(
         replay = _replay_index(config, workspace, store, index_path, request_fingerprint, retiring_proposal_id, publish_guard, is_candidate=False)
         if replay is not None:
             return replay
-    sidecar_id = secrets.token_urlsafe(18)
+    if candidate_binding is not None:
+        from ciao import share_evidence
+        sidecar_id = hmac.new(share_evidence._relation_secret(config), b"candidate-sidecar\0" + key_hash.encode(), hashlib.sha256).hexdigest()[:36]
+    else:
+        sidecar_id = secrets.token_urlsafe(18)
     text = f"Shared note change proposal {sidecar_id}"
     rel_queue = (PurePosixPath(workspace) / _QUEUE).as_posix()
     proposal_id = proposal_tracking.stable_proposal_id(workspace, rel_queue, KIND, text, "", 0)
@@ -767,8 +783,12 @@ def _draft_share(
     if candidate_binding is not None:
         token_fields["evidence_authorization"] = candidate_binding["authorization"]
         token_fields["destination_mapping"] = {
-            key: value for key, value in candidate_binding.items() if key != "authorization"
+            key: value for key, value in candidate_binding.items()
+            if key not in {"authorization", "_redraft_history", "_candidate_root"}
         }
+        if "_redraft_history" in candidate_binding:
+            token_fields["redraft_history"] = candidate_binding["_redraft_history"]
+            token_fields["candidate_root_fingerprint"] = candidate_binding["_candidate_root"]
     token_fields["review_key"] = proposal_tracking.proposal_review_key(workspace, KIND, text, "", sidecar_id, "")
     token = _review_token(token_fields)
     artifact = {"schema": _SCHEMA, "immutable": token_fields, "review_token": token, "request_fingerprint": request_fingerprint, "request_key_hash": key_hash}
@@ -805,10 +825,9 @@ def _draft_share(
         _write_private(id_path, json.dumps(artifact, ensure_ascii=False, sort_keys=True).encode("utf-8"))
         _write_private(index_path, json.dumps(artifact, ensure_ascii=False, sort_keys=True).encode("utf-8"))
         try:
-            memory_receipts.write_queue_atomically(
-                queue, existing_text.rstrip() + "\n\n" + bullet + "\n",
-                publish_guard=publish_guard,
-            )
+            updated = (_replace_queue_row(existing_text, workspace, replace_proposal_id, bullet)
+                       if replace_proposal_id else existing_text.rstrip() + "\n\n" + bullet + "\n")
+            memory_receipts.write_queue_atomically(queue, updated, publish_guard=publish_guard)
         except ShareDraftError:
             index_path.unlink(missing_ok=True)
             id_path.unlink(missing_ok=True)
@@ -1025,9 +1044,44 @@ def _candidate_intent(
     return (qualified[0], qualified[1], original, qualified[3], qualified[4], qualified[5], qualified[6]), result
 
 
+def _candidate_redraft_journal(config: Any, workspace: str, root: str, payload: dict[str, Any] | None = None) -> dict[str, Any] | None:
+    from ciao import share_evidence
+
+    if not re.fullmatch(r"[0-9a-f]{64}", root):
+        _refuse("draft_corrupt", "The private candidate lineage is corrupt.")
+    store = _storage_safe(config, workspace)
+    parent_fd = folder_io.open_directory_nofollow(str(store))
+    try:
+        child_fd, _ = folder_io.open_or_create_private_dir(parent_fd, "candidate-redrafts")
+        os.close(child_fd)
+    finally:
+        os.close(parent_fd)
+    secret = share_evidence._relation_secret(config)
+    name = hmac.new(secret, (workspace + "\0" + root).encode(), hashlib.sha256).hexdigest()
+    path = store / "candidate-redrafts" / (name + ".json")
+    if payload is not None:
+        encoded = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
+        signature = hmac.new(secret, b"candidate-redraft\0" + encoded, hashlib.sha256).hexdigest()
+        share_evidence._write_private(path, json.dumps({"schema": share_evidence.SCHEMA, "payload": payload,
+                                                        "signature": signature}, ensure_ascii=False).encode("utf-8"), limit=16384)
+        return payload
+    record = share_evidence._read_json(path, limit=16384, code="private_state_corrupt")
+    if not record:
+        return None
+    saved = record.get("payload")
+    saved_signature = record.get("signature")
+    if not isinstance(saved, dict) or not isinstance(saved_signature, str) or not re.fullmatch(r"[0-9a-f]{64}", saved_signature):
+        _refuse("draft_corrupt", "The private candidate lineage is corrupt.")
+    encoded = json.dumps(saved, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    expected = hmac.new(secret, b"candidate-redraft\0" + encoded, hashlib.sha256).hexdigest()
+    if not hmac.compare_digest(saved_signature, expected) or saved.get("workspace") != workspace or saved.get("root") != root or saved.get("status") not in ("pending", "complete"):
+        _refuse("draft_corrupt", "The private candidate lineage is corrupt.")
+    return saved
+
+
 def draft_evidence_candidates(config: Any, *, workspace: str, relation: Any) -> list[ShareDraft | ShareRefusal]:
     """File bounded, individually reviewed candidates from engine-attested evidence."""
-    from ciao import share_evidence, shared_brain_mapping
+    from ciao import curation_share, share_evidence, shared_brain_mapping
     from ciao.workspaces import workspace_registry_claim, WorkspaceRegistryBusy, WorkspaceRegistryConflict
 
     if not share_evidence._relation_is_sealed(config, relation) or relation.kind not in ("memory_checkpoint", "care_settlement"):
@@ -1047,6 +1101,21 @@ def draft_evidence_candidates(config: Any, *, workspace: str, relation: Any) -> 
                 if grant is None:
                     continue
                 with share_evidence.evidence_claim(config, workspace=workspace) as claim:
+                    if relation.kind == "care_settlement":
+                        settled = curation_share._validated_outbox(
+                            config, workspace=workspace, holder=relation.relation_id, claim=claim)
+                        witnesses = [item for item in (settled or [])
+                                     if item["witness"].get("witness_signature") == relation.evidence]
+                        if len(witnesses) != 1:
+                            _refuse("invalid_evidence", "The settled care witness is unavailable.")
+                        frozen = witnesses[0].get("settlement_destination")
+                        if not isinstance(frozen, dict):
+                            _refuse("invalid_evidence", "The settled destination is unavailable.")
+                        if frozen.get("brain") != link.name:
+                            continue
+                        current = {"status": "mapped", "brain": link.name, "identity": link.identity, **asdict(grant)}
+                        if frozen != current:
+                            _refuse("destination_changed", "The candidate destination changed after settlement.")
                     authorizations = share_evidence.mint_evidence_authorizations(
                         config, workspace=workspace, brain_name=link.name, relation=relation, claim=claim,
                     )
@@ -1088,6 +1157,9 @@ def draft_evidence_candidates(config: Any, *, workspace: str, relation: Any) -> 
                                     _refuse("draft_unavailable", "The proposal queue is currently unavailable.")
                                 try:
                                     with memory_receipts.queue_lock(queue, timeout_s=0):
+                                        journal = _candidate_redraft_journal(config, workspace, fingerprint)
+                                        if journal and journal.get("status") == "pending":
+                                            _refuse("draft_unavailable", "A candidate redraft needs recovery.")
                                         if not shared_brain_mapping.revalidate_snapshot(config, snapshot, owner=owner):
                                             _refuse("brain_unavailable", "The reviewed destination mapping changed.")
                                         draft = _draft_share(
@@ -1113,6 +1185,9 @@ def draft_evidence_candidates(config: Any, *, workspace: str, relation: Any) -> 
                                 _refuse("draft_unavailable", "The proposal queue is currently unavailable.")
                             try:
                                 with memory_receipts.queue_lock(queue, timeout_s=0):
+                                    journal = _candidate_redraft_journal(config, workspace, fingerprint)
+                                    if journal and journal.get("status") == "pending":
+                                        _refuse("draft_unavailable", "A candidate redraft needs recovery.")
                                     if not shared_brain_mapping.revalidate_snapshot(config, snapshot, owner=owner):
                                         _refuse("brain_unavailable", "The reviewed destination mapping changed.")
                                     store = _storage_safe(config, workspace)
@@ -1136,31 +1211,37 @@ def draft_evidence_candidates(config: Any, *, workspace: str, relation: Any) -> 
                                     fingerprints = ledger.get("fingerprints", [])
                                     if not isinstance(fingerprints, list) or any(not isinstance(item, str) or not re.fullmatch(r"[0-9a-f]{64}", item) for item in fingerprints) or len(fingerprints) > MAX_CANDIDATES_PER_RUN:
                                         _refuse("draft_corrupt", "The private candidate run is corrupt.")
+                                    # Reservations without an intent were interrupted before allocating
+                                    # private content. Reclaim them while holding the queue claim.
+                                    retained = []
+                                    for reserved in fingerprints:
+                                        if _candidate_intent(config, workspace, reserved) is not None:
+                                            retained.append(reserved)
+                                        else:
+                                            reserved_index = hashlib.sha256((workspace + "\0candidate:" + reserved).encode()).hexdigest()
+                                            if (store / (reserved_index + ".json")).exists():
+                                                _refuse("draft_corrupt", "The private candidate intent is missing.")
+                                    if retained != fingerprints:
+                                        fingerprints = retained
+                                        share_evidence._write_private(ledger_path, json.dumps({"schema": share_evidence.SCHEMA, "fingerprints": fingerprints}).encode(), limit=8192)
                                     reserved_now = fingerprint not in fingerprints
                                     if reserved_now:
                                         if len(fingerprints) >= MAX_CANDIDATES_PER_RUN:
                                             _refuse("capacity", "The candidate intake limit for this run is reached.", limit=MAX_CANDIDATES_PER_RUN, count=len(fingerprints))
-                                    if intent is None:
-                                        intent = _candidate_intent(config, workspace, fingerprint, captured, proposed)
-                                        assert intent is not None
                                     if reserved_now:
                                         fingerprints.append(fingerprint)
                                         share_evidence._write_private(ledger_path, json.dumps({"schema": share_evidence.SCHEMA, "fingerprints": fingerprints}).encode(), limit=8192)
-                                    try:
-                                        draft = _draft_share(
+                                    if intent is None:
+                                        intent = _candidate_intent(config, workspace, fingerprint, captured, proposed)
+                                        assert intent is not None
+                                    draft = _draft_share(
                                             config, workspace=workspace, brain=link.name, relative_path=destination.path,
                                             operation=operation, proposed=proposed, request_key="candidate:" + fingerprint,
                                             request_fingerprint=fingerprint, checkout_claimed=True, registry_owner=owner,
                                             expected_qualification=captured,
                                             intent_qualification=captured if recovered_intent else None,
                                             candidate_binding={"authorization": authorization, **asdict(snapshot)},
-                                        )
-                                    except ShareDraftError as exc:
-                                        index_hash = hashlib.sha256((workspace + "\0candidate:" + fingerprint).encode()).hexdigest()
-                                        if reserved_now and exc.refusal.code == "capacity" and not (store / (index_hash + ".json")).exists():
-                                            fingerprints.remove(fingerprint)
-                                            share_evidence._write_private(ledger_path, json.dumps({"schema": share_evidence.SCHEMA, "fingerprints": fingerprints}).encode(), limit=8192)
-                                        raise
+                                    )
                                     _add_candidate_provenance(config, workspace, draft, authorization)
                                     results.append(draft)
                             finally:
@@ -1170,6 +1251,95 @@ def draft_evidence_candidates(config: Any, *, workspace: str, relation: Any) -> 
         except (OSError, WorkspaceRegistryBusy, WorkspaceRegistryConflict, memory_receipts.QueueLockError):
             results.append(ShareRefusal("draft_unavailable", "The candidate could not be filed safely."))
     return results
+
+
+def redraft_evidence_candidate(config: Any, *, workspace: str, proposal_id: str, expected_revision: str) -> ShareDraft | ShareRefusal:
+    """Replace a pending candidate after an explicit review of its current revision."""
+    from ciao import share_evidence, share_publish, shared_brain_mapping
+    from ciao.workspaces import workspace_registry_claim, WorkspaceRegistryBusy, WorkspaceRegistryConflict
+
+    try:
+        old = share_publish._artifact_for(config, workspace, proposal_id)
+        if old is None or old.get("review_token") != expected_revision:
+            _refuse("stale_review", "The candidate review has changed.")
+        fields = old["immutable"]
+        authorization = fields.get("evidence_authorization")
+        mapping = fields.get("destination_mapping")
+        root = fields.get("candidate_root_fingerprint", old.get("request_fingerprint"))
+        history = fields.get("redraft_history", [])
+        if not isinstance(authorization, dict) or not isinstance(mapping, dict) or not isinstance(root, str) or not isinstance(history, list) or len(history) > MAX_CANDIDATE_REDRAFTS:
+            _refuse("draft_corrupt", "The private candidate lineage is corrupt.")
+        link = _brain_for(config, workspace, fields["brain"])
+        queue = Path(config.workspace_vault_root(workspace)) / _QUEUE
+        with shared_brain.checkout_claims_nowait([link.path], config), workspace_registry_claim(config) as owner:
+            with share_evidence.evidence_claim(config, workspace=workspace) as claim:
+                with share_evidence.evidence_authorization_guard(config, workspace=workspace, authorization=authorization, claim=claim) as row:
+                    snapshot = shared_brain_mapping.resolve_workspace_destination(
+                        config, workspace, link.name, note_type="decision", relative_path=fields["path"],
+                        operation=mapping["destination"]["destination"]["operation"], owner=owner)
+                    if snapshot is None or asdict(snapshot) != mapping:
+                        _refuse("destination_changed", "The candidate destination changed.")
+                    with _thread_queue_lock(queue), memory_receipts.queue_lock(queue, timeout_s=0):
+                        old = share_publish._artifact_for(config, workspace, proposal_id)
+                        if old is None or old.get("review_token") != expected_revision:
+                            _refuse("stale_review", "The candidate review has changed.")
+                        publication = old.get("publication", {})
+                        if not isinstance(publication, dict) or not isinstance(publication.get("attempts", []), list) or not isinstance(publication.get("receipts", []), list):
+                            _refuse("draft_corrupt", "The candidate publication state is corrupt.")
+                        if publication.get("attempts") or publication.get("receipts"):
+                            _refuse("publication_pending", "A publication attempt prevents redrafting.")
+                        journal = _candidate_redraft_journal(config, workspace, root)
+                        text = queue.read_text(encoding="utf-8") if queue.exists() else ""
+                        rows = list(proposal_tracking.walk_proposal_queue(workspace, (PurePosixPath(workspace) / _QUEUE).as_posix(), text))
+                        visible = any(item.proposal_id == proposal_id and item.bullet.kind == KIND for item in rows)
+                        summary = f"Shared note change proposal {fields['sidecar_id']}"
+                        if _operator_dismissed(queue, proposal_id, summary):
+                            _refuse("already_settled", "This candidate was already dismissed.")
+                        retry = bool(journal and journal.get("old_id") == proposal_id and journal.get("old_token") == expected_revision)
+                        if not visible and not retry:
+                            _refuse("stale_review", "The candidate is no longer pending.")
+                        if journal and journal.get("status") == "pending" and not retry:
+                            _refuse("draft_unavailable", "A candidate redraft needs recovery.")
+                        if len(history) >= MAX_CANDIDATE_REDRAFTS and not retry:
+                            _refuse("capacity", "The candidate redraft limit is reached.")
+                        fingerprint = hashlib.sha256(("redraft\0" + root + "\0" + expected_revision).encode()).hexdigest()
+                        if retry and journal is not None and journal.get("fingerprint") != fingerprint:
+                            _refuse("draft_corrupt", "The private candidate lineage is corrupt.")
+                        intent = _candidate_intent(config, workspace, fingerprint)
+                        if intent is None:
+                            if not visible:
+                                _refuse("draft_corrupt", "The redraft intent is missing.")
+                            captured = _qualify_owned(config, workspace, link, fields["path"], fields["operation"], owner)
+                            proposed = _compose_candidate(captured[2], _render_evidence(row["canonical_bytes"], row["digest"]), snapshot.destination.destination)
+                            intent = _candidate_intent(config, workspace, fingerprint, captured, proposed)
+                        assert intent is not None
+                        captured, proposed = intent
+                        if not retry:
+                            journal = {"workspace": workspace, "root": root, "old_id": proposal_id,
+                                       "old_token": expected_revision, "fingerprint": fingerprint, "status": "pending"}
+                            _candidate_redraft_journal(config, workspace, root, journal)
+                        assert journal is not None
+                        draft = _draft_share(config, workspace=workspace, brain=link.name, relative_path=fields["path"],
+                            operation=fields["operation"], proposed=proposed, request_key="candidate:" + fingerprint,
+                            request_fingerprint=fingerprint, retiring_proposal_id=proposal_id,
+                            replace_proposal_id=proposal_id, checkout_claimed=True, registry_owner=owner,
+                            expected_qualification=captured, intent_qualification=captured,
+                            candidate_binding={"authorization": authorization, **mapping, "_candidate_root": root,
+                                               "_redraft_history": [*history, {"proposal_id": proposal_id, "review_token": expected_revision}]})
+                        for provenance in old.get("producer_provenance", []):
+                            _add_candidate_provenance(config, workspace, draft, provenance)
+                        store = _storage_safe(config, workspace)
+                        alias_hash = hashlib.sha256((workspace + "\0candidate:" + root).encode()).hexdigest()
+                        alias = {**draft.artifact, "request_fingerprint": root, "request_key_hash": alias_hash}
+                        _write_private(store / (alias_hash + ".json"), json.dumps(alias, ensure_ascii=False, sort_keys=True).encode())
+                        _candidate_redraft_journal(config, workspace, root, {**journal, "status": "complete"})
+                        return draft
+    except ShareDraftError as exc:
+        return exc.refusal
+    except share_evidence.EvidenceError:
+        return ShareRefusal("invalid_evidence", "The candidate evidence is unavailable.")
+    except (OSError, KeyError, TypeError, WorkspaceRegistryBusy, WorkspaceRegistryConflict, memory_receipts.QueueLockError):
+        return ShareRefusal("draft_unavailable", "The candidate could not be redrafted safely.")
 
 
 def load_share(config: Any, *, workspace: str, proposal_id: str) -> dict[str, Any] | ShareRefusal:
