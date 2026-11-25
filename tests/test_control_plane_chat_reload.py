@@ -85,6 +85,17 @@ async def test_managed_care_acquisition_requires_the_active_scheduler_dispatch(t
         status, envelope = await AgentDispatcher(service).dispatch(token, "care_begin", {"ttl_s": 600.0})
         assert status == 200
         result.append(envelope)
+        holder = envelope["data"]["holder"]
+        curation_run.record_plan(vault, holder=holder, plan={
+            "planned": [["proposals", "synthetic-key"]], "blocked": [],
+            "blocked_overflow": 0, "deferred_count": 0,
+        })
+        curation_run.record_done(vault, ["synthetic-key"], holder=holder)
+        status, settled = await AgentDispatcher(service).dispatch(
+            token, "care_end", {"holder": holder, "status": "ok", "reasons": []}
+        )
+        assert status == 200
+        result.append(settled)
         yield {"type": "result", "text": "done", "is_error": False}
 
     pcm.stream_chat = fake_stream_chat  # type: ignore[assignment]
@@ -95,14 +106,16 @@ async def test_managed_care_acquisition_requires_the_active_scheduler_dispatch(t
         web_chat_id=chat.chat_id, archive_policy="manual",
     )
     await pcm._schedule_dispatcher_for().dispatch_schedule(entry, "care", "opus", "auto", "claude")
-    assert len(result) == 1
+    assert len(result) == 2
     holder = result[0]["data"]["holder"]
     assert "proof" not in str(result[0])
-    assert curation_run.active_lease(vault)["holder"] == holder
+    assert curation_run.active_lease(vault) is None
+    assert curation_run.load_state(vault).last_run["run_id"] == holder
     sidecars = list((plane.config.state_path.parent / "secrets" / "share-evidence").rglob("care-leases/*.json"))
-    assert len(sidecars) == 1
-    assert sidecars[0].stat().st_mode & 0o077 == 0
-    stored = json.loads(sidecars[0].read_text())
+    assert not sidecars
+    receipts = list((plane.config.state_path.parent / "secrets" / "share-evidence").rglob("care-settlements/*.json"))
+    assert len(receipts) == 1 and receipts[0].stat().st_mode & 0o077 == 0
+    stored = json.loads(receipts[0].read_text())
     assert stored["payload"]["dispatch_id"] == "synthetic-dispatch"
     assert stored["payload"]["chat_id"] == chat.chat_id
     assert stored["payload"]["holder"] == holder

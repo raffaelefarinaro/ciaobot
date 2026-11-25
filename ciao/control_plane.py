@@ -1755,6 +1755,55 @@ class CiaoControlPlane:
         )
         return _ok({"staged": staged})
 
+    async def managed_care_end(
+        self, principal: AgentPrincipal, holder: str, status: str, reasons: list[str]
+    ) -> dict[str, Any]:
+        """Derive the run outcome and settle it under the active care dispatch."""
+        from ciao import curation_run, curation_share  # noqa: PLC0415
+        from ciao.cli import _derive_run_counts  # noqa: PLC0415
+        from ciao.entity_types import load_entity_types  # noqa: PLC0415
+        from ciao.proposal_predictions import HandoverPolicy  # noqa: PLC0415
+        from ciao.vault_index import VAULT_RENDER_PREFIX  # noqa: PLC0415
+        from ciao.workspace_guide import guide_path  # noqa: PLC0415
+
+        workspace = self._workspace(principal)
+        dispatcher = self.pcm._schedule_dispatcher_for()
+        dispatch_id = dispatcher.active_care_dispatch(principal.chat_id, workspace)
+        if not dispatch_id or not principal.token_id or not self._unattended_turn(principal):
+            raise ControlPlaneError("not_care_dispatch", "A live managed Workspace care dispatch is required.")
+        if status not in ("ok", "failed") or not holder or len(holder) > 512 or len(reasons) > 100:
+            raise ControlPlaneError("invalid_request", "The care settlement request is invalid.")
+        if any(len(reason) > 4096 for reason in reasons):
+            raise ControlPlaneError("invalid_request", "The care settlement reasons are too long.")
+        vault = Path(self.config.workspace_vault_root(workspace))
+
+        def settle() -> dict[str, Any]:
+            counts = _derive_run_counts(vault, holder=holder, workspace=workspace)
+            state = curation_run.load_state(vault)
+            views = curation_run.build_worklist_views(
+                policy=HandoverPolicy.of(self.config.workspace(workspace)), vault_root=vault,
+                guide_path=guide_path(self.config.agent_root(workspace)),
+                workspace_dir=self.config.workspace_root, done_keys=frozenset(state.done_keys),
+                category_registry=load_entity_types(Path(self.config.agent_vault_root(workspace))),
+                config=self.config, path_prefix=VAULT_RENDER_PREFIX, workspace=workspace,
+            )
+            live_keys = frozenset(key for item in views.remaining.items for key in item.keys)
+            return curation_share.end(
+                self.config, workspace=workspace, chat_id=principal.chat_id, token_id=principal.token_id,
+                dispatch_id=dispatch_id, holder=holder, status=status, planned=counts.planned,
+                completed=counts.completed, deferred=counts.deferred, reasons=[*reasons, *counts.reasons],
+                live_keys=live_keys, failed=counts.failed, counts_complete=counts.complete,
+                dispatch_active=lambda: dispatcher.active_care_dispatch(principal.chat_id, workspace) == dispatch_id,
+            )
+
+        try:
+            summary = await asyncio.to_thread(settle)
+        except curation_run.CurationBusy as exc:
+            raise ControlPlaneError("curation_busy", str(exc)) from None
+        except curation_run.CurationStateError as exc:
+            raise ControlPlaneError("curation_state_error", str(exc)) from None
+        return _ok(summary)
+
     def _unattended_turn(self, principal: AgentPrincipal) -> bool:
         """Whether the turn asking right now was fired by a schedule, not a person.
 

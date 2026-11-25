@@ -2576,6 +2576,7 @@ def begin_run(
     ttl_s: float = DEFAULT_MAX_SECONDS,
     now: datetime | None = None,
     chat_id: str = "",
+    before_acquire: Callable[[CurationState], None] | None = None,
 ) -> Lease:
     """Take this vault's curation lease, or raise :class:`CurationBusy`.
 
@@ -2594,6 +2595,8 @@ def begin_run(
                 f"{held.get('holder', 'another run')} holds this vault until "
                 f"{held.get('expires_at', 'its lease expires')}"
             )
+        if before_acquire is not None:
+            before_acquire(state)
         _settle_pending(Path(vault_root), state, holder="", clock=_recheck_clock(now, None))
         proof = secrets.token_urlsafe(32)
         lease = Lease(
@@ -2894,6 +2897,8 @@ def end_run(
     clock: Callable[[], datetime] | None = None,
     failed: int | None = None,
     counts_complete: bool | None = None,
+    before_settlement: Callable[[CurationState, dict[str, Any]], None] | None = None,
+    after_settlement: Callable[[CurationState, dict[str, Any]], None] | None = None,
 ) -> dict[str, Any]:
     """Release the lease and record what the run actually did.
 
@@ -2976,9 +2981,13 @@ def end_run(
             summary["counts_complete"] = counts_complete
             if state.lease.get("chat_id"):
                 summary["chat_id"] = str(state.lease["chat_id"])
+        if before_settlement is not None:
+            before_settlement(state, summary)
         state.last_run = summary
         state.lease = {}
         _store(state_path(vault_root), state)
+        if after_settlement is not None:
+            after_settlement(state, summary)
         _clear_lease_capability(Path(vault_root), holder)
     return {**summary, "full_pass_advanced": advanced, "marker_error": marker_error}
 

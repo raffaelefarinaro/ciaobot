@@ -6444,7 +6444,15 @@ def _curation_begin_command(args: argparse.Namespace) -> int:
             print(f"curation could not begin: {error.get('message', 'engine unavailable')}", file=sys.stderr)
             return CURATION_BUSY_EXIT if error.get("code") == "curation_busy" else 1
         else:
-            lease = begin_run(vault, holder=args.holder, ttl_s=budget.max_seconds, chat_id=chat_id)
+            before_acquire = None
+            if _name:
+                from ciao import curation_share, share_evidence
+
+                config = _installed_config(_workspace)
+                if share_evidence._store_root(config).exists():
+                    before_acquire = lambda state: curation_share.recover(config, _name, state)
+            lease = begin_run(vault, holder=args.holder, ttl_s=budget.max_seconds,
+                              chat_id=chat_id, before_acquire=before_acquire)
     except CurationBusy as exc:
         print(f"curation is already running: {exc}", file=sys.stderr)
         return CURATION_BUSY_EXIT
@@ -6475,7 +6483,14 @@ def _curation_begin_command(args: argparse.Namespace) -> int:
     payload["lease"] = lease.as_dict()
     if payload.get("empty"):
         try:
-            end_run(vault, holder=lease.holder, status="ok", planned=0, completed=0, deferred=0)
+            if managed and managed.get("ok"):
+                settled = post("care_end", {"holder": lease.holder, "status": "ok", "reasons": []},
+                               url=url, token=token)
+                if not settled.get("ok"):
+                    print("curation could not settle the empty run", file=sys.stderr)
+                    return 1
+            else:
+                end_run(vault, holder=lease.holder, status="ok", planned=0, completed=0, deferred=0)
         except CurationBusy as exc:
             print(f"curation lease lost: {exc}", file=sys.stderr)
             return CURATION_BUSY_EXIT
@@ -6809,19 +6824,27 @@ def _curation_end_command(args: argparse.Namespace) -> int:
         # The worklist above already excludes the two hygiene keys, since they
         # are recorded done, so the prune inside `end_run` still forgets them
         # and next week's pass is planned again.
-        summary = end_run(
-            vault,
-            holder=holder,
-            status=args.status,
-            planned=counts.planned,
-            completed=counts.completed,
-            deferred=counts.deferred,
-            reasons=[*(args.reason or []), *counts.reasons],
-            live_keys=live_keys,
-            advance_marker=args.status == "ok",
-            failed=counts.failed,
-            counts_complete=counts.complete,
-        )
+        token = os.environ.get("CIAO_AGENT_TOKEN", "")
+        url = os.environ.get("CIAO_AGENT_URL", "")
+        managed = None
+        if token and url:
+            from ciao.agent_cli import post
+
+            managed = post("care_end", {"holder": holder, "status": args.status,
+                                        "reasons": args.reason or []}, url=url, token=token)
+        if managed and managed.get("ok"):
+            summary = managed["data"]
+        elif managed and managed.get("error", {}).get("code") != "not_care_dispatch":
+            error = managed.get("error", {})
+            print(f"curation could not end: {error.get('message', 'engine unavailable')}", file=sys.stderr)
+            return CURATION_BUSY_EXIT if error.get("code") == "curation_busy" else 1
+        else:
+            summary = end_run(
+                vault, holder=holder, status=args.status, planned=counts.planned,
+                completed=counts.completed, deferred=counts.deferred,
+                reasons=[*(args.reason or []), *counts.reasons], live_keys=live_keys,
+                advance_marker=args.status == "ok", failed=counts.failed, counts_complete=counts.complete,
+            )
     except CurationBusy as exc:
         print(f"curation lease lost: {exc}", file=sys.stderr)
         return CURATION_BUSY_EXIT
@@ -6829,8 +6852,6 @@ def _curation_end_command(args: argparse.Namespace) -> int:
         print(f"curation state error: {exc}", file=sys.stderr)
         return 1
     summary.update(
-        counts_complete=counts.complete,
-        failed=counts.failed,
         remaining_observed_count=int(payload["remaining_observed_count"]),
         coverage_notes=payload["coverage_notes"],
     )

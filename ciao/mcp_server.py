@@ -536,6 +536,14 @@ async def _op_care_checkpoint(service: CiaoMcpService, holder: str, key: str) ->
     )
 
 
+async def _op_care_end(service: CiaoMcpService, holder: str, status: str, reasons: list[str]) -> dict[str, Any]:
+    """Settle the active managed Workspace care run."""
+    return await service._invoke(
+        "care_end", lambda cp, principal: cp.managed_care_end(principal, holder, status, reasons),
+        mutating=True,
+    )
+
+
 async def _op_verify_note(service: CiaoMcpService, payload_file: str = "") -> dict[str, Any]:
     """Record one stale note's verification verdict — the managed operation that
     replaces hand-editing `updated:` on a stale note.
@@ -1699,6 +1707,7 @@ OPERATIONS: tuple[Operation, ...] = (
     Operation("verify_note", _WRITE, _op_verify_note.__doc__ or "", _op_verify_note),
     Operation("care_begin", _WRITE, _op_care_begin.__doc__ or "", _op_care_begin),
     Operation("care_checkpoint", _WRITE, _op_care_checkpoint.__doc__ or "", _op_care_checkpoint),
+    Operation("care_end", _WRITE, _op_care_end.__doc__ or "", _op_care_end),
     Operation("note_related", _READ, _op_note_related.__doc__ or "", _op_note_related),
     Operation("note_create", _WRITE, _op_note_create.__doc__ or "", _op_note_create),
     Operation("note_share", _WRITE, _op_note_share.__doc__ or "", _op_note_share),

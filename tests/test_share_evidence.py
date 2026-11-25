@@ -1144,7 +1144,10 @@ def test_care_witness_binds_exact_preview_revision_and_revocation(tmp_path: Path
 
 
 @pytest.mark.parametrize("cycle", [False, True])
-def test_care_checkpoint_stages_only_completed_exact_witness_and_replays_once(tmp_path: Path, cycle: bool) -> None:
+@pytest.mark.parametrize("crash_before_state", [False, True])
+def test_care_checkpoint_stages_only_completed_exact_witness_and_replays_once(
+    tmp_path: Path, cycle: bool, crash_before_state: bool
+) -> None:
     from ciao import curation_cycle, curation_share
 
     config, manager, project, _source = _memory_manager(tmp_path)
@@ -1216,10 +1219,46 @@ def test_care_checkpoint_stages_only_completed_exact_witness_and_replays_once(tm
     capabilities[0].write_text(json.dumps(tampered))
     assert curation_share.checkpoint(config, manager, **args) == 0
     capabilities[0].write_text(original)
+    assert curation_share.settled_witnesses(config, workspace="home", holder=lease.holder) == []
+    script = "\n".join([
+        "import os, sys",
+        "from pathlib import Path",
+        "from ciao.config import CiaoConfig, WorkspaceConfig",
+        "from ciao import curation_share",
+        "root, vault, lifetime, holder, key, crash_before = sys.argv[1:]",
+        "root = Path(root)",
+        "config = CiaoConfig(pwa_auth_token='t', workspace_root=root, state_path=root / '.runtime/state.json', media_root=root / '.runtime/media', workspaces={'home': WorkspaceConfig(name='home', vault_root=vault, lifetime_id=lifetime, _lifetime_persisted=True)})",
+        "write = curation_share._write_record",
+        "def interrupted(path, record):",
+        "    if path.parent.name == 'care-settlements': os._exit(42)",
+        "    write(path, record)",
+        "curation_share._write_record = interrupted",
+        "if crash_before == 'yes':",
+        "    from ciao import curation_run",
+        "    store = curation_run._store",
+        "    def before_state(path, state):",
+        "        if not state.lease: os._exit(43)",
+        "        store(path, state)",
+        "    curation_run._store = before_state",
+        "curation_share.end(config, workspace='home', chat_id='care', token_id='token', dispatch_id='dispatch', holder=holder, status='ok', planned=1, completed=1, deferred=0, reasons=[], live_keys=frozenset({key}), failed=0, counts_complete=True, dispatch_active=lambda: True)",
+    ])
+    crash = subprocess.run([sys.executable, "-c", script, str(config.workspace_root), str(vault),
+                            config.workspace("home").lifetime_id, lease.holder, key,
+                            "yes" if crash_before_state else "no"], check=False)
+    assert crash.returncode == (43 if crash_before_state else 42)
+    if crash_before_state:
+        replacement = curation_run.begin_run(
+            vault, holder="replacement", chat_id="care", now=datetime.now(UTC) + timedelta(days=1),
+            before_acquire=lambda state: curation_share.recover(config, "home", state),
+        )
+    else:
+        replacement = curation_share.begin(config, workspace="home", chat_id="care", token_id="token",
+                                           dispatch_id="replacement", ttl_s=600)
+    receipts = list((config.state_path.parent / "secrets" / "share-evidence").rglob("care-settlements/*.json"))
+    assert len(receipts) == (0 if crash_before_state else 1)
+    assert len(curation_share.settled_witnesses(config, workspace="home", holder=lease.holder)) == (0 if crash_before_state else 1)
     se.revoke(config, workspace="home", grant_id=grant["grant_id"])
-    assert curation_share.checkpoint(config, manager, **args) == 0
-    curation_run.end_run(vault, holder=lease.holder)
-    replacement = curation_run.begin_run(vault, holder="replacement", chat_id="care")
+    assert curation_share.settled_witnesses(config, workspace="home", holder=lease.holder) == []
     assert curation_share.checkpoint(config, manager, **args) == 0
     curation_run.end_run(vault, holder=replacement.holder)
 
@@ -1233,6 +1272,16 @@ def test_document_revision_matches_planner_bytes(tmp_path: Path, newline: str) -
     entries, revision = se._read_document(document)
     assert entries[0]["decision"] == "Launch"
     assert revision == content_revision(document.read_bytes().decode("utf-8"))
+
+
+def test_care_private_storage_rejects_a_symlink(tmp_path: Path) -> None:
+    from ciao import curation_share
+
+    outside = tmp_path / "outside"
+    outside.mkdir(mode=0o700)
+    (tmp_path / "care-outbox").symlink_to(outside, target_is_directory=True)
+    with pytest.raises(se.EvidenceError, match="unsafe"):
+        curation_share._private_dir(tmp_path, "care-outbox", create=True)
 
 
 def test_real_memory_pass_archive_proves_positive_stream_eligibility(

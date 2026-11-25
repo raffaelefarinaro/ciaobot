@@ -5206,6 +5206,21 @@ def test_record_plan_is_holder_checked_and_lives_on_the_lease_until_the_end(tmp_
     assert set(state.last_run) == {"status", "finished_at", "planned", "completed", "deferred", "reasons"}
 
 
+def test_settlement_hooks_fence_the_state_transition(tmp_path: Path) -> None:
+    vault = _vault(tmp_path)
+    lease = cr.begin_run(vault, holder="nightly")
+    seen: list[tuple[str, bool]] = []
+
+    def prepared(state, summary):
+        seen.append(("prepared", bool(state.lease)))
+
+    def committed(state, summary):
+        seen.append(("committed", not bool(cr.load_state(vault).lease)))
+
+    cr.end_run(vault, holder=lease.holder, before_settlement=prepared, after_settlement=committed)
+    assert seen == [("prepared", True), ("committed", True)]
+
+
 def test_lease_plan_stores_the_planned_pairs_and_caps_the_blocked_ones() -> None:
     planned = (cr.WorklistItem(pass_id="proposals", label="p", reason="r", keys=("a", "b")),)
     blocked = tuple(
