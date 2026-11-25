@@ -35,7 +35,7 @@ import re
 import secrets
 import stat
 import threading
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from dataclasses import dataclass, field
 from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
@@ -576,10 +576,38 @@ def _ensure_store(config: Any, workspace: str) -> Path:
     return directory
 
 
+@dataclass(eq=False, slots=True)
+class EvidenceClaim:
+    config: Any
+    workspace: str
+    directory: Path
+    pid: int
+    thread: int
+    active: bool = True
+
+
+_ACTIVE_CLAIMS: set[EvidenceClaim] = set()
+_CLAIMS_GUARD = threading.Lock()
+
+
+def _validate_claim(config: Any, workspace: str, claim: EvidenceClaim) -> None:
+    if not isinstance(claim, EvidenceClaim):
+        _refuse("invalid_evidence_claim", "Evidence ownership is not current.")
+    with _CLAIMS_GUARD:
+        valid = claim in _ACTIVE_CLAIMS
+    if (not valid or not claim.active or claim.config is not config or claim.workspace != workspace
+            or claim.pid != os.getpid() or claim.thread != threading.get_ident()):
+        _refuse("invalid_evidence_claim", "Evidence ownership is not current.")
+
+
 @contextmanager
-def _workspace_guard(config: Any, workspace: str) -> Iterator[Path]:
-    """Thread + ``flock`` guard around one authoritative state transaction."""
+def evidence_claim(config: Any, *, workspace: str) -> Iterator[EvidenceClaim]:
+    """Own the workspace evidence transaction in this process and thread."""
     directory = _ensure_store(config, workspace)
+    with _CLAIMS_GUARD:
+        if any(item.directory == directory and item.pid == os.getpid()
+               and item.thread == threading.get_ident() for item in _ACTIVE_CLAIMS):
+            _refuse("nested_evidence_claim", "Pass the existing evidence claim to nested operations.")
     with _lock(directory):
         try:
             descriptor = open_private(
@@ -592,12 +620,31 @@ def _workspace_guard(config: Any, workspace: str) -> Iterator[Path]:
             _refuse("private_state_unavailable", "The private evidence lock is unavailable.")
         try:
             lock_exclusive(descriptor)
+            claim = EvidenceClaim(config, workspace, directory, os.getpid(), threading.get_ident())
+            with _CLAIMS_GUARD:
+                _ACTIVE_CLAIMS.add(claim)
             try:
-                yield directory
+                yield claim
             finally:
+                with _CLAIMS_GUARD:
+                    _ACTIVE_CLAIMS.discard(claim)
+                    claim.active = False
                 unlock(descriptor)
         finally:
             os.close(descriptor)
+
+
+@contextmanager
+def _workspace_guard(config: Any, workspace: str) -> Iterator[Path]:
+    with evidence_claim(config, workspace=workspace) as claim:
+        yield claim.directory
+
+
+def _claim_scope(config: Any, workspace: str, claim: EvidenceClaim | None) -> Any:
+    if claim is None:
+        return evidence_claim(config, workspace=workspace)
+    _validate_claim(config, workspace, claim)
+    return nullcontext(claim)
 
 
 def _load_state(config: Any, workspace: str) -> dict[str, Any]:
@@ -1694,9 +1741,11 @@ def _confirmed_snapshot_available(
     return False
 
 
-def care_snapshot_witnesses(config: Any, *, workspace: str, project_id: str, relative_path: str, revision: str) -> list[dict[str, Any]]:
+def care_snapshot_witnesses(config: Any, *, workspace: str, project_id: str, relative_path: str, revision: str, claim: EvidenceClaim | None = None) -> list[dict[str, Any]]:
     """Find confirmed snapshot witnesses; caller must independently prove the lease item."""
     _require_workspace(config, workspace)
+    if claim is not None:
+        _validate_claim(config, workspace, claim)
     vault_root = Path(config.workspace_vault_root(workspace)).resolve()
     project = _require_project(project_id)
     if not isinstance(revision, str) or not re.fullmatch(r"[0-9a-f]{64}", revision):
@@ -1715,7 +1764,7 @@ def care_snapshot_witnesses(config: Any, *, workspace: str, project_id: str, rel
     if relative_path != expected_path:
         return []
     results: list[dict[str, Any]] = []
-    with _workspace_guard(config, workspace):
+    with _claim_scope(config, workspace, claim):
         state = _load_state(config, workspace)
         grants = state.get("grants")
         for grant in grants.values() if isinstance(grants, dict) else []:
@@ -2316,7 +2365,7 @@ def mint_evidence_authorizations(config: Any, *, workspace: str, brain_name: str
 
 
 @contextmanager
-def evidence_authorization_guard(config: Any, *, workspace: str, authorization: object) -> Iterator[dict[str, Any]]:
+def evidence_authorization_guard(config: Any, *, workspace: str, authorization: object, claim: EvidenceClaim | None = None) -> Iterator[dict[str, Any]]:
     """Hold evidence consent stable while the caller performs an authorized effect.
 
     The caller must first hold the checkout and authoritative workspace-registry
@@ -2334,7 +2383,7 @@ def evidence_authorization_guard(config: Any, *, workspace: str, authorization: 
     row = payload.get("row")
     if not isinstance(row, dict):
         _refuse("authorization_invalid", "The evidence authorization is unavailable.")
-    with _workspace_guard(config, workspace):
+    with _claim_scope(config, workspace, claim):
         state = _load_state(config, workspace)
         if (payload.get("workspace") != workspace
                 or payload.get("workspace_lifetime_id") != state.get("workspace_lifetime_id")):
