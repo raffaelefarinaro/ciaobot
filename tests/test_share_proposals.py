@@ -763,6 +763,22 @@ def test_draft_recovers_when_artifact_write_is_interrupted(linked):
     assert queue.read_text().count("[share ") == 1
 
 
+def test_manual_replay_requires_current_destination_before_restoring_queue(linked, monkeypatch):
+    config, _ = linked
+    draft = sp.draft_share(config, workspace="home", relative_path="new.md", operation="create", proposed=b"note", request_key="manual-recovery")
+    assert isinstance(draft, sp.ShareDraft)
+    queue = config.vault / "Workspace" / "Memory-Proposals.md"
+    queue.unlink()
+
+    def changed(*args, **kwargs):
+        sp._refuse("brain_unavailable", "The destination changed.")
+
+    monkeypatch.setattr(sp, "_qualify_owned", changed)
+    replay = sp.draft_share(config, workspace="home", relative_path="new.md", operation="create", proposed=b"note", request_key="manual-recovery")
+    assert isinstance(replay, sp.ShareRefusal) and replay.code == "brain_unavailable"
+    assert not queue.exists()
+
+
 def test_candidate_filing_refuses_a_base_changed_since_composition(linked):
     from ciao.workspaces import workspace_registry_claim
 
@@ -825,6 +841,22 @@ def test_candidate_artifact_replay_retains_same_review_and_queue_row(linked):
     assert replay.artifact["review_token"] == first.artifact["review_token"]
     queue = config.vault / "Workspace" / "Memory-Proposals.md"
     assert queue.read_text().count("[share ") == 1
+
+
+def test_candidate_provenance_deduplicates_replays_and_is_bounded(linked, monkeypatch):
+    config, _ = linked
+    draft = sp.draft_share(config, workspace="home", relative_path="new.md", operation="create", proposed=b"note", request_key="provenance")
+    assert isinstance(draft, sp.ShareDraft)
+    monkeypatch.setattr(sp, "MAX_CANDIDATE_PROVENANCE", 2)
+    row = {"producer": "memory_extraction", "relation_kind": "memory_checkpoint", "relation_id": "run", "relation_evidence": "proof", "grant_id": "grant"}
+    for number in range(40):
+        sp._add_candidate_provenance(config, "home", draft, {"payload": {"row": {**row, "relation_expires_at": number}}, "signature": str(number)})
+    assert len(draft.artifact["producer_provenance"]) == 1
+    sp._add_candidate_provenance(config, "home", draft, {"payload": {"row": {**row, "producer": "nightly_curation"}}, "signature": "care"})
+    assert len(draft.artifact["producer_provenance"]) == 2
+    with pytest.raises(sp.ShareDraftError) as error:
+        sp._add_candidate_provenance(config, "home", draft, {"payload": {"row": {**row, "relation_id": "another"}}, "signature": "third"})
+    assert error.value.refusal.code == "capacity"
 
 
 def test_candidate_composition_preserves_base_and_requires_unambiguous_heading():
@@ -902,10 +934,12 @@ def test_intake_resolves_mapped_destination_and_never_publishes(linked, monkeypa
     relation.batch_index = 1
     row["batch_index"] = 1
     monkeypatch.setattr(sp, "MAX_PER_BRAIN", 1)
+    intents_before = set((sp._store_dir(config) / "candidate-intents").glob("*.json"))
     refusal = sp.draft_evidence_candidates(config, workspace="home", relation=relation)
     assert isinstance(refusal[0], sp.ShareRefusal) and refusal[0].code == "capacity"
+    assert set((sp._store_dir(config) / "candidate-intents").glob("*.json")) == intents_before
     ledgers = list((sp._store_dir(config) / "candidate-runs").glob("*.json"))
-    assert sorted(len(json.loads(path.read_text())["fingerprints"]) for path in ledgers) == [0, 1]
+    assert sorted(len(json.loads(path.read_text())["fingerprints"]) for path in ledgers) == [1]
 
     from ciao import memory_proposals
     from ciao.web import proposal_service
@@ -1250,5 +1284,35 @@ def test_intake_uses_settled_care_witness_and_current_consent(linked, tmp_path, 
     git(clone, "commit", "--quiet", "-m", "advance upstream")
     git(clone, "update-ref", "refs/remotes/origin/main", "HEAD")
     assert sp.draft_evidence_candidates(config, workspace="home", relation=relation)[0].proposal_id == drafts[0].proposal_id
+    replacement = sp.redraft_evidence_candidate(
+        config, workspace="home", proposal_id=drafts[0].proposal_id,
+        expected_revision=drafts[0].artifact["review_token"],
+    )
+    assert isinstance(replacement, sp.ShareDraft)
+    assert replacement.proposal_id != drafts[0].proposal_id
+    assert replacement.artifact["review_token"] != drafts[0].artifact["review_token"]
+    assert replacement.artifact["immutable"]["base_commit"] == git(clone, "rev-parse", "refs/remotes/origin/main")
+    assert (vault / "Workspace" / "Memory-Proposals.md").read_text().count("[share ") == 1
+    share_publish._write_state(config, "home", replacement.artifact["immutable"], {"attempts": [{"status": "pending"}]})
+    blocked = sp.redraft_evidence_candidate(
+        config, workspace="home", proposal_id=replacement.proposal_id,
+        expected_revision=replacement.artifact["review_token"],
+    )
+    assert isinstance(blocked, sp.ShareRefusal) and blocked.code == "publication_pending"
+    share_publish._write_state(config, "home", replacement.artifact["immutable"], {"attempts": []})
+    from ciao import memory_proposals
+    from ciao.web import proposal_service
+
+    queue = vault / "Workspace" / "Memory-Proposals.md"
+    _, by_id = proposal_service._scan_proposal_rows(config)
+    item = by_id[replacement.proposal_id]["row"]
+    assert proposal_service._rewrite_queue_single(queue, item["line"], item["raw"], item["text"], "share", False,
+                                                  "home", vault, config=config, proposal_id=item["id"])
+    memory_proposals.record_dismissal(queue, text=item["text"], kind="share", via="pwa", proposal_id=item["id"])
+    dismissed = sp.redraft_evidence_candidate(
+        config, workspace="home", proposal_id=replacement.proposal_id,
+        expected_revision=replacement.artifact["review_token"],
+    )
+    assert isinstance(dismissed, sp.ShareRefusal) and dismissed.code == "already_settled"
     se.revoke(config, workspace="home", grant_id=grant["grant_id"])
     assert sp.draft_evidence_candidates(config, workspace="home", relation=relation) == []

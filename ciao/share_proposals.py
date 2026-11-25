@@ -36,6 +36,7 @@ MAX_BYTES = 65_536
 MAX_PER_BRAIN = 10
 MAX_PER_WORKSPACE = 30
 MAX_CANDIDATES_PER_RUN = 20
+MAX_CANDIDATE_PROVENANCE = 32
 MAX_SIDECAR_BYTES = 2 * MAX_BYTES * 6 + 16_384
 _SCHEMA = 1
 _QUEUE = PurePosixPath("Workspace/Memory-Proposals.md")
@@ -581,33 +582,11 @@ def _qualify_owned(
     return _qualify(config, link, relative_path, owner, operation)
 
 
-def _draft_share(
-    config: Any, *, workspace: str, brain: str = "", relative_path: str,
-    operation: str | None, proposed: bytes | None, request_key: str,
-    request_fingerprint: str, retiring_proposal_id: str | None = None,
-    publish_guard: Callable[[], AbstractContextManager[object]] | None = None,
-    checkout_claimed: bool = False,
-    registry_owner: Any = None,
-    expected_qualification: tuple[Any, ...] | None = None,
-    candidate_binding: dict[str, Any] | None = None,
-    intent_qualification: tuple[Any, ...] | None = None,
-) -> ShareDraft:
-    """Qualify and privately file one immutable shared-note proposal."""
-    if operation not in (None, "create", "replace", "delete"):
-        _refuse("invalid_operation", "Use create, replace, or delete.")
-    if not isinstance(request_key, str) or not request_key:
-        _refuse("request_conflict", "A stable internal request key is required.")
-    if candidate_binding is not None and (
-        registry_owner is None or not checkout_claimed or expected_qualification is None
-        or not isinstance(candidate_binding.get("authorization"), dict)
-    ):
-        _refuse("invalid_evidence", "The candidate requires owned destination and evidence claims.")
-    if intent_qualification is not None and candidate_binding is None:
-        _refuse("invalid_evidence", "The candidate intent is unavailable.")
-    link = _brain_for(config, workspace, brain)
-    store = _storage_safe(config, workspace)
-    key_hash = hashlib.sha256((workspace + "\0" + request_key).encode()).hexdigest()
-    index_path = store / (key_hash + ".json")
+def _replay_index(
+    config: Any, workspace: str, store: Path, index_path: Path, request_fingerprint: str,
+    retiring_proposal_id: str | None, publish_guard: Callable[[], AbstractContextManager[object]] | None,
+    *, is_candidate: bool,
+) -> ShareDraft | None:
     if index_path.exists():
         previous = _load_sidecar(index_path)
         if previous.get("request_fingerprint") != request_fingerprint:
@@ -650,7 +629,7 @@ def _draft_share(
             if attempts or receipts:
                 _refuse("request_conflict", "This share proposal already has a publication attempt or receipt.")
             if summary in _dismissed_texts(queue):
-                if candidate_binding is not None and _operator_dismissed(queue, fields["proposal_id"], summary):
+                if is_candidate and _operator_dismissed(queue, fields["proposal_id"], summary):
                     _refuse("already_settled", "This candidate was already dismissed.")
                 _refuse("request_conflict", "This share proposal has already been settled.")
             count = sum(
@@ -681,6 +660,40 @@ def _draft_share(
             fields["proposal_id"], canonical,
             proposal_review_path(workspace, canonical_fields["review_key"]),
         )
+    return None
+
+
+def _draft_share(
+    config: Any, *, workspace: str, brain: str = "", relative_path: str,
+    operation: str | None, proposed: bytes | None, request_key: str,
+    request_fingerprint: str, retiring_proposal_id: str | None = None,
+    publish_guard: Callable[[], AbstractContextManager[object]] | None = None,
+    checkout_claimed: bool = False,
+    registry_owner: Any = None,
+    expected_qualification: tuple[Any, ...] | None = None,
+    candidate_binding: dict[str, Any] | None = None,
+    intent_qualification: tuple[Any, ...] | None = None,
+) -> ShareDraft:
+    """Qualify and privately file one immutable shared-note proposal."""
+    if operation not in (None, "create", "replace", "delete"):
+        _refuse("invalid_operation", "Use create, replace, or delete.")
+    if not isinstance(request_key, str) or not request_key:
+        _refuse("request_conflict", "A stable internal request key is required.")
+    if candidate_binding is not None and (
+        registry_owner is None or not checkout_claimed or expected_qualification is None
+        or not isinstance(candidate_binding.get("authorization"), dict)
+    ):
+        _refuse("invalid_evidence", "The candidate requires owned destination and evidence claims.")
+    if intent_qualification is not None and candidate_binding is None:
+        _refuse("invalid_evidence", "The candidate intent is unavailable.")
+    link = _brain_for(config, workspace, brain)
+    store = _storage_safe(config, workspace)
+    key_hash = hashlib.sha256((workspace + "\0" + request_key).encode()).hexdigest()
+    index_path = store / (key_hash + ".json")
+    if candidate_binding is not None:
+        replay = _replay_index(config, workspace, store, index_path, request_fingerprint, retiring_proposal_id, publish_guard, is_candidate=True)
+        if replay is not None:
+            return replay
     from ciao.workspaces import workspace_registry_claim, WorkspaceRegistryBusy, WorkspaceRegistryConflict
 
     claim = (
@@ -727,6 +740,10 @@ def _draft_share(
                 _refuse("secret_detected", "The note contains credential-shaped text.")
             if home in content or str(Path(config.workspace_root)) in content:
                 _refuse("private_path_mentioned", "The note mentions a private local path.")
+    if candidate_binding is None:
+        replay = _replay_index(config, workspace, store, index_path, request_fingerprint, retiring_proposal_id, publish_guard, is_candidate=False)
+        if replay is not None:
+            return replay
     sidecar_id = secrets.token_urlsafe(18)
     text = f"Shared note change proposal {sidecar_id}"
     rel_queue = (PurePosixPath(workspace) / _QUEUE).as_posix()
@@ -919,13 +936,40 @@ def _freeze_care_destination(config: Any, workspace: str, relation: Any, snapsho
 def _add_candidate_provenance(config: Any, workspace: str, draft: ShareDraft, authorization: dict[str, Any]) -> None:
     artifact = draft.artifact
     provenance = artifact.setdefault("producer_provenance", [])
-    if not isinstance(provenance, list):
+    if not isinstance(provenance, list) or len(provenance) > MAX_CANDIDATE_PROVENANCE:
         _refuse("draft_corrupt", "The private candidate provenance is corrupt.")
-    if authorization not in provenance:
+
+    def source_key(item: Any) -> tuple[Any, ...]:
+        payload = item.get("payload") if isinstance(item, dict) else None
+        row = payload.get("row") if isinstance(payload, dict) else None
+        if not isinstance(row, dict):
+            _refuse("draft_corrupt", "The private candidate provenance is corrupt.")
+        return tuple(row.get(key) for key in ("producer", "relation_kind", "relation_id", "relation_evidence", "grant_id"))
+
+    key = source_key(authorization)
+    if not any(source_key(item) == key for item in provenance):
+        if len(provenance) >= MAX_CANDIDATE_PROVENANCE:
+            _refuse("capacity", "The candidate provenance limit is reached.", limit=MAX_CANDIDATE_PROVENANCE, count=len(provenance))
         provenance.append(authorization)
         sidecar_id = artifact["immutable"]["sidecar_id"]
         sidecar = _store_dir(config) / (hashlib.sha256((workspace + "\0sidecar\0" + sidecar_id).encode()).hexdigest() + ".json")
         _write_private(sidecar, json.dumps(artifact, ensure_ascii=False, sort_keys=True).encode("utf-8"))
+
+
+def _check_candidate_capacity(config: Any, workspace: str, brain: str, store: Path, queue: Path) -> None:
+    text = queue.read_text(encoding="utf-8") if queue.exists() else "# Memory Proposals\n"
+    rows = list(proposal_tracking.walk_proposal_queue(workspace, (PurePosixPath(workspace) / _QUEUE).as_posix(), text))
+    shares = [row for row in rows if row.bullet.kind == KIND]
+    if len(shares) >= MAX_PER_WORKSPACE:
+        _refuse("capacity", "The workspace share proposal limit is reached.", limit=MAX_PER_WORKSPACE, count=len(shares))
+    count = 0
+    for row in shares:
+        path = store / (hashlib.sha256((workspace + "\0sidecar\0" + row.bullet.target).encode()).hexdigest() + ".json")
+        prior = _load_sidecar(path)
+        if prior["immutable"].get("brain") == brain:
+            count += 1
+    if count >= MAX_PER_BRAIN:
+        _refuse("capacity", "The shared brain share proposal limit is reached.", limit=MAX_PER_BRAIN, count=count)
 
 
 def _candidate_intent(
@@ -1062,9 +1106,8 @@ def draft_evidence_candidates(config: Any, *, workspace: str, relation: Any) -> 
                             if intent is None:
                                 captured = _qualify_owned(config, workspace, link, destination.path, operation, owner)
                                 proposed = _compose_candidate(captured[2], _render_evidence(row["canonical_bytes"], row["digest"]), destination)
-                                intent = _candidate_intent(config, workspace, fingerprint, captured, proposed)
-                                assert intent is not None
-                            captured, proposed = intent
+                            else:
+                                captured, proposed = intent
                             lock = _thread_queue_lock(queue)
                             if not lock.acquire(blocking=False):
                                 _refuse("draft_unavailable", "The proposal queue is currently unavailable.")
@@ -1073,6 +1116,7 @@ def draft_evidence_candidates(config: Any, *, workspace: str, relation: Any) -> 
                                     if not shared_brain_mapping.revalidate_snapshot(config, snapshot, owner=owner):
                                         _refuse("brain_unavailable", "The reviewed destination mapping changed.")
                                     store = _storage_safe(config, workspace)
+                                    _check_candidate_capacity(config, workspace, link.name, store, queue)
                                     parent_fd = folder_io.open_directory_nofollow(str(store))
                                     try:
                                         run_fd, _ = folder_io.open_or_create_private_dir(parent_fd, "candidate-runs")
@@ -1096,6 +1140,10 @@ def draft_evidence_candidates(config: Any, *, workspace: str, relation: Any) -> 
                                     if reserved_now:
                                         if len(fingerprints) >= MAX_CANDIDATES_PER_RUN:
                                             _refuse("capacity", "The candidate intake limit for this run is reached.", limit=MAX_CANDIDATES_PER_RUN, count=len(fingerprints))
+                                    if intent is None:
+                                        intent = _candidate_intent(config, workspace, fingerprint, captured, proposed)
+                                        assert intent is not None
+                                    if reserved_now:
                                         fingerprints.append(fingerprint)
                                         share_evidence._write_private(ledger_path, json.dumps({"schema": share_evidence.SCHEMA, "fingerprints": fingerprints}).encode(), limit=8192)
                                     try:
