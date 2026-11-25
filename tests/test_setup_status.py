@@ -2242,6 +2242,24 @@ def test_cloud_synced_location_recognises_sync_folders(tmp_path) -> None:
         assert cloud_synced_location(path, platform=platform, home=home) == expected, path
 
 
+def test_cloud_synced_location_recognises_provider_volumes_outside_home(tmp_path) -> None:
+    from ciao.setup_status import cloud_synced_location
+
+    home = tmp_path / "home"
+    cases = [
+        (Path("/Volumes/GoogleDrive/My Drive/ws"), "Google Drive"),
+        (Path("/Volumes/Dropbox/ws"), "Dropbox"),
+        (Path("/Volumes/OneDrive-Personal/ws"), "OneDrive"),
+        (Path("/mnt/GoogleDrive/ws"), "Google Drive"),
+        (Path("/media/user/Dropbox/ws"), "Dropbox"),
+        (Path("/run/user/501/gvfs/Google Drive/ws"), "Google Drive"),
+        (Path("/Volumes/Unrelated/ws"), None),
+        (Path("/opt/Ciaobot/ws"), None),
+    ]
+    for path, expected in cases:
+        assert cloud_synced_location(path, platform="darwin", home=home) == expected, path
+
+
 def test_cloud_synced_location_follows_symlinks(tmp_path) -> None:
     from ciao.setup_status import cloud_synced_location
 

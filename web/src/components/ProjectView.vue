@@ -138,8 +138,13 @@
             <template v-if="project.vault_doc_path">
               Saved to <button type="button" class="link-btn" @click="openContextDoc">{{ project.vault_doc_path }}</button>
             </template>
+            <template v-else-if="project.vault_folder_only">
+              Folder linked; add a note there to create a canonical project document.
+            </template>
           </p>
         </section>
+
+        <ProjectDecisionEntry :key="`${project.workspace}:${project.project_id}`" :workspace="project.workspace" :project-id="project.project_id" />
 
         <section v-if="showRepoSection" class="project-section project-repo" aria-labelledby="project-repo-title">
           <div class="section-head">
@@ -332,6 +337,9 @@
           <p v-if="project.vault_doc_path" class="rail-note">
             Project doc <button type="button" class="link-btn" @click="openContextDoc">{{ project.vault_doc_path }}</button>
           </p>
+          <p v-else-if="project.vault_folder_only" class="rail-note">
+            Folder linked; no project note has been found yet.
+          </p>
           <!-- The project's files live in the folder browser, opened at this
                project's folder, rather than in a list on this page. -->
           <button v-if="project.vault_folder" type="button" class="btn-small rail-browse" @click="browseProjectFolder">
@@ -390,6 +398,7 @@
 </template>
 
 <script setup lang="ts">
+import ProjectDecisionEntry from './ProjectDecisionEntry.vue'
 import SkeletonLoader from './SkeletonLoader.vue'
 import { ref, computed, watch, onBeforeUnmount, onMounted, nextTick, useId } from 'vue'
 import { onBeforeRouteLeave, onBeforeRouteUpdate, useRouter, type RouteLocationNormalized } from 'vue-router'

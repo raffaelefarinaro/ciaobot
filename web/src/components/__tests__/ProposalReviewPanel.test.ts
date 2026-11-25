@@ -5,6 +5,7 @@ import { createPinia, setActivePinia } from 'pinia'
 import { flushPromises, mount } from '@vue/test-utils'
 import { nextTick } from 'vue'
 import ProposalReviewPanel from '../ProposalReviewPanel.vue'
+import InAppToast from '../InAppToast.vue'
 import { useProposalsStore } from '../../stores/proposals'
 import { useProjectStore } from '../../stores/projects'
 import { useFileViewerStore } from '../../stores/fileViewer'
@@ -16,6 +17,9 @@ const apiPost = vi.hoisted(() => vi.fn())
 
 vi.mock('../../lib/api', () => ({
   api: { get: apiGet, post: apiPost, patch: vi.fn(), del: vi.fn() },
+}))
+vi.mock('vue-router', () => ({
+  useRouter: () => ({ push: vi.fn() }),
 }))
 
 /**
@@ -830,6 +834,546 @@ describe('ProposalReviewPanel', () => {
       action: 'accept',
       ids: ['bullet'],
     })
+    wrapper.unmount()
+  })
+})
+
+describe('shared-note review', () => {
+  let pinia: ReturnType<typeof createPinia>
+
+  beforeEach(() => {
+    pinia = createPinia()
+    setActivePinia(pinia)
+    useProjectStore(pinia).activeWorkspace = 'research'
+    apiGet.mockReset()
+    apiPost.mockReset()
+  })
+
+  afterEach(() => {
+    useProjectStore(pinia).$dispose()
+    document.body.innerHTML = ''
+    vi.restoreAllMocks()
+  })
+
+  it('shows each repository destination and publishes only the reviewed revision once', async () => {
+    const rows = [
+      row({ id: 'share-a', kind: 'share', workspace: 'research', text: 'Change shared note A' }),
+      row({ id: 'share-b', kind: 'share', workspace: 'research', text: 'Change shared note B' }),
+    ]
+    const previews: Record<string, ProposalPreview> = {
+      'share-a': preview({ id: 'share-a', kind: 'share', operation: 'replace', before: 'before\n', after: 'after\n', brain: 'Team A', identity: 'https://example.test/team-a.git', branch: 'main', path: 'docs/shared.md', revision: 'review-a', blocked_reason: '' }),
+      'share-b': preview({ id: 'share-b', kind: 'share', operation: 'replace', before: 'before\n', after: 'other\n', brain: 'Team B', identity: 'https://example.test/team-b.git', branch: 'main', path: 'docs/shared.md', revision: 'review-b', blocked_reason: '' }),
+    }
+    apiGet.mockImplementation((url: string) => {
+      const match = /^\/api\/proposals\/(share-[ab])\/preview/.exec(url)
+      if (url.startsWith('/api/proposals/history')) return Promise.resolve({ rows: [], total: 0, truncated: false })
+      if (match) return Promise.resolve({ ok: true, preview: previews[match[1]] })
+      return Promise.resolve({ rows })
+    })
+    let release!: (result: unknown) => void
+    apiPost.mockReturnValue(new Promise(resolve => { release = resolve }))
+
+    const wrapper = mount(ProposalReviewPanel, { global: { plugins: [pinia] } })
+    await flushPromises()
+    expect(wrapper.findAll('.pr-row-accept')).toHaveLength(0)
+    expect(wrapper.findAll('.pr-row-action').map(button => button.text())).toContain('Review to publish')
+    await wrapper.findAll('.pr-row-action')[0].trigger('click')
+    await flushPromises()
+
+    const card = wrapper.find('.pr-card')
+    expect(card.text()).toContain('https://example.test/team-a.git')
+    expect(card.text()).toContain('docs/shared.md')
+    expect(card.text()).toContain('Sharing publishes this text to everyone with access to https://example.test/team-a.git.')
+    expect(card.findAll('pre').map(pre => pre.element.textContent)).toEqual(['before\n', 'after\n'])
+    expect(card.find('button.btn-primary').text()).toBe('Publish')
+
+    await card.findAll('button').find(button => button.text() === 'Cancel')!.trigger('click')
+    await wrapper.findAll('.pr-row-action')[1].trigger('click')
+    await flushPromises()
+    const secondCard = wrapper.find('.pr-card')
+    expect(secondCard.text()).toContain('https://example.test/team-b.git')
+    expect(secondCard.text()).toContain('docs/shared.md')
+    expect(secondCard.findAll('pre').map(pre => pre.element.textContent)).toEqual(['before\n', 'other\n'])
+    await secondCard.findAll('button').find(button => button.text() === 'Cancel')!.trigger('click')
+    await wrapper.findAll('.pr-row-action')[0].trigger('click')
+    await flushPromises()
+
+    const publish = wrapper.find('.pr-card button.btn-primary')
+    await publish.trigger('click')
+    await publish.trigger('click')
+    expect(apiPost).toHaveBeenCalledTimes(1)
+    expect(apiPost).toHaveBeenCalledWith('/api/proposals/share-a/accept?workspace=research', {
+      expected_revision: 'review-a', workspace: 'research',
+    })
+    release({ share_status: 'published' })
+    await flushPromises()
+    wrapper.unmount()
+  })
+
+  it('announces a confirmed Git publication after the review panel closes', async () => {
+    const share = row({ id: 'share-git', kind: 'share', workspace: 'research' })
+    const sharePreview = preview({
+      id: share.id, workspace: share.workspace, kind: 'share',
+      operation: 'replace', before: 'before\n', after: 'after\n',
+      brain: 'Team', identity: 'https://example.test/team.git',
+      branch: 'main', path: 'docs/n.md', revision: 'git-token',
+      link_kind: 'git', blocked_reason: '',
+    })
+    apiGet.mockImplementation((url: string) => {
+      if (url.startsWith('/api/proposals/history')) return Promise.resolve({ rows: [], total: 0, truncated: false })
+      if (url.includes('/preview')) return Promise.resolve({ ok: true, preview: sharePreview })
+      return Promise.resolve({ rows: [share] })
+    })
+    apiPost.mockResolvedValue({
+      share_status: 'published',
+      receipt: { id: 'shrpub_git', commit_oid: 'a'.repeat(40) },
+    })
+
+    const wrapper = mount(ProposalReviewPanel, { global: { plugins: [pinia] } })
+    await flushPromises()
+    await wrapper.find('.pr-row-action').trigger('click')
+    await flushPromises()
+    await wrapper.find('.pr-card button.btn-primary').trigger('click')
+    await flushPromises()
+
+    const store = useProjectStore()
+    expect(store.toasts).toHaveLength(1)
+    expect(store.toasts[0].title).toBe('Published to Team')
+    expect(store.toasts[0].body).toContain('remote commit was confirmed')
+    wrapper.unmount()
+
+    // The success notification is owned by the app, not the closing card.
+    const toast = mount(InAppToast, { global: { plugins: [pinia] } })
+    await nextTick()
+    expect(toast.get('.toast').attributes('role')).toBe('status')
+    expect(toast.text()).toContain('Published to Team')
+    expect(toast.text()).toContain('remote commit was confirmed')
+    toast.unmount()
+  })
+
+  it('announces a folder note saved locally after the review panel closes', async () => {
+    const share = row({ id: 'share-folder', kind: 'share', workspace: 'research' })
+    const sharePreview = preview({
+      id: share.id, workspace: share.workspace, kind: 'share',
+      operation: 'create', before: null, after: 'new\n',
+      brain: 'Team folder', identity: 'folder:/notes',
+      branch: '', path: 'notes/new.md', revision: 'folder-token',
+      link_kind: 'folder', blocked_reason: '',
+    })
+    apiGet.mockImplementation((url: string) => {
+      if (url.startsWith('/api/proposals/history')) return Promise.resolve({ rows: [], total: 0, truncated: false })
+      if (url.includes('/preview')) return Promise.resolve({ ok: true, preview: sharePreview })
+      return Promise.resolve({ rows: [share] })
+    })
+    apiPost.mockResolvedValue({
+      share_status: 'published',
+      receipt: { id: 'shrpub_folder', scope: 'historical_local_write' },
+    })
+
+    const wrapper = mount(ProposalReviewPanel, { global: { plugins: [pinia] } })
+    await flushPromises()
+    await wrapper.find('.pr-row-action').trigger('click')
+    await flushPromises()
+    await wrapper.find('.pr-card button.btn-primary').trigger('click')
+    await flushPromises()
+
+    const store = useProjectStore()
+    expect(store.toasts).toHaveLength(1)
+    expect(store.toasts[0].title).toBe('Saved locally to Team folder')
+    expect(store.toasts[0].body).toContain('Cloud delivery and current availability are unknown')
+    wrapper.unmount()
+
+    const toast = mount(InAppToast, { global: { plugins: [pinia] } })
+    await nextTick()
+    expect(toast.get('.toast').attributes('role')).toBe('status')
+    expect(toast.text()).toContain('Saved locally to Team folder')
+    expect(toast.text()).toContain('Cloud delivery and current availability are unknown')
+    toast.unmount()
+  })
+
+  it('shows a canonical publication refusal when rejecting a share review', async () => {
+    const share = row({ id: 'share-pending', kind: 'share', workspace: 'research' })
+    const sharePreview = preview({
+      id: share.id, workspace: share.workspace, kind: 'share',
+      operation: 'replace', before: 'before\n', after: 'after\n',
+      brain: 'Team', identity: 'https://example.test/team.git',
+      branch: 'main', path: 'note.md', revision: 'share-token',
+      blocked_reason: '',
+    })
+    apiGet.mockImplementation((url: string) => {
+      if (url.startsWith('/api/proposals/history')) return Promise.resolve({ rows: [], total: 0, truncated: false })
+      if (url.includes('/preview')) return Promise.resolve({ ok: true, preview: sharePreview })
+      return Promise.resolve({ rows: [share] })
+    })
+    apiPost.mockRejectedValue(Object.assign(new Error('The publication state is pending.'), {
+      payload: { conflict: true, error: 'The publication state is pending.' },
+    }))
+
+    const wrapper = mount(ProposalReviewPanel, { global: { plugins: [pinia] } })
+    await flushPromises()
+    await wrapper.find('.pr-row-action').trigger('click')
+    await flushPromises()
+    await wrapper.find('.pr-card button.btn-chip').trigger('click')
+    await flushPromises()
+    const dismissCard = wrapper.find('.pr-card--dismiss')
+    await dismissCard.find('.btn-primary').trigger('click')
+    await flushPromises()
+
+    expect(wrapper.find('.pr-card--dismiss').exists()).toBe(true)
+    expect(wrapper.find('.pr-card--dismiss [role="alert"]').text()).toContain('The publication state is pending.')
+    expect(apiPost).toHaveBeenCalledWith('/api/proposals/share-pending/dismiss?workspace=research', { workspace: 'research' })
+    await dismissCard.findAll('button').find(button => button.text() === 'Cancel')!.trigger('click')
+    await wrapper.find('.pr-row-action').trigger('click')
+    await flushPromises()
+    expect(wrapper.find('.pr-card-conflict').exists()).toBe(false)
+    wrapper.unmount()
+  })
+
+  it('reconciles only the server-recorded attempt from a blocked share preview', async () => {
+    const share = row({ id: 'share-indeterminate', kind: 'share', workspace: 'research' })
+    const sharePreview = preview({
+      id: share.id, workspace: share.workspace, kind: 'share',
+      operation: 'replace', before: 'before\n', after: 'after\n',
+      brain: 'Team', identity: 'https://example.test/team.git',
+      branch: 'main', path: 'note.md', revision: 'share-token',
+      blocked_reason: 'brain_unavailable', reconcile_available: true,
+    })
+    apiGet.mockImplementation((url: string) => {
+      if (url.startsWith('/api/proposals/history')) return Promise.resolve({ rows: [], total: 0, truncated: false })
+      if (url.includes('/preview')) return Promise.resolve({ ok: true, preview: sharePreview })
+      return Promise.resolve({ rows: [share] })
+    })
+    apiPost.mockRejectedValue(Object.assign(new Error('The recorded attempt remains unresolved.'), {
+      payload: {
+        conflict: true, error: 'The recorded attempt remains unresolved.',
+        share_status: 'indeterminate',
+      },
+    }))
+
+    const wrapper = mount(ProposalReviewPanel, { global: { plugins: [pinia] } })
+    await flushPromises()
+    await wrapper.find('.pr-row-action').trigger('click')
+    await flushPromises()
+    const card = wrapper.find('.pr-card')
+    expect(card.find('button').text()).toBe('Reconcile publication')
+    expect(card.text()).toContain('It cannot start a new publish.')
+    await card.find('button.btn-primary').trigger('click')
+    await flushPromises()
+
+    expect(apiPost).toHaveBeenCalledTimes(1)
+    expect(apiPost).toHaveBeenCalledWith('/api/proposals/share-indeterminate/reconcile?workspace=research', {
+      expected_revision: 'share-token', workspace: 'research',
+    })
+    expect(apiPost.mock.calls[0][0]).not.toContain('/accept')
+    expect(wrapper.findAll('.pr-card [role="alert"]').map(alert => alert.text()).join(' '))
+      .toContain('The recorded attempt remains unresolved.')
+    wrapper.unmount()
+  })
+
+  it('does not offer reconcile or publish without a server-recorded attempt', async () => {
+    const share = row({ id: 'share-no-attempt', kind: 'share', workspace: 'research' })
+    const sharePreview = preview({
+      id: share.id, workspace: share.workspace, kind: 'share',
+      revision: 'share-token', blocked_reason: 'brain_unavailable',
+      reconcile_available: false,
+    })
+    apiGet.mockImplementation((url: string) => {
+      if (url.startsWith('/api/proposals/history')) return Promise.resolve({ rows: [], total: 0, truncated: false })
+      if (url.includes('/preview')) return Promise.resolve({ ok: true, preview: sharePreview })
+      return Promise.resolve({ rows: [share] })
+    })
+    const wrapper = mount(ProposalReviewPanel, { global: { plugins: [pinia] } })
+    await flushPromises()
+    await wrapper.find('.pr-row-action').trigger('click')
+    await flushPromises()
+
+    expect(wrapper.find('.pr-card button.btn-primary').exists()).toBe(false)
+    expect(wrapper.find('.pr-card').text()).not.toContain('Reconcile publication')
+    wrapper.unmount()
+  })
+
+  it('shows friendly blocked reasons and never exposes internal reason codes', async () => {
+    const share = row({ id: 'share-blocked-copy', kind: 'share', workspace: 'research' })
+    const sharePreview = preview({
+      id: share.id, workspace: share.workspace, kind: 'share',
+      revision: 'share-token', blocked_reason: 'brain_unavailable',
+      reconcile_available: false,
+    })
+    apiGet.mockImplementation((url: string) => {
+      if (url.startsWith('/api/proposals/history')) return Promise.resolve({ rows: [], total: 0, truncated: false })
+      if (url.includes('/preview')) return Promise.resolve({ ok: true, preview: sharePreview })
+      return Promise.resolve({ rows: [share] })
+    })
+    const wrapper = mount(ProposalReviewPanel, { global: { plugins: [pinia] } })
+    await flushPromises()
+    await wrapper.find('.pr-row-action').trigger('click')
+    await flushPromises()
+
+    const alert = wrapper.find('.pr-card [role="alert"]')
+    expect(alert.text()).toBe('The original shared brain link is no longer active. Restore it if possible, or create a new proposal for the current destination.')
+    expect(alert.text()).not.toContain('brain_unavailable')
+    expect(wrapper.find('.pr-card button.btn-primary').exists()).toBe(false)
+
+    wrapper.unmount()
+  })
+
+  it('uses safe fallback copy for an unknown blocked reason', async () => {
+    const share = row({ id: 'share-unknown-block', kind: 'share', workspace: 'research' })
+    const sharePreview = preview({
+      id: share.id, workspace: share.workspace, kind: 'share',
+      revision: 'share-token', blocked_reason: 'future_internal_reason',
+      reconcile_available: false,
+    })
+    apiGet.mockImplementation((url: string) => {
+      if (url.startsWith('/api/proposals/history')) return Promise.resolve({ rows: [], total: 0, truncated: false })
+      if (url.includes('/preview')) return Promise.resolve({ ok: true, preview: sharePreview })
+      return Promise.resolve({ rows: [share] })
+    })
+    const wrapper = mount(ProposalReviewPanel, { global: { plugins: [pinia] } })
+    await flushPromises()
+    await wrapper.find('.pr-row-action').trigger('click')
+    await flushPromises()
+
+    const alert = wrapper.find('.pr-card [role="alert"]')
+    expect(alert.text()).toBe('This shared note cannot be published right now. Refresh the review or check its destination.')
+    expect(alert.text()).not.toContain('future_internal_reason')
+    wrapper.unmount()
+  })
+
+  it('offers Publish retry only when the server confirms retryable rejection', async () => {
+    const share = row({ id: 'share-retryable', kind: 'share', workspace: 'research' })
+    const sharePreview = preview({
+      id: share.id, workspace: share.workspace, kind: 'share',
+      revision: 'share-token', blocked_reason: '',
+      reconcile_available: false, publish_retry_available: true,
+    })
+    apiGet.mockImplementation((url: string) => {
+      if (url.startsWith('/api/proposals/history')) return Promise.resolve({ rows: [], total: 0, truncated: false })
+      if (url.includes('/preview')) return Promise.resolve({ ok: true, preview: sharePreview })
+      return Promise.resolve({ rows: [share] })
+    })
+    apiPost.mockResolvedValue({ share_status: 'published' })
+    const wrapper = mount(ProposalReviewPanel, { global: { plugins: [pinia] } })
+    await flushPromises()
+    await wrapper.find('.pr-row-action').trigger('click')
+    await flushPromises()
+
+    const card = wrapper.find('.pr-card')
+    expect(card.find('.btn-primary').text()).toBe('Retry Publish')
+    await card.find('.btn-primary').trigger('click')
+    await flushPromises()
+    expect(apiPost).toHaveBeenCalledWith('/api/proposals/share-retryable/accept?workspace=research', {
+      expected_revision: 'share-token', workspace: 'research',
+    })
+    expect(apiPost.mock.calls[0][0]).not.toContain('/reconcile')
+    wrapper.unmount()
+  })
+
+  it('moves keyboard focus into shared-note review and restores it on Cancel', async () => {
+    const share = row({ id: 'share-focus', kind: 'share', workspace: 'research' })
+    const sharePreview = preview({
+      id: share.id,
+      kind: 'share',
+      operation: 'replace',
+      before: 'before\n',
+      after: 'after\n',
+      brain: 'Team',
+      identity: 'https://example.test/team.git',
+      branch: 'main',
+      path: 'note.md',
+      revision: 'focus-token',
+      blocked_reason: '',
+    })
+    apiGet.mockImplementation((url: string) => {
+      if (url.startsWith('/api/proposals/history')) return Promise.resolve({ rows: [], total: 0, truncated: false })
+      if (url.includes('/preview')) return Promise.resolve({ ok: true, preview: sharePreview })
+      return Promise.resolve({ rows: [share] })
+    })
+
+    const wrapper = mount(ProposalReviewPanel, { attachTo: document.body, global: { plugins: [pinia] } })
+    await flushPromises()
+    const trigger = wrapper.get('.pr-row-action')
+    ;(trigger.element as HTMLButtonElement).focus()
+    await trigger.trigger('click')
+    await flushPromises()
+
+    const publish = wrapper.get('.pr-card .btn-primary')
+    expect(document.activeElement).toBe(publish.element)
+    await wrapper.get('.pr-card button:last-child').trigger('click')
+    await flushPromises()
+    expect(document.activeElement).toBe(wrapper.get('.pr-row-action').element)
+    wrapper.unmount()
+  })
+
+  it('keeps a shared-note row rendered when the server preview omits generic destination fields', async () => {
+    const share = row({ id: 'share-server-shape', kind: 'share', workspace: 'research' })
+    const serverPreview = {
+      id: share.id,
+      workspace: share.workspace,
+      kind: 'share',
+      operation: 'replace',
+      revision: 'server-share-token',
+      before: 'old note\n',
+      after: 'replacement note\n',
+      brain: 'Team',
+      identity: 'https://example.test/team.git',
+      branch: 'main',
+      path: 'notes/shared.md',
+      blocked_reason: '',
+    } as unknown as ProposalPreview
+    const runtimeErrors: unknown[] = []
+    let previewRequests = 0
+    apiGet.mockImplementation((url: string) => {
+      if (url.startsWith('/api/proposals/history')) return Promise.resolve({ rows: [], total: 0, truncated: false })
+      if (url.includes('/preview')) {
+        previewRequests += 1
+        return Promise.resolve({ ok: true, preview: serverPreview })
+      }
+      return Promise.resolve({ rows: [share] })
+    })
+
+    const wrapper = mount(ProposalReviewPanel, {
+      global: {
+        plugins: [pinia],
+        config: { errorHandler: error => runtimeErrors.push(error) },
+      },
+    })
+    await flushPromises()
+    await flushPromises()
+
+    expect(runtimeErrors).toEqual([])
+    expect(wrapper.find('.pr-row').exists()).toBe(true)
+    expect(wrapper.text()).toContain('Team/notes/shared.md')
+    expect(useProposalsStore(pinia).previews[share.id]).toEqual(serverPreview)
+
+    await wrapper.get('.pr-row-action').trigger('click')
+    await flushPromises()
+    expect(wrapper.find('.pr-card').exists()).toBe(true)
+    expect(wrapper.get('.pr-card').text()).toContain('replacement note')
+    await wrapper.get('.pr-card button:last-child').trigger('click')
+    await flushPromises()
+    expect(previewRequests).toBe(1)
+
+    await wrapper.get('.pr-row-action').trigger('click')
+    await flushPromises()
+    expect(wrapper.find('.pr-card').exists()).toBe(true)
+    expect(previewRequests).toBe(1)
+    wrapper.unmount()
+  })
+
+  it('keeps Publish unavailable for a blocked preview', async () => {
+    const share = row({ id: 'share-a', kind: 'share', workspace: 'research' })
+    const initial = preview({ id: 'share-a', kind: 'share', operation: 'create', before: null, after: '# note\n', brain: 'Team', identity: 'https://example.test/team.git', branch: 'main', path: 'note.md', revision: 'old', blocked_reason: 'brain_unavailable' })
+    apiGet.mockImplementation((url: string) => {
+      if (url.startsWith('/api/proposals/history')) return Promise.resolve({ rows: [], total: 0, truncated: false })
+      if (url.includes('/preview')) return Promise.resolve({ ok: true, preview: initial })
+      return Promise.resolve({ rows: [share] })
+    })
+    const wrapper = mount(ProposalReviewPanel, { global: { plugins: [pinia] } })
+    await flushPromises()
+    await wrapper.get('.pr-row-action').trigger('click')
+    await flushPromises()
+    expect(wrapper.find('.pr-card button.btn-primary').exists()).toBe(false)
+    expect(wrapper.text()).toContain('The original shared brain link is no longer active.')
+    expect(wrapper.text()).not.toContain('brain_unavailable')
+    wrapper.unmount()
+  })
+
+  it('requires a second click after the server returns a refreshed stale preview', async () => {
+    const share = row({ id: 'share-a', kind: 'share', workspace: 'research' })
+    const initial = preview({ id: 'share-a', kind: 'share', operation: 'replace', before: 'old\n', after: 'first\n', brain: 'Team', identity: 'https://example.test/team.git', branch: 'main', path: 'note.md', revision: 'old-token', blocked_reason: '' })
+    const refreshed = { ...initial, before: 'first\n', after: 'second\n', revision: 'fresh-token' }
+    apiGet.mockImplementation((path: string) => {
+      if (path.startsWith('/api/proposals/history')) return Promise.resolve({ rows: [], total: 0, truncated: false })
+      if (path.includes('/preview')) return Promise.resolve({ ok: true, preview: initial })
+      return Promise.resolve({ rows: [share] })
+    })
+    apiPost
+      .mockRejectedValueOnce(Object.assign(new Error('The shared-note review changed'), {
+        payload: { share_status: 'stale_review', preview: refreshed },
+      }))
+      .mockResolvedValueOnce({ share_status: 'published' })
+
+    const wrapper = mount(ProposalReviewPanel, { global: { plugins: [pinia] } })
+    await flushPromises()
+    await wrapper.get('.pr-row-action').trigger('click')
+    await flushPromises()
+    await wrapper.get('.pr-card button.btn-primary').trigger('click')
+    await flushPromises()
+    expect(wrapper.get('.pr-card-conflict').text()).toContain('refreshed preview')
+    expect(wrapper.get('.pr-card').findAll('pre').map(pre => pre.text())).toEqual(['first', 'second'])
+    expect(apiPost).toHaveBeenCalledTimes(1)
+
+    await wrapper.get('.pr-card button.btn-primary').trigger('click')
+    await flushPromises()
+    expect(apiPost).toHaveBeenCalledTimes(2)
+    expect(apiPost).toHaveBeenLastCalledWith('/api/proposals/share-a/accept?workspace=research', {
+      expected_revision: 'fresh-token', workspace: 'research',
+    })
+    wrapper.unmount()
+  })
+
+  it('opens the replacement proposal returned for a stale legacy review', async () => {
+    const oldRow = row({ id: 'share-old', kind: 'share', workspace: 'research' })
+    const newRow = row({ id: 'share-new', kind: 'share', workspace: 'research', text: 'Replacement proposal' })
+    const oldPreview = preview({ id: 'share-old', kind: 'share', operation: 'replace', before: 'old\n', after: 'outdated\n', brain: 'Team', identity: 'https://example.test/team.git', branch: 'main', path: 'note.md', revision: 'old-token', blocked_reason: '' })
+    const newPreview = { ...oldPreview, id: 'share-new', text: 'Replacement proposal', before: 'current\n', after: 'review this\n', revision: 'new-token' }
+    let queueReads = 0
+    apiGet.mockImplementation((path: string) => {
+      if (path.startsWith('/api/proposals/history')) return Promise.resolve({ rows: [], total: 0, truncated: false })
+      if (path.startsWith('/api/proposals/share-old/preview')) return Promise.resolve({ ok: true, preview: oldPreview })
+      if (path.startsWith('/api/proposals')) {
+        queueReads += 1
+        return Promise.resolve({ rows: queueReads === 1 ? [oldRow] : [newRow] })
+      }
+      return Promise.resolve({ rows: [] })
+    })
+    apiPost.mockRejectedValue(Object.assign(new Error('The legacy review was replaced.'), {
+      payload: {
+        error: 'The legacy review was replaced; review and accept the new proposal.',
+        share_status: 'stale_review',
+        replacement: { id: 'share-new', revision: 'new-token', preview: newPreview },
+      },
+    }))
+
+    const wrapper = mount(ProposalReviewPanel, { global: { plugins: [pinia] } })
+    await flushPromises()
+    await wrapper.get('.pr-row-action').trigger('click')
+    await flushPromises()
+    await wrapper.get('.pr-card button.btn-primary').trigger('click')
+    await flushPromises()
+
+    expect(wrapper.text()).toContain('Replacement proposal')
+    expect(wrapper.get('.pr-card').findAll('pre').map(pre => pre.text())).toEqual(['current', 'review this'])
+    expect(wrapper.get('.pr-card button.btn-primary').text()).toBe('Publish')
+    expect(wrapper.text()).not.toContain('outdated')
+    wrapper.unmount()
+  })
+
+  it('adopts the blocked preview from a refused publication and preserves its message', async () => {
+    const share = row({ id: 'share-a', kind: 'share', workspace: 'research' })
+    const eligible = preview({ id: 'share-a', kind: 'share', operation: 'replace', before: 'old\n', after: 'new\n', brain: 'Team', identity: 'https://example.test/team.git', branch: 'main', path: 'note.md', revision: 'review-token', blocked_reason: '' })
+    const blocked = { ...eligible, blocked_reason: 'brain_changed' }
+    apiGet.mockImplementation((path: string) => {
+      if (path.startsWith('/api/proposals/history')) return Promise.resolve({ rows: [], total: 0, truncated: false })
+      if (path.includes('/preview')) return Promise.resolve({ ok: true, preview: eligible })
+      return Promise.resolve({ rows: [share] })
+    })
+    apiPost.mockRejectedValue(Object.assign(new Error('The shared brain changed.'), {
+      payload: { error: 'The selected shared brain changed; this note was not published.', share_status: 'brain_changed', preview: blocked },
+    }))
+
+    const wrapper = mount(ProposalReviewPanel, { global: { plugins: [pinia] } })
+    await flushPromises()
+    await wrapper.get('.pr-row-action').trigger('click')
+    await flushPromises()
+    await wrapper.get('.pr-card button.btn-primary').trigger('click')
+    await flushPromises()
+
+    expect(wrapper.find('.pr-card button.btn-primary').exists()).toBe(false)
+    expect(wrapper.text()).toContain('The shared brain destination changed since this proposal was created.')
+    expect(wrapper.text()).toContain('The selected shared brain changed; this note was not published.')
+    expect(wrapper.text()).not.toContain('brain_changed')
     wrapper.unmount()
   })
 })

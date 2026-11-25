@@ -320,10 +320,10 @@ def test_setup_legacy_dotenv_is_exempt_before_import(
     actual = cli._import_legacy_workspaces_for_setup
     observed: list[str] = []
 
-    def check_before_import(path: Path, env: dict[str, str]) -> None:
+    def check_before_import(path: Path, env: dict[str, str], *, owner) -> None:
         receipt = read_receipt(path / ".runtime")
         observed.append(receipt.installation.status if receipt else "missing")
-        actual(path, env)
+        actual(path, env, owner=owner)
 
     monkeypatch.setattr(cli, "_import_legacy_workspaces_for_setup", check_before_import)
     cli.setup_workspace(root, auth_token="private-token")

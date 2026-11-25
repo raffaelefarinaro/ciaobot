@@ -280,6 +280,17 @@ async def _reap(proc: asyncio.subprocess.Process, tree: ProcessTree) -> None:
                 )
 
 
+def git_output_line(output: str) -> str:
+    """One git output line without its CR/LF ending, keeping path whitespace.
+
+    ``git rev-parse --show-toplevel`` ends its path with a line ending, but a
+    checkout can legitimately end in a space. ``strip()`` would remove that
+    space and turn the path into another existing folder, so callers that read
+    a path from git use this helper instead.
+    """
+    return output.rstrip("\r\n")
+
+
 def run_git_sync(
     workspace: Path, *args: str, stdin: str | None = None
 ) -> tuple[int, str, str]:

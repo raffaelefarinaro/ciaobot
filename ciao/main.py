@@ -177,6 +177,11 @@ def _refresh_vault_index(
     workspace: Path,
     vault_root: Path | None = None,
     targets: list[tuple[Path, str, Path]] | None = None,
+    runtime_dir: Path | None = None,
+    ciao_owned_roots: set[Path] | None = None,
+    preserve_index_roots: set[Path] | None = None,
+    source_roots: frozenset[Path] = frozenset(),
+    authorize_root: Callable[[Path], bool] | None = None,
 ) -> bool:
     """Regenerate each vault's INDEX.md from frontmatter. Non-fatal on failure.
 
@@ -189,33 +194,37 @@ def _refresh_vault_index(
     try:
         from ciao import vault_index
 
-        if targets:
-            written = 0
-            for root, workspace_name, _prefix in targets:
-                if not Path(root).is_dir():
-                    logger.info("Vault root %s does not exist yet; skipping", root)
+        complete = True
+        for root, name, _prefix in targets or [(vault_root or workspace / "memory-vault", "", Path())]:
+            root = Path(root)
+            try:
+                if not root.is_dir():
+                    logger.info("Vault root %s does not exist; skipping index refresh", root)
+                    complete = False
                     continue
-                # Each root owns exactly one vault, so its index carries no
-                # workspace prefix; the stamp keeps `Entry.workspace` correct for
-                # anything reading the index back.
-                entries = vault_index.scan_vault(root, workspace=workspace_name)
-                vault_index.write_index_file(entries, Path(root) / "INDEX.md")
-                written += 1
-            if not written:
-                return False
-            logger.info("Vault index refreshed for %d root(s).", written)
-            return True
+                managed = root in (ciao_owned_roots or set()) and root not in (preserve_index_roots or set())
+                runtime = runtime_dir or workspace / ".runtime"
+                if managed:
+                    entries = vault_index.scan_vault(root, workspace=name, strict=True)
+                    vault_index.write_index_file(
+                        entries, root / "INDEX.md", replace_existing=True,
+                        authorize=(
+                            partial(authorize_root, root)
+                            if authorize_root is not None else None
+                        ),
+                        ownership_runtime=runtime,
+                        registration_runtime=runtime,
+                    )
+                else:
+                    from ciao.fts_search import lookup_connected_entries
 
-        root = vault_root or (workspace / "memory-vault")
-        if not root.is_dir():
-            # Bootstrap mode has no vault yet (the setup wizard creates it);
-            # never scaffold one preemptively.
-            logger.info("Vault root %s does not exist yet; skipping index refresh", root)
-            return False
-        entries = vault_index.scan_vault(root)
-        vault_index.write_index_file(entries, root / "INDEX.md")
-        logger.info("Vault index refreshed.")
-        return True
+                    lookup_connected_entries(root, name or "personal", runtime, workspace,
+                                             refresh=True, source_roots=source_roots, vault_base=vault_root)
+                    logger.info("Keeping unmanaged vault INDEX.md unchanged at %s", root)
+            except Exception:
+                complete = False
+                logger.warning("Vault index refresh failed for %s", root, exc_info=True)
+        return complete
     except Exception:
         logger.warning("Vault index refresh failed", exc_info=True)
         return False
@@ -603,6 +612,18 @@ async def _async_main(
         config.import_legacy_workspaces_env()
         if config._workspace_registry_changed:
             config.persist_workspace_registry()
+        from ciao.shared_brain import recover_sharing_state
+        try:
+            config._sharing_recovery_pending = not recover_sharing_state(config)
+        except Exception:
+            logging.getLogger(__name__).exception(
+                "Could not recover the shared-brain consent journal or fences"
+            )
+            config._sharing_recovery_pending = True
+        if config._sharing_recovery_pending:
+            logging.getLogger(__name__).warning(
+                "Shared-brain consent recovery is pending; automatic authority is disabled"
+            )
         if app_engine:
             # App mode: publish the readiness record for the app's probe and
             # hand the engine's lifetime to the parent watcher, which SIGTERMs
@@ -932,13 +953,29 @@ async def _run_server_locked(
     # Refresh vault index so INDEX.md reflects the current tree
     tracker.start("refresh_vault_index")
     try:
-        await asyncio.to_thread(
+        refreshed = await asyncio.to_thread(
             _refresh_vault_index,
             config.workspace_root,
             config.vault_root,
-            config.vault_scan_targets(),
+            config.index_scan_targets(),
+            config.state_path.parent,
+            {
+                Path(root)
+                for root, name, _prefix in config.index_scan_targets()
+                if config.ciao_owned_vault_index(name or None)
+            },
+            {
+                Path(root)
+                for root, name, _prefix in config.index_scan_targets()
+                if config.adopted_workspace_vault(name)
+            },
+            config.index_source_roots(),
+            lambda root: config.vault_index_ownership(None, root) == "ciao",
         )
-        tracker.done("refresh_vault_index")
+        if refreshed:
+            tracker.done("refresh_vault_index")
+        else:
+            tracker.fail("refresh_vault_index", "one or more vault roots were unavailable")
     except Exception:
         tracker.fail("refresh_vault_index", "index refresh failed")
         logger.exception("Vault index refresh failed")
@@ -1288,6 +1325,9 @@ async def _run_server_locked(
     app.state.state_store = state
     app.state.transcript_store = transcripts
     app.state.project_chat_manager = pcm
+    from ciao import share_evidence  # noqa: PLC0415
+
+    share_evidence.bind_project_manager(pcm)
     # Needs-you handlers reach app singletons (terminal sessions) through this.
     pcm.actions_runtime.bind_app_state(app.state)
 

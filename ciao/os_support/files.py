@@ -12,9 +12,13 @@ correct reading and raise otherwise; nothing here substitutes a weaker path.
 
 from __future__ import annotations
 
+import ctypes
 import errno
 import os
+import stat
 import struct
+import sys
+from pathlib import Path
 
 # Linux POSIX ACL tags that name a user or group other than the file's owner
 # and group, which the mode bits cannot express.
@@ -52,6 +56,50 @@ def open_fd(
 def replace_file(src: str | os.PathLike[str], dst: str | os.PathLike[str]) -> None:
     """``os.replace``: atomic on POSIX even against a concurrent replace."""
     os.replace(src, dst)
+
+
+
+
+
+def read_connected_note(root: Path, relative: Path) -> str:
+    """Read a regular note without following a swapped directory or file symlink."""
+    if relative.is_absolute() or ".." in relative.parts or not relative.parts:
+        raise ValueError("expected a note path relative to the brain")
+    flags = os.O_RDONLY | os.O_NOFOLLOW | os.O_DIRECTORY
+    directory = os.open("/", flags)
+    try:
+        for part in (*root.absolute().parts[1:], *relative.parts[:-1]):
+            child = os.open(part, flags, dir_fd=directory)
+            os.close(directory)
+            directory = child
+        fd = os.open(relative.name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=directory)
+        try:
+            if not stat.S_ISREG(os.fstat(fd).st_mode):
+                raise OSError("connected note is not a regular file")
+            with open(fd, encoding="utf-8", closefd=False) as stream:
+                return stream.read()
+        finally:
+            os.close(fd)
+    finally:
+        os.close(directory)
+
+
+def publish_new_from_fd(source_fd: int, directory_fd: int, name: str) -> None:
+    """Publish the open inode at an absent name without resolving its staging name."""
+    if sys.platform == "darwin":
+        clone = ctypes.CDLL(None, use_errno=True).fclonefileat
+        clone.argtypes = [ctypes.c_int, ctypes.c_int, ctypes.c_char_p, ctypes.c_uint]
+        clone.restype = ctypes.c_int
+        if clone(source_fd, directory_fd, os.fsencode(name), 0):
+            error = ctypes.get_errno()
+            raise OSError(error, os.strerror(error), name)
+    elif sys.platform.startswith("linux"):
+        # Supplying dst_dir_fd selects linkat(AT_SYMLINK_FOLLOW). procfs resolves
+        # this magic link to the open file, even if its old name was rebound.
+        os.link(f"/proc/self/fd/{source_fd}", name, dst_dir_fd=directory_fd,
+                follow_symlinks=True)
+    else:
+        raise OSError(errno.ENOTSUP, "descriptor-based publication is unavailable")
 
 
 def effective_uid() -> int:

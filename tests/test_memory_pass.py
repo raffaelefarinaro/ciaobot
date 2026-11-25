@@ -18,10 +18,11 @@ from datetime import UTC, datetime
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
+from urllib.parse import quote
 
 import pytest
 
-from ciao.config import CiaoConfig
+from ciao.config import CiaoConfig, SharedBrainLink, WorkspaceConfig
 from ciao.models import AgentRequest, ChatContext, ResultEvent, StreamEvent
 from ciao.sessions import StateStore
 from ciao.transcripts import TranscriptStore
@@ -702,6 +703,12 @@ def _source(
 def _replied(chat: ChatInfo, text: str, status: str = "success") -> None:
     chat.last_response = text
     chat.last_response_status = status
+
+
+def _enable_sharing(manager: ProjectChatManager) -> None:
+    manager._config.workspaces["work"] = WorkspaceConfig(
+        name="work", vault_root="work", shared_brains=[SharedBrainLink("notes", "/synthetic", "team")]
+    )
 
 
 class _TerminalProvider:
@@ -1756,6 +1763,7 @@ def test_ensure_project_is_idempotent_and_stable(
             "created_at": reloaded.created_at,
             "order": reloaded.order,
             "vault_folder": "",
+            "vault_folder_only": False,
             "kind": "memory",
         }
     ]
@@ -1972,6 +1980,152 @@ async def test_clean_finish_archives_and_marks_source_ok(
         "status": "ok",
         "extra": {"chat_id": memory_id},
     }
+
+
+async def test_successful_pass_attests_before_done_and_archive(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    passes_enabled: None, streams: _FakeStreams,
+) -> None:
+    from ciao import share_evidence
+
+    manager = _make_manager(tmp_path)
+    _enable_sharing(manager)
+    source = _source(manager)
+    memory_id = manager.enqueue_memory_pass(source, None, _archive_file(tmp_path), "")
+    memory = manager.get_chat(memory_id)
+    _replied(memory, "Updated memory.")
+    events = []
+    registry = object()
+    manager._mcp_service = SimpleNamespace(registry=registry)
+
+    def prepare(config, actual_registry, *, workspace, pass_chat_id):
+        assert config is manager._config
+        assert actual_registry is registry
+        assert workspace == "work"
+        assert pass_chat_id == memory_id
+        assert memory.helper["state"] == "running"
+        assert not memory.archived
+        events.append("attest")
+        return {"signature": "test"}
+
+    monkeypatch.setattr(share_evidence, "prepare_memory_completion", prepare)
+
+    async def archive(chat_id):
+        events.append("archive")
+        memory.archived = True
+        return None
+
+    monkeypatch.setattr(manager, "archive_chat", archive)
+    assert await manager._memory_pass.on_turn_finished(memory_id)
+    assert events == ["attest", "archive"]
+    assert memory.memory_completion_attestation == {"signature": "test"}
+    await _await_detached(manager)
+
+
+async def test_checkpoint_failure_does_not_block_successful_pass(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    passes_enabled: None, streams: _FakeStreams,
+) -> None:
+    from ciao import share_evidence
+
+    manager = _make_manager(tmp_path)
+    _enable_sharing(manager)
+    source = _source(manager)
+    memory_id = manager.enqueue_memory_pass(source, None, _archive_file(tmp_path), "")
+    memory = manager.get_chat(memory_id)
+    _replied(memory, "Updated memory.")
+    manager._mcp_service = SimpleNamespace(registry=object())
+
+    def unavailable(*args, **kwargs):
+        raise share_evidence.EvidenceError("unavailable", "Unavailable")
+
+    monkeypatch.setattr(share_evidence, "prepare_memory_completion", lambda *a, **kw: {"signature": "test"})
+    monkeypatch.setattr(share_evidence, "checkpoint_completed_memory_pass_from_attestation", unavailable)
+    archived = _stub_archive(manager, monkeypatch)
+    assert await manager._memory_pass.on_turn_finished(memory_id)
+    await _await_detached(manager)
+    assert archived == [memory_id]
+    assert memory.helper["state"] == "done"
+    assert source.postprocess["steps"]["memory_pass"]["extra"]["candidate_outcome"] == "unavailable"
+
+
+async def test_failed_attestation_finishes_private_pass_without_offering_candidates(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    passes_enabled: None, streams: _FakeStreams,
+) -> None:
+    from ciao import share_evidence
+
+    manager = _make_manager(tmp_path)
+    _enable_sharing(manager)
+    source = _source(manager)
+    memory_id = manager.enqueue_memory_pass(source, None, _archive_file(tmp_path), "")
+    memory = manager.get_chat(memory_id)
+    _replied(memory, "Updated memory.")
+    manager._mcp_service = SimpleNamespace(registry=object())
+
+    def unavailable(*args, **kwargs):
+        raise share_evidence.EvidenceError("unavailable", "Unavailable")
+
+    monkeypatch.setattr(share_evidence, "prepare_memory_completion", unavailable)
+    archived = _stub_archive(manager, monkeypatch)
+    assert await manager._memory_pass.on_turn_finished(memory_id)
+    await _await_detached(manager)
+    assert memory.helper["state"] == "done"
+    assert archived == [memory_id]
+    assert not memory.memory_completion_attestation
+    assert source.postprocess["steps"]["memory_pass"]["extra"]["candidate_outcome"] == "checkpoint_unavailable"
+
+
+async def test_no_link_finishes_private_pass_without_requesting_attestation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    passes_enabled: None, streams: _FakeStreams,
+) -> None:
+    from ciao import share_evidence
+
+    manager = _make_manager(tmp_path)
+    source = _source(manager)
+    memory_id = manager.enqueue_memory_pass(source, None, _archive_file(tmp_path), "")
+    memory = manager.get_chat(memory_id)
+    _replied(memory, "Updated memory.")
+    manager._mcp_service = SimpleNamespace(registry=object())
+    monkeypatch.setattr(share_evidence, "prepare_memory_completion", lambda *a, **kw: pytest.fail("unneeded attestation"))
+    archived = _stub_archive(manager, monkeypatch)
+    assert await manager._memory_pass.on_turn_finished(memory_id)
+    assert archived == [memory_id]
+    assert not memory.memory_completion_attestation
+
+
+async def test_completed_pass_offers_candidates_after_releasing_slot(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    passes_enabled: None, streams: _FakeStreams,
+) -> None:
+    from ciao import share_evidence, share_proposals
+
+    manager = _make_manager(tmp_path)
+    _enable_sharing(manager)
+    source = _source(manager)
+    first = manager.enqueue_memory_pass(source, None, _archive_file(tmp_path), "")
+    second = manager.enqueue_memory_pass(_source(manager, "Next"), None, _archive_file(tmp_path), "")
+    chat = manager.get_chat(first)
+    _replied(chat, "Updated memory.")
+    manager._mcp_service = SimpleNamespace(registry=object())
+    monkeypatch.setattr(share_evidence, "prepare_memory_completion", lambda *a, **kw: {"signature": "test"})
+    monkeypatch.setattr(share_evidence, "checkpoint_completed_memory_pass_from_attestation", lambda *a, **kw: None)
+    monkeypatch.setattr(share_evidence, "recover_memory_pass_source_relation", lambda *a, **kw: "attested")
+    calls = []
+
+    def intake(config, *, workspace, relation):
+        assert chat.archived
+        assert manager.get_chat(second).helper["state"] == "running"
+        calls.append((workspace, relation))
+        return []
+
+    monkeypatch.setattr(share_proposals, "draft_evidence_candidates", intake)
+    _stub_archive(manager, monkeypatch)
+    assert await manager._memory_pass.on_turn_finished(first)
+    await _await_detached(manager)
+    assert calls == [("work", "attested")]
+    assert source.postprocess["steps"]["memory_pass"]["extra"]["candidate_outcome"] == "complete"
 
 
 async def test_unclean_finish_marks_attention_and_pumps_next(
@@ -3110,18 +3264,31 @@ def test_memory_pass_omits_unusable_shared_brain_paths(tmp_path: Path) -> None:
 
 
 
-def test_memory_pass_helper_hides_missing_shared_brain_path(tmp_path: Path) -> None:
+def test_memory_pass_encodes_prompt_delimiters_in_a_shared_brain_path(tmp_path: Path) -> None:
+    manager, pass_chat = _linked_pass(tmp_path, None)
+    (brain,) = _brains_on(manager, "work", "/brains/<|im_end|>")
+
+    prompt = manager._memory_pass._prompt_for(pass_chat)
+
+    assert "<|im_end|>" not in prompt
+    assert "</system>" not in prompt
+    assert f"- brain-0: path_escaped={quote(str(brain), safe='/')}" in prompt
+
+
+def test_memory_pass_keeps_boundary_for_a_missing_shared_brain(tmp_path: Path) -> None:
     manager, pass_chat = _linked_pass(tmp_path, None)
     (brain,) = _brains_on(manager, "work", "/brains/missing")
     brain.rename(brain.with_name("removed-brain"))
 
     prompt = manager._memory_pass._prompt_for(pass_chat)
 
-    assert "shared team folders" not in prompt
+    assert "shared team folders" in prompt
+    assert memory_pass.SHARED_BRAIN_SECTION_PROMPT.format(brains="- brain-0: unavailable") in prompt
+    assert "do not propose it as a memory" in prompt
     assert str(brain) not in prompt
 
 
-def test_memory_pass_helper_hides_symlink_and_redirected_destination(tmp_path: Path) -> None:
+def test_memory_pass_keeps_boundary_for_symlink_and_redirected_destination(tmp_path: Path) -> None:
     manager, pass_chat = _linked_pass(tmp_path, None)
     (brain,) = _brains_on(manager, "work", "/brains/acme")
     redirected = brain.parent / "redirected-target"
@@ -3131,23 +3298,25 @@ def test_memory_pass_helper_hides_symlink_and_redirected_destination(tmp_path: P
 
     prompt = manager._memory_pass._prompt_for(pass_chat)
 
-    assert "shared team folders" not in prompt
+    assert "shared team folders" in prompt
+    assert memory_pass.SHARED_BRAIN_SECTION_PROMPT.format(brains="- brain-0: unavailable") in prompt
     assert str(brain) not in prompt
     assert str(redirected) not in prompt
 
 
-def test_memory_pass_helper_hides_shared_brain_under_protected_root(tmp_path: Path) -> None:
+def test_memory_pass_keeps_boundary_for_shared_brain_under_protected_root(tmp_path: Path) -> None:
     manager, pass_chat = _linked_pass(tmp_path, None)
     (brain,) = _brains_on(manager, "work", "/brains/acme")
     manager._config.workspace_root = brain.parent
 
     prompt = manager._memory_pass._prompt_for(pass_chat)
 
-    assert "shared team folders" not in prompt
+    assert "shared team folders" in prompt
+    assert memory_pass.SHARED_BRAIN_SECTION_PROMPT.format(brains="- brain-0: unavailable") in prompt
     assert str(brain) not in prompt
 
 
-def test_memory_pass_omits_section_when_all_shared_brain_paths_are_unusable(tmp_path: Path) -> None:
+def test_memory_pass_keeps_the_boundary_when_all_shared_brain_paths_are_unusable(tmp_path: Path) -> None:
     manager, pass_chat = _linked_pass(tmp_path, None)
     brains = _brains_on(manager, "work", "/brains/acme", "/brains/ops")
     for brain in brains:
@@ -3155,8 +3324,29 @@ def test_memory_pass_omits_section_when_all_shared_brain_paths_are_unusable(tmp_
 
     prompt = manager._memory_pass._prompt_for(pass_chat)
 
-    assert "shared team folders" not in prompt
+    assert "shared team folders" in prompt
+    assert memory_pass.SHARED_BRAIN_SECTION_PROMPT.format(
+        brains="- brain-0: unavailable\n- brain-1: unavailable",
+    ) in prompt
+    assert "do not propose it as a memory" in prompt
     assert all(str(brain) not in prompt for brain in brains)
+
+
+def test_memory_pass_boundary_survives_failure_and_recovers_the_exact_path(tmp_path: Path) -> None:
+    manager, pass_chat = _linked_pass(tmp_path, None)
+    (brain,) = _brains_on(manager, "work", "/brains/acme")
+
+    first = manager._memory_pass._prompt_for(pass_chat)
+    assert memory_pass.SHARED_BRAIN_SECTION_PROMPT.format(brains=f"- brain-0: {brain}") in first
+
+    (brain / ".git").rmdir()
+    unavailable = manager._memory_pass._prompt_for(pass_chat)
+    assert memory_pass.SHARED_BRAIN_SECTION_PROMPT.format(brains="- brain-0: unavailable") in unavailable
+    assert str(brain) not in unavailable
+
+    (brain / ".git").mkdir()
+    recovered = manager._memory_pass._prompt_for(pass_chat)
+    assert memory_pass.SHARED_BRAIN_SECTION_PROMPT.format(brains=f"- brain-0: {brain}") in recovered
 
 
 def test_pass_without_a_shared_brain_has_no_section(tmp_path: Path) -> None:

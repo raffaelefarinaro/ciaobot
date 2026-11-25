@@ -249,6 +249,34 @@ class AgentSessionRegistry:
             self._by_key[key] = token
             return token, principal
 
+    def principal_for_chat(self, chat_id: str, provider: str = "") -> AgentPrincipal | None:
+        """The live managed principal for a chat/provider, or None."""
+        now = int(time.time())
+        with self._lock:
+            if provider:
+                token = self._by_key.get((chat_id, provider), "")
+                session = self._by_token.get(token)
+            else:
+                session = next(
+                    (item for item in self._by_token.values()
+                     if item.principal.chat_id == chat_id),
+                    None,
+                )
+            if session is None or session.expires_at <= now:
+                return None
+            return session.principal
+
+    def principal_for_token(self, token: str) -> AgentPrincipal | None:
+        """The live managed principal for one bearer token, or None."""
+        if not token:
+            return None
+        now = int(time.time())
+        with self._lock:
+            session = self._by_token.get(token)
+            if session is None or session.expires_at <= now:
+                return None
+            return session.principal
+
     def revoke_chat(self, chat_id: str) -> int:
         with self._lock:
             doomed = [token for token, item in self._by_token.items() if item.principal.chat_id == chat_id]
@@ -493,6 +521,29 @@ async def _op_vault_review(service: CiaoMcpService, action: str = "list", path: 
     )
 
 
+async def _op_care_begin(service: CiaoMcpService, ttl_s: float, vault: str) -> dict[str, Any]:
+    """Begin a lease for the active engine-owned Workspace care dispatch."""
+    return await service._invoke(
+        "care_begin", lambda cp, principal: cp.managed_care_begin(principal, ttl_s, vault), mutating=True
+    )
+
+
+async def _op_care_checkpoint(service: CiaoMcpService, holder: str, key: str) -> dict[str, Any]:
+    """Checkpoint a completed item of the active Workspace care dispatch."""
+    return await service._invoke(
+        "care_checkpoint", lambda cp, principal: cp.managed_care_checkpoint(principal, holder, key),
+        mutating=True,
+    )
+
+
+async def _op_care_end(service: CiaoMcpService, holder: str, status: str, reasons: list[str]) -> dict[str, Any]:
+    """Settle the active managed Workspace care run."""
+    return await service._invoke(
+        "care_end", lambda cp, principal: cp.managed_care_end(principal, holder, status, reasons),
+        mutating=True,
+    )
+
+
 async def _op_verify_note(service: CiaoMcpService, payload_file: str = "") -> dict[str, Any]:
     """Record one stale note's verification verdict — the managed operation that
     replaces hand-editing `updated:` on a stale note.
@@ -622,6 +673,22 @@ async def _op_note_create(
             body_file=body_file,
             path=path,
         ),
+        mutating=True,
+    )
+
+
+async def _op_note_share(
+    service: CiaoMcpService, path: str, body_file: str, brain: str = ""
+) -> dict[str, Any]:
+    """Queue a note draft for a human to review in a linked shared brain.
+
+    The exact body travels as a file inside this workspace's vault, never as a
+    shell argument. Filing requires a user-typed chat turn and returns a
+    canonical review link; it does not publish or change a checkout.
+    """
+    return await service._invoke(
+        "note_share",
+        lambda cp, p: cp.note_share(p, path=path, body_file=body_file, brain=brain),
         mutating=True,
     )
 
@@ -1638,8 +1705,12 @@ OPERATIONS: tuple[Operation, ...] = (
     Operation("vault_recall_check", _READ, _op_vault_recall_check.__doc__ or "", _op_vault_recall_check),
     Operation("vault_review", _DESTRUCTIVE, _op_vault_review.__doc__ or "", _op_vault_review),
     Operation("verify_note", _WRITE, _op_verify_note.__doc__ or "", _op_verify_note),
+    Operation("care_begin", _WRITE, _op_care_begin.__doc__ or "", _op_care_begin),
+    Operation("care_checkpoint", _WRITE, _op_care_checkpoint.__doc__ or "", _op_care_checkpoint),
+    Operation("care_end", _WRITE, _op_care_end.__doc__ or "", _op_care_end),
     Operation("note_related", _READ, _op_note_related.__doc__ or "", _op_note_related),
     Operation("note_create", _WRITE, _op_note_create.__doc__ or "", _op_note_create),
+    Operation("note_share", _WRITE, _op_note_share.__doc__ or "", _op_note_share),
     Operation("projects_list", _READ, _op_projects_list.__doc__ or "", _op_projects_list),
     Operation("project_get", _READ, _op_project_get.__doc__ or "", _op_project_get),
     Operation("project", _WRITE, _op_project.__doc__ or "", _op_project),

@@ -136,13 +136,15 @@ def _install(tmp_path: Path, *, misplaced: bool = True) -> Install:
     (vault / "People").mkdir(parents=True)
     (vault / "MEMORY.md").write_text("# Memory\n", encoding="utf-8")
     (vault / "People" / "Ida.md").write_text("# Ida\n", encoding="utf-8")
-    (runtime / "workspaces.json").write_text(
+    registry = runtime / "workspaces.json"
+    registry.write_text(
         json.dumps([{"name": "personal", "vault_root": stored}], indent=2) + "\n",
         encoding="utf-8",
     )
     _git(root, "add", "-A")
     _git(root, "commit", "-m", "seed")
     config = CiaoConfig(
+        _workspace_registry_bytes=registry.read_bytes(),
         pwa_auth_token="test",
         workspace_root=root,
         vault_root=root / "memory-vault",

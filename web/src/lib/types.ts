@@ -94,17 +94,30 @@ export interface WorkspaceInfo {
 export interface SharedBrainRow {
   path: string
   name?: string
+  /** Defaults to Git for registry rows written before folder links existed. */
+  kind?: 'git' | 'folder'
 }
 
 /** The payload of a workspace PATCH: a shared-brain save sends rows, not the read links. */
 export type WorkspacePatch = Omit<Partial<WorkspaceInfo>, 'shared_brains'> & { shared_brains?: SharedBrainRow[] }
+
+/** A Git checkout the engine pulls, or an ordinary folder read in place. */
+export type SharedBrainKind = 'git' | 'folder'
 
 /** One linked shared-brain folder, as the workspace registry lists it. */
 export interface SharedBrainLink {
   name: string
   path: string
   identity: string
+  kind?: 'git' | 'folder'
 }
+
+/**
+ * One link's sharing policy. `review` files every note as a proposal a human
+ * must accept; `automatic` is an explicit, durable standing consent for that
+ * one link. Every new and legacy link starts at `review`.
+ */
+export type SharedBrainSharingPolicy = 'review' | 'automatic'
 
 /** The last update attempt for a brain, as `ciao/shared_brain.py` records it. */
 export interface SharedBrainUpdate {
@@ -117,12 +130,29 @@ export interface SharedBrainUpdate {
 /** Live state of one linked brain, from `GET /api/workspaces/{name}/shared-brains`. */
 export interface SharedBrainState {
   name: string
+  kind: SharedBrainKind
   identity: string
   path: string
+  // Opaque link lifetime; a relink changes it and invalidates older tabs.
+  lifetime: string
+  // Effective policy: `automatic` only through a consent matching the link's
+  // lifetime and repository identity; otherwise `review`.
+  sharing_policy: SharedBrainSharingPolicy
+  // Monotonic for the link: every grant and revocation bumps it.
+  sharing_generation: number
+  // The grant time in ISO UTC, or '' at `review`.
+  sharing_granted_at: string
+  // A stored automatic grant that is not effective and still needs a revoke
+  // action (origin drift or a failed invalidation).
+  sharing_grant_pending: boolean
+  // True when a drift invalidation could not be persisted; the old grant stays
+  // paused in this process and must be revoked explicitly.
+  sharing_invalidation_failed: boolean
   origin_changed: boolean
   missing: boolean
   // '' or why the folder cannot be used now: missing, moved, not_a_checkout,
-  // outside_install, unsafe_config, origin_changed.
+  // outside_install, unsafe_config, origin_changed, inaccessible, or
+  // registry_unavailable (a Git link the engine could not inspect).
   problem: string
   branch: string
   head: string
@@ -135,6 +165,91 @@ export interface SharedBrainState {
 
 export interface SharedBrainsResponse {
   shared_brains: SharedBrainState[]
+}
+
+/** One project decision source the Sources panel may offer (server-filtered). */
+export interface ShareEvidenceSource {
+  source_id: string
+  kind: 'stream' | 'document'
+  label: string
+  project_id: string
+  project_name: string
+  entry_count: number
+  stream_id?: string
+}
+
+export interface ShareEvidenceProject {
+  project_id: string
+  name: string
+  sources: ShareEvidenceSource[]
+}
+
+export interface ShareEvidenceBrain {
+  name: string
+  identity: string
+}
+
+export interface ShareEvidenceField {
+  field: 'decision' | 'reason' | 'effective_date'
+  value: string
+}
+
+export interface ShareEvidenceGrant {
+  grant_id: string
+  type: 'standing' | 'snapshot'
+  project_id: string
+  source_id: string
+  source_kind: 'stream' | 'document'
+  source_label: string
+  brain: { name: string; identity: string; link_fingerprint: string }
+  audience: string
+  field_mask: string[]
+  producers: string[]
+  issued_at: string
+  start_revision: number | null
+  consent_generation: number
+  active: boolean
+  linked: boolean
+  status: 'active' | 'revoked' | 'withdrawn' | 'unlinked' | 'inactive'
+  revoked_at: string | null
+  revoked_generation: number | null
+  withdrawn_at: string | null
+  withdrawal_reason: string
+  history: Array<Record<string, unknown>>
+}
+
+export interface ShareEvidenceState {
+  chat_evidence: { available: false; reason: 'protected_authority_unavailable' }
+  disclosure_tokens: Record<string, string>
+  workspace: string
+  mode: 'review' | 'automatic'
+  fields: Array<ShareEvidenceField['field']>
+  producers: string[]
+  brains: ShareEvidenceBrain[]
+  projects: ShareEvidenceProject[]
+  grants: ShareEvidenceGrant[]
+}
+
+export interface ShareEvidencePreview {
+  preview_token: string
+  preview: {
+    grant_type: 'standing' | 'snapshot'
+    scope: 'future_decisions' | 'one_decision'
+    summary: string
+    future_items_without_review: boolean
+    project_id: string
+    source_id: string
+    source_label: string
+    entry_label: string
+    fields: ShareEvidenceField[][]
+    field_mask: string[]
+    excluded_fields: string[]
+    producers: string[]
+    recipient: { brain: string; identity: string; audience: string }
+    expected_generation: string
+    expires_at: string
+    notice: string
+  }
 }
 
 export interface WorkspacesResponse {
@@ -204,6 +319,7 @@ export interface ProjectInfo {
   created_at: string
   order: number
   vault_folder: string
+  vault_folder_only?: boolean
   vault_doc_path?: string
   is_system?: boolean
   is_auto?: boolean
@@ -1960,7 +2076,7 @@ export interface ProposalPreview {
    * `note_edit` rewrites a whole vault note from the verification's exact
    * replacement, and `retire_note` is the one operation that removes it — it
    * moves the note to the reversible review trash and writes no body at all. */
-  operation: 'add' | 'update' | 'move' | 'add_category' | 'note_edit' | 'retire_note' | 'none' | ''
+  operation: 'add' | 'update' | 'move' | 'add_category' | 'note_edit' | 'retire_note' | 'none' | 'create' | 'replace' | 'delete' | ''
   /**
    * `note` or `entry` — the unit the accept writes.
    *
@@ -1988,8 +2104,8 @@ export interface ProposalPreview {
   destination: string
   destination_path: string
   revision: string
-  before: string
-  after: string
+  before: string | null
+  after: string | null
   exact: boolean
   truncated: boolean
   can_accept: boolean
@@ -2010,6 +2126,19 @@ export interface ProposalPreview {
     notes: string[]
     missing?: string[]
   }
+  /** Revision-bound shared-note publication projection (#3576). */
+  brain?: string
+  identity?: string
+  /** `git` or `folder`; a folder preview is create-only. */
+  link_kind?: 'git' | 'folder'
+  branch?: string
+  path?: string
+  blocked_reason?: string | null
+  /** True only when this exact canonical review has a recorded attempt that can be reconciled. */
+  redraft_available?: boolean
+  reconcile_available?: boolean
+  /** True only when every exact recorded attempt was definitively rejected as retryable. */
+  publish_retry_available?: boolean
 }
 
 export interface ProposalPreviewResponse {
@@ -2196,6 +2325,12 @@ export interface ProposalHistoryRow {
   run_id?: string
   /** The decision's own timestamp, the same value as `ts`. ABSENT from an older engine. */
   decided_at?: string
+  /** Share publication is successful only when the server attached its receipt. */
+  share_status?: string
+  commit_oid?: string
+  branch?: string
+  path?: string
+  operation?: string
 }
 
 export type ProposalApplyStatus =
@@ -2271,6 +2406,13 @@ export interface ProposalHistoryChange {
    * Empty for a receipt that cited nothing. Optional because a payload written
    * before this field existed carries none. */
   source_turns?: number[]
+  commit_oid?: string
+  branch?: string
+  /** Folder receipts only: the recorded local write, not the path's current
+   * content or any provider synchronization. */
+  scope?: string
+  local_only?: boolean
+  sync_claimed?: boolean
 }
 
 /** One line of a receipt's before/after. Context lines are not sent: what a
@@ -2300,11 +2442,22 @@ export interface MemoryReceiptDetail {
   changed: boolean
   error: string
   reason?: string
-  before?: string
-  after?: string
+  before?: string | null
+  after?: string | null
   diff?: MemoryReceiptDiffLine[]
   truncated?: boolean
   diff_truncated?: boolean
+  share_status?: string
+  operation?: string
+  branch?: string
+  path?: string
+  identity?: string
+  commit_oid?: string
+  review_path?: string
+  /** Folder receipts only: historical local write scope. */
+  scope?: string
+  local_only?: boolean
+  sync_claimed?: boolean
 }
 
 export interface ProposalHistoryResponse {

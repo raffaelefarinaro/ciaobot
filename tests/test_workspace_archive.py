@@ -61,6 +61,63 @@ def _reroot(tmp_path: Path) -> None:
     reset_reroot_cache()
 
 
+def test_legacy_archive_refresh_reuses_registry_claim_and_completes(tmp_path, monkeypatch):
+    from ciao.workspaces import WorkspaceRegistryBusy, acquire_workspace_registry
+
+    client, config, _, _ = _app(tmp_path, rerooted=False)
+    entered = threading.Event()
+    resume = threading.Event()
+    original = vault_index.scan_vault
+    result = []
+
+    def paused_scan(*args, **kwargs):
+        entered.set()
+        if not resume.wait(5):
+            raise TimeoutError("test did not release index scan")
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(vault_index, "scan_vault", paused_scan)
+    thread = threading.Thread(target=lambda: result.append(client.post("/api/workspaces/work/archive")), daemon=True)
+    thread.start()
+    try:
+        assert entered.wait(5), "archive never reached index rebuild"
+        with pytest.raises(WorkspaceRegistryBusy):
+            acquire_workspace_registry(config, blocking=False)
+    finally:
+        resume.set()
+    thread.join(5)
+    assert not thread.is_alive(), "archive deadlocked rebuilding its shared index"
+    assert result[0].status_code == 200
+    with acquire_workspace_registry(config, blocking=False):
+        assert "work" not in config.workspaces
+
+
+def test_shared_index_refresh_uses_strict_scan_before_replacement(tmp_path: Path, monkeypatch) -> None:
+    root = tmp_path / "memory-vault"
+    root.mkdir()
+    prior = root / "INDEX.md"
+    prior.write_text("previous complete snapshot\n", encoding="utf-8")
+    runtime = tmp_path / ".runtime"
+    runtime.mkdir()
+    config = type("Config", (), {
+        "vault_root": root,
+        "state_path": runtime / "state.json",
+        "_rerooted": lambda self: False,
+        "ciao_owned_vault_index": lambda self, workspace: True,
+        "vault_index_ownership": lambda self, workspace: "ciao",
+    })()
+
+    def partial_scan(vault, **kwargs):
+        assert kwargs.get("strict") is True
+        raise OSError("vault traversal failed")
+
+    monkeypatch.setattr(vault_index, "scan_vault", partial_scan)
+    with pytest.raises(OSError, match="vault traversal failed"):
+        workspace_archive.refresh_shared_index(config)
+
+    assert prior.read_text(encoding="utf-8") == "previous complete snapshot\n"
+
+
 @pytest.fixture(autouse=True)
 def _isolated(tmp_path, monkeypatch):
     # The search database must be this test's, never the operator's.
@@ -81,6 +138,9 @@ def _config(tmp_path: Path, *, rerooted: bool) -> CiaoConfig:
         roots = {name: f"{name}/memory-vault" for name in ("personal", "work")}
     else:
         roots = {name: f"memory-vault/{name}" for name in ("personal", "work")}
+    from ciao.setup_marker import write_vault_index_ownership
+
+    write_vault_index_ownership(runtime, [tmp_path / "memory-vault"], owner="ciao")
     return CiaoConfig(
         pwa_auth_token="test-token",
         workspace_root=tmp_path,
@@ -677,6 +737,77 @@ def test_workspace_archive_restore_clears_memory_approval(tmp_path):
     assert config.workspaces["work"].memory_approval == {}
 
 
+@pytest.mark.parametrize("mapping_generation,rotated", [(0, False), (1, True)])
+def test_workspace_archive_restore_preserves_folder_shared_brain(tmp_path, mapping_generation, rotated):
+    from ciao.config import SharedBrainLink
+
+    client, config, _pcm, _store = _app(tmp_path, rerooted=True)
+    folder = (tmp_path.parent / f"{tmp_path.name}-drive-team").resolve()
+    folder.mkdir()
+    link = SharedBrainLink(
+        "team", str(folder), f"folder:{folder}", lifetime_id="kept-lifetime", kind="folder",
+        guide_mapping_generation=mapping_generation,
+    )
+    config.workspaces["work"].shared_brains = [link]
+
+    archived_response = client.post("/api/workspaces/work/archive")
+    assert archived_response.status_code == 200
+    archived = archived_response.json()["archived"]
+    restored_response = client.post("/api/workspaces/archived/restore", json={"id": archived["id"]})
+
+    assert restored_response.status_code == 200, restored_response.json()
+    (restored,) = config.workspaces["work"].shared_brains
+    assert restored.kind == "folder"
+    assert (restored.lifetime_id != "kept-lifetime") is rotated
+    assert restored.identity == link.identity and restored.path == link.path
+    assert restored.guide_mapping_generation > mapping_generation
+    assert restored.sharing_policy == "review" and restored.sharing_consent is None
+    assert restored.guide_mapping is None
+
+
+@pytest.mark.parametrize("revoked", [False, True])
+def test_workspace_archive_restore_clears_folder_guide_mapping(tmp_path, revoked):
+    from ciao.config import SharedBrainLink
+    from ciao.shared_brain_guide import ConsentGrant, GuidePin
+    from ciao.shared_brain_mapping import GuideMapping
+
+    client, config, _pcm, _store = _app(tmp_path, rerooted=True)
+    folder = (tmp_path.parent / f"{tmp_path.name}-drive-team").resolve()
+    folder.mkdir()
+    identity = f"folder:{folder}"
+    mapping = GuideMapping(identity, "old-lifetime", 1, GuidePin(identity, 1, "a" * 64), (
+        ConsentGrant("decision", "section", "notes/decisions.md", frozenset({"append"}), "Decisions"),
+    ))
+    config.workspaces["work"].shared_brains = [SharedBrainLink(
+        "team", str(folder), identity, lifetime_id="old-lifetime", kind="folder",
+        guide_mapping_generation=2 if revoked else 1, guide_mapping=None if revoked else mapping,
+    )]
+    archived = client.post("/api/workspaces/work/archive").json()["archived"]
+    response = client.post("/api/workspaces/archived/restore", json={"id": archived["id"]})
+    assert response.status_code == 200, response.json()
+    restored = config.workspaces["work"].shared_brains[0]
+    assert restored.lifetime_id != "old-lifetime"
+    assert restored.guide_mapping is None
+    assert restored.guide_mapping_generation == (3 if revoked else 2)
+
+
+def test_move_back_refuses_archive_metadata_changed_after_claim_snapshot(tmp_path):
+    from ciao import workspace_archive
+
+    client, config, _pcm, _store = _app(tmp_path, rerooted=True)
+    response = client.post("/api/workspaces/work/archive")
+    assert response.status_code == 200
+    archive = response.json()["archived"]
+    folder = workspace_archive._archive_folder(config, archive["id"])
+    metadata = workspace_archive._read_metadata(folder)
+    assert metadata is not None
+    changed = dict(metadata, summary={"changed": True})
+    workspace_archive._write_metadata(folder, changed)
+    with pytest.raises(workspace_archive.WorkspaceArchiveError, match="metadata changed"):
+        workspace_archive.move_back(config, archive["id"], expected_metadata=metadata)
+    assert Path(config.workspace_vault_root("work")).exists() is False
+
+
 def test_workspace_archive_restore_does_not_restore_provider_overrides(tmp_path):
     """Overrides can carry bypass, so a restore comes back on engine defaults."""
     from ciao.workspace_archive import restored_settings
@@ -925,10 +1056,10 @@ def test_restore_registry_save_failure_leaves_the_archive_restorable(
     real_persist = CiaoConfig.persist_workspace_registry
     failing = {"on": True}
 
-    def _disk_full(self: CiaoConfig) -> None:
+    def _disk_full(self: CiaoConfig, **kwargs) -> None:
         if failing["on"]:
             raise OSError(28, "No space left on device")
-        real_persist(self)
+        real_persist(self, **kwargs)
 
     monkeypatch.setattr(CiaoConfig, "persist_workspace_registry", _disk_full)
     refused = client.post("/api/workspaces/archived/restore", json={"id": archived["id"]})
@@ -1012,10 +1143,10 @@ def test_registry_save_failure_on_archive_restores_the_entry_and_the_folder(
     real_persist = CiaoConfig.persist_workspace_registry
     failing = {"on": True}
 
-    def _disk_full(self: CiaoConfig) -> None:
+    def _disk_full(self: CiaoConfig, **kwargs) -> None:
         if failing["on"]:
             raise OSError(28, "No space left on device")
-        real_persist(self)
+        real_persist(self, **kwargs)
 
     monkeypatch.setattr(CiaoConfig, "persist_workspace_registry", _disk_full)
     response = client.post("/api/workspaces/work/archive")
@@ -1043,7 +1174,7 @@ def test_unregister_failure_puts_the_entry_back_in_place(tmp_path, monkeypatch):
     config = _config(tmp_path, rerooted=True)
     order_before = list(config.workspaces)
 
-    def _disk_full(self: CiaoConfig) -> None:
+    def _disk_full(self: CiaoConfig, **kwargs) -> None:
         raise OSError(28, "No space left on device")
 
     monkeypatch.setattr(CiaoConfig, "persist_workspace_registry", _disk_full)
@@ -1103,7 +1234,7 @@ def test_rollback_keeps_archive_json_when_the_schedules_cannot_be_put_back(
     mine = _work_schedule(store)
     before = _tree(tmp_path / "work")
 
-    def _disk_full(self: CiaoConfig) -> None:
+    def _disk_full(self: CiaoConfig, **kwargs) -> None:
         raise OSError(28, "No space left on device")
 
     def _no_put_back(_items):
@@ -1140,7 +1271,7 @@ def test_rollback_removes_archive_json_only_after_the_schedules_are_back(
         seen.append(any(archive_root(config).glob("work-*/archive.json")))
         return real_put_back(items)
 
-    def _disk_full(self: CiaoConfig) -> None:
+    def _disk_full(self: CiaoConfig, **kwargs) -> None:
         raise OSError(28, "No space left on device")
 
     monkeypatch.setattr(CiaoConfig, "persist_workspace_registry", _disk_full)
@@ -1179,7 +1310,7 @@ def test_a_failed_archive_does_not_announce_a_registry_change(tmp_path, monkeypa
     client, _config, pcm, _store = _app(tmp_path, rerooted=True)
     events = _capture_events(monkeypatch, pcm)
 
-    def _disk_full(self: CiaoConfig) -> None:
+    def _disk_full(self: CiaoConfig, **kwargs) -> None:
         raise OSError(28, "No space left on device")
 
     monkeypatch.setattr(CiaoConfig, "persist_workspace_registry", _disk_full)
@@ -1197,8 +1328,8 @@ def test_restore_rechecks_the_name_after_the_folder_move(tmp_path, monkeypatch):
     real_move_back = workspace_archive.move_back
     created = WorkspaceConfig(name="work", vault_root="work/memory-vault", color="green")
 
-    def _move_then_create(cfg, archive_id):
-        result = real_move_back(cfg, archive_id)
+    def _move_then_create(cfg, archive_id, **kwargs):
+        result = real_move_back(cfg, archive_id, **kwargs)
         cfg.workspaces["work"] = created
         return result
 
@@ -1690,15 +1821,16 @@ def test_carry_skips_a_symlink_without_moving_or_following_it(tmp_path):
 
 
 
-def test_archive_restore_carries_shared_brains(tmp_path, monkeypatch):
+def test_archive_restore_rotates_lifetime_and_resets_shared_brain_sharing(tmp_path, monkeypatch):
+    from ciao import shared_brain
     from ciao.config import SharedBrainLink
 
     client, config, _pcm, _store = _app(tmp_path, rerooted=True)
     away = tmp_path.parent / f"brain-away-{tmp_path.name}"
     link = SharedBrainLink(name="notes", path=str(away), identity="github.com/acme/notes")
+    link = shared_brain.set_sharing_policy(link, "automatic")
     config.workspaces["work"].shared_brains = [link]
     archived = client.post("/api/workspaces/work/archive").json()["archived"]
-    from ciao import shared_brain
     original_move_back = workspace_archive.move_back
     restore_claimed: list[bool] = []
 
@@ -1711,8 +1843,15 @@ def test_archive_restore_carries_shared_brains(tmp_path, monkeypatch):
     restored = client.post("/api/workspaces/archived/restore", json={"id": archived["id"]})
 
     assert restored.status_code == 200, restored.json()
-    assert config.workspaces["work"].shared_brains == [link]
-    assert config.workspaces["work"].shared_brains[0].lifetime_id == link.lifetime_id
+    [restored_link] = config.workspaces["work"].shared_brains
+    assert (restored_link.name, restored_link.path, restored_link.identity) == (
+        link.name, link.path, link.identity,
+    )
+    assert restored_link.lifetime_id != link.lifetime_id
+    assert restored_link.sharing_policy == "review"
+    assert restored_link.sharing_generation == link.sharing_generation + 1
+    assert restored_link.sharing_consent is None
+    assert not shared_brain.sharing_consent_active(restored_link)
     assert restore_claimed == [True]
 
 
@@ -1766,10 +1905,10 @@ def test_archive_registry_write_serializes_with_legacy_lifetime_initialization(t
     original_persist = workspaces.persist_workspaces
     original_lock = workspaces.workspace_registry_lock
 
-    def blocking_persist(candidate):
+    def blocking_persist(candidate, **kwargs):
         persist_entered.set()
         assert release_persist.wait(timeout=3)
-        return original_persist(candidate)
+        return original_persist(candidate, **kwargs)
 
     def observe_lock(candidate):
         if threading.current_thread().name == "legacy-lifetime-init":
@@ -1808,3 +1947,363 @@ def test_archive_registry_write_serializes_with_legacy_lifetime_initialization(t
     assert not archive_thread.is_alive() and not initializer.is_alive()
     assert failures == []
     assert "work" not in config.workspaces
+
+
+@pytest.mark.parametrize("expire", [False, True], ids=["wait", "expire-and-retry"])
+def test_archive_waits_for_connected_writer_or_reports_incomplete_cleanup(tmp_path, monkeypatch, expire):
+    import select
+    import subprocess
+    import sys
+    from concurrent.futures import ThreadPoolExecutor
+
+    client, config, _pcm, _store = _app(tmp_path, rerooted=True)
+    runtime = config.state_path.parent
+    work = config.workspace_vault_root("work")
+    personal = config.workspace_vault_root("personal")
+    for name, root in (("work", work), ("personal", personal)):
+        fts_search.lookup_connected_entries(root, name, runtime, tmp_path, refresh=True)
+    database = fts_search.connected_db_path(runtime, work)
+    work_key = fts_search.adopted_vault_key_prefix(work, "work")
+    personal_key = fts_search.adopted_vault_key_prefix(personal, "personal")
+
+    def assert_snapshots(work_present):
+        with fts_search.connected_index_connection(database) as conn:
+            for prefix, present in ((work_key, work_present), (personal_key, True)):
+                assert bool(fts_search.connected_entries(conn, prefix)) == present
+                assert bool(fts_search.search_vault(conn, "quokka", path_prefix=prefix)) == present
+                assert bool(conn.execute("SELECT 1 FROM vault_meta WHERE path LIKE ?",
+                                         (prefix + "%",)).fetchone()) == present
+
+    attempting_delete = threading.Event()
+    original_connect = sqlite3.connect
+
+    def traced_connect(path, *args, **kwargs):
+        conn = original_connect(path, *args, **kwargs)
+        if path == database:
+            conn.set_trace_callback(lambda sql: attempting_delete.set()
+                                    if sql == "BEGIN IMMEDIATE" else None)
+        return conn
+
+    monkeypatch.setattr(sqlite3, "connect", traced_connect)
+    if expire:
+        monkeypatch.setattr(fts_search, "CONNECTED_INDEX_BUSY_SECONDS", 0.1)
+
+    writer_script = """
+import sqlite3, sys
+with sqlite3.connect(sys.argv[1]) as conn:
+    conn.execute("BEGIN IMMEDIATE")
+    print("locked", flush=True)
+    sys.stdin.readline()
+"""
+    with ThreadPoolExecutor(1) as pool, subprocess.Popen(
+        [sys.executable, "-c", writer_script, str(database)],
+        stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True,
+    ) as writer:
+        try:
+            assert select.select([writer.stdout], [], [], 10)[0]
+            assert writer.stdout.readline().strip() == "locked"
+            request = pool.submit(client.post, "/api/workspaces/work/archive")
+            assert attempting_delete.wait(5)
+            if expire:
+                response = request.result(timeout=5)
+                assert response.status_code == 503
+                assert "Connected index busy" in response.json()["error"]
+                assert "was archived" in response.json()["error"]
+                assert response.json()["archived"]["search_rows_removed"] is None
+                archive_id = response.json()["archived"]["id"]
+                assert config.workspace("work") is None
+                assert (archive_root(config) / archive_id / "work/memory-vault/People/work-friend.md").is_file()
+                assert_snapshots(True)
+            else:
+                with pytest.raises(TimeoutError):
+                    request.result(timeout=5.4)
+            writer.communicate(input="release\n", timeout=5)
+        finally:
+            writer.kill()
+        if expire:
+            restored = client.post("/api/workspaces/archived/restore", json={"id": archive_id})
+            assert restored.status_code == 200
+            response = client.post("/api/workspaces/work/archive")
+        else:
+            response = request.result(timeout=10)
+
+    assert response.status_code == 200
+    assert response.json()["archived"]["search_rows_removed"] >= 1
+    assert config.workspace("work") is None
+    assert_snapshots(False)
+
+
+@pytest.mark.parametrize("restore_before_release", [False, True], ids=["archived", "restored"])
+def test_archive_fences_queued_refresh_of_readable_link(tmp_path, monkeypatch, restore_before_release):
+    from concurrent.futures import ThreadPoolExecutor
+    from ciao.config import SharedBrainLink
+
+    install = tmp_path / "install"
+    client, config, _pcm, _store = _app(install, rerooted=True)
+    linked = tmp_path / "external-checkout"
+    linked.mkdir()
+    nested = linked / "notes"
+    nested.mkdir()
+    note = nested / "Meeting.md"
+    note.write_text("# originalword")
+    link = SharedBrainLink(name="team", path=str(linked), identity="github.com/example/team")
+    config.workspaces["work"].shared_brains = [link]
+    config.persist_workspace_registry()
+    runtime = config.state_path.parent
+
+    def refresh(selected=link):
+        return fts_search.lookup_connected_entries(nested, "work", runtime, install, refresh=True, link=selected)
+
+    if restore_before_release:
+        refresh()
+    database = fts_search.connected_db_path(runtime, linked)
+    namespace = fts_search.adopted_vault_key_prefix(nested, "work", link=link)
+    note.write_text("# nextword")
+    read_paths = []
+    original_read = fts_search.read_connected_note
+
+    def capture_read(base, relative):
+        read_paths.append(base / relative)
+        return original_read(base, relative)
+
+    monkeypatch.setattr(fts_search, "read_connected_note", capture_read)
+    queued = threading.Event()
+    release = threading.Event()
+    connect = sqlite3.connect
+
+    def wait_for_writer(sql):
+        if sql == "BEGIN IMMEDIATE" and not queued.is_set():
+            queued.set()
+            assert release.wait(10)
+
+    def traced_connect(path, *args, **kwargs):
+        conn = connect(path, *args, **kwargs)
+        if path == database:
+            conn.set_trace_callback(wait_for_writer)
+        return conn
+
+    monkeypatch.setattr(sqlite3, "connect", traced_connect)
+    with ThreadPoolExecutor(1) as pool:
+        old_request = pool.submit(refresh)
+        try:
+            assert queued.wait(5)
+            archived = client.post("/api/workspaces/work/archive")
+            assert archived.status_code == 200, archived.text
+            archive_id = archived.json()["archived"]["id"]
+            assert note.read_text() == "# nextword"
+            if restore_before_release:
+                restored = client.post("/api/workspaces/archived/restore", json={"id": archive_id})
+                assert restored.status_code == 200, restored.text
+        finally:
+            release.set()
+        with pytest.raises(fts_search.ConnectedWorkspaceChanged):
+            old_request.result(timeout=5)
+
+    assert note not in read_paths
+    with fts_search.connected_index_connection(database) as conn:
+        assert fts_search.connected_entries(conn, namespace) is None
+        assert not fts_search.search_vault(conn, "nextword OR originalword", path_prefix=namespace)
+    if not restore_before_release:
+        with pytest.raises(fts_search.ConnectedWorkspaceChanged):
+            refresh()
+        assert client.post("/api/workspaces/archived/restore", json={"id": archive_id}).status_code == 200
+    with pytest.raises(fts_search.ConnectedWorkspaceChanged):
+        refresh()
+    restored_link = config.workspaces["work"].shared_brains[0]
+    assert restored_link.lifetime_id != link.lifetime_id
+    assert [entry.title for entry in refresh(restored_link)] == ["nextword"]
+
+
+@pytest.mark.parametrize("change", ["archive-restore", "relink"])
+def test_cli_rejects_link_lifetime_change_during_root_selection(tmp_path, monkeypatch, change, capsys):
+    from ciao import cli, config as config_module
+    from ciao.config import SharedBrainLink
+
+    install = tmp_path / "install"
+    client, config, _pcm, _store = _app(install, rerooted=True)
+    linked = tmp_path / "external"
+    linked.mkdir()
+    (linked / "Old.md").write_text("# privateword")
+    work = config.workspaces["work"]
+    work.shared_brains = [SharedBrainLink("team", str(linked), "github.com/example/team")]
+    config.persist_workspace_registry()
+    runtime = config.state_path.parent
+    monkeypatch.setenv("CIAO_WORKSPACE", str(install))
+    monkeypatch.setenv("CIAO_RUNTIME_ROOT", str(runtime))
+    monkeypatch.setenv("CIAO_ACTIVE_WORKSPACE", "work")
+    database = fts_search.connected_db_path(runtime, linked)
+    namespace = fts_search.adopted_vault_key_prefix(linked, "work", link=work.shared_brains[0])
+    original_select = config_module.configured_connected_workspace
+
+    def select_then_change(*args, **kwargs):
+        selected = original_select(*args, **kwargs)
+        assert selected is not None and selected.root == linked
+        if change == "archive-restore":
+            archive = client.post("/api/workspaces/work/archive")
+            assert archive.status_code == 200
+            restored = client.post("/api/workspaces/archived/restore", json={"id": archive.json()["archived"]["id"]})
+            assert restored.status_code == 200
+        else:
+            work.shared_brains = [SharedBrainLink("team", str(linked), "github.com/example/relinked")]
+            config.persist_workspace_registry()
+        return selected
+
+    monkeypatch.setattr(config_module, "configured_connected_workspace", select_then_change)
+    monkeypatch.setattr(fts_search, "read_connected_note", lambda *args: pytest.fail("read obsolete link"))
+    assert cli.main(["vault-search", "privateword", "--vault-root", str(linked)]) == 1
+    assert "Workspace registration changed" in capsys.readouterr().err
+    with fts_search.connected_index_connection(database) as conn:
+        fts_search.init_db(conn)
+        assert fts_search.connected_entries(conn, namespace) is None
+        assert fts_search.search_vault(conn, "privateword", path_prefix=namespace) == []
+
+
+def _hold_registry(runtime, acquired, release):
+    from ciao.workspaces import acquire_registry_at
+    with acquire_registry_at(runtime):
+        acquired.set()
+        assert release.wait(15)
+
+
+def test_other_process_blocks_archive_setup_and_maintenance_before_changes(tmp_path):
+    import multiprocessing
+    from ciao import cli, vault_relocate, workspace_reroot
+    from ciao.workspaces import WorkspaceRegistryBusy
+
+    client, config, _, _ = _app(tmp_path, rerooted=True)
+    config.persist_workspace_registry()
+    runtime = config.state_path.parent
+    registry = runtime / "workspaces.json"
+    before = registry.read_bytes()
+    work = _tree(tmp_path / "work")
+    ctx = multiprocessing.get_context("spawn")
+    acquired, release = ctx.Event(), ctx.Event()
+    peer = ctx.Process(target=_hold_registry, args=(runtime, acquired, release))
+    peer.start()
+    try:
+        assert acquired.wait(10)
+        response = client.post("/api/workspaces/work/archive")
+        assert response.status_code == 409
+        assert "busy" in response.json()["error"]
+        with pytest.raises(WorkspaceRegistryBusy):
+            cli.setup_workspace(tmp_path)
+        assert workspace_reroot.undo(tmp_path, runtime)["reason"] == "workspace registry is busy"
+        assert vault_relocate.undo(config, "work", runtime)["reason"] == "workspace registry is busy"
+        assert _tree(tmp_path / "work") == work
+        assert registry.read_bytes() == before
+        assert not (runtime / "onboarding.json").exists()
+    finally:
+        release.set()
+        peer.join(15)
+    assert peer.exitcode == 0
+
+
+def test_cancel_after_restore_move_finishes_registration_and_releases_claim(tmp_path, monkeypatch):
+    import asyncio
+    from starlette.requests import Request
+    from ciao.workspaces import acquire_workspace_registry
+
+    client, config, _, _ = _app(tmp_path, rerooted=True)
+    archive = client.post("/api/workspaces/work/archive").json()["archived"]
+    original = workspace_archive.move_back
+
+    def cancel_after_move(*args, **kwargs):
+        moved = original(*args, **kwargs)
+        asyncio.current_task().cancel()
+        return moved
+
+    monkeypatch.setattr(workspace_archive, "move_back", cancel_after_move)
+    async def exercise():
+        request = Request({"type": "http", "app": client.app})
+        request._json = {"id": archive["id"]}
+        with pytest.raises(asyncio.CancelledError):
+            await asyncio.create_task(restore_archived_workspace(request))
+
+    asyncio.run(exercise())
+    with acquire_workspace_registry(config):
+        assert "work" in config.workspaces
+        assert "work" in {row["name"] for row in json.loads((config.state_path.parent / "workspaces.json").read_bytes())}
+        assert (tmp_path / "work" / "AGENTS.md").is_file()
+        assert not (archive_root(config) / archive["id"]).exists()
+
+
+def test_cancel_during_owned_worker_keeps_registry_until_worker_finishes(tmp_path):
+    import asyncio
+    from ciao.web.routes_api import _workspace_registry_claim
+    from ciao.workspaces import run_while_claimed
+    from ciao.workspaces import WorkspaceRegistryBusy, acquire_workspace_registry
+
+    _, config, _, _ = _app(tmp_path, rerooted=True)
+    entered, finish = threading.Event(), threading.Event()
+
+    def write():
+        entered.set()
+        assert finish.wait(5)
+        (tmp_path / "worker-finished").touch()
+
+    async def mutate():
+        async with _workspace_registry_claim(config):
+            await run_while_claimed(write)
+
+    async def exercise():
+        task = asyncio.create_task(mutate())
+        try:
+            assert await asyncio.to_thread(entered.wait, 3)
+            for _ in range(2):
+                task.cancel()
+                await asyncio.sleep(0)
+                with pytest.raises(WorkspaceRegistryBusy):
+                    acquire_workspace_registry(config)
+        finally:
+            finish.set()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        with acquire_workspace_registry(config):
+            assert (tmp_path / "worker-finished").exists()
+
+    asyncio.run(exercise())
+
+
+def test_first_folder_guide_preview_expires_on_every_restore(tmp_path):
+    from ciao.config import SharedBrainLink
+    from ciao.web.routes_api import workspace_shared_brain_guide_mapping
+
+    client, config, _, _ = _app(tmp_path / "install", rerooted=True)
+    folder = tmp_path / "team"
+    folder.mkdir()
+    guide = {"version": 1, "scope": "Decisions", "exclusions": [], "types": {
+        "decision": {"kind": "section", "path": "notes/decisions.md", "section": "Decisions", "operation": "append"}}}
+    (folder / "CIAO-CONTENT-GUIDE.md").write_text("```ciao-guide\n" + json.dumps(guide) + "\n```\n")
+    link = SharedBrainLink("team", str(folder), f"folder:{folder}", kind="folder")
+    config.workspaces["work"].shared_brains = [link]
+    config.persist_workspace_registry()
+    route = "/api/workspaces/{name}/shared-brains/{brain}/guide-mapping"
+    client.app.router.routes.append(Route(route, workspace_shared_brain_guide_mapping, methods=["GET", "POST"]))
+    endpoint = "/api/workspaces/work/shared-brains/team/guide-mapping"
+
+    def preview():
+        response = client.get(endpoint)
+        assert response.status_code == 200, response.text
+        view = response.json()
+        assert view["pin"] and view["mapping_mode"] == "review"
+        assert config.workspace("work").shared_brains[0].sharing_policy == "review"
+        return {key: view[key] for key in ("identity", "lifetime", "pin", "generation")}
+
+    def restore():
+        response = client.post("/api/workspaces/work/archive")
+        assert response.status_code == 200, response.text
+        response = client.post("/api/workspaces/archived/restore", json={"id": response.json()["archived"]["id"]})
+        assert response.status_code == 200, response.text
+
+    for generation in (0, 1):
+        before = preview()
+        assert before["generation"] == generation
+        restore()
+        response = client.post(endpoint, json={**before, "types": ["decision"]})
+        assert response.status_code == 409 and response.json()["code"] == "mapping_changed"
+        assert config.workspace("work").shared_brains[0].guide_mapping is None
+        assert preview() == {**before, "generation": generation + 1}
+    assert client.post(endpoint, json={**preview(), "types": ["decision"]}).status_code == 200
+    assert client.post(endpoint, json={**preview(), "types": []}).status_code == 200
+    restore()
+    assert preview()["lifetime"] != link.lifetime_id

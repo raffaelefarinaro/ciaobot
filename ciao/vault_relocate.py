@@ -394,7 +394,7 @@ def _registry_has_workspace(runtime_root: Path, workspace: str) -> bool:
 
 
 def _repoint_registry(
-    runtime_root: Path, workspace: str, config: Any
+    runtime_root: Path, workspace: str, config: Any, *, owner: Any
 ) -> tuple[list[dict[str, Any]] | None, list[dict[str, Any]] | None]:
     """Point one workspace's registry entry at its new vault_root.
 
@@ -415,8 +415,9 @@ def _repoint_registry(
     for entry in entries:
         if isinstance(entry, dict) and str(entry.get("name", "")) == workspace:
             entry["vault_root"] = stored
-    _write_registry(runtime_root, entries)
+    _write_registry(runtime_root, entries, owner=owner)
 
+    config._workspace_registry_bytes = owner.current
     workspace_config = config.workspace(workspace)
     if workspace_config is not None:
         workspace_config.vault_root = stored
@@ -430,13 +431,36 @@ def apply(
     *,
     plan_result: RelocationPlan | None = None,
 ) -> dict[str, Any]:
+    from ciao.workspaces import acquire_registry_at, WorkspaceRegistryBusy
+    try:
+        with acquire_registry_at(runtime_root) as owner:
+            return _apply_owned(config, workspace, runtime_root, plan_result=plan_result, owner=owner)
+    except WorkspaceRegistryBusy as exc:
+        return {"status": "refused", "reason": str(exc)}
+
+
+def _apply_owned(
+    config: Any,
+    workspace: str,
+    runtime_root: Path,
+    *,
+    plan_result: RelocationPlan | None = None,
+    owner: Any,
+) -> dict[str, Any]:
     """Move one workspace's vault to its standard folder, and repoint the registry.
 
     Refuses before touching anything if the plan refuses, or a tracked file
     under the source has uncommitted changes (so ``git mv`` in reverse stays a
     working undo). On a mid-run failure, rolls back every move already made.
     """
-    result = plan_result if plan_result is not None else plan(config, workspace)
+    result = plan(config, workspace)
+    if plan_result is not None and plan_result != result:
+        return {"status": "refused", "refusals": ["vault relocation plan changed"]}
+    from ciao.workspaces import ensure_registry_current, WorkspaceRegistryConflict
+    try:
+        ensure_registry_current(config)
+    except WorkspaceRegistryConflict as exc:
+        return {"status": "refused", "refusals": [str(exc)]}
     payload = result.as_dict()
     payload["recorded_at"] = datetime.now(UTC).isoformat().replace("+00:00", "Z")
 
@@ -465,6 +489,20 @@ def apply(
         ]
         payload["receipt_path"] = str(_write_receipt(runtime_root, workspace, payload))
         return payload
+
+    if getattr(config, "_workspace_registry_bytes", None) is not None:
+        from ciao.workspaces import WorkspaceRegistryConflict, ensure_registry_current  # noqa: PLC0415
+
+        try:
+            ensure_registry_current(config)
+        except WorkspaceRegistryConflict:
+            payload["status"] = "refused"
+            payload["refusals"] = [
+                "the workspace registry changed since it was loaded; nothing "
+                "was moved. Reload and retry the relocation."
+            ]
+            payload["receipt_path"] = str(_write_receipt(runtime_root, workspace, payload))
+            return payload
 
     # The move is about to happen; if the result cannot be persisted, refuse
     # before touching anything rather than moving files nothing can find
@@ -601,9 +639,11 @@ def apply(
         except OSError:
             pass
 
+    from ciao.workspaces import WorkspaceRegistryConflict  # noqa: PLC0415
+
     try:
-        registry_before, registry_after = _repoint_registry(runtime_root, workspace, config)
-    except OSError as exc:
+        registry_before, registry_after = _repoint_registry(runtime_root, workspace, config, owner=owner)
+    except (OSError, WorkspaceRegistryConflict) as exc:
         # The registry couldn't be read at all before any move ran (see the
         # earlier _registry_has_workspace refusal), but a write failure here
         # (permissions, disk full) shows up only now, with the vault already
@@ -659,7 +699,19 @@ def apply(
         registry_error: str | None = None
         if registry_before is not None:
             try:
-                _write_registry(runtime_root, registry_before)
+                from ciao.workspaces import restore_registry_entries  # noqa: PLC0415
+
+                if not restore_registry_entries(
+                    runtime_root,
+                    [row for row in registry_before if row.get("name") == workspace],
+                    [row for row in (registry_after or []) if row.get("name") == workspace],
+                    owner=owner, fields=("vault_root",),
+                ):
+                    raise OSError("no authoritative post-relocation registry snapshot")
+                config._workspace_registry_bytes = owner.current
+                prior = next(row for row in registry_before if row.get("name") == workspace)
+                config.workspace(workspace).vault_root = prior.get("vault_root", workspace)
+                config._normalize_workspace_vault_roots()
             except OSError as registry_exc:
                 registry_error = str(registry_exc)
         refusals = [f"could not persist the relocation receipt: {exc}"]
@@ -705,7 +757,7 @@ def apply(
     return payload
 
 
-def undo(config: Any, workspace: str, runtime_root: Path) -> dict[str, Any]:
+def _undo_locked(config: Any, workspace: str, runtime_root: Path, *, owner: Any) -> dict[str, Any]:
     """Reverse the last completed relocation for one workspace, exactly.
 
     CLI only, same as ``workspace_reroot.undo``: there is no housekeeping
@@ -748,7 +800,52 @@ def undo(config: Any, workspace: str, runtime_root: Path) -> dict[str, Any]:
             "status": "refused",
             "reason": "the current workspace registry is missing or corrupt; nothing was undone",
         }
+    def target_root(rows):
+        if not isinstance(rows, list):
+            return None
+        roots = [row.get("vault_root", workspace) for row in rows if isinstance(row, dict) and row.get("name") == workspace]
+        return roots[0] if len(roots) == 1 else None
+
+    if not isinstance(target_root(receipt.get("registry_before")), str):
+        return {"status": "refused", "reason": "original registry target is missing from the relocation receipt"}
+    recorded_root = target_root(receipt.get("registry_after"))
+    if not isinstance(recorded_root, str) or target_root(current_registry) != recorded_root:
+        return {"status": "refused", "reason": "workspace registry target changed since relocation"}
+    loaded_current = config._workspace_registry_bytes == owner.current
     registry_before_undo = json.loads(json.dumps(current_registry))
+    after = receipt.get("registry_after")
+    expected_entry = next(
+        (
+            entry for entry in (after or [])
+            if isinstance(entry, dict)
+            and str(entry.get("name", "")) == workspace
+        ),
+        None,
+    )
+    current_entry = next(
+        (
+            entry for entry in registry_before_undo
+            if isinstance(entry, dict)
+            and str(entry.get("name", "")) == workspace
+        ),
+        None,
+    )
+    if expected_entry is None or current_entry is None:
+        return {
+            "status": "refused",
+            "reason": (
+                "the relocation receipt has no authoritative post-relocation "
+                "registry row; refusing to move files. Repair the receipt by hand."
+            ),
+        }
+    if current_entry.get("vault_root") != expected_entry.get("vault_root"):
+        return {
+            "status": "refused",
+            "reason": (
+                "the workspace's vault_root changed since the relocation; "
+                "nothing was moved. Reload and retry the undo."
+            ),
+        }
     reversed_moves: list[str] = []
     already: list[str] = []
     applied_entries = receipt.get("applied", [])
@@ -847,11 +944,19 @@ def undo(config: Any, workspace: str, runtime_root: Path) -> dict[str, Any]:
     )
     if prior_entry is not None:
         prior_vault_root = prior_entry.get("vault_root", workspace)
-        for entry in current_registry:
-            if isinstance(entry, dict) and str(entry.get("name", "")) == workspace:
-                entry["vault_root"] = prior_vault_root
         try:
-            _write_registry(runtime_root, current_registry)
+            from ciao.workspaces import restore_registry_entries  # noqa: PLC0415
+
+            if not restore_registry_entries(
+                runtime_root,
+                [prior_entry],
+                [expected_entry],
+                owner=owner,
+                fields=("vault_root",),
+            ):
+                raise OSError(
+                    "workspace registry row changed after undo preflight"
+                )
         except OSError as exc:
             rollback_error = None
             for entry in reversed(receipt.get("applied", [])):
@@ -862,22 +967,21 @@ def undo(config: Any, workspace: str, runtime_root: Path) -> dict[str, Any]:
                     code, out = run_git(install_root, "mv", entry["source"], entry["destination"])
                     if code != 0:
                         rollback_error = out
-            try:
-                _write_registry(runtime_root, registry_before_undo)
-            except OSError as registry_exc:
-                rollback_error = str(registry_exc)
             reason = f"could not restore the workspace registry: {exc}"
             if rollback_error:
                 reason += f"; rollback also failed: {rollback_error}"
             return {
-                "status": "refused",
+                "status": "failed",
                 "reason": reason,
                 "reversed": [],
                 "already_reversed": already,
             }
+        if loaded_current:
+            config._workspace_registry_bytes = owner.current
         workspace_config = config.workspace(workspace)
         if workspace_config is not None and prior_vault_root is not None:
             workspace_config.vault_root = prior_vault_root
+            config._normalize_workspace_vault_roots()
 
     # Deleting the receipt is what makes the reverse *complete* rather than
     # merely applied: `read_receipt` then answers "no", so an "After this update"
@@ -892,3 +996,14 @@ def undo(config: Any, workspace: str, runtime_root: Path) -> dict[str, Any]:
         "restart_required": True,
         "restart_note": "the running Ciaobot server must restart via Settings -> Restart before writing more notes",
     }
+
+
+def undo(config: Any, workspace: str, runtime_root: Path) -> dict[str, Any]:
+    """Acquire the registry claim once and hold it through the undo."""
+    from ciao.workspaces import WorkspaceRegistryBusy, acquire_registry_at  # noqa: PLC0415
+
+    try:
+        with acquire_registry_at(runtime_root) as owner:
+            return _undo_locked(config, workspace, runtime_root, owner=owner)
+    except WorkspaceRegistryBusy as exc:
+        return {"status": "refused", "reason": str(exc)}

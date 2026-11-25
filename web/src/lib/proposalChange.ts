@@ -117,6 +117,15 @@ export function changeFor(
   opts: { canAccept: boolean; fallbackQualifier?: string } = { canAccept: true },
 ): ProposalChange {
   const fallback = opts.fallbackQualifier ?? ''
+  if (row.kind === 'share') {
+    return {
+      type: preview?.blocked_reason ? 'blocked' : 'update',
+      label: preview?.blocked_reason ? 'Cannot publish yet' : 'Shared note',
+      verb: '',
+      destination: preview ? `${preview.brain || 'Shared brain'}/${preview.path || ''}` : '',
+      qualifier: preview?.branch ? `Review before publishing · ${preview.branch}` : 'Review before publishing',
+    }
+  }
   if (row.kind === 'skill') {
     // "Improve", never "New": the skill the finding is about already exists, so
     // "New skill" described a task the proposal does not ask for.
@@ -142,7 +151,7 @@ export function changeFor(
     return { type: 'blocked', label: 'Cannot save yet', verb: '', destination, qualifier: '' }
   }
   if (op === 'add') {
-    const creates = preview.action === 'write_people_note' || (!region && !preview.before.trim())
+    const creates = preview.action === 'write_people_note' || (!region && !(preview.before ?? '').trim())
     if (creates) {
       return { type: 'new', label: 'New note', verb: 'Create note', destination, qualifier: 'does not exist yet' }
     }

@@ -27,7 +27,9 @@ def _git(root: Path, *args: str) -> str:
 
 
 def _config(tmp_path: Path, workspaces: dict[str, str]) -> CiaoConfig:
+    registry = tmp_path / ".runtime" / "workspaces.json"
     return CiaoConfig(
+        _workspace_registry_bytes=registry.read_bytes() if registry.exists() else None,
         pwa_auth_token="test-token",
         workspace_root=tmp_path,
         state_path=tmp_path / ".runtime" / "state.json",
@@ -48,6 +50,104 @@ def _git_install(tmp_path: Path) -> Path:
     (install / ".runtime").mkdir()
     (install / ".gitignore").write_text(".runtime/\n", encoding="utf-8")
     return install
+
+
+def test_repoint_registry_holds_lock_through_read_modify_write(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import sys
+    import time
+    from types import SimpleNamespace
+
+    install = _git_install(tmp_path)
+    runtime = install / ".runtime"
+    registry = runtime / "workspaces.json"
+    registry.write_text(json.dumps([
+        {"name": "personal", "vault_root": "old-personal"},
+        {"name": "work", "vault_root": "work/memory-vault"},
+    ]), encoding="utf-8")
+    ready = tmp_path / "relocation-registrar-ready"
+    script = """
+import fcntl, json, os, sys
+runtime, ready = sys.argv[1:3]
+lock = os.path.join(runtime, "locks", "workspaces-registry.lock")
+fd = os.open(lock, os.O_RDWR | os.O_CREAT, 0o600)
+open(ready, "w").write("ready")
+fcntl.flock(fd, fcntl.LOCK_EX)
+path = os.path.join(runtime, "workspaces.json")
+rows = json.load(open(path))
+for row in rows:
+    if row.get("name") == "work":
+        row["shared_brains"] = [{
+            "name": "team", "path": "/tmp/team", "identity": "github.com/example/team",
+        }]
+tmp = path + ".tmp"
+with open(tmp, "w") as stream:
+    stream.write(json.dumps(rows))
+os.replace(tmp, path)
+fcntl.flock(fd, fcntl.LOCK_UN)
+os.close(fd)
+"""
+    registrar: subprocess.Popen[bytes] | None = None
+    original_read = vault_relocate._read_registry
+
+    def read_with_registrar(runtime_root: Path):
+        nonlocal registrar
+        entries = original_read(runtime_root)
+        registrar = subprocess.Popen(
+            [sys.executable, "-c", script, str(runtime_root), str(ready)]
+        )
+        deadline = time.monotonic() + 5
+        while not ready.exists() and time.monotonic() < deadline:
+            time.sleep(0.02)
+        assert ready.exists()
+        time.sleep(0.2)
+        assert registrar.poll() is None, "relocation registry lock was not held"
+        return entries
+
+    monkeypatch.setattr(vault_relocate, "_read_registry", read_with_registrar)
+    config = SimpleNamespace(
+        stored_workspace_vault_root=lambda workspace: "personal/memory-vault",
+        workspace=lambda workspace: None,
+    )
+
+    from ciao.workspaces import acquire_registry_at
+    with acquire_registry_at(runtime) as owner:
+        before, after = vault_relocate._repoint_registry(runtime, "personal", config, owner=owner)
+
+    assert registrar is not None
+    assert registrar.wait(timeout=5) == 0
+    rows = json.loads(registry.read_text(encoding="utf-8"))
+    by_name = {row["name"]: row for row in rows}
+    assert by_name["personal"]["vault_root"] == "personal/memory-vault"
+    assert by_name["work"]["shared_brains"][0]["path"] == "/tmp/team"
+    assert before is not None and after is not None
+
+
+def test_apply_refuses_before_first_move_when_registry_changed(
+    tmp_path: Path,
+) -> None:
+    install, config = _shared_root_install(tmp_path)
+    runtime = install / ".runtime"
+    registry = runtime / "workspaces.json"
+    config._workspace_registry_bytes = registry.read_bytes()
+    rows = json.loads(registry.read_text(encoding="utf-8"))
+    for row in rows:
+        if row["name"] == "other":
+            row["shared_brains"] = [{
+                "name": "team",
+                "path": str(tmp_path / "team"),
+                "identity": "github.com/example/team",
+            }]
+    registry.write_text(json.dumps(rows), encoding="utf-8")
+    source = install / "memory-vault" / "People" / "Peter.md"
+
+    result = apply(config, "scandit", runtime)
+
+    assert result["status"] == "refused"
+    assert any("registry changed" in reason for reason in result["refusals"])
+    assert source.is_file()
+    assert not (install / "scandit" / "memory-vault" / "People" / "Peter.md").exists()
 
 
 def _commit_all(install: Path, message: str = "seed") -> None:
@@ -94,6 +194,38 @@ def _shared_root_install(tmp_path: Path, *, symlink: bool = False) -> tuple[Path
         {"scandit": str(vault_root), "other": "memory-vault/other"},
     )
     return install, config
+
+
+def test_legacy_registry_missing_vault_root_round_trips(tmp_path: Path) -> None:
+    install, config = _shared_root_install(tmp_path)
+    runtime = install / ".runtime"
+    registry = runtime / "workspaces.json"
+    rows = json.loads(registry.read_text(encoding="utf-8"))
+    rows[0].pop("vault_root")
+    registry.write_text(json.dumps(rows), encoding="utf-8")
+    config._workspace_registry_bytes = registry.read_bytes()
+    result = apply(config, "scandit", runtime)
+    assert result["status"] == "relocated", result
+    assert undo(config, "scandit", runtime)["status"] == "undone"
+    assert json.loads(registry.read_text(encoding="utf-8")) == rows
+    assert config.workspace("scandit").vault_root == "memory-vault/scandit"
+    assert (install / "memory-vault/People/Peter.md").is_file()
+
+
+def test_legacy_registry_receipt_failure_restores_absent_field(tmp_path: Path, monkeypatch) -> None:
+    install, config = _shared_root_install(tmp_path)
+    runtime = install / ".runtime"
+    registry = runtime / "workspaces.json"
+    rows = json.loads(registry.read_text(encoding="utf-8"))
+    rows[0].pop("vault_root")
+    registry.write_text(json.dumps(rows), encoding="utf-8")
+    config._workspace_registry_bytes = registry.read_bytes()
+    monkeypatch.setattr(vault_relocate, "_write_receipt", lambda *a, **k: (_ for _ in ()).throw(OSError("receipt failed")))
+    result = apply(config, "scandit", runtime)
+    assert result["status"] == "refused"
+    assert json.loads(registry.read_text(encoding="utf-8")) == rows
+    assert config.workspace("scandit").vault_root == "memory-vault/scandit"
+    assert (install / "memory-vault/People/Peter.md").is_file()
 
 
 def test_plan_classifies_shared_root_entries(tmp_path: Path) -> None:
@@ -261,6 +393,68 @@ def test_undo_preserves_registry_changes_made_after_the_relocation(tmp_path: Pat
     assert any(e["name"] == "newcomer" for e in after)
 
 
+def test_undo_preserves_same_workspace_link_added_before_undo(
+    tmp_path: Path,
+) -> None:
+    install, config = _shared_root_install(tmp_path)
+    runtime = install / ".runtime"
+    applied = apply(config, "scandit", runtime)
+    assert applied["status"] == "relocated"
+    registry_path = runtime / "workspaces.json"
+    entries = json.loads(registry_path.read_text(encoding="utf-8"))
+    scandit = next(entry for entry in entries if entry["name"] == "scandit")
+    scandit["shared_brains"] = [{
+        "name": "team",
+        "path": str(tmp_path / "team"),
+        "identity": "github.com/example/team",
+    }]
+    registry_path.write_text(json.dumps(entries, indent=2) + "\n", encoding="utf-8")
+
+    result = undo(config, "scandit", runtime)
+
+    assert result["status"] == "undone", result
+    after = json.loads(registry_path.read_text(encoding="utf-8"))
+    restored = next(entry for entry in after if entry["name"] == "scandit")
+    assert restored["vault_root"] == str(install / "memory-vault")
+    assert restored["shared_brains"][0]["path"] == str(tmp_path / "team")
+    assert (install / "memory-vault" / "People" / "Peter.md").is_file()
+    assert not receipt_path(runtime, "scandit").exists()
+
+
+def test_undo_keeps_receipt_and_files_when_registry_changes_after_preflight(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    install, config = _shared_root_install(tmp_path)
+    runtime = install / ".runtime"
+    applied = apply(config, "scandit", runtime)
+    assert applied["status"] == "relocated"
+    registry_path = runtime / "workspaces.json"
+    real_git = vault_relocate.run_git
+    injected = {"done": False}
+
+    def git_with_concurrent_edit(root: Path, *args: str):
+        code, out = real_git(root, *args)
+        if not injected["done"] and args[:1] == ("mv",):
+            injected["done"] = True
+            rows = json.loads(registry_path.read_text(encoding="utf-8"))
+            for row in rows:
+                if row["name"] == "scandit":
+                    row["vault_root"] = "elsewhere/scandit"
+            registry_path.write_text(json.dumps(rows), encoding="utf-8")
+        return code, out
+
+    monkeypatch.setattr(vault_relocate, "run_git", git_with_concurrent_edit)
+    result = undo(config, "scandit", runtime)
+
+    assert result["status"] == "failed"
+    assert "registry" in result["reason"].lower()
+    assert receipt_path(runtime, "scandit").is_file()
+    assert (install / "memory-vault" / "scandit" / "People" / "Peter.md").is_file()
+    rows = json.loads(registry_path.read_text(encoding="utf-8"))
+    scandit = next(row for row in rows if row["name"] == "scandit")
+    assert scandit["vault_root"] == "elsewhere/scandit"
+
+
 def test_apply_refuses_when_workspace_is_missing_from_the_registry(tmp_path: Path) -> None:
     """A registry that cannot record the new location must not lose the vault.
 
@@ -319,6 +513,32 @@ def _pinned_install(tmp_path: Path) -> tuple[Path, CiaoConfig]:
     _commit_all(install)
     config = _config(tmp_path / "install", {"personal": str(legacy)})
     return install, config
+
+
+@pytest.mark.parametrize("receipt_failure", [False, True])
+def test_loaded_legacy_sibling_restores_effective_root(tmp_path: Path, monkeypatch, receipt_failure: bool) -> None:
+    install = _git_install(tmp_path)
+    legacy = install / "scandit"
+    (legacy / "People").mkdir(parents=True)
+    (legacy / "People" / "Peter.md").write_text("# Peter\n", encoding="utf-8")
+    (legacy / "MEMORY.md").write_text("# Memory\n", encoding="utf-8")
+    _write_registry(install, [{"name": "scandit"}])
+    _commit_all(install)
+    runtime = install / ".runtime"
+    registry = runtime / "workspaces.json"
+    config = CiaoConfig.from_env({"PWA_AUTH_TOKEN": "x", "CIAO_WORKSPACE": str(install), "CIAO_RUNTIME_ROOT": str(runtime)})
+    assert config.workspace_vault_root("scandit") == legacy
+    if receipt_failure:
+        monkeypatch.setattr(vault_relocate, "_write_receipt", lambda *a, **k: (_ for _ in ()).throw(OSError("receipt failed")))
+    result = apply(config, "scandit", runtime)
+    if receipt_failure:
+        assert result["status"] == "refused", result
+    else:
+        assert result["status"] == "relocated", result
+        assert undo(config, "scandit", runtime)["status"] == "undone"
+    assert json.loads(registry.read_text(encoding="utf-8")) == [{"name": "scandit"}]
+    assert config.workspace_vault_root("scandit") == legacy
+    assert (legacy / "People/Peter.md").read_text(encoding="utf-8") == "# Peter\n"
 
 
 def test_plan_treats_an_unrelated_path_as_the_whole_directory(tmp_path: Path) -> None:
@@ -453,7 +673,8 @@ def test_apply_rolls_back_moves_when_the_registry_cannot_be_written(
     def _boom(*args, **kwargs):
         raise OSError("disk full")
 
-    monkeypatch.setattr(vault_relocate, "_write_registry", _boom)
+    from ciao.workspaces import WorkspaceRegistryOwnership
+    monkeypatch.setattr(WorkspaceRegistryOwnership, "replace", _boom)
 
     result = apply(config, "scandit", runtime)
 
@@ -545,6 +766,26 @@ def test_apply_reports_a_failed_partial_move_rollback(
     assert any("rollback also failed" in r for r in result["refusals"]), result["refusals"]
 
 
+def test_receipt_failure_restores_owned_registry_without_reacquiring_claim(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import threading
+
+    install, config = _shared_root_install(tmp_path)
+    runtime = install / ".runtime"
+    registry = runtime / "workspaces.json"
+    before = json.loads(registry.read_text(encoding="utf-8"))
+    monkeypatch.setattr(vault_relocate, "_write_receipt", lambda *a, **k: (_ for _ in ()).throw(OSError("receipt failed")))
+    results = []
+    worker = threading.Thread(target=lambda: results.append(apply(config, "scandit", runtime)), daemon=True)
+    worker.start()
+    worker.join(5)
+    assert not worker.is_alive(), "receipt recovery deadlocked on the registry claim"
+    assert results[0]["status"] == "refused"
+    assert json.loads(registry.read_text(encoding="utf-8")) == before
+    assert (install / "memory-vault" / "People" / "Peter.md").is_file()
+
+
 def test_apply_survives_a_failing_registry_restore_after_a_receipt_failure(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -564,24 +805,19 @@ def test_apply_survives_a_failing_registry_restore_after_a_receipt_failure(
     def _receipt_boom(*args, **kwargs):
         raise OSError("disk full")
 
-    registry_writes = {"n": 0}
-    real_write_registry = vault_relocate._write_registry
-
     def _registry_boom_after_repoint(*args, **kwargs):
-        # The FIRST registry write (the repoint inside _repoint_registry)
-        # succeeds; any later one (the compensation restore) fails, as it
-        # would under a persistent disk-full condition.
-        if registry_writes["n"] > 0:
-            raise OSError("disk full persists")
-        registry_writes["n"] += 1
-        return real_write_registry(*args, **kwargs)
+        # The repoint already succeeded through the locked read-modify-write
+        # path; the later compensation restore fails as under disk-full.
+        raise OSError("disk full persists")
 
     monkeypatch.setattr(
         vault_relocate,
         "_write_receipt",
         lambda *a, **k: (_ for _ in ()).throw(OSError("receipt dir unwritable")),
     )
-    monkeypatch.setattr(vault_relocate, "_write_registry", _registry_boom_after_repoint)
+    monkeypatch.setattr(
+        "ciao.workspaces.restore_registry_entries", _registry_boom_after_repoint
+    )
 
     result = apply(config, "scandit", runtime)
 

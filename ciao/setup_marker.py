@@ -21,9 +21,16 @@ drives the catch-up grace).
 
 from __future__ import annotations
 
+import json
 import logging
+import os
+import tempfile
+from collections.abc import Iterator, Sequence
+from contextlib import contextmanager
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+
+from ciao.os_support.locks import lock_exclusive, lock_shared, unlock
 
 logger = logging.getLogger(__name__)
 
@@ -39,6 +46,7 @@ RUNTIME_DIR_NAME = ".runtime"
 # Ciaobot workspace" means. The marker below is only written on a first-time
 # setup, and a `.env` is not specific to Ciaobot.
 WORKSPACE_REGISTRY_FILENAME = "workspaces.json"
+VAULT_INDEX_OWNERSHIP_FILENAME = "vault-index-ownership.json"
 
 
 def is_set_up_workspace(root: Path) -> bool:
@@ -91,6 +99,163 @@ def read_setup_vault_mode(runtime_root: Path) -> str:
         return "scratch"
     mode = lines[1].strip().lower() if len(lines) > 1 else ""
     return mode if mode in VAULT_MODES else "scratch"
+
+
+class VaultIndexOwnershipUnreadable(OSError):
+    """The persisted ownership map exists but is not a complete valid document."""
+
+
+@contextmanager
+def vault_index_ownership_lock(
+    runtime_root: Path, *, exclusive: bool = True, blocking: bool = True,
+) -> Iterator[None]:
+    """Serialize ownership updates and readers that need a stable snapshot."""
+    runtime_root.mkdir(parents=True, exist_ok=True)
+    lock_path = runtime_root / ".vault-index-ownership.lock"
+    fd = os.open(lock_path, os.O_RDWR | os.O_CREAT, 0o600)
+    try:
+        (lock_exclusive if exclusive else lock_shared)(fd, blocking=blocking)
+        yield
+    finally:
+        unlock(fd)
+        os.close(fd)
+
+
+def _read_vault_index_ownership_strict(runtime_root: Path) -> dict[str, str]:
+    path = runtime_root / VAULT_INDEX_OWNERSHIP_FILENAME
+    try:
+        raw = path.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        return {}
+    except UnicodeDecodeError as exc:
+        raise VaultIndexOwnershipUnreadable(
+            None, f"ownership map is not valid UTF-8: {path}"
+        ) from exc
+    except OSError as exc:
+        raise VaultIndexOwnershipUnreadable(
+            getattr(exc, "errno", None),
+            f"ownership map is unreadable: {path}",
+        ) from exc
+    try:
+        payload = json.loads(raw)
+    except (json.JSONDecodeError, TypeError, ValueError) as exc:
+        raise VaultIndexOwnershipUnreadable(
+            getattr(exc, "errno", None), f"ownership map is truncated or malformed: {path}"
+        ) from exc
+    rows = payload.get("roots") if isinstance(payload, dict) else None
+    if not isinstance(rows, list):
+        raise VaultIndexOwnershipUnreadable(
+            None, f"ownership map has no roots list: {path}"
+        )
+    recorded: dict[str, str] = {}
+    for row in rows:
+        if (
+            not isinstance(row, dict)
+            or not isinstance(row.get("path"), str)
+            or not row["path"]
+            or row.get("owner") not in {"ciao", "external"}
+        ):
+            raise VaultIndexOwnershipUnreadable(
+                None, f"ownership map has an invalid row: {path}"
+            )
+        recorded[row["path"]] = row["owner"]
+    return recorded
+
+
+def _atomic_write_vault_index_ownership(
+    path: Path, recorded: dict[str, str],
+) -> None:
+    payload = {
+        "roots": [
+            {"path": recorded_path, "owner": recorded_owner}
+            for recorded_path, recorded_owner in sorted(recorded.items())
+        ]
+    }
+    fd, temp_name = tempfile.mkstemp(
+        prefix=".vault-index-ownership-", suffix=".tmp", dir=path.parent,
+    )
+    temp = Path(temp_name)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8", newline="") as stream:
+            stream.write(json.dumps(payload, sort_keys=True) + "\n")
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temp, path)
+        dir_fd = os.open(path.parent, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+        try:
+            os.fsync(dir_fd)
+        finally:
+            os.close(dir_fd)
+    finally:
+        try:
+            temp.unlink()
+        except FileNotFoundError:
+            pass
+
+
+def write_vault_index_ownership(
+    runtime_root: Path, vault_roots: Sequence[Path], *, owner: str,
+) -> Path:
+    """Persist setup's authority for each aggregate index destination."""
+    if owner not in {"ciao", "external"}:
+        raise ValueError("vault index owner must be ciao or external")
+    runtime_root.mkdir(parents=True, exist_ok=True)
+    with vault_index_ownership_lock(runtime_root):
+        path = runtime_root / VAULT_INDEX_OWNERSHIP_FILENAME
+        if path.exists():
+            _read_vault_index_ownership_strict(runtime_root)
+        _atomic_write_vault_index_ownership(
+            path,
+            {str(root.expanduser().resolve()): owner for root in vault_roots},
+        )
+    return path
+
+
+def record_vault_index_ownership(
+    runtime_root: Path, root: Path, *, owner: str,
+) -> Path:
+    """Record one explicit ownership decision without dropping other rows."""
+    if owner not in {"ciao", "external"}:
+        raise ValueError("vault index owner must be ciao or external")
+    runtime_root.mkdir(parents=True, exist_ok=True)
+    with vault_index_ownership_lock(runtime_root):
+        path = runtime_root / VAULT_INDEX_OWNERSHIP_FILENAME
+        recorded = _read_vault_index_ownership_strict(runtime_root)
+        recorded[str(Path(root).expanduser().resolve())] = owner
+        _atomic_write_vault_index_ownership(path, recorded)
+    return path
+
+
+def read_vault_index_ownership_status(
+    runtime_root: Path,
+) -> tuple[dict[str, str], bool]:
+    """The persisted rows and whether the map may be trusted.
+
+    Missing is trusted-but-empty (legacy ambiguity for the caller to decide).
+    A truncated, malformed, invalid-UTF-8 or unreadable map is untrusted and
+    yields no grants.
+    """
+    if not runtime_root.is_dir():
+        return {}, True
+    try:
+        with vault_index_ownership_lock(runtime_root, exclusive=False):
+            return _read_vault_index_ownership_strict(runtime_root), True
+    except OSError:
+        return {}, False
+
+
+def read_vault_index_ownership(runtime_root: Path) -> dict[str, str]:
+    """Return the persisted ownership rows, or no grants when unreadable."""
+    return read_vault_index_ownership_status(runtime_root)[0]
+
+
+def read_vault_index_owned_roots(runtime_root: Path) -> frozenset[str]:
+    """Return Ciao-owned index paths from setup's persisted ownership map."""
+    return frozenset(
+        path
+        for path, owner in read_vault_index_ownership(runtime_root).items()
+        if owner == "ciao"
+    )
 
 
 def read_setup_marker(runtime_root: Path) -> datetime | None:

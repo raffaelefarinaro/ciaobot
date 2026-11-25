@@ -1382,6 +1382,27 @@ exclusively: an existing note is `note_exists`, never overwritten. The search
 index is not refreshed; `vault_search` indexes on every query. Tests:
 `tests/test_note_create.py`, `tests/test_agent_surface.py`.
 
+### Drafting a shared-brain note: `note_share`
+
+`ciao note share --path RELATIVE.md --body-file FILE [--brain NAME]` is the
+managed path from an active foreground chat turn to one private shared-brain
+proposal. The control plane requires an attributable chat and typed current
+turn before reading the body, opens the file beneath that workspace's vault through a
+descriptor walk, and reads at most 65,537 bytes off-loop. The exact bytes go to
+`share_proposals.draft_share` with an idempotency key derived from the chat,
+durable turn identity, requested destination and body digest; the filer infers create versus
+replace from its pinned upstream snapshot. The response contains the queued
+state and canonical review path. The provider bearer is chat-scoped and reused
+across turns so ACP sessions, background shells and subagents can keep working;
+the server cannot distinguish an earlier retained caller from the current
+foreground caller during a typed turn. Treat every queued draft as untrusted
+until a human approves that individual proposal in the review flow. The final
+atomic queue replacement shares a per-stream lock with Stop and stream
+completion, so whichever acquires it first defines whether the proposal was
+queued before the turn ended. This command never accepts or publishes the
+proposal and never writes to the shared checkout. Tests:
+`tests/test_shared_brain_share_op.py`, `tests/test_agent_surface.py`.
+
 `ciao memory-audit` reads one file and skips the vault scan, so the daily
 `system-memory-curation` schedule can afford to call it and fix what it finds.
 `--with-vault` adds the note-aging pass (still informational, never changes the

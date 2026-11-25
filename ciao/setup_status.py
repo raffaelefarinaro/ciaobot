@@ -163,6 +163,47 @@ _ICLOUD_FINDER_KEYS = {
     "documents": "FXICloudDriveDocuments",
 }
 
+# A provider folder mounted outside the home directory, such as
+# /Volumes/GoogleDrive or /media/<user>/Dropbox. Home-relative detection below
+# cannot see these because the path is not under the home directory at all.
+_SYNC_VOLUME_PARENTS = frozenset({"volumes", "mnt", "media", "gvfs"})
+
+
+def _provider_label(component: str) -> str | None:
+    """The sync service named by a path component, ignoring spaces and case."""
+    compact = "".join(component.split()).casefold()
+    for prefix, label in _MAC_CLOUD_STORAGE_PREFIXES:
+        if compact.startswith("".join(prefix.split()).casefold()):
+            return label
+    return None
+
+
+def _provider_volume_location(path: Path) -> str | None:
+    """Best-effort label for a provider-named mount outside home.
+
+    This improves user-facing sync warnings and is defense-in-depth for
+    callers that prefer to avoid synced staging. It is not a security proof:
+    an arbitrarily named sync directory can still hold the path, so callers
+    that must not lose a race publish from an open descriptor rather than
+    trusting a pathname.
+    """
+    forms = [path.absolute()]
+    try:
+        forms.append(path.resolve())
+    except (OSError, RuntimeError):
+        pass
+    for candidate in forms:
+        parts = candidate.parts
+        folded = [part.casefold() for part in parts]
+        for index in range(1, len(parts)):
+            label = _provider_label(parts[index])
+            if label is None:
+                continue
+            parents = folded[max(0, index - 2):index]
+            if any(parent in _SYNC_VOLUME_PARENTS for parent in parents):
+                return label
+    return None
+
 
 def cloud_synced_location(
     path: Path | str,
@@ -176,6 +217,9 @@ def cloud_synced_location(
     platform = platform or sys.platform
     home = home if home is not None else Path.home()
     target = Path(path).expanduser()
+    volume_service = _provider_volume_location(target)
+    if volume_service:
+        return volume_service
     parts = _parts_under(target, home)
     if not parts:
         return None

@@ -58,11 +58,12 @@ async def _drain(stream: Any) -> None:
 async def test_stop_on_a_late_turn_sends_cancel_once_and_clears_late_state(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
+    release = tmp_path / "release-late-update"
     _config, calls = _install(
         monkeypatch, tmp_path,
         prompts=[{"steps": [_late_text("first")]}],
         after_prompt=[_late_text("late words")],
-        after_prompt_delay_ms=20,
+        after_prompt_release_file=str(release),
         spec_quiet_period_s=30,
     )
     manager = _make_manager(tmp_path / "mgr")
@@ -80,6 +81,10 @@ async def test_stop_on_a_late_turn_sends_cancel_once_and_clears_late_state(
         await _wait_for(lambda: stream.done)
         await _wait_for(lambda: manager._streaming.has_live_drain(chat.chat_id))
         provider = manager._providers[chat.chat_id].provider
+        await _wait_for(lambda: any(call["method"] == "late_update_waiting" for call in read_calls(calls)))
+        assert provider.background_work_outstanding is False
+        assert provider._session is not None and provider._session.turn_running is False
+        release.touch()
         await _wait_for(lambda: provider.background_work_outstanding)
 
         assert await asyncio.wait_for(manager.stop_chat(chat.chat_id), timeout=10) is True
