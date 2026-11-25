@@ -299,6 +299,14 @@ starting vault instead of the generic `_fixture`: `IsolatedEngine.boot` and
 the setup template generated, so the vault holds exactly the seed's files. The seed is the
 task overlay, so its one-line guide lands at `ws/personal/AGENTS.md`. Nothing is booted by
 the tests; whether the seed guide lets `curation-begin` plan is not yet verified.
+`budget_continuation` boots with a tight budget (`CONTINUATION_BUDGET`, one item) so attempt 1
+settles with work left. The harness sets it through `IsolatedEngine.boot(ciao_flags=...)`: a
+`ciao` shim in the engine's own workdir, first on its `PATH`, appends `--max-items 1` to
+`ciao curation-begin`. Neither the vault nor a product setting carries it, so a note write
+cannot throttle or break production curation, and `build_record` takes the budget the run used
+(`workload_sha256` binds it). Whether the provider's shell keeps the shim first on `PATH` is
+not yet verified by a live run; if it does not, attempt 1 completes and the run is
+`Unavailable`, never graded.
 
 The record assembler (`ciao/care_eval_record.py`) turns one closed schedule-run outcome,
 the seed manifest and the observations into one `MeasurementRecord` through `public_record`.

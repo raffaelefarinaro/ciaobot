@@ -12,27 +12,21 @@ Boots an engine process when :func:`boot_care` is called; the tests replace
 
 from __future__ import annotations
 
-import json
 from datetime import date
 from pathlib import Path
 
 from ciao import care_eval_seed as seed
-from ciao.curation_run import BUDGET_RELATIVE, DEFAULT_MAX_SECONDS
+from ciao.care_eval_scenario import CONTINUATION_BUDGET
+from ciao.curation_run import DEFAULT_MAX_SECONDS
 from ciao.task_eval import EvalTask, IsolatedEngine
 from ciao.task_eval_contract import Scenario
 
 OVERLAY_DIRNAME = "overlay"
 EMPTY_VAULT_DIRNAME = "empty-vault"
-# One item per run: the continuation scenario's first attempt takes one key and
-# defers the rest, so attempt 2 has something to resume.
-TIGHT_MAX_ITEMS = 1
 
-
-def write_tight_budget(vault: Path, max_items: int) -> None:
-    """Write the vault's curation budget file, which ``ciao curation-begin`` reads by default."""
-    path = vault / BUDGET_RELATIVE
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps({"max_items": max_items}) + "\n", encoding="utf-8", newline="\n")
+def continuation_flags() -> dict[str, tuple[str, ...]]:
+    """The flags the harness adds to ``ciao curation-begin`` for ``budget_continuation``."""
+    return {"curation-begin": ("--max-items", str(CONTINUATION_BUDGET.max_items))}
 
 
 def seed_overlay(scenario: Scenario, root: Path, *, dispatch_date: date) -> seed.SeedManifest:
@@ -71,23 +65,20 @@ def boot_care(
     dispatch_date: date,
     scratch: Path,
     mode: str | None = None,
-    max_items: int | None = None,
 ) -> IsolatedEngine:
     """Boot one isolated engine on the scenario's seed, with no fixture vault.
 
     ``scratch`` is a caller-owned directory that must not already hold a seed.
     The seed and the empty vault are written there before the boot; the engine
-    copies them into its own throwaway workspace. ``budget_continuation`` boots with
-    a ``TIGHT_MAX_ITEMS`` budget so its first attempt settles with work left;
-    ``max_items`` sets one for any scenario.
+    copies them into its own throwaway workspace. ``budget_continuation`` boots with a
+    ``ciao`` shim on the engine's PATH that adds ``CONTINUATION_BUDGET``'s ``--max-items`` to
+    ``curation-begin``, so its first attempt settles with work left. The budget lives in the
+    engine's own workdir, never in the vault, so no note or agent write can change it and the
+    product has no read path for it; the other scenarios run under the built-in budget.
     """
     scratch.mkdir(parents=True, exist_ok=True)
     overlay = scratch / OVERLAY_DIRNAME
     seed_overlay(scenario, overlay, dispatch_date=dispatch_date)
-    if max_items is None and scenario == "budget_continuation":
-        max_items = TIGHT_MAX_ITEMS
-    if max_items is not None:
-        write_tight_budget(overlay / seed.VAULT_DIRNAME, max_items)
     empty = scratch / EMPTY_VAULT_DIRNAME
     empty.mkdir(exist_ok=True)
     return IsolatedEngine.boot(
@@ -96,4 +87,5 @@ def boot_care(
         model=model,
         mode=mode,
         vault_fixture=empty,
+        ciao_flags=continuation_flags() if scenario == "budget_continuation" else None,
     )
