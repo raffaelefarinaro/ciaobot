@@ -6202,11 +6202,18 @@ class ProjectChatManager:
         pairs = self._shared_brain_pairs(chat, project)
         if not pairs:
             return "", ""
+        record = self._config.workspace(project.workspace) if project is not None else None
+        links = {link.path: link for link in (getattr(record, "shared_brains", None) or [])}
         brains: list[tuple[str, str, bool, str]] = []
         fingerprint: list[str] = []
         for name, path in pairs:
-            unavailable = bool(shared_brain.path_problem(self._config, path))
-            fetched = "" if unavailable else (shared_brain.fetched_at(path) or "")[:10]
+            link = links.get(path)
+            unavailable = link is None or bool(shared_brain.link_problem(self._config, link))
+            fetched = (
+                (shared_brain.fetched_at(path) or "")[:10]
+                if not unavailable and link is not None and link.kind == "git"
+                else ""
+            )
             brains.append((name, path, unavailable, fetched))
             fingerprint.append(f"{name}\0{path}\0{'unavailable' if unavailable else 'ok'}")
         return render_shared_brain_block(brains), "\n".join(fingerprint)

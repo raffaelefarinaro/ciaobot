@@ -433,6 +433,26 @@ def apply(
     runtime_root: Path,
     *,
     primary: str,
+    source_config: Any = None,
+) -> dict[str, Any]:
+    from ciao.workspaces import acquire_registry_at, WorkspaceRegistryBusy
+    try:
+        with acquire_registry_at(runtime_root) as owner:
+            if source_config is not None and owner.current != getattr(source_config, "_workspace_registry_bytes", None):
+                return {"status": "refused", "refusals": ["workspace registry changed before migration"]}
+            return _apply_owned(install_root, vault_root, workspaces, runtime_root, primary=primary, owner=owner)
+    except WorkspaceRegistryBusy as exc:
+        return {"status": "refused", "reason": str(exc)}
+
+
+def _apply_owned(
+    install_root: Path,
+    vault_root: Path,
+    workspaces: list[str],
+    runtime_root: Path,
+    *,
+    primary: str,
+    owner: Any,
 ) -> dict[str, Any]:
     """Re-root every registered workspace, or none of them.
 
@@ -458,6 +478,15 @@ def apply(
     install_root = Path(install_root).resolve()
     vault_root = Path(vault_root).resolve()
     runtime_root = Path(runtime_root)
+
+    if owner.current is not None:
+        try:
+            rows = json.loads(owner.current)
+            names = [str(row["name"]) for row in rows]
+        except (ValueError, KeyError, TypeError):
+            names = []
+        if not names or sorted(names) != sorted(workspaces):
+            return {"status": "refused", "refusals": ["workspace registry changed before migration"]}
 
     # Before anything else, because everything else assumes it: the moves are
     # `git mv` and the undo is `git checkout`. An install with no repository used
@@ -658,7 +687,7 @@ def apply(
         # every entry still names memory-vault/<name> while the directory now lives
         # at <name>/memory-vault, so the vault resolves to a path that is gone. The
         # before-image goes in the receipt so undo restores it exactly.
-        registry_before, registry_after = _rewrite_registry(runtime_root, result)
+        registry_before, registry_after = _rewrite_registry(runtime_root, result, owner=owner)
         payload["registry_before"] = registry_before
         payload["registry_after"] = registry_after
 
@@ -766,7 +795,7 @@ def apply(
         refusals = [f"migration failed after moving files: {exc}"]
         if registry_before is not None:
             try:
-                _write_registry(runtime_root, registry_before)
+                _write_registry(runtime_root, registry_before, owner=owner)
             except Exception as restore_exc:  # noqa: BLE001 - surfaced, never swallowed
                 refusals.append(
                     "the workspace registry could not be restored either "
@@ -831,6 +860,15 @@ def _replace_across_filesystems(source: Path, destination: Path) -> None:
 
 
 def undo(install_root: Path, runtime_root: Path) -> dict[str, Any]:
+    from ciao.workspaces import acquire_registry_at, WorkspaceRegistryBusy
+    try:
+        with acquire_registry_at(runtime_root) as owner:
+            return _undo_owned(install_root, runtime_root, owner=owner)
+    except WorkspaceRegistryBusy as exc:
+        return {"status": "refused", "reason": str(exc)}
+
+
+def _undo_owned(install_root: Path, runtime_root: Path, *, owner: Any) -> dict[str, Any]:
     """Reverse a completed re-rooting to a byte-identical tree.
 
     CLI only. Reverting the architecture is not a housekeeping button, and the
@@ -858,6 +896,14 @@ def undo(install_root: Path, runtime_root: Path) -> dict[str, Any]:
     receipt = read_receipt(runtime_root)
     if receipt is None:
         return {"status": "nothing_to_undo", "reason": "no migrated receipt"}
+
+    if "registry_before" in receipt or receipt.get("applied"):
+        try:
+            current = json.loads(owner.current) if owner.current is not None else None
+        except ValueError:
+            return {"status": "refused", "reason": "workspace registry is unreadable"}
+        if current != receipt.get("registry_after"):
+            return {"status": "refused", "reason": "workspace registry changed since migration"}
 
     try:
         schedule_restore = _prepare_schedule_prompt_restore(
@@ -983,7 +1029,7 @@ def undo(install_root: Path, runtime_root: Path) -> dict[str, Any]:
 
     before = receipt.get("registry_before")
     if before is not None:
-        _write_registry(runtime_root, before)
+        _write_registry(runtime_root, before, owner=owner)
 
     if schedule_restore is not None:
         try:
@@ -1169,17 +1215,14 @@ def registry_file(runtime_root: Path) -> Path:
     return Path(runtime_root) / "workspaces.json"
 
 
-def _write_registry(runtime_root: Path, entries: list[dict[str, Any]]) -> None:
-    """Persist the registry atomically, preserving key order and unknown keys."""
-    path = registry_file(runtime_root)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_suffix(".json.tmp")
-    tmp.write_text(json.dumps(entries, indent=2) + "\n", encoding="utf-8", newline="")
-    tmp.replace(path)
+def _write_registry(runtime_root: Path, entries: list[dict[str, Any]], *, owner: Any) -> None:
+    if owner.path != registry_file(runtime_root).resolve():
+        raise ValueError("registry owner belongs to another runtime")
+    owner.replace((json.dumps(entries, indent=2) + "\n").encode(), expected=owner.current)
 
 
 def _rewrite_registry(
-    runtime_root: Path, result: RerootPlan
+    runtime_root: Path, result: RerootPlan, *, owner: Any
 ) -> tuple[list[dict[str, Any]] | None, list[dict[str, Any]] | None]:
     """Point every migrated workspace's ``vault_root`` at its new agent root.
 
@@ -1206,7 +1249,7 @@ def _rewrite_registry(
         destination = destinations.get(str(entry.get("name", "")))
         if destination:
             entry["vault_root"] = destination
-    _write_registry(runtime_root, entries)
+    _write_registry(runtime_root, entries, owner=owner)
     return before, entries
 
 
@@ -2804,7 +2847,7 @@ def migrate_if_needed(config: Any) -> dict[str, Any]:
         return {"status": "not_applicable", "reason": "the vault is the install folder, kept in place"}
 
     try:
-        outcome = apply(install_root, vault_root, names, runtime_root, primary=primary)
+        outcome = apply(install_root, vault_root, names, runtime_root, primary=primary, source_config=config)
     except Exception as exc:  # noqa: BLE001 — see the docstring
         logger.exception("re-root: apply failed")
         return {"status": "error", "reason": str(exc)}
@@ -2877,6 +2920,27 @@ class RepairItem:
 
 
 def repair(
+    install_root: Path,
+    runtime_root: Path,
+    workspaces: list[str],
+    *,
+    shared_sources: Path | None = None,
+    db_path: Path | None = None,
+) -> dict[str, Any]:
+    from ciao.workspaces import acquire_registry_at, registry_rows, WorkspaceRegistryConflict
+    try:
+        with acquire_registry_at(runtime_root) as owner:
+            if owner.current is not None:
+                rows = registry_rows(json.loads(owner.current))
+                if sorted(row.get("name", "") for row in rows) != sorted(workspaces):
+                    raise WorkspaceRegistryConflict("workspace selection changed before repair")
+            return _repair_owned(install_root, runtime_root, workspaces,
+                                 shared_sources=shared_sources, db_path=db_path)
+    except (WorkspaceRegistryConflict, ValueError) as exc:
+        return {"status": "refused", "repaired": [], "reported": [], "errors": [{"error": str(exc)}]}
+
+
+def _repair_owned(
     install_root: Path,
     runtime_root: Path,
     workspaces: list[str],

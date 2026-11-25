@@ -1008,13 +1008,14 @@ curl -sS -b /tmp/ciao.jar -X DELETE "http://localhost:${PWA_PORT:-8443}/api/chat
 # nothing. Each workspace also reports shared_brains ([{name, path, identity}],
 # always present, [] when none): the Git checkouts it links as shared brains.
 # Operator-only: set it with the same PATCH and a whole-list body such as
-# {"shared_brains": [{"path": "<absolute path>", "name": "<optional name>"}]}.
-# [] removes all. At most 5; each path must be an existing checkout with an
-# origin remote, and no two may be the same repository. A bad row is a 400 that
+# {"shared_brains": [{"path": "<absolute path>", "name": "<optional name>", "kind": "folder"}]}.
+# [] removes all. At most 5; Git paths must be checkouts with an origin remote;
+# folder paths must be accessible ordinary directories. Duplicate roots are
+# refused. A bad row is a 400 that
 # saves nothing. A save that omits the key keeps them. Removing one row deletes
 # only that link; the folder and the vault are untouched. Each newly added path
-# gets one update right away; then a background loop fast-forwards each clean
-# checkout every 30 minutes. Each workspace also reports provider_overrides
+# Git path gets one update right away; then a background loop fast-forwards each
+# clean checkout every 30 minutes. Folder links are never passed to Git. Each workspace also reports provider_overrides
 # ({provider: {model, thinking, permission_mode, insights_model}}, sparse,
 # {} when none): this workspace's overrides of the Settings -> Providers
 # defaults for new chats and schedule runs on that provider. Empty or missing

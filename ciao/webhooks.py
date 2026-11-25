@@ -61,6 +61,7 @@ Automations UI, and the CLI/skills/recipes that would describe all of it.
 from __future__ import annotations
 
 import errno
+import builtins
 import hashlib
 import hmac
 import json
@@ -1005,7 +1006,9 @@ class WebhookStore:
                 self._write(records)
             return revoked
 
-    def rename_workspace(self, old: str, new: str) -> int:
+    def rename_workspace(
+        self, old: str, new: str, *, undo: builtins.list[tuple[bytes, bytes]] | None = None
+    ) -> int:
         """Point every trigger filed under ``old`` at ``new``.
 
         The trigger keeps its id, verifier and enabled state; only
@@ -1031,7 +1034,12 @@ class WebhookStore:
                 )
                 renamed += 1
             if renamed:
-                self._write(records)
+                before = self._path.read_bytes() if undo is not None else None
+                try:
+                    self._write(records)
+                finally:
+                    if undo is not None and before is not None:
+                        undo.append((before, self._path.read_bytes()))
             return renamed
 
     # -- authenticating ---------------------------------------------------
