@@ -626,6 +626,22 @@ async def _op_note_create(
     )
 
 
+async def _op_note_share(
+    service: CiaoMcpService, path: str, body_file: str, brain: str = ""
+) -> dict[str, Any]:
+    """Queue a note draft for a human to review in a linked shared brain.
+
+    The exact body travels as a file inside this workspace's vault, never as a
+    shell argument. Filing requires a user-typed chat turn and returns a
+    canonical review link; it does not publish or change a checkout.
+    """
+    return await service._invoke(
+        "note_share",
+        lambda cp, p: cp.note_share(p, path=path, body_file=body_file, brain=brain),
+        mutating=True,
+    )
+
+
 async def _op_projects_list(service: CiaoMcpService, include_completed: bool = False) -> dict[str, Any]:
     """List projects in the active workspace."""
     return await service._invoke("projects_list", lambda cp, p: cp.projects_list(p, include_completed))
@@ -1640,6 +1656,7 @@ OPERATIONS: tuple[Operation, ...] = (
     Operation("verify_note", _WRITE, _op_verify_note.__doc__ or "", _op_verify_note),
     Operation("note_related", _READ, _op_note_related.__doc__ or "", _op_note_related),
     Operation("note_create", _WRITE, _op_note_create.__doc__ or "", _op_note_create),
+    Operation("note_share", _WRITE, _op_note_share.__doc__ or "", _op_note_share),
     Operation("projects_list", _READ, _op_projects_list.__doc__ or "", _op_projects_list),
     Operation("project_get", _READ, _op_project_get.__doc__ or "", _op_project_get),
     Operation("project", _WRITE, _op_project.__doc__ or "", _op_project),
