@@ -88,7 +88,6 @@ from typing import Any, Callable, Iterator, Protocol
 from ciao.os_support.files import open_fd, replace_file
 from ciao.os_support.locks import lock_exclusive, unlock
 from ciao.os_support.private import (
-    is_private,
     is_private_descriptor_strict,
     make_private_dir,
     mkstemp_private,
@@ -113,6 +112,9 @@ _NONCE_BYTES = 32
 #: File-backed store schema. A document with any other schema is corrupt and is
 #: refused rather than read as an empty authority.
 SCHEMA_VERSION = 1
+
+#: Directory opens for the root checks and the post-rename durability flush.
+_DIRECTORY_FLAGS = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
 
 
 class ConnectorKind(str, Enum):
@@ -147,9 +149,9 @@ class StoreError(Exception):
     """The protected store could not be read, verified or written.
 
     ``reason`` is one of ``corrupt``, ``unsafe_root``, ``unsafe_store``,
-    ``wrong_resource`` or ``invalid_record``. The authority engine turns every
-    one of them into ``store_unavailable``: a store it cannot prove is healthy
-    supplies no authority.
+    ``wrong_resource``, ``invalid_record`` or ``durability_unavailable``. The
+    authority engine turns every one of them into ``store_unavailable``: a
+    store it cannot prove is healthy and durable supplies no authority.
     """
 
     def __init__(self, reason: str) -> None:
@@ -467,11 +469,15 @@ class ProtectedAuthorityStore:
     ``root`` is injected. The directory is restricted to its owner (``0700``)
     and the one document to ``0600``; it must sit outside member-editable notes,
     but that placement is the integration owner's decision, not this module's.
-    Reads use an atomic replace's guarantee and verify the descriptor is private
-    before reading it. Writes take an interprocess ``flock`` as well as a
-    thread lock, re-read the document under the lock, apply one condition, and
-    replace it atomically. A missing document is "no authority yet"; a
-    malformed or unsafe one is refused.
+    Every read and write opens the directory by descriptor and runs the strict
+    owner/mode/platform-ACL verifier before trusting it; a mode-private
+    directory that still carries an ACL grant is refused. Reads use an atomic
+    replace's guarantee and verify the document descriptor the same way.
+    Writes take an interprocess ``flock`` as well as a thread lock, re-read the
+    document under the lock, apply one condition, replace it atomically and
+    ``fsync`` the containing directory so the committed generation survives a
+    crash. A missing document is "no authority yet"; a malformed, unsafe or
+    not-durable one is refused.
     """
 
     def __init__(self, root: str | os.PathLike[str]) -> None:
@@ -483,11 +489,12 @@ class ProtectedAuthorityStore:
             make_private_dir(self._root)
         except OSError:
             raise StoreError("unsafe_root") from None
-        if not self._root.is_dir() or self._root.is_symlink() or not is_private(self._root):
+        if not self._root.is_dir() or self._root.is_symlink():
             raise StoreError("unsafe_root")
         self._path = self._root / "authority.json"
         self._lock_path = self._root / "authority.lock"
         self._thread_lock = threading.Lock()
+        self._require_private_root()
 
     def load(self, brain: str) -> AuthorityRecord | None:
         return self._read_records().get(brain)
@@ -532,9 +539,51 @@ class ProtectedAuthorityStore:
         ):
             raise StoreError("invalid_record")
 
+    def _private_root_fd(self) -> int:
+        """An open root descriptor that passed the strict owner/mode/ACL check."""
+        try:
+            descriptor = open_fd(
+                self._root, _DIRECTORY_FLAGS, follow_symlinks=False
+            )
+        except OSError:
+            raise StoreError("unsafe_root") from None
+        try:
+            try:
+                private = is_private_descriptor_strict(descriptor)
+            except OSError:
+                raise StoreError("unsafe_root") from None
+            if not private:
+                raise StoreError("unsafe_root")
+        except BaseException:
+            os.close(descriptor)
+            raise
+        return descriptor
+
+    def _require_private_root(self) -> None:
+        descriptor = self._private_root_fd()
+        os.close(descriptor)
+
+    def _fsync_root(self) -> None:
+        """Flush the directory entry of the just-replaced document.
+
+        The document itself was flushed before the rename; this makes the
+        rename durable. Failure is reported, never swallowed: the caller must
+        treat the committed generation as unconfirmed and reconcile it by a
+        fresh read rather than claim a durable transition.
+        """
+        descriptor = self._private_root_fd()
+        try:
+            try:
+                os.fsync(descriptor)
+            except OSError:
+                raise StoreError("durability_unavailable") from None
+        finally:
+            os.close(descriptor)
+
     @contextmanager
     def _locked(self) -> Iterator[None]:
         with self._thread_lock:
+            self._require_private_root()
             try:
                 descriptor = open_private(
                     self._lock_path,
@@ -559,6 +608,7 @@ class ProtectedAuthorityStore:
                 os.close(descriptor)
 
     def _read_records(self) -> dict[str, AuthorityRecord]:
+        self._require_private_root()
         try:
             descriptor = open_fd(self._path, os.O_RDONLY, follow_symlinks=False)
         except FileNotFoundError:
@@ -615,6 +665,7 @@ class ProtectedAuthorityStore:
         return records
 
     def _write_records(self, records: dict[str, AuthorityRecord]) -> None:
+        self._require_private_root()
         document = {
             "schema": SCHEMA_VERSION,
             "brains": {
@@ -632,6 +683,7 @@ class ProtectedAuthorityStore:
                 handle.flush()
                 os.fsync(handle.fileno())
             replace_file(temporary, self._path)
+            self._fsync_root()
         finally:
             temporary.unlink(missing_ok=True)
 

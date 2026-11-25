@@ -13,6 +13,7 @@ privileged transition, which is the fail-closed answer.
 
 from __future__ import annotations
 
+import errno
 import hashlib
 import hmac
 import json
@@ -1654,6 +1655,70 @@ def test_the_protected_store_is_private_and_conditional(tmp_path: Path) -> None:
     with pytest.raises(StoreError) as skipped:
         store.replace_if_generation(_record("dave", 4), 2)
     assert skipped.value.reason == "invalid_record"
+
+
+def test_the_store_refuses_a_directory_acl_grant(tmp_path: Path, monkeypatch) -> None:
+    from ciao.os_support import private
+
+    monkeypatch.setattr(private, "_acl_grants_another_account", lambda fd: True)
+    with pytest.raises(StoreError) as refused:
+        ProtectedAuthorityStore(tmp_path / "authority")
+    assert refused.value.reason == "unsafe_root"
+
+
+def test_the_store_refuses_a_directory_acl_grant_after_creation(tmp_path: Path, monkeypatch) -> None:
+    from ciao.os_support import private
+
+    store = ProtectedAuthorityStore(tmp_path / "authority")
+    assert store.create_if_absent(_record()) is True
+    monkeypatch.setattr(private, "_acl_grants_another_account", lambda fd: True)
+
+    with pytest.raises(StoreError) as read_refusal:
+        store.load("brain-a")
+    assert read_refusal.value.reason == "unsafe_root"
+    with pytest.raises(StoreError) as write_refusal:
+        store.create_if_absent(_record(steward="carol"))
+    assert write_refusal.value.reason == "unsafe_root"
+
+
+def test_the_store_flushes_the_directory_after_the_atomic_replace(tmp_path: Path, monkeypatch) -> None:
+    store = ProtectedAuthorityStore(tmp_path / "authority")
+    calls: list[tuple[bool, bool]] = []
+    original = os.fsync
+
+    def spy(descriptor: int) -> None:
+        mode = os.fstat(descriptor).st_mode
+        calls.append((stat.S_ISDIR(mode), stat.S_ISREG(mode)))
+        original(descriptor)
+
+    monkeypatch.setattr(os, "fsync", spy)
+    assert store.create_if_absent(_record()) is True
+    file_call = next(index for index, call in enumerate(calls) if call == (False, True))
+    directory_call = next(index for index, call in enumerate(calls) if call == (True, False))
+    assert file_call < directory_call
+
+
+def test_a_failed_directory_fsync_leaves_the_generation_readable_for_recovery(
+    tmp_path: Path, monkeypatch
+) -> None:
+    store = ProtectedAuthorityStore(tmp_path / "authority")
+    original = os.fsync
+
+    def fail_directory(descriptor: int) -> None:
+        if stat.S_ISDIR(os.fstat(descriptor).st_mode):
+            raise OSError(errno.EIO, "directory fsync failed")
+        original(descriptor)
+
+    monkeypatch.setattr(os, "fsync", fail_directory)
+    with pytest.raises(StoreError) as refused:
+        store.create_if_absent(_record())
+    assert refused.value.reason == "durability_unavailable"
+    monkeypatch.setattr(os, "fsync", original)
+
+    # The rename may have landed even though the durability confirmation did
+    # not. The caller gets an error, and a fresh read can reconcile the
+    # committed generation instead of claiming the transition never happened.
+    assert store.load("brain-a") == _record()
 
 
 def test_the_store_refuses_a_world_readable_document(tmp_path: Path) -> None:
