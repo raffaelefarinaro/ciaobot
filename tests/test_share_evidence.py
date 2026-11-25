@@ -1068,6 +1068,87 @@ def test_care_witness_binds_exact_preview_revision_and_revocation(tmp_path: Path
     assert se.care_snapshot_witnesses(config, workspace="home", project_id=project.project_id, relative_path=relative, revision=revision) == []
 
 
+@pytest.mark.parametrize("cycle", [False, True])
+def test_care_checkpoint_stages_only_completed_exact_witness_and_replays_once(tmp_path: Path, cycle: bool) -> None:
+    from ciao import curation_cycle, curation_share
+
+    config, manager, project, _source = _memory_manager(tmp_path)
+    project.vault_folder = "alpha"
+    vault = Path(config.workspace_vault_root("home"))
+    directory = vault / "projects" / "active" / "alpha"
+    directory.mkdir(parents=True)
+    (vault / "Workspace").mkdir(parents=True, exist_ok=True)
+    if cycle:
+        state = curation_cycle.CycleState(
+            cycle_id="c2-" + "0" * 24,
+            prior_marker=curation_cycle.MarkerIdentity(kind="absent", sha256=None),
+            required={}, optional={}, carried=(), legacy_historical={}, daily={},
+            lease={}, last_run={}, pending=None,
+        )
+        curation_run.state_path(vault).write_text(curation_cycle.encode_state(state), encoding="utf-8")
+    config.workspace("home").shared_brains = [SharedBrainLink(
+        name="notes", path=str(tmp_path / "brain"), identity="team", lifetime_id="brain_lifetime_fixed01")]
+    se._reset_project_manager_for_tests()
+    se.bind_project_manager(manager)
+    document = directory / se.DOCUMENT_NAME
+    text = "## Decision\nDecision: Launch\nEffective date: 2026-11-20\n"
+    document.write_text(text, encoding="utf-8")
+    preview = se.preview(config, workspace="home", brain_name="notes", project_id=project.project_id,
+        project_name="Alpha", project_dir=directory, source_id=se.DOCUMENT_SOURCE, grant_type="snapshot",
+        field_mask=["decision"], producers=["nightly_curation"], entry_index=0, session="operator-one")
+    grant = se.confirm(config, workspace="home", token=preview["preview_token"], session="operator-one")["grant"]
+    relative = document.relative_to(vault).as_posix()
+    key = curation_run.item_key(curation_run.PASS_STALE_NOTE, relative)
+    target = curation_run.StaleNoteTarget(relative_path=relative, revision=se._digest(text.encode()))
+    item = curation_run.WorklistItem(pass_id=curation_run.PASS_STALE_NOTE, label="note", reason="due", keys=(key,), target=target)
+    lease = curation_share.begin(config, workspace="home", chat_id="care", token_id="token", dispatch_id="dispatch", ttl_s=600)
+    curation_run.record_plan(vault, holder=lease.holder, plan=curation_run.lease_plan(
+        curation_run.RunPlan(planned=(item,), deferred=(), budget=curation_run.RunBudget())))
+    args = dict(workspace="home", chat_id="care", token_id="token", dispatch_id="dispatch", holder=lease.holder, key=key)
+    assert curation_share.checkpoint(config, manager, **args) == 0
+    subprocess.run([
+        sys.executable, "-c",
+        "import sys; from pathlib import Path; from ciao.curation_run import record_done; "
+        "record_done(Path(sys.argv[1]), [sys.argv[3]], holder=sys.argv[2])",
+        str(vault), lease.holder, key,
+    ], check=True)
+    assert curation_share.checkpoint(config, manager, **{**args, "dispatch_id": "foreign"}) == 0
+    assert curation_share.checkpoint(config, manager, **args) == 1
+    assert curation_share.checkpoint(config, manager, **args) == 1
+    manager._save()
+    restarted = ProjectChatManager(
+        config, state_store=StateStore(config.state_path, config.workspace_root, config.media_root),
+        transcript_store=TranscriptStore(config.state_path.parent, config.workspace_root / "transcripts"),
+        path=config.state_path.parent / "web_projects.json",
+    )
+    se._reset_project_manager_for_tests()
+    se.bind_project_manager(restarted)
+    from ciao.control_plane import AgentPrincipal, CiaoControlPlane, ControlPlaneError
+
+    plane = CiaoControlPlane(config, project_chat_manager=restarted, schedule_manager=SimpleNamespace())
+    principal = AgentPrincipal(token_id="token", chat_id="care", project_id=project.project_id,
+                               workspace="home", provider="claude")
+    with pytest.raises(ControlPlaneError, match="live managed"):
+        plane.managed_care_checkpoint(principal, lease.holder, key)
+    records = list((config.state_path.parent / "secrets" / "share-evidence").rglob("care-outbox/*/*.json"))
+    assert len(records) == 1
+    assert "Launch" not in records[0].read_text()
+    assert not (tmp_path / "brain").exists()
+    capabilities = list((config.state_path.parent / "secrets" / "share-evidence").rglob("care-leases/*.json"))
+    original = capabilities[0].read_text()
+    tampered = json.loads(original)
+    tampered["payload"]["chat_id"] = "foreign"
+    capabilities[0].write_text(json.dumps(tampered))
+    assert curation_share.checkpoint(config, manager, **args) == 0
+    capabilities[0].write_text(original)
+    se.revoke(config, workspace="home", grant_id=grant["grant_id"])
+    assert curation_share.checkpoint(config, manager, **args) == 0
+    curation_run.end_run(vault, holder=lease.holder)
+    replacement = curation_run.begin_run(vault, holder="replacement", chat_id="care")
+    assert curation_share.checkpoint(config, manager, **args) == 0
+    curation_run.end_run(vault, holder=replacement.holder)
+
+
 def test_document_revision_matches_planner_newline_normalization(tmp_path: Path) -> None:
     from ciao.memory_receipts import content_revision
 

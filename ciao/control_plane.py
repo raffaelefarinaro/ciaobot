@@ -1718,6 +1718,43 @@ class CiaoControlPlane:
         # callers and no second spelling of the fallback to drift from it.
         return self.workspace_vault_root(self._workspace(principal))
 
+    def managed_care_begin(self, principal: AgentPrincipal, ttl_s: float) -> dict[str, Any]:
+        """Take a care lease only for the engine's currently running care dispatch."""
+        import math  # noqa: PLC0415
+        from ciao import curation_run, curation_share  # noqa: PLC0415
+
+        workspace = self._workspace(principal)
+        dispatcher = self.pcm._schedule_dispatcher_for()
+        dispatch_id = dispatcher.active_care_dispatch(principal.chat_id, workspace)
+        if not dispatch_id or not principal.token_id or not self._unattended_turn(principal):
+            raise ControlPlaneError("not_care_dispatch", "A live managed Workspace care dispatch is required.")
+        if not math.isfinite(ttl_s) or ttl_s < 1 or ttl_s > 86400:
+            raise ControlPlaneError("invalid_request", "Care lease duration must be between 1 and 86400 seconds.")
+        try:
+            lease = curation_share.begin(
+                self.config, workspace=workspace, chat_id=principal.chat_id,
+                token_id=principal.token_id, dispatch_id=dispatch_id, ttl_s=ttl_s,
+            )
+        except curation_run.CurationBusy as exc:
+            raise ControlPlaneError("curation_busy", str(exc)) from None
+        return _ok({**lease.as_dict(), "vault": str(lease.vault_root.resolve())})
+
+    def managed_care_checkpoint(self, principal: AgentPrincipal, holder: str, key: str) -> dict[str, Any]:
+        """Stage only witnesses for a completed item of this live care dispatch."""
+        from ciao import curation_share  # noqa: PLC0415
+
+        workspace = self._workspace(principal)
+        dispatch_id = self.pcm._schedule_dispatcher_for().active_care_dispatch(principal.chat_id, workspace)
+        if not dispatch_id or not principal.token_id or not self._unattended_turn(principal):
+            raise ControlPlaneError("not_care_dispatch", "A live managed Workspace care dispatch is required.")
+        if not holder or len(holder) > 512 or not key or len(key) > 512:
+            raise ControlPlaneError("invalid_request", "A valid care lease and work item are required.")
+        staged = curation_share.checkpoint(
+            self.config, self.pcm, workspace=workspace, chat_id=principal.chat_id,
+            token_id=principal.token_id, dispatch_id=dispatch_id, holder=holder, key=key,
+        )
+        return _ok({"staged": staged})
+
     def _unattended_turn(self, principal: AgentPrincipal) -> bool:
         """Whether the turn asking right now was fired by a schedule, not a person.
 

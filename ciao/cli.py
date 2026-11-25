@@ -6412,6 +6412,7 @@ def _curation_begin_command(args: argparse.Namespace) -> int:
     from ciao.curation_run import (
         CurationBusy,
         CurationStateError,
+        Lease,
         begin_run,
         end_run,
         holder_is_live,
@@ -6424,7 +6425,26 @@ def _curation_begin_command(args: argparse.Namespace) -> int:
     # Empty outside an agent chat, and then no outcome is shown for the run.
     chat_id = os.environ.get("CIAO_CHAT_ID", "").strip()
     try:
-        lease = begin_run(vault, holder=args.holder, ttl_s=budget.max_seconds, chat_id=chat_id)
+        token = os.environ.get("CIAO_AGENT_TOKEN", "")
+        url = os.environ.get("CIAO_AGENT_URL", "")
+        managed = None
+        if token and url:
+            from ciao.agent_cli import post
+
+            managed = post("care_begin", {"ttl_s": budget.max_seconds}, url=url, token=token)
+        if managed and managed.get("ok"):
+            data = managed["data"]
+            if Path(data["vault"]).resolve() != vault.resolve():
+                print("curation workspace does not match the managed dispatch", file=sys.stderr)
+                return 1
+            lease = Lease(holder=data["holder"], started_at=data["started_at"],
+                          expires_at=data["expires_at"], vault_root=vault)
+        elif managed and managed.get("error", {}).get("code") != "not_care_dispatch":
+            error = managed.get("error", {})
+            print(f"curation could not begin: {error.get('message', 'engine unavailable')}", file=sys.stderr)
+            return CURATION_BUSY_EXIT if error.get("code") == "curation_busy" else 1
+        else:
+            lease = begin_run(vault, holder=args.holder, ttl_s=budget.max_seconds, chat_id=chat_id)
     except CurationBusy as exc:
         print(f"curation is already running: {exc}", file=sys.stderr)
         return CURATION_BUSY_EXIT
@@ -6528,6 +6548,15 @@ def _curation_progress_command(args: argparse.Namespace) -> int:
     except CurationStateError as exc:
         print(f"curation state error: {exc}", file=sys.stderr)
         return 1
+    token = os.environ.get("CIAO_AGENT_TOKEN", "")
+    url = os.environ.get("CIAO_AGENT_URL", "")
+    if token and url:
+        from ciao.agent_cli import post
+
+        for key in keys:
+            result = post("care_checkpoint", {"holder": holder, "key": key}, url=url, token=token, timeout_s=2.0)
+            if not result.get("ok") and result.get("error", {}).get("code") != "not_care_dispatch":
+                print("curation sharing checkpoint unavailable; work remains private", file=sys.stderr)
     payload = {"recorded": len(keys), "newly_done": added}
     if args.json:
         json.dump(payload, sys.stdout, ensure_ascii=False, indent=2)
