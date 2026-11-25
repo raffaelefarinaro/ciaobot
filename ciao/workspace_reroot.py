@@ -38,7 +38,10 @@ import shutil
 import stat
 import subprocess
 import sys
+import tempfile
 import uuid
+from collections.abc import Iterator
+from contextlib import contextmanager
 from dataclasses import asdict, dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path, PurePosixPath
@@ -923,22 +926,89 @@ def _preflight_undo_registry(owner: Any, receipt: dict[str, Any]) -> str | None:
     return None
 
 
-def _index_rows(root: Path, relative: str) -> dict[str, str]:
+def _index_rows(root: Path, relative: str, *, index: Path | None = None) -> dict[str, str]:
     result = subprocess.run(
         ["git", "-C", str(root), "--literal-pathspecs", "ls-files", "--stage", "-z", "--", relative],
-        capture_output=True, check=True,
+        capture_output=True,
+        env={**os.environ, "GIT_INDEX_FILE": str(index)} if index is not None else None,
     )
+    if result.returncode:
+        raise UndoIndexConflict(os.fsdecode(result.stderr))
     rows = {}
     for record in result.stdout.split(b"\0"):
         if record:
             metadata, name = record.split(b"\t", 1)
             if not metadata.endswith(b" 0"):
-                raise OSError(f"unmerged index entry: {os.fsdecode(name)}")
+                raise UndoIndexConflict(f"unmerged index entry: {os.fsdecode(name)}")
             rows[os.fsdecode(name)] = metadata.decode("ascii")
     return rows
 
 
-def _set_index(root: Path, previous: dict[str, str], wanted: dict[str, str]) -> None:
+class UndoIndexConflict(OSError):
+    """The index could not be owned or its staged rows changed."""
+
+
+@contextmanager
+def _own_index(root: Path) -> Iterator[Path]:
+    # Git writers coordinate by creating index.lock exclusively and publishing
+    # it with rename. Cooperate with the per-worktree lock, including gitfiles.
+    if any(key in os.environ for key in ("GIT_INDEX_FILE", "GIT_DIR", "GIT_WORK_TREE", "GIT_COMMON_DIR")):
+        raise UndoIndexConflict("undo requires the worktree's default Git index")
+    code, location = run_git(
+        root, "rev-parse", "--path-format=absolute", "--show-toplevel", "--git-path", "index"
+    )
+    paths = location.splitlines()
+    if code or len(paths) != 2 or Path(paths[0]) != root.resolve() or not Path(paths[1]).is_absolute():
+        raise UndoIndexConflict(f"cannot identify the install root's Git index: {location}")
+    index = Path(paths[1])
+    lock = index.with_name("index.lock")
+    try:
+        fd = os.open(lock, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    except OSError as exc:
+        raise UndoIndexConflict(f"cannot own Git index lock {lock}: {exc}") from exc
+    try:
+        if index.is_symlink() or not index.is_file():
+            raise UndoIndexConflict(f"unsupported Git index: {index}")
+        yield index
+    finally:
+        os.close(fd)
+        # The reservation stays at the same inode until release, even when
+        # the alternate index is published. Never reclaim a stale Git lock.
+        lock.unlink()
+
+
+def _set_index(
+    root: Path, previous: dict[str, str], wanted: dict[str, str], *paths: str
+) -> None:
+    with _own_index(root) as index:
+        original = _index_rows(root, ".")
+        live = {
+            name: value for name, value in original.items()
+            if any(name == path or name.startswith(path + "/") for path in paths)
+        }
+        if live != previous:
+            raise UndoIndexConflict(f"Git index changed independently: {', '.join(paths)}")
+        if previous == wanted:
+            return
+        # Work on a private copy of the complete index so concurrent staging
+        # outside these paths, already present at lock acquisition, survives.
+        with tempfile.TemporaryDirectory(dir=index.parent, prefix="ciao-index-") as temporary:
+            shadow = Path(temporary) / "index"
+            shutil.copy2(index, shadow)
+            _write_index_rows(root, shadow, previous, wanted)
+            # A file/directory collision can affect paths outside the request.
+            # Verify Git produced exactly the requested row changes.
+            expected = {name: value for name, value in original.items() if name not in previous}
+            expected.update(wanted)
+            if _index_rows(root, ".", index=shadow) != expected:
+                raise UndoIndexConflict("Git index update would change other staged entries")
+            shutil.copymode(index, shadow)
+            _fsync_file(shadow)
+            os.replace(shadow, index)
+            _fsync_directory(index.parent)
+
+
+def _write_index_rows(root: Path, shadow: Path, previous: dict[str, str], wanted: dict[str, str]) -> None:
     records = []
     for name in previous.keys() - wanted.keys():
         oid = previous[name].split()[1]
@@ -948,6 +1018,7 @@ def _set_index(root: Path, previous: dict[str, str], wanted: dict[str, str]) -> 
         result = subprocess.run(
             ["git", "-c", "core.fsync=index", "-C", str(root), "update-index", "-z", "--index-info"],
             input=b"\0".join(records) + b"\0", capture_output=True,
+            env={**os.environ, "GIT_INDEX_FILE": str(shadow)},
         )
         if result.returncode:
             raise OSError(os.fsdecode(result.stderr))
@@ -976,7 +1047,7 @@ def _move_undo_entry(root: Path, move: dict[str, Any], *, recovering: bool) -> N
         raise OSError(f"git index changed during move: {src}")
     wanted = previous if recovering else renamed
     if live != wanted:
-        _set_index(root, live, wanted)
+        _set_index(root, live, wanted, original, restored)
 
 
 UNDO_MANIFEST_NAME = "undo-in-progress.json"
@@ -1281,6 +1352,11 @@ def _recover_undo_manifest(
             completed.update(_capture_locations(manifest))
         _unlink_durable(path)
         return None
+    try:
+        with _own_index(install_root):
+            _index_rows(install_root, ".")
+    except OSError as exc:
+        return str(exc)
     errors: list[str] = []
     try:
         errors.extend(
@@ -1323,7 +1399,7 @@ def _recover_undo_manifest(
                 if live not in ({}, item["index"]):
                     errors.append(f"created artifact index changed: {source}")
                 else:
-                    _set_index(install_root, live, item["index"])
+                    _set_index(install_root, live, item["index"], item["source"])
                     item["recovered"] = True
                     _write_json_atomic(path, manifest)
     for item in manifest.get("stashes") or []:
@@ -1338,7 +1414,7 @@ def _recover_undo_manifest(
                 live = _index_rows(install_root, item["source"])
                 if live not in (item["index"], item["published_index"]):
                     raise OSError("stash index entry changed independently")
-                _set_index(install_root, live, item["index"])
+                _set_index(install_root, live, item["index"], item["source"])
         except OSError as exc:
             errors.append(f"{target}: {exc}")
     before = manifest.get("registry_before")
@@ -1408,6 +1484,9 @@ def undo(install_root: Path, runtime_root: Path) -> dict[str, Any]:
             return _undo_owned(install_root, runtime_root, owner=owner)
     except WorkspaceRegistryBusy as exc:
         return {"status": "refused", "reason": str(exc)}
+    except UndoIndexConflict as exc:
+        return {"status": "failed", "reason": str(exc),
+                "recovery_manifest": str(_undo_manifest_path(runtime_root))}
 
 
 def _undo_owned(install_root: Path, runtime_root: Path, *, owner: Any) -> dict[str, Any]:
@@ -1494,6 +1573,8 @@ def _undo_owned(install_root: Path, runtime_root: Path, *, owner: Any) -> dict[s
             backup = _under(runtime_root, item["backup"])
             if backup.is_symlink() or not backup.is_file():
                 raise OSError(f"stash backup missing or invalid: {backup}")
+        with _own_index(install_root):
+            _index_rows(install_root, ".")
         compensation_dir = _new_anchor(install_root, relatives)
     except OSError as exc:
         return {"status": "refused", "reason": str(exc)}
@@ -1570,9 +1651,7 @@ def _undo_owned(install_root: Path, runtime_root: Path, *, owner: Any) -> dict[s
         if _identity(bucket) != item["identity"] or observed != item["expected"]:
             _exclusive_rename(bucket, target)
             raise OSError(f"created artifact was edited independently: {target}")
-        if _index_rows(install_root, relative) != item["index"]:
-            raise OSError(f"created artifact index changed: {target}")
-        _set_index(install_root, item["index"], {})
+        _set_index(install_root, item["index"], {}, relative)
 
     def failed(reason: str) -> dict[str, Any]:
         error = _recover_undo_manifest(runtime_root, owner)
@@ -1606,9 +1685,7 @@ def _undo_owned(install_root: Path, runtime_root: Path, *, owner: Any) -> dict[s
             identity=item["identity"], postimage=item["postimage"],
         )
         if item.get("tracked"):
-            if _index_rows(install_root, item["source"]) != item["index"]:
-                raise OSError(f"stash index entry changed independently: {target}")
-            _set_index(install_root, item["index"], item["published_index"])
+            _set_index(install_root, item["index"], item["published_index"], item["source"])
         restored.append(item["source"])
 
     # Files the migration CREATED are removed before the moves are reversed,

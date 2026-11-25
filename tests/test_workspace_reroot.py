@@ -5547,3 +5547,102 @@ def test_legacy_receipt_undo_retry_reports_original_edited_file(
     assert saved_link.lstat().st_ino == link_inode
     assert saved_link.readlink() == Path("dangling-operator-target")
     assert not path.exists()
+
+
+@pytest.mark.parametrize("phase", ["undo", "recovery"])
+def test_staging_at_index_update_survives_undo_and_recovery(tmp_path: Path, monkeypatch, phase):
+    install, vault, runtime = _with_guide(tmp_path)
+    receipt = apply(install, vault, ["personal", "work"], runtime, primary="personal")
+    queue = next(row for row in receipt["stashed_files"] if row.get("tracked") and row["source"].endswith("INDEX.md"))
+    relative = queue["source"]
+    target = install / relative
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_bytes(b"regenerated index since migration")
+    migrated = target.read_bytes()
+    restored = (runtime / queue["backup"]).read_bytes()
+    registry = (runtime / "workspaces.json").read_bytes()
+    receipt_bytes = receipt_path(runtime).read_bytes()
+    set_index = workspace_reroot._set_index
+
+    if phase == "recovery":
+        def interrupt_after_index(root, previous, wanted, *paths):
+            set_index(root, previous, wanted, *paths)
+            if relative in paths:
+                raise InterruptedError("published queue")
+        with monkeypatch.context() as patch:
+            patch.setattr(workspace_reroot, "_set_index", interrupt_after_index)
+            with pytest.raises(InterruptedError, match="published queue"):
+                undo(install, runtime)
+
+    staged = b"staged by independent Git process"
+    def stage_before_ownership(root, previous, wanted, *paths):
+        if relative in paths:
+            working = target.read_bytes()
+            target.write_bytes(staged)
+            subprocess.run(["git", "-C", str(install), "add", "--", relative], check=True)
+            target.write_bytes(working)
+        set_index(root, previous, wanted, *paths)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(workspace_reroot, "_set_index", stage_before_ownership)
+        result = undo(install, runtime)
+    assert result["status"] == "failed", result
+    assert "index changed independently" in result["reason"]
+    assert subprocess.check_output(["git", "-C", str(install), "show", ":" + relative]) == staged
+    assert target.read_bytes() == (restored if phase == "undo" else migrated)
+    assert (runtime / "workspaces.json").read_bytes() == registry
+    assert receipt_path(runtime).read_bytes() == receipt_bytes
+    assert workspace_reroot._undo_manifest_path(runtime).is_file()
+
+
+def test_real_git_writer_is_excluded_during_undo_index_publication(tmp_path: Path, monkeypatch):
+    install, vault, runtime = _with_guide(tmp_path)
+    apply(install, vault, ["personal", "work"], runtime, primary="personal")
+    independent = install / "independent.txt"
+    independent.write_bytes(b"staged beforehand")
+    subprocess.run(["git", "-C", str(install), "add", "--", independent.name], check=True)
+    independent.write_bytes(b"unstaged change")
+    write_rows = workspace_reroot._write_index_rows
+    attempted = []
+    def compete(root, shadow, previous, wanted):
+        if not attempted:
+            writer = subprocess.run(["git", "-C", str(root), "add", "--", independent.name],
+                                    capture_output=True)
+            assert writer.returncode and b"index.lock" in writer.stderr
+            attempted.append(True)
+        write_rows(root, shadow, previous, wanted)
+    monkeypatch.setattr(workspace_reroot, "_write_index_rows", compete)
+    result = undo(install, runtime)
+    assert result["status"] == "undone", result
+    assert attempted
+    assert subprocess.check_output(["git", "-C", str(install), "show", ":independent.txt"]) == b"staged beforehand"
+    assert independent.read_bytes() == b"unstaged change"
+    assert not receipt_path(runtime).exists()
+
+
+@pytest.mark.parametrize("recovering", [False, True])
+def test_existing_git_lock_refuses_undo_before_mutation(tmp_path: Path, monkeypatch, recovering):
+    install, vault, runtime = _with_guide(tmp_path)
+    apply(install, vault, ["personal", "work"], runtime, primary="personal")
+    if recovering:
+        copy_stash = workspace_reroot._atomic_copy_stash
+        def stop_after_publish(*args, **kwargs):
+            copy_stash(*args, **kwargs)
+            raise InterruptedError("stash published")
+        with monkeypatch.context() as patch:
+            patch.setattr(workspace_reroot, "_atomic_copy_stash", stop_after_publish)
+            with pytest.raises(InterruptedError):
+                undo(install, runtime)
+    before = _install_hashes(install)
+    index = (install / ".git/index").read_bytes()
+    registry = (runtime / "workspaces.json").read_bytes()
+    receipt = receipt_path(runtime).read_bytes()
+    lock = install / ".git/index.lock"
+    lock.write_bytes(b"other Git writer")
+    assert undo(install, runtime)["status"] == ("failed" if recovering else "refused")
+    assert lock.read_bytes() == b"other Git writer"
+    assert _install_hashes(install) == before
+    assert (install / ".git/index").read_bytes() == index
+    assert (runtime / "workspaces.json").read_bytes() == registry
+    assert receipt_path(runtime).read_bytes() == receipt
+    assert workspace_reroot._undo_manifest_path(runtime).exists() == recovering
