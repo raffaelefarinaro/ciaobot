@@ -545,7 +545,10 @@ async def workspace_shared_brain_guide_mapping(request: Request) -> JSONResponse
                                 approved = mapping.approve(current, load, body["types"], expected_pin=load.guide.pin)
                             except ValueError:
                                 return JSONResponse({"error": "invalid type selection"}, status_code=400)
-                            updated = dataclasses.replace(current, guide_mapping=approved, guide_mapping_generation=approved.generation)
+                            updated = dataclasses.replace(
+                                current, guide_mapping=approved, guide_mapping_generation=approved.generation,
+                                guide_generation_from_restore_only=False,
+                            )
                         if updated != current:
                             with workspace_registry_lock(config):
                                 workspace = config.workspace(workspace_name)

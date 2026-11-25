@@ -2256,3 +2256,47 @@ def test_cancel_during_owned_worker_keeps_registry_until_worker_finishes(tmp_pat
             assert (tmp_path / "worker-finished").exists()
 
     asyncio.run(exercise())
+
+
+def test_first_folder_guide_preview_expires_on_every_restore(tmp_path):
+    from ciao.config import SharedBrainLink
+    from ciao.web.routes_api import workspace_shared_brain_guide_mapping
+
+    client, config, _, _ = _app(tmp_path / "install", rerooted=True)
+    folder = tmp_path / "team"
+    folder.mkdir()
+    guide = {"version": 1, "scope": "Decisions", "exclusions": [], "types": {
+        "decision": {"kind": "section", "path": "notes/decisions.md", "section": "Decisions", "operation": "append"}}}
+    (folder / "CIAO-CONTENT-GUIDE.md").write_text("```ciao-guide\n" + json.dumps(guide) + "\n```\n")
+    link = SharedBrainLink("team", str(folder), f"folder:{folder}", kind="folder")
+    config.workspaces["work"].shared_brains = [link]
+    config.persist_workspace_registry()
+    route = "/api/workspaces/{name}/shared-brains/{brain}/guide-mapping"
+    client.app.router.routes.append(Route(route, workspace_shared_brain_guide_mapping, methods=["GET", "POST"]))
+    endpoint = "/api/workspaces/work/shared-brains/team/guide-mapping"
+
+    def preview():
+        response = client.get(endpoint)
+        assert response.status_code == 200, response.text
+        view = response.json()
+        assert view["pin"] and view["mapping_mode"] == "review"
+        return {key: view[key] for key in ("identity", "lifetime", "pin", "generation")}
+
+    def restore():
+        response = client.post("/api/workspaces/work/archive")
+        assert response.status_code == 200, response.text
+        response = client.post("/api/workspaces/archived/restore", json={"id": response.json()["archived"]["id"]})
+        assert response.status_code == 200, response.text
+
+    for generation in (0, 1):
+        before = preview()
+        assert before["generation"] == generation
+        restore()
+        response = client.post(endpoint, json={**before, "types": ["decision"]})
+        assert response.status_code == 409 and response.json()["code"] == "mapping_changed"
+        assert config.workspace("work").shared_brains[0].guide_mapping is None
+        assert preview() == {**before, "generation": generation + 1}
+    assert client.post(endpoint, json={**preview(), "types": ["decision"]}).status_code == 200
+    assert client.post(endpoint, json={**preview(), "types": []}).status_code == 200
+    restore()
+    assert preview()["lifetime"] != link.lifetime_id
