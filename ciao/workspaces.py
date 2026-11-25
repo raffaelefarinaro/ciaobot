@@ -385,7 +385,7 @@ def restore_registry_entries(
             if fields is None:
                 if row != expected_row:
                     return False
-            elif not all(row.get(key) == expected_row.get(key) for key in fields):
+            elif not all((key in row) == (key in expected_row) and row.get(key) == expected_row.get(key) for key in fields):
                 return False
         rewritten: list[dict[str, Any]] = []
         changed = False
@@ -403,6 +403,8 @@ def restore_registry_entries(
                     for key in fields:
                         if key in prior:
                             restored[key] = prior[key]
+                        else:
+                            restored.pop(key, None)
                 rewritten.append(restored)
                 changed = changed or restored != row
             else:

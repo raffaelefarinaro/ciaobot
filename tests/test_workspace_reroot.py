@@ -956,6 +956,84 @@ def test_undo_registry_failure_compensates_artifacts_and_retry_succeeds(
     assert (install / "memory-vault" / "personal" / "People" / "Peter.md").is_file()
 
 
+def test_recovery_after_manifest_kill_preserves_post_migration_queue(tmp_path: Path) -> None:
+    import os
+    import signal
+    from ciao import workspace_reroot, workspaces
+
+    install, vault, runtime = _with_guide(tmp_path)
+    applied = apply(install, vault, ["personal", "work"], runtime, primary="personal")
+    assert applied["status"] == "migrated"
+    receipt = receipt_path(runtime).read_bytes()
+    registry = (runtime / "workspaces.json").read_bytes()
+    queue = install / "work/memory-vault/Workspace/Memory-Proposals.md"
+    before = queue.read_bytes()
+    artifact = install / applied["created_files"][0]
+    artifact_before = artifact.read_bytes()
+    pid = os.fork()
+    if pid == 0:
+        original = workspace_reroot._write_json_atomic
+        def kill_after_write(path, payload):
+            original(path, payload)
+            os.kill(os.getpid(), signal.SIGKILL)
+        workspace_reroot._write_json_atomic = kill_after_write
+        undo(install, runtime)
+        os._exit(0)
+    _, status = os.waitpid(pid, 0)
+    assert os.WIFSIGNALED(status)
+    with workspaces.acquire_registry_at(runtime) as owner:
+        assert workspace_reroot._recover_undo_manifest(runtime, owner) is None
+    assert queue.read_bytes() == before
+    assert artifact.read_bytes() == artifact_before
+    assert (runtime / "workspaces.json").read_bytes() == registry
+    assert receipt_path(runtime).read_bytes() == receipt
+    assert undo(install, runtime)["status"] == "undone"
+
+
+def test_recovery_refuses_independent_edit_of_restored_stash(tmp_path: Path) -> None:
+    import os
+    import signal
+    from ciao import workspace_reroot
+
+    install, vault, runtime = _with_guide(tmp_path)
+    applied = apply(install, vault, ["personal", "work"], runtime, primary="personal")
+    assert applied["status"] == "migrated"
+    queue_entry = next(e for e in applied["stashed_files"] if e["source"].endswith("Memory-Proposals.md"))
+    queue = install / queue_entry["source"]
+    queue_before = queue.read_bytes()
+    registry = (runtime / "workspaces.json").read_bytes()
+    receipt = receipt_path(runtime).read_bytes()
+    artifact = install / applied["created_files"][0]
+    artifact_before = artifact.read_bytes()
+    pid = os.fork()
+    if pid == 0:
+        original = workspace_reroot.shutil.copy2
+        def kill_after_copy(src, dst, *args, **kwargs):
+            result = original(src, dst, *args, **kwargs)
+            if Path(dst) == queue:
+                os.kill(os.getpid(), signal.SIGKILL)
+            return result
+        workspace_reroot.shutil.copy2 = kill_after_copy
+        undo(install, runtime)
+        os._exit(0)
+    _, status = os.waitpid(pid, 0)
+    assert os.WIFSIGNALED(status)
+    queue.write_bytes(b"independent edit\n")
+    failed = undo(install, runtime)
+    assert failed["status"] == "failed"
+    assert queue.read_bytes() == b"independent edit\n"
+    assert artifact.read_bytes() == artifact_before
+    assert (runtime / "migration" / workspace_reroot.UNDO_MANIFEST_NAME).is_file()
+    assert (runtime / "workspaces.json").read_bytes() == registry
+    assert receipt_path(runtime).read_bytes() == receipt
+    queue.write_bytes((runtime / queue_entry["backup"]).read_bytes())
+    from ciao.workspaces import acquire_registry_at
+    with acquire_registry_at(runtime) as owner:
+        assert workspace_reroot._recover_undo_manifest(runtime, owner) is None
+    assert queue.read_bytes() == queue_before
+    assert undo(install, runtime)["status"] == "undone"
+
+
 def test_undo_process_kill_leaves_manifest_and_retry_recovers(
     tmp_path: Path,
 ) -> None:

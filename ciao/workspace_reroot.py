@@ -1096,21 +1096,6 @@ def _recover_undo_manifest(runtime_root: Path, owner: Any) -> str | None:
                     run_git(install_root, "add", "--", str(item.get("source") or ""))
             except OSError as exc:
                 errors.append(str(exc))
-    for item in manifest.get("stashes") or []:
-        if not isinstance(item, dict):
-            continue
-        target = install_root / str(item.get("source") or "")
-        backup = runtime_root / str(item.get("backup") or "")
-        if backup.is_file() and (target.exists() or target.is_symlink()):
-            try:
-                target.unlink()
-                if item.get("tracked"):
-                    run_git(
-                        install_root, "rm", "--cached", "--quiet", "--",
-                        str(item.get("source") or ""),
-                    )
-            except OSError as exc:
-                errors.append(f"{target}: {exc}")
     for move in manifest.get("moves") or []:
         if not isinstance(move, dict):
             continue
@@ -1129,6 +1114,31 @@ def _recover_undo_manifest(runtime_root: Path, owner: Any) -> str | None:
                 errors.append(f"{destination}: {exc}")
         elif not destination.exists():
             errors.append(f"neither path exists for {source}")
+    for item in manifest.get("stashes") or []:
+        if not isinstance(item, dict) or item.get("state") == "pending":
+            continue
+        target = install_root / str(item.get("source") or "")
+        saved = Path(str(item.get("saved") or ""))
+        try:
+            if item.get("state") != "armed":
+                raise OSError("stash progress is missing or invalid")
+            current = _entry_fingerprint(target) if target.exists() or target.is_symlink() else None
+            before = item.get("before")
+            if current == before:
+                continue
+            if current != item.get("postimage"):
+                raise OSError("stash target was edited independently")
+            if before is not None:
+                if not saved.is_file() or _entry_fingerprint(saved) != before:
+                    raise OSError("stash compensation image is missing or changed")
+                target.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(saved, target)
+            elif current is not None:
+                target.unlink()
+            if item.get("tracked"):
+                run_git(install_root, "rm", "--cached", "--quiet", "--", str(item.get("source") or ""))
+        except OSError as exc:
+            errors.append(f"{target}: {exc}")
     before = manifest.get("registry_before")
     after = manifest.get("registry_after")
     migrated = set(manifest.get("workspaces") or [])
@@ -1291,6 +1301,7 @@ def _undo_owned(install_root: Path, runtime_root: Path, *, owner: Any) -> dict[s
                 "source": str(entry.get("source")),
                 "backup": str(entry.get("backup")),
                 "tracked": bool(entry.get("tracked")),
+                "state": "pending",
             }
             for entry in receipt.get("stashed_files", [])
             if isinstance(entry, dict)
@@ -1310,7 +1321,7 @@ def _undo_owned(install_root: Path, runtime_root: Path, *, owner: Any) -> dict[s
         (install_root / vault_name).mkdir(parents=True, exist_ok=True)
 
     created_backups: list[tuple[Path, Path]] = []
-    stash_restores: list[tuple[Path, Path]] = []
+    stash_restores: list[tuple[Path, Path | None]] = []
 
     def stash_for_compensation(target: Path) -> Path:
         relative = target.relative_to(install_root).as_posix()
@@ -1334,10 +1345,16 @@ def _undo_owned(install_root: Path, runtime_root: Path, *, owner: Any) -> dict[s
                     run_git(install_root, "add", "--", relative)
             except OSError as exc:
                 errors.append(f"{target}: {exc}")
-        for target, backup in reversed(stash_restores):
+        for target, stash_backup in reversed(stash_restores):
             try:
-                backup.parent.mkdir(parents=True, exist_ok=True)
-                _replace_across_filesystems(target, backup)
+                relative = target.relative_to(install_root).as_posix()
+                stash = next(item for item in manifest["stashes"] if item["source"] == relative)
+                if not target.is_file() or target.is_symlink() or _entry_fingerprint(target) != stash["postimage"]:
+                    raise OSError("stash target was edited independently")
+                if stash_backup is None:
+                    target.unlink(missing_ok=True)
+                else:
+                    shutil.copy2(stash_backup, target)
                 relative = target.relative_to(install_root).as_posix()
                 if any(
                     entry.get("source") == relative and entry.get("tracked")
@@ -1346,7 +1363,7 @@ def _undo_owned(install_root: Path, runtime_root: Path, *, owner: Any) -> dict[s
                 ):
                     run_git(install_root, "rm", "--cached", "--quiet", "--", relative)
             except OSError as exc:
-                errors.append(f"{backup}: {exc}")
+                errors.append(f"{stash_backup}: {exc}")
         return errors
 
     def cleanup_compensation_state() -> None:
@@ -1355,18 +1372,29 @@ def _undo_owned(install_root: Path, runtime_root: Path, *, owner: Any) -> dict[s
         _unlink_durable(_undo_manifest_path(runtime_root))
 
     restored: list[str] = []
-    for entry in receipt.get("stashed_files", []):
-        backup = runtime_root / entry["backup"]
-        target = install_root / entry["source"]
+    for item in manifest["stashes"]:
+        backup = runtime_root / item["backup"]
+        target = install_root / item["source"]
         if backup.is_file():
+            if target.is_symlink() or (target.exists() and not target.is_file()):
+                raise OSError(f"stash target is not a regular file: {target}")
+            saved = compensation_dir / "stashes" / str(len(stash_restores))
+            before = _entry_fingerprint(target) if target.is_file() else None
+            if before is not None:
+                saved.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(target, saved)
+                _fsync_file(saved)
+                _fsync_directory(saved.parent)
+                _fsync_directory(compensation_dir)
+                _fsync_directory(compensation_dir.parent)
+            item.update(state="armed", saved=str(saved), before=before, postimage=_entry_fingerprint(backup))
+            _write_json_atomic(_undo_manifest_path(runtime_root), manifest)
             target.parent.mkdir(parents=True, exist_ok=True)
             shutil.copy2(backup, target)
-            stash_restores.append((target, backup))
-            # Re-stage only what WAS tracked. `git add` on a file that was
-            # untracked before would newly track it, which is not a restoration.
-            if entry.get("tracked"):
-                run_git(install_root, "add", "--", entry["source"])
-            restored.append(entry["source"])
+            stash_restores.append((target, saved if before is not None else None))
+            if item.get("tracked"):
+                run_git(install_root, "add", "--", item["source"])
+            restored.append(item["source"])
 
     # Files the migration CREATED are removed before the moves are reversed,
     # because they live inside the directories about to move back. Removed by

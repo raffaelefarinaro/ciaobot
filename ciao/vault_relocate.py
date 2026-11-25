@@ -802,7 +802,7 @@ def _undo_locked(config: Any, workspace: str, runtime_root: Path, *, owner: Any)
     def target_root(rows):
         if not isinstance(rows, list):
             return None
-        roots = [row.get("vault_root") for row in rows if isinstance(row, dict) and row.get("name") == workspace]
+        roots = [row.get("vault_root", workspace) for row in rows if isinstance(row, dict) and row.get("name") == workspace]
         return roots[0] if len(roots) == 1 else None
 
     if not isinstance(target_root(receipt.get("registry_before")), str):

@@ -196,6 +196,38 @@ def _shared_root_install(tmp_path: Path, *, symlink: bool = False) -> tuple[Path
     return install, config
 
 
+def test_legacy_registry_missing_vault_root_round_trips(tmp_path: Path) -> None:
+    install, config = _shared_root_install(tmp_path)
+    runtime = install / ".runtime"
+    registry = runtime / "workspaces.json"
+    rows = json.loads(registry.read_text(encoding="utf-8"))
+    rows[0].pop("vault_root")
+    registry.write_text(json.dumps(rows), encoding="utf-8")
+    config._workspace_registry_bytes = registry.read_bytes()
+    result = apply(config, "scandit", runtime)
+    assert result["status"] == "relocated", result
+    assert undo(config, "scandit", runtime)["status"] == "undone"
+    assert json.loads(registry.read_text(encoding="utf-8")) == rows
+    assert config.workspace("scandit").vault_root == "scandit"
+    assert (install / "memory-vault/People/Peter.md").is_file()
+
+
+def test_legacy_registry_receipt_failure_restores_absent_field(tmp_path: Path, monkeypatch) -> None:
+    install, config = _shared_root_install(tmp_path)
+    runtime = install / ".runtime"
+    registry = runtime / "workspaces.json"
+    rows = json.loads(registry.read_text(encoding="utf-8"))
+    rows[0].pop("vault_root")
+    registry.write_text(json.dumps(rows), encoding="utf-8")
+    config._workspace_registry_bytes = registry.read_bytes()
+    monkeypatch.setattr(vault_relocate, "_write_receipt", lambda *a, **k: (_ for _ in ()).throw(OSError("receipt failed")))
+    result = apply(config, "scandit", runtime)
+    assert result["status"] == "refused"
+    assert json.loads(registry.read_text(encoding="utf-8")) == rows
+    assert config.workspace("scandit").vault_root == "scandit"
+    assert (install / "memory-vault/People/Peter.md").is_file()
+
+
 def test_plan_classifies_shared_root_entries(tmp_path: Path) -> None:
     install, config = _shared_root_install(tmp_path)
 
