@@ -920,6 +920,38 @@ def test_intake_resolves_mapped_destination_and_never_publishes(linked, monkeypa
     assert len(remaining) == 1 and isinstance(remaining[0], sp.ShareDraft)
     assert queue.read_text().count("[share ") == 1
 
+    second_clone = clone.parent / "second-brain"
+    subprocess.run(["git", "clone", "--quiet", str(clone.parent / "origin.git"), str(second_clone)], check=True)
+    git(second_clone, "remote", "set-url", "origin", HOSTED)
+    (second_clone / shared_brain_guide.GUIDE_NAME).write_text("```ciao-guide\n" + json.dumps(guide) + "\n```\n")
+    second_link = SharedBrainLink(name="other", path=str(second_clone), identity=config.link.identity)
+    second_load = shared_brain_guide.read_guide(second_clone, brain_identity=second_link.identity)
+    assert second_load.guide is not None
+    second_mapping = shared_brain_mapping.approve(second_link, second_load, ["decision"], expected_pin=second_load.guide.pin)
+    second_link = replace(second_link, guide_mapping=second_mapping, guide_mapping_generation=second_mapping.generation)
+    config.links = [config.link, second_link]
+    registry.write_text(json.dumps([{"name": "home", "vault_root": str(config.vault), "shared_brains": [shared_brain_row(link) for link in config.links]}]))
+    config._workspace_registry_bytes = registry.read_bytes()
+    relation.batch_index = 0
+    row["batch_index"] = 0
+    row["entry_revision"] = 4
+    monkeypatch.setattr(sp, "MAX_CANDIDATES_PER_RUN", 20)
+    monkeypatch.setattr(sp, "MAX_PER_BRAIN", 10)
+    full_ledger = next(path for path in ledgers if first[0].artifact["request_fingerprint"] in json.loads(path.read_text())["fingerprints"])
+    ledger = json.loads(full_ledger.read_text())
+    ledger["fingerprints"].extend(f"{number:064x}" for number in range(19))
+    share_evidence._write_private(full_ledger, json.dumps(ledger).encode(), limit=8192)
+    per_destination = sp.draft_evidence_candidates(config, workspace="home", relation=relation)
+    assert len(per_destination) == 2
+    assert isinstance(per_destination[0], sp.ShareRefusal) and per_destination[0].code == "capacity"
+    assert isinstance(per_destination[1], sp.ShareDraft)
+    assert per_destination[1].artifact["immutable"]["brain"] == "other"
+    replay = sp.draft_evidence_candidates(config, workspace="home", relation=relation)
+    assert isinstance(replay[0], sp.ShareRefusal) and replay[0].code == "capacity"
+    assert isinstance(replay[1], sp.ShareDraft) and replay[1].proposal_id == per_destination[1].proposal_id
+    config.links = [replace(second_link, lifetime_id="relinked-lifetime")]
+    assert sp.draft_evidence_candidates(config, workspace="home", relation=relation) == []
+
 
 @pytest.mark.parametrize("destination_kind", ["collection", "section"])
 def test_intake_uses_real_checkpoint_and_consent(linked, tmp_path, monkeypatch, destination_kind):

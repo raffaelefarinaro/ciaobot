@@ -946,7 +946,7 @@ def draft_evidence_candidates(config: Any, *, workspace: str, relation: Any) -> 
                                     if relation.kind == "care_settlement":
                                         if type(relation.batch_index) is not int or relation.batch_index < 0 or row.get("batch_index") != relation.batch_index:
                                             _refuse("invalid_evidence", "The candidate batch is invalid.")
-                                        batch = "\0care-batch\0" + str(relation.batch_index)
+                                        batch = "\0care-batch\0" + str(relation.batch_index) + "\0destination\0" + snapshot.lifetime_id
                                     run_id = hmac.new(share_evidence._relation_secret(config),
                                         (workspace + "\0" + relation.workspace_lifetime_id + "\0" + relation.relation_id + batch).encode(),
                                         hashlib.sha256).hexdigest()
