@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import os
 import json
+import shutil
 import logging
 import subprocess
 import sys
@@ -3176,3 +3177,122 @@ def test_separate_notes_setup_keeps_pending_when_environment_publication_fails(t
         monkeypatch.setenv(key, "")
     assert routes_api._publish_setup_environment is original
     assert client.post("/api/setup/finish", json=body).status_code == 200
+
+
+def _notes_body(tmp_path, ws, notes, **extra) -> dict:
+    stat = notes.stat()
+    body = {"password": "wizard-pass", "workspace": str(ws), "notes_folder": str(notes),
+            "notes_resolved": str(notes.resolve()), "notes_identity": f"{stat.st_dev}:{stat.st_ino}",
+            "launch_agents_dir": str(tmp_path / "agents"), "app_dir": str(tmp_path / "apps"),
+            "restart": False}
+    body.update(extra)
+    return body
+
+
+def test_separate_notes_setup_never_creates_a_missing_notes_folder(tmp_path) -> None:
+    ws = tmp_path / "engine"
+    ws.mkdir()
+    missing = tmp_path / "cloud" / "notes"
+    response = _finish_client(tmp_path).post("/api/setup/finish", json={
+        "password": "wizard-pass", "workspace": str(ws), "notes_folder": str(missing),
+        "notes_resolved": str(missing), "notes_identity": "1:1"})
+    assert response.status_code == 400
+    assert not missing.exists()
+    assert not missing.parent.exists()
+    assert not (ws / ".env").exists()
+    assert not (ws / ".runtime" / "workspaces.json").exists()
+
+
+@pytest.mark.skipif(sys.platform == "win32" or (hasattr(os, "geteuid") and os.geteuid() == 0),
+                    reason="needs POSIX permissions and a non-root user")
+def test_separate_notes_setup_rejects_inaccessible_notes_folder(tmp_path) -> None:
+    ws = tmp_path / "engine"
+    ws.mkdir()
+    notes = tmp_path / "notes"
+    notes.mkdir()
+    (notes / "private.md").write_text("private", encoding="utf-8")
+    body = _notes_body(tmp_path, ws, notes)
+    notes.chmod(0)
+    try:
+        response = _finish_client(tmp_path).post("/api/setup/finish", json=body)
+    finally:
+        notes.chmod(0o700)
+    assert response.status_code == 400
+    assert not (ws / ".env").exists()
+    assert not (ws / ".runtime" / "workspaces.json").exists()
+    assert sorted(p.name for p in notes.iterdir()) == ["private.md"]
+
+
+@pytest.mark.parametrize("layout", ["same", "alias", "inside_engine", "engine_inside"])
+def test_separate_notes_setup_rejects_overlapping_roots(tmp_path, layout) -> None:
+    from ciao.cli import validate_external_setup_vault
+
+    ws = tmp_path / "engine"
+    ws.mkdir()
+    if layout == "same":
+        notes = ws
+    elif layout == "alias":
+        notes = tmp_path / "alias"
+        notes.symlink_to(ws, target_is_directory=True)
+    elif layout == "inside_engine":
+        notes = ws / "notes"
+        notes.mkdir()
+    else:
+        ws = tmp_path / "notes" / "engine"
+        ws.mkdir(parents=True)
+        notes = tmp_path / "notes"
+    with pytest.raises(ValueError, match="separate"):
+        validate_external_setup_vault(ws, notes)
+    response = _finish_client(tmp_path).post("/api/setup/finish", json=_notes_body(tmp_path, ws, notes))
+    assert response.status_code == 400
+    assert not (ws / ".env").exists()
+
+
+def test_separate_notes_setup_refuses_to_rebind_an_established_install(tmp_path, monkeypatch) -> None:
+    from ciao.cli import validate_external_setup_vault
+
+    ws = tmp_path / "engine"
+    ws.mkdir()
+    first = tmp_path / "first"
+    first.mkdir()
+    second = tmp_path / "second"
+    second.mkdir()
+    for key in ("CIAO_WORKSPACE", "PWA_PORT", "PWA_AUTH_TOKEN"):
+        monkeypatch.setenv(key, "")
+    client = _finish_client(tmp_path)
+    assert client.post("/api/setup/finish", json=_notes_body(tmp_path, ws, first)).status_code == 200
+    registry = (ws / ".runtime" / "workspaces.json").read_bytes()
+    with pytest.raises(ValueError, match="cannot be rebound"):
+        validate_external_setup_vault(ws, second)
+    assert client.post("/api/setup/finish", json=_notes_body(tmp_path, ws, second)).status_code == 400
+    assert (ws / ".runtime" / "workspaces.json").read_bytes() == registry
+    assert not list(second.iterdir())
+
+
+def test_separate_notes_setup_works_end_to_end_without_a_git_executable(tmp_path, monkeypatch) -> None:
+    from ciao.cli import select_setup_vault
+
+    empty_bin = tmp_path / "empty-bin"
+    empty_bin.mkdir()
+    monkeypatch.setenv("PATH", str(empty_bin))
+    assert shutil.which("git") is None
+    ws = tmp_path / "engine"
+    ws.mkdir()
+    notes = tmp_path / "notes"
+    notes.mkdir()
+    (notes / "existing.md").write_text("mine", encoding="utf-8")
+    for key in ("CIAO_WORKSPACE", "PWA_PORT", "PWA_AUTH_TOKEN"):
+        monkeypatch.setenv(key, "")
+    response = _finish_client(tmp_path).post("/api/setup/finish", json=_notes_body(tmp_path, ws, notes))
+    assert response.status_code == 200, response.text
+    assert not (notes / ".git").exists()
+    assert not (ws / ".git").exists()
+    assert (notes / "existing.md").read_text(encoding="utf-8") == "mine"
+    assert not (ws / ".runtime" / "external-setup-pending.json").exists()
+    # A restart re-reads the same selection: the notes stay where they were put
+    # and remain readable and writable without Git.
+    selection = select_setup_vault(ws, vault_mode="scratch")
+    assert selection.vault_path == notes.resolve()
+    (selection.vault_path / "later.md").write_text("later", encoding="utf-8")
+    assert (notes / "later.md").read_text(encoding="utf-8") == "later"
+    assert not (notes / ".git").exists()

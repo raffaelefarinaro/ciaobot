@@ -5512,16 +5512,16 @@ def test_setup_cli_does_not_recreate_disappeared_notes(tmp_path, monkeypatch, re
     notes.mkdir()
     (notes / "existing.md").write_text("private", encoding="utf-8")
     moved = tmp_path / "moved-notes"
-    original = cli._write_if_missing
+    original = cli.ensure_workspace_git
 
-    def remove_notes_during_setup(path, text):
+    def remove_notes_during_setup(*args, **kwargs):
         if not moved.exists():
             notes.rename(moved)
             if replace:
                 notes.mkdir()
-        return original(path, text)
+        return original(*args, **kwargs)
 
-    monkeypatch.setattr(cli, "_write_if_missing", remove_notes_during_setup)
+    monkeypatch.setattr(cli, "ensure_workspace_git", remove_notes_during_setup)
     result = cli.main(["setup", "--workspace", str(workspace), "--notes-folder", str(notes),
         "--auth-token", "password", "--launch-agents-dir", str(tmp_path / "agents"),
         "--app-dir", str(tmp_path / "apps")])
@@ -5534,7 +5534,7 @@ def test_setup_cli_does_not_recreate_disappeared_notes(tmp_path, monkeypatch, re
     if replace:
         notes.rmdir()
     moved.rename(notes)
-    monkeypatch.setattr(cli, "_write_if_missing", original)
+    monkeypatch.setattr(cli, "ensure_workspace_git", original)
     assert cli.main(["setup", "--workspace", str(workspace), "--notes-folder", str(notes),
         "--auth-token", "different", "--launch-agents-dir", str(tmp_path / "agents"),
         "--app-dir", str(tmp_path / "apps")]) != 0
