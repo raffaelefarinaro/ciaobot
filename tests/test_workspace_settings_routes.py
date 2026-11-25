@@ -3188,3 +3188,143 @@ os._exit(0)
     assert restarted.workspace("personal").shared_brains[0].sharing_policy == "review"
     assert list((tmp_path / ".runtime" / "sharing-pending").glob("*.json")) == []
     assert _client(tmp_path)[1].workspace("personal").shared_brains[0].sharing_policy == "review"
+
+
+def test_repeated_get_after_failed_registry_write_keeps_grant_revocable(
+    tmp_path, monkeypatch
+):
+    """A failed registry demotion is surfaced and keeps the persisted grant revocable."""
+    import subprocess
+
+    from ciao import shared_brain
+    from ciao.workspaces import persist_workspaces as real_persist
+
+    monkeypatch.setattr(shared_brain, "schedule_update", lambda link, config: None)
+    client, config, _pcm = _client(tmp_path)
+    acme = _checkout(_away(tmp_path) / "acme", "https://github.com/acme/notes")
+    assert client.patch(
+        "/api/workspaces/personal", json={"shared_brains": [{"path": str(acme)}]}
+    ).status_code == 200
+    path = "/api/workspaces/personal/shared-brains/notes/sharing"
+    healthy = client.get("/api/workspaces/personal/shared-brains").json()["shared_brains"][0]
+    assert client.post(path, json=_sharing_body(healthy)).status_code == 200
+    subprocess.run(
+        ["git", "-C", str(acme), "remote", "set-url", "origin", "https://github.com/other/notes"],
+        check=True,
+    )
+
+    def fail_registry(*_args, **_kwargs):
+        raise OSError("registry disk full")
+
+    monkeypatch.setattr("ciao.workspaces.persist_workspaces", fail_registry)
+    first = client.get("/api/workspaces/personal/shared-brains").json()["shared_brains"][0]
+    second = client.get("/api/workspaces/personal/shared-brains").json()["shared_brains"][0]
+    for row in (first, second):
+        assert row["sharing_policy"] == "review"
+        assert row["sharing_grant_pending"] is True
+        assert row["sharing_invalidation_failed"] is True
+    assert second["sharing_generation"] == first["sharing_generation"]
+
+    # The persisted registry still carries the automatic row, so the repeated
+    # response's generation must be usable to turn it off.
+    monkeypatch.setattr("ciao.workspaces.persist_workspaces", real_persist)
+    revoked = client.post(path, json=_sharing_body(second, "review"))
+    assert revoked.status_code == 200, revoked.text
+    assert revoked.json()["shared_brain"]["sharing_policy"] == "review"
+    assert revoked.json()["shared_brain"]["sharing_grant_pending"] is False
+    row = next(w for w in json.loads((tmp_path / ".runtime" / "workspaces.json").read_text())
+               if w["name"] == "personal")
+    assert row["shared_brains"][0]["sharing_policy"] == "review"
+    assert "sharing_consent" not in row["shared_brains"][0]
+    assert config.workspace("personal").shared_brains[0].sharing_consent is None
+
+
+def test_same_path_workspaces_keep_independent_generations_and_revoke(
+    tmp_path, monkeypatch
+):
+    """Drift in one workspace reports that link's generation, not a same-path sibling's."""
+    import subprocess
+
+    from ciao import shared_brain
+
+    monkeypatch.setattr(shared_brain, "schedule_update", lambda link, config: None)
+    client, config, _pcm = _client(tmp_path)
+    acme = _checkout(_away(tmp_path) / "acme", "https://github.com/acme/notes")
+    created = client.post("/api/workspaces", json={"name": "work"})
+    assert created.status_code == 201, created.text
+    for name in ("personal", "work"):
+        saved = client.patch(
+            f"/api/workspaces/{name}", json={"shared_brains": [{"path": str(acme)}]}
+        )
+        assert saved.status_code == 200, saved.text
+
+    def row(name):
+        return client.get(f"/api/workspaces/{name}/shared-brains").json()["shared_brains"][0]
+
+    def share(name, state, policy="automatic"):
+        return client.post(
+            f"/api/workspaces/{name}/shared-brains/notes/sharing",
+            json=_sharing_body(state, policy),
+        )
+
+    assert share("personal", row("personal")).status_code == 200
+    assert share("work", row("work")).status_code == 200
+    revoked = share("work", row("work"), "review")
+    assert revoked.status_code == 200, revoked.text
+    assert revoked.json()["shared_brain"]["sharing_generation"] == 2
+    # Revoking one workspace's link does not touch the same-path sibling.
+    assert row("personal")["sharing_policy"] == "automatic"
+    assert row("personal")["sharing_generation"] == 1
+    regranted = share("work", row("work"))
+    assert regranted.status_code == 200, regranted.text
+    assert regranted.json()["shared_brain"]["sharing_generation"] == 3
+
+    subprocess.run(
+        ["git", "-C", str(acme), "remote", "set-url", "origin", "https://github.com/other/notes"],
+        check=True,
+    )
+    personal = row("personal")
+    work = row("work")
+    assert personal["sharing_policy"] == "review"
+    assert personal["sharing_generation"] == 2
+    assert work["sharing_policy"] == "review"
+    assert work["sharing_generation"] == 4
+    assert personal["sharing_grant_pending"] is False
+    assert work["sharing_grant_pending"] is False
+
+
+def test_recovery_pending_fails_closed_when_registry_is_unreadable(
+    tmp_path, monkeypatch
+):
+    """When the authoritative registry cannot be read, keep the revoke control."""
+    import subprocess
+
+    from ciao import shared_brain
+
+    monkeypatch.setattr(shared_brain, "schedule_update", lambda link, config: None)
+    client, _config, _pcm = _client(tmp_path)
+    acme = _checkout(_away(tmp_path) / "acme", "https://github.com/acme/notes")
+    assert client.patch(
+        "/api/workspaces/personal", json={"shared_brains": [{"path": str(acme)}]}
+    ).status_code == 200
+    state = client.get("/api/workspaces/personal/shared-brains").json()["shared_brains"][0]
+    assert client.post(
+        "/api/workspaces/personal/shared-brains/notes/sharing",
+        json=_sharing_body(state),
+    ).status_code == 200
+    subprocess.run(
+        ["git", "-C", str(acme), "remote", "set-url", "origin", "https://github.com/other/notes"],
+        check=True,
+    )
+
+    def fail_registry(*_args, **_kwargs):
+        raise OSError("registry disk full")
+
+    monkeypatch.setattr("ciao.workspaces.persist_workspaces", fail_registry)
+    first = client.get("/api/workspaces/personal/shared-brains").json()["shared_brains"][0]
+    assert first["sharing_grant_pending"] is True
+    (tmp_path / ".runtime" / "workspaces.json").write_text("{not json")
+    closed = client.get("/api/workspaces/personal/shared-brains").json()["shared_brains"][0]
+    assert closed["sharing_policy"] == "review"
+    assert closed["sharing_grant_pending"] is True
+    assert closed["sharing_invalidation_failed"] is True

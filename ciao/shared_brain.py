@@ -601,32 +601,101 @@ def _git_urls(folder: Path, *args: str) -> tuple[str, ...]:
     return tuple(line.strip() for line in output.splitlines() if line.strip())
 
 
-def _current_link(config: Any, link: SharedBrainLink) -> SharedBrainLink | None:
+def _current_link(
+    config: Any, link: SharedBrainLink, *, workspace: str | None = None
+) -> SharedBrainLink | None:
+    """The exact in-memory row for this lifetime, never a same-path sibling.
+
+    A checkout may be linked from several workspaces with the same name and
+    path. Their lifetimes and generations are independent, so name and path
+    alone would pick whichever workspace happens to be first.
+    """
     workspaces: dict[str, Any] = getattr(config, "workspaces", {})
-    for workspace in workspaces.values():
+    selected = [workspace] if workspace is not None else list(workspaces)
+    for name in selected:
+        record = workspaces.get(name)
+        if record is None:
+            continue
         links: list[SharedBrainLink] = list(
-            getattr(workspace, "shared_brains", None) or []
+            getattr(record, "shared_brains", None) or []
         )
         for item in links:
-            if item.name == link.name and item.path == link.path:
+            if (
+                item.name == link.name
+                and item.path == link.path
+                and item.identity == link.identity
+                and item.lifetime_id == link.lifetime_id
+            ):
                 return item
     return None
 
 
-def _persisted_grant_exists(owner: Any, link: SharedBrainLink) -> bool:
-    grants = _registry_grants(getattr(owner, "current", None)) or []
+def _registry_workspace(
+    registry_bytes: bytes | None, link: SharedBrainLink
+) -> str | None:
+    """The workspace whose persisted grant names this exact lifetime."""
+    grants = _registry_grants(registry_bytes)
+    if grants is None:
+        return None
+    for row in grants:
+        if (
+            row["name"] == link.name
+            and row["path"] == link.path
+            and row["identity"] == link.identity
+            and row["lifetime_id"] == link.lifetime_id
+        ):
+            workspace = row["workspace"]
+            return workspace if isinstance(workspace, str) else None
+    return None
+
+
+def _registry_grant_pending(
+    registry_bytes: bytes | None,
+    link: SharedBrainLink,
+    *,
+    workspace: str | None = None,
+) -> bool:
+    """Whether the persisted registry still carries this lifetime's grant.
+
+    An unreadable or missing registry is fail-closed: the caller keeps the
+    revoke control rather than assuming the demoted in-memory row is durable.
+    """
+    grants = _registry_grants(registry_bytes)
+    if grants is None:
+        return True
     return any(
-        row["name"] == link.name
+        (workspace is None or row["workspace"] == workspace)
+        and row["name"] == link.name
+        and row["path"] == link.path
+        and row["identity"] == link.identity
         and row["lifetime_id"] == link.lifetime_id
-        and row["generation"] == link.sharing_generation
         for row in grants
     )
+
+
+def _authoritative_grant_pending(
+    config: Any, link: SharedBrainLink, workspace: str
+) -> bool:
+    """Read pending state from the authoritative registry under its claim."""
+    from ciao.workspaces import acquire_workspace_registry
+
+    try:
+        owner = acquire_workspace_registry(config, blocking=False)
+    except (OSError, RuntimeError, ValueError):
+        return True
+    try:
+        return _registry_grant_pending(
+            owner.current, link, workspace=workspace
+        )
+    finally:
+        owner.close()
 
 
 def _demote_bad_observation(
     config: Any, link: SharedBrainLink, owner: Any, state: dict[str, Any]
 ) -> None:
     failed = False
+    workspace = _registry_workspace(getattr(owner, "current", None), link)
     try:
         invalidate_sharing_on_drift(config, link, owner)
     except (OSError, RuntimeError, ValueError):
@@ -634,8 +703,10 @@ def _demote_bad_observation(
         # is what makes the pending grant revocable after a restart.
         failed = True
         config._sharing_recovery_pending = True
-    current = _current_link(config, link)
-    persisted = _persisted_grant_exists(owner, link)
+    current = _current_link(config, link, workspace=workspace)
+    persisted = _registry_grant_pending(
+        getattr(owner, "current", None), link, workspace=workspace
+    )
     state["origin_changed"] = True
     state["problem"] = "origin_changed"
     state["sharing_policy"] = DEFAULT_SHARING_POLICY
@@ -1510,7 +1581,9 @@ def brain_state(link: SharedBrainLink, config: Any, workspace: str) -> dict[str,
         state = _initial_state(link)
         state["sharing_policy"] = DEFAULT_SHARING_POLICY
         state["sharing_granted_at"] = ""
-        state["sharing_grant_pending"] = sharing_grant_stored(link)
+        state["sharing_grant_pending"] = _authoritative_grant_pending(
+            config, link, workspace
+        )
         state["sharing_invalidation_failed"] = True
         return state
     if link.kind == "folder":
@@ -1533,7 +1606,9 @@ def brain_state(link: SharedBrainLink, config: Any, workspace: str) -> dict[str,
         if getattr(config, "_sharing_recovery_pending", False):
             state["sharing_policy"] = DEFAULT_SHARING_POLICY
             state["sharing_granted_at"] = ""
-            state["sharing_grant_pending"] = sharing_grant_stored(link)
+            state["sharing_grant_pending"] = _authoritative_grant_pending(
+                config, link, workspace
+            )
             state["sharing_invalidation_failed"] = True
         return state
 
