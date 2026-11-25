@@ -1088,14 +1088,13 @@ def test_process_killed_after_done_recovers_completed_pass(tmp_path: Path) -> No
     registry.issue(chat_id=chat.chat_id, project_id=chat.project_id, workspace="home", provider="claude")
     pid = os.fork()
     if pid == 0:
-        original = manager._memory_pass._set_state
+        original = manager._memory_pass._settle_success
 
-        def kill_after_done(item, state):
-            original(item, state)
-            if state == "done":
-                os.kill(os.getpid(), signal.SIGKILL)
+        def kill_after_done(item, source_id, outcome):
+            original(item, source_id, outcome)
+            os.kill(os.getpid(), signal.SIGKILL)
 
-        manager._memory_pass._set_state = kill_after_done
+        manager._memory_pass._settle_success = kill_after_done
         asyncio.run(manager._memory_pass.on_turn_finished(chat.chat_id))
         os._exit(1)
     _, status = os.waitpid(pid, 0)

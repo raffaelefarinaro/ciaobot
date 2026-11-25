@@ -1091,12 +1091,9 @@ class MemoryPassCoordinator:
                     candidate_outcome = "pending"
                 except (share_evidence.EvidenceError, OSError):
                     logger.warning("Memory pass evidence checkpoint unavailable for %s", chat_id)
-                    self._set_state(chat, "attention")
-                    self._set_source_step(source_chat_id, "attention", chat_id)
-                    self.pump(workspace)
-                    return False
-            self._set_state(chat, "done")
-            self._set_source_step(source_chat_id, "ok", chat_id, candidate_outcome=candidate_outcome)
+                    chat.memory_completion_attestation = {}
+                    candidate_outcome = "checkpoint_unavailable"
+            self._settle_success(chat, source_chat_id, candidate_outcome)
             await self._archive_finished(chat)
             self.pump(workspace)
             if candidate_outcome == "pending":
@@ -1158,6 +1155,15 @@ class MemoryPassCoordinator:
             self._schedule_candidates(chat)
 
     # ── internals ───────────────────────────────────────────────────────
+
+    def _settle_success(self, chat: ChatInfo, source_id: str, candidate_outcome: str) -> None:
+        self._set_state_fields(chat, "done")
+        source = self._set_source_step_fields(source_id, "ok", chat.chat_id)
+        if source is not None and candidate_outcome:
+            source.postprocess["steps"]["memory_pass"]["extra"]["candidate_outcome"] = candidate_outcome
+        self._host._save()
+        if source is not None:
+            self._host._publish_postprocess(source)
 
     def _candidate_outcome(self, chat: ChatInfo) -> str:
         source = self._host._chats.get(str(self._helper(chat).get("source_chat_id") or ""))

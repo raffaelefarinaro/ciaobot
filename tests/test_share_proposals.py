@@ -1003,7 +1003,8 @@ async def test_memory_pass_files_private_candidate_and_replays_idempotently(link
         se._reset_project_manager_for_tests()
 
 
-def test_killed_memory_completion_files_candidate_after_restart(linked, tmp_path, monkeypatch):
+@pytest.mark.parametrize("attest_failure", [False, True])
+def test_killed_memory_completion_files_candidate_after_restart(linked, tmp_path, monkeypatch, attest_failure):
     from dataclasses import replace
     from tests.test_share_evidence import _memory_manager
     from ciao import share_evidence as se, share_publish, shared_brain_guide, shared_brain_mapping
@@ -1041,16 +1042,19 @@ def test_killed_memory_completion_files_candidate_after_restart(linked, tmp_path
     registry.issue(chat_id=chat.chat_id, project_id=chat.project_id, workspace="home", provider="claude")
     manager._mcp_service = SimpleNamespace(registry=registry)
     monkeypatch.setattr(share_publish, "publish_share", lambda *a, **kw: pytest.fail("intake published"))
+    if attest_failure:
+        def unavailable(*args, **kwargs):
+            raise se.EvidenceError("unavailable", "Unavailable")
+        monkeypatch.setattr(se, "prepare_memory_completion", unavailable)
     pid = os.fork()
     if pid == 0:
-        original = manager._memory_pass._set_state
+        original = manager._memory_pass._settle_success
 
-        def kill_after_done(item, state):
-            original(item, state)
-            if state == "done":
-                os.kill(os.getpid(), signal.SIGKILL)
+        def kill_after_done(item, source_id, outcome):
+            original(item, source_id, outcome)
+            os.kill(os.getpid(), signal.SIGKILL)
 
-        manager._memory_pass._set_state = kill_after_done
+        manager._memory_pass._settle_success = kill_after_done
         asyncio.run(manager._memory_pass.on_turn_finished(chat.chat_id))
         os._exit(1)
     _, status = os.waitpid(pid, 0)
@@ -1066,7 +1070,10 @@ def test_killed_memory_completion_files_candidate_after_restart(linked, tmp_path
                 await asyncio.gather(*list(restarted._detached_tasks))
         asyncio.run(resume_and_wait())
         queue = Path(config.workspace_vault_root("home")) / "Workspace" / "Memory-Proposals.md"
-        assert queue.read_text().count("[share ") == 1
-        assert restarted.get_chat(source.chat_id).postprocess["steps"]["memory_pass"]["extra"]["candidate_outcome"] == "complete"
+        count = queue.read_text().count("[share ") if queue.exists() else 0
+        assert count == (0 if attest_failure else 1)
+        outcome = restarted.get_chat(source.chat_id).postprocess["steps"]["memory_pass"]["extra"]["candidate_outcome"]
+        assert outcome == ("checkpoint_unavailable" if attest_failure else "complete")
+        assert restarted.get_chat(chat.chat_id).archived
     finally:
         se._reset_project_manager_for_tests()

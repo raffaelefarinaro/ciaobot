@@ -2048,7 +2048,7 @@ async def test_checkpoint_failure_does_not_block_successful_pass(
     assert source.postprocess["steps"]["memory_pass"]["extra"]["candidate_outcome"] == "unavailable"
 
 
-async def test_failed_attestation_does_not_commit_an_unproved_completion(
+async def test_failed_attestation_finishes_private_pass_without_offering_candidates(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
     passes_enabled: None, streams: _FakeStreams,
 ) -> None:
@@ -2066,9 +2066,31 @@ async def test_failed_attestation_does_not_commit_an_unproved_completion(
         raise share_evidence.EvidenceError("unavailable", "Unavailable")
 
     monkeypatch.setattr(share_evidence, "prepare_memory_completion", unavailable)
-    assert not await manager._memory_pass.on_turn_finished(memory_id)
-    assert memory.helper["state"] == "attention"
-    assert not memory.archived
+    archived = _stub_archive(manager, monkeypatch)
+    assert await manager._memory_pass.on_turn_finished(memory_id)
+    await _await_detached(manager)
+    assert memory.helper["state"] == "done"
+    assert archived == [memory_id]
+    assert not memory.memory_completion_attestation
+    assert source.postprocess["steps"]["memory_pass"]["extra"]["candidate_outcome"] == "checkpoint_unavailable"
+
+
+async def test_no_link_finishes_private_pass_without_requesting_attestation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    passes_enabled: None, streams: _FakeStreams,
+) -> None:
+    from ciao import share_evidence
+
+    manager = _make_manager(tmp_path)
+    source = _source(manager)
+    memory_id = manager.enqueue_memory_pass(source, None, _archive_file(tmp_path), "")
+    memory = manager.get_chat(memory_id)
+    _replied(memory, "Updated memory.")
+    manager._mcp_service = SimpleNamespace(registry=object())
+    monkeypatch.setattr(share_evidence, "prepare_memory_completion", lambda *a, **kw: pytest.fail("unneeded attestation"))
+    archived = _stub_archive(manager, monkeypatch)
+    assert await manager._memory_pass.on_turn_finished(memory_id)
+    assert archived == [memory_id]
     assert not memory.memory_completion_attestation
 
 
