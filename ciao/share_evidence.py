@@ -155,6 +155,7 @@ class SourceRelation:
     attested_at: str
     expires_at: str
     seal: bytes = field(repr=False, compare=False)
+    batch_index: int | None = None
 
 
 def _relation_payload(relation: SourceRelation) -> bytes:
@@ -173,6 +174,7 @@ def _relation_payload(relation: SourceRelation) -> bytes:
             "nonce": relation.nonce,
             "attested_at": relation.attested_at,
             "expires_at": relation.expires_at,
+            "batch_index": relation.batch_index,
         },
         ensure_ascii=False,
         sort_keys=True,
@@ -199,6 +201,7 @@ def _seal_relation(config: Any, relation: SourceRelation) -> SourceRelation:
         attested_at=relation.attested_at,
         expires_at=relation.expires_at,
         seal=seal,
+        batch_index=relation.batch_index,
     )
 
 
@@ -2240,6 +2243,7 @@ def recover_care_source_relation(config: Any, *, workspace: str, holder: str, wi
             source_id=DOCUMENT_SOURCE, relation_id=holder, evidence=witness_signature,
             lease_vault="", lease_proof_hash="", nonce=secrets.token_hex(16),
             attested_at=_iso(moment), expires_at=_iso(moment + RELATION_TTL), seal=b"",
+            batch_index=matches[0]["batch_index"],
         ))
 
 
@@ -2270,6 +2274,7 @@ def _care_settled_row(config: Any, workspace: str, brain_name: str, holder: str,
             "snapshot_id": key, "consent_generation": grant.get("consent_generation"), "audience": grant.get("audience", ""),
             "project_id": witness["project_id"], "source_id": DOCUMENT_SOURCE, "producer": "nightly_curation",
             "relation_kind": "care_settlement", "relation_id": holder, "relation_evidence": signature,
+            "batch_index": matches[0]["batch_index"],
             "field_mask": grant.get("field_mask"), "canonical_bytes": canonical, "digest": witness["masked_digest"],
             "recorded_at": grant.get("issued_at", "")}
 
@@ -2308,7 +2313,7 @@ def eligible_entries(
     if relation.kind == "care_settlement":
         with _claim_scope(config, workspace, claim) as owned:
             row = _care_settled_row(config, workspace, brain_name, relation.relation_id, relation.evidence, owned)
-            if row is None or row["project_id"] != relation.project_id or relation.source_id != DOCUMENT_SOURCE or relation.producer != "nightly_curation":
+            if row is None or row["project_id"] != relation.project_id or row["batch_index"] != relation.batch_index or relation.source_id != DOCUMENT_SOURCE or relation.producer != "nightly_curation":
                 return []
             return [row]
     if relation.kind == "memory_checkpoint":

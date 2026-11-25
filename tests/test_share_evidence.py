@@ -1303,11 +1303,15 @@ def test_care_checkpoint_stages_only_completed_exact_witness_and_replays_once(
             settled = curation_share.settled_witnesses(config, workspace="home", holder=lease.holder, claim=claim)
             signature = settled[0]["witness"]["witness_signature"]
             relation = se.recover_care_source_relation(config, workspace="home", holder=lease.holder, witness_signature=signature, claim=claim)
+            assert relation.batch_index == settled[0]["batch_index"] == 0
+            with pytest.raises(se.EvidenceError):
+                se.mint_evidence_authorizations(config, workspace="home", brain_name="notes", relation=dataclasses.replace(relation, batch_index=1), claim=claim)
             auths = se.mint_evidence_authorizations(config, workspace="home", brain_name="notes", relation=relation, claim=claim)
             assert len(auths) == 1
             with se.evidence_authorization_guard(config, workspace="home", authorization=auths[0], claim=claim) as row:
                 assert row["canonical_bytes"] == '{"decision":"Launch"}'
                 assert row["producer"] == "nightly_curation"
+                assert row["batch_index"] == 0
             original_link = config.workspace("home").shared_brains[0]
             config.workspace("home").shared_brains = [dataclasses.replace(original_link, lifetime_id="brain_lifetime_new0001")]
             with pytest.raises(se.EvidenceError):
@@ -1402,6 +1406,42 @@ def test_document_revision_matches_planner_bytes(tmp_path: Path, newline: str) -
     entries, revision = se._read_document(document)
     assert entries[0]["decision"] == "Launch"
     assert revision == content_revision(document.read_bytes().decode("utf-8"))
+
+
+def test_care_batch_indices_do_not_shift_when_earlier_witness_is_withdrawn(config: Config, monkeypatch: pytest.MonkeyPatch) -> None:
+    from ciao import curation_share
+    import hashlib
+
+    holder = "synthetic-holder"
+    run_id = hashlib.sha256(holder.encode()).hexdigest()
+    witnesses = []
+    with se.evidence_claim(config, workspace="home") as claim:
+        receipts = curation_share._private_dir(claim.directory, "care-settlements", create=True)
+        root = curation_share._private_dir(claim.directory, "care-outbox", create=True)
+        assert receipts is not None and root is not None
+        outbox = curation_share._private_dir(root, run_id, create=True)
+        assert outbox is not None
+        manifest = []
+        for index in range(21):
+            witness = {"project_id": "proj-alpha", "source_path": "p/Decisions.md", "source_revision": str(index), "witness_signature": f"{index:064x}"}
+            item = {"workspace": "home", "holder": holder, "dispatch_id": "dispatch", "lease_started_at": "start", "lease_proof_hash": "proof", "witness": witness}
+            encoded = json.dumps(item, sort_keys=True, separators=(",", ":")).encode()
+            name = hashlib.sha256(encoded).hexdigest() + ".json"
+            curation_share._write_record(outbox / name, curation_share._seal(config, b"care-outbox\0", item))
+            manifest.append({"name": name, "witness_signature": witness["witness_signature"]})
+            witnesses.append(witness)
+        manifest.sort(key=lambda row: row["name"])
+        settlement = {"workspace": "home", "workspace_lifetime_id": config.lifetimes["home"], "holder": holder, "status": "ok", "dispatch_id": "dispatch", "lease_started_at": "start", "lease_proof_hash": "proof", "manifest_version": 1, "batch_width": 20, "outbox_manifest": manifest}
+        curation_share._write_record(receipts / (run_id + ".json"), curation_share._seal(config, b"care-settlement\0", settlement))
+    active = {w["witness_signature"] for w in witnesses}
+    monkeypatch.setattr(se, "care_snapshot_witnesses", lambda _config, **kw: [w for w in witnesses if w["witness_signature"] in active and w["source_revision"] == kw["revision"]])
+    before = curation_share.settled_witnesses(config, workspace="home", holder=holder)
+    assert len(before) == 21 and before[-1]["batch_index"] == 1
+    active.remove(before[0]["witness"]["witness_signature"])
+    after = curation_share.settled_witnesses(config, workspace="home", holder=holder)
+    assert len(after) == 20 and after[-1]["batch_index"] == 1
+    (outbox / manifest[0]["name"]).unlink()
+    assert curation_share.settled_witnesses(config, workspace="home", holder=holder) == []
 
 
 def test_care_private_storage_rejects_a_symlink(tmp_path: Path) -> None:
