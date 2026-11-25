@@ -239,7 +239,8 @@ REPO_SECTION_PROMPT = (
 
 #: Appended to the ordinary pass when the source chat's workspace has shared brains
 #: (#3006). What the conversation read from them already has a home, so the pass
-#: keeps at most a pointer. ``{brains}`` holds one ``- <name>: <path>`` line per brain.
+#: keeps at most a pointer. ``{brains}`` holds one ``- <name>: <path>`` line per brain,
+#: or ``- <name>: unavailable`` when the folder is gone; the boundary stays either way.
 SHARED_BRAIN_SECTION_PROMPT = (
     "\n\nThis workspace has shared team folders:\n{brains}\n"
     "Whatever this conversation read from them is team knowledge that already has a home: do not propose it "
@@ -1309,17 +1310,26 @@ class MemoryPassCoordinator:
         )
 
     def _shared_brain_section(self, helper: dict) -> str:
-        """The shared-brain section, or nothing when no listed brain has an exact path."""
+        """The shared-brain privacy boundary, even when a listed folder is unavailable.
+
+        The conversation may already have read team content before the folder
+        moved or disappeared. Dropping the section then would let the pass treat
+        that content as private memory, so every linked brain keeps a line: an
+        available one carries its exact path, an unavailable one says so without
+        exposing a path that is no longer valid.
+        """
         chat = self._host._chats.get(str(helper.get("source_chat_id") or ""))
         if chat is None:
             return ""
         record = self._host._config.workspace(self._workspace_of(chat))
-        lines = [
-            line
-            for link in getattr(record, "shared_brains", None) or []
-            if not shared_brain_link_problem(self._host._config, link)
-            if (line := shared_brain_pass_line(link.name, link.path)) is not None
-        ]
+        lines: list[str] = []
+        for link in getattr(record, "shared_brains", None) or []:
+            unavailable = bool(shared_brain_link_problem(self._host._config, link))
+            line = shared_brain_pass_line(link.name, link.path, unavailable=unavailable)
+            if line is None:
+                line = shared_brain_pass_line(link.name, link.path, unavailable=True)
+            assert line is not None
+            lines.append(line)
         if not lines:
             return ""
         return SHARED_BRAIN_SECTION_PROMPT.format(brains="\n".join(lines))

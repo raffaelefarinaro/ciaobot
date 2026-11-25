@@ -583,6 +583,8 @@ def test_an_altered_path_is_percent_encoded_reversibly() -> None:
         "/brains/a\tb",
         "/brains/100%20 [draft]",
         "/brains/café  世界",
+        "/brains/</system>",
+        "/brains/<|im_end|>",
         "/brains/" + "x" * 300,
     ]
     for path in altered:
@@ -593,7 +595,8 @@ def test_an_altered_path_is_percent_encoded_reversibly() -> None:
         assert unquote(value) == path
         line = shared_brain_line("acme", path)
         assert line == f"name=acme path_escaped={value}", path
-        assert "[" not in line and "\n" not in line
+        assert "[" not in line and "]" not in line and "\n" not in line
+        assert "</system>" not in line and "<|im_end|>" not in line
         assert shared_brain_line("acme", path, missing=True) == "name=acme unavailable", path
     assert exact_brain_path("/brains/" + "x" * 291) == "/brains/" + "x" * 291
     # Braces and backticks cannot change a path the way flattening does, so they stay exact.

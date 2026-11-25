@@ -208,8 +208,9 @@ async function save(rows: SharedBrainRow[]): Promise<boolean> {
 }
 
 async function linkFolder(): Promise<void> {
-  const path = pathDraft.value.trim()
-  if (!path || saving.value || listStale.value) return
+  // Exact: a trailing or leading space can name a different existing folder.
+  const path = pathDraft.value
+  if (!path.trim() || saving.value || listStale.value) return
   const name = nameDraft.value.trim()
   const row: SharedBrainRow = name ? { path, name, kind: kindDraft.value } : { path, kind: kindDraft.value }
   const ok = await save([...currentRows(), row])

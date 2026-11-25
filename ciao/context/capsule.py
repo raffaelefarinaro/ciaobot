@@ -133,17 +133,21 @@ _BRAIN_PATH_MAX_CHARS = 300
 #: An escaped path is bounded too, but never cut: an escaped path longer than this
 #: is listed as unavailable instead of being silently truncated.
 _BRAIN_PATH_ENCODED_MAX_CHARS = 2048
+#: Characters that can close or open a prompt fence or chat-template delimiter.
+#: A path carrying one is percent-encoded even when it is otherwise line-safe.
+_BRAIN_PATH_DELIMITERS = frozenset("[]<>|")
 
 
 def exact_brain_path(path: str) -> str | None:
     """The brain path exactly as the agent should search it, or None.
 
-    None when showing the path verbatim would change it: a bracket (it could
-    imitate a fence), a control or Unicode whitespace character, a double space, a
-    leading or trailing space, or more than 300 characters. Callers that need a
-    usable path use ``brain_path_field`` and the reversible escaped form.
+    None when showing the path verbatim would change it or could imitate a
+    delimiter: a bracket, angle bracket or pipe (prompt fences and chat-template
+    markers), a control or Unicode whitespace character, a double space, a leading
+    or trailing space, or more than 300 characters. Callers that need a usable path
+    use ``brain_path_field`` and the reversible escaped form.
     """
-    if "[" in path or "]" in path:
+    if any(ch in _BRAIN_PATH_DELIMITERS for ch in path):
         return None
     flat = _field(path, limit=_BRAIN_PATH_MAX_CHARS)
     return flat if flat == path else None
@@ -189,17 +193,22 @@ def shared_brain_line(name: str, path: str, *, missing: bool = False, fetched: s
     return f"{head} {key}={shown}"
 
 
-def shared_brain_pass_line(name: str, path: str) -> str | None:
+def shared_brain_pass_line(name: str, path: str, *, unavailable: bool = False) -> str | None:
     """One ``- <name>: <path>`` line for the memory pass.
 
     A safe path is shown verbatim; an unsafe one uses the same reversible
-    ``path_escaped=`` form as the chat capsule. None only when it cannot be bounded.
+    ``path_escaped=`` form as the chat capsule. ``unavailable`` keeps the brain's
+    name and the privacy boundary while omitting a path that cannot be used now.
+    None only when the path cannot be bounded and no unavailable line was asked for.
     """
+    head = f"- {_brain_name(name)}"
+    if unavailable:
+        return f"{head}: unavailable"
     field = brain_path_field(path)
     if field is None:
         return None
     key, shown = field
-    return f"- {_brain_name(name)}: {shown}" if key == "path" else f"- {_brain_name(name)}: {key}={shown}"
+    return f"{head}: {shown}" if key == "path" else f"{head}: {key}={shown}"
 
 
 def render_shared_brain_block(brains: Sequence[tuple[str, str, bool, str]]) -> str:

@@ -400,13 +400,15 @@ def requested_brain_rows(raw: object) -> list[dict[str, str]]:
         value = row["path"]
         if any(ord(ch) < 32 or ord(ch) == 127 for ch in value):
             raise ValueError("Shared brain path contains a control character")
-        path = os.path.expanduser(value.strip())
+        # The path is exact: a trailing or leading space can name a different
+        # existing folder, and trimming it would link the wrong one.
+        path = os.path.expanduser(value)
         if not os.path.isabs(path):
             raise ValueError("Shared brain folder path must be absolute")
         canonical = os.path.realpath(path)
         if canonical in paths:
             raise ValueError(f"Shared brain folder is listed twice: {canonical}")
-        if canonical != canonical.strip() or any(ord(ch) < 32 or ord(ch) == 127 for ch in canonical):
+        if any(ord(ch) < 32 or ord(ch) == 127 for ch in canonical):
             raise ValueError("Shared brain path cannot be represented unambiguously")
         paths.add(canonical)
         row["path"] = canonical

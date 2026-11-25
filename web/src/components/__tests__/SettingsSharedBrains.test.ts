@@ -209,10 +209,10 @@ describe('SettingsSharedBrains linking', () => {
     })
   })
 
-  it('sends spaces, brackets and Unicode in a folder path verbatim', async () => {
-    const path = '/Users/me/Team Notes [draft] café'
+  it('sends spaces, brackets, Unicode and a trailing space in a folder path verbatim', async () => {
+    const path = '/Users/me/Team Notes [draft] café '
     const view = await mountCard()
-    await field(view, 'Folder path').setValue(`  ${path}  `)
+    await field(view, 'Folder path').setValue(path)
     await view.find('form').trigger('submit')
     await flushPromises()
     expect(updateWorkspace).toHaveBeenCalledWith('personal', {
@@ -223,7 +223,7 @@ describe('SettingsSharedBrains linking', () => {
   it('preserves every existing row kind when linking or removing another row', async () => {
     apiGet.mockResolvedValueOnce({ shared_brains: [TEAM, LOCAL] })
     const view = await mountCard()
-    await field(view, 'Folder path').setValue('  /x/y  ')
+    await field(view, 'Folder path').setValue('/x/y')
     await view.find('form').trigger('submit')
     await flushPromises()
     expect(updateWorkspace).toHaveBeenCalledWith('personal', {

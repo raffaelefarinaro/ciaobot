@@ -1012,8 +1012,9 @@ curl -sS -b /tmp/ciao.jar -X DELETE "http://localhost:${PWA_PORT:-8443}/api/chat
 # Operator-only: set it with the same PATCH and a whole-list body such as
 # {"shared_brains": [{"path": "<absolute path>", "name": "<optional name>", "kind": "folder"}]}.
 # [] removes all. At most 5; Git paths must be checkouts with an origin remote;
-# folder paths must be accessible ordinary directories. Duplicate roots are
-# refused. A bad row is a 400 that
+# folder paths must be accessible ordinary directories. Paths are used exactly:
+# leading and trailing spaces are not trimmed because they can name a different
+# folder. Duplicate roots are refused. A bad row is a 400 that
 # saves nothing. A save that omits the key keeps them. Removing one row deletes
 # only that link; the folder and the vault are untouched. Each newly added Git path
 # gets one update right away; then a background loop fast-forwards each clean

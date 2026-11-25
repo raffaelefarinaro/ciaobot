@@ -1789,6 +1789,31 @@ def test_workspace_shared_brains_default_empty_persist_validate_and_unlink(tmp_p
     assert config.workspace("personal").shared_brains[0].lifetime_id != first_lifetime
 
 
+def test_shared_brain_folder_paths_preserve_a_trailing_space(tmp_path):
+    """Two existing siblings must stay distinct; trim must not link the wrong one."""
+    client, config, _pcm = _client(tmp_path)
+    parent = _away(tmp_path) / "trailing-space"
+    plain = parent / "notes"
+    spaced = parent / "notes "
+    plain.mkdir(parents=True)
+    spaced.mkdir()
+
+    saved = client.patch(
+        "/api/workspaces/personal",
+        json={"shared_brains": [
+            {"path": str(plain), "kind": "folder"},
+            {"path": str(spaced), "kind": "folder"},
+        ]},
+    )
+    assert saved.status_code == 200, saved.text
+    assert [link.path for link in config.workspace("personal").shared_brains] == [str(plain), str(spaced)]
+
+    states = client.get("/api/workspaces/personal/shared-brains").json()["shared_brains"]
+    assert [state["path"] for state in states] == [str(plain), str(spaced)]
+    assert {state["identity"] for state in states} == {f"folder:{plain}", f"folder:{spaced}"}
+    assert plain.is_dir() and spaced.is_dir()
+
+
 def test_saving_a_new_path_schedules_one_update(tmp_path, monkeypatch):
     from ciao import shared_brain
 

@@ -43,12 +43,14 @@ def _same(a: Path, b: Path) -> bool:
         return False
 
 
-def validate_repo_path(raw: str) -> str:
+def validate_repo_path(raw: str, *, exact: bool = False) -> str:
     """Return git's resolved toplevel for `raw`; "" for empty input (unlink).
 
     Raises ValueError when the path is not the top of an existing checkout.
+    ``exact`` keeps leading and trailing spaces, which can name a different
+    existing checkout; callers that accept user-typed paths trim by default.
     """
-    text = raw.strip()
+    text = raw if exact else raw.strip()
     if not text:
         return ""
     path = Path(text).expanduser()
