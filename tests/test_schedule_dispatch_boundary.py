@@ -237,6 +237,46 @@ def _capture_run_records(monkeypatch: pytest.MonkeyPatch) -> list[JobRun]:
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
+    ("schedule_id", "scope", "dispatch_id", "prior", "expected"),
+    [
+        ("system-memory-curation@personal", "system", "dispatch-1", False, "dispatch-1"),
+        ("system-memory-curation@personal", "system", "dispatch-1", True, None),
+        ("system-memory-curation@personal", "system", "", False, None),
+        ("system-memory-curation@personal", "user", "dispatch-1", False, None),
+        ("another-schedule", "system", "dispatch-1", False, None),
+    ],
+)
+async def test_care_dispatch_authority_exists_only_during_its_own_stream(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, schedule_id: str, scope: str,
+    dispatch_id: str, prior: bool, expected: str | None,
+) -> None:
+    host = _ScheduleHost(tmp_path, [])
+    dispatcher = ScheduleDispatcher(cast(ScheduleDispatchHost, host))
+    broker = SimpleNamespace(current=object() if prior else None)
+    broker.get = lambda _chat_id: broker.current
+    host._broker = broker
+    observed: list[object] = []
+
+    class ObservedStream(_Stream):
+        async def subscribe(self):
+            observed.append(dispatcher.active_care_dispatch("chat-1", "personal"))
+            yield {"type": "result", "text": "done", "is_error": False}
+
+    def start_stream(*args, **kwargs):
+        broker.current = ObservedStream([])
+        return broker.current
+
+    host.start_stream = start_stream
+    entry = dataclasses.replace(_entry(), schedule_id=schedule_id,
+                                scope=scope, last_dispatch_id=dispatch_id)
+    monkeypatch.setattr("ciao.web.schedule_dispatch.job_runs.record_run", lambda _row: None)
+    await dispatcher.dispatch_schedule(entry, "Run the routine.", "opus", "auto", "claude")
+    assert observed == [expected]
+    assert dispatcher.active_care_dispatch("chat-1", "personal") is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
     ("events", "expected_status"),
     [
         ([{"type": "result", "text": "done", "is_error": False}], "ok"),
