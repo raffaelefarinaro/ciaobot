@@ -696,7 +696,10 @@ def test_workspace_archive_restore_preserves_folder_shared_brain(tmp_path):
     assert restored_response.status_code == 200, restored_response.json()
     (restored,) = config.workspaces["work"].shared_brains
     assert restored.kind == "folder"
-    assert restored.lifetime_id == "kept-lifetime"
+    assert restored.path == str(folder) and restored.identity == link.identity
+    assert restored.lifetime_id and restored.lifetime_id != link.lifetime_id
+    assert restored.sharing_policy == "review" and restored.sharing_consent is None
+    assert restored.guide_mapping is None
 
 
 def test_move_back_refuses_archive_metadata_changed_after_claim_snapshot(tmp_path):
