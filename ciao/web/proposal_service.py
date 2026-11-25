@@ -3241,6 +3241,8 @@ def preview_row(
                     blocked = "brain_unavailable"
         if text:
             blocked = "share_text_edits_not_supported"
+        elif "evidence_authorization" in fields:
+            blocked = "draft_unavailable"
         operation = str(fields.get("operation") or "")
         revision = str(draft.get("review_token") or "")
         retry_available = bool(
