@@ -1936,3 +1936,16 @@ def test_status_probe_uses_the_same_alias_observation(
     stored = reloaded.workspace("home").shared_brains[0]
     assert stored.sharing_policy == "review"
     assert stored.sharing_consent is None
+
+
+def test_publish_rejects_changed_upstream_file_mode(linked):
+    config, clone, origin = linked
+    draft = share_proposals.draft_share(config, workspace="home", relative_path="n.md", operation="replace", proposed=b"reviewed", request_key="mode-change")
+    assert isinstance(draft, share_proposals.ShareDraft)
+    assert draft.artifact["immutable"]["base_mode"] == "100755"
+    git(clone, "update-index", "--chmod=-x", "n.md")
+    git(clone, "commit", "--quiet", "-m", "change mode")
+    subprocess.run(["git", *IDENT, "-C", str(clone), "-c", "protocol.file.allow=always", "push", "--quiet", str(origin), "HEAD:refs/heads/main"], check=True)
+    outcome = asyncio.run(share_publish.publish_share(config, workspace="home", proposal_id=draft.proposal_id, expected_revision=draft.artifact["review_token"]))
+    assert outcome.outcome == "changed_upstream"
+    assert not share_publish.list_share_receipts(config, workspace="home")

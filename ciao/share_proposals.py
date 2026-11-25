@@ -199,7 +199,7 @@ def _folder_chain_rows(chain: list[folder_io.DirectoryIdentity]) -> list[dict[st
 
 def _qualify_folder(
     config: Any, link: SharedBrainLink, relative_path: str, operation: str | None,
-) -> tuple[str, None, None, None, str, list[dict[str, int]]]:
+) -> tuple[str, None, None, None, str, list[dict[str, int]], None]:
     """Qualify a new note in an ordinary folder; existing notes are deferred to #3626."""
     if operation not in (None, "create"):
         _refuse(
@@ -231,12 +231,12 @@ def _qualify_folder(
             "folder_update_unsupported",
             "Updating or deleting an existing note in an ordinary folder is not supported yet.",
         )
-    return "", None, None, None, folder_destination_fingerprint(link), _folder_chain_rows(chain)
+    return "", None, None, None, folder_destination_fingerprint(link), _folder_chain_rows(chain), None
 
 
 def _qualify_git(
     config: Any, link: SharedBrainLink, relative_path: str, owner: Any,
-) -> tuple[str, str, bytes | None, str | None, str, None]:
+) -> tuple[str, str, bytes | None, str | None, str, None, str | None]:
     parts = _safe_path(relative_path)
     observation = shared_brain.observe_under_fence(config, link, owner)
     state = observation.state
@@ -262,6 +262,7 @@ def _qualify_git(
     commit = _git_bytes(folder, "rev-parse", "--verify", tracking_ref + "^{commit}", limit=128).decode("ascii", "strict").strip()
     original: bytes | None = None
     original_oid: str | None = None
+    original_mode: str | None = None
     for index in range(len(parts)):
         prefix = "/".join(parts[:index + 1])
         listing = _git_bytes(folder, "ls-tree", "-z", commit, "--", ":(literal)" + prefix, limit=4096)
@@ -284,6 +285,7 @@ def _qualify_git(
                 limit=MAX_BYTES + 1, overflow_code="too_large",
             )
             original_oid = oid
+            original_mode = mode
     if original is not None and len(original) > MAX_BYTES:
         _refuse("too_large", "The existing note exceeds the 65,536-byte limit.")
     try:
@@ -291,13 +293,13 @@ def _qualify_git(
             original.decode("utf-8", "strict")
     except UnicodeDecodeError:
         _refuse("invalid_utf8", "The existing note is not valid UTF-8.")
-    return full_ref, commit, original, original_oid, destination_fingerprint, None
+    return full_ref, commit, original, original_oid, destination_fingerprint, None, original_mode
 
 
 def _qualify(
     config: Any, link: SharedBrainLink, relative_path: str, owner: Any,
     operation: str | None = None,
-) -> tuple[str, str | None, bytes | None, str | None, str, list[dict[str, int]] | None]:
+) -> tuple[str, str | None, bytes | None, str | None, str, list[dict[str, int]] | None, str | None]:
     if link.kind == "folder":
         return _qualify_folder(config, link, relative_path, operation)
     return _qualify_git(config, link, relative_path, owner)
@@ -515,6 +517,7 @@ def _draft_share(
                 original_oid,
                 destination_fingerprint,
                 folder_chain,
+                original_mode,
             ) = _qualify(config, link, relative_path, owner, operation)
     except (WorkspaceRegistryBusy, WorkspaceRegistryConflict):
         _refuse("brain_unavailable", "The shared brain changed while drafting.")
@@ -627,6 +630,7 @@ def _draft_share(
         "destination_fingerprint": destination_fingerprint,
         "upstream_ref": op_ref, "path": relative_path, "operation": operation,
         "base_blob_oid": original_oid,
+        "base_mode": original_mode,
         "original": original_text, "proposed": proposed_text,
         "proposed_sha256": hashlib.sha256(proposed).hexdigest() if proposed is not None else None,
         "base_commit": base_commit,
