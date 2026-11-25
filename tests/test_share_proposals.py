@@ -964,6 +964,14 @@ def test_intake_resolves_mapped_destination_and_never_publishes(linked, monkeypa
     share_evidence._write_private(run_path, json.dumps(forged_run).encode(), limit=8192)
     corrupt_run = sp.draft_evidence_candidates(config, workspace="home", relation=relation)
     assert isinstance(corrupt_run[0], sp.ShareRefusal) and corrupt_run[0].code == "draft_corrupt"
+    share_evidence._write_private(run_path, b"", limit=8192)
+    empty_run = sp.draft_evidence_candidates(config, workspace="home", relation=relation)
+    assert isinstance(empty_run[0], sp.ShareRefusal) and empty_run[0].code == "draft_corrupt"
+    share_evidence._write_private(run_path, saved_run, limit=8192)
+    run_path.chmod(0o644)
+    unsafe_run = sp.draft_evidence_candidates(config, workspace="home", relation=relation)
+    assert isinstance(unsafe_run[0], sp.ShareRefusal) and unsafe_run[0].code == "invalid_evidence"
+    run_path.chmod(0o600)
     share_evidence._write_private(run_path, b"{", limit=8192)
     malformed_run = sp.draft_evidence_candidates(config, workspace="home", relation=relation)
     assert isinstance(malformed_run[0], sp.ShareRefusal) and malformed_run[0].code == "draft_corrupt"

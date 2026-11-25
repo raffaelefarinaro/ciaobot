@@ -972,6 +972,8 @@ def _candidate_run_ledger(config: Any, path: Path, workspace: str, run_id: str,
         return fingerprints
     record = share_evidence._read_json(path, limit=8192, code="private_state_corrupt")
     if not record:
+        if path.exists():
+            _refuse("draft_corrupt", "The private candidate run is corrupt.")
         return []
     loaded_payload = record.get("payload")
     loaded_signature = record.get("signature")
