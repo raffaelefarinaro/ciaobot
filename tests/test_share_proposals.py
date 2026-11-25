@@ -859,7 +859,7 @@ def test_intake_resolves_mapped_destination_and_never_publishes(linked, monkeypa
     row = {"project_id": "project", "source_id": "stream:project", "entry_id": "entry", "entry_revision": 2,
            "digest": hashlib.sha256(canonical.encode()).hexdigest(), "consent_generation": 1,
            "audience": "team", "field_mask": ["decision"], "canonical_bytes": canonical, "batch_index": 0}
-    relation = SimpleNamespace(kind="care_settlement", workspace="home", workspace_lifetime_id="workspace-one", relation_id="run-one", batch_index=0)
+    relation = SimpleNamespace(kind="care_settlement", workspace="home", workspace_lifetime_id="workspace-one", relation_id="run-one", batch_index=0, evidence="witness-two")
     authorization = {"payload": {"row": row}, "signature": "private"}
     monkeypatch.setattr(share_evidence, "_relation_is_sealed", lambda *args: True)
     monkeypatch.setattr(share_evidence, "_relation_secret", lambda *args: b"test-key")
@@ -887,6 +887,7 @@ def test_intake_resolves_mapped_destination_and_never_publishes(linked, monkeypa
     assert (config.vault / "Workspace" / "Memory-Proposals.md").read_text().count("[share ") == 1
     monkeypatch.setattr(sp, "MAX_CANDIDATES_PER_RUN", 1)
     row["entry_revision"] = 3
+    relation.evidence = "witness-three"
     refusal = sp.draft_evidence_candidates(config, workspace="home", relation=relation)
     assert isinstance(refusal[0], sp.ShareRefusal) and refusal[0].code == "capacity"
     relation.batch_index = 1
@@ -911,11 +912,13 @@ def test_intake_resolves_mapped_destination_and_never_publishes(linked, monkeypa
     relation.batch_index = 0
     row["batch_index"] = 0
     row["entry_revision"] = 2
+    relation.evidence = "witness-two"
     settled = sp.draft_evidence_candidates(config, workspace="home", relation=relation)
     assert isinstance(settled[0], sp.ShareRefusal) and settled[0].code == "already_settled"
     relation.batch_index = 1
     row["batch_index"] = 1
     row["entry_revision"] = 3
+    relation.evidence = "witness-three"
     remaining = sp.draft_evidence_candidates(config, workspace="home", relation=relation)
     assert len(remaining) == 1 and isinstance(remaining[0], sp.ShareDraft)
     assert queue.read_text().count("[share ") == 1
@@ -935,6 +938,7 @@ def test_intake_resolves_mapped_destination_and_never_publishes(linked, monkeypa
     relation.batch_index = 0
     row["batch_index"] = 0
     row["entry_revision"] = 4
+    relation.evidence = "witness-four"
     monkeypatch.setattr(sp, "MAX_CANDIDATES_PER_RUN", 20)
     monkeypatch.setattr(sp, "MAX_PER_BRAIN", 10)
     full_ledger = next(path for path in ledgers if first[0].artifact["request_fingerprint"] in json.loads(path.read_text())["fingerprints"])
@@ -949,6 +953,29 @@ def test_intake_resolves_mapped_destination_and_never_publishes(linked, monkeypa
     replay = sp.draft_evidence_candidates(config, workspace="home", relation=relation)
     assert isinstance(replay[0], sp.ShareRefusal) and replay[0].code == "capacity"
     assert isinstance(replay[1], sp.ShareDraft) and replay[1].proposal_id == per_destination[1].proposal_id
+    changed_guide = {**guide, "types": {"decision": {"kind": "collection", "path": "changed", "operation": "create"}}}
+    (second_clone / shared_brain_guide.GUIDE_NAME).write_text("```ciao-guide\n" + json.dumps(changed_guide) + "\n```\n")
+    changed_load = shared_brain_guide.read_guide(second_clone, brain_identity=second_link.identity)
+    assert changed_load.guide is not None
+    changed_mapping = shared_brain_mapping.approve(second_link, changed_load, ["decision"], expected_pin=changed_load.guide.pin)
+    changed_link = replace(second_link, guide_mapping=changed_mapping, guide_mapping_generation=changed_mapping.generation)
+    config.links = [changed_link]
+    registry.write_text(json.dumps([{"name": "home", "vault_root": str(config.vault), "shared_brains": [shared_brain_row(changed_link)]}]))
+    config._workspace_registry_bytes = registry.read_bytes()
+    changed = sp.draft_evidence_candidates(config, workspace="home", relation=relation)
+    assert len(changed) == 1 and isinstance(changed[0], sp.ShareRefusal)
+    assert changed[0].code == "destination_changed"
+    (second_clone / shared_brain_guide.GUIDE_NAME).write_text("```ciao-guide\n" + json.dumps(guide) + "\n```\n")
+    config.links = [second_link]
+    registry.write_text(json.dumps([{"name": "home", "vault_root": str(config.vault), "shared_brains": [shared_brain_row(second_link)]}]))
+    config._workspace_registry_bytes = registry.read_bytes()
+    pins = list((sp._store_dir(config) / "candidate-destinations").glob("*.json"))
+    pinned = next(path for path in pins if json.loads(path.read_text())["payload"]["destination"]["lifetime_id"] == second_link.lifetime_id)
+    altered = json.loads(pinned.read_text())
+    altered["payload"]["holder"] = "forged"
+    share_evidence._write_private(pinned, json.dumps(altered).encode(), limit=16384)
+    corrupt = sp.draft_evidence_candidates(config, workspace="home", relation=relation)
+    assert len(corrupt) == 1 and isinstance(corrupt[0], sp.ShareRefusal) and corrupt[0].code == "draft_corrupt"
     config.links = [replace(second_link, lifetime_id="relinked-lifetime")]
     assert sp.draft_evidence_candidates(config, workspace="home", relation=relation) == []
 
