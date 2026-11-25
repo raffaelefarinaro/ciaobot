@@ -95,12 +95,11 @@ class SetupTransaction:
 
         if expected_notes is not None and _identity(self.notes) != list(expected_notes):
             raise ValueError("notes folder changed since inspection; inspect it again")
+        self._discard_unpublished()
         if self.journal.exists():
             try:
                 data = json.loads(self.journal.read_text(encoding="utf-8"))
-                if (data["root"] != str(self.root) or data["notes"] != str(self.notes)
-                    or data["root_id"] != _identity(self.root)
-                    or data["notes_id"] != _identity(self.notes) or data["complete"]):
+                if not self._folders_match(data) or data["complete"]:
                     raise ValueError("pending setup does not match these folders")
                 self.data = data
                 for name in ("env", "registry"):
@@ -135,6 +134,58 @@ class SetupTransaction:
         }
         self.save()
         return token
+
+    def _folders_match(self, data: dict[str, Any]) -> bool:
+        same: bool = (data["root"] == str(self.root) and data["notes"] == str(self.notes)
+                      and data["root_id"] == _identity(self.root)
+                      and data["notes_id"] == _identity(self.notes))
+        return same
+
+    def _discard_unpublished(self) -> None:
+        """Delete a journal that no longer fits and never published a binding.
+
+        Such a journal only records intent (the password verifier); nothing it
+        authorises exists on disk, so a different notes folder, a replaced
+        folder inode or an edited `.env` starts a fresh setup instead of
+        failing for good. Once either binding was published the journal is the
+        only proof of ownership and is never discarded here.
+        """
+        try:
+            data = json.loads(self.journal.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return  # absent or unreadable: begin() reports it
+        try:
+            if any(data[name].get("published") for name in ("env", "registry")):
+                return
+            self.data = data
+            current = self._folders_match(data) and not data["complete"]
+            if current:
+                for name in ("env", "registry"):
+                    self.verify_binding(name)
+        except (KeyError, TypeError, AttributeError, OSError):
+            return
+        except ValueError:
+            current = False
+        if not current:
+            self.journal.unlink()
+            _sync_dir(self.journal.parent)
+            self.data = {}
+
+    def pin(self, name: str, values: dict[str, Any]) -> dict[str, Any]:
+        """The values a binding's text is built from.
+
+        Until the binding is published the caller's values are recorded; after
+        that the journaled ones win, so a retry rebuilds the identical text
+        even when it is given a different port.
+        """
+        item = self.data[name]
+        if item.get("published"):
+            pinned: dict[str, Any] = item["values"]
+            return pinned
+        if item.get("values") != values:
+            item["values"] = values
+            self.save()
+        return values
 
     def verify_binding(self, name: str) -> None:
         item = self.data[name]

@@ -1523,12 +1523,35 @@ def _setup_selected_workspace(
         configured_vault_root=vault_path,
     )
     name = requested_name or "personal"
+    fresh_adopted_notes = (
+        first_setup
+        and receipt.installation.status == "in_progress"
+        and registered_vaults is None
+        and vault_mode == "existing"
+        and (_adopt_exact_vault or not detect_nested_workspaces(vault_path))
+    )
+    if (
+        _transaction is not None
+        and not fresh_adopted_notes
+        and not _transaction.data["registry"].get("published")
+    ):
+        # Any other branch would write the registry outside the journal, and
+        # complete() would then refuse the binding for good. Refuse before the
+        # first binding is written.
+        raise ValueError(
+            "separate notes setup cannot be recorded for this folder; "
+            "nothing was written to the registry"
+        )
 
     generated_password = (
         (_transaction is not None and _transaction.data.get("generated_token") is not None)
         or (not auth_token and "PWA_AUTH_TOKEN" not in existing_env)
     )
     token = auth_token or secrets.token_urlsafe(32)
+    env_port, env_vault_value = str(port), vault_value
+    if _transaction is not None:
+        pinned_env = _transaction.pin("env", {"port": env_port, "vault_value": env_vault_value})
+        env_port, env_vault_value = pinned_env["port"], pinned_env["vault_value"]
     desired_env: list[tuple[str, str]] = [
         ("PWA_AUTH_TOKEN", token),
     ]
@@ -1538,8 +1561,8 @@ def _setup_selected_workspace(
     # Nor CIAO_VAULT_MODE: only the first-run onboarding chat reads it, so it
     # is recorded in the setup marker below.
     desired_env.extend([
-        ("CIAO_VAULT_ROOT", vault_value),
-        ("PWA_PORT", str(port)),
+        ("CIAO_VAULT_ROOT", env_vault_value),
+        ("PWA_PORT", env_port),
     ])
     fresh_env = not existing_env and not env_path.exists()
     if _transaction is not None:
@@ -1630,13 +1653,6 @@ def _setup_selected_workspace(
         and not detect_nested_workspaces(vault_path)
         and not vault_path.exists()
     )
-    fresh_adopted_notes = (
-        first_setup
-        and receipt.installation.status == "in_progress"
-        and registered_vaults is None
-        and vault_mode == "existing"
-        and (_adopt_exact_vault or not detect_nested_workspaces(vault_path))
-    )
     if fresh_per_root or fresh_adopted_notes:
         from ciao.workspace_reroot import mark_born_per_root
 
@@ -1677,7 +1693,7 @@ def _setup_selected_workspace(
     # decision once, bound to the final vault path; unrecorded/changed roots
     # remain conservatively external to index replacement.
     ownership_path = runtime_root / "vault-index-ownership.json"
-    if not ownership_path.exists() and (first_setup or fresh_env):
+    if not ownership_path.exists() and (first_setup or fresh_env or _transaction is not None):
         from ciao.setup_marker import write_vault_index_ownership
 
         index_owner = "ciao" if selection.source == "default" and vault_mode != "existing" else "external"
