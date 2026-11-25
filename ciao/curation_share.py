@@ -9,6 +9,8 @@ import itertools
 import json
 import os
 import stat
+from dataclasses import asdict
+from contextlib import nullcontext
 from pathlib import Path
 from typing import Any, Callable
 
@@ -291,6 +293,65 @@ def _settlement_manifest(config: Any, directory: Path, *, workspace: str, holder
     return sorted(entries, key=lambda entry: entry["name"])
 
 
+def _manifest_brains(config: Any, directory: Path, workspace: str, holder: str,
+                     entries: list[dict[str, str]]) -> dict[str, dict[str, Any]]:
+    """Resolve signed witness grants to candidate link names, without trusting the caller."""
+    root = _private_dir(directory, "care-outbox")
+    run_id = hashlib.sha256(holder.encode("utf-8")).hexdigest()
+    outbox = _private_dir(root, run_id) if root is not None else None
+    state = share_evidence._load_state(config, workspace)
+    grants = state.get("grants")
+    result: dict[str, dict[str, Any]] = {}
+    for entry in entries:
+        if outbox is None:
+            raise curation_run.CurationStateError("the private care outbox is unavailable")
+        item = _verified(config, b"care-outbox\0", share_evidence._read_json(
+            outbox / entry["name"], limit=16384, code="private_state_corrupt"))
+        witness = item.get("witness") if item else None
+        grant = grants.get(witness.get("grant_id")) if isinstance(grants, dict) and isinstance(witness, dict) else None
+        brain = grant.get("brain") if isinstance(grant, dict) else None
+        if not isinstance(brain, dict) or not isinstance(brain.get("name"), str):
+            raise curation_run.CurationStateError("the care evidence destination is unavailable")
+        result[entry["name"]] = dict(brain)
+    return result
+
+
+def _capture_destinations(config: Any, workspace: str, entries: list[dict[str, str]],
+                          brains: dict[str, dict[str, Any]], owner: Any) -> list[dict[str, Any]]:
+    """Capture reviewed mapping scope while checkout and registry ownership are held."""
+    from ciao import shared_brain_mapping  # noqa: PLC0415
+    from ciao.config import shared_brain_row  # noqa: PLC0415
+    from ciao.workspaces import persisted_shared_links  # noqa: PLC0415
+
+    if owner.current is None or owner.current != getattr(config, "_workspace_registry_bytes", None):
+        raise curation_run.CurationStateError("the workspace registry changed during care settlement")
+    record = config.workspace(workspace)
+    links = list(getattr(record, "shared_brains", []) or [])
+    captured: list[dict[str, Any]] = []
+    for entry in entries:
+        granted_brain = brains[entry["name"]]
+        brain = granted_brain["name"]
+        link = next((item for item in links if item.name == brain), None)
+        destination: dict[str, Any] = {"status": "unavailable", "brain": brain}
+        if (link is not None and link.identity == granted_brain.get("identity")
+            and link.lifetime_id == granted_brain.get("lifetime_id")
+            and any(name == workspace and row == shared_brain_row(link)
+                                    for name, row in persisted_shared_links(owner.current, link.path))):
+            destination = {"status": "not_mapped", "brain": brain, "identity": link.identity,
+                           "lifetime_id": link.lifetime_id, "mapping_generation": link.guide_mapping_generation,
+                           "sharing_generation": link.sharing_generation}
+            if link.guide_mapping is not None:
+                candidates = [item for item in shared_brain_mapping.discover_workspace_destinations(
+                    config, workspace, brain, owner=owner) if item.note_type == "decision"]
+                if len(candidates) == 1:
+                    destination = {"status": "mapped", "brain": brain, "identity": link.identity,
+                                   **asdict(candidates[0])}
+                else:
+                    destination["status"] = "unavailable"
+        captured.append({**entry, "destination": destination})
+    return captured
+
+
 def end(config: Any, *, workspace: str, chat_id: str, token_id: str, dispatch_id: str,
         holder: str, status: str, planned: int, completed: int, deferred: int,
         reasons: list[str], live_keys: frozenset[str], failed: int,
@@ -305,6 +366,22 @@ def end(config: Any, *, workspace: str, chat_id: str, token_id: str, dispatch_id
     if not isinstance(proof, str) or not proof:
         raise curation_run.CurationBusy("the managed care capability is invalid")
     proof_hash = hashlib.sha256(proof.encode("utf-8")).hexdigest()
+    entries: list[dict[str, str]] = []
+    brains: dict[str, dict[str, Any]] = {}
+    if status == "ok":
+        with share_evidence.evidence_claim(config, workspace=workspace) as preclaim, curation_run._state_lock(vault):
+            state = curation_run._load(curation_run.state_path(vault))
+            held = curation_run._live_lease(state, curation_run._utc_now())
+            if (not dispatch_active() or not held or held.get("holder") != holder
+                or held.get("chat_id") != chat_id or held.get("started_at") != capability.get("started_at")):
+                raise curation_run.CurationBusy("the managed care lease no longer matches its capability")
+            entries = _settlement_manifest(config, preclaim.directory, workspace=workspace, holder=holder,
+                                           dispatch_id=dispatch_id, held=held, proof_hash=proof_hash)
+            brains = _manifest_brains(config, preclaim.directory, workspace, holder, entries)
+    record = config.workspace(workspace)
+    links = list(getattr(record, "shared_brains", []) or [])
+    names = {brain["name"] for brain in brains.values()}
+    paths = sorted({link.path for link in links if link.name in names})
 
     def prepare(state: curation_run.CurationState, summary: dict[str, Any]) -> None:
         held = state.lease
@@ -321,10 +398,19 @@ def end(config: Any, *, workspace: str, chat_id: str, token_id: str, dispatch_id
         directory = claim.directory
         payload["manifest_version"] = 1
         payload["batch_width"] = CARE_BATCH_WIDTH
-        payload["outbox_manifest"] = _settlement_manifest(
+        current_entries = _settlement_manifest(
             config, directory, workspace=workspace, holder=holder, dispatch_id=dispatch_id,
             held=held, proof_hash=proof_hash,
         ) if summary["status"] == "ok" else []
+        if summary["status"] == "ok" and (current_entries != entries
+            or _manifest_brains(config, directory, workspace, holder, current_entries) != brains):
+            raise curation_run.CurationStateError("the care evidence changed during settlement")
+        current_links = list(getattr(config.workspace(workspace), "shared_brains", []) or [])
+        if sorted({link.path for link in current_links if link.name in names}) != paths:
+            raise curation_run.CurationStateError("the care destinations changed during settlement")
+        payload["outbox_manifest"] = _capture_destinations(config, workspace, current_entries, brains, owner) if current_entries else []
+        if not curation_run._holds_live_lease_now(vault, holder=holder, clock=curation_run._utc_now):
+            raise curation_run.CurationBusy("the managed care lease expired during settlement")
         pending = directory / "care-settlement-pending.json"
         if pending.exists():
             raise curation_run.CurationStateError("a care settlement needs recovery")
@@ -333,7 +419,12 @@ def end(config: Any, *, workspace: str, chat_id: str, token_id: str, dispatch_id
     def commit(state: curation_run.CurationState, summary: dict[str, Any]) -> None:
         recover(config, workspace, state, claim)
 
-    with share_evidence.evidence_claim(config, workspace=workspace) as claim:
+    from ciao import shared_brain  # noqa: PLC0415
+    from ciao.workspaces import workspace_registry_claim  # noqa: PLC0415
+
+    checkout = shared_brain.checkout_claims_nowait(paths, config) if entries else nullcontext()
+    registry = workspace_registry_claim(config) if entries else nullcontext(None)
+    with checkout, registry as owner, share_evidence.evidence_claim(config, workspace=workspace) as claim:
         return curation_run.end_run(
             vault, holder=holder, status=status, planned=planned, completed=completed,
             deferred=deferred, reasons=reasons, live_keys=live_keys,
@@ -360,8 +451,9 @@ def _validated_outbox(config: Any, *, workspace: str, holder: str, claim: share_
         manifest = settlement.get("outbox_manifest")
         if (settlement.get("manifest_version") != 1 or settlement.get("batch_width") != CARE_BATCH_WIDTH
             or not isinstance(manifest, list) or len(manifest) > MAX_CHECKPOINTS_PER_RUN
-            or any(not isinstance(entry, dict) or set(entry) != {"name", "witness_signature"}
+            or any(not isinstance(entry, dict) or set(entry) != {"name", "witness_signature", "destination"}
                    or not isinstance(entry["name"], str) or not isinstance(entry["witness_signature"], str)
+                   or not isinstance(entry["destination"], dict)
                    for entry in manifest)):
             return None
         manifest_names = [entry["name"] for entry in manifest]
@@ -401,7 +493,8 @@ def _validated_outbox(config: Any, *, workspace: str, holder: str, claim: share_
                 or not isinstance(item.get("witness"), dict)
                 or item["witness"].get("witness_signature") != entry["witness_signature"]):
                 return None
-            items.append({**item, "batch_index": ordinal // CARE_BATCH_WIDTH})
+            items.append({**item, "batch_index": ordinal // CARE_BATCH_WIDTH,
+                          "settlement_destination": entry["destination"]})
         return items
 
 

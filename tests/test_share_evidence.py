@@ -1192,6 +1192,7 @@ def test_care_checkpoint_stages_only_completed_exact_witness_and_replays_once(
         curation_run.state_path(vault).write_text(curation_cycle.encode_state(state), encoding="utf-8")
     config.workspace("home").shared_brains = [SharedBrainLink(
         name="notes", path=str(tmp_path / "brain"), identity="team", lifetime_id="brain_lifetime_fixed01")]
+    config.persist_workspace_registry()
     se._reset_project_manager_for_tests()
     se.bind_project_manager(manager)
     document = directory / se.DOCUMENT_NAME
@@ -1247,13 +1248,17 @@ def test_care_checkpoint_stages_only_completed_exact_witness_and_replays_once(
     capabilities[0].write_text(original)
     assert curation_share.settled_witnesses(config, workspace="home", holder=lease.holder) == []
     script = "\n".join([
-        "import os, sys",
+        "import json, os, sys",
         "from pathlib import Path",
-        "from ciao.config import CiaoConfig, WorkspaceConfig",
+        "from ciao.config import CiaoConfig, WorkspaceConfig, shared_brains_from_rows",
         "from ciao import curation_share",
         "root, vault, lifetime, holder, key, crash_point = sys.argv[1:]",
         "root = Path(root)",
         "config = CiaoConfig(pwa_auth_token='t', workspace_root=root, state_path=root / '.runtime/state.json', media_root=root / '.runtime/media', workspaces={'home': WorkspaceConfig(name='home', vault_root=vault, lifetime_id=lifetime, _lifetime_persisted=True)})",
+        "raw = (root / '.runtime/workspaces.json').read_bytes()",
+        "row = next(row for row in json.loads(raw) if row['name'] == 'home')",
+        "config.workspace('home').shared_brains = shared_brains_from_rows(row.get('shared_brains'))",
+        "config._workspace_registry_bytes = raw",
         "write = curation_share._write_record",
         "def interrupted(path, record):",
         "    if path.parent.name == 'care-settlements' and crash_point == 'before_receipt': os._exit(42)",
@@ -1431,7 +1436,8 @@ def test_care_batch_indices_do_not_shift_when_earlier_witness_is_withdrawn(confi
             encoded = json.dumps(item, sort_keys=True, separators=(",", ":")).encode()
             name = hashlib.sha256(encoded).hexdigest() + ".json"
             curation_share._write_record(outbox / name, curation_share._seal(config, b"care-outbox\0", item))
-            manifest.append({"name": name, "witness_signature": witness["witness_signature"]})
+            manifest.append({"name": name, "witness_signature": witness["witness_signature"],
+                             "destination": {"status": "not_mapped", "brain": "notes"}})
             witnesses.append(witness)
         manifest.sort(key=lambda row: row["name"])
         settlement = {"workspace": "home", "workspace_lifetime_id": config.lifetimes["home"], "holder": holder, "status": "ok", "dispatch_id": "dispatch", "lease_started_at": "start", "lease_proof_hash": "proof", "manifest_version": 1, "batch_width": 20, "outbox_manifest": manifest}
