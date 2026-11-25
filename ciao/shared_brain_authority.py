@@ -44,6 +44,28 @@ Five rules shape the design.
   remains. An ordinary folder or a generic Git remote is member-only even when
   a capability object is presented.
 
+**Production activation gates.** This core is deliberately inactive for real
+brains. Before any connector may enable a privileged transition, the
+integration owner must supply and verify four things, and until then the
+backend stays absent and every such transition fails closed with
+``provider_fencing_unavailable``:
+
+1. **Credential authentication.** ``authenticate`` exchanges a provider session
+   or token for a short-lived sealed :class:`AuthenticatedPrincipal`; it must
+   never mint a capability from a caller-supplied principal name.
+2. **Shared atomic admissions.** ``admit``/``commit`` run against a durable
+   admission store shared by every engine process. An admission is single-use,
+   expiry-bounded and never revived by a restart.
+3. **Provider fencing.** ``commit`` performs the conditional record mutation
+   under the provider's own enforceable fence (for example an ``If-Match``
+   revision or a provider transaction). A local file lock, a fresh role lookup
+   or a prior successful write is not a fence for a provider-side revocation.
+4. **Durable audit and crash recovery.** The old/new principals, actor and
+   generation are recorded in restricted durable audit, and an interrupted
+   commit is reconciled after a crash as committed or not committed without
+   replaying a spent admission. A local in-memory audit trail is evidence for
+   tests, not the production record.
+
 The clock, the store and the provider backend are injected, which is how the
 tests reach expiry, races and failure modes without sleeping or touching live
 data.
@@ -745,8 +767,12 @@ class StewardAuthority:
     ) -> AuthorityTransition:
         """The nominated successor accepts, creating generation 1 only if absent."""
         self._kind(connector)
-        stored = self._claim(nonce, connector, Operation.BOOTSTRAP, successor.principal)
+        if not isinstance(successor, AuthenticatedPrincipal):
+            raise AuthorityError("forged_capability")
+        stored = self._peek(nonce, connector, Operation.BOOTSTRAP, successor.principal)
         successor = self._verified(connector, successor, admin=False)
+        self._verified(connector, stored.actor_capability, admin=True)
+        stored = self._claim(nonce, connector, Operation.BOOTSTRAP, successor.principal)
         now = self._clock()
         record = AuthorityRecord(
             brain=connector.brain,
@@ -783,7 +809,11 @@ class StewardAuthority:
     ) -> AuthorityTransition:
         """The nominated successor accepts a transfer, rotating the generation."""
         self._kind(connector)
+        if not isinstance(successor, AuthenticatedPrincipal):
+            raise AuthorityError("forged_capability")
+        stored = self._peek(nonce, connector, Operation.TRANSFER, successor.principal)
         successor = self._verified(connector, successor, admin=False)
+        self._verified(connector, stored.actor_capability, admin=False)
         stored = self._claim(nonce, connector, Operation.TRANSFER, successor.principal)
         record = self._record_required(connector)
         if record.generation != stored.generation:
@@ -826,7 +856,11 @@ class StewardAuthority:
     ) -> AuthorityTransition:
         """The nominated successor accepts recovery, rotating the generation."""
         self._kind(connector)
+        if not isinstance(successor, AuthenticatedPrincipal):
+            raise AuthorityError("forged_capability")
+        stored = self._peek(nonce, connector, Operation.RECOVERY, successor.principal)
         successor = self._verified(connector, successor, admin=False)
+        self._verified(connector, stored.actor_capability, admin=True)
         stored = self._claim(nonce, connector, Operation.RECOVERY, successor.principal)
         record = self._record_required(connector)
         if record.generation != stored.generation:
@@ -1121,6 +1155,23 @@ class StewardAuthority:
             expires_at=stored.expires_at,
         )
 
+    def _peek(
+        self,
+        nonce: str,
+        connector: BrainConnector,
+        operation: Operation,
+        successor: str,
+    ) -> _StoredChallenge:
+        """Validate every binding without spending the nonce.
+
+        Acceptance uses this before authenticating the successor and the
+        stored actor. A forged capability must not be able to burn a real
+        invitation by naming the invited principal.
+        """
+        return self._challenge(
+            nonce, connector, operation, successor, consume=False
+        )
+
     def _claim(
         self,
         nonce: str,
@@ -1128,7 +1179,20 @@ class StewardAuthority:
         operation: Operation,
         successor: str,
     ) -> _StoredChallenge:
-        """Check every binding and spend the nonce in one locked step."""
+        """Re-check every binding and spend the nonce in one locked step."""
+        return self._challenge(
+            nonce, connector, operation, successor, consume=True
+        )
+
+    def _challenge(
+        self,
+        nonce: str,
+        connector: BrainConnector,
+        operation: Operation,
+        successor: str,
+        *,
+        consume: bool,
+    ) -> _StoredChallenge:
         digest: str | None
         try:
             digest = _digest(nonce) if isinstance(nonce, str) and nonce else None
@@ -1152,7 +1216,8 @@ class StewardAuthority:
                 raise AuthorityError("challenge_wrong_operation")
             if stored.successor != successor:
                 raise AuthorityError("successor_mismatch")
-            stored.used = True
+            if consume:
+                stored.used = True
             return stored
 
     def _invalidate_brain(self, brain: str) -> None:

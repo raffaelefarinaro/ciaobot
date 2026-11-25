@@ -534,6 +534,36 @@ def test_a_forged_successor_capability_is_refused(tmp_path: Path) -> None:
     assert store.load("brain-a") is None
 
 
+def test_a_forged_successor_cannot_spend_a_real_bootstrap_invitation(tmp_path: Path) -> None:
+    clock = FakeClock()
+    backend = FencedBackend(clock)
+    connector = BrainRef("brain-a", "github.com/acme/notes")
+    _add_people(backend, connector)
+    engine, store = _engine(tmp_path, backend, clock)
+    admin = backend.sign_in(connector, "alice-token")
+    bob = backend.sign_in(connector, "bob-token")
+    challenge = engine.begin_bootstrap(
+        connector=connector, admin=admin, successor=bob.principal
+    )
+    forged = backend.forged_principal(connector, "bob", admin=False)
+
+    with pytest.raises(AuthorityError) as refused:
+        engine.accept_bootstrap(
+            challenge.nonce, connector=connector, successor=forged
+        )
+    assert refused.value.reason == "forged_capability"
+
+    # The forged attempt named the invited principal, but it was refused before
+    # the nonce was spent, so the legitimate successor can still accept.
+    transition = engine.accept_bootstrap(
+        challenge.nonce, connector=connector, successor=bob
+    )
+    assert transition.steward == "bob"
+    record = store.load("brain-a")
+    assert record is not None
+    assert (record.steward, record.generation) == ("bob", 1)
+
+
 def test_a_forged_incumbent_capability_is_refused(tmp_path: Path) -> None:
     clock = FakeClock()
     backend = FencedBackend(clock)
@@ -1074,6 +1104,76 @@ def test_transfer_acceptance_must_be_by_the_named_successor(tmp_path: Path) -> N
     assert store.load("brain-a").steward == "bob"
 
     engine.accept_transfer(challenge.nonce, connector=connector, successor=carol)
+    assert store.load("brain-a").steward == "carol"
+
+
+def test_a_forged_successor_cannot_spend_a_transfer_invitation(tmp_path: Path) -> None:
+    clock = FakeClock()
+    backend = FencedBackend(clock)
+    connector = BrainRef("brain-a", "github.com/acme/notes")
+    _add_people(backend, connector)
+    engine, store = _engine(tmp_path, backend, clock)
+    _bootstrap(engine, connector, backend)
+    bob = backend.sign_in(connector, "bob-token")
+    carol = backend.sign_in(connector, "carol-token")
+    challenge = engine.begin_transfer(
+        connector=connector,
+        incumbent=bob,
+        successor=carol.principal,
+        expected_generation=1,
+    )
+    forged = backend.forged_principal(connector, "carol", admin=False)
+
+    with pytest.raises(AuthorityError) as refused:
+        engine.accept_transfer(
+            challenge.nonce, connector=connector, successor=forged
+        )
+    assert refused.value.reason == "forged_capability"
+    assert store.load("brain-a").steward == "bob"
+
+    engine.accept_transfer(
+        challenge.nonce, connector=connector, successor=carol
+    )
+    assert store.load("brain-a").steward == "carol"
+
+
+def test_an_expired_actor_is_refused_before_the_invitation_is_spent(tmp_path: Path) -> None:
+    clock = FakeClock()
+    backend = FencedBackend(clock)
+    connector = BrainRef("brain-a", "github.com/acme/notes")
+    _add_people(backend, connector)
+    engine, store = _engine(tmp_path, backend, clock)
+    _bootstrap(engine, connector, backend)
+    short_incumbent = backend.sign_in(connector, "bob-token", expires_in=10)
+    carol = backend.sign_in(connector, "carol-token")
+    challenge = engine.begin_transfer(
+        connector=connector,
+        incumbent=short_incumbent,
+        successor=carol.principal,
+        expected_generation=1,
+    )
+    clock.advance(11)
+    fresh_carol = backend.sign_in(connector, "carol-token")
+    fresh_bob = backend.sign_in(connector, "bob-token")
+
+    with pytest.raises(AuthorityError) as expired:
+        engine.accept_transfer(
+            challenge.nonce, connector=connector, successor=fresh_carol
+        )
+    assert expired.value.reason == "expired_capability"
+    record = store.load("brain-a")
+    assert record is not None
+    assert (record.steward, record.generation) == ("bob", 1)
+
+    # The failed actor check did not spend the nonce's authority: a fresh
+    # invitation from the incumbent can still complete the transfer.
+    fresh = engine.begin_transfer(
+        connector=connector,
+        incumbent=fresh_bob,
+        successor=fresh_carol.principal,
+        expected_generation=1,
+    )
+    engine.accept_transfer(fresh.nonce, connector=connector, successor=fresh_carol)
     assert store.load("brain-a").steward == "carol"
 
 
