@@ -165,11 +165,27 @@ scripts/dev-commands.sh all              # typecheck, coverage, lint, audit
   `/ciao-upkeep` skill. `/ciao-release` does not fix things: a defect found
   during a release becomes an issue, fixed on `develop` before the next cut.
 
-## Loop engineering notes
-The facts the user-level `loop-engineering` skill reads for this repo (merge
-queue, gates.sh, worktree setup, unavailable-runner exception) are in
-[`docs/LOOP_ENGINEERING.md`](docs/LOOP_ENGINEERING.md). Read it before running
-the loop or merging into `develop`.
+## Repository-specific loop facts
+- A known failing required `develop` check stops merges until it is fixed.
+  Reviewed PRs with passing applicable checks may merge serially as a batch;
+  use full-platform CI on the final combined SHA for integration acceptance.
+- `Closes #N` does not close an issue when merging into `develop`. Close an
+  issue explicitly only when its acceptance criteria are complete; partial
+  PRs leave the issue open.
+- The main checkout's venv is an editable install. When using it from another
+  worktree, set `PYTHONPATH=$PWD` so tests import that worktree's code.
+- Record the tree, commands, toolchain and dependency fingerprint for full
+  gates. Reuse a valid pass only while its inputs remain unchanged; rerun the
+  affected checks when they change. A suite-lock deferral is not a test failure.
+- Installer, migration, service, provider lifecycle, authentication and release
+  changes require a PR-scoped security review. Real macOS install testing is
+  required for installer, service and engine update or migration changes.
+- Shared documentation often conflicts across parallel PRs; preserve both
+  changes when resolving `PWA_API.md`, `DESIGN.md`, `web/README.md` and
+  `docs/ARCHITECTURE.md`.
+- An engine started in a worktree can add backup or session commits to its
+  branch. Compare the remote head with the intended head before pushing.
+  Run live `ciao eval tasks` only in a detached worktree with its own venv.
 
 ## Reporting issues
 When you find a bug, test failure or worthwhile enhancement, explain it to the
