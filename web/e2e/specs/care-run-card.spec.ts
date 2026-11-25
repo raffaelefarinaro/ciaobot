@@ -93,6 +93,16 @@ test.describe('care run card', () => {
   test.describe('phone', () => {
     test.use({ viewport: { width: 390, height: 844 }, isMobile: true, hasTouch: true })
 
+    test('Retry is 44px under pointer: coarse', async ({ page, request }, testInfo) => {
+      await page.route('**/care-run?*', route =>
+        route.fulfill({ status: 500, contentType: 'application/json', body: '{"error":"boom"}' }))
+      await openCare(page, request, `care-retry-phone-${testInfo.workerIndex}`, 'd-ok')
+      const retry = page.locator(`${CARD} .care-run-retry`)
+      await expect(retry).toBeVisible()
+      expect(await page.evaluate(() => matchMedia('(pointer: coarse)').matches)).toBe(true)
+      expect((await retry.boundingBox())!.height).toBeGreaterThanOrEqual(TOUCH_MIN)
+    })
+
     test('targets are 44px and nothing scrolls sideways, also at 200% zoom', async ({ page, request }, testInfo) => {
       await openCare(page, request, `care-phone-${testInfo.workerIndex}`, 'd-ok')
       for (const sel of [`${CARD} a`]) {

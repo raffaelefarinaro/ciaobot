@@ -242,6 +242,46 @@ describe('CareRunOutcome', () => {
     expect(wrapper.find('.care-run-counts').text()).toContain('Planned 7')
   })
 
+  it('drops a slow first answer when the schedule changes', async () => {
+    const first = deferred<unknown>()
+    get.mockReturnValueOnce(first.promise)
+    const wrapper = await mountOutcome({ scheduleId: 'system-memory-curation@personal' })
+    get.mockResolvedValueOnce({ ...OK, counts: { ...COUNTS, planned: 7 } })
+    await wrapper.setProps({ scheduleId: 'system-memory-curation@work' })
+    await flushPromises()
+    first.resolve(OK)
+    await flushPromises()
+    expect(wrapper.find('.care-run-counts').text()).toContain('Planned 7')
+  })
+
+  it('drops a slow first answer when the chat changes', async () => {
+    const first = deferred<unknown>()
+    get.mockReturnValueOnce(first.promise)
+    const wrapper = await mountOutcome({ chatId: 'chat-1' })
+    get.mockResolvedValueOnce({ ...OK, counts: { ...COUNTS, planned: 8 } })
+    await wrapper.setProps({ chatId: 'chat-2' })
+    await flushPromises()
+    first.resolve(OK)
+    await flushPromises()
+    expect(wrapper.find('.care-run-counts').text()).toContain('Planned 8')
+  })
+
+  it('renders hostile text from the engine as literal text', async () => {
+    const evil = '<img src=x onerror=alert(1)><script>alert(2)</script>'
+    get.mockResolvedValueOnce({
+      ...OK,
+      care_run: { run_id: 'r1', ...COUNTS, counts_complete: false, reasons: [evil] },
+      outcomes: [item('failed', evil, evil)],
+    })
+    const wrapper = await mountOutcome()
+    await flushPromises()
+    expect(wrapper.find('img').exists()).toBe(false)
+    expect(wrapper.find('script').exists()).toBe(false)
+    expect(wrapper.find('.care-run-detail').text()).toBe(evil)
+    expect(wrapper.find('.care-run-key').text()).toBe(evil)
+    expect(wrapper.find('.care-run-reasons li').text()).toBe(evil)
+  })
+
   it('keeps Retry and links as native, focusable controls', async () => {
     get.mockRejectedValueOnce(new Error('offline'))
     const wrapper = await mountOutcome()

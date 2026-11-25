@@ -217,7 +217,7 @@ const incomplete = computed(() => report.value?.care_run?.counts_complete === fa
 .care-run-key {
   font-family: var(--font-mono);
   font-size: var(--text-xs);
-  opacity: 0.8;
+  color: var(--fg2);
 }
 
 .care-run-link {
