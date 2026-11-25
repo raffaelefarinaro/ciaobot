@@ -597,6 +597,48 @@ def probe_under_fence(config: Any, link: SharedBrainLink, owner: Any) -> dict[st
     return state
 
 
+@dataclass(frozen=True, slots=True)
+class SharingObservation:
+    """One fenced read of a link's live state and exact origin URLs."""
+
+    state: dict[str, Any]
+    configured_urls: tuple[str, ...]
+    fetch_urls: tuple[str, ...]
+    push_urls: tuple[str, ...]
+    origin_identity: str
+
+
+def _git_urls(folder: Path, *args: str) -> tuple[str, ...]:
+    code, output = _git(folder, *args)
+    if code != 0:
+        return ()
+    return tuple(line.strip() for line in output.splitlines() if line.strip())
+
+
+def observe_under_fence(
+    config: Any, link: SharedBrainLink, owner: Any
+) -> SharingObservation:
+    """Fence, then capture the exact origin read used by draft and publish."""
+    fence_path, grants = fence_before_origin_read(config, link, owner)
+    folder = Path(link.path)
+    configured = _git_urls(folder, "config", "--get-all", "remote.origin.url")
+    fetch = _git_urls(folder, "remote", "get-url", "--all", "origin")
+    push = _git_urls(folder, "remote", "get-url", "--push", "--all", "origin")
+    live_identity = ""
+    if len(configured) == 1:
+        live_identity = _safe_identity(configured[0])
+    state = _brain_state_owned(link, config)
+    if not state.get("problem") and live_identity:
+        settle_fence_after_healthy_probe(fence_path, grants, live_identity)
+    return SharingObservation(
+        state=state,
+        configured_urls=configured,
+        fetch_urls=fetch,
+        push_urls=push,
+        origin_identity=live_identity,
+    )
+
+
 def _load_fence(path: Path) -> dict[str, Any] | None:
     try:
         raw = json.loads(path.read_text(encoding="utf-8"))
@@ -701,7 +743,8 @@ def _demote_fenced_grants(config: Any, grants: list[dict[str, Any]]) -> dict[str
             else:
                 kept.append(item)
         if touched:
-            changed[workspace_name] = replace(workspace, shared_brains=kept)
+            workspace.shared_brains = kept
+            changed[workspace_name] = workspace
     return changed
 
 
@@ -718,7 +761,8 @@ def _demote_all_automatic(config: Any) -> dict[str, Any]:
             else:
                 kept.append(item)
         if touched:
-            changed[workspace_name] = replace(workspace, shared_brains=kept)
+            workspace.shared_brains = kept
+            changed[workspace_name] = workspace
     return changed
 
 

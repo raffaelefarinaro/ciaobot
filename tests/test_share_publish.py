@@ -1569,3 +1569,54 @@ def test_legacy_lifetime_refuses_to_adopt_stale_generation(linked):
         share_proposals._persist_link_lifetime(config, "home", config.link)
     assert config._workspace_registry_bytes == loaded
     assert path.read_bytes() == peer
+
+
+def test_drift_repair_restart_keeps_manual_draft_and_publish(
+    linked: tuple[Config, Path, Path], tmp_path: Path, monkeypatch
+) -> None:
+    config, clone, origin = linked
+    automatic = shared_brain.set_sharing_policy(config.link, "automatic")
+    config.link = automatic
+    config.links = [automatic]
+    config.workspaces["home"].shared_brains = [automatic]
+    _save_test_links(config)
+
+    before = share_proposals.draft_share(
+        config, workspace="home", relative_path="n.md", operation="replace",
+        proposed=b"before drift\n", request_key="before-drift",
+    )
+    assert isinstance(before, share_proposals.ShareDraft)
+
+    git(clone, "remote", "set-url", "origin", "https://github.com/x/elsewhere")
+    refused = share_proposals.draft_share(
+        config, workspace="home", relative_path="n.md", operation="replace",
+        proposed=b"during drift\n", request_key="during-drift",
+    )
+    assert isinstance(refused, share_proposals.ShareRefusal)
+    assert refused.code == "brain_changed"
+    fence_dir = config.state_path.parent / "sharing-pending"
+    assert list(fence_dir.glob("*.json"))
+
+    git(clone, "remote", "set-url", "origin", HOSTED)
+    restarted = Config(tmp_path, config.vault, automatic)
+    restarted.workspaces["home"].shared_brains = [automatic]
+    _save_test_links(restarted)
+
+    def persist(config_arg, candidate=None, *, owner=None):
+        _save_test_links(config_arg)
+
+    monkeypatch.setattr("ciao.workspaces.persist_workspaces", persist)
+    assert shared_brain.recover_sharing_state(restarted)
+    assert restarted.workspaces["home"].shared_brains[0].sharing_policy == "review"
+    assert list(fence_dir.glob("*.json")) == []
+
+    after = share_proposals.draft_share(
+        restarted, workspace="home", relative_path="n.md", operation="replace",
+        proposed=b"after restart, manually approved\n", request_key="after-restart",
+    )
+    assert isinstance(after, share_proposals.ShareDraft)
+    result = asyncio.run(share_publish.publish_share(
+        restarted, workspace="home", proposal_id=after.proposal_id,
+        expected_revision=after.artifact["review_token"],
+    ))
+    assert result.outcome == "published"

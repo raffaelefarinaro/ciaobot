@@ -446,25 +446,44 @@ def _verify_destination(
         return None
     if shared_brain.path_problem(config, link.path):
         return None
-    code, out, _ = _safe_git(folder, "config", "--get-all", "remote.origin.url")
-    configured = out.decode("utf-8", "strict").splitlines() if code == 0 else []
+    from ciao.workspaces import (
+        WorkspaceRegistryConflict,
+        ensure_registry_current,
+        persisted_checkout_links,
+        workspace_registry_claim,
+    )
+
+    try:
+        with workspace_registry_claim(config) as owner:
+            ensure_registry_current(config)
+            if owner.current is None:
+                return None
+            if not any(
+                row.get("name") == link.name
+                and row.get("identity") == link.identity
+                and row.get("lifetime_id", link.lifetime_id) == link.lifetime_id
+                for _workspace, row in persisted_checkout_links(owner.current, link.path)
+            ):
+                return None
+            observation = shared_brain.observe_under_fence(config, link, owner)
+    except (OSError, ValueError, WorkspaceRegistryConflict):
+        return None
+    if observation.state.get("problem"):
+        return None
+    configured = list(observation.configured_urls)
     if len(configured) != 1:
         return None
-    raw_origin = configured[0].strip()
+    raw_origin = configured[0]
     try:
         if shared_brain.canonical_identity(raw_origin) != fields["origin_identity"]:
             return None
     except ValueError:
         return None
     effective: list[str] = []
-    for args in (("remote", "get-url", "--all", "origin"), ("remote", "get-url", "--push", "--all", "origin")):
-        result, data, _ = _safe_git(folder, *args)
-        if result or not data:
-            return None
-        urls = data.decode("utf-8", "strict").splitlines()
+    for urls in (observation.fetch_urls, observation.push_urls):
         if len(urls) != 1:
             return None
-        url = urls[0].strip()
+        url = urls[0]
         try:
             if shared_brain.canonical_identity(url) != fields["origin_identity"]:
                 return None

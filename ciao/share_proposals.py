@@ -172,11 +172,17 @@ def _git_bytes(folder: Path, *args: str, limit: int, overflow_code: str = "") ->
 
 def _qualify(
     config: Any, link: SharedBrainLink, relative_path: str, owner: Any
-) -> tuple[str, str, bytes | None, str | None]:
+) -> tuple[str, str, bytes | None, str | None, str]:
     if link.kind != "git":
         _refuse("upstream_unavailable", "Publishing requires a Git shared brain.")
     parts = _safe_path(relative_path)
-    state = shared_brain.probe_under_fence(config, link, owner)
+    observation = shared_brain.observe_under_fence(config, link, owner)
+    state = observation.state
+    if len(observation.configured_urls) != 1:
+        _refuse("brain_changed", "The shared brain destination is ambiguous.")
+    destination_fingerprint = _origin_fingerprint(observation.configured_urls[0])
+    if not destination_fingerprint or observation.origin_identity != link.identity:
+        _refuse("brain_changed", "The shared brain destination changed.")
     if state.get("problem"):
         code = "brain_changed" if state.get("problem") == "origin_changed" else "brain_unavailable"
         _refuse(code, "The selected shared brain is unavailable or has changed.")
@@ -223,7 +229,7 @@ def _qualify(
             original.decode("utf-8", "strict")
     except UnicodeDecodeError:
         _refuse("invalid_utf8", "The existing note is not valid UTF-8.")
-    return full_ref, commit, original, original_oid
+    return full_ref, commit, original, original_oid, destination_fingerprint
 
 
 def _brain_for(config: Any, workspace: str, name: str) -> SharedBrainLink:
@@ -399,13 +405,13 @@ def _draft_share(
                 raise WorkspaceRegistryConflict("workspace registry is missing")
             persisted_checkout_links(owner.current, link.path)
             _persist_link_lifetime(config, workspace, link, owner=owner)
-            op_ref, base_commit, original, original_oid = _qualify(
-                config, link, relative_path, owner
-            )
-            _origin_code, listing = shared_brain._git(Path(link.path), "config", "--list", "--show-scope")
-            destination_fingerprint = _origin_fingerprint(shared_brain._origin_from_listing(listing))
-            if _origin_code != 0 or not destination_fingerprint:
-                _refuse("brain_changed", "The shared brain destination could not be verified.")
+            (
+                op_ref,
+                base_commit,
+                original,
+                original_oid,
+                destination_fingerprint,
+            ) = _qualify(config, link, relative_path, owner)
     except (WorkspaceRegistryBusy, WorkspaceRegistryConflict):
         _refuse("brain_unavailable", "The shared brain changed while drafting.")
     operation = operation or ("replace" if original is not None else "create")

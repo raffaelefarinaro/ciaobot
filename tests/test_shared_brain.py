@@ -1996,3 +1996,52 @@ async def test_cancelled_registry_acquisition_is_closed_and_reacquirable(tmp_pat
         await task
     owner = await asyncio.to_thread(acquire_workspace_registry, config, blocking=False)
     owner.close()
+
+
+def test_killed_observation_releases_claims_for_another_process(pair: SimpleNamespace, tmp_path) -> None:
+    from ciao.config import SharingConsent, WorkspaceConfig
+    from ciao.workspaces import acquire_workspace_registry
+
+    link = sb.set_sharing_policy(link_of(pair.clone), "automatic")
+    config = FakeConfig(tmp_path)
+    config.workspaces = {"home": WorkspaceConfig(
+        name="home", vault_root="memory-vault/home", shared_brains=[link],
+    )}
+    _install_registry(config, config.workspaces["home"])
+    consent = link.sharing_consent
+    assert consent is not None
+    ready = tmp_path / "observation-ready"
+    script = f"""
+import time
+from pathlib import Path
+from types import SimpleNamespace
+from ciao import shared_brain as sb
+from ciao.config import SharedBrainLink, SharingConsent, WorkspaceConfig
+link = SharedBrainLink(name={link.name!r}, path={link.path!r}, identity={link.identity!r}, lifetime_id={link.lifetime_id!r}, sharing_policy='automatic', sharing_generation={link.sharing_generation}, sharing_consent=SharingConsent(generation={consent.generation}, identity={consent.identity!r}, lifetime_id={consent.lifetime_id!r}, granted_at={consent.granted_at!r}))
+workspace = WorkspaceConfig(name='home', vault_root='memory-vault/home', shared_brains=[link])
+config = SimpleNamespace(workspace_root=Path({str(config.workspace_root)!r}), state_path=Path({str(config.state_path)!r}), workspaces={{'home': workspace}}, _workspace_registry_bytes=Path({str(config.state_path.parent / 'workspaces.json')!r}).read_bytes(), workspace_names=lambda: [], workspace_vault_root=lambda name: Path('/nonexistent-vault'))
+def block(*args, **kwargs):
+    Path({str(ready)!r}).write_text('ready')
+    time.sleep(60)
+    return (1, '')
+sb._git = block
+sb.brain_state(link, config, 'home')
+"""
+    env = {**os.environ, "PYTHONPATH": str(Path.cwd())}
+    process = subprocess.Popen([sys.executable, "-c", script], env=env, cwd=Path.cwd())
+    try:
+        for _ in range(200):
+            if ready.exists():
+                break
+            time.sleep(0.02)
+        assert ready.exists()
+        process.kill()
+        process.wait(5)
+        owner = acquire_workspace_registry(config, blocking=False)
+        owner.close()
+        with sb.checkout_claims_nowait([link.path], config):
+            pass
+    finally:
+        if process.poll() is None:
+            process.kill()
+            process.wait(5)
