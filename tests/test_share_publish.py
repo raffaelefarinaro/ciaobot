@@ -1581,6 +1581,11 @@ def test_drift_repair_restart_keeps_manual_draft_and_publish(
     config.workspaces["home"].shared_brains = [automatic]
     _save_test_links(config)
 
+    def persist(config_arg, candidate=None, *, owner=None):
+        _save_test_links(config_arg)
+
+    monkeypatch.setattr("ciao.workspaces.persist_workspaces", persist)
+
     before = share_proposals.draft_share(
         config, workspace="home", relative_path="n.md", operation="replace",
         proposed=b"before drift\n", request_key="before-drift",
@@ -1595,17 +1600,14 @@ def test_drift_repair_restart_keeps_manual_draft_and_publish(
     assert isinstance(refused, share_proposals.ShareRefusal)
     assert refused.code == "brain_changed"
     fence_dir = config.state_path.parent / "sharing-pending"
-    assert list(fence_dir.glob("*.json"))
+    assert config.workspaces["home"].shared_brains[0].sharing_policy == "review"
 
     git(clone, "remote", "set-url", "origin", HOSTED)
-    restarted = Config(tmp_path, config.vault, automatic)
-    restarted.workspaces["home"].shared_brains = [automatic]
+    recovered_link = config.workspaces["home"].shared_brains[0]
+    restarted = Config(tmp_path, config.vault, recovered_link)
+    restarted.workspaces["home"].shared_brains = [recovered_link]
     _save_test_links(restarted)
 
-    def persist(config_arg, candidate=None, *, owner=None):
-        _save_test_links(config_arg)
-
-    monkeypatch.setattr("ciao.workspaces.persist_workspaces", persist)
     assert shared_brain.recover_sharing_state(restarted)
     assert restarted.workspaces["home"].shared_brains[0].sharing_policy == "review"
     assert list(fence_dir.glob("*.json")) == []

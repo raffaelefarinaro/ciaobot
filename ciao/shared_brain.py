@@ -646,32 +646,34 @@ def observe_under_fence(
     configured = _origin_urls_from_listing(listing)
     fetch = _git_urls(folder, "remote", "get-url", "--all", "origin")
     push = _git_urls(folder, "remote", "get-url", "--push", "--all", "origin")
-    configured_identity = (
-        _safe_identity(configured[0]) if len(configured) == 1 else ""
+    identities: list[str] = []
+    if len(configured) == 1 and len(fetch) == 1 and len(push) == 1:
+        for urls in (configured, fetch, push):
+            identity = _safe_identity(urls[0])
+            if not identity:
+                identities = []
+                break
+            identities.append(identity)
+    consistent = (
+        bool(identities)
+        and len(set(identities)) == 1
+        and identities[0] == link.identity
     )
-    consistent = bool(configured_identity) and len(fetch) == 1 and len(push) == 1
-    live_identity = configured_identity if consistent else ""
-    if consistent:
-        # A single non-hosted effective URL is a transport alias (for example a
-        # test or insteadOf mirror); publish still refuses it when it verifies
-        # the effective push target. A canonical effective identity that differs
-        # from the configured one is a real destination divergence.
-        fetch_identity = _safe_identity(fetch[0])
-        push_identity = _safe_identity(push[0])
-        if (fetch_identity and fetch_identity != configured_identity) or (
-            push_identity and push_identity != configured_identity
-        ):
-            consistent = False
-            live_identity = ""
+    live_identity = identities[0] if consistent else ""
     state = _brain_state_owned(link, config)
     if not consistent or live_identity != link.identity:
-        # Configured, effective fetch and effective push must agree with the
-        # linked identity before the operation may proceed or settle its fence.
+        # Configured, effective fetch and effective push must each prove the
+        # linked identity. Any unparseable or divergent destination durably
+        # retires the affected consent before the operation may proceed.
+        try:
+            invalidate_sharing_on_drift(config, link, owner)
+        except OSError:
+            config._sharing_recovery_pending = True
         state["origin_changed"] = True
         state["problem"] = "origin_changed"
         state["sharing_policy"] = DEFAULT_SHARING_POLICY
         state["sharing_granted_at"] = ""
-        state["sharing_grant_pending"] = sharing_grant_stored(link)
+        state["sharing_grant_pending"] = False
     elif not state.get("problem"):
         settle_fence_after_healthy_probe(fence_path, grants, live_identity)
     return SharingObservation(
