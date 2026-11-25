@@ -446,6 +446,20 @@ def _load_sidecar(path: Path) -> dict[str, Any]:
         _refuse("draft_corrupt", "The private share draft is missing or corrupt.")
 
 
+def _operator_dismissed(queue: Path, proposal_id: str, summary: str) -> bool:
+    from ciao import memory_proposals
+
+    reversed_ids = memory_proposals._reversed_operation_ids(queue)
+    return any(
+        entry.get("dismissed_at") and entry.get("kind") == KIND
+        and entry.get("proposal_id") == proposal_id and entry.get("text") == summary
+        and entry.get("via") == "pwa" and entry.get("outcome") != "swept"
+        and not entry.get("history_only") and entry.get("operation_id") not in reversed_ids
+        for path in memory_proposals._sidecar_paths(queue)
+        for entry in memory_proposals._sidecar_entries(path)
+    )
+
+
 def share_dismissal_block(
     config: Any, *, workspace: str, bullet: Any, proposal_id: str = ""
 ) -> str | None:
@@ -667,8 +681,6 @@ def _draft_share(
                 return ShareDraft(fields["proposal_id"], canonical, proposal_review_path(workspace, canonical_fields["review_key"]))
             from ciao.memory_proposals import _dismissed_texts
             summary = f"Shared note change proposal {fields['sidecar_id']}"
-            if summary in _dismissed_texts(queue):
-                _refuse("request_conflict", "This share proposal has already been settled.")
             publication = canonical.get("publication", {})
             if not isinstance(publication, dict):
                 _refuse("draft_corrupt", "The canonical share publication state is corrupt.")
@@ -678,6 +690,10 @@ def _draft_share(
                 _refuse("draft_corrupt", "The canonical share publication state is corrupt.")
             if attempts or receipts:
                 _refuse("request_conflict", "This share proposal already has a publication attempt or receipt.")
+            if summary in _dismissed_texts(queue):
+                if candidate_binding is not None and _operator_dismissed(queue, fields["proposal_id"], summary):
+                    _refuse("already_settled", "This candidate was already dismissed.")
+                _refuse("request_conflict", "This share proposal has already been settled.")
             count = sum(
                 row.bullet.kind == KIND and row.proposal_id != retiring_proposal_id
                 for row in rows
@@ -926,26 +942,39 @@ def draft_evidence_candidates(config: Any, *, workspace: str, relation: Any) -> 
                                         os.close(run_fd)
                                     finally:
                                         os.close(parent_fd)
+                                    batch = ""
+                                    if relation.kind == "care_settlement":
+                                        if type(relation.batch_index) is not int or relation.batch_index < 0 or row.get("batch_index") != relation.batch_index:
+                                            _refuse("invalid_evidence", "The candidate batch is invalid.")
+                                        batch = "\0care-batch\0" + str(relation.batch_index)
                                     run_id = hmac.new(share_evidence._relation_secret(config),
-                                        (workspace + "\0" + relation.workspace_lifetime_id + "\0" + relation.relation_id).encode(),
+                                        (workspace + "\0" + relation.workspace_lifetime_id + "\0" + relation.relation_id + batch).encode(),
                                         hashlib.sha256).hexdigest()
                                     ledger_path = store / "candidate-runs" / (run_id + ".json")
                                     ledger = share_evidence._read_json(ledger_path, limit=8192, code="private_state_corrupt")
                                     fingerprints = ledger.get("fingerprints", [])
                                     if not isinstance(fingerprints, list) or any(not isinstance(item, str) or not re.fullmatch(r"[0-9a-f]{64}", item) for item in fingerprints) or len(fingerprints) > MAX_CANDIDATES_PER_RUN:
                                         _refuse("draft_corrupt", "The private candidate run is corrupt.")
-                                    if fingerprint not in fingerprints:
+                                    reserved_now = fingerprint not in fingerprints
+                                    if reserved_now:
                                         if len(fingerprints) >= MAX_CANDIDATES_PER_RUN:
                                             _refuse("capacity", "The candidate intake limit for this run is reached.", limit=MAX_CANDIDATES_PER_RUN, count=len(fingerprints))
                                         fingerprints.append(fingerprint)
                                         share_evidence._write_private(ledger_path, json.dumps({"schema": share_evidence.SCHEMA, "fingerprints": fingerprints}).encode(), limit=8192)
-                                    draft = _draft_share(
-                                        config, workspace=workspace, brain=link.name, relative_path=destination.path,
-                                        operation=operation, proposed=proposed, request_key="candidate:" + fingerprint,
-                                        request_fingerprint=fingerprint, checkout_claimed=True, registry_owner=owner,
-                                        expected_qualification=captured,
-                                        candidate_binding={"authorization": authorization, **asdict(snapshot)},
-                                    )
+                                    try:
+                                        draft = _draft_share(
+                                            config, workspace=workspace, brain=link.name, relative_path=destination.path,
+                                            operation=operation, proposed=proposed, request_key="candidate:" + fingerprint,
+                                            request_fingerprint=fingerprint, checkout_claimed=True, registry_owner=owner,
+                                            expected_qualification=captured,
+                                            candidate_binding={"authorization": authorization, **asdict(snapshot)},
+                                        )
+                                    except ShareDraftError as exc:
+                                        index_hash = hashlib.sha256((workspace + "\0candidate:" + fingerprint).encode()).hexdigest()
+                                        if reserved_now and exc.refusal.code == "capacity" and not (store / (index_hash + ".json")).exists():
+                                            fingerprints.remove(fingerprint)
+                                            share_evidence._write_private(ledger_path, json.dumps({"schema": share_evidence.SCHEMA, "fingerprints": fingerprints}).encode(), limit=8192)
+                                        raise
                                     artifact = draft.artifact
                                     provenance = artifact.setdefault("producer_provenance", [])
                                     if not isinstance(provenance, list):

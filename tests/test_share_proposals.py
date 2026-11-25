@@ -858,8 +858,8 @@ def test_intake_resolves_mapped_destination_and_never_publishes(linked, monkeypa
     canonical = '{"decision":"Only disclosed fact"}'
     row = {"project_id": "project", "source_id": "stream:project", "entry_id": "entry", "entry_revision": 2,
            "digest": hashlib.sha256(canonical.encode()).hexdigest(), "consent_generation": 1,
-           "audience": "team", "field_mask": ["decision"], "canonical_bytes": canonical}
-    relation = SimpleNamespace(kind="memory_checkpoint", workspace="home", workspace_lifetime_id="workspace-one", relation_id="run-one")
+           "audience": "team", "field_mask": ["decision"], "canonical_bytes": canonical, "batch_index": 0}
+    relation = SimpleNamespace(kind="care_settlement", workspace="home", workspace_lifetime_id="workspace-one", relation_id="run-one", batch_index=0)
     authorization = {"payload": {"row": row}, "signature": "private"}
     monkeypatch.setattr(share_evidence, "_relation_is_sealed", lambda *args: True)
     monkeypatch.setattr(share_evidence, "_relation_secret", lambda *args: b"test-key")
@@ -889,6 +889,36 @@ def test_intake_resolves_mapped_destination_and_never_publishes(linked, monkeypa
     row["entry_revision"] = 3
     refusal = sp.draft_evidence_candidates(config, workspace="home", relation=relation)
     assert isinstance(refusal[0], sp.ShareRefusal) and refusal[0].code == "capacity"
+    relation.batch_index = 1
+    row["batch_index"] = 1
+    monkeypatch.setattr(sp, "MAX_PER_BRAIN", 1)
+    refusal = sp.draft_evidence_candidates(config, workspace="home", relation=relation)
+    assert isinstance(refusal[0], sp.ShareRefusal) and refusal[0].code == "capacity"
+    ledgers = list((sp._store_dir(config) / "candidate-runs").glob("*.json"))
+    assert sorted(len(json.loads(path.read_text())["fingerprints"]) for path in ledgers) == [0, 1]
+
+    from ciao import memory_proposals
+    from ciao.web import proposal_service
+
+    queue = config.vault / "Workspace" / "Memory-Proposals.md"
+    _, by_id = proposal_service._scan_proposal_rows(config)
+    item = by_id[first[0].proposal_id]["row"]
+    assert proposal_service._rewrite_queue_single(queue, item["line"], item["raw"], item["text"], "share", False,
+                                                  "home", config.vault, config=config, proposal_id=item["id"])
+    memory_proposals.record_dismissal(queue, text=item["text"], kind="share", via="agent", proposal_id=item["id"])
+    assert not sp._operator_dismissed(queue, item["id"], item["text"])
+    memory_proposals.record_dismissal(queue, text=item["text"], kind="share", via="pwa", proposal_id=item["id"])
+    relation.batch_index = 0
+    row["batch_index"] = 0
+    row["entry_revision"] = 2
+    settled = sp.draft_evidence_candidates(config, workspace="home", relation=relation)
+    assert isinstance(settled[0], sp.ShareRefusal) and settled[0].code == "already_settled"
+    relation.batch_index = 1
+    row["batch_index"] = 1
+    row["entry_revision"] = 3
+    remaining = sp.draft_evidence_candidates(config, workspace="home", relation=relation)
+    assert len(remaining) == 1 and isinstance(remaining[0], sp.ShareDraft)
+    assert queue.read_text().count("[share ") == 1
 
 
 @pytest.mark.parametrize("destination_kind", ["collection", "section"])
