@@ -26,6 +26,7 @@ from typing import Final
 from ciao.os_support.files import open_fd
 from ciao.prompt_fence import fence
 from ciao.task_context import flatten_text
+from ciao.memory_policy import is_unattended_turn
 from ciao.transcripts import parse_archive_turns
 
 FENCE_TAG: Final = "linked-chats"
@@ -108,7 +109,7 @@ def section_for_chat(
 
 
 def read_excerpt(path: Path | None) -> Excerpt | None:
-    """The first and last user message of the archive at *path*, or ``None`` when it cannot be read.
+    """The first and last attended user message, or ``None`` when the archive cannot be read.
 
     The file is opened without following links and must be a regular file of at
     most :data:`ARCHIVE_READ_CEILING` bytes that decodes as UTF-8. A FIFO is
@@ -124,7 +125,8 @@ def read_excerpt(path: Path | None) -> Excerpt | None:
     users = [
         turn["user"]
         for turn in parse_archive_turns(text)
-        if isinstance(turn.get("user"), str) and turn["user"].strip()
+        if turn.get("notice") is None and isinstance(turn.get("user"), str)
+        and turn["user"].strip() and not is_unattended_turn(turn["user"])
     ]
     if not users:
         return Excerpt("", None)
