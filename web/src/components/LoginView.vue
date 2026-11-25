@@ -1224,6 +1224,7 @@ onUnmounted(() => {
   font-weight: 600;
 }
 .notes-choice { display: flex; align-items: center; gap: 8px; min-height: 44px; cursor: pointer; }
+#setup-notes-folder { min-height: 44px; }
 .notes-choice input:focus-visible, #setup-notes-folder:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 .form-input {
   background: var(--bg);
