@@ -982,10 +982,39 @@ async def test_real_memory_pass_completion_checkpoints_before_archival(tmp_path:
         assert await manager._memory_pass.on_turn_finished(pass_chat.chat_id)
         assert pass_chat.archived
         assert registry.principal_for_chat(pass_chat.chat_id) is None
+        se._reset_project_manager_for_tests()
+        restarted = ProjectChatManager(
+            config,
+            state_store=StateStore(config.state_path, config.workspace_root, config.media_root),
+            transcript_store=TranscriptStore(config.state_path.parent, config.workspace_root / "transcripts"),
+            path=config.state_path.parent / "web_projects.json",
+        )
+        se.bind_project_manager(restarted)
         relation = se.recover_memory_pass_source_relation(config, workspace="home", pass_chat_id=pass_chat.chat_id)
         assert relation.project_id == project.project_id
         assert relation.relation_id == pass_chat.chat_id
         assert source.chat_id == pass_chat.helper["source_chat_id"]
+    finally:
+        se._reset_project_manager_for_tests()
+
+
+def test_done_without_checkpoint_cannot_recover_source_after_restart(tmp_path: Path) -> None:
+    config, manager, _, _ = _memory_manager(tmp_path)
+    pass_chat = next(chat for chat in manager.list_chats() if (chat.helper or {}).get("kind") == "memory_pass")
+    pass_chat.last_response = "Updated synthetic memory."
+    pass_chat.last_response_status = "success"
+    manager._save()
+    restarted = ProjectChatManager(
+        config,
+        state_store=StateStore(config.state_path, config.workspace_root, config.media_root),
+        transcript_store=TranscriptStore(config.state_path.parent, config.workspace_root / "transcripts"),
+        path=config.state_path.parent / "web_projects.json",
+    )
+    se._reset_project_manager_for_tests()
+    se.bind_project_manager(restarted)
+    try:
+        with pytest.raises(se.EvidenceError, match="checkpoint is unavailable"):
+            se.recover_memory_pass_source_relation(config, workspace="home", pass_chat_id=pass_chat.chat_id)
     finally:
         se._reset_project_manager_for_tests()
 
