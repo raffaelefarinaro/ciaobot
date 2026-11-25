@@ -550,6 +550,8 @@ class SharedBrainLink:
     sharing_policy: str = DEFAULT_SHARING_POLICY
     sharing_generation: int = 0
     sharing_consent: SharingConsent | None = None
+    guide_mapping_generation: int = 0
+    guide_mapping: Any = None
 
 
 @dataclass(slots=True)
@@ -667,6 +669,11 @@ def shared_brain_row(link: SharedBrainLink) -> dict[str, Any]:
             "lifetime_id": link.sharing_consent.lifetime_id,
             "granted_at": link.sharing_consent.granted_at,
         }
+    if link.guide_mapping_generation:
+        row["guide_mapping_generation"] = link.guide_mapping_generation
+    if link.guide_mapping is not None:
+        from ciao.shared_brain_mapping import row as mapping_row
+        row["guide_mapping"] = mapping_row(link.guide_mapping)
     return row
 
 
@@ -716,6 +723,11 @@ def shared_brains_from_rows(raw: object) -> list[SharedBrainLink]:
             sharing_policy = DEFAULT_SHARING_POLICY
             sharing_generation = 0
             sharing_consent = None
+        from ciao.shared_brain_mapping import from_row as mapping_from_row
+        raw_generation = row.get("guide_mapping_generation", 0)
+        mapping_generation = raw_generation if type(raw_generation) is int and raw_generation >= 0 else 0
+        mapping = mapping_from_row(row.get("guide_mapping"), identity=identity,
+                                   lifetime_id=effective_lifetime, generation=mapping_generation)
         links.append(SharedBrainLink(
             name=name, path=path, identity=identity,
             lifetime_id=effective_lifetime,
@@ -723,6 +735,8 @@ def shared_brains_from_rows(raw: object) -> list[SharedBrainLink]:
             sharing_policy=sharing_policy,
             sharing_generation=sharing_generation,
             sharing_consent=sharing_consent,
+            guide_mapping_generation=mapping_generation,
+            guide_mapping=mapping,
         ))
     return links
 

@@ -170,6 +170,7 @@ from ciao.web.routes_api import (
     reorder_workspaces,
     upsert_workspace_setting,
     workspace_shared_brains,
+    workspace_shared_brain_guide_mapping,
     set_workspace_shared_brain_sharing,
     vault_backlinks,
     vault_delete_note,
@@ -412,6 +413,7 @@ def create_app(config, app_settings=None, mcp_service=None) -> Starlette:
         Route("/api/workspaces/reorder", reorder_workspaces, methods=["POST"]),
         Route("/api/workspaces/{name}", upsert_workspace_setting, methods=["PATCH"]),
         Route("/api/workspaces/{name}/shared-brains", workspace_shared_brains, methods=["GET"]),
+        Route("/api/workspaces/{name}/shared-brains/{brain}/guide-mapping", workspace_shared_brain_guide_mapping, methods=["GET", "POST"]),
         Route(
             "/api/workspaces/{name}/shared-brains/{brain}/sharing",
             set_workspace_shared_brain_sharing,
