@@ -552,6 +552,8 @@ class SharedBrainLink:
     sharing_consent: SharingConsent | None = None
     guide_mapping_generation: int = 0
     guide_mapping: Any = None
+    # A never-mapped folder can have a positive generation solely from restores.
+    guide_generation_from_restore_only: bool = False
 
 
 @dataclass(slots=True)
@@ -678,6 +680,8 @@ def shared_brain_row(link: SharedBrainLink) -> dict[str, Any]:
         }
     if link.guide_mapping_generation:
         row["guide_mapping_generation"] = link.guide_mapping_generation
+    if link.guide_generation_from_restore_only:
+        row["guide_generation_from_restore_only"] = True
     if link.guide_mapping is not None:
         from ciao.shared_brain_mapping import row as mapping_row
         row["guide_mapping"] = mapping_row(link.guide_mapping)
@@ -744,6 +748,10 @@ def shared_brains_from_rows(raw: object) -> list[SharedBrainLink]:
             sharing_consent=sharing_consent,
             guide_mapping_generation=mapping_generation,
             guide_mapping=mapping,
+            guide_generation_from_restore_only=(
+                kind == "folder" and mapping_generation > 0 and "guide_mapping" not in row
+                and row.get("guide_generation_from_restore_only") is True
+            ),
         ))
     return links
 

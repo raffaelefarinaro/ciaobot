@@ -47,7 +47,7 @@ import logging
 import os
 import re
 import sqlite3
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -934,11 +934,7 @@ def register_restored(
             claude_trim=settings["claude_trim"],
             color=settings["color"],
             shared_brains=[
-                replace(reset_link_for_restore(link), lifetime_id=link.lifetime_id)
-                if (link.kind == "folder" and link.guide_mapping_generation == 0
-                    and link.guide_mapping is None and link.sharing_generation == 0
-                    and link.sharing_consent is None and link.sharing_policy == "review")
-                else reset_link_for_restore(link)
+                reset_link_for_restore(link)
                 for link in settings["shared_brains"]
             ],
         )
