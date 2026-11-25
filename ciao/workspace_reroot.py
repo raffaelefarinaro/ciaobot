@@ -27,6 +27,7 @@ file it did not recognise is how a vault loses notes.
 
 from __future__ import annotations
 
+import ctypes
 import errno
 import hashlib
 import json
@@ -34,7 +35,9 @@ import logging
 import os
 import re
 import shutil
-import tempfile
+import stat
+import subprocess
+import sys
 import uuid
 from dataclasses import asdict, dataclass, field
 from datetime import UTC, datetime
@@ -761,6 +764,7 @@ def _apply_owned(
             created.extend(f"{name}/{relative}" for relative in files)
             created_dirs.extend(f"{name}/{relative}" for relative in dirs)
         payload["created_files"] = created
+        payload["created_files_contents"] = {name: _entry_fingerprint(install_root / name) for name in created}
         payload["created_dirs"] = created_dirs
         # What the bootstrap put inside each directory it created, recorded so
         # undo can tell the migration's own contents from anything an operator
@@ -919,29 +923,60 @@ def _preflight_undo_registry(owner: Any, receipt: dict[str, Any]) -> str | None:
     return None
 
 
-def _reverse_undo_moves(
-    install_root: Path, receipt: dict[str, Any], reversed_moves: list[str]
-) -> str | None:
-    """Re-apply moves an undo had reversed when its registry restore fails."""
-    for source in reversed(reversed_moves):
-        entry = next(
-            (
-                item for item in receipt.get("applied", [])
-                if isinstance(item, dict) and item.get("source") == source
-            ),
-            None,
+def _index_rows(root: Path, relative: str) -> dict[str, str]:
+    result = subprocess.run(
+        ["git", "-C", str(root), "--literal-pathspecs", "ls-files", "--stage", "-z", "--", relative],
+        capture_output=True, check=True,
+    )
+    rows = {}
+    for record in result.stdout.split(b"\0"):
+        if record:
+            metadata, name = record.split(b"\t", 1)
+            if not metadata.endswith(b" 0"):
+                raise OSError(f"unmerged index entry: {os.fsdecode(name)}")
+            rows[os.fsdecode(name)] = metadata.decode("ascii")
+    return rows
+
+
+def _set_index(root: Path, previous: dict[str, str], wanted: dict[str, str]) -> None:
+    records = []
+    for name in previous.keys() - wanted.keys():
+        oid = previous[name].split()[1]
+        records.append(b"0 " + b"0" * len(oid) + b"\t" + os.fsencode(name))
+    records.extend(meta.encode("ascii") + b"\t" + os.fsencode(name) for name, meta in wanted.items())
+    if records:
+        result = subprocess.run(
+            ["git", "-c", "core.fsync=index", "-C", str(root), "update-index", "-z", "--index-info"],
+            input=b"\0".join(records) + b"\0", capture_output=True,
         )
-        if entry is None:
-            continue
-        (install_root / str(entry["destination"])).parent.mkdir(
-            parents=True, exist_ok=True
-        )
-        code, out = run_git(
-            install_root, "mv", str(entry["source"]), str(entry["destination"])
-        )
-        if code != 0:
-            return out
-    return None
+        if result.returncode:
+            raise OSError(os.fsdecode(result.stderr))
+
+
+def _move_undo_entry(root: Path, move: dict[str, Any], *, recovering: bool) -> None:
+    original, restored = move["destination"], move["source"]
+    previous = move["index"]
+    renamed = {restored + name[len(original):]: meta for name, meta in previous.items()}
+    src, dst = (restored, original) if recovering else (original, restored)
+    target = root / dst
+    if not move.get("identity"):
+        raise OSError(f"missing move identity: {src}")
+    if _identity(root / src) == move["identity"]:
+        _mkdir_durable(target.parent)
+        _exclusive_rename(root / src, target)
+        if _identity(target) != move["identity"]:
+            _exclusive_rename(target, root / src)
+            raise OSError(f"move source changed: {src}")
+    elif os.path.lexists(root / src):
+        raise OSError(f"independent move occupant: {src}")
+    if _identity(target) != move["identity"]:
+        raise OSError(f"move identity changed: {target}")
+    live = {**_index_rows(root, original), **_index_rows(root, restored)}
+    if live != previous and live != renamed:
+        raise OSError(f"git index changed during move: {src}")
+    wanted = previous if recovering else renamed
+    if live != wanted:
+        _set_index(root, live, wanted)
 
 
 UNDO_MANIFEST_NAME = "undo-in-progress.json"
@@ -963,6 +998,14 @@ def _fsync_file(path: Path) -> None:
         os.close(fd)
 
 
+def _mkdir_durable(path: Path) -> None:
+    if path.is_dir():
+        return
+    _mkdir_durable(path.parent)
+    path.mkdir(exist_ok=True)
+    _fsync_directory(path.parent)
+
+
 def _unlink_durable(path: Path) -> None:
     path.unlink(missing_ok=True)
     if path.parent.is_dir():
@@ -974,7 +1017,7 @@ def _undo_manifest_path(runtime_root: Path) -> Path:
 
 
 def _write_json_atomic(path: Path, payload: dict[str, Any]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
+    _mkdir_durable(path.parent)
     tmp = path.with_name(path.name + ".tmp")
     tmp.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8", newline="")
     _fsync_file(tmp)
@@ -982,25 +1025,127 @@ def _write_json_atomic(path: Path, payload: dict[str, Any]) -> None:
     _fsync_directory(path.parent)
 
 
-def _atomic_copy_stash(source: Path, target: Path, expected: dict[str, Any] | None, *, temp_path: Path | None = None) -> None:
-    """Publish a complete, synced copy only while the target still matches."""
-    if temp_path is None:
-        fd, name = tempfile.mkstemp(prefix=".ciao-undo-", suffix=".tmp", dir=target.parent)
-        temp = Path(name)
+def _exclusive_rename(source: Path, target: Path) -> None:
+    libc = ctypes.CDLL(None, use_errno=True)
+    if sys.platform == "darwin":
+        rename = libc.renameatx_np
+        cwd, flag = -2, 4
+    elif sys.platform.startswith("linux") and hasattr(libc, "renameat2"):
+        rename = libc.renameat2
+        cwd, flag = -100, 1
     else:
-        temp = temp_path
-        fd = os.open(temp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
-    os.close(fd)
-    try:
-        shutil.copy2(source, temp)
-        _fsync_file(temp)
-        current = _entry_fingerprint(target) if target.exists() or target.is_symlink() else None
-        if current != expected:
-            raise OSError(f"stash target was edited independently: {target}")
-        os.replace(temp, target)
+        raise OSError(errno.ENOTSUP, "exclusive rename is unavailable")
+    if rename(cwd, os.fsencode(source), cwd, os.fsencode(target), flag):
+        error = ctypes.get_errno()
+        raise OSError(error, os.strerror(error), str(target))
+    _fsync_directory(source.parent)
+    if source.parent != target.parent:
         _fsync_directory(target.parent)
-    finally:
-        temp.unlink(missing_ok=True)
+
+
+def _identity(path: Path) -> list[int] | None:
+    try:
+        info = path.lstat()
+    except FileNotFoundError:
+        return None
+    return [info.st_dev, info.st_ino, stat.S_IFMT(info.st_mode)]
+
+
+def _under(root: Path, relative: str) -> Path:
+    name = Path(relative)
+    if name.is_absolute() or ".." in name.parts or ".git" in name.parts or not name.parts:
+        raise OSError(f"invalid undo path: {relative}")
+    path = root / name
+    if path.parent.resolve() != path.parent:
+        raise OSError(f"symlink ancestor: {path}")
+    return path
+
+
+def _new_anchor(install: Path, relatives: list[str]) -> Path:
+    code, git_dir = run_git(install, "rev-parse", "--absolute-git-dir")
+    if code:
+        raise OSError(git_dir)
+    parent = Path(git_dir.strip()) / "ciao-undo"
+    parent.mkdir(mode=0o700, exist_ok=True)
+    if parent.is_symlink() or parent.stat().st_mode & 0o077 or parent.stat().st_uid != os.getuid():
+        raise OSError(f"capture directory is not private: {parent}")
+    anchor = parent / uuid.uuid4().hex
+    anchor.mkdir(mode=0o700)
+    device = anchor.stat().st_dev
+    for relative in relatives:
+        path = _under(install, relative)
+        if path == parent or path in parent.parents or parent in path.parents:
+            raise OSError(f"capture anchor intersects undo path: {path}")
+        while not os.path.lexists(path):
+            path = path.parent
+        _fsync_directory(path if path.is_dir() and not path.is_symlink() else path.parent)
+        if path.lstat().st_dev != device or path.is_mount():
+            raise OSError(f"cross-device undo capture: {path}")
+    probe = anchor / "probe"
+    probe.touch()
+    occupied = anchor / "occupied"
+    occupied.touch()
+    try:
+        _exclusive_rename(probe, occupied)
+    except FileExistsError:
+        pass
+    else:
+        raise OSError("filesystem did not honor exclusive rename")
+    _unlink_durable(occupied)
+    os.link(probe, occupied)
+    _unlink_durable(occupied)
+    _exclusive_rename(probe, anchor / "renamed")
+    _unlink_durable(anchor / "renamed")
+    _fsync_directory(parent)
+    _fsync_directory(parent.parent)
+    return anchor
+
+
+def _atomic_copy_stash(source: Path, target: Path, expected: dict[str, Any] | None,
+                       *, temp_path: Path, saved: Path, identity: list[int] | None,
+                       postimage: dict[str, Any]) -> None:
+    """Keep the staged inode as the publication witness throughout recovery."""
+    fd = os.open(temp_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    os.close(fd)
+    shutil.copy2(source, temp_path)
+    _fsync_file(temp_path)
+    _fsync_directory(temp_path.parent)
+    if _entry_fingerprint(temp_path) != postimage:
+        raise OSError(f"stash copy changed during staging: {source}")
+    if expected is not None:
+        _exclusive_rename(target, saved)
+        if _identity(saved) != identity or _entry_fingerprint(saved) != expected:
+            _exclusive_rename(saved, target)
+            raise OSError(f"stash target was edited independently: {target}")
+    os.link(temp_path, target)
+    _fsync_directory(target.parent)
+
+
+def _restore_stash(item: dict[str, Any], target: Path) -> None:
+    saved = Path(item["saved"])
+    staged = Path(item["temp"])
+    withdrawn = saved.with_suffix(".withdrawn")
+    current = _identity(target)
+    if current is not None and current == _identity(staged):
+        _exclusive_rename(target, withdrawn)
+        if _identity(withdrawn) != current or _entry_fingerprint(withdrawn) != item["postimage"]:
+            _exclusive_rename(withdrawn, target)
+            raise OSError("stash target was edited independently")
+    elif current is not None and (
+        current != item["identity"] or _entry_fingerprint(target) != item["before"]
+    ):
+        raise OSError("stash target was edited independently")
+    if os.path.lexists(withdrawn) and (
+        _identity(withdrawn) != _identity(staged)
+        or _entry_fingerprint(withdrawn) != item["postimage"]
+    ):
+        raise OSError("withdrawn stash was edited independently")
+    if os.path.lexists(saved):
+        if _identity(saved) != item["identity"]:
+            raise OSError("stash capture identity changed")
+        _exclusive_rename(saved, target)
+    elif item["identity"] != _identity(target):
+        raise OSError("stash capture missing")
 
 
 def _restore_owned_schedule_prompts(runtime_root: Path, rewrites: Any) -> list[str]:
@@ -1070,7 +1215,19 @@ def _restore_owned_schedule_prompts(runtime_root: Path, rewrites: Any) -> list[s
     return []
 
 
-def _recover_undo_manifest(runtime_root: Path, owner: Any) -> str | None:
+def _capture_locations(manifest: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "capture_inventory": str(Path(manifest["compensation_dir"]) / "inventory.json"),
+        "unverified_created_files": {
+            item["source"]: item["backup"] for item in manifest["created"]
+            if item.get("fingerprinted_at_undo") and "identity" in item
+        },
+    }
+
+
+def _recover_undo_manifest(
+    runtime_root: Path, owner: Any, *, completed: dict[str, Any] | None = None
+) -> str | None:
     """Roll an interrupted undo back to its post-apply state before retrying."""
     path = _undo_manifest_path(runtime_root)
     if not path.is_file():
@@ -1079,7 +1236,36 @@ def _recover_undo_manifest(runtime_root: Path, owner: Any) -> str | None:
         manifest = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, ValueError, TypeError):
         return "an interrupted undo manifest is unreadable; repair it by hand"
+    if not isinstance(manifest, dict):
+        return "invalid undo manifest"
     install_root = Path(str(manifest.get("install_root") or "")).resolve()
+    anchor = Path(str(manifest.get("compensation_dir") or ""))
+    if (manifest.get("version") != 2 or not manifest.get("anchor_identity")
+            or _identity(anchor) != manifest["anchor_identity"]):
+        return "undo capture directory or manifest version changed; manual recovery required"
+    try:
+        code, git_dir = run_git(install_root, "rev-parse", "--absolute-git-dir")
+        if (code or anchor.parent != Path(git_dir) / "ciao-undo"
+                or anchor.resolve() != anchor or not re.fullmatch(r"[0-9a-f]{32}", anchor.name)
+                or Path(manifest["receipt_path"]) != receipt_path(runtime_root)):
+            raise ValueError("invalid undo anchor or receipt path")
+        for index, item in enumerate(manifest["created"]):
+            _under(install_root, item["source"])
+            if Path(item["backup"]) != anchor / f"artifact-{index}":
+                raise ValueError("invalid artifact slot")
+        for index, item in enumerate(manifest["stashes"]):
+            _under(install_root, item["source"])
+            _under(runtime_root, item["backup"])
+            if item["state"] == "armed" and (
+                Path(item["saved"]) != anchor / f"stash-{index}"
+                or Path(item["temp"]) != anchor / f"stash-{index}.stage"
+            ):
+                raise ValueError("invalid stash slot")
+        for move in manifest["moves"]:
+            _under(install_root, move["source"])
+            _under(install_root, move["destination"])
+    except (OSError, KeyError, TypeError, ValueError) as exc:
+        return f"invalid undo manifest: {exc}"
     if manifest.get("phase") == "committed":
         stored_receipt = manifest.get("receipt_path")
         if isinstance(stored_receipt, str):
@@ -1089,8 +1275,10 @@ def _recover_undo_manifest(runtime_root: Path, owner: Any) -> str | None:
                 _unlink_durable(runtime_root / str(item.get("backup") or ""))
         compensation = manifest.get("compensation_dir")
         if isinstance(compensation, str):
-            shutil.rmtree(compensation, ignore_errors=True)
+            _write_json_atomic(Path(compensation) / "inventory.json", manifest)
             _fsync_directory(Path(compensation).parent)
+        if completed is not None:
+            completed.update(_capture_locations(manifest))
         _unlink_durable(path)
         return None
     errors: list[str] = []
@@ -1102,67 +1290,55 @@ def _recover_undo_manifest(runtime_root: Path, owner: Any) -> str | None:
         )
     except (OSError, ValueError, TypeError) as exc:
         errors.append(f"schedule: {exc}")
+    for move in reversed(manifest["moves"]):
+        if move.get("recovered"):
+            continue
+        try:
+            _move_undo_entry(install_root, move, recovering=True)
+            move["recovered"] = True
+            _write_json_atomic(path, manifest)
+        except (OSError, subprocess.SubprocessError) as exc:
+            return f"re-applying the already reversed moves also failed: {exc}"
     created = manifest.get("created") or []
     for item in reversed(created):
-        if not isinstance(item, dict):
+        if not isinstance(item, dict) or item.get("recovered"):
             continue
         source = install_root / str(item.get("source") or "")
         backup = Path(str(item.get("backup") or ""))
-        if backup.exists():
+        if os.path.lexists(backup):
             try:
+                if _identity(backup) != item.get("identity"):
+                    raise OSError(f"created capture identity changed: {backup}")
                 if source.exists() or source.is_symlink():
                     raise OSError(f"compensation target exists: {source}")
-                source.parent.mkdir(parents=True, exist_ok=True)
-                shutil.move(str(backup), str(source))
-                if item.get("tracked"):
-                    run_git(install_root, "add", "--", str(item.get("source") or ""))
+                _mkdir_durable(source.parent)
+                _exclusive_rename(backup, source)
             except OSError as exc:
                 errors.append(str(exc))
-    for move in manifest.get("moves") or []:
-        if not isinstance(move, dict):
-            continue
-        source = install_root / str(move.get("source") or "")
-        destination = install_root / str(move.get("destination") or "")
-        if (source.exists() or source.is_symlink()) and not destination.exists():
-            try:
-                destination.parent.mkdir(parents=True, exist_ok=True)
-                code, out = run_git(
-                    install_root, "mv", str(move.get("source") or ""),
-                    str(move.get("destination") or ""),
-                )
-                if code != 0:
-                    shutil.move(str(source), str(destination))
-            except OSError as exc:
-                errors.append(f"{destination}: {exc}")
-        elif not destination.exists():
-            errors.append(f"neither path exists for {source}")
+        if "identity" in item:
+            if _identity(source) != item["identity"]:
+                errors.append(f"created artifact identity changed: {source}")
+            else:
+                live = _index_rows(install_root, item["source"])
+                if live not in ({}, item["index"]):
+                    errors.append(f"created artifact index changed: {source}")
+                else:
+                    _set_index(install_root, live, item["index"])
+                    item["recovered"] = True
+                    _write_json_atomic(path, manifest)
     for item in manifest.get("stashes") or []:
         if not isinstance(item, dict) or item.get("state") == "pending":
             continue
         target = install_root / str(item.get("source") or "")
-        saved = Path(str(item.get("saved") or ""))
         try:
             if item.get("state") != "armed":
                 raise OSError("stash progress is missing or invalid")
-            temp = Path(str(item.get("temp") or ""))
-            if temp.parent != target.parent or not temp.name.startswith(".ciao-undo-"):
-                raise OSError("stash temporary path is invalid")
-            temp.unlink(missing_ok=True)
-            current = _entry_fingerprint(target) if target.exists() or target.is_symlink() else None
-            before = item.get("before")
-            if current == before:
-                continue
-            if current != item.get("postimage"):
-                raise OSError("stash target was edited independently")
-            if before is not None:
-                if not saved.is_file() or _entry_fingerprint(saved) != before:
-                    raise OSError("stash compensation image is missing or changed")
-                target.parent.mkdir(parents=True, exist_ok=True)
-                _atomic_copy_stash(saved, target, current, temp_path=temp)
-            elif current is not None:
-                target.unlink()
+            _restore_stash(item, target)
             if item.get("tracked"):
-                run_git(install_root, "rm", "--cached", "--quiet", "--", str(item.get("source") or ""))
+                live = _index_rows(install_root, item["source"])
+                if live not in (item["index"], item["published_index"]):
+                    raise OSError("stash index entry changed independently")
+                _set_index(install_root, live, item["index"])
         except OSError as exc:
             errors.append(f"{target}: {exc}")
     before = manifest.get("registry_before")
@@ -1207,7 +1383,7 @@ def _recover_undo_manifest(runtime_root: Path, owner: Any) -> str | None:
                         runtime_root, after_rows, before_rows, owner=owner,
                         fields=("vault_root",),
                     ):
-                        errors.append("registry: conditional restore refused")
+                        errors.append("restoring the post-migration registry also failed: conditional restore refused")
                 else:
                     errors.append(
                         "registry: migrated rows no longer match either the "
@@ -1217,11 +1393,11 @@ def _recover_undo_manifest(runtime_root: Path, owner: Any) -> str | None:
                 errors.append(f"registry: {exc}")
     if errors:
         return "an interrupted undo could not be compensated: " + "; ".join(errors)
-    _unlink_durable(path)
     compensation = manifest.get("compensation_dir")
     if isinstance(compensation, str):
-        shutil.rmtree(compensation, ignore_errors=True)
+        _write_json_atomic(Path(compensation) / "inventory.json", manifest)
         _fsync_directory(Path(compensation).parent)
+    _unlink_durable(path)
     return None
 
 
@@ -1258,13 +1434,18 @@ def _undo_owned(install_root: Path, runtime_root: Path, *, owner: Any) -> dict[s
     fingerprints before a single path is touched.
     """
     install_root = Path(install_root).resolve()
-    runtime_root = Path(runtime_root)
-    recovery_error = _recover_undo_manifest(runtime_root, owner)
+    runtime_root = Path(runtime_root).resolve()
+    completed: dict[str, Any] = {}
+    recovery_error = _recover_undo_manifest(runtime_root, owner, completed=completed)
     if recovery_error is not None:
-        return {"status": "failed", "reason": recovery_error + "; receipt retained"}
+        return {
+            "status": "failed",
+            "reason": recovery_error + "; receipt retained",
+            "recovery_manifest": str(_undo_manifest_path(runtime_root)),
+        }
     receipt = read_receipt(runtime_root)
     if receipt is None:
-        return {"status": "nothing_to_undo", "reason": "no migrated receipt"}
+        return {"status": "nothing_to_undo", "reason": "no migrated receipt", **completed}
     registry_conflict = _preflight_undo_registry(owner, receipt)
     if registry_conflict is not None:
         return {
@@ -1284,13 +1465,17 @@ def _undo_owned(install_root: Path, runtime_root: Path, *, owner: Any) -> dict[s
     # everything below assumes the directories hold exactly what the receipt
     # recorded.
     blocked = _unexpected_under_created_dirs(install_root, receipt)
+    for relative, expected in receipt.get("created_files_contents", {}).items():
+        target = install_root / relative
+        if os.path.lexists(target) and _entry_fingerprint(target) != expected:
+            blocked.append(relative)
     if blocked:
         shown = ", ".join(blocked[:5])
         more = f" (and {len(blocked) - 5} more)" if len(blocked) > 5 else ""
         return {
             "status": "refused",
             "reason": (
-                "these paths under directories the migration created were "
+                "these paths the migration created were "
                 f"added, edited or deleted after it ran: {shown}{more}. Restore "
                 "each one to what the migration left or move it out, then run "
                 "the undo again; undoing anyway would delete them with their "
@@ -1299,28 +1484,49 @@ def _undo_owned(install_root: Path, runtime_root: Path, *, owner: Any) -> dict[s
             "unexpected_paths": blocked,
         }
 
-    compensation_dir = runtime_root / "migration" / f"undo-compensation-{uuid.uuid4().hex}"
-    created_map: dict[str, Path] = {}
-    created_tracked: dict[str, bool] = {}
+    created_paths = [*receipt.get("created_files", []), *receipt.get("created_dirs", [])]
+    relatives = list(created_paths)
+    relatives.extend(item["source"] for item in receipt.get("stashed_files", []))
+    for move in receipt.get("applied", []):
+        relatives.extend((move["source"], move["destination"]))
+    try:
+        for item in receipt.get("stashed_files", []):
+            backup = _under(runtime_root, item["backup"])
+            if backup.is_symlink() or not backup.is_file():
+                raise OSError(f"stash backup missing or invalid: {backup}")
+        compensation_dir = _new_anchor(install_root, relatives)
+    except OSError as exc:
+        return {"status": "refused", "reason": str(exc)}
     created_payload: list[dict[str, Any]] = []
-    for index, relative in enumerate(
-        [*receipt.get("created_files", []), *receipt.get("created_dirs", [])]
-    ):
-        backup = compensation_dir / "artifacts" / str(index)
-        created_map[str(relative)] = backup
-        tracked = run_git(
-            install_root, "ls-files", "--error-unmatch", "--", str(relative)
-        )[0] == 0
-        created_tracked[str(relative)] = tracked
-        created_payload.append(
-            {"source": str(relative), "backup": str(backup), "tracked": tracked}
-        )
+    for index, relative in enumerate(created_paths):
+        target = install_root / relative
+        directory = relative in receipt.get("created_dirs", [])
+        captures = receipt.get("created_dirs_contents" if directory else "created_files_contents", {})
+        expected = captures.get(relative)
+        # Early receipts name individual files but only fingerprint directories.
+        # A present-day fingerprint guards capture races, not migration ownership.
+        legacy_file = not directory and "created_files_contents" not in receipt
+        if expected is None and os.path.lexists(target):
+            if legacy_file and (target.is_symlink() or target.is_file()):
+                expected = _entry_fingerprint(target)
+            else:
+                return {"status": "refused", "reason": f"no recorded fingerprint for {target}; inspect the existing entry"}
+        created_payload.append({
+            "source": relative,
+            "backup": str(compensation_dir / f"artifact-{index}"),
+            "expected": expected,
+            "planned_identity": _identity(target),
+            "fingerprinted_at_undo": legacy_file,
+        })
+
     schedule_rewrites = (
         receipt.get("schedule_prompt_rewrites") if schedule_restore is not None else []
     )
-    manifest = {
+    manifest: dict[str, Any] = {
         "install_root": str(install_root),
         "compensation_dir": str(compensation_dir),
+        "version": 2,
+        "anchor_identity": _identity(compensation_dir),
         "created": created_payload,
         "stashes": [
             {
@@ -1332,7 +1538,9 @@ def _undo_owned(install_root: Path, runtime_root: Path, *, owner: Any) -> dict[s
             for entry in receipt.get("stashed_files", [])
             if isinstance(entry, dict)
         ],
-        "moves": receipt.get("applied", []),
+        "moves": [],
+        "move_identities": {move["destination"]: _identity(install_root / move["destination"])
+                            for move in receipt.get("applied", [])},
         "workspaces": list(receipt.get("workspaces") or []),
         "registry_before": receipt.get("registry_before"),
         "registry_after": receipt.get("registry_after"),
@@ -1344,83 +1552,64 @@ def _undo_owned(install_root: Path, runtime_root: Path, *, owner: Any) -> dict[s
 
     vault_name = Path(receipt.get("vault_root", "")).name or VAULT_DIR_NAME
     if receipt.get("removed_vault_dir"):
-        (install_root / vault_name).mkdir(parents=True, exist_ok=True)
+        _mkdir_durable(install_root / vault_name)
 
-    created_backups: list[tuple[Path, Path]] = []
-    stash_restores: list[tuple[Path, Path | None]] = []
-
-    def stash_for_compensation(target: Path) -> Path:
+    def stash_for_compensation(target: Path) -> None:
         relative = target.relative_to(install_root).as_posix()
-        bucket = created_map.get(relative)
-        if bucket is None:
-            bucket = compensation_dir / "artifacts" / f"extra-{len(created_backups)}"
-            created_map[relative] = bucket
-        bucket.parent.mkdir(parents=True, exist_ok=True)
-        shutil.move(str(target), str(bucket))
-        created_backups.append((target, bucket))
-        return bucket
+        item = next(record for record in created_payload if record["source"] == relative)
+        bucket = Path(item["backup"])
+        if _identity(target) != item["planned_identity"]:
+            raise OSError(f"created artifact was replaced: {target}")
+        item.update(identity=item["planned_identity"], index=_index_rows(install_root, relative))
+        _write_json_atomic(_undo_manifest_path(runtime_root), manifest)
+        _exclusive_rename(target, bucket)
+        observed = (
+            _fingerprint_tree(bucket) if bucket.is_dir() and not bucket.is_symlink()
+            else _entry_fingerprint(bucket)
+        )
+        if _identity(bucket) != item["identity"] or observed != item["expected"]:
+            _exclusive_rename(bucket, target)
+            raise OSError(f"created artifact was edited independently: {target}")
+        if _index_rows(install_root, relative) != item["index"]:
+            raise OSError(f"created artifact index changed: {target}")
+        _set_index(install_root, item["index"], {})
 
-    def compensate_artifacts() -> list[str]:
-        errors: list[str] = []
-        for target, backup in reversed(created_backups):
-            try:
-                target.parent.mkdir(parents=True, exist_ok=True)
-                shutil.move(str(backup), str(target))
-                relative = target.relative_to(install_root).as_posix()
-                if created_tracked.get(relative):
-                    run_git(install_root, "add", "--", relative)
-            except OSError as exc:
-                errors.append(f"{target}: {exc}")
-        for target, stash_backup in reversed(stash_restores):
-            try:
-                relative = target.relative_to(install_root).as_posix()
-                stash = next(item for item in manifest["stashes"] if item["source"] == relative)
-                if not target.is_file() or target.is_symlink() or _entry_fingerprint(target) != stash["postimage"]:
-                    raise OSError("stash target was edited independently")
-                if stash_backup is None:
-                    target.unlink(missing_ok=True)
-                else:
-                    _atomic_copy_stash(stash_backup, target, stash["postimage"], temp_path=Path(stash["temp"]))
-                relative = target.relative_to(install_root).as_posix()
-                if any(
-                    entry.get("source") == relative and entry.get("tracked")
-                    for entry in receipt.get("stashed_files", [])
-                    if isinstance(entry, dict)
-                ):
-                    run_git(install_root, "rm", "--cached", "--quiet", "--", relative)
-            except OSError as exc:
-                errors.append(f"{stash_backup}: {exc}")
-        return errors
-
-    def cleanup_compensation_state() -> None:
-        shutil.rmtree(compensation_dir, ignore_errors=True)
-        _fsync_directory(compensation_dir.parent)
-        _unlink_durable(_undo_manifest_path(runtime_root))
+    def failed(reason: str) -> dict[str, Any]:
+        error = _recover_undo_manifest(runtime_root, owner)
+        if error:
+            reason += "; " + error
+        return {"status": "failed", "reason": reason, "reversed": [], "already_reversed": already}
 
     restored: list[str] = []
-    for item in manifest["stashes"]:
+    for index, item in enumerate(manifest["stashes"]):
         backup = runtime_root / item["backup"]
         target = install_root / item["source"]
-        if backup.is_file():
-            if target.is_symlink() or (target.exists() and not target.is_file()):
-                raise OSError(f"stash target is not a regular file: {target}")
-            saved = compensation_dir / "stashes" / str(len(stash_restores))
-            before = _entry_fingerprint(target) if target.is_file() else None
-            if before is not None:
-                saved.parent.mkdir(parents=True, exist_ok=True)
-                shutil.copy2(target, saved)
-                _fsync_file(saved)
-                _fsync_directory(saved.parent)
-                _fsync_directory(compensation_dir)
-                _fsync_directory(compensation_dir.parent)
-            item.update(state="armed", saved=str(saved), before=before, postimage=_entry_fingerprint(backup), temp=str(target.parent / (".ciao-undo-" + uuid.uuid4().hex + ".tmp")))
-            _write_json_atomic(_undo_manifest_path(runtime_root), manifest)
-            target.parent.mkdir(parents=True, exist_ok=True)
-            _atomic_copy_stash(backup, target, before, temp_path=Path(item["temp"]))
-            stash_restores.append((target, saved if before is not None else None))
-            if item.get("tracked"):
-                run_git(install_root, "add", "--", item["source"])
-            restored.append(item["source"])
+        if not backup.is_file() or backup.is_symlink():
+            raise OSError(f"stash backup missing or invalid: {backup}")
+        if target.is_symlink() or (target.exists() and not target.is_file()):
+            raise OSError(f"stash target is not a regular file: {target}")
+        saved = compensation_dir / f"stash-{index}"
+        before = _entry_fingerprint(target) if target.is_file() else None
+        item.update(state="armed", saved=str(saved), before=before, identity=_identity(target),
+                    postimage=_entry_fingerprint(backup), temp=str(saved.with_suffix(".stage")))
+        if item["tracked"]:
+            item["index"] = _index_rows(install_root, item["source"])
+            code, oid = run_git(install_root, "hash-object", "-w", "--", str(backup))
+            if code:
+                raise OSError(oid)
+            mode = "100755" if backup.stat().st_mode & stat.S_IXUSR else "100644"
+            item["published_index"] = {item["source"]: f"{mode} {oid} 0"}
+        _write_json_atomic(_undo_manifest_path(runtime_root), manifest)
+        _mkdir_durable(target.parent)
+        _atomic_copy_stash(
+            backup, target, before, temp_path=Path(item["temp"]), saved=saved,
+            identity=item["identity"], postimage=item["postimage"],
+        )
+        if item.get("tracked"):
+            if _index_rows(install_root, item["source"]) != item["index"]:
+                raise OSError(f"stash index entry changed independently: {target}")
+            _set_index(install_root, item["index"], item["published_index"])
+        restored.append(item["source"])
 
     # Files the migration CREATED are removed before the moves are reversed,
     # because they live inside the directories about to move back. Removed by
@@ -1431,35 +1620,18 @@ def _undo_owned(install_root: Path, runtime_root: Path, *, owner: Any) -> dict[s
         target = install_root / relative
         # is_symlink first: AGENTS.md is a symlink, and `is_file()` follows it,
         # so a link whose target already moved back would be left dangling.
-        if target.is_symlink() or target.is_file():
+        if os.path.lexists(target):
             stash_for_compensation(target)
-            # If the migration was COMMITTED, these paths are tracked. Deleting
-            # the file without staging it leaves the index claiming a file that
-            # is gone, and `git mv` of any ancestor directory then fails with
-            # "bad source" — which is exactly how an undo stalled halfway on the
-            # reference install.
-            run_git(install_root, "rm", "--cached", "--quiet", "--", relative)
             removed.append(relative)
             _prune_empty_parents(install_root, target.parent)
     source_dir = install_root / _SKILLS_SRC
     if source_dir.is_dir() and not any(source_dir.iterdir()):
         source_dir.rmdir()
 
-    # The bootstrap's `.claude/` holds hundreds of packaged files, so it is
-    # recorded as a directory and removed whole rather than listed file by file.
-    # Only directories this migration CREATED are listed, so a root that already
-    # had one keeps it. Removing whole is safe because the guard above verified
-    # every descendant against the name-and-fingerprint capture the receipt
-    # recorded; anything added, edited or deleted since refused the undo before
-    # this line ran.
     for relative in receipt.get("created_dirs", []):
         target = install_root / relative
-        if target.is_dir():
+        if os.path.lexists(target):
             stash_for_compensation(target)
-            # Same reason as the created files: once the migration is committed
-            # everything under here is tracked, so the index has to follow the
-            # worktree or `git mv` of an ancestor fails.
-            run_git(install_root, "rm", "-r", "--cached", "--quiet", "--", relative)
             removed.append(relative)
             _prune_empty_parents(install_root, target.parent)
 
@@ -1478,31 +1650,17 @@ def _undo_owned(install_root: Path, runtime_root: Path, *, owner: Any) -> dict[s
         ):
             already.append(entry["source"])
             continue
-        source.parent.mkdir(parents=True, exist_ok=True)
-        code, out = run_git(install_root, "mv", entry["destination"], entry["source"])
-        if code != 0:
-            rollback_error = _reverse_undo_moves(
-                install_root, receipt, reversed_moves
-            )
-            artifact_errors = compensate_artifacts()
-            reason = f"git mv failed reversing {entry['destination']}: {out}"
-            if artifact_errors:
-                reason += "; artifact compensation also failed: " + "; ".join(artifact_errors)
-            if rollback_error:
-                reason += f"; re-applying the already reversed moves also failed: {rollback_error}"
-            if not artifact_errors and not rollback_error:
-                cleanup_compensation_state()
-            return {
-                "status": "failed",
-                "reason": reason,
-                "reversed": [],
-                "already_reversed": already,
-                "remaining": [
-                    e["destination"]
-                    for e in reversed(receipt.get("applied", []))
-                    if e["source"] not in reversed_moves and e["source"] not in already
-                ],
-            }
+        _mkdir_durable(source.parent)
+        move = {**entry, "identity": manifest["move_identities"][entry["destination"]],
+                "index": _index_rows(install_root, entry["destination"])}
+        if move["identity"] is None or os.path.lexists(source):
+            return failed(f"git mv failed reversing {destination}: source missing or destination occupied")
+        manifest["moves"].append(move)
+        _write_json_atomic(_undo_manifest_path(runtime_root), manifest)
+        try:
+            _move_undo_entry(install_root, move, recovering=False)
+        except (OSError, subprocess.SubprocessError) as exc:
+            return failed(f"git mv failed reversing {destination}: {exc}")
         reversed_moves.append(entry["source"])
         # Drop the now-empty root directory the migration created.
         parent = (install_root / entry["destination"]).parent
@@ -1528,48 +1686,9 @@ def _undo_owned(install_root: Path, runtime_root: Path, *, owner: Any) -> dict[s
                 fields=("vault_root",),
             )
         except OSError as exc:
-            rollback_error = _reverse_undo_moves(
-                install_root, receipt, reversed_moves
-            )
-            artifact_errors = compensate_artifacts()
-            reason = (
-                "could not restore the workspace registry; migration receipt "
-                f"retained: {exc}"
-            )
-            if artifact_errors:
-                reason += "; artifact compensation also failed: " + "; ".join(artifact_errors)
-            if rollback_error:
-                reason += f"; re-applying the reversed moves also failed: {rollback_error}"
-            if not artifact_errors and not rollback_error:
-                cleanup_compensation_state()
-            return {
-                "status": "failed",
-                "reason": reason,
-                "reversed": [],
-                "already_reversed": already,
-            }
+            return failed(f"could not restore the workspace registry; migration receipt retained: {exc}")
         if not restored_registry:
-            rollback_error = _reverse_undo_moves(
-                install_root, receipt, reversed_moves
-            )
-            artifact_errors = compensate_artifacts()
-            reason = (
-                "the migration receipt has no authoritative post-migration "
-                "registry snapshot; refusing to overwrite a live registry and "
-                "keeping the receipt"
-            )
-            if artifact_errors:
-                reason += "; artifact compensation also failed: " + "; ".join(artifact_errors)
-            if rollback_error:
-                reason += f"; re-applying the reversed moves also failed: {rollback_error}"
-            if not artifact_errors and not rollback_error:
-                cleanup_compensation_state()
-            return {
-                "status": "failed",
-                "reason": reason,
-                "reversed": [],
-                "already_reversed": already,
-            }
+            return failed("the registry changed; refusing to overwrite a live registry and keeping the receipt")
 
     if schedule_restore is not None:
         try:
@@ -1577,55 +1696,18 @@ def _undo_owned(install_root: Path, runtime_root: Path, *, owner: Any) -> dict[s
                 runtime_root, receipt.get("schedule_prompt_rewrites")
             )
         except (OSError, ValueError) as exc:
-            rollback_error = _reverse_undo_moves(
-                install_root, receipt, reversed_moves
-            )
-            artifact_errors = compensate_artifacts()
-            registry_forward_error: str | None = None
-            if before is not None and expected_after and prior_rows:
-                try:
-                    from ciao.workspaces import restore_registry_entries  # noqa: PLC0415
-
-                    if not restore_registry_entries(
-                        runtime_root, expected_after, prior_rows, owner=owner,
-                        fields=("vault_root",),
-                    ):
-                        registry_forward_error = (
-                            "the workspace registry no longer matches the "
-                            "post-migration image"
-                        )
-                except OSError as registry_exc:
-                    registry_forward_error = str(registry_exc)
-            reason = (
-                "could not restore schedule prompts; migration receipt "
-                f"retained: {exc}"
-            )
-            if artifact_errors:
-                reason += "; artifact compensation also failed: " + "; ".join(artifact_errors)
-            if rollback_error:
-                reason += f"; re-applying the reversed moves also failed: {rollback_error}"
-            if registry_forward_error:
-                reason += f"; restoring the post-migration registry also failed: {registry_forward_error}"
-            if not artifact_errors and not rollback_error and not registry_forward_error:
-                cleanup_compensation_state()
-            return {
-                "status": "failed",
-                "reason": reason,
-                "reversed": [],
-                "already_reversed": already,
-            }
+            return failed(f"could not restore schedule prompts; migration receipt retained: {exc}")
 
     cleared = clear_stranded_sessions(
         runtime_root, list((receipt.get("stranded_sessions") or {}).get("flagged") or [])
     )
     manifest["phase"] = "committed"
     _write_json_atomic(_undo_manifest_path(runtime_root), manifest)
+    _write_json_atomic(compensation_dir / "inventory.json", manifest)
     _unlink_durable(receipt_path(runtime_root))
     for entry in receipt.get("stashed_files", []):
         if isinstance(entry, dict):
             _unlink_durable(runtime_root / str(entry.get("backup") or ""))
-    shutil.rmtree(compensation_dir, ignore_errors=True)
-    _fsync_directory(compensation_dir.parent)
     _unlink_durable(_undo_manifest_path(runtime_root))
     from ciao.config import reset_reroot_cache
 
@@ -1634,6 +1716,7 @@ def _undo_owned(install_root: Path, runtime_root: Path, *, owner: Any) -> dict[s
         "status": "undone",
         "reversed": reversed_moves,
         "restored_stashed": restored,
+        **_capture_locations(manifest),
         "removed_created": removed,
         "cleared_handover_flags": cleared,
         "already_reversed": already,

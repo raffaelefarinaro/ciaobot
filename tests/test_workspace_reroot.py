@@ -1008,7 +1008,7 @@ def test_stash_copy_interruption_keeps_original_queue(tmp_path: Path, monkeypatc
     receipt = receipt_path(runtime).read_bytes()
     original = workspace_reroot.shutil.copy2
     def fail_during_copy(src, dst, *args, **kwargs):
-        if Path(src) == runtime / entry["backup"] and Path(dst).parent == queue.parent:
+        if Path(src) == runtime / entry["backup"] and Path(dst).suffix == ".stage":
             Path(dst).write_bytes(b"partial")
             if failure == "kill":
                 os.kill(os.getpid(), signal.SIGKILL)
@@ -1036,6 +1036,33 @@ def test_stash_copy_interruption_keeps_original_queue(tmp_path: Path, monkeypatc
     assert not list(install.rglob(".ciao-undo-*.tmp"))
 
 
+def test_stash_publication_does_not_overwrite_edit_at_replace(tmp_path: Path, monkeypatch) -> None:
+    from ciao import workspace_reroot
+
+    source = tmp_path / "backup"
+    target = tmp_path / "queue"
+    source.write_bytes(b"restored")
+    target.write_bytes(b"before")
+    expected = workspace_reroot._entry_fingerprint(target)
+    original = workspace_reroot.os.link
+    saved = tmp_path / "saved"
+    stage = tmp_path / "stage"
+
+    def edit_before_publication(src, dst):
+        if Path(dst) == target:
+            target.write_bytes(b"independent edit")
+        original(src, dst)
+
+    monkeypatch.setattr(workspace_reroot.os, "link", edit_before_publication)
+    with pytest.raises(FileExistsError):
+        workspace_reroot._atomic_copy_stash(
+            source, target, expected, temp_path=stage, saved=saved,
+            identity=workspace_reroot._identity(target), postimage=workspace_reroot._entry_fingerprint(source),
+        )
+    assert target.read_bytes() == b"independent edit"
+    assert saved.read_bytes() == b"before"
+
+
 def test_stash_copy_refuses_edit_before_publication(tmp_path: Path, monkeypatch) -> None:
     from ciao import workspace_reroot
 
@@ -1048,7 +1075,7 @@ def test_stash_copy_refuses_edit_before_publication(tmp_path: Path, monkeypatch)
     original = workspace_reroot.shutil.copy2
     def edit_during_copy(src, dst, *args, **kwargs):
         result = original(src, dst, *args, **kwargs)
-        if Path(src) == runtime / entry["backup"] and Path(dst).parent == queue.parent:
+        if Path(src) == runtime / entry["backup"] and Path(dst).suffix == ".stage":
             queue.write_bytes(b"independent edit\n")
         return result
     with monkeypatch.context() as patch:
@@ -1087,14 +1114,13 @@ def test_recovery_copy_failure_preserves_postimage_and_retry(tmp_path: Path, mon
     _, status = os.waitpid(pid, 0)
     assert os.WIFSIGNALED(status)
     postimage = queue.read_bytes()
-    original_copy = workspace_reroot.shutil.copy2
-    def fail_saved_copy(src, dst, *args, **kwargs):
-        if Path(dst).parent == queue.parent and Path(dst).name.startswith(".ciao-undo-"):
-            Path(dst).write_bytes(b"partial")
-            raise OSError("recovery copy failed")
-        return original_copy(src, dst, *args, **kwargs)
+    rename = workspace_reroot._exclusive_rename
+    def fail_withdrawal(src, dst):
+        if src == queue and dst.suffix == ".withdrawn":
+            raise OSError("recovery capture failed")
+        rename(src, dst)
     with monkeypatch.context() as patch:
-        patch.setattr(workspace_reroot.shutil, "copy2", fail_saved_copy)
+        patch.setattr(workspace_reroot, "_exclusive_rename", fail_withdrawal)
         result = undo(install, runtime)
     assert result["status"] == "failed"
     assert queue.read_bytes() == postimage
@@ -1320,18 +1346,17 @@ def test_undo_reverse_move_failure_compensates_and_retry_succeeds(
     receipt = json.loads(receipt_path(runtime).read_text(encoding="utf-8"))
     created_path = install / receipt["created_files"][0]
     backup_path = runtime / receipt["stashed_files"][0]["backup"]
-    real_git = workspace_reroot.run_git
+    real_git = workspace_reroot._move_undo_entry
     moves = {"n": 0, "failed": False}
 
-    def fail_second_reverse(root: Path, *args: str):
-        if args[:1] == ("mv",):
-            moves["n"] += 1
-            if moves["n"] == 2 and not moves["failed"]:
-                moves["failed"] = True
-                return 1, "injected reverse failure"
-        return real_git(root, *args)
+    def fail_second_reverse(root: Path, move, *, recovering):
+        moves["n"] += 1
+        if moves["n"] == 2 and not moves["failed"]:
+            moves["failed"] = True
+            raise OSError("injected reverse failure")
+        return real_git(root, move, recovering=recovering)
 
-    monkeypatch.setattr(workspace_reroot, "run_git", fail_second_reverse)
+    monkeypatch.setattr(workspace_reroot, "_move_undo_entry", fail_second_reverse)
     failed = undo(install, runtime)
 
     assert failed["status"] == "failed"
@@ -1340,7 +1365,7 @@ def test_undo_reverse_move_failure_compensates_and_retry_succeeds(
     assert backup_path.exists()
     assert (install / "personal" / "memory-vault" / "People" / "Peter.md").is_file()
 
-    monkeypatch.setattr(workspace_reroot, "run_git", real_git)
+    monkeypatch.setattr(workspace_reroot, "_move_undo_entry", real_git)
     retried = undo(install, runtime)
     assert retried["status"] == "undone", retried
     assert not receipt_path(runtime).exists()
@@ -1703,17 +1728,16 @@ def test_undo_failed_reverse_move_compensation_retains_manifest_then_retries(
     receipt = json.loads(receipt_path(runtime).read_text(encoding="utf-8"))
     created_path = install / receipt["created_files"][0]
     backup_path = runtime / receipt["stashed_files"][0]["backup"]
-    real_git = workspace_reroot.run_git
+    real_git = workspace_reroot._move_undo_entry
     calls = {"mv": 0}
 
-    def fail_every_later_move(root: Path, *args: str):
-        if args[:1] == ("mv",):
-            calls["mv"] += 1
-            if calls["mv"] >= 2:
-                return 1, "injected move failure"
-        return real_git(root, *args)
+    def fail_every_later_move(root: Path, move, *, recovering):
+        calls["mv"] += 1
+        if calls["mv"] >= 2:
+            raise OSError("injected move failure")
+        return real_git(root, move, recovering=recovering)
 
-    monkeypatch.setattr(workspace_reroot, "run_git", fail_every_later_move)
+    monkeypatch.setattr(workspace_reroot, "_move_undo_entry", fail_every_later_move)
     failed = undo(install, runtime)
 
     assert failed["status"] == "failed"
@@ -1722,7 +1746,7 @@ def test_undo_failed_reverse_move_compensation_retains_manifest_then_retries(
     assert manifest.is_file()
     assert json.loads(manifest.read_text(encoding="utf-8"))["phase"] == "in_progress"
     assert receipt_path(runtime).is_file()
-    assert created_path.exists(), "artifact compensation did not restore the created file"
+    assert not created_path.exists(), "artifacts must wait for ancestor move recovery"
     assert backup_path.exists()
     # The first reversal (the last applied move, the shared guide) stands because
     # its compensation failed; the workspace moves were never touched.
@@ -1730,7 +1754,7 @@ def test_undo_failed_reverse_move_compensation_retains_manifest_then_retries(
     assert (install / "personal" / "memory-vault" / "People" / "Peter.md").is_file()
     assert (install / "work" / "memory-vault" / "People" / "Peter.md").is_file()
 
-    monkeypatch.setattr(workspace_reroot, "run_git", real_git)
+    monkeypatch.setattr(workspace_reroot, "_move_undo_entry", real_git)
     retried = undo(install, runtime)
 
     assert retried["status"] == "undone", retried
@@ -2032,20 +2056,20 @@ def test_undo_keeps_receipt_when_registry_changes_after_preflight(
     ])
     apply(install, vault, ["personal", "work"], runtime, primary="personal")
     registry = runtime / "workspaces.json"
-    real_git = workspace_reroot.run_git
+    real_git = workspace_reroot._move_undo_entry
     injected = {"done": False}
 
-    def git_with_concurrent_edit(root: Path, *args: str):
-        code, out = real_git(root, *args)
-        if not injected["done"] and args[:1] == ("mv",):
+    def git_with_concurrent_edit(root: Path, move, *, recovering):
+        real_git(root, move, recovering=recovering)
+        if not injected["done"] and not recovering:
             injected["done"] = True
             rows = json.loads(registry.read_text(encoding="utf-8"))
             personal = next(row for row in rows if row["name"] == "personal")
             personal["vault_root"] = "elsewhere/personal"
             registry.write_text(json.dumps(rows), encoding="utf-8")
-        return code, out
+        return
 
-    monkeypatch.setattr(workspace_reroot, "run_git", git_with_concurrent_edit)
+    monkeypatch.setattr(workspace_reroot, "_move_undo_entry", git_with_concurrent_edit)
     result = workspace_reroot.undo(install, runtime)
 
     assert result["status"] == "failed"
@@ -5208,18 +5232,18 @@ def test_undo_applies_prompt_restore_to_the_row_as_it_is_at_write_time(
     store = _schedule_store(runtime, [{"schedule_id": "target", "prompt": "memory-vault/work", "title": "t"}])
     assert apply(install, vault, ["personal", "work"], runtime, primary="personal")["status"] == "migrated"
 
-    real_run_git = workspace_reroot.run_git
+    real_move = workspace_reroot._move_undo_entry
     edited: list[bool] = []
 
     def edit_before_first_move(root, *args, **kwargs):
-        if args and args[0] == "mv" and not edited:
+        if not edited:
             payload = json.loads(store.read_text(encoding="utf-8"))
             payload["schedules"][0]["title"] = "edited during undo"
             store.write_text(json.dumps(payload), encoding="utf-8")
             edited.append(True)
-        return real_run_git(root, *args, **kwargs)
+        return real_move(root, *args, **kwargs)
 
-    monkeypatch.setattr(workspace_reroot, "run_git", edit_before_first_move)
+    monkeypatch.setattr(workspace_reroot, "_move_undo_entry", edit_before_first_move)
     assert undo(install, runtime)["status"] == "undone"
     assert edited
     row = json.loads(store.read_text(encoding="utf-8"))["schedules"][0]
@@ -5275,3 +5299,251 @@ def test_undo_preserves_a_peer_field_change_before_moving_notes(tmp_path):
     assert personal["vault_root"] == "memory-vault/personal"
     assert (install / "memory-vault" / "personal" / "People" / "Peter.md").is_file()
     assert not (install / "personal").exists()
+
+
+def test_capture_anchor_uses_linked_worktree_git_directory(tmp_path: Path) -> None:
+    install, _, _ = _git_install(tmp_path)
+    linked = tmp_path / "linked"
+    _git(install, "worktree", "add", "--detach", str(linked))
+    assert (linked / ".git").is_file()
+    anchor = workspace_reroot._new_anchor(linked, [".gitignore"])
+    assert anchor.parent.parent == Path(_git(linked, "rev-parse", "--absolute-git-dir"))
+    assert anchor.stat().st_mode & 0o777 == 0o700
+
+
+def test_capture_preflight_exdev_leaves_install_untouched(tmp_path: Path, monkeypatch) -> None:
+    install, vault, runtime = _with_guide(tmp_path)
+    applied = apply(install, vault, ["personal", "work"], runtime, primary="personal")
+    assert applied["status"] == "migrated"
+    before = _install_hashes(install)
+    receipt = receipt_path(runtime).read_bytes()
+    def cross_device(source, target):
+        raise OSError(errno.EXDEV, "cross-device capture")
+    monkeypatch.setattr(workspace_reroot, "_exclusive_rename", cross_device)
+    assert undo(install, runtime)["status"] == "refused"
+    assert _install_hashes(install) == before
+    assert receipt_path(runtime).read_bytes() == receipt
+    assert not workspace_reroot._undo_manifest_path(runtime).exists()
+
+
+@pytest.mark.parametrize("boundary", ["capture", "publication", "move"])
+def test_killed_undo_recovers_capture_and_index(tmp_path: Path, boundary: str) -> None:
+    import os
+    import signal
+    from ciao.workspaces import acquire_registry_at
+
+    install, vault, runtime = _with_guide(tmp_path)
+    applied = apply(install, vault, ["personal", "work"], runtime, primary="personal")
+    assert applied["status"] == "migrated"
+    before = _install_hashes(install)
+    index = _git(install, "ls-files", "--stage")
+    pid = os.fork()
+    if pid == 0:
+        rename = workspace_reroot._exclusive_rename
+        link = os.link
+        def crash_after_rename(source, target):
+            rename(source, target)
+            if (boundary == "capture" and target.name.startswith("stash-")
+                    or boundary == "move" and target == install / "AGENTS.md"):
+                os.kill(os.getpid(), signal.SIGKILL)
+        def crash_after_link(source, target):
+            link(source, target)
+            if boundary == "publication" and source.suffix == ".stage":
+                os.kill(os.getpid(), signal.SIGKILL)
+        workspace_reroot._exclusive_rename = crash_after_rename
+        os.link = crash_after_link
+        try:
+            undo(install, runtime)
+        finally:
+            os._exit(1)
+    _, status = os.waitpid(pid, 0)
+    assert os.WIFSIGNALED(status)
+    with acquire_registry_at(runtime) as owner:
+        assert workspace_reroot._recover_undo_manifest(runtime, owner) is None
+    assert _install_hashes(install) == before
+    assert _git(install, "ls-files", "--stage") == index
+    assert undo(install, runtime)["status"] == "undone"
+
+
+def test_committed_inventory_preserves_late_descriptor_write(tmp_path: Path) -> None:
+    install, vault, runtime = _with_guide(tmp_path)
+    applied = apply(install, vault, ["personal", "work"], runtime, primary="personal")
+    queue = next(item["source"] for item in applied["stashed_files"]
+                 if item["source"].endswith("Memory-Proposals.md"))
+    with (install / queue).open("ab", buffering=0) as writer:
+        assert undo(install, runtime)["status"] == "undone"
+        writer.write(b"late writer")
+    inventory, = (install / ".git/ciao-undo").glob("*/inventory.json")
+    manifest = json.loads(inventory.read_text())
+    saved = next(item["saved"] for item in manifest["stashes"] if item["source"] == queue)
+    assert Path(saved).read_bytes().endswith(b"late writer")
+
+
+def test_created_capture_refuses_new_directory_content_at_rename(tmp_path: Path, monkeypatch) -> None:
+    install, vault, runtime = _with_guide(tmp_path)
+    receipt = apply(install, vault, ["personal", "work"], runtime, primary="personal")
+    target = install / receipt["created_dirs"][0]
+    rename = workspace_reroot._exclusive_rename
+
+    def edit_before_capture(source, destination):
+        if source == target:
+            (target / "late.md").write_bytes(b"independent write")
+        rename(source, destination)
+
+    monkeypatch.setattr(workspace_reroot, "_exclusive_rename", edit_before_capture)
+    with pytest.raises(OSError, match="edited independently"):
+        undo(install, runtime)
+    assert (target / "late.md").read_bytes() == b"independent write"
+    assert receipt_path(runtime).is_file()
+
+
+def test_move_collision_preserves_new_occupant_and_retries(tmp_path: Path, monkeypatch) -> None:
+    install, vault, runtime = _with_guide(tmp_path)
+    receipt = apply(install, vault, ["personal", "work"], runtime, primary="personal")
+    target = install / receipt["applied"][-1]["source"]
+    original = install / receipt["applied"][-1]["destination"]
+    content = original.read_bytes()
+    rename = workspace_reroot._exclusive_rename
+
+    def occupy_before_move(source, destination):
+        if destination == target:
+            destination.write_bytes(b"independent occupant")
+        rename(source, destination)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(workspace_reroot, "_exclusive_rename", occupy_before_move)
+        assert undo(install, runtime)["status"] == "failed"
+    assert original.read_bytes() == content
+    assert target.read_bytes() == b"independent occupant"
+    assert undo(install, runtime)["status"] == "failed"
+    assert receipt_path(runtime).is_file()
+    target.unlink()
+    assert undo(install, runtime)["status"] == "undone"
+    assert target.read_bytes() == content
+
+
+def test_runtime_stashes_on_separate_device(tmp_path: Path) -> None:
+    import os
+    import shutil
+    import tempfile
+
+    from contextlib import ExitStack
+
+    install, vault, runtime = _with_guide(tmp_path)
+    before = _install_hashes(install)
+    with ExitStack() as cleanup:
+        shared_memory = Path("/dev/shm")
+        if (shared_memory.is_dir() and os.access(shared_memory, os.W_OK)
+                and shared_memory.stat().st_dev != tmp_path.stat().st_dev):
+            directory = Path(cleanup.enter_context(tempfile.TemporaryDirectory(dir=shared_memory)))
+        elif shutil.which("hdiutil"):
+            image = tmp_path / "runtime.dmg"
+            directory = tmp_path / "mounted"
+            directory.mkdir()
+            subprocess.run(["hdiutil", "create", "-size", "16m", "-fs", "HFS+",
+                            "-volname", "CiaoUndoTest", str(image)], check=True, capture_output=True)
+            subprocess.run(["hdiutil", "attach", "-nobrowse", "-mountpoint",
+                            str(directory), str(image)], check=True, capture_output=True)
+            cleanup.callback(subprocess.run, ["hdiutil", "detach", str(directory)], check=True)
+        else:
+            pytest.skip("requires a writable second filesystem")
+        external_runtime = Path(directory) / "runtime"
+        shutil.move(runtime, external_runtime)
+        receipt = apply(install, vault, ["personal", "work"], external_runtime, primary="personal")
+        assert receipt["status"] == "migrated"
+        result = undo(install, external_runtime)
+        assert result["status"] == "undone", result
+        assert Path(result["capture_inventory"]).stat().st_dev == install.stat().st_dev
+        assert external_runtime.stat().st_dev != install.stat().st_dev
+        assert _install_hashes(install) == before
+
+
+def test_in_place_edit_at_capture_is_returned_to_live_name(tmp_path: Path, monkeypatch) -> None:
+    backup, queue = tmp_path / "backup", tmp_path / "queue"
+    backup.write_bytes(b"migration data")
+    queue.write_bytes(b"original data")
+    identity = workspace_reroot._identity(queue)
+    expected = workspace_reroot._entry_fingerprint(queue)
+    rename = workspace_reroot._exclusive_rename
+
+    def edit_at_capture(source, target):
+        if source == queue:
+            queue.write_bytes(b"independent edit")
+        rename(source, target)
+
+    monkeypatch.setattr(workspace_reroot, "_exclusive_rename", edit_at_capture)
+    with pytest.raises(OSError, match="edited independently"):
+        workspace_reroot._atomic_copy_stash(
+            backup, queue, expected, temp_path=tmp_path / "stage", saved=tmp_path / "saved",
+            identity=identity, postimage=workspace_reroot._entry_fingerprint(backup),
+        )
+    assert workspace_reroot._identity(queue) == identity
+    assert queue.read_bytes() == b"independent edit"
+
+
+@pytest.mark.parametrize("interruption", ["captured", "committed"])
+def test_legacy_receipt_undo_retry_reports_original_edited_file(
+    tmp_path: Path, monkeypatch, interruption: str,
+) -> None:
+    install, vault, runtime = _with_guide(tmp_path)
+    applied = apply(install, vault, ["personal", "work"], runtime, primary="personal")
+    assert applied["status"] == "migrated"
+    path = receipt_path(runtime)
+    receipt = json.loads(path.read_text())
+    del receipt["created_files_contents"]
+    path.write_text(json.dumps(receipt))
+    _git(install, "add", "-A")
+    _git(install, "commit", "-m", "migrated before individual file fingerprints")
+    relative = next(name for name in receipt["created_files"]
+                    if (install / name).is_file() and not (install / name).is_symlink())
+    edited = install / relative
+    edited.write_bytes(b"operator edit after migration")
+    original_inode = edited.lstat().st_ino
+    link_name = next(name for name in receipt["created_files"] if name != relative and (install / name).is_file())
+    link = install / link_name
+    link.unlink()
+    link.symlink_to("dangling-operator-target")
+    link_inode = link.lstat().st_ino
+    rename = workspace_reroot._exclusive_rename
+    unlink = workspace_reroot._unlink_durable
+
+    def stop_after_capture(source, target):
+        rename(source, target)
+        if source == edited:
+            raise InterruptedError("after capture")
+
+    def stop_after_commit(target):
+        unlink(target)
+        if target == path:
+            raise InterruptedError("after commit")
+
+    with monkeypatch.context() as patch:
+        if interruption == "captured":
+            patch.setattr(workspace_reroot, "_exclusive_rename", stop_after_capture)
+        else:
+            patch.setattr(workspace_reroot, "_unlink_durable", stop_after_commit)
+        with pytest.raises(InterruptedError):
+            undo(install, runtime)
+
+    if interruption == "captured":
+        edited.write_bytes(b"occupant during recovery")
+        conflict = undo(install, runtime)
+        assert conflict["status"] == "failed"
+        assert str(edited) in conflict["reason"]
+        assert edited.read_bytes() == b"occupant during recovery"
+        assert path.exists()
+        edited.unlink()
+
+    result = undo(install, runtime)
+    assert result["status"] == ("undone" if interruption == "captured" else "nothing_to_undo")
+    saved = Path(result["unverified_created_files"][relative])
+    assert saved.read_bytes() == b"operator edit after migration"
+    assert saved.lstat().st_ino == original_inode
+    inventory = json.loads(Path(result["capture_inventory"]).read_text())
+    record = next(item for item in inventory["created"] if item["source"] == relative)
+    assert record["fingerprinted_at_undo"]
+    assert record["expected"] == workspace_reroot._entry_fingerprint(saved)
+    saved_link = Path(result["unverified_created_files"][link_name])
+    assert saved_link.lstat().st_ino == link_inode
+    assert saved_link.readlink() == Path("dangling-operator-target")
+    assert not path.exists()
