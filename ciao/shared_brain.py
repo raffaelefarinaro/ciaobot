@@ -24,7 +24,7 @@ from typing import Any, Literal
 
 from ciao import job_runs
 from ciao.config import SHARED_BRAIN_NAME_PATTERN, SharedBrainLink
-from ciao.git_proc import EXACT_BYTES, GIT_TIMEOUT_DETAIL, run_git
+from ciao.git_proc import EXACT_BYTES, GIT_TIMEOUT_DETAIL, git_output_line, run_git
 from ciao.os_support.files import open_fd
 from ciao.os_support.locks import await_exclusive, lock_exclusive
 from ciao.os_support.private import is_private_descriptor_strict, make_private_dir
@@ -191,7 +191,7 @@ def validate_brain_path(config: Any, raw: str) -> str:
     """The resolved checkout path, or ValueError when it cannot be a shared brain."""
     if any(ord(ch) < 32 or ord(ch) == 127 for ch in raw):
         raise ValueError("Shared brain path contains a control character")
-    resolved = validate_repo_path(raw)
+    resolved = validate_repo_path(raw, exact=True)
     if not resolved:
         return ""
     if overlaps_protected(config, resolved):
@@ -205,7 +205,7 @@ def validate_folder_path(config: Any, raw: str) -> str:
     """Resolve an accessible ordinary folder outside every protected root."""
     if any(ord(ch) < 32 or ord(ch) == 127 for ch in raw):
         raise ValueError("Shared brain path contains a control character")
-    expanded = os.path.expanduser(raw.strip())
+    expanded = os.path.expanduser(raw)
     if not expanded or not os.path.isabs(expanded):
         raise ValueError("Shared brain folder path must be absolute")
     resolved = os.path.realpath(expanded)
@@ -335,7 +335,8 @@ def resolve_links(
     for row in raw:
         requested = str(row.get("name") or "").strip()
         raw_path = str(row.get("path", ""))
-        key = os.path.realpath(os.path.expanduser(raw_path.strip()))
+        # Exact, like the Settings row: trimming could resolve to another folder.
+        key = os.path.realpath(os.path.expanduser(raw_path))
         kind = row.get("kind")
         if kind is None:
             kind = by_path[key].kind if key in by_path else "git"
@@ -439,7 +440,8 @@ def link_problem(config: Any, link: SharedBrainLink) -> str:
 
 
 def _is_own_checkout(folder: Path, top: str) -> bool:
-    return bool(top.strip()) and os.path.realpath(top.strip()) == os.path.realpath(folder)
+    top_path = git_output_line(top)
+    return bool(top_path) and os.path.realpath(top_path) == os.path.realpath(folder)
 
 
 def _initial_state(link: SharedBrainLink) -> dict[str, Any]:
