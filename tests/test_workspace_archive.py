@@ -677,14 +677,16 @@ def test_workspace_archive_restore_clears_memory_approval(tmp_path):
     assert config.workspaces["work"].memory_approval == {}
 
 
-def test_workspace_archive_restore_preserves_folder_shared_brain(tmp_path):
+@pytest.mark.parametrize("mapping_generation,rotated", [(0, False), (1, True)])
+def test_workspace_archive_restore_preserves_folder_shared_brain(tmp_path, mapping_generation, rotated):
     from ciao.config import SharedBrainLink
 
     client, config, _pcm, _store = _app(tmp_path, rerooted=True)
     folder = (tmp_path.parent / f"{tmp_path.name}-drive-team").resolve()
     folder.mkdir()
     link = SharedBrainLink(
-        "team", str(folder), f"folder:{folder}", lifetime_id="kept-lifetime", kind="folder"
+        "team", str(folder), f"folder:{folder}", lifetime_id="kept-lifetime", kind="folder",
+        guide_mapping_generation=mapping_generation,
     )
     config.workspaces["work"].shared_brains = [link]
 
@@ -696,8 +698,9 @@ def test_workspace_archive_restore_preserves_folder_shared_brain(tmp_path):
     assert restored_response.status_code == 200, restored_response.json()
     (restored,) = config.workspaces["work"].shared_brains
     assert restored.kind == "folder"
-    assert restored.lifetime_id != "kept-lifetime"
+    assert (restored.lifetime_id != "kept-lifetime") is rotated
     assert restored.identity == link.identity and restored.path == link.path
+    assert restored.guide_mapping_generation > mapping_generation
 
 
 def test_move_back_refuses_archive_metadata_changed_after_claim_snapshot(tmp_path):
