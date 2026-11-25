@@ -24,7 +24,7 @@ from typing import Any, Literal
 
 from ciao import job_runs
 from ciao.config import SHARED_BRAIN_NAME_PATTERN, SharedBrainLink
-from ciao.git_proc import EXACT_BYTES, GIT_TIMEOUT_DETAIL, run_git
+from ciao.git_proc import EXACT_BYTES, GIT_TIMEOUT_DETAIL, git_output_line, run_git
 from ciao.os_support.files import open_fd
 from ciao.os_support.locks import await_exclusive, lock_exclusive
 from ciao.os_support.private import is_private_descriptor_strict, make_private_dir
@@ -440,7 +440,8 @@ def link_problem(config: Any, link: SharedBrainLink) -> str:
 
 
 def _is_own_checkout(folder: Path, top: str) -> bool:
-    return bool(top.strip()) and os.path.realpath(top.strip()) == os.path.realpath(folder)
+    top_path = git_output_line(top)
+    return bool(top_path) and os.path.realpath(top_path) == os.path.realpath(folder)
 
 
 def _initial_state(link: SharedBrainLink) -> dict[str, Any]:

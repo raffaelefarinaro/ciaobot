@@ -9,7 +9,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from ciao.git_proc import EXACT_BYTES
+from ciao.git_proc import EXACT_BYTES, git_output_line
 
 #: Where `candidates_payload` looks for checkouts, one level deep. Hardcoded on
 #: purpose (no env var, no setting).
@@ -61,9 +61,10 @@ def validate_repo_path(raw: str, *, exact: bool = False) -> str:
     if not path.is_dir():
         raise ValueError(f"Repository path is not a directory: {path}")
     code, out = _git(path, "rev-parse", "--show-toplevel")
-    if code != 0 or not out.strip():
+    top_text = git_output_line(out)
+    if code != 0 or not top_text:
         raise ValueError(f"Not a git repository: {path}")
-    top = Path(out.strip())
+    top = Path(top_text)
     if not _same(top, path):
         raise ValueError(f"Repository path must be the top of the git checkout: {path} is inside {top}")
     return str(top.resolve())
