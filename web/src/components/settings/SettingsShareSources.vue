@@ -25,6 +25,9 @@
     </template>
 
     <template v-else>
+      <p class="hint">
+        Ordinary chat messages remain private. Sharing them is unavailable until a protected operator authority is supported.
+      </p>
       <p v-if="loadError" class="hint hint--warn" role="alert">
         Could not refresh: {{ loadError }}. Showing the last known sources.
       </p>
