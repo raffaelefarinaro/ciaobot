@@ -47,7 +47,7 @@
           <p class="shared-brain-kind">{{ kindLabel(brain) }}</p>
           <button type="button" class="btn-secondary btn-small" :disabled="!!mappingBusy || listStale" @click="openMapping(brain)">Review content guide</button>
           <div v-if="mappingBrain === brain.name && mapping" class="guide-mapping">
-            <p>Audience unknown; readers and access have not been verified. Sharing remains in Review.</p>
+            <p>Audience unknown; readers and access have not been verified. Recording destinations does not change your sharing policy.</p>
             <p>Scope: {{ mapping.scope }}</p>
             <p v-if="mapping.exclusions.length">Exclusions: {{ mapping.exclusions.join(', ') }}</p>
             <p v-if="mapping.pin">Guide version {{ mapping.pin.version }} · {{ mapping.pin.digest }}</p>

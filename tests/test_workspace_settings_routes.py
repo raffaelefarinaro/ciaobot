@@ -1951,15 +1951,19 @@ def test_guide_mapping_preview_save_stale_and_relink(tmp_path, monkeypatch):
         "decision": {"kind": "section", "path": "notes/decisions.md", "section": "Decisions", "operation": "append"}}}
     (acme / "CIAO-CONTENT-GUIDE.md").write_text("```ciao-guide\n" + json.dumps(document) + "\n```\n")
     assert client.patch("/api/workspaces/personal", json={"shared_brains": [{"path": str(acme)}]}).status_code == 200
+    state = client.get("/api/workspaces/personal/shared-brains").json()["shared_brains"][0]
+    assert client.post("/api/workspaces/personal/shared-brains/notes/sharing", json=_sharing_body(state)).status_code == 200
+    assert config.workspace("personal").shared_brains[0].sharing_policy == "automatic"
     path = "/api/workspaces/personal/shared-brains/notes/guide-mapping"
     preview = client.get(path)
     assert preview.status_code == 200, preview.text
     view = preview.json()
-    assert view["policy"] == "review" and view["audience"]["status"] == "unknown"
+    assert view["mapping_mode"] == "review" and "policy" not in view and view["audience"]["status"] == "unknown"
     choice = {k: view[k] for k in ("identity", "lifetime", "generation", "pin")}
     choice["types"] = ["decision"]
     other, _, _ = _client(tmp_path)
     assert client.post(path, json=choice).status_code == 200
+    assert config.workspace("personal").shared_brains[0].sharing_policy == "automatic"
     assert other.post(path, json=choice).status_code == 409
     assert config.workspace("personal").shared_brains[0].guide_mapping is not None
     assert client.post(path, json=choice).status_code == 409
