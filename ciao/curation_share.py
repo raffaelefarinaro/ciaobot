@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import hmac
+import itertools
 import json
 import os
 import stat
@@ -188,7 +189,7 @@ def checkpoint(config: Any, manager: Any, *, workspace: str, chat_id: str,
                 assert outbox is not None
                 if outbox.exists() and not (outbox / item_name).exists():
                     with os.scandir(outbox) as rows:
-                        if sum(1 for _ in rows) >= MAX_CHECKPOINTS_PER_RUN:
+                        if sum(1 for _ in itertools.islice(rows, MAX_CHECKPOINTS_PER_RUN)) >= MAX_CHECKPOINTS_PER_RUN:
                             return 0
                 share_evidence._write_private(
                     outbox / item_name,
