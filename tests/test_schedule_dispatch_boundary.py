@@ -943,6 +943,31 @@ def _both_targets(tmp_path: Path):
 
 
 @pytest.mark.asyncio
+async def test_real_manager_binds_care_authority_to_running_stream(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    manager = _workspace_pair_manager(tmp_path)
+    project = manager.create_project("Care", workspace="personal")
+    chat = manager.create_chat(project.project_id, title="Care", provider="claude")
+    entry = dataclasses.replace(
+        _entry(), schedule_id="system-memory-curation@personal", scope="system",
+        last_dispatch_id="dispatch-real", web_chat_id=chat.chat_id,
+    )
+    dispatcher = manager._schedule_dispatcher_for()
+    observed: list[str | None] = []
+
+    async def fake_stream_chat(chat_id, prompt, images=None, **kwargs):
+        observed.append(dispatcher.active_care_dispatch(chat_id, "personal"))
+        yield {"type": "result", "text": "done", "is_error": False}
+
+    monkeypatch.setattr(manager, "stream_chat", fake_stream_chat)
+    monkeypatch.setattr("ciao.web.schedule_dispatch.job_runs.record_run", lambda _row: None)
+    await dispatcher.dispatch_schedule(entry, "Run the routine.", "opus", "auto", "claude")
+    assert observed == ["dispatch-real"]
+    assert dispatcher.active_care_dispatch(chat.chat_id, "personal") is None
+
+
+@pytest.mark.asyncio
 async def test_real_manager_quiet_command_records_command_env_workspace(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
