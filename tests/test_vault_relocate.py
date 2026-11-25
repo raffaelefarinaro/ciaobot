@@ -111,7 +111,9 @@ os.close(fd)
         workspace=lambda workspace: None,
     )
 
-    before, after = vault_relocate._repoint_registry(runtime, "personal", config)
+    from ciao.workspaces import acquire_registry_at
+    with acquire_registry_at(runtime) as owner:
+        before, after = vault_relocate._repoint_registry(runtime, "personal", config, owner=owner)
 
     assert registrar is not None
     assert registrar.wait(timeout=5) == 0
@@ -613,7 +615,8 @@ def test_apply_rolls_back_moves_when_the_registry_cannot_be_written(
     def _boom(*args, **kwargs):
         raise OSError("disk full")
 
-    monkeypatch.setattr(vault_relocate, "_write_registry_unlocked", _boom)
+    from ciao.workspaces import WorkspaceRegistryOwnership
+    monkeypatch.setattr(WorkspaceRegistryOwnership, "replace", _boom)
 
     result = apply(config, "scandit", runtime)
 
@@ -703,6 +706,26 @@ def test_apply_reports_a_failed_partial_move_rollback(
     # The rollback failure is surfaced, not swallowed: the refusal names the
     # divergence between disk and registry instead of claiming a clean undo.
     assert any("rollback also failed" in r for r in result["refusals"]), result["refusals"]
+
+
+def test_receipt_failure_restores_owned_registry_without_reacquiring_claim(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import threading
+
+    install, config = _shared_root_install(tmp_path)
+    runtime = install / ".runtime"
+    registry = runtime / "workspaces.json"
+    before = json.loads(registry.read_text(encoding="utf-8"))
+    monkeypatch.setattr(vault_relocate, "_write_receipt", lambda *a, **k: (_ for _ in ()).throw(OSError("receipt failed")))
+    results = []
+    worker = threading.Thread(target=lambda: results.append(apply(config, "scandit", runtime)), daemon=True)
+    worker.start()
+    worker.join(5)
+    assert not worker.is_alive(), "receipt recovery deadlocked on the registry claim"
+    assert results[0]["status"] == "refused"
+    assert json.loads(registry.read_text(encoding="utf-8")) == before
+    assert (install / "memory-vault" / "People" / "Peter.md").is_file()
 
 
 def test_apply_survives_a_failing_registry_restore_after_a_receipt_failure(

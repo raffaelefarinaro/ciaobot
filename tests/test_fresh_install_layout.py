@@ -13,6 +13,7 @@ the one combination that breaks every layout-dependent path.
 from __future__ import annotations
 
 import json
+import pytest
 from pathlib import Path
 
 from ciao.cli import setup_workspace
@@ -753,7 +754,7 @@ def test_stale_owned_scan_cannot_write_after_external_declaration(
     assert index.read_bytes() == b"external sentinel\r\n"
 
 
-def test_stale_config_save_blocks_then_refuses_and_preserves_link(
+def test_stale_config_save_refuses_busy_then_changed_and_preserves_link(
     tmp_path: Path,
 ) -> None:
     import subprocess
@@ -761,7 +762,7 @@ def test_stale_config_save_blocks_then_refuses_and_preserves_link(
     import threading
     import time
 
-    from ciao.workspaces import WorkspaceRegistryChanged
+    from ciao.workspaces import WorkspaceRegistryBusy, WorkspaceRegistryChanged
 
     config = _fresh(tmp_path)
     runtime = tmp_path / ".runtime"
@@ -810,14 +811,16 @@ os.close(fd)
             errors.append(exc)
 
     writer = threading.Thread(target=save)
-    writer.start()
-    time.sleep(0.2)
-    assert writer.is_alive()
-    release.write_text("go", encoding="utf-8")
-    assert registrar.wait(timeout=5) == 0
-    writer.join(timeout=5)
-    assert not writer.is_alive()
-    assert len(errors) == 1 and isinstance(errors[0], WorkspaceRegistryChanged)
+    try:
+        writer.start()
+        writer.join(timeout=5)
+        assert not writer.is_alive()
+        assert len(errors) == 1 and isinstance(errors[0], WorkspaceRegistryBusy)
+    finally:
+        release.write_text("go", encoding="utf-8")
+        assert registrar.wait(timeout=5) == 0
+    with pytest.raises(WorkspaceRegistryChanged):
+        config.persist_workspace_registry()
     rows = json.loads(registry.read_text(encoding="utf-8"))
     personal = next(row for row in rows if row["name"] == "personal")
     assert personal["shared_brains"][0]["path"] == str(other)

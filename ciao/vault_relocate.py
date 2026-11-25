@@ -639,9 +639,11 @@ def _apply_owned(
         except OSError:
             pass
 
+    from ciao.workspaces import WorkspaceRegistryConflict  # noqa: PLC0415
+
     try:
         registry_before, registry_after = _repoint_registry(runtime_root, workspace, config, owner=owner)
-    except OSError as exc:
+    except (OSError, WorkspaceRegistryConflict) as exc:
         # The registry couldn't be read at all before any move ran (see the
         # earlier _registry_has_workspace refusal), but a write failure here
         # (permissions, disk full) shows up only now, with the vault already
@@ -700,7 +702,10 @@ def _apply_owned(
                 from ciao.workspaces import restore_registry_entries  # noqa: PLC0415
 
                 if not restore_registry_entries(
-                    runtime_root, registry_before, registry_after
+                    runtime_root,
+                    [row for row in registry_before if row.get("name") == workspace],
+                    [row for row in (registry_after or []) if row.get("name") == workspace],
+                    owner=owner, fields=("vault_root",),
                 ):
                     raise OSError("no authoritative post-relocation registry snapshot")
                 config._workspace_registry_bytes = owner.current
@@ -961,10 +966,6 @@ def _undo_locked(config: Any, workspace: str, runtime_root: Path, *, owner: Any)
                     code, out = run_git(install_root, "mv", entry["source"], entry["destination"])
                     if code != 0:
                         rollback_error = out
-            try:
-                _write_registry(runtime_root, registry_before_undo, owner=owner)
-            except OSError as registry_exc:
-                rollback_error = str(registry_exc)
             reason = f"could not restore the workspace registry: {exc}"
             if rollback_error:
                 reason += f"; rollback also failed: {rollback_error}"
