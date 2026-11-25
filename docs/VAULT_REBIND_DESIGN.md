@@ -1,11 +1,32 @@
-# Stopped-engine vault rebind: implementation boundary
+# Stopped-engine vault rebind (#3606)
 
-This is an unfinished design for #3606. No operator command or production registry writer is enabled. The read-only comparison and pure registry transition in `ciao/vault_rebind.py` are independent testable building blocks, not authorization to apply a rebind.
+`ciao vault-rebind` points one existing workspace at an already prepared notes folder (for example a cloud-synced one) while the engine runtime stays local. It is operator-initiated, reversible, and works only for a stopped engine. It never copies, moves, deletes or modifies either notes tree. The cloud client controls synchronisation, and only one engine may write the notes; the command says so in every preview.
 
-A future operator flow must derive the current binding and every other registered root from a strictly validated registry and established runtime configuration, refusing ambiguous or malformed entries. It must show both exact paths, the compared files, and a review token bound to the full registry before-image and tree evidence. It must explain that a cloud client controls synchronization and that only one engine may write the notes. Neither tree is copied, moved, deleted, or modified by this operation.
+## Commands
 
-The apply operation must acquire the existing server instance lock and a registry writer lock shared by every registry writer, then reconstruct the inputs and compare the reviewed token while holding both. The current `workspace_registry_lock` is an in-process lock keyed by config object and is not an interprocess registry lock; an offline process cannot assume it serializes other writers. The writer must refuse if the engine is running, the registry or paths differ, any tree is inaccessible, or the required lock cannot be obtained. The comparison now opens directories and files descriptor-relative without following symlinks and records file and directory identities, but it remains advisory: a cloud client can change either tree after the walk, and the current registry-derived preview accepts only explicit absolute roots. Safe commit-time revalidation, authority for relative and legacy roots, complete protected-root discovery, and a strategy for concurrent external cloud changes need independent security review; the current preview is not sufficient to authorize a write.
+- `preview NAME DEST` (read-only): derives the current binding and every other registered root from the strictly validated registry (an explicit list of rows with absolute, symlink-free roots; legacy name-keyed, relative, duplicate-key or ambiguous registries are refused), compares both trees (regular files only, no symlinks, matching content, no overlap with protected roots) and prints the exact old and new path, the file count and a review token. The token binds the full registry bytes, every file digest and the file and directory identities of both trees, so a replaced folder with identical content invalidates it.
+- `apply NAME DEST --token T`: the explicit reviewed action.
+- `reverse-preview NAME --id ID` and `reverse NAME --id ID --token T`: put the old folder of a completed rebind back.
+- `recover`: resolve an interrupted operation.
 
-Before replacing the registry, persist a private durable journal containing the exact old registry bytes, expected new registry bytes, binding and operation identity, then fsync the journal and directory. Atomically replace the registry and fsync its directory before recording completion. Recovery must compare the current registry to the recorded before and after images; if neither matches, refuse and preserve all evidence for operator review. A reversal is a separate reviewed operation under the same locks: check that the target workspace still has the recorded new binding, verify the old folder is available and suitable, then change only that field while retaining later unrelated registry changes. It must never restore a whole old registry over later edits or delete either notes tree. Journal naming, collision handling, durable failure semantics, and recovery tests remain to be implemented.
+## Apply sequence
 
-Integration depends on #3605 for external-root setup and validation and #3607 for unavailable or partially materialized external roots. Existing installations, including cloud-hosted runtime roots, require explicit handling without silent migration.
+1. Take the engine's `server.lock` (non-blocking; a running engine, or another rebind, refuses) and then the interprocess registry claim (`acquire_registry_at`, non-blocking). Lock contention refuses with no writes beyond the lock files.
+2. Refuse if a pending journal exists (run `recover`).
+3. Re-derive the preview under both locks and compare the token in constant time. Any change to the registry, paths, files or identities refuses before anything is written. The private state directory must not lie inside a notes folder.
+4. Write a private (0600, directory 0700) backup of the exact registry bytes under `.runtime/vault-rebind/`, read it back and verify it.
+5. Write the durable journal `pending.json` (old and new registry bytes, digests, binding, operation id), fsync file and directory. Re-verify the trees once more; a change here removes the journal and refuses, since nothing has changed yet.
+6. Replace the registry through `WorkspaceRegistryOwnership.replace` (byte-exact compare-and-swap, fsync), changing only `vault_root` of one row; unknown fields and other rows are preserved (the file is re-serialised as indented JSON).
+7. Write `done-<id>.json`, then remove `pending.json`.
+
+## Recovery
+
+`recover` validates the journal (kind, id, digests of both images) and compares the live registry to its two images. Equal to the before image: nothing was applied, the journal is removed and the same reviewed token can be used again. Equal to the after image: completion is recorded. Anything else (a later edit, a tampered journal) refuses and keeps every journal and backup file as evidence. Crashes are tested at each step (after backup, after journal, before replace, after replace, after record).
+
+## Reversal
+
+A completed record names the old and new root. Reversal needs the workspace to still use the recorded new root, the old folder to be available and to match the current notes tree exactly, a fresh review token, and no earlier reversal of that record. It changes only that field, so later unrelated registry edits survive; it never restores a whole old registry and never deletes a notes tree. If notes were written to the new folder after the rebind, the trees differ and the reversal refuses; reconcile the folders yourself, nothing is discarded.
+
+## Not covered
+
+The comparison is a point-in-time check: a cloud client can change a tree after the final verification; the engine being stopped and the client being paused are the operator's responsibility. Existing installations (legacy, relative, cloud-hosted runtime roots) are not migrated silently; they are refused until explicit handling exists.

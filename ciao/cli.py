@@ -8391,6 +8391,12 @@ def _mac_takeover_command(args: argparse.Namespace) -> int:
     return mac_takeover.run_cli(args)
 
 
+def _vault_rebind_command(args: argparse.Namespace) -> int:
+    from ciao import vault_rebind
+
+    return vault_rebind.run_cli(args)
+
+
 def _macos_service_command(args: argparse.Namespace) -> int:
     from ciao import macos_service
 
@@ -8766,6 +8772,33 @@ def build_parser() -> argparse.ArgumentParser:
         "--id", required=True, dest="takeover_id", help="The takeover id that apply returned."
     )
     takeover_rollback_parser.set_defaults(func=_mac_takeover_command)
+
+    rebind_parser = subparsers.add_parser(
+        "vault-rebind",
+        help="Point an existing workspace at an already prepared notes folder "
+        "(preview is read-only; apply, reverse and recover need the engine stopped).",
+    )
+    rebind_sub = rebind_parser.add_subparsers(dest="vault_rebind_action", required=True)
+
+    def add_rebind(action: str, help_text: str, *, destination: bool, operation: bool, token: bool) -> None:
+        sub = rebind_sub.add_parser(action, help=help_text)
+        sub.add_argument("name", help="The workspace name in the registry.")
+        if destination:
+            sub.add_argument("destination", help="Absolute path of the prepared notes folder.")
+        if operation:
+            sub.add_argument("--id", required=True, dest="operation", help="The id apply returned.")
+        if token:
+            sub.add_argument("--token", required=True, help="The token the matching preview printed.")
+        sub.add_argument("--root", type=Path, default=Path("."), help="Ciaobot install directory.")
+        sub.set_defaults(func=_vault_rebind_command)
+
+    add_rebind("preview", "Print the exact change and a review token; changes nothing.", destination=True, operation=False, token=False)
+    add_rebind("apply", "Rebind the workspace (engine stopped, reviewed token required).", destination=True, operation=False, token=True)
+    add_rebind("reverse-preview", "Print the reversal of a completed rebind; changes nothing.", destination=False, operation=True, token=False)
+    add_rebind("reverse", "Put the old folder back (engine stopped, reviewed token required).", destination=False, operation=True, token=True)
+    recover_parser = rebind_sub.add_parser("recover", help="Resolve an interrupted rebind (engine stopped).")
+    recover_parser.add_argument("--root", type=Path, default=Path("."), help="Ciaobot install directory.")
+    recover_parser.set_defaults(func=_vault_rebind_command)
 
     linux_service_parser = subparsers.add_parser(
         "linux-service",
