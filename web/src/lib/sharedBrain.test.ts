@@ -163,7 +163,7 @@ describe('sharedBrainPolicyText', () => {
   it('says a review link waits for a person and names an automatic link\'s audience', () => {
     expect(sharedBrainPolicyText(brain())).toBe('You review each note before it is shared.')
     expect(sharedBrainPolicyText(brain({ sharing_policy: 'automatic', sharing_generation: 1 })))
-      .toBe('Automatic sharing is chosen for this engine session for everyone who can access github.com/acme/team-notes; it is not active yet and returns to review on restart.')
+      .toBe('Automatic sharing is chosen for everyone who can access github.com/acme/team-notes; it is not active yet.')
   })
 
   it('says an automatic link is paused while its folder cannot be used', () => {
@@ -172,7 +172,7 @@ describe('sharedBrainPolicyText', () => {
       sharing_generation: 1,
       problem: 'origin_changed',
     }))).toBe(
-      'Automatic sharing is chosen for this engine session for everyone who can access github.com/acme/team-notes; it is not active yet and returns to review on restart. Paused until this folder is fixed.',
+      'Automatic sharing is chosen for everyone who can access github.com/acme/team-notes; it is not active yet. Paused until this folder is fixed.',
     )
   })
 

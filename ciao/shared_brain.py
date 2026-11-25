@@ -32,6 +32,7 @@ from ciao.config import (
     SHARING_POLICIES,
     SharedBrainLink,
     SharingConsent,
+    shared_brains_from_rows,
 )
 from ciao.git_proc import EXACT_BYTES, GIT_TIMEOUT_DETAIL, run_git
 from ciao.os_support.files import open_fd, replace_file
@@ -224,14 +225,6 @@ def reset_link_for_restore(link: SharedBrainLink) -> SharedBrainLink:
 
 MAX_SHARING_REVOCATIONS = 256
 _SHARING_REVOCATIONS_SCHEMA = 2
-#: No publisher exists yet, so a persisted automatic grant is not authority
-#: across a process restart. Every config load demotes automatic Git links to
-#: review; the user must choose again in the new session. This is the explicit
-#: fail-closed fallback for a dual journal+registry persistence failure that no
-#: available storage can make durable.
-AUTOMATIC_AUTHORITY_SESSION_ONLY = True
-
-
 @dataclass(frozen=True, slots=True)
 class SharingRevocations:
     """A loaded revocation journal; unhealthy or full means fail closed."""
@@ -453,106 +446,404 @@ def merge_sharing_revocations(
         )
 
 
-def apply_persisted_sharing_revocations(config: Any) -> None:
-    """Return stored grants to review on a new engine session.
+def _sharing_fence_dir(config: Any) -> Path:
+    return Path(config.state_path).parent / "sharing-pending"
 
-    Until a publisher exists, automatic authority is session-scoped: every
-    config load demotes stored automatic Git grants, so neither an unhealthy
-    journal nor a failed journal+registry write can silently revive consent
-    after a restart. The registry row is not rewritten here; a later successful
-    policy write persists the review state.
-    """
-    if AUTOMATIC_AUTHORITY_SESSION_ONLY:
-        state = SharingRevocations()
-        fail_all = True
-    else:
-        state = load_sharing_revocations(config)
-        if state.healthy and not state.fail_closed and not state.keys:
-            return
-        fail_all = not state.healthy or state.fail_closed
-    for workspace in getattr(config, "workspaces", {}).values():
-        links = list(getattr(workspace, "shared_brains", None) or [])
-        kept: list[SharedBrainLink] = []
-        changed = False
-        for item in links:
+
+def _private_atomic_write(path: Path, payload: bytes) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    make_private_dir(path.parent)
+    fd, temp_name = mkstemp_private(dir=path.parent, prefix=".sharing-pending-")
+    temp = Path(temp_name)
+    try:
+        with os.fdopen(fd, "wb") as handle:
+            handle.write(payload)
+            handle.flush()
+            os.fsync(handle.fileno())
+        replace_file(temp, path)
+        if hasattr(os, "O_DIRECTORY"):
+            directory_fd = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY)
+            try:
+                os.fsync(directory_fd)
+            finally:
+                os.close(directory_fd)
+    except BaseException:
+        temp.unlink(missing_ok=True)
+        raise
+
+
+def _fenced_grants_for_path(config: Any, link: SharedBrainLink) -> list[dict[str, Any]]:
+    """Exact current automatic grants at a path, read without origin observation."""
+    canonical = os.path.realpath(link.path)
+    grants: list[dict[str, Any]] = []
+    for workspace_name, workspace in getattr(config, "workspaces", {}).items():
+        for item in getattr(workspace, "shared_brains", None) or []:
             if (
                 item.kind == "git"
+                and os.path.realpath(item.path) == canonical
                 and sharing_grant_stored(item)
                 and (
-                    fail_all
-                    or (item.lifetime_id, item.sharing_generation) in state.keys
+                    item.lifetime_id != link.lifetime_id
+                    or item.sharing_generation == link.sharing_generation
                 )
             ):
-                kept.append(set_sharing_policy(item, DEFAULT_SHARING_POLICY))
-                changed = True
-            else:
-                kept.append(item)
-        if changed:
-            workspace.shared_brains = kept
+                grants.append(
+                    {
+                        "workspace": workspace_name,
+                        "name": item.name,
+                        "path": item.path,
+                        "lifetime_id": item.lifetime_id,
+                        "generation": item.sharing_generation,
+                    }
+                )
+    return grants
 
 
-def _live_origin_identity(link: SharedBrainLink) -> str:
-    """The live origin identity of a Git checkout, or "" when unreadable."""
-    try:
-        code, listing = _git(Path(link.path), "config", "--list", "--show-scope")
-    except (OSError, ValueError):
-        return ""
-    if code != 0:
-        return ""
-    return _safe_identity(_origin_from_listing(listing))
-
-
-def _drifted_grants(
+def write_pending_sharing_fence(
     config: Any, link: SharedBrainLink
-) -> tuple[dict[str, Any], set[tuple[str, int]]]:
-    """Workspaces to rewrite and exact grants to journal for a drifted path."""
-    live_identity = _live_origin_identity(link)
+) -> tuple[Path, list[dict[str, Any]]]:
+    """Persist the exact grants at risk BEFORE any authorization-relevant origin read."""
+    grants = _fenced_grants_for_path(config, link)
+    if not grants:
+        return _sharing_fence_dir(config) / "none", []
     canonical = os.path.realpath(link.path)
+    key = json.dumps(
+        {"path": canonical, "grants": sorted(grants, key=lambda row: (row["workspace"], row["name"], row["lifetime_id"], row["generation"]))},
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    name = hashlib.sha256(key.encode("utf-8")).hexdigest()
+    path = _sharing_fence_dir(config) / (name + ".json")
+    payload = (
+        json.dumps(
+            {
+                "schema": 1,
+                "path": canonical,
+                "observed_at": _now(),
+                "grants": grants,
+            },
+            indent=2,
+        )
+        + "\n"
+    ).encode("utf-8")
+    _private_atomic_write(path, payload)
+    return path, grants
+
+
+def _load_fence(path: Path) -> dict[str, Any] | None:
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, ValueError):
+        return None
+    if not isinstance(raw, dict) or raw.get("schema") != 1:
+        return None
+    grants = raw.get("grants")
+    if not isinstance(grants, list):
+        return None
+    for row in grants:
+        if not isinstance(row, dict):
+            return None
+        if not all(
+            isinstance(row.get(key), str) and row.get(key)
+            for key in ("workspace", "name", "path", "lifetime_id")
+        ) or type(row.get("generation")) is not int:
+            return None
+    return raw
+
+
+def _registry_grants(registry_bytes: bytes | None) -> list[dict[str, Any]] | None:
+    if registry_bytes is None:
+        return None
+    try:
+        data = json.loads(registry_bytes.decode("utf-8", "strict"))
+    except (UnicodeError, ValueError):
+        return None
+    rows = list(data.values()) if isinstance(data, dict) else data
+    if not isinstance(rows, list):
+        return None
+    found: list[dict[str, Any]] = []
+    for row in rows:
+        if not isinstance(row, dict):
+            return None
+        workspace = row.get("name")
+        links = row.get("shared_brains", [])
+        if not isinstance(workspace, str) or not isinstance(links, list):
+            return None
+        for link in links:
+            if not isinstance(link, dict):
+                return None
+            if (
+                link.get("kind", "git") == "git"
+                and link.get("sharing_policy") == "automatic"
+                and isinstance(link.get("name"), str)
+                and isinstance(link.get("path"), str)
+                and isinstance(link.get("lifetime_id"), str)
+                and type(link.get("sharing_generation")) is int
+                and isinstance(link.get("sharing_consent"), dict)
+                and link["sharing_consent"].get("generation") == link["sharing_generation"]
+            ):
+                found.append(
+                    {
+                        "workspace": workspace,
+                        "name": link["name"],
+                        "path": link["path"],
+                        "lifetime_id": link["lifetime_id"],
+                        "generation": link["sharing_generation"],
+                    }
+                )
+    return found
+
+
+def _fence_matching_grants(
+    fence: dict[str, Any], registry_bytes: bytes | None
+) -> list[dict[str, Any]]:
+    persisted = _registry_grants(registry_bytes)
+    if persisted is None:
+        return []
+    wanted = {
+        (row.get("workspace"), row.get("name"), row.get("lifetime_id"), row.get("generation"))
+        for row in fence.get("grants", [])
+        if isinstance(row, dict)
+    }
+    return [
+        row
+        for row in persisted
+        if (row["workspace"], row["name"], row["lifetime_id"], row["generation"]) in wanted
+    ]
+
+
+def _demote_fenced_grants(config: Any, grants: list[dict[str, Any]]) -> dict[str, Any]:
     changed: dict[str, Any] = {}
-    revoked: set[tuple[str, int]] = set()
-    for name, workspace in getattr(config, "workspaces", {}).items():
+    wanted = {
+        (row.get("workspace"), row.get("name"), row.get("lifetime_id"), row.get("generation"))
+        for row in grants
+    }
+    for workspace_name, workspace in getattr(config, "workspaces", {}).items():
         links = list(getattr(workspace, "shared_brains", None) or [])
         kept: list[SharedBrainLink] = []
         touched = False
         for item in links:
             if (
                 item.kind == "git"
-                and os.path.realpath(item.path) == canonical
                 and sharing_grant_stored(item)
-                and item.identity != live_identity
-                and (
-                    item.lifetime_id != link.lifetime_id
-                    or item.sharing_generation == link.sharing_generation
-                )
+                and (workspace_name, item.name, item.lifetime_id, item.sharing_generation) in wanted
             ):
-                revoked.add((item.lifetime_id, item.sharing_generation))
                 kept.append(set_sharing_policy(item, DEFAULT_SHARING_POLICY))
                 touched = True
             else:
                 kept.append(item)
         if touched:
-            changed[name] = replace(workspace, shared_brains=kept)
-    return changed, revoked
+            changed[workspace_name] = replace(workspace, shared_brains=kept)
+    return changed
+
+
+def _demote_all_automatic(config: Any) -> dict[str, Any]:
+    changed: dict[str, Any] = {}
+    for workspace_name, workspace in getattr(config, "workspaces", {}).items():
+        links = list(getattr(workspace, "shared_brains", None) or [])
+        kept: list[SharedBrainLink] = []
+        touched = False
+        for item in links:
+            if item.kind == "git" and sharing_grant_stored(item):
+                kept.append(set_sharing_policy(item, DEFAULT_SHARING_POLICY))
+                touched = True
+            else:
+                kept.append(item)
+        if touched:
+            changed[workspace_name] = replace(workspace, shared_brains=kept)
+    return changed
+
+
+def recover_pending_sharing_fences(config: Any, owner: Any | None = None) -> bool:
+    """Turn abandoned drift fences into persisted review before admission."""
+    from ciao.workspaces import (
+        WorkspaceRegistryBusy,
+        acquire_workspace_registry,
+        persist_workspaces,
+        read_workspace_registry_bytes,
+        workspace_registry_lock,
+    )
+
+    directory = _sharing_fence_dir(config)
+    try:
+        paths = sorted(directory.glob("*.json"))
+    except OSError:
+        return False
+    if not paths:
+        return True
+    own_owner = owner is None
+    if owner is None:
+        try:
+            owner = acquire_workspace_registry(config)
+        except WorkspaceRegistryBusy:
+            return False
+    try:
+        for path in paths:
+            fence = _load_fence(path)
+            with workspace_registry_lock(config):
+                if fence is None:
+                    changed = _demote_all_automatic(config)
+                    matching = None
+                else:
+                    matching = _fence_matching_grants(fence, owner.current)
+                    changed = _demote_fenced_grants(config, matching)
+                if not changed:
+                    # No surviving authority to retire; the fence is settled.
+                    try:
+                        path.unlink(missing_ok=True)
+                    except OSError:
+                        return False
+                    continue
+                config.workspaces.update(changed)
+                try:
+                    persist_workspaces(config, dict(config.workspaces), owner=owner)
+                except Exception:
+                    return False
+                try:
+                    path.unlink(missing_ok=True)
+                except OSError:
+                    return False
+        return True
+    finally:
+        if own_owner and owner is not None:
+            owner.close()
+
+
+def recover_sharing_state(config: Any, owner: Any | None = None) -> bool:
+    """Durably settle fences and the journal before the server admits work."""
+    from ciao.workspaces import (
+        WorkspaceRegistryBusy,
+        acquire_workspace_registry,
+        persist_workspaces,
+        read_workspace_registry_bytes,
+        workspace_registry_lock,
+    )
+
+    own_owner = owner is None
+    if owner is None:
+        try:
+            owner = acquire_workspace_registry(config)
+        except WorkspaceRegistryBusy:
+            return False
+    try:
+        if not recover_pending_sharing_fences(config, owner):
+            return False
+        state = load_sharing_revocations(config)
+        if state.healthy and not state.fail_closed and not state.keys:
+            return True
+        with workspace_registry_lock(config):
+            if not state.healthy or state.fail_closed:
+                changed = _demote_all_automatic(config)
+            else:
+                fenced = [
+                    {"workspace": workspace_name, "name": item.name,
+                     "lifetime_id": item.lifetime_id,
+                     "generation": item.sharing_generation}
+                    for workspace_name, workspace in getattr(config, "workspaces", {}).items()
+                    for item in getattr(workspace, "shared_brains", None) or []
+                    if item.kind == "git"
+                    and sharing_grant_stored(item)
+                    and (item.lifetime_id, item.sharing_generation) in state.keys
+                ]
+                changed = _demote_fenced_grants(config, fenced)
+            if changed:
+                config.workspaces.update(changed)
+                try:
+                    persist_workspaces(config, dict(config.workspaces), owner=owner)
+                except Exception:
+                    return False
+            # Only after every surviving automatic grant was durably demoted
+            # may a missing/malformed/fail-closed journal be replaced.
+            try:
+                with _sharing_journal_claim(config):
+                    save_sharing_revocations(
+                        config,
+                        set(),
+                        registry_bytes=owner.current,
+                        force_fail_closed=False,
+                    )
+            except OSError:
+                return False
+        return True
+    finally:
+        if own_owner and owner is not None:
+            owner.close()
+
+
+def has_automatic_grants(config: Any) -> bool:
+    return any(
+        item.kind == "git" and sharing_grant_stored(item)
+        for workspace in getattr(config, "workspaces", {}).values()
+        for item in getattr(workspace, "shared_brains", None) or []
+    )
+
+
+def apply_persisted_sharing_revocations(config: Any) -> None:
+    """Load consent state and mark whether durable recovery is needed.
+
+    A healthy journal with no pending keys or fences preserves grants across a
+    restart. Anything else leaves the persisted registry untouched and marks
+    ``_sharing_recovery_pending``; `recover_sharing_state` settles it under the
+    server's authoritative registry claim before work is admitted.
+    """
+    directory = _sharing_fence_dir(config)
+    try:
+        fences = list(directory.glob("*.json"))
+    except OSError:
+        fences = []
+    if fences:
+        config._sharing_recovery_pending = True
+        return
+    state = load_sharing_revocations(config)
+    if state.healthy and not state.fail_closed and not state.keys:
+        config._sharing_recovery_pending = False
+        return
+    if not has_automatic_grants(config):
+        # No surviving authority needs demotion; a fresh empty journal is safe.
+        try:
+            with _sharing_journal_claim(config):
+                save_sharing_revocations(
+                    config, set(), force_fail_closed=False
+                )
+        except OSError:
+            config._sharing_recovery_pending = True
+        else:
+            config._sharing_recovery_pending = False
+        return
+    config._sharing_recovery_pending = True
 
 
 def record_sharing_revocation_without_registry(
     config: Any, link: SharedBrainLink
 ) -> bool:
-    """Journal a drift revocation when the registry claim is unavailable.
+    """Fence and journal a drift revocation when the registry claim is unavailable.
 
-    Uses the last persisted bytes (best effort) for compaction, writes the
-    durable journal, and demotes the affected links in memory. It does not
-    write the registry. Raises OSError if the journal itself cannot be written.
+    The fence is written before any origin observation and names the exact
+    grants at risk. It is left in place for startup recovery because the registry
+    could not be rewritten here. Raises OSError if neither the fence nor the
+    journal can be written.
     """
-    changed, revoked = _drifted_grants(config, link)
-    if not changed:
+    fence_path, grants = write_pending_sharing_fence(config, link)
+    if not grants:
         return False
     from ciao.workspaces import read_workspace_registry_bytes
 
+    registry_bytes = read_workspace_registry_bytes(config)
+    matching = _fence_matching_grants(
+        {"grants": grants}, registry_bytes
+    )
+    if not matching:
+        try:
+            fence_path.unlink(missing_ok=True)
+        except OSError:
+            pass
+        return False
+    keys = {(row["lifetime_id"], row["generation"]) for row in matching}
+    changed = _demote_fenced_grants(config, matching)
     merge_sharing_revocations(
         config,
-        revoked,
-        registry_bytes=read_workspace_registry_bytes(config),
+        keys,
+        registry_bytes=registry_bytes,
     )
     config.workspaces.update(changed)
     return True
@@ -561,18 +852,17 @@ def record_sharing_revocation_without_registry(
 def invalidate_sharing_on_drift(
     config: Any, link: SharedBrainLink, owner: Any | None = None
 ) -> bool:
-    """Durably return every drifted Git link at this path to review.
+    """Fence the exact grants at risk, then retire them under fresh claims.
 
-    Called while the caller owns the checkout claim. The live origin is re-read
-    here, so a delayed observation cannot revoke a grant after the origin was
-    repaired. Every workspace linking the same path is covered.
+    The fence is written before any authorization-relevant origin read. A later
+    re-probe cannot erase the observation: only the fresh persisted registry, not
+    a repaired origin, decides which exact grants are still there to retire.
 
-    The revocation journal is written before the registry. If the journal write
-    fails, the registry write is still attempted so a durable review state is
-    possible; a failed registry write then surfaces. If the registry claim is
-    already held, the journal-only path records the exact grants and leaves the
-    registry for a later writer. Raises OSError when no durable record can be
-    written.
+    The journal is merged before the registry. If the registry write fails, the
+    fence remains and startup recovery demotes the exact grants. If the fence
+    itself cannot be written, the caller gets an OSError and must treat the
+    result as unavailable; this function never claims durable success when no
+    authoritative local record was written.
     """
     from ciao.workspaces import (
         WorkspaceRegistryBusy,
@@ -588,37 +878,72 @@ def invalidate_sharing_on_drift(
         except WorkspaceRegistryBusy:
             return record_sharing_revocation_without_registry(config, link)
     try:
+        fence_path, grants = write_pending_sharing_fence(config, link)
+    except OSError:
+        # The fence could not be written. Fail closed in this process and try
+        # one durable global marker instead: a fail-closed journal revokes all
+        # automatic authority on the next restart. If that also fails, no
+        # durable record exists and the caller receives the OSError.
+        changed = _demote_fenced_grants(config, _fenced_grants_for_path(config, link))
+        config.workspaces.update(changed)
+        config._sharing_recovery_pending = True
+        try:
+            merge_sharing_revocations(
+                config, set(), registry_bytes=owner.current, force_fail_closed=True
+            )
+        except OSError:
+            logger.exception("No durable shared-brain revocation record could be written")
+        raise
+    if not grants:
+        return False
+    try:
         with workspace_registry_lock(config):
-            changed, revoked = _drifted_grants(config, link)
-            if not changed:
+            matching = _fence_matching_grants({"grants": grants}, owner.current)
+            if not matching:
+                # Stale queued grants or a relink: nothing in the fresh registry
+                # still has the authority the fence named.
+                fence_path.unlink(missing_ok=True)
                 return False
+            keys = {(row["lifetime_id"], row["generation"]) for row in matching}
+            changed = _demote_fenced_grants(config, matching)
+            journal_state = load_sharing_revocations(config)
             try:
                 merge_sharing_revocations(
                     config,
-                    revoked,
+                    keys,
                     registry_bytes=owner.current,
                 )
             except OSError:
-                # The registry write below is still attempted: if it lands, the
-                # review state is durable even without the journal.
+                # The registry write below still proves the demotion and the
+                # fence remains until that write succeeds.
                 logger.exception("Could not write the shared-brain revocation journal")
             config.workspaces.update(changed)
             try:
-                persist_workspaces(
-                    config, dict(config.workspaces), owner=owner
-                )
+                persist_workspaces(config, dict(config.workspaces), owner=owner)
             except Exception:
-                # A failed registry write is surfaced; the journal (when it
-                # landed) keeps this revocation durable across a restart.
+                # Leave the fence in place: a restart retires these exact grants.
                 raise
-            # The registry write succeeded, so old entries no longer match a
-            # stored automatic grant; compact them away.
+            # Committed review. The fence is no longer needed.
+            try:
+                fence_path.unlink(missing_ok=True)
+            except OSError:
+                pass
+            # Compact only after the new registry bytes are available. If the
+            # journal was unhealthy or fail-closed, keep that global marker while
+            # any unrelated automatic grant still survives.
+            remaining = _persisted_automatic_grants(
+                getattr(config, "_workspace_registry_bytes", None)
+            )
+            keep_fail_closed = bool(
+                (journal_state.fail_closed or not journal_state.healthy)
+                and remaining
+            )
             try:
                 merge_sharing_revocations(
                     config,
-                    revoked,
+                    keys,
                     registry_bytes=getattr(config, "_workspace_registry_bytes", None),
-                    force_fail_closed=False,
+                    force_fail_closed=keep_fail_closed,
                 )
             except OSError:
                 logger.exception("Could not compact the shared-brain revocation journal")
@@ -975,6 +1300,13 @@ def brain_state(link: SharedBrainLink, config: Any, workspace: str) -> dict[str,
     """Inspect a registered checkout only while its path and registry are owned."""
     from ciao.workspaces import WorkspaceRegistryConflict, persisted_checkout_links, workspace_registry_claim
 
+    if link.kind == "git" and getattr(config, "_sharing_recovery_pending", False):
+        state = _brain_state_owned(link, config)
+        state["sharing_policy"] = DEFAULT_SHARING_POLICY
+        state["sharing_granted_at"] = ""
+        state["sharing_grant_pending"] = sharing_grant_stored(link)
+        state["sharing_invalidation_failed"] = True
+        return state
     if link.kind == "folder":
         return _brain_state_owned(link, config)
     try:
@@ -1129,6 +1461,7 @@ async def update_brain(link: SharedBrainLink, config: Any) -> dict[str, Any]:
                         )
                     except (OSError, WorkspaceRegistryConflict):
                         result["sharing_invalidation_failed"] = True
+                        config._sharing_recovery_pending = True
         except OSError:
             result = _result("failed", "lock_unavailable")
     _last_update[key] = result

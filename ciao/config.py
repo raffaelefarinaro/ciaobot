@@ -968,6 +968,7 @@ class CiaoConfig:
         init=False, default=False, repr=False
     )
     _workspace_registry_bytes: bytes | None = field(default=None, repr=False, compare=False)
+    _sharing_recovery_pending: bool = field(default=False, init=False, repr=False)
     # Raw value of the retired ``CIAO_WORKSPACES`` variable, if an install
     # still sets it. Never used as a workspace source; server startup imports
     # it into ``.runtime/workspaces.json`` once and then ignores it.

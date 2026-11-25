@@ -373,7 +373,29 @@ async def workspace_shared_brains(request: Request) -> JSONResponse:
                         link,
                     )
                 except OSError:
-                    pass
+                    # Nothing durable could be written; fail closed in this
+                    # process and report the result as unavailable/unconfirmed.
+                    from ciao.workspaces import workspace_registry_lock
+
+                    with workspace_registry_lock(config):
+                        demotions = shared_brain._demote_fenced_grants(
+                            config,
+                            shared_brain._fenced_grants_for_path(config, link),
+                        )
+                        config.workspaces.update(demotions)
+                    config._sharing_recovery_pending = True
+                    try:
+                        from ciao.workspaces import read_workspace_registry_bytes
+
+                        await run_while_claimed(
+                            shared_brain.merge_sharing_revocations,
+                            config,
+                            set(),
+                            registry_bytes=read_workspace_registry_bytes(config),
+                            force_fail_closed=True,
+                        )
+                    except OSError:
+                        pass
                 current = _sharing_link(config, workspace_name, link.name)
                 if current is not None:
                     state = await asyncio.to_thread(
@@ -604,6 +626,15 @@ async def _apply_sharing_policy(
     if not matches(link):
         return changed()
     if policy == "automatic":
+        if getattr(config, "_sharing_recovery_pending", False):
+            return JSONResponse(
+                {
+                    "error": "Automatic sharing is unavailable until shared-brain "
+                    "consent recovery completes.",
+                    "code": "consent_journal_unavailable",
+                },
+                status_code=409,
+            )
         # A grant names a person's audience, so the folder has to be usable
         # and still its own checkout right now. Revocation never needs this:
         # it must work even when the folder is gone or broken.
@@ -636,6 +667,34 @@ async def _apply_sharing_policy(
                 },
                 status_code=409,
             )
+        journal_state = shared_brain.load_sharing_revocations(config)
+        if not journal_state.healthy or journal_state.fail_closed:
+            if shared_brain.has_automatic_grants(config):
+                return JSONResponse(
+                    {
+                        "error": "Automatic sharing is unavailable until the "
+                        "revocation journal is recovered.",
+                        "code": "consent_journal_unavailable",
+                    },
+                    status_code=409,
+                )
+            try:
+                await run_while_claimed(
+                    shared_brain.merge_sharing_revocations,
+                    config,
+                    set(),
+                    registry_bytes=owner.current,
+                    force_fail_closed=False,
+                )
+            except OSError:
+                return JSONResponse(
+                    {
+                        "error": "The sharing journal could not be initialized. "
+                        "Nothing was changed.",
+                        "code": "consent_journal_unavailable",
+                    },
+                    status_code=503,
+                )
     with workspace_registry_lock(config):
         workspace = config.workspace(workspace_name)
         if workspace is None:

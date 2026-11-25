@@ -48,6 +48,46 @@ class FakeConfig:
         return self._vaults[name]
 
 
+def _install_registry(config: "FakeConfig", *workspaces: object) -> bytes:
+    """Write authoritative registry bytes containing these workspace links."""
+    rows = []
+    for workspace in workspaces:
+        rows.append(
+            {
+                "name": workspace.name,
+                "vault_root": workspace.vault_root,
+                "shared_brains": [
+                    {
+                        "name": link.name,
+                        "path": link.path,
+                        "identity": link.identity,
+                        "lifetime_id": link.lifetime_id,
+                        "kind": link.kind,
+                        "sharing_policy": link.sharing_policy,
+                        "sharing_generation": link.sharing_generation,
+                        "sharing_consent": (
+                            {
+                                "generation": link.sharing_consent.generation,
+                                "identity": link.sharing_consent.identity,
+                                "lifetime_id": link.sharing_consent.lifetime_id,
+                                "granted_at": link.sharing_consent.granted_at,
+                            }
+                            if link.sharing_consent is not None
+                            else None
+                        ),
+                    }
+                    for link in workspace.shared_brains
+                ],
+            }
+        )
+    payload = json.dumps(rows).encode()
+    path = config.state_path.parent / "workspaces.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(payload)
+    config._workspace_registry_bytes = payload
+    return payload
+
+
 def make_checkout(path: Path, origin_url: str | None = None) -> Path:
     path.mkdir(parents=True, exist_ok=True)
     subprocess.run(["git", "init", "-q", "-b", "main", str(path)], check=True)
@@ -1513,6 +1553,7 @@ def test_origin_drift_durably_invalidates_consent(tmp_path, monkeypatch) -> None
     config.workspaces = {"work": WorkspaceConfig(
         name="work", vault_root="memory-vault/work", shared_brains=[link],
     )}
+    _install_registry(config, config.workspaces["work"])
     persisted: dict[str, object] = {}
 
     def capture(config_arg, candidate=None, **kwargs):
@@ -1543,6 +1584,7 @@ async def test_update_brain_invalidates_consent_when_origin_drift_is_seen(
     config.workspaces = {"work": WorkspaceConfig(
         name="work", vault_root="memory-vault/work", shared_brains=[link],
     )}
+    _install_registry(config, config.workspaces["work"])
     persisted: list[object] = []
     monkeypatch.setattr(
         "ciao.workspaces.persist_workspaces",
@@ -1609,6 +1651,7 @@ def test_drift_invalidation_covers_the_same_path_in_independent_workspaces(tmp_p
             name="second", vault_root="memory-vault/second", shared_brains=[second],
         ),
     }
+    _install_registry(config, *config.workspaces.values())
     persist_calls: list[object] = []
     monkeypatch.setattr(
         "ciao.workspaces.persist_workspaces",
@@ -1640,8 +1683,10 @@ async def test_queued_git_update_rechecks_registry_after_folder_adoption(tmp_pat
     assert (await waiting)["reason"] == "registry_changed"
 
 
-def test_revocation_journal_is_compacted_and_bounded(tmp_path) -> None:
+def test_revocation_journal_is_compacted_and_bounded(tmp_path, monkeypatch) -> None:
     from ciao.config import WorkspaceConfig, SharedBrainLink
+
+    monkeypatch.setattr("ciao.workspaces.persist_workspaces", lambda *a, **k: None)
 
     link = sb.set_sharing_policy(SharedBrainLink(
         name="notes", path=str(tmp_path / "notes"), identity="github.com/a/notes",
@@ -1694,6 +1739,8 @@ def test_revocation_journal_is_compacted_and_bounded(tmp_path) -> None:
     assert state.healthy and state.fail_closed
     assert state.keys == frozenset()
     sb.apply_persisted_sharing_revocations(config)
+    assert config._sharing_recovery_pending is True
+    assert sb.recover_sharing_state(config) is True
     assert config.workspaces["work"].shared_brains[0].sharing_policy == "review"
 
 
@@ -1745,6 +1792,8 @@ def test_unreadable_revocation_journal_fails_closed(tmp_path) -> None:
     sb._sharing_revocations_path(config).mkdir()
 
     sb.apply_persisted_sharing_revocations(config)
+    assert config._sharing_recovery_pending is True
+    sb.recover_sharing_state(config)
     assert config.workspaces["work"].shared_brains[0].sharing_policy == "review"
     assert config.workspaces["work"].shared_brains[0].sharing_consent is None
 
@@ -1795,3 +1844,114 @@ def test_missing_revocation_journal_is_not_treated_as_healthy(tmp_path) -> None:
     state = sb.load_sharing_revocations(config)
     assert state.healthy is False
     assert state.fail_closed is True
+
+
+def test_stale_fence_does_not_demote_a_relinked_grant(tmp_path, monkeypatch) -> None:
+    from ciao.config import SharedBrainLink, WorkspaceConfig
+
+    old = sb.set_sharing_policy(SharedBrainLink(
+        name="notes", path=str(tmp_path / "notes"), identity="github.com/a/notes",
+        lifetime_id="old-lifetime",
+    ), "automatic")
+    config = FakeConfig(tmp_path)
+    config.workspaces = {"work": WorkspaceConfig(
+        name="work", vault_root="memory-vault/work", shared_brains=[old],
+    )}
+    _install_registry(config, config.workspaces["work"])
+    fence_path, _grants = sb.write_pending_sharing_fence(config, old)
+
+    new = sb.set_sharing_policy(SharedBrainLink(
+        name="notes", path=str(tmp_path / "notes"), identity="github.com/a/notes",
+        lifetime_id="new-lifetime",
+    ), "automatic")
+    config.workspaces["work"].shared_brains = [new]
+    _install_registry(config, config.workspaces["work"])
+
+    assert sb.recover_pending_sharing_fences(config) is True
+    assert not fence_path.exists()
+    assert sb.sharing_consent_active(config.workspaces["work"].shared_brains[0])
+
+
+def test_fence_recovery_leaves_an_unrelated_link_alone(tmp_path, monkeypatch) -> None:
+    from ciao.config import SharedBrainLink, WorkspaceConfig
+
+    monkeypatch.setattr("ciao.workspaces.persist_workspaces", lambda *a, **k: None)
+
+    first = sb.set_sharing_policy(SharedBrainLink(
+        name="notes", path=str(tmp_path / "one"), identity="github.com/a/one",
+        lifetime_id="one-lifetime",
+    ), "automatic")
+    second = sb.set_sharing_policy(SharedBrainLink(
+        name="other", path=str(tmp_path / "two"), identity="github.com/a/two",
+        lifetime_id="two-lifetime",
+    ), "automatic")
+    config = FakeConfig(tmp_path)
+    config.workspaces = {"work": WorkspaceConfig(
+        name="work", vault_root="memory-vault/work", shared_brains=[first, second],
+    )}
+    _install_registry(config, config.workspaces["work"])
+    fence_path, _grants = sb.write_pending_sharing_fence(config, first)
+
+    assert sb.recover_pending_sharing_fences(config) is True
+    assert not fence_path.exists()
+    links = {item.name: item for item in config.workspaces["work"].shared_brains}
+    assert links["notes"].sharing_policy == "review"
+    assert sb.sharing_consent_active(links["other"])
+
+
+def _child_merge_journal(state_path: str, lifetime: str, barrier) -> None:
+    import multiprocessing
+    from types import SimpleNamespace
+
+    from ciao import shared_brain
+
+    barrier.wait(timeout=10)
+    config = SimpleNamespace(state_path=Path(state_path))
+    shared_brain.merge_sharing_revocations(config, {(lifetime, 1)})
+
+
+def test_cross_process_journal_writers_do_not_lose_keys(tmp_path) -> None:
+    import multiprocessing
+    from types import SimpleNamespace
+
+    context = multiprocessing.get_context("spawn")
+    barrier = context.Barrier(2)
+    state_path = tmp_path / "state.json"
+    processes = [
+        context.Process(
+            target=_child_merge_journal,
+            args=(str(state_path), f"process-{index}", barrier),
+        )
+        for index in range(2)
+    ]
+    for process in processes:
+        process.start()
+    for process in processes:
+        process.join(20)
+        assert process.exitcode == 0
+    state = sb.load_sharing_revocations(SimpleNamespace(state_path=state_path))
+    assert state.keys == frozenset({("process-0", 1), ("process-1", 1)})
+
+
+def test_fence_after_restore_rotation_is_settled_without_touching_new_link(tmp_path, monkeypatch) -> None:
+    from ciao.config import SharedBrainLink, WorkspaceConfig
+
+    old = sb.set_sharing_policy(SharedBrainLink(
+        name="notes", path=str(tmp_path / "notes"), identity="github.com/a/notes",
+        lifetime_id="pre-restore",
+    ), "automatic")
+    config = FakeConfig(tmp_path)
+    config.workspaces = {"work": WorkspaceConfig(
+        name="work", vault_root="memory-vault/work", shared_brains=[old],
+    )}
+    _install_registry(config, config.workspaces["work"])
+    fence_path, _grants = sb.write_pending_sharing_fence(config, old)
+
+    restored = sb.reset_link_for_restore(old)
+    config.workspaces["work"].shared_brains = [restored]
+    _install_registry(config, config.workspaces["work"])
+    monkeypatch.setattr("ciao.workspaces.persist_workspaces", lambda *a, **k: None)
+
+    assert sb.recover_pending_sharing_fences(config) is True
+    assert not fence_path.exists()
+    assert config.workspaces["work"].shared_brains[0].sharing_policy == "review"

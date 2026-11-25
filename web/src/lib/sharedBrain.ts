@@ -20,7 +20,7 @@ export function automaticSharingConfirm(name: string, identity: string): string 
     + `Published notes stay in the repository's history even if they are removed later. `
     + 'Ciaobot does not copy your vault itself, but a note drafted for this brain can include private details from your memory or vault. Your memory pass and nightly care can choose private material for a draft too, not only a note you pick yourself. Other shared brains are not included. '
     + 'The repository address does not prove who can see it today: team membership and visibility can change outside Ciaobot. '
-    + 'Automatic sharing is not active yet. This choice is kept only for this engine session; restarting Ciaobot returns it to review. The future publisher must verify the current target when it acts.'
+    + 'Automatic sharing is not active yet: this records a standing permission for when the producer ships, and the future publisher must verify the current target when it acts.'
 }
 
 /** Words for turning the standing permission back into review. */
@@ -38,7 +38,7 @@ export function sharedBrainPolicyText(state: SharedBrainState): string {
       : base
   }
   if (state.sharing_policy === 'automatic') {
-    const audience = `Automatic sharing is chosen for this engine session for everyone who can access ${state.identity}; it is not active yet and returns to review on restart.`
+    const audience = `Automatic sharing is chosen for everyone who can access ${state.identity}; it is not active yet.`
     return state.problem ? `${audience} Paused until this folder is fixed.` : audience
   }
   return 'You review each note before it is shared.'
