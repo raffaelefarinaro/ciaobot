@@ -1195,23 +1195,12 @@ def validate_external_setup_vault(workspace: Path | str, vault: Path | str) -> P
     if notes == root or notes in root.parents or root in notes.parents:
         raise ValueError("notes folder and Ciaobot folder must be separate")
     selection = select_setup_vault(root, vault_mode="scratch")
-    if is_set_up_workspace(root):
+    from ciao.setup_transaction import pending_matches
+
+    pending = pending_matches(root, notes)
+    if is_set_up_workspace(root) and not pending:
         raise ValueError("an existing installation cannot be rebound during setup")
-    marker = root / ".runtime" / "external-setup-pending.json"
-    root_stat = root.stat() if root.exists() else None
-    notes_stat = notes.stat()
-    expected = {"notes": str(notes), "notes_identity": [notes_stat.st_dev, notes_stat.st_ino],
-                "install_identity": [root_stat.st_dev, root_stat.st_ino] if root_stat else None}
-    if marker.exists():
-        try:
-            pending = json.loads(marker.read_text(encoding="utf-8"))
-        except (OSError, ValueError):
-            pending = None
-        if pending != expected:
-            raise ValueError("pending setup belongs to another notes folder")
-    else:
-        pending = None
-    if selection.source in {"env", "registry", "legacy"}:
+    if selection.source in {"env", "registry", "legacy"} and not pending:
         raise ValueError("an existing installation cannot be rebound during setup")
     return notes
 
@@ -1343,6 +1332,7 @@ def setup_workspace(
     _adopt_exact_vault: bool = False,
     _external_identity: tuple[int, int] | None = None,
     _complete_external_setup: bool = True,
+    _transaction: Any = None,
 ) -> list[Path]:
     requested_name = (workspace_name or "").strip()
     if workspace_name is not None and not _WORKSPACE_NAME_RE.fullmatch(
@@ -1433,17 +1423,8 @@ def setup_workspace(
         if initialize_git:
             raise ValueError("separate notes setup cannot initialize Git history")
         _check_external_setup_identity(selection.vault_path, _external_identity)
-        pending_path = root / ".runtime" / "external-setup-pending.json"
-        pending_path.parent.mkdir(parents=True, exist_ok=True)
-        if not pending_path.exists():
-            from ciao.onboarding import _atomic_write
-
-            root_stat = root.stat()
-            _atomic_write(pending_path, json.dumps({
-                "notes": str(selection.vault_path),
-                "notes_identity": list(_external_identity or ()),
-                "install_identity": [root_stat.st_dev, root_stat.st_ino],
-            }).encode())
+        if _transaction is None:
+            raise ValueError("separate notes setup requires a transaction")
         if auth_token is not None and "PWA_AUTH_TOKEN" in selection.existing_env:
             if selection.existing_env["PWA_AUTH_TOKEN"] != auth_token:
                 raise ValueError("Use the password chosen when setup began.")
@@ -1493,7 +1474,10 @@ def setup_workspace(
     )
     name = requested_name or "personal"
 
-    generated_password = not auth_token and "PWA_AUTH_TOKEN" not in existing_env
+    generated_password = (
+        (_transaction is not None and _transaction.data.get("generated_token") is not None)
+        or (not auth_token and "PWA_AUTH_TOKEN" not in existing_env)
+    )
     token = auth_token or secrets.token_urlsafe(32)
     desired_env: list[tuple[str, str]] = [
         ("PWA_AUTH_TOKEN", token),
@@ -1508,7 +1492,15 @@ def setup_workspace(
         ("PWA_PORT", str(port)),
     ])
     fresh_env = not existing_env and not env_path.exists()
-    if fresh_env:
+    if _transaction is not None:
+        original = env_path.read_text(encoding="utf-8") if env_path.exists() else ""
+        additions = [f"{key}={value}" for key, value in desired_env if key not in existing_env]
+        if additions:
+            prefix = "" if not original or original.endswith("\n") else "\n"
+            suffix = ("# Added by Ciaobot setup\n" if original else "") + "\n".join(additions) + "\n"
+            _transaction.publish("env", original + prefix + suffix)
+            written.append(env_path)
+    elif fresh_env:
         # The password is in here in clear text: owner-only from creation.
         write_private_text(
             env_path, "\n".join(f"{key}={value}" for key, value in desired_env) + "\n"
@@ -1616,17 +1608,18 @@ def setup_workspace(
         # attempt at this still put `.claude/`, `commands/` and a stock CLAUDE.md
         # beside the nested vault instead of inside the workspace's own folder.
         # The later branch is `_write_if_missing`, so this does not fight it.
-        _write_if_missing(
-            root / ".runtime" / "workspaces.json",
-            json.dumps(
+        registry_text = json.dumps(
                 [{
                     "name": name,
                     "vault_root": stored_vault_root,
                     "default_provider": default_provider,
                 }],
                 indent=2,
-            ) + "\n",
-        )
+            ) + "\n"
+        if _transaction is not None:
+            _transaction.publish("registry", registry_text)
+        else:
+            _write_if_missing(root / ".runtime" / "workspaces.json", registry_text)
         written.append(root / ".runtime" / "workspaces.json")
 
     stock = resources.files("ciao.stock")
@@ -1881,7 +1874,7 @@ def setup_workspace(
     if _adopt_exact_vault:
         _check_external_setup_identity(vault_path, _external_identity)
         if _complete_external_setup:
-            pending_path.unlink()
+            _transaction.complete()
     else:
         ensure_vault_git(vault_path, initialize_if_missing=initialize_git)
 
@@ -1994,16 +1987,25 @@ def _setup_command(args: argparse.Namespace) -> int:
     except OSError:
         had_token = False
     sync_failures: list[str] = []
+    transaction = None
     try:
         notes = validate_external_setup_vault(root, args.notes_folder) if args.notes_folder else None
         notes_stat = notes.stat() if notes else None
+        token = args.auth_token
+        if notes:
+            from ciao.setup_transaction import SetupTransaction
+
+            root.mkdir(parents=True, exist_ok=True)
+            transaction = SetupTransaction(root, notes)
+            token = transaction.begin(args.auth_token, (notes_stat.st_dev, notes_stat.st_ino) if notes_stat else None)
         written = setup_workspace(
             args.workspace,
-            auth_token=args.auth_token,
+            auth_token=token,
             vault_root=notes,
             vault_mode="existing" if notes else "scratch",
             _adopt_exact_vault=bool(notes),
             _external_identity=(notes_stat.st_dev, notes_stat.st_ino) if notes_stat else None,
+            _transaction=transaction,
             workspace_name=args.workspace_name,
             python_path=args.python,
             port=args.port,
@@ -2016,6 +2018,9 @@ def _setup_command(args: argparse.Namespace) -> int:
     except (OSError, RuntimeError, ValueError) as exc:
         print(f"Error: {exc}", file=sys.stderr)
         return 1
+    finally:
+        if transaction is not None:
+            transaction.close()
     for path in written:
         print(path)
     if notes:

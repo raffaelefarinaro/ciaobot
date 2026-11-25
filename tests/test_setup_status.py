@@ -3149,9 +3149,11 @@ def test_separate_notes_setup_keeps_pending_when_environment_publication_fails(t
     original = routes_api._publish_setup_environment
     with monkeypatch.context() as patch:
         patch.setattr(routes_api, "_publish_setup_environment", lambda *args: (_ for _ in ()).throw(RuntimeError("interrupted")))
-        with pytest.raises(RuntimeError, match="interrupted"):
-            client.post("/api/setup/finish", json=body)
-    assert (ws / ".runtime" / "external-setup-pending.json").is_file()
+        response = client.post("/api/setup/finish", json=body)
+        assert response.status_code == 409
+        assert "interrupted" in response.json()["error"]
+    from ciao.setup_transaction import pending_matches
+    assert pending_matches(ws.resolve(), notes.resolve())
     for key in ("CIAO_WORKSPACE", "PWA_PORT", "PWA_AUTH_TOKEN"):
         monkeypatch.setenv(key, "")
     assert routes_api._publish_setup_environment is original

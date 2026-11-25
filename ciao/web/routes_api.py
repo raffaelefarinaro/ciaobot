@@ -6402,17 +6402,30 @@ async def setup_finish_endpoint(request: Request) -> JSONResponse:
     setup_kwargs["python_path"] = str(body.get("python", "")).strip() or None
     setup_kwargs["launch_agents_dir"] = str(body.get("launch_agents_dir", "")).strip() or None
     setup_kwargs["app_dir"] = str(body.get("app_dir", "")).strip() or None
+    transaction = None
     try:
+        if notes_folder:
+            from ciao.setup_transaction import SetupTransaction
+
+            transaction = SetupTransaction(resolved_workspace, notes)
+            transaction.begin(password, notes_identity)
+            setup_kwargs["_transaction"] = transaction
+            setup_kwargs["_vault_selection"] = select_setup_vault(
+                resolved_workspace, vault_mode=vault_mode, vault_root=vault_root_arg
+            )
         written = await asyncio.to_thread(
             functools.partial(setup_workspace, str(resolved_workspace), **setup_kwargs)
         )
+        _publish_setup_environment(resolved_workspace, port, password)
+        if transaction is not None:
+            transaction.complete()
     except RuntimeError as exc:
         return JSONResponse({"error": str(exc)}, status_code=409)
-    except ValueError as exc:
+    except (OSError, ValueError) as exc:
         return JSONResponse({"error": str(exc)}, status_code=400)
-    _publish_setup_environment(resolved_workspace, port, password)
-    if notes_folder:
-        (resolved_workspace / ".runtime" / "external-setup-pending.json").unlink()
+    finally:
+        if transaction is not None:
+            transaction.close()
     # Only the real per-user LaunchAgents dir may be registered with launchd —
     # scripted/test setups pass a custom dir and must not touch it. App mode is
     # the third exclusion: the Mac app owns the bundled engine, so setup must
