@@ -737,7 +737,7 @@ def test_reconcile_refuses_cross_workspace_folder_alias_and_runs_no_git(linked, 
 
 
 def test_reconcile_reads_persisted_registry_from_independent_config(linked, monkeypatch) -> None:
-    from ciao.config import CiaoConfig
+    from ciao.config import CiaoConfig, WorkspaceConfig
     from ciao.workspaces import persist_workspaces
 
     config, clone, _origin = linked
@@ -758,7 +758,7 @@ def test_reconcile_reads_persisted_registry_from_independent_config(linked, monk
     config.workspace_root.mkdir(parents=True, exist_ok=True)
     folder_link = SharedBrainLink("team", str(clone), f"folder:{clone}", kind="folder")
     first = CiaoConfig.from_env(env)
-    first.workspaces["team"] = SimpleNamespace(
+    first.workspaces["team"] = WorkspaceConfig(
         name="team", vault_root=str(config.vault), shared_brains=[folder_link],
         default_provider="claude", disallowed_tools=None, claude_trim={}, color="blue",
         memory_handover="always", memory_approval={}, provider_overrides={},
