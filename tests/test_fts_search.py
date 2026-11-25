@@ -268,6 +268,52 @@ def test_a_deleted_note_is_still_pruned_within_its_own_root(
     assert paths == {"work/memory-vault/People/User.md"}
 
 
+def test_incomplete_walk_preserves_rows_for_this_and_other_roots(
+    db_conn: sqlite3.Connection, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    first = tmp_path / "first"
+    second = tmp_path / "second"
+    first.mkdir()
+    second.mkdir()
+    (first / "kept.md").write_text("# Kept\noriginal", encoding="utf-8")
+    (second / "sibling.md").write_text("# Sibling\nother workspace", encoding="utf-8")
+    fts_search.index_vault(db_conn, first, path_base=tmp_path)
+    fts_search.index_vault(db_conn, second, path_base=tmp_path)
+
+    (first / "kept.md").unlink()
+    (first / "new.md").write_text("# New\npartial pass", encoding="utf-8")
+    unreadable = first / "Unreadable"
+    unreadable.mkdir()
+    real_scandir = os.scandir
+
+    def fail_unreadable(path: object):
+        if Path(path) == unreadable:
+            raise PermissionError("test scan failure")
+        return real_scandir(path)
+
+    monkeypatch.setattr(fts_search.os, "scandir", fail_unreadable)
+    with pytest.raises(OSError, match="incomplete FTS scan"):
+        fts_search.index_vault(db_conn, first, path_base=tmp_path)
+
+    rows = {
+        row[0]
+        for row in db_conn.execute("SELECT path FROM vault_fts").fetchall()
+    }
+    assert rows == {"first/kept.md", "second/sibling.md"}
+    assert "original" in fts_search.search_vault(db_conn, "original")[0]["snippet"]
+    assert fts_search.search_vault(db_conn, "partial") == []
+    assert len(fts_search.search_vault(db_conn, "other workspace")) == 1
+
+    monkeypatch.setattr(fts_search.os, "scandir", real_scandir)
+    indexed, removed = fts_search.index_vault(db_conn, first, path_base=tmp_path)
+    assert (indexed, removed) == (1, 1)
+    recovered_rows = {
+        row[0]
+        for row in db_conn.execute("SELECT path FROM vault_fts").fetchall()
+    }
+    assert recovered_rows == {"first/new.md", "second/sibling.md"}
+
+
 def test_a_scoped_search_cannot_return_another_roots_note(
     db_conn: sqlite3.Connection, tmp_path: Path
 ) -> None:
@@ -1057,3 +1103,165 @@ def test_failed_or_top_up_keeps_the_and_hits() -> None:
 
     rows = fts_search.search(_OrFails(), "vault_fts", "heron marsh", limit=5)  # type: ignore[arg-type]
     assert [row["path"] for row in rows] == ["Notes/heron.md"]
+
+
+@pytest.mark.parametrize("mode", [0o755, 0o775, 0o777])
+def test_connected_storage_preserves_existing_directory_permissions(tmp_path, monkeypatch, mode):
+    import os
+    import stat
+    from ciao.fts_search import connected_db_path
+
+    base = tmp_path / "existing-override"
+    base.mkdir()
+    base.chmod(mode)
+    monkeypatch.setenv("CIAO_MEMORY_DIR", str(base))
+    if mode & 0o022:
+        with pytest.raises(PermissionError):
+            connected_db_path(tmp_path / "runtime", tmp_path / "brain")
+        assert list(base.iterdir()) == []
+    else:
+        previous = os.umask(0)
+        try:
+            database = connected_db_path(tmp_path / "runtime", tmp_path / "brain")
+        finally:
+            os.umask(previous)
+        assert stat.S_IMODE(database.stat().st_mode) == 0o600
+        assert stat.S_IMODE(database.parent.stat().st_mode) == 0o700
+    assert stat.S_IMODE(base.stat().st_mode) == mode
+
+
+@pytest.mark.parametrize("name", ["vault-fts.db", "vault-fts.db-wal", "vault-fts.db-journal"])
+def test_connected_storage_refuses_public_or_linked_database_files(tmp_path, monkeypatch, name):
+    from ciao.fts_search import connected_db_path
+
+    root = tmp_path / "brain"
+    monkeypatch.setenv("CIAO_MEMORY_DIR", str(tmp_path / "override"))
+    db = connected_db_path(tmp_path / "runtime", root)
+    candidate = db.parent / name
+    candidate.write_bytes(b"preserved")
+    candidate.chmod(0o644)
+    with pytest.raises(PermissionError):
+        connected_db_path(tmp_path / "runtime", root)
+    assert candidate.read_bytes() == b"preserved"
+    target = tmp_path / "private"
+    candidate.rename(target)
+    candidate.symlink_to(target)
+    with pytest.raises(OSError):
+        connected_db_path(tmp_path / "runtime", root)
+    assert target.read_bytes() == b"preserved"
+
+
+def test_connected_path_inspection_preserves_sqlite_writer_lock(tmp_path, monkeypatch):
+    import subprocess
+    import sys
+
+    runtime = tmp_path / "runtime"
+    root = tmp_path / "brain"
+    monkeypatch.delenv("CIAO_MEMORY_DIR", raising=False)
+    database = fts_search.connected_db_path(runtime, root)
+    conn = sqlite3.connect(database)
+    try:
+        conn.execute("CREATE TABLE notes (title TEXT)")
+        conn.execute("INSERT INTO notes VALUES ('held')")
+        assert fts_search.connected_db_path(runtime, root) == database
+        result = subprocess.run(
+            [sys.executable, "-c",
+             "import sqlite3, sys; sqlite3.connect(sys.argv[1], timeout=0).execute('BEGIN IMMEDIATE')",
+             str(database)], capture_output=True, text=True,
+        )
+        assert result.returncode != 0
+        assert "database is locked" in result.stderr
+    finally:
+        conn.close()
+
+
+def test_connected_store_refuses_nonprivate_leaf_or_hardlinked_database(tmp_path, monkeypatch):
+    base = tmp_path / "runtime"
+    leaf = base / "connected"
+    leaf.mkdir(parents=True)
+    leaf.chmod(0o755)
+    monkeypatch.delenv("CIAO_MEMORY_DIR", raising=False)
+    root = tmp_path / "brain"
+    with pytest.raises(PermissionError, match="directory must be owner-private"):
+        fts_search.connected_db_path(base, root)
+    assert list(leaf.iterdir()) == []
+    leaf.chmod(0o700)
+    db = fts_search.connected_db_path(base, root)
+    duplicate = tmp_path / "other-file"
+    os.link(db, duplicate)
+    with pytest.raises(PermissionError, match="database must be owner-private"):
+        fts_search.connected_db_path(base, root)
+    assert duplicate.stat().st_ino == db.stat().st_ino
+
+
+def test_connected_cli_waits_for_another_process_writer(tmp_path, monkeypatch, capsys):
+    import select
+    import subprocess
+    import sys
+
+    root = tmp_path / "brain"
+    root.mkdir()
+    note = root / "Note.md"
+    note.write_text("# orchid")
+    runtime = tmp_path / ".runtime"
+    runtime.mkdir()
+    (runtime / "workspaces.json").write_text(json.dumps([{"name": "personal", "vault_root": str(root)}]))
+    monkeypatch.setenv("CIAO_WORKSPACE", str(tmp_path))
+    monkeypatch.setenv("CIAO_RUNTIME_ROOT", str(runtime))
+    monkeypatch.setenv("CIAO_MEMORY_DIR", str(runtime / "indexes"))
+    database = fts_search.connected_db_path(runtime, root)
+    script = """
+import sqlite3, sys
+from ciao import cli
+
+connect = sqlite3.connect
+def traced_connect(*args, **kwargs):
+    conn = connect(*args, **kwargs)
+    conn.set_trace_callback(lambda sql: print("waiting", flush=True) if sql == "BEGIN IMMEDIATE" else None)
+    return conn
+sqlite3.connect = traced_connect
+sys.exit(cli.main(["vault-search", "orchid", "--vault-root", sys.argv[1]]))
+"""
+    with fts_search.connected_index_connection(database) as writer:
+        fts_search.init_db(writer)
+        writer.execute("BEGIN IMMEDIATE")
+        from ciao import cli as cli_module
+
+        with monkeypatch.context() as short_wait:
+            short_wait.setattr(fts_search, "CONNECTED_INDEX_BUSY_SECONDS", 0.05)
+            assert cli_module.main(["vault-search", "--vault-root", str(root)]) == 1
+            report = capsys.readouterr()
+            assert "Connected index busy" in report.err
+            assert "Updated local index" not in report.err
+        with subprocess.Popen([sys.executable, "-c", script, str(root)], text=True,
+                              stdout=subprocess.PIPE, stderr=subprocess.PIPE) as cli:
+            try:
+                assert select.select([cli.stdout], [], [], 10)[0]
+                assert cli.stdout.readline().strip() == "waiting"
+                with pytest.raises(subprocess.TimeoutExpired):
+                    cli.wait(timeout=5.4)
+                writer.commit()
+                output, errors = cli.communicate(timeout=10)
+            finally:
+                cli.kill()
+            assert cli.returncode == 0, errors
+            assert note.as_uri() in output
+
+
+def test_connected_writer_timeout_preserves_previous_snapshot(tmp_path, monkeypatch):
+    root = tmp_path / "brain"
+    root.mkdir()
+    note = root / "Note.md"
+    note.write_text("# original")
+    runtime = tmp_path / ".runtime"
+    previous = fts_search.lookup_connected_entries(root, "personal", runtime, tmp_path)
+    database = fts_search.connected_db_path(runtime, root)
+    note.write_text("# changed")
+    monkeypatch.setattr(fts_search, "CONNECTED_INDEX_BUSY_SECONDS", 0.05)
+    with fts_search.connected_index_connection(database) as writer:
+        writer.execute("BEGIN IMMEDIATE")
+        with pytest.raises(fts_search.ConnectedIndexBusy, match="Connected index busy"):
+            fts_search.lookup_connected_entries(root, "personal", runtime, tmp_path, refresh=True)
+        assert fts_search.lookup_connected_entries(root, "personal", runtime, tmp_path) == previous
+    assert [e.title for e in fts_search.lookup_connected_entries(
+        root, "personal", runtime, tmp_path, refresh=True)] == ["changed"]

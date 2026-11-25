@@ -319,6 +319,7 @@ export interface ProjectInfo {
   created_at: string
   order: number
   vault_folder: string
+  vault_folder_only?: boolean
   vault_doc_path?: string
   is_system?: boolean
   is_auto?: boolean

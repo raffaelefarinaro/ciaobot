@@ -12,6 +12,7 @@ Work projects are folder-only and rooted under
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 from unittest.mock import patch
 
@@ -21,7 +22,8 @@ from ciao.config import CiaoConfig, WorkspaceConfig
 from ciao.sessions import StateStore
 from ciao.transcripts import TranscriptStore
 from ciao.web.memory_pass import MemoryPassCoordinator
-from ciao.web.project_chats import ProjectChatManager
+import ciao.web.project_chats as project_chats_module
+from ciao.web.project_chats import ProjectChatManager, ProjectInfo
 
 
 # ── fixtures ───────────────────────────────────────────────────────────────
@@ -447,6 +449,330 @@ def test_prune_keeps_personal_project_with_chats(tmp_path: Path) -> None:
         "project with chats should survive pruning even if vault entry is gone"
 
 
+def test_unavailable_adopted_vault_is_not_recreated_or_pruned_and_recovers(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config = _make_custom_workspace_config(tmp_path)
+    monkeypatch.setattr(
+        CiaoConfig, "adopted_workspace_vault",
+        lambda self, name: name == "client",
+    )
+    pcm = _make_manager(tmp_path, config)
+    client = ProjectInfo(
+        "client-project", "Client project", "client", vault_folder="kept"
+    )
+    local = ProjectInfo("local-project", "Local project", "home", vault_folder="gone")
+    pcm._projects[client.project_id] = client
+    pcm._projects[local.project_id] = local
+
+    pcm._discover_vault_projects()
+
+    assert pcm._projects[client.project_id] is client
+    assert local.project_id not in pcm._projects
+    assert not config.workspace_vault_root("client").exists()
+    pcm._scaffold_project_note(
+        ProjectInfo("new-client-project", "New client project", "client")
+    )
+    assert not config.workspace_vault_root("client").exists()
+
+    restored = config.workspace_vault_root("client") / "projects" / "active" / "kept"
+    restored.mkdir(parents=True)
+    (restored / "README.md").write_text("---\nname: Client project\n---\n", encoding="utf-8")
+    pcm._discover_vault_projects()
+    assert pcm._projects[client.project_id].vault_folder == "kept"
+
+
+def test_adopted_vault_permission_error_does_not_prune(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    config = _make_custom_workspace_config(tmp_path)
+    monkeypatch.setattr(
+        CiaoConfig, "adopted_workspace_vault",
+        lambda self, name: name == "client",
+    )
+    pcm = _make_manager(tmp_path, config)
+    project = ProjectInfo("client-project", "Client project", "client", vault_folder="kept")
+    pcm._projects[project.project_id] = project
+    original = pcm._iter_vault_entries
+
+    def scan(workspace: str, root: Path, *, strict: bool = False):
+        if workspace == "client":
+            raise PermissionError("cloud folder unavailable")
+        return original(workspace, root, strict=strict)
+
+    monkeypatch.setattr(pcm, "_iter_vault_entries", scan)
+    pcm._discover_vault_projects()
+
+    assert pcm._projects[project.project_id] is project
+    assert not config.workspace_vault_root("client").exists()
+
+
+def test_partial_adopted_vault_scan_does_not_prune(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    config = _make_custom_workspace_config(tmp_path)
+    monkeypatch.setattr(
+        CiaoConfig, "adopted_workspace_vault",
+        lambda self, name: name == "client",
+    )
+    pcm = _make_manager(tmp_path, config)
+    project = ProjectInfo("client-project", "Client project", "client", vault_folder="kept")
+    pcm._projects[project.project_id] = project
+    active = pcm._vault_active_root("client")
+    active.mkdir(parents=True)
+    original_iterdir = Path.iterdir
+
+    def interrupted_iterdir(path: Path):
+        if path == active:
+            def partial_scan():
+                yield active / "another-project"
+                raise OSError("scan interrupted while cloud files materialize")
+            return partial_scan()
+        return original_iterdir(path)
+
+    monkeypatch.setattr(Path, "iterdir", interrupted_iterdir)
+    pcm._discover_vault_projects()
+
+    assert pcm._projects[project.project_id] is project
+
+
+def test_create_scaffold_fails_without_adopted_note_and_does_not_recreate_root(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config = _make_custom_workspace_config(tmp_path)
+    monkeypatch.setattr(CiaoConfig, "adopted_workspace_vault", lambda self, name: name == "client")
+    pcm = _make_manager(tmp_path, config)
+
+    with pytest.raises(ValueError, match="notes folder is unavailable"):
+        pcm.create_project("Needs note", workspace="client", scaffold=True)
+
+    assert not config.workspace_vault_root("client").exists()
+    assert not any(p.name == "Needs note" for p in pcm._projects.values())
+
+
+def test_create_scaffold_fails_on_permission_error_while_adopted_root_remains(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import os
+
+    config = _make_custom_workspace_config(tmp_path)
+    monkeypatch.setattr(CiaoConfig, "adopted_workspace_vault", lambda self, name: name == "client")
+    pcm = _make_manager(tmp_path, config)
+    root = config.workspace_vault_root("client")
+    root.mkdir(parents=True)
+    original_mkdir = os.mkdir
+
+    def denied_projects(name, *args, **kwargs):
+        if name == "projects":
+            raise PermissionError("cloud root is mounted read-only")
+        return original_mkdir(name, *args, **kwargs)
+
+    monkeypatch.setattr(os, "mkdir", denied_projects)
+    with pytest.raises(ValueError, match="project note could not be created"):
+        pcm.create_project("Read Only", workspace="client", scaffold=True)
+
+    assert root.is_dir()
+    assert not (root / "projects").exists()
+    assert not any(p.name == "Read Only" for p in pcm._projects.values())
+
+
+def test_directory_chain_rejects_symlink_in_root_path(tmp_path: Path) -> None:
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    linked_parent = tmp_path / "linked-parent"
+    linked_parent.symlink_to(outside, target_is_directory=True)
+
+    with pytest.raises(OSError):
+        project_chats_module._open_directory_chain(
+            linked_parent / "vault", (), create=False
+        )
+
+    assert list(outside.iterdir()) == []
+
+
+def test_directory_chain_rejects_root_component_replaced_at_open(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import os
+
+    root = tmp_path / "vault-root"
+    root.mkdir()
+    held = tmp_path / "vault-root-held"
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    original_open = os.open
+    swapped = False
+
+    def replace_component(name, flags, *args, **kwargs):
+        nonlocal swapped
+        if name == root.name and kwargs.get("dir_fd") is not None and not swapped:
+            swapped = True
+            root.rename(held)
+            root.symlink_to(outside, target_is_directory=True)
+        return original_open(name, flags, *args, **kwargs)
+
+    monkeypatch.setattr(os, "open", replace_component)
+    with pytest.raises(OSError):
+        project_chats_module._open_directory_chain(root, (), create=False)
+
+    assert swapped
+    assert list(outside.iterdir()) == []
+
+
+def test_project_scaffold_keeps_concurrent_materialized_note(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config = _make_custom_workspace_config(tmp_path)
+    monkeypatch.setattr(CiaoConfig, "adopted_workspace_vault", lambda self, name: name == "client")
+    pcm = _make_manager(tmp_path, config)
+    root = config.workspace_vault_root("client")
+    root.mkdir(parents=True)
+    active = root / "projects" / "active"
+    active.mkdir(parents=True)
+    folder = active / "race-project"
+    import os
+
+    original_mkdir = os.mkdir
+
+    def sync_wins(name, *args, **kwargs):
+        if name == "race-project":
+            original_mkdir(name, *args, **kwargs)
+            (folder / "README.md").write_text("sync-owned", encoding="utf-8")
+            raise FileExistsError(name)
+        else:
+            original_mkdir(name, *args, **kwargs)
+
+    monkeypatch.setattr(os, "mkdir", sync_wins)
+    project = pcm.create_project("Race Project", workspace="client", scaffold=True)
+
+    assert (folder / "README.md").read_text(encoding="utf-8") == "sync-owned"
+    assert not (folder / "race-project.md").exists()
+    assert project.vault_folder == "race-project"
+
+
+def test_project_scaffold_does_not_recreate_adopted_root_removed_after_check(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import shutil
+    import os
+
+    config = _make_custom_workspace_config(tmp_path)
+    monkeypatch.setattr(CiaoConfig, "adopted_workspace_vault", lambda self, name: name == "client")
+    pcm = _make_manager(tmp_path, config)
+    root = config.workspace_vault_root("client")
+    (root / "projects" / "active").mkdir(parents=True)
+    folder = root / "projects" / "active" / "vanishing-root"
+    original_mkdir = os.mkdir
+
+    def root_disappears(name, *args, **kwargs):
+        if name == "vanishing-root":
+            shutil.rmtree(root)
+        return original_mkdir(name, *args, **kwargs)
+
+    monkeypatch.setattr(os, "mkdir", root_disappears)
+    with pytest.raises(ValueError, match="notes folder is unavailable"):
+        pcm.create_project("Vanishing Root", workspace="client", scaffold=True)
+    assert not root.exists()
+
+
+def test_project_scaffold_uses_opened_active_directory_after_path_swap(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import os
+
+    config = _make_custom_workspace_config(tmp_path)
+    monkeypatch.setattr(CiaoConfig, "adopted_workspace_vault", lambda self, name: name == "client")
+    pcm = _make_manager(tmp_path, config)
+    root = config.workspace_vault_root("client")
+    active = root / "projects" / "active"
+    active.mkdir(parents=True)
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    original_open = os.open
+    swapped = False
+
+    def swap_after_active_open(name, flags, *args, **kwargs):
+        nonlocal swapped
+        fd = original_open(name, flags, *args, **kwargs)
+        if name == "active" and kwargs.get("dir_fd") is not None and not swapped:
+            swapped = True
+            active.rename(root / "projects" / "active-held")
+            active.symlink_to(outside, target_is_directory=True)
+        return fd
+
+    monkeypatch.setattr(os, "open", swap_after_active_open)
+    with pytest.raises(ValueError, match="notes folder is unavailable"):
+        pcm.create_project("Race Project", workspace="client", scaffold=True)
+
+    assert list(outside.iterdir()) == []
+    assert swapped
+    held = root / "projects" / "active-held" / "race-project"
+    assert held.is_dir()
+    assert not (held / "race-project.md").exists()
+    assert not any(p.name == "Race Project" for p in pcm._projects.values())
+
+
+def test_project_scaffold_rejects_slug_directory_replaced_after_open(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config = _make_custom_workspace_config(tmp_path)
+    monkeypatch.setattr(CiaoConfig, "adopted_workspace_vault", lambda self, name: name == "client")
+    pcm = _make_manager(tmp_path, config)
+    root = config.workspace_vault_root("client")
+    active = root / "projects" / "active"
+    active.mkdir(parents=True)
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    original_same_child = project_chats_module._same_child_directory
+    swapped = False
+
+    def swap_slug_after_open(parent_fd, name, expected_fd):
+        nonlocal swapped
+        if name == "race-project" and not swapped:
+            swapped = True
+            folder = active / "race-project"
+            folder.rename(active / "race-project-held")
+            folder.symlink_to(outside, target_is_directory=True)
+        return original_same_child(parent_fd, name, expected_fd)
+
+    monkeypatch.setattr(
+        project_chats_module, "_same_child_directory", swap_slug_after_open
+    )
+    with pytest.raises(ValueError, match="project note could not be created"):
+        pcm.create_project("Race Project", workspace="client", scaffold=True)
+
+    assert swapped
+    assert list(outside.iterdir()) == []
+    assert not any(p.name == "Race Project" for p in pcm._projects.values())
+    assert (active / "race-project-held").is_dir()
+    assert not (active / "race-project-held" / "race-project.md").exists()
+
+
+def test_general_seed_never_overwrites_a_note_materialized_at_write_seam(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config = _make_custom_workspace_config(tmp_path)
+    pcm = _make_manager(tmp_path, config)
+    folder = pcm._vault_active_root("client") / "general"
+    folder.mkdir(parents=True, exist_ok=True)
+    target = folder / "general.md"
+    target.unlink(missing_ok=True)
+    original_rename = project_chats_module._publish_exclusive_at
+    raced = False
+
+    def sync_wins(src_fd, source, dst_fd, destination, *, expected_fd):
+        nonlocal raced
+        if destination == "general.md" and not raced:
+            raced = True
+            external_fd = os.open(
+                destination, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o666, dir_fd=dst_fd,
+            )
+            with os.fdopen(external_fd, "w", encoding="utf-8") as stream:
+                stream.write("sync-owned")
+        return original_rename(src_fd, source, dst_fd, destination, expected_fd=expected_fd)
+
+    monkeypatch.setattr(project_chats_module, "_publish_exclusive_at", sync_wins)
+    pcm._ensure_general_vault_folder("client")
+
+    assert target.read_text(encoding="utf-8") == "sync-owned"
+
+
 # ── auto-promotion: orphan single-file → folder ────────────────────────────
 
 
@@ -456,9 +782,9 @@ def test_auto_promote_single_file_personal_to_folder(tmp_path: Path) -> None:
     pcm = _make_manager(tmp_path)
     pcm.list_projects()
 
-    # Source file is gone; <stem>/<stem>.md takes its place. Discovery picks
+    # Source is retained; <stem>/<stem>.md is copied. Discovery picks
     # the project up under its folder form, vault_folder unchanged.
-    assert not md.exists()
+    assert md.is_file()
     promoted = tmp_path / "memory-vault" / "personal" / "projects" / "active" / "Wedding" / "Wedding.md"
     assert promoted.is_file()
     proj = next(p for p in pcm.list_projects() if p.vault_folder == "Wedding")
@@ -476,6 +802,104 @@ def test_auto_promote_skips_when_target_exists(tmp_path: Path) -> None:
     # Both still on disk: promotion refused because Wedding/ exists.
     assert md.exists()
     assert (tmp_path / "memory-vault" / "personal" / "projects" / "active" / "Wedding").is_dir()
+
+
+def test_personal_promotion_keeps_source_when_sync_wins_destination_race(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    pcm = _make_manager(tmp_path)
+    source = _make_personal_file(tmp_path, "Wedding")
+    folder = source.parent / "Wedding"
+    original_rename = project_chats_module._publish_exclusive_at
+
+    def sync_wins(src_fd, src, dst_fd, dst, *, expected_fd):
+        if dst == "Wedding.md":
+            fd = os.open(
+                dst, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o666, dir_fd=dst_fd,
+            )
+            with os.fdopen(fd, "w", encoding="utf-8") as stream:
+                stream.write("sync-owned")
+        return original_rename(src_fd, src, dst_fd, dst, expected_fd=expected_fd)
+
+    monkeypatch.setattr(project_chats_module, "_publish_exclusive_at", sync_wins)
+    pcm._promote_single_file_personal_projects()
+
+    assert source.read_text(encoding="utf-8").startswith("---")
+    assert (folder / "Wedding.md").read_text(encoding="utf-8") == "sync-owned"
+
+
+def test_personal_promotion_keeps_source_when_slug_is_replaced_at_publish(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    pcm = _make_manager(tmp_path)
+    source = _make_personal_file(tmp_path, "Wedding")
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    original = project_chats_module._publish_exclusive_at
+    swapped = False
+
+    def replace_slug(src_fd, src, dst_fd, dst, *, expected_fd):
+        nonlocal swapped
+        if dst == "Wedding.md" and not swapped:
+            swapped = True
+            folder = source.parent / "Wedding"
+            folder.rename(source.parent / "Wedding-held")
+            folder.symlink_to(outside, target_is_directory=True)
+        return original(src_fd, src, dst_fd, dst, expected_fd=expected_fd)
+
+    monkeypatch.setattr(project_chats_module, "_publish_exclusive_at", replace_slug)
+    pcm._promote_single_file_personal_projects()
+
+    assert swapped
+    assert source.is_file()
+    assert list(outside.iterdir()) == []
+    assert (source.parent / "Wedding-held" / "Wedding.md").is_file()
+
+
+def test_personal_promotion_keeps_source_replaced_after_link(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    pcm = _make_manager(tmp_path)
+    source = _make_personal_file(tmp_path, "Wedding")
+    original_rename = project_chats_module._publish_exclusive_at
+    replaced = False
+
+    def sync_replaces_source(src_fd, src, dst_fd, dst, *, expected_fd):
+        nonlocal replaced
+        if dst == "Wedding.md" and not replaced:
+            replaced = True
+            concurrent = source.with_name("Wedding.sync-tmp")
+            concurrent.write_text("new sync version", encoding="utf-8")
+            os.replace(concurrent, source)
+        return original_rename(src_fd, src, dst_fd, dst, expected_fd=expected_fd)
+
+    monkeypatch.setattr(project_chats_module, "_publish_exclusive_at", sync_replaces_source)
+    pcm._promote_single_file_personal_projects()
+
+    assert replaced
+    promoted = source.parent / "Wedding" / "Wedding.md"
+    assert source.read_text(encoding="utf-8") == "new sync version"
+    assert promoted.read_text(encoding="utf-8").startswith("---")
+
+
+def test_personal_promotion_error_does_not_block_other_workspace_discovery(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    pcm = _make_manager(tmp_path)
+    work_folder = _make_work_project_folder(tmp_path, "kept-project")
+    original_open_chain = project_chats_module._open_directory_chain
+    personal_root = pcm._workspace_vault_root("personal")
+
+    def fail_personal_active(root: Path, parts, *, create: bool):
+        if root == personal_root and parts == ("projects", "active"):
+            raise PermissionError("personal cloud folder is unavailable")
+        return original_open_chain(root, parts, create=create)
+
+    monkeypatch.setattr(project_chats_module, "_open_directory_chain", fail_personal_active)
+    pcm._discover_vault_projects()
+
+    assert work_folder.is_dir()
+    assert any(p.vault_folder == "kept-project" for p in pcm._projects.values())
 
 
 # ── complete_project: work (regression) ────────────────────────────────────
@@ -513,8 +937,9 @@ def test_complete_personal_promoted_file_moves_to_completed(tmp_path: Path) -> N
     md = _make_personal_file(tmp_path, "Wedding")
     pcm = _make_manager(tmp_path)
     pcm.list_projects()
-    # Auto-promoted at startup.
-    assert not md.exists()
+    # The legacy source is retained because conditional unlink cannot be
+    # guaranteed across sync replacement races.
+    assert md.is_file()
     proj = next(p for p in pcm.list_projects() if p.vault_folder == "Wedding")
 
     result = pcm.complete_project(proj.project_id)

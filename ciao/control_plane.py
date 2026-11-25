@@ -36,6 +36,14 @@ from ciao.async_reads import keyed_lock, run_read
 from ciao.execution_modes import MODE_RANK
 from ciao.jsonio import MAX_JSON_DEPTH, json_nesting_exceeds
 from ciao.fts_search import (
+    connected_db_path,
+    connected_index_connection,
+    ConnectedIndexBusy,
+    ConnectedRegistration,
+    ConnectedWorkspaceChanged,
+    connected_entries,
+    refresh_connected_index,
+    adopted_vault_key_prefix,
     get_db_path,
     index_vault,
     init_db,
@@ -3267,42 +3275,75 @@ class CiaoControlPlane:
         which opens and closes its own SQLite connection there so a connection
         never crosses threads. Identical in-flight searches coalesce.
         """
-        root = self._vault_root(principal)
         base = self._search_key_base()
         runtime_dir = self._search_runtime_dir() or (base / ".runtime")
+        registration = ConnectedRegistration.capture(runtime_dir)
+        root = self._vault_root(principal)
+        adopted_check = getattr(self.config, "adopted_workspace_vault", None)
+        adopted = bool(adopted_check(self._workspace(principal))) if callable(adopted_check) else False
+        ownership_check = getattr(self.config, "vault_index_ownership", None)
+        owner_check = getattr(self.config, "ciao_owned_vault_index", None)
+        if callable(ownership_check):
+            unmanaged = ownership_check(self._workspace(principal)) != "ciao"
+        elif callable(owner_check):
+            unmanaged = not bool(owner_check(self._workspace(principal)))
+        else:
+            unmanaged = adopted
+        namespace = adopted_vault_key_prefix(root, self._workspace(principal)) if unmanaged else None
         bounded_limit = max(1, min(50, int(limit)))
 
         def _search() -> list[dict[str, str]]:
             # Install-owned database (SYS-03), resolved inside the worker so the
             # connection and its path never cross threads.
-            db_path = get_db_path(self._search_runtime_dir())
-            conn = sqlite3.connect(db_path)
-            try:
-                # Serialize the write phase per database file. Distinct query
-                # keys run concurrently, but SQLite takes one file-level write
-                # lock, so two index passes against this database would race it
-                # and fail with "database is locked" once a scan outlasts the
-                # connection timeout. The search that follows is read-only and
-                # does not need the lock.
-                with keyed_lock(f"fts-index:{db_path}"):
+            db_path = connected_db_path(runtime_dir, root, self.config.index_source_roots()) if namespace else get_db_path(runtime_dir)
+            connection = (connected_index_connection(db_path) if namespace
+                          else contextlib.closing(sqlite3.connect(db_path)))
+            with connection as conn:
+                # Connected refreshes reserve the SQLite writer across processes.
+                # Ordinary indexing uses the existing per-file thread lock.
+                with contextlib.nullcontext() if namespace else keyed_lock(f"fts-index:{db_path}"):
                     init_db(conn)
-                    index_vault(conn, root, path_base=base)
+                    try:
+                        if namespace is None:
+                            index_vault(conn, root, path_base=base)
+                        else:
+                            assert registration is not None
+                            refresh_connected_index(conn, root, self._workspace(principal), base, namespace, registration)
+                    except (OSError, UnicodeError):
+                        if namespace is None or connected_entries(conn, namespace) is None:
+                            raise
+                        logger.info("Searching the previous local index for %s", root)
                 rows = search_vault(
                     conn,
                     query,
                     limit=bounded_limit,
-                    path_prefix=vault_key_prefix(root, base),
+                    path_prefix=vault_key_prefix(root, base, key_namespace=namespace),
                 )
-            finally:
-                conn.close()
+                if registration is not None:
+                    registration.verify()
+                hit_paths = [row["path"] for row in rows]
+                if namespace is not None:
+                    for row in rows:
+                        relative = row["path"][len(namespace):]
+                        if not adopted and root.is_relative_to(base):
+                            relative = (root.relative_to(base) / relative).as_posix()
+                        row["path"] = relative
             # Retrieval telemetry for the decay-by-disuse audit: which notes
             # recall actually uses. Best-effort, and appended here so the whole
             # read (SQLite plus this write) stays in one worker.
-            record_search_hits(runtime_dir, query, [row["path"] for row in rows])
+            record_search_hits(db_path.parent if namespace else runtime_dir, query, hit_paths)
             return rows
 
-        key = f"vault_search:{root}:{base}:{query}:{bounded_limit}"
-        rows = await run_read(key, _search)
+        try:
+            registration.verify()
+            if namespace:
+                registration.authorize(root, self._workspace(principal), base, self.config.vault_root)
+            key = f"vault_search:{root}:{base}:{namespace}:{registration}:{query}:{bounded_limit}"
+            rows = await run_read(key, _search)
+        except ConnectedWorkspaceChanged as exc:
+            raise ControlPlaneError("workspace_changed", str(exc), retryable=True) from exc
+        except ConnectedIndexBusy as exc:
+            raise ControlPlaneError("connected_index_busy", str(exc), retryable=True) from exc
         return _ok(rows)
 
     async def vault_index_refresh(self, principal: AgentPrincipal) -> dict[str, Any]:
@@ -3326,32 +3367,84 @@ class CiaoControlPlane:
         the worker opens and closes its own connection so it never crosses
         threads. Scope is resolved on the calling thread first.
         """
+        workspace = self._workspace(principal)
+        runtime_dir = self._search_runtime_dir()
+        registration = ConnectedRegistration.capture(runtime_dir) if runtime_dir else None
         search_root = self._vault_root(principal)
         index_root = self._entity_index_root(principal)
         stamp = self._index_stamp(principal)
         base = self._search_key_base()
-        runtime_dir = self._search_runtime_dir()
+        adopted_vault_check = getattr(self.config, "adopted_workspace_vault", None)
+        adopted_vault = bool(adopted_vault_check(workspace)) if callable(adopted_vault_check) else False
+        ownership_check = getattr(self.config, "vault_index_ownership", None)
+        owns_index = getattr(self.config, "ciao_owned_vault_index", None)
+        if callable(ownership_check):
+            managed_index = ownership_check(workspace) == "ciao"
+        else:
+            managed_index = bool(owns_index(workspace)) if callable(owns_index) else not adopted_vault
+        namespace: str | None
+        if adopted_vault:
+            # For an adopted folder, the aggregate must be indexed under the
+            # original root so local paths and Markdown links keep resolving.
+            search_root = index_root
+            namespace = adopted_vault_key_prefix(index_root, workspace)
+        else:
+            namespace = None if managed_index else adopted_vault_key_prefix(search_root, workspace)
+
 
         def _refresh() -> tuple[int, int, int]:
-            entries = vault_index.scan_vault(index_root, workspace=stamp)
-            vault_index.write_index_file(entries, index_root / "INDEX.md")
+            runtime_dir = self._search_runtime_dir()
+            if runtime_dir is None:
+                raise OSError("private index staging directory is unavailable")
+            if managed_index:
+                entries = vault_index.scan_vault(index_root, workspace=stamp, strict=True)
+                vault_index.write_index_file(
+                    entries,
+                    index_root / "INDEX.md",
+                    replace_existing=managed_index,
+                    authorize=(
+                        (lambda: ownership_check(workspace) == "ciao")
+                        if callable(ownership_check) else None
+                    ),
+                    ownership_runtime=runtime_dir,
+                    registration_runtime=runtime_dir,
+                )
             # Install-owned database (SYS-03), resolved inside the worker.
-            db_path = get_db_path(runtime_dir)
-            conn = sqlite3.connect(db_path)
-            try:
+            db_path = connected_db_path(runtime_dir, search_root, self.config.index_source_roots()) if namespace else get_db_path(runtime_dir)
+            connection = (connected_index_connection(db_path) if namespace
+                          else contextlib.closing(sqlite3.connect(db_path)))
+            with connection as conn:
                 # Same database-file write lock as vault_search: an index
                 # refresh and a search can land on the same SQLite file, so the
                 # write phase is serialized per database.
-                with keyed_lock(f"fts-index:{db_path}"):
+                with contextlib.nullcontext() if namespace else keyed_lock(f"fts-index:{db_path}"):
                     init_db(conn)
-                    indexed, removed = index_vault(conn, search_root, path_base=base)
-            finally:
-                conn.close()
+                    if namespace is None:
+                        indexed, removed = index_vault(conn, search_root, path_base=base)
+                    else:
+                        assert registration is not None
+                        entries, indexed, removed = refresh_connected_index(
+                            conn, search_root, workspace, base, namespace, registration
+                        )
             return len(entries), indexed, removed
 
-        key = f"vault_index_refresh:{index_root}:{search_root}:{base}:{stamp}"
-        notes, indexed, removed = await run_read(key, _refresh)
-        return _ok({"notes": notes, "fts_indexed": indexed, "fts_removed": removed})
+        try:
+            if registration is not None:
+                registration.verify()
+                if namespace:
+                    registration.authorize(search_root, workspace, base, self.config.vault_root)
+            key = f"vault_index_refresh:{index_root}:{search_root}:{base}:{stamp}:{namespace}:{registration}"
+            notes, indexed, removed = await run_read(key, _refresh)
+        except ConnectedWorkspaceChanged as exc:
+            raise ControlPlaneError("workspace_changed", str(exc), retryable=True) from exc
+        except ConnectedIndexBusy as exc:
+            raise ControlPlaneError("connected_index_busy", str(exc), retryable=True) from exc
+        return _ok({
+            "notes": notes,
+            "fts_indexed": indexed,
+            "fts_removed": removed,
+            "markdown_index": "refreshed" if managed_index else "preserved_unmanaged",
+        })
 
     # ---- vault review --------------------------------------------------
 

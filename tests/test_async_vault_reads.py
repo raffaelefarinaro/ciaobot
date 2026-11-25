@@ -61,6 +61,7 @@ def _note(path: Path, title: str) -> None:
 
 def _plane(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> tuple[CiaoControlPlane, McpPrincipal]:
     monkeypatch.setenv("CIAO_MEMORY_DIR", str(tmp_path / ".ciao"))
+    (tmp_path / ".runtime").mkdir()
     vault = tmp_path / "memory-vault"
     _note(vault / "personal" / "People" / "Alba.md", "Alba")
     _note(vault / "work" / "People" / "Aymen.md", "Aymen")

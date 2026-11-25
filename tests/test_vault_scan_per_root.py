@@ -161,11 +161,12 @@ def test_the_memory_map_no_longer_reads_the_shared_vault_root(tmp_path: Path) ->
     from ciao.web import routes_api
 
     source = inspect.getsource(routes_api._vault_graph_payload)
-    assert "vault_scan_targets" in source
-    # Comments may still name it (one explains the bug); no CODE line may read it.
+    assert "index_scan_targets" in source
+    # The shared root is a layout hint for source authorization, never a scan target.
     code = [
         line for line in source.splitlines()
-        if "config.vault_root" in line and not line.strip().startswith("#")
+        if "config.vault_root" in line.replace("vault_base=config.vault_root", "")
+        and not line.strip().startswith("#")
     ]
     assert code == [], code
 
@@ -181,7 +182,9 @@ def test_the_startup_index_refresh_writes_one_index_per_root(tmp_path: Path) -> 
 
     config = _install(tmp_path, migrated=True)
 
-    assert _refresh_vault_index(tmp_path, config.vault_root, config.vault_scan_targets())
+    targets = config.vault_scan_targets()
+    assert _refresh_vault_index(tmp_path, config.vault_root, targets,
+                                ciao_owned_roots={root for root, _, _ in targets})
 
     for name in ("personal", "work"):
         index = tmp_path / name / "memory-vault" / "INDEX.md"
@@ -197,7 +200,9 @@ def test_the_startup_refresh_still_writes_one_shared_index_before_migrating(
 
     config = _install(tmp_path, migrated=False)
 
-    assert _refresh_vault_index(tmp_path, config.vault_root, config.vault_scan_targets())
+    targets = config.vault_scan_targets()
+    assert _refresh_vault_index(tmp_path, config.vault_root, targets,
+                                ciao_owned_roots={root for root, _, _ in targets})
 
     assert (tmp_path / "memory-vault" / "INDEX.md").is_file()
     assert not (tmp_path / "personal" / "memory-vault" / "INDEX.md").exists()

@@ -1361,6 +1361,7 @@ def move_note_between_roots(
     targets: Sequence[tuple[Path, str, Path]],
     workspaces: Sequence[str],
     apply: bool = False,
+    runtime_root: Path | None = None,
 ) -> dict[str, Any]:
     """Move ONE note to another workspace, taking its links with it.
 
@@ -1615,9 +1616,18 @@ def move_note_between_roots(
         # close the loop.
         from ciao.workspace_reroot import rebuild_indexes
 
-        out["indexes"] = rebuild_indexes(
-            install_root, sorted({source_workspace, target_workspace}), vault_name=leaf
-        )
+        if runtime_root is None:
+            out["indexes"] = {
+                "rebuilt": [],
+                "errors": [{"workspace": "", "error": "configured runtime staging directory required"}],
+            }
+        else:
+            out["indexes"] = rebuild_indexes(
+                install_root,
+                sorted({source_workspace, target_workspace}),
+                vault_name=leaf,
+                runtime_root=runtime_root,
+            )
     return out
 
 
@@ -1786,6 +1796,7 @@ def rehome_vault_people(
     workspaces: Sequence[str] | None = None,
     plan: dict[str, Any] | None = None,
     registry: EntityTypeRegistry | None = None,
+    runtime_root: Path | None = None,
 ) -> dict[str, Any]:
     """Re-file the tag-obvious person notes and repoint every reference to them.
 
@@ -2088,7 +2099,12 @@ def rehome_people(
             return {"skipped": "vault has uncommitted changes", "git": git}
 
     summary = rehome_vault_people(
-        vault_root, apply=apply, workspaces=workspaces, plan=plan, registry=registry
+        vault_root,
+        apply=apply,
+        workspaces=workspaces,
+        plan=plan,
+        registry=registry,
+        runtime_root=runtime_root,
     )
     summary["git_head_before"] = git["head"]
     summary["forced"] = bool(force)
