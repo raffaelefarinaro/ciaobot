@@ -178,14 +178,14 @@ def _qualify(
     parts = _safe_path(relative_path)
     observation = shared_brain.observe_under_fence(config, link, owner)
     state = observation.state
+    if state.get("problem"):
+        code = "brain_changed" if state.get("problem") == "origin_changed" else "brain_unavailable"
+        _refuse(code, "The selected shared brain is unavailable or has changed.")
     if len(observation.configured_urls) != 1:
         _refuse("brain_changed", "The shared brain destination is ambiguous.")
     destination_fingerprint = _origin_fingerprint(observation.configured_urls[0])
     if not destination_fingerprint or observation.origin_identity != link.identity:
         _refuse("brain_changed", "The shared brain destination changed.")
-    if state.get("problem"):
-        code = "brain_changed" if state.get("problem") == "origin_changed" else "brain_unavailable"
-        _refuse(code, "The selected shared brain is unavailable or has changed.")
     folder = Path(link.path)
     branch = str(state.get("branch") or "")
     if not branch:

@@ -1972,6 +1972,10 @@ async def test_update_brain_fences_before_the_origin_read(pair: SimpleNamespace,
         return sb._result("up_to_date")
 
     monkeypatch.setattr(sb, "_update_unlocked", assert_fenced)
+    # The pair fixture installs its local transport as a command-line
+    # insteadOf alias. Production has no such alias; pin the effective URLs
+    # this timing test needs without weakening the observation elsewhere.
+    monkeypatch.setattr(sb, "_git_urls", lambda _folder, *_args: (GITHUB_URL,))
     result = await sb.update_brain(link, config)
 
     assert result["outcome"] == "up_to_date"
@@ -2070,7 +2074,7 @@ def test_observation_refuses_unsafe_config_before_origin_git(pair: SimpleNamespa
     from ciao.config import WorkspaceConfig
     from ciao.workspaces import workspace_registry_claim
 
-    link = sb.set_sharing_policy(link_of(pair.clone), "automatic")
+    link = link_of(pair.clone)
     git(pair.clone, "config", "filter.x.smudge", "cat")
     config = FakeConfig(tmp_path)
     config.workspaces = {"work": WorkspaceConfig(

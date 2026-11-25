@@ -532,19 +532,6 @@ def write_pending_sharing_fence(
     return path, grants
 
 
-def _live_origin_identity(link: SharedBrainLink) -> str:
-    """Read the live origin identity after a fence exists, under caller claims."""
-    if link.kind != "git":
-        return ""
-    try:
-        code, listing = _git(Path(link.path), "config", "--list", "--show-scope")
-    except (OSError, ValueError):
-        return ""
-    if code != 0 or _first_unsafe_key(listing) is not None:
-        return ""
-    return _safe_identity(_origin_from_listing(listing))
-
-
 def fence_before_origin_read(
     config: Any, link: SharedBrainLink, owner: Any
 ) -> tuple[Path | None, list[dict[str, Any]]]:
@@ -588,13 +575,8 @@ def settle_fence_after_healthy_probe(
 
 
 def probe_under_fence(config: Any, link: SharedBrainLink, owner: Any) -> dict[str, Any]:
-    """Fence, observe origin, then settle only on a healthy result."""
-    fence_path, grants = fence_before_origin_read(config, link, owner)
-    live_identity = _live_origin_identity(link) if fence_path is not None else ""
-    state = _brain_state_owned(link, config)
-    if not state.get("problem"):
-        settle_fence_after_healthy_probe(fence_path, grants, live_identity)
-    return state
+    """Fence, validate all origin identities, then settle only on a healthy result."""
+    return observe_under_fence(config, link, owner).state
 
 
 @dataclass(frozen=True, slots=True)
@@ -619,6 +601,51 @@ def _git_urls(folder: Path, *args: str) -> tuple[str, ...]:
     return tuple(line.strip() for line in output.splitlines() if line.strip())
 
 
+def _current_link(config: Any, link: SharedBrainLink) -> SharedBrainLink | None:
+    workspaces: dict[str, Any] = getattr(config, "workspaces", {})
+    for workspace in workspaces.values():
+        links: list[SharedBrainLink] = list(
+            getattr(workspace, "shared_brains", None) or []
+        )
+        for item in links:
+            if item.name == link.name and item.path == link.path:
+                return item
+    return None
+
+
+def _persisted_grant_exists(owner: Any, link: SharedBrainLink) -> bool:
+    grants = _registry_grants(getattr(owner, "current", None)) or []
+    return any(
+        row["name"] == link.name
+        and row["lifetime_id"] == link.lifetime_id
+        and row["generation"] == link.sharing_generation
+        for row in grants
+    )
+
+
+def _demote_bad_observation(
+    config: Any, link: SharedBrainLink, owner: Any, state: dict[str, Any]
+) -> None:
+    failed = False
+    try:
+        invalidate_sharing_on_drift(config, link, owner)
+    except (OSError, RuntimeError, ValueError):
+        # A journal or registry write failed. The fence (or fail-closed marker)
+        # is what makes the pending grant revocable after a restart.
+        failed = True
+        config._sharing_recovery_pending = True
+    current = _current_link(config, link)
+    persisted = _persisted_grant_exists(owner, link)
+    state["origin_changed"] = True
+    state["problem"] = "origin_changed"
+    state["sharing_policy"] = DEFAULT_SHARING_POLICY
+    state["sharing_granted_at"] = ""
+    if current is not None:
+        state["sharing_generation"] = current.sharing_generation
+    state["sharing_grant_pending"] = persisted
+    state["sharing_invalidation_failed"] = failed
+
+
 def observe_under_fence(
     config: Any, link: SharedBrainLink, owner: Any
 ) -> SharingObservation:
@@ -640,6 +667,9 @@ def observe_under_fence(
         return SharingObservation(state, (), (), (), "")
     if _first_unsafe_key(listing) is not None:
         state["problem"] = "unsafe_config"
+        if _fenced_grants_for_path(config, link):
+            _demote_bad_observation(config, link, owner, state)
+            state["problem"] = "unsafe_config"
         return SharingObservation(state, (), (), (), "")
 
     fence_path, grants = fence_before_origin_read(config, link, owner)
@@ -665,15 +695,7 @@ def observe_under_fence(
         # Configured, effective fetch and effective push must each prove the
         # linked identity. Any unparseable or divergent destination durably
         # retires the affected consent before the operation may proceed.
-        try:
-            invalidate_sharing_on_drift(config, link, owner)
-        except OSError:
-            config._sharing_recovery_pending = True
-        state["origin_changed"] = True
-        state["problem"] = "origin_changed"
-        state["sharing_policy"] = DEFAULT_SHARING_POLICY
-        state["sharing_granted_at"] = ""
-        state["sharing_grant_pending"] = False
+        _demote_bad_observation(config, link, owner, state)
     elif not state.get("problem"):
         settle_fence_after_healthy_probe(fence_path, grants, live_identity)
     return SharingObservation(
@@ -1070,6 +1092,7 @@ def invalidate_sharing_on_drift(
             keys = {(row["lifetime_id"], row["generation"]) for row in matching}
             changed = _demote_fenced_grants(config, matching)
             journal_state = load_sharing_revocations(config)
+            journal_failed = False
             try:
                 merge_sharing_revocations(
                     config,
@@ -1079,6 +1102,7 @@ def invalidate_sharing_on_drift(
             except OSError:
                 # The registry write below still proves the demotion and the
                 # fence remains until that write succeeds.
+                journal_failed = True
                 logger.exception("Could not write the shared-brain revocation journal")
             config.workspaces.update(changed)
             try:
@@ -1109,7 +1133,12 @@ def invalidate_sharing_on_drift(
                     force_fail_closed=keep_fail_closed,
                 )
             except OSError:
+                journal_failed = True
                 logger.exception("Could not compact the shared-brain revocation journal")
+            else:
+                journal_failed = False
+            if journal_failed:
+                raise OSError("shared-brain revocation journal could not be written")
             return True
     finally:
         if own_owner and owner is not None:
@@ -1629,7 +1658,6 @@ async def update_brain(link: SharedBrainLink, config: Any) -> dict[str, Any]:
                 )
 
                 fence_path: Path | None = None
-                fenced_grants: list[dict[str, Any]] = []
                 owner = None
                 try:
                     owner = await _acquire_registry_claimed(config)
@@ -1647,7 +1675,7 @@ async def update_brain(link: SharedBrainLink, config: Any) -> dict[str, Any]:
                             return _result("skipped", "registry_changed")
                     if conflicts_with_link_kind(config, "", key, "git"):
                         return _result("skipped", "folder")
-                    fence_path, fenced_grants = await run_while_claimed(
+                    fence_path, _ = await run_while_claimed(
                         fence_before_origin_read, config, link, owner
                     )
                 except WorkspaceRegistryConflict:
@@ -1667,22 +1695,15 @@ async def update_brain(link: SharedBrainLink, config: Any) -> dict[str, Any]:
                         result["sharing_invalidation_failed"] = True
                         config._sharing_recovery_pending = True
                 else:
-                    # Settle the fence only after proving the live origin still
-                    # matches every fenced grant.
+                    # Settle the fence only after the same validated observation
+                    # proves every configured, fetch and push identity.
                     owner = None
                     try:
                         owner = await _acquire_registry_claimed(config)
-                        live_identity = (
-                            await run_while_claimed(_live_origin_identity, link)
-                            if fence_path is not None
-                            else ""
-                        )
-                        await run_while_claimed(
-                            settle_fence_after_healthy_probe,
-                            fence_path,
-                            fenced_grants,
-                            live_identity,
-                        )
+                        if fence_path is not None:
+                            await run_while_claimed(
+                                observe_under_fence, config, link, owner
+                            )
                     except (OSError, WorkspaceRegistryConflict):
                         pass
                     finally:

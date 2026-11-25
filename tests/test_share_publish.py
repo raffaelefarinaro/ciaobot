@@ -1668,3 +1668,205 @@ def test_multiple_configured_or_fetch_urls_refuse_draft(linked: tuple[Config, Pa
     )
     assert isinstance(refused, share_proposals.ShareRefusal)
     assert refused.code == "brain_changed"
+
+
+def _reload_persisted_config(config: Config):
+    from ciao.config import CiaoConfig
+
+    return CiaoConfig.from_env({
+        "CIAO_WORKSPACE": str(config.workspace_root),
+        "CIAO_RUNTIME_ROOT": str(config.state_path.parent),
+        "PWA_AUTH_TOKEN": "test-token",
+    })
+
+
+def _persist_automatic_grant(config) -> SharedBrainLink:
+    from ciao.workspaces import persist_workspaces
+
+    workspace = config.workspace("home")
+    assert workspace is not None
+    granted = shared_brain.set_sharing_policy(workspace.shared_brains[0], "automatic")
+    workspace.shared_brains = [granted]
+    persist_workspaces(config, dict(config.workspaces))
+    return granted
+
+
+def _alias_drift(kind: str, clone: Path, tmp_path: Path, monkeypatch):
+    if kind == "configured":
+        git(clone, "remote", "set-url", "origin", "https://github.com/x/elsewhere")
+
+        def repair() -> None:
+            git(clone, "remote", "set-url", "origin", HOSTED)
+
+        return repair
+    home = tmp_path / f"hostile-{kind}-home"
+    home.mkdir(exist_ok=True)
+    config_path = home / ".gitconfig"
+    if kind == "fetch":
+        config_path.write_text(
+            f'[url "file:///tmp/hostile-fetch"]\n\tinsteadOf = {HOSTED}\n'
+        )
+    else:
+        config_path.write_text(
+            f'[url "file:///tmp/hostile-push"]\n\tpushInsteadOf = {HOSTED}\n'
+        )
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.delenv("XDG_CONFIG_HOME", raising=False)
+
+    def repair() -> None:
+        config_path.write_text("")
+
+    return repair
+
+
+@pytest.mark.parametrize("kind", ["configured", "fetch", "push"])
+def test_persisted_automatic_grant_alias_drift_repairs_draft_and_publish(
+    linked: tuple[Config, Path, Path], tmp_path: Path, monkeypatch, kind: str
+) -> None:
+    config, clone, _origin = linked
+    live = _reload_persisted_config(config)
+    _persist_automatic_grant(live)
+
+    before = share_proposals.draft_share(
+        live, workspace="home", relative_path="n.md", operation="replace",
+        proposed=b"reviewed before drift\n", request_key=f"before-{kind}",
+    )
+    assert isinstance(before, share_proposals.ShareDraft)
+
+    repair = _alias_drift(kind, clone, tmp_path, monkeypatch)
+
+    # Publishing the pre-drift draft sees the alias under the fence, refuses,
+    # and durably retires the automatic grant.
+    refused_publish = asyncio.run(share_publish.publish_share(
+        live, workspace="home", proposal_id=before.proposal_id,
+        expected_revision=before.artifact["review_token"],
+    ))
+    assert refused_publish.outcome == "brain_changed"
+    after_publish = _reload_persisted_config(config)
+    stored = after_publish.workspace("home").shared_brains[0]
+    assert stored.sharing_policy == "review"
+    assert stored.sharing_consent is None
+    assert not shared_brain.sharing_consent_active(stored)
+
+    repair()
+    restarted = _reload_persisted_config(config)
+    assert shared_brain.recover_sharing_state(restarted)
+    assert restarted.workspace("home").shared_brains[0].sharing_policy == "review"
+    published = asyncio.run(share_publish.publish_share(
+        restarted, workspace="home", proposal_id=before.proposal_id,
+        expected_revision=before.artifact["review_token"],
+    ))
+    assert published.outcome == "published"
+
+    # Grant again, then drift before a fresh draft: the draft path must retire
+    # the same grant and a reload must still see review after repair.
+    regranted = _persist_automatic_grant(restarted)
+    assert shared_brain.sharing_consent_active(regranted)
+    repair = _alias_drift(kind, clone, tmp_path, monkeypatch)
+    refused_draft = share_proposals.draft_share(
+        restarted, workspace="home", relative_path="n.md", operation="replace",
+        proposed=b"draft during drift\n", request_key=f"during-{kind}",
+    )
+    assert isinstance(refused_draft, share_proposals.ShareRefusal)
+    assert refused_draft.code == "brain_changed"
+    after_draft = _reload_persisted_config(config)
+    stored = after_draft.workspace("home").shared_brains[0]
+    assert stored.sharing_policy == "review"
+    assert stored.sharing_consent is None
+
+    repair()
+    final = _reload_persisted_config(config)
+    assert shared_brain.recover_sharing_state(final)
+    accepted = share_proposals.draft_share(
+        final, workspace="home", relative_path="n.md", operation="replace",
+        proposed=b"reviewed after repair\n", request_key=f"after-{kind}",
+    )
+    assert isinstance(accepted, share_proposals.ShareDraft)
+    result = asyncio.run(share_publish.publish_share(
+        final, workspace="home", proposal_id=accepted.proposal_id,
+        expected_revision=accepted.artifact["review_token"],
+    ))
+    assert result.outcome == "published"
+
+
+def test_failed_invalidation_surfaces_pending_grant_and_restart_demotes(
+    linked: tuple[Config, Path, Path], monkeypatch
+) -> None:
+    from ciao.workspaces import acquire_workspace_registry, persist_workspaces
+
+    config, clone, _origin = linked
+    live = _reload_persisted_config(config)
+    granted = _persist_automatic_grant(live)
+    git(clone, "remote", "set-url", "origin", "https://github.com/x/elsewhere")
+
+    def fail_registry(*_args, **_kwargs):
+        raise OSError("registry disk full")
+
+    monkeypatch.setattr("ciao.workspaces.persist_workspaces", fail_registry)
+    with acquire_workspace_registry(live) as owner:
+        observation = shared_brain.observe_under_fence(live, granted, owner)
+    state = observation.state
+    assert state["problem"] == "origin_changed"
+    assert state["sharing_policy"] == "review"
+    assert state["sharing_grant_pending"] is True
+    assert state["sharing_invalidation_failed"] is True
+    assert live._sharing_recovery_pending is True
+    journal = live.state_path.parent / "sharing-revocations.json"
+    assert granted.lifetime_id in journal.read_text()
+
+    # The registry still carries the automatic row; a restart applies the
+    # journal and never revives consent after repair.
+    monkeypatch.setattr("ciao.workspaces.persist_workspaces", persist_workspaces)
+    git(clone, "remote", "set-url", "origin", HOSTED)
+    restarted = _reload_persisted_config(config)
+    assert shared_brain.recover_sharing_state(restarted)
+    stored = restarted.workspace("home").shared_brains[0]
+    assert stored.sharing_policy == "review"
+    assert stored.sharing_consent is None
+
+
+def test_hostile_local_config_demotes_grant_without_origin_reads(
+    linked: tuple[Config, Path, Path], monkeypatch
+) -> None:
+    config, clone, _origin = linked
+    live = _reload_persisted_config(config)
+    _persist_automatic_grant(live)
+    git(clone, "config", "filter.x.smudge", "cat")
+    calls: list[tuple[str, ...]] = []
+    original = shared_brain._git
+
+    def record(folder, *args):
+        calls.append(tuple(str(arg) for arg in args))
+        return original(folder, *args)
+
+    monkeypatch.setattr(shared_brain, "_git", record)
+    refused = share_proposals.draft_share(
+        live, workspace="home", relative_path="n.md", operation="replace",
+        proposed=b"hostile config\n", request_key="hostile-config",
+    )
+    assert isinstance(refused, share_proposals.ShareRefusal)
+    assert refused.code == "brain_unavailable"
+    assert calls == [("config", "--list", "--show-scope")]
+    reloaded = _reload_persisted_config(config)
+    stored = reloaded.workspace("home").shared_brains[0]
+    assert stored.sharing_policy == "review"
+    assert stored.sharing_consent is None
+
+
+def test_status_probe_uses_the_same_alias_observation(
+    linked: tuple[Config, Path, Path], tmp_path: Path, monkeypatch
+) -> None:
+    config, clone, _origin = linked
+    live = _reload_persisted_config(config)
+    granted = _persist_automatic_grant(live)
+    _alias_drift("push", clone, tmp_path, monkeypatch)
+
+    state = shared_brain.brain_state(granted, live, "home")
+    assert state["problem"] == "origin_changed"
+    assert state["sharing_policy"] == "review"
+    assert state["sharing_grant_pending"] is False
+    assert state["sharing_invalidation_failed"] is False
+    reloaded = _reload_persisted_config(config)
+    stored = reloaded.workspace("home").shared_brains[0]
+    assert stored.sharing_policy == "review"
+    assert stored.sharing_consent is None

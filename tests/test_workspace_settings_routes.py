@@ -2761,6 +2761,9 @@ def test_journal_write_failure_still_persists_registry_review(tmp_path, monkeypa
     monkeypatch.setattr(shared_brain, "save_sharing_revocations", fail_journal)
     listed = client.get("/api/workspaces/personal/shared-brains").json()["shared_brains"][0]
     assert listed["sharing_policy"] == "review"
+    assert listed["sharing_invalidation_failed"] is True
+    # The registry write landed, so there is no stale grant left to revoke.
+    assert listed["sharing_grant_pending"] is False
     restarted = _client(tmp_path)[1]
     assert shared_brain.recover_sharing_state(restarted)
     link = restarted.workspace("personal").shared_brains[0]
