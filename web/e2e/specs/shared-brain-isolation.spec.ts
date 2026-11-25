@@ -2,13 +2,13 @@ import { expect, test, type Locator, type Page } from '@playwright/test'
 import { activeWorkspaceButton, boot, isolate, quiesce } from '../support/app'
 
 /**
- * Sources and consent across two workspaces (#3614, #3646). One stateful stub
- * plays the engine for alpha and beta: every read is scoped to the workspace in
- * the URL, a preview token is bound to its workspace and is single-use, and the
- * confirmed grant carries exactly the previewed scope. The foreign workspace
- * has distinctive names so any leak into the DOM, the requests the page makes
- * or a grant listing is caught by text. The real-store version of the same
- * guarantees is tests/test_share_evidence_isolation.py.
+ * Client-side isolation of Sources and consent across two workspaces (#3614,
+ * #3646). One stateful stub plays the engine for alpha and beta, so these tests
+ * constrain what the panel shows, requests and sends: the foreign workspace's
+ * names never reach the DOM or the requests, a DOM edit or forged token changes
+ * nothing the client sends, and a workspace switch drops or ignores pending
+ * work. The stub is not evidence of engine isolation; that is covered against
+ * real stores by tests/test_share_evidence_isolation.py.
  */
 const OVERVIEW = '/settings/workspace'
 const SENTINELS = { alpha: ['Atlas Launch', 'grn_aaaa', 'ALPHA-ONLY'], beta: ['Borealis Secret', 'grn_bbbb', 'BETA-ONLY'] } as const
@@ -164,7 +164,7 @@ test.describe('sources and consent across two workspaces', () => {
     await sources.getByRole('button', { name: 'Preview exact scope' }).click()
     const preview = sources.locator('.sources-preview')
     await expect(preview).toContainText('ALPHA-ONLY decision')
-    // Editing the rendered values in the DOM changes nothing the engine receives.
+    // Editing the rendered values in the DOM changes nothing the client sends.
     await preview.evaluate((el) => {
       const walker = document.createTreeWalker(el, NodeFilter.SHOW_TEXT)
       for (let node = walker.nextNode(); node; node = walker.nextNode()) {
@@ -176,8 +176,6 @@ test.describe('sources and consent across two workspaces', () => {
     await expect.poll(() => engine.grants.alpha.length).toBe(1)
     expect(engine.confirms).toHaveLength(1)
     expect(Object.keys(engine.confirms[0].body).sort()).toEqual(['confirm', 'preview_token'])
-    expect(engine.grants.alpha[0].field_mask).toEqual(['decision'])
-    expect(JSON.stringify(engine.grants.alpha)).not.toContain('FORGED')
   })
 
   test('a forged token is refused in the panel and no grant is listed', async ({ page }) => {
@@ -223,8 +221,12 @@ test.describe('sources and consent across two workspaces', () => {
     expect(engine.confirms[0].ws).toBe('alpha')
 
     await switchToBeta(page)
+    // Wait for the held response to reach the page, then let the UI settle, before any negative check.
+    const landed = page.waitForResponse((res) => res.url().endsWith('/alpha/share-evidence/confirm'))
     engine.holdConfirm.release()
-    await expect.poll(() => engine.grants.alpha.length).toBe(1)
+    await landed
+    await quiesce(page)
+    expect(engine.grants.alpha).toHaveLength(1)
 
     // The alpha grant exists in alpha only; beta's panel stays empty and shows no alpha text.
     await expect(sources.getByText('Review', { exact: true })).toBeVisible()

@@ -104,6 +104,7 @@ def test_foreign_workspace_never_leaks_through_listing_read_preview_or_mutation(
 
     direct = get(world, f"/api/workspaces/home/share-evidence/grants/{gid}")
     assert direct.status_code == 404
+    # The request names the foreign id, so this checks the error does not echo or enrich it.
     assert_no_foreign(direct.text, (gid, "WORK-SECRET-REASON"))
 
     # Preview for a foreign project, source or entry resolves nothing in this workspace.
@@ -125,7 +126,7 @@ def test_foreign_workspace_never_leaks_through_listing_read_preview_or_mutation(
     for action in ("revoke", "withdraw"):
         refused = post(world, f"/api/workspaces/home/share-evidence/grants/{gid}/{action}", {})
         assert refused.status_code in {400, 404}, action
-        assert_no_foreign(refused.text, (gid,))
+        assert_no_foreign(refused.text, (gid,))  # the error must not echo the foreign id
     saved = post(world, "/api/workspaces/home/share-evidence/decisions", {
         "project_id": "proj-borealis", "decision": "Injected", "effective_date": "2026-11-24",
         "disclosure_token": "0" * 64,
@@ -192,7 +193,8 @@ def test_workspace_switch_between_preview_and_confirm_writes_nothing(world: Test
     assert post(world, "/api/workspaces/home/share-evidence/confirm", {"preview_token": token, "confirm": True}).status_code == 200
 
 
-def test_snapshot_survives_a_child_process_editing_and_deleting_the_source(world: TestClient) -> None:
+# Durability, not isolation: kept here because it uses the same two-workspace routes.
+def test_snapshot_bytes_survive_a_child_process_editing_and_deleting_the_source(world: TestClient) -> None:
     config = world.app.state.config
     prev = post(world, "/api/workspaces/home/share-evidence/preview", preview_body(
         "proj-atlas", se.DOCUMENT_SOURCE, "snapshot", entry_index=1))
