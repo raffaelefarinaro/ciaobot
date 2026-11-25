@@ -34,6 +34,7 @@ import logging
 import os
 import re
 import shutil
+import tempfile
 import uuid
 from dataclasses import asdict, dataclass, field
 from datetime import UTC, datetime
@@ -981,6 +982,27 @@ def _write_json_atomic(path: Path, payload: dict[str, Any]) -> None:
     _fsync_directory(path.parent)
 
 
+def _atomic_copy_stash(source: Path, target: Path, expected: dict[str, Any] | None, *, temp_path: Path | None = None) -> None:
+    """Publish a complete, synced copy only while the target still matches."""
+    if temp_path is None:
+        fd, name = tempfile.mkstemp(prefix=".ciao-undo-", suffix=".tmp", dir=target.parent)
+        temp = Path(name)
+    else:
+        temp = temp_path
+        fd = os.open(temp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    os.close(fd)
+    try:
+        shutil.copy2(source, temp)
+        _fsync_file(temp)
+        current = _entry_fingerprint(target) if target.exists() or target.is_symlink() else None
+        if current != expected:
+            raise OSError(f"stash target was edited independently: {target}")
+        os.replace(temp, target)
+        _fsync_directory(target.parent)
+    finally:
+        temp.unlink(missing_ok=True)
+
+
 def _restore_owned_schedule_prompts(runtime_root: Path, rewrites: Any) -> list[str]:
     """Reverse only the prompt fields this undo wrote, against their post-images.
 
@@ -1122,6 +1144,10 @@ def _recover_undo_manifest(runtime_root: Path, owner: Any) -> str | None:
         try:
             if item.get("state") != "armed":
                 raise OSError("stash progress is missing or invalid")
+            temp = Path(str(item.get("temp") or ""))
+            if temp.parent != target.parent or not temp.name.startswith(".ciao-undo-"):
+                raise OSError("stash temporary path is invalid")
+            temp.unlink(missing_ok=True)
             current = _entry_fingerprint(target) if target.exists() or target.is_symlink() else None
             before = item.get("before")
             if current == before:
@@ -1132,7 +1158,7 @@ def _recover_undo_manifest(runtime_root: Path, owner: Any) -> str | None:
                 if not saved.is_file() or _entry_fingerprint(saved) != before:
                     raise OSError("stash compensation image is missing or changed")
                 target.parent.mkdir(parents=True, exist_ok=True)
-                shutil.copy2(saved, target)
+                _atomic_copy_stash(saved, target, current, temp_path=temp)
             elif current is not None:
                 target.unlink()
             if item.get("tracked"):
@@ -1354,7 +1380,7 @@ def _undo_owned(install_root: Path, runtime_root: Path, *, owner: Any) -> dict[s
                 if stash_backup is None:
                     target.unlink(missing_ok=True)
                 else:
-                    shutil.copy2(stash_backup, target)
+                    _atomic_copy_stash(stash_backup, target, stash["postimage"], temp_path=Path(stash["temp"]))
                 relative = target.relative_to(install_root).as_posix()
                 if any(
                     entry.get("source") == relative and entry.get("tracked")
@@ -1387,10 +1413,10 @@ def _undo_owned(install_root: Path, runtime_root: Path, *, owner: Any) -> dict[s
                 _fsync_directory(saved.parent)
                 _fsync_directory(compensation_dir)
                 _fsync_directory(compensation_dir.parent)
-            item.update(state="armed", saved=str(saved), before=before, postimage=_entry_fingerprint(backup))
+            item.update(state="armed", saved=str(saved), before=before, postimage=_entry_fingerprint(backup), temp=str(target.parent / (".ciao-undo-" + uuid.uuid4().hex + ".tmp")))
             _write_json_atomic(_undo_manifest_path(runtime_root), manifest)
             target.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copy2(backup, target)
+            _atomic_copy_stash(backup, target, before, temp_path=Path(item["temp"]))
             stash_restores.append((target, saved if before is not None else None))
             if item.get("tracked"):
                 run_git(install_root, "add", "--", item["source"])

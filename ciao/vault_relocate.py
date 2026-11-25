@@ -711,6 +711,7 @@ def _apply_owned(
                 config._workspace_registry_bytes = owner.current
                 prior = next(row for row in registry_before if row.get("name") == workspace)
                 config.workspace(workspace).vault_root = prior.get("vault_root", workspace)
+                config._normalize_workspace_vault_roots()
             except OSError as registry_exc:
                 registry_error = str(registry_exc)
         refusals = [f"could not persist the relocation receipt: {exc}"]
@@ -980,6 +981,7 @@ def _undo_locked(config: Any, workspace: str, runtime_root: Path, *, owner: Any)
         workspace_config = config.workspace(workspace)
         if workspace_config is not None and prior_vault_root is not None:
             workspace_config.vault_root = prior_vault_root
+            config._normalize_workspace_vault_roots()
 
     # Deleting the receipt is what makes the reverse *complete* rather than
     # merely applied: `read_receipt` then answers "no", so an "After this update"

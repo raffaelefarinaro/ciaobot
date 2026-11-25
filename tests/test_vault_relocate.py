@@ -208,7 +208,7 @@ def test_legacy_registry_missing_vault_root_round_trips(tmp_path: Path) -> None:
     assert result["status"] == "relocated", result
     assert undo(config, "scandit", runtime)["status"] == "undone"
     assert json.loads(registry.read_text(encoding="utf-8")) == rows
-    assert config.workspace("scandit").vault_root == "scandit"
+    assert config.workspace("scandit").vault_root == "memory-vault/scandit"
     assert (install / "memory-vault/People/Peter.md").is_file()
 
 
@@ -224,7 +224,7 @@ def test_legacy_registry_receipt_failure_restores_absent_field(tmp_path: Path, m
     result = apply(config, "scandit", runtime)
     assert result["status"] == "refused"
     assert json.loads(registry.read_text(encoding="utf-8")) == rows
-    assert config.workspace("scandit").vault_root == "scandit"
+    assert config.workspace("scandit").vault_root == "memory-vault/scandit"
     assert (install / "memory-vault/People/Peter.md").is_file()
 
 
@@ -513,6 +513,32 @@ def _pinned_install(tmp_path: Path) -> tuple[Path, CiaoConfig]:
     _commit_all(install)
     config = _config(tmp_path / "install", {"personal": str(legacy)})
     return install, config
+
+
+@pytest.mark.parametrize("receipt_failure", [False, True])
+def test_loaded_legacy_sibling_restores_effective_root(tmp_path: Path, monkeypatch, receipt_failure: bool) -> None:
+    install = _git_install(tmp_path)
+    legacy = install / "scandit"
+    (legacy / "People").mkdir(parents=True)
+    (legacy / "People" / "Peter.md").write_text("# Peter\n", encoding="utf-8")
+    (legacy / "MEMORY.md").write_text("# Memory\n", encoding="utf-8")
+    _write_registry(install, [{"name": "scandit"}])
+    _commit_all(install)
+    runtime = install / ".runtime"
+    registry = runtime / "workspaces.json"
+    config = CiaoConfig.from_env({"PWA_AUTH_TOKEN": "x", "CIAO_WORKSPACE": str(install), "CIAO_RUNTIME_ROOT": str(runtime)})
+    assert config.workspace_vault_root("scandit") == legacy
+    if receipt_failure:
+        monkeypatch.setattr(vault_relocate, "_write_receipt", lambda *a, **k: (_ for _ in ()).throw(OSError("receipt failed")))
+    result = apply(config, "scandit", runtime)
+    if receipt_failure:
+        assert result["status"] == "refused", result
+    else:
+        assert result["status"] == "relocated", result
+        assert undo(config, "scandit", runtime)["status"] == "undone"
+    assert json.loads(registry.read_text(encoding="utf-8")) == [{"name": "scandit"}]
+    assert config.workspace_vault_root("scandit") == legacy
+    assert (legacy / "People/Peter.md").read_text(encoding="utf-8") == "# Peter\n"
 
 
 def test_plan_treats_an_unrelated_path_as_the_whole_directory(tmp_path: Path) -> None:

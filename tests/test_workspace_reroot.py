@@ -990,6 +990,121 @@ def test_recovery_after_manifest_kill_preserves_post_migration_queue(tmp_path: P
     assert undo(install, runtime)["status"] == "undone"
 
 
+@pytest.mark.parametrize("failure", ["kill", "io_error"])
+def test_stash_copy_interruption_keeps_original_queue(tmp_path: Path, monkeypatch, failure: str) -> None:
+    import os
+    import signal
+    from ciao import workspace_reroot
+
+    install, vault, runtime = _with_guide(tmp_path)
+    applied = apply(install, vault, ["personal", "work"], runtime, primary="personal")
+    assert applied["status"] == "migrated"
+    entry = next(e for e in applied["stashed_files"] if e["source"].endswith("Memory-Proposals.md"))
+    queue = install / entry["source"]
+    before = queue.read_bytes()
+    artifact = install / applied["created_files"][0]
+    artifact_before = artifact.read_bytes()
+    registry = (runtime / "workspaces.json").read_bytes()
+    receipt = receipt_path(runtime).read_bytes()
+    original = workspace_reroot.shutil.copy2
+    def fail_during_copy(src, dst, *args, **kwargs):
+        if Path(src) == runtime / entry["backup"] and Path(dst).parent == queue.parent:
+            Path(dst).write_bytes(b"partial")
+            if failure == "kill":
+                os.kill(os.getpid(), signal.SIGKILL)
+            raise OSError("simulated copy failure")
+        return original(src, dst, *args, **kwargs)
+    if failure == "kill":
+        pid = os.fork()
+        if pid == 0:
+            workspace_reroot.shutil.copy2 = fail_during_copy
+            undo(install, runtime)
+            os._exit(0)
+        _, status = os.waitpid(pid, 0)
+        assert os.WIFSIGNALED(status)
+    else:
+        with monkeypatch.context() as patch:
+            patch.setattr(workspace_reroot.shutil, "copy2", fail_during_copy)
+            with pytest.raises(OSError, match="simulated copy failure"):
+                undo(install, runtime)
+    assert queue.read_bytes() == before
+    assert artifact.read_bytes() == artifact_before
+    assert (runtime / "workspaces.json").read_bytes() == registry
+    assert receipt_path(runtime).read_bytes() == receipt
+    assert (runtime / "migration" / workspace_reroot.UNDO_MANIFEST_NAME).is_file()
+    assert undo(install, runtime)["status"] == "undone"
+    assert not list(install.rglob(".ciao-undo-*.tmp"))
+
+
+def test_stash_copy_refuses_edit_before_publication(tmp_path: Path, monkeypatch) -> None:
+    from ciao import workspace_reroot
+
+    install, vault, runtime = _with_guide(tmp_path)
+    applied = apply(install, vault, ["personal", "work"], runtime, primary="personal")
+    entry = next(e for e in applied["stashed_files"] if e["source"].endswith("Memory-Proposals.md"))
+    queue = install / entry["source"]
+    registry = (runtime / "workspaces.json").read_bytes()
+    receipt = receipt_path(runtime).read_bytes()
+    original = workspace_reroot.shutil.copy2
+    def edit_during_copy(src, dst, *args, **kwargs):
+        result = original(src, dst, *args, **kwargs)
+        if Path(src) == runtime / entry["backup"] and Path(dst).parent == queue.parent:
+            queue.write_bytes(b"independent edit\n")
+        return result
+    with monkeypatch.context() as patch:
+        patch.setattr(workspace_reroot.shutil, "copy2", edit_during_copy)
+        with pytest.raises(OSError, match="edited independently"):
+            undo(install, runtime)
+    assert queue.read_bytes() == b"independent edit\n"
+    assert (runtime / "workspaces.json").read_bytes() == registry
+    assert receipt_path(runtime).read_bytes() == receipt
+    assert undo(install, runtime)["status"] == "failed"
+
+
+def test_recovery_copy_failure_preserves_postimage_and_retry(tmp_path: Path, monkeypatch) -> None:
+    import os
+    import signal
+    from ciao import workspace_reroot
+
+    install, vault, runtime = _with_guide(tmp_path)
+    applied = apply(install, vault, ["personal", "work"], runtime, primary="personal")
+    entry = next(e for e in applied["stashed_files"] if e["source"].endswith("Memory-Proposals.md"))
+    queue = install / entry["source"]
+    registry = (runtime / "workspaces.json").read_bytes()
+    receipt = receipt_path(runtime).read_bytes()
+    artifact = install / applied["created_files"][0]
+    artifact_before = artifact.read_bytes()
+    pid = os.fork()
+    if pid == 0:
+        original = workspace_reroot._atomic_copy_stash
+        def stop_after_publish(src, dst, expected, **kwargs):
+            original(src, dst, expected, **kwargs)
+            if dst == queue:
+                os.kill(os.getpid(), signal.SIGKILL)
+        workspace_reroot._atomic_copy_stash = stop_after_publish
+        undo(install, runtime)
+        os._exit(0)
+    _, status = os.waitpid(pid, 0)
+    assert os.WIFSIGNALED(status)
+    postimage = queue.read_bytes()
+    original_copy = workspace_reroot.shutil.copy2
+    def fail_saved_copy(src, dst, *args, **kwargs):
+        if Path(dst).parent == queue.parent and Path(dst).name.startswith(".ciao-undo-"):
+            Path(dst).write_bytes(b"partial")
+            raise OSError("recovery copy failed")
+        return original_copy(src, dst, *args, **kwargs)
+    with monkeypatch.context() as patch:
+        patch.setattr(workspace_reroot.shutil, "copy2", fail_saved_copy)
+        result = undo(install, runtime)
+    assert result["status"] == "failed"
+    assert queue.read_bytes() == postimage
+    assert artifact.read_bytes() == artifact_before
+    assert (runtime / "workspaces.json").read_bytes() == registry
+    assert receipt_path(runtime).read_bytes() == receipt
+    assert (runtime / "migration" / workspace_reroot.UNDO_MANIFEST_NAME).is_file()
+    assert undo(install, runtime)["status"] == "undone"
+
+
 def test_recovery_refuses_independent_edit_of_restored_stash(tmp_path: Path) -> None:
     import os
     import signal
@@ -1007,13 +1122,13 @@ def test_recovery_refuses_independent_edit_of_restored_stash(tmp_path: Path) -> 
     artifact_before = artifact.read_bytes()
     pid = os.fork()
     if pid == 0:
-        original = workspace_reroot.shutil.copy2
+        original = workspace_reroot._atomic_copy_stash
         def kill_after_copy(src, dst, *args, **kwargs):
             result = original(src, dst, *args, **kwargs)
             if Path(dst) == queue:
                 os.kill(os.getpid(), signal.SIGKILL)
             return result
-        workspace_reroot.shutil.copy2 = kill_after_copy
+        workspace_reroot._atomic_copy_stash = kill_after_copy
         undo(install, runtime)
         os._exit(0)
     _, status = os.waitpid(pid, 0)
