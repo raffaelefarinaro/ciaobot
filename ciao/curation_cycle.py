@@ -67,7 +67,7 @@ _LEASE_OPTIONAL_FIELDS = frozenset({"plan", "chat_id", "proof_hash"})
 _LAST_RUN_FIELDS = frozenset({"status", "finished_at", "planned", "completed", "deferred", "reasons"})
 # Written by curation-end once the run's derived outcome is known. Optional, so
 # a state file from before they existed still decodes (no schema bump).
-_LAST_RUN_OPTIONAL_FIELDS = frozenset({"run_id", "chat_id", "failed", "counts_complete"})
+_LAST_RUN_OPTIONAL_FIELDS = frozenset({"run_id", "chat_id", "failed", "counts_complete", "dispatch_id", "report"})
 _PENDING_FIELDS = frozenset({"cycle_id", "prior", "target_stamp", "target_sha256", "proven_required"})
 
 
@@ -293,7 +293,7 @@ def decode_state(text: str) -> CycleState:
         legacy_historical=_date_map(document["legacy_historical"], "legacy_historical"),
         daily=_date_map(document["daily"], "daily"),
         lease=dict(_mapping(document["lease"], "lease")),
-        last_run=dict(_mapping(document["last_run"], "last_run")),
+        last_run=_without_invalid_report(_mapping(document["last_run"], "last_run")),
         pending=None if pending_raw is None else _decode_pending(pending_raw),
     )
 
@@ -490,9 +490,19 @@ def _check_last_run(last_run: dict[str, Any]) -> None:
         raise CycleError("last_run optional fields are invalid")
 
 
+def _without_invalid_report(last_run: Mapping[str, Any]) -> dict[str, Any]:
+    from ciao.care_run_report import without_invalid_report
+
+    return without_invalid_report(last_run)
+
+
 def last_run_optional_valid(last_run: Mapping[str, Any]) -> bool:
     """Whether each optional ``last_run`` field that is present has its type. Shared with the v1 loader."""
+    from ciao.care_run_report import MAX_ID_CHARS, report_valid
+
     checks = {
+        "dispatch_id": lambda value: isinstance(value, str) and len(value) <= MAX_ID_CHARS,
+        "report": report_valid,
         "run_id": lambda value: isinstance(value, str),
         "chat_id": lambda value: isinstance(value, str),
         "failed": lambda value: type(value) is int,

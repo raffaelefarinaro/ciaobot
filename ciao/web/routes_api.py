@@ -6354,6 +6354,9 @@ async def schedule_care_run(request: Request) -> JSONResponse:
     entry = request.app.state.schedule_manager._store.get(schedule_id)
     if entry is None:
         return JSONResponse({"error": "not found"}, status_code=404)
+    dispatch_id = request.query_params.get("dispatch_id")
+    if dispatch_id is not None:
+        return await _care_run_for_dispatch(request, schedule_id, dispatch_id)
     chat_id = str(entry.last_run_chat_id or "")
     if not is_care_schedule_id(schedule_id) or not chat_id:
         return JSONResponse({"care_run": None})
@@ -6373,6 +6376,71 @@ async def schedule_care_run(request: Request) -> JSONResponse:
         state.last_run, chat_id, dispatched_at=parse_dispatch_stamp(entry)
     )
     return JSONResponse({"care_run": outcome})
+
+
+async def _care_run_for_dispatch(request: Request, schedule_id: str, dispatch_id: str) -> JSONResponse:
+    """The care run report of one exact schedule dispatch (#3647).
+
+    The job row is matched on the dispatch id alone and the stored run only when
+    it names that id (``ciao.care_run_report``); anything else answers a state
+    with no counts. The vault is the schedule's own workspace.
+    """
+    from ciao import care_run_report
+    from ciao.care_eval_run import JobRunsUnreadable, read_runtime_job_runs
+    from ciao.care_run_outcome import bounded_outcome, is_care_schedule_id
+    from ciao.config import DEFAULT_WORKSPACE_NAME
+    from ciao.curation_run import CurationStateError, load_state
+
+    if not dispatch_id or len(dispatch_id) > care_run_report.MAX_ID_CHARS:
+        return JSONResponse({"error": "invalid dispatch_id"}, status_code=400)
+    if not is_care_schedule_id(schedule_id):
+        return JSONResponse({"care_run": None})
+    workspace = schedule_id.partition("@")[2] or DEFAULT_WORKSPACE_NAME
+    config = request.app.state.config
+    # The name comes from the URL: it is a vault path only once the registry knows it.
+    if config.workspace(workspace) is None:
+        return JSONResponse({"error": "workspace not found"}, status_code=404)
+
+    def answer(state: str, **extra: Any) -> JSONResponse:
+        return JSONResponse({"care_run": None, "state": state, "report_available": False, **extra})
+
+    try:
+        rows = await asyncio.to_thread(read_runtime_job_runs, Path(config.state_path).parent)
+    except JobRunsUnreadable:
+        return answer("unavailable")
+    picked = care_run_report.select_run(rows, schedule_id, workspace, dispatch_id)
+    if picked.state != "ok":
+        return answer(picked.state)
+    try:
+        state = load_state(config.workspace_vault_root(workspace))
+    except CurationStateError:
+        return JSONResponse(
+            {"error": "care run state is unreadable; nothing is shown"}, status_code=503
+        )
+    last_run = state.last_run
+    if care_run_report.join_last_run(last_run, dispatch_id) != "ok":
+        return answer("superseded", job_status=picked.job_status)
+    # The stored run's own chat must be the chat the job row names.
+    stored_chat = last_run.get("chat_id")
+    if isinstance(stored_chat, str) and stored_chat:
+        picked = care_run_report.select_run(rows, schedule_id, workspace, dispatch_id, chat_id=stored_chat)
+        if picked.state != "ok":
+            return answer(picked.state)
+    outcome = bounded_outcome(last_run)
+    body: dict[str, Any] = {
+        "care_run": outcome,
+        "state": "ok",
+        "job_status": picked.job_status,
+        "report_available": "report" in last_run,
+    }
+    if outcome is not None:
+        body["run_id"] = outcome["run_id"]
+        body["counts"] = {k: outcome[k] for k in ("planned", "completed", "deferred", "failed")}
+    report = last_run.get("report")
+    if report is not None:
+        body["outcomes"] = report["items"]
+        body["weekly"] = report["weekly"]
+    return JSONResponse(body)
 
 
 async def schedule_detail(request: Request) -> JSONResponse:

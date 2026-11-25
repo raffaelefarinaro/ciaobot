@@ -1806,7 +1806,7 @@ class CiaoControlPlane:
                 self.config, workspace=workspace, chat_id=principal.chat_id, token_id=principal.token_id,
                 dispatch_id=dispatch_id, holder=holder, status=status, planned=counts.planned,
                 completed=counts.completed, deferred=counts.deferred, reasons=[*reasons, *counts.reasons],
-                live_keys=live_keys, failed=counts.failed, counts_complete=counts.complete,
+                live_keys=live_keys, failed=counts.failed, counts_complete=counts.complete, report=counts.report,
                 dispatch_active=lambda: dispatcher.active_care_dispatch(principal.chat_id, workspace) == dispatch_id,
             )
             try:

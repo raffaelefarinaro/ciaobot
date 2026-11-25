@@ -2189,6 +2189,9 @@ def _load(path: Path) -> CurationState:
     last_run = raw.get("last_run")
     if not isinstance(done, dict) or not isinstance(lease, dict) or not isinstance(last_run, dict):
         raise _state_error(path, "state fields have invalid types")
+    from ciao.care_run_report import without_invalid_report
+
+    last_run = without_invalid_report(last_run)
     for key, value in done.items():
         if not isinstance(key, str) or not isinstance(value, str):
             raise _state_error(path, "done_keys entries have invalid types")
@@ -2897,6 +2900,8 @@ def end_run(
     clock: Callable[[], datetime] | None = None,
     failed: int | None = None,
     counts_complete: bool | None = None,
+    report: dict[str, Any] | None = None,
+    dispatch_id: str = "",
     before_settlement: Callable[[CurationState, dict[str, Any]], None] | None = None,
     after_settlement: Callable[[CurationState, dict[str, Any]], None] | None = None,
 ) -> dict[str, Any]:
@@ -2906,6 +2911,11 @@ def end_run(
     are given, ``last_run`` also records the run id and the chat binding; when
     either is absent (an error exit that derived nothing) none of the outcome
     fields are written, and no outcome is shown for the run.
+
+    ``report`` is the bounded per-item fold (``care_run_report.bounded_report``)
+    and ``dispatch_id`` the schedule dispatch a managed run settles under; both
+    are written only with the outcome block, and the report gains the weekly
+    marker state decided here. A run with neither reads as legacy.
 
     ``live_keys`` are the keys still present in the freshly rebuilt worklist.
     Done keys outside that set are dropped: the work they named is gone from
@@ -2981,6 +2991,10 @@ def end_run(
             summary["counts_complete"] = counts_complete
             if state.lease.get("chat_id"):
                 summary["chat_id"] = str(state.lease["chat_id"])
+            if dispatch_id:
+                summary["dispatch_id"] = dispatch_id
+            if report is not None:
+                summary["report"] = {**report, "weekly": {"marker": "advanced" if advanced else "not_advanced"}}
         if before_settlement is not None:
             before_settlement(state, summary)
         state.last_run = summary

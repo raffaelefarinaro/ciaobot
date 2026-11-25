@@ -6772,6 +6772,7 @@ class _RunCounts:
     complete: bool
     reasons: tuple[str, ...]
     failed: int
+    report: dict[str, Any] | None = None
 
 
 def _curation_cycle_migrate_command(args: argparse.Namespace) -> int:
@@ -6873,7 +6874,7 @@ def _derive_run_counts(vault: Path, *, holder: str, workspace: str) -> _RunCount
     never count here. ``complete`` is false while any unplanned operation did
     not finish. ``deferred`` is the begin-time count; the end does not recount it.
     """
-    from ciao import care_report, memory_receipts
+    from ciao import care_report, care_run_report, memory_receipts
     from ciao.curation_run import load_state
 
     state = load_state(vault)
@@ -6973,6 +6974,7 @@ def _derive_run_counts(vault: Path, *, holder: str, workspace: str) -> _RunCount
         complete=fold.complete and extra.complete,
         reasons=tuple(reasons),
         failed=failed,
+        report=care_run_report.bounded_report([*fold.outcomes, *extra.outcomes]),
     )
 
 
@@ -7027,6 +7029,7 @@ def _curation_end_command(args: argparse.Namespace) -> int:
                 completed=counts.completed, deferred=counts.deferred,
                 reasons=[*(args.reason or []), *counts.reasons], live_keys=live_keys,
                 advance_marker=args.status == "ok", failed=counts.failed, counts_complete=counts.complete,
+                report=counts.report,
             )
     except CurationBusy as exc:
         print(f"curation lease lost: {exc}", file=sys.stderr)

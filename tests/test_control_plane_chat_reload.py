@@ -116,6 +116,13 @@ async def test_managed_care_acquisition_requires_the_active_scheduler_dispatch(t
     assert "proof" not in str(result[0])
     assert curation_run.active_lease(vault) is None
     assert curation_run.load_state(vault).last_run["run_id"] == holder
+    managed = curation_run.load_state(vault).last_run
+    assert managed["dispatch_id"] == "synthetic-dispatch"
+    assert managed["report"]["items"] == [{
+        "item_key": "synthetic-key", "pass_id": "proposals", "status": "done_unverified",
+        "detail": "the pass reports done, with no effect receipt", "receipt_ids": [],
+    }]
+    assert managed["report"]["weekly"] == {"marker": "not_advanced"}
     sidecars = list((plane.config.state_path.parent / "secrets" / "share-evidence").rglob("care-leases/*.json"))
     assert not sidecars
     receipts = list((plane.config.state_path.parent / "secrets" / "share-evidence").rglob("care-settlements/*.json"))

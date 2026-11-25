@@ -70,12 +70,17 @@ def outcome_for_chat(
     """The bounded outcome of ``last_run`` when it belongs to ``chat_id`` and is not older than the dispatch."""
     if not chat_id or not last_run or last_run.get("chat_id") != chat_id:
         return None
-    if "failed" not in last_run or "counts_complete" not in last_run or "run_id" not in last_run:
-        return None
     if dispatched_at is None:
         return None
     finished = _instant(last_run.get("finished_at"))
     if finished is None or finished < dispatched_at:
+        return None
+    return bounded_outcome(last_run)
+
+
+def bounded_outcome(last_run: Mapping[str, Any]) -> dict[str, Any] | None:
+    """The capped counts block of a run that stored derived counts, else None. No binding is checked here."""
+    if "failed" not in last_run or "counts_complete" not in last_run or "run_id" not in last_run:
         return None
     reasons = [str(reason)[:MAX_REASON_CHARS] for reason in last_run.get("reasons", [])]
     return {
