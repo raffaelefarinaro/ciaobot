@@ -5986,14 +5986,14 @@ def _add_curation_arguments(parser: argparse.ArgumentParser) -> None:
 def _curation_context(
     args: argparse.Namespace,
 ) -> tuple[Path, Path, Path, Any, Path, str | None]:
-    from ciao.curation_run import RunBudget
+    from ciao.curation_run import RunBudget, load_budget
 
     workspace, vault, registry_root, name = _resolve_workspace_and_vaults(args)
     if args.guide:
         guide = Path(args.guide).expanduser().resolve()
     else:
         guide = guide_path(_curation_agent_root(workspace, name))
-    defaults = RunBudget()
+    defaults = load_budget(vault)
     budget = RunBudget(
         max_items=args.max_items if args.max_items is not None else defaults.max_items,
         max_seconds=args.max_seconds if args.max_seconds is not None else defaults.max_seconds,

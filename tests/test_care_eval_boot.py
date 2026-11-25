@@ -4,10 +4,16 @@ from datetime import date
 from pathlib import Path
 from typing import Any
 
+import os
+import signal
+import subprocess
+import sys
+
 import pytest
 
 from ciao import care_eval_boot as boot
 from ciao import care_eval_seed as seed
+from ciao import curation_run as cr
 from ciao import task_eval as te
 from ciao.schedules import ScheduleStore, system_schedule_id
 from ciao.task_eval import TASKS_ROOT, WORKSPACE, EvalTask, IsolatedEngine
@@ -132,3 +138,141 @@ def test_boot_care_refuses_a_scratch_that_already_holds_a_seed(tmp_path: Path, m
     with pytest.raises(FileExistsError):
         boot.boot_care("nightly", provider="claude", model="haiku", dispatch_date=DISPATCH_DATE,
                        scratch=tmp_path / "scratch")
+
+
+# --- tight budget (#3244) ---------------------------------------------------------
+
+
+def _worklist(*keys: str) -> cr.Worklist:
+    item = cr.WorklistItem(pass_id="hygiene", label="Hygiene", reason="test", keys=tuple(keys))
+    return cr.Worklist(items=(item,), weekly_due=False, last_full_pass="", generated_at="2026-11-24T00:00:00Z")
+
+
+def _fake_boot(captured: dict[str, Any]) -> Any:
+    def fake_boot(cls: type[IsolatedEngine], task: EvalTask, **kwargs: Any) -> str:
+        # Read the overlay while it exists: the real boot copies it into the workspace.
+        captured["budget"] = (task.overlay / seed.VAULT_DIRNAME / cr.BUDGET_RELATIVE) if task.overlay else None
+        captured["budget_bytes"] = (
+            captured["budget"].read_bytes() if captured["budget"] and captured["budget"].is_file() else None
+        )
+        return "engine-stub"
+
+    return classmethod(fake_boot)
+
+
+def _boot(tmp_path: Path, scenario: str, monkeypatch: pytest.MonkeyPatch, **kwargs: Any) -> dict[str, Any]:
+    captured: dict[str, Any] = {}
+    monkeypatch.setattr(IsolatedEngine, "boot", _fake_boot(captured))
+    boot.boot_care(
+        scenario, provider="claude", model="haiku", dispatch_date=DISPATCH_DATE,
+        scratch=tmp_path / "scratch", **kwargs,
+    )
+    return captured
+
+
+def test_continuation_boot_writes_a_one_item_budget_without_caller_setup(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    captured = _boot(tmp_path, "budget_continuation", monkeypatch)
+    vault = tmp_path / "scratch" / boot.OVERLAY_DIRNAME / seed.VAULT_DIRNAME
+    assert cr.load_budget(vault).max_items == boot.TIGHT_MAX_ITEMS == 1
+    assert captured["budget_bytes"] is not None
+
+
+@pytest.mark.parametrize("scenario", ["nightly", "weekly_due"])
+def test_other_scenarios_keep_the_default_budget(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, scenario: str
+) -> None:
+    captured = _boot(tmp_path, scenario, monkeypatch)
+    assert captured["budget_bytes"] is None
+    vault = tmp_path / "scratch" / boot.OVERLAY_DIRNAME / seed.VAULT_DIRNAME
+    assert cr.load_budget(vault) == cr.RunBudget()
+
+
+def test_an_explicit_max_items_overrides_the_scenario_default(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _boot(tmp_path, "nightly", monkeypatch, max_items=3)
+    vault = tmp_path / "scratch" / boot.OVERLAY_DIRNAME / seed.VAULT_DIRNAME
+    assert cr.load_budget(vault).max_items == 3
+
+
+def test_the_budget_file_is_not_part_of_the_seed_manifest(tmp_path: Path) -> None:
+    manifest = boot.seed_overlay("budget_continuation", tmp_path / "a", dispatch_date=DISPATCH_DATE)
+    assert cr.BUDGET_RELATIVE not in {f.path for f in manifest.files}
+
+
+@pytest.mark.parametrize("body", ["{", "[]", '{"max_items": 0}', '{"max_items": true}', '{"max_items": "2"}'])
+def test_an_unreadable_budget_file_is_refused_not_defaulted(tmp_path: Path, body: str) -> None:
+    path = tmp_path / cr.BUDGET_RELATIVE
+    path.parent.mkdir(parents=True)
+    path.write_text(body, encoding="utf-8")
+    with pytest.raises(cr.CurationStateError):
+        cr.load_budget(tmp_path)
+
+
+def test_the_curation_cli_budget_reads_the_vault_file_and_an_explicit_flag_wins(tmp_path: Path) -> None:
+    import argparse
+
+    from ciao import cli
+
+    vault = tmp_path / "vault"
+    boot.write_tight_budget(vault, 1)
+    args = argparse.Namespace(vault_root=vault, workspace=None, guide=None, max_items=None, max_seconds=None)
+    assert cli._curation_context(args)[3].max_items == 1
+    args.max_items = 5
+    assert cli._curation_context(args)[3].max_items == 5
+
+
+def test_attempt_one_settles_incomplete_and_attempt_two_resumes(tmp_path: Path) -> None:
+    root = tmp_path / "overlay"
+    manifest = boot.seed_overlay("budget_continuation", root, dispatch_date=DISPATCH_DATE)
+    vault = root / seed.VAULT_DIRNAME
+    boot.write_tight_budget(vault, boot.TIGHT_MAX_ITEMS)
+    keys = ("k-first", "k-second")
+
+    def attempt(done: frozenset[str]) -> tuple[cr.RunPlan, str]:
+        worklist = _worklist(*[k for k in keys if k not in done])
+        plan = cr.plan_run(worklist, cr.load_budget(vault))
+        lease = cr.begin_run(vault, holder=f"h-{len(done)}")
+        planned = [k for item in plan.planned for k in item.keys]
+        cr.record_done(vault, planned, holder=lease.holder)
+        left = sum(item.count for item in plan.deferred)
+        cr.end_run(
+            vault, holder=lease.holder, planned=len(planned), completed=len(planned), deferred=left,
+            live_keys=frozenset(keys),
+            failed=0, counts_complete=left == 0,
+        )
+        return plan, lease.holder
+
+    plan1, _ = attempt(frozenset())
+    first = seed.observe_cursor(vault)
+    last1 = seed.observe_last_run(vault)
+    assert [k for i in plan1.planned for k in i.keys] == ["k-first"]
+    assert last1 is not None and last1.deferred == 1
+    assert first.done_keys == {"k-first"}
+
+    plan2, _ = attempt(frozenset(first.done_keys))
+    last2 = seed.observe_last_run(vault)
+    assert [k for i in plan2.planned for k in i.keys] == ["k-second"]
+    assert last2 is not None and last2.deferred == 0
+    assert seed.observe_cursor(vault).done_keys == {"k-first", "k-second"}
+    assert manifest.scenario == "budget_continuation"
+
+
+def test_cleanup_stops_only_the_owned_engine(tmp_path: Path) -> None:
+    def sleeper() -> subprocess.Popen[bytes]:
+        return subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"], start_new_session=True)
+
+    owned, bystander = sleeper(), sleeper()
+    engine = IsolatedEngine(tmp_path / "owned", keep_workdir=False)
+    engine._proc = owned
+    try:
+        engine.close()
+        owned.wait(timeout=10)
+        assert owned.returncode is not None
+        assert bystander.poll() is None
+        os.kill(bystander.pid, 0)
+    finally:
+        os.killpg(bystander.pid, signal.SIGKILL)
+        bystander.wait(timeout=10)

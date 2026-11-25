@@ -12,16 +12,27 @@ Boots an engine process when :func:`boot_care` is called; the tests replace
 
 from __future__ import annotations
 
+import json
 from datetime import date
 from pathlib import Path
 
 from ciao import care_eval_seed as seed
-from ciao.curation_run import DEFAULT_MAX_SECONDS
+from ciao.curation_run import BUDGET_RELATIVE, DEFAULT_MAX_SECONDS
 from ciao.task_eval import EvalTask, IsolatedEngine
 from ciao.task_eval_contract import Scenario
 
 OVERLAY_DIRNAME = "overlay"
 EMPTY_VAULT_DIRNAME = "empty-vault"
+# One item per run: the continuation scenario's first attempt takes one key and
+# defers the rest, so attempt 2 has something to resume.
+TIGHT_MAX_ITEMS = 1
+
+
+def write_tight_budget(vault: Path, max_items: int) -> None:
+    """Write the vault's curation budget file, which ``ciao curation-begin`` reads by default."""
+    path = vault / BUDGET_RELATIVE
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps({"max_items": max_items}) + "\n", encoding="utf-8", newline="\n")
 
 
 def seed_overlay(scenario: Scenario, root: Path, *, dispatch_date: date) -> seed.SeedManifest:
@@ -60,16 +71,23 @@ def boot_care(
     dispatch_date: date,
     scratch: Path,
     mode: str | None = None,
+    max_items: int | None = None,
 ) -> IsolatedEngine:
     """Boot one isolated engine on the scenario's seed, with no fixture vault.
 
     ``scratch`` is a caller-owned directory that must not already hold a seed.
     The seed and the empty vault are written there before the boot; the engine
-    copies them into its own throwaway workspace.
+    copies them into its own throwaway workspace. ``budget_continuation`` boots with
+    a ``TIGHT_MAX_ITEMS`` budget so its first attempt settles with work left;
+    ``max_items`` sets one for any scenario.
     """
     scratch.mkdir(parents=True, exist_ok=True)
     overlay = scratch / OVERLAY_DIRNAME
     seed_overlay(scenario, overlay, dispatch_date=dispatch_date)
+    if max_items is None and scenario == "budget_continuation":
+        max_items = TIGHT_MAX_ITEMS
+    if max_items is not None:
+        write_tight_budget(overlay / seed.VAULT_DIRNAME, max_items)
     empty = scratch / EMPTY_VAULT_DIRNAME
     empty.mkdir(exist_ok=True)
     return IsolatedEngine.boot(

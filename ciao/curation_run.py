@@ -66,6 +66,10 @@ logger = logging.getLogger(__name__)
 
 
 STATE_RELATIVE = "Workspace/Curation-State.json"
+# An optional per-vault budget, read when a command is given no --max-items or
+# --max-seconds. The care measurement harness writes it so a run can be made to
+# stop early without a flag the unattended schedule never passes.
+BUDGET_RELATIVE = "Workspace/Curation-Budget.json"
 CURATION_LOG_RELATIVE = "Workspace/Curation-Log.md"
 WEEKLY_REVIEW_LOG_RELATIVE = "Workspace/Weekly-Review-Log.md"
 PROPOSALS_RELATIVE = "Workspace/Memory-Proposals.md"
@@ -2155,6 +2159,35 @@ def _is_reliably_absent(path: Path) -> bool:
         if parent == current:
             return True
         current = parent
+
+
+def load_budget(vault_root: Path) -> RunBudget:
+    """The vault's budget: the built-in one when the file is absent, else the file's.
+
+    A file that is present but unreadable or invalid raises
+    :class:`CurationStateError` rather than quietly restoring the default.
+    """
+    path = Path(vault_root) / BUDGET_RELATIVE
+    try:
+        raw = path.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        return RunBudget()
+    except (OSError, UnicodeDecodeError) as exc:
+        raise CurationStateError(f"curation budget {path} is unreadable: {exc}") from exc
+    try:
+        data = json.loads(raw)
+    except ValueError as exc:
+        raise CurationStateError(f"curation budget {path} is not JSON: {exc}") from exc
+    if not isinstance(data, dict):
+        raise CurationStateError(f"curation budget {path} must be a JSON object")
+    defaults = RunBudget()
+    items = data.get("max_items", defaults.max_items)
+    seconds = data.get("max_seconds", defaults.max_seconds)
+    if isinstance(items, bool) or not isinstance(items, int) or items < 1:
+        raise CurationStateError(f"curation budget {path}: max_items must be a positive integer")
+    if isinstance(seconds, bool) or not isinstance(seconds, (int, float)) or seconds <= 0:
+        raise CurationStateError(f"curation budget {path}: max_seconds must be a positive number")
+    return RunBudget(max_items=items, max_seconds=float(seconds))
 
 
 def state_path(vault_root: Path) -> Path:
