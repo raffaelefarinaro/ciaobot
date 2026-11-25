@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 import dataclasses
+import asyncio
 import json
 import subprocess
 import sys
 import threading
+import time
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
@@ -1086,7 +1088,8 @@ def test_completed_memory_checkpoint_survives_registry_restart_and_revocation(tm
         se.recover_memory_pass_source_relation(config, workspace="home", pass_chat_id=chat.chat_id)
 
 
-def test_care_witness_binds_exact_preview_revision_and_revocation(tmp_path: Path) -> None:
+@pytest.mark.parametrize("newline", ["\r\n", "\r"])
+def test_care_witness_binds_exact_preview_revision_and_revocation(tmp_path: Path, newline: str) -> None:
     config, manager, project, _source = _memory_manager(tmp_path)
     project.vault_folder = "alpha"
     directory = Path(config.workspace_vault_root("home")) / "projects" / "active" / "alpha"
@@ -1095,19 +1098,30 @@ def test_care_witness_binds_exact_preview_revision_and_revocation(tmp_path: Path
     se._reset_project_manager_for_tests()
     se.bind_project_manager(manager)
     document = directory / se.DOCUMENT_NAME
-    text = "## Decision\nDecision: Launch\nEffective date: 2026-11-20\n"
-    document.write_text(text, encoding="utf-8")
+    text = newline.join(["## Decision", "Decision: Launch", "Effective date: 2026-11-20", ""])
+    document.write_bytes(text.encode("utf-8"))
+    relative = document.relative_to(config.workspace_vault_root("home")).as_posix()
+    note = curation_run._ScannedNote(rendered=relative, relative=relative, title="Decisions", stale=True,
+        exempt=False, age_days=120, threshold_days=90, last_verified=None)
+    items, _, _ = curation_run._stale_note_items(
+        vault_root=config.workspace_vault_root("home"), scanned=[note], today=datetime(2026, 11, 25).date(), scan_unavailable=False,
+    )
+    assert len(items) == 1 and items[0].target is not None
+    revision = items[0].target.revision
     preview = se.preview(config, workspace="home", brain_name="notes", project_id=project.project_id,
         project_name="Alpha", project_dir=directory, source_id=se.DOCUMENT_SOURCE, grant_type="snapshot",
         field_mask=["decision"], producers=["nightly_curation"], entry_index=0, session="operator-one")
     subprocess.run([sys.executable, "-c", "from pathlib import Path; import sys; Path(sys.argv[1]).write_text(sys.argv[2], encoding='utf-8')", str(document), text + "changed"], check=True)
     grant = se.confirm(config, workspace="home", token=preview["preview_token"], session="operator-one")["grant"]
-    relative = document.relative_to(config.workspace_vault_root("home")).as_posix()
-    revision = se._digest(text.encode())
     rows = se.care_snapshot_witnesses(config, workspace="home", project_id=project.project_id, relative_path=relative, revision=revision)
     assert len(rows) == 1 and rows[0]["grant_id"] == grant["grant_id"]
     assert rows[0]["entry_index"] == 0
-    assert se.care_snapshot_witnesses(config, workspace="home", project_id=project.project_id, relative_path=relative, revision=se._digest(document.read_bytes())) == []
+    changed_items, _, _ = curation_run._stale_note_items(
+        vault_root=config.workspace_vault_root("home"), scanned=[note], today=datetime(2026, 11, 25).date(), scan_unavailable=False,
+    )
+    assert len(changed_items) == 1 and changed_items[0].target is not None
+    assert changed_items[0].target.revision != revision
+    assert se.care_snapshot_witnesses(config, workspace="home", project_id=project.project_id, relative_path=relative, revision=changed_items[0].target.revision) == []
     assert se.care_snapshot_witnesses(config, workspace="work", project_id=project.project_id, relative_path=relative, revision=revision) == []
     old_created = project.created_at
     project.created_at = "2099-01-01T00:00:00Z"
@@ -1131,14 +1145,234 @@ def test_care_witness_binds_exact_preview_revision_and_revocation(tmp_path: Path
     assert se.care_snapshot_witnesses(config, workspace="home", project_id=project.project_id, relative_path=relative, revision=revision) == []
 
 
-def test_document_revision_matches_planner_newline_normalization(tmp_path: Path) -> None:
+@pytest.mark.parametrize("cycle", [False, True])
+@pytest.mark.parametrize("crash_before_state", [False, True])
+def test_care_checkpoint_stages_only_completed_exact_witness_and_replays_once(
+    tmp_path: Path, cycle: bool, crash_before_state: bool
+) -> None:
+    from ciao import curation_cycle, curation_share
+
+    config, manager, project, _source = _memory_manager(tmp_path)
+    project.vault_folder = "alpha"
+    vault = Path(config.workspace_vault_root("home"))
+    directory = vault / "projects" / "active" / "alpha"
+    directory.mkdir(parents=True)
+    (vault / "Workspace").mkdir(parents=True, exist_ok=True)
+    if cycle:
+        state = curation_cycle.CycleState(
+            cycle_id="c2-" + "0" * 24,
+            prior_marker=curation_cycle.MarkerIdentity(kind="absent", sha256=None),
+            required={}, optional={}, carried=(), legacy_historical={}, daily={},
+            lease={}, last_run={}, pending=None,
+        )
+        curation_run.state_path(vault).write_text(curation_cycle.encode_state(state), encoding="utf-8")
+    config.workspace("home").shared_brains = [SharedBrainLink(
+        name="notes", path=str(tmp_path / "brain"), identity="team", lifetime_id="brain_lifetime_fixed01")]
+    se._reset_project_manager_for_tests()
+    se.bind_project_manager(manager)
+    document = directory / se.DOCUMENT_NAME
+    text = "## Decision\nDecision: Launch\nEffective date: 2026-11-20\n"
+    document.write_text(text, encoding="utf-8")
+    preview = se.preview(config, workspace="home", brain_name="notes", project_id=project.project_id,
+        project_name="Alpha", project_dir=directory, source_id=se.DOCUMENT_SOURCE, grant_type="snapshot",
+        field_mask=["decision"], producers=["nightly_curation"], entry_index=0, session="operator-one")
+    grant = se.confirm(config, workspace="home", token=preview["preview_token"], session="operator-one")["grant"]
+    relative = document.relative_to(vault).as_posix()
+    key = curation_run.item_key(curation_run.PASS_STALE_NOTE, relative)
+    target = curation_run.StaleNoteTarget(relative_path=relative, revision=se._digest(text.encode()))
+    item = curation_run.WorklistItem(pass_id=curation_run.PASS_STALE_NOTE, label="note", reason="due", keys=(key,), target=target)
+    lease = curation_share.begin(config, workspace="home", chat_id="care", token_id="token", dispatch_id="dispatch", ttl_s=600)
+    curation_run.record_plan(vault, holder=lease.holder, plan=curation_run.lease_plan(
+        curation_run.RunPlan(planned=(item,), deferred=(), budget=curation_run.RunBudget())))
+    args = dict(workspace="home", chat_id="care", token_id="token", dispatch_id="dispatch", holder=lease.holder, key=key)
+    assert curation_share.checkpoint(config, manager, **args) == 0
+    subprocess.run([
+        sys.executable, "-c",
+        "import sys; from pathlib import Path; from ciao.curation_run import record_done; "
+        "record_done(Path(sys.argv[1]), [sys.argv[3]], holder=sys.argv[2])",
+        str(vault), lease.holder, key,
+    ], check=True)
+    assert curation_share.checkpoint(config, manager, **{**args, "dispatch_id": "foreign"}) == 0
+    assert curation_share.checkpoint(config, manager, **args) == 1
+    assert curation_share.checkpoint(config, manager, **args) == 1
+    manager._save()
+    restarted = ProjectChatManager(
+        config, state_store=StateStore(config.state_path, config.workspace_root, config.media_root),
+        transcript_store=TranscriptStore(config.state_path.parent, config.workspace_root / "transcripts"),
+        path=config.state_path.parent / "web_projects.json",
+    )
+    se._reset_project_manager_for_tests()
+    se.bind_project_manager(restarted)
+    from ciao.control_plane import AgentPrincipal, CiaoControlPlane, ControlPlaneError
+
+    plane = CiaoControlPlane(config, project_chat_manager=restarted, schedule_manager=SimpleNamespace())
+    principal = AgentPrincipal(token_id="token", chat_id="care", project_id=project.project_id,
+                               workspace="home", provider="claude")
+    with pytest.raises(ControlPlaneError, match="live managed"):
+        plane.managed_care_checkpoint(principal, lease.holder, key)
+    records = list((config.state_path.parent / "secrets" / "share-evidence").rglob("care-outbox/*/*.json"))
+    assert len(records) == 1
+    assert "Launch" not in records[0].read_text()
+    assert not (tmp_path / "brain").exists()
+    capabilities = list((config.state_path.parent / "secrets" / "share-evidence").rglob("care-leases/*.json"))
+    original = capabilities[0].read_text()
+    tampered = json.loads(original)
+    tampered["payload"]["chat_id"] = "foreign"
+    capabilities[0].write_text(json.dumps(tampered))
+    assert curation_share.checkpoint(config, manager, **args) == 0
+    capabilities[0].write_text(original)
+    assert curation_share.settled_witnesses(config, workspace="home", holder=lease.holder) == []
+    script = "\n".join([
+        "import os, sys",
+        "from pathlib import Path",
+        "from ciao.config import CiaoConfig, WorkspaceConfig",
+        "from ciao import curation_share",
+        "root, vault, lifetime, holder, key, crash_before = sys.argv[1:]",
+        "root = Path(root)",
+        "config = CiaoConfig(pwa_auth_token='t', workspace_root=root, state_path=root / '.runtime/state.json', media_root=root / '.runtime/media', workspaces={'home': WorkspaceConfig(name='home', vault_root=vault, lifetime_id=lifetime, _lifetime_persisted=True)})",
+        "write = curation_share._write_record",
+        "def interrupted(path, record):",
+        "    if path.parent.name == 'care-settlements': os._exit(42)",
+        "    write(path, record)",
+        "curation_share._write_record = interrupted",
+        "if crash_before == 'yes':",
+        "    from ciao import curation_run",
+        "    store = curation_run._store",
+        "    def before_state(path, state):",
+        "        if not state.lease: os._exit(43)",
+        "        store(path, state)",
+        "    curation_run._store = before_state",
+        "curation_share.end(config, workspace='home', chat_id='care', token_id='token', dispatch_id='dispatch', holder=holder, status='ok', planned=1, completed=1, deferred=0, reasons=[], live_keys=frozenset({key}), failed=0, counts_complete=True, dispatch_active=lambda: True)",
+    ])
+    crash = subprocess.run([sys.executable, "-c", script, str(config.workspace_root), str(vault),
+                            config.workspace("home").lifetime_id, lease.holder, key,
+                            "yes" if crash_before_state else "no"], check=False)
+    assert crash.returncode == (43 if crash_before_state else 42)
+    if crash_before_state:
+        replacement = curation_run.begin_run(
+            vault, holder="replacement", chat_id="care", now=datetime.now(UTC) + timedelta(days=1),
+            before_acquire=lambda state: curation_share.recover(config, "home", state),
+        )
+    else:
+        replacement = curation_share.begin(config, workspace="home", chat_id="care", token_id="token",
+                                           dispatch_id="replacement", ttl_s=600)
+    receipts = list((config.state_path.parent / "secrets" / "share-evidence").rglob("care-settlements/*.json"))
+    assert len(receipts) == (0 if crash_before_state else 1)
+    assert len(curation_share.settled_witnesses(config, workspace="home", holder=lease.holder)) == (0 if crash_before_state else 1)
+    if not crash_before_state:
+        with se.evidence_claim(config, workspace="home") as claim:
+            settled = curation_share.settled_witnesses(config, workspace="home", holder=lease.holder, claim=claim)
+            signature = settled[0]["witness"]["witness_signature"]
+            relation = se.recover_care_source_relation(config, workspace="home", holder=lease.holder, witness_signature=signature, claim=claim)
+            auths = se.mint_evidence_authorizations(config, workspace="home", brain_name="notes", relation=relation, claim=claim)
+            assert len(auths) == 1
+            with se.evidence_authorization_guard(config, workspace="home", authorization=auths[0], claim=claim) as row:
+                assert row["canonical_bytes"] == '{"decision":"Launch"}'
+                assert row["producer"] == "nightly_curation"
+            original_link = config.workspace("home").shared_brains[0]
+            config.workspace("home").shared_brains = [dataclasses.replace(original_link, lifetime_id="brain_lifetime_new0001")]
+            with pytest.raises(se.EvidenceError):
+                with se.evidence_authorization_guard(config, workspace="home", authorization=auths[0], claim=claim):
+                    pass
+            config.workspace("home").shared_brains = [original_link]
+            with pytest.raises(se.EvidenceError):
+                se.recover_care_source_relation(config, workspace="home", holder=lease.holder, witness_signature="0" * 64, claim=claim)
+        obtained = threading.Event()
+        release = threading.Event()
+        finished = threading.Event()
+        errors: list[BaseException] = []
+        def reader() -> None:
+            try:
+                async def ordered() -> None:
+                    from ciao import shared_brain
+                    from ciao.workspaces import acquire_workspace_registry
+                    path = str(tmp_path / "brain")
+                    async with shared_brain._checkout_lock(path), shared_brain._checkout_claim(path, config):
+                        owner = acquire_workspace_registry(config)
+                        try:
+                            with se.evidence_claim(config, workspace="home") as claim:
+                                assert len(curation_share.settled_witnesses(config, workspace="home", holder=lease.holder, claim=claim)) == 1
+                                foreign_thread_errors: list[str] = []
+                                def check_foreign_thread() -> None:
+                                    try:
+                                        curation_share.settled_witnesses(config, workspace="home", holder=lease.holder, claim=claim)
+                                    except se.EvidenceError as exc:
+                                        foreign_thread_errors.append(exc.code)
+                                foreign_thread = threading.Thread(target=check_foreign_thread)
+                                foreign_thread.start()
+                                foreign_thread.join(2)
+                                assert foreign_thread_errors == ["invalid_evidence_claim"]
+                                with pytest.raises(se.EvidenceError):
+                                    curation_share.settled_witnesses(config, workspace="work", holder=lease.holder, claim=claim)
+                                object.__setattr__(claim, "workspace", "work")
+                                with pytest.raises(se.EvidenceError):
+                                    curation_share.settled_witnesses(config, workspace="work", holder=lease.holder, claim=claim)
+                                object.__setattr__(claim, "workspace", "home")
+                                with pytest.raises(se.EvidenceError, match="existing evidence claim"):
+                                    curation_share.settled_witnesses(config, workspace="home", holder=lease.holder)
+                                obtained.set()
+                                assert release.wait(5)
+                            with pytest.raises(se.EvidenceError):
+                                curation_share.settled_witnesses(config, workspace="home", holder=lease.holder, claim=claim)
+                        finally:
+                            owner.close()
+                asyncio.run(ordered())
+            except BaseException as exc:
+                errors.append(exc)
+                obtained.set()
+        def revoke() -> None:
+            se.revoke(config, workspace="home", grant_id=grant["grant_id"])
+            finished.set()
+        reader_thread = threading.Thread(target=reader, daemon=True)
+        reader_thread.start()
+        assert obtained.wait(3), "nested settlement lookup deadlocked"
+        assert not errors
+        revoker = threading.Thread(target=revoke, daemon=True)
+        revoker.start()
+        assert not finished.wait(0.1)
+        ready = tmp_path / "revoker-ready"
+        script = "from pathlib import Path; import sys; from ciao.config import CiaoConfig, WorkspaceConfig; from ciao import share_evidence as se; root=Path(sys.argv[1]); cfg=CiaoConfig(pwa_auth_token='t',workspace_root=root,state_path=root / '.runtime/state.json',media_root=root / '.runtime/media',workspaces={'home': WorkspaceConfig(name='home',vault_root=sys.argv[2],lifetime_id=sys.argv[3],_lifetime_persisted=True)}); Path(sys.argv[5]).touch(); se.revoke(cfg,workspace='home',grant_id=sys.argv[4])"
+        child = subprocess.Popen([sys.executable, "-c", script, str(config.workspace_root), str(vault), config.workspace("home").lifetime_id, grant["grant_id"], str(ready)])
+        deadline = time.monotonic() + 5
+        while not ready.exists() and time.monotonic() < deadline:
+            time.sleep(0.01)
+        assert ready.exists()
+        with pytest.raises(subprocess.TimeoutExpired):
+            child.wait(timeout=0.2)
+        release.set()
+        reader_thread.join(3)
+        revoker.join(3)
+        assert not reader_thread.is_alive() and not revoker.is_alive()
+        assert not errors and finished.is_set()
+        assert child.wait(timeout=10) == 0
+        with pytest.raises(se.EvidenceError):
+            with se.evidence_authorization_guard(config, workspace="home", authorization=auths[0]):
+                pass
+    se.revoke(config, workspace="home", grant_id=grant["grant_id"])
+    assert curation_share.settled_witnesses(config, workspace="home", holder=lease.holder) == []
+    assert curation_share.checkpoint(config, manager, **args) == 0
+    curation_run.end_run(vault, holder=replacement.holder)
+
+
+@pytest.mark.parametrize("newline", ["\r\n", "\r"])
+def test_document_revision_matches_planner_bytes(tmp_path: Path, newline: str) -> None:
     from ciao.memory_receipts import content_revision
 
     document = tmp_path / "Decisions.md"
-    document.write_bytes(b"## Decision\r\nDecision: Launch\r\nEffective date: 2026-11-20\r\n")
+    document.write_bytes(newline.join(["## Decision", "Decision: Launch", "Effective date: 2026-11-20", ""]).encode())
     entries, revision = se._read_document(document)
     assert entries[0]["decision"] == "Launch"
-    assert revision == content_revision(document.read_text(encoding="utf-8"))
+    assert revision == content_revision(document.read_bytes().decode("utf-8"))
+
+
+def test_care_private_storage_rejects_a_symlink(tmp_path: Path) -> None:
+    from ciao import curation_share
+
+    outside = tmp_path / "outside"
+    outside.mkdir(mode=0o700)
+    (tmp_path / "care-outbox").symlink_to(outside, target_is_directory=True)
+    with pytest.raises(se.EvidenceError, match="unsafe"):
+        curation_share._private_dir(tmp_path, "care-outbox", create=True)
 
 
 def test_real_memory_pass_archive_proves_positive_stream_eligibility(

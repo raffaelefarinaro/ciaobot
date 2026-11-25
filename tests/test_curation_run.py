@@ -5206,6 +5206,21 @@ def test_record_plan_is_holder_checked_and_lives_on_the_lease_until_the_end(tmp_
     assert set(state.last_run) == {"status", "finished_at", "planned", "completed", "deferred", "reasons"}
 
 
+def test_settlement_hooks_fence_the_state_transition(tmp_path: Path) -> None:
+    vault = _vault(tmp_path)
+    lease = cr.begin_run(vault, holder="nightly")
+    seen: list[tuple[str, bool]] = []
+
+    def prepared(state, summary):
+        seen.append(("prepared", bool(state.lease)))
+
+    def committed(state, summary):
+        seen.append(("committed", not bool(cr.load_state(vault).lease)))
+
+    cr.end_run(vault, holder=lease.holder, before_settlement=prepared, after_settlement=committed)
+    assert seen == [("prepared", True), ("committed", True)]
+
+
 def test_lease_plan_stores_the_planned_pairs_and_caps_the_blocked_ones() -> None:
     planned = (cr.WorklistItem(pass_id="proposals", label="p", reason="r", keys=("a", "b")),)
     blocked = tuple(
@@ -5222,6 +5237,104 @@ def test_lease_plan_stores_the_planned_pairs_and_caps_the_blocked_ones() -> None
     assert len(plan["blocked"]) == cr.LEASE_PLAN_BLOCKED_CAP
     assert plan["blocked_overflow"] == 5
     assert plan["deferred_count"] == cr.LEASE_PLAN_BLOCKED_CAP + 5
+
+
+def test_lease_plan_retains_the_revision_of_each_planned_stale_note(tmp_path: Path) -> None:
+    vault = _vault(tmp_path)
+    target = cr.StaleNoteTarget(relative_path="Projects/alpha/Decisions.md", revision="a" * 64)
+    key = cr.item_key(cr.PASS_STALE_NOTE, target.relative_path)
+    item = cr.WorklistItem(pass_id=cr.PASS_STALE_NOTE, label="note", reason="due", keys=(key,), target=target)
+    plan = cr.lease_plan(cr.RunPlan(planned=(item,), deferred=(), budget=cr.RunBudget()))
+    lease = cr.begin_run(vault, holder="nightly")
+    cr.record_plan(vault, holder=lease.holder, plan=plan)
+    assert cr.load_state(vault).lease["plan"]["stale_note_targets"] == {
+        key: {"relative_path": target.relative_path, "revision": target.revision}
+    }
+    assert cr.load_state(vault).lease["plan"]["completed_stale_notes"] == []
+    with pytest.raises(cr.CurationBusy):
+        cr.record_done(vault, [key], holder="different-holder")
+    cr.record_done(vault, [key], holder=lease.holder)
+    assert cr.load_state(vault).lease["plan"]["completed_stale_notes"] == [key]
+
+
+def test_stale_note_checkpoint_rejects_a_replaced_lease(tmp_path: Path) -> None:
+    vault = _vault(tmp_path)
+    moment = datetime(2026, 1, 1, tzinfo=UTC)
+    target = cr.StaleNoteTarget(relative_path="Projects/alpha/Decisions.md", revision="a" * 64)
+    key = cr.item_key(cr.PASS_STALE_NOTE, target.relative_path)
+    item = cr.WorklistItem(pass_id=cr.PASS_STALE_NOTE, label="note", reason="due", keys=(key,), target=target)
+    plan = cr.lease_plan(cr.RunPlan(planned=(item,), deferred=(), budget=cr.RunBudget()))
+    old = cr.begin_run(vault, holder="old", ttl_s=1, now=moment)
+    cr.record_plan(vault, holder=old.holder, plan=plan, now=moment)
+    later = moment + timedelta(seconds=2)
+    new = cr.begin_run(vault, holder="new", ttl_s=60, now=later)
+    cr.record_plan(vault, holder=new.holder, plan=plan, now=later)
+    with pytest.raises(cr.CurationBusy):
+        cr.record_done(vault, [key], holder=old.holder, now=later)
+    assert cr.load_state(vault).lease["plan"]["completed_stale_notes"] == []
+
+
+def test_holder_authority_can_bind_the_live_private_proof_and_chat(tmp_path: Path) -> None:
+    from ciao import curation_cycle as cc
+
+    vault = _vault(tmp_path)
+    cycle = cc.CycleState(
+        cycle_id="c2-" + "0" * 24, prior_marker=cc.MarkerIdentity(kind="absent", sha256=None),
+        required={}, optional={}, carried=(), legacy_historical={}, daily={},
+        lease={}, last_run={}, pending=None,
+    )
+    cr.state_path(vault).write_text(cc.encode_state(cycle), encoding="utf-8")
+    lease = cr.begin_run(vault, holder="nightly", chat_id="care-chat")
+    target = cr.StaleNoteTarget(relative_path="Projects/alpha/Decisions.md", revision="a" * 64)
+    key = cr.item_key(cr.PASS_STALE_NOTE, target.relative_path)
+    item = cr.WorklistItem(pass_id=cr.PASS_STALE_NOTE, label="note", reason="due", keys=(key,), target=target)
+    cr.record_plan(vault, holder=lease.holder, plan=cr.lease_plan(cr.RunPlan(
+        planned=(item,), deferred=(), budget=cr.RunBudget())))
+    with cr.authorize_care_item(vault, holder=lease.holder, proof=lease.proof, chat_id="care-chat", key=key) as selected:
+        assert selected is None
+    cr.record_done(vault, [key], holder=lease.holder)
+    with cr.authorize_care_item(vault, holder=lease.holder, proof=lease.proof, chat_id="care-chat", key=key) as selected:
+        assert selected == target
+    with cr.authorize_care_item(vault, holder=lease.holder, proof="wrong", chat_id="care-chat", key=key) as selected:
+        assert selected is None
+    with cr.authorize_care_item(vault, holder=lease.holder, proof=lease.proof, chat_id="other", key=key) as selected:
+        assert selected is None
+
+
+def test_partial_stale_note_run_checkpoints_only_planned_completed_revision(tmp_path: Path) -> None:
+    vault = _vault(tmp_path)
+    guide = _guide(tmp_path)
+    _fresh_log(vault, last_full_pass="2026-09-18")
+    first = _note(vault, "People/First.md", updated="2023-01-01")
+    _note(vault, "People/Second.md", updated="2024-01-01")
+    items = _stale_items(vault, guide)
+    plan = cr.plan_run(cr.Worklist(tuple(items), False, "", "now"), cr.RunBudget(max_items=1))
+    assert len(plan.planned) == 1 and len(plan.deferred) == 1
+    lease = cr.begin_run(vault, holder="nightly")
+    cr.record_plan(vault, holder=lease.holder, plan=cr.lease_plan(plan))
+    key = cr.item_key(cr.PASS_STALE_NOTE, "People/First.md")
+    other = cr.item_key(cr.PASS_STALE_NOTE, "People/Second.md")
+    cr.record_done(vault, [other, key, key], holder=lease.holder)
+    stored = cr.load_state(vault).lease["plan"]
+    assert stored["stale_note_targets"] == {
+        key: {"relative_path": "People/First.md", "revision": mr.content_revision(first.read_text())}
+    }
+    assert stored["completed_stale_notes"] == [key]
+    cr.end_run(vault, holder=lease.holder)
+    assert cr.load_state(vault).lease == {}
+
+
+@pytest.mark.parametrize("relative,revision", [("../outside.md", "a" * 64), ("People/A.md", "invalid")])
+def test_lease_plan_rejects_invalid_stale_note_source(tmp_path: Path, relative: str, revision: str) -> None:
+    vault = _vault(tmp_path)
+    lease = cr.begin_run(vault, holder="nightly")
+    key = cr.item_key(cr.PASS_STALE_NOTE, relative)
+    item = cr.WorklistItem(pass_id=cr.PASS_STALE_NOTE, label="note", reason="due", keys=(key,),
+                           target=cr.StaleNoteTarget(relative_path=relative, revision=revision))
+    plan = cr.lease_plan(cr.RunPlan(planned=(item,), deferred=(), budget=cr.RunBudget()))
+    with pytest.raises(cr.CurationStateError):
+        cr.record_plan(vault, holder=lease.holder, plan=plan)
+    assert "plan" not in cr.load_state(vault).lease
 
 
 # ── S2: curation-end derives planned and completed from receipts ──
