@@ -1146,9 +1146,9 @@ def test_care_witness_binds_exact_preview_revision_and_revocation(tmp_path: Path
 
 
 @pytest.mark.parametrize("cycle", [False, True])
-@pytest.mark.parametrize("crash_before_state", [False, True])
+@pytest.mark.parametrize("crash_point", ["before_state", "before_receipt", "before_ready"])
 def test_care_checkpoint_stages_only_completed_exact_witness_and_replays_once(
-    tmp_path: Path, cycle: bool, crash_before_state: bool
+    tmp_path: Path, cycle: bool, crash_point: str
 ) -> None:
     from ciao import curation_cycle, curation_share
 
@@ -1227,15 +1227,16 @@ def test_care_checkpoint_stages_only_completed_exact_witness_and_replays_once(
         "from pathlib import Path",
         "from ciao.config import CiaoConfig, WorkspaceConfig",
         "from ciao import curation_share",
-        "root, vault, lifetime, holder, key, crash_before = sys.argv[1:]",
+        "root, vault, lifetime, holder, key, crash_point = sys.argv[1:]",
         "root = Path(root)",
         "config = CiaoConfig(pwa_auth_token='t', workspace_root=root, state_path=root / '.runtime/state.json', media_root=root / '.runtime/media', workspaces={'home': WorkspaceConfig(name='home', vault_root=vault, lifetime_id=lifetime, _lifetime_persisted=True)})",
         "write = curation_share._write_record",
         "def interrupted(path, record):",
-        "    if path.parent.name == 'care-settlements': os._exit(42)",
+        "    if path.parent.name == 'care-settlements' and crash_point == 'before_receipt': os._exit(42)",
+        "    if path.parent.name == 'care-ready' and crash_point == 'before_ready': os._exit(44)",
         "    write(path, record)",
         "curation_share._write_record = interrupted",
-        "if crash_before == 'yes':",
+        "if crash_point == 'before_state':",
         "    from ciao import curation_run",
         "    store = curation_run._store",
         "    def before_state(path, state):",
@@ -1246,9 +1247,9 @@ def test_care_checkpoint_stages_only_completed_exact_witness_and_replays_once(
     ])
     crash = subprocess.run([sys.executable, "-c", script, str(config.workspace_root), str(vault),
                             config.workspace("home").lifetime_id, lease.holder, key,
-                            "yes" if crash_before_state else "no"], check=False)
-    assert crash.returncode == (43 if crash_before_state else 42)
-    if crash_before_state:
+                            crash_point], check=False)
+    assert crash.returncode == {"before_state": 43, "before_receipt": 42, "before_ready": 44}[crash_point]
+    if crash_point == "before_state":
         replacement = curation_run.begin_run(
             vault, holder="replacement", chat_id="care", now=datetime.now(UTC) + timedelta(days=1),
             before_acquire=lambda state: curation_share.recover(config, "home", state),
@@ -1257,9 +1258,23 @@ def test_care_checkpoint_stages_only_completed_exact_witness_and_replays_once(
         replacement = curation_share.begin(config, workspace="home", chat_id="care", token_id="token",
                                            dispatch_id="replacement", ttl_s=600)
     receipts = list((config.state_path.parent / "secrets" / "share-evidence").rglob("care-settlements/*.json"))
-    assert len(receipts) == (0 if crash_before_state else 1)
-    assert len(curation_share.settled_witnesses(config, workspace="home", holder=lease.holder)) == (0 if crash_before_state else 1)
-    if not crash_before_state:
+    assert len(receipts) == (0 if crash_point == "before_state" else 1)
+    if receipts:
+        manifest = json.loads(receipts[0].read_text())["payload"]
+        assert manifest["manifest_version"] == 1 and manifest["batch_width"] == 20
+        assert len(manifest["outbox_manifest"]) == 1
+        original = records[0].read_bytes()
+        records[0].unlink()
+        assert curation_share.settled_witnesses(config, workspace="home", holder=lease.holder) == []
+        records[0].write_bytes(original)
+        records[0].chmod(0o600)
+        extra = records[0].with_name("f" * 64 + ".json")
+        extra.write_bytes(original)
+        extra.chmod(0o600)
+        assert curation_share.settled_witnesses(config, workspace="home", holder=lease.holder) == []
+        extra.unlink()
+    assert len(curation_share.settled_witnesses(config, workspace="home", holder=lease.holder)) == (0 if crash_point == "before_state" else 1)
+    if crash_point != "before_state":
         with se.evidence_claim(config, workspace="home") as claim:
             settled = curation_share.settled_witnesses(config, workspace="home", holder=lease.holder, claim=claim)
             signature = settled[0]["witness"]["witness_signature"]
