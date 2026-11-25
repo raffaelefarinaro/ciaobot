@@ -178,6 +178,7 @@ from ciao.web.routes_api import (
     share_evidence_revoke,
     share_evidence_withdraw,
 
+    workspace_shared_brain_guide_mapping,
     set_workspace_shared_brain_sharing,
     vault_backlinks,
     vault_delete_note,
@@ -451,6 +452,7 @@ def create_app(config, app_settings=None, mcp_service=None) -> Starlette:
             share_evidence_withdraw,
             methods=["POST"],
         ),
+        Route("/api/workspaces/{name}/shared-brains/{brain}/guide-mapping", workspace_shared_brain_guide_mapping, methods=["GET", "POST"]),
         Route(
             "/api/workspaces/{name}/shared-brains/{brain}/sharing",
             set_workspace_shared_brain_sharing,

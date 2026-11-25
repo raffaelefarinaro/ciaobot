@@ -220,6 +220,8 @@ def reset_link_for_restore(link: SharedBrainLink) -> SharedBrainLink:
         sharing_policy=DEFAULT_SHARING_POLICY,
         sharing_generation=link.sharing_generation + 1,
         sharing_consent=None,
+        guide_mapping_generation=link.guide_mapping_generation + 1,
+        guide_mapping=None,
     )
 
 

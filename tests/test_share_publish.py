@@ -1121,6 +1121,10 @@ def test_legacy_refresh_fails_closed_after_index_write_without_canonical(linked,
     assert isinstance(first, share_proposals.ShareRefusal)
     queue = config.vault / "Workspace" / "Memory-Proposals.md"
     assert f"Shared note change proposal {artifact['immutable']['sidecar_id']}" in queue.read_text(encoding="utf-8")
+    index = share_proposals._load_sidecar(share_proposals._store_dir(config) / f"{index_hash}.json")
+    replacement_id = index["immutable"]["sidecar_id"]
+    canonical_hash = hashlib.sha256(("home\0sidecar\0" + replacement_id).encode()).hexdigest()
+    (share_proposals._store_dir(config) / f"{canonical_hash}.json").unlink()
 
     monkeypatch.setattr(share_proposals, "_write_private", original_write)
     retried = share_publish.refresh_legacy_draft(
@@ -1936,3 +1940,38 @@ def test_status_probe_uses_the_same_alias_observation(
     stored = reloaded.workspace("home").shared_brains[0]
     assert stored.sharing_policy == "review"
     assert stored.sharing_consent is None
+
+
+def test_publish_rejects_changed_upstream_file_mode(linked):
+    config, clone, origin = linked
+    draft = share_proposals.draft_share(config, workspace="home", relative_path="n.md", operation="replace", proposed=b"reviewed", request_key="mode-change")
+    assert isinstance(draft, share_proposals.ShareDraft)
+    assert draft.artifact["immutable"]["base_mode"] == "100755"
+    git(clone, "update-index", "--chmod=-x", "n.md")
+    git(clone, "commit", "--quiet", "-m", "change mode")
+    subprocess.run(["git", *IDENT, "-C", str(clone), "-c", "protocol.file.allow=always", "push", "--quiet", str(origin), "HEAD:refs/heads/main"], check=True)
+    outcome = asyncio.run(share_publish.publish_share(config, workspace="home", proposal_id=draft.proposal_id, expected_revision=draft.artifact["review_token"]))
+    assert outcome.outcome == "changed_upstream"
+    assert not share_publish.list_share_receipts(config, workspace="home")
+
+
+def test_evidence_candidate_cannot_publish_without_effect_fence(linked, monkeypatch):
+    config, _, _ = linked
+    draft = share_proposals.draft_share(
+        config, workspace="home", relative_path="new.md", operation="create",
+        proposed=b"candidate", request_key="candidate-fence",
+    )
+    assert isinstance(draft, share_proposals.ShareDraft)
+    artifact = draft.artifact
+    artifact["immutable"]["evidence_authorization"] = {"proof": "private"}
+    artifact["review_token"] = share_proposals._review_token(artifact["immutable"])
+    for path in share_proposals._store_dir(config).glob("*.json"):
+        stored = share_proposals._load_sidecar(path)
+        if stored["immutable"]["sidecar_id"] == artifact["immutable"]["sidecar_id"]:
+            share_proposals._write_private(path, json.dumps(artifact, sort_keys=True).encode())
+    monkeypatch.setattr(share_publish, "_network_git", lambda *args, **kwargs: pytest.fail("publication attempted"))
+    result = asyncio.run(share_publish.publish_share(
+        config, workspace="home", proposal_id=draft.proposal_id,
+        expected_revision=artifact["review_token"],
+    ))
+    assert result.outcome == "draft_unavailable"
