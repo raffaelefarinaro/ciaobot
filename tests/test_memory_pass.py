@@ -1975,6 +1975,66 @@ async def test_clean_finish_archives_and_marks_source_ok(
     }
 
 
+async def test_successful_pass_checkpoints_before_archive(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    passes_enabled: None, streams: _FakeStreams,
+) -> None:
+    from ciao import share_evidence
+
+    manager = _make_manager(tmp_path)
+    source = _source(manager)
+    memory_id = manager.enqueue_memory_pass(source, None, _archive_file(tmp_path), "")
+    memory = manager.get_chat(memory_id)
+    _replied(memory, "Updated memory.")
+    events = []
+    registry = object()
+    manager._mcp_service = SimpleNamespace(registry=registry)
+
+    def checkpoint(config, actual_registry, *, workspace, pass_chat_id):
+        assert config is manager._config
+        assert actual_registry is registry
+        assert workspace == "work"
+        assert pass_chat_id == memory_id
+        assert memory.helper["state"] == "done"
+        assert not memory.archived
+        events.append("checkpoint")
+
+    monkeypatch.setattr(share_evidence, "checkpoint_completed_memory_pass", checkpoint, raising=False)
+
+    async def archive(chat_id):
+        events.append("archive")
+        memory.archived = True
+        return None
+
+    monkeypatch.setattr(manager, "archive_chat", archive)
+    assert await manager._memory_pass.on_turn_finished(memory_id)
+    assert events == ["checkpoint", "archive"]
+
+
+async def test_checkpoint_failure_does_not_block_successful_pass(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    passes_enabled: None, streams: _FakeStreams,
+) -> None:
+    from ciao import share_evidence
+
+    manager = _make_manager(tmp_path)
+    source = _source(manager)
+    memory_id = manager.enqueue_memory_pass(source, None, _archive_file(tmp_path), "")
+    memory = manager.get_chat(memory_id)
+    _replied(memory, "Updated memory.")
+    manager._mcp_service = SimpleNamespace(registry=object())
+
+    def unavailable(*args, **kwargs):
+        raise share_evidence.EvidenceError("unavailable", "Unavailable")
+
+    monkeypatch.setattr(share_evidence, "checkpoint_completed_memory_pass", unavailable, raising=False)
+    archived = _stub_archive(manager, monkeypatch)
+    assert await manager._memory_pass.on_turn_finished(memory_id)
+    assert archived == [memory_id]
+    assert memory.helper["state"] == "done"
+    assert source.postprocess["steps"]["memory_pass"]["extra"]["candidate_outcome"] == "checkpoint_unavailable"
+
+
 async def test_unclean_finish_marks_attention_and_pumps_next(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

@@ -966,6 +966,30 @@ def _memory_manager(tmp_path: Path) -> tuple[CiaoConfig, ProjectChatManager, obj
     return config, manager, project, source
 
 
+async def test_real_memory_pass_completion_checkpoints_before_archival(tmp_path: Path) -> None:
+    config, manager, project, source = _memory_manager(tmp_path)
+    se._reset_project_manager_for_tests()
+    se.bind_project_manager(manager)
+    registry = AgentSessionRegistry()
+    manager._mcp_service = SimpleNamespace(registry=registry)
+    pass_chat = next(chat for chat in manager.list_chats() if (chat.helper or {}).get("kind") == "memory_pass")
+    pass_chat.helper["state"] = "running"
+    pass_chat.last_response = "Updated synthetic memory."
+    pass_chat.last_response_status = "success"
+    registry.issue(chat_id=pass_chat.chat_id, project_id=pass_chat.project_id, workspace="home", provider="claude")
+
+    try:
+        assert await manager._memory_pass.on_turn_finished(pass_chat.chat_id)
+        assert pass_chat.archived
+        assert registry.principal_for_chat(pass_chat.chat_id) is None
+        relation = se.recover_memory_pass_source_relation(config, workspace="home", pass_chat_id=pass_chat.chat_id)
+        assert relation.project_id == project.project_id
+        assert relation.relation_id == pass_chat.chat_id
+        assert source.chat_id == pass_chat.helper["source_chat_id"]
+    finally:
+        se._reset_project_manager_for_tests()
+
+
 def test_completed_memory_checkpoint_survives_registry_restart_and_revocation(tmp_path: Path) -> None:
     config, manager, project, source = _memory_manager(tmp_path)
     project.vault_folder = "alpha"

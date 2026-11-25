@@ -1071,7 +1071,19 @@ class MemoryPassCoordinator:
         workspace = self._workspace_of(chat)
         if chat.last_response_status == "success" and chat.last_response.strip():
             self._set_state(chat, "done")
-            self._set_source_step(source_chat_id, "ok", chat_id)
+            from ciao import share_evidence
+
+            registry = getattr(host._mcp_service, "registry", None)
+            candidate_outcome = ""
+            if registry is not None:
+                try:
+                    share_evidence.checkpoint_completed_memory_pass(
+                        host._config, registry, workspace=workspace, pass_chat_id=chat_id
+                    )
+                except (share_evidence.EvidenceError, OSError):
+                    candidate_outcome = "checkpoint_unavailable"
+                    logger.warning("Memory pass evidence checkpoint unavailable for %s", chat_id)
+            self._set_source_step(source_chat_id, "ok", chat_id, candidate_outcome=candidate_outcome)
             await self._archive_finished(chat)
             self.pump(workspace)
             return True
@@ -1576,10 +1588,12 @@ class MemoryPassCoordinator:
         return sorted(name for name in used if name in owned)
 
     def _set_source_step(
-        self, source_chat_id: str, status: str, memory_chat_id: str
+        self, source_chat_id: str, status: str, memory_chat_id: str, *, candidate_outcome: str = ""
     ) -> None:
         source = self._set_source_step_fields(source_chat_id, status, memory_chat_id)
         if source is not None:
+            if candidate_outcome:
+                source.postprocess["steps"]["memory_pass"]["extra"]["candidate_outcome"] = candidate_outcome
             self._host._save()
             self._host._publish_postprocess(source)
 
