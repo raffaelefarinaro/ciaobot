@@ -364,6 +364,20 @@ def test_apply_refuses_before_first_move_when_registry_row_is_missing(
     assert _install_hashes(install) == before
 
 
+def test_apply_refuses_when_registry_appears_after_config_load(tmp_path: Path) -> None:
+    from types import SimpleNamespace
+
+    install, vault, runtime = _git_install(tmp_path)
+    _registry(runtime, [{"name": "personal", "vault_root": "memory-vault/personal"}])
+    before = _install_hashes(install)
+    result = workspace_reroot.apply(
+        install, vault, ["personal"], runtime, primary="personal",
+        source_config=SimpleNamespace(_workspace_registry_bytes=None),
+    )
+    assert result["status"] == "refused"
+    assert _install_hashes(install) == before
+
+
 def test_apply_refuses_before_first_move_when_registry_bytes_changed(
     tmp_path: Path,
 ) -> None:

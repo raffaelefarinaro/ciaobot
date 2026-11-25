@@ -467,7 +467,7 @@ def apply(
             expected = expected_registry_bytes
             if source_config is not None:
                 expected = getattr(source_config, "_workspace_registry_bytes", None)
-            if expected is not None and owner.current != expected:
+            if (source_config is not None or expected_registry_bytes is not None) and owner.current != expected:
                 return {"status": "refused", "refusals": ["workspace registry changed before migration"]}
             return _apply_owned(install_root, vault_root, workspaces, runtime_root, primary=primary, owner=owner)
     except WorkspaceRegistryBusy as exc:
