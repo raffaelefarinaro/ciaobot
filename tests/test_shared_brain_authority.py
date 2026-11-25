@@ -1165,8 +1165,15 @@ def test_an_expired_actor_is_refused_before_the_invitation_is_spent(tmp_path: Pa
     assert record is not None
     assert (record.steward, record.generation) == ("bob", 1)
 
-    # The failed actor check did not spend the nonce's authority: a fresh
-    # invitation from the incumbent can still complete the transfer.
+    # The original nonce is still unspent: retrying it reaches the same actor
+    # refusal instead of ``challenge_used`` or ``challenge_unknown``.
+    with pytest.raises(AuthorityError) as retried:
+        engine.accept_transfer(
+            challenge.nonce, connector=connector, successor=fresh_carol
+        )
+    assert retried.value.reason == "expired_capability"
+
+    # A fresh invitation from the incumbent can still complete the transfer.
     fresh = engine.begin_transfer(
         connector=connector,
         incumbent=fresh_bob,
@@ -1320,6 +1327,42 @@ def test_recovery_is_conditional_on_the_current_generation(tmp_path: Path) -> No
     assert store.load("brain-a").generation == 3
 
 
+def test_a_forged_successor_cannot_spend_a_recovery_invitation(tmp_path: Path) -> None:
+    clock = FakeClock()
+    backend = FencedBackend(clock)
+    connector = BrainRef("brain-a", "github.com/acme/notes")
+    _add_people(backend, connector)
+    engine, store = _engine(tmp_path, backend, clock)
+    _bootstrap(engine, connector, backend)
+    admin = backend.sign_in(connector, "alice-token")
+    carol = backend.sign_in(connector, "carol-token")
+    challenge = engine.begin_recovery(
+        connector=connector,
+        admin=admin,
+        successor=carol.principal,
+        expected_generation=1,
+        confirmed=True,
+    )
+    forged = backend.forged_principal(connector, "carol", admin=False)
+
+    with pytest.raises(AuthorityError) as refused:
+        engine.accept_recovery(
+            challenge.nonce, connector=connector, successor=forged
+        )
+    assert refused.value.reason == "forged_capability"
+    record = store.load("brain-a")
+    assert record is not None
+    assert (record.steward, record.generation) == ("bob", 1)
+
+    transition = engine.accept_recovery(
+        challenge.nonce, connector=connector, successor=carol
+    )
+    assert transition.steward == "carol"
+    record = store.load("brain-a")
+    assert record is not None
+    assert (record.steward, record.generation) == ("carol", 2)
+
+
 def test_an_expired_recovery_cannot_be_replayed(tmp_path: Path) -> None:
     clock = FakeClock()
     backend = FencedBackend(clock)
@@ -1404,6 +1447,36 @@ def test_authorize_steward_requires_a_current_capability(tmp_path: Path) -> None
 
 
 # ── Races ───────────────────────────────────────────────────────────────────
+
+
+def test_concurrent_claims_of_the_same_nonce_yield_one_record(tmp_path: Path) -> None:
+    clock = FakeClock()
+    backend = FencedBackend(clock)
+    connector = BrainRef("brain-a", "github.com/acme/notes")
+    _add_people(backend, connector)
+    engine, store = _engine(tmp_path, backend, clock)
+    admin = backend.sign_in(connector, "alice-token")
+    bob = backend.sign_in(connector, "bob-token")
+    challenge = engine.begin_bootstrap(
+        connector=connector, admin=admin, successor=bob.principal
+    )
+
+    outcomes = _race(
+        lambda: engine.accept_bootstrap(
+            challenge.nonce, connector=connector, successor=bob
+        ),
+        lambda: engine.accept_bootstrap(
+            challenge.nonce, connector=connector, successor=bob
+        ),
+    )
+    kinds = sorted(kind for kind, _value in outcomes)
+    assert kinds == ["error", "ok"]
+    error = next(value for kind, value in outcomes if kind == "error")
+    assert error == "challenge_used"
+    record = store.load("brain-a")
+    assert record is not None
+    assert (record.steward, record.generation) == ("bob", 1)
+    assert len(engine.audit_trail()) == 1
 
 
 def test_two_initial_enrollments_race_to_one_record(tmp_path: Path) -> None:
