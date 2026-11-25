@@ -94,16 +94,22 @@ export interface WorkspaceInfo {
 export interface SharedBrainRow {
   path: string
   name?: string
+  /** Defaults to Git for registry rows written before folder links existed. */
+  kind?: 'git' | 'folder'
 }
 
 /** The payload of a workspace PATCH: a shared-brain save sends rows, not the read links. */
 export type WorkspacePatch = Omit<Partial<WorkspaceInfo>, 'shared_brains'> & { shared_brains?: SharedBrainRow[] }
+
+/** A Git checkout the engine pulls, or an ordinary folder read in place. */
+export type SharedBrainKind = 'git' | 'folder'
 
 /** One linked shared-brain folder, as the workspace registry lists it. */
 export interface SharedBrainLink {
   name: string
   path: string
   identity: string
+  kind?: 'git' | 'folder'
 }
 
 /** The last update attempt for a brain, as `ciao/shared_brain.py` records it. */
@@ -117,12 +123,14 @@ export interface SharedBrainUpdate {
 /** Live state of one linked brain, from `GET /api/workspaces/{name}/shared-brains`. */
 export interface SharedBrainState {
   name: string
+  kind: SharedBrainKind
   identity: string
   path: string
   origin_changed: boolean
   missing: boolean
   // '' or why the folder cannot be used now: missing, moved, not_a_checkout,
-  // outside_install, unsafe_config, origin_changed.
+  // outside_install, unsafe_config, origin_changed, inaccessible, or
+  // registry_unavailable (a Git link the engine could not inspect).
   problem: string
   branch: string
   head: string
@@ -1960,7 +1968,7 @@ export interface ProposalPreview {
    * `note_edit` rewrites a whole vault note from the verification's exact
    * replacement, and `retire_note` is the one operation that removes it — it
    * moves the note to the reversible review trash and writes no body at all. */
-  operation: 'add' | 'update' | 'move' | 'add_category' | 'note_edit' | 'retire_note' | 'none' | ''
+  operation: 'add' | 'update' | 'move' | 'add_category' | 'note_edit' | 'retire_note' | 'none' | 'create' | 'replace' | 'delete' | ''
   /**
    * `note` or `entry` — the unit the accept writes.
    *
@@ -1988,8 +1996,8 @@ export interface ProposalPreview {
   destination: string
   destination_path: string
   revision: string
-  before: string
-  after: string
+  before: string | null
+  after: string | null
   exact: boolean
   truncated: boolean
   can_accept: boolean
@@ -2010,6 +2018,16 @@ export interface ProposalPreview {
     notes: string[]
     missing?: string[]
   }
+  /** Revision-bound shared-note publication projection (#3576). */
+  brain?: string
+  identity?: string
+  branch?: string
+  path?: string
+  blocked_reason?: string | null
+  /** True only when this exact canonical review has a recorded attempt that can be reconciled. */
+  reconcile_available?: boolean
+  /** True only when every exact recorded attempt was definitively rejected as retryable. */
+  publish_retry_available?: boolean
 }
 
 export interface ProposalPreviewResponse {
@@ -2196,6 +2214,12 @@ export interface ProposalHistoryRow {
   run_id?: string
   /** The decision's own timestamp, the same value as `ts`. ABSENT from an older engine. */
   decided_at?: string
+  /** Share publication is successful only when the server attached its receipt. */
+  share_status?: string
+  commit_oid?: string
+  branch?: string
+  path?: string
+  operation?: string
 }
 
 export type ProposalApplyStatus =
@@ -2271,6 +2295,8 @@ export interface ProposalHistoryChange {
    * Empty for a receipt that cited nothing. Optional because a payload written
    * before this field existed carries none. */
   source_turns?: number[]
+  commit_oid?: string
+  branch?: string
 }
 
 /** One line of a receipt's before/after. Context lines are not sent: what a
@@ -2300,11 +2326,18 @@ export interface MemoryReceiptDetail {
   changed: boolean
   error: string
   reason?: string
-  before?: string
-  after?: string
+  before?: string | null
+  after?: string | null
   diff?: MemoryReceiptDiffLine[]
   truncated?: boolean
   diff_truncated?: boolean
+  share_status?: string
+  operation?: string
+  branch?: string
+  path?: string
+  identity?: string
+  commit_oid?: string
+  review_path?: string
 }
 
 export interface ProposalHistoryResponse {

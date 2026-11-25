@@ -517,12 +517,13 @@ SHARED_BRAIN_NAME_PATTERN = r"^[a-z0-9](?:[a-z0-9-]{0,30}[a-z0-9])?$"
 
 @dataclass(frozen=True, slots=True)
 class SharedBrainLink:
-    """One linked shared brain: a local Git checkout a workspace reads."""
+    """One linked shared brain: a Git checkout or ordinary folder a workspace reads."""
 
     name: str  # stable local name, unique per workspace
-    path: str  # absolute path of the Git checkout
-    identity: str  # canonical "host/owner/repo" read from origin, unique per workspace
+    path: str  # canonical absolute path of the Git checkout or ordinary folder
+    identity: str  # Git origin identity or canonical folder identity, unique per workspace
     lifetime_id: str = field(default_factory=lambda: secrets.token_urlsafe(24), compare=False)
+    kind: str = "git"
 
 
 @dataclass(slots=True)
@@ -584,6 +585,7 @@ def shared_brains_from_rows(raw: object) -> list[SharedBrainLink]:
         if not isinstance(row, dict):
             continue
         name, path, identity = row.get("name"), row.get("path"), row.get("identity")
+        kind = row.get("kind", "git")
         lifetime_id = row.get("lifetime_id")
         if not (isinstance(name, str) and isinstance(path, str) and isinstance(identity, str)):
             continue
@@ -593,6 +595,7 @@ def shared_brains_from_rows(raw: object) -> list[SharedBrainLink]:
             and not _has_control(path)
             and not _has_control(identity)
             and bool(identity.strip())
+            and kind in ("git", "folder")
         )
         clash = {f"name:{name}", f"path:{path}", f"id:{identity}"} & seen
         if not sound or clash:
@@ -602,6 +605,7 @@ def shared_brains_from_rows(raw: object) -> list[SharedBrainLink]:
         links.append(SharedBrainLink(
             name=name, path=path, identity=identity,
             lifetime_id=lifetime_id if isinstance(lifetime_id, str) and lifetime_id else secrets.token_urlsafe(24),
+            kind=kind,
         ))
     return links
 
@@ -846,6 +850,7 @@ class CiaoConfig:
     _workspace_registry_changed: bool = field(
         init=False, default=False, repr=False
     )
+    _workspace_registry_bytes: bytes | None = field(default=None, repr=False, compare=False)
     # Raw value of the retired ``CIAO_WORKSPACES`` variable, if an install
     # still sets it. Never used as a workspace source; server startup imports
     # it into ``.runtime/workspaces.json`` once and then ignores it.
@@ -1349,17 +1354,31 @@ class CiaoConfig:
                 changed = True
         return changed
 
-    def persist_workspace_registry(self) -> None:
-        """Atomically persist the live workspace registry."""
-        from ciao.workspaces import workspace_registry_lock  # noqa: PLC0415
+    def persist_workspace_registry(self, *, owner: Any | None = None) -> None:
+        """Atomically persist the live registry if its loaded snapshot is current."""
+        from ciao.workspaces import (
+            replace_workspace_registry,
+            acquire_workspace_registry,
+            workspace_registry_lock,
+        )  # noqa: PLC0415
 
         with workspace_registry_lock(self):
-            self._persist_workspace_registry_locked()
+            payload = self._workspace_registry_payload()
+            own_owner = owner is None
+            if owner is None:
+                owner = acquire_workspace_registry(self)
+            try:
+                replace_workspace_registry(
+                    self, payload, expected=self._workspace_registry_bytes, owner=owner
+                )
+                self._workspace_registry_bytes = payload
+                self._workspace_registry_changed = False
+            finally:
+                if own_owner:
+                    owner.close()
 
-    def _persist_workspace_registry_locked(self) -> None:
-        """Write a registry snapshot while its shared serialization lock is held."""
-        path = self.state_path.parent / "workspaces.json"
-        path.parent.mkdir(parents=True, exist_ok=True)
+    def _workspace_registry_payload(self) -> bytes:
+        """Serialize the in-memory registry without writing it."""
         payload: list[dict[str, Any]] = []
         for workspace in self.workspaces.values():
             row: dict[str, Any] = {
@@ -1383,7 +1402,7 @@ class CiaoConfig:
                 row["memory_handover"] = workspace.memory_handover
             if workspace.shared_brains:
                 row["shared_brains"] = [
-                    {"name": link.name, "path": link.path, "identity": link.identity, "lifetime_id": link.lifetime_id}
+                    {"name": link.name, "path": link.path, "identity": link.identity, "lifetime_id": link.lifetime_id, "kind": link.kind}
                     for link in workspace.shared_brains
                 ]
             if workspace.memory_approval:
@@ -1391,10 +1410,7 @@ class CiaoConfig:
             if workspace.provider_overrides:
                 row["provider_overrides"] = workspace.provider_overrides
             payload.append(row)
-        tmp = path.with_suffix(".json.tmp")
-        tmp.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8", newline="")
-        tmp.replace(path)
-        self._workspace_registry_changed = False
+        return (json.dumps(payload, indent=2) + "\n").encode("utf-8")
 
     def _archived_workspace_names(self) -> set[str]:
         """Casefolded names recorded in ``<install>/.archived-workspaces/*/archive.json``."""
@@ -1415,7 +1431,7 @@ class CiaoConfig:
                 names.add(str(data["name"]).casefold())
         return names
 
-    def import_legacy_workspaces_env(self) -> list[str]:
+    def import_legacy_workspaces_env(self, *, owner: Any = None) -> list[str]:
         """Import the retired ``CIAO_WORKSPACES`` variable into the registry, once.
 
         ``CIAO_WORKSPACES`` used to override ``.runtime/workspaces.json`` on
@@ -1442,6 +1458,11 @@ class CiaoConfig:
         raw = self.legacy_workspaces_env.strip()
         if not raw:
             return []
+        from ciao.workspaces import workspace_registry_claim, ensure_registry_current
+        if owner is None:
+            with workspace_registry_claim(self) as claim:
+                return self.import_legacy_workspaces_env(owner=claim)
+        ensure_registry_current(self)
         runtime_root = self.state_path.parent
         marker = runtime_root / LEGACY_WORKSPACES_IMPORT_MARKER
         if marker.exists():
@@ -1469,25 +1490,22 @@ class CiaoConfig:
                 ", ".join(skipped),
             )
             legacy = {n: w for n, w in legacy.items() if n.casefold() not in archived}
-        registry_path = runtime_root / "workspaces.json"
-        on_disk: dict[str, WorkspaceConfig] = {}
-        try:
-            if registry_path.is_file():
-                on_disk = _parse_workspaces_json(
-                    registry_path.read_text(encoding="utf-8")
-                )
-        except OSError:
-            on_disk = {}
+        on_disk = _parse_workspaces_json((self._workspace_registry_bytes or b"").decode("utf-8"))
+        previous = self.workspaces
         if on_disk:
             imported = {n: w for n, w in legacy.items() if n not in self.workspaces}
-            self.workspaces.update(imported)
+            self.workspaces = {**self.workspaces, **imported}
         else:
             imported = dict(legacy)
             if imported:
                 self.workspaces = dict(imported)
         if imported:
             self._normalize_workspace_vault_roots()
-            self.persist_workspace_registry()
+            try:
+                self.persist_workspace_registry(owner=owner)
+            except BaseException:
+                self.workspaces = previous
+                raise
         runtime_root.mkdir(parents=True, exist_ok=True)
         marker.write_text(
             json.dumps(
@@ -1505,7 +1523,7 @@ class CiaoConfig:
             "Workspaces are managed in Settings now; remove CIAO_WORKSPACES "
             "from .env.",
             ", ".join(imported) if imported else "no new workspaces",
-            registry_path,
+            runtime_root / "workspaces.json",
         )
         return list(imported)
 
@@ -1821,14 +1839,14 @@ class CiaoConfig:
         workspaces_json = ""
         workspaces_path = runtime_root / "workspaces.json"
         try:
-            if workspaces_path.is_file():
-                workspaces_json = workspaces_path.read_text(encoding="utf-8")
-        except PermissionError as exc:
+            registry_bytes = workspaces_path.read_bytes()
+            workspaces_json = registry_bytes.decode("utf-8")
+        except FileNotFoundError:
+            registry_bytes = None
+        except OSError as exc:
             from ciao.workspace_reroot import RuntimeStateUnreadable  # noqa: PLC0415
 
             raise RuntimeStateUnreadable(workspaces_path) from exc
-        except OSError:
-            workspaces_json = ""
 
         workspaces = _parse_workspaces_json(workspaces_json) or _bootstrap_registry(vault_root)
 
@@ -1866,6 +1884,7 @@ class CiaoConfig:
             log_level=stored.log_level or DEFAULT_LOG_LEVEL,
             legacy_env_settings=legacy_env_settings,
             workspaces=workspaces,
+            _workspace_registry_bytes=registry_bytes,
             legacy_workspaces_env=str(source.get("CIAO_WORKSPACES", "") or "").strip(),
         )
 

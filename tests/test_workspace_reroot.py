@@ -2774,6 +2774,7 @@ def _trigger_config(install: Path, runtime: Path, workspaces=("personal", "work"
         pwa_auth_token="test-token",
         workspace_root=install,
         vault_root=install / "memory-vault",
+        _workspace_registry_bytes=(runtime / "workspaces.json").read_bytes() if (runtime / "workspaces.json").exists() else None,
         state_path=runtime / "state.json",
         media_root=runtime / "media",
         workspaces={
@@ -3679,6 +3680,7 @@ def test_an_unmigrated_install_still_runs_the_real_migration(tmp_path: Path) -> 
     )
     config = SimpleNamespace(
         workspace_root=install,
+        _workspace_registry_bytes=(runtime / "workspaces.json").read_bytes(),
         state_path=runtime / "state.json",
         vault_root=vault,
         workspace_names=lambda: ["personal", "work"],
@@ -3905,7 +3907,12 @@ def test_from_env_raises_when_the_registry_is_denied(
     runtime.mkdir()
     registry = runtime / "workspaces.json"
     registry.write_text("{}", encoding="utf-8")
-    _deny_is_file(monkeypatch, registry)
+    original = Path.read_bytes
+    def denied(path):
+        if path == registry:
+            raise PermissionError("denied")
+        return original(path)
+    monkeypatch.setattr(Path, "read_bytes", denied)
 
     with pytest.raises(workspace_reroot.RuntimeStateUnreadable) as exc:
         CiaoConfig.from_env(
@@ -3990,8 +3997,27 @@ def test_reroot_registry_rewrite_keeps_shared_brains(tmp_path):
     workspace_reroot.registry_file(runtime).write_text(_json.dumps(rows), encoding="utf-8")
     plan = SimpleNamespace(moves=[SimpleNamespace(workspace="work", destination="/new/work")])
 
-    workspace_reroot._rewrite_registry(runtime, plan)
+    from ciao.workspaces import acquire_registry_at
+    with acquire_registry_at(runtime) as owner:
+        workspace_reroot._rewrite_registry(runtime, plan, owner=owner)
 
     written = _json.loads(workspace_reroot.registry_file(runtime).read_text(encoding="utf-8"))
     assert written[0]["vault_root"] == "/new/work"
     assert written[0]["shared_brains"] == links
+
+
+def test_undo_refuses_peer_registry_change_before_moving_any_notes(tmp_path):
+    install, vault, runtime = _git_install(tmp_path)
+    _registry(runtime, [{"name": name, "vault_root": f"memory-vault/{name}"} for name in ("personal", "work")])
+    assert apply(install, vault, ["personal", "work"], runtime, primary="personal")["status"] == "migrated"
+    before = _tree_hashes(install / "personal")
+    path = runtime / "workspaces.json"
+    rows = json.loads(path.read_bytes())
+    rows[0]["color"] = "green"
+    _registry(runtime, rows)
+    peer = path.read_bytes()
+
+    assert undo(install, runtime)["status"] == "refused"
+    assert path.read_bytes() == peer
+    assert _tree_hashes(install / "personal") == before
+    assert not vault.exists()

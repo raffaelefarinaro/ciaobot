@@ -202,7 +202,7 @@ def _registry_entry(config: Any, workspace: WorkspaceConfig) -> dict[str, Any]:
         "color": workspace.color,
         "shared_brains": [
             {"name": link.name, "path": link.path, "identity": link.identity,
-             "lifetime_id": link.lifetime_id}
+             "lifetime_id": link.lifetime_id, "kind": link.kind}
             for link in workspace.shared_brains
         ],
     }
@@ -369,7 +369,7 @@ def _remove_empty_archive_folder(folder: Path) -> None:
         logger.warning("Could not clean up %s after a failed archive", folder)
 
 
-def unregister(config: Any, name: str) -> None:
+def unregister(config: Any, name: str, *, owner: Any = None) -> None:
     """Drop *name* from the registry, in memory and on disk, or from neither.
 
     A failed save puts the entry back (in its original position) before
@@ -382,7 +382,7 @@ def unregister(config: Any, name: str) -> None:
         previous = dict(config.workspaces)
         config.workspaces.pop(name, None)
         try:
-            persist_workspaces(config)
+            persist_workspaces(config, owner=owner)
         except BaseException:
             config.workspaces.clear()
             config.workspaces.update(previous)
@@ -771,6 +771,10 @@ def _restore_blocker(config: Any, metadata: dict[str, Any], folder: Path) -> str
     destination = _restore_destination(config, metadata)
     if content_dir and (destination.exists() or destination.is_symlink()):
         return f"a folder already exists at {_display(config, destination)}"
+    from ciao.shared_brain import conflicts_with_link_kind
+    for link in restored_settings(config, metadata)["shared_brains"]:
+        if conflicts_with_link_kind(config, name, link.path, link.kind):
+            return "a shared brain path is already linked with a different storage kind"
     try:
         _restored_vault_root(config, metadata, folder)
     except ValueError as exc:
@@ -843,7 +847,9 @@ def list_archives(config: Any) -> list[dict[str, Any]]:
     return out
 
 
-def move_back(config: Any, archive_id: str) -> tuple[Path, dict[str, Any], Path]:
+def move_back(
+    config: Any, archive_id: str, *, expected_metadata: dict[str, Any] | None = None
+) -> tuple[Path, dict[str, Any], Path]:
     """Validate an archive and move its folder back; never touches the registry.
 
     Returns ``(archive folder, metadata, destination)`` for
@@ -854,6 +860,8 @@ def move_back(config: Any, archive_id: str) -> tuple[Path, dict[str, Any], Path]
     metadata = _read_metadata(folder)
     if metadata is None or not metadata.get("name"):
         raise WorkspaceArchiveError("archive metadata is missing or unreadable", 409)
+    if expected_metadata is not None and metadata != expected_metadata:
+        raise WorkspaceArchiveError("archive metadata changed while acquiring checkout claims", 409)
     name = str(metadata["name"])
     from ciao.workspaces import WORKSPACE_NAME_RE  # noqa: PLC0415
 
@@ -880,19 +888,21 @@ def restored_shared_brain_paths(config: Any, archive_id: str) -> list[str]:
     try:
         folder = _archive_folder(config, archive_id)
     except WorkspaceArchiveError:
-        return []
+        raise
     metadata = _read_metadata(folder)
     if metadata is None or not metadata.get("name"):
-        return []
-    try:
-        settings = restored_settings(config, metadata)
-    except (TypeError, ValueError):
-        return []
-    return sorted({link.path for link in settings["shared_brains"]})
+        raise WorkspaceArchiveError("archive metadata is missing or unreadable", 409)
+    return archive_checkout_paths(config, metadata)
+
+
+def archive_checkout_paths(config: Any, metadata: dict[str, Any]) -> list[str]:
+    from ciao.config import shared_brains_from_rows
+    entry = _workspace_entry(metadata)
+    return sorted({link.path for link in shared_brains_from_rows(entry.get("shared_brains"))})
 
 
 def register_restored(
-    config: Any, folder: Path, metadata: dict[str, Any], destination: Path
+    config: Any, folder: Path, metadata: dict[str, Any], destination: Path, *, owner: Any = None
 ) -> dict[str, Any]:
     """Re-register a workspace whose folder :func:`move_back` put back.
 
@@ -910,7 +920,7 @@ def register_restored(
         )
     vault_root, _vault = _restored_vault_root(config, metadata, folder)
     settings = restored_settings(config, metadata)
-    from ciao.workspaces import persist_workspaces, workspace_registry_lock  # noqa: PLC0415
+    from ciao.workspaces import WorkspaceRegistryConflict, persist_workspaces, workspace_registry_lock  # noqa: PLC0415
 
     with workspace_registry_lock(config):
         config.workspaces[name] = WorkspaceConfig(
@@ -923,8 +933,8 @@ def register_restored(
             shared_brains=settings["shared_brains"],
         )
         try:
-            persist_workspaces(config)
-        except OSError as exc:
+            persist_workspaces(config, owner=owner)
+        except (OSError, WorkspaceRegistryConflict) as exc:
             # Undo both halves so the archive stays restorable: without this the
             # folder sat at its old path while the registry on disk lacked the
             # entry, and a retry was refused (content missing, destination exists).
@@ -971,7 +981,7 @@ def _move_into_archive_again(
 
 
 def unregister_restored(
-    config: Any, folder: Path, metadata: dict[str, Any], destination: Path
+    config: Any, folder: Path, metadata: dict[str, Any], destination: Path, *, owner: Any = None
 ) -> None:
     """Undo :func:`register_restored` so the archive can be restored again.
 
@@ -981,6 +991,7 @@ def unregister_restored(
     :class:`WorkspaceArchiveError` when either half fails; the workspace is
     then left registered with its folder and ``archive.json`` stays in place.
     """
+    from ciao.workspaces import WorkspaceRegistryConflict
     name = str(metadata["name"])
     content_dir = str(metadata.get("content_dir") or "")
     if content_dir:
@@ -993,8 +1004,8 @@ def unregister_restored(
                 500,
             ) from exc
     try:
-        unregister(config, name)
-    except OSError as exc:
+        unregister(config, name, owner=owner)
+    except (OSError, WorkspaceRegistryConflict) as exc:
         # Still registered, so the folder must be where the entry points.
         if content_dir:
             try:
@@ -1038,7 +1049,16 @@ def restore_archive(config: Any, archive_id: str) -> dict[str, Any]:
     are not part of an archive: vault-backed projects are rediscovered from
     the restored notes, and every workspace gets its General project again.
     """
-    folder, metadata, destination = move_back(config, archive_id)
-    restored = register_restored(config, folder, metadata, destination)
-    discard_archive_folder(folder)
-    return restored
+    from ciao.workspaces import ensure_registry_current, workspace_registry_claim
+
+    from ciao.shared_brain import checkout_claims_nowait
+    metadata = _read_metadata(_archive_folder(config, archive_id))
+    if metadata is None:
+        raise WorkspaceArchiveError("archive metadata is unreadable", 409)
+    paths = archive_checkout_paths(config, metadata)
+    with checkout_claims_nowait(paths, config), workspace_registry_claim(config) as owner:
+        ensure_registry_current(config)
+        folder, metadata, destination = move_back(config, archive_id, expected_metadata=metadata)
+        restored = register_restored(config, folder, metadata, destination, owner=owner)
+        discard_archive_folder(folder)
+        return restored

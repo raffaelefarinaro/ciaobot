@@ -273,7 +273,7 @@ def build_parser() -> argparse.ArgumentParser:
         if verb == "delete":
             sub.add_argument("--confirm", required=True, help="Repeat the candidate id.")
 
-    note = _verbs(nouns.add_parser("note", help="Vault notes: create one, relate, verify."))
+    note = _verbs(nouns.add_parser("note", help="Vault notes: create one, relate, verify, share."))
     create = note.add_parser("create", help="Create a vault note with canonical frontmatter.")
     create.add_argument("--type", required=True, dest="note_type", help="Category id or alias from VOCABULARY.md.")
     create.add_argument("--title", required=True, help="The note's title; it also names the file.")
@@ -309,6 +309,10 @@ def build_parser() -> argparse.ArgumentParser:
         help="JSON document holding the verdict: relative_path, expected_revision, "
         "outcome, coverage, evidence, before/after, reason. Never pass the prose itself.",
     )
+    share = note.add_parser("share", help="Queue a note draft for human review in a shared brain.")
+    share.add_argument("--path", required=True, help="Repository-relative Markdown destination path.")
+    share.add_argument("--body-file", required=True, metavar="FILE", help="File inside this workspace vault holding the exact note body.")
+    share.add_argument("--brain", default="", help="Name of a linked shared brain when several are available.")
 
     file_ = _verbs(nouns.add_parser("file", help="Surface a workspace file in the pinned panel."))
     surface = file_.add_parser("surface", help="Open a workspace file in the pinned panel.")
@@ -819,6 +823,8 @@ def resolve(args: argparse.Namespace) -> tuple[str, dict[str, Any]] | None:
                 "body_file": args.body_file or "",
                 "path": args.path,
             }
+        if verb == "share":
+            return "note_share", {"path": args.path, "body_file": args.body_file, "brain": args.brain}
         # The path crosses to the server as written. Reading the document here
         # and posting the parsed object would move the size cap, the workspace
         # confinement and the "is this actually a file" check into the one place

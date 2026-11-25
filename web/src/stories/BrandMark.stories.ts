@@ -10,12 +10,12 @@ const meta = {
 export default meta
 type Story = StoryObj<typeof meta>
 
-// The product mark as the sidebar renders it: a fixed 30px box that presents
-// the production CiaoMark as one image named after the product. BrandMark has
-// no props and no branches, so this is its only state.
+// The product mark as the sidebar renders it: a 30px reload button around the
+// production CiaoMark. Hover or focus closes the C into a ring; leaving reopens
+// it. BrandMark has no props, so this is its only state.
 export const Default: Story = {
   play: async ({ canvas }) => {
-    const mark = canvas.getByRole('img', { name: 'Ciaobot' })
+    const mark = canvas.getByRole('button', { name: 'Reload Ciaobot' })
     expect(mark.classList.contains('brand')).toBe(true)
     expect(mark.querySelector('svg.ciao-mark')).not.toBeNull()
     expect(mark.querySelectorAll('circle[fill="var(--accent)"]')).toHaveLength(2)

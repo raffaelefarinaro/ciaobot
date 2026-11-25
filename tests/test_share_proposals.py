@@ -6,7 +6,9 @@ import asyncio
 import subprocess
 import hashlib
 import json
+import threading
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import contextmanager
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -65,7 +67,14 @@ def linked(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> tuple[Config, Pat
     link = SharedBrainLink(name="notes", path=str(clone), identity="github.com/x/notes")
     vault = tmp_path / "vault"
     vault.mkdir()
-    return Config(tmp_path, vault, link), clone
+    config = Config(tmp_path, vault, link)
+    registry = config.state_path.parent / "workspaces.json"
+    registry.parent.mkdir(parents=True)
+    registry.write_text(json.dumps([{"name": "home", "vault_root": str(vault), "shared_brains": [
+        {"name": link.name, "path": link.path, "identity": link.identity}
+    ]}]))
+    config._workspace_registry_bytes = registry.read_bytes()
+    return config, clone
 
 
 def test_share_identity_preserves_exact_upstream_bytes_and_private_queue(linked: tuple[Config, Path]) -> None:
@@ -197,6 +206,103 @@ def test_share_request_key_is_idempotent_but_cannot_change_content(linked: tuple
     assert (config.vault / "Workspace" / "Memory-Proposals.md").read_text().count("[share ") == 1
     refusal = sp.draft_share(config, **{**args, "proposed": b"changed"})
     assert isinstance(refusal, sp.ShareRefusal) and refusal.code == "request_conflict"
+
+
+def test_share_turn_stopped_during_git_qualification_never_queues(
+    linked: tuple[Config, Path], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    config, _clone = linked
+    active = True
+    lock = threading.Lock()
+    original_qualify = sp._qualify
+
+    def stop_after_qualification(*args, **kwargs):
+        nonlocal active
+        result = original_qualify(*args, **kwargs)
+        with lock:
+            active = False
+        return result
+
+    @contextmanager
+    def require_active_turn():
+        with lock:
+            if not active:
+                raise sp.ShareDraftError(
+                    sp.ShareRefusal("note_share_inactive", "The user turn stopped during qualification.")
+                )
+            yield
+
+    monkeypatch.setattr(sp, "_qualify", stop_after_qualification)
+    result = sp.draft_share(
+        config,
+        workspace="home",
+        relative_path="new.md",
+        operation=None,
+        proposed=b"draft",
+        request_key="stopped-during-qualification",
+        publish_guard=require_active_turn,
+    )
+    assert isinstance(result, sp.ShareRefusal) and result.code == "note_share_inactive"
+
+    queue = config.vault / "Workspace" / "Memory-Proposals.md"
+    private_store = config.state_path.parent / "secrets" / "share-proposals"
+    assert not queue.exists()
+    assert not list(private_store.glob("*.json"))
+
+
+def test_share_publish_guard_serializes_stop_with_queue_replace(
+    linked: tuple[Config, Path], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    config, _clone = linked
+    queue = config.vault / "Workspace" / "Memory-Proposals.md"
+    lock = threading.Lock()
+    active = True
+    replace_started = threading.Event()
+    stop_started = threading.Event()
+    stop_done = threading.Event()
+    original_replace = sp.memory_receipts.os.replace
+
+    @contextmanager
+    def publish_guard():
+        with lock:
+            if not active:
+                raise sp.ShareDraftError(sp.ShareRefusal("stopped", "turn stopped"))
+            yield
+
+    def stop_turn() -> None:
+        nonlocal active
+        replace_started.wait(timeout=5)
+        stop_started.set()
+        with lock:
+            active = False
+        stop_done.set()
+
+    def replace_after_stop_attempt(source, destination):
+        if Path(destination) == queue:
+            replace_started.set()
+            assert stop_started.wait(timeout=5)
+            assert not stop_done.is_set()
+        return original_replace(source, destination)
+
+    monkeypatch.setattr(sp.memory_receipts.os, "replace", replace_after_stop_attempt)
+    args = dict(
+        config=config,
+        workspace="home",
+        relative_path="new.md",
+        operation=None,
+        proposed=b"draft",
+        request_key="serialized-stop",
+        publish_guard=publish_guard,
+    )
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        stop_future = pool.submit(stop_turn)
+        result_future = pool.submit(sp.draft_share, **args)
+        result = result_future.result(timeout=10)
+        stop_future.result(timeout=10)
+
+    assert isinstance(result, sp.ShareDraft)
+    assert stop_done.is_set()
+    assert "[share " in queue.read_text(encoding="utf-8")
 
 
 def test_share_sync_git_reader_works_inside_running_event_loop(linked: tuple[Config, Path]) -> None:
@@ -476,6 +582,12 @@ def test_share_limits_apply_during_orphan_recovery_and_across_brains(linked: tup
     monkeypatch.setattr(sp, "MAX_PER_BRAIN", 10)
     monkeypatch.setattr(sp, "MAX_PER_WORKSPACE", 1)
     config.links.append(SharedBrainLink(name="second", path=str(clone), identity="github.com/x/notes"))
+    from dataclasses import asdict
+    registry = config.state_path.parent / "workspaces.json"
+    rows = json.loads(registry.read_bytes())
+    rows[0]["shared_brains"].append(asdict(config.links[-1]))
+    registry.write_text(json.dumps(rows))
+    config._workspace_registry_bytes = registry.read_bytes()
     cross_brain = sp.draft_share(config, workspace="home", brain="second", relative_path="other.md", operation="create", proposed=b"other", request_key="workspace-cap")
     assert isinstance(cross_brain, sp.ShareRefusal) and cross_brain.code == "capacity"
     assert cross_brain.limit == 1 and cross_brain.count == 1
