@@ -67,7 +67,14 @@ def linked(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> tuple[Config, Pat
     link = SharedBrainLink(name="notes", path=str(clone), identity="github.com/x/notes")
     vault = tmp_path / "vault"
     vault.mkdir()
-    return Config(tmp_path, vault, link), clone
+    config = Config(tmp_path, vault, link)
+    registry = config.state_path.parent / "workspaces.json"
+    registry.parent.mkdir(parents=True)
+    registry.write_text(json.dumps([{"name": "home", "vault_root": str(vault), "shared_brains": [
+        {"name": link.name, "path": link.path, "identity": link.identity}
+    ]}]))
+    config._workspace_registry_bytes = registry.read_bytes()
+    return config, clone
 
 
 def test_share_identity_preserves_exact_upstream_bytes_and_private_queue(linked: tuple[Config, Path]) -> None:
@@ -575,6 +582,12 @@ def test_share_limits_apply_during_orphan_recovery_and_across_brains(linked: tup
     monkeypatch.setattr(sp, "MAX_PER_BRAIN", 10)
     monkeypatch.setattr(sp, "MAX_PER_WORKSPACE", 1)
     config.links.append(SharedBrainLink(name="second", path=str(clone), identity="github.com/x/notes"))
+    from dataclasses import asdict
+    registry = config.state_path.parent / "workspaces.json"
+    rows = json.loads(registry.read_bytes())
+    rows[0]["shared_brains"].append(asdict(config.links[-1]))
+    registry.write_text(json.dumps(rows))
+    config._workspace_registry_bytes = registry.read_bytes()
     cross_brain = sp.draft_share(config, workspace="home", brain="second", relative_path="other.md", operation="create", proposed=b"other", request_key="workspace-cap")
     assert isinstance(cross_brain, sp.ShareRefusal) and cross_brain.code == "capacity"
     assert cross_brain.limit == 1 and cross_brain.count == 1

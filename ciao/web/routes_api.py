@@ -86,8 +86,10 @@ from ciao.model_tiers import MAX_MODEL_ID_CHARS
 from ciao.models import THINKING_LEVELS, ChatContext
 from ciao.workspaces import (
     WORKSPACE_NAME_RE,
+    WorkspaceRegistryConflict,
     agent_root_for,
     persist_workspaces,
+    run_while_claimed,
     workspace_from_request,
     workspace_provider_options,
     workspace_provider_values,
@@ -258,11 +260,8 @@ def _workspace_from_request(
     return workspace_from_request(data, config=config, existing=existing)
 
 
-def _persist_workspaces(config, candidate_workspaces=None) -> None:
-    if candidate_workspaces is None:
-        persist_workspaces(config)
-    else:
-        persist_workspaces(config, candidate_workspaces)
+def _persist_workspaces(config, candidate_workspaces=None, *, owner=None) -> None:
+    persist_workspaces(config, candidate_workspaces, owner=owner)
 
 
 def _workspace_registry_snapshot(config) -> tuple[tuple[str, dict[str, Any]], ...]:
@@ -318,19 +317,18 @@ async def _workspace_from_request_async(
     must not freeze every other request while it runs.
     """
     if "shared_brains" in data:
-        return await asyncio.to_thread(
-            _workspace_from_request, data, config=config, existing=existing
-        )
+        return await run_while_claimed(_workspace_from_request, data, config=config, existing=existing)
     return _workspace_from_request(data, config=config, existing=existing)
 
 
 async def _invalidate_sharing_claim(config: Any, link: SharedBrainLink) -> bool:
-    """Persist a drift invalidation while holding the cross-process checkout claim."""
+    """Persist a drift invalidation under checkout + authoritative registry claims."""
     async with shared_brain._checkout_lock(link.path):
         async with shared_brain._checkout_claim(link.path, config):
-            return await asyncio.to_thread(
-                shared_brain.invalidate_sharing_on_drift, config, link
-            )
+            async with _workspace_registry_claim(config) as owner:
+                return await asyncio.to_thread(
+                    shared_brain.invalidate_sharing_on_drift, config, link, owner
+                )
 
 
 async def workspace_shared_brains(request: Request) -> JSONResponse:
@@ -342,21 +340,26 @@ async def workspace_shared_brains(request: Request) -> JSONResponse:
         return JSONResponse({"error": "unknown workspace"}, status_code=404)
     states = []
     for link in list(workspace.shared_brains):
-        state = await asyncio.to_thread(shared_brain.brain_state, link, config)
+        state = await asyncio.to_thread(shared_brain.brain_state, link, config, workspace.name)
         if state.get("problem") == "origin_changed":
             # Seeing a retargeted folder is the moment to retire its standing
             # grant durably; a repaired origin must ask again.
             try:
                 changed = await _invalidate_sharing_claim(config, link)
-            except OSError:
+            except (OSError, WorkspaceRegistryConflict):
+                current = _sharing_link(config, workspace_name, link.name)
+                if current is not None:
+                    state = await asyncio.to_thread(
+                        shared_brain.brain_state, current, config, workspace_name
+                    )
                 state["sharing_invalidation_failed"] = True
-                state["sharing_grant_pending"] = shared_brain.sharing_grant_stored(link)
+                state["sharing_grant_pending"] = True
             else:
                 if changed:
                     current = _sharing_link(config, workspace_name, link.name)
                     if current is not None:
                         state = await asyncio.to_thread(
-                            shared_brain.brain_state, current, config
+                            shared_brain.brain_state, current, config, workspace_name
                         )
         states.append(state)
     return JSONResponse({"shared_brains": states})
@@ -406,16 +409,28 @@ def _disk_shared_brain_row(
 def _disk_link_matches(link: SharedBrainLink, row: dict[str, Any] | None) -> bool:
     if not isinstance(row, dict):
         return False
+    # Generation/policy changes are covered by the authoritative registry claim:
+    # `_workspace_registry_claim` refuses a stale in-memory snapshot, and the
+    # owner CAS refuses a file changed between that check and the write.
+    return (
+        row.get("identity") == link.identity
+        and row.get("lifetime_id") == link.lifetime_id
+        and row.get("kind", "git") == link.kind
+    )
+
+
+def _disk_link_state_matches(link: SharedBrainLink, row: dict[str, Any] | None) -> bool:
+    """Whether the persisted row already carries this exact policy state."""
+    if not isinstance(row, dict):
+        return False
     consent = row.get("sharing_consent")
     consent_generation = consent.get("generation") if isinstance(consent, dict) else None
     current_generation = (
         link.sharing_consent.generation if link.sharing_consent is not None else None
     )
     return (
-        row.get("identity") == link.identity
-        and row.get("lifetime_id") == link.lifetime_id
+        row.get("sharing_policy", "review") == link.sharing_policy
         and row.get("sharing_generation", 0) == link.sharing_generation
-        and row.get("sharing_policy", "review") == link.sharing_policy
         and consent_generation == current_generation
     )
 
@@ -478,7 +493,7 @@ async def set_workspace_shared_brain_sharing(request: Request) -> JSONResponse:
                 return JSONResponse({"error": "unknown workspace"}, status_code=404)
             return JSONResponse({"error": "unknown shared brain"}, status_code=404)
 
-        async def apply() -> JSONResponse:
+        async def apply(owner: Any) -> JSONResponse:
             return await _apply_sharing_policy(
                 config,
                 workspace_name=workspace_name,
@@ -487,15 +502,17 @@ async def set_workspace_shared_brain_sharing(request: Request) -> JSONResponse:
                 expected_identity=expected_identity,
                 expected_lifetime=expected_lifetime,
                 expected_generation=expected_generation,
+                owner=owner,
             )
 
         claimed = False
         try:
             async with shared_brain._checkout_lock(link.path):
                 async with shared_brain._checkout_claim(link.path, config):
-                    claimed = True
-                    return await apply()
-        except OSError:
+                    async with _workspace_registry_claim(config) as owner:
+                        claimed = True
+                        return await apply(owner)
+        except (OSError, WorkspaceRegistryConflict):
             if claimed:
                 return JSONResponse(
                     {
@@ -505,18 +522,14 @@ async def set_workspace_shared_brain_sharing(request: Request) -> JSONResponse:
                     },
                     status_code=503,
                 )
-            if policy == "automatic":
-                return JSONResponse(
-                    {
-                        "error": "Automatic sharing is unavailable while another "
-                        "shared-brain operation holds the checkout. Try again.",
-                        "code": "policy_locked",
-                    },
-                    status_code=409,
-                )
-            # Turning automatic sharing off is always allowed; the disk CAS in
-            # `apply` still refuses a stale generation.
-            return await apply()
+            return JSONResponse(
+                {
+                    "error": "The sharing choice is unavailable while another "
+                    "registry or shared-brain operation is running. Try again.",
+                    "code": "policy_locked",
+                },
+                status_code=409,
+            )
 
 
 async def _apply_sharing_policy(
@@ -528,6 +541,7 @@ async def _apply_sharing_policy(
     expected_identity: str,
     expected_lifetime: str,
     expected_generation: int,
+    owner: Any,
 ) -> JSONResponse:
     """Revalidate one policy change against memory and disk, then write it."""
     from ciao.workspaces import workspace_registry_lock  # noqa: PLC0415
@@ -555,20 +569,25 @@ async def _apply_sharing_policy(
         if config.workspace(workspace_name) is None:
             return JSONResponse({"error": "unknown workspace"}, status_code=404)
         return JSONResponse({"error": "unknown shared brain"}, status_code=404)
+    if link.kind != "git":
+        return JSONResponse(
+            {"error": "Ordinary folder links do not have a sharing policy.", "code": "unsupported_brain_kind"},
+            status_code=409,
+        )
     if not matches(link):
         return changed()
     if policy == "automatic":
         # A grant names a person's audience, so the folder has to be usable
         # and still its own checkout right now. Revocation never needs this:
         # it must work even when the folder is gone or broken.
-        probe = await asyncio.to_thread(shared_brain.brain_state, link, config)
+        probe = await asyncio.to_thread(shared_brain._brain_state_owned, link, config)
         if probe.get("problem"):
             if probe["problem"] == "origin_changed":
                 # A retargeted folder permanently loses the old standing
                 # grant; restoring the old origin later needs a fresh choice.
                 try:
                     await asyncio.to_thread(
-                        shared_brain.invalidate_sharing_on_drift, config, link
+                        shared_brain.invalidate_sharing_on_drift, config, link, owner
                     )
                 except OSError:
                     return JSONResponse(
@@ -603,22 +622,37 @@ async def _apply_sharing_policy(
         current = links[index]
         if not matches(current):
             return changed()
-        if not _disk_link_matches(
-            current, _disk_shared_brain_row(config, workspace_name, brain_name)
-        ):
+        disk_row = _disk_shared_brain_row(config, workspace_name, brain_name)
+        if not _disk_link_matches(current, disk_row):
             return changed()
         updated = shared_brain.set_sharing_policy(current, policy)
-        if updated != current:
+        if updated != current or not _disk_link_state_matches(current, disk_row):
             links[index] = updated
             candidate = dataclasses.replace(workspace, shared_brains=links)
             candidate_workspaces = dict(config.workspaces)
             candidate_workspaces[workspace_name] = candidate
-            _persist_workspaces(config, candidate_workspaces)
+            _persist_workspaces(config, candidate_workspaces, owner=owner)
             config.workspaces[workspace_name] = candidate
-    state = await asyncio.to_thread(shared_brain.brain_state, updated, config)
+    state = await asyncio.to_thread(shared_brain._brain_state_owned, updated, config)
     return JSONResponse({"shared_brain": state})
 
 
+def _registry_conflicts(handler):
+    from functools import wraps
+    from ciao.workspace_archive import WorkspaceArchiveError
+
+    @wraps(handler)
+    async def wrapped(request):
+        try:
+            return await handler(request)
+        except WorkspaceRegistryConflict as exc:
+            return JSONResponse({"error": str(exc)}, status_code=409)
+        except WorkspaceArchiveError as exc:
+            return JSONResponse({"error": exc.message}, status_code=exc.status)
+    return wrapped
+
+
+@_registry_conflicts
 async def upsert_workspace_setting(request: Request) -> JSONResponse:
     config = request.app.state.config
     try:
@@ -634,122 +668,98 @@ async def upsert_workspace_setting(request: Request) -> JSONResponse:
     # Serialized with archive and restore; see ``_workspace_archive_lock``.
     async with _workspace_archive_lock(request):
         renamed: dict[str, str] | None = None
-        if route_name and requested and requested != route_name:
-            # A PATCH carrying a different name renames the workspace first;
-            # the rest of the save below then applies to the new record.
-            # The submitted settings are validated against the renamed record
-            # BEFORE the rename runs: otherwise an invalid provider, color or
-            # tool list would 400 after the registry, the references and (on
-            # a re-rooted install) the directory had already moved.
-            from ciao.workspace_rename import (  # noqa: PLC0415
-                WorkspaceRenameBusy,
-                preview_renamed_config,
-                rename_workspace,
-            )
-
-            old_existing = config.workspace(str(route_name))
-            if old_existing is not None:
-                try:
-                    await _workspace_from_request_async(
-                        {**body, "name": requested},
-                        config=config,
-                        existing=preview_renamed_config(
-                            old_existing, old=str(route_name), new=requested
-                        ),
-                    )
-                except ValueError as exc:
-                    return JSONResponse({"error": str(exc)}, status_code=400)
-            try:
-                async with _workspace_checkout_claims(config, str(route_name)):
-                    renamed = rename_workspace(
-                        config,
-                        old=str(route_name),
-                        new=requested,
-                        projects=getattr(
-                            request.app.state, "project_chat_manager", None
-                        ),
-                        schedules=_rename_schedule_store(request),
-                        webhooks=_rename_webhook_store(request),
-                        imports=_rename_import_store(request),
-                    )
-            except WorkspaceRenameBusy as exc:
-                return JSONResponse({"error": str(exc)}, status_code=409)
-            except ValueError as exc:
-                return JSONResponse({"error": str(exc)}, status_code=400)
-            body = {**body, "name": requested}
+        from ciao.workspace_rename import WorkspaceRenameBusy, preview_renamed_config, rename_workspace
+        renaming = bool(route_name and requested and requested != route_name)
         from ciao.workspaces import workspace_registry_lock  # noqa: PLC0415
 
+        from ciao.workspaces import check_requested_brain_kinds, requested_brain_rows
+
+        requested_rows = []
+        if "shared_brains" in body:
+            try:
+                requested_rows = requested_brain_rows(body["shared_brains"])
+            except (ValueError, OSError) as exc:
+                return JSONResponse({"error": str(exc)}, status_code=400)
+            body = {**body, "shared_brains": requested_rows}
+
         while True:
-            # Resolve omitted settings against a stable snapshot. The link list
-            # may be edited by another registry writer while Git resolution or
-            # checkout-claim acquisition yields, so the snapshot is rechecked
-            # under the same lock used for the final save.
             with workspace_registry_lock(config):
                 previous_workspaces = dict(config.workspaces)
                 registry_snapshot = _workspace_registry_snapshot(config)
                 existing = config.workspace(str(body.get("name", "")).strip())
-            try:
-                workspace = await _workspace_from_request_async(
-                    body, config=config, existing=existing
-                )
-            except ValueError as exc:
-                return JSONResponse({"error": str(exc)}, status_code=400)
-            created = workspace.name not in previous_workspaces
-            previous_links = {
-                link.path: link.lifetime_id
-                for name, item in previous_workspaces.items()
-                if name == workspace.name
-                for link in getattr(item, "shared_brains", [])
-            }
-            next_links = {link.path: link.lifetime_id for link in workspace.shared_brains}
-            affected_paths = sorted(
-                path for path in set(previous_links) | set(next_links)
-                if previous_links.get(path) != next_links.get(path)
-            )
-            candidate_workspaces = dict(previous_workspaces)
-            candidate_workspaces[workspace.name] = workspace
-            retry = False
-            async with contextlib.AsyncExitStack() as claims:
-                for path in affected_paths:
-                    await claims.enter_async_context(shared_brain._checkout_lock(path))
-                    await claims.enter_async_context(shared_brain._checkout_claim(path, config))
+            editing = existing
+            if renaming:
+                if existing is None:
+                    return JSONResponse({"error": f"unknown workspace '{route_name}'"}, status_code=400)
+                editing = preview_renamed_config(existing, old=str(route_name), new=requested)
+            existing_links = getattr(existing, "shared_brains", [])
+            paths = {row["path"] for row in requested_rows}
+            if renaming or "shared_brains" in body:
+                paths.update(os.path.realpath(link.path) for link in existing_links)
+            async with _checkout_claims_for_paths(config, paths), _workspace_registry_claim(config) as registry_owner:
                 with workspace_registry_lock(config):
                     if _workspace_registry_snapshot(config) != registry_snapshot:
-                        retry = True
-                    else:
-                        onboarding_target = None
-                        if created:
-                            # Validate receipt access before mutating the live registry.
-                            # Installs without onboarding retain their old save behavior.
-                            from ciao.onboarding import read_receipt  # noqa: PLC0415
-                            from ciao.onboarding_progress import register_new_workspace  # noqa: PLC0415
+                        continue
+                try:
+                    if requested_rows:
+                        check_requested_brain_kinds(registry_owner, requested_rows, existing_links)
+                    workspace = await _workspace_from_request_async(
+                        {**body, "name": requested} if renaming else body, config=config, existing=editing
+                    )
+                except ValueError as exc:
+                    return JSONResponse({"error": str(exc)}, status_code=400)
+                created = not renaming and workspace.name not in previous_workspaces
+                candidate_workspaces = {**previous_workspaces, workspace.name: workspace}
+                with workspace_registry_lock(config):
+                    onboarding_target = None
+                    if created:
+                        # Validate receipt access before mutating the live registry.
+                        # Installs without onboarding retain their old save behavior.
+                        from ciao.onboarding import read_receipt  # noqa: PLC0415
+                        from ciao.onboarding_progress import register_new_workspace  # noqa: PLC0415
 
-                            if read_receipt(Path(config.state_path).parent) is not None:
-                                register_new_workspace(config, workspace.name)
-                                onboarding_target = {"kind": "workspace", "name": workspace.name}
-                        _persist_workspaces(config, candidate_workspaces)
+                        if read_receipt(Path(config.state_path).parent) is not None:
+                            register_new_workspace(config, workspace.name)
+                            onboarding_target = {"kind": "workspace", "name": workspace.name}
+                    if renaming:
+                        try:
+                            renamed = rename_workspace(
+                                config, old=str(route_name), new=requested, owner=registry_owner,
+                                updated=workspace,
+                                projects=getattr(request.app.state, "project_chat_manager", None),
+                                schedules=_rename_schedule_store(request),
+                                webhooks=_rename_webhook_store(request),
+                                imports=_rename_import_store(request),
+                            )
+                        except WorkspaceRenameBusy as exc:
+                            return JSONResponse({"error": str(exc)}, status_code=409)
+                        except ValueError as exc:
+                            return JSONResponse({"error": str(exc)}, status_code=400)
+                    else:
+                        _persist_workspaces(config, candidate_workspaces, owner=registry_owner)
                         config.workspaces[workspace.name] = workspace
-            if retry:
-                continue
+                _refresh_project_manager_workspaces(request)
+                if created:
+                    bootstrapped = await _bootstrap_new_agent_root(config, workspace.name)
             break
         # A newly linked folder gets its first update now, not at the next loop pass.
         linked_before = {link.path for link in getattr(existing, "shared_brains", [])}
         for link in workspace.shared_brains:
             if link.path not in linked_before:
                 shared_brain.schedule_update(link, config)
-        _refresh_project_manager_workspaces(request)
         payload = _workspaces_payload(config)
         if renamed is not None:
             payload["renamed"] = renamed
         if created:
             if onboarding_target is not None:
                 payload["onboarding_target"] = onboarding_target
-            payload["bootstrapped"] = await _bootstrap_new_agent_root(config, workspace.name)
+            payload["bootstrapped"] = bootstrapped
         if renamed is not None:
             _publish_workspaces_changed(request, renamed["from"], renamed["to"])
         return JSONResponse(payload, status_code=201 if created else 200)
 
 
+@_registry_conflicts
 async def reorder_workspaces(request: Request) -> JSONResponse:
     """Persist a reordered workspace registry. Body: {"order": [name, ...]}."""
     config = request.app.state.config
@@ -771,30 +781,40 @@ async def reorder_workspaces(request: Request) -> JSONResponse:
         if order != current:
             from ciao.workspaces import workspace_registry_lock  # noqa: PLC0415
 
-            with workspace_registry_lock(config):
-                before = config.primary_workspace()
-                previous = dict(config.workspaces)
-                rebuilt = {name: previous[name] for name in order}
-                config.workspaces.clear()
-                config.workspaces.update(rebuilt)
-                if config.primary_workspace() != before:
-                    # Without a workspace named "personal" the first entry is the
-                    # main workspace; a reorder must not hand that role away.
+            async with contextlib.AsyncExitStack() as claims:
+                all_paths = [
+                    link.path
+                    for workspace in config.workspaces.values()
+                    for link in getattr(workspace, "shared_brains", []) or []
+                ]
+                await claims.enter_async_context(_checkout_claims_for_paths(config, all_paths))
+                registry_owner = await claims.enter_async_context(_workspace_registry_claim(config))
+                with workspace_registry_lock(config):
+                    before = config.primary_workspace()
+                    previous = dict(config.workspaces)
+                    rebuilt = {name: previous[name] for name in order}
                     config.workspaces.clear()
-                    config.workspaces.update(previous)
-                    return JSONResponse(
-                        {"error": f"'{before}' is the main workspace and stays first"},
-                        status_code=409,
-                    )
-                try:
-                    _persist_workspaces(config)
-                except OSError as exc:
-                    config.workspaces.clear()
-                    config.workspaces.update(previous)
-                    return JSONResponse(
-                        {"error": f"Failed to save the workspace order: {exc}"},
-                        status_code=500,
-                    )
+                    config.workspaces.update(rebuilt)
+                    if config.primary_workspace() != before:
+                        # Without a workspace named "personal" the first entry is
+                        # the main workspace; reorder must not hand it away.
+                        config.workspaces.clear()
+                        config.workspaces.update(previous)
+                        return JSONResponse(
+                            {"error": f"'{before}' is the main workspace and stays first"},
+                            status_code=409,
+                        )
+                    try:
+                        _persist_workspaces(config, owner=registry_owner)
+                    except (OSError, ValueError, WorkspaceRegistryConflict) as exc:
+                        config.workspaces.clear()
+                        config.workspaces.update(previous)
+                        if isinstance(exc, WorkspaceRegistryConflict):
+                            raise
+                        return JSONResponse(
+                            {"error": f"Failed to save the workspace order: {exc}"},
+                            status_code=500,
+                        )
             _refresh_project_manager_workspaces(request)
             _publish_workspaces_changed(request)
     return JSONResponse(_workspaces_payload(config))
@@ -824,7 +844,7 @@ async def _bootstrap_new_agent_root(config, name: str) -> bool:
     try:
         # `refresh_upstream=False`: this is a local seeding on a user-facing
         # request, not the periodic upstream regeneration.
-        await asyncio.to_thread(sync_workspace_skills, root, refresh_upstream=False)
+        await run_while_claimed(sync_workspace_skills, root, refresh_upstream=False)
     except Exception:  # noqa: BLE001 - creation already succeeded
         logger.exception("Could not seed agent root for new workspace %s", name)
         return False
@@ -903,6 +923,36 @@ async def _checkout_claims_for_paths(config: Any, paths: Iterable[str]):
 
 
 @contextlib.asynccontextmanager
+async def _workspace_registry_claim(config: Any):
+    """Acquire explicit nonblocking runtime registry ownership off-loop."""
+    from ciao.workspaces import acquire_workspace_registry
+
+    acquire_task = asyncio.create_task(
+        asyncio.to_thread(acquire_workspace_registry, config, blocking=False)
+    )
+    try:
+        owner = await asyncio.shield(acquire_task)
+    except asyncio.CancelledError:
+        # Keep cancellation from detaching a worker that may already own the fd.
+        while not acquire_task.done():
+            try:
+                await asyncio.shield(acquire_task)
+            except asyncio.CancelledError:
+                continue
+            except Exception:
+                break
+        if not acquire_task.cancelled() and acquire_task.exception() is None:
+            acquire_task.result().close()
+        raise
+    try:
+        from ciao.workspaces import ensure_registry_current
+        ensure_registry_current(config)
+        yield owner
+    finally:
+        owner.close()
+
+
+@contextlib.asynccontextmanager
 async def _workspace_checkout_claims(config: Any, workspace_name: str):
     workspace = config.workspace(workspace_name)
     paths = [link.path for link in getattr(workspace, "shared_brains", []) or []]
@@ -914,13 +964,16 @@ async def _workspace_checkout_claims(config: Any, workspace_name: str):
 async def _archive_checkout_claims(config: Any, archive_id: str):
     from ciao import workspace_archive  # noqa: PLC0415
 
-    paths = await asyncio.to_thread(
-        workspace_archive.restored_shared_brain_paths, config, archive_id
-    )
+    folder = workspace_archive._archive_folder(config, archive_id)
+    metadata = workspace_archive._read_metadata(folder)
+    if metadata is None:
+        raise workspace_archive.WorkspaceArchiveError("archive metadata is unreadable", 409)
+    paths = workspace_archive.archive_checkout_paths(config, metadata)
     async with _checkout_claims_for_paths(config, paths):
-        yield
+        yield metadata
 
 
+@_registry_conflicts
 async def archive_workspace_setting(request: Request) -> JSONResponse:
     """Archive a workspace: unregister it and move its folder aside, intact.
 
@@ -938,7 +991,7 @@ async def archive_workspace_setting(request: Request) -> JSONResponse:
 
     config = request.app.state.config
     name = str(request.path_params.get("name", "")).strip()
-    async with _workspace_archive_lock(request), _workspace_checkout_claims(config, name):
+    async with _workspace_archive_lock(request), _workspace_checkout_claims(config, name), _workspace_registry_claim(config) as owner:
         try:
             target = workspace_archive.plan_archive(config, name)
         except workspace_archive.WorkspaceArchiveError as exc:
@@ -1115,8 +1168,8 @@ async def archive_workspace_setting(request: Request) -> JSONResponse:
             )
             return _roll_back(f"its webhook triggers could not be revoked ({exc})")
         try:
-            workspace_archive.unregister(config, name)
-        except OSError as exc:
+            workspace_archive.unregister(config, name, owner=owner)
+        except (OSError, WorkspaceRegistryConflict) as exc:
             logger.exception("Could not save the registry after archiving %s", name)
             return _roll_back(f"the workspace registry could not be saved ({exc})")
         _refresh_project_manager_workspaces(request)
@@ -1137,7 +1190,7 @@ async def archive_workspace_setting(request: Request) -> JSONResponse:
                 logger.exception("Could not rebuild INDEX.md after archiving %s", name)
             return rows, rebuilt
 
-        search_rows, index_rebuilt = await asyncio.to_thread(_forget)
+        search_rows, index_rebuilt = await run_while_claimed(_forget)
         payload = _workspaces_payload(config)
         payload["archived"] = {
             "id": archived["id"],
@@ -1162,6 +1215,7 @@ async def list_archived_workspaces(request: Request) -> JSONResponse:
     return JSONResponse({"archived": archives})
 
 
+@_registry_conflicts
 async def restore_archived_workspace(request: Request) -> JSONResponse:
     """Move an archived workspace back and re-register it."""
     from ciao import workspace_archive  # noqa: PLC0415
@@ -1174,18 +1228,19 @@ async def restore_archived_workspace(request: Request) -> JSONResponse:
     if not isinstance(body, dict):
         return JSONResponse({"error": "expected an object"}, status_code=400)
     archive_id = str(body.get("id") or "").strip()
-    async with _workspace_archive_lock(request), _archive_checkout_claims(config, archive_id):
+    async with _workspace_archive_lock(request), _archive_checkout_claims(config, archive_id) as expected_metadata, _workspace_registry_claim(config) as owner:
         try:
-            folder, metadata, destination = await asyncio.to_thread(
-                workspace_archive.move_back, config, archive_id
+            folder, moved_metadata, destination = workspace_archive.move_back(
+                config, archive_id, expected_metadata=expected_metadata,
             )
+            metadata: dict[str, Any] = moved_metadata
         except workspace_archive.WorkspaceArchiveError as exc:
             return JSONResponse({"error": exc.message}, status_code=exc.status)
         # The registry is mutated here, on the event loop, never in the worker:
         # other handlers iterate ``config.workspaces`` on this thread.
         try:
             restored = workspace_archive.register_restored(
-                config, folder, metadata, destination
+                config, folder, metadata, destination, owner=owner
             )
         except workspace_archive.WorkspaceArchiveError as exc:
             return JSONResponse({"error": exc.message}, status_code=exc.status)
@@ -1221,7 +1276,7 @@ async def restore_archived_workspace(request: Request) -> JSONResponse:
                 logger.exception("Could not put back the schedules of %s", name)
                 try:
                     workspace_archive.unregister_restored(
-                        config, folder, metadata, destination
+                        config, folder, metadata, destination, owner=owner
                     )
                 except workspace_archive.WorkspaceArchiveError as undo_exc:
                     _refresh_project_manager_workspaces(request)
@@ -1253,7 +1308,7 @@ async def restore_archived_workspace(request: Request) -> JSONResponse:
         if added:
             _publish_automations_changed(request)
         try:
-            await asyncio.to_thread(workspace_archive.refresh_shared_index, config)
+            await run_while_claimed(workspace_archive.refresh_shared_index, config)
         except Exception:  # noqa: BLE001 - regenerated at the next startup
             logger.exception("Could not rebuild INDEX.md after restoring %s", name)
         if getattr(config, "_rerooted", lambda: False)():
@@ -9475,14 +9530,12 @@ def _share_context_is_current(config: Any, ctx: dict[str, Any]) -> bool:
 
 async def _settle_share_accept(config: Any, ctx: dict[str, Any], receipt: dict[str, Any]) -> bool:
     """Remove a confirmed share row and record its decision as one worker transaction."""
-    from ciao import share_publish
-
     queue = Path(ctx["path"])
     try:
         vault = Path(config.workspace_vault_root(ctx["workspace"]))
     except (AttributeError, ValueError):
         vault = queue.parent.parent
-    return await share_publish._run_locked(
+    return await run_while_claimed(
         functools.partial(_settle_share_accept_sync, ctx, receipt, queue, vault)
     )
 
@@ -9687,7 +9740,7 @@ async def _refresh_legacy_share_review(
     from ciao import share_proposals, share_publish
 
     config = request.app.state.config
-    replacement = await share_publish._run_locked(functools.partial(
+    replacement = await run_while_claimed(functools.partial(
         share_publish.refresh_legacy_draft,
         config, workspace=workspace, proposal_id=pid,
         expected_revision=expected_revision,

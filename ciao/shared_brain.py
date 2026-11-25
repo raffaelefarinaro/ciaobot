@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import json
 import logging
 import os
 import re
@@ -21,7 +22,7 @@ import subprocess
 from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
-from contextlib import asynccontextmanager
+from contextlib import ExitStack, asynccontextmanager, contextmanager
 from typing import Any, Literal
 
 from ciao import job_runs
@@ -33,9 +34,13 @@ from ciao.config import (
     SharingConsent,
 )
 from ciao.git_proc import EXACT_BYTES, GIT_TIMEOUT_DETAIL, run_git
-from ciao.os_support.files import open_fd
-from ciao.os_support.locks import lock_exclusive, unlock
-from ciao.os_support.private import is_private_descriptor_strict, make_private_dir
+from ciao.os_support.files import open_fd, replace_file
+from ciao.os_support.locks import await_exclusive, lock_exclusive
+from ciao.os_support.private import (
+    is_private_descriptor_strict,
+    make_private_dir,
+    mkstemp_private,
+)
 from ciao.os_support.child_env import child_env
 from ciao.redact import redact_text
 from ciao.repo_link import validate_repo_path
@@ -87,6 +92,9 @@ _locks: dict[str, asyncio.Lock] = {}
 _last_update: dict[str, dict[str, Any]] = {}
 _pending: dict[str, asyncio.Task[Any]] = {}
 _cursor = 0
+_updates_closed = False
+_update_loop_task: asyncio.Task[None] | None = None
+_shutdown_task: asyncio.Task[None] | None = None
 
 
 def _git_env(folder: Path) -> dict[str, str]:
@@ -138,13 +146,6 @@ def _now() -> str:
     return datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
-#: Grants this process observed as no longer valid (normally after an origin
-#: drift) but could not yet persist as review. Keyed by lifetime and generation
-#: so a fresh grant on the same lifetime is unaffected. This is the fail-closed
-#: memory guard for the window between the observation and a successful write.
-_invalidated_grants: set[tuple[str, int]] = set()
-
-
 def sharing_grant_stored(link: SharedBrainLink) -> bool:
     """True when the registry row still carries an automatic consent."""
     return link.sharing_policy == "automatic" and link.sharing_consent is not None
@@ -162,7 +163,6 @@ def sharing_consent_active(link: SharedBrainLink) -> bool:
     consent = link.sharing_consent
     return (
         link.sharing_policy == "automatic"
-        and (link.lifetime_id, link.sharing_generation) not in _invalidated_grants
         and consent is not None
         and consent.generation == link.sharing_generation
         and consent.identity == link.identity
@@ -222,56 +222,170 @@ def reset_link_for_restore(link: SharedBrainLink) -> SharedBrainLink:
     )
 
 
-def invalidate_sharing_on_drift(config: Any, link: SharedBrainLink) -> bool:
-    """Durably return every workspace's copy of this link to review.
+def _sharing_revocations_path(config: Any) -> Path:
+    return Path(config.state_path).parent / "sharing-revocations.json"
 
-    Called only after the live folder's origin no longer gives the linked
-    identity. The registry write drops the consent and bumps the generation, so
-    a later origin repair cannot quietly resume the old standing grant: the
-    person has to choose automatic again.
 
-    Only the exact observed ``(path, lifetime, generation)`` is invalidated, so
-    a delayed observation cannot revoke a newer grant, and an independently
-    linked workspace at the same path keeps its own lifetime. Returns True when
-    a registry write happened, False when there was nothing to invalidate.
-    A persistence failure raises ``OSError`` after the process-local fail-closed
-    guard is set, so the caller can surface it and keep revocation available.
+def load_sharing_revocations(config: Any) -> set[tuple[str, int]]:
+    """Durable fail-closed revocations, keyed by link lifetime and generation."""
+    path = _sharing_revocations_path(config)
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, ValueError):
+        return set()
+    grants = raw.get("grants") if isinstance(raw, dict) else None
+    if not isinstance(grants, list):
+        return set()
+    found: set[tuple[str, int]] = set()
+    for row in grants:
+        if not isinstance(row, dict):
+            continue
+        lifetime = row.get("lifetime_id")
+        generation = row.get("generation")
+        if (
+            isinstance(lifetime, str)
+            and lifetime
+            and type(generation) is int
+            and generation >= 0
+        ):
+            found.add((lifetime, generation))
+    return found
+
+
+def save_sharing_revocations(config: Any, keys: set[tuple[str, int]]) -> None:
+    """Atomically persist the revocation journal; raises OSError on failure."""
+    parent = Path(config.state_path).parent
+    parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    rows = [
+        {"lifetime_id": lifetime, "generation": generation}
+        for lifetime, generation in sorted(keys)
+    ]
+    payload = (
+        json.dumps({"schema": 1, "grants": rows}, indent=2) + "\n"
+    ).encode("utf-8")
+    fd, temp_name = mkstemp_private(dir=parent, prefix=".sharing-revocations-")
+    temp = Path(temp_name)
+    try:
+        with os.fdopen(fd, "wb") as handle:
+            handle.write(payload)
+            handle.flush()
+            os.fsync(handle.fileno())
+        replace_file(temp, _sharing_revocations_path(config))
+        if hasattr(os, "O_DIRECTORY"):
+            directory_fd = os.open(parent, os.O_RDONLY | os.O_DIRECTORY)
+            try:
+                os.fsync(directory_fd)
+            finally:
+                os.close(directory_fd)
+    except BaseException:
+        temp.unlink(missing_ok=True)
+        raise
+
+
+def apply_persisted_sharing_revocations(config: Any) -> None:
+    """Load the durable journal and make matching stored grants review in memory.
+
+    The registry row is not rewritten here: a later successful policy write
+    persists it, while the journal keeps the grant inert across restarts even
+    when the registry write had failed.
     """
-    from ciao.workspaces import persist_workspaces, workspace_registry_lock
+    revoked = load_sharing_revocations(config)
+    if not revoked:
+        return
+    for workspace in getattr(config, "workspaces", {}).values():
+        links = list(getattr(workspace, "shared_brains", None) or [])
+        kept: list[SharedBrainLink] = []
+        changed = False
+        for item in links:
+            if (
+                item.kind == "git"
+                and sharing_grant_stored(item)
+                and (item.lifetime_id, item.sharing_generation) in revoked
+            ):
+                kept.append(set_sharing_policy(item, DEFAULT_SHARING_POLICY))
+                changed = True
+            else:
+                kept.append(item)
+        if changed:
+            workspace.shared_brains = kept
 
-    changed: dict[str, Any] = {}
-    with workspace_registry_lock(config):
-        for name, workspace in getattr(config, "workspaces", {}).items():
-            links = list(getattr(workspace, "shared_brains", None) or [])
-            kept: list[SharedBrainLink] = []
-            touched = False
-            for item in links:
-                if (
-                    item.path == link.path
-                    and item.lifetime_id == link.lifetime_id
-                    and item.sharing_generation == link.sharing_generation
-                    and sharing_grant_stored(item)
-                ):
-                    _invalidated_grants.add((item.lifetime_id, item.sharing_generation))
-                    kept.append(set_sharing_policy(item, DEFAULT_SHARING_POLICY))
-                    touched = True
-                else:
-                    kept.append(item)
-            if touched:
-                changed[name] = replace(workspace, shared_brains=kept)
-        if not changed:
-            return False
-        candidate_workspaces = dict(config.workspaces)
-        candidate_workspaces.update(changed)
-        try:
-            persist_workspaces(config, candidate_workspaces)
-        except OSError:
-            # The process-local guard already makes this grant inactive; the
-            # registry write is retried by the next observation or a revoke.
-            logger.exception("Could not persist a shared-brain consent invalidation")
-            raise
-        config.workspaces.update(changed)
-        return True
+
+def _live_origin_identity(link: SharedBrainLink) -> str:
+    """The live origin identity of a Git checkout, or "" when unreadable."""
+    try:
+        code, listing = _git(Path(link.path), "config", "--list", "--show-scope")
+    except (OSError, ValueError):
+        return ""
+    if code != 0:
+        return ""
+    return _safe_identity(_origin_from_listing(listing))
+
+
+def invalidate_sharing_on_drift(
+    config: Any, link: SharedBrainLink, owner: Any | None = None
+) -> bool:
+    """Durably return every drifted Git link at this path to review.
+
+    Called only while the caller owns the checkout claim (and normally the
+    authoritative registry claim). The live origin is re-read here, so a delayed
+    observation cannot revoke a grant after the origin was repaired. Every
+    workspace linking the same path is covered, not only the workspace that
+    observed the drift.
+
+    A revocation journal is written before the registry. If the registry write
+    then fails, the journal keeps those exact grants inert across a restart.
+    Raises OSError when either durable write fails; the caller surfaces it.
+    """
+    from ciao.workspaces import (
+        acquire_workspace_registry,
+        persist_workspaces,
+        workspace_registry_lock,
+    )
+
+    own_owner = owner is None
+    if own_owner:
+        owner = acquire_workspace_registry(config)
+    try:
+        live_identity = _live_origin_identity(link)
+        canonical = os.path.realpath(link.path)
+        changed: dict[str, Any] = {}
+        revoked: set[tuple[str, int]] = set()
+        with workspace_registry_lock(config):
+            for name, workspace in getattr(config, "workspaces", {}).items():
+                links = list(getattr(workspace, "shared_brains", None) or [])
+                kept: list[SharedBrainLink] = []
+                touched = False
+                for item in links:
+                    if (
+                        item.kind == "git"
+                        and os.path.realpath(item.path) == canonical
+                        and sharing_grant_stored(item)
+                        and item.identity != live_identity
+                        and (
+                            item.lifetime_id != link.lifetime_id
+                            or item.sharing_generation == link.sharing_generation
+                        )
+                    ):
+                        revoked.add((item.lifetime_id, item.sharing_generation))
+                        kept.append(set_sharing_policy(item, DEFAULT_SHARING_POLICY))
+                        touched = True
+                    else:
+                        kept.append(item)
+                if touched:
+                    changed[name] = replace(workspace, shared_brains=kept)
+            if not changed:
+                return False
+            journal = load_sharing_revocations(config) | revoked
+            save_sharing_revocations(config, journal)
+            config.workspaces.update(changed)
+            candidate_workspaces = dict(config.workspaces)
+            # If this write fails, the in-memory review state and the journal
+            # remain; the next startup applies the journal.
+            persist_workspaces(config, candidate_workspaces, owner=owner)
+            return True
+    finally:
+        if own_owner and owner is not None:
+            owner.close()
 
 
 _SCP_RE = re.compile(r"(?:[^@/\\:\s]+@)?[^@/\\:\s]+:[^\s]+")
@@ -335,6 +449,30 @@ def validate_brain_path(config: Any, raw: str) -> str:
     resolved = validate_repo_path(raw)
     if not resolved:
         return ""
+    if overlaps_protected(config, resolved):
+        raise ValueError(
+            f"Shared brain folder must be outside the Ciaobot install and its vaults: {resolved}"
+        )
+    return resolved
+
+
+def validate_folder_path(config: Any, raw: str) -> str:
+    """Resolve an accessible ordinary folder outside every protected root."""
+    if any(ord(ch) < 32 or ord(ch) == 127 for ch in raw):
+        raise ValueError("Shared brain path contains a control character")
+    expanded = os.path.expanduser(raw.strip())
+    if not expanded or not os.path.isabs(expanded):
+        raise ValueError("Shared brain folder path must be absolute")
+    resolved = os.path.realpath(expanded)
+    if not os.path.isdir(resolved):
+        raise ValueError(f"Shared brain folder does not exist: {resolved}")
+    if not os.access(resolved, os.R_OK | os.X_OK):
+        raise ValueError(f"Shared brain folder is not accessible: {resolved}")
+    try:
+        with os.scandir(resolved):
+            pass
+    except OSError as exc:
+        raise ValueError(f"Shared brain folder is not accessible: {resolved}") from exc
     if overlaps_protected(config, resolved):
         raise ValueError(
             f"Shared brain folder must be outside the Ciaobot install and its vaults: {resolved}"
@@ -426,6 +564,15 @@ def _derived_name(identity: str, taken: set[str]) -> str:
     return candidate
 
 
+def conflicts_with_link_kind(config: Any, workspace: str, path: str, kind: str) -> bool:
+    key = os.path.realpath(path)
+    return any(
+        link.kind != kind and os.path.realpath(link.path) == key
+        for name, record in getattr(config, "workspaces", {}).items() if name != workspace
+        for link in getattr(record, "shared_brains", ())
+    )
+
+
 def resolve_links(
     config: Any,
     workspace: str,
@@ -435,7 +582,7 @@ def resolve_links(
     """The whole new list for one workspace. Git runs only for rows that are new."""
     if len(raw) > MAX_BRAINS_PER_WORKSPACE:
         raise ValueError(f"A workspace can link at most {MAX_BRAINS_PER_WORKSPACE} shared brains")
-    by_path = {link.path: link for link in existing}
+    by_path = {os.path.realpath(link.path): link for link in existing}
     names: set[str] = set()
     identities: dict[str, str] = {}
     paths: set[str] = set()
@@ -444,25 +591,42 @@ def resolve_links(
         requested = str(row.get("name") or "").strip()
         raw_path = str(row.get("path", ""))
         key = os.path.realpath(os.path.expanduser(raw_path.strip()))
+        kind = row.get("kind")
+        if kind is None:
+            kind = by_path[key].kind if key in by_path else "git"
+        if kind not in ("git", "folder"):
+            raise ValueError("shared brain kind must be 'git' or 'folder'")
+        if conflicts_with_link_kind(config, workspace, key, kind):
+            raise ValueError("shared brain path is linked with another kind in a different workspace")
         if key in paths:
             raise ValueError(f"Shared brain folder is listed twice: {key}")
         paths.add(key)
         kept = by_path.get(key)
         if kept is not None:
+            if kind != kept.kind:
+                raise ValueError(
+                    f"Shared brain '{kept.name}' is already linked as {kept.kind}; unlink and add it again to change kind"
+                )
             if requested and requested != kept.name:
                 raise ValueError(
                     f"Shared brain '{kept.name}' is already linked; remove and add it again to rename it"
                 )
+            if kept.name in names or kept.identity in identities:
+                raise ValueError("retained shared brain name or identity is duplicated")
             names.add(kept.name)
             identities[kept.identity] = kept.name
             out.append(kept)
             continue
-        path = validate_brain_path(config, raw_path)
-        origin = _link_origin(path)
-        try:
-            identity = canonical_identity(origin)
-        except ValueError as exc:
-            raise ValueError(f"{path}: {exc}") from exc
+        if kind == "folder":
+            path = validate_folder_path(config, raw_path)
+            identity = f"folder:{path}"
+        else:
+            path = validate_brain_path(config, raw_path)
+            origin = _link_origin(path)
+            try:
+                identity = canonical_identity(origin)
+            except ValueError as exc:
+                raise ValueError(f"{path}: {exc}") from exc
         if identity in identities:
             raise ValueError(
                 f"{path} is the same repository as shared brain '{identities[identity]}'"
@@ -477,7 +641,7 @@ def resolve_links(
             name = _derived_name(identity, names)
         names.add(name)
         identities[identity] = name
-        out.append(SharedBrainLink(name=name, path=path, identity=identity))
+        out.append(SharedBrainLink(name=name, path=path, identity=identity, kind=kind))
     return out
 
 
@@ -510,21 +674,40 @@ def path_problem(config: Any, path: str) -> str:
     return ""
 
 
+def link_problem(config: Any, link: SharedBrainLink) -> str:
+    """Current filesystem problem for either kind, without starting Git."""
+    if link.kind == "git":
+        return path_problem(config, link.path)
+    path = link.path
+    if os.path.realpath(path) != path or not os.path.isdir(path):
+        return "missing" if not os.path.exists(path) else "moved"
+    if overlaps_protected(config, path):
+        return "outside_install"
+    if not os.access(path, os.R_OK | os.X_OK):
+        return "inaccessible"
+    try:
+        with os.scandir(path):
+            pass
+    except OSError:
+        return "inaccessible"
+    return ""
+
+
 def _is_own_checkout(folder: Path, top: str) -> bool:
     return bool(top.strip()) and os.path.realpath(top.strip()) == os.path.realpath(folder)
 
 
-def brain_state(link: SharedBrainLink, config: Any) -> dict[str, Any]:
-    """Live state of one linked folder. Its own config is vetted before any other git call."""
-    automatic = sharing_consent_active(link)
-    stored = sharing_grant_stored(link)
+def _initial_state(link: SharedBrainLink) -> dict[str, Any]:
+    automatic = sharing_consent_active(link) if link.kind == "git" else False
+    stored = sharing_grant_stored(link) if link.kind == "git" else False
     state: dict[str, Any] = {
         "name": link.name,
+        "kind": link.kind,
         "identity": link.identity,
         "path": link.path,
         "lifetime": link.lifetime_id,
         "sharing_policy": "automatic" if automatic else DEFAULT_SHARING_POLICY,
-        "sharing_generation": link.sharing_generation,
+        "sharing_generation": link.sharing_generation if link.kind == "git" else 0,
         "sharing_granted_at": (
             link.sharing_consent.granted_at
             if automatic and link.sharing_consent is not None
@@ -542,9 +725,42 @@ def brain_state(link: SharedBrainLink, config: Any) -> dict[str, Any]:
         "head_date": "",
         "dirty": False,
         "upstream": False,
-        "fetched_at": fetched_at(link.path),
-        "last_update": _last_update.get(_lock_key(link.path)),
+        "fetched_at": None,
+        "last_update": _last_update.get(_lock_key(link.path)) if link.kind == "git" else None,
     }
+    return state
+
+
+def brain_state(link: SharedBrainLink, config: Any, workspace: str) -> dict[str, Any]:
+    """Inspect a registered checkout only while its path and registry are owned."""
+    from ciao.workspaces import WorkspaceRegistryConflict, persisted_checkout_links, workspace_registry_claim
+
+    if link.kind == "folder":
+        return _brain_state_owned(link, config)
+    try:
+        with checkout_claims_nowait([link.path], config), workspace_registry_claim(config) as owner:
+            if owner.current is None or owner.current != config._workspace_registry_bytes:
+                raise WorkspaceRegistryConflict("workspace registry changed")
+            matches = persisted_checkout_links(owner.current, link.path)
+            if not any(
+                name == workspace and row.get("name") == link.name and row.get("identity") == link.identity
+                and row.get("lifetime_id", link.lifetime_id) == link.lifetime_id
+                for name, row in matches
+            ):
+                raise WorkspaceRegistryConflict("shared brain link changed")
+            return _brain_state_owned(link, config)
+    except (OSError, ValueError, WorkspaceRegistryConflict):
+        return {**_initial_state(link), "problem": "registry_unavailable"}
+
+
+def _brain_state_owned(link: SharedBrainLink, config: Any) -> dict[str, Any]:
+    """Read live status inside the caller's checkout or registry transaction."""
+    state = _initial_state(link)
+    if link.kind == "folder":
+        state["problem"] = link_problem(config, link)
+        state["missing"] = state["problem"] == "missing"
+        return state
+    state["fetched_at"] = fetched_at(link.path)
     problem = path_problem(config, link.path)
     if problem:
         state["problem"] = problem
@@ -572,7 +788,7 @@ def brain_state(link: SharedBrainLink, config: Any) -> dict[str, Any]:
         # reader can mistake this observation for a live automatic grant.
         state["sharing_policy"] = DEFAULT_SHARING_POLICY
         state["sharing_granted_at"] = ""
-        state["sharing_grant_pending"] = stored
+        state["sharing_grant_pending"] = sharing_grant_stored(link)
     code, head = _git(folder, "log", "-1", "--format=%h%x00%cs")
     if code == 0 and head.strip():
         sha, _, day = head.strip().partition("\x00")
@@ -604,9 +820,8 @@ def _checkout_lock(path: str) -> asyncio.Lock:
     return _locks.setdefault(key, asyncio.Lock())
 
 
-@asynccontextmanager
-async def _checkout_claim(path: str, config: Any):
-    """Serialize checkout network and ref changes across engine processes."""
+@contextmanager
+def _checkout_descriptor(path: str, config: Any):
     root = Path(config.state_path).parent / "locks" / "shared-brains"
     root.mkdir(parents=True, exist_ok=True, mode=0o700)
     make_private_dir(root)
@@ -616,36 +831,61 @@ async def _checkout_claim(path: str, config: Any):
     try:
         if not is_private_descriptor_strict(fd):
             raise OSError("shared brain lock is not private")
-        loop = asyncio.get_running_loop()
-        acquire = loop.run_in_executor(None, lock_exclusive, fd)
-        try:
-            await asyncio.shield(acquire)
-        except asyncio.CancelledError:
-            await acquire
-            await asyncio.shield(loop.run_in_executor(None, unlock, fd))
-            raise
-        try:
-            yield
-        finally:
-            await asyncio.shield(loop.run_in_executor(None, unlock, fd))
+        yield fd
     finally:
         os.close(fd)
 
 
+@contextmanager
+def checkout_claims_nowait(paths, config: Any):
+    from ciao.workspaces import WorkspaceRegistryBusy
+    with ExitStack() as stack:
+        for path in sorted({_lock_key(path) for path in paths}):
+            fd = stack.enter_context(_checkout_descriptor(path, config))
+            try:
+                lock_exclusive(fd, blocking=False)
+            except BlockingIOError as exc:
+                raise WorkspaceRegistryBusy("shared checkout is busy") from exc
+        yield
+
+
+@asynccontextmanager
+async def _checkout_claim(path: str, config: Any):
+    """Serialize checkout network and ref changes across engine processes."""
+    with _checkout_descriptor(path, config) as fd:
+        await await_exclusive(fd)
+        yield
+
+
 async def update_brain(link: SharedBrainLink, config: Any) -> dict[str, Any]:
     """Fetch and fast-forward one linked folder, one case from the matrix (see the issue)."""
+    if link.kind != "git":
+        return _result("skipped", "folder")
     key = _lock_key(link.path)
     lock = _checkout_lock(key)
     async with lock:
         try:
             async with _checkout_claim(key, config):
+                from ciao.workspaces import ensure_registry_current, persisted_checkout_links, WorkspaceRegistryConflict
+                try:
+                    ensure_registry_current(config)
+                    raw = getattr(config, "_workspace_registry_bytes", None)
+                    if raw is not None:
+                        links = persisted_checkout_links(raw, key)
+                        if not any(row.get("identity") == link.identity and row.get("name") == link.name
+                                   and row.get("lifetime_id", link.lifetime_id) == link.lifetime_id for _, row in links):
+                            return _result("skipped", "registry_changed")
+                except (ValueError, WorkspaceRegistryConflict):
+                    return _result("skipped", "registry_changed")
+                if conflicts_with_link_kind(config, "", key, "git"):
+                    return _result("skipped", "folder")
                 result = await _update_unlocked(config, Path(key), link.identity)
                 if result.get("reason") == "origin_changed":
                     try:
                         await asyncio.to_thread(
                             invalidate_sharing_on_drift, config, link
                         )
-                    except OSError:
+                    except (OSError, WorkspaceRegistryConflict):
                         result["sharing_invalidation_failed"] = True
         except OSError:
             result = _result("failed", "lock_unavailable")
@@ -708,12 +948,16 @@ async def _update_unlocked(config: Any, folder: Path, identity: str) -> dict[str
 
 def schedule_update(link: SharedBrainLink, config: Any) -> None:
     """Start one background update for ``link`` unless one is already pending."""
+    if link.kind != "git" or _updates_closed:
+        return
     key = _lock_key(link.path)
     if key in _pending:
         return
     task = asyncio.create_task(update_brain(link, config))
     _pending[key] = task
-    task.add_done_callback(lambda _done: _pending.pop(key, None))
+    task.add_done_callback(
+        lambda done: _pending.pop(key, None) if _pending.get(key) is done else None
+    )
 
 
 async def _run_pass(config: Any, links: list[SharedBrainLink]) -> dict[str, int]:
@@ -734,7 +978,7 @@ def _linked_links(config: Any) -> list[SharedBrainLink]:
     seen: dict[str, SharedBrainLink] = {}
     for workspace in getattr(config, "workspaces", {}).values():
         for link in getattr(workspace, "shared_brains", []):
-            if not overlaps_protected(config, link.path):
+            if link.kind == "git" and not overlaps_protected(config, link.path):
                 seen.setdefault(link.path, link)
     return list(seen.values())
 
@@ -779,3 +1023,62 @@ async def update_loop(config: Any) -> None:
         except Exception:
             logger.exception("Shared brain update loop failed")
         await asyncio.sleep(UPDATE_INTERVAL_S)
+
+
+def start_update_loop(config: Any) -> asyncio.Task[None]:
+    """Start and retain the engine's periodic shared brain updater."""
+    global _update_loop_task
+    if _updates_closed:
+        raise RuntimeError("shared brain updates are shut down")
+    if _update_loop_task is None or _update_loop_task.done():
+        _update_loop_task = asyncio.create_task(update_loop(config))
+    return _update_loop_task
+
+
+def begin_update_lifecycle() -> None:
+    """Open update admission for a new server lifetime after its predecessor drained."""
+    global _updates_closed, _update_loop_task, _shutdown_task
+    if not _updates_closed:
+        return
+    if _shutdown_task is None or not _shutdown_task.done():
+        raise RuntimeError("previous shared brain updates are still shutting down")
+    _shutdown_task.result()
+    if any(not task.done() for task in _pending.values()):
+        raise RuntimeError("previous shared brain updates are still running")
+    if _update_loop_task is not None and not _update_loop_task.done():
+        raise RuntimeError("previous shared brain update loop is still running")
+    _pending.clear()
+    _update_loop_task = None
+    _shutdown_task = None
+    _updates_closed = False
+
+
+async def shutdown_updates() -> None:
+    """Close update admission, then cancel and await every owned update task."""
+    global _updates_closed, _shutdown_task
+    _updates_closed = True
+    if _shutdown_task is None:
+        tasks = set(_pending.values())
+        if _update_loop_task is not None:
+            tasks.add(_update_loop_task)
+
+        async def cancel_and_wait() -> None:
+            for task in tasks:
+                if not task.done():
+                    task.cancel()
+            if tasks:
+                await asyncio.gather(*tasks, return_exceptions=True)
+
+        _shutdown_task = asyncio.create_task(cancel_and_wait())
+    cancelled = False
+    while True:
+        try:
+            await asyncio.shield(_shutdown_task)
+            break
+        except asyncio.CancelledError:
+            cancelled = True
+            if _shutdown_task.done():
+                break
+    _shutdown_task.result()
+    if cancelled:
+        raise asyncio.CancelledError
