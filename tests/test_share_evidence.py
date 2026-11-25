@@ -1019,6 +1019,41 @@ def test_done_without_checkpoint_cannot_recover_source_after_restart(tmp_path: P
         se._reset_project_manager_for_tests()
 
 
+async def test_checkpoint_survives_interruption_before_pass_archive(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    config, manager, project, _ = _memory_manager(tmp_path)
+    se._reset_project_manager_for_tests()
+    se.bind_project_manager(manager)
+    registry = AgentSessionRegistry()
+    manager._mcp_service = SimpleNamespace(registry=registry)
+    chat = next(item for item in manager.list_chats() if (item.helper or {}).get("kind") == "memory_pass")
+    chat.helper["state"] = "running"
+    chat.last_response = "Updated synthetic memory."
+    chat.last_response_status = "success"
+    registry.issue(chat_id=chat.chat_id, project_id=chat.project_id, workspace="home", provider="claude")
+
+    async def interrupted(_chat):
+        raise RuntimeError("simulated interruption before archive")
+
+    monkeypatch.setattr(manager._memory_pass, "_archive_finished", interrupted)
+    try:
+        with pytest.raises(RuntimeError, match="simulated interruption"):
+            await manager._memory_pass.on_turn_finished(chat.chat_id)
+        restarted = ProjectChatManager(
+            config,
+            state_store=StateStore(config.state_path, config.workspace_root, config.media_root),
+            transcript_store=TranscriptStore(config.state_path.parent, config.workspace_root / "transcripts"),
+            path=config.state_path.parent / "web_projects.json",
+        )
+        se._reset_project_manager_for_tests()
+        se.bind_project_manager(restarted)
+        await restarted.resume_memory_passes()
+        assert restarted.get_chat(chat.chat_id).archived
+        relation = se.recover_memory_pass_source_relation(config, workspace="home", pass_chat_id=chat.chat_id)
+        assert relation.project_id == project.project_id
+    finally:
+        se._reset_project_manager_for_tests()
+
+
 def test_completed_memory_checkpoint_survives_registry_restart_and_revocation(tmp_path: Path) -> None:
     config, manager, project, source = _memory_manager(tmp_path)
     project.vault_folder = "alpha"
