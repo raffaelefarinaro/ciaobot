@@ -12,7 +12,7 @@ import os
 import re
 import secrets
 import threading
-from contextlib import AbstractContextManager
+from contextlib import AbstractContextManager, nullcontext
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from typing import Any, Callable, NoReturn
@@ -170,11 +170,13 @@ def _git_bytes(folder: Path, *args: str, limit: int, overflow_code: str = "") ->
     return result.stdout
 
 
-def _qualify(config: Any, link: SharedBrainLink, relative_path: str) -> tuple[str, str, bytes | None, str | None]:
+def _qualify(
+    config: Any, link: SharedBrainLink, relative_path: str, owner: Any
+) -> tuple[str, str, bytes | None, str | None]:
     if link.kind != "git":
         _refuse("upstream_unavailable", "Publishing requires a Git shared brain.")
     parts = _safe_path(relative_path)
-    state = shared_brain._brain_state_owned(link, config)
+    state = shared_brain.probe_under_fence(config, link, owner)
     if state.get("problem"):
         code = "brain_changed" if state.get("problem") == "origin_changed" else "brain_unavailable"
         _refuse(code, "The selected shared brain is unavailable or has changed.")
@@ -367,6 +369,7 @@ def _draft_share(
     operation: str | None, proposed: bytes | None, request_key: str,
     request_fingerprint: str, retiring_proposal_id: str | None = None,
     publish_guard: Callable[[], AbstractContextManager[object]] | None = None,
+    checkout_claimed: bool = False,
 ) -> ShareDraft:
     """Qualify and privately file one immutable shared-note proposal."""
     if operation not in (None, "create", "replace", "delete"):
@@ -374,24 +377,37 @@ def _draft_share(
     if not isinstance(request_key, str) or not request_key:
         _refuse("request_conflict", "A stable internal request key is required.")
     link = _brain_for(config, workspace, brain)
-    from ciao.workspaces import ensure_registry_current, persisted_checkout_links, workspace_registry_claim, WorkspaceRegistryConflict
+    from ciao.workspaces import (
+        ensure_registry_current,
+        persisted_checkout_links,
+        workspace_registry_claim,
+        WorkspaceRegistryBusy,
+        WorkspaceRegistryConflict,
+    )
 
     if link.kind != "git":
         _refuse("upstream_unavailable", "Publishing requires a Git shared brain.")
+    claim = (
+        nullcontext()
+        if checkout_claimed
+        else shared_brain.checkout_claims_nowait([link.path], config)
+    )
     try:
-        with workspace_registry_claim(config) as owner:
+        with claim, workspace_registry_claim(config) as owner:
             ensure_registry_current(config)
             if owner.current is None:
                 raise WorkspaceRegistryConflict("workspace registry is missing")
             persisted_checkout_links(owner.current, link.path)
             _persist_link_lifetime(config, workspace, link, owner=owner)
-            op_ref, base_commit, original, original_oid = _qualify(config, link, relative_path)
+            op_ref, base_commit, original, original_oid = _qualify(
+                config, link, relative_path, owner
+            )
             _origin_code, listing = shared_brain._git(Path(link.path), "config", "--list", "--show-scope")
             destination_fingerprint = _origin_fingerprint(shared_brain._origin_from_listing(listing))
             if _origin_code != 0 or not destination_fingerprint:
                 _refuse("brain_changed", "The shared brain destination could not be verified.")
-    except WorkspaceRegistryConflict:
-        _refuse("brain_unavailable", "The shared brain registry changed while drafting.")
+    except (WorkspaceRegistryBusy, WorkspaceRegistryConflict):
+        _refuse("brain_unavailable", "The shared brain changed while drafting.")
     operation = operation or ("replace" if original is not None else "create")
     if operation == "create" and original is not None or operation in ("replace", "delete") and original is None:
         _refuse("invalid_operation", "The requested operation does not match the upstream note.")
@@ -557,6 +573,7 @@ def draft_share(
     operation: str | None, proposed: bytes | None, request_key: str,
     retiring_proposal_id: str | None = None,
     publish_guard: Callable[[], AbstractContextManager[object]] | None = None,
+    checkout_claimed: bool = False,
 ) -> ShareDraft | ShareRefusal:
     """Return a draft or its safe, typed refusal without exposing input data."""
     try:
@@ -607,6 +624,7 @@ def draft_share(
                 request_fingerprint=request_fingerprint,
                 retiring_proposal_id=retiring_proposal_id,
                 publish_guard=publish_guard,
+                checkout_claimed=checkout_claimed,
             )
     except ShareDraftError as exc:
         return exc.refusal

@@ -721,7 +721,31 @@ async def _apply_sharing_policy(
             candidate_workspaces[workspace_name] = candidate
             _persist_workspaces(config, candidate_workspaces, owner=owner)
             config.workspaces[workspace_name] = candidate
-    state = await run_while_claimed(shared_brain._brain_state_owned, updated, config)
+    state = await run_while_claimed(
+        shared_brain.probe_under_fence, config, updated, owner
+    )
+    if state.get("problem") == "origin_changed":
+        # A race after the commit must not return an automatic response. The
+        # probe already left a fence; commit the demotion before replying.
+        try:
+            await run_while_claimed(
+                shared_brain.invalidate_sharing_on_drift, config, updated, owner
+            )
+        except OSError:
+            return JSONResponse(
+                {
+                    "error": "The sharing change was committed but could not be "
+                    "confirmed; it remains paused and revocable.",
+                    "code": "consent_invalidation_failed",
+                },
+                status_code=409,
+            )
+        current = _sharing_link(config, workspace_name, brain_name)
+        if current is not None:
+            updated = current
+        state = await run_while_claimed(
+            shared_brain.probe_under_fence, config, updated, owner
+        )
     return JSONResponse({"shared_brain": state})
 
 

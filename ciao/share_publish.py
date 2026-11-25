@@ -444,8 +444,7 @@ def _verify_destination(
         allow_legacy_lifetime and "link_lifetime_id" not in fields
     ):
         return None
-    state = shared_brain._brain_state_owned(link, config)
-    if state.get("problem") or state.get("identity") != fields.get("origin_identity"):
+    if shared_brain.path_problem(config, link.path):
         return None
     code, out, _ = _safe_git(folder, "config", "--get-all", "remote.origin.url")
     configured = out.decode("utf-8", "strict").splitlines() if code == 0 else []
@@ -771,9 +770,6 @@ def _publish_locked(config: Any, workspace: str, folder: Path, link: SharedBrain
     if destination is None:
         return PublishOutcome("brain_changed", message="The shared brain destination changed after review.")
     origin, ref = destination
-    state = shared_brain._brain_state_owned(link, config)
-    if state.get("problem"):
-        return PublishOutcome("brain_changed", message="The shared brain is unavailable or has changed.")
     code, _out, _err = _safe_git(folder, "config", "--get", "core.repositoryformatversion", limit=256)
     if code:
         return PublishOutcome("brain_changed", message="The shared brain checkout could not be verified.")
@@ -1068,6 +1064,7 @@ async def draft_share_reversal(
                         config, workspace=workspace, brain=str(fields["brain"]),
                         relative_path=str(fields["path"]), operation=inverse,
                         proposed=proposed, request_key="undo:" + receipt_id,
+                        checkout_claimed=True,
                     )
                     if isinstance(drafted, drafts.ShareRefusal):
                         return drafted

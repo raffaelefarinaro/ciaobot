@@ -1521,7 +1521,6 @@ async def update_brain(link: SharedBrainLink, config: Any) -> dict[str, Any]:
             async with _checkout_claim(key, config):
                 from ciao.workspaces import (
                     WorkspaceRegistryConflict,
-                    acquire_workspace_registry,
                     persisted_checkout_links,
                     run_while_claimed,
                 )
@@ -1530,9 +1529,7 @@ async def update_brain(link: SharedBrainLink, config: Any) -> dict[str, Any]:
                 fenced_grants: list[dict[str, Any]] = []
                 owner = None
                 try:
-                    owner = await asyncio.to_thread(
-                        acquire_workspace_registry, config, blocking=True
-                    )
+                    owner = await _acquire_registry_claimed(config)
                     raw = owner.current
                     if raw is not None:
                         if raw != getattr(config, "_workspace_registry_bytes", None):
@@ -1571,9 +1568,7 @@ async def update_brain(link: SharedBrainLink, config: Any) -> dict[str, Any]:
                     # matches every fenced grant.
                     owner = None
                     try:
-                        owner = await asyncio.to_thread(
-                            acquire_workspace_registry, config, blocking=True
-                        )
+                        owner = await _acquire_registry_claimed(config)
                         live_identity = (
                             await run_while_claimed(_live_origin_identity, link)
                             if fence_path is not None
@@ -1594,6 +1589,28 @@ async def update_brain(link: SharedBrainLink, config: Any) -> dict[str, Any]:
             result = _result("failed", "lock_unavailable")
     _last_update[key] = result
     return result
+
+
+async def _acquire_registry_claimed(config: Any, *, blocking: bool = True):
+    """Cancellation-safe ownership acquisition; never leaves an orphan owner."""
+    from ciao.workspaces import acquire_workspace_registry
+
+    acquire_task = asyncio.create_task(
+        asyncio.to_thread(acquire_workspace_registry, config, blocking=blocking)
+    )
+    try:
+        return await asyncio.shield(acquire_task)
+    except asyncio.CancelledError:
+        while not acquire_task.done():
+            try:
+                await asyncio.shield(acquire_task)
+            except asyncio.CancelledError:
+                continue
+            except Exception:
+                break
+        if not acquire_task.cancelled() and acquire_task.exception() is None:
+            acquire_task.result().close()
+        raise
 
 
 async def _update_unlocked(config: Any, folder: Path, identity: str) -> dict[str, Any]:

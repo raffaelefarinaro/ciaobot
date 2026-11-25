@@ -1979,3 +1979,20 @@ async def test_update_brain_fences_before_the_origin_read(pair: SimpleNamespace,
     assert result["outcome"] == "up_to_date"
     assert observed == [True]
     assert list((Path(config.state_path).parent / "sharing-pending").glob("*.json")) == []
+
+
+@pytest.mark.asyncio
+async def test_cancelled_registry_acquisition_is_closed_and_reacquirable(tmp_path) -> None:
+    from ciao.workspaces import acquire_workspace_registry
+
+    config = FakeConfig(tmp_path)
+    holder = await asyncio.to_thread(acquire_workspace_registry, config, blocking=False)
+    task = asyncio.create_task(sb._acquire_registry_claimed(config))
+    await asyncio.sleep(0)
+    task.cancel()
+    await asyncio.sleep(0)
+    holder.close()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    owner = await asyncio.to_thread(acquire_workspace_registry, config, blocking=False)
+    owner.close()

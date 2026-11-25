@@ -3111,3 +3111,77 @@ def test_inaccessible_fence_directory_marks_recovery_pending(tmp_path, monkeypat
     monkeypatch.setattr(Path, "glob", fail_glob)
     shared_brain.apply_persisted_sharing_revocations(config)
     assert config._sharing_recovery_pending is True
+
+
+def test_post_grant_response_probes_under_a_fence(tmp_path, monkeypatch):
+    """The state returned after a grant commit is probed after a fence exists."""
+    from ciao import shared_brain
+
+    monkeypatch.setattr(shared_brain, "schedule_update", lambda link, config: None)
+    client, config, _pcm = _client(tmp_path)
+    acme = _checkout(_away(tmp_path) / "acme", "https://github.com/acme/notes")
+    assert client.patch(
+        "/api/workspaces/personal", json={"shared_brains": [{"path": str(acme)}]}
+    ).status_code == 200
+    state = client.get("/api/workspaces/personal/shared-brains").json()["shared_brains"][0]
+    observed: list[bool] = []
+    original = shared_brain._brain_state_owned
+
+    def observe(config_arg, link_arg):
+        observed.append(bool(list((tmp_path / ".runtime" / "sharing-pending").glob("*.json"))))
+        return original(config_arg, link_arg)
+
+    monkeypatch.setattr(shared_brain, "_brain_state_owned", observe)
+    granted = client.post(
+        "/api/workspaces/personal/shared-brains/notes/sharing",
+        json=_sharing_body(state),
+    )
+    assert granted.status_code == 200, granted.text
+    assert observed == [False, True]
+    assert list((tmp_path / ".runtime" / "sharing-pending").glob("*.json")) == []
+
+
+def test_real_subprocess_exit_after_fence_is_recovered_as_review(tmp_path, monkeypatch):
+    """A process that dies after writing the fence but before settlement is recovered."""
+    import os
+    import subprocess
+    import sys
+
+    from ciao import shared_brain
+
+    monkeypatch.setattr(shared_brain, "schedule_update", lambda link, config: None)
+    client, config, _pcm = _client(tmp_path)
+    acme = _checkout(_away(tmp_path) / "acme", "https://github.com/acme/notes")
+    assert client.patch(
+        "/api/workspaces/personal", json={"shared_brains": [{"path": str(acme)}]}
+    ).status_code == 200
+    state = client.get("/api/workspaces/personal/shared-brains").json()["shared_brains"][0]
+    assert client.post(
+        "/api/workspaces/personal/shared-brains/notes/sharing",
+        json=_sharing_body(state),
+    ).status_code == 200
+    link = config.workspace("personal").shared_brains[0]
+    script = f"""
+import os
+from pathlib import Path
+from types import SimpleNamespace
+from ciao import shared_brain
+from ciao.config import SharedBrainLink, SharingConsent, WorkspaceConfig
+consent = SharingConsent(generation={link.sharing_consent.generation}, identity={link.identity!r}, lifetime_id={link.lifetime_id!r}, granted_at={link.sharing_consent.granted_at!r})
+link = SharedBrainLink(name={link.name!r}, path={link.path!r}, identity={link.identity!r}, lifetime_id={link.lifetime_id!r}, sharing_policy='automatic', sharing_generation={link.sharing_generation}, sharing_consent=consent)
+workspace = WorkspaceConfig(name='personal', vault_root='memory-vault/personal', shared_brains=[link])
+config = SimpleNamespace(state_path=Path({str(config.state_path)!r}), workspaces={{'personal': workspace}})
+shared_brain.write_pending_sharing_fence(config, link)
+os._exit(0)
+"""
+    env = {**os.environ, "PYTHONPATH": str(Path.cwd())}
+    result = subprocess.run([sys.executable, "-c", script], env=env, cwd=Path.cwd())
+    assert result.returncode == 0
+    assert list((tmp_path / ".runtime" / "sharing-pending").glob("*.json"))
+
+    restarted = _client(tmp_path)[1]
+    assert restarted._sharing_recovery_pending is True
+    assert shared_brain.recover_sharing_state(restarted)
+    assert restarted.workspace("personal").shared_brains[0].sharing_policy == "review"
+    assert list((tmp_path / ".runtime" / "sharing-pending").glob("*.json")) == []
+    assert _client(tmp_path)[1].workspace("personal").shared_brains[0].sharing_policy == "review"
