@@ -13,6 +13,40 @@ export interface InventoryFilters { query: string; family: string; coverage: 'al
 // Ownership is deliberately explicit: adding a production SFC requires its own row.
 export const inventory: InventoryEntry[] = [
   {
+    id: 'components-settings-settings-share-sources',
+    name: 'SettingsShareSources',
+    family: 'Settings',
+    kind: 'component',
+    owner: { path: 'web/src/components/settings/SettingsShareSources.vue', anchor: '<template>' },
+    sources: [],
+    consumers: ['web/src/components/settings/SettingsSharedBrains.vue'],
+    variants: [],
+    variantNotes: 'Source and disclosure consent controls; workshop variants are unassessed.',
+    states: [
+      { name: 'default', coverage: 'uncovered', storyIds: [], note: 'The source selection panel has no workshop story.' },
+      { name: 'other states', coverage: 'unknown', storyIds: [], note: 'Loading, grant and error states have not been audited in the workshop.' },
+    ],
+    loading: { status: 'unknown', detail: 'Source and grant loading has not been audited in the workshop.' },
+    migration: { status: 'unassessed', note: 'Inventory admission does not approve a design migration.' },
+  },
+  {
+    id: 'components-project-decision-entry',
+    name: 'ProjectDecisionEntry',
+    family: 'Tasks, projects and automations',
+    kind: 'component',
+    owner: { path: 'web/src/components/ProjectDecisionEntry.vue', anchor: '<template>' },
+    sources: [],
+    consumers: ['web/src/components/ProjectView.vue'],
+    variants: [],
+    variantNotes: 'Decision entry, permission disclosure and save states; workshop variants are unassessed.',
+    states: [
+      { name: 'default', coverage: 'uncovered', storyIds: [], note: 'The closed decision entry has no workshop story.' },
+      { name: 'other states', coverage: 'unknown', storyIds: [], note: 'Loading, save and error states have not been audited in the workshop.' },
+    ],
+    loading: { status: 'unknown', detail: 'Permission loading has not been audited in the workshop.' },
+    migration: { status: 'unassessed', note: 'Inventory admission does not approve a design migration.' },
+  },
+  {
     id: 'components-settings-settings-switch',
     name: 'SettingsSwitch',
     family: 'Settings',
