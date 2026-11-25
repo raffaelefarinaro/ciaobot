@@ -3210,7 +3210,9 @@ def preview_row(
         )
         blocked = None
         expected_kind = str(fields.get("link_kind") or "git")
-        if link is None or link.kind != expected_kind or getattr(link, "lifetime_id", None) != fields.get("link_lifetime_id"):
+        if "evidence_authorization" in fields:
+            blocked = "draft_unavailable"
+        elif link is None or link.kind != expected_kind or getattr(link, "lifetime_id", None) != fields.get("link_lifetime_id"):
             blocked = "brain_unavailable"
         elif expected_kind == "folder" and str(fields.get("operation") or "") != "create":
             blocked = "folder_update_unsupported"
@@ -3241,8 +3243,6 @@ def preview_row(
                     blocked = "brain_unavailable"
         if text:
             blocked = "share_text_edits_not_supported"
-        elif "evidence_authorization" in fields:
-            blocked = "draft_unavailable"
         operation = str(fields.get("operation") or "")
         revision = str(draft.get("review_token") or "")
         retry_available = bool(

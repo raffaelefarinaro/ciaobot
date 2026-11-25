@@ -1972,6 +1972,7 @@ def test_evidence_candidate_cannot_publish_without_effect_fence(linked, monkeypa
     from ciao.web import proposal_service
 
     _, by_id = proposal_service._scan_proposal_rows(config)
+    monkeypatch.setattr(shared_brain, "brain_state", lambda *args, **kwargs: pytest.fail("blocked preview probed destination"))
     preview = proposal_service.preview_row(config, by_id[draft.proposal_id])
     assert preview["blocked_reason"] == "draft_unavailable"
     assert "evidence_authorization" not in preview and "do-not-expose-proof" not in json.dumps(preview)
