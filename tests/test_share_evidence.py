@@ -1088,6 +1088,30 @@ def test_completed_memory_checkpoint_survives_registry_restart_and_revocation(tm
         se.recover_memory_pass_source_relation(config, workspace="home", pass_chat_id=chat.chat_id)
 
 
+def test_atomic_memory_attestation_recovers_after_done_without_live_principal(tmp_path: Path) -> None:
+    config, manager, _project, _source = _memory_manager(tmp_path)
+    se._reset_project_manager_for_tests()
+    se.bind_project_manager(manager)
+    chat = next(item for item in manager.list_chats() if (item.helper or {}).get("kind") == memory_pass.MEMORY_PASS_KIND)
+    chat.helper["state"] = "running"
+    chat.last_response_status = "success"
+    chat.last_response = "settled response"
+    registry = AgentSessionRegistry()
+    registry.issue(chat_id=chat.chat_id, project_id=chat.project_id, workspace="home", provider="claude")
+    attestation = se.prepare_memory_completion(config, registry, workspace="home", pass_chat_id=chat.chat_id)
+    with pytest.raises(se.EvidenceError):
+        se._verified_memory_checkpoint(config, "home", chat.chat_id, checkpoint=attestation)
+    chat.helper["state"] = "done"
+    manager._save()
+    restarted = ProjectChatManager(config, state_store=StateStore(config.state_path, config.workspace_root, config.media_root),
+        transcript_store=TranscriptStore(config.state_path.parent, config.workspace_root / "transcripts"), path=config.state_path.parent / "web_projects.json")
+    se._reset_project_manager_for_tests()
+    se.bind_project_manager(restarted)
+    se._verified_memory_checkpoint(config, "home", chat.chat_id, checkpoint=attestation)
+    se._store_memory_checkpoint(config, "home", chat.chat_id, attestation)
+    assert se.recover_memory_pass_source_relation(config, workspace="home", pass_chat_id=chat.chat_id).relation_id == chat.chat_id
+
+
 @pytest.mark.parametrize("newline", ["\r\n", "\r"])
 def test_care_witness_binds_exact_preview_revision_and_revocation(tmp_path: Path, newline: str) -> None:
     config, manager, project, _source = _memory_manager(tmp_path)
