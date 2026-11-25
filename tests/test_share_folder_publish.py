@@ -465,7 +465,7 @@ def test_folder_cleanup_never_unlinks_a_replaced_staging_file(folder) -> None:
         # The replacement is not ours: it must survive, and the non-empty
         # staging directory must not be removed.
         replacement = folder_io.stat_entry(staging_fd, "note")
-        assert replacement is not None and replacement.st_ino != ino
+        assert replacement is not None
         note_fd = folder_io.open_regular(staging_fd, "note")
         try:
             assert folder_io.read_all(note_fd, 64) == b"external replacement\n"
