@@ -1638,3 +1638,112 @@ async def test_queued_git_update_rechecks_registry_after_folder_adoption(tmp_pat
             {"path": str(checkout), "kind": "folder"}
         ]}]))
     assert (await waiting)["reason"] == "registry_changed"
+
+
+def test_revocation_journal_is_compacted_and_bounded(tmp_path) -> None:
+    from ciao.config import WorkspaceConfig, SharedBrainLink
+
+    link = sb.set_sharing_policy(SharedBrainLink(
+        name="notes", path=str(tmp_path / "notes"), identity="github.com/a/notes",
+        lifetime_id="live-lifetime",
+    ), "automatic")
+    config = FakeConfig(tmp_path)
+    config.workspaces = {"work": WorkspaceConfig(
+        name="work", vault_root="memory-vault/work", shared_brains=[link],
+    )}
+    registry_bytes = json.dumps([
+        {
+            "name": "work",
+            "shared_brains": [
+                {
+                    "name": "notes",
+                    "path": str(tmp_path / "notes"),
+                    "identity": "github.com/a/notes",
+                    "lifetime_id": "live-lifetime",
+                    "kind": "git",
+                    "sharing_policy": "automatic",
+                    "sharing_generation": 1,
+                    "sharing_consent": {
+                        "generation": 1,
+                        "identity": "github.com/a/notes",
+                        "lifetime_id": "live-lifetime",
+                        "granted_at": "2026-11-25T09:00:00Z",
+                    },
+                }
+            ],
+        }
+    ]).encode()
+
+    sb.save_sharing_revocations(
+        config,
+        {("live-lifetime", 1), ("repaired-earlier", 0)},
+        registry_bytes=registry_bytes,
+    )
+    state = sb.load_sharing_revocations(config)
+    assert state.healthy and not state.fail_closed
+    assert state.keys == frozenset({("live-lifetime", 1)})
+
+    # Over the bound without registry compaction: write a bounded fail-closed
+    # journal rather than silently dropping entries that might still matter.
+    sb.save_sharing_revocations(
+        config,
+        {(f"lifetime-{i}", 1) for i in range(sb.MAX_SHARING_REVOCATIONS + 1)},
+        registry_bytes=None,
+    )
+    state = sb.load_sharing_revocations(config)
+    assert state.healthy and state.fail_closed
+    assert state.keys == frozenset()
+    sb.apply_persisted_sharing_revocations(config)
+    assert config.workspaces["work"].shared_brains[0].sharing_policy == "review"
+
+
+@pytest.mark.asyncio
+async def test_cancel_during_update_invalidation_keeps_the_checkout_claim(
+    pair: SimpleNamespace, monkeypatch
+) -> None:
+    import threading
+    from ciao.config import WorkspaceConfig
+
+    link = sb.set_sharing_policy(link_of(pair.clone), "automatic")
+    config = FakeConfig(pair.root)
+    config.workspaces = {"work": WorkspaceConfig(
+        name="work", vault_root="memory-vault/work", shared_brains=[link],
+    )}
+    git(pair.clone, "remote", "set-url", "origin", "https://github.com/x/elsewhere")
+    entered, finish = threading.Event(), threading.Event()
+
+    def slow_invalidate(_config, _link, _owner=None):
+        entered.set()
+        assert finish.wait(5)
+        return True
+
+    monkeypatch.setattr(sb, "invalidate_sharing_on_drift", slow_invalidate)
+    task = asyncio.create_task(sb.update_brain(link, config))
+    assert await asyncio.to_thread(entered.wait, 3)
+    for _ in range(2):
+        task.cancel()
+        await asyncio.sleep(0)
+        assert sb._checkout_lock(link.path).locked()
+    finish.set()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert not sb._checkout_lock(link.path).locked()
+
+
+def test_unreadable_revocation_journal_fails_closed(tmp_path) -> None:
+    from ciao.config import SharedBrainLink, WorkspaceConfig
+
+    link = sb.set_sharing_policy(SharedBrainLink(
+        name="notes", path=str(tmp_path / "notes"), identity="github.com/a/notes",
+        lifetime_id="unreadable-lifetime",
+    ), "automatic")
+    config = FakeConfig(tmp_path)
+    config.workspaces = {"work": WorkspaceConfig(
+        name="work", vault_root="memory-vault/work", shared_brains=[link],
+    )}
+    (tmp_path / "install" / "state").mkdir(parents=True)
+    sb._sharing_revocations_path(config).mkdir()
+
+    sb.apply_persisted_sharing_revocations(config)
+    assert config.workspaces["work"].shared_brains[0].sharing_policy == "review"
+    assert config.workspaces["work"].shared_brains[0].sharing_consent is None

@@ -19,7 +19,7 @@ import os
 import re
 import secrets
 import subprocess
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from pathlib import Path
 from contextlib import ExitStack, asynccontextmanager, contextmanager
@@ -222,38 +222,140 @@ def reset_link_for_restore(link: SharedBrainLink) -> SharedBrainLink:
     )
 
 
+MAX_SHARING_REVOCATIONS = 256
+_SHARING_REVOCATIONS_SCHEMA = 2
+
+
+@dataclass(frozen=True, slots=True)
+class SharingRevocations:
+    """A loaded revocation journal; unhealthy or full means fail closed."""
+
+    keys: frozenset[tuple[str, int]] = frozenset()
+    healthy: bool = True
+    fail_closed: bool = False
+
+
 def _sharing_revocations_path(config: Any) -> Path:
     return Path(config.state_path).parent / "sharing-revocations.json"
 
 
-def load_sharing_revocations(config: Any) -> set[tuple[str, int]]:
-    """Durable fail-closed revocations, keyed by link lifetime and generation."""
+def load_sharing_revocations(config: Any) -> SharingRevocations:
+    """Load the durable revocation journal.
+
+    A missing file is a healthy empty journal. An existing file that cannot be
+    read, is not JSON, or has the wrong shape is UNHEALTHY: callers must fail
+    closed (demote every stored automatic grant), never treat it as empty. A
+    journal marked ``fail_closed`` means the bounded journal overflowed and all
+    automatic grants must stay review until a later successful write replaces it.
+    """
     path = _sharing_revocations_path(config)
+    if not path.exists():
+        return SharingRevocations()
     try:
         raw = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, UnicodeError, ValueError):
-        return set()
-    grants = raw.get("grants") if isinstance(raw, dict) else None
+        logger.error("The shared-brain revocation journal is unreadable; failing closed")
+        return SharingRevocations(healthy=False, fail_closed=True)
+    if not isinstance(raw, dict) or raw.get("schema") not in (1, _SHARING_REVOCATIONS_SCHEMA):
+        logger.error("The shared-brain revocation journal is malformed; failing closed")
+        return SharingRevocations(healthy=False, fail_closed=True)
+    fail_closed = raw.get("fail_closed") is True
+    grants = raw.get("grants")
     if not isinstance(grants, list):
-        return set()
+        logger.error("The shared-brain revocation journal has no grant list; failing closed")
+        return SharingRevocations(healthy=False, fail_closed=True)
     found: set[tuple[str, int]] = set()
     for row in grants:
         if not isinstance(row, dict):
-            continue
+            logger.error("The shared-brain revocation journal has an invalid grant row; failing closed")
+            return SharingRevocations(healthy=False, fail_closed=True)
         lifetime = row.get("lifetime_id")
         generation = row.get("generation")
         if (
-            isinstance(lifetime, str)
-            and lifetime
-            and type(generation) is int
-            and generation >= 0
+            not isinstance(lifetime, str)
+            or not lifetime
+            or type(generation) is not int
+            or generation < 0
         ):
-            found.add((lifetime, generation))
+            logger.error("The shared-brain revocation journal has an invalid grant; failing closed")
+            return SharingRevocations(healthy=False, fail_closed=True)
+        found.add((lifetime, generation))
+    return SharingRevocations(
+        keys=frozenset(found), healthy=True, fail_closed=fail_closed
+    )
+
+
+def _persisted_automatic_grants(registry_bytes: bytes | None) -> set[tuple[str, int]] | None:
+    """Keys of automatic grants still present in the persisted registry, or None."""
+    if registry_bytes is None:
+        return None
+    try:
+        data = json.loads(registry_bytes.decode("utf-8", "strict"))
+    except (UnicodeError, ValueError):
+        return None
+    if isinstance(data, dict):
+        rows = list(data.values())
+    elif isinstance(data, list):
+        rows = data
+    else:
+        return None
+    found: set[tuple[str, int]] = set()
+    for row in rows:
+        if not isinstance(row, dict):
+            return None
+        links = row.get("shared_brains", [])
+        if not isinstance(links, list):
+            return None
+        for link in links:
+            if not isinstance(link, dict):
+                return None
+            generation = link.get("sharing_generation")
+            consent = link.get("sharing_consent")
+            lifetime = link.get("lifetime_id")
+            if (
+                link.get("kind", "git") == "git"
+                and link.get("sharing_policy") == "automatic"
+                and isinstance(lifetime, str)
+                and lifetime
+                and type(generation) is int
+                and isinstance(consent, dict)
+                and consent.get("generation") == generation
+            ):
+                found.add((lifetime, generation))
     return found
 
 
-def save_sharing_revocations(config: Any, keys: set[tuple[str, int]]) -> None:
-    """Atomically persist the revocation journal; raises OSError on failure."""
+def _bounded_revocation_keys(
+    keys: set[tuple[str, int]], registry_bytes: bytes | None
+) -> tuple[set[tuple[str, int]], bool]:
+    """Drop entries already repaired in the registry and bound the journal.
+
+    Only a revocation whose exact old grant is still in the persisted registry
+    needs to survive. Once a successful registry write has moved that link to
+    review, its journal entry is safe to drop. If the result exceeds the bound,
+    keep the journal bounded and mark it fail-closed instead of dropping keys
+    that might still be needed.
+    """
+    pending = _persisted_automatic_grants(registry_bytes)
+    if pending is not None:
+        keys = {key for key in keys if key in pending}
+    if len(keys) > MAX_SHARING_REVOCATIONS:
+        return set(), True
+    return keys, False
+
+
+def save_sharing_revocations(
+    config: Any,
+    keys: set[tuple[str, int]],
+    *,
+    registry_bytes: bytes | None = None,
+    force_fail_closed: bool = False,
+) -> None:
+    """Atomically persist a compacted, bounded revocation journal; raises on failure."""
+    keys, fail_closed = _bounded_revocation_keys(set(keys), registry_bytes)
+    fail_closed = fail_closed or force_fail_closed
+    if fail_closed and not force_fail_closed:
+        logger.error("The shared-brain revocation journal exceeded its bound; failing closed")
     parent = Path(config.state_path).parent
     parent.mkdir(parents=True, exist_ok=True, mode=0o700)
     make_private_dir(parent)
@@ -262,7 +364,15 @@ def save_sharing_revocations(config: Any, keys: set[tuple[str, int]]) -> None:
         for lifetime, generation in sorted(keys)
     ]
     payload = (
-        json.dumps({"schema": 1, "grants": rows}, indent=2) + "\n"
+        json.dumps(
+            {
+                "schema": _SHARING_REVOCATIONS_SCHEMA,
+                "fail_closed": fail_closed,
+                "grants": rows,
+            },
+            indent=2,
+        )
+        + "\n"
     ).encode("utf-8")
     fd, temp_name = mkstemp_private(dir=parent, prefix=".sharing-revocations-")
     temp = Path(temp_name)
@@ -284,15 +394,16 @@ def save_sharing_revocations(config: Any, keys: set[tuple[str, int]]) -> None:
 
 
 def apply_persisted_sharing_revocations(config: Any) -> None:
-    """Load the durable journal and make matching stored grants review in memory.
+    """Load the journal and make matching stored grants review in memory.
 
-    The registry row is not rewritten here: a later successful policy write
-    persists it, while the journal keeps the grant inert across restarts even
-    when the registry write had failed.
+    An unhealthy journal or a fail-closed marker demotes every stored automatic
+    grant. The registry row is not rewritten here: a later successful policy
+    write persists it, while the journal keeps grants inert across restarts.
     """
-    revoked = load_sharing_revocations(config)
-    if not revoked:
+    state = load_sharing_revocations(config)
+    if state.healthy and not state.fail_closed and not state.keys:
         return
+    fail_all = not state.healthy or state.fail_closed
     for workspace in getattr(config, "workspaces", {}).values():
         links = list(getattr(workspace, "shared_brains", None) or [])
         kept: list[SharedBrainLink] = []
@@ -301,7 +412,10 @@ def apply_persisted_sharing_revocations(config: Any) -> None:
             if (
                 item.kind == "git"
                 and sharing_grant_stored(item)
-                and (item.lifetime_id, item.sharing_generation) in revoked
+                and (
+                    fail_all
+                    or (item.lifetime_id, item.sharing_generation) in state.keys
+                )
             ):
                 kept.append(set_sharing_policy(item, DEFAULT_SHARING_POLICY))
                 changed = True
@@ -322,67 +436,131 @@ def _live_origin_identity(link: SharedBrainLink) -> str:
     return _safe_identity(_origin_from_listing(listing))
 
 
+def _drifted_grants(
+    config: Any, link: SharedBrainLink
+) -> tuple[dict[str, Any], set[tuple[str, int]]]:
+    """Workspaces to rewrite and exact grants to journal for a drifted path."""
+    live_identity = _live_origin_identity(link)
+    canonical = os.path.realpath(link.path)
+    changed: dict[str, Any] = {}
+    revoked: set[tuple[str, int]] = set()
+    for name, workspace in getattr(config, "workspaces", {}).items():
+        links = list(getattr(workspace, "shared_brains", None) or [])
+        kept: list[SharedBrainLink] = []
+        touched = False
+        for item in links:
+            if (
+                item.kind == "git"
+                and os.path.realpath(item.path) == canonical
+                and sharing_grant_stored(item)
+                and item.identity != live_identity
+                and (
+                    item.lifetime_id != link.lifetime_id
+                    or item.sharing_generation == link.sharing_generation
+                )
+            ):
+                revoked.add((item.lifetime_id, item.sharing_generation))
+                kept.append(set_sharing_policy(item, DEFAULT_SHARING_POLICY))
+                touched = True
+            else:
+                kept.append(item)
+        if touched:
+            changed[name] = replace(workspace, shared_brains=kept)
+    return changed, revoked
+
+
+def record_sharing_revocation_without_registry(
+    config: Any, link: SharedBrainLink
+) -> bool:
+    """Journal a drift revocation when the registry claim is unavailable.
+
+    Uses the last persisted bytes (best effort) for compaction, writes the
+    durable journal, and demotes the affected links in memory. It does not
+    write the registry. Raises OSError if the journal itself cannot be written.
+    """
+    changed, revoked = _drifted_grants(config, link)
+    if not changed:
+        return False
+    from ciao.workspaces import read_workspace_registry_bytes
+
+    state = load_sharing_revocations(config)
+    save_sharing_revocations(
+        config,
+        set(state.keys) | revoked,
+        registry_bytes=read_workspace_registry_bytes(config),
+        force_fail_closed=state.fail_closed or not state.healthy,
+    )
+    config.workspaces.update(changed)
+    return True
+
+
 def invalidate_sharing_on_drift(
     config: Any, link: SharedBrainLink, owner: Any | None = None
 ) -> bool:
     """Durably return every drifted Git link at this path to review.
 
-    Called only while the caller owns the checkout claim (and normally the
-    authoritative registry claim). The live origin is re-read here, so a delayed
-    observation cannot revoke a grant after the origin was repaired. Every
-    workspace linking the same path is covered, not only the workspace that
-    observed the drift.
+    Called while the caller owns the checkout claim. The live origin is re-read
+    here, so a delayed observation cannot revoke a grant after the origin was
+    repaired. Every workspace linking the same path is covered.
 
-    A revocation journal is written before the registry. If the registry write
-    then fails, the journal keeps those exact grants inert across a restart.
-    Raises OSError when either durable write fails; the caller surfaces it.
+    The revocation journal is written before the registry. If the journal write
+    fails, the registry write is still attempted so a durable review state is
+    possible; a failed registry write then surfaces. If the registry claim is
+    already held, the journal-only path records the exact grants and leaves the
+    registry for a later writer. Raises OSError when no durable record can be
+    written.
     """
     from ciao.workspaces import (
+        WorkspaceRegistryBusy,
         acquire_workspace_registry,
         persist_workspaces,
         workspace_registry_lock,
     )
 
     own_owner = owner is None
-    if own_owner:
-        owner = acquire_workspace_registry(config)
+    if owner is None:
+        try:
+            owner = acquire_workspace_registry(config)
+        except WorkspaceRegistryBusy:
+            return record_sharing_revocation_without_registry(config, link)
     try:
-        live_identity = _live_origin_identity(link)
-        canonical = os.path.realpath(link.path)
-        changed: dict[str, Any] = {}
-        revoked: set[tuple[str, int]] = set()
         with workspace_registry_lock(config):
-            for name, workspace in getattr(config, "workspaces", {}).items():
-                links = list(getattr(workspace, "shared_brains", None) or [])
-                kept: list[SharedBrainLink] = []
-                touched = False
-                for item in links:
-                    if (
-                        item.kind == "git"
-                        and os.path.realpath(item.path) == canonical
-                        and sharing_grant_stored(item)
-                        and item.identity != live_identity
-                        and (
-                            item.lifetime_id != link.lifetime_id
-                            or item.sharing_generation == link.sharing_generation
-                        )
-                    ):
-                        revoked.add((item.lifetime_id, item.sharing_generation))
-                        kept.append(set_sharing_policy(item, DEFAULT_SHARING_POLICY))
-                        touched = True
-                    else:
-                        kept.append(item)
-                if touched:
-                    changed[name] = replace(workspace, shared_brains=kept)
+            changed, revoked = _drifted_grants(config, link)
             if not changed:
                 return False
-            journal = load_sharing_revocations(config) | revoked
-            save_sharing_revocations(config, journal)
+            state = load_sharing_revocations(config)
+            journal_keys = set(state.keys) | revoked
+            try:
+                save_sharing_revocations(
+                    config,
+                    journal_keys,
+                    registry_bytes=owner.current,
+                    force_fail_closed=state.fail_closed or not state.healthy,
+                )
+            except OSError:
+                # The registry write below is still attempted: if it lands, the
+                # review state is durable even without the journal.
+                logger.exception("Could not write the shared-brain revocation journal")
             config.workspaces.update(changed)
-            candidate_workspaces = dict(config.workspaces)
-            # If this write fails, the in-memory review state and the journal
-            # remain; the next startup applies the journal.
-            persist_workspaces(config, candidate_workspaces, owner=owner)
+            try:
+                persist_workspaces(
+                    config, dict(config.workspaces), owner=owner
+                )
+            except Exception:
+                # A failed registry write is surfaced; the journal (when it
+                # landed) keeps this revocation durable across a restart.
+                raise
+            # The registry write succeeded, so old entries no longer match a
+            # stored automatic grant; compact them away.
+            try:
+                save_sharing_revocations(
+                    config,
+                    set(load_sharing_revocations(config).keys) | revoked,
+                    registry_bytes=getattr(config, "_workspace_registry_bytes", None),
+                    force_fail_closed=False,
+                )
+            except OSError:
+                logger.exception("Could not compact the shared-brain revocation journal")
             return True
     finally:
         if own_owner and owner is not None:
@@ -883,7 +1061,9 @@ async def update_brain(link: SharedBrainLink, config: Any) -> dict[str, Any]:
                 result = await _update_unlocked(config, Path(key), link.identity)
                 if result.get("reason") == "origin_changed":
                     try:
-                        await asyncio.to_thread(
+                        from ciao.workspaces import run_while_claimed
+
+                        await run_while_claimed(
                             invalidate_sharing_on_drift, config, link
                         )
                     except (OSError, WorkspaceRegistryConflict):

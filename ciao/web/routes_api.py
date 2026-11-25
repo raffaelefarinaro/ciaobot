@@ -86,6 +86,7 @@ from ciao.model_tiers import MAX_MODEL_ID_CHARS
 from ciao.models import THINKING_LEVELS, ChatContext
 from ciao.workspaces import (
     WORKSPACE_NAME_RE,
+    WorkspaceRegistryBusy,
     WorkspaceRegistryConflict,
     agent_root_for,
     persist_workspaces,
@@ -322,12 +323,27 @@ async def _workspace_from_request_async(
 
 
 async def _invalidate_sharing_claim(config: Any, link: SharedBrainLink) -> bool:
-    """Persist a drift invalidation under checkout + authoritative registry claims."""
+    """Persist a drift invalidation under checkout + authoritative registry claims.
+
+    When the registry claim is already held, record only the durable journal;
+    the next writer persists the review state. The worker is shielded so a
+    cancelled request cannot release the checkout claim before it finishes.
+    """
     async with shared_brain._checkout_lock(link.path):
         async with shared_brain._checkout_claim(link.path, config):
-            async with _workspace_registry_claim(config) as owner:
-                return await asyncio.to_thread(
-                    shared_brain.invalidate_sharing_on_drift, config, link, owner
+            try:
+                async with _workspace_registry_claim(config) as owner:
+                    return await run_while_claimed(
+                        shared_brain.invalidate_sharing_on_drift,
+                        config,
+                        link,
+                        owner,
+                    )
+            except WorkspaceRegistryBusy:
+                return await run_while_claimed(
+                    shared_brain.record_sharing_revocation_without_registry,
+                    config,
+                    link,
                 )
 
 
@@ -580,13 +596,13 @@ async def _apply_sharing_policy(
         # A grant names a person's audience, so the folder has to be usable
         # and still its own checkout right now. Revocation never needs this:
         # it must work even when the folder is gone or broken.
-        probe = await asyncio.to_thread(shared_brain._brain_state_owned, link, config)
+        probe = await run_while_claimed(shared_brain._brain_state_owned, link, config)
         if probe.get("problem"):
             if probe["problem"] == "origin_changed":
                 # A retargeted folder permanently loses the old standing
                 # grant; restoring the old origin later needs a fresh choice.
                 try:
-                    await asyncio.to_thread(
+                    await run_while_claimed(
                         shared_brain.invalidate_sharing_on_drift, config, link, owner
                     )
                 except OSError:
@@ -633,7 +649,7 @@ async def _apply_sharing_policy(
             candidate_workspaces[workspace_name] = candidate
             _persist_workspaces(config, candidate_workspaces, owner=owner)
             config.workspaces[workspace_name] = candidate
-    state = await asyncio.to_thread(shared_brain._brain_state_owned, updated, config)
+    state = await run_while_claimed(shared_brain._brain_state_owned, updated, config)
     return JSONResponse({"shared_brain": state})
 
 

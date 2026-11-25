@@ -2665,14 +2665,19 @@ def test_origin_drift_retires_the_same_path_in_another_workspace(tmp_path, monke
     assert peer.sharing_consent is None
     journal = tmp_path / ".runtime" / "sharing-revocations.json"
     assert journal.is_file()
-    text = journal.read_text()
-    assert personal["lifetime"] in text
-    assert peer.lifetime_id in text
+    payload = json.loads(journal.read_text())
+    # The registry write landed, so the two entries were compacted away.
+    assert payload["fail_closed"] is False
+    assert payload["grants"] == []
+    restarted = _client(tmp_path)[1]
+    assert restarted.workspace("personal").shared_brains[0].sharing_policy == "review"
+    assert restarted.workspace("research").shared_brains[0].sharing_policy == "review"
 
 
 def test_shared_brain_policy_refuses_while_the_registry_claim_is_held(tmp_path, monkeypatch):
     """A held authoritative registry claim blocks both grant and revoke without writing."""
     from ciao import shared_brain
+    from ciao.web.routes_api import _invalidate_sharing_claim
     from ciao.workspaces import acquire_workspace_registry
 
     monkeypatch.setattr(shared_brain, "schedule_update", lambda link, config: None)
@@ -2693,3 +2698,146 @@ def test_shared_brain_policy_refuses_while_the_registry_claim_is_held(tmp_path, 
     finally:
         holder.close()
     assert config.workspace("personal").shared_brains[0].sharing_policy == "review"
+
+
+def test_malformed_revocation_journal_fails_closed_on_restart(tmp_path, monkeypatch):
+    """A corrupt journal demotes every stored automatic grant, never revives it."""
+    from ciao import shared_brain
+
+    monkeypatch.setattr(shared_brain, "schedule_update", lambda link, config: None)
+    client, config, _pcm = _client(tmp_path)
+    acme = _checkout(_away(tmp_path) / "acme", "https://github.com/acme/notes")
+    assert client.patch(
+        "/api/workspaces/personal", json={"shared_brains": [{"path": str(acme)}]}
+    ).status_code == 200
+    state = client.get("/api/workspaces/personal/shared-brains").json()["shared_brains"][0]
+    assert client.post(
+        "/api/workspaces/personal/shared-brains/notes/sharing",
+        json=_sharing_body(state),
+    ).status_code == 200
+    journal = tmp_path / ".runtime" / "sharing-revocations.json"
+    journal.write_text("{not json")
+
+    restarted = _client(tmp_path)[1]
+    link = restarted.workspace("personal").shared_brains[0]
+    assert link.sharing_policy == "review"
+    assert link.sharing_consent is None
+    assert not shared_brain.sharing_consent_active(link)
+
+
+def test_journal_write_failure_still_persists_registry_review(tmp_path, monkeypatch):
+    """When the journal cannot be written, a successful registry write is still durable."""
+    import subprocess
+
+    from ciao import shared_brain
+
+    monkeypatch.setattr(shared_brain, "schedule_update", lambda link, config: None)
+    client, config, _pcm = _client(tmp_path)
+    acme = _checkout(_away(tmp_path) / "acme", "https://github.com/acme/notes")
+    assert client.patch(
+        "/api/workspaces/personal", json={"shared_brains": [{"path": str(acme)}]}
+    ).status_code == 200
+    state = client.get("/api/workspaces/personal/shared-brains").json()["shared_brains"][0]
+    assert client.post(
+        "/api/workspaces/personal/shared-brains/notes/sharing",
+        json=_sharing_body(state),
+    ).status_code == 200
+    subprocess.run(
+        ["git", "-C", str(acme), "remote", "set-url", "origin", "https://github.com/other/notes"],
+        check=True,
+    )
+
+    def fail_journal(*_args, **_kwargs):
+        raise OSError("journal disk full")
+
+    monkeypatch.setattr(shared_brain, "save_sharing_revocations", fail_journal)
+    listed = client.get("/api/workspaces/personal/shared-brains").json()["shared_brains"][0]
+    assert listed["sharing_policy"] == "review"
+    restarted = _client(tmp_path)[1]
+    link = restarted.workspace("personal").shared_brains[0]
+    assert link.sharing_policy == "review"
+    assert link.sharing_consent is None
+
+
+def test_registry_claim_failure_records_a_durable_journal_revocation(tmp_path, monkeypatch):
+    """A held registry claim still lets drift write a journal-only revocation."""
+    import asyncio
+
+    from ciao import shared_brain
+    from ciao.web.routes_api import _invalidate_sharing_claim
+    from ciao.workspaces import acquire_workspace_registry
+
+    monkeypatch.setattr(shared_brain, "schedule_update", lambda link, config: None)
+    client, config, _pcm = _client(tmp_path)
+    acme = _checkout(_away(tmp_path) / "acme", "https://github.com/acme/notes")
+    assert client.patch(
+        "/api/workspaces/personal", json={"shared_brains": [{"path": str(acme)}]}
+    ).status_code == 200
+    state = client.get("/api/workspaces/personal/shared-brains").json()["shared_brains"][0]
+    assert client.post(
+        "/api/workspaces/personal/shared-brains/notes/sharing",
+        json=_sharing_body(state),
+    ).status_code == 200
+    link = config.workspace("personal").shared_brains[0]
+    git_remote = ["git", "-C", str(acme), "remote", "set-url", "origin", "https://github.com/other/notes"]
+    import subprocess
+
+    subprocess.run(git_remote, check=True)
+
+    holder = acquire_workspace_registry(config)
+    try:
+        assert asyncio.run(_invalidate_sharing_claim(config, link)) is True
+    finally:
+        holder.close()
+
+    assert config.workspace("personal").shared_brains[0].sharing_policy == "review"
+    journal = tmp_path / ".runtime" / "sharing-revocations.json"
+    payload = json.loads(journal.read_text())
+    assert payload["fail_closed"] is False
+    assert any(row["lifetime_id"] == link.lifetime_id for row in payload["grants"])
+    restarted = _client(tmp_path)[1]
+    assert restarted.workspace("personal").shared_brains[0].sharing_policy == "review"
+
+
+def test_cancel_during_sharing_invalidation_keeps_the_claims(tmp_path, monkeypatch):
+    """A cancelled request cannot release checkout/registry claims before the worker exits."""
+    import asyncio
+    import threading
+
+    from ciao import shared_brain
+    from ciao.web.routes_api import _invalidate_sharing_claim
+    from ciao.workspaces import WorkspaceRegistryBusy, acquire_workspace_registry
+
+    monkeypatch.setattr(shared_brain, "schedule_update", lambda link, config: None)
+    client, config, _pcm = _client(tmp_path)
+    acme = _checkout(_away(tmp_path) / "acme", "https://github.com/acme/notes")
+    assert client.patch(
+        "/api/workspaces/personal", json={"shared_brains": [{"path": str(acme)}]}
+    ).status_code == 200
+    link = config.workspace("personal").shared_brains[0]
+    entered, finish = threading.Event(), threading.Event()
+
+    def slow_invalidate(_config, _link, _owner=None):
+        entered.set()
+        assert finish.wait(5)
+        return True
+
+    monkeypatch.setattr(shared_brain, "invalidate_sharing_on_drift", slow_invalidate)
+
+    async def exercise():
+        task = asyncio.create_task(_invalidate_sharing_claim(config, link))
+        assert await asyncio.to_thread(entered.wait, 3)
+        for _ in range(2):
+            task.cancel()
+            await asyncio.sleep(0)
+            with pytest.raises(WorkspaceRegistryBusy):
+                acquire_workspace_registry(config)
+            assert shared_brain._checkout_lock(link.path).locked()
+        finish.set()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        assert not shared_brain._checkout_lock(link.path).locked()
+        owner = await asyncio.to_thread(acquire_workspace_registry, config, blocking=False)
+        await asyncio.to_thread(owner.close)
+
+    asyncio.run(exercise())
