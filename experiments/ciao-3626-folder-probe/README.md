@@ -4,11 +4,14 @@ Research-only evidence for
 [#3626](https://github.com/raffaelefarinaro/ciaobot/issues/3626), "Determine and
 implement safe existing-note changes for folder destinations".
 
-**Status: no supported ordinary-folder backend found for existing-note
-expected-version replacement. Automatic and engine-applied reviewed replacement
-for folder destinations remains disabled; retain the proposed diff for manual
-application.** New-note creation through `O_EXCL` is the only ordinary-folder
-mutation this probe could support.
+**Status: on the exercised APFS schedules and primitives, no tested primitive
+provided an atomic expected-version replacement for an existing note against an
+independent writer. Automatic and engine-applied reviewed replacement for folder
+destinations remains disabled; retain the proposed diff for manual
+application.** `O_EXCL` held for concurrent new-name namespace no-clobber only;
+this probe makes no crash-safe or complete-creation claim. This is not a
+universal impossibility claim: cloud and network backends and other filesystems
+were not tested.
 
 This directory adds an experiment, not a production adapter. It does not import
 `ciao`, does not start the engine, does not touch a vault, a workspace, an
@@ -31,11 +34,14 @@ The probe tests the primitives that look promising on a local volume:
 - an exclusive `O_EXCL` claim file;
 - vnode observation through `stat`;
 - content-hash, size+mtime and inode identity as versions;
+- a writer that re-reads after the first external write, then replaces;
 - path-based and descriptor-relative root handling;
-- a simulated remote ETag-only writer on a locally dirty tree.
+- a *local model* of an ETag-only writer on a locally dirty tree. This is not a
+  test of any provider's conditional operation.
 
-It also tests the one mutation that is genuinely safe without a version check:
-creating a **new** path with `O_EXCL`. That is not an existing-note update.
+It also exercises concurrent `O_EXCL` creation of a **new** path. That is
+namespace no-clobber for two creators in this run, not crash-safe or complete
+creation, and not an existing-note update.
 
 ## Environment used for the recorded result
 
@@ -100,51 +106,60 @@ or sync agent may do the same.
 Recorded report:
 [`results/macos-27.0.1-apfs.json`](results/macos-27.0.1-apfs.json).
 
-Counts: **11 failed, 3 supported, 1 partial, 1 unverified**.
+Counts: **11 failed, 3 supported, 2 partial, 2 unverified**.
 
 | Test | Status | What it demonstrated |
 |---|---|---|
 | `hash_then_rename_two_writers` | failed | Two processes both validated the same expected SHA-256 and both renamed over the target; one writer's change was lost with no conflict. |
 | `flock_coop_cooperating_writers` | supported | Two writers that both honor one advisory lock serialized: one wrote, one reported a conflict. |
-| `claim_coop_cooperating_writers` | supported | Two writers that both honor one `O_EXCL` claim serialized the same way. |
-| `hash_then_rename_external_writer` | failed | An independent editor wrote after the version check; the writer's rename discarded it. |
-| `flock_external_writer` | failed | Holding an advisory lock did not stop an independent editor; the writer replaced its bytes. |
-| `claim_external_writer` | failed | Holding an `O_EXCL` claim did not stop an independent editor; the writer replaced its bytes. |
-| `vnode_observation_external_writer` | failed | Observing the target's stat identity before the external write did not guard the replacement. |
+| `claim_coop_cooperating_writers` | supported | The winner held the `O_EXCL` claim until the other writer attempted it; the loser retried, acquired after release, re-read the new version, and refused with a conflict. Cooperative retry, not external exclusion. |
+| `hash_then_rename_external_writer` | failed | A check-once hash-then-rename writer (no final reread) discarded an external write that landed after its check. |
+| `flock_external_writer` | failed | A check-once writer holding an advisory lock discarded an external write; the external writer ignores the lock. |
+| `claim_external_writer` | failed | A check-once writer holding an `O_EXCL` claim discarded an external write; the external writer ignores the claim. |
+| `vnode_observation_external_writer` | failed | Observing the target's stat identity once before the external write, with no final reread, did not guard the replacement. |
 | `renameatx_swap_external_writer` | failed | `RENAME_SWAP` moved the external bytes out of the target and discarded them; it does not compare versions. |
-| `remote_etag_only_local_dirty` | failed | A remote ETag-only writer accepted an unchanged remote version and replaced an offline-dirty local file. |
+| `reread_detect_external_writer` | partial | A final reread after a *different* external write detected the change, and the writer refused without replacing. This is detection for that non-racy schedule; it does not make the reread and replacement atomic. |
+| `reread_window_external_writer` | failed | The first external write returned identical bytes (a content-hash ABA); the reread passed, then a second external write landed after the reread but before the replacement, and was lost. |
+| `remote_etag_only_local_dirty` | unverified | **Local model only, not a provider test:** an ETag-only implementation that trusts an unchanged remote version and performs an unconditional local replace lost an offline-dirty local file. A local content recheck detected this schedule. No cloud ETag semantics were exercised. |
 | `content_hash_delete_recreate_aba` | failed | A content hash accepted a delete/recreate that returned identical bytes; the generation changed but the version did not. |
 | `mtime_size_delete_recreate_aba` | failed | A size+mtime version accepted a delete/recreate after the mtime was restored. |
 | `inode_reuse_cycles` | unverified | 200 create/unlink cycles used 200 distinct inodes here; reuse was not observed, but inode identity is not atomic with replacement and cannot be assumed stable on another backend. |
 | `root_substitution_path_writer` | failed | A path-based writer followed a substituted root symlink and wrote into the decoy directory. |
 | `root_substitution_dirfd_writer` | partial | Descriptor-relative traversal stayed in the original directory and refused an already-symlinked root, but the user-visible root no longer received the write. Containment is not root binding. |
-| `root_aba_identical_clone` | failed | An identical clone at the visible root left the bytes unchanged while the writer committed to a detached directory. |
-| `o_excl_new_note_create` | supported | Two writers creating the same new path produced exactly one file; the loser got `EEXIST` and wrote nothing. Create-only. |
+| `root_aba_identical_clone` | failed | An identical clone at the visible root left the bytes unchanged; the probe asserts that the writer's payload landed in the detached directory. |
+| `o_excl_new_note_create` | supported | Two writers creating the same new path produced exactly one file; the loser got `EEXIST` and wrote nothing. Namespace no-clobber only; not crash-safe or complete creation. |
 
-The supported rows are intentionally narrow. Cooperating writers can be
-serialized by a shared lock or claim, but a lock or claim is **advisory**: it
-does not bind a process that does not honor it, and it does not survive a crash
-as a trustworthy version. `O_EXCL` protects only the creation of a name that did
-not exist; it cannot replace an existing note.
+The supported and partial rows are intentionally narrow. Cooperating writers
+can be serialized by a shared lock or a retried claim, but a lock or claim is
+**advisory**: it does not bind a process that does not honor it. A final reread
+can detect an external change that landed before it; the `reread_window` test
+shows a second write landing after that reread is still lost. `O_EXCL` protects
+only the creation of a name that did not exist; it cannot replace an existing
+note and is not evidence of crash-safe creation.
 
 ## Decision supported by this evidence
 
-For an existing note on an ordinary folder:
+For an existing note on an ordinary folder, **on the exercised APFS schedules
+and primitives**:
 
-- **Unsupported:** an atomic expected-version replacement against all relevant
-  writers. Hash-then-rename, swap, advisory locks, exclusive claims, vnode
-  observation, content/weak version checks and remote ETag-only writes all lost
-  an external or ABA change in the probe.
+- **Unsupported:** an atomic expected-version replacement against an independent
+  writer. Check-once hash-then-rename, swap, advisory locks, exclusive claims and
+  vnode observation lost an external change. Content/mtime ABA was
+  indistinguishable in the exercised schedules. A final reread detected an
+  external write that landed before it, but a second write landing after the
+  reread was lost.
 - **Partial:** descriptor-relative traversal contains a root swap, but it cannot
   prove the user-visible root is still the selected root at commit. The caller
-  would need an atomic root/link-lifetime binding that ordinary filesystems do
-  not provide.
-- **Supported:** create-only no-clobber with `O_EXCL`.
+  would need a root/link-lifetime binding the exercised APFS primitives did not
+  provide.
+- **Supported narrowly:** `O_EXCL` namespace no-clobber for two concurrent
+  creators. Not crash-safe, not complete creation, not an existing-note update.
 - **Unverified:** every cloud-backed folder path (iCloud Drive, Dropbox,
   OneDrive, Google Drive for Desktop), every non-APFS local filesystem, every
   network mount, and the link-lifetime, consent-generation, journaling,
-  reconciliation, revoke/retry and crash-after-acceptance requirements. None of
-  them may be counted as a supported ordinary-folder success from this probe.
+  reconciliation, revoke/retry and crash-after-acceptance requirements. The ETag
+  row is a local model, not provider evidence. None of them may be counted as a
+  supported ordinary-folder success from this probe.
 
 Consequently, per #3626, automatic and engine-applied reviewed replacement for
 existing notes on ordinary folders should remain disabled. A proposed diff
@@ -160,6 +175,9 @@ product decision and is not an ordinary-folder success.
 - It does not test a real cloud provider, network mount, or another local
   filesystem. Those rows in the capability matrix are **unsupported
   (unvalidated)**, not passes.
+- It does not establish that no filesystem or provider can ever offer an atomic
+  conditional replacement. It reports only the exercised APFS schedules and
+  primitives; a provider-managed conditional operation is outside this probe.
 - It does not claim that a cooperating lock is worthless. It is useful for two
   Ciaobot writers that share it; it is not an external-writer precondition.
 - It does not claim inode reuse is impossible. It observed no reuse in 200

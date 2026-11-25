@@ -376,6 +376,10 @@ def _run_writer(job: dict[str, Any]) -> dict[str, Any]:
         return _writer_external(
             result, target, payload, expected, barrier, role, protocol, deadline
         )
+    if protocol in {"reread_detect_external", "reread_window_external"}:
+        return _writer_reread_external(
+            result, target, payload, expected, barrier, role, protocol, deadline
+        )
     if protocol == "excl_create":
         return _writer_excl_create(
             result, target, payload, barrier, role, count, deadline
@@ -457,6 +461,39 @@ def _writer_flock_coop(
             os.close(fd)
 
 
+def _acquire_claim(
+    claim: Path, role: str, barrier: Path, deadline: float
+) -> tuple[int | None, int, bool]:
+    """Acquire an O_EXCL claim, retrying while another cooperating writer holds it."""
+    attempts = 0
+    contended = False
+    while time.monotonic() < deadline:
+        attempts += 1
+        try:
+            claim_fd = os.open(
+                claim,
+                os.O_CREAT | os.O_EXCL | os.O_WRONLY | getattr(os, "O_NOFOLLOW", 0),
+                0o600,
+            )
+        except FileExistsError:
+            if not contended:
+                # Let the holder know contention actually happened, so the
+                # test cannot pass by one writer finishing before the other
+                # tried the claim.
+                _touch(barrier / f"contended.{role}")
+                contended = True
+            time.sleep(0.002)
+            continue
+        try:
+            os.write(claim_fd, role.encode("utf-8"))
+            os.fsync(claim_fd)
+        except Exception:
+            os.close(claim_fd)
+            raise
+        return claim_fd, attempts, contended
+    return None, attempts, contended
+
+
 def _writer_claim_coop(
     result: dict[str, Any],
     target: Path,
@@ -469,20 +506,23 @@ def _writer_claim_coop(
 ) -> dict[str, Any]:
     _barrier(barrier, "ready", role, count, deadline)
     claim = target.parent / (target.name + ".probe.claim")
-    try:
-        claim_fd = os.open(
-            claim,
-            os.O_CREAT | os.O_EXCL | os.O_WRONLY | getattr(os, "O_NOFOLLOW", 0),
-            0o600,
-        )
-    except FileExistsError:
-        result["claim_acquired"] = False
+    claim_fd, attempts, contended = _acquire_claim(claim, role, barrier, deadline)
+    result["claim_attempts"] = attempts
+    result["claim_contended"] = contended
+    result["claim_waited"] = attempts > 1
+    result["claim_acquired"] = claim_fd is not None
+    if claim_fd is None:
         result["conflict"] = True
         return result
     try:
-        os.write(claim_fd, role.encode("utf-8"))
-        os.fsync(claim_fd)
-        result["claim_acquired"] = True
+        # Hold the claim until the other writer has actually attempted it, so
+        # the contention schedule is deterministic. The wait is bounded.
+        result["claim_hold_observed"] = _wait_for(
+            barrier, "contended", 1, min(deadline, time.monotonic() + 1.0)
+        )
+        # The loser acquires only after the winner releases and has therefore
+        # re-read the new version. This is serialization by cooperation/retry,
+        # not a claim that a non-cooperating writer is excluded.
         current = _read(target)
         result["check_sha256"] = _sha(current or b"")
         result["check_ok"] = current is not None and _sha(current) == expected
@@ -600,6 +640,72 @@ def _writer_external(
                 fcntl.flock(lock_fd, fcntl.LOCK_UN)
             finally:
                 os.close(lock_fd)
+
+
+def _writer_reread_external(
+    result: dict[str, Any],
+    target: Path,
+    payload: bytes,
+    expected: str,
+    barrier: Path,
+    role: str,
+    protocol: str,
+    deadline: float,
+) -> dict[str, Any]:
+    """A writer that re-reads after the first external write, then replaces.
+
+    ``reread_detect_external`` is the fair case: the external write changes the
+    bytes, the reread sees it, and the writer refuses.  ``reread_window_external``
+    is the adversarial case: the first external write returns identical bytes
+    (so a content-hash reread passes), then a second external write lands after
+    that reread but before the replacement.  The reread narrows the window; it
+    does not make the reread and the replacement one atomic operation.
+    """
+    base = _read(target)
+    result["initial_sha256"] = _sha(base or b"")
+    result["identity_before"] = _identity(target)
+    current = _read(target)
+    result["check_sha256"] = _sha(current or b"")
+    result["check_ok"] = current is not None and _sha(current) == expected
+    if not result["check_ok"]:
+        result["conflict"] = True
+        return result
+
+    _barrier(barrier, "checked", role, 1, deadline)
+    if not _wait_for_path(barrier / "external1.done", deadline):
+        raise TimeoutError("first external writer did not signal completion")
+
+    external1 = _read(target)
+    result["external1_seen_sha256"] = _sha(external1 or b"")
+    result["identity_after_external1"] = _identity(target)
+    result["reread_ok"] = external1 is not None and _sha(external1) == expected
+    result["reread_sha256"] = _sha(external1 or b"")
+
+    if protocol == "reread_detect_external":
+        if not result["reread_ok"]:
+            result["conflict"] = True
+            return result
+        # This mode is meant to receive a different external write; if it did
+        # not, report that the schedule did not exercise detection.
+        result["conflict"] = True
+        result["schedule_error"] = "external1 did not differ from the expected version"
+        return result
+
+    if not result["reread_ok"]:
+        result["conflict"] = True
+        return result
+
+    _touch(barrier / "reread.done")
+    if not _wait_for_path(barrier / "external2.done", deadline):
+        raise TimeoutError("second external writer did not signal completion")
+    external2 = _read(target)
+    result["external2_seen_sha256"] = _sha(external2 or b"")
+    result["identity_after_external2"] = _identity(target)
+
+    _atomic_replace(target, payload)
+    result["replace_ok"] = True
+    result["final_sha256"] = _sha(_read(target) or b"")
+    return result
 
 
 def _writer_excl_create(
@@ -831,21 +937,36 @@ def test_cooperating(root: Path, protocol: str) -> dict[str, Any]:
         if result.get("conflict") or result.get("check_ok") is False
     ]
     final = _read(target) or b""
+    claim_evidence_ok = protocol != "claim_coop" or (
+        any(result.get("claim_hold_observed") for result in results.values())
+        and any(result.get("claim_waited") for result in results.values())
+    )
     supported = (
         len(winners) == 1
         and len(conflicts) == 1
         and final == payloads[winners[0]]
+        and claim_evidence_ok
     )
-    return {
-        "name": f"{protocol}_cooperating_writers",
-        "capability": "cooperating-writer serialization (not external-writer exclusion)",
-        "status": "supported" if supported else "failed",
-        "detail": (
+    if supported and protocol == "claim_coop":
+        detail = (
+            "The winner held the O_EXCL claim until the other writer actually "
+            "attempted it; the loser retried, acquired it after release, "
+            "re-read the new version, and refused with a conflict. This is "
+            "cooperative serialization with retry, not external-writer "
+            "exclusion."
+        )
+    else:
+        detail = (
             "Two writers that both honor the same primitive serialized: one "
             "won and the other reported a conflict without writing."
             if supported
             else "The cooperating-writer case did not serialize as claimed."
-        ),
+        )
+    return {
+        "name": f"{protocol}_cooperating_writers",
+        "capability": "cooperating-writer serialization (not external-writer exclusion)",
+        "status": "supported" if supported else "failed",
+        "detail": detail,
         "evidence": {
             "winners": winners,
             "conflicts": conflicts,
@@ -946,7 +1067,154 @@ def test_swap_external(root: Path) -> dict[str, Any]:
     )
 
 
+def _reread_case(
+    root: Path,
+    *,
+    name: str,
+    protocol: str,
+    capability: str,
+) -> dict[str, Any]:
+    case = _case(root, name)
+    target = _target(case)
+    expected = _sha(b"base\n")
+    payload = b"writer-payload\n"
+    external1 = (
+        b"external-editor-change\n"
+        if protocol == "reread_detect_external"
+        else b"base\n"
+    )
+    external2 = b"external-editor-change\n"
+    barrier = case / "barrier"
+    barrier.mkdir()
+    job = _job(
+        role="A",
+        protocol=protocol,
+        target=target,
+        payload=payload,
+        expected=expected,
+        barrier=barrier,
+        count=1,
+    )
+    process = _launch(job)
+    if not _wait_for(barrier, "checked", 1, time.monotonic() + DEFAULT_TIMEOUT_S):
+        process.kill()
+        out, err = process.communicate()
+        return {
+            "name": name,
+            "capability": capability,
+            "status": "error",
+            "detail": "The writer never reached the checked barrier.",
+            "evidence": {
+                "stdout": out.decode("utf-8", "replace"),
+                "stderr": err.decode("utf-8", "replace"),
+            },
+        }
+
+    if protocol == "reread_detect_external":
+        _write_in_place(target, external1)
+    else:
+        # Identical bytes, different inode: a content-hash reread passes, but
+        # the generation is not the one the writer started from.
+        _delete_recreate(target, external1)
+    _touch(barrier / "external1.done")
+
+    if protocol == "reread_window_external":
+        if not _wait_for_path(barrier / "reread.done", time.monotonic() + DEFAULT_TIMEOUT_S):
+            process.kill()
+            out, err = process.communicate()
+            return {
+                "name": name,
+                "capability": capability,
+                "status": "error",
+                "detail": "The writer never completed the reread barrier.",
+                "evidence": {
+                    "stdout": out.decode("utf-8", "replace"),
+                    "stderr": err.decode("utf-8", "replace"),
+                },
+            }
+        _write_in_place(target, external2)
+        _touch(barrier / "external2.done")
+
+    results, diagnostics = _collect([job], [process])
+    result = results["A"]
+    final = _read(target) or b""
+    if result.get("error"):
+        status = "error"
+        detail = f"Writer failed: {result['error']}"
+    elif protocol == "reread_detect_external":
+        detected = (
+            final == external1
+            and not result.get("reread_ok")
+            and not result.get("replace_ok")
+        )
+        status = "partial" if detected else "unverified"
+        detail = (
+            "A final reread after a different external write detected the "
+            "change and the writer refused without replacing. This is a "
+            "detection pass for this schedule, not an atomicity result; see "
+            "reread_window_external_writer for the remaining window."
+            if detected
+            else "The reread did not detect the external change in this run."
+        )
+    else:
+        lost = (
+            final == payload
+            and result.get("reread_ok") is True
+            and result.get("replace_ok") is True
+            and result.get("external2_seen_sha256") == _sha(external2)
+        )
+        status = "failed" if lost else "unverified"
+        detail = (
+            "The writer re-read after an identical delete/recreate (the "
+            "content hash passed), then a second external write landed after "
+            "that reread; the replacement discarded it. A reread narrows the "
+            "window but is not atomic with the replacement."
+            if lost
+            else "The post-reread external write was not lost in this schedule."
+        )
+    return {
+        "name": name,
+        "capability": capability,
+        "status": status,
+        "detail": detail,
+        "evidence": {
+            "protocol": protocol,
+            "external1_sha256": _sha(external1),
+            "external2_sha256": _sha(external2),
+            "final_sha256": _sha(final),
+            "result": result,
+            "writer_diagnostics": diagnostics,
+        },
+    }
+
+
+def test_reread_detect_external(root: Path) -> dict[str, Any]:
+    return _reread_case(
+        root,
+        name="reread_detect_external_writer",
+        protocol="reread_detect_external",
+        capability="reread-before-replace detection (non-racy schedule)",
+    )
+
+
+def test_reread_window_external(root: Path) -> dict[str, Any]:
+    return _reread_case(
+        root,
+        name="reread_window_external_writer",
+        protocol="reread_window_external",
+        capability="expected-version atomicity with a final reread",
+    )
+
+
 def test_remote_etag_only(root: Path) -> dict[str, Any]:
+    """A local *model* of an ETag-only implementation, not a provider test.
+
+    No remote conditional operation is available without a live provider, so
+    this test only shows what happens when an implementation trusts an
+    unchanged remote version and performs an unconditional local replace on a
+    dirty tree. It is recorded as unverified for any cloud backend, not as a
+    claim about ETag semantics.
+    """
     case = _case(root, "remote-etag-only")
     target = _target(case)
     remote_version = {
@@ -957,8 +1225,8 @@ def test_remote_etag_only(root: Path) -> dict[str, Any]:
     _write_in_place(target, dirty)
     dirty_seen = _read(target) or b""
 
-    # ETag-only writer: the remote version still matches, so it never looks at
-    # local bytes. It replaces the dirty local file.
+    # Modeled ETag-only writer: the remote version still matches, so it never
+    # consults local bytes. It performs an unconditional local replace.
     accepted = remote_version["version"] == "v1"
     _atomic_replace(target, b"writer-payload\n")
     etag_final = _read(target) or b""
@@ -972,15 +1240,21 @@ def test_remote_etag_only(root: Path) -> dict[str, Any]:
 
     return {
         "name": "remote_etag_only_local_dirty",
-        "capability": "local dirty-state authority",
-        "status": "failed" if etag_lost else "unverified",
+        "capability": "local dirty-state authority (local model, not a provider test)",
+        "status": "unverified",
         "detail": (
-            "A remote ETag-only writer accepted the unchanged remote version "
-            "and replaced an offline-dirty local file; the local change was "
-            "lost. A local content recheck detects this example but cannot be "
-            "made atomic with the replacement."
+            "Local model only: an ETag-only implementation that trusts an "
+            "unchanged remote version and performs an unconditional local "
+            "replace lost an offline-dirty local file. A local content recheck "
+            "detected this schedule. No cloud provider or conditional ETag "
+            "operation was tested, so cloud/network authority remains "
+            "unverified."
         ),
         "evidence": {
+            "model": True,
+            "backend_tested": False,
+            "remote_conditional_operation": False,
+            "local_bytes_consulted": False,
             "remote_version": remote_version,
             "local_dirty_sha256": _sha(dirty_seen),
             "etag_accepted": accepted,
@@ -1229,20 +1503,24 @@ def test_root_aba_identical_clone(root: Path) -> dict[str, Any]:
 
     visible_after = _read(root_dir / "note.md") or b""
     detached_after = _read(moved / "note.md") or b""
+    visible_unchanged = visible_after == b"base\n"
+    detached_write = detached_after == b"writer-payload\n"
     return {
         "name": "root_aba_identical_clone",
         "capability": "root ABA / identical-root substitution",
-        "status": "failed" if visible_after == b"base\n" else "unverified",
+        "status": "failed" if visible_unchanged and detached_write else "unverified",
         "detail": (
             "The visible root was replaced by an identical clone while a "
             "writer held the old directory descriptor. The bytes read at the "
             "visible path were unchanged, so a content/version check cannot "
-            "distinguish the clone; the writer committed to a detached directory."
+            "distinguish the clone; the probe asserts that the writer's payload "
+            "landed in the detached directory."
         ),
         "evidence": {
             "visible_root_sha256": _sha(visible_after),
             "detached_root_sha256": _sha(detached_after),
-            "visible_root_unchanged": visible_after == b"base\n",
+            "visible_root_unchanged": visible_unchanged,
+            "detached_write": detached_write,
         },
     }
 
@@ -1282,13 +1560,14 @@ def test_excl_create(root: Path) -> dict[str, Any]:
     )
     return {
         "name": "o_excl_new_note_create",
-        "capability": "new-note no-clobber creation",
+        "capability": "new-name namespace no-clobber (concurrent creators)",
         "status": "supported" if supported else "failed",
         "detail": (
             "Two writers racing to create the same new path produced exactly "
-            "one file; the loser got EEXIST and wrote nothing. This is a "
-            "create-only capability and says nothing about updating an "
-            "existing note."
+            "one file; the loser got EEXIST and wrote nothing. This is "
+            "namespace no-clobber for two concurrent creators in this run; it "
+            "is not a claim about crash-safe complete creation, durability, "
+            "directory fsync, or replacing an existing note."
             if supported
             else "The O_EXCL create race did not produce one winner and one EEXIST."
         ),
@@ -1322,22 +1601,27 @@ def _capabilities(tests: list[dict[str, Any]]) -> dict[str, str]:
     )
     return {
         "existing_note_expected_version_atomicity": (
-            "supported" if existing_note_supported else "unsupported"
+            "supported" if existing_note_supported
+            else "unsupported (exercised APFS schedules/primitives)"
         ),
-        "local_dirty_state_authority": "unsupported",
-        "delete_recreate_aba_detection": "unsupported",
-        "root_substitution_binding": "unsupported",
-        "new_note_no_clobber_creation": status("o_excl_new_note_create"),
+        "local_dirty_state_authority": "unverified (local model only; cloud ETag untested)",
+        "delete_recreate_aba_detection": "unsupported (exercised APFS hash/mtime schedules)",
+        "root_substitution_binding": "partial (dirfd containment only; no APFS root binding)",
+        "new_note_no_clobber_creation": (
+            "supported narrowly (concurrent O_EXCL namespace no-clobber; "
+            "not crash-safe/complete)"
+            if status("o_excl_new_note_create") == "supported" else "unverified"
+        ),
         "cooperating_writer_serialization": (
-            "supported_with_cooperation"
+            "supported with cooperation and retry"
             if status("flock_coop_cooperating_writers") == "supported"
             and status("claim_coop_cooperating_writers") == "supported"
             else "unverified"
         ),
-        "external_writer_exclusion": "unsupported",
+        "external_writer_exclusion": "unsupported (exercised APFS schedules/primitives)",
         "automatic_folder_existing_note_edit": "disabled",
         "engine_applied_reviewed_replacement": "disabled",
-        "cloud_backed_folder_backends": "unverified",
+        "cloud_backed_folder_backends": "unverified (not tested)",
     }
 
 
@@ -1357,18 +1641,21 @@ def _report(root: Path, tests: list[dict[str, Any]], *, kept: bool) -> dict[str,
             "counts": counts,
             "capabilities": capabilities,
             "verdict": (
-                "No tested ordinary-filesystem primitive enforces an atomic "
-                "expected-version precondition for an existing note against an "
-                "independent external writer. Content hash, mtime+size, "
-                "hash-then-rename, renameatx_np(RENAME_SWAP), advisory locks, "
-                "exclusive claim files and vnode observation all lost an "
-                "external or ABA change; descriptor-relative traversal "
-                "contains a root swap but does not bind the user-visible root. "
-                "Keep automatic and engine-applied reviewed replacement for "
-                "existing notes on ordinary folders disabled and retain the "
-                "proposed diff for manual application. O_EXCL supports "
-                "create-only no-clobber. Cloud-backed folder paths were not "
-                "validated and remain unsupported."
+                "On the exercised APFS schedules and primitives, no tested "
+                "primitive enforced an atomic expected-version precondition "
+                "for an existing note against an independent external writer. "
+                "A final reread detected an external write that landed before "
+                "it, but a second write landing after the reread was lost; "
+                "content/mtime ABA was indistinguishable in the exercised "
+                "schedules. This is not a universal impossibility claim: cloud "
+                "and network backends and other filesystems were not tested, "
+                "and the ETag row is a local model, not provider evidence. "
+                "Descriptor-relative traversal contained a root swap but did "
+                "not bind the visible root. O_EXCL held for concurrent "
+                "new-name namespace no-clobber only; it makes no crash-safe or "
+                "complete-creation claim. Keep automatic and engine-applied "
+                "reviewed replacement for existing notes on ordinary folders "
+                "disabled and retain the proposed diff for manual application."
             ),
         },
     }
@@ -1476,11 +1763,13 @@ def main(argv: list[str] | None = None) -> int:
                 root,
                 name="hash_then_rename_external_writer",
                 protocol="hash_then_rename_external",
-                capability="atomic expected-version replacement (hash-then-rename)",
+                capability="atomic expected-version replacement (hash-then-rename, check-once)",
                 description=(
-                    "A hash-then-rename writer validated the expected version, "
-                    "then renamed its prepared file over the target after an "
-                    "external editor wrote to it; the external change was lost."
+                    "A check-once hash-then-rename writer validated the "
+                    "expected version, did not re-read after the external "
+                    "signal, then renamed its prepared file over the target; "
+                    "the external change was lost. The reread schedules below "
+                    "separate detection from atomicity."
                 ),
             )
         )
@@ -1489,9 +1778,10 @@ def main(argv: list[str] | None = None) -> int:
                 root,
                 name="flock_external_writer",
                 protocol="flock_external",
-                capability="external writer exclusion (advisory lock)",
+                capability="external writer exclusion (advisory lock, check-once)",
                 description=(
-                    "A writer holding an advisory flock still replaced the "
+                    "A writer holding an advisory flock checked once, did not "
+                    "re-read after the external signal, and still replaced the "
                     "target after an external editor wrote to it."
                 ),
             )
@@ -1501,10 +1791,11 @@ def main(argv: list[str] | None = None) -> int:
                 root,
                 name="claim_external_writer",
                 protocol="claim_external",
-                capability="external writer exclusion (exclusive claim)",
+                capability="external writer exclusion (exclusive claim, check-once)",
                 description=(
-                    "A writer holding an O_EXCL claim file still replaced the "
-                    "target after an external editor wrote to it."
+                    "A writer holding an O_EXCL claim file checked once, did "
+                    "not re-read after the external signal, and still replaced "
+                    "the target after an external editor wrote to it."
                 ),
             )
         )
@@ -1513,14 +1804,17 @@ def main(argv: list[str] | None = None) -> int:
                 root,
                 name="vnode_observation_external_writer",
                 protocol="vnode_observation",
-                capability="atomic expected-version replacement (vnode observation)",
+                capability="atomic expected-version replacement (vnode observation, check-once)",
                 description=(
-                    "A writer that observed the target's stat identity before "
-                    "the external write still replaced the target afterwards."
+                    "A writer that observed the target's stat identity once "
+                    "before the external write, without a final reread, still "
+                    "replaced the target afterwards."
                 ),
             )
         )
         tests.append(test_swap_external(root))
+        tests.append(test_reread_detect_external(root))
+        tests.append(test_reread_window_external(root))
         tests.append(test_remote_etag_only(root))
         tests.append(test_content_hash_aba(root))
         tests.append(test_mtime_size_aba(root))

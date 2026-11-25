@@ -1,5 +1,5 @@
 {
-  "generated_at": "2026-11-25T13:34:37Z",
+  "generated_at": "2026-11-25T13:40:12Z",
   "platform": {
     "executable": "/opt/homebrew/opt/python@3.15/bin/python3.15",
     "filesystem_type": "apfs",
@@ -7,7 +7,7 @@
     "machine": "arm64",
     "os_build": "26A434",
     "platform": "macOS-27.0.1-arm64-arm-64bit-Mach-O",
-    "probe_sha256": "5cb5091d44ee91e225248ada060a63c7157f993539dfd4a0cdb65fc5084fea69",
+    "probe_sha256": "48faeb50483aaa7dab9e7bb8d6693d43663f078facc590109afcda12aa89d96c",
     "python": "3.15.2",
     "python_implementation": "CPython",
     "release": "27.0.0",
@@ -22,29 +22,29 @@
     ],
     "version": "Darwin Kernel Version 27.0.0: Tue Aug 11 21:02:57 PDT 2026; root:xnu-13432.1.9~1/RELEASE_ARM64_T8132"
   },
-  "root": "/var/folders/wz/j_xbzm9126q6x405bg6qvj300000gn/T/ciao-3626-probe-4eyf4ewn",
+  "root": "/var/folders/wz/j_xbzm9126q6x405bg6qvj300000gn/T/ciao-3626-probe-snh0comh",
   "root_retained": false,
   "schema": "ciao-3626-folder-probe/1",
   "summary": {
     "capabilities": {
       "automatic_folder_existing_note_edit": "disabled",
-      "cloud_backed_folder_backends": "unverified",
-      "cooperating_writer_serialization": "supported_with_cooperation",
-      "delete_recreate_aba_detection": "unsupported",
+      "cloud_backed_folder_backends": "unverified (not tested)",
+      "cooperating_writer_serialization": "supported with cooperation and retry",
+      "delete_recreate_aba_detection": "unsupported (exercised APFS hash/mtime schedules)",
       "engine_applied_reviewed_replacement": "disabled",
-      "existing_note_expected_version_atomicity": "unsupported",
-      "external_writer_exclusion": "unsupported",
-      "local_dirty_state_authority": "unsupported",
-      "new_note_no_clobber_creation": "supported",
-      "root_substitution_binding": "unsupported"
+      "existing_note_expected_version_atomicity": "unsupported (exercised APFS schedules/primitives)",
+      "external_writer_exclusion": "unsupported (exercised APFS schedules/primitives)",
+      "local_dirty_state_authority": "unverified (local model only; cloud ETag untested)",
+      "new_note_no_clobber_creation": "supported narrowly (concurrent O_EXCL namespace no-clobber; not crash-safe/complete)",
+      "root_substitution_binding": "partial (dirfd containment only; no APFS root binding)"
     },
     "counts": {
       "failed": 11,
-      "partial": 1,
+      "partial": 2,
       "supported": 3,
-      "unverified": 1
+      "unverified": 2
     },
-    "verdict": "No tested ordinary-filesystem primitive enforces an atomic expected-version precondition for an existing note against an independent external writer. Content hash, mtime+size, hash-then-rename, renameatx_np(RENAME_SWAP), advisory locks, exclusive claim files and vnode observation all lost an external or ABA change; descriptor-relative traversal contains a root swap but does not bind the user-visible root. Keep automatic and engine-applied reviewed replacement for existing notes on ordinary folders disabled and retain the proposed diff for manual application. O_EXCL supports create-only no-clobber. Cloud-backed folder paths were not validated and remain unsupported."
+    "verdict": "On the exercised APFS schedules and primitives, no tested primitive enforced an atomic expected-version precondition for an existing note against an independent external writer. A final reread detected an external write that landed before it, but a second write landing after the reread was lost; content/mtime ABA was indistinguishable in the exercised schedules. This is not a universal impossibility claim: cloud and network backends and other filesystems were not tested, and the ETag row is a local model, not provider evidence. Descriptor-relative traversal contained a root swap but did not bind the visible root. O_EXCL held for concurrent new-name namespace no-clobber only; it makes no crash-safe or complete-creation claim. Keep automatic and engine-applied reviewed replacement for existing notes on ordinary folders disabled and retain the proposed diff for manual application."
   },
   "tests": [
     {
@@ -56,39 +56,8 @@
         "runs": [
           {
             "both_checked": true,
-            "final_is": "A",
-            "iteration": 0,
-            "lost": "B",
-            "replacements": 2,
-            "results": {
-              "A": {
-                "check_ok": true,
-                "check_sha256": "f34848ca92665c342abd5816c9e3eda0e82180671195362bcd0080544a3bc2ac",
-                "expected_sha256": "f34848ca92665c342abd5816c9e3eda0e82180671195362bcd0080544a3bc2ac",
-                "final_sha256": "c8bf0e3943cbe35bcf9978b6f43bd4499934b44cf42501d6e442c856dfea7460",
-                "initial_sha256": "f34848ca92665c342abd5816c9e3eda0e82180671195362bcd0080544a3bc2ac",
-                "pid": 38946,
-                "protocol": "hash_then_rename",
-                "replace_ok": true,
-                "role": "A"
-              },
-              "B": {
-                "check_ok": true,
-                "check_sha256": "f34848ca92665c342abd5816c9e3eda0e82180671195362bcd0080544a3bc2ac",
-                "expected_sha256": "f34848ca92665c342abd5816c9e3eda0e82180671195362bcd0080544a3bc2ac",
-                "final_sha256": "851ca2879d9bed3d9714eaf320a5d7a03fdd5ef1440c5fd79486e7b8a02c5ee9",
-                "initial_sha256": "f34848ca92665c342abd5816c9e3eda0e82180671195362bcd0080544a3bc2ac",
-                "pid": 38947,
-                "protocol": "hash_then_rename",
-                "replace_ok": true,
-                "role": "B"
-              }
-            }
-          },
-          {
-            "both_checked": true,
             "final_is": "B",
-            "iteration": 1,
+            "iteration": 0,
             "lost": "A",
             "replacements": 2,
             "results": {
@@ -98,7 +67,7 @@
                 "expected_sha256": "f34848ca92665c342abd5816c9e3eda0e82180671195362bcd0080544a3bc2ac",
                 "final_sha256": "c8bf0e3943cbe35bcf9978b6f43bd4499934b44cf42501d6e442c856dfea7460",
                 "initial_sha256": "f34848ca92665c342abd5816c9e3eda0e82180671195362bcd0080544a3bc2ac",
-                "pid": 38964,
+                "pid": 9346,
                 "protocol": "hash_then_rename",
                 "replace_ok": true,
                 "role": "A"
@@ -109,7 +78,38 @@
                 "expected_sha256": "f34848ca92665c342abd5816c9e3eda0e82180671195362bcd0080544a3bc2ac",
                 "final_sha256": "851ca2879d9bed3d9714eaf320a5d7a03fdd5ef1440c5fd79486e7b8a02c5ee9",
                 "initial_sha256": "f34848ca92665c342abd5816c9e3eda0e82180671195362bcd0080544a3bc2ac",
-                "pid": 38965,
+                "pid": 9353,
+                "protocol": "hash_then_rename",
+                "replace_ok": true,
+                "role": "B"
+              }
+            }
+          },
+          {
+            "both_checked": true,
+            "final_is": "A",
+            "iteration": 1,
+            "lost": "B",
+            "replacements": 2,
+            "results": {
+              "A": {
+                "check_ok": true,
+                "check_sha256": "f34848ca92665c342abd5816c9e3eda0e82180671195362bcd0080544a3bc2ac",
+                "expected_sha256": "f34848ca92665c342abd5816c9e3eda0e82180671195362bcd0080544a3bc2ac",
+                "final_sha256": "c8bf0e3943cbe35bcf9978b6f43bd4499934b44cf42501d6e442c856dfea7460",
+                "initial_sha256": "f34848ca92665c342abd5816c9e3eda0e82180671195362bcd0080544a3bc2ac",
+                "pid": 9367,
+                "protocol": "hash_then_rename",
+                "replace_ok": true,
+                "role": "A"
+              },
+              "B": {
+                "check_ok": true,
+                "check_sha256": "f34848ca92665c342abd5816c9e3eda0e82180671195362bcd0080544a3bc2ac",
+                "expected_sha256": "f34848ca92665c342abd5816c9e3eda0e82180671195362bcd0080544a3bc2ac",
+                "final_sha256": "851ca2879d9bed3d9714eaf320a5d7a03fdd5ef1440c5fd79486e7b8a02c5ee9",
+                "initial_sha256": "f34848ca92665c342abd5816c9e3eda0e82180671195362bcd0080544a3bc2ac",
+                "pid": 9368,
                 "protocol": "hash_then_rename",
                 "replace_ok": true,
                 "role": "B"
@@ -129,7 +129,7 @@
                 "expected_sha256": "f34848ca92665c342abd5816c9e3eda0e82180671195362bcd0080544a3bc2ac",
                 "final_sha256": "c8bf0e3943cbe35bcf9978b6f43bd4499934b44cf42501d6e442c856dfea7460",
                 "initial_sha256": "f34848ca92665c342abd5816c9e3eda0e82180671195362bcd0080544a3bc2ac",
-                "pid": 38974,
+                "pid": 9385,
                 "protocol": "hash_then_rename",
                 "replace_ok": true,
                 "role": "A"
@@ -138,9 +138,9 @@
                 "check_ok": true,
                 "check_sha256": "f34848ca92665c342abd5816c9e3eda0e82180671195362bcd0080544a3bc2ac",
                 "expected_sha256": "f34848ca92665c342abd5816c9e3eda0e82180671195362bcd0080544a3bc2ac",
-                "final_sha256": "851ca2879d9bed3d9714eaf320a5d7a03fdd5ef1440c5fd79486e7b8a02c5ee9",
+                "final_sha256": "c8bf0e3943cbe35bcf9978b6f43bd4499934b44cf42501d6e442c856dfea7460",
                 "initial_sha256": "f34848ca92665c342abd5816c9e3eda0e82180671195362bcd0080544a3bc2ac",
-                "pid": 38975,
+                "pid": 9386,
                 "protocol": "hash_then_rename",
                 "replace_ok": true,
                 "role": "B"
@@ -205,7 +205,7 @@
             "conflict": true,
             "expected_sha256": "f34848ca92665c342abd5816c9e3eda0e82180671195362bcd0080544a3bc2ac",
             "lock_acquired": true,
-            "pid": 38982,
+            "pid": 9400,
             "protocol": "flock_coop",
             "role": "A"
           },
@@ -215,7 +215,7 @@
             "expected_sha256": "f34848ca92665c342abd5816c9e3eda0e82180671195362bcd0080544a3bc2ac",
             "final_sha256": "851ca2879d9bed3d9714eaf320a5d7a03fdd5ef1440c5fd79486e7b8a02c5ee9",
             "lock_acquired": true,
-            "pid": 38983,
+            "pid": 9403,
             "protocol": "flock_coop",
             "replace_ok": true,
             "role": "B"
@@ -244,7 +244,7 @@
     },
     {
       "capability": "cooperating-writer serialization (not external-writer exclusion)",
-      "detail": "Two writers that both honor the same primitive serialized: one won and the other reported a conflict without writing.",
+      "detail": "The winner held the O_EXCL claim until the other writer actually attempted it; the loser retried, acquired it after release, re-read the new version, and refused with a conflict. This is cooperative serialization with retry, not external-writer exclusion.",
       "evidence": {
         "conflicts": [
           "A"
@@ -252,10 +252,16 @@
         "final_sha256": "851ca2879d9bed3d9714eaf320a5d7a03fdd5ef1440c5fd79486e7b8a02c5ee9",
         "results": {
           "A": {
-            "claim_acquired": false,
+            "check_ok": false,
+            "check_sha256": "851ca2879d9bed3d9714eaf320a5d7a03fdd5ef1440c5fd79486e7b8a02c5ee9",
+            "claim_acquired": true,
+            "claim_attempts": 3,
+            "claim_contended": true,
+            "claim_hold_observed": true,
+            "claim_waited": true,
             "conflict": true,
             "expected_sha256": "f34848ca92665c342abd5816c9e3eda0e82180671195362bcd0080544a3bc2ac",
-            "pid": 38989,
+            "pid": 9417,
             "protocol": "claim_coop",
             "role": "A"
           },
@@ -263,9 +269,13 @@
             "check_ok": true,
             "check_sha256": "f34848ca92665c342abd5816c9e3eda0e82180671195362bcd0080544a3bc2ac",
             "claim_acquired": true,
+            "claim_attempts": 1,
+            "claim_contended": false,
+            "claim_hold_observed": true,
+            "claim_waited": false,
             "expected_sha256": "f34848ca92665c342abd5816c9e3eda0e82180671195362bcd0080544a3bc2ac",
             "final_sha256": "851ca2879d9bed3d9714eaf320a5d7a03fdd5ef1440c5fd79486e7b8a02c5ee9",
-            "pid": 38990,
+            "pid": 9418,
             "protocol": "claim_coop",
             "replace_ok": true,
             "role": "B"
@@ -293,8 +303,8 @@
       "status": "supported"
     },
     {
-      "capability": "atomic expected-version replacement (hash-then-rename)",
-      "detail": "A hash-then-rename writer validated the expected version, then renamed its prepared file over the target after an external editor wrote to it; the external change was lost.",
+      "capability": "atomic expected-version replacement (hash-then-rename, check-once)",
+      "detail": "A check-once hash-then-rename writer validated the expected version, did not re-read after the external signal, then renamed its prepared file over the target; the external change was lost. The reread schedules below separate detection from atomicity.",
       "evidence": {
         "external_sha256": "b9b62c30e864b42a61b160298eec920b9b44ce3f7d881e9e83b1bf7d7aac8884",
         "final_sha256": "7f0c8b9fb2d0b86f3f58318f1965cc377f5b20d9c10b917033702dcc7cec4790",
@@ -306,22 +316,22 @@
           "external_seen_sha256": "b9b62c30e864b42a61b160298eec920b9b44ce3f7d881e9e83b1bf7d7aac8884",
           "final_sha256": "7f0c8b9fb2d0b86f3f58318f1965cc377f5b20d9c10b917033702dcc7cec4790",
           "identity_after_external": {
-            "ctime_ns": 1795613677412811259,
+            "ctime_ns": 1795614011886587625,
             "dev": 16777233,
-            "ino": 1468276426,
-            "mtime_ns": 1795613677412811259,
+            "ino": 1469152445,
+            "mtime_ns": 1795614011886587625,
             "size": 23
           },
           "identity_before": {
-            "ctime_ns": 1795613677367642814,
+            "ctime_ns": 1795614011807257557,
             "dev": 16777233,
-            "ino": 1468276426,
-            "mtime_ns": 1795613677367642814,
+            "ino": 1469152445,
+            "mtime_ns": 1795614011807257557,
             "size": 5
           },
           "identity_check_ok": true,
           "initial_sha256": "f34848ca92665c342abd5816c9e3eda0e82180671195362bcd0080544a3bc2ac",
-          "pid": 38996,
+          "pid": 9432,
           "protocol": "hash_then_rename_external",
           "replace_ok": true,
           "role": "A"
@@ -339,8 +349,8 @@
       "status": "failed"
     },
     {
-      "capability": "external writer exclusion (advisory lock)",
-      "detail": "A writer holding an advisory flock still replaced the target after an external editor wrote to it.",
+      "capability": "external writer exclusion (advisory lock, check-once)",
+      "detail": "A writer holding an advisory flock checked once, did not re-read after the external signal, and still replaced the target after an external editor wrote to it.",
       "evidence": {
         "external_sha256": "b9b62c30e864b42a61b160298eec920b9b44ce3f7d881e9e83b1bf7d7aac8884",
         "final_sha256": "7f0c8b9fb2d0b86f3f58318f1965cc377f5b20d9c10b917033702dcc7cec4790",
@@ -352,23 +362,23 @@
           "external_seen_sha256": "b9b62c30e864b42a61b160298eec920b9b44ce3f7d881e9e83b1bf7d7aac8884",
           "final_sha256": "7f0c8b9fb2d0b86f3f58318f1965cc377f5b20d9c10b917033702dcc7cec4790",
           "identity_after_external": {
-            "ctime_ns": 1795613677469102669,
+            "ctime_ns": 1795614011974099866,
             "dev": 16777233,
-            "ino": 1468276443,
-            "mtime_ns": 1795613677469102669,
+            "ino": 1469152575,
+            "mtime_ns": 1795614011974099866,
             "size": 23
           },
           "identity_before": {
-            "ctime_ns": 1795613677421091556,
+            "ctime_ns": 1795614011893957048,
             "dev": 16777233,
-            "ino": 1468276443,
-            "mtime_ns": 1795613677421091556,
+            "ino": 1469152575,
+            "mtime_ns": 1795614011893957048,
             "size": 5
           },
           "identity_check_ok": true,
           "initial_sha256": "f34848ca92665c342abd5816c9e3eda0e82180671195362bcd0080544a3bc2ac",
           "lock_acquired": true,
-          "pid": 39001,
+          "pid": 9449,
           "protocol": "flock_external",
           "replace_ok": true,
           "role": "A"
@@ -386,8 +396,8 @@
       "status": "failed"
     },
     {
-      "capability": "external writer exclusion (exclusive claim)",
-      "detail": "A writer holding an O_EXCL claim file still replaced the target after an external editor wrote to it.",
+      "capability": "external writer exclusion (exclusive claim, check-once)",
+      "detail": "A writer holding an O_EXCL claim file checked once, did not re-read after the external signal, and still replaced the target after an external editor wrote to it.",
       "evidence": {
         "external_sha256": "b9b62c30e864b42a61b160298eec920b9b44ce3f7d881e9e83b1bf7d7aac8884",
         "final_sha256": "7f0c8b9fb2d0b86f3f58318f1965cc377f5b20d9c10b917033702dcc7cec4790",
@@ -400,22 +410,22 @@
           "external_seen_sha256": "b9b62c30e864b42a61b160298eec920b9b44ce3f7d881e9e83b1bf7d7aac8884",
           "final_sha256": "7f0c8b9fb2d0b86f3f58318f1965cc377f5b20d9c10b917033702dcc7cec4790",
           "identity_after_external": {
-            "ctime_ns": 1795613677522854786,
+            "ctime_ns": 1795614012054937059,
             "dev": 16777233,
-            "ino": 1468276486,
-            "mtime_ns": 1795613677522854786,
+            "ino": 1469152751,
+            "mtime_ns": 1795614012054937059,
             "size": 23
           },
           "identity_before": {
-            "ctime_ns": 1795613677476965383,
+            "ctime_ns": 1795614011984967292,
             "dev": 16777233,
-            "ino": 1468276486,
-            "mtime_ns": 1795613677476965383,
+            "ino": 1469152751,
+            "mtime_ns": 1795614011984967292,
             "size": 5
           },
           "identity_check_ok": true,
           "initial_sha256": "f34848ca92665c342abd5816c9e3eda0e82180671195362bcd0080544a3bc2ac",
-          "pid": 39007,
+          "pid": 9470,
           "protocol": "claim_external",
           "replace_ok": true,
           "role": "A"
@@ -433,8 +443,8 @@
       "status": "failed"
     },
     {
-      "capability": "atomic expected-version replacement (vnode observation)",
-      "detail": "A writer that observed the target's stat identity before the external write still replaced the target afterwards.",
+      "capability": "atomic expected-version replacement (vnode observation, check-once)",
+      "detail": "A writer that observed the target's stat identity once before the external write, without a final reread, still replaced the target afterwards.",
       "evidence": {
         "external_sha256": "b9b62c30e864b42a61b160298eec920b9b44ce3f7d881e9e83b1bf7d7aac8884",
         "final_sha256": "7f0c8b9fb2d0b86f3f58318f1965cc377f5b20d9c10b917033702dcc7cec4790",
@@ -446,22 +456,22 @@
           "external_seen_sha256": "b9b62c30e864b42a61b160298eec920b9b44ce3f7d881e9e83b1bf7d7aac8884",
           "final_sha256": "7f0c8b9fb2d0b86f3f58318f1965cc377f5b20d9c10b917033702dcc7cec4790",
           "identity_after_external": {
-            "ctime_ns": 1795613677575262527,
+            "ctime_ns": 1795614012140783091,
             "dev": 16777233,
-            "ino": 1468276578,
-            "mtime_ns": 1795613677575262527,
+            "ino": 1469153003,
+            "mtime_ns": 1795614012140783091,
             "size": 23
           },
           "identity_before": {
-            "ctime_ns": 1795613677529478415,
+            "ctime_ns": 1795614012063589025,
             "dev": 16777233,
-            "ino": 1468276578,
-            "mtime_ns": 1795613677529478415,
+            "ino": 1469153003,
+            "mtime_ns": 1795614012063589025,
             "size": 5
           },
           "identity_check_ok": true,
           "initial_sha256": "f34848ca92665c342abd5816c9e3eda0e82180671195362bcd0080544a3bc2ac",
-          "pid": 39013,
+          "pid": 9482,
           "protocol": "vnode_observation",
           "replace_ok": true,
           "role": "A"
@@ -492,22 +502,22 @@
           "external_seen_sha256": "b9b62c30e864b42a61b160298eec920b9b44ce3f7d881e9e83b1bf7d7aac8884",
           "final_sha256": "7f0c8b9fb2d0b86f3f58318f1965cc377f5b20d9c10b917033702dcc7cec4790",
           "identity_after_external": {
-            "ctime_ns": 1795613677628053018,
+            "ctime_ns": 1795614012221556076,
             "dev": 16777233,
-            "ino": 1468276732,
-            "mtime_ns": 1795613677628053018,
+            "ino": 1469153130,
+            "mtime_ns": 1795614012221556076,
             "size": 23
           },
           "identity_before": {
-            "ctime_ns": 1795613677582617615,
+            "ctime_ns": 1795614012149045973,
             "dev": 16777233,
-            "ino": 1468276732,
-            "mtime_ns": 1795613677582617615,
+            "ino": 1469153130,
+            "mtime_ns": 1795614012149045973,
             "size": 5
           },
           "identity_check_ok": true,
           "initial_sha256": "f34848ca92665c342abd5816c9e3eda0e82180671195362bcd0080544a3bc2ac",
-          "pid": 39020,
+          "pid": 9509,
           "prepared_after_swap_sha256": "b9b62c30e864b42a61b160298eec920b9b44ce3f7d881e9e83b1bf7d7aac8884",
           "protocol": "swap_external",
           "role": "A",
@@ -526,21 +536,128 @@
       "status": "failed"
     },
     {
-      "capability": "local dirty-state authority",
-      "detail": "A remote ETag-only writer accepted the unchanged remote version and replaced an offline-dirty local file; the local change was lost. A local content recheck detects this example but cannot be made atomic with the replacement.",
+      "capability": "reread-before-replace detection (non-racy schedule)",
+      "detail": "A final reread after a different external write detected the change and the writer refused without replacing. This is a detection pass for this schedule, not an atomicity result; see reread_window_external_writer for the remaining window.",
       "evidence": {
+        "external1_sha256": "b9b62c30e864b42a61b160298eec920b9b44ce3f7d881e9e83b1bf7d7aac8884",
+        "external2_sha256": "b9b62c30e864b42a61b160298eec920b9b44ce3f7d881e9e83b1bf7d7aac8884",
+        "final_sha256": "b9b62c30e864b42a61b160298eec920b9b44ce3f7d881e9e83b1bf7d7aac8884",
+        "protocol": "reread_detect_external",
+        "result": {
+          "check_ok": true,
+          "check_sha256": "f34848ca92665c342abd5816c9e3eda0e82180671195362bcd0080544a3bc2ac",
+          "conflict": true,
+          "expected_sha256": "f34848ca92665c342abd5816c9e3eda0e82180671195362bcd0080544a3bc2ac",
+          "external1_seen_sha256": "b9b62c30e864b42a61b160298eec920b9b44ce3f7d881e9e83b1bf7d7aac8884",
+          "identity_after_external1": {
+            "ctime_ns": 1795614012297416640,
+            "dev": 16777233,
+            "ino": 1469153302,
+            "mtime_ns": 1795614012297416640,
+            "size": 23
+          },
+          "identity_before": {
+            "ctime_ns": 1795614012228934082,
+            "dev": 16777233,
+            "ino": 1469153302,
+            "mtime_ns": 1795614012228934082,
+            "size": 5
+          },
+          "initial_sha256": "f34848ca92665c342abd5816c9e3eda0e82180671195362bcd0080544a3bc2ac",
+          "pid": 9534,
+          "protocol": "reread_detect_external",
+          "reread_ok": false,
+          "reread_sha256": "b9b62c30e864b42a61b160298eec920b9b44ce3f7d881e9e83b1bf7d7aac8884",
+          "role": "A"
+        },
+        "writer_diagnostics": [
+          {
+            "returncode": 0,
+            "role": "A",
+            "stderr": "",
+            "stdout": ""
+          }
+        ]
+      },
+      "name": "reread_detect_external_writer",
+      "status": "partial"
+    },
+    {
+      "capability": "expected-version atomicity with a final reread",
+      "detail": "The writer re-read after an identical delete/recreate (the content hash passed), then a second external write landed after that reread; the replacement discarded it. A reread narrows the window but is not atomic with the replacement.",
+      "evidence": {
+        "external1_sha256": "f34848ca92665c342abd5816c9e3eda0e82180671195362bcd0080544a3bc2ac",
+        "external2_sha256": "b9b62c30e864b42a61b160298eec920b9b44ce3f7d881e9e83b1bf7d7aac8884",
+        "final_sha256": "7f0c8b9fb2d0b86f3f58318f1965cc377f5b20d9c10b917033702dcc7cec4790",
+        "protocol": "reread_window_external",
+        "result": {
+          "check_ok": true,
+          "check_sha256": "f34848ca92665c342abd5816c9e3eda0e82180671195362bcd0080544a3bc2ac",
+          "expected_sha256": "f34848ca92665c342abd5816c9e3eda0e82180671195362bcd0080544a3bc2ac",
+          "external1_seen_sha256": "f34848ca92665c342abd5816c9e3eda0e82180671195362bcd0080544a3bc2ac",
+          "external2_seen_sha256": "b9b62c30e864b42a61b160298eec920b9b44ce3f7d881e9e83b1bf7d7aac8884",
+          "final_sha256": "7f0c8b9fb2d0b86f3f58318f1965cc377f5b20d9c10b917033702dcc7cec4790",
+          "identity_after_external1": {
+            "ctime_ns": 1795614012371825120,
+            "dev": 16777233,
+            "ino": 1469153700,
+            "mtime_ns": 1795614012371825120,
+            "size": 5
+          },
+          "identity_after_external2": {
+            "ctime_ns": 1795614012375270873,
+            "dev": 16777233,
+            "ino": 1469153700,
+            "mtime_ns": 1795614012375270873,
+            "size": 23
+          },
+          "identity_before": {
+            "ctime_ns": 1795614012305050480,
+            "dev": 16777233,
+            "ino": 1469153534,
+            "mtime_ns": 1795614012305050480,
+            "size": 5
+          },
+          "initial_sha256": "f34848ca92665c342abd5816c9e3eda0e82180671195362bcd0080544a3bc2ac",
+          "pid": 9565,
+          "protocol": "reread_window_external",
+          "replace_ok": true,
+          "reread_ok": true,
+          "reread_sha256": "f34848ca92665c342abd5816c9e3eda0e82180671195362bcd0080544a3bc2ac",
+          "role": "A"
+        },
+        "writer_diagnostics": [
+          {
+            "returncode": 0,
+            "role": "A",
+            "stderr": "",
+            "stdout": ""
+          }
+        ]
+      },
+      "name": "reread_window_external_writer",
+      "status": "failed"
+    },
+    {
+      "capability": "local dirty-state authority (local model, not a provider test)",
+      "detail": "Local model only: an ETag-only implementation that trusts an unchanged remote version and performs an unconditional local replace lost an offline-dirty local file. A local content recheck detected this schedule. No cloud provider or conditional ETag operation was tested, so cloud/network authority remains unverified.",
+      "evidence": {
+        "backend_tested": false,
         "content_recheck_detected": true,
         "etag_accepted": true,
         "etag_final_sha256": "7f0c8b9fb2d0b86f3f58318f1965cc377f5b20d9c10b917033702dcc7cec4790",
         "etag_local_change_lost": true,
+        "local_bytes_consulted": false,
         "local_dirty_sha256": "85c28e287db1c81c1c3dd1484f0eb1a838752c3d8d3e7318b3c4a1ecb2ed305b",
+        "model": true,
+        "remote_conditional_operation": false,
         "remote_version": {
           "sha256": "f34848ca92665c342abd5816c9e3eda0e82180671195362bcd0080544a3bc2ac",
           "version": "v1"
         }
       },
       "name": "remote_etag_only_local_dirty",
-      "status": "failed"
+      "status": "unverified"
     },
     {
       "capability": "delete/recreate ABA detection",
@@ -550,17 +667,17 @@
         "expected_sha256": "f34848ca92665c342abd5816c9e3eda0e82180671195362bcd0080544a3bc2ac",
         "final_sha256": "7f0c8b9fb2d0b86f3f58318f1965cc377f5b20d9c10b917033702dcc7cec4790",
         "identity_after": {
-          "ctime_ns": 1795613677635690523,
+          "ctime_ns": 1795614012385169798,
           "dev": 16777233,
-          "ino": 1468276889,
-          "mtime_ns": 1795613677635690523,
+          "ino": 1469153716,
+          "mtime_ns": 1795614012385169798,
           "size": 5
         },
         "identity_before": {
-          "ctime_ns": 1795613677635551898,
+          "ctime_ns": 1795614012385035131,
           "dev": 16777233,
-          "ino": 1468276888,
-          "mtime_ns": 1795613677635551898,
+          "ino": 1469153715,
+          "mtime_ns": 1795614012385035131,
           "size": 5
         },
         "identity_changed": true
@@ -575,27 +692,27 @@
         "accepted": true,
         "final_sha256": "7f0c8b9fb2d0b86f3f58318f1965cc377f5b20d9c10b917033702dcc7cec4790",
         "identity_after": {
-          "ctime_ns": 1795613677636483065,
+          "ctime_ns": 1795614012385807257,
           "dev": 16777233,
-          "ino": 1468276894,
-          "mtime_ns": 1795613677636276023,
+          "ino": 1469153720,
+          "mtime_ns": 1795614012385592965,
           "size": 5
         },
         "identity_before": {
-          "ctime_ns": 1795613677636276023,
+          "ctime_ns": 1795614012385592965,
           "dev": 16777233,
-          "ino": 1468276893,
-          "mtime_ns": 1795613677636276023,
+          "ino": 1469153719,
+          "mtime_ns": 1795614012385592965,
           "size": 5
         },
         "identity_changed": true,
         "weak_version_after": [
           5,
-          1795613677636276023
+          1795614012385592965
         ],
         "weak_version_before": [
           5,
-          1795613677636276023
+          1795614012385592965
         ]
       },
       "name": "mtime_size_delete_recreate_aba",
@@ -609,26 +726,26 @@
         "distinct_inodes": 200,
         "reuse_observed": false,
         "sample_inodes": [
-          1468276898,
-          1468276899,
-          1468276900,
-          1468276901,
-          1468276902,
-          1468276903,
-          1468276904,
-          1468276905,
-          1468276906,
-          1468276907,
-          1468276908,
-          1468276909,
-          1468276910,
-          1468276911,
-          1468276912,
-          1468276913,
-          1468276914,
-          1468276915,
-          1468276916,
-          1468276917
+          1469153723,
+          1469153724,
+          1469153725,
+          1469153726,
+          1469153727,
+          1469153728,
+          1469153729,
+          1469153730,
+          1469153731,
+          1469153732,
+          1469153733,
+          1469153734,
+          1469153735,
+          1469153736,
+          1469153737,
+          1469153738,
+          1469153739,
+          1469153740,
+          1469153741,
+          1469153742
         ]
       },
       "name": "inode_reuse_cycles",
@@ -660,9 +777,10 @@
     },
     {
       "capability": "root ABA / identical-root substitution",
-      "detail": "The visible root was replaced by an identical clone while a writer held the old directory descriptor. The bytes read at the visible path were unchanged, so a content/version check cannot distinguish the clone; the writer committed to a detached directory.",
+      "detail": "The visible root was replaced by an identical clone while a writer held the old directory descriptor. The bytes read at the visible path were unchanged, so a content/version check cannot distinguish the clone; the probe asserts that the writer's payload landed in the detached directory.",
       "evidence": {
         "detached_root_sha256": "7f0c8b9fb2d0b86f3f58318f1965cc377f5b20d9c10b917033702dcc7cec4790",
+        "detached_write": true,
         "visible_root_sha256": "f34848ca92665c342abd5816c9e3eda0e82180671195362bcd0080544a3bc2ac",
         "visible_root_unchanged": true
       },
@@ -670,31 +788,31 @@
       "status": "failed"
     },
     {
-      "capability": "new-note no-clobber creation",
-      "detail": "Two writers racing to create the same new path produced exactly one file; the loser got EEXIST and wrote nothing. This is a create-only capability and says nothing about updating an existing note.",
+      "capability": "new-name namespace no-clobber (concurrent creators)",
+      "detail": "Two writers racing to create the same new path produced exactly one file; the loser got EEXIST and wrote nothing. This is namespace no-clobber for two concurrent creators in this run; it is not a claim about crash-safe complete creation, durability, directory fsync, or replacing an existing note.",
       "evidence": {
         "creators": [
-          "B"
-        ],
-        "final_sha256": "d6ee4cc48a470cb533a52e0ecb4ec7408c099621ae86d27d46e9c5e4be192762",
-        "losers": [
           "A"
+        ],
+        "final_sha256": "88b269fcee5840c28a90e10cb2cdc6de121d25d892257ec7313cf7273813abc1",
+        "losers": [
+          "B"
         ],
         "results": {
           "A": {
-            "conflict": true,
-            "created": false,
-            "error_errno": 17,
+            "created": true,
             "expected_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
-            "pid": 39031,
+            "final_sha256": "88b269fcee5840c28a90e10cb2cdc6de121d25d892257ec7313cf7273813abc1",
+            "pid": 9595,
             "protocol": "excl_create",
             "role": "A"
           },
           "B": {
-            "created": true,
+            "conflict": true,
+            "created": false,
+            "error_errno": 17,
             "expected_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
-            "final_sha256": "d6ee4cc48a470cb533a52e0ecb4ec7408c099621ae86d27d46e9c5e4be192762",
-            "pid": 39032,
+            "pid": 9596,
             "protocol": "excl_create",
             "role": "B"
           }
