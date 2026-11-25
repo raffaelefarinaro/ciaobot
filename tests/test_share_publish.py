@@ -14,9 +14,13 @@ from types import SimpleNamespace
 from typing import Any
 
 import pytest
+from starlette.applications import Starlette
+from starlette.routing import Route
+from starlette.testclient import TestClient
 
-from ciao import share_proposals, share_publish, shared_brain
+from ciao import proposal_actions, share_proposals, share_publish, shared_brain
 from ciao.config import SharedBrainLink
+from ciao.web.routes_api import memory_receipt_detail, memory_receipts, proposals_history
 
 IDENT = ("-c", "user.name=Test", "-c", "user.email=test@example.com")
 HOSTED = "https://github.com/x/notes"
@@ -43,6 +47,9 @@ class Config:
 
     def workspace_vault_root(self, name: str) -> Path:
         return self.vaults[name]
+
+    def chats_roots(self) -> list[str]:
+        return []
 
     def workspace(self, name: str | None) -> SimpleNamespace | None:
         return SimpleNamespace(shared_brains=self.links) if name == "home" else self.workspaces.get(name)
@@ -108,6 +115,60 @@ def linked(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> tuple[Config, Pat
     return config, clone, origin
 
 
+def _receipt_client(config: Config) -> TestClient:
+    app = Starlette(routes=[
+        Route("/api/memory/receipts/{id}", memory_receipt_detail, methods=["GET"]),
+        Route("/api/memory/receipts", memory_receipts, methods=["GET"]),
+        Route("/api/proposals/history", proposals_history, methods=["GET"]),
+    ])
+    app.state.config = config
+    return TestClient(app)
+
+
+def test_git_receipt_api_projection_stays_a_confirmed_remote_publication(
+    linked: tuple[Config, Path, Path],
+) -> None:
+    config, _clone, _origin = linked
+    draft = share_proposals.draft_share(
+        config, workspace="home", relative_path="n.md", operation="replace",
+        proposed=b"remote receipt\n", request_key="git-receipt-api",
+    )
+    assert isinstance(draft, share_proposals.ShareDraft)
+    published = asyncio.run(share_publish.publish_share(
+        config, workspace="home", proposal_id=draft.proposal_id,
+        expected_revision=draft.artifact["review_token"],
+    ))
+    assert published.outcome == "published"
+    client = _receipt_client(config)
+    listed = client.get("/api/memory/receipts").json()["rows"]
+    row = next(item for item in listed if item["id"] == published.receipt_id)
+    assert row["kind"] == "share_publish"
+    assert row["undoable"] is True
+    assert row.get("scope") is None
+    assert row.get("local_only") is None
+    assert row.get("sync_claimed") is None
+    detail = client.get(f"/api/memory/receipts/{published.receipt_id}").json()
+    assert detail["undoable"] is True
+    assert detail["commit_oid"] == published.commit_oid
+    assert detail["before"] == "before\r\nλ\n"
+    assert detail["after"] == "remote receipt\n"
+    assert detail.get("scope") is None
+    assert detail.get("local_only") is None
+    assert detail.get("sync_claimed") is None
+    queue = config.vault / "Workspace" / "Memory-Proposals.md"
+    proposal_actions.record_decision(
+        queue, action="accept",
+        text=f"Shared note change proposal {draft.artifact['immutable']['sidecar_id']}",
+        kind="share", via="pwa", outcome="published",
+        proposal_id=draft.proposal_id, receipt_id=str(published.receipt_id),
+    )
+    history = client.get("/api/proposals/history").json()["rows"]
+    row = next(item for item in history if item.get("kind") == "share")
+    assert row["change"]["scope"] is None
+    assert row["change"]["commit_oid"] == published.commit_oid
+    assert row["change"]["undoable"] is True
+
+
 def test_publish_uses_reviewed_bytes_and_is_idempotent(linked: tuple[Config, Path, Path]) -> None:
     config, clone, origin = linked
     (clone / "n.md").write_bytes(b"uncommitted local change")
@@ -134,6 +195,11 @@ def test_publish_uses_reviewed_bytes_and_is_idempotent(linked: tuple[Config, Pat
     assert len(share_publish.list_share_receipts(config, workspace="home")) == 1
     receipt = share_publish.get_share_receipt(config, workspace="home", proposal_id=draft.proposal_id, expected_revision=token)
     assert receipt and receipt["commit_oid"] == result.commit_oid and receipt["published_blob_oid"]
+    # A Git receipt is a confirmed remote publication, not a folder's
+    # historical-local-only record.
+    assert "scope" not in receipt
+    assert "local_only" not in receipt
+    assert "sync_claimed" not in receipt
 
 
 def test_publish_retries_only_after_a_persisted_retryable_rejection(linked, monkeypatch) -> None:
@@ -1569,3 +1635,304 @@ def test_legacy_lifetime_refuses_to_adopt_stale_generation(linked):
         share_proposals._persist_link_lifetime(config, "home", config.link)
     assert config._workspace_registry_bytes == loaded
     assert path.read_bytes() == peer
+
+
+def test_drift_repair_restart_keeps_manual_draft_and_publish(
+    linked: tuple[Config, Path, Path], tmp_path: Path, monkeypatch
+) -> None:
+    config, clone, origin = linked
+    automatic = shared_brain.set_sharing_policy(config.link, "automatic")
+    config.link = automatic
+    config.links = [automatic]
+    config.workspaces["home"].shared_brains = [automatic]
+    _save_test_links(config)
+
+    def persist(config_arg, candidate=None, *, owner=None):
+        _save_test_links(config_arg)
+
+    monkeypatch.setattr("ciao.workspaces.persist_workspaces", persist)
+
+    before = share_proposals.draft_share(
+        config, workspace="home", relative_path="n.md", operation="replace",
+        proposed=b"before drift\n", request_key="before-drift",
+    )
+    assert isinstance(before, share_proposals.ShareDraft)
+
+    git(clone, "remote", "set-url", "origin", "https://github.com/x/elsewhere")
+    refused = share_proposals.draft_share(
+        config, workspace="home", relative_path="n.md", operation="replace",
+        proposed=b"during drift\n", request_key="during-drift",
+    )
+    assert isinstance(refused, share_proposals.ShareRefusal)
+    assert refused.code == "brain_changed"
+    fence_dir = config.state_path.parent / "sharing-pending"
+    assert config.workspaces["home"].shared_brains[0].sharing_policy == "review"
+
+    git(clone, "remote", "set-url", "origin", HOSTED)
+    recovered_link = config.workspaces["home"].shared_brains[0]
+    restarted = Config(tmp_path, config.vault, recovered_link)
+    restarted.workspaces["home"].shared_brains = [recovered_link]
+    _save_test_links(restarted)
+
+    assert shared_brain.recover_sharing_state(restarted)
+    assert restarted.workspaces["home"].shared_brains[0].sharing_policy == "review"
+    assert list(fence_dir.glob("*.json")) == []
+
+    after = share_proposals.draft_share(
+        restarted, workspace="home", relative_path="n.md", operation="replace",
+        proposed=b"after restart, manually approved\n", request_key="after-restart",
+    )
+    assert isinstance(after, share_proposals.ShareDraft)
+    result = asyncio.run(share_publish.publish_share(
+        restarted, workspace="home", proposal_id=after.proposal_id,
+        expected_revision=after.artifact["review_token"],
+    ))
+    assert result.outcome == "published"
+
+
+def test_divergent_push_url_refuses_draft_then_repairs_and_publishes(
+    linked: tuple[Config, Path, Path]
+) -> None:
+    config, clone, origin = linked
+    git(clone, "remote", "set-url", "--push", "origin", "https://github.com/x/other")
+    refused = share_proposals.draft_share(
+        config, workspace="home", relative_path="n.md", operation="replace",
+        proposed=b"divergent push\n", request_key="divergent-push",
+    )
+    assert isinstance(refused, share_proposals.ShareRefusal)
+    assert refused.code == "brain_changed"
+
+    git(clone, "remote", "set-url", "--push", "origin", HOSTED)
+    draft = share_proposals.draft_share(
+        config, workspace="home", relative_path="n.md", operation="replace",
+        proposed=b"repaired push\n", request_key="repaired-push",
+    )
+    assert isinstance(draft, share_proposals.ShareDraft)
+
+    # Diverge again after review: the publish path must refuse the same draft.
+    git(clone, "remote", "set-url", "--push", "origin", "https://github.com/x/other")
+    refused_publish = asyncio.run(share_publish.publish_share(
+        config, workspace="home", proposal_id=draft.proposal_id,
+        expected_revision=draft.artifact["review_token"],
+    ))
+    assert refused_publish.outcome == "brain_changed"
+
+    git(clone, "remote", "set-url", "--push", "origin", HOSTED)
+    published = asyncio.run(share_publish.publish_share(
+        config, workspace="home", proposal_id=draft.proposal_id,
+        expected_revision=draft.artifact["review_token"],
+    ))
+    assert published.outcome == "published"
+
+
+def test_multiple_configured_or_fetch_urls_refuse_draft(linked: tuple[Config, Path, Path]) -> None:
+    config, clone, _origin = linked
+    git(clone, "remote", "set-url", "--add", "origin", "https://github.com/x/other")
+    refused = share_proposals.draft_share(
+        config, workspace="home", relative_path="n.md", operation="replace",
+        proposed=b"ambiguous origin\n", request_key="ambiguous-origin",
+    )
+    assert isinstance(refused, share_proposals.ShareRefusal)
+    assert refused.code == "brain_changed"
+
+
+def _reload_persisted_config(config: Config):
+    from ciao.config import CiaoConfig
+
+    return CiaoConfig.from_env({
+        "CIAO_WORKSPACE": str(config.workspace_root),
+        "CIAO_RUNTIME_ROOT": str(config.state_path.parent),
+        "PWA_AUTH_TOKEN": "test-token",
+    })
+
+
+def _persist_automatic_grant(config) -> SharedBrainLink:
+    from ciao.workspaces import persist_workspaces
+
+    workspace = config.workspace("home")
+    assert workspace is not None
+    granted = shared_brain.set_sharing_policy(workspace.shared_brains[0], "automatic")
+    workspace.shared_brains = [granted]
+    persist_workspaces(config, dict(config.workspaces))
+    return granted
+
+
+def _alias_drift(kind: str, clone: Path, tmp_path: Path, monkeypatch):
+    if kind == "configured":
+        git(clone, "remote", "set-url", "origin", "https://github.com/x/elsewhere")
+
+        def repair() -> None:
+            git(clone, "remote", "set-url", "origin", HOSTED)
+
+        return repair
+    home = tmp_path / f"hostile-{kind}-home"
+    home.mkdir(exist_ok=True)
+    config_path = home / ".gitconfig"
+    if kind == "fetch":
+        config_path.write_text(
+            f'[url "file:///tmp/hostile-fetch"]\n\tinsteadOf = {HOSTED}\n'
+        )
+    else:
+        config_path.write_text(
+            f'[url "file:///tmp/hostile-push"]\n\tpushInsteadOf = {HOSTED}\n'
+        )
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.delenv("XDG_CONFIG_HOME", raising=False)
+
+    def repair() -> None:
+        config_path.write_text("")
+
+    return repair
+
+
+@pytest.mark.parametrize("kind", ["configured", "fetch", "push"])
+def test_persisted_automatic_grant_alias_drift_repairs_draft_and_publish(
+    linked: tuple[Config, Path, Path], tmp_path: Path, monkeypatch, kind: str
+) -> None:
+    config, clone, _origin = linked
+    live = _reload_persisted_config(config)
+    _persist_automatic_grant(live)
+
+    before = share_proposals.draft_share(
+        live, workspace="home", relative_path="n.md", operation="replace",
+        proposed=b"reviewed before drift\n", request_key=f"before-{kind}",
+    )
+    assert isinstance(before, share_proposals.ShareDraft)
+
+    repair = _alias_drift(kind, clone, tmp_path, monkeypatch)
+
+    # Publishing the pre-drift draft sees the alias under the fence, refuses,
+    # and durably retires the automatic grant.
+    refused_publish = asyncio.run(share_publish.publish_share(
+        live, workspace="home", proposal_id=before.proposal_id,
+        expected_revision=before.artifact["review_token"],
+    ))
+    assert refused_publish.outcome == "brain_changed"
+    after_publish = _reload_persisted_config(config)
+    stored = after_publish.workspace("home").shared_brains[0]
+    assert stored.sharing_policy == "review"
+    assert stored.sharing_consent is None
+    assert not shared_brain.sharing_consent_active(stored)
+
+    repair()
+    restarted = _reload_persisted_config(config)
+    assert shared_brain.recover_sharing_state(restarted)
+    assert restarted.workspace("home").shared_brains[0].sharing_policy == "review"
+    published = asyncio.run(share_publish.publish_share(
+        restarted, workspace="home", proposal_id=before.proposal_id,
+        expected_revision=before.artifact["review_token"],
+    ))
+    assert published.outcome == "published"
+
+    # Grant again, then drift before a fresh draft: the draft path must retire
+    # the same grant and a reload must still see review after repair.
+    regranted = _persist_automatic_grant(restarted)
+    assert shared_brain.sharing_consent_active(regranted)
+    repair = _alias_drift(kind, clone, tmp_path, monkeypatch)
+    refused_draft = share_proposals.draft_share(
+        restarted, workspace="home", relative_path="n.md", operation="replace",
+        proposed=b"draft during drift\n", request_key=f"during-{kind}",
+    )
+    assert isinstance(refused_draft, share_proposals.ShareRefusal)
+    assert refused_draft.code == "brain_changed"
+    after_draft = _reload_persisted_config(config)
+    stored = after_draft.workspace("home").shared_brains[0]
+    assert stored.sharing_policy == "review"
+    assert stored.sharing_consent is None
+
+    repair()
+    final = _reload_persisted_config(config)
+    assert shared_brain.recover_sharing_state(final)
+    accepted = share_proposals.draft_share(
+        final, workspace="home", relative_path="n.md", operation="replace",
+        proposed=b"reviewed after repair\n", request_key=f"after-{kind}",
+    )
+    assert isinstance(accepted, share_proposals.ShareDraft)
+    result = asyncio.run(share_publish.publish_share(
+        final, workspace="home", proposal_id=accepted.proposal_id,
+        expected_revision=accepted.artifact["review_token"],
+    ))
+    assert result.outcome == "published"
+
+
+def test_failed_invalidation_surfaces_pending_grant_and_restart_demotes(
+    linked: tuple[Config, Path, Path], monkeypatch
+) -> None:
+    from ciao.workspaces import acquire_workspace_registry, persist_workspaces
+
+    config, clone, _origin = linked
+    live = _reload_persisted_config(config)
+    granted = _persist_automatic_grant(live)
+    git(clone, "remote", "set-url", "origin", "https://github.com/x/elsewhere")
+
+    def fail_registry(*_args, **_kwargs):
+        raise OSError("registry disk full")
+
+    monkeypatch.setattr("ciao.workspaces.persist_workspaces", fail_registry)
+    with acquire_workspace_registry(live) as owner:
+        observation = shared_brain.observe_under_fence(live, granted, owner)
+    state = observation.state
+    assert state["problem"] == "origin_changed"
+    assert state["sharing_policy"] == "review"
+    assert state["sharing_grant_pending"] is True
+    assert state["sharing_invalidation_failed"] is True
+    assert live._sharing_recovery_pending is True
+    journal = live.state_path.parent / "sharing-revocations.json"
+    assert granted.lifetime_id in journal.read_text()
+
+    # The registry still carries the automatic row; a restart applies the
+    # journal and never revives consent after repair.
+    monkeypatch.setattr("ciao.workspaces.persist_workspaces", persist_workspaces)
+    git(clone, "remote", "set-url", "origin", HOSTED)
+    restarted = _reload_persisted_config(config)
+    assert shared_brain.recover_sharing_state(restarted)
+    stored = restarted.workspace("home").shared_brains[0]
+    assert stored.sharing_policy == "review"
+    assert stored.sharing_consent is None
+
+
+def test_hostile_local_config_demotes_grant_without_origin_reads(
+    linked: tuple[Config, Path, Path], monkeypatch
+) -> None:
+    config, clone, _origin = linked
+    live = _reload_persisted_config(config)
+    _persist_automatic_grant(live)
+    git(clone, "config", "filter.x.smudge", "cat")
+    calls: list[tuple[str, ...]] = []
+    original = shared_brain._git
+
+    def record(folder, *args):
+        calls.append(tuple(str(arg) for arg in args))
+        return original(folder, *args)
+
+    monkeypatch.setattr(shared_brain, "_git", record)
+    refused = share_proposals.draft_share(
+        live, workspace="home", relative_path="n.md", operation="replace",
+        proposed=b"hostile config\n", request_key="hostile-config",
+    )
+    assert isinstance(refused, share_proposals.ShareRefusal)
+    assert refused.code == "brain_unavailable"
+    assert calls == [("config", "--list", "--show-scope")]
+    reloaded = _reload_persisted_config(config)
+    stored = reloaded.workspace("home").shared_brains[0]
+    assert stored.sharing_policy == "review"
+    assert stored.sharing_consent is None
+
+
+def test_status_probe_uses_the_same_alias_observation(
+    linked: tuple[Config, Path, Path], tmp_path: Path, monkeypatch
+) -> None:
+    config, clone, _origin = linked
+    live = _reload_persisted_config(config)
+    granted = _persist_automatic_grant(live)
+    _alias_drift("push", clone, tmp_path, monkeypatch)
+
+    state = shared_brain.brain_state(granted, live, "home")
+    assert state["problem"] == "origin_changed"
+    assert state["sharing_policy"] == "review"
+    assert state["sharing_grant_pending"] is False
+    assert state["sharing_invalidation_failed"] is False
+    reloaded = _reload_persisted_config(config)
+    stored = reloaded.workspace("home").shared_brains[0]
+    assert stored.sharing_policy == "review"
+    assert stored.sharing_consent is None

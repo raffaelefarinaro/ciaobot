@@ -128,7 +128,7 @@ def test_standing_grant_records_scope_and_blocks_eligibility_until_integration(c
         session="operator-one",
     )
     assert preview["preview"]["future_items_without_review"] is True
-    assert "Future structured decisions" in preview["preview"]["summary"]
+    assert "When automatic sharing becomes available" in preview["preview"]["summary"]
     assert preview["preview"]["excluded_fields"] == ["reason"]
     sample_fields = {row["field"] for sample in preview["preview"]["fields"] for row in sample}
     assert sample_fields == {"decision", "effective_date"}

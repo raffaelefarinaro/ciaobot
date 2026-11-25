@@ -34,6 +34,7 @@ from ciao.config import (
     coerce_provider_overrides,
     coerce_workspace_color,
     merge_memory_approval,
+    shared_brain_row,
 )
 from ciao import shared_brain
 from ciao.model_tiers import is_tier
@@ -208,8 +209,8 @@ def registry_rows(data: Any) -> list[dict[str, Any]]:
     raise WorkspaceRegistryConflict("workspace registry is invalid")
 
 
-def persisted_checkout_links(raw: bytes, path: str) -> list[tuple[str, dict[str, Any]]]:
-    """Collect current Git links, refusing any folder or unknown kind at this checkout."""
+def persisted_shared_links(raw: bytes, path: str) -> list[tuple[str, dict[str, Any]]]:
+    """Collect current Git or folder links whose stored path resolves to ``path``."""
     matches = []
     canonical = os.path.realpath(path)
     try:
@@ -223,11 +224,19 @@ def persisted_checkout_links(raw: bytes, path: str) -> list[tuple[str, dict[str,
         for candidate in links:
             if not isinstance(candidate, dict) or not isinstance(candidate.get("path"), str):
                 raise WorkspaceRegistryConflict("workspace shared brain path is unreadable")
+            if candidate.get("kind", "git") not in ("git", "folder"):
+                raise WorkspaceRegistryConflict("workspace shared brain kind is unreadable")
             if os.path.realpath(candidate["path"]) != canonical:
                 continue
-            if candidate.get("kind", "git") != "git":
-                raise WorkspaceRegistryConflict("the checkout is linked with another storage kind")
             matches.append((row.get("name", ""), candidate))
+    return matches
+
+
+def persisted_checkout_links(raw: bytes, path: str) -> list[tuple[str, dict[str, Any]]]:
+    """Collect current Git links, refusing any folder or unknown kind at this checkout."""
+    matches = persisted_shared_links(raw, path)
+    if any(candidate.get("kind", "git") != "git" for _name, candidate in matches):
+        raise WorkspaceRegistryConflict("the checkout is linked with another storage kind")
     return matches
 
 
@@ -260,7 +269,14 @@ def patch_shared_brain_lifetime(config: Any, workspace: str, link: Any, *, owner
 
 
 def workspace_registry_lock(config: Any) -> threading.RLock:
-    """Serialize registry snapshots with initialization of legacy link IDs."""
+    """Serialize registry snapshots with initialization of legacy link IDs.
+
+    This is the in-process reentrant lock. Cross-process writers use
+    ``acquire_workspace_registry`` and ``replace_workspace_registry`` for the
+    authoritative claim plus byte-exact compare-and-swap. Shared-brain policy
+    writes take both that registry transaction and the cross-process checkout
+    claim.
+    """
     key = id(config)
     with _REGISTRY_LOCKS_GUARD:
         return _REGISTRY_LOCKS.setdefault(key, threading.RLock())
@@ -401,13 +417,15 @@ def requested_brain_rows(raw: object) -> list[dict[str, str]]:
         value = row["path"]
         if any(ord(ch) < 32 or ord(ch) == 127 for ch in value):
             raise ValueError("Shared brain path contains a control character")
-        path = os.path.expanduser(value.strip())
+        # The path is exact: a trailing or leading space can name a different
+        # existing folder, and trimming it would link the wrong one.
+        path = os.path.expanduser(value)
         if not os.path.isabs(path):
             raise ValueError("Shared brain folder path must be absolute")
         canonical = os.path.realpath(path)
         if canonical in paths:
             raise ValueError(f"Shared brain folder is listed twice: {canonical}")
-        if canonical != canonical.strip() or any(ord(ch) < 32 or ord(ch) == 127 for ch in canonical):
+        if any(ord(ch) < 32 or ord(ch) == 127 for ch in canonical):
             raise ValueError("Shared brain path cannot be represented unambiguously")
         paths.add(canonical)
         row["path"] = canonical
@@ -645,8 +663,7 @@ def persist_workspaces(
                 row.pop("shared_brains", None)
         if workspace.shared_brains:
             row["shared_brains"] = [
-                {"name": link.name, "path": link.path, "identity": link.identity, "lifetime_id": link.lifetime_id, "kind": link.kind}
-                for link in workspace.shared_brains
+                shared_brain_row(link) for link in workspace.shared_brains
             ]
     expected = getattr(config, "_workspace_registry_bytes", None)
     content = (json.dumps(payload, indent=2) + "\n").encode("utf-8")

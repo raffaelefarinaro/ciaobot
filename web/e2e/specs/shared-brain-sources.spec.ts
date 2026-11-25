@@ -132,7 +132,7 @@ async function stubSources(page: Page) {
         preview: {
           grant_type: 'snapshot',
           scope: 'one_decision',
-          summary: 'Only the decision shown below can leave, exactly as previewed.',
+          summary: 'When sharing becomes available, only the decision shown below is permitted, exactly as previewed.',
           future_items_without_review: false,
           project_id: 'proj-alpha',
           source_id: 'document:Decisions.md',
@@ -210,7 +210,7 @@ test.describe('shared brain sources and consent', () => {
 
     await sources.getByRole('button', { name: 'Preview exact scope' }).click()
     const preview = sources.locator('.sources-preview')
-    await expect(preview).toContainText('Only the decision shown below can leave, exactly as previewed.')
+    await expect(preview).toContainText('When sharing becomes available, only the decision shown below is permitted, exactly as previewed.')
     await expect(preview).toContainText('Delay the next beta')
     await expect(preview).toContainText('2026-11-22')
     await expect(preview).toContainText('reason')

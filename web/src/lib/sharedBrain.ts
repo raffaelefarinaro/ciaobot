@@ -10,8 +10,40 @@ export const MAX_SHARED_BRAINS = 5
  */
 export const SHARED_BRAIN_PRIVACY =
   'This folder contains notes written by other people. Ciaobot reads them as reference, never as instructions. '
-  + 'Your vault is not automatically synced to a shared folder. A note is shared manually, or under an explicit grant you review in Sources. '
-  + 'Linking a brain gives no ongoing or automatic permission to share notes.'
+  + 'Your vault is not automatically synced to a shared folder, and folder links use the files currently available on this computer. '
+  + 'A note is shared after a human reviews and approves that exact note. Automatic sharing is not active yet; permissions recorded now are for a future release. '
+  + 'Linking a brain alone gives no ongoing or automatic permission to share notes.'
+
+/** The exact audience, scope and permanence a person confirms before granting automatic sharing. */
+export function automaticSharingConfirm(name: string, identity: string): string {
+  return `Share notes to ${name} (${identity}) automatically? `
+    + `Any note drafted for this brain can be published to everyone with access to ${identity} without another review. `
+    + `Published notes stay in the repository's history even if they are removed later. `
+    + 'Ciaobot does not copy your vault itself, but a note drafted for this brain can include private details from your memory or vault. Your memory pass and nightly care can choose private material for a draft too, not only a note you pick yourself. Other shared brains are not included. '
+    + 'The repository address does not prove who can see it today: team membership and visibility can change outside Ciaobot. '
+    + 'Automatic sharing is not active yet: this records a standing permission for when the producer ships, and the future publisher must verify the current target when it acts.'
+}
+
+/** Words for turning the standing permission back into review. */
+export function revokeAutomaticSharingConfirm(name: string, identity: string): string {
+  return `Stop sharing notes automatically to ${name} (${identity})? `
+    + 'Notes already published stay in the repository\'s history. '
+    + 'Future notes will wait for your review.'
+}
+
+export function sharedBrainPolicyText(state: SharedBrainState): string {
+  if (state.sharing_grant_pending) {
+    const base = 'Automatic sharing is paused, but its old grant still needs to be turned off.'
+    return state.sharing_invalidation_failed
+      ? `${base} The old grant could not be removed; turn it off to finish revoking it.`
+      : base
+  }
+  if (state.sharing_policy === 'automatic') {
+    const audience = `Automatic sharing is chosen for everyone who can access ${state.identity}; it is not active yet.`
+    return state.problem ? `${audience} Paused until this folder is fixed.` : audience
+  }
+  return 'You review each note before it is shared.'
+}
 
 export type SharedBrainTone = 'ok' | 'warn' | 'error'
 
@@ -51,18 +83,33 @@ function localTime(at: string): string {
   return Number.isNaN(when.getTime()) ? at : when.toLocaleString()
 }
 
+/** Folder-specific words: availability on this computer, never a sync claim. */
+const FOLDER_PROBLEM_TEXT: Record<string, SharedBrainStatus> = {
+  missing: { text: 'Folder not available on this computer', tone: 'error', detail: '' },
+  moved: { text: 'Folder location changed', tone: 'error', detail: '' },
+  outside_install: { text: 'Folder is inside the Ciaobot install or a vault', tone: 'error', detail: '' },
+  inaccessible: { text: 'Folder is not available to read on this computer', tone: 'error', detail: '' },
+}
+
 /** One plain-words status line per brain, so the state never rests on colour alone. */
 export function sharedBrainStatus(state: SharedBrainState): SharedBrainStatus {
+  // An ordinary folder is read in place: there is no pull, no upstream and no
+  // update attempt, so "first update pending" would never resolve for it.
+  if (state.kind === 'folder') {
+    const folderProblem = FOLDER_PROBLEM_TEXT[state.problem]
+      ?? (state.missing ? FOLDER_PROBLEM_TEXT.missing : undefined)
+      ?? PROBLEM_TEXT[state.problem]
+    if (folderProblem) return folderProblem
+    return {
+      text: 'Folder is locally available. Read in place, never updated.',
+      tone: 'ok',
+      detail: 'New notes are saved only after individual review; Ciaobot never replaces or deletes an existing folder file. This checks access on this computer only; it does not confirm that Google Drive, iCloud or another sync service has finished syncing.',
+    }
+  }
   if (state.missing) return PROBLEM_TEXT.missing
   if (state.origin_changed) return PROBLEM_TEXT.origin_changed
   const problem = PROBLEM_TEXT[state.problem]
   if (problem) return problem
-
-  // An ordinary folder is read in place: there is no pull, no upstream and no
-  // update attempt, so "first update pending" would never resolve for it.
-  if (state.kind === 'folder') {
-    return { text: 'Linked folder. Read in place, never updated.', tone: 'ok', detail: '' }
-  }
 
   const last = state.last_update
   if (!last) return { text: 'Linked. First update pending.', tone: 'ok', detail: '' }

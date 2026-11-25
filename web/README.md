@@ -79,12 +79,15 @@ CLI until the canonical publication state proves it was rejected. Unavailable
 or malformed state remains protected; a stale marker never recreates an
 actionable review card. If a blocked review has a server-confirmed recorded
 attempt, its card offers **Reconcile publication**. That action checks only the
-persisted attempt and never starts a new push; without the exact recorded
-attempt indicator, neither Publish nor Reconcile is available. If every prior
-attempt is a verified retryable rejection and the server still allows another
-attempt, the card instead offers **Retry Publish**; unresolved or confirmed
-attempts never get that push action. A refused shared-note Reject stays open
-and explains the refusal inline.
+persisted attempt and never starts a new push or folder write; without the
+exact recorded attempt indicator, neither Publish nor Reconcile is available. If
+every prior attempt is a verified retryable rejection and the server still
+allows another attempt, the card instead offers **Retry Publish**; unresolved or
+confirmed attempts never get that action. A folder destination is create-only:
+the card shows the folder identity and path, blocks once an external note
+appears there, and never offers replacement or deletion of an existing file. A
+folder receipt is not undoable. A refused shared-note Reject stays open and
+explains the refusal inline.
 
 ```bash
 cd web
@@ -596,7 +599,7 @@ CSS custom properties live in `src/styles/app.css` as `:root` declarations, load
 - **Type**: Body font (Settings > Appearance: System, Serif or Mono) sets `data-body-font` on `<html>`, which swaps `--font`; components use `var(--font)`, never `var(--font-sans)`. Hybrid system: proportional system sans for prose and controls; monospace (SF Mono, Fira Code, Cascadia Code) for code, commands, IDs, schedules, timestamps, and technical labels. Base scale: 11/12/14/16px (`--text-xs`, `--text-sm`, `--text-base`, `--text-lg`), dynamically adjusted via the client-side `--font-scale` multiplier (from 0.8x to 1.5x, configured under Settings > Appearance).
 - **Geometry**: 10/6/14px radii (`--radius`, `--radius-sm`, `--radius-lg`). Spacing scale `--space-1` through `--space-6`.
 - **Motion**: `--ease: cubic-bezier(0.2, 0.8, 0.2, 1)`.
-- **Brand mark and wordmark**: `BrandMark.vue` renders the Ciaobot C as inline SVG at 30×30px: the C follows `currentColor` and its two dots use the selected `--accent`. `CiaoMark.vue` shares that vector mark in Settings; neither surface is a control or has cache/service-worker side effects. Only the expanded sidebar owns the navigation mark. `PaneHeader.vue` has no mark or `brand` prop; it retains page tags, title/actions slots and mobile controls. A collapsed sidebar or closed phone drawer needs no logo: its toggle or hamburger still opens navigation. `Wordmark.vue` renders the supplied wordmark image (`web/public/brand/`): ink on light themes, off-white on dark ones, switched by the `theme-light` class. It is used by StartupView, UpdateProgressView, LoginView and RestartNotice.
+- **Brand mark and wordmark**: `BrandMark.vue` renders the Ciaobot C as inline SVG at 30×30px: the C follows `currentColor` and its two dots use the selected `--accent`. `CiaoMark.vue` shares that vector mark in Settings (static there) and takes an optional `progress` prop (0 resting C, 1 closed ring; geometry in `lib/ciaoRing.ts`, shared with the website header). `BrandMark` is a button: hover or focus closes the C into a ring at a slow follow rate and leaving reverses it from wherever it is, reduced motion keeps the static C, and a click hard-refreshes (service workers updated, caches cleared, reload with `_r`). Only the expanded sidebar owns the navigation mark. `PaneHeader.vue` has no mark or `brand` prop; it retains page tags, title/actions slots and mobile controls. A collapsed sidebar or closed phone drawer needs no logo: its toggle or hamburger still opens navigation. `Wordmark.vue` renders the supplied wordmark image (`web/public/brand/`): ink on light themes, off-white on dark ones, switched by the `theme-light` class. It is used by StartupView, UpdateProgressView, LoginView and RestartNotice.
 - **Caret**: `.caret` is a blinking accent terminal caret. Pair it with the wordmark for "live" surfaces (login prompt, idle empty state).
 - **Body and scroll:** the normal app surface is clean (no CRT grain); startup/update/native surfaces retain the terminal texture. Scrollbars are thin and visible so long files, tables, tabs, and settings panes never hide the fact that more content exists. The chat footer's turn-facts strip is the one exception: it scrolls sideways without a visible bar, because a bar under a reply reads as a rule across the transcript.
 
@@ -846,7 +849,8 @@ establish:
 | `workspace-shortcuts.spec.ts` | Where a typed character actually lands. The `1`-`9` shortcuts must follow the visible sidebar order and stay inert while a text field is focused; jsdom reports a focused textarea that no keystroke is routed to. Also walks Tab through the primary nav, which is how a click-only control gets caught. |
 | `chat-title-rail.spec.ts` | That the header's rail centres the title with the neighbours off-screen and the state track on the header's bottom edge, snaps and settles to a neighbour, slides and switches on the arrow key, keeps the 61px header and close on the title block's centre, and that the body never scrolls sideways.; and that dragging the title down closes the chat to Home, a short pull springs back, and a mouse drag sideways switches |
 | `chat-motion.spec.ts` | That a chat opened from Home rises into place, archiving opens the next chat in the rail order rather than Home, and the phone drawer slides out on close with its rows still in it.; Chat details stays closed in the next chat once closed; and a pinned file slides in after the chat |
-| `shared-brain-settings.spec.ts` | The Shared brains card on Settings › Workspace › Overview at 390px: the path field is 16px and the buttons 44px under touch, the list keeps its folders after a reload, a refused folder shows the engine's words inline, and Remove asks first and runs from the keyboard. |
+| `shared-brain-settings.spec.ts` | The Shared brains card on Settings › Workspace › Overview at 390px: the Link type selector is usable, the path field is 16px and controls are 44px under touch, mixed Folder and Git rows keep their kinds after reload and saves, local folder availability stays distinct from cloud sync status, a refused path shows the engine's words inline, and Remove asks first and runs from the keyboard. |
+
 | `shared-brain-sources.spec.ts` | The Sources and consent panel at 390px with a stubbed evidence API: server-filtered brain/project/source pickers, exact snapshot fields and the future-without-review sentence, cancel writing nothing, confirm listing the grant, and keyboard revoke surviving a reload. |
 | `sidebar-overflow.spec.ts` | That the sidebar's chat list never scrolls sideways, with project rows idle or hovered. |
 | `narrow-viewport.spec.ts` | Layout at 390px. jsdom has no layout engine: every rect is 0x0 and `scrollWidth` is always 0, so neither the unbreakable-flex-child trap nor a tap target under `--touch: 44px` is visible from a mount. The memory-insight journey also measures the row that carries a second control (the retry beside the open control), which is the one place a row can grow past the pane. Selecting a reply measures the opposite case: the action footer is not in the layout until the message is selected, and selection must leave the transcript's `scrollTop` alone; the fixture's opt-in `comment` shape then measures that the selected card's accent outline does not bleed across the turn gap onto the comment-reference card below it. Structured question cases measure the always-visible, hit-testable answer footer and usable scroll region at portrait, landscape and enlarged text, and check composer/keyboard focus. |

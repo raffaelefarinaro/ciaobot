@@ -1283,9 +1283,9 @@ def preview(
             "grant_type": grant_type,
             "scope": "future_decisions" if grant_type == "standing" else "one_decision",
             "summary": (
-                "Future structured decisions in this project can leave without review."
+                "When automatic sharing becomes available, future structured decisions in this project may be shared without review."
                 if grant_type == "standing"
-                else "Only the decision shown below can leave, exactly as previewed."
+                else "When sharing becomes available, only the decision shown below is permitted, exactly as previewed."
             ),
             "future_items_without_review": grant_type == "standing",
             "project_id": project,

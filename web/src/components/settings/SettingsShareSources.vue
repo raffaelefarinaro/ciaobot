@@ -5,11 +5,11 @@
         <p id="sources-heading" class="section-title">Sources and consent</p>
         <p class="hint">
           Choose one linked brain and one project source. A standing grant authorizes future structured
-          decisions from that project only. An individual snapshot authorizes the exact decision you preview.
+          decisions from that project only. An individual snapshot authorizes the exact decision you preview. Automatic sharing is not active yet; these permissions prepare for a future release.
         </p>
       </div>
       <p v-if="data" class="sources-mode" :class="`sources-mode--${data.mode}`">
-        {{ data.mode === 'automatic' ? 'Automatic for granted streams' : 'Review' }}
+        {{ data.mode === 'automatic' ? 'Standing permission recorded' : 'Review' }}
       </p>
     </div>
 
@@ -122,7 +122,7 @@
           <p id="preview-heading" class="sources-preview-title">Confirm this exact disclosure</p>
           <p class="sources-preview-summary">{{ previewData.preview.summary }}</p>
           <p v-if="previewData.preview.future_items_without_review" class="hint hint--warn">
-            Future items can leave without another review. Entries recorded before this grant are not included.
+            When automatic sharing becomes available, future items may be shared without another review. Entries recorded before this grant are not included.
           </p>
           <dl class="sources-scope">
             <dt>Scope</dt><dd>{{ previewData.preview.scope === 'future_decisions' ? 'Future decisions' : 'One decision' }}</dd>
@@ -155,13 +155,13 @@
             <p>Standing disclosures active for this project stream:</p>
             <ul class="sources-disclosures">
               <li v-for="grant in activeDisclosures" :key="grant.grant_id">
-                To {{ grant.brain.name }}: {{ grant.field_mask.join(', ') }} can leave automatically for
+                To {{ grant.brain.name }}: {{ grant.field_mask.join(', ') }} are permitted for future automatic sharing by
                 {{ grant.producers.join(', ') }}.
               </li>
             </ul>
           </div>
           <p v-else class="hint hint--compact" role="note">
-            Review is active. Nothing from this project stream leaves automatically until you grant it above.
+            No standing permission is recorded for this project stream.
           </p>
           <form class="sources-form" @submit.prevent="recordDecision">
             <label class="sources-field">

@@ -94,6 +94,8 @@ export interface WorkspaceInfo {
 export interface SharedBrainRow {
   path: string
   name?: string
+  /** Defaults to Git for registry rows written before folder links existed. */
+  kind?: 'git' | 'folder'
 }
 
 /** The payload of a workspace PATCH: a shared-brain save sends rows, not the read links. */
@@ -107,7 +109,15 @@ export interface SharedBrainLink {
   name: string
   path: string
   identity: string
+  kind?: 'git' | 'folder'
 }
+
+/**
+ * One link's sharing policy. `review` files every note as a proposal a human
+ * must accept; `automatic` is an explicit, durable standing consent for that
+ * one link. Every new and legacy link starts at `review`.
+ */
+export type SharedBrainSharingPolicy = 'review' | 'automatic'
 
 /** The last update attempt for a brain, as `ciao/shared_brain.py` records it. */
 export interface SharedBrainUpdate {
@@ -123,6 +133,21 @@ export interface SharedBrainState {
   kind: SharedBrainKind
   identity: string
   path: string
+  // Opaque link lifetime; a relink changes it and invalidates older tabs.
+  lifetime: string
+  // Effective policy: `automatic` only through a consent matching the link's
+  // lifetime and repository identity; otherwise `review`.
+  sharing_policy: SharedBrainSharingPolicy
+  // Monotonic for the link: every grant and revocation bumps it.
+  sharing_generation: number
+  // The grant time in ISO UTC, or '' at `review`.
+  sharing_granted_at: string
+  // A stored automatic grant that is not effective and still needs a revoke
+  // action (origin drift or a failed invalidation).
+  sharing_grant_pending: boolean
+  // True when a drift invalidation could not be persisted; the old grant stays
+  // paused in this process and must be revoked explicitly.
+  sharing_invalidation_failed: boolean
   origin_changed: boolean
   missing: boolean
   // '' or why the folder cannot be used now: missing, moved, not_a_checkout,
@@ -2101,6 +2126,8 @@ export interface ProposalPreview {
   /** Revision-bound shared-note publication projection (#3576). */
   brain?: string
   identity?: string
+  /** `git` or `folder`; a folder preview is create-only. */
+  link_kind?: 'git' | 'folder'
   branch?: string
   path?: string
   blocked_reason?: string | null
@@ -2377,6 +2404,11 @@ export interface ProposalHistoryChange {
   source_turns?: number[]
   commit_oid?: string
   branch?: string
+  /** Folder receipts only: the recorded local write, not the path's current
+   * content or any provider synchronization. */
+  scope?: string
+  local_only?: boolean
+  sync_claimed?: boolean
 }
 
 /** One line of a receipt's before/after. Context lines are not sent: what a
@@ -2418,6 +2450,10 @@ export interface MemoryReceiptDetail {
   identity?: string
   commit_oid?: string
   review_path?: string
+  /** Folder receipts only: historical local write scope. */
+  scope?: string
+  local_only?: boolean
+  sync_claimed?: boolean
 }
 
 export interface ProposalHistoryResponse {

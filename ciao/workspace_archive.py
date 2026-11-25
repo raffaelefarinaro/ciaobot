@@ -52,7 +52,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-from ciao.config import WorkspaceConfig
+from ciao.config import WorkspaceConfig, shared_brain_row
 from ciao.vault_index import ARCHIVED_WORKSPACES_DIR
 
 logger = logging.getLogger(__name__)
@@ -201,9 +201,7 @@ def _registry_entry(config: Any, workspace: WorkspaceConfig) -> dict[str, Any]:
         "claude_trim": workspace.claude_trim,
         "color": workspace.color,
         "shared_brains": [
-            {"name": link.name, "path": link.path, "identity": link.identity,
-             "lifetime_id": link.lifetime_id, "kind": link.kind}
-            for link in workspace.shared_brains
+            shared_brain_row(link) for link in workspace.shared_brains
         ],
     }
 
@@ -920,7 +918,12 @@ def register_restored(
         )
     vault_root, _vault = _restored_vault_root(config, metadata, folder)
     settings = restored_settings(config, metadata)
-    from ciao.workspaces import WorkspaceRegistryConflict, persist_workspaces, workspace_registry_lock  # noqa: PLC0415
+    from ciao.shared_brain import reset_link_for_restore  # noqa: PLC0415
+    from ciao.workspaces import (  # noqa: PLC0415
+        WorkspaceRegistryConflict,
+        persist_workspaces,
+        workspace_registry_lock,
+    )
 
     with workspace_registry_lock(config):
         config.workspaces[name] = WorkspaceConfig(
@@ -930,7 +933,10 @@ def register_restored(
             disallowed_tools=settings["disallowed_tools"],
             claude_trim=settings["claude_trim"],
             color=settings["color"],
-            shared_brains=settings["shared_brains"],
+            shared_brains=[
+                reset_link_for_restore(link) if link.kind == "git" else link
+                for link in settings["shared_brains"]
+            ],
         )
         try:
             persist_workspaces(config, owner=owner)
