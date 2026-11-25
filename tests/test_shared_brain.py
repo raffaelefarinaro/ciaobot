@@ -2089,3 +2089,10 @@ def test_observation_refuses_unsafe_config_before_origin_git(pair: SimpleNamespa
         observation = sb.observe_under_fence(config, link, owner)
     assert observation.state["problem"] == "unsafe_config"
     assert calls == [("config", "--list", "--show-scope")]
+
+
+def test_link_refuses_a_non_hosted_pushurl(root: Path) -> None:
+    checkout = make_checkout(root / "hostile-push", "https://github.com/x/notes")
+    git(checkout, "config", "remote.origin.pushurl", "file:///tmp/evil")
+    with pytest.raises(ValueError, match="pushurl must be an https, ssh or scp address"):
+        sb.resolve_links(FakeConfig(root), "work", [{"path": str(checkout)}], [])

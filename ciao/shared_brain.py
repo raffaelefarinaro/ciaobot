@@ -1281,6 +1281,16 @@ def _link_origin(path: str) -> str:
     key = _first_unsafe_key(listing)
     if key is not None:
         raise ValueError(_refusal_message(key))
+    for push_url in (
+        value for key, value in _own_entries(listing) if key == "remote.origin.pushurl"
+    ):
+        try:
+            canonical_identity(push_url)
+        except ValueError as exc:
+            raise ValueError(
+                f"remote.origin.pushurl must be an https, ssh or scp address: "
+                f"{redact_text(push_url)}"
+            ) from exc
     return _origin_from_listing(listing)
 
 
