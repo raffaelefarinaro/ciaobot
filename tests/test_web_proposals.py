@@ -3965,6 +3965,68 @@ def test_share_publication_receipts_project_private_text_and_queue_undo(
     assert undo.json() == {"ok": True, "workspace": "personal", "review_path": "/memory/review?proposal=undo"}
 
 
+def test_folder_share_receipt_is_projected_as_a_historical_local_write(
+    tmp_path: Path, monkeypatch,
+) -> None:
+    from ciao import proposal_actions, share_publish
+
+    config = _default_vault(tmp_path)
+    queue = _queue_text(config, "personal")
+    proposal_id = "d" * 16
+    receipt = {
+        "id": "shrpub_folder_scope", "workspace": "personal", "proposal_id": proposal_id,
+        "ts": "2026-11-24T10:00:00+00:00", "brain": "folder", "path": "notes/n.md",
+        "operation": "create", "scope": "historical_local_write",
+        "local_only": True, "sync_claimed": False, "undoable": False,
+        "commit_oid": None, "published_blob_oid": None,
+        "file_dev": 1, "file_ino": 2, "content_sha256": "a" * 64, "content_bytes": 3,
+        "link_kind": "folder", "attempt_token": "opaque-token",
+    }
+    fields = {
+        "sidecar_id": "opaque-folder", "workspace": "personal",
+        "proposal_id": proposal_id, "brain": "folder", "path": "notes/n.md",
+        "operation": "create", "link_kind": "folder",
+        "origin_identity": f"folder:{tmp_path}", "original": None,
+        "proposed": "new folder note\n",
+    }
+    detail = {"receipt": receipt, "immutable": fields}
+    monkeypatch.setattr(
+        share_publish, "list_share_receipts", lambda _config, **_kwargs: [receipt]
+    )
+    monkeypatch.setattr(
+        share_publish, "list_share_receipt_details", lambda _config, **_kwargs: [detail]
+    )
+    monkeypatch.setattr(
+        share_publish, "get_share_receipt_detail", lambda *_args, **_kwargs: detail
+    )
+    proposal_actions.record_decision(
+        queue, action="accept", text="Shared note change proposal opaque-folder",
+        kind="share", via="pwa", destination="folder:notes/n.md",
+        outcome="published", proposal_id=proposal_id,
+        receipt_id="shrpub_folder_scope",
+    )
+
+    client = _undo_client(config)
+    history = client.get("/api/proposals/history").json()["rows"]
+    row = next(item for item in history if item.get("kind") == "share")
+    assert row["change"]["scope"] == "historical_local_write"
+    assert row["change"]["local_only"] is True
+    assert row["change"]["sync_claimed"] is False
+    assert not row["commit_oid"]
+    listed = client.get("/api/memory/receipts").json()["rows"]
+    listed_row = next(item for item in listed if item["id"] == "shrpub_folder_scope")
+    assert listed_row["scope"] == "historical_local_write"
+    assert listed_row["local_only"] is True
+    assert listed_row["sync_claimed"] is False
+    detail_payload = client.get(
+        "/api/memory/receipts/shrpub_folder_scope?workspace=personal"
+    ).json()
+    assert detail_payload["scope"] == "historical_local_write"
+    assert detail_payload["local_only"] is True
+    assert detail_payload["sync_claimed"] is False
+    assert detail_payload["undoable"] is False
+
+
 def test_share_settlement_queue_receipt_cannot_undo_a_published_note(
     tmp_path: Path, monkeypatch,
 ) -> None:

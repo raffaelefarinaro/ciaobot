@@ -758,7 +758,12 @@ const GET_ROUTES = {
   // proposal, a settled verdict) opts in through POST /__fixture__/verification
   // rather than replacing these defaults for everybody: the other review specs
   // assert the empty and the plain states, which must stay the default.
-  '/api/proposals': (req) => (sessionOf(req).verification ? { rows: [...PROPOSALS, ...VERIFICATION_PROPOSALS] } : { rows: PROPOSALS }),
+  '/api/proposals': (req) => {
+    const state = sessionOf(req)
+    const rows = state.verification ? [...PROPOSALS, ...VERIFICATION_PROPOSALS] : [...PROPOSALS]
+    if (state.shareSuccess && !state.shareDone) rows.push(shareProposal(state.shareSuccess))
+    return { rows }
+  },
   // Settings > Workspace > Overview's Weekly care cycle card: the dry run. A
   // switch made in this session flips the workspace to v2 (see careCycleApply).
   '/api/care/cycle': (req, url) => {
@@ -949,8 +954,55 @@ function projectChats(req, url) {
   }
 }
 
+/** A synthetic share row and the exact preview its review card reads. */
+function shareProposal(kind) {
+  return {
+    id: `share-${kind}`,
+    kind: 'share',
+    text: `Shared note change proposal opaque-${kind}`,
+    source: '',
+    workspace: WORKSPACES[0].name,
+    line: 1,
+  }
+}
+
+function sharePreview(kind) {
+  const folder = kind === 'folder'
+  return {
+    id: `share-${kind}`,
+    workspace: WORKSPACES[0].name,
+    kind: 'share',
+    text: '',
+    source: '',
+    action: 'publish_share',
+    operation: folder ? 'create' : 'replace',
+    before: folder ? null : 'Before the share.\n',
+    after: folder ? 'A new folder note.\n' : 'After the share.\n',
+    destination: folder ? 'Team folder:notes/new.md' : 'Team:docs/shared.md',
+    destination_path: '',
+    brain: folder ? 'Team folder' : 'Team',
+    identity: folder ? 'folder:/fixture/notes' : 'https://example.test/team.git',
+    link_kind: kind,
+    branch: folder ? '' : 'main',
+    path: folder ? 'notes/new.md' : 'docs/shared.md',
+    revision: `review-${kind}`,
+    blocked_reason: null,
+    reconcile_available: false,
+    publish_retry_available: false,
+    exact: true,
+    truncated: false,
+    can_accept: true,
+    reason: '',
+    separator: '\n',
+  }
+}
+
 /** Path patterns, for the routes that carry an id. */
 const GET_PATTERNS = [
+  [/^\/api\/proposals\/share-(git|folder)\/preview$/, (_req, url) => {
+    const kind = /share-(git|folder)/.exec(url.pathname)?.[1] || 'git'
+    return { ok: true, preview: sharePreview(kind) }
+  }],
   // An empty array is the "nothing to merge" short-circuit in the store; the
   // fallback `{}` would be read as a pagination envelope and crash on
   // `env.items`. The transcript is per-session, so a spec opts in through
@@ -1158,6 +1210,13 @@ const server = http.createServer(async (req, res) => {
     if (pathname === '/__fixture__/ws-count') {
       return sendJson(res, { connections: state.connections, open: state.sockets.size })
     }
+    if (pathname === '/__fixture__/share-success') {
+      const body = await readBody(req)
+      state.shareSuccess = body?.kind === 'folder' ? 'folder' : 'git'
+      state.shareDone = false
+      state.writes = []
+      return sendJson(res, { ok: true, kind: state.shareSuccess })
+    }
     if (pathname === '/__fixture__/verification') {
       // Opt this session into the managed-verification payloads. Per session for
       // the same reason the transcript is: one server serves every worker, and a
@@ -1306,6 +1365,25 @@ const server = http.createServer(async (req, res) => {
     if (scheduleDelete) {
       writer.removedSchedules.add(decodeURIComponent(scheduleDelete[1]))
       return sendJson(res, { ok: true })
+    }
+    const shareAccept = req.method === 'POST'
+      ? /^\/api\/proposals\/share-(git|folder)\/accept$/.exec(pathname)
+      : null
+    if (shareAccept) {
+      const kind = shareAccept[1]
+      writer.shareDone = true
+      return sendJson(res, {
+        ok: true,
+        result: { id: `share-${kind}`, action: 'accept', dismissed: false, promoted: true },
+        share_status: 'published',
+        receipt: {
+          id: `shrpub_fixture_${kind}`,
+          workspace: WORKSPACES[0].name,
+          proposal_id: `share-${kind}`,
+          scope: kind === 'folder' ? 'historical_local_write' : undefined,
+          commit_oid: kind === 'git' ? 'a'.repeat(40) : undefined,
+        },
+      })
     }
     if (pathname === '/api/care/cycle' && req.method === 'POST') {
       return careCycleApply(writer, workspaceOf(body), body, res)
