@@ -87,6 +87,10 @@ async def test_stop_on_a_late_turn_sends_cancel_once_and_clears_late_state(
         release.touch()
         await _wait_for(lambda: provider.background_work_outstanding)
 
+        # The provider's late turn opens before the drain has read its first event and registered
+        # the wake stream. Stop only has something to stop once that stream is registered.
+        await _wait_for(lambda: manager._broker.get(chat.chat_id) is not None)
+
         assert await asyncio.wait_for(manager.stop_chat(chat.chat_id), timeout=10) is True
         await _wait_for(lambda: manager._broker.get(chat.chat_id) is None)
 
