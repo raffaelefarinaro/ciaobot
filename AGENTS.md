@@ -93,22 +93,16 @@ scripts/dev-commands.sh all              # typecheck, coverage, lint, audit
   job will pass.
   `pip-audit`, `npm audit` and `npm run lint` are advisory in CI (`|| true`).
   Lint is still worth running; it just will not fail the build for you.
-- Run one full backend suite and one frontend run at a time, here and in any
-  gate script. Two concurrent suites starve the machine and time out the 20 s
-  component tests (`mountSmoke`), which reads as a red gate. A single
-  failure is re-run (`--lf`) before it is called red. Timing tests assert
-  relative behaviour with a small absolute allowance, not a fixed millisecond
-  budget a loaded machine can miss.
+- Run one full backend suite and one frontend run at a time; concurrent suites
+  time out the 20 s component tests. Re-run a single failure (`--lf`) before
+  calling it red. Timing tests assert relative behaviour, not fixed budgets.
 - Re-run a red CI run whole (`gh run rerun <id>`, not `--failed` or "Re-run
   failed jobs"). A failed-jobs re-run leaves the PR's status rollup with only
   that attempt's jobs, so required checks such as `linux-server`, `linux-web`,
   the conditional `linux-e2e` and `mac-app` go missing and the PR shows BLOCKED
   while everything is green.
-- Assert a guard where it acts, not only in the finished output. When a change
-  bounds, redacts, filters or fences untrusted text, the test should observe the
-  value at that seam (what is handed to the fence, filter or builder), and an
-  ordering-sensitive filter needs more inputs than its limit so that reversing
-  "filter then limit" fails the test.
+- Assert a guard where it acts: for bounded, redacted or filtered untrusted text,
+  the test observes the value at that seam, with more inputs than the limit.
 - Some docs are checked by tests, so new code often needs a doc edit:
   - a new route in `app.py` goes in `PWA_API.md`. A new POST/PATCH/DELETE
     `/api/*` route also needs an entry under `## Agent recipes` there, or a
@@ -119,16 +113,8 @@ scripts/dev-commands.sh all              # typecheck, coverage, lint, audit
 - For UI changes, verify keyboard focus, browser zoom, and 44px mobile touch
   targets. Every new feature must be visually inspected in the browser before
   pushing.
-- Workspace shortcuts map unmodified `1`–`9` to the visible sidebar order and
-  must remain inert while a text field is focused. The Settings keyboard
-  shortcuts card can disable or rebind them; preferences are shared through the
-  engine. Enter-to-send is also shared, but touch keyboards always insert a
-  newline. Preserve picker precedence and IME composition handling. The standalone
-  `/mcp` token is local chat navigation (arguments remain ordinary messages):
-  retain the owning workspace, actual provider, staged attachments and pane. Only
-  MCP actions are quiet in attention projections; never hide failed turns or
-  questions. MCP terminal recovery copies only; the user opens Terminal and
-  reviews and runs it separately. See `web/README.md` and `DESIGN.md`.
+- Keyboard shortcuts, Enter-to-send and the standalone `/mcp` token are specified in
+  `web/README.md` and `DESIGN.md`; read them before touching those paths.
 - OpenCode provider changes run over `opencode acp` at OpenCode 2.3.2 or newer.
   Replay the ACP fixtures and run one tiny real turn against the installed
   OpenCode 2.x; do not restore the retired HTTP server or its V1 route fallbacks.
@@ -158,12 +144,9 @@ scripts/dev-commands.sh all              # typecheck, coverage, lint, audit
 ## Branching and releases
 - All pull requests target `develop`. Only the admin creates releases from `develop`.
 - Use plain, factual engineering notes in commits and pull requests.
-- [`docs/UPKEEP.md`](docs/UPKEEP.md) is the watchlist of topics we keep an eye on,
-  with the last-checked date and the decision. Add a row in whatever PR you are
-  already in when you notice something worth watching; a stale date on an
-  unchecked row is worse than no date. The checks themselves are in the
-  `/ciao-upkeep` skill. `/ciao-release` does not fix things: a defect found
-  during a release becomes an issue, fixed on `develop` before the next cut.
+- Add a row to [`docs/UPKEEP.md`](docs/UPKEEP.md) (watchlist, last-checked date,
+  decision) when you notice something worth watching. A defect found during a
+  release becomes an issue, fixed on `develop` before the next cut.
 
 ## Repository-specific loop facts
 - A required `develop` check that fails reproducibly stops merges until it is
