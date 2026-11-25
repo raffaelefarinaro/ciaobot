@@ -86,7 +86,7 @@
         To set up a Git repository, create and seed it with the access you want, then clone it on this computer outside the Ciaobot install and vaults. Give the clone a valid SSH or HTTPS origin and tracked branch, then link its absolute folder path here. Ciaobot does not create or clone repositories for you. It pulls the checkout's tracked branch with fast-forward-only updates. Public HTTPS can be used to read updates. Publishing needs noninteractive write access; use SSH when the remote requires authentication. Private HTTPS credential helpers are not used.
       </p>
       <p v-else class="hint hint--compact">
-        Folder links are read in place for reference. Ciaobot never pulls, fetches or updates them; changes on disk appear as they are. Availability is checked on this computer when Ciaobot uses the folder, and a locally available folder does not confirm that Google Drive, iCloud or another sync service has finished syncing.
+        Folder links are read in place. Ciaobot never pulls, fetches or updates them; changes on disk appear as they are. A reviewed new note can be saved to a folder after individual approval, and Ciaobot never replaces or deletes an existing folder file. Availability is checked on this computer when Ciaobot uses the folder, and a locally available folder does not confirm that Google Drive, iCloud or another sync service has finished syncing.
       </p>
 
       <p v-if="saveError" class="action-result action-result--error" role="alert">{{ saveError }}</p>
@@ -100,12 +100,12 @@
             aria-describedby="shared-brain-kind-hint"
             :disabled="saving || listStale"
           >
-            <option value="folder">Folder (reference only)</option>
+            <option value="folder">Folder</option>
             <option value="git">Git repository</option>
           </select>
         </label>
         <p id="shared-brain-kind-hint" class="hint hint--compact">
-          Folders are reference-only and are not synced by Ciaobot. Git repositories use the existing update and approved-publishing flow.
+          Folders are read in place and are not synced by Ciaobot. A reviewed new note can be saved to a folder; existing files are never replaced or deleted. Git repositories use the existing update and approved-publishing flow.
         </p>
         <label class="shared-brain-field">
           <span class="shared-brain-label">Folder path</span>
@@ -200,7 +200,7 @@ function currentRows(): SharedBrainRow[] {
 }
 
 function kindLabel(brain: SharedBrainState): string {
-  return brain.kind === 'folder' ? 'Folder · reference only' : 'Git repository'
+  return brain.kind === 'folder' ? 'Folder' : 'Git repository'
 }
 
 async function load(): Promise<void> {

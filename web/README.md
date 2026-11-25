@@ -79,12 +79,15 @@ CLI until the canonical publication state proves it was rejected. Unavailable
 or malformed state remains protected; a stale marker never recreates an
 actionable review card. If a blocked review has a server-confirmed recorded
 attempt, its card offers **Reconcile publication**. That action checks only the
-persisted attempt and never starts a new push; without the exact recorded
-attempt indicator, neither Publish nor Reconcile is available. If every prior
-attempt is a verified retryable rejection and the server still allows another
-attempt, the card instead offers **Retry Publish**; unresolved or confirmed
-attempts never get that push action. A refused shared-note Reject stays open
-and explains the refusal inline.
+persisted attempt and never starts a new push or folder write; without the
+exact recorded attempt indicator, neither Publish nor Reconcile is available. If
+every prior attempt is a verified retryable rejection and the server still
+allows another attempt, the card instead offers **Retry Publish**; unresolved or
+confirmed attempts never get that action. A folder destination is create-only:
+the card shows the folder identity and path, blocks once an external note
+appears there, and never offers replacement or deletion of an existing file. A
+folder receipt is not undoable. A refused shared-note Reject stays open and
+explains the refusal inline.
 
 ```bash
 cd web
