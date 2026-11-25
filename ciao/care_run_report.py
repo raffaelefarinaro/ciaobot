@@ -96,6 +96,18 @@ def report_valid(report: object) -> bool:
     return True
 
 
+def without_invalid_report(last_run: Mapping[str, Any]) -> dict[str, Any]:
+    """``last_run`` with a malformed ``report`` dropped.
+
+    The report is a convenience view: a bad one reads as a legacy run
+    (``report_available`` false) and never fails the curation state.
+    """
+    kept = dict(last_run)
+    if "report" in kept and not report_valid(kept["report"]):
+        del kept["report"]
+    return kept
+
+
 @dataclass(frozen=True, slots=True)
 class RunSelection:
     state: RunState

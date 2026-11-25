@@ -152,9 +152,6 @@ def test_v1_loads_a_valid_report_and_refuses_an_invalid_one(tmp_path: Path) -> N
     good = {**BASE_RUN, "dispatch_id": DISPATCH, "report": _report()}
     _write_v1(tmp_path, good)
     assert cr.load_state(tmp_path).last_run == good
-    _write_v1(tmp_path, {**good, "report": {**_report(), "truncated": 1}})
-    with pytest.raises(cr.CurationStateError):
-        cr.load_state(tmp_path)
     _write_v1(tmp_path, {**BASE_RUN, "dispatch_id": 5})
     with pytest.raises(cr.CurationStateError):
         cr.load_state(tmp_path)
@@ -165,8 +162,31 @@ def test_v2_codec_accepts_the_report_and_refuses_a_bad_one() -> None:
 
     good = {**BASE_RUN, "dispatch_id": DISPATCH, "report": _report()}
     assert cc.decode_state(_v2_text(good)).last_run == good
-    with pytest.raises(cc.CycleError):
-        cc.decode_state(_v2_text({**good, "report": {"items": []}}))
+
+_BAD_REPORTS = [
+    {**_report(), "truncated": 1},
+    {"items": []},
+    _report([_item(status="not_a_status")]),
+    _report([_item(detail="d" * 5000)]),
+    _report([_item(f"k{i}") for i in range(MAX_ITEMS + 1)]),
+    "garbage",
+]
+
+
+@pytest.mark.parametrize("bad", _BAD_REPORTS)
+def test_v1_drops_a_bad_report_instead_of_failing_the_state(tmp_path: Path, bad: Any) -> None:
+    _write_v1(tmp_path, {**BASE_RUN, "dispatch_id": DISPATCH, "report": bad})
+    assert cr.load_state(tmp_path).last_run == {**BASE_RUN, "dispatch_id": DISPATCH}
+
+
+@pytest.mark.parametrize("bad", _BAD_REPORTS)
+def test_v2_drops_a_bad_report_instead_of_failing_the_state(bad: Any) -> None:
+    from tests.test_care_run_outcome import _v2_text
+
+    document = json.loads(_v2_text({**BASE_RUN, "dispatch_id": DISPATCH}))
+    document["last_run"]["report"] = bad
+    decoded = cc.decode_state(json.dumps(document))
+    assert decoded.last_run == {**BASE_RUN, "dispatch_id": DISPATCH}
 
 
 def test_end_run_persists_report_dispatch_and_weekly_state(tmp_path: Path) -> None:
@@ -246,7 +266,11 @@ def _client(tmp_path: Path, job_rows: list[dict] | None) -> TestClient:
     runtime.mkdir(exist_ok=True)
     if job_rows is not None:
         (runtime / "job_runs.jsonl").write_text("\n".join(json.dumps(r) for r in job_rows) + "\n", encoding="utf-8")
-    config = SimpleNamespace(workspace_vault_root=lambda name: tmp_path / "vault", state_path=runtime / "state.json")
+    config = SimpleNamespace(
+        workspace=lambda name: object() if name == "personal" else None,
+        workspace_vault_root=lambda name: tmp_path / "vault",
+        state_path=runtime / "state.json",
+    )
     app = Starlette(routes=[Route("/api/schedules/{schedule_id}/care-run", schedule_care_run, methods=["GET"])])
     app.state.schedule_manager = SimpleNamespace(_store=_Store({
         CARE_ID: SimpleNamespace(last_run_chat_id="", timezone_name="UTC"),
@@ -344,3 +368,75 @@ def test_endpoint_non_care_schedule_is_null_and_unknown_is_404(tmp_path: Path) -
 
 def test_endpoint_refuses_an_oversize_dispatch_id(tmp_path: Path) -> None:
     assert _get(_client(tmp_path, []), dispatch="d" * 201).status_code == 400
+
+
+# -- route seams (security review of #3652) -----------------------------------
+
+
+def test_endpoint_job_row_of_another_chat_than_the_stored_run_is_ambiguous(tmp_path: Path) -> None:
+    _settle(tmp_path / "vault")  # stored run is chat-1
+    body = _get(_client(tmp_path, [_row(chat="chat-9")])).json()
+    assert body["state"] == "ambiguous" and body["care_run"] is None and "counts" not in body
+
+
+def test_endpoint_job_row_of_the_stored_chat_is_ok(tmp_path: Path) -> None:
+    _settle(tmp_path / "vault")
+    assert _get(_client(tmp_path, [_row(chat="chat-1")])).json()["state"] == "ok"
+
+
+def test_endpoint_unregistered_workspace_is_404_and_no_vault_is_read(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    reads: list[Path] = []
+    monkeypatch.setattr(cr, "load_state", lambda vault: reads.append(vault))
+    client = _client(tmp_path, [_row()])
+    client.app.state.schedule_manager._store._rows["system-memory-curation@ghost"] = SimpleNamespace(
+        last_run_chat_id="", timezone_name="UTC")
+    response = client.get("/api/schedules/system-memory-curation@ghost/care-run", params={"dispatch_id": DISPATCH})
+    assert response.status_code == 404 and response.json() == {"error": "workspace not found"}
+    assert reads == []
+
+
+def test_endpoint_missing_vault_directory_is_superseded(tmp_path: Path) -> None:
+    body = _get(_client(tmp_path, [_row()])).json()
+    assert body["state"] == "superseded" and body["report_available"] is False
+
+
+def test_endpoint_bad_stored_report_reads_as_not_available(tmp_path: Path) -> None:
+    lease = cr.begin_run(tmp_path / "vault", holder="nightly", chat_id="chat-1")
+    cr.end_run(tmp_path / "vault", holder=lease.holder, status="ok", planned=1, completed=1, failed=0,
+               counts_complete=True, dispatch_id=DISPATCH)
+    path = cr.state_path(tmp_path / "vault")
+    doc = json.loads(path.read_text())
+    doc["last_run"]["report"] = {"items": [_item(status="bogus")], "truncated": False, "weekly": {}}
+    path.write_text(json.dumps(doc))
+    body = _get(_client(tmp_path, [_row()])).json()
+    assert body["state"] == "ok" and body["report_available"] is False and "outcomes" not in body
+
+
+def test_endpoint_returns_every_stored_item_at_the_cap(tmp_path: Path) -> None:
+    items = [_item(f"k{i}") for i in range(MAX_ITEMS)]
+    _settle(tmp_path / "vault", report={"items": items, "truncated": False})
+    assert len(_get(_client(tmp_path, [_row()])).json()["outcomes"]) == MAX_ITEMS
+
+
+# -- detail text: fixed phrases only ------------------------------------------
+
+
+def test_report_detail_never_carries_receipt_or_note_text() -> None:
+    from ciao import care_report as cr_
+
+    hostile = "/Users/x/secret-note.md SECRET NOTE TEXT"
+    receipts = [
+        {"id": "r1", "operation_id": "op1", "kind": "region_apply", "status": "applied", "workspace": "personal",
+         "item_key": hostile, "title": hostile, "path": hostile, "note": hostile},
+        {"id": "r2", "operation_id": "op2", "kind": hostile, "status": "applied", "workspace": "personal"},
+        {"id": "r3", "operation_id": "op3", "kind": "region_apply", "status": hostile, "workspace": "personal"},
+        {"id": "r4", "operation_id": "op4", "kind": "region_apply", "status": "applied", "workspace": hostile},
+    ]
+    items = tuple(
+        cr_.ReportItem("proposals", f"key{n}", "planned", reason=hostile, operation_ids=(f"op{n}",))
+        for n in range(1, 5)
+    ) + (cr_.ReportItem("proposals", "key5", "blocked", reason=hostile),)
+    fold = cr_.summarize_care_run(cr_.CareReportPlan("run", "personal", items), receipts)
+    report = bounded_report(fold.outcomes)
+    assert report["items"] and all("SECRET" not in i["detail"] and "/Users" not in i["detail"] for i in report["items"])
+    assert {i["status"] for i in report["items"]} >= {"incomplete", "blocked"}

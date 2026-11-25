@@ -2189,6 +2189,9 @@ def _load(path: Path) -> CurationState:
     last_run = raw.get("last_run")
     if not isinstance(done, dict) or not isinstance(lease, dict) or not isinstance(last_run, dict):
         raise _state_error(path, "state fields have invalid types")
+    from ciao.care_run_report import without_invalid_report
+
+    last_run = without_invalid_report(last_run)
     for key, value in done.items():
         if not isinstance(key, str) or not isinstance(value, str):
             raise _state_error(path, "done_keys entries have invalid types")

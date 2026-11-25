@@ -6397,6 +6397,9 @@ async def _care_run_for_dispatch(request: Request, schedule_id: str, dispatch_id
         return JSONResponse({"care_run": None})
     workspace = schedule_id.partition("@")[2] or DEFAULT_WORKSPACE_NAME
     config = request.app.state.config
+    # The name comes from the URL: it is a vault path only once the registry knows it.
+    if config.workspace(workspace) is None:
+        return JSONResponse({"error": "workspace not found"}, status_code=404)
 
     def answer(state: str, **extra: Any) -> JSONResponse:
         return JSONResponse({"care_run": None, "state": state, "report_available": False, **extra})
@@ -6417,6 +6420,12 @@ async def _care_run_for_dispatch(request: Request, schedule_id: str, dispatch_id
     last_run = state.last_run
     if care_run_report.join_last_run(last_run, dispatch_id) != "ok":
         return answer("superseded", job_status=picked.job_status)
+    # The stored run's own chat must be the chat the job row names.
+    stored_chat = last_run.get("chat_id")
+    if isinstance(stored_chat, str) and stored_chat:
+        picked = care_run_report.select_run(rows, schedule_id, workspace, dispatch_id, chat_id=stored_chat)
+        if picked.state != "ok":
+            return answer(picked.state)
     outcome = bounded_outcome(last_run)
     body: dict[str, Any] = {
         "care_run": outcome,
@@ -6429,7 +6438,7 @@ async def _care_run_for_dispatch(request: Request, schedule_id: str, dispatch_id
         body["counts"] = {k: outcome[k] for k in ("planned", "completed", "deferred", "failed")}
     report = last_run.get("report")
     if report is not None:
-        body["outcomes"] = report["items"][: care_run_report.MAX_ITEMS]
+        body["outcomes"] = report["items"]
         body["weekly"] = report["weekly"]
     return JSONResponse(body)
 

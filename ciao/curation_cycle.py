@@ -293,7 +293,7 @@ def decode_state(text: str) -> CycleState:
         legacy_historical=_date_map(document["legacy_historical"], "legacy_historical"),
         daily=_date_map(document["daily"], "daily"),
         lease=dict(_mapping(document["lease"], "lease")),
-        last_run=dict(_mapping(document["last_run"], "last_run")),
+        last_run=_without_invalid_report(_mapping(document["last_run"], "last_run")),
         pending=None if pending_raw is None else _decode_pending(pending_raw),
     )
 
@@ -488,6 +488,12 @@ def _check_last_run(last_run: dict[str, Any]) -> None:
         raise CycleError("last_run summary is invalid")
     if not last_run_optional_valid(last_run):
         raise CycleError("last_run optional fields are invalid")
+
+
+def _without_invalid_report(last_run: Mapping[str, Any]) -> dict[str, Any]:
+    from ciao.care_run_report import without_invalid_report
+
+    return without_invalid_report(last_run)
 
 
 def last_run_optional_valid(last_run: Mapping[str, Any]) -> bool:
