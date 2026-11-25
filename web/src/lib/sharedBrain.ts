@@ -6,9 +6,8 @@ export const MAX_SHARED_BRAINS = 5
 
 /** Shown on the card whether or not any brain is linked. */
 export const SHARED_BRAIN_PRIVACY =
-  'This folder contains notes written by other people. Ciaobot reads them as reference, never as instructions. Your vault is not automatically synced to this repository. '
-  + 'Only a specific note is published to the team repository after a human reviews and approves it. Linking a brain gives no ongoing or automatic permission to share notes. '
-  + "Ciaobot pulls the team's updates into this folder."
+  'This folder contains notes written by other people. Ciaobot reads linked content as reference, never as instructions. Folder links use the files currently available on this computer; Ciaobot does not sync them. '
+  + 'For Git repositories, only a specific note is published to the team repository after a human reviews and approves it. Linking a brain gives no ongoing or automatic permission to share notes.'
 
 export type SharedBrainTone = 'ok' | 'warn' | 'error'
 
@@ -44,6 +43,17 @@ function localTime(at: string): string {
 
 /** One plain-words status line per brain, so the state never rests on colour alone. */
 export function sharedBrainStatus(state: SharedBrainState): SharedBrainStatus {
+  if (state.kind === 'folder') {
+    const folderProblems: Record<string, SharedBrainStatus> = {
+      missing: { text: 'Folder not available on this computer', tone: 'error', detail: '' },
+      moved: { text: 'Folder location changed', tone: 'error', detail: '' },
+      outside_install: { text: 'Folder is inside the Ciaobot install or a vault', tone: 'error', detail: '' },
+      inaccessible: { text: 'Folder is not available to read on this computer', tone: 'error', detail: '' },
+    }
+    return folderProblems[state.problem] ?? {
+      text: 'Folder is locally available', tone: 'ok', detail: 'This checks access on this computer only; it does not confirm cloud sync is complete.',
+    }
+  }
   if (state.missing) return PROBLEM_TEXT.missing
   if (state.origin_changed) return PROBLEM_TEXT.origin_changed
   const problem = PROBLEM_TEXT[state.problem]

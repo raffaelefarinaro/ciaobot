@@ -94,6 +94,8 @@ export interface WorkspaceInfo {
 export interface SharedBrainRow {
   path: string
   name?: string
+  /** Defaults to Git for registry rows written before folder links existed. */
+  kind?: 'git' | 'folder'
 }
 
 /** The payload of a workspace PATCH: a shared-brain save sends rows, not the read links. */
@@ -104,6 +106,7 @@ export interface SharedBrainLink {
   name: string
   path: string
   identity: string
+  kind?: 'git' | 'folder'
 }
 
 /** The last update attempt for a brain, as `ciao/shared_brain.py` records it. */
@@ -119,6 +122,7 @@ export interface SharedBrainState {
   name: string
   identity: string
   path: string
+  kind?: 'git' | 'folder'
   origin_changed: boolean
   missing: boolean
   // '' or why the folder cannot be used now: missing, moved, not_a_checkout,

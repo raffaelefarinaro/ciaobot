@@ -12,7 +12,7 @@ import { createPinia, setActivePinia } from 'pinia'
 import { flushPromises, mount, type VueWrapper } from '@vue/test-utils'
 import SettingsSharedBrains from '../settings/SettingsSharedBrains.vue'
 import { useProjectStore } from '../../stores/projects'
-import { SHARED_BRAIN_PRIVACY } from '../../lib/sharedBrain'
+import { SHARED_BRAIN_PRIVACY, sharedBrainStatus } from '../../lib/sharedBrain'
 import type { SharedBrainState } from '../../lib/types'
 
 function apiError(message: string, payload?: Record<string, unknown>): Error {
@@ -32,6 +32,7 @@ function state(over: Partial<SharedBrainState> = {}): SharedBrainState {
     name: 'team-notes',
     identity: 'github.com/acme/team-notes',
     path: '/Users/me/team-notes',
+    kind: 'git',
     origin_changed: false,
     missing: false,
     problem: '',
@@ -99,18 +100,29 @@ describe('SettingsSharedBrains loading and failures', () => {
   it('shows the privacy sentence with no brains and with brains', async () => {
     const empty = await mountCard()
     expect(empty.text()).toContain(SHARED_BRAIN_PRIVACY)
-    expect(empty.text()).toContain('clone it on this computer outside the Ciaobot install and vaults')
-    expect(empty.text()).toContain('Private HTTPS credential helpers are not used')
-    expect(empty.text()).toContain('Public HTTPS can be used to read updates')
-    expect(empty.text()).toContain('Publishing needs noninteractive write access')
-    expect(empty.text()).toContain('use SSH when the remote requires authentication')
-    expect(SHARED_BRAIN_PRIVACY).toContain('not automatically synced to this repository')
+    expect(empty.text()).not.toContain('To set up a Git repository')
+    expect(empty.text()).toContain('Folder availability is checked on this computer when Ciaobot uses it')
+    expect(empty.text()).toContain('does not confirm that Google Drive, iCloud or another sync service has finished syncing')
+    expect(SHARED_BRAIN_PRIVACY).toContain('Ciaobot does not sync them')
     expect(SHARED_BRAIN_PRIVACY).toContain('published to the team repository')
     expect(SHARED_BRAIN_PRIVACY).toContain('after a human reviews and approves it')
     expect(SHARED_BRAIN_PRIVACY).toContain('no ongoing or automatic permission')
+    expect(SHARED_BRAIN_PRIVACY).not.toContain('pulls')
+    const type = empty.find('select[aria-labelledby="shared-brain-kind-label"]')
+    await type.setValue('git')
+    expect(empty.text()).toContain('To set up a Git repository')
+    expect(empty.text()).toContain('Private HTTPS credential helpers are not used')
+    await type.setValue('folder')
+    expect(empty.text()).not.toContain('To set up a Git repository')
     apiGet.mockResolvedValueOnce({ shared_brains: [TEAM] })
     const listed = await mountCard()
     expect(listed.text()).toContain(SHARED_BRAIN_PRIVACY)
+    expect(listed.text()).not.toContain('To set up a Git repository')
+    await listed.find('select[aria-labelledby="shared-brain-kind-label"]').setValue('git')
+    expect(listed.text()).toContain('To set up a Git repository')
+    expect(listed.text()).toContain('Public HTTPS can be used to read updates')
+    expect(listed.text()).toContain('Publishing needs noninteractive write access')
+    expect(listed.text()).toContain('use SSH when the remote requires authentication')
   })
 
   it('shows the checked-out commit and dirty state separately from a skipped update', async () => {
@@ -154,25 +166,54 @@ describe('SettingsSharedBrains loading and failures', () => {
 })
 
 describe('SettingsSharedBrains linking', () => {
-  it('sends the whole list with the typed path, trimmed and without a name, then re-reads', async () => {
+  it('offers Folder and Git choices and sends the selected kind with the new row', async () => {
+    const view = await mountCard()
+    const select = view.find('select[aria-labelledby="shared-brain-kind-label"]')
+    expect(select.exists()).toBe(true)
+    expect(select.text()).toContain('Folder (reference only)')
+    expect(select.text()).toContain('Git repository')
+    expect(select.element.value).toBe('folder')
+    await select.setValue('git')
+    await field(view, 'Folder path').setValue('/x/y')
+    await view.find('form').trigger('submit')
+    await flushPromises()
+    expect(updateWorkspace).toHaveBeenCalledWith('personal', {
+      shared_brains: [{ path: '/x/y', kind: 'git' }],
+    })
+  })
+
+  it('preserves every existing row kind when linking or removing another row', async () => {
+    const local = state({ name: 'local-notes', identity: 'folder:/Users/me/local-notes', path: '/Users/me/local-notes', kind: 'folder', branch: '', head: '' })
+    apiGet.mockResolvedValueOnce({ shared_brains: [TEAM, local] })
     apiGet.mockResolvedValueOnce({ shared_brains: [TEAM] })
     const view = await mountCard()
     await field(view, 'Folder path').setValue('  /x/y  ')
     await view.find('form').trigger('submit')
     await flushPromises()
     expect(updateWorkspace).toHaveBeenCalledWith('personal', {
-      shared_brains: [{ path: TEAM.path, name: TEAM.name }, { path: '/x/y' }],
+      shared_brains: [{ path: TEAM.path, name: TEAM.name, kind: 'git' }, { path: local.path, name: local.name, kind: 'folder' }, { path: '/x/y', kind: 'folder' }],
     })
     expect(apiGet).toHaveBeenCalledTimes(2)
+
+    updateWorkspace.mockClear()
+    apiGet.mockResolvedValueOnce({ shared_brains: [TEAM, local] })
+    const removeView = await mountCard()
+    askConfirm.mockResolvedValueOnce(true)
+    await removeView.findAll('.shared-brain-row')[0].find('button').trigger('click')
+    await flushPromises()
+    expect(updateWorkspace).toHaveBeenCalledWith('personal', {
+      shared_brains: [{ path: local.path, name: local.name, kind: 'folder' }],
+    })
   })
 
   it('sends the name when one is typed', async () => {
     const view = await mountCard()
+    await view.find('select[aria-labelledby="shared-brain-kind-label"]').setValue('git')
     await field(view, 'Folder path').setValue('/x/y')
     await field(view, 'Name (optional)').setValue(' notes ')
     await view.find('form').trigger('submit')
     await flushPromises()
-    expect(updateWorkspace).toHaveBeenCalledWith('personal', { shared_brains: [{ path: '/x/y', name: 'notes' }] })
+    expect(updateWorkspace).toHaveBeenCalledWith('personal', { shared_brains: [{ path: '/x/y', name: 'notes', kind: 'git' }] })
   })
 
   it("shows the engine's refusal inline in an alert and keeps the typed text", async () => {
@@ -188,12 +229,16 @@ describe('SettingsSharedBrains linking', () => {
 
 describe('SettingsSharedBrains listed brains', () => {
   it('renders one row per brain, each with its own status words', async () => {
-    apiGet.mockResolvedValueOnce({ shared_brains: [TEAM, OTHER] })
+    apiGet.mockResolvedValueOnce({ shared_brains: [TEAM, state({ name: 'local-notes', path: '/Users/me/local-notes', identity: 'folder:/Users/me/local-notes', kind: 'folder', branch: '', head: '' })] })
     const view = await mountCard()
     const rows = view.findAll('.shared-brain-row')
     expect(rows).toHaveLength(2)
     expect(rows[0].text()).toContain('Up to date')
-    expect(rows[1].text()).toContain('Not updated: local changes in the folder')
+    expect(rows[0].text()).toContain('Git repository')
+    expect(rows[1].text()).toContain('Folder · reference only')
+    expect(rows[1].text()).toContain('Folder is locally available')
+    expect(rows[1].text()).toContain('does not confirm cloud sync is complete')
+    expect(view.text()).toContain('For Git repositories, only a specific note is published')
   })
 
   it('hides the add form at the limit of five brains', async () => {
@@ -217,7 +262,7 @@ describe('SettingsSharedBrains listed brains', () => {
     apiGet.mockResolvedValueOnce({ shared_brains: [OTHER] })
     await view.findAll('.shared-brain-row')[0].findAll('button').find((b) => b.text() === 'Remove')!.trigger('click')
     await flushPromises()
-    expect(updateWorkspace).toHaveBeenCalledWith('personal', { shared_brains: [{ path: OTHER.path, name: OTHER.name }] })
+    expect(updateWorkspace).toHaveBeenCalledWith('personal', { shared_brains: [{ path: OTHER.path, name: OTHER.name, kind: 'git' }] })
   })
 
   it('a stale read for a previous workspace never lands on the active one', async () => {
@@ -246,10 +291,21 @@ describe('SettingsSharedBrains listed brains', () => {
     expect(updateWorkspace).toHaveBeenCalledTimes(1)
     expect(updateWorkspace).toHaveBeenCalledWith('personal', {
       shared_brains: [
-        { path: TEAM.path, name: 'team-notes' },
-        { path: third.path, name: 'third-notes' },
+        { path: TEAM.path, name: 'team-notes', kind: 'git' },
+        { path: third.path, name: 'third-notes', kind: 'git' },
       ],
     })
+  })
+})
+
+describe('folder availability wording', () => {
+  it.each([
+    ['missing', 'Folder not available on this computer'],
+    ['moved', 'Folder location changed'],
+    ['outside_install', 'Folder is inside the Ciaobot install or a vault'],
+    ['inaccessible', 'Folder is not available to read on this computer'],
+  ])('describes %s as local availability', (problem, expected) => {
+    expect(sharedBrainStatus(state({ kind: 'folder', problem })).text).toBe(expected)
   })
 })
 
@@ -281,7 +337,7 @@ describe('SettingsSharedBrains workspace switch and stale lists', () => {
     apiGet.mockRejectedValueOnce(apiError('engine blip'))
     await view.find('form').trigger('submit')
     await flushPromises()
-    expect(updateWorkspace).toHaveBeenCalledWith('personal', { shared_brains: [{ path: TEAM.path, name: TEAM.name }, { path: '/x/y' }] })
+    expect(updateWorkspace).toHaveBeenCalledWith('personal', { shared_brains: [{ path: TEAM.path, name: TEAM.name, kind: 'git' }, { path: '/x/y', kind: 'folder' }] })
 
     expect(view.find('.shared-brain-row button').attributes('disabled')).toBeDefined()
     expect(button(view, 'Link folder')!.attributes('disabled')).toBeDefined()
