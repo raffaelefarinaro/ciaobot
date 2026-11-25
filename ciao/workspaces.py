@@ -33,6 +33,7 @@ from ciao.config import (
     coerce_provider_overrides,
     coerce_workspace_color,
     merge_memory_approval,
+    shared_brain_row,
 )
 from ciao import shared_brain
 from ciao.model_tiers import is_tier
@@ -267,7 +268,14 @@ def patch_shared_brain_lifetime(config: Any, workspace: str, link: Any, *, owner
 
 
 def workspace_registry_lock(config: Any) -> threading.RLock:
-    """Serialize registry snapshots with initialization of legacy link IDs."""
+    """Serialize registry snapshots with initialization of legacy link IDs.
+
+    This is the in-process reentrant lock. Cross-process writers use
+    ``acquire_workspace_registry`` and ``replace_workspace_registry`` for the
+    authoritative claim plus byte-exact compare-and-swap. Shared-brain policy
+    writes take both that registry transaction and the cross-process checkout
+    claim.
+    """
     key = id(config)
     with _REGISTRY_LOCKS_GUARD:
         return _REGISTRY_LOCKS.setdefault(key, threading.RLock())
@@ -650,8 +658,7 @@ def persist_workspaces(
                 row.pop("shared_brains", None)
         if workspace.shared_brains:
             row["shared_brains"] = [
-                {"name": link.name, "path": link.path, "identity": link.identity, "lifetime_id": link.lifetime_id, "kind": link.kind}
-                for link in workspace.shared_brains
+                shared_brain_row(link) for link in workspace.shared_brains
             ]
     expected = getattr(config, "_workspace_registry_bytes", None)
     content = (json.dumps(payload, indent=2) + "\n").encode("utf-8")

@@ -537,28 +537,46 @@ def _verify_destination(
         allow_legacy_lifetime and "link_lifetime_id" not in fields
     ):
         return None
-    state = shared_brain._brain_state_owned(link, config)
-    if state.get("problem") or state.get("identity") != fields.get("origin_identity"):
+    if shared_brain.path_problem(config, link.path):
         return None
-    code, out, _ = _safe_git(folder, "config", "--get-all", "remote.origin.url")
-    configured = out.decode("utf-8", "strict").splitlines() if code == 0 else []
+    from ciao.workspaces import (
+        WorkspaceRegistryConflict,
+        ensure_registry_current,
+        persisted_checkout_links,
+        workspace_registry_claim,
+    )
+
+    try:
+        with workspace_registry_claim(config) as owner:
+            ensure_registry_current(config)
+            if owner.current is None:
+                return None
+            if not any(
+                row.get("name") == link.name
+                and row.get("identity") == link.identity
+                and row.get("lifetime_id", link.lifetime_id) == link.lifetime_id
+                for _workspace, row in persisted_checkout_links(owner.current, link.path)
+            ):
+                return None
+            observation = shared_brain.observe_under_fence(config, link, owner)
+    except (OSError, ValueError, WorkspaceRegistryConflict):
+        return None
+    if observation.state.get("problem"):
+        return None
+    configured = list(observation.configured_urls)
     if len(configured) != 1:
         return None
-    raw_origin = configured[0].strip()
+    raw_origin = configured[0]
     try:
         if shared_brain.canonical_identity(raw_origin) != fields["origin_identity"]:
             return None
     except ValueError:
         return None
     effective: list[str] = []
-    for args in (("remote", "get-url", "--all", "origin"), ("remote", "get-url", "--push", "--all", "origin")):
-        result, data, _ = _safe_git(folder, *args)
-        if result or not data:
-            return None
-        urls = data.decode("utf-8", "strict").splitlines()
+    for urls in (observation.fetch_urls, observation.push_urls):
         if len(urls) != 1:
             return None
-        url = urls[0].strip()
+        url = urls[0]
         try:
             if shared_brain.canonical_identity(url) != fields["origin_identity"]:
                 return None
@@ -1547,9 +1565,6 @@ def _publish_locked(config: Any, workspace: str, folder: Path, link: SharedBrain
     if destination is None:
         return PublishOutcome("brain_changed", message="The shared brain destination changed after review.")
     origin, ref = destination
-    state = shared_brain._brain_state_owned(link, config)
-    if state.get("problem"):
-        return PublishOutcome("brain_changed", message="The shared brain is unavailable or has changed.")
     code, _out, _err = _safe_git(folder, "config", "--get", "core.repositoryformatversion", limit=256)
     if code:
         return PublishOutcome("brain_changed", message="The shared brain checkout could not be verified.")
@@ -1851,6 +1866,7 @@ async def draft_share_reversal(
                         config, workspace=workspace, brain=str(fields["brain"]),
                         relative_path=str(fields["path"]), operation=inverse,
                         proposed=proposed, request_key="undo:" + receipt_id,
+                        checkout_claimed=True,
                     )
                     if isinstance(drafted, drafts.ShareRefusal):
                         return drafted

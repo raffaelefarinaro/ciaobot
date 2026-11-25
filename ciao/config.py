@@ -514,6 +514,27 @@ def coerce_provider_overrides(raw: object) -> dict[str, dict[str, str]]:
 #: Local name of a shared brain: a-z, 0-9 and "-", 1 to 32 characters.
 SHARED_BRAIN_NAME_PATTERN = r"^[a-z0-9](?:[a-z0-9-]{0,30}[a-z0-9])?$"
 
+#: Per-link sharing policy. ``review`` files a proposal a human must accept;
+#: ``automatic`` is an explicit, durable standing consent for that one link.
+SHARING_POLICIES = frozenset({"review", "automatic"})
+DEFAULT_SHARING_POLICY = "review"
+
+
+@dataclass(frozen=True, slots=True)
+class SharingConsent:
+    """Durable consent for automatic sharing with one link lifetime and target.
+
+    ``generation`` is monotonic for the link: a grant and a revocation each bump
+    it, so a publisher holding an older generation can never act after either.
+    The identity and lifetime are frozen into the consent so a registry edit, a
+    relink or a different repository at the same path cannot inherit it.
+    """
+
+    generation: int
+    identity: str
+    lifetime_id: str
+    granted_at: str
+
 
 @dataclass(frozen=True, slots=True)
 class SharedBrainLink:
@@ -524,6 +545,11 @@ class SharedBrainLink:
     identity: str  # Git origin identity or canonical folder identity, unique per workspace
     lifetime_id: str = field(default_factory=lambda: secrets.token_urlsafe(24), compare=False)
     kind: str = "git"
+    # Review is the default for every new and every legacy link. Automatic only
+    # counts through a matching SharingConsent (see shared_brain.sharing_consent_active).
+    sharing_policy: str = DEFAULT_SHARING_POLICY
+    sharing_generation: int = 0
+    sharing_consent: SharingConsent | None = None
 
 
 @dataclass(slots=True)
@@ -567,6 +593,83 @@ def _has_control(text: str) -> bool:
     return any(ord(ch) < 32 or ord(ch) == 127 for ch in text)
 
 
+def _sharing_consent_from_row(
+    raw: object, *, identity: str, lifetime_id: str
+) -> SharingConsent | None:
+    """A consent only when it is well formed and bound to this exact link."""
+    if not isinstance(raw, dict):
+        return None
+    generation = raw.get("generation")
+    granted_at = raw.get("granted_at")
+    if (
+        type(generation) is not int
+        or generation < 1
+        or not isinstance(granted_at, str)
+        or not granted_at
+        or raw.get("identity") != identity
+        or raw.get("lifetime_id") != lifetime_id
+    ):
+        return None
+    return SharingConsent(
+        generation=generation,
+        identity=identity,
+        lifetime_id=lifetime_id,
+        granted_at=granted_at,
+    )
+
+
+def _sharing_from_row(
+    row: dict[str, Any], *, identity: str, lifetime_id: str
+) -> tuple[str, int, SharingConsent | None]:
+    """The effective (policy, generation, consent) of one persisted link row.
+
+    Anything inconsistent falls back to review. A legacy row has no policy keys
+    at all, so it loads exactly as before: review, generation 0, no consent.
+    """
+    raw_policy = row.get("sharing_policy", DEFAULT_SHARING_POLICY)
+    policy = (
+        raw_policy
+        if isinstance(raw_policy, str) and raw_policy in SHARING_POLICIES
+        else DEFAULT_SHARING_POLICY
+    )
+    raw_generation = row.get("sharing_generation", 0)
+    generation = raw_generation if type(raw_generation) is int and raw_generation >= 0 else 0
+    consent = _sharing_consent_from_row(
+        row.get("sharing_consent"), identity=identity, lifetime_id=lifetime_id
+    )
+    if policy == "automatic" and (consent is None or consent.generation != generation):
+        policy = DEFAULT_SHARING_POLICY
+    if policy != "automatic":
+        consent = None
+    return policy, generation, consent
+
+
+def shared_brain_row(link: SharedBrainLink) -> dict[str, Any]:
+    """The private registry shape of one link, sparse for a link on the default.
+
+    A legacy-equivalent link (review, never granted) writes exactly the row it
+    always did. ``lifetime_id`` stays private to the registry/archive.
+    """
+    row: dict[str, Any] = {
+        "name": link.name,
+        "path": link.path,
+        "identity": link.identity,
+        "lifetime_id": link.lifetime_id,
+        "kind": link.kind,
+    }
+    if link.sharing_policy != DEFAULT_SHARING_POLICY or link.sharing_generation:
+        row["sharing_policy"] = link.sharing_policy
+        row["sharing_generation"] = link.sharing_generation
+    if link.sharing_consent is not None:
+        row["sharing_consent"] = {
+            "generation": link.sharing_consent.generation,
+            "identity": link.sharing_consent.identity,
+            "lifetime_id": link.sharing_consent.lifetime_id,
+            "granted_at": link.sharing_consent.granted_at,
+        }
+    return row
+
+
 def shared_brains_from_rows(raw: object) -> list[SharedBrainLink]:
     """Shared-brain rows from a registry or archive, with bad rows dropped.
 
@@ -602,10 +705,24 @@ def shared_brains_from_rows(raw: object) -> list[SharedBrainLink]:
             log.warning("Dropping an invalid shared brain row %r", name)
             continue
         seen |= {f"name:{name}", f"path:{path}", f"id:{identity}"}
+        effective_lifetime = (
+            lifetime_id if isinstance(lifetime_id, str) and lifetime_id
+            else secrets.token_urlsafe(24)
+        )
+        sharing_policy, sharing_generation, sharing_consent = _sharing_from_row(
+            row, identity=identity, lifetime_id=effective_lifetime
+        )
+        if kind != "git":
+            sharing_policy = DEFAULT_SHARING_POLICY
+            sharing_generation = 0
+            sharing_consent = None
         links.append(SharedBrainLink(
             name=name, path=path, identity=identity,
-            lifetime_id=lifetime_id if isinstance(lifetime_id, str) and lifetime_id else secrets.token_urlsafe(24),
+            lifetime_id=effective_lifetime,
             kind=kind,
+            sharing_policy=sharing_policy,
+            sharing_generation=sharing_generation,
+            sharing_consent=sharing_consent,
         ))
     return links
 
@@ -851,6 +968,7 @@ class CiaoConfig:
         init=False, default=False, repr=False
     )
     _workspace_registry_bytes: bytes | None = field(default=None, repr=False, compare=False)
+    _sharing_recovery_pending: bool = field(default=False, init=False, repr=False)
     # Raw value of the retired ``CIAO_WORKSPACES`` variable, if an install
     # still sets it. Never used as a workspace source; server startup imports
     # it into ``.runtime/workspaces.json`` once and then ignores it.
@@ -902,6 +1020,9 @@ class CiaoConfig:
             self.workspaces = _bootstrap_registry(self.vault_root)
         self._workspace_registry_changed = self._normalize_workspace_vault_roots()
         self._note_unsafe_shared_brains()
+        from ciao.shared_brain import apply_persisted_sharing_revocations  # noqa: PLC0415
+
+        apply_persisted_sharing_revocations(self)
 
     def _note_unsafe_shared_brains(self) -> None:
         """Log shared brains that point into the install, a vault or the runtime dir.
@@ -1402,8 +1523,7 @@ class CiaoConfig:
                 row["memory_handover"] = workspace.memory_handover
             if workspace.shared_brains:
                 row["shared_brains"] = [
-                    {"name": link.name, "path": link.path, "identity": link.identity, "lifetime_id": link.lifetime_id, "kind": link.kind}
-                    for link in workspace.shared_brains
+                    shared_brain_row(link) for link in workspace.shared_brains
                 ]
             if workspace.memory_approval:
                 row["memory_approval"] = dict(workspace.memory_approval)

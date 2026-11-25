@@ -21,10 +21,11 @@ function apiError(message: string, payload?: Record<string, unknown>): Error {
 }
 
 const apiGet = vi.hoisted(() => vi.fn())
+const apiPost = vi.hoisted(() => vi.fn())
 const askConfirm = vi.hoisted(() => vi.fn())
 
 vi.mock('../../lib/api', () => ({
-  api: { get: apiGet, post: vi.fn(), patch: vi.fn() },
+  api: { get: apiGet, post: apiPost, patch: vi.fn() },
 }))
 vi.mock('../../lib/confirm', () => ({ askConfirm }))
 
@@ -34,6 +35,12 @@ function state(over: Partial<SharedBrainState> = {}): SharedBrainState {
     kind: 'git',
     identity: 'github.com/acme/team-notes',
     path: '/Users/me/team-notes',
+    lifetime: 'lifetime-team-notes',
+    sharing_policy: 'review',
+    sharing_generation: 0,
+    sharing_granted_at: '',
+    sharing_grant_pending: false,
+    sharing_invalidation_failed: false,
     origin_changed: false,
     missing: false,
     problem: '',
@@ -100,6 +107,7 @@ beforeEach(() => {
   projectStore = useProjectStore()
   projectStore.activeWorkspace = 'personal'
   apiGet.mockReset().mockResolvedValue({ shared_brains: [] })
+  apiPost.mockReset().mockResolvedValue({ shared_brain: state() })
   askConfirm.mockReset().mockResolvedValue(true)
   updateWorkspace = vi.fn().mockResolvedValue({ workspaces: [] })
   projectStore.updateWorkspace = updateWorkspace as typeof projectStore.updateWorkspace
@@ -137,7 +145,7 @@ describe('SettingsSharedBrains loading and failures', () => {
     expect(empty.text()).toContain('use SSH when the remote requires authentication')
     await type.setValue('folder')
     expect(empty.text()).not.toContain('To set up a Git repository')
-
+    expect(SHARED_BRAIN_PRIVACY).toContain('unless you explicitly choose automatic sharing')
     apiGet.mockResolvedValueOnce({ shared_brains: [TEAM] })
     const listed = await mountCard()
     expect(listed.text()).toContain(SHARED_BRAIN_PRIVACY)
@@ -208,6 +216,7 @@ describe('SettingsSharedBrains linking', () => {
     expect(updateWorkspace).toHaveBeenCalledWith('personal', {
       shared_brains: [{ path: '/x/y', kind: 'git' }],
     })
+    expect(apiGet).toHaveBeenCalledTimes(2)
   })
 
   it('sends spaces, brackets, Unicode and a trailing space in a folder path verbatim', async () => {
@@ -283,6 +292,7 @@ describe('SettingsSharedBrains listed brains', () => {
     expect(rows[1].text()).toContain('Folder is locally available. Read in place, never updated.')
     expect(rows[1].text()).toContain('does not confirm that Google Drive, iCloud or another sync service has finished syncing')
     expect(rows[1].text()).not.toContain('Checked-out commit')
+    expect(rows[1].find('.shared-brain-policy-toggle').exists()).toBe(false)
   })
 
   it('reports an unreadable folder as local unavailability, never as pending', async () => {
@@ -319,7 +329,7 @@ describe('SettingsSharedBrains listed brains', () => {
     expect(view.text()).not.toContain('To set up a Git repository')
     await kindSelect(view).setValue('git')
     expect(view.text()).toContain('To set up a Git repository')
-    expect(view.text).not.toContain('Folder links are read in place')
+    expect(view.text()).not.toContain('Folder links are read in place')
   })
 
   it('hides the add form at the limit of five brains', async () => {
@@ -431,5 +441,129 @@ describe('SettingsSharedBrains workspace switch and stale lists', () => {
     await flushPromises()
     expect(view.find('.shared-brain-row button').attributes('disabled')).toBeUndefined()
     expect(updateWorkspace).not.toHaveBeenCalled()
+  })
+})
+
+describe('SettingsSharedBrains automatic sharing choice', () => {
+  it('starts at review and confirms the audience and permanence before granting automatic', async () => {
+    apiGet.mockResolvedValueOnce({ shared_brains: [TEAM] })
+    const view = await mountCard()
+    expect(view.find('.shared-brain-row').text()).toContain('You review each note before it is shared.')
+    expect(view.find('.shared-brain-policy-toggle').text()).toBe('Share automatically…')
+
+    askConfirm.mockResolvedValueOnce(false)
+    await view.find('.shared-brain-policy-toggle').trigger('click')
+    await flushPromises()
+    expect(apiPost).not.toHaveBeenCalled()
+    const words = askConfirm.mock.calls[0][0] as string
+    expect(words).toContain(TEAM.name)
+    expect(words).toContain(TEAM.identity)
+    expect(words).toContain('everyone with access')
+    expect(words).toContain("repository's history")
+    expect(words).toContain('does not copy your vault itself')
+    expect(words).toContain('private details from your memory or vault')
+    expect(words).toContain('memory pass and nightly care can choose private material')
+    expect(words).toContain('does not prove who can see it today')
+    expect(words).toContain('standing permission for when the producer ships')
+
+    askConfirm.mockResolvedValueOnce(true)
+    apiGet.mockResolvedValueOnce({
+      shared_brains: [state({
+        sharing_policy: 'automatic',
+        sharing_generation: 1,
+        sharing_granted_at: '2026-11-25T09:00:00Z',
+      })],
+    })
+    await view.find('.shared-brain-policy-toggle').trigger('click')
+    await flushPromises()
+
+    expect(apiPost).toHaveBeenCalledWith(
+      '/api/workspaces/personal/shared-brains/team-notes/sharing',
+      { policy: 'automatic', identity: TEAM.identity, lifetime: TEAM.lifetime, generation: 0 },
+    )
+    expect(apiGet).toHaveBeenCalledTimes(2)
+    expect(view.find('.shared-brain-row').text()).toContain(
+      'Automatic sharing is chosen for everyone who can access github.com/acme/team-notes; it is not active yet.',
+    )
+    expect(view.find('.shared-brain-policy-toggle').text()).toBe('Turn off automatic sharing')
+  })
+
+  it('turns automatic sharing back into review and says published notes stay in history', async () => {
+    apiGet.mockResolvedValueOnce({
+      shared_brains: [state({
+        sharing_policy: 'automatic',
+        sharing_generation: 4,
+        sharing_granted_at: '2026-11-24T10:00:00Z',
+      })],
+    })
+    const view = await mountCard()
+    askConfirm.mockResolvedValueOnce(false)
+    await view.find('.shared-brain-policy-toggle').trigger('click')
+    await flushPromises()
+    expect(apiPost).not.toHaveBeenCalled()
+    const words = askConfirm.mock.calls[0][0] as string
+    expect(words).toContain('already published stay')
+    expect(words).toContain('Future notes will wait for your review')
+
+    askConfirm.mockResolvedValueOnce(true)
+    apiGet.mockResolvedValueOnce({ shared_brains: [state({ sharing_generation: 5 })] })
+    await view.find('.shared-brain-policy-toggle').trigger('click')
+    await flushPromises()
+    expect(apiPost).toHaveBeenCalledWith(
+      '/api/workspaces/personal/shared-brains/team-notes/sharing',
+      { policy: 'review', identity: TEAM.identity, lifetime: TEAM.lifetime, generation: 4 },
+    )
+    expect(view.find('.shared-brain-row').text()).toContain('You review each note before it is shared.')
+  })
+
+  it('will not offer automatic sharing for a folder the engine cannot use', async () => {
+    apiGet.mockResolvedValueOnce({ shared_brains: [state({ problem: 'origin_changed', origin_changed: true })] })
+    const view = await mountCard()
+    const toggle = view.find('.shared-brain-policy-toggle')
+    expect(toggle.attributes('disabled')).toBeDefined()
+    expect(view.find('.shared-brain-row').text()).toContain('Fix this folder before choosing automatic sharing.')
+  })
+
+  it('keeps the revoke action when an old grant is pending after drift', async () => {
+    apiGet.mockResolvedValueOnce({
+      shared_brains: [state({
+        sharing_policy: 'review',
+        sharing_generation: 2,
+        sharing_grant_pending: true,
+        sharing_invalidation_failed: true,
+        problem: 'origin_changed',
+        origin_changed: true,
+      })],
+    })
+    const view = await mountCard()
+    expect(view.find('.shared-brain-row').text()).toContain(
+      'Automatic sharing is paused, but its old grant still needs to be turned off.',
+    )
+    expect(view.find('.shared-brain-row').text()).toContain(
+      'The old grant could not be removed; turn it off to finish revoking it.',
+    )
+    expect(view.find('.shared-brain-policy-toggle').text()).toBe('Turn off automatic sharing')
+    expect(view.find('.shared-brain-policy-toggle').attributes('disabled')).toBeUndefined()
+
+    askConfirm.mockResolvedValueOnce(true)
+    apiGet.mockResolvedValueOnce({ shared_brains: [state({ sharing_generation: 3 })] })
+    await view.find('.shared-brain-policy-toggle').trigger('click')
+    await flushPromises()
+    expect(apiPost).toHaveBeenCalledWith(
+      '/api/workspaces/personal/shared-brains/team-notes/sharing',
+      { policy: 'review', identity: TEAM.identity, lifetime: TEAM.lifetime, generation: 2 },
+    )
+  })
+
+  it("shows the engine's refusal when the sharing choice is not saved", async () => {
+    apiGet.mockResolvedValueOnce({ shared_brains: [TEAM] })
+    const view = await mountCard()
+    apiPost.mockRejectedValueOnce(apiError('This shared brain changed since the page was loaded.', {
+      error: 'This shared brain changed since the page was loaded.',
+      code: 'brain_changed',
+    }))
+    await view.find('.shared-brain-policy-toggle').trigger('click')
+    await flushPromises()
+    expect(view.find('[role="alert"]').text()).toContain('This shared brain changed')
   })
 })

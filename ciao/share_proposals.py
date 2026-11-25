@@ -13,7 +13,7 @@ import re
 import secrets
 import stat
 import threading
-from contextlib import AbstractContextManager
+from contextlib import AbstractContextManager, nullcontext
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from typing import Any, Callable, NoReturn
@@ -235,13 +235,19 @@ def _qualify_folder(
 
 
 def _qualify_git(
-    config: Any, link: SharedBrainLink, relative_path: str,
+    config: Any, link: SharedBrainLink, relative_path: str, owner: Any,
 ) -> tuple[str, str, bytes | None, str | None, str, None]:
     parts = _safe_path(relative_path)
-    state = shared_brain._brain_state_owned(link, config)
+    observation = shared_brain.observe_under_fence(config, link, owner)
+    state = observation.state
     if state.get("problem"):
         code = "brain_changed" if state.get("problem") == "origin_changed" else "brain_unavailable"
         _refuse(code, "The selected shared brain is unavailable or has changed.")
+    if len(observation.configured_urls) != 1:
+        _refuse("brain_changed", "The shared brain destination is ambiguous.")
+    destination_fingerprint = _origin_fingerprint(observation.configured_urls[0])
+    if not destination_fingerprint or observation.origin_identity != link.identity:
+        _refuse("brain_changed", "The shared brain destination changed.")
     folder = Path(link.path)
     branch = str(state.get("branch") or "")
     if not branch:
@@ -285,19 +291,16 @@ def _qualify_git(
             original.decode("utf-8", "strict")
     except UnicodeDecodeError:
         _refuse("invalid_utf8", "The existing note is not valid UTF-8.")
-    _origin_code, config_listing = shared_brain._git(folder, "config", "--list", "--show-scope")
-    destination_fingerprint = _origin_fingerprint(shared_brain._origin_from_listing(config_listing))
-    if _origin_code != 0 or not destination_fingerprint:
-        _refuse("brain_changed", "The shared brain destination could not be verified.")
     return full_ref, commit, original, original_oid, destination_fingerprint, None
 
 
 def _qualify(
-    config: Any, link: SharedBrainLink, relative_path: str, operation: str | None = None,
+    config: Any, link: SharedBrainLink, relative_path: str, owner: Any,
+    operation: str | None = None,
 ) -> tuple[str, str | None, bytes | None, str | None, str, list[dict[str, int]] | None]:
     if link.kind == "folder":
         return _qualify_folder(config, link, relative_path, operation)
-    return _qualify_git(config, link, relative_path)
+    return _qualify_git(config, link, relative_path, owner)
 
 
 def _brain_for(config: Any, workspace: str, name: str) -> SharedBrainLink:
@@ -464,6 +467,7 @@ def _draft_share(
     operation: str | None, proposed: bytes | None, request_key: str,
     request_fingerprint: str, retiring_proposal_id: str | None = None,
     publish_guard: Callable[[], AbstractContextManager[object]] | None = None,
+    checkout_claimed: bool = False,
 ) -> ShareDraft:
     """Qualify and privately file one immutable shared-note proposal."""
     if operation not in (None, "create", "replace", "delete"):
@@ -476,11 +480,17 @@ def _draft_share(
         persisted_checkout_links,
         persisted_shared_links,
         workspace_registry_claim,
+        WorkspaceRegistryBusy,
         WorkspaceRegistryConflict,
     )
 
+    claim = (
+        nullcontext()
+        if checkout_claimed or link.kind != "git"
+        else shared_brain.checkout_claims_nowait([link.path], config)
+    )
     try:
-        with workspace_registry_claim(config) as owner:
+        with claim, workspace_registry_claim(config) as owner:
             ensure_registry_current(config)
             if owner.current is None:
                 raise WorkspaceRegistryConflict("workspace registry is missing")
@@ -498,11 +508,16 @@ def _draft_share(
             else:
                 persisted_checkout_links(owner.current, link.path)
                 _persist_link_lifetime(config, workspace, link, owner=owner)
-            op_ref, base_commit, original, original_oid, destination_fingerprint, folder_chain = _qualify(
-                config, link, relative_path, operation
-            )
-    except WorkspaceRegistryConflict:
-        _refuse("brain_unavailable", "The shared brain registry changed while drafting.")
+            (
+                op_ref,
+                base_commit,
+                original,
+                original_oid,
+                destination_fingerprint,
+                folder_chain,
+            ) = _qualify(config, link, relative_path, owner, operation)
+    except (WorkspaceRegistryBusy, WorkspaceRegistryConflict):
+        _refuse("brain_unavailable", "The shared brain changed while drafting.")
     operation = operation or ("replace" if original is not None else "create")
     if operation == "create" and original is not None or operation in ("replace", "delete") and original is None:
         _refuse("invalid_operation", "The requested operation does not match the upstream note.")
@@ -670,6 +685,7 @@ def draft_share(
     operation: str | None, proposed: bytes | None, request_key: str,
     retiring_proposal_id: str | None = None,
     publish_guard: Callable[[], AbstractContextManager[object]] | None = None,
+    checkout_claimed: bool = False,
 ) -> ShareDraft | ShareRefusal:
     """Return a draft or its safe, typed refusal without exposing input data."""
     try:
@@ -720,6 +736,7 @@ def draft_share(
                 request_fingerprint=request_fingerprint,
                 retiring_proposal_id=retiring_proposal_id,
                 publish_guard=publish_guard,
+                checkout_claimed=checkout_claimed,
             )
     except ShareDraftError as exc:
         return exc.refusal
