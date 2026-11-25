@@ -47,7 +47,7 @@
           <p class="shared-brain-kind">{{ kindLabel(brain) }}</p>
           <button type="button" class="btn-secondary btn-small" :disabled="!!mappingBusy || listStale" @click="openMapping(brain)">Review content guide</button>
           <div v-if="mappingBrain === brain.name && mapping" class="guide-mapping">
-            <p>Audience unknown; readers and access have not been verified. Sharing remains in Review.</p>
+            <p>Audience unknown; readers and access have not been verified. Recording destinations does not change your sharing policy.</p>
             <p>Scope: {{ mapping.scope }}</p>
             <p v-if="mapping.exclusions.length">Exclusions: {{ mapping.exclusions.join(', ') }}</p>
             <p v-if="mapping.pin">Guide version {{ mapping.pin.version }} · {{ mapping.pin.digest }}</p>
@@ -403,8 +403,12 @@ watch(workspace, () => {
 
 <style scoped>
 .shared-brain-list { list-style: none; margin: var(--space-2) 0 0; padding: 0; display: grid; gap: var(--space-3); }
-.guide-mapping { overflow-wrap: anywhere; }
-.guide-choice { display: flex; align-items: center; gap: var(--space-2); min-height: 44px; }
+.guide-mapping { display: grid; gap: var(--space-2); margin: var(--space-3) 0; overflow-wrap: anywhere; }
+.guide-mapping p { margin: 0; color: var(--fg2); font-size: var(--text-sm); line-height: 1.5; }
+.guide-mapping fieldset { min-width: 0; margin: 0; padding: var(--space-2); border: 1px solid var(--border); border-radius: var(--radius-sm); }
+.guide-mapping legend { color: var(--fg); font-size: var(--text-sm); }
+.guide-choice { display: flex; align-items: center; gap: var(--space-2); min-height: 44px; color: var(--fg); font-size: var(--text-sm); line-height: 1.5; }
+.guide-mapping button { justify-self: start; }
 .shared-brain-row {
   padding: var(--space-3);
   border: 1px solid var(--border);

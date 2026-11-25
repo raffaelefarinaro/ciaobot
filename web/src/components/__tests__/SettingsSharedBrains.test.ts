@@ -119,7 +119,7 @@ afterEach(() => {
 })
 
 it('previews unknown audience and saves only selected guide destinations', async () => {
-  apiGet.mockResolvedValueOnce({ shared_brains: [TEAM] }).mockResolvedValueOnce({
+  apiGet.mockResolvedValueOnce({ shared_brains: [state({ sharing_policy: 'automatic' })] }).mockResolvedValueOnce({
     identity: TEAM.identity, lifetime: TEAM.lifetime, generation: 0,
     pin: { identity: TEAM.identity, version: 1, digest: 'a'.repeat(64) },
     scope: 'Team decisions', exclusions: ['personal notes'], selected: [],
@@ -129,6 +129,8 @@ it('previews unknown audience and saves only selected guide destinations', async
   await button(view, 'Review content guide')!.trigger('click')
   await flushPromises()
   expect(view.text()).toContain('Audience unknown')
+  expect(view.text()).toContain('Recording destinations does not change your sharing policy')
+  expect(view.text()).not.toContain('Sharing remains in Review')
   expect(view.text()).toContain('append section notes/decisions.md')
   await view.find('input[type="checkbox"]').setValue(true)
   await button(view, 'Save reviewed destinations')!.trigger('click')
