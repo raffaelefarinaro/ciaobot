@@ -33,6 +33,7 @@ import json
 import os
 import re
 import secrets
+import stat
 import threading
 from contextlib import contextmanager
 from dataclasses import dataclass, field
@@ -1755,6 +1756,125 @@ def memory_pass_source_relation(
         expires_at=_iso(moment + RELATION_TTL),
         seal=b"",
     ))
+
+
+def _memory_checkpoint_path(config: Any, workspace: str, pass_chat_id: str) -> Path:
+    return _workspace_dir(config, workspace) / "memory-checkpoints" / (_digest(pass_chat_id.encode("utf-8")) + ".json")
+
+
+def _archive_digest(path: Path) -> str:
+    try:
+        fd = open_fd(path, os.O_RDONLY, follow_symlinks=False)
+        try:
+            info = os.fstat(fd)
+            if not stat.S_ISREG(info.st_mode) or info.st_size > 1_048_576:
+                _refuse("source_unavailable", "The archived transcript cannot be verified.")
+            with os.fdopen(fd, "rb", closefd=False) as handle:
+                raw = handle.read(1_048_577)
+        finally:
+            os.close(fd)
+    except OSError:
+        _refuse("source_unavailable", "The archived transcript cannot be verified.")
+    if len(raw) > 1_048_576:
+        _refuse("source_unavailable", "The archived transcript cannot be verified.")
+    return _digest(raw)
+
+
+def _checkpoint_signature(config: Any, payload: dict[str, Any]) -> str:
+    raw = json.dumps(payload, sort_keys=True, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+    return hmac.new(_relation_secret(config), b"memory-checkpoint\0" + raw, hashlib.sha256).hexdigest()
+
+
+def checkpoint_completed_memory_pass(config: Any, registry: Any, *, workspace: str, pass_chat_id: str) -> None:
+    """Attest a completed pass while its engine-managed principal still exists."""
+    relation = memory_pass_source_relation(config, registry, workspace=workspace, pass_chat_id=pass_chat_id)
+    chat = _project_manager().get_chat(pass_chat_id)
+    if chat is None or chat.last_response_status != "success" or not chat.last_response.strip():
+        _refuse("source_unavailable", "The memory pass did not complete successfully.")
+    payload = {
+        "workspace": workspace, "workspace_lifetime_id": relation.workspace_lifetime_id,
+        "pass_chat_id": pass_chat_id, "pass_project_id": chat.project_id,
+        "source_chat_id": str(chat.helper.get("source_chat_id") or ""),
+        "project_id": relation.project_id, "archive_path": relation.evidence,
+        "archive_digest": _archive_digest(Path(relation.evidence)),
+        "turn_count": chat.user_turn_count,
+        "response_digest": _digest(chat.last_response.encode("utf-8")),
+    }
+    checkpoint = {"schema": SCHEMA, "payload": payload, "signature": _checkpoint_signature(config, payload)}
+    with _workspace_guard(config, workspace):
+        path = _memory_checkpoint_path(config, workspace, pass_chat_id)
+        existing = _read_json(path, limit=MAX_EVIDENCE_BYTES, code="private_state_corrupt")
+        if existing and existing != checkpoint:
+            _refuse("source_unavailable", "The memory pass checkpoint has changed.")
+        if not existing:
+            _write_private(path, json.dumps(checkpoint, sort_keys=True).encode("utf-8"), limit=MAX_EVIDENCE_BYTES)
+
+
+def _verified_memory_checkpoint(config: Any, workspace: str, pass_chat_id: str) -> dict[str, Any]:
+    _require_workspace(config, workspace)
+    if not isinstance(pass_chat_id, str) or not pass_chat_id:
+        _refuse("source_unavailable", "The memory pass checkpoint is unavailable.")
+    checkpoint = _read_json(_memory_checkpoint_path(config, workspace, pass_chat_id), limit=MAX_EVIDENCE_BYTES, code="private_state_corrupt")
+    payload = checkpoint.get("payload")
+    signature = checkpoint.get("signature")
+    if not isinstance(payload, dict) or not isinstance(signature, str) or not re.fullmatch(r"[0-9a-f]{64}", signature) or not hmac.compare_digest(signature, _checkpoint_signature(config, payload)):
+        _refuse("source_unavailable", "The memory pass checkpoint is unavailable.")
+    pcm = _project_manager()
+    chat = pcm.get_chat(pass_chat_id)
+    source = pcm.get_chat(str(payload.get("source_chat_id") or ""))
+    project = pcm.get_project(source.project_id) if source is not None else None
+    pass_project = pcm.get_project(chat.project_id) if chat is not None else None
+    from ciao.web import chat_service, memory_pass  # noqa: PLC0415
+    helper = chat_service._normalize_chat_helper(chat.helper) if chat is not None else {}
+    archive = pcm._locate_archive(source.chat_id, str(source.archive_path)) if source is not None and source.archived else None
+    helper_archive = pcm._locate_archive(source.chat_id, str(helper.get("archive_path") or "")) if source is not None else None
+    if (
+        payload.get("workspace") != workspace or payload.get("workspace_lifetime_id") != _workspace_lifetime(config, workspace)
+        or payload.get("pass_chat_id") != pass_chat_id or chat is None or pass_project is None
+        or pass_project.workspace != workspace or pass_project.kind != memory_pass.MEMORY_PROJECT_KIND
+        or payload.get("pass_project_id") != chat.project_id
+        or helper.get("kind") != memory_pass.MEMORY_PASS_KIND or helper.get("state") != "done"
+        or helper.get("source_chat_id") != payload.get("source_chat_id")
+        or source is None or project is None or project.workspace != workspace
+        or project.project_id != payload.get("project_id") or memory_pass.is_memory_pass_chat(source, project)
+        or archive is None or helper_archive != archive or str(archive) != payload.get("archive_path")
+        or chat.last_response_status != "success" or not chat.last_response.strip()
+        or chat.user_turn_count != payload.get("turn_count")
+        or _digest(chat.last_response.encode("utf-8")) != payload.get("response_digest")
+        or _archive_digest(archive) != payload.get("archive_digest")
+    ):
+        _refuse("source_unavailable", "The memory pass checkpoint no longer matches its source.")
+    return {**payload, "signature": signature}
+
+
+def recover_memory_pass_source_relation(config: Any, *, workspace: str, pass_chat_id: str, source_id: str = "", now: datetime | None = None) -> SourceRelation:
+    """Recover an attested pass after restart without a live producer principal."""
+    payload = _verified_memory_checkpoint(config, workspace, pass_chat_id)
+    project = str(payload["project_id"])
+    chosen = source_id or f"stream:{project}"
+    if chosen not in (f"stream:{project}", DOCUMENT_SOURCE):
+        _refuse("invalid_source", "The memory pass source is not available.")
+    if chosen == DOCUMENT_SOURCE and not _confirmed_snapshot_available(config, workspace=workspace, project_id=project, source_id=chosen):
+        _refuse("source_unavailable", "The confirmed project snapshot is unavailable.")
+    moment = _now(now)
+    return _seal_relation(config, SourceRelation(
+        kind="memory_checkpoint", producer="memory_extraction", workspace=workspace,
+        workspace_lifetime_id=str(payload["workspace_lifetime_id"]), project_id=project,
+        source_id=chosen, relation_id=pass_chat_id, evidence=str(payload["signature"]),
+        lease_vault="", lease_proof_hash="", nonce=secrets.token_hex(16),
+        attested_at=_iso(moment), expires_at=_iso(moment + RELATION_TTL), seal=b"",
+    ))
+
+
+def revoke_memory_pass_checkpoint(config: Any, *, workspace: str, pass_chat_id: str) -> None:
+    """Withdraw a checkpoint; existing recovered relations then fail closed."""
+    _require_workspace(config, workspace)
+    with _workspace_guard(config, workspace):
+        _write_private(
+            _memory_checkpoint_path(config, workspace, pass_chat_id),
+            json.dumps({"schema": SCHEMA, "revoked": True}).encode("utf-8"),
+            limit=MAX_EVIDENCE_BYTES,
+        )
 def curation_source_relation(
     config: Any,
     registry: Any,
@@ -1914,21 +2034,17 @@ def eligible_entries(
     moment = _now(now)
     if relation.expires_at <= _iso(moment):
         return []
-    if relation.kind == "curation_lease_item":
-        from ciao import curation_run  # noqa: PLC0415
-
+    if relation.kind == "memory_checkpoint":
         try:
-            lease = curation_run.active_lease(Path(relation.lease_vault), now=moment)
-        except (OSError, curation_run.CurationStateError):
+            checkpoint = _verified_memory_checkpoint(config, workspace, relation.relation_id)
+        except EvidenceError:
             return []
-        if not lease or str(lease.get("holder") or "") != relation.relation_id:
+        if checkpoint.get("signature") != relation.evidence or checkpoint.get("project_id") != relation.project_id:
             return []
-        plan = lease.get("plan")
-        planned = plan.get("planned") if isinstance(plan, dict) else None
-        if not isinstance(planned, list) or [
-            curation_run.PASS_STALE_NOTE, relation.evidence
-        ] not in planned:
-            return []
+    if relation.kind == "curation_lease_item":
+        # The lease identifies a project file, not an individual evidence fact.
+        # No fact may be selected until an engine-owned item-to-fact binding exists.
+        return []
     try:
         link = _link(config, workspace, brain_name)
     except EvidenceError:
@@ -1979,6 +2095,9 @@ def eligible_entries(
                     "grant_id": grant.get("grant_id", ""),
                     "grant_type": "standing",
                     "entry_id": entry.get("entry_id", ""),
+                    "entry_revision": entry.get("revision"),
+                    "consent_generation": grant.get("consent_generation"),
+                    "audience": grant.get("audience", ""),
                     "project_id": project,
                     "source_id": grant.get("source_id"),
                     "producer": relation.producer,
@@ -2017,6 +2136,9 @@ def eligible_entries(
                 "grant_id": grant.get("grant_id", ""),
                 "grant_type": "snapshot",
                 "entry_id": "",
+                "entry_revision": None,
+                "consent_generation": grant.get("consent_generation"),
+                "audience": grant.get("audience", ""),
                 "project_id": project,
                 "source_id": grant.get("source_id"),
                 "producer": relation.producer,
