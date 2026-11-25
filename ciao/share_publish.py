@@ -901,10 +901,12 @@ def _cleanup_folder_staging(attempt: dict[str, Any]) -> None:
         name = str(attempt["staging_name"])
         dev = attempt.get("temp_dev")
         ino = attempt.get("temp_ino")
+        token = attempt.get("token")
         folder_io.discard_staging(
             staging_fd, name, staging_root,
             expected_dev=dev if type(dev) is int else None,
             expected_ino=ino if type(ino) is int else None,
+            token=token if isinstance(token, str) else None,
         )
     finally:
         os.close(staging_fd)
@@ -1226,7 +1228,7 @@ def _publish_folder_locked(
             if failure is not None:
                 folder_io.discard_staging(
                     staging_fd, staging_name, staging_root,
-                    expected_dev=temp_dev, expected_ino=temp_ino,
+                    expected_dev=temp_dev, expected_ino=temp_ino, token=token,
                 )
                 return failure
             try:
@@ -1238,18 +1240,18 @@ def _publish_folder_locked(
             except folder_io.FolderChanged:
                 folder_io.discard_staging(
                     staging_fd, staging_name, staging_root,
-                    expected_dev=temp_dev, expected_ino=temp_ino,
+                    expected_dev=temp_dev, expected_ino=temp_ino, token=token,
                 )
                 return PublishOutcome("indeterminate", message="The approved folder path changed before the write; nothing was published.")
             try:
                 folder_io.link_no_clobber(
                     staging_fd, "note", parent_fd, final_name,
-                    expected_dev=temp_dev, expected_ino=temp_ino,
+                    expected_dev=temp_dev, expected_ino=temp_ino, token=token,
                 )
             except folder_io.UnsupportedFilesystem:
                 folder_io.discard_staging(
                     staging_fd, staging_name, staging_root,
-                    expected_dev=temp_dev, expected_ino=temp_ino,
+                    expected_dev=temp_dev, expected_ino=temp_ino, token=token,
                 )
                 rejected = _folder_status_attempt(updated, len(updated) - 1, retryable=False, reason="unsupported_mount")
                 _write_folder_attempts(config, workspace, fields, artifact, rejected)
@@ -1297,7 +1299,7 @@ def _publish_folder_locked(
                         return failure
                     folder_io.discard_staging(
                         staging_fd, staging_name, staging_root,
-                        expected_dev=temp_dev, expected_ino=temp_ino,
+                        expected_dev=temp_dev, expected_ino=temp_ino, token=token,
                     )
                     return PublishOutcome("changed_upstream", message="The destination changed while publishing; nothing was overwritten.")
                 return PublishOutcome("indeterminate", message="The created note cannot be proven complete; reconcile before retrying.")
@@ -1308,7 +1310,7 @@ def _publish_folder_locked(
                 return PublishOutcome("indeterminate", message="The publish was confirmed but its receipt needs recovery.")
             folder_io.discard_staging(
                 staging_fd, staging_name, staging_root,
-                expected_dev=temp_dev, expected_ino=temp_ino,
+                expected_dev=temp_dev, expected_ino=temp_ino, token=token,
             )
             return PublishOutcome("published", None, receipt["id"])
         finally:

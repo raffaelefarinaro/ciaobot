@@ -448,10 +448,13 @@ def create_staged_file(
         if failure is not None:
             # Remove only the inode this call created, and only from inside
             # the private staging directory. Never touch the destination.
-            _discard_named_file(staging_fd, name, identity)
+            _discard_named_file(staging_fd, name, identity, token)
 
 
-def _discard_named_file(staging_fd: int, name: str, identity: tuple[int, int] | None) -> None:
+def _discard_named_file(
+    staging_fd: int, name: str, identity: tuple[int, int] | None,
+    token: str | None = None,
+) -> None:
     if identity is None:
         return
     try:
@@ -463,6 +466,20 @@ def _discard_named_file(staging_fd: int, name: str, identity: tuple[int, int] | 
         or (current.st_dev, current.st_ino) != identity
     ):
         return
+    if token is not None:
+        # Inode numbers are reusable (notably after unlink on Linux). The
+        # operation tag is the durable identity of the file this call wrote.
+        try:
+            fd = open_regular(staging_fd, name)
+        except OSError:
+            return
+        try:
+            if read_operation_tag(fd) != token:
+                return
+        except (OSError, UnsupportedFilesystem):
+            return
+        finally:
+            os.close(fd)
     try:
         os.unlink(name, dir_fd=staging_fd)
     except OSError:
@@ -476,7 +493,7 @@ def same_mount(staging_fd: int, parent_fd: int) -> bool:
 
 def link_no_clobber(
     staging_fd: int, source_name: str, parent_fd: int, final_name: str,
-    *, expected_dev: int, expected_ino: int,
+    *, expected_dev: int, expected_ino: int, token: str,
 ) -> None:
     """Atomically publish a staged inode without replacing anything.
 
@@ -491,13 +508,21 @@ def link_no_clobber(
         raise UnsupportedFilesystem(
             errno.EXDEV, "staging and destination are on different filesystems"
         )
-    current = os.stat(source_name, dir_fd=staging_fd, follow_symlinks=False)
-    if (
-        not stat.S_ISREG(current.st_mode)
-        or current.st_dev != expected_dev
-        or current.st_ino != expected_ino
-    ):
-        raise FolderChanged(errno.ELOOP, "the staged note changed before linking")
+    try:
+        source_fd = open_regular(staging_fd, source_name)
+    except OSError as exc:
+        raise FolderChanged(errno.ELOOP, "the staged note changed before linking") from exc
+    try:
+        current = os.fstat(source_fd)
+        if (
+            not stat.S_ISREG(current.st_mode)
+            or current.st_dev != expected_dev
+            or current.st_ino != expected_ino
+            or read_operation_tag(source_fd) != token
+        ):
+            raise FolderChanged(errno.ELOOP, "the staged note changed before linking")
+    finally:
+        os.close(source_fd)
     os.link(
         source_name, final_name,
         src_dir_fd=staging_fd, dst_dir_fd=parent_fd, follow_symlinks=False,
@@ -507,6 +532,7 @@ def link_no_clobber(
 def discard_staging(
     staging_fd: int, staging_name: str, staging_root: str,
     *, expected_dev: int | None = None, expected_ino: int | None = None,
+    token: str | None = None,
 ) -> None:
     """Best-effort non-destructive cleanup of engine-owned staging.
 
@@ -516,7 +542,7 @@ def discard_staging(
     the shared folder is ever unlinked, renamed or removed by this helper.
     """
     if isinstance(expected_dev, int) and isinstance(expected_ino, int):
-        _discard_named_file(staging_fd, "note", (expected_dev, expected_ino))
+        _discard_named_file(staging_fd, "note", (expected_dev, expected_ino), token)
     try:
         root_fd = os.open(staging_root, _directory_flags())
     except OSError:

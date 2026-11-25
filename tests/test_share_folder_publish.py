@@ -249,7 +249,7 @@ def test_folder_concurrent_external_create_wins_and_nothing_is_overwritten(
 
     def external_writer_wins(
         staging_fd: int, source_name: str, parent_fd: int, final_name: str,
-        *, expected_dev: int, expected_ino: int,
+        *, expected_dev: int, expected_ino: int, token: str,
     ) -> None:
         fd = os.open(
             final_name, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o644,
@@ -262,7 +262,7 @@ def test_folder_concurrent_external_create_wins_and_nothing_is_overwritten(
             os.close(fd)
         original(
             staging_fd, source_name, parent_fd, final_name,
-            expected_dev=expected_dev, expected_ino=expected_ino,
+            expected_dev=expected_dev, expected_ino=expected_ino, token=token,
         )
 
     monkeypatch.setattr(share_publish.folder_io, "link_no_clobber", external_writer_wins)
@@ -313,16 +313,16 @@ def test_folder_atomic_link_materializes_exactly_one_of_two_concurrent_writers(
         for name, content in (("a", b"first\n"), ("b", b"second\n")):
             staging_fd, _identity = folder_io.create_staging_dir(staging_root, f".ciao-share-{name}.d")
             dev, ino = folder_io.create_staged_file(staging_fd, "note", content, name)
-            staging.append((staging_fd, dev, ino))
+            staging.append((staging_fd, dev, ino, name))
         barrier = threading.Barrier(2)
 
         def link(item) -> str:
-            staging_fd, dev, ino = item
+            staging_fd, dev, ino, token = item
             barrier.wait(timeout=5)
             try:
                 folder_io.link_no_clobber(
                     staging_fd, "note", parent_fd, "winner.md",
-                    expected_dev=dev, expected_ino=ino,
+                    expected_dev=dev, expected_ino=ino, token=token,
                 )
             except FileExistsError:
                 return "lost"
@@ -331,7 +331,7 @@ def test_folder_atomic_link_materializes_exactly_one_of_two_concurrent_writers(
         with ThreadPoolExecutor(max_workers=2) as pool:
             outcomes = sorted(pool.map(link, staging))
     finally:
-        for staging_fd, _dev, _ino in staging:
+        for staging_fd, _dev, _ino, _token in staging:
             os.close(staging_fd)
         os.close(parent_fd)
     assert outcomes == ["lost", "won"]
@@ -389,7 +389,7 @@ def test_folder_crash_after_link_without_flush_marker_is_indeterminate(
             temp_dev, temp_ino = folder_io.create_staged_file(staging_fd, "note", content, token)
             folder_io.link_no_clobber(
                 staging_fd, "note", parent_fd, parts[-1],
-                expected_dev=temp_dev, expected_ino=temp_ino,
+                expected_dev=temp_dev, expected_ino=temp_ino, token=token,
             )
             folder_io.fsync_directory(parent_fd)
         finally:
@@ -460,7 +460,7 @@ def test_folder_cleanup_never_unlinks_a_replaced_staging_file(folder) -> None:
             os.close(fd)
         folder_io.discard_staging(
             staging_fd, staging_name, _staging_root(_config),
-            expected_dev=dev, expected_ino=ino,
+            expected_dev=dev, expected_ino=ino, token="cleanup-token",
         )
         # The replacement is not ours: it must survive, and the non-empty
         # staging directory must not be removed.
@@ -496,7 +496,7 @@ def test_folder_source_swap_before_link_is_indeterminate_and_not_published(
 
     def swap_source(
         staging_fd: int, source_name: str, parent_fd: int, final_name: str,
-        *, expected_dev: int, expected_ino: int,
+        *, expected_dev: int, expected_ino: int, token: str,
     ) -> None:
         os.unlink(source_name, dir_fd=staging_fd)
         fd = os.open(
@@ -510,7 +510,7 @@ def test_folder_source_swap_before_link_is_indeterminate_and_not_published(
             os.close(fd)
         original(
             staging_fd, source_name, parent_fd, final_name,
-            expected_dev=expected_dev, expected_ino=expected_ino,
+            expected_dev=expected_dev, expected_ino=expected_ino, token=token,
         )
 
     monkeypatch.setattr(share_publish.folder_io, "link_no_clobber", swap_source)
@@ -553,11 +553,11 @@ def test_folder_parent_detached_after_link_is_indeterminate(
 
     def detach_after_link(
         staging_fd: int, source_name: str, parent_fd: int, final_name: str,
-        *, expected_dev: int, expected_ino: int,
+        *, expected_dev: int, expected_ino: int, token: str,
     ) -> None:
         original(
             staging_fd, source_name, parent_fd, final_name,
-            expected_dev=expected_dev, expected_ino=expected_ino,
+            expected_dev=expected_dev, expected_ino=expected_ino, token=token,
         )
         nested.rename(moved)
         nested.mkdir()
@@ -660,12 +660,12 @@ def test_folder_parent_away_and_back_inside_link_is_indeterminate(
 
     def move_away_and_back_inside_link(
         staging_fd: int, source_name: str, parent_fd: int, final_name: str,
-        *, expected_dev: int, expected_ino: int,
+        *, expected_dev: int, expected_ino: int, token: str,
     ) -> None:
         nested.rename(moved)
         original(
             staging_fd, source_name, parent_fd, final_name,
-            expected_dev=expected_dev, expected_ino=expected_ino,
+            expected_dev=expected_dev, expected_ino=expected_ino, token=token,
         )
         moved.rename(nested)
 
@@ -787,11 +787,11 @@ def test_folder_commit_then_each_classified_error_stays_indeterminate(
 
     def commit_then_error(
         staging_fd: int, source_name: str, parent_fd: int, final_name: str,
-        *, expected_dev: int, expected_ino: int,
+        *, expected_dev: int, expected_ino: int, token: str,
     ) -> None:
         original(
             staging_fd, source_name, parent_fd, final_name,
-            expected_dev=expected_dev, expected_ino=expected_ino,
+            expected_dev=expected_dev, expected_ino=expected_ino, token=token,
         )
         raise OSError(error_code, "link succeeded but the syscall reported an error")
 
@@ -1227,13 +1227,13 @@ def test_folder_higher_ancestor_away_and_back_is_indeterminate(
 
     def move_root_away_and_back(
         staging_fd: int, source_name: str, parent_fd: int, final_name: str,
-        *, expected_dev: int, expected_ino: int,
+        *, expected_dev: int, expected_ino: int, token: str,
     ) -> None:
         root.rename(moved)
         try:
             original(
                 staging_fd, source_name, parent_fd, final_name,
-                expected_dev=expected_dev, expected_ino=expected_ino,
+                expected_dev=expected_dev, expected_ino=expected_ino, token=token,
             )
         finally:
             moved.rename(root)
@@ -1266,7 +1266,7 @@ def test_folder_degraded_probe_reconciles_existing_flushed_attempt(
             temp_dev, temp_ino = folder_io.create_staged_file(staging_fd, "note", content, token)
             folder_io.link_no_clobber(
                 staging_fd, "note", parent_fd, parts[-1],
-                expected_dev=temp_dev, expected_ino=temp_ino,
+                expected_dev=temp_dev, expected_ino=temp_ino, token=token,
             )
             folder_io.fsync_directory(parent_fd)
         finally:
