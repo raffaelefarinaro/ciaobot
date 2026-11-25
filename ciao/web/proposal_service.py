@@ -3187,7 +3187,7 @@ def preview_row(
     row = ctx["row"]
     fact = (text or str(row.get("text") or "")).strip()
     if str(row.get("kind") or "") == "share":
-        from ciao import share_proposals, shared_brain
+        from ciao import share_proposals, share_publish, shared_brain
 
         workspace = str(ctx.get("workspace") or row.get("workspace") or "")
         proposal_id = str(row.get("id") or "")
@@ -3218,6 +3218,17 @@ def preview_row(
         if text:
             blocked = "share_text_edits_not_supported"
         operation = str(fields.get("operation") or "")
+        revision = str(draft.get("review_token") or "")
+        retry_available = bool(
+            not blocked and share_publish.can_retry_publication(
+                config, workspace=workspace, proposal_id=proposal_id,
+                expected_revision=revision,
+            )
+        )
+        attempt_available = share_publish.has_publication_attempt(
+            config, workspace=workspace, proposal_id=proposal_id,
+            expected_revision=revision,
+        )
         return {
             "id": proposal_id, "kind": "share", "workspace": workspace,
             "operation": operation, "before": fields.get("original"),
@@ -3225,8 +3236,10 @@ def preview_row(
             "identity": str(fields.get("origin_identity") or ""),
             "branch": str(fields.get("upstream_ref") or "").removeprefix("refs/heads/"),
             "path": str(fields.get("path") or ""),
-            "revision": str(draft.get("review_token") or ""),
+            "revision": revision,
             "blocked_reason": blocked,
+            "reconcile_available": attempt_available and not retry_available,
+            "publish_retry_available": retry_available,
         }
     if ctx.get("file"):
         out = _base_preview(row)

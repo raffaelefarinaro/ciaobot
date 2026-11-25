@@ -119,6 +119,49 @@ def test_publish_uses_reviewed_bytes_and_is_idempotent(linked: tuple[Config, Pat
     assert receipt and receipt["commit_oid"] == result.commit_oid and receipt["published_blob_oid"]
 
 
+def test_publish_retries_only_after_a_persisted_retryable_rejection(linked, monkeypatch) -> None:
+    config, _clone, _origin = linked
+    draft = share_proposals.draft_share(
+        config, workspace="home", relative_path="n.md", operation="replace",
+        proposed=b"retry after a recorded rejection", request_key="retry-rejected-attempt",
+    )
+    assert isinstance(draft, share_proposals.ShareDraft)
+    fields = draft.artifact["immutable"]
+    attempt = {
+        "attempt": 1, "commit_oid": "a" * 40,
+        "parent_oid": fields["base_commit"],
+        "proposal_id": fields["proposal_id"], "revision": fields["revision"],
+        "destination_fingerprint": fields["destination_fingerprint"],
+        "ref": fields["upstream_ref"], "status": "rejected", "retryable": True,
+    }
+    share_publish._write_state(config, "home", fields, {"attempts": [attempt]})
+    token = draft.artifact["review_token"]
+    assert share_publish.can_retry_publication(
+        config, workspace="home", proposal_id=draft.proposal_id,
+        expected_revision=token,
+    )
+    pushes = 0
+    transport = share_publish._network_git
+
+    def count_push(folder: Path, *args: str, limit: int = 4096, timeout_s: float = 60.0):
+        nonlocal pushes
+        if args and args[0] == "push":
+            pushes += 1
+        return transport(folder, *args, limit=limit, timeout_s=timeout_s)
+
+    monkeypatch.setattr(share_publish, "_network_git", count_push)
+    result = asyncio.run(share_publish.publish_share(
+        config, workspace="home", proposal_id=draft.proposal_id,
+        expected_revision=token,
+    ))
+    assert result.outcome == "published"
+    assert pushes == 1
+    assert not share_publish.can_retry_publication(
+        config, workspace="home", proposal_id=draft.proposal_id,
+        expected_revision=token,
+    )
+
+
 def test_receipt_enumeration_skips_malformed_canonical_and_index(linked, monkeypatch) -> None:
     config, _clone, _origin = linked
     valid = share_proposals.draft_share(
