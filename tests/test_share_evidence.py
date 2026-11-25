@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import dataclasses
 import json
+import subprocess
+import sys
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
@@ -966,6 +968,116 @@ def _memory_manager(tmp_path: Path) -> tuple[CiaoConfig, ProjectChatManager, obj
     return config, manager, project, source
 
 
+def test_completed_memory_checkpoint_survives_registry_restart_and_revocation(tmp_path: Path) -> None:
+    config, manager, project, source = _memory_manager(tmp_path)
+    project.vault_folder = "alpha"
+    project_dir = Path(config.workspace_vault_root("home")) / "projects" / "active" / "alpha"
+    project_dir.mkdir(parents=True)
+    config.workspace("home").shared_brains = [SharedBrainLink(
+        name="notes", path=str(tmp_path / "brain"), identity="github.com/acme/home",
+        lifetime_id="brain_lifetime_fixed01",
+    )]
+    se._reset_project_manager_for_tests()
+    se.bind_project_manager(manager)
+    chat = next(item for item in manager.list_chats() if (item.helper or {}).get("kind") == memory_pass.MEMORY_PASS_KIND)
+    chat.last_response = "Completed the pass"
+    chat.last_response_status = "success"
+    registry = AgentSessionRegistry()
+    registry.issue(chat_id=chat.chat_id, project_id=chat.project_id, workspace="home", provider="claude")
+    se.record_operator_decision(config, workspace="home", project_id=project.project_id, decision="Baseline", reason="", effective_date="2026-11-20", session="operator-one")
+    preview = se.preview(config, workspace="home", brain_name="notes", project_id=project.project_id, project_name="Alpha", project_dir=project_dir, source_id=f"stream:{project.project_id}", grant_type="standing", field_mask=["decision"], producers=["memory_extraction"], session="operator-one")
+    grant = se.confirm(config, workspace="home", token=preview["preview_token"], session="operator-one")["grant"]
+    se.record_operator_decision(config, workspace="home", project_id=project.project_id, decision="Later", reason="", effective_date="2026-11-21", session="operator-one")
+    manager._save()
+    se.checkpoint_completed_memory_pass(config, registry, workspace="home", pass_chat_id=chat.chat_id)
+    registry.revoke_chat(chat.chat_id)
+    restarted = ProjectChatManager(
+        config, state_store=StateStore(config.state_path, config.workspace_root, config.media_root),
+        transcript_store=TranscriptStore(config.state_path.parent, config.workspace_root / "transcripts"),
+        path=config.state_path.parent / "web_projects.json",
+    )
+    se._reset_project_manager_for_tests()
+    se.bind_project_manager(restarted)
+    chat = restarted.get_chat(chat.chat_id)
+    assert chat is not None
+    relation = se.recover_memory_pass_source_relation(config, workspace="home", pass_chat_id=chat.chat_id)
+    assert relation.project_id == project.project_id
+    assert relation.source_id == f"stream:{project.project_id}"
+    assert [row["canonical_bytes"] for row in se.eligible_entries(config, workspace="home", brain_name="notes", relation=relation)] == ['{"decision":"Later"}']
+    se.revoke(config, workspace="home", grant_id=grant["grant_id"])
+    assert se.eligible_entries(config, workspace="home", brain_name="notes", relation=relation) == []
+    with pytest.raises(se.EvidenceError):
+        se.recover_memory_pass_source_relation(config, workspace="work", pass_chat_id=chat.chat_id)
+    chat.last_response = "Changed"
+    with pytest.raises(se.EvidenceError):
+        se.recover_memory_pass_source_relation(config, workspace="home", pass_chat_id=chat.chat_id)
+    chat.last_response = "Completed the pass"
+    archive = Path(source.archive_path)
+    original = archive.read_bytes()
+    archive.write_bytes(b"changed")
+    with pytest.raises(se.EvidenceError):
+        se.recover_memory_pass_source_relation(config, workspace="home", pass_chat_id=chat.chat_id)
+    archive.write_bytes(original)
+    se.revoke_memory_pass_checkpoint(config, workspace="home", pass_chat_id=chat.chat_id)
+    with pytest.raises(se.EvidenceError):
+        se.recover_memory_pass_source_relation(config, workspace="home", pass_chat_id=chat.chat_id)
+
+
+def test_care_witness_binds_exact_preview_revision_and_revocation(tmp_path: Path) -> None:
+    config, manager, project, _source = _memory_manager(tmp_path)
+    project.vault_folder = "alpha"
+    directory = Path(config.workspace_vault_root("home")) / "projects" / "active" / "alpha"
+    directory.mkdir(parents=True)
+    config.workspace("home").shared_brains = [SharedBrainLink(name="notes", path=str(tmp_path / "brain"), identity="team", lifetime_id="brain_lifetime_fixed01")]
+    se._reset_project_manager_for_tests()
+    se.bind_project_manager(manager)
+    document = directory / se.DOCUMENT_NAME
+    text = "## Decision\nDecision: Launch\nEffective date: 2026-11-20\n"
+    document.write_text(text, encoding="utf-8")
+    preview = se.preview(config, workspace="home", brain_name="notes", project_id=project.project_id,
+        project_name="Alpha", project_dir=directory, source_id=se.DOCUMENT_SOURCE, grant_type="snapshot",
+        field_mask=["decision"], producers=["nightly_curation"], entry_index=0, session="operator-one")
+    subprocess.run([sys.executable, "-c", "from pathlib import Path; import sys; Path(sys.argv[1]).write_text(sys.argv[2], encoding='utf-8')", str(document), text + "changed"], check=True)
+    grant = se.confirm(config, workspace="home", token=preview["preview_token"], session="operator-one")["grant"]
+    relative = document.relative_to(config.workspace_vault_root("home")).as_posix()
+    revision = se._digest(text.encode())
+    rows = se.care_snapshot_witnesses(config, workspace="home", project_id=project.project_id, relative_path=relative, revision=revision)
+    assert len(rows) == 1 and rows[0]["grant_id"] == grant["grant_id"]
+    assert rows[0]["entry_index"] == 0
+    assert se.care_snapshot_witnesses(config, workspace="home", project_id=project.project_id, relative_path=relative, revision=se._digest(document.read_bytes())) == []
+    assert se.care_snapshot_witnesses(config, workspace="work", project_id=project.project_id, relative_path=relative, revision=revision) == []
+    old_created = project.created_at
+    project.created_at = "2099-01-01T00:00:00Z"
+    assert se.care_snapshot_witnesses(config, workspace="home", project_id=project.project_id, relative_path=relative, revision=revision) == []
+    project.created_at = old_created
+    old_link = config.workspace("home").shared_brains[0]
+    config.workspace("home").shared_brains = [dataclasses.replace(old_link, lifetime_id="brain_lifetime_new0001")]
+    assert se.care_snapshot_witnesses(config, workspace="home", project_id=project.project_id, relative_path=relative, revision=revision) == []
+    config.workspace("home").shared_brains = [old_link]
+    with se._workspace_guard(config, "home"):
+        state = se._load_state(config, "home")
+        saved = state["grants"][grant["grant_id"]]["care_witness"]
+        state["grants"][grant["grant_id"]]["care_witness"] = None
+        se._save_state(config, "home", state)
+    assert se.care_snapshot_witnesses(config, workspace="home", project_id=project.project_id, relative_path=relative, revision=revision) == []
+    with se._workspace_guard(config, "home"):
+        state = se._load_state(config, "home")
+        state["grants"][grant["grant_id"]]["care_witness"] = saved
+        se._save_state(config, "home", state)
+    se.revoke(config, workspace="home", grant_id=grant["grant_id"])
+    assert se.care_snapshot_witnesses(config, workspace="home", project_id=project.project_id, relative_path=relative, revision=revision) == []
+
+
+def test_document_revision_matches_planner_newline_normalization(tmp_path: Path) -> None:
+    from ciao.memory_receipts import content_revision
+
+    document = tmp_path / "Decisions.md"
+    document.write_bytes(b"## Decision\r\nDecision: Launch\r\nEffective date: 2026-11-20\r\n")
+    entries, revision = se._read_document(document)
+    assert entries[0]["decision"] == "Launch"
+    assert revision == content_revision(document.read_text(encoding="utf-8"))
+
+
 def test_real_memory_pass_archive_proves_positive_stream_eligibility(
     tmp_path: Path,
 ) -> None:
@@ -1116,7 +1228,7 @@ def test_real_memory_pass_archive_proves_positive_stream_eligibility(
     assert se.eligible_entries(config, workspace="home", brain_name="notes", relation=relation) == []
 
 
-def test_curation_lease_work_item_proves_positive_snapshot_eligibility(
+def test_curation_lease_work_item_cannot_authorize_unattributed_snapshot(
     config: Config, tmp_path: Path
 ) -> None:
     document = config.project_dirs["home"] / se.DOCUMENT_NAME
@@ -1184,9 +1296,7 @@ def test_curation_lease_work_item_proves_positive_snapshot_eligibility(
     rows = se.eligible_entries(
         config, workspace="home", brain_name="notes", relation=relation, now=moment,
     )
-    assert [row["canonical_bytes"] for row in rows] == [
-        '{"decision":"Ship the beta","effective_date":"2026-11-21"}'
-    ]
+    assert rows == []
     # A later process can load the private capability from the public holder.
     capability = curation_run.load_lease_capability(vault, lease.holder, now=moment)
     assert capability is not None and capability.proof == lease.proof
@@ -1221,27 +1331,27 @@ def test_curation_lease_work_item_proves_positive_snapshot_eligibility(
             source_id=se.DOCUMENT_SOURCE, lease=lease,
             agent_token=wrong_token, now=moment,
         )
-    assert rows[0]["grant_id"] == grant["grant_id"]
-    assert rows[0]["producer"] == "nightly_curation"
-    assert rows[0]["relation_evidence"] == key
+    assert grant["status"] == "active"
+    assert relation.producer == "nightly_curation"
+    assert relation.evidence == key
     document.unlink()
-    # Resolve exactly the confirmed snapshot while the source is still absent.
+    # The confirmed snapshot remains unauthorized without fact attribution.
     deleted_relation = se.curation_source_relation(
         config, registry, vault, workspace="home", project_id="proj-alpha",
         source_id=se.DOCUMENT_SOURCE, lease=lease, agent_token=token, now=moment,
     )
-    assert [row["canonical_bytes"] for row in se.eligible_entries(
+    assert se.eligible_entries(
         config, workspace="home", brain_name="notes",
         relation=deleted_relation, now=moment,
-    )] == ['{"decision":"Ship the beta","effective_date":"2026-11-21"}']
+    ) == []
     # A later replacement document is not substituted into the same snapshot.
     document.write_text(
         "## Decision\nDecision: Replacement\nEffective date: 2026-12-01\n", encoding="utf-8"
     )
-    assert [row["canonical_bytes"] for row in se.eligible_entries(
+    assert se.eligible_entries(
         config, workspace="home", brain_name="notes",
         relation=deleted_relation, now=moment,
-    )] == ['{"decision":"Ship the beta","effective_date":"2026-11-21"}']
+    ) == []
     curation_run.end_run(vault, holder=lease.holder, now=moment)
     assert curation_run.load_lease_capability(vault, lease.holder, now=moment) is None
     assert se.eligible_entries(

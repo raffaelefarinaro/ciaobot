@@ -33,6 +33,7 @@ import json
 import os
 import re
 import secrets
+import stat
 import threading
 from contextlib import contextmanager
 from dataclasses import dataclass, field
@@ -855,7 +856,7 @@ def _inside(path: Path, root: Path) -> bool:
         return False
 
 
-def _parse_document(path: Path) -> list[dict[str, str]]:
+def _read_document(path: Path) -> tuple[list[dict[str, str]], str]:
     """Parse bounded ``## Decision`` blocks from an externally editable file.
 
     Only the three declared field lines are read; prose around them is not
@@ -863,8 +864,10 @@ def _parse_document(path: Path) -> list[dict[str, str]]:
     refuses the whole document rather than offering a partial reading.
     """
     try:
-        fd = open_fd(path, os.O_RDONLY, follow_symlinks=False)
+        fd = open_fd(path, os.O_RDONLY | os.O_NONBLOCK, follow_symlinks=False)
         try:
+            if not stat.S_ISREG(os.fstat(fd).st_mode):
+                _refuse("source_unavailable", "The decision document is not a regular file.")
             with os.fdopen(fd, "rb", closefd=False) as handle:
                 raw = handle.read(MAX_SOURCE_BYTES + 1)
         finally:
@@ -925,7 +928,12 @@ def _parse_document(path: Path) -> list[dict[str, str]]:
         entry["decision"] = _clean_text(entry.get("decision", ""), "Decision", MAX_DECISION_CHARS, required=True)
         entry["reason"] = _clean_text(entry.get("reason", ""), "Reason", MAX_REASON_CHARS, required=False)
         entry["effective_date"] = _clean_effective_date(entry.get("effective_date", ""))
-    return entries
+    # Path.read_text, used by the planner, applies universal newline translation.
+    return entries, _digest(text.replace("\r\n", "\n").replace("\r", "\n").encode("utf-8"))
+
+
+def _parse_document(path: Path) -> list[dict[str, str]]:
+    return _read_document(path)[0]
 
 
 def list_sources(
@@ -1201,6 +1209,11 @@ def workspace_mode(config: Any, *, workspace: str) -> str:
     ) else MODE_REVIEW
 
 
+def _care_witness_signature(config: Any, payload: dict[str, Any]) -> str:
+    raw = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    return hmac.new(_relation_secret(config), b"care-snapshot-witness\0" + raw, hashlib.sha256).hexdigest()
+
+
 def preview(
     config: Any,
     *,
@@ -1241,10 +1254,14 @@ def preview(
         _refuse("invalid_grant_type", "A decision document supports only an individual snapshot.")
     if source_id.startswith("stream:") and grant_type != "standing":
         _refuse("invalid_grant_type", "A decision stream supports only a standing grant.")
-    entries = _source_entries(
-        config, workspace=workspace, project_id=project,
-        project_dir=project_dir, source_id=source_id,
-    )
+    document_revision = ""
+    if grant_type == "snapshot":
+        entries, document_revision = _read_document(project_dir / DOCUMENT_NAME)
+    else:
+        entries = _source_entries(
+            config, workspace=workspace, project_id=project,
+            project_dir=project_dir, source_id=source_id,
+        )
     source_label = (
         f"Structured decisions · {project_name}"
         if source_id.startswith("stream:")
@@ -1275,6 +1292,28 @@ def preview(
         entry_label = f"Decision {entry_index + 1} in {DOCUMENT_NAME}"
     token = "sev_" + secrets.token_urlsafe(32)
     token_hash = _token_hash(token)
+    witness: dict[str, Any] | None = None
+    if grant_type == "snapshot" and _ENGINE_PROJECT_MANAGER is not None:
+        manager = _ENGINE_PROJECT_MANAGER
+        owner = manager.get_project(project) if getattr(manager, "_config", None) is config else None
+        active_dir = manager.active_project_vault_dir(project) if owner is not None else None
+        if (owner is not None and owner.workspace == workspace and owner.created_at
+                and active_dir is not None and Path(active_dir).resolve() == Path(project_dir).resolve()):
+            try:
+                relative = (Path(project_dir).resolve() / DOCUMENT_NAME).relative_to(
+                    Path(config.workspace_vault_root(workspace)).resolve()
+                ).as_posix()
+            except (OSError, ValueError):
+                _refuse("invalid_source", "The decision document is outside this workspace.")
+            payload = {
+                "workspace": workspace, "workspace_lifetime_id": _workspace_lifetime(config, workspace),
+                "project_id": project, "project_created_at": owner.created_at,
+                "brain_name": link.name, "brain_lifetime_id": link.lifetime_id,
+                "source_path": relative, "source_revision": document_revision,
+                "entry_index": entry_index, "masked_digest": expected,
+                "preview_token_hash": token_hash,
+            }
+            witness = {"payload": payload, "signature": _care_witness_signature(config, payload)}
     record = {
         "schema": SCHEMA,
         "token_hash": token_hash,
@@ -1295,6 +1334,7 @@ def preview(
         "expected_generation": expected,
         "entry_index": entry_index if grant_type == "snapshot" else None,
         "snapshot_fields": snapshot_fields,
+        "care_witness": witness,
         "created_at": _iso(moment),
         "expires_at": _iso(moment + PREVIEW_TTL),
         "used_at": None,
@@ -1491,6 +1531,24 @@ def confirm(
         else:
             _refuse("invalid_grant_type", "The preview has no supported grant type.")
         issued = _iso(moment)
+        care_witness = record.get("care_witness")
+        if care_witness is not None:
+            if not isinstance(care_witness, dict) or not isinstance(care_witness.get("payload"), dict):
+                _refuse("preview_corrupt", "The previewed source witness is unreadable.")
+            payload = care_witness["payload"]
+            signature = care_witness.get("signature")
+            if (not isinstance(signature, str) or not re.fullmatch(r"[0-9a-f]{64}", signature)
+                    or not hmac.compare_digest(signature, _care_witness_signature(config, payload))
+                    or payload.get("workspace") != workspace or payload.get("workspace_lifetime_id") != lifetime
+                    or payload.get("project_id") != project or payload.get("brain_name") != link.name
+                    or payload.get("brain_lifetime_id") != link.lifetime_id
+                    or payload.get("preview_token_hash") != token_hash
+                    or payload.get("masked_digest") != record.get("expected_generation")
+                    or payload.get("entry_index") != record.get("entry_index")
+                    or grant_type != "snapshot"):
+                _refuse("preview_corrupt", "The previewed source witness does not match.")
+            payload = {**payload, "grant_id": grant_id, "consent_generation": 1, "evidence_key": evidence_key}
+            care_witness = {"payload": payload, "signature": _care_witness_signature(config, payload)}
         grant: dict[str, Any] = {
             "schema": SCHEMA,
             "grant_id": grant_id,
@@ -1513,6 +1571,7 @@ def confirm(
             "issued_at": issued,
             "start_revision": start_revision,
             "evidence_key": evidence_key,
+            "care_witness": care_witness,
             "preview_token_hash": token_hash,
             "consent_generation": 1,
             "active": True,
@@ -1635,6 +1694,78 @@ def _confirmed_snapshot_available(
     return False
 
 
+def care_snapshot_witnesses(config: Any, *, workspace: str, project_id: str, relative_path: str, revision: str) -> list[dict[str, Any]]:
+    """Find confirmed snapshot witnesses; caller must independently prove the lease item."""
+    _require_workspace(config, workspace)
+    vault_root = Path(config.workspace_vault_root(workspace)).resolve()
+    project = _require_project(project_id)
+    if not isinstance(revision, str) or not re.fullmatch(r"[0-9a-f]{64}", revision):
+        return []
+    manager = _ENGINE_PROJECT_MANAGER
+    if config is None or manager is None or getattr(manager, "_config", None) is not config:
+        return []
+    owner = manager.get_project(project)
+    folder = manager.active_project_vault_dir(project) if owner is not None else None
+    if owner is None or owner.workspace != workspace or not owner.created_at or folder is None:
+        return []
+    try:
+        expected_path = (Path(folder).resolve() / DOCUMENT_NAME).relative_to(vault_root).as_posix()
+    except (OSError, ValueError):
+        return []
+    if relative_path != expected_path:
+        return []
+    results: list[dict[str, Any]] = []
+    with _workspace_guard(config, workspace):
+        state = _load_state(config, workspace)
+        grants = state.get("grants")
+        for grant in grants.values() if isinstance(grants, dict) else []:
+            if (not isinstance(grant, dict) or not grant.get("active") or grant.get("type") != "snapshot"
+                    or grant.get("project_id") != project or grant.get("source_id") != DOCUMENT_SOURCE
+                    or "nightly_curation" not in (grant.get("producers") or [])
+                    or not _grant_linked(config, workspace, grant)):
+                continue
+            witness = grant.get("care_witness")
+            if not isinstance(witness, dict) or not isinstance(witness.get("payload"), dict):
+                continue
+            payload = witness["payload"]
+            signature = witness.get("signature")
+            if (not isinstance(signature, str) or not re.fullmatch(r"[0-9a-f]{64}", signature)
+                    or not hmac.compare_digest(signature, _care_witness_signature(config, payload))
+                    or payload.get("workspace") != workspace
+                    or payload.get("workspace_lifetime_id") != state.get("workspace_lifetime_id")
+                    or payload.get("project_id") != project or payload.get("project_created_at") != owner.created_at
+                    or payload.get("source_path") != relative_path or payload.get("source_revision") != revision
+                    or payload.get("grant_id") != grant.get("grant_id")
+                    or payload.get("consent_generation") != grant.get("consent_generation")
+                    or payload.get("evidence_key") != grant.get("evidence_key")
+                    or not isinstance(grant.get("brain"), dict)
+                    or payload.get("brain_name") != grant["brain"].get("name")
+                    or payload.get("brain_lifetime_id") != grant["brain"].get("lifetime_id")
+                    or type(payload.get("entry_index")) is not int or payload["entry_index"] < 0):
+                continue
+            evidence_key = payload.get("evidence_key")
+            if not isinstance(evidence_key, str) or not re.fullmatch(r"[0-9a-f]{64}", evidence_key):
+                continue
+            try:
+                evidence = _read_json(_evidence_dir(config, workspace) / (evidence_key + ".json"), limit=MAX_EVIDENCE_BYTES, code="evidence_corrupt")
+            except EvidenceError:
+                continue
+            canonical = evidence.get("canonical_bytes")
+            if (not isinstance(canonical, str) or _digest(canonical.encode("utf-8")) != payload.get("masked_digest")
+                    or evidence.get("workspace") != workspace or evidence.get("project_id") != project
+                    or evidence.get("workspace_lifetime_id") != state.get("workspace_lifetime_id")
+                    or evidence.get("source_id") != DOCUMENT_SOURCE or evidence.get("evidence_key") != evidence_key
+                    or evidence.get("field_mask") != grant.get("field_mask")):
+                continue
+            results.append({
+                "grant_id": grant["grant_id"], "project_id": project,
+                "source_path": relative_path, "source_revision": revision,
+                "entry_index": payload.get("entry_index"), "masked_digest": payload.get("masked_digest"),
+                "consent_generation": grant.get("consent_generation"), "witness_signature": signature,
+            })
+    return results
+
+
 def memory_pass_source_relation(
     config: Any,
     registry: Any,
@@ -1755,6 +1886,125 @@ def memory_pass_source_relation(
         expires_at=_iso(moment + RELATION_TTL),
         seal=b"",
     ))
+
+
+def _memory_checkpoint_path(config: Any, workspace: str, pass_chat_id: str) -> Path:
+    return _workspace_dir(config, workspace) / "memory-checkpoints" / (_digest(pass_chat_id.encode("utf-8")) + ".json")
+
+
+def _archive_digest(path: Path) -> str:
+    try:
+        fd = open_fd(path, os.O_RDONLY, follow_symlinks=False)
+        try:
+            info = os.fstat(fd)
+            if not stat.S_ISREG(info.st_mode) or info.st_size > 1_048_576:
+                _refuse("source_unavailable", "The archived transcript cannot be verified.")
+            with os.fdopen(fd, "rb", closefd=False) as handle:
+                raw = handle.read(1_048_577)
+        finally:
+            os.close(fd)
+    except OSError:
+        _refuse("source_unavailable", "The archived transcript cannot be verified.")
+    if len(raw) > 1_048_576:
+        _refuse("source_unavailable", "The archived transcript cannot be verified.")
+    return _digest(raw)
+
+
+def _checkpoint_signature(config: Any, payload: dict[str, Any]) -> str:
+    raw = json.dumps(payload, sort_keys=True, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+    return hmac.new(_relation_secret(config), b"memory-checkpoint\0" + raw, hashlib.sha256).hexdigest()
+
+
+def checkpoint_completed_memory_pass(config: Any, registry: Any, *, workspace: str, pass_chat_id: str) -> None:
+    """Attest a completed pass while its engine-managed principal still exists."""
+    relation = memory_pass_source_relation(config, registry, workspace=workspace, pass_chat_id=pass_chat_id)
+    chat = _project_manager().get_chat(pass_chat_id)
+    if chat is None or chat.last_response_status != "success" or not chat.last_response.strip():
+        _refuse("source_unavailable", "The memory pass did not complete successfully.")
+    payload = {
+        "workspace": workspace, "workspace_lifetime_id": relation.workspace_lifetime_id,
+        "pass_chat_id": pass_chat_id, "pass_project_id": chat.project_id,
+        "source_chat_id": str(chat.helper.get("source_chat_id") or ""),
+        "project_id": relation.project_id, "archive_path": relation.evidence,
+        "archive_digest": _archive_digest(Path(relation.evidence)),
+        "turn_count": chat.user_turn_count,
+        "response_digest": _digest(chat.last_response.encode("utf-8")),
+    }
+    checkpoint = {"schema": SCHEMA, "payload": payload, "signature": _checkpoint_signature(config, payload)}
+    with _workspace_guard(config, workspace):
+        path = _memory_checkpoint_path(config, workspace, pass_chat_id)
+        existing = _read_json(path, limit=MAX_EVIDENCE_BYTES, code="private_state_corrupt")
+        if existing and existing != checkpoint:
+            _refuse("source_unavailable", "The memory pass checkpoint has changed.")
+        if not existing:
+            _write_private(path, json.dumps(checkpoint, sort_keys=True).encode("utf-8"), limit=MAX_EVIDENCE_BYTES)
+
+
+def _verified_memory_checkpoint(config: Any, workspace: str, pass_chat_id: str) -> dict[str, Any]:
+    _require_workspace(config, workspace)
+    if not isinstance(pass_chat_id, str) or not pass_chat_id:
+        _refuse("source_unavailable", "The memory pass checkpoint is unavailable.")
+    checkpoint = _read_json(_memory_checkpoint_path(config, workspace, pass_chat_id), limit=MAX_EVIDENCE_BYTES, code="private_state_corrupt")
+    payload = checkpoint.get("payload")
+    signature = checkpoint.get("signature")
+    if not isinstance(payload, dict) or not isinstance(signature, str) or not re.fullmatch(r"[0-9a-f]{64}", signature) or not hmac.compare_digest(signature, _checkpoint_signature(config, payload)):
+        _refuse("source_unavailable", "The memory pass checkpoint is unavailable.")
+    pcm = _project_manager()
+    chat = pcm.get_chat(pass_chat_id)
+    source = pcm.get_chat(str(payload.get("source_chat_id") or ""))
+    project = pcm.get_project(source.project_id) if source is not None else None
+    pass_project = pcm.get_project(chat.project_id) if chat is not None else None
+    from ciao.web import chat_service, memory_pass  # noqa: PLC0415
+    helper = chat_service._normalize_chat_helper(chat.helper) if chat is not None else {}
+    archive = pcm._locate_archive(source.chat_id, str(source.archive_path)) if source is not None and source.archived else None
+    helper_archive = pcm._locate_archive(source.chat_id, str(helper.get("archive_path") or "")) if source is not None else None
+    if (
+        payload.get("workspace") != workspace or payload.get("workspace_lifetime_id") != _workspace_lifetime(config, workspace)
+        or payload.get("pass_chat_id") != pass_chat_id or chat is None or pass_project is None
+        or pass_project.workspace != workspace or pass_project.kind != memory_pass.MEMORY_PROJECT_KIND
+        or payload.get("pass_project_id") != chat.project_id
+        or helper.get("kind") != memory_pass.MEMORY_PASS_KIND or helper.get("state") != "done"
+        or helper.get("source_chat_id") != payload.get("source_chat_id")
+        or source is None or project is None or project.workspace != workspace
+        or project.project_id != payload.get("project_id") or memory_pass.is_memory_pass_chat(source, project)
+        or archive is None or helper_archive != archive or str(archive) != payload.get("archive_path")
+        or chat.last_response_status != "success" or not chat.last_response.strip()
+        or chat.user_turn_count != payload.get("turn_count")
+        or _digest(chat.last_response.encode("utf-8")) != payload.get("response_digest")
+        or _archive_digest(archive) != payload.get("archive_digest")
+    ):
+        _refuse("source_unavailable", "The memory pass checkpoint no longer matches its source.")
+    return {**payload, "signature": signature}
+
+
+def recover_memory_pass_source_relation(config: Any, *, workspace: str, pass_chat_id: str, source_id: str = "", now: datetime | None = None) -> SourceRelation:
+    """Recover an attested pass after restart without a live producer principal."""
+    payload = _verified_memory_checkpoint(config, workspace, pass_chat_id)
+    project = str(payload["project_id"])
+    chosen = source_id or f"stream:{project}"
+    if chosen not in (f"stream:{project}", DOCUMENT_SOURCE):
+        _refuse("invalid_source", "The memory pass source is not available.")
+    if chosen == DOCUMENT_SOURCE and not _confirmed_snapshot_available(config, workspace=workspace, project_id=project, source_id=chosen):
+        _refuse("source_unavailable", "The confirmed project snapshot is unavailable.")
+    moment = _now(now)
+    return _seal_relation(config, SourceRelation(
+        kind="memory_checkpoint", producer="memory_extraction", workspace=workspace,
+        workspace_lifetime_id=str(payload["workspace_lifetime_id"]), project_id=project,
+        source_id=chosen, relation_id=pass_chat_id, evidence=str(payload["signature"]),
+        lease_vault="", lease_proof_hash="", nonce=secrets.token_hex(16),
+        attested_at=_iso(moment), expires_at=_iso(moment + RELATION_TTL), seal=b"",
+    ))
+
+
+def revoke_memory_pass_checkpoint(config: Any, *, workspace: str, pass_chat_id: str) -> None:
+    """Withdraw a checkpoint; existing recovered relations then fail closed."""
+    _require_workspace(config, workspace)
+    with _workspace_guard(config, workspace):
+        _write_private(
+            _memory_checkpoint_path(config, workspace, pass_chat_id),
+            json.dumps({"schema": SCHEMA, "revoked": True}).encode("utf-8"),
+            limit=MAX_EVIDENCE_BYTES,
+        )
 def curation_source_relation(
     config: Any,
     registry: Any,
@@ -1914,21 +2164,17 @@ def eligible_entries(
     moment = _now(now)
     if relation.expires_at <= _iso(moment):
         return []
-    if relation.kind == "curation_lease_item":
-        from ciao import curation_run  # noqa: PLC0415
-
+    if relation.kind == "memory_checkpoint":
         try:
-            lease = curation_run.active_lease(Path(relation.lease_vault), now=moment)
-        except (OSError, curation_run.CurationStateError):
+            checkpoint = _verified_memory_checkpoint(config, workspace, relation.relation_id)
+        except EvidenceError:
             return []
-        if not lease or str(lease.get("holder") or "") != relation.relation_id:
+        if checkpoint.get("signature") != relation.evidence or checkpoint.get("project_id") != relation.project_id:
             return []
-        plan = lease.get("plan")
-        planned = plan.get("planned") if isinstance(plan, dict) else None
-        if not isinstance(planned, list) or [
-            curation_run.PASS_STALE_NOTE, relation.evidence
-        ] not in planned:
-            return []
+    if relation.kind == "curation_lease_item":
+        # The lease identifies a project file, not an individual evidence fact.
+        # No fact may be selected until an engine-owned item-to-fact binding exists.
+        return []
     try:
         link = _link(config, workspace, brain_name)
     except EvidenceError:
@@ -1979,6 +2225,9 @@ def eligible_entries(
                     "grant_id": grant.get("grant_id", ""),
                     "grant_type": "standing",
                     "entry_id": entry.get("entry_id", ""),
+                    "entry_revision": entry.get("revision"),
+                    "consent_generation": grant.get("consent_generation"),
+                    "audience": grant.get("audience", ""),
                     "project_id": project,
                     "source_id": grant.get("source_id"),
                     "producer": relation.producer,
@@ -2017,6 +2266,9 @@ def eligible_entries(
                 "grant_id": grant.get("grant_id", ""),
                 "grant_type": "snapshot",
                 "entry_id": "",
+                "entry_revision": None,
+                "consent_generation": grant.get("consent_generation"),
+                "audience": grant.get("audience", ""),
                 "project_id": project,
                 "source_id": grant.get("source_id"),
                 "producer": relation.producer,
