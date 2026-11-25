@@ -2035,6 +2035,37 @@ async def test_checkpoint_failure_does_not_block_successful_pass(
     assert source.postprocess["steps"]["memory_pass"]["extra"]["candidate_outcome"] == "checkpoint_unavailable"
 
 
+async def test_completed_pass_offers_candidates_after_releasing_slot(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    passes_enabled: None, streams: _FakeStreams,
+) -> None:
+    from ciao import share_evidence, share_proposals
+
+    manager = _make_manager(tmp_path)
+    source = _source(manager)
+    first = manager.enqueue_memory_pass(source, None, _archive_file(tmp_path), "")
+    second = manager.enqueue_memory_pass(_source(manager, "Next"), None, _archive_file(tmp_path), "")
+    chat = manager.get_chat(first)
+    _replied(chat, "Updated memory.")
+    manager._mcp_service = SimpleNamespace(registry=object())
+    monkeypatch.setattr(share_evidence, "checkpoint_completed_memory_pass", lambda *a, **kw: None)
+    monkeypatch.setattr(share_evidence, "recover_memory_pass_source_relation", lambda *a, **kw: "attested")
+    calls = []
+
+    def intake(config, *, workspace, relation):
+        assert chat.archived
+        assert manager.get_chat(second).helper["state"] == "running"
+        calls.append((workspace, relation))
+        return []
+
+    monkeypatch.setattr(share_proposals, "draft_evidence_candidates", intake)
+    _stub_archive(manager, monkeypatch)
+    assert await manager._memory_pass.on_turn_finished(first)
+    await _await_detached(manager)
+    assert calls == [("work", "attested")]
+    assert source.postprocess["steps"]["memory_pass"]["extra"]["candidate_outcome"] == "complete"
+
+
 async def test_unclean_finish_marks_attention_and_pumps_next(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

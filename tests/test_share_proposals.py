@@ -925,3 +925,69 @@ def test_intake_uses_real_checkpoint_and_consent(linked, tmp_path, monkeypatch):
     assert "private reason" not in drafts[0].artifact["immutable"]["proposed"]
     se.revoke(config, workspace="home", grant_id=grant["grant_id"])
     assert sp.draft_evidence_candidates(config, workspace="home", relation=relation) == []
+
+
+async def test_memory_pass_files_private_candidate_and_replays_idempotently(linked, tmp_path, monkeypatch):
+    from dataclasses import replace
+    from tests.test_share_evidence import _memory_manager
+    from ciao import share_evidence as se, share_publish, shared_brain_guide, shared_brain_mapping
+    from ciao.mcp_server import AgentSessionRegistry
+    from ciao.web import memory_pass
+
+    fixture_config, clone = linked
+    config, manager, project, source = _memory_manager(tmp_path)
+    guide = {"version": 1, "scope": "Decisions", "exclusions": [], "types": {
+        "decision": {"kind": "collection", "path": "decisions", "operation": "create"}}}
+    (clone / shared_brain_guide.GUIDE_NAME).write_text("```ciao-guide\n" + json.dumps(guide) + "\n```\n")
+    load = shared_brain_guide.read_guide(clone, brain_identity=fixture_config.link.identity)
+    mapping = shared_brain_mapping.approve(fixture_config.link, load, ["decision"], expected_pin=load.guide.pin)
+    link = replace(fixture_config.link, guide_mapping=mapping, guide_mapping_generation=mapping.generation)
+    config.workspace("home").shared_brains = [link]
+    config.persist_workspace_registry()
+    project.vault_folder = "alpha"
+    project_dir = Path(config.workspace_vault_root("home")) / "projects" / "active" / "alpha"
+    project_dir.mkdir(parents=True)
+    se._reset_project_manager_for_tests()
+    se.bind_project_manager(manager)
+    chat = next(item for item in manager.list_chats() if (item.helper or {}).get("kind") == memory_pass.MEMORY_PASS_KIND)
+    chat.helper["state"] = "running"
+    chat.last_response = "Completed synthetic pass"
+    chat.last_response_status = "success"
+    registry = AgentSessionRegistry()
+    registry.issue(chat_id=chat.chat_id, project_id=chat.project_id, workspace="home", provider="claude")
+    manager._mcp_service = SimpleNamespace(registry=registry)
+    se.record_operator_decision(config, workspace="home", project_id=project.project_id, decision="Baseline", reason="", effective_date="2026-11-20", session="operator")
+    preview = se.preview(config, workspace="home", brain_name=link.name, project_id=project.project_id, project_name="Alpha", project_dir=project_dir, source_id=f"stream:{project.project_id}", grant_type="standing", field_mask=["decision"], producers=["memory_extraction"], session="operator")
+    se.confirm(config, workspace="home", token=preview["preview_token"], session="operator")
+    se.record_operator_decision(config, workspace="home", project_id=project.project_id, decision="Share this decision", reason="private reason", effective_date="2026-11-21", session="operator")
+    monkeypatch.setattr(share_publish, "publish_share", lambda *a, **kw: pytest.fail("intake published"))
+    intake = sp.draft_evidence_candidates
+
+    def interrupted(*args, **kwargs):
+        intake(*args, **kwargs)
+        raise OSError("simulated interruption after filing")
+
+    monkeypatch.setattr(sp, "draft_evidence_candidates", interrupted)
+    try:
+        assert await manager._memory_pass.on_turn_finished(chat.chat_id)
+        await asyncio.gather(*list(manager._detached_tasks))
+        queue = Path(config.workspace_vault_root("home")) / "Workspace" / "Memory-Proposals.md"
+        assert queue.read_text().count("[share ") == 1
+        assert source.postprocess["steps"]["memory_pass"]["extra"]["candidate_outcome"] == "unavailable"
+        monkeypatch.setattr(sp, "draft_evidence_candidates", intake)
+        from ciao.sessions import StateStore
+        from ciao.transcripts import TranscriptStore
+        from ciao.web.project_chats import ProjectChatManager
+        restarted = ProjectChatManager(
+            config, state_store=StateStore(config.state_path, config.workspace_root, config.media_root),
+            transcript_store=TranscriptStore(config.state_path.parent, config.workspace_root / "transcripts"),
+            path=config.state_path.parent / "web_projects.json",
+        )
+        se._reset_project_manager_for_tests()
+        se.bind_project_manager(restarted)
+        await restarted.resume_memory_passes()
+        await asyncio.gather(*list(restarted._detached_tasks))
+        assert restarted.get_chat(source.chat_id).postprocess["steps"]["memory_pass"]["extra"]["candidate_outcome"] == "complete"
+        assert queue.read_text().count("[share ") == 1
+    finally:
+        se._reset_project_manager_for_tests()
