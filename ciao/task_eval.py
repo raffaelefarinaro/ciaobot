@@ -18,6 +18,7 @@ import json
 import os
 import re
 import secrets
+import shlex
 import signal
 import shutil
 import socket
@@ -915,7 +916,39 @@ class EngineAPIError(RuntimeError):
         self.body = body
 
 
-def engine_env(base_env: Mapping[str, str], workdir: Path, ws: Path) -> dict[str, str]:
+SHIM_DIRNAME = "shim"
+
+
+def write_ciao_shim(workdir: Path, real: Path, extra_flags: Mapping[str, Sequence[str]]) -> Path:
+    """A ``ciao`` wrapper under ``workdir`` that appends flags to chosen subcommands.
+
+    The harness uses it to set a run's flags (a tight ``--max-items``) where neither the
+    agent's prompt nor the vault can reach them. Every other call runs ``real`` unchanged.
+    The flags go last, so they win over an agent-passed value. Returns the directory to
+    put first on the engine's ``PATH``.
+    """
+    if not extra_flags:
+        raise ValueError("a shim needs at least one subcommand")
+    directory = workdir / SHIM_DIRNAME
+    directory.mkdir(parents=True, exist_ok=True)
+    arms = "".join(
+        f"  {shlex.quote(sub)}) exec {shlex.quote(str(real))} \"$@\" "
+        f"{' '.join(shlex.quote(flag) for flag in flags)};;\n"
+        for sub, flags in extra_flags.items()
+    )
+    script = directory / "ciao"
+    script.write_text(
+        f"#!/bin/sh\ncase \"$1\" in\n{arms}esac\nexec {shlex.quote(str(real))} \"$@\"\n",
+        encoding="utf-8",
+        newline="\n",
+    )
+    script.chmod(0o755)
+    return directory
+
+
+def engine_env(
+    base_env: Mapping[str, str], workdir: Path, ws: Path, *, path_prefix: Path | None = None
+) -> dict[str, str]:
     """The environment an isolated engine runs with.
 
     Every ``CIAO_``/``PWA_``/``GWS_`` variable from the caller is dropped, so a
@@ -935,6 +968,8 @@ def engine_env(base_env: Mapping[str, str], workdir: Path, ws: Path) -> dict[str
             "PWA_HOST": "127.0.0.1",
         }
     )
+    if path_prefix is not None:
+        env["PATH"] = os.pathsep.join([str(path_prefix), *filter(None, [env.get("PATH")])])
     return env
 
 
@@ -1192,11 +1227,12 @@ class IsolatedEngine(EngineSession):
         keep_workdir: bool = False,
         mode: str | None = None,
         vault_fixture: Path | None = None,
+        ciao_flags: Mapping[str, Sequence[str]] | None = None,
     ) -> "IsolatedEngine":
         workdir = Path(tempfile.mkdtemp(prefix=EVAL_WORKDIR_PREFIX))
         engine = cls(workdir, keep_workdir=keep_workdir)
         try:
-            engine._start(task, provider, model, mode, vault_fixture)
+            engine._start(task, provider, model, mode, vault_fixture, ciao_flags)
         except BaseException:
             engine.close()
             raise
@@ -1209,6 +1245,7 @@ class IsolatedEngine(EngineSession):
         model: str,
         mode: str | None,
         vault_fixture: Path | None = None,
+        ciao_flags: Mapping[str, Sequence[str]] | None = None,
     ) -> None:
         prepare_workspace(
             self.workdir,
@@ -1228,7 +1265,13 @@ class IsolatedEngine(EngineSession):
             if script.exists()
             else [sys.executable, *python_isolation_flags(), "-m", "ciao", "run"]
         )
-        env = engine_env(_BASE_ENV, self.workdir, self.ws)
+        shim: Path | None = None
+        if ciao_flags:
+            # The engine's own state, outside the vault: its agents resolve `ciao` here first.
+            if not script.exists():
+                raise RuntimeError("the ciao script beside the interpreter is needed for a flag shim")
+            shim = write_ciao_shim(self.workdir, script, ciao_flags)
+        env = engine_env(_BASE_ENV, self.workdir, self.ws, path_prefix=shim)
         self._proc = subprocess.Popen(
             command,
             cwd=self.ws,

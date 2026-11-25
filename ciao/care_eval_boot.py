@@ -16,12 +16,17 @@ from datetime import date
 from pathlib import Path
 
 from ciao import care_eval_seed as seed
+from ciao.care_eval_scenario import CONTINUATION_BUDGET
 from ciao.curation_run import DEFAULT_MAX_SECONDS
 from ciao.task_eval import EvalTask, IsolatedEngine
 from ciao.task_eval_contract import Scenario
 
 OVERLAY_DIRNAME = "overlay"
 EMPTY_VAULT_DIRNAME = "empty-vault"
+
+def continuation_flags() -> dict[str, tuple[str, ...]]:
+    """The flags the harness adds to ``ciao curation-begin`` for ``budget_continuation``."""
+    return {"curation-begin": ("--max-items", str(CONTINUATION_BUDGET.max_items))}
 
 
 def seed_overlay(scenario: Scenario, root: Path, *, dispatch_date: date) -> seed.SeedManifest:
@@ -65,7 +70,11 @@ def boot_care(
 
     ``scratch`` is a caller-owned directory that must not already hold a seed.
     The seed and the empty vault are written there before the boot; the engine
-    copies them into its own throwaway workspace.
+    copies them into its own throwaway workspace. ``budget_continuation`` boots with a
+    ``ciao`` shim on the engine's PATH that adds ``CONTINUATION_BUDGET``'s ``--max-items`` to
+    ``curation-begin``, so its first attempt settles with work left. The budget lives in the
+    engine's own workdir, never in the vault, so no note or agent write can change it and the
+    product has no read path for it; the other scenarios run under the built-in budget.
     """
     scratch.mkdir(parents=True, exist_ok=True)
     overlay = scratch / OVERLAY_DIRNAME
@@ -78,4 +87,5 @@ def boot_care(
         model=model,
         mode=mode,
         vault_fixture=empty,
+        ciao_flags=continuation_flags() if scenario == "budget_continuation" else None,
     )
