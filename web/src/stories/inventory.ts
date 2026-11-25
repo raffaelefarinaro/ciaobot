@@ -13,6 +13,24 @@ export interface InventoryFilters { query: string; family: string; coverage: 'al
 // Ownership is deliberately explicit: adding a production SFC requires its own row.
 export const inventory: InventoryEntry[] = [
   {
+    id: 'components-project-decision-entry', name: 'ProjectDecisionEntry', family: 'Projects', kind: 'component',
+    owner: { path: 'web/src/components/ProjectDecisionEntry.vue', anchor: 'class="project-section decision-entry"' },
+    sources: [], consumers: ['web/src/components/ProjectView.vue'], variants: [],
+    variantNotes: 'Project-scoped decision entry and standing disclosure information; variants are unassessed.',
+    states: [{ name: 'default', coverage: 'uncovered', storyIds: [], note: 'The project view opens this form; no workshop story is recorded yet.' }],
+    loading: { status: 'known', detail: 'Opening the form loads disclosure permissions before entry.' },
+    migration: { status: 'unassessed', note: 'Inventory admission does not approve a design migration.' },
+  },
+  {
+    id: 'components-settings-share-sources', name: 'SettingsShareSources', family: 'Settings', kind: 'component',
+    owner: { path: 'web/src/components/settings/SettingsShareSources.vue', anchor: 'class="sources-panel"' },
+    sources: [], consumers: ['web/src/components/settings/SettingsSharedBrains.vue'], variants: [],
+    variantNotes: 'Workspace-scoped source permission and snapshot confirmation panel; variants are unassessed.',
+    states: [{ name: 'default', coverage: 'uncovered', storyIds: [], note: 'Settings opens this panel; no workshop story is recorded yet.' }],
+    loading: { status: 'known', detail: 'Loads available sources and reports loading or failure.' },
+    migration: { status: 'unassessed', note: 'Inventory admission does not approve a design migration.' },
+  },
+  {
     id: 'components-settings-settings-switch',
     name: 'SettingsSwitch',
     family: 'Settings',

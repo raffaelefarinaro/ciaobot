@@ -108,6 +108,19 @@
       </p>
 
       <p v-if="saveError" class="action-result action-result--error" role="alert">{{ saveError }}</p>
+
+      <div class="shared-brain-sources">
+        <button
+          type="button"
+          class="btn-secondary btn-small"
+          :aria-expanded="sourcesOpen ? 'true' : 'false'"
+          aria-controls="share-sources-panel"
+          @click="sourcesOpen = !sourcesOpen"
+        >{{ sourcesOpen ? 'Hide sources and consent' : 'Sources and consent' }}</button>
+        <SettingsShareSources v-if="sourcesOpen" id="share-sources-panel" />
+      </div>
+
+
       <form v-if="brains.length < MAX_SHARED_BRAINS" class="shared-brain-form" @submit.prevent="linkFolder">
         <label class="shared-brain-field">
           <span class="shared-brain-label" id="shared-brain-kind-label">Link type</span>
@@ -168,6 +181,7 @@
 
 <script setup lang="ts">
 import { computed, onMounted, ref, watch } from 'vue'
+import SettingsShareSources from './SettingsShareSources.vue'
 import { api } from '../../lib/api'
 import { askConfirm } from '../../lib/confirm'
 import { apiErrorMessage } from '../../lib/errorMessage'
@@ -201,6 +215,8 @@ const listStale = ref(false)
 const saveError = ref('')
 const pathDraft = ref('')
 const nameDraft = ref('')
+const sourcesOpen = ref(false)
+
 const kindDraft = ref<'git' | 'folder'>('folder')
 interface GuidePreview {
   identity: string; lifetime: string; generation: number
@@ -418,6 +434,9 @@ watch(workspace, () => {
 .shared-brain-policy-toggle { margin: 0 0 var(--space-2); }
 .shared-brain-stale { margin: 0 0 var(--space-2); }
 .shared-brain-form { display: grid; gap: var(--space-3); margin-top: var(--space-3); min-width: 0; }
+.shared-brain-sources { display: grid; gap: var(--space-2); margin-top: var(--space-3); justify-items: start; min-width: 0; }
+.shared-brain-sources > * { width: 100%; }
+.shared-brain-sources > button { width: auto; }
 .shared-brain-field { display: grid; gap: var(--space-1); min-width: 0; }
 .shared-brain-label { color: var(--fg); font-size: var(--text-sm); }
 .shared-brain-input { width: 100%; min-width: 0; font-family: var(--font-mono); }

@@ -1300,6 +1300,9 @@ async def _run_server_locked(
     app.state.state_store = state
     app.state.transcript_store = transcripts
     app.state.project_chat_manager = pcm
+    from ciao import share_evidence  # noqa: PLC0415
+
+    share_evidence.bind_project_manager(pcm)
     # Needs-you handlers reach app singletons (terminal sessions) through this.
     pcm.actions_runtime.bind_app_state(app.state)
 

@@ -37,11 +37,14 @@ so no ``*.lock`` pollutes user-owned content.
 from __future__ import annotations
 
 import hashlib
+import hmac
 import json
 import logging
 import os
+import secrets
 import socket
 import stat
+import tempfile
 import uuid
 from contextlib import contextmanager
 from dataclasses import dataclass, field, replace
@@ -2002,7 +2005,7 @@ def _check_lease_plan(path: Path, plan: object) -> None:
     command that loads the state stops with a state error and does not release
     or rewrite the lease.
     """
-    if not isinstance(plan, dict) or set(plan) != _LEASE_PLAN_FIELDS:
+    if not isinstance(plan, dict) or set(plan) not in (_LEASE_PLAN_FIELDS, _LEASE_PLAN_FIELDS | {"stale_note_targets", "completed_stale_notes"}):
         raise _state_error(path, "lease plan has missing or unknown fields")
     planned, blocked = plan["planned"], plan["blocked"]
     if (
@@ -2025,6 +2028,23 @@ def _check_lease_plan(path: Path, plan: object) -> None:
     for count in (plan["blocked_overflow"], plan["deferred_count"]):
         if type(count) is not int or count < 0:
             raise _state_error(path, "lease plan counts are malformed")
+    targets = plan.get("stale_note_targets", {})
+    if not isinstance(targets, dict) or len(targets) > len(planned):
+        raise _state_error(path, "lease plan stale-note targets are malformed")
+    for key, target in targets.items():
+        if not isinstance(key, str) or not isinstance(target, dict) or set(target) != {"relative_path", "revision"}:
+            raise _state_error(path, "lease plan stale-note target is malformed")
+        relative, revision = target["relative_path"], target["revision"]
+        if (not isinstance(relative, str) or not relative or len(relative) > LEASE_PLAN_KEY_MAX_CHARS
+            or Path(relative).is_absolute() or any(part in (".", "..", "") for part in relative.split("/"))
+            or not isinstance(revision, str) or len(revision) != 64
+            or any(c not in "0123456789abcdef" for c in revision)
+            or key != item_key(PASS_STALE_NOTE, relative) or [PASS_STALE_NOTE, key] not in planned):
+            raise _state_error(path, "lease plan stale-note target is invalid")
+    completed = plan.get("completed_stale_notes", [])
+    if (not isinstance(completed, list) or any(not isinstance(key, str) or key not in targets for key in completed)
+        or len(completed) != len(set(completed))):
+        raise _state_error(path, "lease plan completed stale-note targets are malformed")
 
 
 def lease_plan(run_plan: RunPlan) -> dict[str, Any]:
@@ -2036,6 +2056,12 @@ def lease_plan(run_plan: RunPlan) -> dict[str, Any]:
     blocked_pairs = [[item.pass_id, key] for item in run_plan.blocked for key in item.keys]
     return {
         "planned": [[item.pass_id, key] for item in run_plan.planned for key in item.keys],
+        "stale_note_targets": {
+            key: {"relative_path": item.target.relative_path, "revision": item.target.revision}
+            for item in run_plan.planned if item.pass_id == PASS_STALE_NOTE and item.target is not None
+            for key in item.keys
+        },
+        "completed_stale_notes": [],
         "blocked": blocked_pairs[:LEASE_PLAN_BLOCKED_CAP],
         "blocked_overflow": max(0, len(blocked_pairs) - LEASE_PLAN_BLOCKED_CAP),
         "deferred_count": run_plan.deferred_count,
@@ -2186,6 +2212,12 @@ def _load(path: Path) -> CurationState:
             _check_lease_plan(path, lease["plan"])
         if "chat_id" in lease and not isinstance(lease["chat_id"], str):
             raise _state_error(path, "lease chat_id is invalid")
+        if "proof_hash" in lease and (
+            not isinstance(lease["proof_hash"], str)
+            or len(lease["proof_hash"]) != 64
+            or any(ch not in "0123456789abcdef" for ch in lease["proof_hash"])
+        ):
+            raise _state_error(path, "lease proof hash is invalid")
     if last_run:
         if (
             not isinstance(last_run.get("status"), str)
@@ -2363,12 +2395,19 @@ def _state_lock(vault_root: Path) -> Iterator[None]:
 
 @dataclass(frozen=True, slots=True)
 class Lease:
-    """A held curation lease."""
+    """A held curation lease.
+
+    ``proof`` is returned only to the process that took the lease; the state
+    stores only ``proof_hash``. A reader of the state can copy the holder but
+    cannot present the proof.
+    """
 
     holder: str
     started_at: str
     expires_at: str
     vault_root: Path
+    proof: str = field(default="", repr=False)
+    proof_hash: str = ""
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -2376,6 +2415,108 @@ class Lease:
             "started_at": self.started_at,
             "expires_at": self.expires_at,
         }
+
+
+def _capability_path(vault_root: Path, holder: str) -> Path:
+    from ciao.memory_receipts import lock_path_for  # noqa: PLC0415
+
+    lock = lock_path_for(f"{Path(vault_root).resolve()}\0{holder}")
+    return lock.with_name(lock.stem + ".lease.json")
+
+
+def _store_lease_capability(lease: Lease) -> None:
+    """Persist the one-time proof outside the vault, owner-only, never in argv/logs."""
+    path = _capability_path(lease.vault_root, lease.holder)
+    path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    os.chmod(path.parent, 0o700)
+    payload = json.dumps(
+        {
+            "vault": str(lease.vault_root.resolve()),
+            "holder": lease.holder,
+            "proof": lease.proof,
+            "proof_hash": lease.proof_hash,
+            "started_at": lease.started_at,
+            "expires_at": lease.expires_at,
+        },
+        ensure_ascii=False,
+        sort_keys=True,
+    ).encode("utf-8")
+    fd, tmp = tempfile.mkstemp(dir=path.parent, prefix=".lease-cap-")
+    try:
+        os.chmod(tmp, 0o600)
+        with os.fdopen(fd, "wb") as handle:
+            handle.write(payload)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(tmp, path)
+    except BaseException:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
+
+
+def _clear_lease_capability(vault_root: Path, holder: str) -> None:
+    try:
+        _capability_path(vault_root, holder).unlink()
+    except FileNotFoundError:
+        pass
+    except OSError:
+        logger.warning("Could not remove a curation lease capability")
+
+
+def load_lease_capability(
+    vault_root: Path, holder: str, *, now: datetime | None = None
+) -> Lease | None:
+    """Load the private capability a prior process wrote for this lease.
+
+    Returns None when it is absent, expired, malformed or not owner-only. The
+    proof itself never appears in argv, stdout, stderr or logs.
+    """
+    if not isinstance(holder, str) or not holder:
+        return None
+    path = _capability_path(Path(vault_root), holder)
+    try:
+        descriptor = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+    except OSError:
+        return None
+    try:
+        info = os.fstat(descriptor)
+        if stat.S_IMODE(info.st_mode) != 0o600:
+            return None
+        with os.fdopen(descriptor, "rb", closefd=False) as handle:
+            raw = handle.read(16_384 + 1)
+    finally:
+        os.close(descriptor)
+    if len(raw) > 16_384:
+        return None
+    try:
+        data = json.loads(raw.decode("utf-8", "strict"))
+    except (UnicodeError, json.JSONDecodeError):
+        return None
+    if not isinstance(data, dict):
+        return None
+    moment = (now or datetime.now(UTC)).astimezone(UTC)
+    expires = _parse_iso(str(data.get("expires_at") or ""))
+    if (
+        data.get("vault") != str(Path(vault_root).resolve())
+        or data.get("holder") != holder
+        or not isinstance(data.get("proof"), str)
+        or not data["proof"]
+        or data.get("proof_hash") != hashlib.sha256(data["proof"].encode("utf-8")).hexdigest()
+        or expires is None
+        or expires <= moment
+    ):
+        return None
+    return Lease(
+        holder=holder,
+        started_at=str(data.get("started_at") or ""),
+        expires_at=str(data.get("expires_at") or ""),
+        vault_root=Path(vault_root),
+        proof=data["proof"],
+        proof_hash=data["proof_hash"],
+    )
 
 
 def _live_lease(state: CurationState, now: datetime) -> dict[str, Any] | None:
@@ -2435,6 +2576,7 @@ def begin_run(
     ttl_s: float = DEFAULT_MAX_SECONDS,
     now: datetime | None = None,
     chat_id: str = "",
+    before_acquire: Callable[[CurationState], None] | None = None,
 ) -> Lease:
     """Take this vault's curation lease, or raise :class:`CurationBusy`.
 
@@ -2453,7 +2595,10 @@ def begin_run(
                 f"{held.get('holder', 'another run')} holds this vault until "
                 f"{held.get('expires_at', 'its lease expires')}"
             )
+        if before_acquire is not None:
+            before_acquire(state)
         _settle_pending(Path(vault_root), state, holder="", clock=_recheck_clock(now, None))
+        proof = secrets.token_urlsafe(32)
         lease = Lease(
             holder=f"{holder}:{uuid.uuid4()}",
             started_at=now.replace(microsecond=0).isoformat().replace("+00:00", "Z"),
@@ -2462,9 +2607,22 @@ def begin_run(
             .isoformat()
             .replace("+00:00", "Z"),
             vault_root=Path(vault_root),
+            proof=proof,
+            proof_hash=hashlib.sha256(proof.encode("utf-8")).hexdigest(),
         )
-        state.lease = {**lease.as_dict(), **({"chat_id": chat_id} if chat_id else {})}
+        state.lease = {
+            **lease.as_dict(),
+            # v1 byte compatibility: only the cycle (v2) writer records the
+            # capability hash; a v1 lease has no source capability.
+            **({"proof_hash": lease.proof_hash} if state.cycle is not None else {}),
+            **({"chat_id": chat_id} if chat_id else {}),
+        }
         _store(state_path(vault_root), state)
+        if state.cycle is not None:
+            try:
+                _store_lease_capability(lease)
+            except OSError:
+                logger.warning("Could not store a curation lease capability")
     return lease
 
 
@@ -2535,6 +2693,12 @@ def record_done(
             if key not in state.done_keys:
                 added += 1
             state.done_keys[key] = stamp
+        plan = state.lease.get("plan") if holder else None
+        if isinstance(plan, dict) and "stale_note_targets" in plan:
+            completed = plan["completed_stale_notes"]
+            for key in keys:
+                if key in plan["stale_note_targets"] and key not in completed:
+                    completed.append(key)
         if ttl_s is not None:
             state.lease["expires_at"] = (
                 (effective_now + timedelta(seconds=max(1.0, ttl_s)))
@@ -2631,6 +2795,30 @@ def authorize_holder(
         yield ok
 
 
+@contextmanager
+def authorize_care_item(
+    vault_root: Path, *, holder: str, proof: str, chat_id: str, key: str,
+    clock: Callable[[], datetime] | None = None,
+) -> Iterator[StaleNoteTarget | None]:
+    """Hold the lease lock while using one completed, revision-bound care item."""
+    vault = Path(vault_root)
+    recheck = _recheck_clock(None, clock)
+    with _state_lock(vault):
+        state = _load(state_path(vault))
+        held = _live_lease(state, recheck().astimezone(UTC))
+        target: StaleNoteTarget | None = None
+        if held and holder and proof and chat_id and held.get("holder") == holder and held.get("chat_id") == chat_id:
+            proof_hash = held.get("proof_hash")
+            plan = held.get("plan")
+            if (isinstance(proof_hash, str)
+                and hmac.compare_digest(proof_hash, hashlib.sha256(proof.encode("utf-8")).hexdigest())
+                and isinstance(plan, dict) and key in plan.get("completed_stale_notes", [])):
+                row = plan.get("stale_note_targets", {}).get(key)
+                if isinstance(row, dict):
+                    target = StaleNoteTarget(relative_path=row["relative_path"], revision=row["revision"])
+        yield target
+
+
 def _other_curation_files(vault: Path, relative: str) -> list[Path]:
     """The state file and the other decision log: nothing a log may alias."""
     others = [state_path(vault)]
@@ -2709,6 +2897,8 @@ def end_run(
     clock: Callable[[], datetime] | None = None,
     failed: int | None = None,
     counts_complete: bool | None = None,
+    before_settlement: Callable[[CurationState, dict[str, Any]], None] | None = None,
+    after_settlement: Callable[[CurationState, dict[str, Any]], None] | None = None,
 ) -> dict[str, Any]:
     """Release the lease and record what the run actually did.
 
@@ -2791,9 +2981,14 @@ def end_run(
             summary["counts_complete"] = counts_complete
             if state.lease.get("chat_id"):
                 summary["chat_id"] = str(state.lease["chat_id"])
+        if before_settlement is not None:
+            before_settlement(state, summary)
         state.last_run = summary
         state.lease = {}
         _store(state_path(vault_root), state)
+        if after_settlement is not None:
+            after_settlement(state, summary)
+        _clear_lease_capability(Path(vault_root), holder)
     return {**summary, "full_pass_advanced": advanced, "marker_error": marker_error}
 
 

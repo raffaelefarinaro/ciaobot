@@ -208,12 +208,16 @@ def set_sharing_policy(link: SharedBrainLink, policy: str) -> SharedBrainLink:
 
 
 def reset_link_for_restore(link: SharedBrainLink) -> SharedBrainLink:
-    """A restored link starts a new lifetime and a fresh review state.
-
-    An archive is a pause, not a durable standing permission. The old lifetime
-    is retired so a stale tab or publisher can never match the restored link,
-    the consent is dropped, and the generation advances for audit continuity.
-    """
+    """Expire guide previews on every restore and retire prior permissions."""
+    if (link.kind == "folder" and link.guide_mapping is None
+            and (link.guide_mapping_generation == 0 or link.guide_generation_from_restore_only)):
+        return replace(
+            link, guide_mapping_generation=link.guide_mapping_generation + 1,
+            guide_generation_from_restore_only=True,
+            sharing_policy=DEFAULT_SHARING_POLICY,
+            sharing_generation=link.sharing_generation + 1,
+            sharing_consent=None,
+        )
     return replace(
         link,
         lifetime_id=secrets.token_urlsafe(24),
@@ -222,6 +226,7 @@ def reset_link_for_restore(link: SharedBrainLink) -> SharedBrainLink:
         sharing_consent=None,
         guide_mapping_generation=link.guide_mapping_generation + 1,
         guide_mapping=None,
+        guide_generation_from_restore_only=False,
     )
 
 

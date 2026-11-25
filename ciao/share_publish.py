@@ -1405,6 +1405,8 @@ async def publish_share(config: Any, *, workspace: str, proposal_id: str, expect
     fields = artifact["immutable"]
     if expected_revision != artifact.get("review_token"):
         return PublishOutcome("stale_review", message="The shared-note review has changed.")
+    if "evidence_authorization" in fields:
+        return PublishOutcome("draft_unavailable", message="This candidate is awaiting publication fencing.")
     publication_raw = artifact.get("publication")
     publication: dict[str, Any] = publication_raw if isinstance(publication_raw, dict) else {}
     receipts = publication.get("receipts", [])
@@ -1602,9 +1604,13 @@ def _publish_locked(config: Any, workspace: str, folder: Path, link: SharedBrain
         if code:
             return PublishOutcome("upstream_unavailable", message="The shared brain upstream could not be read.")
         tip = _text(tip_raw)
-        base_state, base_oid, _base_content, _mode = _blob(folder, tip, fields["path"])
+        base_state, base_oid, _base_content, mode = _blob(folder, tip, fields["path"])
         expected_oid = fields.get("base_blob_oid")
-        if (expected_oid is None and base_state != "absent") or (expected_oid is not None and (base_state != "blob" or base_oid != expected_oid)):
+        if (expected_oid is None and base_state != "absent") or (
+            expected_oid is not None
+            and (base_state != "blob" or base_oid != expected_oid
+                 or ("base_mode" in fields and mode != fields["base_mode"]))
+        ):
             return PublishOutcome("changed_upstream", message="The reviewed note changed upstream; draft it again.")
         commit, error = _prepare_commit(folder, tip, fields, number + 1)
         if commit is None:

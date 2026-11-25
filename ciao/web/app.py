@@ -154,6 +154,7 @@ from ciao.web.routes_api import (
     memory_entity_types,
     proposal_action,
     proposal_reconcile_action,
+    proposal_redraft_action,
     proposal_implement,
     proposal_preview,
     proposals_batch,
@@ -170,6 +171,14 @@ from ciao.web.routes_api import (
     reorder_workspaces,
     upsert_workspace_setting,
     workspace_shared_brains,
+    share_evidence_state,
+    share_evidence_record_decision,
+    share_evidence_preview,
+    share_evidence_confirm,
+    share_evidence_grant,
+    share_evidence_revoke,
+    share_evidence_withdraw,
+
     workspace_shared_brain_guide_mapping,
     set_workspace_shared_brain_sharing,
     vault_backlinks,
@@ -413,6 +422,37 @@ def create_app(config, app_settings=None, mcp_service=None) -> Starlette:
         Route("/api/workspaces/reorder", reorder_workspaces, methods=["POST"]),
         Route("/api/workspaces/{name}", upsert_workspace_setting, methods=["PATCH"]),
         Route("/api/workspaces/{name}/shared-brains", workspace_shared_brains, methods=["GET"]),
+        Route("/api/workspaces/{name}/share-evidence", share_evidence_state, methods=["GET"]),
+        Route(
+            "/api/workspaces/{name}/share-evidence/decisions",
+            share_evidence_record_decision,
+            methods=["POST"],
+        ),
+        Route(
+            "/api/workspaces/{name}/share-evidence/preview",
+            share_evidence_preview,
+            methods=["POST"],
+        ),
+        Route(
+            "/api/workspaces/{name}/share-evidence/confirm",
+            share_evidence_confirm,
+            methods=["POST"],
+        ),
+        Route(
+            "/api/workspaces/{name}/share-evidence/grants/{grant_id}",
+            share_evidence_grant,
+            methods=["GET"],
+        ),
+        Route(
+            "/api/workspaces/{name}/share-evidence/grants/{grant_id}/revoke",
+            share_evidence_revoke,
+            methods=["POST"],
+        ),
+        Route(
+            "/api/workspaces/{name}/share-evidence/grants/{grant_id}/withdraw",
+            share_evidence_withdraw,
+            methods=["POST"],
+        ),
         Route("/api/workspaces/{name}/shared-brains/{brain}/guide-mapping", workspace_shared_brain_guide_mapping, methods=["GET", "POST"]),
         Route(
             "/api/workspaces/{name}/shared-brains/{brain}/sharing",
@@ -584,6 +624,7 @@ def create_app(config, app_settings=None, mcp_service=None) -> Starlette:
         # `/api/proposals/{id}/implement` would otherwise be read as an `accept`
         # or `dismiss` action and refused.
         Route("/api/proposals/{id}/implement", proposal_implement, methods=["POST"]),
+        Route("/api/proposals/{id}/redraft", proposal_redraft_action, methods=["POST"]),
         # Reconciliation checks a persisted share attempt and cannot publish.
         Route("/api/proposals/{id}/reconcile", proposal_reconcile_action, methods=["POST"]),
         Route("/api/proposals/dismiss-older-than", dismiss_older_than, methods=["POST"]),

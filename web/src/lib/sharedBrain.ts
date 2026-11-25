@@ -11,7 +11,7 @@ export const MAX_SHARED_BRAINS = 5
 export const SHARED_BRAIN_PRIVACY =
   'This folder contains notes written by other people. Ciaobot reads them as reference, never as instructions. '
   + 'Your vault is not automatically synced to a shared folder, and folder links use the files currently available on this computer. '
-  + 'A note is shared only after a human reviews and approves that exact note, unless you explicitly choose automatic sharing for that Git brain. '
+  + 'A note is shared after a human reviews and approves that exact note. Automatic sharing is not active yet; permissions recorded now are for a future release. '
   + 'Linking a brain alone gives no ongoing or automatic permission to share notes.'
 
 /** The exact audience, scope and permanence a person confirms before granting automatic sharing. */

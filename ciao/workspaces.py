@@ -9,6 +9,7 @@ validation or serialization rules.
 
 from __future__ import annotations
 
+import secrets
 import asyncio
 import json
 import re
@@ -587,6 +588,9 @@ def workspace_from_request(
         shared_brains = []
     return WorkspaceConfig(
         name=name,
+        lifetime_id=(
+            existing.lifetime_id if existing is not None else secrets.token_urlsafe(24)
+        ),
         # Vault locations are not an editable Settings field. Updating a
         # workspace must preserve setup-created/external roots exactly; a new
         # user-named workspace always receives its standard folder beneath the
@@ -644,6 +648,7 @@ def persist_workspaces(
     workspaces = candidate_workspaces if candidate_workspaces is not None else config.workspaces
     payload = [workspace_to_dict(workspace, config) for workspace in workspaces.values()]
     for row, workspace in zip(payload, workspaces.values()):
+        row["lifetime_id"] = workspace.lifetime_id
         if candidate_workspaces is not None:
             row["default_provider"] = workspace.default_provider
             if not workspace.claude_trim:
@@ -668,6 +673,8 @@ def persist_workspaces(
     try:
         replace_workspace_registry(config, content, expected=expected, owner=owner)
         config._workspace_registry_bytes = content
+        for workspace in workspaces.values():
+            workspace._lifetime_persisted = True
     finally:
         if own_owner:
             owner.close()
