@@ -5259,6 +5259,33 @@ def test_stale_note_checkpoint_rejects_a_replaced_lease(tmp_path: Path) -> None:
     assert cr.load_state(vault).lease["plan"]["completed_stale_notes"] == []
 
 
+def test_holder_authority_can_bind_the_live_private_proof_and_chat(tmp_path: Path) -> None:
+    from ciao import curation_cycle as cc
+
+    vault = _vault(tmp_path)
+    cycle = cc.CycleState(
+        cycle_id="c2-" + "0" * 24, prior_marker=cc.MarkerIdentity(kind="absent", sha256=None),
+        required={}, optional={}, carried=(), legacy_historical={}, daily={},
+        lease={}, last_run={}, pending=None,
+    )
+    cr.state_path(vault).write_text(cc.encode_state(cycle), encoding="utf-8")
+    lease = cr.begin_run(vault, holder="nightly", chat_id="care-chat")
+    target = cr.StaleNoteTarget(relative_path="Projects/alpha/Decisions.md", revision="a" * 64)
+    key = cr.item_key(cr.PASS_STALE_NOTE, target.relative_path)
+    item = cr.WorklistItem(pass_id=cr.PASS_STALE_NOTE, label="note", reason="due", keys=(key,), target=target)
+    cr.record_plan(vault, holder=lease.holder, plan=cr.lease_plan(cr.RunPlan(
+        planned=(item,), deferred=(), budget=cr.RunBudget())))
+    with cr.authorize_care_item(vault, holder=lease.holder, proof=lease.proof, chat_id="care-chat", key=key) as selected:
+        assert selected is None
+    cr.record_done(vault, [key], holder=lease.holder)
+    with cr.authorize_care_item(vault, holder=lease.holder, proof=lease.proof, chat_id="care-chat", key=key) as selected:
+        assert selected == target
+    with cr.authorize_care_item(vault, holder=lease.holder, proof="wrong", chat_id="care-chat", key=key) as selected:
+        assert selected is None
+    with cr.authorize_care_item(vault, holder=lease.holder, proof=lease.proof, chat_id="other", key=key) as selected:
+        assert selected is None
+
+
 def test_partial_stale_note_run_checkpoints_only_planned_completed_revision(tmp_path: Path) -> None:
     vault = _vault(tmp_path)
     guide = _guide(tmp_path)

@@ -37,6 +37,7 @@ so no ``*.lock`` pollutes user-owned content.
 from __future__ import annotations
 
 import hashlib
+import hmac
 import json
 import logging
 import os
@@ -2789,6 +2790,30 @@ def authorize_holder(
             except (CurationStateError, CurationBusy):
                 ok = False
         yield ok
+
+
+@contextmanager
+def authorize_care_item(
+    vault_root: Path, *, holder: str, proof: str, chat_id: str, key: str,
+    clock: Callable[[], datetime] | None = None,
+) -> Iterator[StaleNoteTarget | None]:
+    """Hold the lease lock while using one completed, revision-bound care item."""
+    vault = Path(vault_root)
+    recheck = _recheck_clock(None, clock)
+    with _state_lock(vault):
+        state = _load(state_path(vault))
+        held = _live_lease(state, recheck().astimezone(UTC))
+        target: StaleNoteTarget | None = None
+        if held and holder and proof and chat_id and held.get("holder") == holder and held.get("chat_id") == chat_id:
+            proof_hash = held.get("proof_hash")
+            plan = held.get("plan")
+            if (isinstance(proof_hash, str)
+                and hmac.compare_digest(proof_hash, hashlib.sha256(proof.encode("utf-8")).hexdigest())
+                and isinstance(plan, dict) and key in plan.get("completed_stale_notes", [])):
+                row = plan.get("stale_note_targets", {}).get(key)
+                if isinstance(row, dict):
+                    target = StaleNoteTarget(relative_path=row["relative_path"], revision=row["revision"])
+        yield target
 
 
 def _other_curation_files(vault: Path, relative: str) -> list[Path]:
