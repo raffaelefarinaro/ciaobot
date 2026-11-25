@@ -1001,3 +1001,72 @@ async def test_memory_pass_files_private_candidate_and_replays_idempotently(link
         assert queue.read_text().count("[share ") == 1
     finally:
         se._reset_project_manager_for_tests()
+
+
+def test_killed_memory_completion_files_candidate_after_restart(linked, tmp_path, monkeypatch):
+    from dataclasses import replace
+    from tests.test_share_evidence import _memory_manager
+    from ciao import share_evidence as se, share_publish, shared_brain_guide, shared_brain_mapping
+    from ciao.mcp_server import AgentSessionRegistry
+    from ciao.sessions import StateStore
+    from ciao.transcripts import TranscriptStore
+    from ciao.web.project_chats import ProjectChatManager
+    import signal
+
+    fixture_config, clone = linked
+    config, manager, project, source = _memory_manager(tmp_path)
+    guide = {"version": 1, "scope": "Decisions", "exclusions": [], "types": {
+        "decision": {"kind": "collection", "path": "decisions", "operation": "create"}}}
+    (clone / shared_brain_guide.GUIDE_NAME).write_text("```ciao-guide\n" + json.dumps(guide) + "\n```\n")
+    load = shared_brain_guide.read_guide(clone, brain_identity=fixture_config.link.identity)
+    mapping = shared_brain_mapping.approve(fixture_config.link, load, ["decision"], expected_pin=load.guide.pin)
+    link = replace(fixture_config.link, guide_mapping=mapping, guide_mapping_generation=mapping.generation)
+    config.workspace("home").shared_brains = [link]
+    config.persist_workspace_registry()
+    project.vault_folder = "alpha"
+    project_dir = Path(config.workspace_vault_root("home")) / "projects" / "active" / "alpha"
+    project_dir.mkdir(parents=True)
+    se._reset_project_manager_for_tests()
+    se.bind_project_manager(manager)
+    se.record_operator_decision(config, workspace="home", project_id=project.project_id, decision="Baseline", reason="", effective_date="2026-11-20", session="operator")
+    preview = se.preview(config, workspace="home", brain_name=link.name, project_id=project.project_id, project_name="Alpha", project_dir=project_dir, source_id=f"stream:{project.project_id}", grant_type="standing", field_mask=["decision"], producers=["memory_extraction"], session="operator")
+    se.confirm(config, workspace="home", token=preview["preview_token"], session="operator")
+    se.record_operator_decision(config, workspace="home", project_id=project.project_id, decision="Share this decision", reason="private", effective_date="2026-11-21", session="operator")
+    chat = next(item for item in manager.list_chats() if (item.helper or {}).get("kind") == "memory_pass")
+    chat.helper["state"] = "running"
+    chat.last_response = "Completed synthetic pass"
+    chat.last_response_status = "success"
+    manager._save()
+    registry = AgentSessionRegistry()
+    registry.issue(chat_id=chat.chat_id, project_id=chat.project_id, workspace="home", provider="claude")
+    manager._mcp_service = SimpleNamespace(registry=registry)
+    monkeypatch.setattr(share_publish, "publish_share", lambda *a, **kw: pytest.fail("intake published"))
+    pid = os.fork()
+    if pid == 0:
+        original = manager._memory_pass._set_state
+
+        def kill_after_done(item, state):
+            original(item, state)
+            if state == "done":
+                os.kill(os.getpid(), signal.SIGKILL)
+
+        manager._memory_pass._set_state = kill_after_done
+        asyncio.run(manager._memory_pass.on_turn_finished(chat.chat_id))
+        os._exit(1)
+    _, status = os.waitpid(pid, 0)
+    assert os.WIFSIGNALED(status) and os.WTERMSIG(status) == signal.SIGKILL
+    restarted = ProjectChatManager(config, state_store=StateStore(config.state_path, config.workspace_root, config.media_root),
+        transcript_store=TranscriptStore(config.state_path.parent, config.workspace_root / "transcripts"), path=config.state_path.parent / "web_projects.json")
+    se._reset_project_manager_for_tests()
+    se.bind_project_manager(restarted)
+    try:
+        async def resume_and_wait():
+            await restarted.resume_memory_passes()
+            if restarted._detached_tasks:
+                await asyncio.gather(*list(restarted._detached_tasks))
+        asyncio.run(resume_and_wait())
+        queue = Path(config.workspace_vault_root("home")) / "Workspace" / "Memory-Proposals.md"
+        assert queue.read_text().count("[share ") == 1
+        assert restarted.get_chat(source.chat_id).postprocess["steps"]["memory_pass"]["extra"]["candidate_outcome"] == "complete"
+    finally:
+        se._reset_project_manager_for_tests()
