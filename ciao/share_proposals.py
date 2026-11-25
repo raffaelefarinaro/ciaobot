@@ -7,6 +7,7 @@ destination details stay in owner-only runtime state until a human reviews them.
 from __future__ import annotations
 
 import hashlib
+import hmac
 import json
 import os
 import re
@@ -14,7 +15,7 @@ import secrets
 import stat
 import threading
 from contextlib import AbstractContextManager, nullcontext
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from pathlib import Path, PurePosixPath
 from typing import Any, Callable, NoReturn
 from urllib.parse import urlsplit, urlunsplit
@@ -32,6 +33,7 @@ KIND = "share"
 MAX_BYTES = 65_536
 MAX_PER_BRAIN = 10
 MAX_PER_WORKSPACE = 30
+MAX_CANDIDATES_PER_RUN = 20
 MAX_SIDECAR_BYTES = 2 * MAX_BYTES * 6 + 16_384
 _SCHEMA = 1
 _QUEUE = PurePosixPath("Workspace/Memory-Proposals.md")
@@ -199,7 +201,7 @@ def _folder_chain_rows(chain: list[folder_io.DirectoryIdentity]) -> list[dict[st
 
 def _qualify_folder(
     config: Any, link: SharedBrainLink, relative_path: str, operation: str | None,
-) -> tuple[str, None, None, None, str, list[dict[str, int]]]:
+) -> tuple[str, None, None, None, str, list[dict[str, int]], None]:
     """Qualify a new note in an ordinary folder; existing notes are deferred to #3626."""
     if operation not in (None, "create"):
         _refuse(
@@ -231,12 +233,12 @@ def _qualify_folder(
             "folder_update_unsupported",
             "Updating or deleting an existing note in an ordinary folder is not supported yet.",
         )
-    return "", None, None, None, folder_destination_fingerprint(link), _folder_chain_rows(chain)
+    return "", None, None, None, folder_destination_fingerprint(link), _folder_chain_rows(chain), None
 
 
 def _qualify_git(
     config: Any, link: SharedBrainLink, relative_path: str, owner: Any,
-) -> tuple[str, str, bytes | None, str | None, str, None]:
+) -> tuple[str, str, bytes | None, str | None, str, None, str | None]:
     parts = _safe_path(relative_path)
     observation = shared_brain.observe_under_fence(config, link, owner)
     state = observation.state
@@ -262,6 +264,7 @@ def _qualify_git(
     commit = _git_bytes(folder, "rev-parse", "--verify", tracking_ref + "^{commit}", limit=128).decode("ascii", "strict").strip()
     original: bytes | None = None
     original_oid: str | None = None
+    original_mode: str | None = None
     for index in range(len(parts)):
         prefix = "/".join(parts[:index + 1])
         listing = _git_bytes(folder, "ls-tree", "-z", commit, "--", ":(literal)" + prefix, limit=4096)
@@ -284,6 +287,7 @@ def _qualify_git(
                 limit=MAX_BYTES + 1, overflow_code="too_large",
             )
             original_oid = oid
+            original_mode = mode
     if original is not None and len(original) > MAX_BYTES:
         _refuse("too_large", "The existing note exceeds the 65,536-byte limit.")
     try:
@@ -291,13 +295,13 @@ def _qualify_git(
             original.decode("utf-8", "strict")
     except UnicodeDecodeError:
         _refuse("invalid_utf8", "The existing note is not valid UTF-8.")
-    return full_ref, commit, original, original_oid, destination_fingerprint, None
+    return full_ref, commit, original, original_oid, destination_fingerprint, None, original_mode
 
 
 def _qualify(
     config: Any, link: SharedBrainLink, relative_path: str, owner: Any,
     operation: str | None = None,
-) -> tuple[str, str | None, bytes | None, str | None, str, list[dict[str, int]] | None]:
+) -> tuple[str, str | None, bytes | None, str | None, str, list[dict[str, int]] | None, str | None]:
     if link.kind == "folder":
         return _qualify_folder(config, link, relative_path, operation)
     return _qualify_git(config, link, relative_path, owner)
@@ -349,6 +353,74 @@ def _persist_link_lifetime(config: Any, workspace: str, link: SharedBrainLink, *
 def _review_token(fields: dict[str, Any]) -> str:
     payload = json.dumps(fields, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
     return "shr_" + hashlib.sha256(payload).hexdigest()
+
+
+def _render_evidence(canonical: str, digest: str) -> bytes:
+    """Render only verified, typed evidence as inert, deterministic Markdown data."""
+    from ciao import share_evidence
+
+    if not isinstance(canonical, str) or not isinstance(digest, str):
+        _refuse("invalid_evidence", "The evidence is invalid.")
+    try:
+        raw = canonical.encode("utf-8")
+    except UnicodeEncodeError:
+        _refuse("invalid_evidence", "The evidence is invalid.")
+    if len(raw) > MAX_BYTES or hashlib.sha256(raw).hexdigest() != digest:
+        _refuse("invalid_evidence", "The evidence is invalid.")
+    try:
+        fields = json.loads(canonical)
+    except (ValueError, RecursionError):
+        _refuse("invalid_evidence", "The evidence is invalid.")
+    if (
+        not isinstance(fields, dict) or not fields
+        or any(key not in share_evidence.FIELDS or not isinstance(value, str)
+               for key, value in fields.items())
+    ):
+        _refuse("invalid_evidence", "The evidence is invalid.")
+    if any(re.search(r"(?:https?|file)://", value, re.IGNORECASE) for value in fields.values()):
+        _refuse("disclosure_prohibited", "The evidence contains a link that cannot be shared automatically.")
+    try:
+        if share_evidence._canonical(fields) != raw:
+            _refuse("invalid_evidence", "The evidence is invalid.")
+    except UnicodeEncodeError:
+        _refuse("invalid_evidence", "The evidence is invalid.")
+    text = json.dumps(fields, ensure_ascii=True, sort_keys=True, indent=2)
+    for char in "`<>&":
+        text = text.replace(char, f"\\u{ord(char):04x}")
+    result = ("```json\n" + text + "\n```\n").encode("utf-8")
+    if len(result) > MAX_BYTES:
+        _refuse("too_large", "The proposed note exceeds the 65,536-byte limit.")
+    return result
+
+
+def _compose_candidate(base: bytes | None, rendered: bytes, destination: Any) -> bytes:
+    if destination.kind == "collection":
+        return rendered
+    if destination.kind != "section" or destination.operation != "append" or base is None:
+        _refuse("invalid_operation", "This mapped destination cannot be composed safely.")
+    try:
+        text = base.decode("utf-8", "strict")
+        fact = rendered.decode("utf-8", "strict")
+    except UnicodeDecodeError:
+        _refuse("invalid_utf8", "The note content is not valid UTF-8.")
+    lines = text.splitlines(keepends=True)
+    # Fenced code could contain headings; refuse ambiguity rather than editing it.
+    if any(re.match(r"^\s{0,3}(`{3,}|~{3,})", line) for line in lines):
+        _refuse("ambiguous_destination", "The mapped section cannot be located safely.")
+    headings = [(i, match) for i, line in enumerate(lines)
+                if (match := re.match(r"^(#{1,6})[ \t]+(.+?)[ \t]*\r?\n?$", line))]
+    targets = [(i, match) for i, match in headings if match.group(2) == destination.section]
+    if len(targets) != 1:
+        _refuse("ambiguous_destination", "The mapped section cannot be located safely.")
+    start, match = targets[0]
+    end = next((i for i, item in headings if i > start and len(item.group(1)) <= len(match.group(1))), len(lines))
+    before = "".join(lines[:end])
+    after = "".join(lines[end:])
+    if before and not before.endswith("\n"):
+        before += "\n"
+    if before and not before.endswith("\n\n") and not before.endswith("\r\n\r\n"):
+        before += "\n"
+    return (before + fact.rstrip("\n") + "\n\n" + after).encode("utf-8")
 
 
 def _load_sidecar(path: Path) -> dict[str, Any]:
@@ -462,27 +534,59 @@ def share_dismissal_block(
     return None
 
 
+def _qualify_owned(
+    config: Any, workspace: str, link: SharedBrainLink, relative_path: str,
+    operation: str | None, owner: Any,
+) -> tuple[str, str | None, bytes | None, str | None, str, list[dict[str, int]] | None, str | None]:
+    from ciao.workspaces import (
+        ensure_registry_current,
+        persisted_checkout_links,
+        persisted_shared_links,
+        WorkspaceRegistryConflict,
+    )
+
+    ensure_registry_current(config)
+    if owner.current is None:
+        raise WorkspaceRegistryConflict("workspace registry is missing")
+    if link.kind == "folder":
+        if not any(
+            name == workspace
+            and row.get("name") == link.name
+            and row.get("path") == link.path
+            and row.get("identity") == link.identity
+            and row.get("kind") == "folder"
+            and row.get("lifetime_id") == link.lifetime_id
+            for name, row in persisted_shared_links(owner.current, link.path)
+        ):
+            raise WorkspaceRegistryConflict("the shared folder link changed")
+    else:
+        persisted_checkout_links(owner.current, link.path)
+        _persist_link_lifetime(config, workspace, link, owner=owner)
+    return _qualify(config, link, relative_path, owner, operation)
+
+
 def _draft_share(
     config: Any, *, workspace: str, brain: str = "", relative_path: str,
     operation: str | None, proposed: bytes | None, request_key: str,
     request_fingerprint: str, retiring_proposal_id: str | None = None,
     publish_guard: Callable[[], AbstractContextManager[object]] | None = None,
     checkout_claimed: bool = False,
+    registry_owner: Any = None,
+    expected_qualification: tuple[Any, ...] | None = None,
+    candidate_binding: dict[str, Any] | None = None,
 ) -> ShareDraft:
     """Qualify and privately file one immutable shared-note proposal."""
     if operation not in (None, "create", "replace", "delete"):
         _refuse("invalid_operation", "Use create, replace, or delete.")
     if not isinstance(request_key, str) or not request_key:
         _refuse("request_conflict", "A stable internal request key is required.")
+    if candidate_binding is not None and (
+        registry_owner is None or not checkout_claimed or expected_qualification is None
+        or not isinstance(candidate_binding.get("authorization"), dict)
+    ):
+        _refuse("invalid_evidence", "The candidate requires owned destination and evidence claims.")
     link = _brain_for(config, workspace, brain)
-    from ciao.workspaces import (
-        ensure_registry_current,
-        persisted_checkout_links,
-        persisted_shared_links,
-        workspace_registry_claim,
-        WorkspaceRegistryBusy,
-        WorkspaceRegistryConflict,
-    )
+    from ciao.workspaces import workspace_registry_claim, WorkspaceRegistryBusy, WorkspaceRegistryConflict
 
     claim = (
         nullcontext()
@@ -490,24 +594,11 @@ def _draft_share(
         else shared_brain.checkout_claims_nowait([link.path], config)
     )
     try:
-        with claim, workspace_registry_claim(config) as owner:
-            ensure_registry_current(config)
-            if owner.current is None:
-                raise WorkspaceRegistryConflict("workspace registry is missing")
-            if link.kind == "folder":
-                if not any(
-                    name == workspace
-                    and row.get("name") == link.name
-                    and row.get("path") == link.path
-                    and row.get("identity") == link.identity
-                    and row.get("kind") == "folder"
-                    and row.get("lifetime_id") == link.lifetime_id
-                    for name, row in persisted_shared_links(owner.current, link.path)
-                ):
-                    raise WorkspaceRegistryConflict("the shared folder link changed")
-            else:
-                persisted_checkout_links(owner.current, link.path)
-                _persist_link_lifetime(config, workspace, link, owner=owner)
+        registry = nullcontext(registry_owner) if registry_owner is not None else workspace_registry_claim(config)
+        with claim, registry as owner:
+            qualified = _qualify_owned(config, workspace, link, relative_path, operation, owner)
+            if expected_qualification is not None and qualified != expected_qualification:
+                _refuse("changed_upstream", "The reviewed note changed while composing; draft it again.")
             (
                 op_ref,
                 base_commit,
@@ -515,7 +606,8 @@ def _draft_share(
                 original_oid,
                 destination_fingerprint,
                 folder_chain,
-            ) = _qualify(config, link, relative_path, owner, operation)
+                original_mode,
+            ) = qualified
     except (WorkspaceRegistryBusy, WorkspaceRegistryConflict):
         _refuse("brain_unavailable", "The shared brain changed while drafting.")
     operation = operation or ("replace" if original is not None else "create")
@@ -627,12 +719,18 @@ def _draft_share(
         "destination_fingerprint": destination_fingerprint,
         "upstream_ref": op_ref, "path": relative_path, "operation": operation,
         "base_blob_oid": original_oid,
+        "base_mode": original_mode,
         "original": original_text, "proposed": proposed_text,
         "proposed_sha256": hashlib.sha256(proposed).hexdigest() if proposed is not None else None,
         "base_commit": base_commit,
     }
     if link.kind == "folder":
         token_fields["folder_chain"] = folder_chain
+    if candidate_binding is not None:
+        token_fields["evidence_authorization"] = candidate_binding["authorization"]
+        token_fields["destination_mapping"] = {
+            key: value for key, value in candidate_binding.items() if key != "authorization"
+        }
     token_fields["review_key"] = proposal_tracking.proposal_review_key(workspace, KIND, text, "", sidecar_id, "")
     token = _review_token(token_fields)
     artifact = {"schema": _SCHEMA, "immutable": token_fields, "review_token": token, "request_fingerprint": request_fingerprint, "request_key_hash": key_hash}
@@ -665,9 +763,9 @@ def _draft_share(
             _refuse("capacity", "The shared brain share proposal limit is reached.", limit=MAX_PER_BRAIN, count=brain_count)
         # The ID payload is visible; no path, content or content hash is.
         bullet = f"- [share {sidecar_id}] {text}"
-        _write_private(index_path, json.dumps(artifact, ensure_ascii=False, sort_keys=True).encode("utf-8"))
         id_path = store / (hashlib.sha256((workspace + "\0sidecar\0" + sidecar_id).encode()).hexdigest() + ".json")
         _write_private(id_path, json.dumps(artifact, ensure_ascii=False, sort_keys=True).encode("utf-8"))
+        _write_private(index_path, json.dumps(artifact, ensure_ascii=False, sort_keys=True).encode("utf-8"))
         try:
             memory_receipts.write_queue_atomically(
                 queue, existing_text.rstrip() + "\n\n" + bullet + "\n",
@@ -757,6 +855,113 @@ def _request_fingerprint(
         separators=(",", ":"),
     ).encode("utf-8")
     return hashlib.sha256(payload).hexdigest()
+
+
+def draft_evidence_candidates(config: Any, *, workspace: str, relation: Any) -> list[ShareDraft | ShareRefusal]:
+    """File bounded, individually reviewed candidates from engine-attested evidence."""
+    from ciao import share_evidence, shared_brain_mapping
+    from ciao.workspaces import workspace_registry_claim, WorkspaceRegistryBusy, WorkspaceRegistryConflict
+
+    if not share_evidence._relation_is_sealed(config, relation) or relation.kind != "memory_checkpoint":
+        share_evidence._refuse("invalid_relation", "A durable engine-attested source is required.")
+    if relation.workspace != workspace:
+        return []
+    record = config.workspace(workspace)
+    links = list(getattr(record, "shared_brains", []) or [])
+    results: list[ShareDraft | ShareRefusal] = []
+    for link in links:
+        if len(results) >= MAX_CANDIDATES_PER_RUN:
+            break
+        try:
+            with shared_brain.checkout_claims_nowait([link.path], config), workspace_registry_claim(config) as owner:
+                mapped = shared_brain_mapping.discover_workspace_destinations(config, workspace, link.name, owner=owner)
+                grant = next((item for item in mapped if item.note_type == "decision"), None)
+                if grant is None:
+                    continue
+                authorizations = share_evidence.mint_evidence_authorizations(
+                    config, workspace=workspace, brain_name=link.name, relation=relation,
+                )
+                for authorization in authorizations[:MAX_CANDIDATES_PER_RUN - len(results)]:
+                    with share_evidence.evidence_authorization_guard(config, workspace=workspace, authorization=authorization) as row:
+                        identity = {key: row.get(key) for key in (
+                            "project_id", "source_id", "entry_id", "entry_revision", "snapshot_id",
+                            "digest", "consent_generation", "audience", "field_mask",
+                        )}
+                        identity.update(workspace=workspace, workspace_lifetime=relation.workspace_lifetime_id,
+                                        brain_lifetime=link.lifetime_id)
+                        encoded = json.dumps(identity, sort_keys=True, separators=(",", ":")).encode("utf-8")
+                        opaque = hmac.new(share_evidence._relation_secret(config), b"share-candidate-path\0" + encoded, hashlib.sha256).hexdigest()
+                        relative_path = f"{grant.path}/{opaque}.md" if grant.kind == "collection" else ""
+                        snapshot = shared_brain_mapping.resolve_workspace_destination(
+                            config, workspace, link.name, note_type="decision", relative_path=relative_path,
+                            operation=grant.operation, owner=owner,
+                        )
+                        if snapshot is None:
+                            continue
+                        destination = snapshot.destination.destination
+                        operation = "replace" if destination.operation == "append" else destination.operation
+                        if operation not in ("create", "replace"):
+                            continue
+                        captured = _qualify_owned(config, workspace, link, destination.path, operation, owner)
+                        proposed = _compose_candidate(captured[2], _render_evidence(row["canonical_bytes"], row["digest"]), destination)
+                        identity.update(destination=asdict(snapshot), operation=operation,
+                                        base_commit=captured[1], base_blob=captured[3], base_mode=captured[6],
+                                        base_digest=hashlib.sha256(captured[2]).hexdigest() if captured[2] is not None else None,
+                                        result_digest=hashlib.sha256(proposed).hexdigest())
+                        request = json.dumps(identity, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+                        fingerprint = hashlib.sha256(request.encode("utf-8")).hexdigest()
+                        queue = Path(config.workspace_vault_root(workspace)) / _QUEUE
+                        lock = _thread_queue_lock(queue)
+                        if not lock.acquire(blocking=False):
+                            _refuse("draft_unavailable", "The proposal queue is currently unavailable.")
+                        try:
+                            with memory_receipts.queue_lock(queue, timeout_s=0):
+                                if not shared_brain_mapping.revalidate_snapshot(config, snapshot, owner=owner):
+                                    _refuse("brain_unavailable", "The reviewed destination mapping changed.")
+                                store = _storage_safe(config, workspace)
+                                parent_fd = folder_io.open_directory_nofollow(str(store))
+                                try:
+                                    run_fd, _ = folder_io.open_or_create_private_dir(parent_fd, "candidate-runs")
+                                    os.close(run_fd)
+                                finally:
+                                    os.close(parent_fd)
+                                run_id = hmac.new(share_evidence._relation_secret(config),
+                                    (workspace + "\0" + relation.workspace_lifetime_id + "\0" + relation.relation_id).encode(),
+                                    hashlib.sha256).hexdigest()
+                                ledger_path = store / "candidate-runs" / (run_id + ".json")
+                                ledger = share_evidence._read_json(ledger_path, limit=8192, code="private_state_corrupt")
+                                fingerprints = ledger.get("fingerprints", [])
+                                if not isinstance(fingerprints, list) or any(not isinstance(item, str) or not re.fullmatch(r"[0-9a-f]{64}", item) for item in fingerprints) or len(fingerprints) > MAX_CANDIDATES_PER_RUN:
+                                    _refuse("draft_corrupt", "The private candidate run is corrupt.")
+                                if fingerprint not in fingerprints:
+                                    if len(fingerprints) >= MAX_CANDIDATES_PER_RUN:
+                                        _refuse("capacity", "The candidate intake limit for this run is reached.", limit=MAX_CANDIDATES_PER_RUN, count=len(fingerprints))
+                                    fingerprints.append(fingerprint)
+                                    share_evidence._write_private(ledger_path, json.dumps({"schema": share_evidence.SCHEMA, "fingerprints": fingerprints}).encode(), limit=8192)
+                                draft = _draft_share(
+                                    config, workspace=workspace, brain=link.name, relative_path=destination.path,
+                                    operation=operation, proposed=proposed, request_key="candidate:" + fingerprint,
+                                    request_fingerprint=fingerprint, checkout_claimed=True, registry_owner=owner,
+                                    expected_qualification=captured,
+                                    candidate_binding={"authorization": authorization, **asdict(snapshot)},
+                                )
+                                artifact = draft.artifact
+                                provenance = artifact.setdefault("producer_provenance", [])
+                                if not isinstance(provenance, list):
+                                    _refuse("draft_corrupt", "The private candidate provenance is corrupt.")
+                                if authorization not in provenance:
+                                    provenance.append(authorization)
+                                    sidecar_id = artifact["immutable"]["sidecar_id"]
+                                    sidecar = _store_dir(config) / (hashlib.sha256((workspace + "\0sidecar\0" + sidecar_id).encode()).hexdigest() + ".json")
+                                    _write_private(sidecar, json.dumps(artifact, ensure_ascii=False, sort_keys=True).encode("utf-8"))
+                                results.append(draft)
+                        finally:
+                            lock.release()
+        except ShareDraftError as exc:
+            results.append(exc.refusal)
+        except (OSError, WorkspaceRegistryBusy, WorkspaceRegistryConflict, memory_receipts.QueueLockError):
+            results.append(ShareRefusal("draft_unavailable", "The candidate could not be filed safely."))
+    return results
 
 
 def load_share(config: Any, *, workspace: str, proposal_id: str) -> dict[str, Any] | ShareRefusal:
