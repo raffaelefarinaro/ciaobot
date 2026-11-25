@@ -1274,10 +1274,11 @@ def test_care_checkpoint_stages_only_completed_exact_witness_and_replays_once(
                             crash_point], check=False)
     assert crash.returncode == {"before_state": 43, "before_receipt": 42, "before_ready": 44}[crash_point]
     if crash_point == "before_state":
-        replacement = curation_run.begin_run(
-            vault, holder="replacement", chat_id="care", now=datetime.now(UTC) + timedelta(days=1),
-            before_acquire=lambda state: curation_share.recover(config, "home", state),
-        )
+        with se.evidence_claim(config, workspace="home") as claim:
+            replacement = curation_run.begin_run(
+                vault, holder="replacement", chat_id="care", now=datetime.now(UTC) + timedelta(days=1),
+                before_acquire=lambda state: curation_share.recover(config, "home", state, claim),
+            )
     else:
         replacement = curation_share.begin(config, workspace="home", chat_id="care", token_id="token",
                                            dispatch_id="replacement", ttl_s=600)
@@ -1454,6 +1455,47 @@ def test_care_private_storage_rejects_a_symlink(tmp_path: Path) -> None:
     (tmp_path / "care-outbox").symlink_to(outside, target_is_directory=True)
     with pytest.raises(se.EvidenceError, match="unsafe"):
         curation_share._private_dir(tmp_path, "care-outbox", create=True)
+
+
+def test_care_acquires_evidence_before_lease_state(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    import fcntl
+    from contextlib import contextmanager
+    from ciao import curation_share, memory_receipts
+
+    config, manager, _project, _source = _memory_manager(tmp_path)
+    vault = Path(config.workspace_vault_root("home"))
+    (vault / "Workspace").mkdir(parents=True, exist_ok=True)
+    original = se.evidence_claim
+    checks: list[str] = []
+
+    @contextmanager
+    def checked(config, *, workspace):
+        path = memory_receipts.lock_path_for(str(curation_run.state_path(vault).resolve()))
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with path.open("a+") as handle:
+            fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+            fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+        checks.append(workspace)
+        with original(config, workspace=workspace) as claim:
+            yield claim
+
+    monkeypatch.setattr(se, "evidence_claim", checked)
+    se._reset_project_manager_for_tests()
+    se.bind_project_manager(manager)
+    lease = curation_share.begin(config, workspace="home", chat_id="care", token_id="token", dispatch_id="dispatch", ttl_s=600)
+    relative = "People/Example.md"
+    key = curation_run.item_key(curation_run.PASS_STALE_NOTE, relative)
+    item = curation_run.WorklistItem(pass_id=curation_run.PASS_STALE_NOTE, label="note", reason="due", keys=(key,),
+                                     target=curation_run.StaleNoteTarget(relative_path=relative, revision="a" * 64))
+    curation_run.record_plan(vault, holder=lease.holder, plan=curation_run.lease_plan(
+        curation_run.RunPlan(planned=(item,), deferred=(), budget=curation_run.RunBudget())))
+    curation_run.record_done(vault, [key], holder=lease.holder)
+    assert curation_share.checkpoint(config, manager, workspace="home", chat_id="care", token_id="token",
+                                     dispatch_id="dispatch", holder=lease.holder, key=key) == 0
+    curation_share.end(config, workspace="home", chat_id="care", token_id="token", dispatch_id="dispatch",
+                       holder=lease.holder, status="ok", planned=0, completed=0, deferred=0,
+                       reasons=[], live_keys=frozenset(), failed=0, counts_complete=True, dispatch_active=lambda: True)
+    assert len(checks) >= 2
 
 
 def test_real_memory_pass_archive_proves_positive_stream_eligibility(

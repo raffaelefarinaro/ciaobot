@@ -71,18 +71,20 @@ def _capability(config: Any, *, workspace: str, chat_id: str, token_id: str,
         return payload
 
 
-def recover(config: Any, workspace: str, state: curation_run.CurationState) -> None:
+def recover(config: Any, workspace: str, state: curation_run.CurationState,
+            claim: share_evidence.EvidenceClaim) -> None:
     """Settle an interrupted private receipt before a later lease can overwrite last_run.
 
-    The caller holds the curation state lock. An intent with no matching committed
-    run is discarded; it can never authorize a candidate.
+    The caller holds the evidence claim before the curation state lock. An intent
+    with no matching committed run is discarded and cannot authorize a candidate.
     """
     pending_path = share_evidence._workspace_dir(config, workspace) / "care-settlement-pending.json"
     try:
         pending_path.lstat()
     except FileNotFoundError:
         return
-    with share_evidence._workspace_guard(config, workspace) as directory:
+    with share_evidence._claim_scope(config, workspace, claim) as owned:
+        directory = owned.directory
         pending = directory / "care-settlement-pending.json"
         record = share_evidence._read_json(pending, limit=65536, code="private_state_corrupt")
         if not record:
@@ -123,12 +125,13 @@ def begin(config: Any, *, workspace: str, chat_id: str, token_id: str,
           dispatch_id: str, ttl_s: float) -> curation_run.Lease:
     """Acquire and privately attest the lease created by an active care dispatch."""
     vault = Path(config.workspace_vault_root(workspace))
-    lease = curation_run.begin_run(
-        vault, ttl_s=ttl_s, chat_id=chat_id,
-        before_acquire=lambda state: recover(config, workspace, state),
-    )
-    try:
-        with share_evidence._workspace_guard(config, workspace) as directory:
+    with share_evidence.evidence_claim(config, workspace=workspace) as claim:
+        lease = curation_run.begin_run(
+            vault, ttl_s=ttl_s, chat_id=chat_id,
+            before_acquire=lambda state: recover(config, workspace, state, claim),
+        )
+        try:
+            directory = claim.directory
             payload = {
                 "workspace": workspace, "workspace_lifetime_id": share_evidence._workspace_lifetime(config, workspace),
                 "chat_id": chat_id, "token_id": token_id,
@@ -140,9 +143,9 @@ def begin(config: Any, *, workspace: str, chat_id: str, token_id: str,
             leases = _private_dir(directory, "care-leases", create=True)
             assert leases is not None
             _write_record(leases / name, _seal(config, b"care-lease\0", payload))
-    except Exception:
-        curation_run.end_run(vault, holder=lease.holder, status="error")
-        raise
+        except Exception:
+            curation_run.end_run(vault, holder=lease.holder, status="error")
+            raise
     return lease
 
 
@@ -155,7 +158,7 @@ def checkpoint(config: Any, manager: Any, *, workspace: str, chat_id: str,
     if payload is None:
         return 0
 
-    with curation_run._state_lock(vault):
+    with share_evidence.evidence_claim(config, workspace=workspace) as claim, curation_run._state_lock(vault):
         state = curation_run._load(curation_run.state_path(vault))
         held = curation_run._live_lease(state, curation_run._utc_now())
         if (not held or held.get("holder") != holder or held.get("chat_id") != chat_id
@@ -176,25 +179,25 @@ def checkpoint(config: Any, manager: Any, *, workspace: str, chat_id: str,
         relative, revision = target["relative_path"], target["revision"]
         run_id = hashlib.sha256(holder.encode("utf-8")).hexdigest()
         marker_name = hashlib.sha256(key.encode("utf-8")).hexdigest() + ".json"
-        with share_evidence._workspace_guard(config, workspace) as directory:
-            root = _private_dir(directory, "care-item-checkpoints")
-            run_dir = _private_dir(root, run_id) if root is not None else None
-            if run_dir is not None:
-                existing = share_evidence._read_json(run_dir / marker_name, limit=65536, code="private_state_corrupt")
-                if existing:
-                    marker = _verified(config, b"care-item\0", existing)
-                    if (marker is None or marker.get("workspace") != workspace or marker.get("holder") != holder
-                        or marker.get("dispatch_id") != dispatch_id or marker.get("work_item") != key
-                        or marker.get("lease_started_at") != held.get("started_at")
-                        or marker.get("lease_proof_hash") != proof_hash or marker.get("source_revision") != revision
-                        or not isinstance(marker.get("entries"), list)):
-                        raise curation_run.CurationStateError("the care item checkpoint is invalid")
-                    return len(marker["entries"])
+        directory = claim.directory
+        root = _private_dir(directory, "care-item-checkpoints")
+        run_dir = _private_dir(root, run_id) if root is not None else None
+        if run_dir is not None:
+            existing = share_evidence._read_json(run_dir / marker_name, limit=65536, code="private_state_corrupt")
+            if existing:
+                marker = _verified(config, b"care-item\0", existing)
+                if (marker is None or marker.get("workspace") != workspace or marker.get("holder") != holder
+                    or marker.get("dispatch_id") != dispatch_id or marker.get("work_item") != key
+                    or marker.get("lease_started_at") != held.get("started_at")
+                    or marker.get("lease_proof_hash") != proof_hash or marker.get("source_revision") != revision
+                    or not isinstance(marker.get("entries"), list)):
+                    raise curation_run.CurationStateError("the care item checkpoint is invalid")
+                return len(marker["entries"])
         found: list[dict[str, Any]] = []
         for project in manager.list_projects(workspace=workspace):
             witnesses = share_evidence.care_snapshot_witnesses(
                 config, workspace=workspace, project_id=project.project_id,
-                relative_path=relative, revision=revision,
+                relative_path=relative, revision=revision, claim=claim,
             )
             found.extend(witnesses)
             if len(found) > MAX_CHECKPOINTS_PER_RUN:
@@ -210,30 +213,28 @@ def checkpoint(config: Any, manager: Any, *, workspace: str, chat_id: str,
             seal = hmac.new(share_evidence._relation_secret(config), b"care-outbox\0" + encoded_item,
                             hashlib.sha256).hexdigest()
             item_name = hashlib.sha256(encoded_item).hexdigest() + ".json"
-            with share_evidence._workspace_guard(config, workspace) as directory:
-                root = _private_dir(directory, "care-outbox", create=True)
-                assert root is not None
-                outbox = _private_dir(root, run_id, create=True)
-                assert outbox is not None
-                if outbox.exists() and not (outbox / item_name).exists():
-                    with os.scandir(outbox) as rows:
-                        if sum(1 for _ in itertools.islice(rows, MAX_CHECKPOINTS_PER_RUN)) >= MAX_CHECKPOINTS_PER_RUN:
-                            return 0
-                share_evidence._write_private(
-                    outbox / item_name,
-                    json.dumps({"schema": share_evidence.SCHEMA, "payload": item, "signature": seal}, sort_keys=True).encode("utf-8"),
-                    limit=16384,
-                )
+            root = _private_dir(directory, "care-outbox", create=True)
+            assert root is not None
+            outbox = _private_dir(root, run_id, create=True)
+            assert outbox is not None
+            if outbox.exists() and not (outbox / item_name).exists():
+                with os.scandir(outbox) as rows:
+                    if sum(1 for _ in itertools.islice(rows, MAX_CHECKPOINTS_PER_RUN)) >= MAX_CHECKPOINTS_PER_RUN:
+                        return 0
+            share_evidence._write_private(
+                outbox / item_name,
+                json.dumps({"schema": share_evidence.SCHEMA, "payload": item, "signature": seal}, sort_keys=True).encode("utf-8"),
+                limit=16384,
+            )
             entries.append({"name": item_name, "witness_signature": witness["witness_signature"]})
         marker = {"workspace": workspace, "holder": holder, "dispatch_id": dispatch_id,
                   "lease_started_at": held["started_at"], "lease_proof_hash": proof_hash,
                   "work_item": key, "source_revision": revision, "entries": sorted(entries, key=lambda row: row["name"])}
-        with share_evidence._workspace_guard(config, workspace) as directory:
-            root = _private_dir(directory, "care-item-checkpoints", create=True)
-            assert root is not None
-            run_dir = _private_dir(root, run_id, create=True)
-            assert run_dir is not None
-            _write_record(run_dir / marker_name, _seal(config, b"care-item\0", marker))
+        root = _private_dir(directory, "care-item-checkpoints", create=True)
+        assert root is not None
+        run_dir = _private_dir(root, run_id, create=True)
+        assert run_dir is not None
+        _write_record(run_dir / marker_name, _seal(config, b"care-item\0", marker))
         return len(found)
 
 
@@ -317,27 +318,28 @@ def end(config: Any, *, workspace: str, chat_id: str, token_id: str, dispatch_id
             "lease_started_at": held["started_at"], "lease_proof_hash": proof_hash,
             "status": summary["status"],
         }
-        with share_evidence._workspace_guard(config, workspace) as directory:
-            payload["manifest_version"] = 1
-            payload["batch_width"] = CARE_BATCH_WIDTH
-            payload["outbox_manifest"] = _settlement_manifest(
-                config, directory, workspace=workspace, holder=holder, dispatch_id=dispatch_id,
-                held=held, proof_hash=proof_hash,
-            ) if summary["status"] == "ok" else []
-            pending = directory / "care-settlement-pending.json"
-            if pending.exists():
-                raise curation_run.CurationStateError("a care settlement needs recovery")
-            _write_record(pending, _seal(config, b"care-settlement\0", payload))
+        directory = claim.directory
+        payload["manifest_version"] = 1
+        payload["batch_width"] = CARE_BATCH_WIDTH
+        payload["outbox_manifest"] = _settlement_manifest(
+            config, directory, workspace=workspace, holder=holder, dispatch_id=dispatch_id,
+            held=held, proof_hash=proof_hash,
+        ) if summary["status"] == "ok" else []
+        pending = directory / "care-settlement-pending.json"
+        if pending.exists():
+            raise curation_run.CurationStateError("a care settlement needs recovery")
+        _write_record(pending, _seal(config, b"care-settlement\0", payload))
 
     def commit(state: curation_run.CurationState, summary: dict[str, Any]) -> None:
-        recover(config, workspace, state)
+        recover(config, workspace, state, claim)
 
-    return curation_run.end_run(
-        vault, holder=holder, status=status, planned=planned, completed=completed,
-        deferred=deferred, reasons=reasons, live_keys=live_keys,
-        advance_marker=status == "ok", failed=failed, counts_complete=counts_complete,
-        before_settlement=prepare, after_settlement=commit,
-    )
+    with share_evidence.evidence_claim(config, workspace=workspace) as claim:
+        return curation_run.end_run(
+            vault, holder=holder, status=status, planned=planned, completed=completed,
+            deferred=deferred, reasons=reasons, live_keys=live_keys,
+            advance_marker=status == "ok", failed=failed, counts_complete=counts_complete,
+            before_settlement=prepare, after_settlement=commit,
+        )
 
 
 def _validated_outbox(config: Any, *, workspace: str, holder: str, claim: share_evidence.EvidenceClaim | None = None) -> list[dict[str, Any]] | None:
