@@ -256,6 +256,7 @@ def save_sharing_revocations(config: Any, keys: set[tuple[str, int]]) -> None:
     """Atomically persist the revocation journal; raises OSError on failure."""
     parent = Path(config.state_path).parent
     parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    make_private_dir(parent)
     rows = [
         {"lifetime_id": lifetime, "generation": generation}
         for lifetime, generation in sorted(keys)
