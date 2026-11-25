@@ -93,6 +93,11 @@ describe('sharedBrainStatus', () => {
       .toEqual({ text: 'Folder is not available to read on this computer', tone: 'error', detail: '' })
   })
 
+  it('honours a missing flag even when a stale state carries no problem code', () => {
+    expect(sharedBrainStatus(brain({ kind: 'folder', missing: true, problem: '', last_update: null })))
+      .toEqual({ text: 'Folder not available on this computer', tone: 'error', detail: '' })
+  })
+
   it.each([
     ['missing', 'Folder not available on this computer'],
     ['moved', 'Folder location changed'],

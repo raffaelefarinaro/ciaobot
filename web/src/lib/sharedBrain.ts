@@ -65,7 +65,9 @@ export function sharedBrainStatus(state: SharedBrainState): SharedBrainStatus {
   // An ordinary folder is read in place: there is no pull, no upstream and no
   // update attempt, so "first update pending" would never resolve for it.
   if (state.kind === 'folder') {
-    const folderProblem = FOLDER_PROBLEM_TEXT[state.problem] ?? PROBLEM_TEXT[state.problem]
+    const folderProblem = FOLDER_PROBLEM_TEXT[state.problem]
+      ?? (state.missing ? FOLDER_PROBLEM_TEXT.missing : undefined)
+      ?? PROBLEM_TEXT[state.problem]
     if (folderProblem) return folderProblem
     return {
       text: 'Folder is locally available. Read in place, never updated.',
