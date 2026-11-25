@@ -1217,6 +1217,26 @@ def test_brain_state_reports_unsafe_config(pair: SimpleNamespace) -> None:
 
 
 @pytest.mark.asyncio
+async def test_a_git_checkout_ending_in_space_links_inspects_and_updates(pair: SimpleNamespace) -> None:
+    """git prints the path plus a line ending; only the ending is removed."""
+    spaced = pair.root / "clone "
+    pair.clone.rename(spaced)
+    config = FakeConfig(pair.root)
+    (link,) = sb.resolve_links(config, "work", [{"path": str(spaced)}], [])
+    assert link.path == str(spaced.resolve())
+
+    state = sb._brain_state_owned(link, config)
+    assert state["path"] == str(spaced.resolve())
+    assert state["problem"] == ""
+    assert state["branch"] == "main"
+
+    new_head = push_from_seed(pair, "spaced.md")
+    result = await sb.update_brain(link, config)
+    assert result["outcome"] == "updated", result
+    assert git(spaced, "rev-parse", "HEAD") == new_head
+
+
+@pytest.mark.asyncio
 async def test_git_dir_pointer_is_refused_at_update_and_link(pair: SimpleNamespace, monkeypatch) -> None:
     worktree = pair.root / "linked-wt"
     git(pair.clone, "worktree", "add", "-q", str(worktree), "-b", "wt-branch")

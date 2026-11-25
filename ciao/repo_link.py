@@ -9,7 +9,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from ciao.git_proc import EXACT_BYTES
+from ciao.git_proc import EXACT_BYTES, git_output_line
 
 #: Where `candidates_payload` looks for checkouts, one level deep. Hardcoded on
 #: purpose (no env var, no setting).
@@ -43,12 +43,14 @@ def _same(a: Path, b: Path) -> bool:
         return False
 
 
-def validate_repo_path(raw: str) -> str:
+def validate_repo_path(raw: str, *, exact: bool = False) -> str:
     """Return git's resolved toplevel for `raw`; "" for empty input (unlink).
 
     Raises ValueError when the path is not the top of an existing checkout.
+    ``exact`` keeps leading and trailing spaces, which can name a different
+    existing checkout; callers that accept user-typed paths trim by default.
     """
-    text = raw.strip()
+    text = raw if exact else raw.strip()
     if not text:
         return ""
     path = Path(text).expanduser()
@@ -59,9 +61,10 @@ def validate_repo_path(raw: str) -> str:
     if not path.is_dir():
         raise ValueError(f"Repository path is not a directory: {path}")
     code, out = _git(path, "rev-parse", "--show-toplevel")
-    if code != 0 or not out.strip():
+    top_text = git_output_line(out)
+    if code != 0 or not top_text:
         raise ValueError(f"Not a git repository: {path}")
-    top = Path(out.strip())
+    top = Path(top_text)
     if not _same(top, path):
         raise ValueError(f"Repository path must be the top of the git checkout: {path} is inside {top}")
     return str(top.resolve())

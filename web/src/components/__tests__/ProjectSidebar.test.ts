@@ -700,7 +700,7 @@ describe('ProjectSidebar global new chat', () => {
     const wrapper = await mountSidebar('chat')
     const row = wrapper.get('.sidebar-brand-row').element
     expect(wrapper.find('.sidebar-brand-mark').exists()).toBe(false)
-    expect(wrapper.get('.sidebar-brand[role="img"]').attributes('aria-label')).toBe('Ciaobot')
+    expect(wrapper.get('button.sidebar-brand').attributes('aria-label')).toBe('Reload Ciaobot')
     expect(wrapper.get('.sidebar-brand svg path').attributes('stroke')).toBe('currentColor')
     const order = Array.from(row.children).map((el) =>
       el.classList.contains('sidebar-history') ? 'history'

@@ -341,12 +341,26 @@ describe('Settings > All workspaces', () => {
     }
   })
 
-  it('has no Google text anywhere, and each row summary is the provider label only', async () => {
+  it('has no Google provider option or section, keeps cloud guidance, and each row summary is the provider label only', async () => {
     const { wrapper } = await mountManage()
     try {
-      expect(wrapper.findAll('.section-title').map(t => t.text())).not.toContain('Google Workspace')
-      expect(wrapper.text()).not.toContain('Google')
-      for (const row of rows(wrapper)) expect(row.get('.set-row-sub').text()).toBe('Anthropic (via Claude Code)')
+      // Provider regression protection stays scoped to provider surfaces: no
+      // Google section and no Google option in the new-workspace provider select.
+      expect(wrapper.findAll('.section-title').map(t => t.text()).filter(t => /Google/i.test(t))).toEqual([])
+      await wrapper.findAll('button').find(b => b.text() === 'New workspace')!.trigger('click')
+      await flushPromises()
+      const options = wrapper.findAll('.workspace-select option').map(o => o.text())
+      expect(options).toEqual(['Anthropic (via Claude Code)'])
+      expect(options.filter(t => /Google/i.test(t))).toEqual([])
+
+      for (const row of rows(wrapper)) {
+        expect(row.get('.set-row-sub').text()).toBe('Anthropic (via Claude Code)')
+        expect(row.text()).not.toMatch(/Google/)
+      }
+
+      // #3603's folder guidance deliberately names cloud services; keep that
+      // cloud-availability sentence rather than banning the word "Google".
+      expect(wrapper.text()).toContain('does not confirm that Google Drive, iCloud or another sync service has finished syncing')
     } finally {
       wrapper.unmount()
     }

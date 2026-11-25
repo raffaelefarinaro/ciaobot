@@ -44,7 +44,7 @@ describe('SHARED_BRAIN_PRIVACY', () => {
   it('claims no sync or approval for linking, and no pull for a plain folder', () => {
     expect(SHARED_BRAIN_PRIVACY).toContain('not automatically synced')
     expect(SHARED_BRAIN_PRIVACY).toContain('reviews and approves that exact note')
-    expect(SHARED_BRAIN_PRIVACY).toContain('no automatic permission')
+    expect(SHARED_BRAIN_PRIVACY).toContain('no ongoing or automatic permission')
     expect(SHARED_BRAIN_PRIVACY).not.toContain("pulls the team's updates")
   })
 })
@@ -80,19 +80,36 @@ describe('sharedBrainStatus', () => {
       .toMatchObject({ text: 'Linked. First update pending.', tone: 'ok' })
   })
 
-  it('reports a healthy ordinary folder as read in place, never as an update pending forever', () => {
+  it('reports a healthy ordinary folder as locally available and read in place, never as an update pending forever', () => {
     expect(sharedBrainStatus(brain({
       kind: 'folder',
       branch: '',
       head: '',
       fetched_at: null,
       last_update: null,
-    }))).toEqual({ text: 'Linked folder. Read in place, never updated.', tone: 'ok', detail: '' })
+    }))).toEqual({
+      text: 'Folder is locally available. Read in place, never updated.',
+      tone: 'ok',
+      detail: 'This checks access on this computer only; it does not confirm that Google Drive, iCloud or another sync service has finished syncing.',
+    })
   })
 
-  it('maps an unreadable folder to an error, never to a healthy link', () => {
+  it('maps an unreadable folder to local unavailability, never to a healthy link', () => {
     expect(sharedBrainStatus(brain({ kind: 'folder', problem: 'inaccessible', last_update: null })))
-      .toMatchObject({ text: 'Folder is not readable', tone: 'error' })
+      .toEqual({ text: 'Folder is not available to read on this computer', tone: 'error', detail: '' })
+  })
+
+  it('honours a missing flag even when a stale state carries no problem code', () => {
+    expect(sharedBrainStatus(brain({ kind: 'folder', missing: true, problem: '', last_update: null })))
+      .toEqual({ text: 'Folder not available on this computer', tone: 'error', detail: '' })
+  })
+
+  it.each([
+    ['missing', 'Folder not available on this computer'],
+    ['moved', 'Folder location changed'],
+    ['outside_install', 'Folder is inside the Ciaobot install or a vault'],
+  ])('describes a folder problem %s in folder terms', (problem, text) => {
+    expect(sharedBrainStatus(brain({ kind: 'folder', problem }))).toEqual({ text, tone: 'error', detail: '' })
   })
 
   it('says inspection is temporarily unavailable for a busy checkout, without guessing a cause', () => {

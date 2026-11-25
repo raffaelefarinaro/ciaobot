@@ -44,6 +44,7 @@
           </div>
           <p class="shared-brain-identity">{{ brain.identity }}</p>
           <p class="shared-brain-path">{{ brain.path }}</p>
+          <p class="shared-brain-kind">{{ kindLabel(brain) }}</p>
           <p
             class="shared-brain-status"
             :class="`shared-brain-status--${statusOf(brain).tone}`"
@@ -81,16 +82,31 @@
       </ul>
       <p v-else class="hint">No shared brains are linked to this workspace yet.</p>
 
-      <p class="hint hint--compact">
-        Adding a path here links a Git checkout: create and seed a dedicated repository with the access you want, then clone it on this computer outside the Ciaobot install and vaults. Give the clone a valid SSH or HTTPS origin and tracked branch, then link its absolute folder path here. Ciaobot does not create or clone repositories for you. It pulls the checkout's tracked branch with fast-forward-only updates. Public HTTPS can be used to read updates. Publishing needs noninteractive write access; use SSH when the remote requires authentication. Private HTTPS credential helpers are not used.
+      <p v-if="kindDraft === 'git'" class="hint hint--compact">
+        To set up a Git repository, create and seed it with the access you want, then clone it on this computer outside the Ciaobot install and vaults. Give the clone a valid SSH or HTTPS origin and tracked branch, then link its absolute folder path here. Ciaobot does not create or clone repositories for you. It pulls the checkout's tracked branch with fast-forward-only updates. Public HTTPS can be used to read updates. Publishing needs noninteractive write access; use SSH when the remote requires authentication. Private HTTPS credential helpers are not used.
       </p>
-      <p v-if="hasFolderLinks" class="hint hint--compact">
-        An ordinary folder linked through another setup is read in place for reference. Ciaobot never pulls, fetches or updates it; changes on disk appear as they are.
+      <p v-else class="hint hint--compact">
+        Folder links are read in place for reference. Ciaobot never pulls, fetches or updates them; changes on disk appear as they are. Availability is checked on this computer when Ciaobot uses the folder, and a locally available folder does not confirm that Google Drive, iCloud or another sync service has finished syncing.
       </p>
 
       <p v-if="saveError" class="action-result action-result--error" role="alert">{{ saveError }}</p>
-
       <form v-if="brains.length < MAX_SHARED_BRAINS" class="shared-brain-form" @submit.prevent="linkFolder">
+        <label class="shared-brain-field">
+          <span class="shared-brain-label" id="shared-brain-kind-label">Link type</span>
+          <select
+            v-model="kindDraft"
+            class="routine-input shared-brain-input"
+            aria-labelledby="shared-brain-kind-label"
+            aria-describedby="shared-brain-kind-hint"
+            :disabled="saving || listStale"
+          >
+            <option value="folder">Folder (reference only)</option>
+            <option value="git">Git repository</option>
+          </select>
+        </label>
+        <p id="shared-brain-kind-hint" class="hint hint--compact">
+          Folders are reference-only and are not synced by Ciaobot. Git repositories use the existing update and approved-publishing flow.
+        </p>
         <label class="shared-brain-field">
           <span class="shared-brain-label">Folder path</span>
           <input
@@ -111,7 +127,7 @@
             class="routine-input shared-brain-input"
             autocomplete="off"
             spellcheck="false"
-            placeholder="taken from the repository"
+            :placeholder="kindDraft === 'git' ? 'taken from the repository' : 'taken from the folder'"
             :disabled="saving || listStale || !!sharingBusy"
           />
         </label>
@@ -122,7 +138,7 @@
             class="btn-small"
             :disabled="saving || listStale || !!sharingBusy || !pathDraft.trim()"
             :aria-busy="saving ? 'true' : undefined"
-          >{{ saving ? 'Linking...' : 'Link folder' }}</button>
+          >{{ saving ? 'Linking...' : (kindDraft === 'git' ? 'Link Git repository' : 'Link folder') }}</button>
         </div>
       </form>
       <p v-else class="hint hint--compact" role="status">
@@ -156,9 +172,6 @@ const projectStore = useProjectStore()
 const workspace = computed(() => projectStore.activeWorkspace)
 
 const brains = ref<SharedBrainState[] | null>(null)
-// Guidance is per kind: only a Git link is pulled, so only a Git setup claim is
-// made; ordinary folders get their own line when one is listed.
-const hasFolderLinks = computed(() => (brains.value ?? []).some((brain) => brain.kind === 'folder'))
 const loading = ref(false)
 const loadError = ref('')
 const saving = ref(false)
@@ -170,6 +183,7 @@ const listStale = ref(false)
 const saveError = ref('')
 const pathDraft = ref('')
 const nameDraft = ref('')
+const kindDraft = ref<'git' | 'folder'>('folder')
 let ticket = 0
 
 function statusOf(brain: SharedBrainState) {
@@ -180,9 +194,13 @@ function isRevoking(brain: SharedBrainState): boolean {
   return brain.sharing_policy === 'automatic' || brain.sharing_grant_pending
 }
 
-/** The rows a save sends: every linked brain, as { path, name }. */
+/** The rows a save sends, preserving the kind returned by the engine. */
 function currentRows(): SharedBrainRow[] {
-  return (brains.value ?? []).map((brain) => ({ path: brain.path, name: brain.name }))
+  return (brains.value ?? []).map((brain) => ({ path: brain.path, name: brain.name, kind: brain.kind ?? 'git' }))
+}
+
+function kindLabel(brain: SharedBrainState): string {
+  return brain.kind === 'folder' ? 'Folder · reference only' : 'Git repository'
 }
 
 async function load(): Promise<void> {
@@ -222,14 +240,16 @@ async function save(rows: SharedBrainRow[]): Promise<boolean> {
 }
 
 async function linkFolder(): Promise<void> {
-  const path = pathDraft.value.trim()
-  if (!path || saving.value || listStale.value || sharingBusy.value) return
+  // Exact: a trailing or leading space can name a different existing folder.
+  const path = pathDraft.value
+  if (!path.trim() || saving.value || listStale.value || sharingBusy.value) return
   const name = nameDraft.value.trim()
-  const row: SharedBrainRow = name ? { path, name } : { path }
+  const row: SharedBrainRow = name ? { path, name, kind: kindDraft.value } : { path, kind: kindDraft.value }
   const ok = await save([...currentRows(), row])
   if (!ok) return
   pathDraft.value = ''
   nameDraft.value = ''
+  kindDraft.value = 'folder'
   await load()
 }
 
@@ -292,6 +312,7 @@ watch(workspace, () => {
   saveError.value = ''
   pathDraft.value = ''
   nameDraft.value = ''
+  kindDraft.value = 'folder'
   void load()
 })
 </script>
@@ -316,6 +337,7 @@ watch(workspace, () => {
   overflow-wrap: anywhere;
 }
 .shared-brain-path { font-family: var(--font-mono); }
+.shared-brain-kind { margin: var(--space-1) 0 0; color: var(--fg2); font-size: var(--text-xs); }
 .shared-brain-status { margin: var(--space-2) 0 0; font-size: var(--text-sm); line-height: 1.5; overflow-wrap: anywhere; }
 .shared-brain-status--ok { color: var(--fg); }
 .shared-brain-status--warn { color: var(--warning); }
@@ -329,6 +351,7 @@ watch(workspace, () => {
 .shared-brain-input { width: 100%; min-width: 0; font-family: var(--font-mono); }
 @media (pointer: coarse) {
   .shared-brain-input { min-height: var(--touch); font-size: 16px; }
+  .shared-brain-form select { min-height: var(--touch); }
   .shared-brain-head .set-link,
   .shared-brain-policy-toggle,
   .shared-brain-form .btn-small { min-height: var(--touch); min-width: var(--touch); }

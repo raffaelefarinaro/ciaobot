@@ -16,13 +16,23 @@ describe('BrandMark', () => {
   const originalLocation = Object.getOwnPropertyDescriptor(window, 'location')
   const originalServiceWorker = Object.getOwnPropertyDescriptor(navigator, 'serviceWorker')
   let replace: ReturnType<typeof vi.fn>
+  let frames: FrameRequestCallback[]
+
+  function runFrames(count: number) {
+    for (let i = 0; i < count; i++) frames.splice(0).forEach((cb) => cb(0))
+  }
+  const progressOf = (wrapper: ReturnType<typeof mount>) => wrapper.getComponent({ name: 'CiaoMark' }).props('progress') as number
 
   beforeEach(() => {
     replace = vi.fn()
+    frames = []
     Object.defineProperty(window, 'location', {
       configurable: true,
       value: { href: 'http://localhost/chat/abc', replace },
     })
+    vi.stubGlobal('requestAnimationFrame', (cb: FrameRequestCallback) => frames.push(cb))
+    vi.stubGlobal('cancelAnimationFrame', () => { frames = [] })
+    vi.stubGlobal('matchMedia', () => ({ matches: false }))
   })
 
   afterEach(() => {
@@ -35,7 +45,6 @@ describe('BrandMark', () => {
 
   it('renders the inline vector mark with a themeable C and accent dots', () => {
     const wrapper = mount(BrandMark)
-    expect(wrapper.attributes()).toMatchObject({ role: 'img', 'aria-label': 'Ciaobot' })
     expect(wrapper.get('svg path').attributes('stroke')).toBe('currentColor')
     expect(wrapper.findAll('svg circle')).toHaveLength(2)
     expect(wrapper.findAll('svg circle').map((circle) => circle.attributes('fill'))).toEqual(['var(--accent)', 'var(--accent)'])
@@ -43,17 +52,59 @@ describe('BrandMark', () => {
     wrapper.unmount()
   })
 
-  it('is an accessible non-focusable brand image, not a reload control', () => {
+  it('is a labelled reload button', () => {
     const wrapper = mount(BrandMark)
-    expect(wrapper.get('[role="img"]').attributes('aria-label')).toBe('Ciaobot')
-    expect(wrapper.attributes('tabindex')).toBeUndefined()
-    expect(wrapper.attributes('role')).toBe('img')
-    expect(wrapper.attributes('aria-busy')).toBeUndefined()
-    expect(wrapper.attributes('title')).toBeUndefined()
+    expect(wrapper.element.tagName).toBe('BUTTON')
+    expect(wrapper.attributes('aria-label')).toBe('Reload Ciaobot')
+    expect(wrapper.attributes('type')).toBe('button')
     wrapper.unmount()
   })
 
-  it('does not navigate, clear caches or update service workers when clicked', async () => {
+  it('closes slowly while hovered and reopens from where it stopped when the pointer leaves', async () => {
+    const wrapper = mount(BrandMark)
+    expect(progressOf(wrapper)).toBe(0)
+    await wrapper.trigger('pointerenter')
+    runFrames(20)
+    await nextTick()
+    const midway = progressOf(wrapper)
+    expect(midway).toBeGreaterThan(0.2)
+    expect(midway).toBeLessThan(0.8)
+    await wrapper.trigger('pointerleave')
+    runFrames(3)
+    await nextTick()
+    expect(progressOf(wrapper)).toBeLessThan(midway)
+    expect(progressOf(wrapper)).toBeGreaterThan(0)
+    runFrames(400)
+    await nextTick()
+    expect(progressOf(wrapper)).toBe(0)
+    wrapper.unmount()
+  })
+
+  it('reaches the closed ring if the pointer stays, and follows keyboard focus', async () => {
+    const wrapper = mount(BrandMark)
+    await wrapper.trigger('focus')
+    runFrames(600)
+    await nextTick()
+    expect(progressOf(wrapper)).toBe(1)
+    await wrapper.trigger('blur')
+    runFrames(600)
+    await nextTick()
+    expect(progressOf(wrapper)).toBe(0)
+    wrapper.unmount()
+  })
+
+  it('stays a static C with reduced motion', async () => {
+    vi.stubGlobal('matchMedia', () => ({ matches: true }))
+    const wrapper = mount(BrandMark)
+    await wrapper.trigger('pointerenter')
+    runFrames(50)
+    await nextTick()
+    expect(progressOf(wrapper)).toBe(0)
+    expect(frames).toHaveLength(0)
+    wrapper.unmount()
+  })
+
+  it('hard-refreshes on click: updates service workers, clears caches, reloads with a cache-busting query', async () => {
     const update = vi.fn()
     const deleteCache = vi.fn()
     const keys = vi.fn().mockResolvedValue(['app'])
@@ -65,11 +116,21 @@ describe('BrandMark', () => {
     const wrapper = mount(BrandMark)
     await wrapper.trigger('click')
     await flushPromises()
-    expect(replace).not.toHaveBeenCalled()
-    expect(keys).not.toHaveBeenCalled()
-    expect(deleteCache).not.toHaveBeenCalled()
-    expect(getRegistrations).not.toHaveBeenCalled()
-    expect(update).not.toHaveBeenCalled()
+    expect(update).toHaveBeenCalledOnce()
+    expect(deleteCache).toHaveBeenCalledWith('app')
+    expect(replace).toHaveBeenCalledOnce()
+    const target = new URL(String(replace.mock.calls[0][0]))
+    expect(target.pathname).toBe('/chat/abc')
+    expect(target.searchParams.get('_r')).toMatch(/^\d+$/)
+    wrapper.unmount()
+  })
+
+  it('reloads once even if clicked twice', async () => {
+    const wrapper = mount(BrandMark)
+    await wrapper.trigger('click')
+    await wrapper.trigger('click')
+    await flushPromises()
+    expect(replace).toHaveBeenCalledOnce()
     wrapper.unmount()
   })
 })
