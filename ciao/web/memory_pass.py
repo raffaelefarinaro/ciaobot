@@ -69,7 +69,7 @@ from ciao import (
     upstream_drafts,
 )
 from ciao.context.capsule import shared_brain_pass_line
-from ciao.shared_brain import path_problem as shared_brain_path_problem
+from ciao.shared_brain import link_problem as shared_brain_link_problem
 from ciao.prompt_fence import fence
 from ciao.task_attempts import TaskAttemptError, TaskAttemptStore
 from ciao.web import chat_service
@@ -1316,7 +1316,7 @@ class MemoryPassCoordinator:
         lines = [
             line
             for link in getattr(record, "shared_brains", None) or []
-            if not shared_brain_path_problem(self._host._config, link.path)
+            if not shared_brain_link_problem(self._host._config, link)
             if (line := shared_brain_pass_line(link.name, link.path)) is not None
         ]
         if not lines:

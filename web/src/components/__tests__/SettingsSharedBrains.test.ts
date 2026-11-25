@@ -30,6 +30,7 @@ vi.mock('../../lib/confirm', () => ({ askConfirm }))
 function state(over: Partial<SharedBrainState> = {}): SharedBrainState {
   return {
     name: 'team-notes',
+    kind: 'git',
     identity: 'github.com/acme/team-notes',
     path: '/Users/me/team-notes',
     origin_changed: false,
@@ -52,6 +53,20 @@ const OTHER = state({
   identity: 'github.com/acme/other-notes',
   path: '/Users/me/other-notes',
   last_update: { outcome: 'skipped', reason: 'local_changes', detail: '', at: '2026-11-22T10:00:00Z' },
+})
+
+const FOLDER = state({
+  name: 'shared-folder',
+  kind: 'folder',
+  identity: 'folder:/Users/me/shared',
+  path: '/Users/me/shared',
+  branch: '',
+  head: '',
+  head_date: '',
+  dirty: false,
+  upstream: false,
+  fetched_at: null,
+  last_update: null,
 })
 
 const mounted: VueWrapper[] = []
@@ -104,9 +119,8 @@ describe('SettingsSharedBrains loading and failures', () => {
     expect(empty.text()).toContain('Public HTTPS can be used to read updates')
     expect(empty.text()).toContain('Publishing needs noninteractive write access')
     expect(empty.text()).toContain('use SSH when the remote requires authentication')
-    expect(SHARED_BRAIN_PRIVACY).toContain('not automatically synced to this repository')
-    expect(SHARED_BRAIN_PRIVACY).toContain('published to the team repository')
-    expect(SHARED_BRAIN_PRIVACY).toContain('after a human reviews and approves it')
+    expect(SHARED_BRAIN_PRIVACY).toContain('not automatically synced to a shared folder')
+    expect(SHARED_BRAIN_PRIVACY).toContain('reviews and approves that exact note')
     expect(SHARED_BRAIN_PRIVACY).toContain('no ongoing or automatic permission')
     apiGet.mockResolvedValueOnce({ shared_brains: [TEAM] })
     const listed = await mountCard()
@@ -194,6 +208,51 @@ describe('SettingsSharedBrains listed brains', () => {
     expect(rows).toHaveLength(2)
     expect(rows[0].text()).toContain('Up to date')
     expect(rows[1].text()).toContain('Not updated: local changes in the folder')
+  })
+
+  it('reports a healthy folder as read in place, with no Git metadata and kind-aware guidance', async () => {
+    apiGet.mockResolvedValueOnce({ shared_brains: [FOLDER] })
+    const view = await mountCard()
+    const row = view.find('.shared-brain-row')
+    expect(row.find('.shared-brain-status').text()).toBe('Linked folder. Read in place, never updated.')
+    expect(row.text()).not.toContain('First update pending')
+    expect(row.text()).not.toContain('Checked-out commit')
+    expect(view.text()).toContain('An ordinary folder linked through another setup is read in place')
+    expect(view.text()).toContain('Ciaobot never pulls, fetches or updates it')
+    expect(view.text()).toContain('Adding a path here links a Git checkout')
+  })
+
+  it('reports a busy checkout and an unreadable folder accurately, never as pending or with a guessed cause', async () => {
+    apiGet.mockResolvedValueOnce({
+      shared_brains: [
+        state({ problem: 'registry_unavailable', last_update: null }),
+        state({
+          ...FOLDER,
+          problem: 'inaccessible',
+          identity: 'folder:/Users/me/unreadable',
+          path: '/Users/me/unreadable',
+        }),
+      ],
+    })
+    const view = await mountCard()
+    const rows = view.findAll('.shared-brain-row')
+    expect(rows[0].find('.shared-brain-status').text()).toBe('Inspection temporarily unavailable')
+    expect(rows[0].text()).toContain('Try again in a moment')
+    expect(rows[0].text()).not.toContain('Workspace settings')
+    expect(rows[1].find('.shared-brain-status').text()).toBe('Folder is not readable')
+    expect(view.text()).not.toContain('First update pending')
+  })
+
+  it('renders mixed Git and folder links with their own state and both guidance lines', async () => {
+    apiGet.mockResolvedValueOnce({ shared_brains: [TEAM, FOLDER] })
+    const view = await mountCard()
+    const rows = view.findAll('.shared-brain-row')
+    expect(rows[0].find('.shared-brain-status').text()).toBe('Up to date')
+    expect(rows[0].text()).toContain('Checked-out commit abc1234')
+    expect(rows[1].find('.shared-brain-status').text()).toBe('Linked folder. Read in place, never updated.')
+    expect(rows[1].text()).not.toContain('Checked-out commit')
+    expect(view.text()).toContain('Adding a path here links a Git checkout')
+    expect(view.text()).toContain('An ordinary folder linked through another setup is read in place')
   })
 
   it('hides the add form at the limit of five brains', async () => {

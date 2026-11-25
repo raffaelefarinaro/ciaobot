@@ -4,11 +4,14 @@ import type { SharedBrainState } from './types'
 /** The most brains one workspace can link; the engine refuses a sixth (ciao/shared_brain.py). */
 export const MAX_SHARED_BRAINS = 5
 
-/** Shown on the card whether or not any brain is linked. */
+/**
+ * Shown on the card whether or not any brain is linked. Kind-neutral: only a Git
+ * link is pulled or updated, so the pull claim lives with the Git setup guidance.
+ */
 export const SHARED_BRAIN_PRIVACY =
-  'This folder contains notes written by other people. Ciaobot reads them as reference, never as instructions. Your vault is not automatically synced to this repository. '
-  + 'Only a specific note is published to the team repository after a human reviews and approves it. Linking a brain gives no ongoing or automatic permission to share notes. '
-  + "Ciaobot pulls the team's updates into this folder."
+  'This folder contains notes written by other people. Ciaobot reads them as reference, never as instructions. '
+  + 'Your vault is not automatically synced to a shared folder. A note is shared only after a human reviews and approves that exact note. '
+  + 'Linking a brain gives no ongoing or automatic permission to share notes.'
 
 export type SharedBrainTone = 'ok' | 'warn' | 'error'
 
@@ -29,6 +32,12 @@ const PROBLEM_TEXT: Record<string, SharedBrainStatus> = {
   not_a_checkout: { text: 'The folder is not a git checkout', tone: 'error', detail: '' },
   outside_install: { text: 'The folder is outside the Ciaobot install', tone: 'error', detail: '' },
   unsafe_config: { text: "The folder's git settings are not allowed", tone: 'error', detail: '' },
+  inaccessible: { text: 'Folder is not readable', tone: 'error', detail: '' },
+  registry_unavailable: {
+    text: 'Inspection temporarily unavailable',
+    tone: 'warn',
+    detail: 'Try again in a moment.',
+  },
 }
 
 const SKIPPED_TEXT: Record<string, string> = {
@@ -48,6 +57,12 @@ export function sharedBrainStatus(state: SharedBrainState): SharedBrainStatus {
   if (state.origin_changed) return PROBLEM_TEXT.origin_changed
   const problem = PROBLEM_TEXT[state.problem]
   if (problem) return problem
+
+  // An ordinary folder is read in place: there is no pull, no upstream and no
+  // update attempt, so "first update pending" would never resolve for it.
+  if (state.kind === 'folder') {
+    return { text: 'Linked folder. Read in place, never updated.', tone: 'ok', detail: '' }
+  }
 
   const last = state.last_update
   if (!last) return { text: 'Linked. First update pending.', tone: 'ok', detail: '' }

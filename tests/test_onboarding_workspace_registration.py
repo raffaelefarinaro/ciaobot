@@ -102,7 +102,7 @@ def test_registry_failure_removes_live_workspace_and_orphan_cannot_be_targeted(t
     client, config, _ = _client(tmp_path)
     runtime = tmp_path / RUNTIME_DIR_NAME
     ensure_receipt(runtime, established_install=False)
-    monkeypatch.setattr("ciao.web.routes_api._persist_workspaces", lambda *_args: (_ for _ in ()).throw(OSError("disk full")))
+    monkeypatch.setattr("ciao.web.routes_api._persist_workspaces", lambda *_args, **_kwargs: (_ for _ in ()).throw(OSError("disk full")))
     with pytest.raises(OSError, match="disk full"):
         client.post("/api/workspaces", json={"name": "orphan", "vault_root": "orphan"})
     assert "orphan" not in config.workspaces
@@ -234,7 +234,7 @@ def test_rollback_does_not_delete_a_progress_write_that_landed_after_the_rename(
     )
     after_patch = (root / "onboarding.json").read_bytes()
 
-    workspace_rename._restore_snapshot_files(snapshot)
+    workspace_rename._restore_onboarding_receipt(snapshot)
 
     assert read_receipt(root) == patched
     assert (root / "onboarding.json").read_bytes() == after_patch

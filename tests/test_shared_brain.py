@@ -297,7 +297,7 @@ async def main():
     connect_read_pipe = loop.connect_read_pipe
     loop.connect_read_pipe = pause_during_pipe_setup
     sb.update_brain = update
-    sb.schedule_update(type("Link", (), {"path": str(Path("/tmp/ciao-shutdown-pipe"))})(), None)
+    sb.schedule_update(type("Link", (), {"path": str(Path("/tmp/ciao-shutdown-pipe")), "kind": "git"})(), None)
     await pipe_setup.wait()
     shutdown = asyncio.create_task(sb.shutdown_updates())
     await asyncio.sleep(0)
@@ -464,7 +464,7 @@ def test_brain_state_reports_missing_branch_head_dirty_and_fetch_time(root: Path
     git(checkout, "branch", "--set-upstream-to=origin/main", "main")
     link = SharedBrainLink(name="notes", path=str(checkout.resolve()), identity="github.com/x/notes")
 
-    state = sb.brain_state(link, FakeConfig(root))
+    state = sb._brain_state_owned(link, FakeConfig(root))
     assert state["missing"] is False and state["branch"] == "main"
     assert state["head"] == head[:7] and state["head_date"]
     assert state["upstream"] is True and state["dirty"] is False
@@ -472,13 +472,13 @@ def test_brain_state_reports_missing_branch_head_dirty_and_fetch_time(root: Path
     assert state["last_update"] is None
 
     (checkout / "a.md").write_text("edited\n", encoding="utf-8")
-    assert sb.brain_state(link, FakeConfig(root))["dirty"] is True
+    assert sb._brain_state_owned(link, FakeConfig(root))["dirty"] is True
 
     git(checkout, "remote", "set-url", "origin", "https://github.com/x/elsewhere")
-    assert sb.brain_state(link, FakeConfig(root))["origin_changed"] is True
+    assert sb._brain_state_owned(link, FakeConfig(root))["origin_changed"] is True
 
     gone = SharedBrainLink(name="gone", path=str(root / "gone"), identity=link.identity)
-    assert sb.brain_state(gone, FakeConfig(root))["missing"] is True
+    assert sb._brain_state_owned(gone, FakeConfig(root))["missing"] is True
 
 
 def test_fetched_at_is_a_stat_and_none_without_fetch_head(root: Path, monkeypatch) -> None:
@@ -585,7 +585,7 @@ async def test_update_row8_behind_with_local_changes_is_skipped(pair: SimpleName
     _assert_result(await sb.update_brain(link_of(pair.clone), FakeConfig(pair.root)), "skipped", "local_changes")
     assert git(pair.clone, "rev-parse", "HEAD") == head
     assert git(pair.clone, "rev-parse", "origin/main") == remote_head
-    state = sb.brain_state(link_of(pair.clone), FakeConfig(pair.root))
+    state = sb._brain_state_owned(link_of(pair.clone), FakeConfig(pair.root))
     assert state["head"] == head[:7]
     assert state["fetched_at"]
     assert state["last_update"]["outcome"] == "skipped"
@@ -843,6 +843,160 @@ def test_bad_rows_are_dropped_on_load(tmp_path: Path) -> None:
     assert shared_brains_from_rows(rows) == [sb.SharedBrainLink(**good)]
 
 
+def test_kind_defaults_to_git_and_invalid_kinds_are_dropped() -> None:
+    from ciao.config import shared_brains_from_rows
+
+    rows = [
+        {"name": "legacy", "path": "/away/legacy", "identity": "github.com/a/legacy"},
+        {"name": "folder", "path": "/away/folder", "identity": "folder:/away/folder", "kind": "folder"},
+        {"name": "bad", "path": "/away/bad", "identity": "github.com/a/bad", "kind": "svn"},
+    ]
+    links = shared_brains_from_rows(rows)
+    assert [(link.name, link.kind) for link in links] == [("legacy", "git"), ("folder", "folder")]
+
+
+def test_explicit_non_string_kind_is_not_treated_as_omitted() -> None:
+    from ciao.workspaces import _shared_brain_rows
+
+    with pytest.raises(ValueError, match="shared_brains must be a list"):
+        _shared_brain_rows([{"path": "/cloud/team", "kind": None}])
+
+
+def test_folder_kind_and_lifetime_persist_across_config_reload(tmp_path: Path) -> None:
+    from ciao.config import CiaoConfig
+
+    env = {
+        "CIAO_WORKSPACE": str(tmp_path),
+        "CIAO_RUNTIME_ROOT": str(tmp_path / ".runtime"),
+        "PWA_AUTH_TOKEN": "test-token",
+    }
+    config = CiaoConfig.from_env(env)
+    workspace = config.workspace(config.primary_workspace())
+    workspace.shared_brains = [SharedBrainLink(
+        "team", "/cloud/team", "folder:/cloud/team", lifetime_id="same-lifetime", kind="folder"
+    )]
+    config.persist_workspace_registry()
+    reloaded = CiaoConfig.from_env(env)
+    (link,) = reloaded.workspace(workspace.name).shared_brains
+    assert link.kind == "folder"
+    assert link.lifetime_id == "same-lifetime"
+
+
+def test_folder_link_validation_retention_and_git_free_state(tmp_path: Path, monkeypatch) -> None:
+    folder = tmp_path / "cloud folder"
+    folder.mkdir()
+    config = FakeConfig(tmp_path)
+    monkeypatch.setattr(sb, "_git", lambda *_args: pytest.fail("folder links must not invoke git"))
+    (link,) = sb.resolve_links(config, "work", [{"path": str(folder), "kind": "folder"}], [])
+    assert link.path == str(folder.resolve())
+    assert link.identity == f"folder:{folder.resolve()}"
+    assert link.kind == "folder"
+    assert sb._brain_state_owned(link, config)["problem"] == ""
+
+    (retained,) = sb.resolve_links(config, "work", [{"path": str(folder)}], [link])
+    assert retained == link
+    with pytest.raises(ValueError, match="unlink and add it again"):
+        sb.resolve_links(config, "work", [{"path": str(folder), "kind": "git"}], [link])
+    assert sb.resolve_links(config, "work", [], [link]) == []
+    monkeypatch.undo()
+    make_checkout(folder, "https://github.com/acme/relinked")
+    (relinked,) = sb.resolve_links(config, "work", [{"path": str(folder), "kind": "git"}], [])
+    assert relinked.kind == "git"
+    assert relinked.lifetime_id != link.lifetime_id
+
+
+@pytest.mark.parametrize("order", [("folder", "git"), ("git", "folder")])
+def test_retained_links_recheck_accumulated_names_and_identities(tmp_path: Path, order: tuple[str, str]) -> None:
+    folder = tmp_path / "shared"
+    folder.mkdir()
+    checkout = make_checkout(tmp_path / "checkout", "https://github.com/acme/notes")
+    folder_link = SharedBrainLink("notes", str(folder), f"folder:{folder}", kind="folder")
+    git_link = SharedBrainLink("notes", str(checkout), "github.com/acme/notes")
+    by_kind = {"folder": (folder_link, {"path": str(folder), "kind": "folder"}),
+               "git": (git_link, {"path": str(checkout), "kind": "git"})}
+    existing = [by_kind[key][0] for key in order]
+    rows = [by_kind[key][1] for key in order]
+    config = FakeConfig(tmp_path)
+    with pytest.raises(ValueError, match="duplicated"):
+        sb.resolve_links(config, "work", rows, existing)
+
+
+@pytest.mark.parametrize("new_first", [False, True])
+def test_new_and_retained_links_recheck_duplicate_name_and_identity(tmp_path: Path, new_first: bool) -> None:
+    folder = tmp_path / "retained"
+    folder.mkdir()
+    retained = SharedBrainLink("notes", str(folder), f"folder:{folder}", kind="folder")
+    new_path = tmp_path / "other"
+    new_path.mkdir()
+    new = {"path": str(new_path), "kind": "folder", "name": "notes"}
+    entries = [(retained, {"path": str(folder), "kind": "folder"}), (None, new)]
+    if new_first:
+        entries.reverse()
+    config = FakeConfig(tmp_path)
+    with pytest.raises(ValueError, match="already used|duplicated"):
+        sb.resolve_links(config, "work", [row for _link, row in entries], [retained])
+
+
+def test_folder_and_git_links_can_coexist(tmp_path: Path, monkeypatch) -> None:
+    folder = tmp_path.parent / f"{tmp_path.name}-team-folder"
+    folder.mkdir()
+    checkout = make_checkout(tmp_path / "git-brain", "https://github.com/acme/git-brain")
+    config = FakeConfig(tmp_path)
+    links = sb.resolve_links(config, "work", [
+        {"path": str(folder), "kind": "folder"},
+        {"path": str(checkout), "kind": "git"},
+    ], [])
+    assert [link.kind for link in links] == ["folder", "git"]
+
+
+def test_folder_links_reject_missing_protected_and_duplicate_paths(tmp_path: Path) -> None:
+    folder = tmp_path.parent / f"{tmp_path.name}-shared"
+    folder.mkdir()
+    config = FakeConfig(tmp_path)
+    config.workspace_root.mkdir(parents=True)
+    with pytest.raises(ValueError, match="does not exist"):
+        sb.resolve_links(config, "work", [{"path": str(tmp_path / "missing"), "kind": "folder"}], [])
+    with pytest.raises(ValueError, match="outside the Ciaobot install"):
+        sb.resolve_links(config, "work", [{"path": str(config.workspace_root), "kind": "folder"}], [])
+    with pytest.raises(ValueError, match="listed twice"):
+        sb.resolve_links(config, "work", [
+            {"path": str(folder), "kind": "folder"},
+            {"path": str(folder), "kind": "folder"},
+        ], [])
+
+
+def test_folder_link_rejects_a_symlink_into_a_protected_root(tmp_path: Path) -> None:
+    config = FakeConfig(tmp_path)
+    config.workspace_root.mkdir(parents=True)
+    alias = tmp_path / "alias"
+    alias.symlink_to(config.workspace_root, target_is_directory=True)
+    with pytest.raises(ValueError, match="outside the Ciaobot install"):
+        sb.resolve_links(config, "work", [{"path": str(alias), "kind": "folder"}], [])
+
+
+def test_folder_link_rejects_inaccessible_directory(tmp_path: Path, monkeypatch) -> None:
+    folder = tmp_path / "cloud"
+    folder.mkdir()
+    monkeypatch.setattr(sb.os, "access", lambda *_args: False)
+    with pytest.raises(ValueError, match="not accessible"):
+        sb.resolve_links(FakeConfig(tmp_path), "work", [{"path": str(folder), "kind": "folder"}], [])
+
+
+@pytest.mark.asyncio
+async def test_folder_link_never_updates_or_enters_git_update_batch(tmp_path: Path, monkeypatch) -> None:
+    folder = tmp_path / "folder"
+    folder.mkdir()
+    link = SharedBrainLink("brain", str(folder), f"folder:{folder}", kind="folder")
+    config = FakeConfig(tmp_path)
+    config.workspaces = {"work": SimpleNamespace(shared_brains=[link])}
+    monkeypatch.setattr(sb, "_git", lambda *_args: pytest.fail("folder status must not invoke git"))
+    result = await sb.update_brain(link, config)
+    assert result["outcome"] == "skipped" and result["reason"] == "folder"
+    assert sb._linked_links(config) == []
+    sb.schedule_update(link, config)
+    assert sb._lock_key(link.path) not in sb._pending
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     "key,value",
@@ -1020,7 +1174,7 @@ async def test_restored_row_with_hostile_config_is_refused_at_update(
 def test_brain_state_reports_unsafe_config(pair: SimpleNamespace) -> None:
     git(pair.clone, "config", "core.pager", "/bin/evil")
     link = sb.SharedBrainLink(name="notes", path=str(pair.clone.resolve()), identity="github.com/x/notes")
-    assert sb.brain_state(link, FakeConfig(pair.root))["problem"] == "unsafe_config"
+    assert sb._brain_state_owned(link, FakeConfig(pair.root))["problem"] == "unsafe_config"
 
 
 @pytest.mark.asyncio
@@ -1089,7 +1243,7 @@ def test_load_keeps_a_brain_pointing_into_the_install_and_reports_it(tmp_path: P
     )
     (link,) = config.workspace("personal").shared_brains
     assert link.name == "inside"
-    assert sb.brain_state(link, config)["problem"] == "outside_install"
+    assert sb._brain_state_owned(link, config)["problem"] == "outside_install"
     assert sb._linked_links(config) == []
 
 
@@ -1196,7 +1350,7 @@ def test_brain_state_vets_config_before_other_git(pair: SimpleNamespace, monkeyp
         return real(path, *args)
 
     monkeypatch.setattr(sb, "_git", spy)
-    sb.brain_state(link_of(pair.clone), FakeConfig(pair.root))
+    sb._brain_state_owned(link_of(pair.clone), FakeConfig(pair.root))
     assert seen and "--show-scope" in seen[0]
 
 
@@ -1239,3 +1393,24 @@ def test_clone_of_a_local_bare_repo_with_https_origin_still_links(root: Path) ->
     git(clone, "remote", "set-url", "origin", "https://github.com/acme/notes.git")
     (link,) = sb.resolve_links(FakeConfig(root), "work", [{"path": str(clone)}], [])
     assert link.identity == "github.com/acme/notes"
+
+
+@pytest.mark.asyncio
+async def test_queued_git_update_rechecks_registry_after_folder_adoption(tmp_path, monkeypatch):
+    config = FakeConfig(tmp_path)
+    checkout = tmp_path / "external"
+    checkout.mkdir()
+    link = link_of(checkout)
+    registry = config.state_path.parent / "workspaces.json"
+    registry.parent.mkdir(parents=True)
+    registry.write_text("[]")
+    config._workspace_registry_bytes = registry.read_bytes()
+    lock = sb._checkout_lock(str(checkout))
+    monkeypatch.setattr(sb, "_update_unlocked", lambda *args: pytest.fail("Git ran on a folder"))
+    async with lock:
+        waiting = asyncio.create_task(sb.update_brain(link, config))
+        await asyncio.sleep(0)
+        registry.write_text(json.dumps([{"name": "work", "shared_brains": [
+            {"path": str(checkout), "kind": "folder"}
+        ]}]))
+    assert (await waiting)["reason"] == "registry_changed"

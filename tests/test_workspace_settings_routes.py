@@ -1498,7 +1498,7 @@ def test_reorder_workspaces_rolls_back_when_persist_fails(tmp_path, monkeypatch)
     current = list(config.workspaces)
     stored = _registry_file(tmp_path).read_text()
 
-    def boom(_config):
+    def boom(_config, *args, **kwargs):
         raise OSError("disk full")
 
     monkeypatch.setattr("ciao.web.routes_api.persist_workspaces", boom)
@@ -1758,7 +1758,7 @@ def test_workspace_shared_brains_default_empty_persist_validate_and_unlink(tmp_p
 
     original_persist = routes_api.persist_workspaces
     saved_registry = registry.read_text()
-    def fail_persist(_config, *_args):
+    def fail_persist(_config, *_args, **_kwargs):
         raise OSError("disk full")
     monkeypatch.setattr(routes_api, "persist_workspaces", fail_persist)
     with pytest.raises(OSError, match="disk full"):
@@ -1830,18 +1830,14 @@ def test_workspace_save_retries_when_registry_changes_while_claims_wait(tmp_path
     async def interleaved_claim(path: str, claim_config):
         nonlocal unlinked
         claim_paths.append(path)
-        if path == str(other.resolve()) and not unlinked:
-            # A competing registry writer removes the old link while this save
-            # is waiting only on the newly-added checkout. The stale candidate
-            # still carries the original lifetime ID for `acme`.
-            async with shared_brain._checkout_lock(str(acme.resolve())):
-                async with original_claim(str(acme.resolve()), claim_config):
-                    with workspace_registry_lock(claim_config):
-                        current = claim_config.workspace("personal")
-                        claim_config.workspaces["personal"] = replace(
-                            current, shared_brains=[]
-                        )
-                        claim_config.persist_workspace_registry()
+        if path == str(acme.resolve()) and not unlinked:
+            # The other process owns the file claim first. Its process-local
+            # asyncio lock is independent of the requesting server's lock.
+            async with original_claim(path, claim_config):
+                with workspace_registry_lock(claim_config):
+                    current = claim_config.workspace("personal")
+                    claim_config.workspaces["personal"] = replace(current, shared_brains=[])
+                    claim_config.persist_workspace_registry()
             unlinked = True
         async with original_claim(path, claim_config):
             yield
@@ -1882,3 +1878,169 @@ def test_workspace_shared_brains_route_lists_states_empty_and_404(tmp_path, monk
     assert states[0]["identity"] == "github.com/acme/notes"
     assert states[0]["missing"] is False and states[0]["last_update"] is None
 
+
+
+def _link_folder_in_peer(install, folder):
+    client, _, _ = _client(install)
+    response = client.patch("/api/workspaces/personal", json={
+        "shared_brains": [{"name": "team", "kind": "folder", "path": str(folder)}],
+    })
+    assert response.status_code == 200, response.text
+
+
+def test_git_validation_claims_canonical_path_before_checking_peer_folder(tmp_path, monkeypatch):
+    import multiprocessing
+    from contextlib import asynccontextmanager
+    from ciao import repo_link, shared_brain
+
+    stale, _, _ = _client(tmp_path)
+    folder = _away(tmp_path)
+    folder.mkdir()
+    alias = tmp_path.parent / f"alias-{tmp_path.name}"
+    alias.symlink_to(folder, target_is_directory=True)
+    peer = multiprocessing.get_context("spawn").Process(target=_link_folder_in_peer, args=(tmp_path, folder))
+    original_claim = shared_brain._checkout_claim
+    claimed = []
+
+    @asynccontextmanager
+    async def after_peer_commit(path, config):
+        claimed.append(path)
+        if peer.pid is None:
+            peer.start()
+            peer.join(10)
+            assert peer.exitcode == 0
+        async with original_claim(path, config):
+            yield
+
+    def unexpected_git(*args, **kwargs):
+        pytest.fail("Git validation ran on an ordinary folder")
+
+    monkeypatch.setattr(shared_brain, "_checkout_claim", after_peer_commit)
+    for module, seam in ((repo_link, "_git"), (shared_brain, "validate_repo_path"),
+                         (shared_brain, "_link_origin"), (shared_brain, "_git"),
+                         (shared_brain, "_git_async"), (shared_brain, "run_git")):
+        monkeypatch.setattr(module, seam, unexpected_git)
+
+    payload = {"shared_brains": [{"path": str(alias)}]}
+    response = stale.patch("/api/workspaces/work", json=payload)
+    assert response.status_code == 409, response.text
+    current, _, _ = _client(tmp_path)
+    refused = current.patch("/api/workspaces/work", json=payload)
+    assert refused.status_code == 400, refused.text
+    assert claimed == [str(folder.resolve())] * 2
+
+
+def test_git_discovery_runs_under_checkout_and_registry_ownership(tmp_path, monkeypatch):
+    from ciao import repo_link, shared_brain
+    from ciao.workspaces import WorkspaceRegistryBusy, acquire_workspace_registry
+
+    client, config, _ = _client(tmp_path)
+    checkout = _checkout(_away(tmp_path) / "git", "https://github.com/team/notes")
+    original = repo_link._git
+    observed = []
+
+    def discovery(path, *args):
+        observed.append(path)
+        with pytest.raises(WorkspaceRegistryBusy):
+            with shared_brain.checkout_claims_nowait([str(path)], config):
+                pytest.fail("checkout claim was free at Git discovery")
+        with pytest.raises(WorkspaceRegistryBusy):
+            with acquire_workspace_registry(config):
+                pytest.fail("registry claim was free at Git discovery")
+        return original(path, *args)
+
+    monkeypatch.setattr(repo_link, "_git", discovery)
+    response = client.patch("/api/workspaces/personal", json={"shared_brains": [{"path": str(checkout)}]})
+    assert response.status_code == 200, response.text
+    assert observed == [checkout.resolve()]
+
+
+@pytest.mark.parametrize("surface", ["settings", "preview"])
+def test_status_refuses_git_after_independent_folder_relink(tmp_path, monkeypatch, surface):
+    import concurrent.futures
+    import threading
+    from contextlib import contextmanager
+
+    from ciao import repo_link, share_proposals, shared_brain
+    from ciao.web import proposal_service
+
+    reader, stale, _ = _client(tmp_path)
+    checkout = _checkout(_away(tmp_path) / "git", "https://github.com/team/notes")
+    monkeypatch.setattr(shared_brain, "schedule_update", lambda *_: None)
+    settings = "/api/workspaces/personal"
+    assert reader.patch(settings, json={"shared_brains": [{"path": str(checkout)}]}).status_code == 200
+    link = stale.workspace("personal").shared_brains[0]
+    peer, _, _ = _client(tmp_path)
+    waiting, proceed = threading.Event(), threading.Event()
+    original = shared_brain.checkout_claims_nowait
+
+    @contextmanager
+    def interleave(paths, config):
+        waiting.set()
+        assert proceed.wait(5)
+        with original(paths, config):
+            yield
+
+    monkeypatch.setattr(shared_brain, "checkout_claims_nowait", interleave)
+    monkeypatch.setattr(share_proposals, "load_share", lambda *args, **kwargs: {
+        "immutable": {"brain": link.name, "link_lifetime_id": link.lifetime_id},
+        "review_token": "revision",
+    })
+
+    def unexpected(*args, **kwargs):
+        pytest.fail("Git ran after the checkout was relinked as a folder")
+
+    for module, seam in ((repo_link, "_git"), (shared_brain, "validate_repo_path"),
+                         (shared_brain, "_link_origin"), (shared_brain, "_git"),
+                         (shared_brain, "_git_async"), (shared_brain, "run_git"),
+                         (shared_brain, "fetched_at")):
+        monkeypatch.setattr(module, seam, unexpected)
+    with concurrent.futures.ThreadPoolExecutor(1) as pool:
+        if surface == "settings":
+            future = pool.submit(reader.get, settings + "/shared-brains")
+        else:
+            future = pool.submit(proposal_service.preview_row, stale, {
+                "workspace": "personal", "row": {"kind": "share", "id": "draft"},
+            })
+        try:
+            assert waiting.wait(5)
+            assert peer.patch(settings, json={"shared_brains": []}).status_code == 200
+            assert peer.patch(settings, json={"shared_brains": [
+                {"path": str(checkout), "kind": "folder"}
+            ]}).status_code == 200
+        finally:
+            proceed.set()
+        result = future.result(timeout=5)
+    if surface == "settings":
+        assert result.status_code == 200
+        assert result.json()["shared_brains"][0]["problem"] == "registry_unavailable"
+    else:
+        assert result["blocked_reason"] == "brain_unavailable"
+
+
+def test_status_holds_checkout_and_registry_during_git(tmp_path, monkeypatch):
+    from ciao import shared_brain
+    from ciao.workspaces import WorkspaceRegistryBusy, workspace_registry_claim
+
+    client, _, _ = _client(tmp_path)
+    checkout = _checkout(_away(tmp_path) / "git", "https://github.com/team/notes")
+    monkeypatch.setattr(shared_brain, "schedule_update", lambda *_: None)
+    url = "/api/workspaces/personal"
+    assert client.patch(url, json={"shared_brains": [{"path": str(checkout)}]}).status_code == 200
+    _, peer, _ = _client(tmp_path)
+    git = shared_brain._git
+    observed = []
+
+    def check_claims(path, *args):
+        with pytest.raises(WorkspaceRegistryBusy), shared_brain.checkout_claims_nowait([path], peer):
+            pytest.fail("checkout was free during status")
+        with pytest.raises(WorkspaceRegistryBusy), workspace_registry_claim(peer):
+            pytest.fail("registry was free during status")
+        observed.append(args)
+        return git(path, *args)
+
+    monkeypatch.setattr(shared_brain, "_git", check_claims)
+    response = client.get(url + "/shared-brains")
+    assert response.status_code == 200
+    assert response.json()["shared_brains"][0]["problem"] == ""
+    assert observed

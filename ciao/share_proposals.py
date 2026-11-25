@@ -171,8 +171,10 @@ def _git_bytes(folder: Path, *args: str, limit: int, overflow_code: str = "") ->
 
 
 def _qualify(config: Any, link: SharedBrainLink, relative_path: str) -> tuple[str, str, bytes | None, str | None]:
+    if link.kind != "git":
+        _refuse("upstream_unavailable", "Publishing requires a Git shared brain.")
     parts = _safe_path(relative_path)
-    state = shared_brain.brain_state(link, config)
+    state = shared_brain._brain_state_owned(link, config)
     if state.get("problem"):
         code = "brain_changed" if state.get("problem") == "origin_changed" else "brain_unavailable"
         _refuse(code, "The selected shared brain is unavailable or has changed.")
@@ -238,9 +240,14 @@ def _brain_for(config: Any, workspace: str, name: str) -> SharedBrainLink:
     _refuse("brain_required", "Choose one linked shared brain.", eligible_brains=eligible)
 
 
-def _persist_link_lifetime(config: Any, workspace: str, link: SharedBrainLink) -> None:
+def _persist_link_lifetime(config: Any, workspace: str, link: SharedBrainLink, *, owner: Any = None) -> None:
     """Persist generated identities for registries written before lifetimes existed."""
-    from ciao.workspaces import workspace_registry_lock
+    from ciao.workspaces import (
+        WorkspaceRegistryConflict,
+        patch_shared_brain_lifetime,
+        workspace_registry_claim,
+        workspace_registry_lock,
+    )
 
     with workspace_registry_lock(config):
         record = config.workspace(workspace) if hasattr(config, "workspace") else None
@@ -248,24 +255,16 @@ def _persist_link_lifetime(config: Any, workspace: str, link: SharedBrainLink) -
                         if item.name == link.name and item.path == link.path), None)
         if current is None or current.lifetime_id != link.lifetime_id:
             _refuse("brain_unavailable", "The selected shared brain link changed while drafting.")
-        registry = Path(config.state_path).parent / "workspaces.json"
         try:
-            rows = json.loads(registry.read_text(encoding="utf-8"))
-        except (OSError, ValueError, UnicodeError):
-            rows = []
-        for row in rows if isinstance(rows, list) else ():
-            if not isinstance(row, dict) or row.get("name") != workspace:
-                continue
-            links = row.get("shared_brains")
-            if isinstance(links, list) and any(
-                isinstance(item, dict) and item.get("path") == link.path
-                and item.get("lifetime_id") == link.lifetime_id for item in links
-            ):
-                return
-            break
-        persist_registry = getattr(config, "persist_workspace_registry", None)
-        if callable(persist_registry):
-            persist_registry()
+            if owner is None:
+                with workspace_registry_claim(config) as claim:
+                    lifetime_id = patch_shared_brain_lifetime(config, workspace, link, owner=claim)
+            else:
+                lifetime_id = patch_shared_brain_lifetime(config, workspace, link, owner=owner)
+        except (OSError, ValueError, WorkspaceRegistryConflict):
+            _refuse("brain_unavailable", "The shared brain registry changed while drafting.")
+        if lifetime_id != link.lifetime_id:
+            _refuse("brain_unavailable", "The selected shared brain link changed while drafting.")
 
 
 def _review_token(fields: dict[str, Any]) -> str:
@@ -375,10 +374,24 @@ def _draft_share(
     if not isinstance(request_key, str) or not request_key:
         _refuse("request_conflict", "A stable internal request key is required.")
     link = _brain_for(config, workspace, brain)
-    _persist_link_lifetime(config, workspace, link)
-    if not getattr(link, "lifetime_id", ""):
-        _refuse("brain_unavailable", "The selected shared brain link has no persistent lifetime identity.")
-    op_ref, base_commit, original, original_oid = _qualify(config, link, relative_path)
+    from ciao.workspaces import ensure_registry_current, persisted_checkout_links, workspace_registry_claim, WorkspaceRegistryConflict
+
+    if link.kind != "git":
+        _refuse("upstream_unavailable", "Publishing requires a Git shared brain.")
+    try:
+        with workspace_registry_claim(config) as owner:
+            ensure_registry_current(config)
+            if owner.current is None:
+                raise WorkspaceRegistryConflict("workspace registry is missing")
+            persisted_checkout_links(owner.current, link.path)
+            _persist_link_lifetime(config, workspace, link, owner=owner)
+            op_ref, base_commit, original, original_oid = _qualify(config, link, relative_path)
+            _origin_code, listing = shared_brain._git(Path(link.path), "config", "--list", "--show-scope")
+            destination_fingerprint = _origin_fingerprint(shared_brain._origin_from_listing(listing))
+            if _origin_code != 0 or not destination_fingerprint:
+                _refuse("brain_changed", "The shared brain destination could not be verified.")
+    except WorkspaceRegistryConflict:
+        _refuse("brain_unavailable", "The shared brain registry changed while drafting.")
     operation = operation or ("replace" if original is not None else "create")
     if operation == "create" and original is not None or operation in ("replace", "delete") and original is None:
         _refuse("invalid_operation", "The requested operation does not match the upstream note.")
@@ -479,10 +492,6 @@ def _draft_share(
     text = f"Shared note change proposal {sidecar_id}"
     rel_queue = (PurePosixPath(workspace) / _QUEUE).as_posix()
     proposal_id = proposal_tracking.stable_proposal_id(workspace, rel_queue, KIND, text, "", 0)
-    _origin_code, listing = shared_brain._git(Path(link.path), "config", "--list", "--show-scope")
-    destination_fingerprint = _origin_fingerprint(shared_brain._origin_from_listing(listing))
-    if _origin_code != 0 or not destination_fingerprint:
-        _refuse("brain_changed", "The shared brain destination could not be verified.")
     token_fields: dict[str, Any] = {
         "schema": _SCHEMA,
         "workspace": workspace, "proposal_id": proposal_id, "revision": 1,

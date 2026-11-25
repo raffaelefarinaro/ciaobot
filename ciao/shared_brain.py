@@ -19,14 +19,14 @@ import re
 import subprocess
 from datetime import UTC, datetime
 from pathlib import Path
-from contextlib import asynccontextmanager
+from contextlib import ExitStack, asynccontextmanager, contextmanager
 from typing import Any, Literal
 
 from ciao import job_runs
 from ciao.config import SHARED_BRAIN_NAME_PATTERN, SharedBrainLink
 from ciao.git_proc import EXACT_BYTES, GIT_TIMEOUT_DETAIL, run_git
 from ciao.os_support.files import open_fd
-from ciao.os_support.locks import lock_exclusive, unlock
+from ciao.os_support.locks import await_exclusive, lock_exclusive
 from ciao.os_support.private import is_private_descriptor_strict, make_private_dir
 from ciao.os_support.child_env import child_env
 from ciao.redact import redact_text
@@ -201,6 +201,30 @@ def validate_brain_path(config: Any, raw: str) -> str:
     return resolved
 
 
+def validate_folder_path(config: Any, raw: str) -> str:
+    """Resolve an accessible ordinary folder outside every protected root."""
+    if any(ord(ch) < 32 or ord(ch) == 127 for ch in raw):
+        raise ValueError("Shared brain path contains a control character")
+    expanded = os.path.expanduser(raw.strip())
+    if not expanded or not os.path.isabs(expanded):
+        raise ValueError("Shared brain folder path must be absolute")
+    resolved = os.path.realpath(expanded)
+    if not os.path.isdir(resolved):
+        raise ValueError(f"Shared brain folder does not exist: {resolved}")
+    if not os.access(resolved, os.R_OK | os.X_OK):
+        raise ValueError(f"Shared brain folder is not accessible: {resolved}")
+    try:
+        with os.scandir(resolved):
+            pass
+    except OSError as exc:
+        raise ValueError(f"Shared brain folder is not accessible: {resolved}") from exc
+    if overlaps_protected(config, resolved):
+        raise ValueError(
+            f"Shared brain folder must be outside the Ciaobot install and its vaults: {resolved}"
+        )
+    return resolved
+
+
 def _own_entries(listing: str) -> list[tuple[str, str]]:
     """(key, value) of every local and worktree setting; global, system and -c are not the folder's own."""
     entries: list[tuple[str, str]] = []
@@ -285,6 +309,15 @@ def _derived_name(identity: str, taken: set[str]) -> str:
     return candidate
 
 
+def conflicts_with_link_kind(config: Any, workspace: str, path: str, kind: str) -> bool:
+    key = os.path.realpath(path)
+    return any(
+        link.kind != kind and os.path.realpath(link.path) == key
+        for name, record in getattr(config, "workspaces", {}).items() if name != workspace
+        for link in getattr(record, "shared_brains", ())
+    )
+
+
 def resolve_links(
     config: Any,
     workspace: str,
@@ -294,7 +327,7 @@ def resolve_links(
     """The whole new list for one workspace. Git runs only for rows that are new."""
     if len(raw) > MAX_BRAINS_PER_WORKSPACE:
         raise ValueError(f"A workspace can link at most {MAX_BRAINS_PER_WORKSPACE} shared brains")
-    by_path = {link.path: link for link in existing}
+    by_path = {os.path.realpath(link.path): link for link in existing}
     names: set[str] = set()
     identities: dict[str, str] = {}
     paths: set[str] = set()
@@ -303,25 +336,42 @@ def resolve_links(
         requested = str(row.get("name") or "").strip()
         raw_path = str(row.get("path", ""))
         key = os.path.realpath(os.path.expanduser(raw_path.strip()))
+        kind = row.get("kind")
+        if kind is None:
+            kind = by_path[key].kind if key in by_path else "git"
+        if kind not in ("git", "folder"):
+            raise ValueError("shared brain kind must be 'git' or 'folder'")
+        if conflicts_with_link_kind(config, workspace, key, kind):
+            raise ValueError("shared brain path is linked with another kind in a different workspace")
         if key in paths:
             raise ValueError(f"Shared brain folder is listed twice: {key}")
         paths.add(key)
         kept = by_path.get(key)
         if kept is not None:
+            if kind != kept.kind:
+                raise ValueError(
+                    f"Shared brain '{kept.name}' is already linked as {kept.kind}; unlink and add it again to change kind"
+                )
             if requested and requested != kept.name:
                 raise ValueError(
                     f"Shared brain '{kept.name}' is already linked; remove and add it again to rename it"
                 )
+            if kept.name in names or kept.identity in identities:
+                raise ValueError("retained shared brain name or identity is duplicated")
             names.add(kept.name)
             identities[kept.identity] = kept.name
             out.append(kept)
             continue
-        path = validate_brain_path(config, raw_path)
-        origin = _link_origin(path)
-        try:
-            identity = canonical_identity(origin)
-        except ValueError as exc:
-            raise ValueError(f"{path}: {exc}") from exc
+        if kind == "folder":
+            path = validate_folder_path(config, raw_path)
+            identity = f"folder:{path}"
+        else:
+            path = validate_brain_path(config, raw_path)
+            origin = _link_origin(path)
+            try:
+                identity = canonical_identity(origin)
+            except ValueError as exc:
+                raise ValueError(f"{path}: {exc}") from exc
         if identity in identities:
             raise ValueError(
                 f"{path} is the same repository as shared brain '{identities[identity]}'"
@@ -336,7 +386,7 @@ def resolve_links(
             name = _derived_name(identity, names)
         names.add(name)
         identities[identity] = name
-        out.append(SharedBrainLink(name=name, path=path, identity=identity))
+        out.append(SharedBrainLink(name=name, path=path, identity=identity, kind=kind))
     return out
 
 
@@ -369,14 +419,33 @@ def path_problem(config: Any, path: str) -> str:
     return ""
 
 
+def link_problem(config: Any, link: SharedBrainLink) -> str:
+    """Current filesystem problem for either kind, without starting Git."""
+    if link.kind == "git":
+        return path_problem(config, link.path)
+    path = link.path
+    if os.path.realpath(path) != path or not os.path.isdir(path):
+        return "missing" if not os.path.exists(path) else "moved"
+    if overlaps_protected(config, path):
+        return "outside_install"
+    if not os.access(path, os.R_OK | os.X_OK):
+        return "inaccessible"
+    try:
+        with os.scandir(path):
+            pass
+    except OSError:
+        return "inaccessible"
+    return ""
+
+
 def _is_own_checkout(folder: Path, top: str) -> bool:
     return bool(top.strip()) and os.path.realpath(top.strip()) == os.path.realpath(folder)
 
 
-def brain_state(link: SharedBrainLink, config: Any) -> dict[str, Any]:
-    """Live state of one linked folder. Its own config is vetted before any other git call."""
+def _initial_state(link: SharedBrainLink) -> dict[str, Any]:
     state: dict[str, Any] = {
         "name": link.name,
+        "kind": link.kind,
         "identity": link.identity,
         "path": link.path,
         "origin_changed": False,
@@ -387,9 +456,42 @@ def brain_state(link: SharedBrainLink, config: Any) -> dict[str, Any]:
         "head_date": "",
         "dirty": False,
         "upstream": False,
-        "fetched_at": fetched_at(link.path),
-        "last_update": _last_update.get(_lock_key(link.path)),
+        "fetched_at": None,
+        "last_update": _last_update.get(_lock_key(link.path)) if link.kind == "git" else None,
     }
+    return state
+
+
+def brain_state(link: SharedBrainLink, config: Any, workspace: str) -> dict[str, Any]:
+    """Inspect a registered checkout only while its path and registry are owned."""
+    from ciao.workspaces import WorkspaceRegistryConflict, persisted_checkout_links, workspace_registry_claim
+
+    if link.kind == "folder":
+        return _brain_state_owned(link, config)
+    try:
+        with checkout_claims_nowait([link.path], config), workspace_registry_claim(config) as owner:
+            if owner.current is None or owner.current != config._workspace_registry_bytes:
+                raise WorkspaceRegistryConflict("workspace registry changed")
+            matches = persisted_checkout_links(owner.current, link.path)
+            if not any(
+                name == workspace and row.get("name") == link.name and row.get("identity") == link.identity
+                and row.get("lifetime_id", link.lifetime_id) == link.lifetime_id
+                for name, row in matches
+            ):
+                raise WorkspaceRegistryConflict("shared brain link changed")
+            return _brain_state_owned(link, config)
+    except (OSError, ValueError, WorkspaceRegistryConflict):
+        return {**_initial_state(link), "problem": "registry_unavailable"}
+
+
+def _brain_state_owned(link: SharedBrainLink, config: Any) -> dict[str, Any]:
+    """Read live status inside the caller's checkout or registry transaction."""
+    state = _initial_state(link)
+    if link.kind == "folder":
+        state["problem"] = link_problem(config, link)
+        state["missing"] = state["problem"] == "missing"
+        return state
+    state["fetched_at"] = fetched_at(link.path)
     problem = path_problem(config, link.path)
     if problem:
         state["problem"] = problem
@@ -443,9 +545,8 @@ def _checkout_lock(path: str) -> asyncio.Lock:
     return _locks.setdefault(key, asyncio.Lock())
 
 
-@asynccontextmanager
-async def _checkout_claim(path: str, config: Any):
-    """Serialize checkout network and ref changes across engine processes."""
+@contextmanager
+def _checkout_descriptor(path: str, config: Any):
     root = Path(config.state_path).parent / "locks" / "shared-brains"
     root.mkdir(parents=True, exist_ok=True, mode=0o700)
     make_private_dir(root)
@@ -455,29 +556,54 @@ async def _checkout_claim(path: str, config: Any):
     try:
         if not is_private_descriptor_strict(fd):
             raise OSError("shared brain lock is not private")
-        loop = asyncio.get_running_loop()
-        acquire = loop.run_in_executor(None, lock_exclusive, fd)
-        try:
-            await asyncio.shield(acquire)
-        except asyncio.CancelledError:
-            await acquire
-            await asyncio.shield(loop.run_in_executor(None, unlock, fd))
-            raise
-        try:
-            yield
-        finally:
-            await asyncio.shield(loop.run_in_executor(None, unlock, fd))
+        yield fd
     finally:
         os.close(fd)
 
 
+@contextmanager
+def checkout_claims_nowait(paths, config: Any):
+    from ciao.workspaces import WorkspaceRegistryBusy
+    with ExitStack() as stack:
+        for path in sorted({_lock_key(path) for path in paths}):
+            fd = stack.enter_context(_checkout_descriptor(path, config))
+            try:
+                lock_exclusive(fd, blocking=False)
+            except BlockingIOError as exc:
+                raise WorkspaceRegistryBusy("shared checkout is busy") from exc
+        yield
+
+
+@asynccontextmanager
+async def _checkout_claim(path: str, config: Any):
+    """Serialize checkout network and ref changes across engine processes."""
+    with _checkout_descriptor(path, config) as fd:
+        await await_exclusive(fd)
+        yield
+
+
 async def update_brain(link: SharedBrainLink, config: Any) -> dict[str, Any]:
     """Fetch and fast-forward one linked folder, one case from the matrix (see the issue)."""
+    if link.kind != "git":
+        return _result("skipped", "folder")
     key = _lock_key(link.path)
     lock = _checkout_lock(key)
     async with lock:
         try:
             async with _checkout_claim(key, config):
+                from ciao.workspaces import ensure_registry_current, persisted_checkout_links, WorkspaceRegistryConflict
+                try:
+                    ensure_registry_current(config)
+                    raw = getattr(config, "_workspace_registry_bytes", None)
+                    if raw is not None:
+                        links = persisted_checkout_links(raw, key)
+                        if not any(row.get("identity") == link.identity and row.get("name") == link.name
+                                   and row.get("lifetime_id", link.lifetime_id) == link.lifetime_id for _, row in links):
+                            return _result("skipped", "registry_changed")
+                except (ValueError, WorkspaceRegistryConflict):
+                    return _result("skipped", "registry_changed")
+                if conflicts_with_link_kind(config, "", key, "git"):
+                    return _result("skipped", "folder")
                 result = await _update_unlocked(config, Path(key), link.identity)
         except OSError:
             result = _result("failed", "lock_unavailable")
@@ -540,7 +666,7 @@ async def _update_unlocked(config: Any, folder: Path, identity: str) -> dict[str
 
 def schedule_update(link: SharedBrainLink, config: Any) -> None:
     """Start one background update for ``link`` unless one is already pending."""
-    if _updates_closed:
+    if link.kind != "git" or _updates_closed:
         return
     key = _lock_key(link.path)
     if key in _pending:
@@ -570,7 +696,7 @@ def _linked_links(config: Any) -> list[SharedBrainLink]:
     seen: dict[str, SharedBrainLink] = {}
     for workspace in getattr(config, "workspaces", {}).values():
         for link in getattr(workspace, "shared_brains", []):
-            if not overlaps_protected(config, link.path):
+            if link.kind == "git" and not overlaps_protected(config, link.path):
                 seen.setdefault(link.path, link)
     return list(seen.values())
 
