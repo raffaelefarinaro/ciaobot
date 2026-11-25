@@ -1467,32 +1467,28 @@ def write_index_file(
         if authorize is not None and ownership_runtime is not None:
             from ciao.setup_marker import vault_index_ownership_lock
 
-            # Lock order is ownership then registry. Ownership updates take only
-            # the ownership lock; registry writers take only the registry lock,
-            # so there is no cycle. Both are held through the final publication.
-            with vault_index_ownership_lock(Path(ownership_runtime), exclusive=False):
-                if registration_runtime is not None:
-                    from ciao.workspaces import (
-                        acquire_registry_at,
-                        registry_owner_scope,
-                    )
+            # Registry precedes ownership everywhere both locks are held.
+            if registration_runtime is not None:
+                from ciao.workspaces import acquire_registry_at, registry_owner_scope
 
-                    own_owner = registry_owner is None
-                    owner = registry_owner or acquire_registry_at(
-                        Path(registration_runtime), blocking=True
-                    )
-                    try:
-                        with registry_owner_scope(owner):
+                own_owner = registry_owner is None
+                owner = registry_owner or acquire_registry_at(
+                    Path(registration_runtime), blocking=True
+                )
+                try:
+                    with registry_owner_scope(owner):
+                        with vault_index_ownership_lock(Path(ownership_runtime), exclusive=False):
                             if not authorize():
                                 raise OSError(
                                     errno.EACCES,
                                     "index ownership changed before publication",
                                 )
                             commit()
-                    finally:
-                        if own_owner:
-                            owner.close()
-                else:
+                finally:
+                    if own_owner:
+                        owner.close()
+            else:
+                with vault_index_ownership_lock(Path(ownership_runtime), exclusive=False):
                     if not authorize():
                         raise OSError(
                             errno.EACCES,

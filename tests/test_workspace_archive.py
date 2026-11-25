@@ -61,6 +61,37 @@ def _reroot(tmp_path: Path) -> None:
     reset_reroot_cache()
 
 
+def test_legacy_archive_refresh_reuses_registry_claim_and_completes(tmp_path, monkeypatch):
+    from ciao.workspaces import WorkspaceRegistryBusy, acquire_workspace_registry
+
+    client, config, _, _ = _app(tmp_path, rerooted=False)
+    entered = threading.Event()
+    resume = threading.Event()
+    original = vault_index.scan_vault
+    result = []
+
+    def paused_scan(*args, **kwargs):
+        entered.set()
+        if not resume.wait(5):
+            raise TimeoutError("test did not release index scan")
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(vault_index, "scan_vault", paused_scan)
+    thread = threading.Thread(target=lambda: result.append(client.post("/api/workspaces/work/archive")), daemon=True)
+    thread.start()
+    try:
+        assert entered.wait(5), "archive never reached index rebuild"
+        with pytest.raises(WorkspaceRegistryBusy):
+            acquire_workspace_registry(config, blocking=False)
+    finally:
+        resume.set()
+    thread.join(5)
+    assert not thread.is_alive(), "archive deadlocked rebuilding its shared index"
+    assert result[0].status_code == 200
+    with acquire_workspace_registry(config, blocking=False):
+        assert "work" not in config.workspaces
+
+
 def test_shared_index_refresh_uses_strict_scan_before_replacement(tmp_path: Path, monkeypatch) -> None:
     root = tmp_path / "memory-vault"
     root.mkdir()

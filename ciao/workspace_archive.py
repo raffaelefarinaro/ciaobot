@@ -449,7 +449,7 @@ def mark_rolled_back(config: Any, archived: dict[str, Any]) -> None:
         logger.warning("Could not mark %s as rolled back", folder, exc_info=True)
 
 
-def refresh_shared_index(config: Any) -> bool:
+def refresh_shared_index(config: Any, *, registry_owner: Any = None) -> bool:
     """Rebuild the shared ``INDEX.md`` on an install that has not re-rooted.
 
     There one index lists every workspace's notes under a workspace prefix, so
@@ -477,6 +477,7 @@ def refresh_shared_index(config: Any) -> bool:
         authorize=lambda: ownership(None) == "ciao",
         ownership_runtime=Path(config.state_path).parent,
         registration_runtime=Path(config.state_path).parent,
+        registry_owner=registry_owner,
     )
     return True
 

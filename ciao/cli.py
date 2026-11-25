@@ -1606,14 +1606,14 @@ def _setup_selected_workspace(
     if not ownership_path.exists() and (first_setup or fresh_env):
         from ciao.setup_marker import write_vault_index_ownership
 
-        owner = "ciao" if selection.source == "default" and vault_mode != "existing" else "external"
+        index_owner = "ciao" if selection.source == "default" and vault_mode != "existing" else "external"
         owned_targets = (
             [path for _workspace, path in registered_vaults]
             if registered_vaults is not None
             else [vault_path]
         )
         written.append(
-            write_vault_index_ownership(runtime_root, owned_targets, owner=owner)
+            write_vault_index_ownership(runtime_root, owned_targets, owner=index_owner)
         )
 
     stock = resources.files("ciao.stock")

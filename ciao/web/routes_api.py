@@ -889,7 +889,7 @@ async def archive_workspace_setting(request: Request) -> JSONResponse:
                 logger.exception("Could not clear the search index for archived workspace %s", name)
                 cleanup_exc = exc
             try:
-                rebuilt = workspace_archive.refresh_shared_index(config)
+                rebuilt = workspace_archive.refresh_shared_index(config, registry_owner=owner)
             except Exception:  # regenerated at the next startup
                 logger.exception("Could not rebuild INDEX.md after archiving %s", name)
             return rows, rebuilt, cleanup_exc
@@ -1022,7 +1022,7 @@ async def restore_archived_workspace(request: Request) -> JSONResponse:
         if added:
             _publish_automations_changed(request)
         try:
-            await run_while_claimed(workspace_archive.refresh_shared_index, config)
+            await run_while_claimed(workspace_archive.refresh_shared_index, config, registry_owner=owner)
         except Exception:  # noqa: BLE001 - regenerated at the next startup
             logger.exception("Could not rebuild INDEX.md after restoring %s", name)
         if getattr(config, "_rerooted", lambda: False)():
