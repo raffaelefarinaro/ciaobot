@@ -36,6 +36,9 @@ def _install(tmp_path: Path, name: str, *, workspaces: tuple[str, ...] = ("perso
             f"findme-{name}-{workspace}\n",
             encoding="utf-8",
         )
+    from ciao.setup_marker import write_vault_index_ownership
+
+    write_vault_index_ownership(runtime, [root / "memory-vault"], owner="ciao")
     return CiaoConfig(
         pwa_auth_token="t",
         workspace_root=root,

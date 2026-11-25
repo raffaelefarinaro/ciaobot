@@ -25,6 +25,7 @@ from ciao.care_eval_run import (
     TimedOut,
 )
 from ciao.care_usage import Inventory, collect, contract_metrics
+from ciao.curation_run import RunBudget
 from ciao.task_eval_contract import METRIC_NAMES, comparison_eligibility, public_record
 
 DISPATCH_DATE = date(2026, 11, 24)
@@ -63,6 +64,7 @@ def build(tmp_path: Path, scenario: str = "nightly", **overrides: Any) -> dict[s
         "scenario": scenario,
         "outcome": settled(),
         "manifest": manifest,
+        "budget": RunBudget(),
         "observed": full_observation(scenario),
         "wall_s": 180.25,
         "usage": None,
@@ -179,19 +181,33 @@ def test_observation_digest_is_stable_and_moves_with_one_value(tmp_path: Path) -
 
 def test_workload_digest_moves_with_one_expected_byte() -> None:
     fixture = fixture_for("nightly")
-    first = rec.workload_digest(fixture)
-    assert rec.workload_digest(fixture) == first
+    first = rec.workload_digest(fixture, RunBudget())
+    assert rec.workload_digest(fixture, RunBudget()) == first
     altered_obligations = (
         dataclasses.replace(fixture.obligations[0], expected_bytes=b"fixture-note-rev-2"),
         *fixture.obligations[1:],
     )
     altered = dataclasses.replace(fixture, obligations=altered_obligations)
-    assert rec.workload_digest(altered) != first
+    assert rec.workload_digest(altered, RunBudget()) != first
 
 
 def test_workload_digest_differs_between_scenarios() -> None:
-    digests = {rec.workload_digest(fixture_for(name)) for name in SCENARIOS}
+    digests = {rec.workload_digest(fixture_for(name), RunBudget()) for name in SCENARIOS}
     assert len(digests) == len(SCENARIOS)
+
+
+def test_workload_digest_records_the_budget_the_run_used() -> None:
+    fixture = fixture_for("budget_continuation")
+    assert rec.workload_digest(fixture, RunBudget(max_items=1)) != rec.workload_digest(fixture, RunBudget())
+
+
+def test_the_record_binds_the_budget_it_was_built_with(tmp_path: Path) -> None:
+    tight = rec.build_record(**build(tmp_path / "t", "budget_continuation", budget=RunBudget(max_items=1)))
+    default = rec.build_record(**build(tmp_path / "d", "budget_continuation"))
+    assert tight["provenance"]["workload_sha256"] != default["provenance"]["workload_sha256"]
+    assert tight["provenance"]["workload_sha256"] == rec.workload_digest(
+        fixture_for("budget_continuation"), RunBudget(max_items=1)
+    )
 
 
 def test_identity_digests_do_not_depend_on_source_text() -> None:

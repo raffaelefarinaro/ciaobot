@@ -271,7 +271,7 @@ export const useProposalsStore = defineStore('proposals', () => {
    * since the operation, because restoring the before image would delete an
    * unrelated later fact; that refusal is surfaced verbatim rather than
    * retried. */
-  async function undoReceipt(id: string, workspace = ''): Promise<{ ok: boolean; error?: string }> {
+  async function undoReceipt(id: string, workspace = ''): Promise<{ ok: boolean; error?: string; review_path?: string }> {
     setBusy(id, true)
     const key = receiptKey(id, workspace)
     const next = { ...receiptErrors.value }
@@ -279,7 +279,7 @@ export const useProposalsStore = defineStore('proposals', () => {
     receiptErrors.value = next
     try {
       const query = workspace ? `?workspace=${encodeURIComponent(workspace)}` : ''
-      await api.post(`/api/memory/receipts/${id}/undo${query}`)
+      const reply = await api.post<{ review_path?: string }>(`/api/memory/receipts/${id}/undo${query}`)
       // The change is reversed, so the cached image describes an operation that
       // no longer holds; History refetches and the row re-reads it.
       const without = { ...receipts.value }
@@ -287,7 +287,7 @@ export const useProposalsStore = defineStore('proposals', () => {
       receipts.value = without
       invalidateHistory()
       await fetch({ force: true })
-      return { ok: true }
+      return { ok: true, review_path: reply?.review_path }
     } catch (e) {
       const msg = e instanceof Error ? e.message : 'Undo failed'
       receiptErrors.value = { ...receiptErrors.value, [key]: msg }
@@ -499,10 +499,10 @@ export const useProposalsStore = defineStore('proposals', () => {
    */
   async function act(
     id: string,
-    action: 'accept' | 'dismiss',
+    action: 'accept' | 'dismiss' | 'reconcile' | 'redraft',
     workspace = '',
     opts?: { expectedRevision?: string; text?: string; reconcile?: boolean; reason?: string },
-  ): Promise<{ ok: boolean; error?: string; conflict?: boolean; payload?: unknown }> {
+  ): Promise<{ ok: boolean; error?: string; conflict?: boolean; payload?: unknown; replacementId?: string }> {
     setBusy(id, true)
     error.value = ''
     try {
@@ -515,6 +515,9 @@ export const useProposalsStore = defineStore('proposals', () => {
       const queryString = params.toString()
       const query = queryString ? `?${queryString}` : ''
       const body: Record<string, string> = {}
+      if (workspace && rows.value.find(row => row.id === id)?.kind === 'share') {
+        body.workspace = workspace
+      }
       // Only sent when a preview was actually shown. Without it the server
       // keeps its pre-preview behaviour, which is what the batch bar and any
       // older client rely on.
@@ -522,23 +525,80 @@ export const useProposalsStore = defineStore('proposals', () => {
       if (opts?.text) body.text = opts.text
       // Single-row decisions only: the batch bar never sends one.
       if (opts?.reason) body.reason = opts.reason
-      await api.post<ProposalBatchResponse>(`/api/proposals/${id}/${action}${query}`, body)
-      const stale = action === 'accept' ? dropSiblingPreviews([id]) : []
+      const reply = await api.post<ProposalBatchResponse>(`/api/proposals/${id}/${action}${query}`, body)
+      const stale = action !== 'dismiss' ? dropSiblingPreviews([id]) : []
       await fetch({ force: true })
       refetchPreviews(stale)
       invalidateHistory()
-      return { ok: true }
+      if (action === 'redraft') {
+        const replacementId = (reply as { replacement?: { id?: string } }).replacement?.id
+        dropPreview(id)
+        if (replacementId) revealRow(replacementId)
+        return { ok: true, payload: reply, replacementId }
+      }
+      return { ok: true, payload: reply }
     } catch (e) {
-      const conflict = adoptConflict(id, e)
       const payload = (e as { payload?: unknown } | null)?.payload
+      const payloadConflict = Boolean((payload as { conflict?: boolean } | undefined)?.conflict)
+      const shareDismissConflict = action === 'dismiss'
+        && rows.value.find(row => row.id === id)?.kind === 'share'
+        && payloadConflict
+      const inlineShareError = action === 'reconcile' || shareDismissConflict
+      // These share outcomes have their own card-level message. Do not mark a
+      // publication refusal as a destination-preview conflict.
+      const conflict = action === 'reconcile'
+        ? payloadConflict
+        : shareDismissConflict ? true : adoptConflict(id, e)
+      const sharePayload = payload as {
+        error?: string
+        share_status?: string
+        preview?: ProposalPreview
+        replacement?: { id?: string; preview?: ProposalPreview | null }
+      } | undefined
+      if (sharePayload?.share_status === 'stale_review') {
+        const message = typeof sharePayload.error === 'string' ? sharePayload.error : (e as Error).message
+        const replacement = sharePayload.replacement
+        if (replacement?.id) {
+          dropPreview(id)
+          await fetch({ force: true })
+          if (replacement.preview) {
+            previews.value = { ...previews.value, [replacement.id]: replacement.preview }
+          }
+          if (rows.value.some(row => row.id === replacement.id)) {
+            revealRow(replacement.id)
+            return { ok: false, error: message, conflict: true, payload, replacementId: replacement.id }
+          }
+          previewErrors.value = { ...previewErrors.value, [id]: message }
+          error.value = message
+          return { ok: false, error: message, conflict: true, payload }
+        }
+        if (sharePayload.preview) {
+          previews.value = { ...previews.value, [id]: sharePayload.preview }
+        } else {
+          dropPreview(id)
+          await fetch({ force: true })
+          if (rows.value.some(row => row.id === id)) {
+            previewErrors.value = { ...previewErrors.value, [id]: message }
+          } else {
+            error.value = message
+          }
+        }
+        if (action !== 'reconcile') conflictIds.value = new Set(conflictIds.value).add(id)
+        return { ok: false, error: message, conflict: true, payload }
+      }
+      if (sharePayload?.preview) {
+        previews.value = { ...previews.value, [id]: sharePayload.preview }
+      }
       const deferred = Boolean((payload as { deferred?: boolean } | undefined)?.deferred)
-      const msg = e instanceof Error ? e.message : 'Action failed'
+      const msg = typeof sharePayload?.error === 'string'
+        ? sharePayload.error
+        : e instanceof Error ? e.message : 'Action failed'
       // A conflict is not an action failure: the card is already re-rendering
       // with the refreshed preview, and a toast on top of it would say the
       // same thing twice in two places. Nor is a deferral: the caller renders
       // it on the row, with the entries it was weighed against and a retry, and
       // a toast would take all three away the moment they became relevant.
-      if (!conflict && !deferred) error.value = msg
+      if (!conflict && !deferred && !inlineShareError) error.value = msg
       return { ok: false, error: msg, conflict, payload }
     } finally {
       setBusy(id, false)
@@ -602,8 +662,11 @@ export const useProposalsStore = defineStore('proposals', () => {
 
   /** `workspace` names the destination for re-home rows in the selection. */
   async function batch(ids: string[], action: 'accept' | 'dismiss', workspace = '') {
-    if (!ids.length) return
-    setBusyMany(ids, true)
+    const targetIds = action === 'accept'
+      ? ids.filter(id => rows.value.find(row => row.id === id)?.kind !== 'share')
+      : ids
+    if (!targetIds.length) return
+    setBusyMany(targetIds, true)
     error.value = ''
     lastBatchSummary.value = []
     try {
@@ -612,12 +675,12 @@ export const useProposalsStore = defineStore('proposals', () => {
       // normally every row on screen. A row whose preview never arrived sends
       // none and keeps the unguarded behaviour rather than being blocked.
       const revisions: Record<string, string> = {}
-      for (const id of ids) {
+      for (const id of targetIds) {
         const revision = previews.value[id]?.revision
         if (revision) revisions[id] = revision
       }
       const reply = await api.post<ProposalBatchResponse>('/api/proposals/batch', {
-        action, ids, ...(workspace ? { workspace } : {}),
+        action, ids: targetIds, ...(workspace ? { workspace } : {}),
         ...(Object.keys(revisions).length ? { revisions } : {}),
       })
       lastBatchSummary.value = reply?.summary ?? []
@@ -630,8 +693,8 @@ export const useProposalsStore = defineStore('proposals', () => {
       // bulk accept with no revision: the guarded write would silently
       // downgrade to unguarded on exactly the rows known to have moved.
       // Those rows stay, and are re-previewed below onto fresh state.
-      const stale = action === 'accept' ? dropSiblingPreviews(ids.filter(id => !conflicted.includes(id))) : []
-      for (const id of ids) if (!conflicted.includes(id)) dropPreview(id)
+      const stale = action === 'accept' ? dropSiblingPreviews(targetIds.filter(id => !conflicted.includes(id))) : []
+      for (const id of targetIds) if (!conflicted.includes(id)) dropPreview(id)
       await fetch({ force: true })
       refetchPreviews(stale)
       for (const id of conflicted) await loadPreview(id)
@@ -639,7 +702,7 @@ export const useProposalsStore = defineStore('proposals', () => {
     } catch (e) {
       error.value = e instanceof Error ? e.message : 'Batch action failed'
     } finally {
-      setBusyMany(ids, false)
+      setBusyMany(targetIds, false)
     }
   }
 

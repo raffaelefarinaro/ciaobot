@@ -41,10 +41,13 @@ def client(tmp_path):
         encoding="utf-8", newline=""
     )
 
+    from ciao.setup_marker import write_vault_index_ownership
+
+    write_vault_index_ownership(tmp_path / ".runtime", [vault], owner="ciao")
     cfg = CiaoConfig(
         pwa_auth_token="test-secret",
         workspace_root=tmp_path,
-        state_path=tmp_path / ".runtime",
+        state_path=tmp_path / ".runtime" / "state.json",
         media_root=tmp_path / "media",
         vault_root=vault,
     )

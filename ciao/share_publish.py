@@ -3,35 +3,42 @@
 from __future__ import annotations
 
 import asyncio
+import errno
 import hashlib
 import json
 import os
 import re
+import secrets
+import stat
 import subprocess
 import tempfile
 from contextlib import asynccontextmanager, contextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any, Callable, Iterator, Literal, TypeVar
+from typing import Any, Literal
 
 from ciao import memory_receipts, share_proposals as drafts, shared_brain
 from ciao.config import SharedBrainLink
 from ciao.git_proc import run_git_sync_bounded
+from ciao.os_support import folder_io
 from ciao.os_support.files import open_fd
-from ciao.os_support.locks import lock_exclusive, unlock
+from ciao.os_support.locks import await_exclusive
 from ciao.os_support.private import is_private_descriptor_strict, make_private_dir
 from ciao.redact import redact_text
+from ciao.workspaces import run_while_claimed
 
 OutcomeCode = Literal[
     "published", "already_published", "changed_upstream", "brain_changed",
     "push_refused", "indeterminate", "stale_review", "draft_corrupt",
-    "brain_unavailable", "upstream_unavailable", "draft_unavailable", "reconcile_after_unlink",
+    "brain_unavailable", "upstream_unavailable", "draft_unavailable",
+    "reconcile_after_unlink", "unsafe_target", "folder_update_unsupported",
+    "folder_unverifiable", "manual_export_required",
 ]
 MAX_ATTEMPTS = 3
 PUSH_TIMEOUT_S = 20.0
+MOUNT_STAGING_DIR = ".ciao-share-staging"
 _OID = re.compile(r"^[0-9a-f]{40,64}$")
-_T = TypeVar("_T")
 
 
 @dataclass(frozen=True, slots=True)
@@ -119,6 +126,63 @@ def has_publication_attempt(config: Any, *, workspace: str, proposal_id: str, ex
     publication = artifact.get("publication")
     attempts = publication.get("attempts", []) if isinstance(publication, dict) else []
     return isinstance(attempts, list) and bool(attempts)
+
+
+def can_retry_publication(
+    config: Any, *, workspace: str, proposal_id: str, expected_revision: str,
+) -> bool:
+    """Whether every persisted attempt was definitively rejected as retryable."""
+    artifact = _artifact_for(config, workspace, proposal_id)
+    if artifact is None or artifact.get("review_token") != expected_revision:
+        return False
+    fields = artifact.get("immutable")
+    publication = artifact.get("publication")
+    if not isinstance(fields, dict) or not isinstance(publication, dict):
+        return False
+    attempts = publication.get("attempts")
+    receipts = publication.get("receipts")
+    if (
+        not isinstance(attempts, list) or not attempts
+        or len(attempts) >= MAX_ATTEMPTS
+        or not isinstance(receipts, list) or receipts
+    ):
+        return False
+    if fields.get("link_kind") == "folder":
+        for index, attempt in enumerate(attempts, start=1):
+            if (
+                not isinstance(attempt, dict)
+                or attempt.get("kind") != "folder"
+                or type(attempt.get("attempt")) is not int
+                or attempt.get("attempt") != index
+                or attempt.get("proposal_id") != fields.get("proposal_id")
+                or attempt.get("revision") != fields.get("revision")
+                or attempt.get("destination_fingerprint") != fields.get("destination_fingerprint")
+                or attempt.get("path") != fields.get("path")
+                or not isinstance(attempt.get("token"), str)
+                or not attempt.get("token")
+                or attempt.get("status") != "rejected"
+                or attempt.get("retryable") is not True
+            ):
+                return False
+        return True
+    for index, attempt in enumerate(attempts, start=1):
+        if not isinstance(attempt, dict):
+            return False
+        commit_oid = attempt.get("commit_oid")
+        parent_oid = attempt.get("parent_oid")
+        if (
+            type(attempt.get("attempt")) is not int or attempt["attempt"] != index
+            or not isinstance(commit_oid, str) or not _OID.fullmatch(commit_oid)
+            or not isinstance(parent_oid, str) or not _OID.fullmatch(parent_oid)
+            or attempt.get("proposal_id") != fields.get("proposal_id")
+            or attempt.get("revision") != fields.get("revision")
+            or attempt.get("destination_fingerprint") != fields.get("destination_fingerprint")
+            or attempt.get("ref") != fields.get("upstream_ref")
+            or attempt.get("status") != "rejected"
+            or attempt.get("retryable") is not True
+        ):
+            return False
+    return True
 
 
 def refresh_legacy_draft(
@@ -280,6 +344,37 @@ def _retire_legacy_queue_row(config: Any, workspace: str, proposal_id: str, fiel
 
 
 def _active_link(config: Any, workspace: str, fields: dict[str, Any]) -> SharedBrainLink | None:
+    from ciao.workspaces import (
+        ensure_registry_current,
+        persisted_checkout_links,
+        persisted_shared_links,
+        WorkspaceRegistryConflict,
+    )
+    kind = fields.get("link_kind", "git")
+    try:
+        ensure_registry_current(config)
+        raw = config._workspace_registry_bytes
+        if raw is None:
+            return None
+        if kind == "folder":
+            matches = persisted_shared_links(raw, fields["checkout_path"])
+            if not any(
+                name == workspace and row.get("name") == fields.get("brain")
+                and row.get("identity") == fields.get("origin_identity")
+                and row.get("kind") == "folder"
+                and row.get("lifetime_id") == fields.get("link_lifetime_id")
+                for name, row in matches
+            ):
+                return None
+        elif not any(
+            name == workspace and row.get("name") == fields.get("brain")
+            and row.get("identity") == fields.get("origin_identity")
+            and row.get("lifetime_id") == fields.get("link_lifetime_id")
+            for name, row in persisted_checkout_links(raw, fields["checkout_path"])
+        ):
+            return None
+    except (WorkspaceRegistryConflict, OSError, ValueError):
+        return None
     record = config.workspace(workspace) if hasattr(config, "workspace") else None
     links = getattr(record, "shared_brains", []) or []
     if not isinstance(links, list):
@@ -289,7 +384,8 @@ def _active_link(config: Any, workspace: str, fields: dict[str, Any]) -> SharedB
             continue
         if (candidate.name == fields.get("brain")
                 and candidate.path == fields.get("checkout_path")
-                and getattr(candidate, "lifetime_id", None) == fields.get("link_lifetime_id")):
+                and getattr(candidate, "lifetime_id", None) == fields.get("link_lifetime_id")
+                and getattr(candidate, "kind", "git") == kind):
             return candidate
     return None
 
@@ -299,19 +395,52 @@ def _receipt_id(fields: dict[str, Any], commit: str) -> str:
     return "shrpub_" + hashlib.sha256(value.encode()).hexdigest()
 
 
+def _folder_receipt_id(fields: dict[str, Any], token: str) -> str:
+    """A deterministic identity for one folder create attempt, not its bytes alone."""
+    value = "\0".join((
+        fields["workspace"], fields["proposal_id"], str(fields["revision"]),
+        fields["destination_fingerprint"], "folder", token,
+    ))
+    return "shrpub_" + hashlib.sha256(value.encode()).hexdigest()
+
+
 def _valid_receipt(fields: dict[str, Any], receipt: dict[str, Any]) -> bool:
-    commit = receipt.get("commit_oid")
-    required_matches = (
-        isinstance(commit, str) and _OID.fullmatch(commit) is not None
-        and receipt.get("id") == _receipt_id(fields, commit)
-        and receipt.get("workspace") == fields.get("workspace")
+    common = (
+        receipt.get("workspace") == fields.get("workspace")
         and receipt.get("proposal_id") == fields.get("proposal_id")
         and receipt.get("revision") == fields.get("revision")
         and receipt.get("destination_fingerprint") == fields.get("destination_fingerprint")
         and receipt.get("operation") == fields.get("operation")
     )
-    if not required_matches:
+    if not common:
         return False
+    if fields.get("link_kind") == "folder":
+        token = receipt.get("attempt_token")
+        proposed = fields.get("proposed")
+        if (
+            not isinstance(token, str) or not token
+            or receipt.get("id") != _folder_receipt_id(fields, token)
+            or fields.get("operation") != "create"
+            or not isinstance(proposed, str)
+            or receipt.get("content_sha256") != fields.get("proposed_sha256")
+            or receipt.get("content_bytes") != len(proposed.encode("utf-8"))
+            or type(receipt.get("file_dev")) is not int
+            or type(receipt.get("file_ino")) is not int
+            or receipt.get("path") != fields.get("path")
+            or receipt.get("brain") != fields.get("brain")
+            or receipt.get("identity") != fields.get("origin_identity")
+            or receipt.get("link_lifetime_id") != fields.get("link_lifetime_id")
+            or receipt.get("scope") != "historical_local_write"
+            or receipt.get("local_only") is not True
+            or receipt.get("sync_claimed") is not False
+        ):
+            return False
+    else:
+        commit = receipt.get("commit_oid")
+        if not isinstance(commit, str) or _OID.fullmatch(commit) is None:
+            return False
+        if receipt.get("id") != _receipt_id(fields, commit):
+            return False
     # #3575 receipts predate destination display metadata. The immutable
     # artifact and deterministic receipt ID still bind them to this path.
     return all(
@@ -335,7 +464,23 @@ def _receipt_with_metadata(fields: dict[str, Any], receipt: dict[str, Any]) -> d
         enriched.setdefault("branch", upstream_ref.removeprefix("refs/heads/"))
     if isinstance(fields.get("link_lifetime_id"), str):
         enriched.setdefault("link_lifetime_id", fields["link_lifetime_id"])
+    if fields.get("link_kind") == "folder":
+        enriched.setdefault("link_kind", "folder")
+        enriched.setdefault("undoable", False)
+    else:
+        enriched.setdefault("link_kind", "git")
+        enriched.setdefault("undoable", True)
     return enriched
+
+
+def is_share_receipt_undoable(receipt: dict[str, Any]) -> bool:
+    """A folder create has no conditional reverse; only Git receipts are undoable."""
+    return (
+        receipt.get("undoable", True) is not False
+        and receipt.get("link_kind", "git") != "folder"
+        and isinstance(receipt.get("commit_oid"), str)
+        and bool(receipt.get("commit_oid"))
+    )
 
 
 def _write_state(config: Any, workspace: str, fields: dict[str, Any], update: dict[str, Any]) -> dict[str, Any]:
@@ -365,8 +510,8 @@ def _write_state(config: Any, workspace: str, fields: dict[str, Any], update: di
     return data
 
 
-@contextmanager
-def _proposal_lock(config: Any, workspace: str, fields: dict[str, Any]) -> Iterator[None]:
+@asynccontextmanager
+async def _locked_proposal(config: Any, workspace: str, fields: dict[str, Any]):
     lock_root = drafts._store_dir(config) / "locks"
     lock_root.mkdir(parents=True, exist_ok=True, mode=0o700)
     make_private_dir(lock_root)
@@ -376,73 +521,62 @@ def _proposal_lock(config: Any, workspace: str, fields: dict[str, Any]) -> Itera
     try:
         if not is_private_descriptor_strict(fd):
             raise OSError("share publication lock is not private")
-        lock_exclusive(fd)
+        await await_exclusive(fd)
         yield
     finally:
-        try:
-            unlock(fd)
-        finally:
-            os.close(fd)
-
-
-@asynccontextmanager
-async def _locked_proposal(config: Any, workspace: str, fields: dict[str, Any]):
-    """Acquire the cross-process proposal lock without blocking the event loop."""
-    loop = asyncio.get_running_loop()
-    context = _proposal_lock(config, workspace, fields)
-    acquire = loop.run_in_executor(None, context.__enter__)
-    try:
-        await asyncio.shield(acquire)
-    except asyncio.CancelledError:
-        await acquire
-        await asyncio.shield(loop.run_in_executor(None, context.__exit__, None, None, None))
-        raise
-    try:
-        yield
-    finally:
-        await asyncio.shield(loop.run_in_executor(None, context.__exit__, None, None, None))
-
-
-async def _run_locked(function: Callable[..., _T], *args: Any) -> _T:
-    """Keep locks held until a synchronous Git transaction finishes on cancellation."""
-    task = asyncio.create_task(asyncio.to_thread(function, *args))
-    try:
-        return await asyncio.shield(task)
-    except asyncio.CancelledError:
-        await task
-        raise
+        os.close(fd)
 
 
 def _verify_destination(
     config: Any, folder: Path, link: SharedBrainLink, fields: dict[str, Any], *,
     allow_legacy_lifetime: bool = False,
 ) -> tuple[str, str] | None:
+    if link.kind != "git":
+        return None
     if fields.get("link_lifetime_id") != getattr(link, "lifetime_id", None) and not (
         allow_legacy_lifetime and "link_lifetime_id" not in fields
     ):
         return None
-    state = shared_brain.brain_state(link, config)
-    if state.get("problem") or state.get("identity") != fields.get("origin_identity"):
+    if shared_brain.path_problem(config, link.path):
         return None
-    code, out, _ = _safe_git(folder, "config", "--get-all", "remote.origin.url")
-    configured = out.decode("utf-8", "strict").splitlines() if code == 0 else []
+    from ciao.workspaces import (
+        WorkspaceRegistryConflict,
+        ensure_registry_current,
+        persisted_checkout_links,
+        workspace_registry_claim,
+    )
+
+    try:
+        with workspace_registry_claim(config) as owner:
+            ensure_registry_current(config)
+            if owner.current is None:
+                return None
+            if not any(
+                row.get("name") == link.name
+                and row.get("identity") == link.identity
+                and row.get("lifetime_id", link.lifetime_id) == link.lifetime_id
+                for _workspace, row in persisted_checkout_links(owner.current, link.path)
+            ):
+                return None
+            observation = shared_brain.observe_under_fence(config, link, owner)
+    except (OSError, ValueError, WorkspaceRegistryConflict):
+        return None
+    if observation.state.get("problem"):
+        return None
+    configured = list(observation.configured_urls)
     if len(configured) != 1:
         return None
-    raw_origin = configured[0].strip()
+    raw_origin = configured[0]
     try:
         if shared_brain.canonical_identity(raw_origin) != fields["origin_identity"]:
             return None
     except ValueError:
         return None
     effective: list[str] = []
-    for args in (("remote", "get-url", "--all", "origin"), ("remote", "get-url", "--push", "--all", "origin")):
-        result, data, _ = _safe_git(folder, *args)
-        if result or not data:
-            return None
-        urls = data.decode("utf-8", "strict").splitlines()
+    for urls in (observation.fetch_urls, observation.push_urls):
         if len(urls) != 1:
             return None
-        url = urls[0].strip()
+        url = urls[0]
         try:
             if shared_brain.canonical_identity(url) != fields["origin_identity"]:
                 return None
@@ -602,6 +736,667 @@ def _porcelain_rejection(stdout: bytes, ref: str, commit: str) -> Literal["retry
     return None
 
 
+def _folder_chain_matches(
+    recorded: Any, chain: list[folder_io.DirectoryIdentity],
+) -> bool:
+    if not isinstance(recorded, list) or len(recorded) != len(chain):
+        return False
+    for row, current in zip(recorded, chain):
+        if (
+            not isinstance(row, dict)
+            or type(row.get("dev")) is not int
+            or type(row.get("ino")) is not int
+            or row["dev"] != current.dev
+            or row["ino"] != current.ino
+        ):
+            return False
+    return True
+
+
+@contextmanager
+def _folder_target(fields: dict[str, Any]):
+    """Open the reviewed folder chain and verify it is still the same directories."""
+    path = fields.get("checkout_path")
+    relative = fields.get("path")
+    if not isinstance(path, str) or not Path(path).is_absolute() or not isinstance(relative, str):
+        raise folder_io.FolderChanged("the reviewed folder path is invalid")
+    parts = tuple(relative.split("/"))
+    parent_fd, chain = folder_io.open_chain(path, parts)
+    try:
+        if not _folder_chain_matches(fields.get("folder_chain"), chain):
+            raise folder_io.FolderChanged("the shared folder path changed after review")
+        yield parent_fd, chain
+    finally:
+        os.close(parent_fd)
+
+
+def _folder_parts(fields: dict[str, Any]) -> tuple[str, tuple[str, ...]]:
+    path = fields.get("checkout_path")
+    relative = fields.get("path")
+    if not isinstance(path, str) or not Path(path).is_absolute() or not isinstance(relative, str):
+        raise folder_io.FolderChanged("the reviewed folder path is invalid")
+    return path, tuple(relative.split("/"))
+
+
+def _revalidate_visible_chain(
+    fields: dict[str, Any], chain: list[folder_io.DirectoryIdentity],
+) -> None:
+    path, parts = _folder_parts(fields)
+    folder_io.revalidate_chain(path, parts, chain)
+
+
+def _folder_staging_root(
+    config: Any, workspace: str, fields: dict[str, Any], parent_fd: int,
+) -> str:
+    """Pick or create trusted staging on the destination filesystem.
+
+    Engine state is used when it is already on the destination volume. A
+    mounted folder on another volume gets a private staging directory at that
+    volume's root, but only when it is outside every linked/synced tree and can
+    be opened without modifying an existing object. Otherwise the caller
+    offers manual export.
+    """
+    store = drafts._storage_safe(config, workspace)
+    store_fd = folder_io.open_directory_nofollow(str(store))
+    try:
+        engine_root = store / "staging"
+        try:
+            engine_fd, _identity = folder_io.open_or_create_private_dir(store_fd, "staging")
+        except FileExistsError:
+            raise
+        try:
+            if folder_io.same_mount(engine_fd, parent_fd):
+                return str(engine_root)
+        finally:
+            os.close(engine_fd)
+    finally:
+        os.close(store_fd)
+    volume_root = _folder_volume_root(fields, parent_fd)
+    candidate = Path(volume_root) / MOUNT_STAGING_DIR
+    if not _folder_staging_path_safe(config, candidate):
+        raise folder_io.UnsupportedFilesystem(
+            errno.EXDEV, "no trusted staging directory outside synced trees on this volume"
+        )
+    volume_fd = folder_io.open_directory_nofollow(volume_root)
+    try:
+        if not folder_io.same_mount(volume_fd, parent_fd):
+            raise folder_io.UnsupportedFilesystem(
+                errno.EXDEV, "staging is not on the destination filesystem"
+            )
+        child_fd, _identity = folder_io.open_or_create_private_dir(
+            volume_fd, MOUNT_STAGING_DIR
+        )
+        try:
+            if not folder_io.same_mount(child_fd, parent_fd):
+                raise folder_io.UnsupportedFilesystem(
+                    errno.EXDEV, "staging is not on the destination filesystem"
+                )
+        finally:
+            os.close(child_fd)
+    finally:
+        os.close(volume_fd)
+    return str(candidate)
+
+def _folder_volume_root(fields: dict[str, Any], parent_fd: int) -> str:
+    """The mount root containing the linked folder, by device identity."""
+    checkout = fields.get("checkout_path")
+    if not isinstance(checkout, str) or not Path(checkout).is_absolute():
+        raise folder_io.UnsupportedFilesystem(errno.EINVAL, "the linked folder path is invalid")
+    device = os.fstat(parent_fd).st_dev
+    candidate = Path(checkout)
+    while True:
+        parent = candidate.parent
+        if parent == candidate:
+            break
+        try:
+            parent_device = os.stat(parent).st_dev
+        except OSError as exc:
+            raise folder_io.UnsupportedFilesystem(
+                errno.EXDEV, "the destination mount root cannot be inspected"
+            ) from exc
+        if parent_device != device:
+            break
+        candidate = parent
+    return str(candidate)
+
+
+def _folder_staging_path_safe(config: Any, candidate: Path) -> bool:
+    """Reject staging inside the install, a vault, a shared brain, or export/archive."""
+    try:
+        target = Path(os.path.realpath(candidate))
+    except OSError:
+        return False
+    protected = [Path(config.workspace_root), Path(config.state_path).parent]
+    for name in config.workspace_names():
+        try:
+            protected.append(Path(config.workspace_vault_root(name)))
+        except ValueError:
+            continue
+        record = config.workspace(name) if hasattr(config, "workspace") else None
+        protected.extend(Path(link.path) for link in (getattr(record, "shared_brains", []) or []))
+    export_root = getattr(config, "workspace_export_root", None)
+    if export_root:
+        protected.append(Path(export_root))
+    from ciao.workspace_archive import archive_root
+
+    protected.append(archive_root(config))
+    for root in protected:
+        try:
+            root = Path(os.path.realpath(root))
+        except OSError:
+            return False
+        if target == root or target.is_relative_to(root):
+            return False
+    return True
+
+
+def _folder_same_mount(staging_root: str, parent_fd: int) -> bool:
+    """Hard links need staging and the destination on one filesystem."""
+    return os.stat(staging_root).st_dev == os.fstat(parent_fd).st_dev
+
+
+def _open_folder_staging(
+    staging_root: str, attempt: dict[str, Any],
+) -> int:
+    name = attempt.get("staging_name")
+    dev = attempt.get("staging_dev")
+    ino = attempt.get("staging_ino")
+    if not isinstance(name, str) or type(dev) is not int or type(ino) is not int:
+        raise folder_io.FolderChanged("the staging directory identity is missing")
+    return folder_io.open_staging_dir(staging_root, name, expected_dev=dev, expected_ino=ino)
+
+
+def _cleanup_folder_staging(attempt: dict[str, Any]) -> None:
+    """Best-effort staging cleanup that never removes a replaced or external file."""
+    staging_root = attempt.get("staging_root")
+    if not isinstance(staging_root, str) or not Path(staging_root).is_absolute():
+        return
+    try:
+        staging_fd = _open_folder_staging(staging_root, attempt)
+    except OSError:
+        return
+    try:
+        name = str(attempt["staging_name"])
+        dev = attempt.get("temp_dev")
+        ino = attempt.get("temp_ino")
+        token = attempt.get("token")
+        folder_io.discard_staging(
+            staging_fd, name, staging_root,
+            expected_dev=dev if type(dev) is int else None,
+            expected_ino=ino if type(ino) is int else None,
+            token=token if isinstance(token, str) else None,
+        )
+    finally:
+        os.close(staging_fd)
+
+def _folder_verify_link(config: Any, link: SharedBrainLink, fields: dict[str, Any]) -> bool:
+    if link.kind != "folder" or fields.get("link_kind") != "folder":
+        return False
+    if getattr(link, "lifetime_id", None) != fields.get("link_lifetime_id"):
+        return False
+    if link.identity != fields.get("origin_identity"):
+        return False
+    if os.path.realpath(link.path) != link.path:
+        return False
+    if drafts.folder_destination_fingerprint(link) != fields.get("destination_fingerprint"):
+        return False
+    state = shared_brain._brain_state_owned(link, config)
+    return not state.get("problem")
+
+
+def _folder_entry_matches(
+    parent_fd: int, fields: dict[str, Any], attempt: dict[str, Any],
+    proposed: bytes, *, staging_fd: int | None = None,
+) -> tuple[str, os.stat_result | None]:
+    """Classify the destination against the live staged inode and operation tag.
+
+    ``match`` returns the ``fstat`` of the descriptor that was actually read,
+    so the caller never re-resolves the mutable final name for the receipt.
+    """
+    name = str(fields["path"]).rsplit("/", 1)[-1]
+    owned_staging = staging_fd is None
+    if staging_fd is None:
+        staging_root = attempt.get("staging_root")
+        if not isinstance(staging_root, str) or not Path(staging_root).is_absolute():
+            return "indeterminate", None
+        try:
+            staging_fd = _open_folder_staging(staging_root, attempt)
+        except OSError:
+            return "indeterminate", None
+    try:
+        try:
+            staged = os.stat("note", dir_fd=staging_fd, follow_symlinks=False)
+        except OSError:
+            return "indeterminate", None
+        expected_dev = attempt.get("temp_dev")
+        expected_ino = attempt.get("temp_ino")
+        if (
+            not stat.S_ISREG(staged.st_mode)
+            or (type(expected_dev) is int and staged.st_dev != expected_dev)
+            or (type(expected_ino) is int and staged.st_ino != expected_ino)
+        ):
+            return "indeterminate", None
+        try:
+            fd = folder_io.open_regular(parent_fd, name)
+        except FileNotFoundError:
+            return "absent", None
+        except OSError:
+            return "indeterminate", None
+        try:
+            opened = os.fstat(fd)
+            if not stat.S_ISREG(opened.st_mode):
+                return "conflict", None
+            if opened.st_dev != staged.st_dev or opened.st_ino != staged.st_ino:
+                return "conflict", None
+            try:
+                tag = folder_io.read_operation_tag(fd)
+            except folder_io.UnsupportedFilesystem:
+                return "unsupported", None
+            except OSError:
+                return "indeterminate", None
+            if tag != attempt.get("token"):
+                return "indeterminate", None
+            if folder_io.read_all(fd, len(proposed) + 1) != proposed:
+                return "conflict", None
+            return "match", opened
+        finally:
+            os.close(fd)
+    finally:
+        if owned_staging:
+            os.close(staging_fd)
+
+
+def _folder_attempt_fields(fields: dict[str, Any], attempt: Any) -> bool:
+    token = attempt.get("token") if isinstance(attempt, dict) else None
+    return bool(
+        isinstance(attempt, dict)
+        and attempt.get("kind") == "folder"
+        and type(attempt.get("attempt")) is int
+        and attempt.get("attempt", 0) >= 1
+        and attempt.get("proposal_id") == fields.get("proposal_id")
+        and attempt.get("revision") == fields.get("revision")
+        and attempt.get("destination_fingerprint") == fields.get("destination_fingerprint")
+        and attempt.get("path") == fields.get("path")
+        and isinstance(token, str)
+        and bool(token)
+        and attempt.get("staging_name") == f".ciao-share-{token}.d"
+        and isinstance(attempt.get("staging_root"), str)
+        and Path(str(attempt.get("staging_root"))).is_absolute()
+    )
+
+
+def _make_folder_receipt(
+    fields: dict[str, Any], token: str, proposed: bytes, entry: os.stat_result,
+) -> dict[str, Any]:
+    return {
+        "id": _folder_receipt_id(fields, token),
+        "workspace": fields["workspace"], "ts": datetime.now(UTC).isoformat(),
+        "proposal_id": fields["proposal_id"], "revision": fields["revision"],
+        "brain": fields["brain"], "identity": fields["origin_identity"],
+        "path": fields["path"], "operation": "create",
+        "destination_fingerprint": fields["destination_fingerprint"],
+        "link_lifetime_id": fields.get("link_lifetime_id"),
+        "link_kind": "folder", "attempt_token": token,
+        "content_sha256": hashlib.sha256(proposed).hexdigest(),
+        "content_bytes": len(proposed),
+        "file_dev": entry.st_dev, "file_ino": entry.st_ino,
+        "commit_oid": None, "published_blob_oid": None,
+        "base_commit": None, "base_blob_oid": None,
+        "scope": "historical_local_write", "local_only": True, "sync_claimed": False,
+        "undoable": False,
+    }
+
+
+def _write_folder_attempts(
+    config: Any, workspace: str, fields: dict[str, Any], artifact: dict[str, Any],
+    attempts: list[dict[str, Any]],
+) -> PublishOutcome | None:
+    """Persist an attempt (or its resolution) under the same fence as dismissal."""
+    queue = Path(config.workspace_vault_root(workspace)) / drafts._QUEUE
+    try:
+        with drafts._thread_queue_lock(queue), memory_receipts.queue_lock(queue):
+            visible = drafts.load_share(config, workspace=workspace, proposal_id=fields["proposal_id"])
+            if (
+                isinstance(visible, drafts.ShareRefusal)
+                or visible.get("review_token") != artifact.get("review_token")
+                or visible.get("immutable") != fields
+            ):
+                return PublishOutcome("draft_corrupt", message="The share proposal is no longer active in its queue.")
+            try:
+                _write_state(config, workspace, fields, {"attempts": attempts})
+            except (OSError, ValueError, drafts.ShareDraftError):
+                return PublishOutcome("draft_unavailable", message="The publication attempt could not be recorded safely.")
+    except memory_receipts.QueueLockError:
+        return PublishOutcome("draft_unavailable", message="The share proposal queue could not be locked safely.")
+    return None
+
+
+def _folder_status_attempt(
+    attempts: list[dict[str, Any]], index: int, *, retryable: bool, reason: str,
+) -> list[dict[str, Any]]:
+    updated = [dict(attempt) for attempt in attempts]
+    updated[index]["status"] = "rejected"
+    updated[index]["retryable"] = retryable
+    updated[index]["reason"] = reason
+    return updated
+
+
+def _folder_advance_attempt(
+    attempts: list[dict[str, Any]], index: int, status: str,
+) -> list[dict[str, Any]]:
+    updated = [dict(attempt) for attempt in attempts]
+    updated[index]["status"] = status
+    updated[index].pop("retryable", None)
+    updated[index].pop("reason", None)
+    return updated
+
+
+def _publish_folder_locked(
+    config: Any, workspace: str, link: SharedBrainLink, fields: dict[str, Any],
+    artifact: dict[str, Any],
+) -> PublishOutcome:
+    """Stage in engine state, link one verified inode, and receipt only after flush."""
+    current = _artifact_for(config, workspace, fields["proposal_id"])
+    if current is None or current.get("immutable") != fields:
+        return PublishOutcome("draft_corrupt", message="The private share artifact changed during publication.")
+    publication = current.get("publication")
+    if isinstance(publication, dict):
+        for receipt in publication.get("receipts", []):
+            if isinstance(receipt, dict) and receipt.get("revision") == fields.get("revision") and _valid_receipt(fields, receipt):
+                return PublishOutcome("already_published", None, receipt.get("id"))
+    if not _folder_verify_link(config, link, fields):
+        return PublishOutcome("brain_changed", message="The shared folder destination changed after review.")
+    if fields.get("operation") != "create" or not isinstance(fields.get("proposed"), str):
+        return PublishOutcome(
+            "folder_update_unsupported",
+            message="Updating or deleting an existing note in an ordinary folder is not supported yet.",
+        )
+    proposed = str(fields["proposed"]).encode("utf-8")
+    if hashlib.sha256(proposed).hexdigest() != fields.get("proposed_sha256"):
+        return PublishOutcome("draft_corrupt", message="The reviewed note bytes could not be verified.")
+    attempts = current.get("publication", {}).get("attempts", [])
+    if not isinstance(attempts, list):
+        return PublishOutcome("draft_corrupt", message="The recorded publication attempts are unreadable.")
+    try:
+        target = _folder_target(fields)
+        parent_fd, chain = target.__enter__()
+    except folder_io.FolderChanged:
+        return PublishOutcome("unsafe_target", message="The shared folder path changed after review.")
+    except FileNotFoundError:
+        return PublishOutcome("brain_unavailable", message="The shared folder is not available.")
+    except OSError:
+        return PublishOutcome("brain_unavailable", message="The shared folder could not be opened safely.")
+    try:
+        final_name = str(fields["path"]).rsplit("/", 1)[-1]
+        # Resolve every attempt before starting a new one. Only a durably
+        # flushed attempt can become a receipt; pending, linked-but-unflushed
+        # and ambiguous attempts stay indeterminate.
+        for index, attempt in enumerate(attempts):
+            if not _folder_attempt_fields(fields, attempt):
+                return PublishOutcome("indeterminate", message="A recorded publication attempt is malformed.")
+            if attempt.get("status") == "rejected":
+                if attempt.get("retryable") is True:
+                    if folder_io.stat_entry(parent_fd, final_name) is not None:
+                        return PublishOutcome("changed_upstream", message="The reviewed note destination now exists; nothing was overwritten.")
+                    continue
+                if attempt.get("reason") == "unsupported_tag":
+                    return PublishOutcome("manual_export_required", message="This volume cannot carry the operation tag; export the note manually.")
+                return PublishOutcome("changed_upstream", message="The reviewed note destination already existed; nothing was overwritten.")
+            resolution, verified_entry = _folder_entry_matches(
+                parent_fd, fields, attempt, proposed,
+            )
+            if resolution == "match" and attempt.get("status") == "flushed" and verified_entry is not None:
+                receipt = _make_folder_receipt(fields, str(attempt["token"]), proposed, verified_entry)
+                try:
+                    _write_state(config, workspace, fields, {"receipt": receipt})
+                except (OSError, ValueError, drafts.ShareDraftError):
+                    return PublishOutcome("indeterminate", message="The publish was confirmed but its receipt needs recovery.")
+                _cleanup_folder_staging(attempt)
+                return PublishOutcome("published", None, receipt["id"])
+            if resolution == "conflict":
+                if attempt.get("status") != "flushed":
+                    # A pending/linked attempt has no proof that the link was
+                    # not ours-then-replaced; retain it and the staging inode.
+                    return PublishOutcome("indeterminate", message="The destination was replaced after an unproven link; reconcile before retrying.")
+                updated = _folder_status_attempt(attempts, index, retryable=False, reason="conflict")
+                failure = _write_folder_attempts(config, workspace, fields, artifact, updated)
+                if failure is not None:
+                    return failure
+                _cleanup_folder_staging(attempt)
+                return PublishOutcome("changed_upstream", message="The destination changed after review; nothing was overwritten.")
+            if resolution == "unsupported":
+                return PublishOutcome("folder_unverifiable", message="This volume cannot prove the completed write, so nothing was claimed.")
+            return PublishOutcome("indeterminate", message="A recorded create cannot be proven flushed and complete; reconcile before retrying.")
+        if len(attempts) >= MAX_ATTEMPTS:
+            return PublishOutcome("indeterminate", message="No further folder publication attempt is allowed without re-review.")
+        # Capability checks gate only a NEW attempt. Existing attempts were
+        # reconciled above even when this volume can no longer start one.
+        try:
+            staging_root = _folder_staging_root(config, workspace, fields, parent_fd)
+            same_mount = _folder_same_mount(staging_root, parent_fd)
+        except OSError:
+            return PublishOutcome(
+                "manual_export_required",
+                message="No trusted staging directory is available on the destination filesystem; export the note manually.",
+            )
+        if not same_mount:
+            return PublishOutcome(
+                "manual_export_required",
+                message="No trusted staging directory is available on the destination filesystem; export the note manually.",
+            )
+        if not folder_io.verified_hardlink_support(staging_root):
+            return PublishOutcome(
+                "manual_export_required",
+                message="This filesystem cannot hard-link from trusted staging; export the note manually.",
+            )
+        if not folder_io.verified_rename_observability(staging_root):
+            return PublishOutcome(
+                "manual_export_required",
+                message="This volume does not expose a verifiable move-away guard; export the note manually.",
+            )
+        if folder_io.stat_entry(parent_fd, final_name) is not None:
+            return PublishOutcome("changed_upstream", message="The reviewed note destination now exists; nothing was overwritten.")
+        token = secrets.token_urlsafe(24)
+        staging_name = f".ciao-share-{token}.d"
+        new_attempt: dict[str, Any] = {
+            "attempt": len(attempts) + 1, "kind": "folder", "status": "pending",
+            "token": token, "staging_name": staging_name,
+            "staging_root": staging_root,
+            "proposal_id": fields["proposal_id"], "revision": fields["revision"],
+            "destination_fingerprint": fields["destination_fingerprint"],
+            "path": fields["path"],
+        }
+        # The durable intent exists before the destination is touched.
+        updated = [*attempts, new_attempt]
+        failure = _write_folder_attempts(config, workspace, fields, artifact, updated)
+        if failure is not None:
+            return failure
+        try:
+            staging_fd, staging_identity = folder_io.create_staging_dir(staging_root, staging_name)
+        except FileExistsError:
+            rejected = _folder_status_attempt(updated, len(updated) - 1, retryable=True, reason="staging_exists")
+            _write_folder_attempts(config, workspace, fields, artifact, rejected)
+            return PublishOutcome("draft_unavailable", message="A private staging name already exists; retry the review.")
+        except OSError:
+            rejected = _folder_status_attempt(updated, len(updated) - 1, retryable=True, reason="staging_unavailable")
+            _write_folder_attempts(config, workspace, fields, artifact, rejected)
+            return PublishOutcome("draft_unavailable", message="The note could not be staged safely; nothing was published.")
+        try:
+            new_attempt["staging_dev"] = staging_identity.dev
+            new_attempt["staging_ino"] = staging_identity.ino
+            failure = _write_folder_attempts(config, workspace, fields, artifact, updated)
+            if failure is not None:
+                folder_io.discard_staging(staging_fd, staging_name, staging_root)
+                return failure
+            try:
+                temp_dev, temp_ino = folder_io.create_staged_file(staging_fd, "note", proposed, token)
+            except folder_io.UnsupportedFilesystem:
+                folder_io.discard_staging(staging_fd, staging_name, staging_root)
+                rejected = _folder_status_attempt(updated, len(updated) - 1, retryable=False, reason="unsupported_tag")
+                _write_folder_attempts(config, workspace, fields, artifact, rejected)
+                return PublishOutcome("manual_export_required", message="This volume cannot carry the operation tag that proves a completed write; export the note manually.")
+            except OSError:
+                folder_io.discard_staging(staging_fd, staging_name, staging_root)
+                rejected = _folder_status_attempt(updated, len(updated) - 1, retryable=True, reason="staged_write_failed")
+                _write_folder_attempts(config, workspace, fields, artifact, rejected)
+                return PublishOutcome("draft_unavailable", message="The note could not be staged safely; nothing was published.")
+            new_attempt["temp_dev"] = temp_dev
+            new_attempt["temp_ino"] = temp_ino
+            failure = _write_folder_attempts(config, workspace, fields, artifact, updated)
+            if failure is not None:
+                folder_io.discard_staging(
+                    staging_fd, staging_name, staging_root,
+                    expected_dev=temp_dev, expected_ino=temp_ino, token=token,
+                )
+                return failure
+            try:
+                ancestor_before = folder_io.ancestor_stamps(parent_fd)
+            except OSError:
+                return PublishOutcome("indeterminate", message="The approved folder path cannot be proven stable; reconcile before retrying.")
+            try:
+                _revalidate_visible_chain(fields, chain)
+            except folder_io.FolderChanged:
+                folder_io.discard_staging(
+                    staging_fd, staging_name, staging_root,
+                    expected_dev=temp_dev, expected_ino=temp_ino, token=token,
+                )
+                return PublishOutcome("indeterminate", message="The approved folder path changed before the write; nothing was published.")
+            try:
+                folder_io.link_no_clobber(
+                    staging_fd, "note", parent_fd, final_name,
+                    expected_dev=temp_dev, expected_ino=temp_ino, token=token,
+                )
+            except folder_io.UnsupportedFilesystem:
+                folder_io.discard_staging(
+                    staging_fd, staging_name, staging_root,
+                    expected_dev=temp_dev, expected_ino=temp_ino, token=token,
+                )
+                rejected = _folder_status_attempt(updated, len(updated) - 1, retryable=False, reason="unsupported_mount")
+                _write_folder_attempts(config, workspace, fields, artifact, rejected)
+                return PublishOutcome("manual_export_required", message="This folder cannot be hard-linked from private staging; export the note manually.")
+            except folder_io.FolderChanged:
+                return PublishOutcome("indeterminate", message="The staged note changed before linking; reconcile before retrying.")
+            except OSError:
+                # No post-syscall errno is a portable proof that the link did
+                # not complete on an unverified volume. Keep the proposal and
+                # staging evidence; only reconciliation may resolve it.
+                return PublishOutcome("indeterminate", message="The filesystem did not confirm the link; reconcile before retrying.")
+            try:
+                ancestor_after = folder_io.ancestor_stamps(parent_fd)
+            except OSError:
+                return PublishOutcome("indeterminate", message="The approved folder path cannot be proven stable; reconcile before retrying.")
+            if ancestor_after != ancestor_before:
+                return PublishOutcome("indeterminate", message="The approved folder path changed during the write; reconcile before retrying.")
+            linked = _folder_advance_attempt(updated, len(updated) - 1, "linked")
+            failure = _write_folder_attempts(config, workspace, fields, artifact, linked)
+            if failure is not None:
+                return PublishOutcome("indeterminate", message="The link succeeded but its durable state could not be recorded; reconcile before retrying.")
+            try:
+                folder_io.fsync_directory(parent_fd)
+            except OSError:
+                return PublishOutcome("indeterminate", message="The created note could not be flushed to stable storage; reconcile before retrying.")
+            flushed = _folder_advance_attempt(linked, len(linked) - 1, "flushed")
+            failure = _write_folder_attempts(config, workspace, fields, artifact, flushed)
+            if failure is not None:
+                return PublishOutcome("indeterminate", message="The directory flush succeeded but its durable state could not be recorded; reconcile before retrying.")
+            try:
+                _revalidate_visible_chain(fields, chain)
+            except folder_io.FolderChanged:
+                return PublishOutcome("indeterminate", message="The approved folder path changed after the write; reconcile before retrying.")
+            resolution, verified_entry = _folder_entry_matches(
+                parent_fd, fields, new_attempt, proposed,
+                staging_fd=staging_fd,
+            )
+            if resolution == "unsupported":
+                return PublishOutcome("folder_unverifiable", message="This volume cannot prove the completed write, so nothing was claimed.")
+            if resolution != "match" or verified_entry is None:
+                if resolution == "conflict":
+                    rejected = _folder_status_attempt(flushed, len(flushed) - 1, retryable=False, reason="conflict")
+                    failure = _write_folder_attempts(config, workspace, fields, artifact, rejected)
+                    if failure is not None:
+                        return failure
+                    folder_io.discard_staging(
+                        staging_fd, staging_name, staging_root,
+                        expected_dev=temp_dev, expected_ino=temp_ino, token=token,
+                    )
+                    return PublishOutcome("changed_upstream", message="The destination changed while publishing; nothing was overwritten.")
+                return PublishOutcome("indeterminate", message="The created note cannot be proven complete; reconcile before retrying.")
+            receipt = _make_folder_receipt(fields, token, proposed, verified_entry)
+            try:
+                _write_state(config, workspace, fields, {"receipt": receipt})
+            except (OSError, ValueError, drafts.ShareDraftError):
+                return PublishOutcome("indeterminate", message="The publish was confirmed but its receipt needs recovery.")
+            folder_io.discard_staging(
+                staging_fd, staging_name, staging_root,
+                expected_dev=temp_dev, expected_ino=temp_ino, token=token,
+            )
+            return PublishOutcome("published", None, receipt["id"])
+        finally:
+            os.close(staging_fd)
+    finally:
+        target.__exit__(None, None, None)
+
+
+def _reconcile_folder_locked(
+    config: Any, workspace: str, link: SharedBrainLink | None, fields: dict[str, Any],
+    artifact: dict[str, Any],
+) -> PublishOutcome:
+    """Confirm only a durably flushed attempt from its live staged inode and tag."""
+    current = _artifact_for(config, workspace, fields["proposal_id"])
+    if current is None or current.get("immutable") != fields:
+        return PublishOutcome("draft_corrupt", message="The private share artifact changed during reconciliation.")
+    artifact = current
+    publication = artifact.get("publication")
+    attempts = publication.get("attempts", []) if isinstance(publication, dict) else []
+    if not isinstance(attempts, list) or not attempts:
+        return PublishOutcome("indeterminate", message="There is no recorded folder publication attempt to reconcile.")
+    proposed = fields.get("proposed")
+    if not isinstance(proposed, str) or fields.get("operation") != "create":
+        return PublishOutcome("indeterminate", message="The recorded folder publication is unsupported.")
+    payload = proposed.encode("utf-8")
+    try:
+        target = _folder_target(fields)
+        parent_fd, _chain = target.__enter__()
+    except folder_io.FolderChanged:
+        return PublishOutcome("indeterminate", message="The recorded folder destination changed.")
+    except (FileNotFoundError, OSError):
+        return PublishOutcome("indeterminate", message="The recorded folder destination is unavailable.")
+    try:
+        final_name = str(fields["path"]).rsplit("/", 1)[-1]
+        for index, attempt in enumerate(attempts):
+            if not _folder_attempt_fields(fields, attempt):
+                return PublishOutcome("indeterminate", message="A recorded publication attempt is malformed.")
+            if attempt.get("status") == "rejected":
+                if attempt.get("retryable") is True:
+                    continue
+                if attempt.get("reason") == "unsupported_tag":
+                    return PublishOutcome("manual_export_required", message="This volume cannot prove a completed write; export the note manually.")
+                return PublishOutcome("changed_upstream", message="The reviewed destination already existed; nothing was overwritten.")
+            resolution, verified_entry = _folder_entry_matches(
+                parent_fd, fields, attempt, payload,
+            )
+            if resolution == "match" and attempt.get("status") == "flushed" and verified_entry is not None:
+                receipt = _make_folder_receipt(fields, str(attempt["token"]), payload, verified_entry)
+                try:
+                    _write_state(config, workspace, fields, {"receipt": receipt})
+                except (OSError, ValueError, drafts.ShareDraftError):
+                    return PublishOutcome("indeterminate", message="The publish was confirmed but its receipt needs recovery.")
+                _cleanup_folder_staging(attempt)
+                return PublishOutcome("published", None, receipt["id"])
+            if resolution == "conflict":
+                if attempt.get("status") != "flushed":
+                    return PublishOutcome("indeterminate", message="The destination was replaced after an unproven link; reconcile before retrying.")
+                updated = _folder_status_attempt(attempts, index, retryable=False, reason="conflict")
+                _write_folder_attempts(config, workspace, fields, artifact, updated)
+                _cleanup_folder_staging(attempt)
+                return PublishOutcome("changed_upstream", message="The destination changed after review; nothing was overwritten.")
+            if resolution == "unsupported":
+                return PublishOutcome("folder_unverifiable", message="This volume cannot prove the completed write, so nothing was claimed.")
+            return PublishOutcome("indeterminate", message="No recorded folder create can be proven flushed and complete.")
+        return PublishOutcome("indeterminate", message="No recorded folder create can be proven flushed and complete.")
+    finally:
+        target.__exit__(None, None, None)
+
 async def publish_share(config: Any, *, workspace: str, proposal_id: str, expected_revision: str) -> PublishOutcome:
     """Publish the reviewed artifact once; reconcile every persisted attempt first."""
     artifact = _artifact_for(config, workspace, proposal_id)
@@ -610,6 +1405,8 @@ async def publish_share(config: Any, *, workspace: str, proposal_id: str, expect
     fields = artifact["immutable"]
     if expected_revision != artifact.get("review_token"):
         return PublishOutcome("stale_review", message="The shared-note review has changed.")
+    if "evidence_authorization" in fields:
+        return PublishOutcome("draft_unavailable", message="This candidate is awaiting publication fencing.")
     publication_raw = artifact.get("publication")
     publication: dict[str, Any] = publication_raw if isinstance(publication_raw, dict) else {}
     receipts = publication.get("receipts", [])
@@ -633,11 +1430,15 @@ async def publish_share(config: Any, *, workspace: str, proposal_id: str, expect
         if isinstance(prior_publication, dict) and prior_publication.get("attempts"):
             return await reconcile_share(config, workspace=workspace, proposal_id=proposal_id, expected_revision=expected_revision)
         return PublishOutcome("brain_unavailable", message="The selected shared brain is no longer linked.")
+    expected_kind = fields.get("link_kind", "git")
+    if getattr(link, "kind", "git") != expected_kind:
+        if publication.get("attempts"):
+            return await reconcile_share(config, workspace=workspace, proposal_id=proposal_id, expected_revision=expected_revision)
+        return PublishOutcome("brain_changed", message="The selected shared brain is linked with a different storage kind.")
     if getattr(link, "lifetime_id", None) != fields.get("link_lifetime_id"):
         if publication.get("attempts"):
             return await reconcile_share(config, workspace=workspace, proposal_id=proposal_id, expected_revision=expected_revision)
         return PublishOutcome("brain_unavailable", message="The selected shared brain link lifetime has changed.")
-    folder = Path(link.path)
     checkout_lock = shared_brain._checkout_lock(link.path)
     try:
         async with checkout_lock:
@@ -650,13 +1451,20 @@ async def publish_share(config: Any, *, workspace: str, proposal_id: str, expect
                     ) else "brain_unavailable", message="The selected shared brain link is no longer active.")
                 else:
                     async with _locked_proposal(config, workspace, fields):
-                        result = await _run_locked(_publish_locked, config, workspace, Path(active.path), active, fields, artifact)
+                        if active.kind == "folder":
+                            result = await run_while_claimed(
+                                _publish_folder_locked, config, workspace, active, fields, artifact
+                            )
+                        else:
+                            result = await run_while_claimed(
+                                _publish_locked, config, workspace, Path(active.path), active, fields, artifact
+                            )
     except (OSError, ValueError, drafts.ShareDraftError):
         return PublishOutcome("draft_unavailable", message="Private publication state is unavailable.")
     if result.outcome == "reconcile_after_unlink":
         return await reconcile_share(config, workspace=workspace, proposal_id=proposal_id,
                                      expected_revision=expected_revision)
-    if result.outcome == "published":
+    if result.outcome == "published" and link.kind == "git":
         try:
             await shared_brain.update_brain(link, config)
         except Exception:
@@ -680,6 +1488,17 @@ async def reconcile_share(config: Any, *, workspace: str, proposal_id: str, expe
     path = fields.get("checkout_path")
     if not isinstance(path, str) or not Path(path).is_absolute():
         return PublishOutcome("indeterminate", message="The recorded checkout cannot be verified.")
+    if fields.get("link_kind") == "folder":
+        checkout_lock = shared_brain._checkout_lock(path)
+        try:
+            async with checkout_lock:
+                async with shared_brain._checkout_claim(path, config):
+                    async with _locked_proposal(config, workspace, fields):
+                        return await run_while_claimed(
+                            _reconcile_folder_locked, config, workspace, None, fields, artifact
+                        )
+        except (OSError, ValueError, drafts.ShareDraftError):
+            return PublishOutcome("indeterminate", message="The recorded folder publication could not be reconciled.")
     link = SharedBrainLink(
         name=str(fields.get("brain", "")), path=path,
         identity=str(fields.get("origin_identity", "")),
@@ -689,8 +1508,14 @@ async def reconcile_share(config: Any, *, workspace: str, proposal_id: str, expe
     try:
         async with checkout_lock:
             async with shared_brain._checkout_claim(path, config):
+                from ciao.workspaces import persisted_checkout_links, WorkspaceRegistryConflict
+                registry_path = Path(config.state_path).parent / "workspaces.json"
+                try:
+                    persisted_checkout_links(registry_path.read_bytes(), path)
+                except (OSError, ValueError, WorkspaceRegistryConflict):
+                    return PublishOutcome("indeterminate", message="The recorded checkout cannot be verified.")
                 async with _locked_proposal(config, workspace, fields):
-                    result = await _run_locked(_reconcile_locked, config, workspace, Path(path), link, fields)
+                    result = await run_while_claimed(_reconcile_locked, config, workspace, Path(path), link, fields)
     except (OSError, ValueError, drafts.ShareDraftError):
         return PublishOutcome("indeterminate", message="The recorded publish attempt could not be reconciled.")
     return result
@@ -742,9 +1567,6 @@ def _publish_locked(config: Any, workspace: str, folder: Path, link: SharedBrain
     if destination is None:
         return PublishOutcome("brain_changed", message="The shared brain destination changed after review.")
     origin, ref = destination
-    state = shared_brain.brain_state(link, config)
-    if state.get("problem"):
-        return PublishOutcome("brain_changed", message="The shared brain is unavailable or has changed.")
     code, _out, _err = _safe_git(folder, "config", "--get", "core.repositoryformatversion", limit=256)
     if code:
         return PublishOutcome("brain_changed", message="The shared brain checkout could not be verified.")
@@ -782,9 +1604,13 @@ def _publish_locked(config: Any, workspace: str, folder: Path, link: SharedBrain
         if code:
             return PublishOutcome("upstream_unavailable", message="The shared brain upstream could not be read.")
         tip = _text(tip_raw)
-        base_state, base_oid, _base_content, _mode = _blob(folder, tip, fields["path"])
+        base_state, base_oid, _base_content, mode = _blob(folder, tip, fields["path"])
         expected_oid = fields.get("base_blob_oid")
-        if (expected_oid is None and base_state != "absent") or (expected_oid is not None and (base_state != "blob" or base_oid != expected_oid)):
+        if (expected_oid is None and base_state != "absent") or (
+            expected_oid is not None
+            and (base_state != "blob" or base_oid != expected_oid
+                 or ("base_mode" in fields and mode != fields["base_mode"]))
+        ):
             return PublishOutcome("changed_upstream", message="The reviewed note changed upstream; draft it again.")
         commit, error = _prepare_commit(folder, tip, fields, number + 1)
         if commit is None:
@@ -897,10 +1723,12 @@ def list_share_receipt_details(
             continue
         owner = fields.get("workspace")
         sidecar_id = fields.get("sidecar_id")
-        required_strings = (
+        required_strings = [
             "workspace", "sidecar_id", "proposal_id", "destination_fingerprint",
-            "operation", "brain", "origin_identity", "path", "upstream_ref",
-        )
+            "operation", "brain", "origin_identity", "path",
+        ]
+        if fields.get("link_kind") != "folder":
+            required_strings.append("upstream_ref")
         if (
             any(not isinstance(fields.get(key), str) or not fields.get(key) for key in required_strings)
             or type(fields.get("revision")) is not int
@@ -995,6 +1823,11 @@ async def draft_share_reversal(
     if detail is None:
         return drafts.ShareRefusal("receipt_unavailable", "The shared-note receipt could not be verified.")
     receipt, fields = detail["receipt"], detail["immutable"]
+    if fields.get("link_kind") == "folder":
+        return drafts.ShareRefusal(
+            "undo_unsupported",
+            "A note published into an ordinary folder cannot be undone or deleted by Ciaobot; edit it in the folder instead.",
+        )
     record = config.workspace(workspace) if hasattr(config, "workspace") else None
     link = next((item for item in getattr(record, "shared_brains", []) or [] if item.name == fields.get("brain")), None)
     if link is None or getattr(link, "lifetime_id", None) != fields.get("link_lifetime_id"):
@@ -1039,10 +1872,11 @@ async def draft_share_reversal(
                         config, workspace=workspace, brain=str(fields["brain"]),
                         relative_path=str(fields["path"]), operation=inverse,
                         proposed=proposed, request_key="undo:" + receipt_id,
+                        checkout_claimed=True,
                     )
                     if isinstance(drafted, drafts.ShareRefusal):
                         return drafted
                     return {"workspace": workspace, "review_path": drafted.review_path}
-                return await asyncio.to_thread(verify_and_draft)
+                return await run_while_claimed(verify_and_draft)
     except (OSError, ValueError, drafts.ShareDraftError):
         return drafts.ShareRefusal("draft_unavailable", "The shared-note reversal could not be queued.")

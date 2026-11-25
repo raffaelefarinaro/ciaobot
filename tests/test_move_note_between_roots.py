@@ -66,6 +66,14 @@ def _install(tmp_path: Path, *, git: bool = True) -> tuple[Path, list]:
 
 
 def _move(root: Path, targets: list, source: str, to: str, **kw):
+    runtime = root / ".runtime"
+    runtime.mkdir(exist_ok=True)
+    from ciao.setup_marker import write_vault_index_ownership
+
+    write_vault_index_ownership(
+        runtime, [target for target, _name, _prefix in targets], owner="ciao"
+    )
+    kw.setdefault("runtime_root", runtime)
     return move_note_between_roots(
         root, source, to, targets=targets, workspaces=["personal", "work"], **kw
     )

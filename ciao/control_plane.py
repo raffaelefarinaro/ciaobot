@@ -16,6 +16,7 @@ import json
 import logging
 import math
 import os
+import stat
 import sqlite3
 import sys
 import threading
@@ -35,6 +36,14 @@ from ciao.async_reads import keyed_lock, run_read
 from ciao.execution_modes import MODE_RANK
 from ciao.jsonio import MAX_JSON_DEPTH, json_nesting_exceeds
 from ciao.fts_search import (
+    connected_db_path,
+    connected_index_connection,
+    ConnectedIndexBusy,
+    ConnectedRegistration,
+    ConnectedWorkspaceChanged,
+    connected_entries,
+    refresh_connected_index,
+    adopted_vault_key_prefix,
     get_db_path,
     index_vault,
     init_db,
@@ -1717,6 +1726,103 @@ class CiaoControlPlane:
         # callers and no second spelling of the fallback to drift from it.
         return self.workspace_vault_root(self._workspace(principal))
 
+    async def managed_care_begin(self, principal: AgentPrincipal, ttl_s: float, vault: str) -> dict[str, Any]:
+        """Take a care lease only for the engine's currently running care dispatch."""
+        import math  # noqa: PLC0415
+        from ciao import curation_run, curation_share  # noqa: PLC0415
+
+        workspace = self._workspace(principal)
+        dispatcher = self.pcm._schedule_dispatcher_for()
+        dispatch_id = dispatcher.active_care_dispatch(principal.chat_id, workspace)
+        if not dispatch_id or not principal.token_id or not self._unattended_turn(principal):
+            raise ControlPlaneError("not_care_dispatch", "A live managed Workspace care dispatch is required.")
+        if not vault or Path(vault).resolve() != self._vault_root(principal).resolve():
+            raise ControlPlaneError("invalid_workspace", "The care vault does not match the managed workspace.")
+        if not math.isfinite(ttl_s) or ttl_s < 1 or ttl_s > 86400:
+            raise ControlPlaneError("invalid_request", "Care lease duration must be between 1 and 86400 seconds.")
+        try:
+            lease = curation_share.begin(
+                self.config, workspace=workspace, chat_id=principal.chat_id,
+                token_id=principal.token_id, dispatch_id=dispatch_id, ttl_s=ttl_s,
+            )
+        except curation_run.CurationBusy as exc:
+            raise ControlPlaneError("curation_busy", str(exc)) from None
+        try:
+            await asyncio.to_thread(curation_share.dispatch_ready, self.config, workspace=workspace)
+        except Exception:  # noqa: BLE001 - private intake remains retryable
+            logger.warning("Unable to file settled Workspace care candidates; they remain private")
+        return _ok({**lease.as_dict(), "vault": str(lease.vault_root.resolve())})
+
+    def managed_care_checkpoint(self, principal: AgentPrincipal, holder: str, key: str) -> dict[str, Any]:
+        """Stage only witnesses for a completed item of this live care dispatch."""
+        from ciao import curation_share  # noqa: PLC0415
+
+        workspace = self._workspace(principal)
+        dispatch_id = self.pcm._schedule_dispatcher_for().active_care_dispatch(principal.chat_id, workspace)
+        if not dispatch_id or not principal.token_id or not self._unattended_turn(principal):
+            raise ControlPlaneError("not_care_dispatch", "A live managed Workspace care dispatch is required.")
+        if not holder or len(holder) > 512 or not key or len(key) > 512:
+            raise ControlPlaneError("invalid_request", "A valid care lease and work item are required.")
+        staged = curation_share.checkpoint(
+            self.config, self.pcm, workspace=workspace, chat_id=principal.chat_id,
+            token_id=principal.token_id, dispatch_id=dispatch_id, holder=holder, key=key,
+        )
+        return _ok({"staged": staged})
+
+    async def managed_care_end(
+        self, principal: AgentPrincipal, holder: str, status: str, reasons: list[str]
+    ) -> dict[str, Any]:
+        """Derive the run outcome and settle it under the active care dispatch."""
+        from ciao import curation_run, curation_share  # noqa: PLC0415
+        from ciao.cli import _derive_run_counts  # noqa: PLC0415
+        from ciao.entity_types import load_entity_types  # noqa: PLC0415
+        from ciao.proposal_predictions import HandoverPolicy  # noqa: PLC0415
+        from ciao.vault_index import VAULT_RENDER_PREFIX  # noqa: PLC0415
+        from ciao.workspace_guide import guide_path  # noqa: PLC0415
+
+        workspace = self._workspace(principal)
+        dispatcher = self.pcm._schedule_dispatcher_for()
+        dispatch_id = dispatcher.active_care_dispatch(principal.chat_id, workspace)
+        if not dispatch_id or not principal.token_id or not self._unattended_turn(principal):
+            raise ControlPlaneError("not_care_dispatch", "A live managed Workspace care dispatch is required.")
+        if status not in ("ok", "failed") or not holder or len(holder) > 512 or len(reasons) > 100:
+            raise ControlPlaneError("invalid_request", "The care settlement request is invalid.")
+        if any(len(reason) > 4096 for reason in reasons):
+            raise ControlPlaneError("invalid_request", "The care settlement reasons are too long.")
+        vault = Path(self.config.workspace_vault_root(workspace))
+
+        def settle() -> dict[str, Any]:
+            counts = _derive_run_counts(vault, holder=holder, workspace=workspace)
+            state = curation_run.load_state(vault)
+            views = curation_run.build_worklist_views(
+                policy=HandoverPolicy.of(self.config.workspace(workspace)), vault_root=vault,
+                guide_path=guide_path(self.config.agent_root(workspace)),
+                workspace_dir=self.config.workspace_root, done_keys=frozenset(state.done_keys),
+                category_registry=load_entity_types(Path(self.config.agent_vault_root(workspace))),
+                config=self.config, path_prefix=VAULT_RENDER_PREFIX, workspace=workspace,
+            )
+            live_keys = frozenset(key for item in views.remaining.items for key in item.keys)
+            summary = curation_share.end(
+                self.config, workspace=workspace, chat_id=principal.chat_id, token_id=principal.token_id,
+                dispatch_id=dispatch_id, holder=holder, status=status, planned=counts.planned,
+                completed=counts.completed, deferred=counts.deferred, reasons=[*reasons, *counts.reasons],
+                live_keys=live_keys, failed=counts.failed, counts_complete=counts.complete,
+                dispatch_active=lambda: dispatcher.active_care_dispatch(principal.chat_id, workspace) == dispatch_id,
+            )
+            try:
+                curation_share.dispatch_ready(self.config, workspace=workspace)
+            except Exception:  # noqa: BLE001 - the durable receipt is retried on the next run
+                logger.warning("Unable to file settled Workspace care candidates; they remain private")
+            return summary
+
+        try:
+            summary = await asyncio.to_thread(settle)
+        except curation_run.CurationBusy as exc:
+            raise ControlPlaneError("curation_busy", str(exc)) from None
+        except curation_run.CurationStateError as exc:
+            raise ControlPlaneError("curation_state_error", str(exc)) from None
+        return _ok(summary)
+
     def _unattended_turn(self, principal: AgentPrincipal) -> bool:
         """Whether the turn asking right now was fired by a schedule, not a person.
 
@@ -2224,6 +2330,160 @@ class CiaoControlPlane:
             f"note-create:{notes_root}:{title}", _run, coalesce=False
         )
         return _ok(reported)
+
+    def _share_body_bytes(self, workspace: str, relative: str) -> bytes:
+        """Read one regular file beneath this workspace's vault through its descriptor."""
+        from ciao.share_proposals import MAX_BYTES
+
+        if not relative or Path(relative).is_absolute() or "\\" in relative or "\x00" in relative:
+            raise ControlPlaneError("note_file_invalid", "--body-file must be a relative path inside this workspace vault.")
+        parts = relative.split("/")
+        if any(part in {"", ".", ".."} for part in parts):
+            raise ControlPlaneError("note_file_invalid", "--body-file must be a relative path inside this workspace vault.")
+        root = Path(self.config.workspace_vault_root(workspace)).resolve()
+        directory_flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
+        file_flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
+        descriptor = -1
+        try:
+            descriptor = os.open(root, directory_flags)
+            for component in parts[:-1]:
+                next_descriptor = os.open(component, directory_flags, dir_fd=descriptor)
+                os.close(descriptor)
+                descriptor = next_descriptor
+            file_descriptor = os.open(parts[-1], file_flags, dir_fd=descriptor)
+            with os.fdopen(file_descriptor, "rb") as handle:
+                if not stat.S_ISREG(os.fstat(handle.fileno()).st_mode):
+                    raise ControlPlaneError("note_file_invalid", "--body-file must name an ordinary file.")
+                data = handle.read(MAX_BYTES + 1)
+                if len(data) > MAX_BYTES:
+                    raise ControlPlaneError("note_file_invalid", f"--body-file exceeds the {MAX_BYTES}-byte limit.")
+                return data
+        except ControlPlaneError:
+            raise
+        except (OSError, ValueError) as exc:
+            raise ControlPlaneError("note_file_invalid", f"--body-file cannot be read inside this workspace vault: {exc}") from exc
+        finally:
+            if descriptor >= 0:
+                os.close(descriptor)
+
+    async def note_share(
+        self, principal: AgentPrincipal, *, path: str, body_file: str, brain: str = ""
+    ) -> dict[str, Any]:
+        """Queue an exact note body for a human to review before it reaches a shared brain."""
+        import hashlib
+        from ciao import share_proposals as sp
+
+        workspace = self._workspace(principal)
+        chat, project = self._chat_scope(principal)
+        if (
+            project.workspace != workspace
+            or str(chat.chat_id) != principal.chat_id
+            or str(chat.project_id) != principal.project_id
+            or str(chat.provider) != principal.provider
+        ):
+            raise ControlPlaneError("chat_required", "Sharing a note requires an attributable chat in this workspace.")
+        stream = self.pcm.get_active_stream(principal.chat_id)
+        if stream is None:
+            raise ControlPlaneError("note_share_inactive", "Sharing a note requires the active foreground user turn.")
+        with stream.publish_lock:
+            turn_count = int(getattr(chat, "user_turn_count", 0) or 0)
+            if turn_count < 1:
+                raise ControlPlaneError("chat_required", "Sharing a note requires an attributable user turn in this chat.")
+            turn_index = turn_count - 1
+            turn_key = str(turn_index)
+            publish_generation = stream.publish_generation
+            origins = getattr(chat, "user_turn_origin", None)
+            timings = getattr(chat, "user_turn_timings", None)
+            turn_ids = getattr(chat, "user_turn_ids", None)
+            # Ordinary typed turns intentionally have no origin-map entry:
+            # streaming persists only truthy engine origins. The per-turn send
+            # time proves this is a recorded user turn; absent means typed.
+            if (
+                not isinstance(timings, dict)
+                or not isinstance(timings.get(turn_key), dict)
+                or not isinstance(turn_ids, dict)
+                or not isinstance(turn_ids.get(turn_key), str)
+                or not turn_ids.get(turn_key)
+            ):
+                raise ControlPlaneError(
+                    "note_share_inactive", "Sharing a note requires the active foreground user turn."
+                )
+            if not isinstance(origins, dict) or (
+                turn_key in origins and not isinstance(origins[turn_key], str)
+            ):
+                raise ControlPlaneError("unattended_forbidden", "Sharing a note requires a verifiable user turn.")
+            turn_id = str(turn_ids[turn_key])
+
+        def _require_active_turn_locked() -> None:
+            current_count = int(getattr(chat, "user_turn_count", 0) or 0)
+            origins = getattr(chat, "user_turn_origin", None)
+            timings = getattr(chat, "user_turn_timings", None)
+            turn_ids = getattr(chat, "user_turn_ids", None)
+            current_turn_id = turn_ids.get(turn_key) if isinstance(turn_ids, dict) else None
+            if (
+                self.pcm.get_chat(principal.chat_id) is not chat
+                or self.pcm.get_project(principal.project_id) is not project
+                or current_count != turn_index + 1
+                or stream.publish_generation != publish_generation
+                or not stream.publish_active
+                or stream.publish_turn_index != turn_index
+                or not isinstance(origins, dict)
+                or not isinstance(timings, dict)
+                or not isinstance(timings.get(turn_key), dict)
+                or not isinstance(turn_ids, dict)
+                or current_turn_id != turn_id
+                or (turn_key in origins and not isinstance(origins[turn_key], str))
+                or self.pcm.get_active_stream(principal.chat_id) is not stream
+                or getattr(stream, "background", False)
+                or getattr(stream, "done", False)
+                or getattr(stream, "user_stopped", False)
+                or getattr(stream, "running_turn_index", None) != turn_index
+            ):
+                raise ControlPlaneError(
+                    "note_share_inactive", "Sharing a note requires the active foreground user turn."
+                )
+            self._require_person_typed_turn(principal, "Sharing a note")
+
+        @contextlib.contextmanager
+        def _queue_publish_guard() -> Iterator[None]:
+            # Turn start/end, count changes, Stop, and stream finish publish
+            # their lifecycle generation under this lock. The queue writer
+            # stages first and holds it only around atomic replace.
+            with stream.publish_lock:
+                try:
+                    _require_active_turn_locked()
+                except ControlPlaneError as exc:
+                    raise sp.ShareDraftError(sp.ShareRefusal(exc.code, str(exc))) from exc
+                yield
+
+        with stream.publish_lock:
+            _require_active_turn_locked()
+
+        def _run() -> dict[str, Any]:
+            with stream.publish_lock:
+                _require_active_turn_locked()
+            proposed = self._share_body_bytes(workspace, body_file)
+            with stream.publish_lock:
+                _require_active_turn_locked()
+            identity = json.dumps(
+                [principal.chat_id, turn_id, turn_index, brain, path, hashlib.sha256(proposed).hexdigest()],
+                ensure_ascii=False, separators=(",", ":"),
+            )
+            draft = sp.draft_share(
+                self.config, workspace=workspace, brain=brain, relative_path=path,
+                operation=None, proposed=proposed,
+                request_key="chat-share:" + hashlib.sha256(identity.encode("utf-8")).hexdigest(),
+                publish_guard=_queue_publish_guard,
+            )
+            if isinstance(draft, sp.ShareRefusal):
+                error = ControlPlaneError(draft.code, draft.message)
+                if draft.eligible_brains:
+                    error.suggestions = ["Choose one linked shared brain: " + ", ".join(draft.eligible_brains)]
+                raise error
+            return {"status": "queued", "proposal_id": draft.proposal_id, "review_path": draft.review_path}
+
+        key = f"note-share:{self._search_runtime_dir()}:{workspace}:{principal.chat_id}:{turn_id}:{brain}:{path}"
+        return _ok(await run_read(key, _run, coalesce=False))
 
     def _workspace_text_file(self, workspace: str, relative: str, *, flag: str) -> str:
         """One UTF-8 prose file confined to the caller's workspace root, or a refusal."""
@@ -3015,42 +3275,75 @@ class CiaoControlPlane:
         which opens and closes its own SQLite connection there so a connection
         never crosses threads. Identical in-flight searches coalesce.
         """
-        root = self._vault_root(principal)
         base = self._search_key_base()
         runtime_dir = self._search_runtime_dir() or (base / ".runtime")
+        registration = ConnectedRegistration.capture(runtime_dir)
+        root = self._vault_root(principal)
+        adopted_check = getattr(self.config, "adopted_workspace_vault", None)
+        adopted = bool(adopted_check(self._workspace(principal))) if callable(adopted_check) else False
+        ownership_check = getattr(self.config, "vault_index_ownership", None)
+        owner_check = getattr(self.config, "ciao_owned_vault_index", None)
+        if callable(ownership_check):
+            unmanaged = ownership_check(self._workspace(principal)) != "ciao"
+        elif callable(owner_check):
+            unmanaged = not bool(owner_check(self._workspace(principal)))
+        else:
+            unmanaged = adopted
+        namespace = adopted_vault_key_prefix(root, self._workspace(principal)) if unmanaged else None
         bounded_limit = max(1, min(50, int(limit)))
 
         def _search() -> list[dict[str, str]]:
             # Install-owned database (SYS-03), resolved inside the worker so the
             # connection and its path never cross threads.
-            db_path = get_db_path(self._search_runtime_dir())
-            conn = sqlite3.connect(db_path)
-            try:
-                # Serialize the write phase per database file. Distinct query
-                # keys run concurrently, but SQLite takes one file-level write
-                # lock, so two index passes against this database would race it
-                # and fail with "database is locked" once a scan outlasts the
-                # connection timeout. The search that follows is read-only and
-                # does not need the lock.
-                with keyed_lock(f"fts-index:{db_path}"):
+            db_path = connected_db_path(runtime_dir, root, self.config.index_source_roots()) if namespace else get_db_path(runtime_dir)
+            connection = (connected_index_connection(db_path) if namespace
+                          else contextlib.closing(sqlite3.connect(db_path)))
+            with connection as conn:
+                # Connected refreshes reserve the SQLite writer across processes.
+                # Ordinary indexing uses the existing per-file thread lock.
+                with contextlib.nullcontext() if namespace else keyed_lock(f"fts-index:{db_path}"):
                     init_db(conn)
-                    index_vault(conn, root, path_base=base)
+                    try:
+                        if namespace is None:
+                            index_vault(conn, root, path_base=base)
+                        else:
+                            assert registration is not None
+                            refresh_connected_index(conn, root, self._workspace(principal), base, namespace, registration)
+                    except (OSError, UnicodeError):
+                        if namespace is None or connected_entries(conn, namespace) is None:
+                            raise
+                        logger.info("Searching the previous local index for %s", root)
                 rows = search_vault(
                     conn,
                     query,
                     limit=bounded_limit,
-                    path_prefix=vault_key_prefix(root, base),
+                    path_prefix=vault_key_prefix(root, base, key_namespace=namespace),
                 )
-            finally:
-                conn.close()
+                if registration is not None:
+                    registration.verify()
+                hit_paths = [row["path"] for row in rows]
+                if namespace is not None:
+                    for row in rows:
+                        relative = row["path"][len(namespace):]
+                        if not adopted and root.is_relative_to(base):
+                            relative = (root.relative_to(base) / relative).as_posix()
+                        row["path"] = relative
             # Retrieval telemetry for the decay-by-disuse audit: which notes
             # recall actually uses. Best-effort, and appended here so the whole
             # read (SQLite plus this write) stays in one worker.
-            record_search_hits(runtime_dir, query, [row["path"] for row in rows])
+            record_search_hits(db_path.parent if namespace else runtime_dir, query, hit_paths)
             return rows
 
-        key = f"vault_search:{root}:{base}:{query}:{bounded_limit}"
-        rows = await run_read(key, _search)
+        try:
+            registration.verify()
+            if namespace:
+                registration.authorize(root, self._workspace(principal), base, self.config.vault_root)
+            key = f"vault_search:{root}:{base}:{namespace}:{registration}:{query}:{bounded_limit}"
+            rows = await run_read(key, _search)
+        except ConnectedWorkspaceChanged as exc:
+            raise ControlPlaneError("workspace_changed", str(exc), retryable=True) from exc
+        except ConnectedIndexBusy as exc:
+            raise ControlPlaneError("connected_index_busy", str(exc), retryable=True) from exc
         return _ok(rows)
 
     async def vault_index_refresh(self, principal: AgentPrincipal) -> dict[str, Any]:
@@ -3074,32 +3367,84 @@ class CiaoControlPlane:
         the worker opens and closes its own connection so it never crosses
         threads. Scope is resolved on the calling thread first.
         """
+        workspace = self._workspace(principal)
+        runtime_dir = self._search_runtime_dir()
+        registration = ConnectedRegistration.capture(runtime_dir) if runtime_dir else None
         search_root = self._vault_root(principal)
         index_root = self._entity_index_root(principal)
         stamp = self._index_stamp(principal)
         base = self._search_key_base()
-        runtime_dir = self._search_runtime_dir()
+        adopted_vault_check = getattr(self.config, "adopted_workspace_vault", None)
+        adopted_vault = bool(adopted_vault_check(workspace)) if callable(adopted_vault_check) else False
+        ownership_check = getattr(self.config, "vault_index_ownership", None)
+        owns_index = getattr(self.config, "ciao_owned_vault_index", None)
+        if callable(ownership_check):
+            managed_index = ownership_check(workspace) == "ciao"
+        else:
+            managed_index = bool(owns_index(workspace)) if callable(owns_index) else not adopted_vault
+        namespace: str | None
+        if adopted_vault:
+            # For an adopted folder, the aggregate must be indexed under the
+            # original root so local paths and Markdown links keep resolving.
+            search_root = index_root
+            namespace = adopted_vault_key_prefix(index_root, workspace)
+        else:
+            namespace = None if managed_index else adopted_vault_key_prefix(search_root, workspace)
+
 
         def _refresh() -> tuple[int, int, int]:
-            entries = vault_index.scan_vault(index_root, workspace=stamp)
-            vault_index.write_index_file(entries, index_root / "INDEX.md")
+            runtime_dir = self._search_runtime_dir()
+            if runtime_dir is None:
+                raise OSError("private index staging directory is unavailable")
+            if managed_index:
+                entries = vault_index.scan_vault(index_root, workspace=stamp, strict=True)
+                vault_index.write_index_file(
+                    entries,
+                    index_root / "INDEX.md",
+                    replace_existing=managed_index,
+                    authorize=(
+                        (lambda: ownership_check(workspace) == "ciao")
+                        if callable(ownership_check) else None
+                    ),
+                    ownership_runtime=runtime_dir,
+                    registration_runtime=runtime_dir,
+                )
             # Install-owned database (SYS-03), resolved inside the worker.
-            db_path = get_db_path(runtime_dir)
-            conn = sqlite3.connect(db_path)
-            try:
+            db_path = connected_db_path(runtime_dir, search_root, self.config.index_source_roots()) if namespace else get_db_path(runtime_dir)
+            connection = (connected_index_connection(db_path) if namespace
+                          else contextlib.closing(sqlite3.connect(db_path)))
+            with connection as conn:
                 # Same database-file write lock as vault_search: an index
                 # refresh and a search can land on the same SQLite file, so the
                 # write phase is serialized per database.
-                with keyed_lock(f"fts-index:{db_path}"):
+                with contextlib.nullcontext() if namespace else keyed_lock(f"fts-index:{db_path}"):
                     init_db(conn)
-                    indexed, removed = index_vault(conn, search_root, path_base=base)
-            finally:
-                conn.close()
+                    if namespace is None:
+                        indexed, removed = index_vault(conn, search_root, path_base=base)
+                    else:
+                        assert registration is not None
+                        entries, indexed, removed = refresh_connected_index(
+                            conn, search_root, workspace, base, namespace, registration
+                        )
             return len(entries), indexed, removed
 
-        key = f"vault_index_refresh:{index_root}:{search_root}:{base}:{stamp}"
-        notes, indexed, removed = await run_read(key, _refresh)
-        return _ok({"notes": notes, "fts_indexed": indexed, "fts_removed": removed})
+        try:
+            if registration is not None:
+                registration.verify()
+                if namespace:
+                    registration.authorize(search_root, workspace, base, self.config.vault_root)
+            key = f"vault_index_refresh:{index_root}:{search_root}:{base}:{stamp}:{namespace}:{registration}"
+            notes, indexed, removed = await run_read(key, _refresh)
+        except ConnectedWorkspaceChanged as exc:
+            raise ControlPlaneError("workspace_changed", str(exc), retryable=True) from exc
+        except ConnectedIndexBusy as exc:
+            raise ControlPlaneError("connected_index_busy", str(exc), retryable=True) from exc
+        return _ok({
+            "notes": notes,
+            "fts_indexed": indexed,
+            "fts_removed": removed,
+            "markdown_index": "refreshed" if managed_index else "preserved_unmanaged",
+        })
 
     # ---- vault review --------------------------------------------------
 

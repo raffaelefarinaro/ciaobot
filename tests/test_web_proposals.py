@@ -213,7 +213,7 @@ def test_share_accept_requires_workspace_and_exact_review_token(tmp_path: Path, 
 
     from ciao import share_publish
     from ciao.web import routes_api
-    from ciao.web import proposal_service
+    from ciao.web import proposal_service, routes_api
 
     config = _default_vault(tmp_path)
     queue = _queue_text(config, "personal")
@@ -274,6 +274,159 @@ def test_share_accept_requires_workspace_and_exact_review_token(tmp_path: Path, 
         ("personal", share["id"], "shr_exact-token"),
         ("personal", share["id"], "shr_exact-token"),
     ]
+
+
+def test_share_reconcile_is_recorded_attempt_only_and_never_calls_publish(
+    tmp_path: Path, monkeypatch,
+) -> None:
+    from types import SimpleNamespace
+
+    from ciao import share_publish
+    from ciao.web import proposal_service
+
+    config = _default_vault(tmp_path)
+    queue = _queue_text(config, "personal")
+    queue.write_text(
+        "# Queue\n- [share opaque123] Shared note change proposal opaque123\n",
+        encoding="utf-8",
+    )
+    client = _client(config)
+    share = next(row for row in client.get("/api/proposals").json()["rows"] if row["kind"] == "share")
+    preview = {
+        "id": share["id"], "workspace": "personal", "kind": "share",
+        "revision": "shr_recorded-attempt", "blocked_reason": "brain_unavailable",
+        "reconcile_available": True, "brain": "notes", "path": "n.md",
+    }
+    monkeypatch.setattr(proposal_service, "preview_row", lambda *_args, **_kwargs: dict(preview))
+    reconcile_calls = []
+
+    async def reconcile(_config, *, workspace, proposal_id, expected_revision):
+        reconcile_calls.append((workspace, proposal_id, expected_revision))
+        return SimpleNamespace(outcome="push_refused", message="the recorded attempt was rejected")
+
+    monkeypatch.setattr(share_publish, "reconcile_share", reconcile)
+    monkeypatch.setattr(
+        share_publish, "publish_share",
+        lambda *_args, **_kwargs: pytest.fail("reconcile must never enter the publisher path"),
+    )
+    request_body = {"workspace": "personal", "expected_revision": "shr_recorded-attempt"}
+    refused = client.post(f"/api/proposals/{share['id']}/reconcile", json=request_body)
+    assert refused.status_code == 409
+    assert refused.json()["share_status"] == "push_refused"
+    assert reconcile_calls == [("personal", share["id"], "shr_recorded-attempt")]
+    assert "opaque123" in queue.read_text(encoding="utf-8")
+
+    preview["reconcile_available"] = False
+    no_attempt = client.post(f"/api/proposals/{share['id']}/reconcile", json=request_body)
+    assert no_attempt.status_code == 409
+    assert no_attempt.json()["share_status"] == "no_recorded_attempt"
+    assert len(reconcile_calls) == 1
+    assert "opaque123" in queue.read_text(encoding="utf-8")
+
+    async def confirmed(_config, *, workspace, proposal_id, expected_revision):
+        reconcile_calls.append((workspace, proposal_id, expected_revision))
+        return SimpleNamespace(outcome="published", message="")
+
+    monkeypatch.setattr(share_publish, "reconcile_share", confirmed)
+    monkeypatch.setattr(
+        share_publish, "get_share_receipt",
+        lambda *_a, **_k: {"id": "shrpub_confirmed", "brain": "notes", "path": "n.md"},
+    )
+
+    async def settle(*_args, **_kwargs):
+        return True
+
+    monkeypatch.setattr(routes_api, "_settle_share_accept", settle)
+    preview["reconcile_available"] = True
+    published = client.post(f"/api/proposals/{share['id']}/reconcile", json=request_body)
+    assert published.status_code == 200
+    assert published.json()["share_status"] == "published"
+    assert published.json()["settled"] is True
+    assert published.json()["receipt"]["id"] == "shrpub_confirmed"
+    assert len(reconcile_calls) == 2
+    assert "opaque123" in queue.read_text(encoding="utf-8")
+
+
+def test_registered_reconcile_route_uses_dedicated_recorded_attempt_handler(
+    tmp_path: Path, monkeypatch,
+) -> None:
+    from types import SimpleNamespace
+
+    from ciao import share_publish
+    from ciao.web.app import create_app
+    from tests.session import signed_in
+
+    config = _default_vault(tmp_path)
+    queue = _queue_text(config, "personal")
+    queue.write_text(
+        "# Queue\n- [share opaque123] Shared note change proposal opaque123\n",
+        encoding="utf-8",
+    )
+    client = signed_in(TestClient(create_app(config)))
+    rows = client.get("/api/proposals").json()["rows"]
+    share = next(row for row in rows if row["kind"] == "share")
+    monkeypatch.setattr(
+        proposal_service, "preview_row",
+        lambda *_args, **_kwargs: {
+            "id": share["id"], "workspace": "personal", "kind": "share",
+            "revision": "shr_registered-route", "blocked_reason": "brain_unavailable",
+            "reconcile_available": True, "brain": "notes", "path": "n.md",
+        },
+    )
+    monkeypatch.setattr(routes_api, "_share_context_is_current", lambda *_a, **_k: True)
+    calls = []
+
+    async def reconcile(_config, *, workspace, proposal_id, expected_revision):
+        calls.append((workspace, proposal_id, expected_revision))
+        return SimpleNamespace(outcome="indeterminate", message="still unresolved")
+
+    monkeypatch.setattr(share_publish, "reconcile_share", reconcile)
+    monkeypatch.setattr(
+        share_publish, "publish_share",
+        lambda *_args, **_kwargs: pytest.fail("the reconcile route must not publish"),
+    )
+    response = client.post(
+        f"/api/proposals/{share['id']}/reconcile",
+        json={"workspace": "personal", "expected_revision": "shr_registered-route"},
+        headers={"Origin": "http://testserver"},
+    )
+
+    assert response.status_code == 503, response.text
+    assert response.json()["share_status"] == "indeterminate"
+    assert calls == [("personal", share["id"], "shr_registered-route")]
+
+
+def test_share_preview_marks_only_the_exact_recorded_review_reconcilable(
+    tmp_path: Path, monkeypatch,
+) -> None:
+    from ciao import share_publish, share_proposals
+    from ciao.web import proposal_service
+
+    config = _default_vault(tmp_path)
+    row = {
+        "id": "proposal-exact", "kind": "share", "workspace": "personal",
+        "text": "Shared note change proposal opaque123", "source": "",
+    }
+    fields = {
+        "workspace": "personal", "proposal_id": row["id"],
+        "sidecar_id": "opaque123", "brain": "notes",
+        "origin_identity": "https://example.test/notes.git",
+        "upstream_ref": "refs/heads/main", "path": "n.md",
+        "operation": "replace", "original": "before\n", "proposed": "after\n",
+    }
+    draft = {"immutable": fields, "review_token": "canonical-review-token"}
+    monkeypatch.setattr(share_proposals, "load_share", lambda *_a, **_k: draft)
+    seen = []
+
+    def has_attempt(_config, *, workspace, proposal_id, expected_revision):
+        seen.append((workspace, proposal_id, expected_revision))
+        return True
+
+    monkeypatch.setattr(share_publish, "has_publication_attempt", has_attempt)
+    result = proposal_service.preview_row(config, {"row": row, "workspace": "personal"})
+    assert result["reconcile_available"] is True
+    assert result["revision"] == "canonical-review-token"
+    assert seen == [("personal", "proposal-exact", "canonical-review-token")]
 
 def test_list_returns_rows_with_workspace_path_and_kind(tmp_path: Path) -> None:
     config = _default_vault(tmp_path)
@@ -1020,6 +1173,8 @@ def test_the_real_app_serves_every_documented_proposal_route() -> None:
         "/api/proposals/legacy-learning-dismiss",
         "/api/proposals/{id}/preview",
         "/api/proposals/{id}/implement",
+        "/api/proposals/{id}/reconcile",
+        "/api/proposals/{id}/redraft",
         "/api/proposals/{id}/{action}",
     }
     assert registered == expected, f"app.py route table drifted: {registered}"
@@ -3809,6 +3964,68 @@ def test_share_publication_receipts_project_private_text_and_queue_undo(
     undo = client.post("/api/memory/receipts/shrpub_private/undo?workspace=personal")
     assert undo.status_code == 200
     assert undo.json() == {"ok": True, "workspace": "personal", "review_path": "/memory/review?proposal=undo"}
+
+
+def test_folder_share_receipt_is_projected_as_a_historical_local_write(
+    tmp_path: Path, monkeypatch,
+) -> None:
+    from ciao import proposal_actions, share_publish
+
+    config = _default_vault(tmp_path)
+    queue = _queue_text(config, "personal")
+    proposal_id = "d" * 16
+    receipt = {
+        "id": "shrpub_folder_scope", "workspace": "personal", "proposal_id": proposal_id,
+        "ts": "2026-11-24T10:00:00+00:00", "brain": "folder", "path": "notes/n.md",
+        "operation": "create", "scope": "historical_local_write",
+        "local_only": True, "sync_claimed": False, "undoable": False,
+        "commit_oid": None, "published_blob_oid": None,
+        "file_dev": 1, "file_ino": 2, "content_sha256": "a" * 64, "content_bytes": 3,
+        "link_kind": "folder", "attempt_token": "opaque-token",
+    }
+    fields = {
+        "sidecar_id": "opaque-folder", "workspace": "personal",
+        "proposal_id": proposal_id, "brain": "folder", "path": "notes/n.md",
+        "operation": "create", "link_kind": "folder",
+        "origin_identity": f"folder:{tmp_path}", "original": None,
+        "proposed": "new folder note\n",
+    }
+    detail = {"receipt": receipt, "immutable": fields}
+    monkeypatch.setattr(
+        share_publish, "list_share_receipts", lambda _config, **_kwargs: [receipt]
+    )
+    monkeypatch.setattr(
+        share_publish, "list_share_receipt_details", lambda _config, **_kwargs: [detail]
+    )
+    monkeypatch.setattr(
+        share_publish, "get_share_receipt_detail", lambda *_args, **_kwargs: detail
+    )
+    proposal_actions.record_decision(
+        queue, action="accept", text="Shared note change proposal opaque-folder",
+        kind="share", via="pwa", destination="folder:notes/n.md",
+        outcome="published", proposal_id=proposal_id,
+        receipt_id="shrpub_folder_scope",
+    )
+
+    client = _undo_client(config)
+    history = client.get("/api/proposals/history").json()["rows"]
+    row = next(item for item in history if item.get("kind") == "share")
+    assert row["change"]["scope"] == "historical_local_write"
+    assert row["change"]["local_only"] is True
+    assert row["change"]["sync_claimed"] is False
+    assert not row["commit_oid"]
+    listed = client.get("/api/memory/receipts").json()["rows"]
+    listed_row = next(item for item in listed if item["id"] == "shrpub_folder_scope")
+    assert listed_row["scope"] == "historical_local_write"
+    assert listed_row["local_only"] is True
+    assert listed_row["sync_claimed"] is False
+    detail_payload = client.get(
+        "/api/memory/receipts/shrpub_folder_scope?workspace=personal"
+    ).json()
+    assert detail_payload["scope"] == "historical_local_write"
+    assert detail_payload["local_only"] is True
+    assert detail_payload["sync_claimed"] is False
+    assert detail_payload["undoable"] is False
 
 
 def test_share_settlement_queue_receipt_cannot_undo_a_published_note(

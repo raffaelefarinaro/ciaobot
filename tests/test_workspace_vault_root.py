@@ -18,7 +18,7 @@ from ciao.config import CiaoConfig, WorkspaceConfig, reset_reroot_cache
 
 def _config(tmp_path: Path, workspaces: dict[str, str]) -> CiaoConfig:
     """Config whose workspaces map name -> stored vault_root."""
-    return CiaoConfig(
+    config = CiaoConfig(
         pwa_auth_token="test-token",
         workspace_root=tmp_path,
         state_path=tmp_path / ".runtime" / "state.json",
@@ -28,6 +28,14 @@ def _config(tmp_path: Path, workspaces: dict[str, str]) -> CiaoConfig:
             for name, root in workspaces.items()
         },
     )
+    from ciao.setup_marker import write_vault_index_ownership
+
+    write_vault_index_ownership(
+        tmp_path / ".runtime",
+        [config.agent_vault_root(next(iter(workspaces)))],
+        owner="ciao",
+    )
+    return config
 
 
 def test_bare_name_nests_under_the_vault_for_any_workspace(tmp_path: Path) -> None:
@@ -355,7 +363,7 @@ def _per_root_config(root: Path, workspaces: dict[str, str]) -> CiaoConfig:
     receipt.parent.mkdir(parents=True, exist_ok=True)
     receipt.write_text(json.dumps({"status": "migrated"}), encoding="utf-8")
     reset_reroot_cache()
-    return CiaoConfig(
+    config = CiaoConfig(
         pwa_auth_token="test-token",
         workspace_root=root,
         vault_root=root / "memory-vault",
@@ -366,6 +374,18 @@ def _per_root_config(root: Path, workspaces: dict[str, str]) -> CiaoConfig:
             for name, raw in workspaces.items()
         },
     )
+    from ciao.setup_marker import write_vault_index_ownership
+
+    write_vault_index_ownership(
+        runtime,
+        [
+            config.agent_vault_root(name)
+            for name in workspaces
+            if not config.adopted_workspace_vault(name)
+        ],
+        owner="ciao",
+    )
+    return config
 
 
 def test_per_root_dot_agent_vault_matches_registered_root(tmp_path: Path) -> None:
@@ -455,3 +475,20 @@ def test_adopted_workspace_vault_is_a_registered_nonstandard_per_root_vault(
 
     assert config.adopted_workspace_vault("work") is expected
     assert config.adopted_workspace_vault("unregistered") is False
+    assert config.ciao_owned_vault_index("work") is (not expected)
+    assert config.ciao_owned_vault_index("unregistered") is (not rerooted)
+
+
+def test_explicit_pre_reroot_vault_is_not_treated_as_ciao_owned(tmp_path: Path) -> None:
+    external = tmp_path / "cloud-drive" / "vault"
+    config = CiaoConfig.from_env(
+        {
+            "PWA_AUTH_TOKEN": "test-token",
+            "CIAO_WORKSPACE": str(tmp_path),
+            "CIAO_VAULT_ROOT": str(external),
+        },
+        export=False,
+    )
+
+    assert config.vault_root == external
+    assert config.ciao_owned_vault_index(None) is False

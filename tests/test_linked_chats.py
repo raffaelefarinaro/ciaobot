@@ -81,6 +81,30 @@ def _never_read(path: Path | None):
     raise AssertionError(f"the archive reader must not run, got {path}")
 
 
+def test_unattended_turns_are_excluded_before_selecting_first_and_last(tmp_path: Path) -> None:
+    from ciao.memory_policy import UNATTENDED_MARKER
+
+    automated = f"[CIAO_CONTEXT_BEGIN]\n{UNATTENDED_MARKER}\n[CIAO_CONTEXT_END]\n"
+    archive = _archive(tmp_path / "parent.md", automated + "AUTO FIRST", "HUMAN FIRST",
+                       "HUMAN LAST", automated + "AUTO LAST")
+    section = section_for_chat(
+        SOURCE, (LinkCandidate("parent", "2026-11-10T10:00:00+00:00"),),
+        workspace_of=_workspace_of, archive_of=_archives({"parent": archive}),
+    )
+    assert "HUMAN FIRST" in section and "HUMAN LAST" in section
+    assert "AUTO FIRST" not in section and "AUTO LAST" not in section
+
+
+def test_all_unattended_turns_are_empty_but_a_pasted_marker_is_human(tmp_path: Path) -> None:
+    from ciao.memory_policy import UNATTENDED_MARKER
+
+    automated = f"[CIAO_CONTEXT_BEGIN]\n{UNATTENDED_MARKER}\n[CIAO_CONTEXT_END]\nAUTO"
+    empty = read_excerpt(_archive(tmp_path / "auto.md", automated))
+    assert empty is not None and empty.first == "" and empty.last is None
+    pasted = read_excerpt(_archive(tmp_path / "human.md", f"I saw {UNATTENDED_MARKER}"))
+    assert pasted is not None and pasted.first == f"I saw {UNATTENDED_MARKER}"
+
+
 # --- which chats are read at all -------------------------------------------------
 
 

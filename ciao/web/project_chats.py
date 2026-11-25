@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import errno
 from functools import partial
 import copy
 import json
@@ -10,6 +11,7 @@ import logging
 import os
 import re
 import shutil
+import stat
 import subprocess
 import tempfile
 import dataclasses
@@ -18,7 +20,7 @@ import unicodedata
 import uuid
 from collections import deque
 from collections.abc import AsyncGenerator, Callable, Coroutine, Iterable, Iterator, Sequence
-from contextlib import ExitStack, contextmanager
+from contextlib import ExitStack, contextmanager, nullcontext
 from dataclasses import dataclass, field
 from types import MappingProxyType
 from datetime import UTC, datetime, timedelta
@@ -48,6 +50,107 @@ def _shell_permission_marker(raw: object) -> bool:
     return isinstance(value, dict) and value.get("shell_command") is True
 
 
+def _open_directory_chain(
+    root: Path, parts: Sequence[str], *, create: bool, create_root: bool = False,
+) -> int:
+    """Open an absolute directory chain without following any path symlink."""
+    directory_flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
+    absolute_root = Path(os.path.abspath(root))
+    fd = os.open("/", directory_flags)
+    try:
+        components = [
+            *((part, create_root) for part in absolute_root.parts[1:]),
+            *((part, create) for part in parts),
+        ]
+        for part, may_create in components:
+            try:
+                child_fd = os.open(part, directory_flags, dir_fd=fd)
+            except FileNotFoundError:
+                if not may_create:
+                    raise
+                try:
+                    os.mkdir(part, dir_fd=fd)
+                except FileExistsError:
+                    pass
+                child_fd = os.open(part, directory_flags, dir_fd=fd)
+            os.close(fd)
+            fd = child_fd
+        return fd
+    except BaseException:
+        os.close(fd)
+        raise
+
+
+def _write_file_exclusive_at(
+    directory_fd: int, name: str, content: str | bytes, staging_root: Path,
+) -> bool:
+    """Publish private staged bytes from the open file without replacing the destination."""
+    staging_fd = _open_directory_chain(staging_root, (), create=False)
+    temp_name = f".ciao-write-{uuid.uuid4().hex}.tmp"
+    flags = os.O_RDWR | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
+    temp_fd = -1
+    try:
+        if os.fstat(staging_fd).st_dev != os.fstat(directory_fd).st_dev:
+            raise OSError(errno.EXDEV, "private staging directory is on another filesystem")
+        temp_fd = os.open(temp_name, flags, 0o600, dir_fd=staging_fd)
+        write_all(temp_fd, content.encode("utf-8") if isinstance(content, str) else content)
+        os.fsync(temp_fd)
+        _publish_exclusive_at(
+            staging_fd, temp_name, directory_fd, name, expected_fd=temp_fd
+        )
+        return True
+    except FileExistsError:
+        return False
+    finally:
+        if temp_fd >= 0:
+            os.close(temp_fd)
+        os.close(staging_fd)
+
+
+def _publish_exclusive_at(
+    src_fd: int, src: str, dst_fd: int, dst: str, *, expected_fd: int,
+) -> None:
+    """Reject an observable conflict, then publish from the open staging descriptor."""
+    source = os.stat(src, dir_fd=src_fd, follow_symlinks=False)
+    expected = os.fstat(expected_fd)
+    if not stat.S_ISREG(source.st_mode) or (source.st_dev, source.st_ino) != (
+        expected.st_dev, expected.st_ino
+    ):
+        raise OSError(errno.EAGAIN, "staging entry changed before publication", src)
+    publish_new_from_fd(expected_fd, dst_fd, dst)
+
+
+def _regular_file_exists_at(directory_fd: int, name: str) -> bool:
+    try:
+        return stat.S_ISREG(os.stat(name, dir_fd=directory_fd, follow_symlinks=False).st_mode)
+    except FileNotFoundError:
+        return False
+
+
+def _same_directory_at_path(root: Path, parts: Sequence[str], expected_fd: int) -> bool:
+    try:
+        current_fd = _open_directory_chain(root, parts, create=False)
+    except OSError:
+        return False
+    try:
+        expected = os.fstat(expected_fd)
+        current = os.fstat(current_fd)
+        return (expected.st_dev, expected.st_ino) == (current.st_dev, current.st_ino)
+    finally:
+        os.close(current_fd)
+
+
+def _same_child_directory(parent_fd: int, name: str, expected_fd: int) -> bool:
+    try:
+        current = os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
+        expected = os.fstat(expected_fd)
+    except OSError:
+        return False
+    return stat.S_ISDIR(current.st_mode) and (current.st_dev, current.st_ino) == (
+        expected.st_dev, expected.st_ino
+    )
+
+
 class _RegistryCommittedError(OSError):
     """The registry was replaced, but a subsequent operation failed."""
 
@@ -60,7 +163,7 @@ class _AdmissionSnapshot:
         "retry_last_error", "retry_attempts", "retry_kind", "retry_interval_seconds",
         "retry_unattended", "pending_question", "pending_permission", "last_error",
         "user_turn_count", "turn_owner", "last_activity_at", "last_read_at",
-        "user_turn_images", "user_turn_timings", "user_turn_unattended",
+        "user_turn_images", "user_turn_ids", "user_turn_timings", "user_turn_unattended",
         "user_turn_origin", "user_turn_send_ids", "helper", "postprocess",
         "failure_id", "retry_recovery", "retry_schedule_id",
     )
@@ -203,7 +306,7 @@ from ciao.models import (
     StreamEvent,
     ToolUseEvent,
 )
-from ciao.os_support.files import open_fd
+from ciao.os_support.files import open_fd, publish_new_from_fd, write_all
 from ciao.os_support.locks import lock_exclusive, unlock
 from ciao import provider_registry
 from ciao.provider_service import ProviderService, capabilities_for, supported_providers
@@ -758,6 +861,7 @@ class ProjectInfo:
     created_at: str = ""
     order: int = 0
     vault_folder: str = ""  # e.g. "store-intelligence-platform"
+    vault_folder_only: bool = False
     # Marks a project the app owns rather than one the user made. "memory" is
     # the per-workspace Memory project the end-of-conversation pass runs in.
     # Empty for every ordinary project, so this is not a behaviour switch for
@@ -787,6 +891,7 @@ class ProjectInfo:
             "created_at": self.created_at,
             "order": self.order,
             "vault_folder": self.vault_folder,
+            "vault_folder_only": self.vault_folder_only,
             "kind": self.kind,
             "repo_path": self.repo_path,
             "repo": repo_link.repo_payload(self.repo_path) if self.repo_path else None,
@@ -858,6 +963,17 @@ CIAOBOT_AUTO_TITLE_ORIGINS = ("default", "fallback")
 ADAPTER_REPLACEABLE_TITLE_ORIGINS = ("default", "fallback", "adapter")
 
 
+def _restore_memory_completion_attestation(value: object) -> dict:
+    if not isinstance(value, dict):
+        return {}
+    try:
+        if len(json.dumps(value, ensure_ascii=True).encode("utf-8")) <= 16_384:
+            return value
+    except (TypeError, ValueError, RecursionError):
+        pass
+    return {}
+
+
 @dataclass(slots=True)
 class ChatInfo:
     chat_id: str
@@ -917,6 +1033,9 @@ class ChatInfo:
     # media_root). JSON round-trip turns int keys into strings, so lookups
     # must tolerate both.
     user_turn_images: dict = field(default_factory=dict)
+    # Opaque, durable turn identity. Unlike its visible index, this stays
+    # unique across resets and cancelled-turn rollback.
+    user_turn_ids: dict = field(default_factory=dict)
     # Map of user-turn index (as str) → {sent_at, completed_at, duration_ms}.
     # Drives the per-message footer in the PWA (time of send, agent latency).
     # Recorded at the orchestration layer so it stays provider-agnostic.
@@ -1064,6 +1183,8 @@ class ChatInfo:
     # UI. Resolution helpers may auto-archive only after their target proposal
     # IDs have durably left the queue; discussion helpers always remain manual.
     helper: dict = field(default_factory=dict)
+    # Signed completion proof stays in the private registry, never the chat API.
+    memory_completion_attestation: dict = field(default_factory=dict)
     # What the memory pass queued by archiving this chat is doing, or did.
     # Lives on the chat so it survives a restart: an archived chat opened next
     # month should still be able to say what Ciaobot took from it.
@@ -1554,6 +1675,7 @@ class ProjectChatManager:
                 created_at=pd.get("created_at", ""),
                 order=pd.get("order", 0),
                 vault_folder=pd.get("vault_folder", ""),
+                vault_folder_only=bool(pd.get("vault_folder_only", False)),
                 kind=pd.get("kind", ""),
                 repo_path=pd.get("repo_path", ""),
             )
@@ -1600,6 +1722,7 @@ class ProjectChatManager:
                 user_turn_count=cd.get("user_turn_count", 0),
                 turn_index_base=int(cd.get("turn_index_base", 0) or 0),
                 user_turn_images=dict(cd.get("user_turn_images", {})),
+                user_turn_ids=dict(cd.get("user_turn_ids", {})),
                 user_turn_timings=dict(cd.get("user_turn_timings", {})),
                 user_turn_unattended=dict(cd.get("user_turn_unattended", {})),
                 user_turn_steered=dict(cd.get("user_turn_steered", {})),
@@ -1637,6 +1760,9 @@ class ProjectChatManager:
                 schedule_id=cd.get("schedule_id", ""),
                 schedule_title=cd.get("schedule_title", ""),
                 helper=chat_service._normalize_chat_helper(cd.get("helper")),
+                memory_completion_attestation=_restore_memory_completion_attestation(
+                    cd.get("memory_completion_attestation")
+                ),
                 # A record written before pins existed (#1118) has none of
                 # these keys and restores unpinned at revision 0. Nothing is
                 # imported from any browser: the engine's registry is the only
@@ -1712,6 +1838,7 @@ class ProjectChatManager:
                     "created_at": p.created_at,
                     "order": p.order,
                     "vault_folder": p.vault_folder,
+                    "vault_folder_only": p.vault_folder_only,
                     "kind": p.kind,
                     # Only a linked project carries the key, so unlinked
                     # projects persist exactly as before.
@@ -1743,6 +1870,7 @@ class ProjectChatManager:
                     "user_turn_count": c.user_turn_count,
                     "turn_index_base": c.turn_index_base,
                     "user_turn_images": c.user_turn_images,
+                    "user_turn_ids": c.user_turn_ids,
                     "user_turn_timings": c.user_turn_timings,
                     "user_turn_unattended": c.user_turn_unattended,
                     "user_turn_steered": c.user_turn_steered,
@@ -1778,6 +1906,7 @@ class ProjectChatManager:
                     "schedule_id": c.schedule_id,
                     "schedule_title": c.schedule_title,
                     "helper": c.helper,
+                    "memory_completion_attestation": c.memory_completion_attestation,
                     "postprocess": c.postprocess,
                     "pinned_file_path": c.pinned_file_path,
                     "dismissed_pin_paths": list(c.dismissed_pin_paths),
@@ -2555,90 +2684,169 @@ class ProjectChatManager:
         ]
         return ", ".join(_plain_markdown(label) for label in labels), ", ".join(labels)
 
+    def _adopted_vault_is_available(self, workspace: str) -> bool:
+        if not self._config.adopted_workspace_vault(workspace):
+            return True
+        root = self._workspace_vault_root(workspace)
+        try:
+            root_fd = _open_directory_chain(root, (), create=False)
+            os.close(root_fd)
+            return True
+        except OSError as exc:
+            logger.warning(
+                "Adopted vault for %s is unavailable at %s: %s", workspace, root, exc
+            )
+            return False
+
     def _ensure_general_vault_folder(self, workspace: str) -> None:
-        """Create ``projects/active/general/general.md`` if it doesn't exist.
-
-        The PWA Files surface only lights up when the vault folder is present.
-        The same-named ``.md`` is the project's main doc by convention; we
-        seed a minimal frontmatter so vault tooling (INDEX, search) picks it
-        up. Idempotent.
-        """
-        root = self._vault_active_root(workspace)
-        folder = root / "general"
+        """Seed General through directory descriptors and no-clobber creation."""
+        vault_root = self._workspace_vault_root(workspace)
         try:
-            folder.mkdir(parents=True, exist_ok=True)
+            if not self._config.adopted_workspace_vault(workspace):
+                root_fd = _open_directory_chain(vault_root, (), create=False, create_root=True)
+                os.close(root_fd)
+            active_fd = _open_directory_chain(vault_root, ("projects", "active"), create=True)
+            folder_fd = -1
+            try:
+                try:
+                    os.mkdir("general", dir_fd=active_fd)
+                except FileExistsError:
+                    pass
+                folder_fd = os.open(
+                    "general",
+                    os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0),
+                    dir_fd=active_fd,
+                )
+                if not self._same_active_directory(workspace, active_fd):
+                    return
+                body = (
+                    "---\nname: General\n"
+                    f"workspace: {workspace}\n"
+                    "type: project\nstatus: active\ntags: [project, general]\n---\n\n"
+                    "# General\n\nCatch-all home for ad-hoc chats and scheduled automations.\n"
+                )
+                if self._config.adopted_workspace_vault(workspace):
+                    general = next(
+                        p for p in self._projects.values()
+                        if p.workspace == workspace and p.name == "General"
+                    )
+                    doc_name = next(
+                        (name for name in ("README.md", "general.md")
+                         if _regular_file_exists_at(folder_fd, name)),
+                        None,
+                    )
+                    general.vault_folder_only = doc_name is None
+                    general.vault_doc_path = (
+                        self._display_path(vault_root / "projects/active/general" / doc_name)
+                        if doc_name is not None else ""
+                    )
+                elif not _regular_file_exists_at(folder_fd, "general.md"):
+                    _write_file_exclusive_at(
+                        folder_fd, "general.md", body, self._config.state_path.parent
+                    )
+            finally:
+                if folder_fd >= 0:
+                    os.close(folder_fd)
+                os.close(active_fd)
         except OSError as exc:
-            logger.warning("Could not create General vault folder %s: %s", folder, exc)
-            return
-        target = folder / "general.md"
-        if target.exists():
-            return
-        # Don't clobber an existing README; the discovery code falls back to
-        # `<stem>/<stem>.md` only when no README is present, but the user
-        # still expects a same-named doc to exist per the convention.
-        body = (
-            "---\n"
-            "name: General\n"
-            f"workspace: {workspace}\n"
-            "type: project\n"
-            "status: active\n"
-            "tags: [project, general]\n"
-            "---\n\n"
-            "# General\n\n"
-            "Catch-all home for ad-hoc chats and scheduled automations.\n"
+            logger.warning("Could not seed General for %s: %s", workspace, exc)
+
+    def _same_active_directory(self, workspace: str, directory_fd: int) -> bool:
+        return _same_directory_at_path(
+            self._workspace_vault_root(workspace), ("projects", "active"), directory_fd
         )
-        try:
-            target.write_text(body, encoding="utf-8", newline="")
-        except OSError as exc:
-            logger.warning("Could not seed %s: %s", target, exc)
 
-    def _scaffold_project_note(self, project: ProjectInfo) -> None:
-        """Create ``projects/active/<slug>/<slug>.md`` and bind the project to it.
-
-        Frontmatter goes through ``yaml.safe_dump`` so any name or context is
-        valid YAML. An existing active folder is adopted, never overwritten; a
-        slug already bound elsewhere or present under completed/ leaves the
-        project registry-only.
-        """
+    def _scaffold_project_note(self, project: ProjectInfo) -> bool:
+        """Create and bind a note using no-follow, descriptor-relative operations."""
         slug = chat_service._project_reference_key(project.name)
         if not slug or not chat_service._VAULT_FOLDER_RE.fullmatch(slug):
-            return
+            return True
         if not self._is_known_workspace(project.workspace):
-            return
+            return True
+        if not self._adopted_vault_is_available(project.workspace):
+            return False
+        adopted = self._config.adopted_workspace_vault(project.workspace)
+        root = self._workspace_vault_root(project.workspace)
         try:
-            active = self._vault_active_root(project.workspace)
-            completed = self._vault_completed_root(project.workspace)
-        except ValueError:
-            return
-        taken = any(
-            other is not project and other.workspace == project.workspace and other.vault_folder == slug
-            for other in self._projects.values()
-        )
-        if taken or (completed / slug).exists():
-            logger.info("Not scaffolding %s: vault folder %r is taken", project.name, slug)
-            return
-        folder = active / slug
-        doc = folder / f"{slug}.md"
-        readme = folder / "README.md"
-        if not folder.exists():
-            today = chat_service._now_iso()[:10]
-            meta: dict[str, object] = {"type": "project", "title": project.name}
-            if project.context.strip():
-                meta["description"] = project.context.strip()
-            meta.update({"status": "active", "created": today, "updated": today})
-            front = yaml.safe_dump(meta, sort_keys=False, allow_unicode=True, width=10_000)
-            body = f"---\n{front}---\n\n# {project.name}\n"
+            if not adopted:
+                root_fd = _open_directory_chain(root, (), create=False, create_root=True)
+                os.close(root_fd)
             try:
-                folder.mkdir(parents=True, exist_ok=True)
-                doc.write_text(body, encoding="utf-8", newline="")
-            except OSError as exc:
-                logger.warning("Could not scaffold project note %s: %s", doc, exc)
-                shutil.rmtree(folder, ignore_errors=True)
-                return
-        project.vault_folder = slug
-        existing = readme if readme.is_file() else doc
-        if existing.is_file():
-            project.vault_doc_path = self._display_path(existing)
+                completed_fd = _open_directory_chain(root, ("projects", "completed"), create=False)
+            except FileNotFoundError:
+                completed_fd = -1
+            if completed_fd >= 0:
+                try:
+                    try:
+                        if stat.S_ISDIR(os.stat(slug, dir_fd=completed_fd, follow_symlinks=False).st_mode):
+                            return True
+                    except FileNotFoundError:
+                        pass
+                finally:
+                    os.close(completed_fd)
+            if any(
+                other is not project
+                and other.workspace == project.workspace
+                and other.vault_folder == slug
+                for other in self._projects.values()
+            ):
+                return True
+
+            active_fd = _open_directory_chain(root, ("projects", "active"), create=True)
+            try:
+                try:
+                    os.mkdir(slug, dir_fd=active_fd)
+                except FileExistsError:
+                    pass
+                folder_fd = os.open(
+                    slug,
+                    os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0),
+                    dir_fd=active_fd,
+                )
+                try:
+                    readme_exists = _regular_file_exists_at(folder_fd, "README.md")
+                    note_name = f"{slug}.md"
+                    note_exists = _regular_file_exists_at(folder_fd, note_name)
+                    note_exists = readme_exists or note_exists
+                    folder_only = adopted and not note_exists
+                    if not adopted and not note_exists:
+                        today = chat_service._now_iso()[:10]
+                        meta: dict[str, object] = {"type": "project", "title": project.name}
+                        if project.context.strip():
+                            meta["description"] = project.context.strip()
+                        meta.update({"status": "active", "created": today, "updated": today})
+                        front = yaml.safe_dump(meta, sort_keys=False, allow_unicode=True, width=10_000)
+                        note_exists = _write_file_exclusive_at(
+                            folder_fd,
+                            note_name,
+                            f"---\n{front}---\n\n# {project.name}\n",
+                            self._config.state_path.parent,
+                        ) or _regular_file_exists_at(folder_fd, note_name)
+                    selected_note = "README.md" if readme_exists else note_name
+                    if not folder_only:
+                        note_exists = note_exists and _regular_file_exists_at(folder_fd, selected_note)
+                    same_project_folder = _same_child_directory(active_fd, slug, folder_fd)
+                finally:
+                    os.close(folder_fd)
+                if (
+                    (not folder_only and not note_exists)
+                    or not same_project_folder
+                    or not self._same_active_directory(project.workspace, active_fd)
+                ):
+                    return False
+                project.vault_folder = slug
+                project.vault_folder_only = folder_only
+                if folder_only:
+                    project.vault_doc_path = ""
+                else:
+                    note_path = root / "projects" / "active" / slug
+                    project.vault_doc_path = self._display_path(note_path / selected_note)
+                return True
+            finally:
+                os.close(active_fd)
+        except OSError as exc:
+            logger.warning("Could not scaffold project note %s: %s", project.name, exc, exc_info=True)
+            return False
 
     def _vault_active_root(self, workspace: str) -> Path:
         """Return the active/ directory for the given workspace, no existence check.
@@ -2659,7 +2867,9 @@ class ProjectChatManager:
         except ValueError:
             return str(path)
 
-    def _iter_vault_entries(self, workspace: str, root: Path) -> list[tuple[str, Path, Path | None]]:
+    def _iter_vault_entries(
+        self, workspace: str, root: Path, *, strict: bool = False,
+    ) -> list[tuple[str, Path, Path | None]]:
         """Yield ``(stem, entry_path, readme_path)`` for each project under ``root``.
 
         Both workspaces use the same convention: a project is a directory.
@@ -2671,20 +2881,38 @@ class ProjectChatManager:
         Hidden entries (``.``-prefixed) and ``.gitkeep`` are skipped.
         """
         out: list[tuple[str, Path, Path | None]] = []
-        if not root.is_dir():
+        try:
+            entries = sorted(root.iterdir())
+        except FileNotFoundError:
+            if strict and self._config.adopted_workspace_vault(workspace):
+                raise
             return out
-        for entry in sorted(root.iterdir()):
+        except OSError:
+            if strict:
+                raise
+            return out
+        for entry in entries:
             if entry.name.startswith(".") or entry.name == ".gitkeep":
                 continue
-            if not entry.is_dir():
-                continue
-            readme = entry / "README.md"
-            if not readme.exists():
-                # Fall back to <entry>/<entry>.md, the convention for projects
-                # promoted from the old single-file form. Either provides the
-                # frontmatter we read below.
-                readme = entry / f"{entry.name}.md"
-            out.append((entry.name, entry, readme if readme.exists() else None))
+            try:
+                if not stat.S_ISDIR(entry.stat().st_mode):
+                    continue
+                readme = entry / "README.md"
+                try:
+                    readme.stat()
+                except FileNotFoundError:
+                    readme = entry / f"{entry.name}.md"
+                try:
+                    readme.stat()
+                except FileNotFoundError:
+                    readme_path: Path | None = None
+                else:
+                    readme_path = readme
+                out.append((entry.name, entry, readme_path))
+            except OSError:
+                if strict:
+                    raise
+                return []
         return out
 
     def _promote_single_file_personal_projects(self) -> None:
@@ -2699,36 +2927,78 @@ class ProjectChatManager:
         chat asks Claude to create a project file directly). Runs on
         every manager init: cheap iterdir, idempotent.
         """
-        for root in (
-            self._vault_active_root("personal"),
-            self._vault_completed_root("personal"),
-        ):
-            if not root.is_dir():
+        if self._config.adopted_workspace_vault("personal"):
+            return
+        try:
+            vault_root = self._workspace_vault_root("personal")
+        except (OSError, ValueError) as exc:
+            logger.info("Skipping personal project promotion: %s", exc)
+            return
+        for parts in (("projects", "active"), ("projects", "completed")):
+            try:
+                root_fd = _open_directory_chain(vault_root, parts, create=False)
+            except OSError as exc:
+                logger.info("Skipping unavailable personal project folder %s: %s", parts, exc)
                 continue
-            for entry in list(root.iterdir()):
-                if not entry.is_file() or entry.suffix != ".md":
+            try:
+                try:
+                    names = os.listdir(root_fd)
+                except OSError as exc:
+                    logger.warning("Could not list personal project folder %s: %s", parts, exc)
                     continue
-                if entry.name.startswith(".") or entry.name == ".gitkeep":
-                    continue
-                stem = entry.stem
-                target_dir = root / stem
-                target = target_dir / f"{stem}.md"
-                # Refuse to clobber an existing folder/file.
-                if target.exists():
-                    logger.warning(
-                        "Cannot promote %s: %s already exists. Resolve manually.",
-                        entry, target,
-                    )
-                    continue
-                if target_dir.exists() and not target_dir.is_dir():
-                    logger.warning(
-                        "Cannot promote %s: %s exists and is not a directory.",
-                        entry, target_dir,
-                    )
-                    continue
-                target_dir.mkdir(parents=True, exist_ok=True)
-                entry.rename(target)
-                logger.info("Promoted single-file personal project %s -> %s", entry, target)
+                for name in names:
+                    if name.startswith(".") or name == ".gitkeep" or not name.endswith(".md"):
+                        continue
+                    source_fd = -1
+                    try:
+                        source_fd = os.open(
+                            name,
+                            os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0),
+                            dir_fd=root_fd,
+                        )
+                        source_stat = os.fstat(source_fd)
+                        if not stat.S_ISREG(source_stat.st_mode):
+                            continue
+                        data = bytearray()
+                        while chunk := os.read(source_fd, 128 * 1024):
+                            data.extend(chunk)
+                        stem = name[:-3]
+                        try:
+                            os.mkdir(stem, dir_fd=root_fd)
+                        except FileExistsError:
+                            pass
+                        target_fd = os.open(
+                            stem,
+                            os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0),
+                            dir_fd=root_fd,
+                        )
+                        try:
+                            note_name = f"{stem}.md"
+                            published = _write_file_exclusive_at(
+                                target_fd,
+                                note_name,
+                                bytes(data),
+                                self._config.state_path.parent,
+                            )
+                            same_target = _same_child_directory(root_fd, stem, target_fd)
+                        finally:
+                            os.close(target_fd)
+                        if not published or not same_target:
+                            logger.warning("Kept personal note %s after a promotion conflict", name)
+                            continue
+                        # The original is intentionally retained: a portable
+                        # conditional unlink is unavailable, so a sync version
+                        # arriving during promotion must never be deleted.
+                        logger.info("Copied legacy personal project note %s", name)
+                    except FileExistsError:
+                        logger.warning("Cannot promote %s: destination already exists", name)
+                    except OSError as exc:
+                        logger.warning("Could not promote personal project %s: %s", name, exc)
+                    finally:
+                        if source_fd >= 0:
+                            os.close(source_fd)
+            finally:
+                os.close(root_fd)
 
     @staticmethod
     def _safe_yaml_frontmatter(text: str, source: Path) -> dict | None:
@@ -2848,6 +3118,8 @@ class ProjectChatManager:
         Best effort: a project with no vault folder (or no doc inside it)
         keeps its context in the projects registry alone, as before.
         """
+        if self._config.adopted_workspace_vault(project.workspace):
+            return False
         doc = self._project_doc_file(project)
         if doc is None:
             return False
@@ -3366,9 +3638,15 @@ class ProjectChatManager:
         per_workspace_entries: dict[str, list[tuple[str, Path, Path | None]]] = {}
         per_workspace_stems: dict[str, set[str]] = {}
         workspace_names = self._workspace_names()
+        unavailable_workspaces: set[str] = set()
         for ws in workspace_names:
             root = self._vault_active_root(ws)
-            entries = self._iter_vault_entries(ws, root)
+            try:
+                entries = self._iter_vault_entries(ws, root, strict=True)
+            except OSError as exc:
+                logger.warning("Could not scan vault projects for %s at %s: %s", ws, root, exc)
+                entries = []
+                unavailable_workspaces.add(ws)
             per_workspace_entries[ws] = entries
             per_workspace_stems[ws] = {stem for stem, _, _ in entries}
 
@@ -3377,6 +3655,8 @@ class ProjectChatManager:
             pid
             for pid, proj in self._projects.items()
             if proj.vault_folder
+            and proj.workspace not in unavailable_workspaces
+            and not self._config.adopted_workspace_vault(proj.workspace)
             and proj.vault_folder not in per_workspace_stems.get(proj.workspace, set())
         ]
         for pid in orphan_ids:
@@ -3436,12 +3716,24 @@ class ProjectChatManager:
                          if p.vault_folder == stem and p.workspace == ws),
                         None,
                     )
-                    if existing is None or readme is None:
+                    if existing is None:
                         continue
                     changed = False
+                    if readme is None:
+                        if not existing.vault_folder_only or existing.vault_doc_path:
+                            existing.vault_folder_only = True
+                            existing.vault_doc_path = ""
+                            changed = True
+                        if changed:
+                            self._events.publish({
+                                "type": "project_updated",
+                                "project": existing.to_dict(),
+                            })
+                        continue
                     doc_path = self._display_path(readme)
-                    if existing.vault_doc_path != doc_path:
+                    if existing.vault_doc_path != doc_path or existing.vault_folder_only:
                         existing.vault_doc_path = doc_path
+                        existing.vault_folder_only = False
                         changed = True
                     _, context = self._read_project_metadata_cached(readme, stem)
                     # An empty description never clears a context typed before
@@ -3465,13 +3757,17 @@ class ProjectChatManager:
                     existing.vault_folder = stem
                     if readme is not None:
                         existing.vault_doc_path = self._display_path(readme)
+                        existing.vault_folder_only = False
+                    else:
+                        existing.vault_doc_path = ""
+                        existing.vault_folder_only = True
                     # First bind is the one moment the registry wins: a context
                     # typed in the PWA before the folder existed is deliberate,
                     # and the doc it's adopting was most likely scaffolded. Push
                     # it into the doc rather than dropping it, so the two are
                     # already in agreement by the time the doc-wins rule above
                     # takes over on every later pass.
-                    if existing.context:
+                    if existing.context and not self._config.adopted_workspace_vault(ws):
                         self._write_project_context(existing)
                     elif context:
                         existing.context = context
@@ -3494,6 +3790,7 @@ class ProjectChatManager:
                     created_at=chat_service._now_iso(),
                     order=len(self._projects),
                     vault_folder=stem,
+                    vault_folder_only=readme is None,
                     vault_doc_path=self._display_path(readme) if readme is not None else "",
                 )
                 self._projects[pid] = project
@@ -3553,7 +3850,11 @@ class ProjectChatManager:
         )
         self._projects[pid] = project
         if scaffold:
-            self._scaffold_project_note(project)
+            if not self._scaffold_project_note(project):
+                self._projects.pop(pid, None)
+                raise ValueError(
+                    "The workspace notes folder is unavailable or the project note could not be created."
+                )
         self._save()
         self._events.publish({
             "type": "project_created",
@@ -3597,6 +3898,7 @@ class ProjectChatManager:
             # cleared or no canonical doc exists under the new folder yet.
             doc = self._project_doc_file(project)
             project.vault_doc_path = self._display_path(doc) if doc is not None else ""
+            project.vault_folder_only = bool(vault_folder) and doc is None
         cleared_chats: list[str] = []
         if clean_repo is not None and clean_repo != project.repo_path:
             project.repo_path = clean_repo
@@ -6197,11 +6499,18 @@ class ProjectChatManager:
         pairs = self._shared_brain_pairs(chat, project)
         if not pairs:
             return "", ""
+        record = self._config.workspace(project.workspace) if project is not None else None
+        links = {link.path: link for link in (getattr(record, "shared_brains", None) or [])}
         brains: list[tuple[str, str, bool, str]] = []
         fingerprint: list[str] = []
         for name, path in pairs:
-            unavailable = bool(shared_brain.path_problem(self._config, path))
-            fetched = "" if unavailable else (shared_brain.fetched_at(path) or "")[:10]
+            link = links.get(path)
+            unavailable = link is None or bool(shared_brain.link_problem(self._config, link))
+            fetched = (
+                (shared_brain.fetched_at(path) or "")[:10]
+                if not unavailable and link is not None and link.kind == "git"
+                else ""
+            )
             brains.append((name, path, unavailable, fetched))
             fingerprint.append(f"{name}\0{path}\0{'unavailable' if unavailable else 'ok'}")
         return render_shared_brain_block(brains), "\n".join(fingerprint)
@@ -7381,25 +7690,27 @@ class ProjectChatManager:
         cancelled_origin = ""
         cancelled_send_ids: list[str] = []
         if turn_index is not None:
-            if chat.user_turn_count == turn_index + 1:
-                chat.user_turn_count = turn_index
-                key = str(turn_index)
-                chat.user_turn_timings.pop(key, None)
-                chat.user_turn_images.pop(key, None)
-                chat.user_turn_unattended.pop(key, None)
-                chat.user_turn_steered.pop(key, None)
-                chat.turn_verification.pop(key, None)
-                cancelled_send_ids = chat.user_turn_send_ids.pop(key, [])
-                if isinstance(cancelled_send_ids, str):
-                    cancelled_send_ids = [cancelled_send_ids]
-                cancelled_origin = str(chat.user_turn_origin.pop(key, "") or "")
-                self._streaming.discard_turn_perf(chat_id, turn_index)
-            else:
-                logger.warning(
-                    "Chat %s cancelled turn %d but a later turn exists "
-                    "(count=%d); keeping its history indexes",
-                    chat_id, turn_index, chat.user_turn_count,
-                )
+            with stream.publish_lock:
+                if chat.user_turn_count == turn_index + 1:
+                    chat.user_turn_count = turn_index
+                    key = str(turn_index)
+                    chat.user_turn_ids.pop(key, None)
+                    chat.user_turn_timings.pop(key, None)
+                    chat.user_turn_images.pop(key, None)
+                    chat.user_turn_unattended.pop(key, None)
+                    chat.user_turn_steered.pop(key, None)
+                    chat.turn_verification.pop(key, None)
+                    cancelled_send_ids = chat.user_turn_send_ids.pop(key, [])
+                    if isinstance(cancelled_send_ids, str):
+                        cancelled_send_ids = [cancelled_send_ids]
+                    cancelled_origin = str(chat.user_turn_origin.pop(key, "") or "")
+                    self._streaming.discard_turn_perf(chat_id, turn_index)
+                else:
+                    logger.warning(
+                        "Chat %s cancelled turn %d but a later turn exists "
+                        "(count=%d); keeping its history indexes",
+                        chat_id, turn_index, chat.user_turn_count,
+                    )
             stream.publish({"type": "prompt_cancelled", "turn_index": turn_index})
         # The capsule rode on the prompt that never ran; the resend carries it.
         chat.context_digest = ""
@@ -8812,22 +9123,24 @@ class ProjectChatManager:
                     self._release_shell_finished_waiting(chat_id)
                     chat_meta.last_error = ""
                     chat_meta.failure_id = ""
-                    turn_index = chat_meta.user_turn_count
-                    chat_meta.user_turn_count = turn_index + 1
-                    self._unattended_denials.discard(chat_id)
-                    chat_meta.turn_owner = restart_resume.PROCESS_TOKEN
-                    if image_refs:
-                        chat_meta.user_turn_images[str(turn_index)] = list(image_refs)
-                    sent_at_iso = chat_service._now_iso()
-                    chat_meta.last_activity_at = sent_at_iso
-                    chat_meta.last_read_at = sent_at_iso
-                    chat_meta.user_turn_timings[str(turn_index)] = {"sent_at": sent_at_iso}
-                    if unattended:
-                        chat_meta.user_turn_unattended[str(turn_index)] = True
-                    if origin:
-                        chat_meta.user_turn_origin[str(turn_index)] = origin
-                    if send_id:
-                        chat_meta.record_send_id(turn_index, send_id)
+                    with stream.publish_lock:
+                        turn_index = chat_meta.user_turn_count
+                        chat_meta.user_turn_count = turn_index + 1
+                        chat_meta.user_turn_ids[str(turn_index)] = uuid.uuid4().hex
+                        self._unattended_denials.discard(chat_id)
+                        chat_meta.turn_owner = restart_resume.PROCESS_TOKEN
+                        if image_refs:
+                            chat_meta.user_turn_images[str(turn_index)] = list(image_refs)
+                        sent_at_iso = chat_service._now_iso()
+                        chat_meta.last_activity_at = sent_at_iso
+                        chat_meta.last_read_at = sent_at_iso
+                        chat_meta.user_turn_timings[str(turn_index)] = {"sent_at": sent_at_iso}
+                        if unattended:
+                            chat_meta.user_turn_unattended[str(turn_index)] = True
+                        if origin:
+                            chat_meta.user_turn_origin[str(turn_index)] = origin
+                        if send_id:
+                            chat_meta.record_send_id(turn_index, send_id)
                 if not is_retry and not compact:
                     if not self._save_checked(reason="registry_mutation", _unrelated_turn=chat_id):
                         raise ValueError("recovery is in flight")
@@ -10342,11 +10655,14 @@ class ProjectChatManager:
             if started_perf is not None:
                 duration_ms = int((time.perf_counter() - started_perf) * 1000)
             if chat_now is not None:
-                rec = chat_now.user_turn_timings.setdefault(str(turn_index), {})
-                rec["completed_at"] = completed_at
-                if duration_ms is not None:
-                    rec["duration_ms"] = duration_ms
-                sent_at_rec = rec.get("sent_at", "")
+                stream = self._broker.get(chat_id)
+                lock = stream.publish_lock if stream is not None else nullcontext()
+                with lock:
+                    rec = chat_now.user_turn_timings.setdefault(str(turn_index), {})
+                    rec["completed_at"] = completed_at
+                    if duration_ms is not None:
+                        rec["duration_ms"] = duration_ms
+                    sent_at_rec = rec.get("sent_at", "")
                 self._save()
         payload: dict[str, object] = {
             "type": "result",
@@ -10427,7 +10743,7 @@ class ProjectChatManager:
             self.stop_chat_retry(chat_id)
         stream = self._broker.get(chat_id)
         if stream is not None:
-            stream.user_stopped = True
+            stream.stop_publish_turn()
             if stream.background:
                 # No active handle exists between turns; stopping means
                 # ending the drain (its cleanup finishes the stream). The drain
@@ -11280,9 +11596,13 @@ class ProjectChatManager:
                         attachment.path.unlink(missing_ok=True)
                     except OSError:
                         logger.exception("Failed to unlink image %s", ref)
-        chat.user_turn_images = {}
-        chat.user_turn_send_ids = {}
-        chat.user_turn_count = 0
+        stream = self._broker.get(chat.chat_id)
+        lock = stream.publish_lock if stream is not None else nullcontext()
+        with lock:
+            chat.user_turn_images = {}
+            chat.user_turn_ids = {}
+            chat.user_turn_send_ids = {}
+            chat.user_turn_count = 0
 
     def resolve_image_ref(self, ref: str) -> ImageAttachment | None:
         """Resolve an image reference (filename) to an ImageAttachment."""

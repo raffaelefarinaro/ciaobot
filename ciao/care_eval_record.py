@@ -89,11 +89,11 @@ def _fixture(scenario: Scenario) -> CareFixture:
     return match
 
 
-def workload_digest(fixture: CareFixture) -> str:
-    """Digest of what the run was asked to do: the scenario, its declared budget, its obligations."""
+def workload_digest(fixture: CareFixture, budget: RunBudget) -> str:
+    """Digest of what the run was asked to do: the scenario, the budget it ran under, its obligations."""
     return _sha({
         "scenario": fixture.scenario,
-        "declared_budget": RunBudget().as_dict(),
+        "declared_budget": budget.as_dict(),
         "obligations": [[item.id, item.observation_key, _bytes_digest(item.expected_bytes)]
                         for item in fixture.obligations],
         "protected": [[item.id, item.observation_key, _bytes_digest(item.expected_bytes)]
@@ -158,6 +158,7 @@ def build_record(
     scenario: Scenario,
     outcome: ScheduleRunOutcome,
     manifest: SeedManifest,
+    budget: RunBudget,
     observed: Mapping[str, bytes | None] | None,
     wall_s: float | None,
     usage: CareUsageReport | None,
@@ -168,13 +169,14 @@ def build_record(
 
     ``observed`` must be the seed observers' output for this run, or ``None``
     when nothing was observed (the grade is then ``none`` and every outcome is
-    unknown). ``wall_s`` is the caller's monotonic seconds around the trigger.
+    unknown). ``budget`` is the budget the run actually used, bound into the workload
+    digest. ``wall_s`` is the caller's monotonic seconds around the trigger.
     """
     if manifest.scenario != scenario:
         raise ValueError("seed manifest is for another scenario")
     fixture = _fixture(scenario)
     obligation_ids = sorted(item.id for item in fixture.obligations)
-    workload = workload_digest(fixture)
+    workload = workload_digest(fixture, budget)
     grader = grader_digest()
     if observed is None:
         grade: dict[str, Any] = {

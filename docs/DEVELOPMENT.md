@@ -51,6 +51,8 @@ ciao run
 
 `ciao setup` is idempotent and defers Git history unless explicitly requested with `--initialize-git`. That option creates local history and an initial commit of nonignored workspace and external-vault contents; it configures no remote and uploads nothing. `--yes` is not Git consent. Existing repositories still receive missing ignore guards. It writes the initial `.env` (including the selected port), seeds stock workspace files, copies the editable `AGENTS.md` workspace guide (both providers discover it natively; nothing writes a `CLAUDE.md` any more) and copies `CIAO_CUSTOMIZATION.md`. On macOS it also renders the server plist under `~/Library/LaunchAgents/` and removes retired launcher bundles. Existing custom `AGENTS.md` files and configuration values are preserved. By default setup does not load launchd; add `--load-launchd` on macOS to run `launchctl`. Linux setup creates no desktop/service files unless an explicit `--launch-agents-dir` requests an offline plist export. See [Linux hosting](LINUX.md) for the Linux install, the systemd unit and HTTPS deployment.
 
+For a new installation, `ciao setup --workspace ~/Ciaobot --notes-folder ~/Notes` selects an existing, accessible notes directory separate from the operational folder. The first-run browser setup offers the same choice. Ciaobot stores credentials, runtime data and its database in the operational folder; the notes remain in the selected directory. Setup does not create files in the separate notes folder or initialize its Git history, and refuses `--initialize-git` with this option. A cloud client manages synchronization, and Ciaobot does not report whether cloud synchronization is complete. This option does not rebind an existing installation.
+
 Onboarding lifecycle is recorded separately in the owner-private `.runtime/onboarding.json` receipt; it is not the provisioning timestamp or welcome-password flag. A fresh supported setup starts `in_progress`; an existing receipt is always preserved. Receipt-less established installs are marked `legacy_exempt`, based on setup registry/legacy workspace evidence or durable runtime state—not notes-folder contents, unrelated `.env` files, or bootstrap auth/lock files. Startup creates a pending receipt for a fresh configured install before importing legacy workspace configuration. Invalid existing receipts fail closed and are never overwritten.
 A genuinely new install also writes `backup_enabled: false` into its app settings before the engine starts: adopting a folder that already sits inside a repository with an `origin` must not begin unattended commits or uploads. Existing installs, explicit choices and unreadable settings files are left untouched, and local history (`--initialize-git`) is not consent to backup. An operator turns backup on later from Settings → Memory (the backup settings route) or by running the guided backup setup, both of which are explicit actions.
 
@@ -1379,6 +1381,27 @@ and body come from files inside the workspace (`--description-file`,
 exclusively: an existing note is `note_exists`, never overwritten. The search
 index is not refreshed; `vault_search` indexes on every query. Tests:
 `tests/test_note_create.py`, `tests/test_agent_surface.py`.
+
+### Drafting a shared-brain note: `note_share`
+
+`ciao note share --path RELATIVE.md --body-file FILE [--brain NAME]` is the
+managed path from an active foreground chat turn to one private shared-brain
+proposal. The control plane requires an attributable chat and typed current
+turn before reading the body, opens the file beneath that workspace's vault through a
+descriptor walk, and reads at most 65,537 bytes off-loop. The exact bytes go to
+`share_proposals.draft_share` with an idempotency key derived from the chat,
+durable turn identity, requested destination and body digest; the filer infers create versus
+replace from its pinned upstream snapshot. The response contains the queued
+state and canonical review path. The provider bearer is chat-scoped and reused
+across turns so ACP sessions, background shells and subagents can keep working;
+the server cannot distinguish an earlier retained caller from the current
+foreground caller during a typed turn. Treat every queued draft as untrusted
+until a human approves that individual proposal in the review flow. The final
+atomic queue replacement shares a per-stream lock with Stop and stream
+completion, so whichever acquires it first defines whether the proposal was
+queued before the turn ended. This command never accepts or publishes the
+proposal and never writes to the shared checkout. Tests:
+`tests/test_shared_brain_share_op.py`, `tests/test_agent_surface.py`.
 
 `ciao memory-audit` reads one file and skips the vault scan, so the daily
 `system-memory-curation` schedule can afford to call it and fix what it finds.

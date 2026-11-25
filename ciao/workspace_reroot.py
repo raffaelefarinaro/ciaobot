@@ -27,6 +27,7 @@ file it did not recognise is how a vault loses notes.
 
 from __future__ import annotations
 
+import ctypes
 import errno
 import hashlib
 import json
@@ -34,6 +35,13 @@ import logging
 import os
 import re
 import shutil
+import stat
+import subprocess
+import sys
+import tempfile
+import uuid
+from collections.abc import Iterator
+from contextlib import contextmanager
 from dataclasses import asdict, dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path, PurePosixPath
@@ -426,6 +434,30 @@ def dirty_tracked_paths(install_root: Path, *relatives: str) -> list[str]:
 _REGENERATED_BACKUP = "migration/reroot-regenerated"
 
 
+def _preflight_registry(owner: Any, workspaces: list[str]) -> str | None:
+    """Validate touched rows against the owned bytes before any filesystem move."""
+    from ciao.workspaces import registry_rows  # noqa: PLC0415
+
+    if owner.current is None:
+        return None  # no persisted rows to preflight; migration creates none
+    try:
+        rows = registry_rows(json.loads(owner.current))
+    except (ValueError, TypeError):
+        return "workspace registry is unreadable"
+    by_name = {
+        str(row.get("name")): row
+        for row in rows
+        if isinstance(row, dict) and isinstance(row.get("name"), str)
+    }
+    for name in workspaces:
+        row = by_name.get(name)
+        if row is None:
+            return f"workspace registry has no entry for '{name}'"
+        if not isinstance(row.get("vault_root"), str) or not row["vault_root"]:
+            return f"workspace registry entry '{name}' has no vault_root"
+    return None
+
+
 def apply(
     install_root: Path,
     vault_root: Path,
@@ -433,6 +465,30 @@ def apply(
     runtime_root: Path,
     *,
     primary: str,
+    source_config: Any = None,
+    expected_registry_bytes: bytes | None = None,
+) -> dict[str, Any]:
+    from ciao.workspaces import acquire_registry_at, WorkspaceRegistryBusy
+    try:
+        with acquire_registry_at(runtime_root) as owner:
+            expected = expected_registry_bytes
+            if source_config is not None:
+                expected = getattr(source_config, "_workspace_registry_bytes", None)
+            if (source_config is not None or expected_registry_bytes is not None) and owner.current != expected:
+                return {"status": "refused", "refusals": ["workspace registry changed before migration"]}
+            return _apply_owned(install_root, vault_root, workspaces, runtime_root, primary=primary, owner=owner)
+    except WorkspaceRegistryBusy as exc:
+        return {"status": "refused", "reason": str(exc)}
+
+
+def _apply_owned(
+    install_root: Path,
+    vault_root: Path,
+    workspaces: list[str],
+    runtime_root: Path,
+    *,
+    primary: str,
+    owner: Any,
 ) -> dict[str, Any]:
     """Re-root every registered workspace, or none of them.
 
@@ -501,6 +557,14 @@ def apply(
             f"primary workspace '{primary}' is not registered, so the guide "
             "regions and the skill catalog have nowhere to go"
         ]
+        payload["receipt_path"] = str(write_receipt(runtime_root, payload))
+        return payload
+
+    preflight_error = _preflight_registry(owner, list(result.workspaces))
+    if preflight_error is not None:
+        payload["status"] = "refused"
+        payload["refused"] = True
+        payload["refusals"] = [preflight_error + "; nothing was moved"]
         payload["receipt_path"] = str(write_receipt(runtime_root, payload))
         return payload
 
@@ -604,6 +668,7 @@ def apply(
     # the unwind can restore it; if the rewrite itself is what failed, the file
     # was never touched (it writes atomically) and None is exactly right.
     registry_before: list[dict[str, Any]] | None = None
+    registry_after: list[dict[str, Any]] | None = None
     schedule_path = _schedule_store_path(runtime_root)
     schedule_before: bytes | None = None
     schedule_written: bytes | None = None
@@ -658,7 +723,7 @@ def apply(
         # every entry still names memory-vault/<name> while the directory now lives
         # at <name>/memory-vault, so the vault resolves to a path that is gone. The
         # before-image goes in the receipt so undo restores it exactly.
-        registry_before, registry_after = _rewrite_registry(runtime_root, result)
+        registry_before, registry_after = _rewrite_registry(runtime_root, result, owner=owner)
         payload["registry_before"] = registry_before
         payload["registry_after"] = registry_after
 
@@ -702,6 +767,7 @@ def apply(
             created.extend(f"{name}/{relative}" for relative in files)
             created_dirs.extend(f"{name}/{relative}" for relative in dirs)
         payload["created_files"] = created
+        payload["created_files_contents"] = {name: _entry_fingerprint(install_root / name) for name in created}
         payload["created_dirs"] = created_dirs
         # What the bootstrap put inside each directory it created, recorded so
         # undo can tell the migration's own contents from anything an operator
@@ -766,11 +832,18 @@ def apply(
         refusals = [f"migration failed after moving files: {exc}"]
         if registry_before is not None:
             try:
-                _write_registry(runtime_root, registry_before)
+                from ciao.workspaces import restore_registry_entries  # noqa: PLC0415
+
+                if not restore_registry_entries(
+                    runtime_root, registry_before, registry_after, owner=owner
+                ):
+                    raise OSError(
+                        "no authoritative post-migration registry snapshot"
+                    )
             except Exception as restore_exc:  # noqa: BLE001 - surfaced, never swallowed
                 refusals.append(
                     "the workspace registry could not be restored either "
-                    f"({restore_exc}); its entries still name per-root paths "
+                    f"({restore_exc}); its entries may still name per-root paths "
                     "while the vaults are back under the shared root, so repair "
                     "it by hand before starting the app"
                 )
@@ -804,17 +877,7 @@ def apply(
 
 
 def _replace_across_filesystems(source: Path, destination: Path) -> None:
-    """Replace ``destination`` with ``source``, even across filesystems.
-
-    why: ``Path.replace`` is rename(2), which fails with EXDEV when the runtime
-    root (``CIAO_RUNTIME_ROOT``) sits on a different filesystem from the install
-    root. The forward migration stashes INTO the runtime root with
-    ``shutil.move`` precisely because that layout is supported, so this reverse
-    step needs the same reach. The fast path stays an atomic rename; on EXDEV
-    the fallback copies beside the DESTINATION and ``os.replace``s onto it, so
-    the overwrite stays atomic and a failed copy leaves the destination
-    untouched. Errors propagate: a failed restore still aborts the undo.
-    """
+    """Replace ``destination`` with ``source``, even across filesystems."""
     try:
         source.replace(destination)
         return
@@ -830,7 +893,645 @@ def _replace_across_filesystems(source: Path, destination: Path) -> None:
         raise
 
 
+def _preflight_undo_registry(owner: Any, receipt: dict[str, Any]) -> str | None:
+    """Check transaction-owned vault_root fields against the owned live bytes."""
+    from ciao.workspaces import registry_rows  # noqa: PLC0415
+
+    after = receipt.get("registry_after")
+    if owner.current is None:
+        return (
+            None
+            if after is None
+            else "the live workspace registry disappeared after the migration"
+        )
+    if not isinstance(after, list):
+        return "the migration receipt has no authoritative post-migration registry snapshot"
+    try:
+        live_rows = registry_rows(json.loads(owner.current))
+    except (ValueError, TypeError):
+        return "the live workspace registry is unreadable"
+    live = {
+        str(row.get("name")): row
+        for row in live_rows
+        if isinstance(row, dict) and isinstance(row.get("name"), str)
+    }
+    names = set(receipt.get("workspaces") or [])
+    for row in after:
+        if not isinstance(row, dict) or str(row.get("name")) not in names:
+            continue
+        name = str(row["name"])
+        current = live.get(name)
+        if current is None or current.get("vault_root") != row.get("vault_root"):
+            return f"workspace registry row '{name}' changed since the migration; nothing was undone"
+    return None
+
+
+# Git's debug format is not a stable serialization. Only accept the known
+# record layout. The NUL ends the raw pathname, including any embedded tabs or
+# newlines, before the fixed ASCII stat fields and hexadecimal flags.
+_INDEX_RECORD = re.compile(
+    rb"([0-7]{6} [0-9a-f]+ [0-3])\t([^\0]+)\0"
+    rb"  ctime: [0-9]+:[0-9]+\n  mtime: [0-9]+:[0-9]+\n"
+    rb"  dev: [0-9]+\tino: [0-9]+\n  uid: [0-9]+\tgid: [0-9]+\n"
+    rb"  size: [0-9]+\tflags: ([0-9a-fA-F]+)\n"
+)
+
+
+def _index_snapshot(
+    root: Path, relative: str, *, index: Path | None = None
+) -> tuple[dict[str, str], dict[str, int]]:
+    result = subprocess.run(
+        ["git", "-C", str(root), "--literal-pathspecs", "ls-files", "--stage", "--debug", "-z", "--", relative],
+        capture_output=True,
+        env={**os.environ, "GIT_INDEX_FILE": str(index)} if index is not None else None,
+    )
+    if result.returncode:
+        raise UndoIndexConflict(os.fsdecode(result.stderr))
+    rows = {}
+    flags = {}
+    offset = 0
+    while offset < len(result.stdout):
+        record = _INDEX_RECORD.match(result.stdout, offset)
+        if record is None:
+            raise UndoIndexConflict("unsupported Git index entry format")
+        metadata, raw_name, raw_flags = record.groups()
+        name = os.fsdecode(raw_name)
+        if not metadata.endswith(b" 0"):
+            raise UndoIndexConflict(f"unmerged index entry: {name}")
+        rows[name] = metadata.decode("ascii")
+        bits = int(raw_flags, 16)
+        if bits:
+            flags[name] = bits
+        offset = record.end()
+    return rows, flags
+
+
+def _refuse_index_flags(flags: dict[str, int], paths: list[str] | tuple[str, ...]) -> None:
+    for name, bits in flags.items():
+        if any(
+            path == "." or name == path or name.startswith(path + "/") or path.startswith(name + "/")
+            for path in paths
+        ):
+            raise UndoIndexConflict(f"Git index flags 0x{bits:x} require operator inspection: {name}")
+
+
+def _index_rows(root: Path, relative: str) -> dict[str, str]:
+    rows, flags = _index_snapshot(root, relative)
+    _refuse_index_flags(flags, [relative])
+    return rows
+
+
+class UndoIndexConflict(OSError):
+    """The index could not be owned or its staged rows changed."""
+
+
+@contextmanager
+def _own_index(root: Path) -> Iterator[Path]:
+    # Git writers coordinate by creating index.lock exclusively and publishing
+    # it with rename. Cooperate with the per-worktree lock, including gitfiles.
+    if any(key in os.environ for key in ("GIT_INDEX_FILE", "GIT_DIR", "GIT_WORK_TREE", "GIT_COMMON_DIR")):
+        raise UndoIndexConflict("undo requires the worktree's default Git index")
+    code, location = run_git(
+        root, "rev-parse", "--path-format=absolute", "--show-toplevel", "--git-path", "index"
+    )
+    paths = location.splitlines()
+    if code or len(paths) != 2 or Path(paths[0]) != root.resolve() or not Path(paths[1]).is_absolute():
+        raise UndoIndexConflict(f"cannot identify the install root's Git index: {location}")
+    index = Path(paths[1])
+    lock = index.with_name("index.lock")
+    try:
+        fd = os.open(lock, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    except OSError as exc:
+        raise UndoIndexConflict(f"cannot own Git index lock {lock}: {exc}") from exc
+    try:
+        if index.is_symlink() or not index.is_file():
+            raise UndoIndexConflict(f"unsupported Git index: {index}")
+        yield index
+    finally:
+        os.close(fd)
+        # The reservation stays at the same inode until release, even when
+        # the alternate index is published. Never reclaim a stale Git lock.
+        lock.unlink()
+
+
+def _set_index(
+    root: Path, previous: dict[str, str], wanted: dict[str, str], *paths: str
+) -> None:
+    with _own_index(root) as index:
+        original, flags = _index_snapshot(root, ".")
+        _refuse_index_flags(flags, paths)
+        live = {
+            name: value for name, value in original.items()
+            if any(name == path or name.startswith(path + "/") for path in paths)
+        }
+        if live != previous:
+            raise UndoIndexConflict(f"Git index changed independently: {', '.join(paths)}")
+        if previous == wanted:
+            return
+        # Work on a private copy of the complete index so concurrent staging
+        # outside these paths, already present at lock acquisition, survives.
+        with tempfile.TemporaryDirectory(dir=index.parent, prefix="ciao-index-") as temporary:
+            shadow = Path(temporary) / "index"
+            shutil.copy2(index, shadow)
+            _write_index_rows(root, shadow, previous, wanted)
+            # A file/directory collision can affect paths outside the request.
+            # Verify Git produced exactly the requested row changes.
+            expected = {name: value for name, value in original.items() if name not in previous}
+            expected.update(wanted)
+            if _index_snapshot(root, ".", index=shadow) != (expected, flags):
+                raise UndoIndexConflict("Git index update would change other staged entries")
+            shutil.copymode(index, shadow)
+            _fsync_file(shadow)
+            os.replace(shadow, index)
+            _fsync_directory(index.parent)
+
+
+def _write_index_rows(root: Path, shadow: Path, previous: dict[str, str], wanted: dict[str, str]) -> None:
+    records = []
+    for name in previous.keys() - wanted.keys():
+        oid = previous[name].split()[1]
+        records.append(b"0 " + b"0" * len(oid) + b"\t" + os.fsencode(name))
+    records.extend(meta.encode("ascii") + b"\t" + os.fsencode(name) for name, meta in wanted.items())
+    if records:
+        result = subprocess.run(
+            ["git", "-c", "core.fsync=index", "-C", str(root), "update-index", "-z", "--index-info"],
+            input=b"\0".join(records) + b"\0", capture_output=True,
+            env={**os.environ, "GIT_INDEX_FILE": str(shadow)},
+        )
+        if result.returncode:
+            raise OSError(os.fsdecode(result.stderr))
+
+
+def _move_undo_entry(root: Path, move: dict[str, Any], *, recovering: bool) -> None:
+    original, restored = move["destination"], move["source"]
+    previous = move["index"]
+    renamed = {restored + name[len(original):]: meta for name, meta in previous.items()}
+    src, dst = (restored, original) if recovering else (original, restored)
+    target = root / dst
+    if not move.get("identity"):
+        raise OSError(f"missing move identity: {src}")
+    if _identity(root / src) == move["identity"]:
+        _mkdir_durable(target.parent)
+        _exclusive_rename(root / src, target)
+        if _identity(target) != move["identity"]:
+            _exclusive_rename(target, root / src)
+            raise OSError(f"move source changed: {src}")
+    elif os.path.lexists(root / src):
+        raise OSError(f"independent move occupant: {src}")
+    if _identity(target) != move["identity"]:
+        raise OSError(f"move identity changed: {target}")
+    live = {**_index_rows(root, original), **_index_rows(root, restored)}
+    if live != previous and live != renamed:
+        raise OSError(f"git index changed during move: {src}")
+    wanted = previous if recovering else renamed
+    if live != wanted:
+        _set_index(root, live, wanted, original, restored)
+
+
+UNDO_MANIFEST_NAME = "undo-in-progress.json"
+
+
+def _fsync_directory(path: Path) -> None:
+    fd = os.open(path, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+    try:
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+
+
+def _fsync_file(path: Path) -> None:
+    fd = os.open(path, os.O_RDONLY)
+    try:
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+
+
+def _mkdir_durable(path: Path) -> None:
+    if path.is_dir():
+        return
+    _mkdir_durable(path.parent)
+    path.mkdir(exist_ok=True)
+    _fsync_directory(path.parent)
+
+
+def _unlink_durable(path: Path) -> None:
+    path.unlink(missing_ok=True)
+    if path.parent.is_dir():
+        _fsync_directory(path.parent)
+
+
+def _undo_manifest_path(runtime_root: Path) -> Path:
+    return Path(runtime_root) / "migration" / UNDO_MANIFEST_NAME
+
+
+def _write_json_atomic(path: Path, payload: dict[str, Any]) -> None:
+    _mkdir_durable(path.parent)
+    tmp = path.with_name(path.name + ".tmp")
+    tmp.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8", newline="")
+    _fsync_file(tmp)
+    os.replace(tmp, path)
+    _fsync_directory(path.parent)
+
+
+def _exclusive_rename(source: Path, target: Path) -> None:
+    libc = ctypes.CDLL(None, use_errno=True)
+    if sys.platform == "darwin":
+        rename = libc.renameatx_np
+        cwd, flag = -2, 4
+    elif sys.platform.startswith("linux") and hasattr(libc, "renameat2"):
+        rename = libc.renameat2
+        cwd, flag = -100, 1
+    else:
+        raise OSError(errno.ENOTSUP, "exclusive rename is unavailable")
+    if rename(cwd, os.fsencode(source), cwd, os.fsencode(target), flag):
+        error = ctypes.get_errno()
+        raise OSError(error, os.strerror(error), str(target))
+    _fsync_directory(source.parent)
+    if source.parent != target.parent:
+        _fsync_directory(target.parent)
+
+
+def _identity(path: Path) -> list[int] | None:
+    try:
+        info = path.lstat()
+    except FileNotFoundError:
+        return None
+    return [info.st_dev, info.st_ino, stat.S_IFMT(info.st_mode)]
+
+
+def _under(root: Path, relative: str) -> Path:
+    name = Path(relative)
+    if name.is_absolute() or ".." in name.parts or ".git" in name.parts or not name.parts:
+        raise OSError(f"invalid undo path: {relative}")
+    path = root / name
+    if path.parent.resolve() != path.parent:
+        raise OSError(f"symlink ancestor: {path}")
+    return path
+
+
+def _new_anchor(install: Path, relatives: list[str]) -> Path:
+    code, git_dir = run_git(install, "rev-parse", "--absolute-git-dir")
+    if code:
+        raise OSError(git_dir)
+    parent = Path(git_dir.strip()) / "ciao-undo"
+    parent.mkdir(mode=0o700, exist_ok=True)
+    if parent.is_symlink() or parent.stat().st_mode & 0o077 or parent.stat().st_uid != os.getuid():
+        raise OSError(f"capture directory is not private: {parent}")
+    anchor = parent / uuid.uuid4().hex
+    anchor.mkdir(mode=0o700)
+    device = anchor.stat().st_dev
+    for relative in relatives:
+        path = _under(install, relative)
+        if path == parent or path in parent.parents or parent in path.parents:
+            raise OSError(f"capture anchor intersects undo path: {path}")
+        while not os.path.lexists(path):
+            path = path.parent
+        _fsync_directory(path if path.is_dir() and not path.is_symlink() else path.parent)
+        if path.lstat().st_dev != device or path.is_mount():
+            raise OSError(f"cross-device undo capture: {path}")
+    probe = anchor / "probe"
+    probe.touch()
+    occupied = anchor / "occupied"
+    occupied.touch()
+    try:
+        _exclusive_rename(probe, occupied)
+    except FileExistsError:
+        pass
+    else:
+        raise OSError("filesystem did not honor exclusive rename")
+    _unlink_durable(occupied)
+    os.link(probe, occupied)
+    _unlink_durable(occupied)
+    _exclusive_rename(probe, anchor / "renamed")
+    _unlink_durable(anchor / "renamed")
+    _fsync_directory(parent)
+    _fsync_directory(parent.parent)
+    return anchor
+
+
+def _atomic_copy_stash(source: Path, target: Path, expected: dict[str, Any] | None,
+                       *, temp_path: Path, saved: Path, identity: list[int] | None,
+                       postimage: dict[str, Any]) -> None:
+    """Keep the staged inode as the publication witness throughout recovery."""
+    fd = os.open(temp_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    os.close(fd)
+    shutil.copy2(source, temp_path)
+    _fsync_file(temp_path)
+    _fsync_directory(temp_path.parent)
+    if _entry_fingerprint(temp_path) != postimage:
+        raise OSError(f"stash copy changed during staging: {source}")
+    if expected is not None:
+        _exclusive_rename(target, saved)
+        if _identity(saved) != identity or _entry_fingerprint(saved) != expected:
+            _exclusive_rename(saved, target)
+            raise OSError(f"stash target was edited independently: {target}")
+    os.link(temp_path, target)
+    _fsync_directory(target.parent)
+
+
+def _restore_stash(item: dict[str, Any], target: Path) -> None:
+    saved = Path(item["saved"])
+    staged = Path(item["temp"])
+    withdrawn = saved.with_suffix(".withdrawn")
+    current = _identity(target)
+    if current is not None and current == _identity(staged):
+        _exclusive_rename(target, withdrawn)
+        if _identity(withdrawn) != current or _entry_fingerprint(withdrawn) != item["postimage"]:
+            _exclusive_rename(withdrawn, target)
+            raise OSError("stash target was edited independently")
+    elif current is not None and (
+        current != item["identity"] or _entry_fingerprint(target) != item["before"]
+    ):
+        raise OSError("stash target was edited independently")
+    if os.path.lexists(withdrawn) and (
+        _identity(withdrawn) != _identity(staged)
+        or _entry_fingerprint(withdrawn) != item["postimage"]
+    ):
+        raise OSError("withdrawn stash was edited independently")
+    if os.path.lexists(saved):
+        if _identity(saved) != item["identity"]:
+            raise OSError("stash capture identity changed")
+        _exclusive_rename(saved, target)
+    elif item["identity"] != _identity(target):
+        raise OSError("stash capture missing")
+
+
+def _restore_owned_schedule_prompts(runtime_root: Path, rewrites: Any) -> list[str]:
+    """Reverse only the prompt fields this undo wrote, against their post-images.
+
+    The read, the ownership comparison and the write all happen under the store's
+    writer lock, so a concurrent edit cannot land between them. A prompt that reads
+    as neither the migration's text nor the restored text was edited independently;
+    that is an explicit conflict and nothing is written.
+    """
+    if not rewrites:
+        return []
+    if not isinstance(rewrites, list):
+        return ["schedule: the undo manifest has invalid prompt rewrite records"]
+    records: list[dict[str, str]] = []
+    for record in rewrites:
+        if (
+            not isinstance(record, dict)
+            or not isinstance(record.get("schedule_id"), str)
+            or not isinstance(record.get("before"), str)
+            or not isinstance(record.get("after"), str)
+        ):
+            return ["schedule: the undo manifest has invalid prompt rewrite records"]
+        records.append(
+            {
+                "schedule_id": record["schedule_id"],
+                "before": record["before"],
+                "after": record["after"],
+            }
+        )
+    errors: list[str] = []
+    with schedule_store_lock(runtime_root):
+        path, _original, store = _read_schedule_store(runtime_root)
+        if store is None:
+            return ["schedule: the store disappeared during recovery"]
+        restored = json.loads(json.dumps(store))
+        by_id: dict[str, list[dict[str, Any]]] = {}
+        for row in restored["schedules"]:
+            schedule_id = row.get("schedule_id")
+            if isinstance(schedule_id, str):
+                by_id.setdefault(schedule_id, []).append(row)
+        changed = False
+        for record in records:
+            rows = by_id.get(record["schedule_id"], [])
+            if len(rows) != 1:
+                errors.append(
+                    f"schedule {record['schedule_id']!r} is missing or duplicated"
+                )
+                continue
+            prompt = rows[0].get("prompt")
+            if prompt == record["after"]:
+                # The undo never wrote this row, or recovery already reversed it.
+                continue
+            if prompt != record["before"]:
+                errors.append(
+                    f"schedule {record['schedule_id']!r} was edited independently; "
+                    "its prompt is neither the migration text nor the restored text"
+                )
+                continue
+            rows[0]["prompt"] = record["after"]
+            bump_row_revision(rows[0])
+            changed = True
+        if errors:
+            return errors
+        if changed:
+            _write_schedule_store(path, restored)
+    return []
+
+
+def _capture_locations(manifest: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "capture_inventory": str(Path(manifest["compensation_dir"]) / "inventory.json"),
+        "unverified_created_files": {
+            item["source"]: item["backup"] for item in manifest["created"]
+            if item.get("fingerprinted_at_undo") and "identity" in item
+        },
+    }
+
+
+def _recover_undo_manifest(
+    runtime_root: Path, owner: Any, *, completed: dict[str, Any] | None = None
+) -> str | None:
+    """Roll an interrupted undo back to its post-apply state before retrying."""
+    path = _undo_manifest_path(runtime_root)
+    if not path.is_file():
+        return None
+    try:
+        manifest = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError, TypeError):
+        return "an interrupted undo manifest is unreadable; repair it by hand"
+    if not isinstance(manifest, dict):
+        return "invalid undo manifest"
+    install_root = Path(str(manifest.get("install_root") or "")).resolve()
+    anchor = Path(str(manifest.get("compensation_dir") or ""))
+    if (manifest.get("version") != 2 or not manifest.get("anchor_identity")
+            or _identity(anchor) != manifest["anchor_identity"]):
+        return "undo capture directory or manifest version changed; manual recovery required"
+    try:
+        code, git_dir = run_git(install_root, "rev-parse", "--absolute-git-dir")
+        if (code or anchor.parent != Path(git_dir) / "ciao-undo"
+                or anchor.resolve() != anchor or not re.fullmatch(r"[0-9a-f]{32}", anchor.name)
+                or Path(manifest["receipt_path"]) != receipt_path(runtime_root)):
+            raise ValueError("invalid undo anchor or receipt path")
+        for index, item in enumerate(manifest["created"]):
+            _under(install_root, item["source"])
+            if Path(item["backup"]) != anchor / f"artifact-{index}":
+                raise ValueError("invalid artifact slot")
+        for index, item in enumerate(manifest["stashes"]):
+            _under(install_root, item["source"])
+            _under(runtime_root, item["backup"])
+            if item["state"] == "armed" and (
+                Path(item["saved"]) != anchor / f"stash-{index}"
+                or Path(item["temp"]) != anchor / f"stash-{index}.stage"
+            ):
+                raise ValueError("invalid stash slot")
+        for move in manifest["moves"]:
+            _under(install_root, move["source"])
+            _under(install_root, move["destination"])
+    except (OSError, KeyError, TypeError, ValueError) as exc:
+        return f"invalid undo manifest: {exc}"
+    if manifest.get("phase") == "committed":
+        stored_receipt = manifest.get("receipt_path")
+        if isinstance(stored_receipt, str):
+            _unlink_durable(Path(stored_receipt))
+        for item in manifest.get("stashes") or []:
+            if isinstance(item, dict):
+                _unlink_durable(runtime_root / str(item.get("backup") or ""))
+        compensation = manifest.get("compensation_dir")
+        if isinstance(compensation, str):
+            _write_json_atomic(Path(compensation) / "inventory.json", manifest)
+            _fsync_directory(Path(compensation).parent)
+        if completed is not None:
+            completed.update(_capture_locations(manifest))
+        _unlink_durable(path)
+        return None
+    try:
+        affected = [item["source"] for item in manifest["created"] + manifest["stashes"]]
+        for move in manifest["moves"]:
+            affected.extend((move["source"], move["destination"]))
+        with _own_index(install_root):
+            _, flags = _index_snapshot(install_root, ".")
+            _refuse_index_flags(flags, affected)
+    except OSError as exc:
+        return str(exc)
+    errors: list[str] = []
+    try:
+        errors.extend(
+            _restore_owned_schedule_prompts(
+                runtime_root, manifest.get("schedule_rewrites")
+            )
+        )
+    except (OSError, ValueError, TypeError) as exc:
+        errors.append(f"schedule: {exc}")
+    for move in reversed(manifest["moves"]):
+        if move.get("recovered"):
+            continue
+        try:
+            _move_undo_entry(install_root, move, recovering=True)
+            move["recovered"] = True
+            _write_json_atomic(path, manifest)
+        except (OSError, subprocess.SubprocessError) as exc:
+            return f"re-applying the already reversed moves also failed: {exc}"
+    created = manifest.get("created") or []
+    for item in reversed(created):
+        if not isinstance(item, dict) or item.get("recovered"):
+            continue
+        source = install_root / str(item.get("source") or "")
+        backup = Path(str(item.get("backup") or ""))
+        if os.path.lexists(backup):
+            try:
+                if _identity(backup) != item.get("identity"):
+                    raise OSError(f"created capture identity changed: {backup}")
+                if source.exists() or source.is_symlink():
+                    raise OSError(f"compensation target exists: {source}")
+                _mkdir_durable(source.parent)
+                _exclusive_rename(backup, source)
+            except OSError as exc:
+                errors.append(str(exc))
+        if "identity" in item:
+            if _identity(source) != item["identity"]:
+                errors.append(f"created artifact identity changed: {source}")
+            else:
+                live = _index_rows(install_root, item["source"])
+                if live not in ({}, item["index"]):
+                    errors.append(f"created artifact index changed: {source}")
+                else:
+                    _set_index(install_root, live, item["index"], item["source"])
+                    item["recovered"] = True
+                    _write_json_atomic(path, manifest)
+    for item in manifest.get("stashes") or []:
+        if not isinstance(item, dict) or item.get("state") == "pending":
+            continue
+        target = install_root / str(item.get("source") or "")
+        try:
+            if item.get("state") != "armed":
+                raise OSError("stash progress is missing or invalid")
+            _restore_stash(item, target)
+            if item.get("tracked"):
+                live = _index_rows(install_root, item["source"])
+                if live not in (item["index"], item["published_index"]):
+                    raise OSError("stash index entry changed independently")
+                _set_index(install_root, live, item["index"], item["source"])
+        except OSError as exc:
+            errors.append(f"{target}: {exc}")
+    before = manifest.get("registry_before")
+    after = manifest.get("registry_after")
+    migrated = set(manifest.get("workspaces") or [])
+    current_registry = owner.current
+    if (
+        isinstance(before, list)
+        and isinstance(after, list)
+        and current_registry is not None
+    ):
+        before_rows = [
+            row for row in before
+            if isinstance(row, dict) and str(row.get("name")) in migrated
+        ]
+        after_rows = [
+            row for row in after
+            if isinstance(row, dict) and str(row.get("name")) in migrated
+        ]
+        if before_rows and after_rows:
+            from ciao.workspaces import registry_rows, restore_registry_entries  # noqa: PLC0415
+
+            try:
+                live_rows = registry_rows(json.loads(current_registry))
+                live_by_name = {
+                    str(row.get("name")): row
+                    for row in live_rows
+                    if isinstance(row, dict) and isinstance(row.get("name"), str)
+                }
+                if all(
+                    live_by_name.get(str(row.get("name")), {}).get("vault_root")
+                    == row.get("vault_root")
+                    for row in after_rows
+                ):
+                    pass
+                elif all(
+                    live_by_name.get(str(row.get("name")), {}).get("vault_root")
+                    == row.get("vault_root")
+                    for row in before_rows
+                ):
+                    if not restore_registry_entries(
+                        runtime_root, after_rows, before_rows, owner=owner,
+                        fields=("vault_root",),
+                    ):
+                        errors.append("restoring the post-migration registry also failed: conditional restore refused")
+                else:
+                    errors.append(
+                        "registry: migrated rows no longer match either the "
+                        "pre- or post-undo image"
+                    )
+            except (OSError, ValueError, TypeError) as exc:
+                errors.append(f"registry: {exc}")
+    if errors:
+        return "an interrupted undo could not be compensated: " + "; ".join(errors)
+    compensation = manifest.get("compensation_dir")
+    if isinstance(compensation, str):
+        _write_json_atomic(Path(compensation) / "inventory.json", manifest)
+        _fsync_directory(Path(compensation).parent)
+    _unlink_durable(path)
+    return None
+
+
 def undo(install_root: Path, runtime_root: Path) -> dict[str, Any]:
+    from ciao.workspaces import acquire_registry_at, WorkspaceRegistryBusy
+    try:
+        with acquire_registry_at(runtime_root) as owner:
+            return _undo_owned(install_root, runtime_root, owner=owner)
+    except WorkspaceRegistryBusy as exc:
+        return {"status": "refused", "reason": str(exc)}
+    except UndoIndexConflict as exc:
+        return {"status": "failed", "reason": str(exc),
+                "recovery_manifest": str(_undo_manifest_path(runtime_root))}
+
+
+def _undo_owned(install_root: Path, runtime_root: Path, *, owner: Any) -> dict[str, Any]:
     """Reverse a completed re-rooting to a byte-identical tree.
 
     CLI only. Reverting the architecture is not a housekeeping button, and the
@@ -854,10 +1555,24 @@ def undo(install_root: Path, runtime_root: Path) -> dict[str, Any]:
     fingerprints before a single path is touched.
     """
     install_root = Path(install_root).resolve()
-    runtime_root = Path(runtime_root)
+    runtime_root = Path(runtime_root).resolve()
+    completed: dict[str, Any] = {}
+    recovery_error = _recover_undo_manifest(runtime_root, owner, completed=completed)
+    if recovery_error is not None:
+        return {
+            "status": "failed",
+            "reason": recovery_error + "; receipt retained",
+            "recovery_manifest": str(_undo_manifest_path(runtime_root)),
+        }
     receipt = read_receipt(runtime_root)
     if receipt is None:
-        return {"status": "nothing_to_undo", "reason": "no migrated receipt"}
+        return {"status": "nothing_to_undo", "reason": "no migrated receipt", **completed}
+    registry_conflict = _preflight_undo_registry(owner, receipt)
+    if registry_conflict is not None:
+        return {
+            "status": "refused",
+            "reason": registry_conflict + "; the migration receipt is retained",
+        }
 
     try:
         schedule_restore = _prepare_schedule_prompt_restore(
@@ -871,13 +1586,17 @@ def undo(install_root: Path, runtime_root: Path) -> dict[str, Any]:
     # everything below assumes the directories hold exactly what the receipt
     # recorded.
     blocked = _unexpected_under_created_dirs(install_root, receipt)
+    for relative, expected in receipt.get("created_files_contents", {}).items():
+        target = install_root / relative
+        if os.path.lexists(target) and _entry_fingerprint(target) != expected:
+            blocked.append(relative)
     if blocked:
         shown = ", ".join(blocked[:5])
         more = f" (and {len(blocked) - 5} more)" if len(blocked) > 5 else ""
         return {
             "status": "refused",
             "reason": (
-                "these paths under directories the migration created were "
+                "these paths the migration created were "
                 f"added, edited or deleted after it ran: {shown}{more}. Restore "
                 "each one to what the migration left or move it out, then run "
                 "the undo again; undoing anyway would delete them with their "
@@ -886,22 +1605,131 @@ def undo(install_root: Path, runtime_root: Path) -> dict[str, Any]:
             "unexpected_paths": blocked,
         }
 
+    created_paths = [*receipt.get("created_files", []), *receipt.get("created_dirs", [])]
+    relatives = list(created_paths)
+    relatives.extend(item["source"] for item in receipt.get("stashed_files", []))
+    for move in receipt.get("applied", []):
+        relatives.extend((move["source"], move["destination"]))
+    try:
+        for item in receipt.get("stashed_files", []):
+            backup = _under(runtime_root, item["backup"])
+            if backup.is_symlink() or not backup.is_file():
+                raise OSError(f"stash backup missing or invalid: {backup}")
+        with _own_index(install_root):
+            _, flags = _index_snapshot(install_root, ".")
+            _refuse_index_flags(flags, relatives)
+        compensation_dir = _new_anchor(install_root, relatives)
+    except OSError as exc:
+        return {"status": "refused", "reason": str(exc)}
+    created_payload: list[dict[str, Any]] = []
+    for index, relative in enumerate(created_paths):
+        target = install_root / relative
+        directory = relative in receipt.get("created_dirs", [])
+        captures = receipt.get("created_dirs_contents" if directory else "created_files_contents", {})
+        expected = captures.get(relative)
+        # Early receipts name individual files but only fingerprint directories.
+        # A present-day fingerprint guards capture races, not migration ownership.
+        legacy_file = not directory and "created_files_contents" not in receipt
+        if expected is None and os.path.lexists(target):
+            if legacy_file and (target.is_symlink() or target.is_file()):
+                expected = _entry_fingerprint(target)
+            else:
+                return {"status": "refused", "reason": f"no recorded fingerprint for {target}; inspect the existing entry"}
+        created_payload.append({
+            "source": relative,
+            "backup": str(compensation_dir / f"artifact-{index}"),
+            "expected": expected,
+            "planned_identity": _identity(target),
+            "fingerprinted_at_undo": legacy_file,
+        })
+
+    schedule_rewrites = (
+        receipt.get("schedule_prompt_rewrites") if schedule_restore is not None else []
+    )
+    manifest: dict[str, Any] = {
+        "install_root": str(install_root),
+        "compensation_dir": str(compensation_dir),
+        "version": 2,
+        "anchor_identity": _identity(compensation_dir),
+        "created": created_payload,
+        "stashes": [
+            {
+                "source": str(entry.get("source")),
+                "backup": str(entry.get("backup")),
+                "tracked": bool(entry.get("tracked")),
+                "state": "pending",
+            }
+            for entry in receipt.get("stashed_files", [])
+            if isinstance(entry, dict)
+        ],
+        "moves": [],
+        "move_identities": {move["destination"]: _identity(install_root / move["destination"])
+                            for move in receipt.get("applied", [])},
+        "workspaces": list(receipt.get("workspaces") or []),
+        "registry_before": receipt.get("registry_before"),
+        "registry_after": receipt.get("registry_after"),
+        "schedule_rewrites": schedule_rewrites,
+        "phase": "in_progress",
+        "receipt_path": str(receipt_path(runtime_root)),
+    }
+    _write_json_atomic(_undo_manifest_path(runtime_root), manifest)
+
     vault_name = Path(receipt.get("vault_root", "")).name or VAULT_DIR_NAME
     if receipt.get("removed_vault_dir"):
-        (install_root / vault_name).mkdir(parents=True, exist_ok=True)
+        _mkdir_durable(install_root / vault_name)
+
+    def stash_for_compensation(target: Path) -> None:
+        relative = target.relative_to(install_root).as_posix()
+        item = next(record for record in created_payload if record["source"] == relative)
+        bucket = Path(item["backup"])
+        if _identity(target) != item["planned_identity"]:
+            raise OSError(f"created artifact was replaced: {target}")
+        item.update(identity=item["planned_identity"], index=_index_rows(install_root, relative))
+        _write_json_atomic(_undo_manifest_path(runtime_root), manifest)
+        _exclusive_rename(target, bucket)
+        observed = (
+            _fingerprint_tree(bucket) if bucket.is_dir() and not bucket.is_symlink()
+            else _entry_fingerprint(bucket)
+        )
+        if _identity(bucket) != item["identity"] or observed != item["expected"]:
+            _exclusive_rename(bucket, target)
+            raise OSError(f"created artifact was edited independently: {target}")
+        _set_index(install_root, item["index"], {}, relative)
+
+    def failed(reason: str) -> dict[str, Any]:
+        error = _recover_undo_manifest(runtime_root, owner)
+        if error:
+            reason += "; " + error
+        return {"status": "failed", "reason": reason, "reversed": [], "already_reversed": already}
 
     restored: list[str] = []
-    for entry in receipt.get("stashed_files", []):
-        backup = runtime_root / entry["backup"]
-        target = install_root / entry["source"]
-        if backup.is_file():
-            target.parent.mkdir(parents=True, exist_ok=True)
-            _replace_across_filesystems(backup, target)
-            # Re-stage only what WAS tracked. `git add` on a file that was
-            # untracked before would newly track it, which is not a restoration.
-            if entry.get("tracked"):
-                run_git(install_root, "add", "--", entry["source"])
-            restored.append(entry["source"])
+    for index, item in enumerate(manifest["stashes"]):
+        backup = runtime_root / item["backup"]
+        target = install_root / item["source"]
+        if not backup.is_file() or backup.is_symlink():
+            raise OSError(f"stash backup missing or invalid: {backup}")
+        if target.is_symlink() or (target.exists() and not target.is_file()):
+            raise OSError(f"stash target is not a regular file: {target}")
+        saved = compensation_dir / f"stash-{index}"
+        before = _entry_fingerprint(target) if target.is_file() else None
+        item.update(state="armed", saved=str(saved), before=before, identity=_identity(target),
+                    postimage=_entry_fingerprint(backup), temp=str(saved.with_suffix(".stage")))
+        if item["tracked"]:
+            item["index"] = _index_rows(install_root, item["source"])
+            code, oid = run_git(install_root, "hash-object", "-w", "--", str(backup))
+            if code:
+                raise OSError(oid)
+            mode = "100755" if backup.stat().st_mode & stat.S_IXUSR else "100644"
+            item["published_index"] = {item["source"]: f"{mode} {oid} 0"}
+        _write_json_atomic(_undo_manifest_path(runtime_root), manifest)
+        _mkdir_durable(target.parent)
+        _atomic_copy_stash(
+            backup, target, before, temp_path=Path(item["temp"]), saved=saved,
+            identity=item["identity"], postimage=item["postimage"],
+        )
+        if item.get("tracked"):
+            _set_index(install_root, item["index"], item["published_index"], item["source"])
+        restored.append(item["source"])
 
     # Files the migration CREATED are removed before the moves are reversed,
     # because they live inside the directories about to move back. Removed by
@@ -912,37 +1740,18 @@ def undo(install_root: Path, runtime_root: Path) -> dict[str, Any]:
         target = install_root / relative
         # is_symlink first: AGENTS.md is a symlink, and `is_file()` follows it,
         # so a link whose target already moved back would be left dangling.
-        if target.is_symlink() or target.is_file():
-            target.unlink()
-            # If the migration was COMMITTED, these paths are tracked. Deleting
-            # the file without staging it leaves the index claiming a file that
-            # is gone, and `git mv` of any ancestor directory then fails with
-            # "bad source" — which is exactly how an undo stalled halfway on the
-            # reference install.
-            run_git(install_root, "rm", "--cached", "--quiet", "--", relative)
+        if os.path.lexists(target):
+            stash_for_compensation(target)
             removed.append(relative)
             _prune_empty_parents(install_root, target.parent)
     source_dir = install_root / _SKILLS_SRC
     if source_dir.is_dir() and not any(source_dir.iterdir()):
         source_dir.rmdir()
 
-    # The bootstrap's `.claude/` holds hundreds of packaged files, so it is
-    # recorded as a directory and removed whole rather than listed file by file.
-    # Only directories this migration CREATED are listed, so a root that already
-    # had one keeps it. Removing whole is safe because the guard above verified
-    # every descendant against the name-and-fingerprint capture the receipt
-    # recorded; anything added, edited or deleted since refused the undo before
-    # this line ran.
-    import shutil  # noqa: PLC0415
-
     for relative in receipt.get("created_dirs", []):
         target = install_root / relative
-        if target.is_dir():
-            shutil.rmtree(target)
-            # Same reason as the created files: once the migration is committed
-            # everything under here is tracked, so the index has to follow the
-            # worktree or `git mv` of an ancestor fails.
-            run_git(install_root, "rm", "-r", "--cached", "--quiet", "--", relative)
+        if os.path.lexists(target):
+            stash_for_compensation(target)
             removed.append(relative)
             _prune_empty_parents(install_root, target.parent)
 
@@ -961,20 +1770,17 @@ def undo(install_root: Path, runtime_root: Path) -> dict[str, Any]:
         ):
             already.append(entry["source"])
             continue
-        source.parent.mkdir(parents=True, exist_ok=True)
-        code, out = run_git(install_root, "mv", entry["destination"], entry["source"])
-        if code != 0:
-            return {
-                "status": "failed",
-                "reason": f"git mv failed reversing {entry['destination']}: {out}",
-                "reversed": reversed_moves,
-                "already_reversed": already,
-                "remaining": [
-                    e["destination"]
-                    for e in reversed(receipt.get("applied", []))
-                    if e["source"] not in reversed_moves and e["source"] not in already
-                ],
-            }
+        _mkdir_durable(source.parent)
+        move = {**entry, "identity": manifest["move_identities"][entry["destination"]],
+                "index": _index_rows(install_root, entry["destination"])}
+        if move["identity"] is None or os.path.lexists(source):
+            return failed(f"git mv failed reversing {destination}: source missing or destination occupied")
+        manifest["moves"].append(move)
+        _write_json_atomic(_undo_manifest_path(runtime_root), manifest)
+        try:
+            _move_undo_entry(install_root, move, recovering=False)
+        except (OSError, subprocess.SubprocessError) as exc:
+            return failed(f"git mv failed reversing {destination}: {exc}")
         reversed_moves.append(entry["source"])
         # Drop the now-empty root directory the migration created.
         parent = (install_root / entry["destination"]).parent
@@ -983,7 +1789,26 @@ def undo(install_root: Path, runtime_root: Path) -> dict[str, Any]:
 
     before = receipt.get("registry_before")
     if before is not None:
-        _write_registry(runtime_root, before)
+        from ciao.workspaces import restore_registry_entries  # noqa: PLC0415
+
+        migrated = set(receipt.get("workspaces") or [])
+        expected_after = [
+            row for row in (receipt.get("registry_after") or [])
+            if isinstance(row, dict) and str(row.get("name")) in migrated
+        ]
+        prior_rows = [
+            row for row in before
+            if isinstance(row, dict) and str(row.get("name")) in migrated
+        ]
+        try:
+            restored_registry = bool(expected_after) and restore_registry_entries(
+                runtime_root, prior_rows, expected_after, owner=owner,
+                fields=("vault_root",),
+            )
+        except OSError as exc:
+            return failed(f"could not restore the workspace registry; migration receipt retained: {exc}")
+        if not restored_registry:
+            return failed("the registry changed; refusing to overwrite a live registry and keeping the receipt")
 
     if schedule_restore is not None:
         try:
@@ -991,18 +1816,19 @@ def undo(install_root: Path, runtime_root: Path) -> dict[str, Any]:
                 runtime_root, receipt.get("schedule_prompt_rewrites")
             )
         except (OSError, ValueError) as exc:
-            return {
-                "status": "failed",
-                "reason": f"could not restore schedule prompts; migration receipt retained: {exc}",
-                "reversed": reversed_moves,
-                "already_reversed": already,
-            }
+            return failed(f"could not restore schedule prompts; migration receipt retained: {exc}")
 
     cleared = clear_stranded_sessions(
         runtime_root, list((receipt.get("stranded_sessions") or {}).get("flagged") or [])
     )
-
-    remove_receipt(runtime_root)
+    manifest["phase"] = "committed"
+    _write_json_atomic(_undo_manifest_path(runtime_root), manifest)
+    _write_json_atomic(compensation_dir / "inventory.json", manifest)
+    _unlink_durable(receipt_path(runtime_root))
+    for entry in receipt.get("stashed_files", []):
+        if isinstance(entry, dict):
+            _unlink_durable(runtime_root / str(entry.get("backup") or ""))
+    _unlink_durable(_undo_manifest_path(runtime_root))
     from ciao.config import reset_reroot_cache
 
     reset_reroot_cache()
@@ -1010,6 +1836,7 @@ def undo(install_root: Path, runtime_root: Path) -> dict[str, Any]:
         "status": "undone",
         "reversed": reversed_moves,
         "restored_stashed": restored,
+        **_capture_locations(manifest),
         "removed_created": removed,
         "cleared_handover_flags": cleared,
         "already_reversed": already,
@@ -1169,8 +1996,9 @@ def registry_file(runtime_root: Path) -> Path:
     return Path(runtime_root) / "workspaces.json"
 
 
-def _write_registry(runtime_root: Path, entries: list[dict[str, Any]]) -> None:
-    """Persist the registry atomically, preserving key order and unknown keys."""
+def _write_registry_unlocked(
+    runtime_root: Path, entries: list[dict[str, Any]],
+) -> None:
     path = registry_file(runtime_root)
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_suffix(".json.tmp")
@@ -1178,8 +2006,14 @@ def _write_registry(runtime_root: Path, entries: list[dict[str, Any]]) -> None:
     tmp.replace(path)
 
 
+def _write_registry(runtime_root: Path, entries: list[dict[str, Any]], *, owner: Any) -> None:
+    if owner.path != registry_file(runtime_root).resolve():
+        raise ValueError("registry owner belongs to another runtime")
+    owner.replace((json.dumps(entries, indent=2) + "\n").encode(), expected=owner.current)
+
+
 def _rewrite_registry(
-    runtime_root: Path, result: RerootPlan
+    runtime_root: Path, result: RerootPlan, *, owner: Any
 ) -> tuple[list[dict[str, Any]] | None, list[dict[str, Any]] | None]:
     """Point every migrated workspace's ``vault_root`` at its new agent root.
 
@@ -1188,12 +2022,11 @@ def _rewrite_registry(
     WorkspaceConfig, because an unknown key a future release adds must survive a
     migration that only means to change one field.
     """
-    path = registry_file(runtime_root)
-    if not path.is_file():
+    if owner.current is None:
         return None, None
     try:
-        entries = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, ValueError, TypeError):
+        entries = json.loads(owner.current)
+    except (ValueError, TypeError, UnicodeDecodeError):
         return None, None
     if not isinstance(entries, list):
         return None, None
@@ -1206,7 +2039,7 @@ def _rewrite_registry(
         destination = destinations.get(str(entry.get("name", "")))
         if destination:
             entry["vault_root"] = destination
-    _write_registry(runtime_root, entries)
+    _write_registry(runtime_root, entries, owner=owner)
     return before, entries
 
 
@@ -2090,10 +2923,61 @@ def _write_snapshot_gitignore(root: Path) -> None:
 # -- P10.6: rebuild the derived artefacts per root ---------------------------
 
 
+def index_destination_is_ciao_owned(runtime_root: Path, vault: Path) -> bool:
+    """Whether the shared classifier proves this exact root Ciao-owned."""
+    from ciao.config import classify_vault_index_destination, INDEX_OWNERSHIP_CIAO
+    from ciao.setup_marker import read_vault_index_ownership_status
+    from ciao.workspaces import authoritative_shared_links
+
+    links = authoritative_shared_links(runtime_root)
+    if links is None:
+        return False
+    receipt = read_receipt(runtime_root)
+    ownership, ownership_trusted = read_vault_index_ownership_status(runtime_root)
+    if not ownership_trusted:
+        return False
+    if receipt is None:
+        return (
+            classify_vault_index_destination(
+                Path(vault), ownership=ownership, linked_roots=links,
+            )
+            == INDEX_OWNERSHIP_CIAO
+        )
+    install = Path(str(receipt.get("install_root") or "")).expanduser().resolve()
+    leaf = Path(str(receipt.get("vault_root") or "")).name
+    try:
+        relative = Path(vault).expanduser().resolve().relative_to(install)
+    except (OSError, ValueError):
+        return False
+    from ciao.config import INDEX_OWNERSHIP_AMBIGUOUS, INDEX_OWNERSHIP_CIAO
+
+    decision = classify_vault_index_destination(
+        Path(vault),
+        ownership=ownership,
+        linked_roots=links,
+        receipt=receipt,
+        install_root=install,
+    )
+    if decision == INDEX_OWNERSHIP_CIAO:
+        return True
+    if decision != INDEX_OWNERSHIP_AMBIGUOUS:
+        return False
+    # Maintainer decision: an existing registered per-root local workspace
+    # index is generated and refreshed even when older installs lack a
+    # provenance row. Connected/external/synchronized destinations returned
+    # above and are never written.
+    return len(relative.parts) == 2 and relative.name == leaf
+
+
 def rebuild_indexes(
-    install_root: Path, workspaces: list[str], *, vault_name: str = VAULT_DIR_NAME
+    install_root: Path,
+    workspaces: list[str],
+    *,
+    vault_name: str = VAULT_DIR_NAME,
+    runtime_root: Path | None = None,
+    registry_owner: Any | None = None,
 ) -> dict[str, Any]:
-    """Rebuild each root's INDEX.md and VOCABULARY.md, with no path prefix.
+    """Rebuild each root's INDEX.md/VOCABULARY.md or its private SQLite index.
 
     ``vault_name`` is the vault directory's leaf, which is configurable
     (``CIAO_VAULT_ROOT``) and is NOT always ``memory-vault``. Hardcoding it meant
@@ -2111,20 +2995,52 @@ def rebuild_indexes(
     copies are stashed rather than left in place.
 
     Reports per root rather than aggregating: a failure in one root's rebuild
-    must be attributable to that root, not hidden in a total.
+    must be attributable to that root, not hidden in a total. Connected,
+    explicitly external and ambiguous roots are refreshed into the private
+    SQLite index only; their Markdown INDEX is never created or replaced.
     """
+    from ciao.config import configured_connected_workspace
+    from ciao.fts_search import lookup_connected_entries
     from ciao.vault_index import format_vocabulary, scan_vault, write_index_file
 
     out: dict[str, Any] = {"rebuilt": [], "errors": []}
     leaf = vault_name or VAULT_DIR_NAME
+    runtime = Path(runtime_root) if runtime_root else Path(install_root) / ".runtime"
+    local_roots = [Path(install_root) / name / leaf for name in workspaces]
     for name in workspaces:
         vault = Path(install_root) / name / leaf
         if not vault.is_dir():
             out["errors"].append({"workspace": name, "error": f"no vault at {vault}"})
             continue
         try:
-            entries = scan_vault(vault)
-            write_index_file(entries, vault / "INDEX.md")
+            owned = index_destination_is_ciao_owned(runtime, vault)
+            connected = configured_connected_workspace(
+                {"CIAO_WORKSPACE": str(install_root), "CIAO_RUNTIME_ROOT": str(runtime),
+                 "CIAO_ACTIVE_WORKSPACE": name}, vault, registered_brains_only=True,
+            )
+            if connected or not owned:
+                entries = lookup_connected_entries(
+                    vault, name, runtime, install_root,
+                    refresh=True,
+                    source_roots=connected.source_roots if connected else frozenset(local_roots),
+                    vault_base=connected.vault_base if connected else install_root,
+                    link=connected.link if connected else None,
+                )
+                out["rebuilt"].append({
+                    "workspace": name, "entries": len(entries),
+                    "storage": "sqlite", "markdown_index": "preserved",
+                })
+                continue
+            entries = scan_vault(vault, strict=True)
+            write_index_file(
+                entries,
+                vault / "INDEX.md",
+                replace_existing=True,
+                authorize=lambda: index_destination_is_ciao_owned(runtime, vault),
+                ownership_runtime=runtime,
+                registration_runtime=runtime,
+                registry_owner=registry_owner,
+            )
             (vault / "VOCABULARY.md").write_text(
                 format_vocabulary(entries), encoding="utf-8", newline=""
             )
@@ -2804,7 +3720,10 @@ def migrate_if_needed(config: Any) -> dict[str, Any]:
         return {"status": "not_applicable", "reason": "the vault is the install folder, kept in place"}
 
     try:
-        outcome = apply(install_root, vault_root, names, runtime_root, primary=primary)
+        outcome = apply(
+            install_root, vault_root, names, runtime_root, primary=primary,
+            expected_registry_bytes=getattr(config, "_workspace_registry_bytes", None),
+        )
     except Exception as exc:  # noqa: BLE001 — see the docstring
         logger.exception("re-root: apply failed")
         return {"status": "error", "reason": str(exc)}
@@ -2825,7 +3744,12 @@ def migrate_if_needed(config: Any) -> dict[str, Any]:
     # CIAO_VAULT_ROOT does not end in `memory-vault`.
     leaf = vault_root.name or VAULT_DIR_NAME
     try:
-        outcome["indexes"] = rebuild_indexes(install_root, names, vault_name=leaf)
+        outcome["indexes"] = rebuild_indexes(
+            install_root,
+            names,
+            vault_name=leaf,
+            runtime_root=runtime_root,
+        )
         outcome["search"] = rebuild_search_index(
             install_root, names, runtime_root=runtime_root, vault_name=leaf
         )
@@ -2884,6 +3808,29 @@ def repair(
     shared_sources: Path | None = None,
     db_path: Path | None = None,
 ) -> dict[str, Any]:
+    from ciao.workspaces import acquire_registry_at, registry_rows, WorkspaceRegistryConflict
+    try:
+        with acquire_registry_at(runtime_root) as owner:
+            if owner.current is not None:
+                rows = registry_rows(json.loads(owner.current))
+                if sorted(row.get("name", "") for row in rows) != sorted(workspaces):
+                    raise WorkspaceRegistryConflict("workspace selection changed before repair")
+            return _repair_owned(install_root, runtime_root, workspaces,
+                                 shared_sources=shared_sources, db_path=db_path,
+                                 owner=owner)
+    except (WorkspaceRegistryConflict, ValueError) as exc:
+        return {"status": "refused", "repaired": [], "reported": [], "errors": [{"error": str(exc)}]}
+
+
+def _repair_owned(
+    install_root: Path,
+    runtime_root: Path,
+    workspaces: list[str],
+    *,
+    shared_sources: Path | None = None,
+    db_path: Path | None = None,
+    owner: Any | None = None,
+) -> dict[str, Any]:
     """Reconcile the filesystem to the registry. Idempotent; a no-op when correct.
 
     Refuses on an install that has not re-rooted, and the reason is not caution:
@@ -2938,7 +3885,8 @@ def repair(
     for name in sorted(workspaces):
         root = install_root / name
         try:
-            _repair_one_root(root, name, shared, record, vault_name=leaf)
+            _repair_one_root(root, name, shared, record, vault_name=leaf,
+                             runtime_root=runtime_root, owner=owner)
         except Exception as exc:  # noqa: BLE001 — one bad root must not stop the rest
             errors.append({"workspace": name, "error": str(exc)})
 
@@ -3014,6 +3962,8 @@ def _repair_one_root(
     record: Any,
     *,
     vault_name: str = VAULT_DIR_NAME,
+    runtime_root: Path | None = None,
+    owner: Any | None = None,
 ) -> None:
     """Reconcile one agent root. Every branch is safe to run twice."""
     from ciao.sync_skills import _ensure_workspace_guide  # noqa: PLC0415
@@ -3117,10 +4067,35 @@ def _repair_one_root(
             )
         )
 
+    from ciao.config import configured_connected_workspace
+
+    runtime = Path(runtime_root or root.parent / ".runtime")
+    if configured_connected_workspace(
+        {"CIAO_WORKSPACE": str(root.parent), "CIAO_ACTIVE_WORKSPACE": name,
+         "CIAO_RUNTIME_ROOT": str(runtime)}, vault, registered_brains_only=True,
+    ) or not index_destination_is_ciao_owned(runtime, vault):
+        # Connected, external and ambiguous roots get the private SQLite index
+        # only; an absent Markdown INDEX is not drift we may create.
+        if vault.is_dir():
+            rebuilt = rebuild_indexes(
+                root.parent, [name], vault_name=vault.name, runtime_root=runtime,
+                registry_owner=owner,
+            )
+            if rebuilt["errors"]:
+                raise OSError(rebuilt["errors"][0]["error"])
+        return
     index = vault / "INDEX.md"
     prefixed = index_workspace_prefixes(index, [name])
     if vault.is_dir() and (not index.is_file() or prefixed):
-        rebuild_indexes(root.parent, [name], vault_name=vault.name)
+        rebuilt = rebuild_indexes(
+            root.parent,
+            [name],
+            vault_name=vault.name,
+            runtime_root=runtime_root,
+            registry_owner=owner,
+        )
+        if rebuilt["errors"]:
+            raise OSError(rebuilt["errors"][0]["error"])
         record(
             RepairItem(
                 workspace=name,

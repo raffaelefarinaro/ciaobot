@@ -101,7 +101,7 @@ export function fenceStory(config: FixtureConfig | undefined, docs: boolean): Fi
 const lifecycleEvents = new Set([
   'storyRenderPhaseChanged', 'storyRendered', 'storyFinished', 'storyUnmounted',
   'storyErrored', 'storyThrewException', 'playFunctionThrewException', 'storyMissing', 'currentStoryWasSet',
-  'storybook/instrumenter/sync', 'storybook/instrumenter/call', 'storybook/docs/snippet-rendered', 'previewKeydown', 'pong',
+  'storybook/instrumenter/sync', 'storybook/instrumenter/call', 'storybook/docs/snippet-rendered', 'storybook/actions/action-event', 'previewKeydown', 'pong',
 ])
 
 // The method names the vitest browser runner's page side calls over its

@@ -13,6 +13,24 @@ export interface InventoryFilters { query: string; family: string; coverage: 'al
 // Ownership is deliberately explicit: adding a production SFC requires its own row.
 export const inventory: InventoryEntry[] = [
   {
+    id: 'components-project-decision-entry', name: 'ProjectDecisionEntry', family: 'Projects', kind: 'component',
+    owner: { path: 'web/src/components/ProjectDecisionEntry.vue', anchor: 'class="project-section decision-entry"' },
+    sources: [], consumers: ['web/src/components/ProjectView.vue'], variants: [],
+    variantNotes: 'Project-scoped decision entry and standing disclosure information; variants are unassessed.',
+    states: [{ name: 'default', coverage: 'uncovered', storyIds: [], note: 'The project view opens this form; no workshop story is recorded yet.' }],
+    loading: { status: 'known', detail: 'Opening the form loads disclosure permissions before entry.' },
+    migration: { status: 'unassessed', note: 'Inventory admission does not approve a design migration.' },
+  },
+  {
+    id: 'components-settings-share-sources', name: 'SettingsShareSources', family: 'Settings', kind: 'component',
+    owner: { path: 'web/src/components/settings/SettingsShareSources.vue', anchor: 'class="sources-panel"' },
+    sources: [], consumers: ['web/src/components/settings/SettingsSharedBrains.vue'], variants: [],
+    variantNotes: 'Workspace-scoped source permission and snapshot confirmation panel; variants are unassessed.',
+    states: [{ name: 'default', coverage: 'uncovered', storyIds: [], note: 'Settings opens this panel; no workshop story is recorded yet.' }],
+    loading: { status: 'known', detail: 'Loads available sources and reports loading or failure.' },
+    migration: { status: 'unassessed', note: 'Inventory admission does not approve a design migration.' },
+  },
+  {
     id: 'components-settings-settings-switch',
     name: 'SettingsSwitch',
     family: 'Settings',
@@ -406,18 +424,18 @@ export const inventory: InventoryEntry[] = [
       "web/src/components/ProjectSidebar.vue"
     ],
     "variants": [],
-    "variantNotes": "No configurable variants: a fixed 30px box around the production CiaoMark; the mark's dots follow the accent.",
+    "variantNotes": "No configurable variants: a fixed 30px reload button around the production CiaoMark; the mark's dots follow the accent.",
     "states": [
       {
         "name": "default",
         "coverage": "covered",
         "storyIds": ["brand-mark--default"],
-        "note": "Default renders the 30px brand box with the accessible name Ciaobot around the production CiaoMark."
+        "note": "Default renders the 30px reload button named Reload Ciaobot around the production CiaoMark."
       }
     ],
     "loading": {
       "status": "none",
-      "detail": "BrandMark.vue is static SVG presentation and performs no loading."
+      "detail": "BrandMark.vue performs no loading; clicking it reloads the page."
     },
     "migration": {
       "status": "unassessed",
@@ -1272,7 +1290,7 @@ export const inventory: InventoryEntry[] = [
       "web/src/components/SettingsView.vue"
     ],
     "variants": [],
-    "variantNotes": "No configurable variants: one inline SVG whose C follows currentColor and whose two dots use the accent.",
+    "variantNotes": "No configurable variants beyond an optional progress value (0 resting C, 1 closed ring): one inline SVG whose C follows currentColor and whose two dots use the accent.",
     "states": [
       {
         "name": "default",

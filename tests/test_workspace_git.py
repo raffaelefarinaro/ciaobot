@@ -1571,3 +1571,68 @@ def test_completed_legacy_import_marker_stops_preview_but_keeps_discovery_suppre
     assert selection.import_legacy is False
     assert selection.registered_vaults is None
     assert selection.vault_value == "memory-vault"
+
+
+def test_external_setup_validation_rejects_missing_and_overlapping_roots(tmp_path: Path) -> None:
+    from ciao.cli import validate_external_setup_vault
+
+    workspace = tmp_path / "engine"
+    workspace.mkdir()
+    missing = tmp_path / "missing"
+    with pytest.raises(ValueError):
+        validate_external_setup_vault(workspace, missing)
+    assert not missing.exists()
+    with pytest.raises(ValueError):
+        validate_external_setup_vault(workspace, workspace)
+    with pytest.raises(ValueError):
+        validate_external_setup_vault(workspace, tmp_path)
+    notes = tmp_path / "notes"
+    notes.mkdir()
+    assert validate_external_setup_vault(workspace, notes) == notes.resolve()
+
+
+def test_external_setup_validation_refuses_unreadable_or_established_install(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from ciao.cli import validate_external_setup_vault
+
+    workspace = tmp_path / "engine"
+    workspace.mkdir()
+    notes = tmp_path / "notes"
+    notes.mkdir()
+    real_scandir = __import__("os").scandir
+
+    def denied(path):
+        if Path(path) == notes.resolve():
+            raise PermissionError("denied")
+        return real_scandir(path)
+
+    with monkeypatch.context() as patch:
+        patch.setattr("ciao.cli.os.scandir", denied)
+        with pytest.raises(ValueError, match="unavailable"):
+            validate_external_setup_vault(workspace, notes)
+    (workspace / ".env").write_text("CIAO_VAULT_ROOT=other\n", encoding="utf-8")
+    with pytest.raises(ValueError, match="cannot be rebound"):
+        validate_external_setup_vault(workspace, notes)
+    assert not list(notes.iterdir())
+
+
+def test_external_setup_pending_record_cannot_authorize_established_install(tmp_path: Path) -> None:
+    from ciao.cli import validate_external_setup_vault
+
+    workspace = tmp_path / "engine"
+    notes = tmp_path / "notes"
+    workspace.mkdir()
+    notes.mkdir()
+    runtime = workspace / ".runtime"
+    runtime.mkdir()
+    (workspace / ".env").write_text(f"CIAO_VAULT_ROOT={notes}\n", encoding="utf-8")
+    (runtime / "workspaces.json").write_text(json.dumps([{"name": "personal", "vault_root": str(notes)}]), encoding="utf-8")
+    ws_stat, notes_stat = workspace.stat(), notes.stat()
+    (runtime / "external-setup-pending.json").write_text(json.dumps({
+        "notes": str(notes.resolve()),
+        "notes_identity": [notes_stat.st_dev, notes_stat.st_ino],
+        "install_identity": [ws_stat.st_dev, ws_stat.st_ino],
+    }), encoding="utf-8")
+    with pytest.raises(ValueError, match="cannot be rebound"):
+        validate_external_setup_vault(workspace, notes)

@@ -30,8 +30,8 @@ Deviations from the first brief, decided here:
 from __future__ import annotations
 
 import hashlib
-from collections.abc import Callable
 import uuid
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -39,25 +39,32 @@ from pathlib import Path
 from ciao.care_eval_record import build_record
 from ciao.care_eval_run import (
     BoundEngine,
-    ScheduleRunRequest,
     ScheduleRunOutcome,
+    ScheduleRunRequest,
     Settled,
     run_schedule,
 )
 from ciao.care_eval_seed import (
     GUIDE_RELATIVE,
     DispatchClock,
-    Layout,
     LastRun,
+    Layout,
     SeedManifest,
     observe,
     observe_cursor,
     observe_effects,
     observe_last_run,
 )
+from ciao.curation_run import RunBudget
 from ciao.task_eval_contract import MeasurementRecord, Scenario
 
 ORCHESTRATED: tuple[Scenario, ...] = ("nightly", "weekly_due")
+
+# What ``budget_continuation`` runs under: one item per attempt, so attempt 1 takes one
+# key and defers the rest and attempt 2 has something to resume. The harness hands it to
+# ``ciao curation-begin`` as a flag through a shim on the engine's PATH
+# (``task_eval.IsolatedEngine.boot``); no vault file or product setting carries it.
+CONTINUATION_BUDGET = RunBudget(max_items=1)
 
 REASON_ATTEMPT1_NOT_SETTLED = "attempt 1 did not settle"
 REASON_ATTEMPT1_COMPLETED = "attempt 1 completed; no work was left for attempt 2"
@@ -155,6 +162,7 @@ def run_scenario(
         scenario=scenario,
         outcome=outcome,
         manifest=manifest,
+        budget=RunBudget(),
         observed=observed,
         wall_s=wall_s,
         usage=None,
@@ -258,6 +266,7 @@ def run_continuation(
         scenario="budget_continuation",
         outcome=second_outcome,
         manifest=manifest,
+        budget=CONTINUATION_BUDGET,
         observed=observe("budget_continuation", layout, manifest, dispatch),
         wall_s=wall_s,
         usage=None,

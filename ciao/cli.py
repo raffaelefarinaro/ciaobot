@@ -212,7 +212,7 @@ def _copy_tree_if_missing(src, dest: Path) -> list[Path]:
     return written
 
 
-def _import_legacy_workspaces_for_setup(root: Path, existing_env: dict[str, str]) -> None:
+def _import_legacy_workspaces_for_setup(root: Path, existing_env: dict[str, str], *, owner: Any = None) -> None:
     """Run the one-time ``CIAO_WORKSPACES`` import against ``root``'s ``.env``.
 
     Built from the install's own ``.env`` (not the ambient environment) so the
@@ -226,7 +226,7 @@ def _import_legacy_workspaces_for_setup(root: Path, existing_env: dict[str, str]
         "CIAO_RUNTIME_ROOT": str((root / RUNTIME_DIR_NAME).resolve()),
         "PWA_AUTH_TOKEN": existing_env.get("PWA_AUTH_TOKEN") or "setup",
     }
-    CiaoConfig.from_env(source).import_legacy_workspaces_env()
+    CiaoConfig.from_env(source).import_legacy_workspaces_env(owner=owner)
 
 
 def _write_if_missing(path: Path, text: str) -> None:
@@ -1179,6 +1179,41 @@ def _preview_legacy_workspaces(
     }
 
 
+def validate_external_setup_vault(workspace: Path | str, vault: Path | str) -> Path:
+    """Validate a first-run notes folder without creating or changing it."""
+    from ciao.setup_marker import is_set_up_workspace
+
+    root = Path(workspace).expanduser().resolve()
+    try:
+        notes = Path(vault).expanduser().resolve(strict=True)
+        if not notes.is_dir() or not os.access(notes, os.R_OK | os.W_OK | os.X_OK):
+            raise ValueError("notes folder must be an accessible, writable directory")
+        with os.scandir(notes) as entries:
+            next(entries, None)
+    except OSError as exc:
+        raise ValueError(f"notes folder is unavailable: {exc}") from exc
+    if notes == root or notes in root.parents or root in notes.parents:
+        raise ValueError("notes folder and Ciaobot folder must be separate")
+    selection = select_setup_vault(root, vault_mode="scratch")
+    from ciao.setup_transaction import pending_matches
+
+    pending = pending_matches(root, notes)
+    if is_set_up_workspace(root) and not pending:
+        raise ValueError("an existing installation cannot be rebound during setup")
+    if selection.source in {"env", "registry", "legacy"} and not pending:
+        raise ValueError("an existing installation cannot be rebound during setup")
+    return notes
+
+
+def _check_external_setup_identity(path: Path, expected: tuple[int, int] | None) -> None:
+    try:
+        current = path.stat()
+    except OSError as exc:
+        raise ValueError(f"notes folder is unavailable: {exc}") from exc
+    if expected is None or (current.st_dev, current.st_ino) != expected:
+        raise ValueError("notes folder changed during setup; inspect it again")
+
+
 def select_setup_vault(
     workspace: Path | str,
     *,
@@ -1294,6 +1329,10 @@ def setup_workspace(
     initialize_git: bool = False,
     sync_failures: list[str] | None = None,
     _vault_selection: SetupVaultSelection | None = None,
+    _adopt_exact_vault: bool = False,
+    _external_identity: tuple[int, int] | None = None,
+    _complete_external_setup: bool = True,
+    _transaction: Any = None,
 ) -> list[Path]:
     requested_name = (workspace_name or "").strip()
     if workspace_name is not None and not _WORKSPACE_NAME_RE.fullmatch(
@@ -1379,6 +1418,59 @@ def setup_workspace(
     else:
         selection = _vault_selection
 
+    if _adopt_exact_vault:
+        validate_external_setup_vault(root, selection.vault_path)
+        if initialize_git:
+            raise ValueError("separate notes setup cannot initialize Git history")
+        _check_external_setup_identity(selection.vault_path, _external_identity)
+        if _transaction is None:
+            raise ValueError("separate notes setup requires a transaction")
+        if auth_token is not None and "PWA_AUTH_TOKEN" in selection.existing_env:
+            if selection.existing_env["PWA_AUTH_TOKEN"] != auth_token:
+                raise ValueError("Use the password chosen when setup began.")
+
+    from ciao.workspaces import acquire_registry_at, WorkspaceRegistryConflict
+
+    with acquire_registry_at(root / RUNTIME_DIR_NAME) as owner:
+        current = select_setup_vault(root, vault_mode=vault_mode, vault_root=vault_root)
+        if current != selection:
+            raise WorkspaceRegistryConflict("setup selection changed during preflight")
+        return _setup_selected_workspace(
+            root, current, owner, auth_token=auth_token, vault_root=vault_root,
+            vault_mode=vault_mode, requested_name=requested_name, default_provider=default_provider,
+            python_path=python_path, port=port, launch_agents_dir=launch_agents_dir,
+            app_dir=app_dir, confirm_repoint=confirm_repoint, initialize_git=initialize_git,
+            sync_failures=sync_failures, write_launchd=write_launchd, host=host,
+            _adopt_exact_vault=_adopt_exact_vault, _transaction=_transaction,
+            _external_identity=_external_identity,
+            _complete_external_setup=_complete_external_setup,
+        )
+
+
+def _setup_selected_workspace(
+    root: Path,
+    selection: SetupVaultSelection,
+    owner: Any,
+    *,
+    auth_token: str | None,
+    vault_root: Path | str | None,
+    vault_mode: str,
+    requested_name: str,
+    default_provider: str,
+    python_path: str | None,
+    port: int,
+    launch_agents_dir: Path | str | None,
+    app_dir: Path | str | None,
+    confirm_repoint: bool,
+    initialize_git: bool,
+    sync_failures: list[str] | None,
+    write_launchd: bool,
+    host: HostOwnership | None,
+    _adopt_exact_vault: bool,
+    _transaction: Any,
+    _external_identity: tuple[int, int] | None,
+    _complete_external_setup: bool,
+) -> list[Path]:
     from ciao.onboarding import ensure_receipt, read_receipt
     from ciao.setup_marker import is_set_up_workspace
 
@@ -1398,6 +1490,14 @@ def setup_workspace(
     vault_path = selection.vault_path
     env_path = root / ".env"
     workspaces_registry = root / ".runtime" / "workspaces.json"
+    def create_registry(text: str) -> None:
+        # The setup transaction publishes its own registry copy, so the file may
+        # already exist without this owner having loaded it.
+        if _transaction is not None and workspaces_registry.exists():
+            return
+        if owner.current is None:
+            owner.replace(text.encode("utf-8"), expected=None)
+
     if selection.import_legacy:
         # An install that still configures workspaces through the retired
         # variable usually has no registry file (the server never persisted
@@ -1407,7 +1507,7 @@ def setup_workspace(
         # import keep that synthetic entry and drop the variable's real
         # vault_root / disallowed_tools for the same name. Import
         # the variable first so the registry setup sees is the real one.
-        _import_legacy_workspaces_for_setup(root, existing_env)
+        _import_legacy_workspaces_for_setup(root, existing_env, owner=owner)
     # No registry yet means this folder has never been set up, even when it
     # already holds a `.env` of its own (a notes folder or a project checkout).
     first_setup = not workspaces_registry.exists()
@@ -1424,7 +1524,10 @@ def setup_workspace(
     )
     name = requested_name or "personal"
 
-    generated_password = not auth_token and "PWA_AUTH_TOKEN" not in existing_env
+    generated_password = (
+        (_transaction is not None and _transaction.data.get("generated_token") is not None)
+        or (not auth_token and "PWA_AUTH_TOKEN" not in existing_env)
+    )
     token = auth_token or secrets.token_urlsafe(32)
     desired_env: list[tuple[str, str]] = [
         ("PWA_AUTH_TOKEN", token),
@@ -1439,7 +1542,15 @@ def setup_workspace(
         ("PWA_PORT", str(port)),
     ])
     fresh_env = not existing_env and not env_path.exists()
-    if fresh_env:
+    if _transaction is not None:
+        original = env_path.read_text(encoding="utf-8") if env_path.exists() else ""
+        additions = [f"{key}={value}" for key, value in desired_env if key not in existing_env]
+        if additions:
+            prefix = "" if not original or original.endswith("\n") else "\n"
+            suffix = ("# Added by Ciaobot setup\n" if original else "") + "\n".join(additions) + "\n"
+            _transaction.publish("env", original + prefix + suffix)
+            written.append(env_path)
+    elif fresh_env:
         # The password is in here in clear text: owner-only from creation.
         write_private_text(
             env_path, "\n".join(f"{key}={value}" for key, value in desired_env) + "\n"
@@ -1524,7 +1635,7 @@ def setup_workspace(
         and receipt.installation.status == "in_progress"
         and registered_vaults is None
         and vault_mode == "existing"
-        and not detect_nested_workspaces(vault_path)
+        and (_adopt_exact_vault or not detect_nested_workspaces(vault_path))
     )
     if fresh_per_root or fresh_adopted_notes:
         from ciao.workspace_reroot import mark_born_per_root
@@ -1547,18 +1658,37 @@ def setup_workspace(
         # attempt at this still put `.claude/`, `commands/` and a stock CLAUDE.md
         # beside the nested vault instead of inside the workspace's own folder.
         # The later branch is `_write_if_missing`, so this does not fight it.
-        _write_if_missing(
-            root / ".runtime" / "workspaces.json",
-            json.dumps(
+        registry_text = json.dumps(
                 [{
                     "name": name,
                     "vault_root": stored_vault_root,
                     "default_provider": default_provider,
                 }],
                 indent=2,
-            ) + "\n",
-        )
+            ) + "\n"
+        if _transaction is not None:
+            _transaction.publish("registry", registry_text)
+        else:
+            create_registry(registry_text)
         written.append(root / ".runtime" / "workspaces.json")
+
+    # `.env` always receives CIAO_VAULT_ROOT, including the generated default,
+    # so that variable alone cannot say who owns INDEX.md. Persist the setup
+    # decision once, bound to the final vault path; unrecorded/changed roots
+    # remain conservatively external to index replacement.
+    ownership_path = runtime_root / "vault-index-ownership.json"
+    if not ownership_path.exists() and (first_setup or fresh_env):
+        from ciao.setup_marker import write_vault_index_ownership
+
+        index_owner = "ciao" if selection.source == "default" and vault_mode != "existing" else "external"
+        owned_targets = (
+            [path for _workspace, path in registered_vaults]
+            if registered_vaults is not None
+            else [vault_path]
+        )
+        written.append(
+            write_vault_index_ownership(runtime_root, owned_targets, owner=index_owner)
+        )
 
     stock = resources.files("ciao.stock")
     stock_workspace = stock.joinpath("workspace")
@@ -1636,7 +1766,7 @@ def setup_workspace(
         # the vaults it already names.
         scaffold_vaults = registered_vaults
     else:
-        nested = detect_nested_workspaces(vault_path)
+        nested = [] if _adopt_exact_vault else detect_nested_workspaces(vault_path)
         scaffold_vaults = []
     if registered_vaults is None and nested:
         entries: list[dict[str, str]] = []
@@ -1658,8 +1788,7 @@ def setup_workspace(
                 nested_vault / "projects" / "active" / "general" / "general.md",
                 "---\ntype: project\ntitle: General\ndescription: Default project.\nstatus: active\ntags: [project]\n---\n\n# General\n",
             )
-        _write_if_missing(
-            workspaces_registry,
+        create_registry(
             json.dumps(entries, indent=2) + "\n",
         )
         written.append(workspaces_registry)
@@ -1678,8 +1807,7 @@ def setup_workspace(
             stored_root = scaffold_vault_path.relative_to(root).as_posix()
         except ValueError:
             stored_root = str(scaffold_vault_path)
-        _write_if_missing(
-            workspaces_registry,
+        create_registry(
             json.dumps(
                 [
                     {
@@ -1694,15 +1822,22 @@ def setup_workspace(
         )
         written.append(workspaces_registry)
 
+    from ciao.setup_marker import read_vault_index_owned_roots
+
+    owned_indexes = read_vault_index_owned_roots(runtime_root)
     for _, scaffold_vault_path in scaffold_vaults:
+        if _adopt_exact_vault:
+            # Setup never creates inside an externally managed notes root.
+            continue
         _write_if_missing(
             scaffold_vault_path / "MEMORY.md",
             "# Memory\n\nDurable workspace memory lives here.\n",
         )
-        _write_if_missing(
-            scaffold_vault_path / "INDEX.md",
-            "# Vault Index\n\nGenerated by `ciao vault-index`.\n",
-        )
+        if vault_mode != "existing" and str(scaffold_vault_path.resolve()) in owned_indexes:
+            _write_if_missing(
+                scaffold_vault_path / "INDEX.md",
+                "# Vault Index\n\nGenerated by `ciao vault-index`.\n",
+            )
         _write_if_missing(
             scaffold_vault_path / "projects" / "active" / "general" / "general.md",
             "---\ntype: project\ntitle: General\ndescription: Default project.\nstatus: active\ntags: [project]\n---\n\n# General\n",
@@ -1806,7 +1941,12 @@ def setup_workspace(
     # A vault outside the workspace (existing notes folder) gets its own
     # repo. Runs after the workspace init so the default nested vault is
     # never double-initialized.
-    ensure_vault_git(vault_path, initialize_if_missing=initialize_git)
+    if _adopt_exact_vault:
+        _check_external_setup_identity(vault_path, _external_identity)
+        if _complete_external_setup:
+            _transaction.complete()
+    else:
+        ensure_vault_git(vault_path, initialize_if_missing=initialize_git)
 
     return written
 
@@ -1917,10 +2057,25 @@ def _setup_command(args: argparse.Namespace) -> int:
     except OSError:
         had_token = False
     sync_failures: list[str] = []
+    transaction = None
     try:
+        notes = validate_external_setup_vault(root, args.notes_folder) if args.notes_folder else None
+        notes_stat = notes.stat() if notes else None
+        token = args.auth_token
+        if notes:
+            from ciao.setup_transaction import SetupTransaction
+
+            root.mkdir(parents=True, exist_ok=True)
+            transaction = SetupTransaction(root, notes)
+            token = transaction.begin(args.auth_token, (notes_stat.st_dev, notes_stat.st_ino) if notes_stat else None)
         written = setup_workspace(
             args.workspace,
-            auth_token=args.auth_token,
+            auth_token=token,
+            vault_root=notes,
+            vault_mode="existing" if notes else "scratch",
+            _adopt_exact_vault=bool(notes),
+            _external_identity=(notes_stat.st_dev, notes_stat.st_ino) if notes_stat else None,
+            _transaction=transaction,
             workspace_name=args.workspace_name,
             python_path=args.python,
             port=args.port,
@@ -1930,11 +2085,16 @@ def _setup_command(args: argparse.Namespace) -> int:
             initialize_git=args.initialize_git,
             sync_failures=sync_failures,
         )
-    except RuntimeError as exc:
+    except (OSError, RuntimeError, ValueError) as exc:
         print(f"Error: {exc}", file=sys.stderr)
         return 1
+    finally:
+        if transaction is not None:
+            transaction.close()
     for path in written:
         print(path)
+    if notes:
+        print(f"Ciaobot data: {root}\nNotes: {notes}")
     from ciao.setup_status import macos_access_note
 
     access_note = macos_access_note(root)
@@ -2103,8 +2263,25 @@ def _resolve_runtime_root(raw: Path | str | None = None) -> Path:
 
 
 def _vault_search_command(args: argparse.Namespace) -> int:
+    from ciao.fts_search import ConnectedIndexBusy, ConnectedWorkspaceChanged
+
+    try:
+        return _search_vault(args)
+    except (ConnectedIndexBusy, ConnectedWorkspaceChanged) as exc:
+        print(str(exc), file=sys.stderr)
+        return 1
+
+
+def _search_vault(args: argparse.Namespace) -> int:
     from ciao import fts_search
 
+    from ciao.config import configured_runtime_root
+    runtime_arg = getattr(args, "runtime_root", None)
+    source_env = dict(os.environ)
+    if runtime_arg:
+        source_env["CIAO_RUNTIME_ROOT"] = str(_resolve_runtime_root(runtime_arg))
+    auth_runtime = configured_runtime_root(source_env)
+    registration = fts_search.ConnectedRegistration.capture(auth_runtime) if not args.logs else None
     vault_root = _resolve_vault_root(args.vault_root)
     # The re-rooting promotes Logs/ out of the vault, so the archive root cannot
     # be derived from the vault root on a migrated install.
@@ -2117,7 +2294,6 @@ def _vault_search_command(args: argparse.Namespace) -> int:
     # `/install/personal/memory-vault`) opened the install's live database while
     # writing keys, and `_ensure_path_base` then cleared every workspace's rows
     # because the base did not match the server's `/install`.
-    runtime_arg = getattr(args, "runtime_root", None)
     env_runtime = os.environ.get("CIAO_RUNTIME_ROOT", "").strip()
     if runtime_arg or env_runtime:
         runtime_root = _resolve_runtime_root(runtime_arg)
@@ -2142,20 +2318,52 @@ def _vault_search_command(args: argparse.Namespace) -> int:
     # legacy global `~/.ciao/vault-fts.db`, a `ciao vault-search` run from a dev
     # checkout cleared the production install's index (and vice versa) because
     # the key base differs between installs.
-    db_path = fts_search.get_db_path(runtime_root)
+    from ciao.config import configured_connected_workspace
 
-    if args.rebuild and db_path.exists():
+    connected = (configured_connected_workspace(source_env, vault_root, implicit_root=args.vault_root is None)
+                 if not args.logs else None)
+    if connected:
+        vault_root = connected.root
+        runtime_root = auth_runtime
+        from ciao.config import installed_workspace_env
+
+        install = installed_workspace_env(os.environ).get("CIAO_WORKSPACE")
+        if install:
+            key_base = Path(install).expanduser().resolve()
+    if registration is not None:
+        registration.verify()
+        if connected:
+            registration.authorize(vault_root, connected.name, key_base, connected.vault_base, allow_subfolders=True, link=connected.link)
+    namespace = fts_search.adopted_vault_key_prefix(vault_root, connected.name, link=connected.link) if connected else None
+    db_path = (fts_search.connected_db_path(runtime_root, vault_root, connected.source_roots)
+               if connected else fts_search.get_db_path(runtime_root))
+
+    if args.rebuild and not connected and db_path.exists():
         try:
             db_path.unlink()
             print("Dropped index database for rebuild.", file=sys.stderr)
         except OSError as exc:
             print(f"Error dropping index database: {exc}", file=sys.stderr)
 
-    conn = sqlite3.connect(db_path)
-    try:
+    from contextlib import closing
+
+    connection = (fts_search.connected_index_connection(db_path) if connected
+                  else closing(sqlite3.connect(db_path)))
+    with connection as conn:
         fts_search.init_db(conn)
+        if connected and namespace:
+            assert registration is not None
+            try:
+                fts_search.refresh_connected_index(conn, vault_root, connected.name, key_base, namespace, registration)
+            except OSError as exc:
+                if not args.query or args.rebuild or fts_search.connected_entries(conn, namespace) is None:
+                    raise
+                print(f"Searching the previous local index: {exc}", file=sys.stderr)
+            if not args.query:
+                print(f"Updated local index for {connected.name}.", file=sys.stderr)
+                return 0
         if not args.query:
-            vault_indexed, vault_removed = fts_search.index_vault(conn, vault_root, path_base=key_base)
+            vault_indexed, vault_removed = fts_search.index_vault(conn, vault_root, path_base=key_base, key_namespace=namespace)
             logs_indexed = logs_removed = 0
             for logs_root in all_logs_roots:
                 indexed, removed = fts_search.index_logs(conn, vault_root, logs_root=logs_root, path_base=key_base)
@@ -2182,8 +2390,8 @@ def _vault_search_command(args: argparse.Namespace) -> int:
                         f"Transcripts index: {indexed} indexed, {removed} removed.",
                         file=sys.stderr,
                     )
-            else:
-                indexed, removed = fts_search.index_vault(conn, vault_root, path_base=key_base)
+            elif not connected:
+                indexed, removed = fts_search.index_vault(conn, vault_root, path_base=key_base, key_namespace=namespace)
                 if indexed or removed:
                     print(
                         f"Vault index: {indexed} indexed, {removed} removed.",
@@ -2215,12 +2423,12 @@ def _vault_search_command(args: argparse.Namespace) -> int:
                 conn,
                 args.query,
                 limit=args.limit,
-                path_prefix=fts_search.vault_key_prefix(vault_root, key_base),
+                path_prefix=fts_search.vault_key_prefix(vault_root, key_base, key_namespace=namespace),
             )
         )
-    finally:
-        conn.close()
 
+    if registration is not None:
+        registration.verify()
     if not results:
         print(f"No matches found for: {args.query}")
         return 0
@@ -2230,7 +2438,8 @@ def _vault_search_command(args: argparse.Namespace) -> int:
         # Keys are relative to `key_base`, not to the vault's parent: on a
         # re-rooted install those differ by the workspace segment, so joining
         # against the parent printed a `file://` link that does not exist.
-        abs_path = key_base / result["path"]
+        abs_path = (vault_root / result["path"].removeprefix(namespace) if namespace
+                    else key_base / result["path"])
         # as_uri, not "file://" + the path: a space or non-ASCII name broke the markdown link.
         link = abs_path.as_uri()
         print(f"- **[{result['title']}]({link})** (rank: {result['rank']})")
@@ -3395,9 +3604,11 @@ def _vault_rehome_command(args: argparse.Namespace) -> int:
         )
         return 1
 
+    runtime_root = _resolve_runtime_root(args.runtime_root)
+
     summary = rehome_people(
         vault_root,
-        _resolve_runtime_root(args.runtime_root),
+        runtime_root,
         apply=args.apply,
         force=args.force,
         workspaces=args.workspace_name or None,
@@ -4004,6 +4215,7 @@ def _workspace_reroot_command(args: argparse.Namespace) -> int:
     config = CiaoConfig.from_env({
         **os.environ,
         "CIAO_WORKSPACE": str(workspace),
+        "CIAO_RUNTIME_ROOT": str(runtime),
         "PWA_AUTH_TOKEN": os.environ.get("PWA_AUTH_TOKEN") or "workspace-reroot",
     })
     names = sorted(config.workspace_names())
@@ -4019,62 +4231,13 @@ def _workspace_reroot_command(args: argparse.Namespace) -> int:
         # files sit in the new one — the one combination that
         # breaks every layout-dependent path. Verified, not asserted: the folders
         # have to actually be there, or this would tell the app a comforting lie.
-        from ciao.workspace_reroot import mark_born_per_root, read_receipt
-
-        if read_receipt(runtime) is not None:
-            print("Already recorded as migrated; nothing to do.")
-            return 0
-        # Straight off the registry file, the way `agent_roots_for` does: this
-        # command runs before any config exists that would answer per-root.
+        from ciao.workspaces import acquire_registry_at, WorkspaceRegistryBusy
         try:
-            entries = json.loads(
-                (runtime / "workspaces.json").read_text(encoding="utf-8")
-            )
-        except (OSError, ValueError):
-            entries = []
-        names = [
-            str(e.get("name", "")).strip()
-            for e in entries
-            if isinstance(e, dict) and str(e.get("name", "")).strip()
-        ]
-        if not names:
-            print(
-                f"Refusing: no workspaces registered in {runtime / 'workspaces.json'}.",
-                file=sys.stderr,
-            )
+            with acquire_registry_at(runtime):
+                return _record_hand_migration(workspace, runtime, vault)
+        except WorkspaceRegistryBusy as exc:
+            print(str(exc), file=sys.stderr)
             return 1
-        missing = [
-            n for n in names
-            if not (workspace / n / vault.name).is_dir()
-        ]
-        if missing:
-            # #812: this used to send the reader to docs/VAULT_MIGRATION_PROMPT.md
-            # as the place to move the vaults by hand, and that document was
-            # rewritten to stop teaching exactly that (#800/#815) — so the refusal
-            # and the reader it named contradicted each other, and the document
-            # was the right one. Name the command that does the move instead,
-            # with the one caveat the refusal cannot check for the operator: an
-            # `--apply` run from the wrong engine boots with no vault at all. The
-            # document stays named, because it is still the reader for what
-            # `--apply` refuses on and for an install already moved by hand.
-            print(
-                "Refusing: these workspaces have no "
-                f"<workspace>/{vault.name} directory yet: {', '.join(missing)}.\n"
-                "The move is `ciao workspace-reroot --apply`, run from the engine "
-                "that will serve this install and with the app stopped.\n"
-                "docs/VAULT_MIGRATION_PROMPT.md is the reader for what it refuses "
-                "on.\n"
-                "Only if these vaults are already where they belong because "
-                "someone moved them by hand: finish the directories named above, "
-                "then re-run this.",
-                file=sys.stderr,
-            )
-            return 1
-        written = mark_born_per_root(workspace, runtime, names, origin="hand")
-        for path in written:
-            print(f"Recorded the per-workspace layout: {path}")
-        print("Run `ciao workspace-reroot --repair` next to rebuild the derived files.")
-        return 0
 
     if args.repair:
         result = workspace_reroot.repair(workspace, runtime, names)
@@ -4091,7 +4254,7 @@ def _workspace_reroot_command(args: argparse.Namespace) -> int:
         if refused is not None:
             return refused
         result = workspace_reroot.apply(
-            workspace, vault, names, runtime, primary=config.primary_workspace()
+            workspace, vault, names, runtime, primary=config.primary_workspace(), source_config=config
         )
         if result["status"] == "migrated":
             # The leaf of the vault that was just moved, not a constant: an
@@ -4099,7 +4262,10 @@ def _workspace_reroot_command(args: argparse.Namespace) -> int:
             # otherwise rebuild nothing and report success.
             leaf = vault.name
             result["indexes"] = workspace_reroot.rebuild_indexes(
-                workspace, names, vault_name=leaf
+                workspace,
+                names,
+                vault_name=leaf,
+                runtime_root=runtime,
             )
             result["search"] = workspace_reroot.rebuild_search_index(
                 workspace, names, runtime_root=runtime, vault_name=leaf
@@ -4133,6 +4299,65 @@ def _workspace_reroot_command(args: argparse.Namespace) -> int:
     print(json.dumps(payload, indent=2))
     # Exit 1 on a refusal so a script can gate on it, 0 when the plan is clean.
     return 1 if payload["refused"] else 0
+
+
+def _record_hand_migration(workspace: Path, runtime: Path, vault: Path) -> int:
+    from ciao.workspace_reroot import mark_born_per_root, read_receipt
+
+    if read_receipt(runtime) is not None:
+        print("Already recorded as migrated; nothing to do.")
+        return 0
+    # Straight off the registry file, the way `agent_roots_for` does: this
+    # command runs before any config exists that would answer per-root.
+    try:
+        entries = json.loads(
+            (runtime / "workspaces.json").read_text(encoding="utf-8")
+        )
+    except (OSError, ValueError):
+        entries = []
+    names = [
+        str(e.get("name", "")).strip()
+        for e in entries
+        if isinstance(e, dict) and str(e.get("name", "")).strip()
+    ]
+    if not names:
+        print(
+            f"Refusing: no workspaces registered in {runtime / 'workspaces.json'}.",
+            file=sys.stderr,
+        )
+        return 1
+    missing = [
+        n for n in names
+        if not (workspace / n / vault.name).is_dir()
+    ]
+    if missing:
+        # #812: this used to send the reader to docs/VAULT_MIGRATION_PROMPT.md
+        # as the place to move the vaults by hand, and that document was
+        # rewritten to stop teaching exactly that (#800/#815) — so the refusal
+        # and the reader it named contradicted each other, and the document
+        # was the right one. Name the command that does the move instead,
+        # with the one caveat the refusal cannot check for the operator: an
+        # `--apply` run from the wrong engine boots with no vault at all. The
+        # document stays named, because it is still the reader for what
+        # `--apply` refuses on and for an install already moved by hand.
+        print(
+            "Refusing: these workspaces have no "
+            f"<workspace>/{vault.name} directory yet: {', '.join(missing)}.\n"
+            "The move is `ciao workspace-reroot --apply`, run from the engine "
+            "that will serve this install and with the app stopped.\n"
+            "docs/VAULT_MIGRATION_PROMPT.md is the reader for what it refuses "
+            "on.\n"
+            "Only if these vaults are already where they belong because "
+            "someone moved them by hand: finish the directories named above, "
+            "then re-run this.",
+            file=sys.stderr,
+        )
+        return 1
+    written = mark_born_per_root(workspace, runtime, names, origin="hand")
+    for path in written:
+        print(f"Recorded the per-workspace layout: {path}")
+    print("Run `ciao workspace-reroot --repair` next to rebuild the derived files.")
+    return 0
 
 
 def _workspace_census_command(args: argparse.Namespace) -> int:
@@ -4265,17 +4490,18 @@ def _memory_audit_command(args: argparse.Namespace) -> int:
             # state.json, which honours CIAO_RUNTIME_ROOT — a hardcoded
             # `.runtime` would silently read an empty location on installs
             # with a custom runtime root.
-            hit_paths = read_search_hit_paths(Path(config.state_path).parent)
-            # Compare in the index's own key space: hits are stored relative
-            # to the install root with the vault directory's real name, while
-            # scan_vault renders every path under the render prefix above.
-            # Rebuilding the stored key per finding keeps a same-named note in
-            # another workspace (or a vault not named `memory-vault`) from
-            # producing a false match. The fail-closed prefix means this vault
-            # has no identifiable rows: no evidence, so mark nothing.
-            # workspace_root is a required config field, populated above from
-            # the same value injected into config_source — no fallback.
-            key_prefix = vault_key_prefix(vault, Path(config.workspace_root))
+            from ciao.config import configured_connected_workspace
+            from ciao.fts_search import adopted_vault_key_prefix, connected_db_path
+
+            connected = configured_connected_workspace(config_source, vault)
+            runtime = Path(config.state_path).parent
+            if connected:
+                directory = connected_db_path(runtime, vault, connected.source_roots).parent
+                key_prefix = adopted_vault_key_prefix(vault, connected.name, link=connected.link)
+            else:
+                directory = runtime
+                key_prefix = vault_key_prefix(vault, Path(config.workspace_root))
+            hit_paths = read_search_hit_paths(directory)
             # Keys, prefix and rendered paths are all `/`-spelled on every OS
             # (fts_search.KEY_SEPARATOR, Entry.path_key), so they compare as is.
             if hit_paths is not None and key_prefix != NO_MATCH_KEY_PREFIX:
@@ -6365,6 +6591,7 @@ def _curation_begin_command(args: argparse.Namespace) -> int:
     from ciao.curation_run import (
         CurationBusy,
         CurationStateError,
+        Lease,
         begin_run,
         end_run,
         holder_is_live,
@@ -6377,7 +6604,37 @@ def _curation_begin_command(args: argparse.Namespace) -> int:
     # Empty outside an agent chat, and then no outcome is shown for the run.
     chat_id = os.environ.get("CIAO_CHAT_ID", "").strip()
     try:
-        lease = begin_run(vault, holder=args.holder, ttl_s=budget.max_seconds, chat_id=chat_id)
+        token = os.environ.get("CIAO_AGENT_TOKEN", "")
+        url = os.environ.get("CIAO_AGENT_URL", "")
+        managed = None
+        if token and url:
+            from ciao.agent_cli import post
+
+            managed = post("care_begin", {"ttl_s": budget.max_seconds, "vault": str(vault)}, url=url, token=token)
+        if managed and managed.get("ok"):
+            data = managed["data"]
+            if Path(data["vault"]).resolve() != vault.resolve():
+                print("curation workspace does not match the managed dispatch", file=sys.stderr)
+                return 1
+            lease = Lease(holder=data["holder"], started_at=data["started_at"],
+                          expires_at=data["expires_at"], vault_root=vault)
+        elif managed and managed.get("error", {}).get("code") != "not_care_dispatch":
+            error = managed.get("error", {})
+            print(f"curation could not begin: {error.get('message', 'engine unavailable')}", file=sys.stderr)
+            return CURATION_BUSY_EXIT if error.get("code") == "curation_busy" else 1
+        else:
+            lease = None
+            if _name:
+                from ciao import curation_share, share_evidence
+
+                config = _installed_config(_workspace)
+                if share_evidence._store_root(config).exists():
+                    name = _name
+                    with share_evidence.evidence_claim(config, workspace=name) as claim:
+                        lease = begin_run(vault, holder=args.holder, ttl_s=budget.max_seconds, chat_id=chat_id,
+                                          before_acquire=lambda state: curation_share.recover(config, name, state, claim))
+            if lease is None:
+                lease = begin_run(vault, holder=args.holder, ttl_s=budget.max_seconds, chat_id=chat_id)
     except CurationBusy as exc:
         print(f"curation is already running: {exc}", file=sys.stderr)
         return CURATION_BUSY_EXIT
@@ -6385,6 +6642,7 @@ def _curation_begin_command(args: argparse.Namespace) -> int:
         print(f"curation state error: {exc}", file=sys.stderr)
         return 1
 
+    assert lease is not None
     from ciao.curation_run import _category_cluster_items
 
     try:
@@ -6408,7 +6666,14 @@ def _curation_begin_command(args: argparse.Namespace) -> int:
     payload["lease"] = lease.as_dict()
     if payload.get("empty"):
         try:
-            end_run(vault, holder=lease.holder, status="ok", planned=0, completed=0, deferred=0)
+            if managed and managed.get("ok"):
+                settled = post("care_end", {"holder": lease.holder, "status": "ok", "reasons": []},
+                               url=url, token=token)
+                if not settled.get("ok"):
+                    print("curation could not settle the empty run", file=sys.stderr)
+                    return 1
+            else:
+                end_run(vault, holder=lease.holder, status="ok", planned=0, completed=0, deferred=0)
         except CurationBusy as exc:
             print(f"curation lease lost: {exc}", file=sys.stderr)
             return CURATION_BUSY_EXIT
@@ -6481,6 +6746,15 @@ def _curation_progress_command(args: argparse.Namespace) -> int:
     except CurationStateError as exc:
         print(f"curation state error: {exc}", file=sys.stderr)
         return 1
+    token = os.environ.get("CIAO_AGENT_TOKEN", "")
+    url = os.environ.get("CIAO_AGENT_URL", "")
+    if token and url:
+        from ciao.agent_cli import post
+
+        for key in keys:
+            result = post("care_checkpoint", {"holder": holder, "key": key}, url=url, token=token, timeout_s=2.0)
+            if not result.get("ok") and result.get("error", {}).get("code") != "not_care_dispatch":
+                print("curation sharing checkpoint unavailable; work remains private", file=sys.stderr)
     payload = {"recorded": len(keys), "newly_done": added}
     if args.json:
         json.dump(payload, sys.stdout, ensure_ascii=False, indent=2)
@@ -6733,19 +7007,27 @@ def _curation_end_command(args: argparse.Namespace) -> int:
         # The worklist above already excludes the two hygiene keys, since they
         # are recorded done, so the prune inside `end_run` still forgets them
         # and next week's pass is planned again.
-        summary = end_run(
-            vault,
-            holder=holder,
-            status=args.status,
-            planned=counts.planned,
-            completed=counts.completed,
-            deferred=counts.deferred,
-            reasons=[*(args.reason or []), *counts.reasons],
-            live_keys=live_keys,
-            advance_marker=args.status == "ok",
-            failed=counts.failed,
-            counts_complete=counts.complete,
-        )
+        token = os.environ.get("CIAO_AGENT_TOKEN", "")
+        url = os.environ.get("CIAO_AGENT_URL", "")
+        managed = None
+        if token and url:
+            from ciao.agent_cli import post
+
+            managed = post("care_end", {"holder": holder, "status": args.status,
+                                        "reasons": args.reason or []}, url=url, token=token)
+        if managed and managed.get("ok"):
+            summary = managed["data"]
+        elif managed and managed.get("error", {}).get("code") != "not_care_dispatch":
+            error = managed.get("error", {})
+            print(f"curation could not end: {error.get('message', 'engine unavailable')}", file=sys.stderr)
+            return CURATION_BUSY_EXIT if error.get("code") == "curation_busy" else 1
+        else:
+            summary = end_run(
+                vault, holder=holder, status=args.status, planned=counts.planned,
+                completed=counts.completed, deferred=counts.deferred,
+                reasons=[*(args.reason or []), *counts.reasons], live_keys=live_keys,
+                advance_marker=args.status == "ok", failed=counts.failed, counts_complete=counts.complete,
+            )
     except CurationBusy as exc:
         print(f"curation lease lost: {exc}", file=sys.stderr)
         return CURATION_BUSY_EXIT
@@ -6753,8 +7035,6 @@ def _curation_end_command(args: argparse.Namespace) -> int:
         print(f"curation state error: {exc}", file=sys.stderr)
         return 1
     summary.update(
-        counts_complete=counts.complete,
-        failed=counts.failed,
         remaining_observed_count=int(payload["remaining_observed_count"]),
         coverage_notes=payload["coverage_notes"],
     )
@@ -8514,6 +8794,10 @@ def build_parser() -> argparse.ArgumentParser:
         type=Path,
         default=Path("."),
         help="Workspace directory to initialize.",
+    )
+    setup_parser.add_argument(
+        "--notes-folder", type=Path, default=None,
+        help="Use an existing separate notes directory for a new installation.",
     )
     setup_parser.add_argument(
         "--initialize-git",
