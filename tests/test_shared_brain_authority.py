@@ -1,17 +1,29 @@
-"""Steward authority core: bootstrap, transfer, recovery and their fences.
+"""Steward authority core: capabilities, fenced admissions and their fences.
 
 Pure unit tests over an injected clock, a temporary protected store and a
-synthetic verifier: no routes, no Settings, no live repository and no sleeps.
-Every test names the behavior it pins.
+synthetic provider backend: no routes, no Settings, no live repository, no
+sleeps. The synthetic backend stands in for the integration seam Terra required:
+it authenticates provider credentials into sealed capabilities and commits a
+mutation only inside its own admission fence.
+
+The local file store tests prove conditional persistence and durability only.
+They do not claim provider fencing; the engine with no backend refuses every
+privileged transition, which is the fail-closed answer.
 """
 
 from __future__ import annotations
 
+import hashlib
+import hmac
+import json
+import multiprocessing
 import os
+import secrets
 import stat
 import threading
-from dataclasses import dataclass
+from dataclasses import dataclass, field, replace
 from pathlib import Path
+from typing import Callable
 
 import pytest
 
@@ -19,10 +31,13 @@ from ciao.shared_brain_authority import (
     CHALLENGE_TTL_S,
     AuthorityError,
     AuthorityRecord,
+    AuthenticatedPrincipal,
     BrainRef,
+    CommitOutcome,
     ConnectorKind,
+    MutationAdmission,
     Operation,
-    PrincipalEvidence,
+    ProviderCredential,
     ProtectedAuthorityStore,
     StewardAuthority,
     StoreError,
@@ -42,100 +57,281 @@ class FakeClock:
         self.now += float(seconds)
 
 
-class RecordingVerifier:
-    """A synthetic trusted connector verifier.
+def _principal_material(capability: AuthenticatedPrincipal) -> bytes:
+    return json.dumps(
+        {
+            "principal": capability.principal,
+            "brain": capability.brain,
+            "storage": capability.storage,
+            "member": capability.member,
+            "admin": capability.admin,
+            "revision": capability.revision,
+            "source": capability.source,
+            "authenticated_at": capability.authenticated_at,
+            "expires_at": capability.expires_at,
+        },
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode()
 
-    It models the seam the integration owner will supply from a real backend:
-    an answer for one (brain, storage, principal) or ``None`` when the backend
-    cannot verify that principal for that resource.
+
+def _admission_material(admission: MutationAdmission) -> bytes:
+    return json.dumps(
+        {
+            "admission_id": admission.admission_id,
+            "actor": admission.actor,
+            "successor": admission.successor,
+            "brain": admission.brain,
+            "storage": admission.storage,
+            "operation": admission.operation.value,
+            "generation": admission.generation,
+            "fence": admission.fence,
+            "issued_at": admission.issued_at,
+            "expires_at": admission.expires_at,
+        },
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode()
+
+
+class FencedBackend:
+    """A synthetic trusted provider: sealed capabilities plus a real admission fence.
+
+    This is the shape a Git/folder integration must supply. ``admit`` re-reads
+    current entitlement; ``commit`` is the place a revocation observed at the
+    effect is enforced, before the store mutation runs. The sealed values are
+    HMACs, so a caller-built capability or admission is not accepted.
     """
 
-    def __init__(self) -> None:
-        self.roles: dict[tuple[str, str, str], PrincipalEvidence] = {}
+    def __init__(self, clock: FakeClock, *, secret: bytes = b"test-fence-secret") -> None:
+        self.clock = clock
+        self._secret = secret
+        self.tokens: dict[str, tuple[str, bool, bool]] = {}
+        self.principals: set[str] = set()
+        self.revoked: set[str] = set()
+        self.admissions: dict[str, MutationAdmission] = {}
+        self.used: set[str] = set()
+        self.lock = threading.Lock()
+        self.fail_admit = False
+        self.forge_admission = False
+        self.mismatch_admission = False
+        self.revoke_before_commit: str | None = None
+        self.fence_counter = 0
 
-    def grant(
+    # ── Identity ─────────────────────────────────────────────────────────
+
+    def add_token(
+        self, token: str, principal: str, *, admin: bool = False, member: bool = True
+    ) -> None:
+        self.tokens[token] = (principal, admin, member)
+        self.principals.add(principal)
+
+    def revoke(self, principal: str) -> None:
+        with self.lock:
+            self.revoked.add(principal)
+
+    def credential(self, token: str) -> ProviderCredential:
+        return ProviderCredential(token=token)
+
+    def sign_in(
+        self,
+        connector: BrainRef,
+        token: str,
+        *,
+        expires_in: float = 60.0,
+    ) -> AuthenticatedPrincipal:
+        principal, admin, member = self.tokens[token]
+        return self._capability(
+            connector,
+            principal,
+            admin=admin,
+            member=member,
+            expires_in=expires_in,
+        )
+
+    def forged_principal(
         self,
         connector: BrainRef,
         principal: str,
         *,
-        admin: bool = False,
-        member: bool = True,
-        revision: str = "rev-1",
-        source: str = "test-acl",
-        brain: str | None = None,
-        storage: str | None = None,
-        evidence_principal: str | None = None,
-    ) -> PrincipalEvidence:
-        evidence = PrincipalEvidence(
-            principal=evidence_principal if evidence_principal is not None else principal,
-            brain=brain if brain is not None else connector.brain,
-            storage=storage if storage is not None else connector.storage,
+        admin: bool = True,
+    ) -> AuthenticatedPrincipal:
+        now = self.clock()
+        return AuthenticatedPrincipal(
+            principal=principal,
+            brain=connector.brain,
+            storage=connector.storage,
+            member=True,
+            admin=admin,
+            revision="forged",
+            source="forged",
+            authenticated_at=now,
+            expires_at=now + 60,
+            seal="forged-seal",
+        )
+
+    def _capability(
+        self,
+        connector: BrainRef,
+        principal: str,
+        *,
+        admin: bool,
+        member: bool,
+        expires_in: float,
+    ) -> AuthenticatedPrincipal:
+        now = self.clock()
+        capability = AuthenticatedPrincipal(
+            principal=principal,
+            brain=connector.brain,
+            storage=connector.storage,
             member=member,
             admin=admin,
-            revision=revision,
-            source=source,
-            observed_at=0.0,
+            revision=f"rev-{self.fence_counter}",
+            source="test-provider",
+            authenticated_at=now,
+            expires_at=now + expires_in,
+            seal="",
         )
-        self.roles[(connector.brain, connector.storage, principal)] = evidence
-        return evidence
+        return replace(
+            capability,
+            seal=hmac.new(
+                self._secret, _principal_material(capability), hashlib.sha256
+            ).hexdigest(),
+        )
 
-    def revoke(self, connector: BrainRef, principal: str) -> None:
-        self.roles.pop((connector.brain, connector.storage, principal), None)
+    # ── AuthorityBackend protocol ────────────────────────────────────────
 
-    def verify(
-        self, connector: BrainRef, principal: str
-    ) -> PrincipalEvidence | None:
-        return self.roles.get((connector.brain, connector.storage, principal))
-
-
-class StrictVerifier(RecordingVerifier):
-    """A verifier that only accepts the engine's own connector value.
-
-    It is the boundary a fake connector must fail: the fake is structurally
-    callable but is not evidence this trusted verifier observed.
-    """
-
-    def verify(
-        self, connector: BrainRef, principal: str
-    ) -> PrincipalEvidence | None:
-        if not isinstance(connector, BrainRef):
+    def authenticate(
+        self, connector: BrainRef, credential: ProviderCredential
+    ) -> AuthenticatedPrincipal | None:
+        found = self.tokens.get(credential.token)
+        if found is None:
             return None
-        return super().verify(connector, principal)
+        principal, admin, member = found
+        return self._capability(
+            connector, principal, admin=admin, member=member, expires_in=60
+        )
+
+    def verify_principal(self, capability: AuthenticatedPrincipal) -> bool:
+        expected = hmac.new(
+            self._secret, _principal_material(capability), hashlib.sha256
+        ).hexdigest()
+        return hmac.compare_digest(capability.seal, expected)
+
+    def admit(
+        self,
+        *,
+        connector: BrainRef,
+        operation: Operation,
+        generation: int,
+        actor: AuthenticatedPrincipal,
+        successor: AuthenticatedPrincipal,
+    ) -> MutationAdmission | None:
+        if self.fail_admit:
+            return None
+        if not self.verify_principal(actor) or not self.verify_principal(successor):
+            return None
+        actor_id = actor.principal
+        successor_id = successor.principal
+        with self.lock:
+            if actor_id in self.revoked or successor_id in self.revoked:
+                return None
+            if actor_id not in self.principals or successor_id not in self.principals:
+                return None
+            self.fence_counter += 1
+            now = self.clock()
+            admission = MutationAdmission(
+                admission_id=secrets.token_urlsafe(16),
+                actor=actor_id,
+                successor=successor_id,
+                brain=connector.brain,
+                storage=connector.storage,
+                operation=operation,
+                generation=generation,
+                fence=f"provider-rev-{self.fence_counter}",
+                issued_at=now,
+                expires_at=now + 30,
+                seal="",
+            )
+            if self.mismatch_admission:
+                admission = replace(admission, successor="mallory")
+            sealed = replace(
+                admission,
+                seal="forged-seal"
+                if self.forge_admission
+                else hmac.new(
+                    self._secret, _admission_material(admission), hashlib.sha256
+                ).hexdigest(),
+            )
+            self.admissions[sealed.admission_id] = sealed
+            return sealed
+
+    def verify_admission(self, admission: MutationAdmission) -> bool:
+        stored = self.admissions.get(admission.admission_id)
+        if stored is None or stored != admission:
+            return False
+        expected = hmac.new(
+            self._secret, _admission_material(admission), hashlib.sha256
+        ).hexdigest()
+        return hmac.compare_digest(admission.seal, expected)
+
+    def commit(
+        self, admission: MutationAdmission, mutation: Callable[[], bool]
+    ) -> CommitOutcome:
+        with self.lock:
+            if self.revoke_before_commit is not None:
+                self.revoked.add(self.revoke_before_commit)
+                self.revoke_before_commit = None
+            stored = self.admissions.get(admission.admission_id)
+            if (
+                stored is None
+                or stored != admission
+                or admission.admission_id in self.used
+                or not self.verify_admission(admission)
+            ):
+                return CommitOutcome.REJECTED
+            if admission.actor in self.revoked or admission.successor in self.revoked:
+                return CommitOutcome.REJECTED
+            self.used.add(admission.admission_id)
+            return (
+                CommitOutcome.COMMITTED
+                if mutation()
+                else CommitOutcome.CONDITION_FAILED
+            )
 
 
-class BarrierVerifier(RecordingVerifier):
-    """Wait for the named successors so a race reaches the store together."""
+class BarrierBackend(FencedBackend):
+    """Wait for named successors so two admissions reach the store together."""
 
-    def __init__(self, successors: set[str]) -> None:
-        super().__init__()
+    def __init__(self, clock: FakeClock, successors: set[str]) -> None:
+        super().__init__(clock)
         self.successors = set(successors)
         self.barrier = threading.Barrier(2)
 
-    def verify(
-        self, connector: BrainRef, principal: str
-    ) -> PrincipalEvidence | None:
-        evidence = super().verify(connector, principal)
-        if principal in self.successors:
+    def admit(
+        self,
+        *,
+        connector: BrainRef,
+        operation: Operation,
+        generation: int,
+        actor: AuthenticatedPrincipal,
+        successor: AuthenticatedPrincipal,
+    ) -> MutationAdmission | None:
+        admission = super().admit(
+            connector=connector,
+            operation=operation,
+            generation=generation,
+            actor=actor,
+            successor=successor,
+        )
+        if successor.principal in self.successors:
             self.barrier.wait(timeout=5)
-        return evidence
-
-
-@dataclass(frozen=True)
-class FakeConnector:
-    """A connector that claims privilege but has no verified observation."""
-
-    brain: str
-    storage: str
-    kind: ConnectorKind = ConnectorKind.GIT
-    verified_admin: bool = True
-
-    def is_admin(self, principal: str) -> bool:
-        return self.verified_admin
+        return admission
 
 
 def _engine(
     tmp_path: Path,
-    verifier: RecordingVerifier | None,
+    backend: FencedBackend | None,
     clock: FakeClock | None = None,
     *,
     ttl: float = CHALLENGE_TTL_S,
@@ -143,27 +339,65 @@ def _engine(
     store = ProtectedAuthorityStore(tmp_path / "authority")
     engine = StewardAuthority(
         store,
-        verifier=verifier,
+        backend=backend,
         clock=clock or FakeClock(),
         challenge_ttl_s=ttl,
     )
     return engine, store
 
 
+def _add_people(backend: FencedBackend, connector: BrainRef) -> None:
+    backend.add_token("alice-token", "alice", admin=True)
+    backend.add_token("bob-token", "bob")
+    backend.add_token("carol-token", "carol")
+    backend.add_token("dave-token", "dave")
+    backend.add_token("mallory-token", "mallory")
+
+
 def _bootstrap(
     engine: StewardAuthority,
     connector: BrainRef,
+    backend: FencedBackend,
     *,
-    admin: str,
-    successor: str,
+    admin_token: str = "alice-token",
+    successor_token: str = "bob-token",
 ) -> AuthorityRecord:
+    admin = backend.sign_in(connector, admin_token)
+    successor = backend.sign_in(connector, successor_token)
     challenge = engine.begin_bootstrap(
-        connector=connector, admin=admin, successor=successor
+        connector=connector, admin=admin, successor=successor.principal
     )
     engine.accept_bootstrap(
         challenge.nonce, connector=connector, successor=successor
     )
-    return engine.authorize_steward(connector=connector, principal=successor)
+    return engine.authorize_steward(
+        connector=connector, principal=successor, generation=1
+    )
+
+
+def _transfer(
+    engine: StewardAuthority,
+    connector: BrainRef,
+    backend: FencedBackend,
+    *,
+    incumbent_token: str = "bob-token",
+    successor_token: str = "carol-token",
+    generation: int = 1,
+) -> AuthorityRecord:
+    incumbent = backend.sign_in(connector, incumbent_token)
+    successor = backend.sign_in(connector, successor_token)
+    challenge = engine.begin_transfer(
+        connector=connector,
+        incumbent=incumbent,
+        successor=successor.principal,
+        expected_generation=generation,
+    )
+    engine.accept_transfer(
+        challenge.nonce, connector=connector, successor=successor
+    )
+    return engine.authorize_steward(
+        connector=connector, principal=successor, generation=generation + 1
+    )
 
 
 def _race(*calls):
@@ -191,24 +425,27 @@ def _race(*calls):
     return outcomes
 
 
-# ── Bootstrap ───────────────────────────────────────────────────────────────
+# ── Authenticated capabilities ──────────────────────────────────────────────
 
 
-def test_bootstrap_needs_a_verified_admin_and_successor_acceptance(tmp_path: Path) -> None:
+def test_bootstrap_needs_authenticated_admin_and_successor_capabilities(tmp_path: Path) -> None:
     clock = FakeClock()
+    backend = FencedBackend(clock)
     connector = BrainRef("brain-a", "github.com/acme/notes")
-    verifier = RecordingVerifier()
-    verifier.grant(connector, "alice", admin=True)
-    verifier.grant(connector, "bob")
-    engine, store = _engine(tmp_path, verifier, clock)
+    _add_people(backend, connector)
+    engine, store = _engine(tmp_path, backend, clock)
 
-    # No record exists until the nominated successor accepts.
     with pytest.raises(AuthorityError) as missing:
-        engine.authorize_steward(connector=connector, principal="bob")
+        engine.authorize_steward(
+            connector=connector,
+            principal=backend.sign_in(connector, "bob-token"),
+        )
     assert missing.value.reason == "not_initialized"
 
+    admin = backend.sign_in(connector, "alice-token")
+    successor = backend.sign_in(connector, "bob-token")
     challenge = engine.begin_bootstrap(
-        connector=connector, admin="alice", successor="bob"
+        connector=connector, admin=admin, successor=successor.principal
     )
     assert challenge.operation is Operation.BOOTSTRAP
     assert challenge.actor == "alice"
@@ -217,7 +454,7 @@ def test_bootstrap_needs_a_verified_admin_and_successor_acceptance(tmp_path: Pat
     assert challenge.expires_at > clock.now
 
     transition = engine.accept_bootstrap(
-        challenge.nonce, connector=connector, successor="bob"
+        challenge.nonce, connector=connector, successor=successor
     )
     assert transition.operation is Operation.BOOTSTRAP
     assert transition.actor == "alice"
@@ -233,205 +470,491 @@ def test_bootstrap_needs_a_verified_admin_and_successor_acceptance(tmp_path: Pat
 
 
 def test_a_member_cannot_bootstrap(tmp_path: Path) -> None:
+    clock = FakeClock()
+    backend = FencedBackend(clock)
     connector = BrainRef("brain-a", "github.com/acme/notes")
-    verifier = RecordingVerifier()
-    verifier.grant(connector, "mallory")
-    engine, _store = _engine(tmp_path, verifier)
+    _add_people(backend, connector)
+    engine, _store = _engine(tmp_path, backend, clock)
+    mallory = backend.sign_in(connector, "mallory-token")
 
     with pytest.raises(AuthorityError) as refused:
         engine.begin_bootstrap(
-            connector=connector, admin="mallory", successor="mallory"
+            connector=connector, admin=mallory, successor=mallory.principal
         )
     assert refused.value.reason == "not_admin"
 
 
-def test_unverifiable_connectors_stay_member_only(tmp_path: Path) -> None:
-    connector = BrainRef("brain-a", "generic.example/notes")
-    verifier = RecordingVerifier()  # answers None for every principal
-    engine, _store = _engine(tmp_path, verifier)
+def test_an_unknown_credential_is_not_authenticated(tmp_path: Path) -> None:
+    clock = FakeClock()
+    backend = FencedBackend(clock)
+    connector = BrainRef("brain-a", "github.com/acme/notes")
+    _add_people(backend, connector)
+    engine, _store = _engine(tmp_path, backend, clock)
 
-    with pytest.raises(AuthorityError) as generic:
-        engine.begin_bootstrap(
-            connector=connector, admin="mallory", successor="mallory"
+    with pytest.raises(AuthorityError) as refused:
+        engine.authenticate(
+            connector=connector, credential=backend.credential("not-a-token")
         )
-    assert generic.value.reason == "member_only"
-
-    # An ordinary folder is member-only by policy, even if a verifier were to
-    # answer with an administrator role for it.
-    folder = BrainRef("brain-f", "/tmp/team-notes", ConnectorKind.FOLDER)
-    verifier.grant(folder, "alice", admin=True)
-    with pytest.raises(AuthorityError) as folder_refusal:
-        engine.begin_bootstrap(
-            connector=folder, admin="alice", successor="bob"
-        )
-    assert folder_refusal.value.reason == "member_only"
-
-    # No verifier at all is the same answer, not a stronger default.
-    bare = StewardAuthority(ProtectedAuthorityStore(tmp_path / "bare"))
-    with pytest.raises(AuthorityError) as no_verifier:
-        bare.begin_bootstrap(connector=connector, admin="alice", successor="bob")
-    assert no_verifier.value.reason == "member_only"
+    assert refused.value.reason == "not_authenticated"
 
 
-def test_a_fake_connector_cannot_enable_a_privileged_action(tmp_path: Path) -> None:
-    fake = FakeConnector("brain-a", "github.com/acme/notes")
-    verifier = StrictVerifier()
-    engine, store = _engine(tmp_path, verifier)
+def test_a_forged_admin_capability_is_refused(tmp_path: Path) -> None:
+    clock = FakeClock()
+    backend = FencedBackend(clock)
+    connector = BrainRef("brain-a", "github.com/acme/notes")
+    _add_people(backend, connector)
+    engine, store = _engine(tmp_path, backend, clock)
+    forged = backend.forged_principal(connector, "alice", admin=True)
 
-    # The fake claims ``verified_admin`` and ``is_admin()``, but the trusted
-    # verifier has no observation for it and the engine never asks the fake.
-    assert fake.verified_admin is True
-    assert fake.is_admin("mallory") is True
     with pytest.raises(AuthorityError) as refused:
         engine.begin_bootstrap(
-            connector=fake, admin="mallory", successor="mallory"
+            connector=connector, admin=forged, successor="bob"
         )
-    assert refused.value.reason == "member_only"
+    assert refused.value.reason == "forged_capability"
     assert store.load("brain-a") is None
 
 
-def test_bootstrap_is_conditional_on_absence(tmp_path: Path) -> None:
+def test_a_forged_successor_capability_is_refused(tmp_path: Path) -> None:
+    clock = FakeClock()
+    backend = FencedBackend(clock)
     connector = BrainRef("brain-a", "github.com/acme/notes")
-    verifier = RecordingVerifier()
-    verifier.grant(connector, "alice", admin=True)
-    verifier.grant(connector, "bob")
-    engine, store = _engine(tmp_path, verifier)
-    first = engine.begin_bootstrap(
-        connector=connector, admin="alice", successor="bob"
+    _add_people(backend, connector)
+    engine, store = _engine(tmp_path, backend, clock)
+    admin = backend.sign_in(connector, "alice-token")
+    challenge = engine.begin_bootstrap(
+        connector=connector, admin=admin, successor="bob"
     )
-    engine.accept_bootstrap(first.nonce, connector=connector, successor="bob")
+    forged = backend.forged_principal(connector, "bob", admin=False)
 
+    with pytest.raises(AuthorityError) as refused:
+        engine.accept_bootstrap(
+            challenge.nonce, connector=connector, successor=forged
+        )
+    assert refused.value.reason == "forged_capability"
+    assert store.load("brain-a") is None
+
+
+def test_a_forged_incumbent_capability_is_refused(tmp_path: Path) -> None:
+    clock = FakeClock()
+    backend = FencedBackend(clock)
+    connector = BrainRef("brain-a", "github.com/acme/notes")
+    _add_people(backend, connector)
+    engine, _store = _engine(tmp_path, backend, clock)
+    _bootstrap(engine, connector, backend)
+    forged = backend.forged_principal(connector, "bob", admin=False)
+
+    with pytest.raises(AuthorityError) as refused:
+        engine.begin_transfer(
+            connector=connector,
+            incumbent=forged,
+            successor="carol",
+            expected_generation=1,
+        )
+    assert refused.value.reason == "forged_capability"
+
+
+def test_a_capability_from_another_backend_is_a_forgery(tmp_path: Path) -> None:
+    clock = FakeClock()
+    trusted = FencedBackend(clock)
+    foreign = FencedBackend(clock, secret=b"foreign-secret")
+    connector = BrainRef("brain-a", "github.com/acme/notes")
+    _add_people(trusted, connector)
+    _add_people(foreign, connector)
+    engine, _store = _engine(tmp_path, trusted, clock)
+    foreign_admin = foreign.sign_in(connector, "alice-token")
+
+    with pytest.raises(AuthorityError) as refused:
+        engine.begin_bootstrap(
+            connector=connector, admin=foreign_admin, successor="bob"
+        )
+    assert refused.value.reason == "forged_capability"
+
+
+def test_an_expired_capability_is_refused(tmp_path: Path) -> None:
+    clock = FakeClock()
+    backend = FencedBackend(clock)
+    connector = BrainRef("brain-a", "github.com/acme/notes")
+    _add_people(backend, connector)
+    engine, store = _engine(tmp_path, backend, clock)
+    admin = backend.sign_in(connector, "alice-token")
+    expired = backend.sign_in(connector, "bob-token", expires_in=-1)
+    challenge = engine.begin_bootstrap(
+        connector=connector, admin=admin, successor="bob"
+    )
+
+    with pytest.raises(AuthorityError) as refused:
+        engine.accept_bootstrap(
+            challenge.nonce, connector=connector, successor=expired
+        )
+    assert refused.value.reason == "expired_capability"
+    assert store.load("brain-a") is None
+
+
+def test_a_missing_backend_fails_closed(tmp_path: Path) -> None:
+    clock = FakeClock()
+    signer = FencedBackend(clock)
+    connector = BrainRef("brain-a", "github.com/acme/notes")
+    _add_people(signer, connector)
+    admin = signer.sign_in(connector, "alice-token")
+    engine, store = _engine(tmp_path, None, clock)
+
+    with pytest.raises(AuthorityError) as refused:
+        engine.begin_bootstrap(
+            connector=connector, admin=admin, successor="bob"
+        )
+    assert refused.value.reason == "provider_fencing_unavailable"
+    assert store.load("brain-a") is None
+
+
+def test_an_unverifiable_connector_stays_member_only(tmp_path: Path) -> None:
+    clock = FakeClock()
+    backend = FencedBackend(clock)
+    folder = BrainRef("brain-f", "/tmp/team-notes", ConnectorKind.FOLDER)
+    _add_people(backend, folder)
+    engine, _store = _engine(tmp_path, backend, clock)
+    admin = backend.sign_in(folder, "alice-token")
+
+    with pytest.raises(AuthorityError) as refused:
+        engine.begin_bootstrap(
+            connector=folder, admin=admin, successor="bob"
+        )
+    assert refused.value.reason == "member_only"
+
+
+def test_a_capability_for_another_resource_is_refused(tmp_path: Path) -> None:
+    clock = FakeClock()
+    backend = FencedBackend(clock)
+    first = BrainRef("brain-a", "github.com/acme/notes")
+    second = BrainRef("brain-b", "github.com/acme/other")
+    _add_people(backend, first)
+    engine, _store = _engine(tmp_path, backend, clock)
+    wrong = backend.sign_in(second, "alice-token")
+
+    with pytest.raises(AuthorityError) as refused:
+        engine.begin_bootstrap(
+            connector=first, admin=wrong, successor="bob"
+        )
+    assert refused.value.reason == "wrong_resource"
+
+
+# ── Admission boundary ──────────────────────────────────────────────────────
+
+
+def test_no_admission_boundary_fails_closed(tmp_path: Path) -> None:
+    clock = FakeClock()
+    backend = FencedBackend(clock)
+    connector = BrainRef("brain-a", "github.com/acme/notes")
+    _add_people(backend, connector)
+    engine, store = _engine(tmp_path, backend, clock)
+    admin = backend.sign_in(connector, "alice-token")
+    challenge = engine.begin_bootstrap(
+        connector=connector, admin=admin, successor="bob"
+    )
+    backend.fail_admit = True
+    successor = backend.sign_in(connector, "bob-token")
+
+    with pytest.raises(AuthorityError) as refused:
+        engine.accept_bootstrap(
+            challenge.nonce, connector=connector, successor=successor
+        )
+    assert refused.value.reason == "provider_fencing_unavailable"
+    assert store.load("brain-a") is None
+
+
+def test_a_forged_admission_is_refused(tmp_path: Path) -> None:
+    clock = FakeClock()
+    backend = FencedBackend(clock)
+    connector = BrainRef("brain-a", "github.com/acme/notes")
+    _add_people(backend, connector)
+    engine, store = _engine(tmp_path, backend, clock)
+    admin = backend.sign_in(connector, "alice-token")
+    challenge = engine.begin_bootstrap(
+        connector=connector, admin=admin, successor="bob"
+    )
+    backend.forge_admission = True
+    successor = backend.sign_in(connector, "bob-token")
+
+    with pytest.raises(AuthorityError) as refused:
+        engine.accept_bootstrap(
+            challenge.nonce, connector=connector, successor=successor
+        )
+    assert refused.value.reason == "forged_admission"
+    assert store.load("brain-a") is None
+
+
+def test_an_admission_bound_to_another_successor_is_refused(tmp_path: Path) -> None:
+    clock = FakeClock()
+    backend = FencedBackend(clock)
+    connector = BrainRef("brain-a", "github.com/acme/notes")
+    _add_people(backend, connector)
+    engine, store = _engine(tmp_path, backend, clock)
+    admin = backend.sign_in(connector, "alice-token")
+    challenge = engine.begin_bootstrap(
+        connector=connector, admin=admin, successor="bob"
+    )
+    backend.mismatch_admission = True
+    successor = backend.sign_in(connector, "bob-token")
+
+    with pytest.raises(AuthorityError) as refused:
+        engine.accept_bootstrap(
+            challenge.nonce, connector=connector, successor=successor
+        )
+    assert refused.value.reason == "admission_mismatch"
+    assert store.load("brain-a") is None
+
+
+def test_revocation_before_acceptance_refuses_the_admission(tmp_path: Path) -> None:
+    clock = FakeClock()
+    backend = FencedBackend(clock)
+    connector = BrainRef("brain-a", "github.com/acme/notes")
+    _add_people(backend, connector)
+    engine, store = _engine(tmp_path, backend, clock)
+    _bootstrap(engine, connector, backend)
+    incumbent = backend.sign_in(connector, "bob-token")
+    successor = backend.sign_in(connector, "carol-token")
+    challenge = engine.begin_transfer(
+        connector=connector,
+        incumbent=incumbent,
+        successor=successor.principal,
+        expected_generation=1,
+    )
+    backend.revoke("bob")
+
+    with pytest.raises(AuthorityError) as refused:
+        engine.accept_transfer(
+            challenge.nonce, connector=connector, successor=successor
+        )
+    assert refused.value.reason == "provider_fencing_unavailable"
+    record = store.load("brain-a")
+    assert record is not None
+    assert (record.steward, record.generation) == ("bob", 1)
+
+
+def test_revocation_at_the_effect_is_rejected_by_the_commit_fence(tmp_path: Path) -> None:
+    clock = FakeClock()
+    backend = FencedBackend(clock)
+    connector = BrainRef("brain-a", "github.com/acme/notes")
+    _add_people(backend, connector)
+    engine, store = _engine(tmp_path, backend, clock)
+    _bootstrap(engine, connector, backend)
+    incumbent = backend.sign_in(connector, "bob-token")
+    successor = backend.sign_in(connector, "carol-token")
+    challenge = engine.begin_transfer(
+        connector=connector,
+        incumbent=incumbent,
+        successor=successor.principal,
+        expected_generation=1,
+    )
+    # The admission is issued while bob is still entitled; the provider
+    # revocation lands between the check and the store mutation. Only the
+    # commit fence can catch this, which is why the core requires it.
+    backend.revoke_before_commit = "bob"
+
+    with pytest.raises(AuthorityError) as refused:
+        engine.accept_transfer(
+            challenge.nonce, connector=connector, successor=successor
+        )
+    assert refused.value.reason == "admission_rejected"
+    record = store.load("brain-a")
+    assert record is not None
+    assert (record.steward, record.generation) == ("bob", 1)
+
+
+def test_recovery_revocation_at_the_effect_is_rejected(tmp_path: Path) -> None:
+    clock = FakeClock()
+    backend = FencedBackend(clock)
+    connector = BrainRef("brain-a", "github.com/acme/notes")
+    _add_people(backend, connector)
+    engine, store = _engine(tmp_path, backend, clock)
+    _bootstrap(engine, connector, backend)
+    admin = backend.sign_in(connector, "alice-token")
+    successor = backend.sign_in(connector, "carol-token")
+    challenge = engine.begin_recovery(
+        connector=connector,
+        admin=admin,
+        successor=successor.principal,
+        expected_generation=1,
+        confirmed=True,
+    )
+    backend.revoke_before_commit = "alice"
+
+    with pytest.raises(AuthorityError) as refused:
+        engine.accept_recovery(
+            challenge.nonce, connector=connector, successor=successor
+        )
+    assert refused.value.reason == "admission_rejected"
+    record = store.load("brain-a")
+    assert record is not None
+    assert (record.steward, record.generation) == ("bob", 1)
+
+
+# ── Bootstrap ───────────────────────────────────────────────────────────────
+
+
+def test_bootstrap_is_conditional_on_absence(tmp_path: Path) -> None:
+    clock = FakeClock()
+    backend = FencedBackend(clock)
+    connector = BrainRef("brain-a", "github.com/acme/notes")
+    _add_people(backend, connector)
+    engine, store = _engine(tmp_path, backend, clock)
+    _bootstrap(engine, connector, backend)
+
+    admin = backend.sign_in(connector, "alice-token")
     with pytest.raises(AuthorityError) as again:
         engine.begin_bootstrap(
-            connector=connector, admin="alice", successor="bob"
+            connector=connector, admin=admin, successor="bob"
         )
     assert again.value.reason == "already_initialized"
 
-    # A second engine sharing the same record (a copied configuration) sees
-    # the same absence answer and cannot mint a second first steward.
-    copied = StewardAuthority(store, verifier=verifier, clock=FakeClock())
+    copied = StewardAuthority(store, backend=backend, clock=FakeClock())
     with pytest.raises(AuthorityError) as copied_refusal:
         copied.begin_bootstrap(
-            connector=connector, admin="alice", successor="mallory"
+            connector=connector, admin=admin, successor="mallory"
         )
     assert copied_refusal.value.reason == "already_initialized"
     assert store.load("brain-a").steward == "bob"
 
 
-def test_a_replayed_bootstrap_invitation_is_spent(tmp_path: Path) -> None:
+def test_two_bootstrap_invitations_still_create_only_one_record(tmp_path: Path) -> None:
+    clock = FakeClock()
+    backend = FencedBackend(clock)
     connector = BrainRef("brain-a", "github.com/acme/notes")
-    verifier = RecordingVerifier()
-    verifier.grant(connector, "alice", admin=True)
-    verifier.grant(connector, "bob")
-    engine, _store = _engine(tmp_path, verifier)
-    challenge = engine.begin_bootstrap(
-        connector=connector, admin="alice", successor="bob"
+    _add_people(backend, connector)
+    engine, store = _engine(tmp_path, backend, clock)
+    first = backend.sign_in(connector, "alice-token")
+    bob = backend.sign_in(connector, "bob-token")
+    dave = backend.sign_in(connector, "dave-token")
+    first_challenge = engine.begin_bootstrap(
+        connector=connector, admin=first, successor=bob.principal
     )
-    engine.accept_bootstrap(challenge.nonce, connector=connector, successor="bob")
+    # alice is the admin for the first invitation; carol is a second admin.
+    backend.add_token("carol-admin-token", "carol", admin=True)
+    carol_admin = backend.sign_in(connector, "carol-admin-token")
+    second_challenge = engine.begin_bootstrap(
+        connector=connector, admin=carol_admin, successor=dave.principal
+    )
+    engine.accept_bootstrap(
+        first_challenge.nonce, connector=connector, successor=bob
+    )
+
+    with pytest.raises(AuthorityError) as refused:
+        engine.accept_bootstrap(
+            second_challenge.nonce, connector=connector, successor=dave
+        )
+    assert refused.value.reason == "challenge_unknown"
+    record = store.load("brain-a")
+    assert record is not None
+    assert record.generation == 1
+    assert record.steward == "bob"
+
+
+def test_a_replayed_bootstrap_invitation_is_spent(tmp_path: Path) -> None:
+    clock = FakeClock()
+    backend = FencedBackend(clock)
+    connector = BrainRef("brain-a", "github.com/acme/notes")
+    _add_people(backend, connector)
+    engine, _store = _engine(tmp_path, backend, clock)
+    admin = backend.sign_in(connector, "alice-token")
+    successor = backend.sign_in(connector, "bob-token")
+    challenge = engine.begin_bootstrap(
+        connector=connector, admin=admin, successor=successor.principal
+    )
+    engine.accept_bootstrap(
+        challenge.nonce, connector=connector, successor=successor
+    )
 
     with pytest.raises(AuthorityError) as replay:
         engine.accept_bootstrap(
-            challenge.nonce, connector=connector, successor="bob"
+            challenge.nonce, connector=connector, successor=successor
         )
     assert replay.value.reason == "challenge_used"
-
-
-def test_bootstrap_acceptance_rechecks_the_admin(tmp_path: Path) -> None:
-    connector = BrainRef("brain-a", "github.com/acme/notes")
-    verifier = RecordingVerifier()
-    verifier.grant(connector, "alice", admin=True)
-    verifier.grant(connector, "bob")
-    engine, store = _engine(tmp_path, verifier)
-    challenge = engine.begin_bootstrap(
-        connector=connector, admin="alice", successor="bob"
-    )
-    verifier.revoke(connector, "alice")
-
-    with pytest.raises(AuthorityError) as revoked:
-        engine.accept_bootstrap(challenge.nonce, connector=connector, successor="bob")
-    assert revoked.value.reason == "member_only"
-    assert store.load("brain-a") is None
 
 
 # ── Challenge binding and expiry ────────────────────────────────────────────
 
 
-def test_a_challenge_is_bound_to_its_brain_storage_and_successor(tmp_path: Path) -> None:
+def test_a_challenge_is_bound_to_brain_storage_and_successor(tmp_path: Path) -> None:
     clock = FakeClock()
+    backend = FencedBackend(clock)
     connector = BrainRef("brain-a", "github.com/acme/notes")
     other = BrainRef("brain-b", "github.com/acme/other")
-    verifier = RecordingVerifier()
-    verifier.grant(connector, "alice", admin=True)
-    verifier.grant(connector, "bob")
-    engine, _store = _engine(tmp_path, verifier, clock)
+    _add_people(backend, connector)
+    _add_people(backend, other)
+    engine, _store = _engine(tmp_path, backend, clock)
+    admin = backend.sign_in(connector, "alice-token")
+    bob = backend.sign_in(connector, "bob-token")
+    dave = backend.sign_in(connector, "dave-token")
     challenge = engine.begin_bootstrap(
-        connector=connector, admin="alice", successor="bob"
+        connector=connector, admin=admin, successor=bob.principal
     )
 
     with pytest.raises(AuthorityError) as wrong_brain:
         engine.accept_bootstrap(
-            challenge.nonce, connector=other, successor="bob"
+            challenge.nonce, connector=other, successor=bob
         )
     assert wrong_brain.value.reason == "challenge_wrong_resource"
 
     with pytest.raises(AuthorityError) as wrong_successor:
         engine.accept_bootstrap(
-            challenge.nonce, connector=connector, successor="carol"
+            challenge.nonce, connector=connector, successor=dave
         )
     assert wrong_successor.value.reason == "successor_mismatch"
 
-    # Binding mismatches do not spend the invitation.
     transition = engine.accept_bootstrap(
-        challenge.nonce, connector=connector, successor="bob"
+        challenge.nonce, connector=connector, successor=bob
     )
     assert transition.steward == "bob"
 
 
 def test_a_challenge_expires_and_is_single_use(tmp_path: Path) -> None:
     clock = FakeClock()
+    backend = FencedBackend(clock)
     connector = BrainRef("brain-a", "github.com/acme/notes")
-    verifier = RecordingVerifier()
-    verifier.grant(connector, "alice", admin=True)
-    verifier.grant(connector, "bob")
-    engine, store = _engine(tmp_path, verifier, clock, ttl=30)
+    _add_people(backend, connector)
+    engine, store = _engine(tmp_path, backend, clock, ttl=30)
+    admin = backend.sign_in(connector, "alice-token")
+    bob = backend.sign_in(connector, "bob-token")
 
     expired = engine.begin_bootstrap(
-        connector=connector, admin="alice", successor="bob"
+        connector=connector, admin=admin, successor=bob.principal
     )
     clock.advance(31)
     with pytest.raises(AuthorityError) as refused:
-        engine.accept_bootstrap(expired.nonce, connector=connector, successor="bob")
+        engine.accept_bootstrap(
+            expired.nonce, connector=connector, successor=bob
+        )
     assert refused.value.reason == "challenge_expired"
     assert store.load("brain-a") is None
 
     fresh = engine.begin_bootstrap(
-        connector=connector, admin="alice", successor="bob"
+        connector=connector, admin=admin, successor=bob.principal
     )
     assert fresh.nonce != expired.nonce
-    engine.accept_bootstrap(fresh.nonce, connector=connector, successor="bob")
+    engine.accept_bootstrap(fresh.nonce, connector=connector, successor=bob)
     with pytest.raises(AuthorityError) as replayed:
-        engine.accept_bootstrap(fresh.nonce, connector=connector, successor="bob")
+        engine.accept_bootstrap(fresh.nonce, connector=connector, successor=bob)
     assert replayed.value.reason == "challenge_used"
 
 
 def test_a_challenge_is_bound_to_its_operation(tmp_path: Path) -> None:
+    clock = FakeClock()
+    backend = FencedBackend(clock)
     connector = BrainRef("brain-a", "github.com/acme/notes")
-    verifier = RecordingVerifier()
-    verifier.grant(connector, "alice", admin=True)
-    verifier.grant(connector, "bob")
-    verifier.grant(connector, "carol")
-    engine, _store = _engine(tmp_path, verifier)
-    _bootstrap(engine, connector, admin="alice", successor="bob")
-
+    _add_people(backend, connector)
+    engine, _store = _engine(tmp_path, backend, clock)
+    _bootstrap(engine, connector, backend)
+    incumbent = backend.sign_in(connector, "bob-token")
+    successor = backend.sign_in(connector, "carol-token")
     transfer = engine.begin_transfer(
         connector=connector,
-        incumbent="bob",
-        successor="carol",
+        incumbent=incumbent,
+        successor=successor.principal,
         expected_generation=1,
     )
+
     with pytest.raises(AuthorityError) as wrong_operation:
         engine.accept_recovery(
-            transfer.nonce, connector=connector, successor="carol"
+            transfer.nonce, connector=connector, successor=successor
         )
     assert wrong_operation.value.reason == "challenge_wrong_operation"
 
@@ -440,20 +963,21 @@ def test_a_challenge_is_bound_to_its_operation(tmp_path: Path) -> None:
 
 
 def test_a_transfer_needs_the_incumbent_and_the_observed_generation(tmp_path: Path) -> None:
+    clock = FakeClock()
+    backend = FencedBackend(clock)
     connector = BrainRef("brain-a", "github.com/acme/notes")
-    verifier = RecordingVerifier()
-    verifier.grant(connector, "alice", admin=True)
-    verifier.grant(connector, "bob")
-    verifier.grant(connector, "carol")
-    verifier.grant(connector, "mallory")
-    engine, _store = _engine(tmp_path, verifier)
-    _bootstrap(engine, connector, admin="alice", successor="bob")
+    _add_people(backend, connector)
+    engine, _store = _engine(tmp_path, backend, clock)
+    _bootstrap(engine, connector, backend)
+    mallory = backend.sign_in(connector, "mallory-token")
+    bob = backend.sign_in(connector, "bob-token")
+    carol = backend.sign_in(connector, "carol-token")
 
     with pytest.raises(AuthorityError) as not_steward:
         engine.begin_transfer(
             connector=connector,
-            incumbent="mallory",
-            successor="carol",
+            incumbent=mallory,
+            successor=carol.principal,
             expected_generation=1,
         )
     assert not_steward.value.reason == "not_steward"
@@ -461,16 +985,16 @@ def test_a_transfer_needs_the_incumbent_and_the_observed_generation(tmp_path: Pa
     with pytest.raises(AuthorityError) as stale:
         engine.begin_transfer(
             connector=connector,
-            incumbent="bob",
-            successor="carol",
+            incumbent=bob,
+            successor=carol.principal,
             expected_generation=0,
         )
     assert stale.value.reason == "stale_generation"
 
     challenge = engine.begin_transfer(
         connector=connector,
-        incumbent="bob",
-        successor="carol",
+        incumbent=bob,
+        successor=carol.principal,
         expected_generation=1,
     )
     assert challenge.actor == "bob"
@@ -478,29 +1002,27 @@ def test_a_transfer_needs_the_incumbent_and_the_observed_generation(tmp_path: Pa
 
 
 def test_transfer_acceptance_rotates_generation_and_fences_the_old_one(tmp_path: Path) -> None:
+    clock = FakeClock()
+    backend = FencedBackend(clock)
     connector = BrainRef("brain-a", "github.com/acme/notes")
-    verifier = RecordingVerifier()
-    verifier.grant(connector, "alice", admin=True)
-    verifier.grant(connector, "bob")
-    verifier.grant(connector, "carol")
-    engine, store = _engine(tmp_path, verifier)
-    _bootstrap(engine, connector, admin="alice", successor="bob")
-
+    _add_people(backend, connector)
+    engine, store = _engine(tmp_path, backend, clock)
+    _bootstrap(engine, connector, backend)
+    bob = backend.sign_in(connector, "bob-token")
+    carol = backend.sign_in(connector, "carol-token")
     challenge = engine.begin_transfer(
         connector=connector,
-        incumbent="bob",
-        successor="carol",
+        incumbent=bob,
+        successor=carol.principal,
         expected_generation=1,
     )
-    # Before commit the incumbent still holds the record and the successor
-    # holds nothing.
-    engine.authorize_steward(connector=connector, principal="bob", generation=1)
+    engine.authorize_steward(connector=connector, principal=bob, generation=1)
     with pytest.raises(AuthorityError) as successor_early:
-        engine.authorize_steward(connector=connector, principal="carol")
+        engine.authorize_steward(connector=connector, principal=carol)
     assert successor_early.value.reason == "not_steward"
 
     transition = engine.accept_transfer(
-        challenge.nonce, connector=connector, successor="carol"
+        challenge.nonce, connector=connector, successor=carol
     )
     assert transition.operation is Operation.TRANSFER
     assert transition.actor == "bob"
@@ -508,160 +1030,128 @@ def test_transfer_acceptance_rotates_generation_and_fences_the_old_one(tmp_path:
     assert transition.steward == "carol"
     assert transition.previous_generation == 1
     assert transition.generation == 2
-
     record = store.load("brain-a")
     assert record is not None
     assert (record.steward, record.generation) == ("carol", 2)
 
-    # An old generation is rejected immediately; the old steward is no longer
-    # the steward even without a generation fence.
     with pytest.raises(AuthorityError) as old_generation:
-        engine.authorize_steward(connector=connector, principal="bob", generation=1)
+        engine.authorize_steward(connector=connector, principal=bob, generation=1)
     assert old_generation.value.reason == "stale_generation"
     with pytest.raises(AuthorityError) as old_steward:
-        engine.authorize_steward(connector=connector, principal="bob", generation=2)
+        engine.authorize_steward(connector=connector, principal=bob, generation=2)
     assert old_steward.value.reason == "not_steward"
-    engine.authorize_steward(connector=connector, principal="carol", generation=2)
+    engine.authorize_steward(connector=connector, principal=carol, generation=2)
 
     with pytest.raises(AuthorityError) as replay:
-        engine.accept_transfer(challenge.nonce, connector=connector, successor="carol")
+        engine.accept_transfer(
+            challenge.nonce, connector=connector, successor=carol
+        )
     assert replay.value.reason == "challenge_used"
 
 
 def test_transfer_acceptance_must_be_by_the_named_successor(tmp_path: Path) -> None:
+    clock = FakeClock()
+    backend = FencedBackend(clock)
     connector = BrainRef("brain-a", "github.com/acme/notes")
-    verifier = RecordingVerifier()
-    verifier.grant(connector, "alice", admin=True)
-    verifier.grant(connector, "bob")
-    verifier.grant(connector, "carol")
-    verifier.grant(connector, "dave")
-    engine, store = _engine(tmp_path, verifier)
-    _bootstrap(engine, connector, admin="alice", successor="bob")
+    _add_people(backend, connector)
+    engine, store = _engine(tmp_path, backend, clock)
+    _bootstrap(engine, connector, backend)
+    bob = backend.sign_in(connector, "bob-token")
+    carol = backend.sign_in(connector, "carol-token")
+    dave = backend.sign_in(connector, "dave-token")
     challenge = engine.begin_transfer(
         connector=connector,
-        incumbent="bob",
-        successor="carol",
+        incumbent=bob,
+        successor=carol.principal,
         expected_generation=1,
     )
 
     with pytest.raises(AuthorityError) as wrong_successor:
-        engine.accept_transfer(challenge.nonce, connector=connector, successor="dave")
+        engine.accept_transfer(
+            challenge.nonce, connector=connector, successor=dave
+        )
     assert wrong_successor.value.reason == "successor_mismatch"
     assert store.load("brain-a").steward == "bob"
 
-    engine.accept_transfer(challenge.nonce, connector=connector, successor="carol")
+    engine.accept_transfer(challenge.nonce, connector=connector, successor=carol)
     assert store.load("brain-a").steward == "carol"
 
 
-def test_transfer_acceptance_reverifies_the_successor(tmp_path: Path) -> None:
+def test_transfer_acceptance_rechecks_the_successor(tmp_path: Path) -> None:
+    clock = FakeClock()
+    backend = FencedBackend(clock)
     connector = BrainRef("brain-a", "github.com/acme/notes")
-    verifier = RecordingVerifier()
-    verifier.grant(connector, "alice", admin=True)
-    verifier.grant(connector, "bob")
-    verifier.grant(connector, "carol")
-    engine, _store = _engine(tmp_path, verifier)
-    _bootstrap(engine, connector, admin="alice", successor="bob")
+    _add_people(backend, connector)
+    engine, store = _engine(tmp_path, backend, clock)
+    _bootstrap(engine, connector, backend)
+    bob = backend.sign_in(connector, "bob-token")
+    carol = backend.sign_in(connector, "carol-token")
     challenge = engine.begin_transfer(
         connector=connector,
-        incumbent="bob",
-        successor="carol",
+        incumbent=bob,
+        successor=carol.principal,
         expected_generation=1,
     )
-    verifier.revoke(connector, "carol")
+    backend.revoke("carol")
 
     with pytest.raises(AuthorityError) as unverified:
-        engine.accept_transfer(challenge.nonce, connector=connector, successor="carol")
-    assert unverified.value.reason == "member_only"
-
-
-def test_transfer_acceptance_rechecks_the_incumbent(tmp_path: Path) -> None:
-    connector = BrainRef("brain-a", "github.com/acme/notes")
-    verifier = RecordingVerifier()
-    verifier.grant(connector, "alice", admin=True)
-    verifier.grant(connector, "bob")
-    verifier.grant(connector, "carol")
-    engine, store = _engine(tmp_path, verifier)
-    _bootstrap(engine, connector, admin="alice", successor="bob")
-    challenge = engine.begin_transfer(
-        connector=connector,
-        incumbent="bob",
-        successor="carol",
-        expected_generation=1,
-    )
-    verifier.revoke(connector, "bob")
-
-    with pytest.raises(AuthorityError) as revoked:
-        engine.accept_transfer(challenge.nonce, connector=connector, successor="carol")
-    assert revoked.value.reason == "member_only"
-    record = store.load("brain-a")
-    assert record is not None
-    assert (record.steward, record.generation) == ("bob", 1)
+        engine.accept_transfer(
+            challenge.nonce, connector=connector, successor=carol
+        )
+    assert unverified.value.reason == "provider_fencing_unavailable"
+    assert store.load("brain-a").steward == "bob"
 
 
 def test_an_outstanding_invitation_is_invalidated_by_a_winning_transition(tmp_path: Path) -> None:
+    clock = FakeClock()
+    backend = FencedBackend(clock)
     connector = BrainRef("brain-a", "github.com/acme/notes")
-    verifier = RecordingVerifier()
-    verifier.grant(connector, "alice", admin=True)
-    verifier.grant(connector, "bob")
-    verifier.grant(connector, "carol")
-    verifier.grant(connector, "dave")
-    engine, _store = _engine(tmp_path, verifier)
-    _bootstrap(engine, connector, admin="alice", successor="bob")
-
+    _add_people(backend, connector)
+    engine, _store = _engine(tmp_path, backend, clock)
+    _bootstrap(engine, connector, backend)
+    bob = backend.sign_in(connector, "bob-token")
+    carol = backend.sign_in(connector, "carol-token")
+    dave = backend.sign_in(connector, "dave-token")
     first = engine.begin_transfer(
         connector=connector,
-        incumbent="bob",
-        successor="carol",
+        incumbent=bob,
+        successor=carol.principal,
         expected_generation=1,
     )
     stale = engine.begin_transfer(
         connector=connector,
-        incumbent="bob",
-        successor="dave",
+        incumbent=bob,
+        successor=dave.principal,
         expected_generation=1,
     )
-    engine.accept_transfer(first.nonce, connector=connector, successor="carol")
+    engine.accept_transfer(first.nonce, connector=connector, successor=carol)
 
     with pytest.raises(AuthorityError) as revoked:
-        engine.accept_transfer(stale.nonce, connector=connector, successor="dave")
+        engine.accept_transfer(
+            stale.nonce, connector=connector, successor=dave
+        )
     assert revoked.value.reason == "challenge_unknown"
-
-
-def test_authorize_steward_rechecks_current_verification(tmp_path: Path) -> None:
-    connector = BrainRef("brain-a", "github.com/acme/notes")
-    verifier = RecordingVerifier()
-    verifier.grant(connector, "alice", admin=True)
-    verifier.grant(connector, "bob")
-    engine, _store = _engine(tmp_path, verifier)
-    _bootstrap(engine, connector, admin="alice", successor="bob")
-
-    verifier.revoke(connector, "bob")
-    with pytest.raises(AuthorityError) as unverified:
-        engine.authorize_steward(connector=connector, principal="bob", generation=1)
-    assert unverified.value.reason == "member_only"
 
 
 # ── Recovery ────────────────────────────────────────────────────────────────
 
 
 def test_recovery_needs_a_fresh_admin_confirmation_and_successor_acceptance(tmp_path: Path) -> None:
+    clock = FakeClock()
+    backend = FencedBackend(clock)
     connector = BrainRef("brain-a", "github.com/acme/notes")
-    verifier = RecordingVerifier()
-    verifier.grant(connector, "alice", admin=True)
-    verifier.grant(connector, "mallory")
-    verifier.grant(connector, "bob")
-    verifier.grant(connector, "carol")
-    engine, store = _engine(tmp_path, verifier)
-    _bootstrap(engine, connector, admin="alice", successor="bob")
-    # The incumbent is unavailable: only the connector administrator can start
-    # recovery, and no incumbent evidence is consulted.
-    verifier.revoke(connector, "bob")
+    _add_people(backend, connector)
+    engine, store = _engine(tmp_path, backend, clock)
+    _bootstrap(engine, connector, backend)
+    admin = backend.sign_in(connector, "alice-token")
+    mallory = backend.sign_in(connector, "mallory-token")
+    carol = backend.sign_in(connector, "carol-token")
 
     with pytest.raises(AuthorityError) as member_admin:
         engine.begin_recovery(
             connector=connector,
-            admin="mallory",
-            successor="carol",
+            admin=mallory,
+            successor=carol.principal,
             expected_generation=1,
             confirmed=True,
         )
@@ -670,8 +1160,8 @@ def test_recovery_needs_a_fresh_admin_confirmation_and_successor_acceptance(tmp_
     with pytest.raises(AuthorityError) as unconfirmed:
         engine.begin_recovery(
             connector=connector,
-            admin="alice",
-            successor="carol",
+            admin=admin,
+            successor=carol.principal,
             expected_generation=1,
             confirmed=False,
         )
@@ -679,13 +1169,13 @@ def test_recovery_needs_a_fresh_admin_confirmation_and_successor_acceptance(tmp_
 
     challenge = engine.begin_recovery(
         connector=connector,
-        admin="alice",
-        successor="carol",
+        admin=admin,
+        successor=carol.principal,
         expected_generation=1,
         confirmed=True,
     )
     transition = engine.accept_recovery(
-        challenge.nonce, connector=connector, successor="carol"
+        challenge.nonce, connector=connector, successor=carol
     )
     assert transition.operation is Operation.RECOVERY
     assert transition.actor == "alice"
@@ -699,27 +1189,21 @@ def test_recovery_needs_a_fresh_admin_confirmation_and_successor_acceptance(tmp_
 
 
 def test_recovery_is_conditional_on_the_current_generation(tmp_path: Path) -> None:
+    clock = FakeClock()
+    backend = FencedBackend(clock)
     connector = BrainRef("brain-a", "github.com/acme/notes")
-    verifier = RecordingVerifier()
-    verifier.grant(connector, "alice", admin=True)
-    verifier.grant(connector, "bob")
-    verifier.grant(connector, "carol")
-    verifier.grant(connector, "dave")
-    engine, _store = _engine(tmp_path, verifier)
-    _bootstrap(engine, connector, admin="alice", successor="bob")
-    transfer = engine.begin_transfer(
-        connector=connector,
-        incumbent="bob",
-        successor="carol",
-        expected_generation=1,
-    )
-    engine.accept_transfer(transfer.nonce, connector=connector, successor="carol")
+    _add_people(backend, connector)
+    engine, store = _engine(tmp_path, backend, clock)
+    _bootstrap(engine, connector, backend)
+    _transfer(engine, connector, backend)
+    admin = backend.sign_in(connector, "alice-token")
+    dave = backend.sign_in(connector, "dave-token")
 
     with pytest.raises(AuthorityError) as stale:
         engine.begin_recovery(
             connector=connector,
-            admin="alice",
-            successor="dave",
+            admin=admin,
+            successor=dave.principal,
             expected_generation=1,
             confirmed=True,
         )
@@ -727,151 +1211,127 @@ def test_recovery_is_conditional_on_the_current_generation(tmp_path: Path) -> No
 
     challenge = engine.begin_recovery(
         connector=connector,
-        admin="alice",
-        successor="dave",
+        admin=admin,
+        successor=dave.principal,
         expected_generation=2,
         confirmed=True,
     )
-    engine.accept_recovery(challenge.nonce, connector=connector, successor="dave")
-    assert _store.load("brain-a").generation == 3
-
-
-def test_recovery_acceptance_rechecks_the_admin(tmp_path: Path) -> None:
-    connector = BrainRef("brain-a", "github.com/acme/notes")
-    verifier = RecordingVerifier()
-    verifier.grant(connector, "alice", admin=True)
-    verifier.grant(connector, "bob")
-    verifier.grant(connector, "carol")
-    engine, store = _engine(tmp_path, verifier)
-    _bootstrap(engine, connector, admin="alice", successor="bob")
-    challenge = engine.begin_recovery(
-        connector=connector,
-        admin="alice",
-        successor="carol",
-        expected_generation=1,
-        confirmed=True,
-    )
-    verifier.revoke(connector, "alice")
-
-    with pytest.raises(AuthorityError) as revoked:
-        engine.accept_recovery(challenge.nonce, connector=connector, successor="carol")
-    assert revoked.value.reason == "member_only"
-    record = store.load("brain-a")
-    assert record is not None
-    assert (record.steward, record.generation) == ("bob", 1)
+    engine.accept_recovery(challenge.nonce, connector=connector, successor=dave)
+    assert store.load("brain-a").generation == 3
 
 
 def test_an_expired_recovery_cannot_be_replayed(tmp_path: Path) -> None:
     clock = FakeClock()
+    backend = FencedBackend(clock)
     connector = BrainRef("brain-a", "github.com/acme/notes")
-    verifier = RecordingVerifier()
-    verifier.grant(connector, "alice", admin=True)
-    verifier.grant(connector, "bob")
-    verifier.grant(connector, "carol")
-    engine, store = _engine(tmp_path, verifier, clock, ttl=20)
-    _bootstrap(engine, connector, admin="alice", successor="bob")
+    _add_people(backend, connector)
+    engine, store = _engine(tmp_path, backend, clock, ttl=20)
+    _bootstrap(engine, connector, backend)
+    admin = backend.sign_in(connector, "alice-token")
+    carol = backend.sign_in(connector, "carol-token")
     challenge = engine.begin_recovery(
         connector=connector,
-        admin="alice",
-        successor="carol",
+        admin=admin,
+        successor=carol.principal,
         expected_generation=1,
         confirmed=True,
     )
     clock.advance(21)
 
     with pytest.raises(AuthorityError) as expired:
-        engine.accept_recovery(challenge.nonce, connector=connector, successor="carol")
+        engine.accept_recovery(
+            challenge.nonce, connector=connector, successor=carol
+        )
     assert expired.value.reason == "challenge_expired"
     assert store.load("brain-a").steward == "bob"
 
 
-# ── Scoping and evidence ────────────────────────────────────────────────────
+# ── Scoping and authorization ───────────────────────────────────────────────
 
 
 def test_a_steward_role_in_one_brain_confers_nothing_in_another(tmp_path: Path) -> None:
+    clock = FakeClock()
+    backend = FencedBackend(clock)
     first = BrainRef("brain-a", "github.com/acme/notes")
     second = BrainRef("brain-b", "github.com/acme/other")
-    verifier = RecordingVerifier()
-    verifier.grant(first, "alice", admin=True)
-    verifier.grant(first, "bob")
-    verifier.grant(second, "alice", admin=True)
-    verifier.grant(second, "carol")
-    engine, _store = _engine(tmp_path, verifier)
-    _bootstrap(engine, first, admin="alice", successor="bob")
-    _bootstrap(engine, second, admin="alice", successor="carol")
+    _add_people(backend, first)
+    _add_people(backend, second)
+    engine, _store = _engine(tmp_path, backend, clock)
+    _bootstrap(engine, first, backend)
+    _bootstrap(engine, second, backend, admin_token="alice-token", successor_token="carol-token")
+    bob_first = backend.sign_in(first, "bob-token")
+    bob_second = backend.sign_in(second, "bob-token")
 
-    engine.authorize_steward(connector=first, principal="bob", generation=1)
+    engine.authorize_steward(connector=first, principal=bob_first, generation=1)
     with pytest.raises(AuthorityError) as elsewhere:
-        engine.authorize_steward(connector=second, principal="bob", generation=1)
+        engine.authorize_steward(connector=second, principal=bob_second, generation=1)
     assert elsewhere.value.reason == "not_steward"
     with pytest.raises(AuthorityError) as transfer_elsewhere:
         engine.begin_transfer(
             connector=second,
-            incumbent="bob",
+            incumbent=bob_second,
             successor="dave",
             expected_generation=1,
         )
     assert transfer_elsewhere.value.reason == "not_steward"
 
 
-def test_evidence_must_be_for_the_same_resource_and_principal(tmp_path: Path) -> None:
+def test_authorize_steward_requires_a_current_capability(tmp_path: Path) -> None:
+    clock = FakeClock()
+    backend = FencedBackend(clock)
     connector = BrainRef("brain-a", "github.com/acme/notes")
-    other = BrainRef("brain-b", "github.com/acme/other")
+    _add_people(backend, connector)
+    engine, _store = _engine(tmp_path, backend, clock)
+    _bootstrap(engine, connector, backend)
+    bob = backend.sign_in(connector, "bob-token")
 
-    wrong_resource = RecordingVerifier()
-    wrong_resource.grant(connector, "alice", admin=True, storage=other.storage)
-    engine, _store = _engine(tmp_path / "resource", wrong_resource)
-    with pytest.raises(AuthorityError) as resource_refusal:
-        engine.begin_bootstrap(
-            connector=connector, admin="alice", successor="bob"
+    with pytest.raises(AuthorityError) as forged:
+        engine.authorize_steward(
+            connector=connector,
+            principal=backend.forged_principal(connector, "bob", admin=False),
+            generation=1,
         )
-    assert resource_refusal.value.reason == "wrong_resource"
+    assert forged.value.reason == "forged_capability"
 
-    wrong_principal = RecordingVerifier()
-    wrong_principal.grant(connector, "alice", admin=True, evidence_principal="eve")
-    engine, _store = _engine(tmp_path / "principal", wrong_principal)
-    with pytest.raises(AuthorityError) as principal_refusal:
-        engine.begin_bootstrap(
-            connector=connector, admin="alice", successor="bob"
+    expired = backend.sign_in(connector, "bob-token", expires_in=-1)
+    with pytest.raises(AuthorityError) as expired_refusal:
+        engine.authorize_steward(
+            connector=connector, principal=expired, generation=1
         )
-    assert principal_refusal.value.reason == "wrong_principal"
+    assert expired_refusal.value.reason == "expired_capability"
 
-    no_revision = RecordingVerifier()
-    no_revision.grant(connector, "alice", admin=True, revision="")
-    engine, _store = _engine(tmp_path / "revision", no_revision)
-    with pytest.raises(AuthorityError) as revision_refusal:
-        engine.begin_bootstrap(
-            connector=connector, admin="alice", successor="bob"
-        )
-    assert revision_refusal.value.reason == "member_only"
+    engine.authorize_steward(connector=connector, principal=bob, generation=1)
 
 
 # ── Races ───────────────────────────────────────────────────────────────────
 
 
 def test_two_initial_enrollments_race_to_one_record(tmp_path: Path) -> None:
+    clock = FakeClock()
     store = ProtectedAuthorityStore(tmp_path / "authority")
     connector = BrainRef("brain-a", "github.com/acme/notes")
-    verifier = BarrierVerifier({"bob", "dave"})
-    verifier.grant(connector, "alice", admin=True)
-    verifier.grant(connector, "bob")
-    verifier.grant(connector, "carol", admin=True)
-    verifier.grant(connector, "dave")
-    first = StewardAuthority(store, verifier=verifier, clock=FakeClock())
-    second = StewardAuthority(store, verifier=verifier, clock=FakeClock())
+    backend = BarrierBackend(clock, {"bob", "dave"})
+    _add_people(backend, connector)
+    backend.add_token("carol-admin-token", "carol", admin=True)
+    alice = backend.sign_in(connector, "alice-token")
+    bob = backend.sign_in(connector, "bob-token")
+    carol_admin = backend.sign_in(connector, "carol-admin-token")
+    dave = backend.sign_in(connector, "dave-token")
+    first = StewardAuthority(store, backend=backend, clock=clock)
+    second = StewardAuthority(store, backend=backend, clock=clock)
     first_challenge = first.begin_bootstrap(
-        connector=connector, admin="alice", successor="bob"
+        connector=connector, admin=alice, successor=bob.principal
     )
     second_challenge = second.begin_bootstrap(
-        connector=connector, admin="carol", successor="dave"
+        connector=connector, admin=carol_admin, successor=dave.principal
     )
 
     outcomes = _race(
         lambda: first.accept_bootstrap(
-            first_challenge.nonce, connector=connector, successor="bob"
+            first_challenge.nonce, connector=connector, successor=bob
         ),
         lambda: second.accept_bootstrap(
-            second_challenge.nonce, connector=connector, successor="dave"
+            second_challenge.nonce, connector=connector, successor=dave
         ),
     )
     kinds = sorted(kind for kind, _value in outcomes)
@@ -882,38 +1342,40 @@ def test_two_initial_enrollments_race_to_one_record(tmp_path: Path) -> None:
     assert record is not None
     assert record.generation == 1
     assert record.steward in {"bob", "dave"}
+    backend.successors.clear()
 
 
 def test_two_transfers_race_and_only_one_generation_wins(tmp_path: Path) -> None:
+    clock = FakeClock()
     store = ProtectedAuthorityStore(tmp_path / "authority")
     connector = BrainRef("brain-a", "github.com/acme/notes")
-    verifier = BarrierVerifier({"carol", "dave"})
-    verifier.grant(connector, "alice", admin=True)
-    verifier.grant(connector, "bob")
-    verifier.grant(connector, "carol")
-    verifier.grant(connector, "dave")
-    first = StewardAuthority(store, verifier=verifier, clock=FakeClock())
-    second = StewardAuthority(store, verifier=verifier, clock=FakeClock())
-    _bootstrap(first, connector, admin="alice", successor="bob")
+    backend = BarrierBackend(clock, {"carol", "dave"})
+    _add_people(backend, connector)
+    first = StewardAuthority(store, backend=backend, clock=clock)
+    second = StewardAuthority(store, backend=backend, clock=clock)
+    _bootstrap(first, connector, backend)
+    bob = backend.sign_in(connector, "bob-token")
+    carol = backend.sign_in(connector, "carol-token")
+    dave = backend.sign_in(connector, "dave-token")
     first_challenge = first.begin_transfer(
         connector=connector,
-        incumbent="bob",
-        successor="carol",
+        incumbent=bob,
+        successor=carol.principal,
         expected_generation=1,
     )
     second_challenge = second.begin_transfer(
         connector=connector,
-        incumbent="bob",
-        successor="dave",
+        incumbent=bob,
+        successor=dave.principal,
         expected_generation=1,
     )
 
     outcomes = _race(
         lambda: first.accept_transfer(
-            first_challenge.nonce, connector=connector, successor="carol"
+            first_challenge.nonce, connector=connector, successor=carol
         ),
         lambda: second.accept_transfer(
-            second_challenge.nonce, connector=connector, successor="dave"
+            second_challenge.nonce, connector=connector, successor=dave
         ),
     )
     kinds = sorted(kind for kind, _value in outcomes)
@@ -924,46 +1386,55 @@ def test_two_transfers_race_and_only_one_generation_wins(tmp_path: Path) -> None
     assert record is not None
     assert record.generation == 2
     assert record.steward in {"carol", "dave"}
+    backend.successors.clear()
 
-    # Only the accepted successor of the winning transfer may act afterwards.
-    verifier.successors.clear()
     loser = "carol" if record.steward == "dave" else "dave"
+    winner = backend.sign_in(connector, f"{record.steward}-token")
+    loser_cap = backend.sign_in(connector, f"{loser}-token")
     first.authorize_steward(
-        connector=connector, principal=record.steward, generation=2
+        connector=connector, principal=winner, generation=2
     )
     with pytest.raises(AuthorityError) as refused:
-        first.authorize_steward(connector=connector, principal=loser, generation=2)
+        first.authorize_steward(
+            connector=connector, principal=loser_cap, generation=2
+        )
     assert refused.value.reason == "not_steward"
 
 
 def test_transfer_and_recovery_race_and_one_transition_wins(tmp_path: Path) -> None:
+    clock = FakeClock()
     store = ProtectedAuthorityStore(tmp_path / "authority")
     connector = BrainRef("brain-a", "github.com/acme/notes")
-    verifier = BarrierVerifier({"carol", "dave"})
-    verifier.grant(connector, "alice", admin=True)
-    verifier.grant(connector, "bob")
-    verifier.grant(connector, "carol")
-    verifier.grant(connector, "dave")
-    first = StewardAuthority(store, verifier=verifier, clock=FakeClock())
-    second = StewardAuthority(store, verifier=verifier, clock=FakeClock())
-    _bootstrap(first, connector, admin="alice", successor="bob")
+    backend = BarrierBackend(clock, {"carol", "dave"})
+    _add_people(backend, connector)
+    first = StewardAuthority(store, backend=backend, clock=clock)
+    second = StewardAuthority(store, backend=backend, clock=clock)
+    _bootstrap(first, connector, backend)
+    bob = backend.sign_in(connector, "bob-token")
+    alice = backend.sign_in(connector, "alice-token")
+    carol = backend.sign_in(connector, "carol-token")
+    dave = backend.sign_in(connector, "dave-token")
     transfer = first.begin_transfer(
         connector=connector,
-        incumbent="bob",
-        successor="carol",
+        incumbent=bob,
+        successor=carol.principal,
         expected_generation=1,
     )
     recovery = second.begin_recovery(
         connector=connector,
-        admin="alice",
-        successor="dave",
+        admin=alice,
+        successor=dave.principal,
         expected_generation=1,
         confirmed=True,
     )
 
     outcomes = _race(
-        lambda: first.accept_transfer(transfer.nonce, connector=connector, successor="carol"),
-        lambda: second.accept_recovery(recovery.nonce, connector=connector, successor="dave"),
+        lambda: first.accept_transfer(
+            transfer.nonce, connector=connector, successor=carol
+        ),
+        lambda: second.accept_recovery(
+            recovery.nonce, connector=connector, successor=dave
+        ),
     )
     kinds = sorted(kind for kind, _value in outcomes)
     assert kinds == ["error", "ok"]
@@ -973,7 +1444,7 @@ def test_transfer_and_recovery_race_and_one_transition_wins(tmp_path: Path) -> N
     assert record is not None
     assert record.generation == 2
     assert record.steward in {"carol", "dave"}
-    verifier.successors.clear()
+    backend.successors.clear()
 
 
 # ── Protected store ─────────────────────────────────────────────────────────
@@ -1007,7 +1478,6 @@ def test_the_protected_store_is_private_and_conditional(tmp_path: Path) -> None:
     assert store.load("brain-a") == _record("carol", 2)
     assert store.replace_if_generation(_record("dave", 3), 1) is False
 
-    # A replace must be exactly one generation forward; a caller cannot skip.
     with pytest.raises(StoreError) as skipped:
         store.replace_if_generation(_record("dave", 4), 2)
     assert skipped.value.reason == "invalid_record"
@@ -1034,17 +1504,18 @@ def test_a_malformed_or_unsafe_store_supplies_no_authority(tmp_path: Path) -> No
         store.load("brain-a")
     assert corrupt.value.reason == "corrupt"
 
-    verifier = RecordingVerifier()
+    clock = FakeClock()
+    backend = FencedBackend(clock)
     connector = BrainRef("brain-a", "github.com/acme/notes")
-    verifier.grant(connector, "alice", admin=True)
-    engine = StewardAuthority(store, verifier=verifier, clock=FakeClock())
+    _add_people(backend, connector)
+    admin = backend.sign_in(connector, "alice-token")
+    engine = StewardAuthority(store, backend=backend, clock=clock)
     with pytest.raises(AuthorityError) as unavailable:
         engine.begin_bootstrap(
-            connector=connector, admin="alice", successor="bob"
+            connector=connector, admin=admin, successor="bob"
         )
     assert unavailable.value.reason == "store_unavailable"
 
-    # A symlink where the authority document belongs is refused, not followed.
     path.unlink()
     target = tmp_path / "target.json"
     target.write_text("{}", encoding="utf-8")
@@ -1053,3 +1524,103 @@ def test_a_malformed_or_unsafe_store_supplies_no_authority(tmp_path: Path) -> No
     with pytest.raises(StoreError) as unsafe:
         store.load("brain-a")
     assert unsafe.value.reason == "unsafe_store"
+
+
+# ── Cross-process store ─────────────────────────────────────────────────────
+
+
+def _create_worker(root: str, steward: str, queue) -> None:
+    try:
+        store = ProtectedAuthorityStore(root)
+        record = AuthorityRecord(
+            brain="brain-a",
+            storage="github.com/acme/notes",
+            connector=ConnectorKind.GIT.value,
+            generation=1,
+            steward=steward,
+            created_at=1.0,
+            updated_at=1.0,
+        )
+        queue.put(("ok", store.create_if_absent(record)))
+    except Exception as exc:  # pragma: no cover - a failed child is the assertion
+        queue.put(("error", repr(exc)))
+
+
+def _read_worker(root: str, queue) -> None:
+    try:
+        record = ProtectedAuthorityStore(root).load("brain-a")
+        queue.put(("ok", None if record is None else record.steward))
+    except Exception as exc:  # pragma: no cover - a failed child is the assertion
+        queue.put(("error", repr(exc)))
+
+
+def _replace_worker(root: str, steward: str, queue) -> None:
+    try:
+        store = ProtectedAuthorityStore(root)
+        record = AuthorityRecord(
+            brain="brain-a",
+            storage="github.com/acme/notes",
+            connector=ConnectorKind.GIT.value,
+            generation=2,
+            steward=steward,
+            created_at=1.0,
+            updated_at=2.0,
+        )
+        queue.put(("ok", store.replace_if_generation(record, 1)))
+    except Exception as exc:  # pragma: no cover - a failed child is the assertion
+        queue.put(("error", repr(exc)))
+
+
+def test_two_processes_share_one_conditional_store(tmp_path: Path) -> None:
+    context = multiprocessing.get_context("spawn")
+    queue = context.Queue()
+    root = str(tmp_path / "authority")
+    first = context.Process(target=_create_worker, args=(root, "bob", queue))
+    second = context.Process(target=_create_worker, args=(root, "carol", queue))
+    for process in (first, second):
+        process.start()
+    for process in (first, second):
+        process.join(timeout=20)
+        assert process.exitcode == 0
+    results = [queue.get(timeout=5), queue.get(timeout=5)]
+    assert all(kind == "ok" for kind, _value in results)
+    assert sorted(bool(value) for _kind, value in results) == [False, True]
+    record = ProtectedAuthorityStore(root).load("brain-a")
+    assert record is not None
+    assert record.steward in {"bob", "carol"}
+    assert record.generation == 1
+
+
+def test_a_record_survives_a_fresh_process(tmp_path: Path) -> None:
+    root = tmp_path / "authority"
+    store = ProtectedAuthorityStore(root)
+    assert store.create_if_absent(_record()) is True
+    context = multiprocessing.get_context("spawn")
+    queue = context.Queue()
+    reader = context.Process(target=_read_worker, args=(str(root), queue))
+    reader.start()
+    reader.join(timeout=20)
+    assert reader.exitcode == 0
+    assert queue.get(timeout=5) == ("ok", "bob")
+
+
+def test_two_processes_share_one_generation_fence(tmp_path: Path) -> None:
+    root = tmp_path / "authority"
+    store = ProtectedAuthorityStore(root)
+    assert store.create_if_absent(_record()) is True
+    context = multiprocessing.get_context("spawn")
+    queue = context.Queue()
+    first = context.Process(target=_replace_worker, args=(str(root), "carol", queue))
+    second = context.Process(target=_replace_worker, args=(str(root), "dave", queue))
+    for process in (first, second):
+        process.start()
+    for process in (first, second):
+        process.join(timeout=20)
+        assert process.exitcode == 0
+    results = [queue.get(timeout=5), queue.get(timeout=5)]
+    assert all(kind == "ok" for kind, _value in results)
+    assert sorted(bool(value) for _kind, value in results) == [False, True]
+    record = ProtectedAuthorityStore(root).load("brain-a")
+    assert record is not None
+    assert record.generation == 2
+    assert record.steward in {"carol", "dave"}

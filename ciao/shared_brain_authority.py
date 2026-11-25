@@ -6,41 +6,47 @@ the one principal allowed to transfer that role, and a recovery has to be
 possible when the incumbent is gone. This module is that authority core and
 nothing else: no route, no Settings surface, no publisher, no background job.
 It is built so the integration slice can supply a protected, conditional store
-and a trusted connector verifier without this file deciding where either lives.
+and a trusted provider backend without this file deciding where either lives.
 
 Five rules shape the design.
 
-* **A connector cannot grant authority by claiming it.** The engine never asks
-  a connector object whether its caller is an administrator. It asks the
-  injected :class:`PrincipalVerifier`, which the connector layer must implement
-  from a trusted backend. Connector attributes such as ``verified_admin`` are
-  ignored: a fake connector is an unverifiable connector, and an unverifiable
-  connector stays member-only.
-* **Authority is conditional.** Bootstrap creates a record only when none
-  exists, and every later transition replaces one only at the exact generation
-  it observed. Two callers that both saw generation *N* cannot both write
-  generation *N+1*: one wins and the other is stale. The store is a protocol,
-  so the integration owner chooses the protected location; the file-backed
-  implementation here shows the conditional and private shape through an
-  injected directory and an owner-only ``0600`` document.
+* **A principal string is not an identity.** Every entry point takes an
+  :class:`AuthenticatedPrincipal` capability, never a caller-supplied name. The
+  capability is minted only by the injected :class:`AuthorityBackend` after it
+  has authenticated the provider's own credential; the engine re-verifies the
+  capability's seal before it uses any field. A forged or expired capability is
+  a typed refusal. A fake connector cannot become a steward by claiming a role,
+  and an unverifiable connector stays member-only.
+* **Authority is conditional, and its effect is admitted.** Bootstrap creates a
+  record only when none exists, and every later transition replaces one only at
+  the exact generation it observed. More importantly, a transition's mutation
+  goes through :meth:`AuthorityBackend.commit`: the backend issues a short-lived
+  single-use :class:`MutationAdmission` only after a fresh provider entitlement
+  check, and performs the conditional store write under its own enforceable
+  fence. A permission lookup immediately before a local compare-and-swap is not
+  such a fence, so the authority core never treats one as authority.
 * **Acceptance is a second signature.** An administrator may nominate a
-  steward, but the nominated principal must accept the invitation itself. Every
-  challenge is bound to the brain, the storage identity, the actor, the
-  successor, the operation, the observed generation and a single-use nonce,
-  with a fixed expiry.
+  steward, but the nominated principal must accept the invitation itself with
+  its own authenticated capability. Every challenge is bound to the brain, the
+  storage identity, the actor, the successor, the operation, the observed
+  generation and a single-use nonce, with a fixed expiry.
 * **Generation rotation is the fence.** Bootstrap starts at generation 1 and
   every transfer or recovery increments it. Completing a transition spends its
   own nonce, invalidates every unspent invitation for that brain, and makes the
   previous generation immediately unusable. A role in one brain says nothing
   about another brain.
-* **Ordinary folders are member-only in this slice.** A folder connector cannot
-  verify provider membership and has no conditional authority store, so
-  :class:`ConnectorKind.FOLDER` is refused for every privileged transition even
-  if a verifier were to answer with an administrator role. A generic Git remote
-  lands in the same place because its verifier returns ``None``.
+* **No backend means member-only, not a weaker guess.** Provider authentication
+  and a provider-enforced mutation fence are integration objects. This module
+  does not implement GitHub/folder membership, a provider conditional write or
+  an atomic cross-system revocation fence. When that backend is absent, or it
+  cannot issue an admission, every privileged transition fails closed with
+  ``provider_fencing_unavailable`` and the ordinary member surface is all that
+  remains. An ordinary folder or a generic Git remote is member-only even when
+  a capability object is presented.
 
-The clock, the store and the verifier are injected, which is how the tests
-reach expiry, races and failure modes without sleeping or touching live data.
+The clock, the store and the provider backend are injected, which is how the
+tests reach expiry, races and failure modes without sleeping or touching live
+data.
 """
 
 from __future__ import annotations
@@ -106,8 +112,8 @@ class AuthorityError(Exception):
     """A typed refusal from the authority core.
 
     ``reason`` is a closed vocabulary so a route can map it to a status code
-    without parsing prose. Nothing here echoes a nonce, a principal's evidence
-    or a store path into the message.
+    without parsing prose. Nothing here echoes a nonce, a capability or a store
+    path into the message.
     """
 
     def __init__(self, reason: str) -> None:
@@ -133,8 +139,8 @@ class BrainConnector(Protocol):
     """The immutable resource a connector addresses.
 
     A connector is a value, not a trust decision. The engine reads ``brain``,
-    ``storage`` and ``kind`` and asks the injected verifier for any role; a
-    method or flag on the connector itself is never authority.
+    ``storage`` and ``kind``; the trusted backend supplies every identity and
+    role, and a method or flag on the connector itself is never authority.
     """
 
     brain: str
@@ -158,14 +164,26 @@ class BrainRef:
 
 
 @dataclass(frozen=True, slots=True)
-class PrincipalEvidence:
-    """What a trusted connector backend observed about one principal.
+class ProviderCredential:
+    """An opaque provider credential (session, cookie or token).
 
-    ``member`` and ``admin`` describe the provider's answer *now*. ``revision``
-    and ``source`` name the observation so a caller can tell a fresh answer from
-    a copied one. ``brain`` and ``storage`` bind the answer to exactly one
-    resource: evidence for a repository is not evidence for a folder with the
-    same name.
+    The authority core never reads this value. Only the injected
+    :class:`AuthorityBackend` may exchange it for an authenticated capability,
+    and it must verify the provider's own session rather than accept a name.
+    """
+
+    token: str = field(repr=False)
+
+
+@dataclass(frozen=True, slots=True)
+class AuthenticatedPrincipal:
+    """A provider-verified principal capability bound to one resource.
+
+    The capability is minted only by the trusted backend. ``seal`` is an
+    unforgeable backend marker over every other field; a caller-built instance
+    of this dataclass is refused by :meth:`AuthorityBackend.verify_principal`.
+    ``revision`` and ``source`` name the provider observation and ``expires_at``
+    keeps a copied capability from acting indefinitely.
     """
 
     principal: str
@@ -175,28 +193,85 @@ class PrincipalEvidence:
     admin: bool
     revision: str
     source: str
-    observed_at: float
-
-    @property
-    def role(self) -> str:
-        """``admin``, ``member`` or ``none`` for a record that grants neither."""
-        if self.admin:
-            return "admin"
-        if self.member:
-            return "member"
-        return "none"
+    authenticated_at: float
+    expires_at: float
+    seal: str = field(repr=False)
 
 
-class PrincipalVerifier(Protocol):
-    """The trusted seam that answers "who is this, and what may they do here?".
+@dataclass(frozen=True, slots=True)
+class MutationAdmission:
+    """A short-lived, single-use authority to apply one exact transition.
 
-    ``None`` means the backend cannot verify the principal for this resource.
-    That is the correct answer for an ordinary folder, a generic Git remote and
-    any connector without an independently verified authority source, and the
-    engine treats it as member-only rather than as an error to route around.
+    It is issued by the trusted backend after a fresh provider entitlement
+    check, and carries the provider's own ``fence`` token. The engine verifies
+    the seal and every binding before asking the backend to commit. The backend
+    performs the store mutation inside its fence; a stale fence or a revocation
+    observed at that moment is ``admission_rejected``, not a successful write.
     """
 
-    def verify(self, connector: BrainConnector, principal: str) -> PrincipalEvidence | None:
+    admission_id: str = field(repr=False)
+    actor: str
+    successor: str
+    brain: str
+    storage: str
+    operation: Operation
+    generation: int
+    fence: str
+    issued_at: float
+    expires_at: float
+    seal: str = field(repr=False)
+
+
+class CommitOutcome(str, Enum):
+    """What a fenced mutation did."""
+
+    COMMITTED = "committed"
+    CONDITION_FAILED = "condition_failed"
+    REJECTED = "rejected"
+
+
+class AuthorityBackend(Protocol):
+    """The trusted provider integration: authentication plus a real fence.
+
+    An implementation must verify the provider's credential or session before
+    minting an :class:`AuthenticatedPrincipal`; a role lookup for a
+    caller-supplied name is exactly what this seam forbids. ``admit`` receives
+    the sealed actor and successor capabilities, must verify them and re-read
+    current entitlement, and returns an admission only when it can make the
+    following ``commit`` conditional on an enforceable provider revision.
+    ``commit`` must call ``mutation`` only while that fence is valid and must
+    report ``REJECTED`` for a revocation or stale fence. When the provider
+    cannot offer that guarantee, return ``None`` from ``admit``: the core then
+    fails closed instead of pretending a local check is authority.
+    """
+
+    def authenticate(
+        self, connector: BrainConnector, credential: ProviderCredential
+    ) -> AuthenticatedPrincipal | None:
+        ...
+
+    def verify_principal(self, capability: AuthenticatedPrincipal) -> bool:
+        ...
+
+    def admit(
+        self,
+        *,
+        connector: BrainConnector,
+        operation: Operation,
+        generation: int,
+        actor: AuthenticatedPrincipal,
+        successor: AuthenticatedPrincipal,
+    ) -> MutationAdmission | None:
+        ...
+
+    def verify_admission(self, admission: MutationAdmission) -> bool:
+        ...
+
+    def commit(
+        self,
+        admission: MutationAdmission,
+        mutation: Callable[[], bool],
+    ) -> CommitOutcome:
         ...
 
 
@@ -205,8 +280,9 @@ class AuthorityRecord:
     """One brain's protected stewardship record.
 
     The record names one steward at one generation. It carries no credential:
-    the steward's current role is re-verified on every privileged call through
-    :class:`PrincipalVerifier`, so a copied record alone cannot act.
+    every privileged call presents a fresh authenticated capability and every
+    mutation is admitted by :class:`AuthorityBackend`, so a copied record alone
+    cannot act.
     """
 
     brain: str
@@ -273,11 +349,17 @@ class AuthorityTransition:
 
 @dataclass
 class _StoredChallenge:
-    """The retained half of a minted challenge: everything but the nonce."""
+    """The retained half of a minted challenge: everything but the nonce.
+
+    The authenticated actor capability stays here so acceptance can hand the
+    backend a sealed identity, not a caller-supplied name. The challenge's own
+    expiry, not the actor capability's, bounds the invitation.
+    """
 
     brain: str
     storage: str
     actor: str
+    actor_capability: AuthenticatedPrincipal
     successor: str
     operation: Operation
     generation: int
@@ -537,23 +619,25 @@ class StewardAuthority:
 
     The engine holds only pending invitations and a bounded audit trail; the
     durable record lives in the injected :class:`ConditionalAuthorityStore`.
-    Every privileged call re-verifies the acting principal through the injected
-    :class:`PrincipalVerifier`, so a stale record, a copied configuration or a
-    connector that merely claims administrator access cannot act.
+    Privileged entry points accept only :class:`AuthenticatedPrincipal`
+    capabilities minted by the injected :class:`AuthorityBackend`, and every
+    mutation is committed through that backend's fenced admission. A missing
+    backend, a forged capability, a revoked principal or an unavailable fence
+    is a typed refusal; none of them is converted into a weaker local check.
     """
 
     def __init__(
         self,
         store: ConditionalAuthorityStore,
         *,
-        verifier: PrincipalVerifier | None = None,
+        backend: AuthorityBackend | None = None,
         clock: Callable[[], float] = time.monotonic,
         challenge_ttl_s: float = CHALLENGE_TTL_S,
     ) -> None:
         if challenge_ttl_s <= 0:
             raise ValueError("a challenge needs a positive lifetime")
         self._store = store
-        self._verifier = verifier
+        self._backend = backend
         self._clock = clock
         self._challenge_ttl_s = float(challenge_ttl_s)
         self._lock = threading.Lock()
@@ -562,17 +646,23 @@ class StewardAuthority:
 
     # ── Transitions ──────────────────────────────────────────────────────
 
-    def begin_bootstrap(self, *, connector: BrainConnector, admin: str, successor: str) -> Challenge:
-        """Nominate the first steward through a verified connector administrator.
+    def begin_bootstrap(
+        self,
+        *,
+        connector: BrainConnector,
+        admin: AuthenticatedPrincipal,
+        successor: str,
+    ) -> Challenge:
+        """Nominate the first steward through an authenticated administrator.
 
-        The record must not exist yet. The challenge is bound to the nominated
-        successor; the successor's own authenticated acceptance is what creates
-        the record.
+        ``successor`` is only the provider identity being invited; it is not
+        authentication. The nominated principal must later accept with its own
+        authenticated capability, and the backend must admit that acceptance
+        under its provider fence.
         """
         self._kind(connector)
-        admin = _required_principal(admin, "not_member")
+        admin = self._verified(connector, admin, admin=True)
         successor = _required_principal(successor, "invalid_successor")
-        self._verified(connector, admin, admin=True)
         if self._record(connector) is not None:
             raise AuthorityError("already_initialized")
         return self._mint(
@@ -587,11 +677,11 @@ class StewardAuthority:
         self,
         *,
         connector: BrainConnector,
-        incumbent: str,
+        incumbent: AuthenticatedPrincipal,
         successor: str,
         expected_generation: int,
     ) -> Challenge:
-        """The current steward nominates a successor.
+        """The authenticated current steward nominates a successor.
 
         Before the successor accepts, the incumbent still holds the record and
         the successor holds nothing. The invitation is pinned to the generation
@@ -599,16 +689,15 @@ class StewardAuthority:
         newer steward.
         """
         self._kind(connector)
-        incumbent = _required_principal(incumbent, "not_member")
+        incumbent = self._verified(connector, incumbent, admin=False)
         successor = _required_principal(successor, "invalid_successor")
-        if successor == incumbent:
+        if successor == incumbent.principal:
             raise AuthorityError("invalid_successor")
         record = self._record_required(connector)
         if record.generation != expected_generation:
             raise AuthorityError("stale_generation")
-        if record.steward != incumbent:
+        if record.steward != incumbent.principal:
             raise AuthorityError("not_steward")
-        self._verified(connector, incumbent, admin=False)
         return self._mint(
             connector=connector,
             actor=incumbent,
@@ -621,20 +710,20 @@ class StewardAuthority:
         self,
         *,
         connector: BrainConnector,
-        admin: str,
+        admin: AuthenticatedPrincipal,
         successor: str,
         expected_generation: int,
         confirmed: bool,
     ) -> Challenge:
-        """A verified connector administrator starts recovery for an absent incumbent.
+        """An authenticated administrator starts recovery for an absent incumbent.
 
         Recovery does not need the incumbent's participation, which is the
-        point: it needs a fresh administrator verification, an explicit
+        point: it needs a fresh administrator capability, an explicit
         confirmation, the exact current generation and the successor's own
-        acceptance.
+        authenticated acceptance under a provider fence.
         """
         self._kind(connector)
-        admin = _required_principal(admin, "not_member")
+        admin = self._verified(connector, admin, admin=True)
         successor = _required_principal(successor, "invalid_successor")
         if not confirmed:
             raise AuthorityError("confirmation_required")
@@ -643,7 +732,6 @@ class StewardAuthority:
             raise AuthorityError("stale_generation")
         if successor == record.steward:
             raise AuthorityError("invalid_successor")
-        self._verified(connector, admin, admin=True)
         return self._mint(
             connector=connector,
             actor=admin,
@@ -653,107 +741,122 @@ class StewardAuthority:
         )
 
     def accept_bootstrap(
-        self, nonce: str, *, connector: BrainConnector, successor: str
+        self, nonce: str, *, connector: BrainConnector, successor: AuthenticatedPrincipal
     ) -> AuthorityTransition:
         """The nominated successor accepts, creating generation 1 only if absent."""
         self._kind(connector)
-        successor = _required_principal(successor, "invalid_successor")
-        stored = self._claim(nonce, connector, Operation.BOOTSTRAP, successor)
-        self._verified(connector, successor, admin=False)
-        self._verified(connector, stored.actor, admin=True)
+        stored = self._claim(nonce, connector, Operation.BOOTSTRAP, successor.principal)
+        successor = self._verified(connector, successor, admin=False)
         now = self._clock()
         record = AuthorityRecord(
             brain=connector.brain,
             storage=connector.storage,
             connector=self._kind(connector).value,
             generation=1,
-            steward=successor,
+            steward=successor.principal,
             created_at=now,
             updated_at=now,
         )
-        if not self._create(record):
-            raise AuthorityError("already_initialized")
+        self._fenced_commit(
+            connector=connector,
+            operation=Operation.BOOTSTRAP,
+            generation=0,
+            actor=stored.actor_capability,
+            successor=successor,
+            condition_reason="already_initialized",
+            mutation=lambda: self._create(record),
+        )
         self._invalidate_brain(connector.brain)
         return self._record_transition(
             operation=Operation.BOOTSTRAP,
             connector=connector,
             actor=stored.actor,
             previous_steward=None,
-            steward=successor,
+            steward=successor.principal,
             previous_generation=0,
             generation=1,
             at=now,
         )
 
     def accept_transfer(
-        self, nonce: str, *, connector: BrainConnector, successor: str
+        self, nonce: str, *, connector: BrainConnector, successor: AuthenticatedPrincipal
     ) -> AuthorityTransition:
-        """The named successor accepts a transfer, rotating the generation."""
+        """The nominated successor accepts a transfer, rotating the generation."""
         self._kind(connector)
-        successor = _required_principal(successor, "invalid_successor")
-        stored = self._claim(nonce, connector, Operation.TRANSFER, successor)
-        self._verified(connector, successor, admin=False)
+        successor = self._verified(connector, successor, admin=False)
+        stored = self._claim(nonce, connector, Operation.TRANSFER, successor.principal)
         record = self._record_required(connector)
         if record.generation != stored.generation:
             raise AuthorityError("stale_generation")
         if record.steward != stored.actor:
             raise AuthorityError("not_steward")
-        self._verified(connector, stored.actor, admin=False)
         now = self._clock()
         updated = AuthorityRecord(
             brain=record.brain,
             storage=record.storage,
             connector=record.connector,
             generation=record.generation + 1,
-            steward=successor,
+            steward=successor.principal,
             created_at=record.created_at,
             updated_at=now,
         )
-        if not self._replace(updated, record.generation):
-            raise AuthorityError("stale_generation")
+        self._fenced_commit(
+            connector=connector,
+            operation=Operation.TRANSFER,
+            generation=record.generation,
+            actor=stored.actor_capability,
+            successor=successor,
+            condition_reason="stale_generation",
+            mutation=lambda: self._replace(updated, record.generation),
+        )
         self._invalidate_brain(connector.brain)
         return self._record_transition(
             operation=Operation.TRANSFER,
             connector=connector,
             actor=stored.actor,
             previous_steward=record.steward,
-            steward=successor,
+            steward=successor.principal,
             previous_generation=record.generation,
             generation=updated.generation,
             at=now,
         )
 
     def accept_recovery(
-        self, nonce: str, *, connector: BrainConnector, successor: str
+        self, nonce: str, *, connector: BrainConnector, successor: AuthenticatedPrincipal
     ) -> AuthorityTransition:
-        """The named successor accepts recovery, rotating the generation."""
+        """The nominated successor accepts recovery, rotating the generation."""
         self._kind(connector)
-        successor = _required_principal(successor, "invalid_successor")
-        stored = self._claim(nonce, connector, Operation.RECOVERY, successor)
-        self._verified(connector, successor, admin=False)
+        successor = self._verified(connector, successor, admin=False)
+        stored = self._claim(nonce, connector, Operation.RECOVERY, successor.principal)
         record = self._record_required(connector)
         if record.generation != stored.generation:
             raise AuthorityError("stale_generation")
-        self._verified(connector, stored.actor, admin=True)
         now = self._clock()
         updated = AuthorityRecord(
             brain=record.brain,
             storage=record.storage,
             connector=record.connector,
             generation=record.generation + 1,
-            steward=successor,
+            steward=successor.principal,
             created_at=record.created_at,
             updated_at=now,
         )
-        if not self._replace(updated, record.generation):
-            raise AuthorityError("stale_generation")
+        self._fenced_commit(
+            connector=connector,
+            operation=Operation.RECOVERY,
+            generation=record.generation,
+            actor=stored.actor_capability,
+            successor=successor,
+            condition_reason="stale_generation",
+            mutation=lambda: self._replace(updated, record.generation),
+        )
         self._invalidate_brain(connector.brain)
         return self._record_transition(
             operation=Operation.RECOVERY,
             connector=connector,
             actor=stored.actor,
             previous_steward=record.steward,
-            steward=successor,
+            steward=successor.principal,
             previous_generation=record.generation,
             generation=updated.generation,
             at=now,
@@ -761,11 +864,28 @@ class StewardAuthority:
 
     # ── Authorization ────────────────────────────────────────────────────
 
+    def authenticate(
+        self, *, connector: BrainConnector, credential: ProviderCredential
+    ) -> AuthenticatedPrincipal:
+        """Exchange a provider credential for a verified principal capability.
+
+        Integration calls this before a privileged entry point. The engine does
+        not accept a name as a substitute: the backend must verify the provider
+        session and seal the capability.
+        """
+        self._kind(connector)
+        if self._backend is None:
+            raise AuthorityError("provider_fencing_unavailable")
+        capability = self._backend.authenticate(connector, credential)
+        if capability is None:
+            raise AuthorityError("not_authenticated")
+        return self._verified(connector, capability, admin=False)
+
     def authorize_steward(
         self,
         *,
         connector: BrainConnector,
-        principal: str,
+        principal: AuthenticatedPrincipal,
         generation: int | None = None,
     ) -> AuthorityRecord:
         """The current record, when ``principal`` is its steward right now.
@@ -773,18 +893,18 @@ class StewardAuthority:
         ``generation`` is the fence a caller captured before a privileged
         effect. Passing it makes a transfer or recovery that landed in between
         a ``stale_generation`` refusal rather than an effect under old
-        authority. The provider entitlement is re-read on every call, so a
-        revoked or unverifiable connector supplies nothing even when the stored
-        record still names this principal.
+        authority. This is a read-side check only: a privileged mutation must
+        still be committed through :meth:`AuthorityBackend.commit`, because a
+        check immediately before a local write does not fence a provider
+        revocation.
         """
         self._kind(connector)
-        principal = _required_principal(principal, "not_member")
+        principal = self._verified(connector, principal, admin=False)
         record = self._record_required(connector)
         if generation is not None and record.generation != generation:
             raise AuthorityError("stale_generation")
-        if record.steward != principal:
+        if record.steward != principal.principal:
             raise AuthorityError("not_steward")
-        self._verified(connector, principal, admin=False)
         return record
 
     def audit_trail(self) -> tuple[AuthorityTransition, ...]:
@@ -808,34 +928,134 @@ class StewardAuthority:
     def _verified(
         self,
         connector: BrainConnector,
-        principal: str,
+        capability: AuthenticatedPrincipal,
         *,
         admin: bool,
-    ) -> PrincipalEvidence:
-        """Evidence for ``principal`` at ``connector``, or a typed refusal.
+    ) -> AuthenticatedPrincipal:
+        """A verified capability for ``connector``, or a typed refusal.
 
-        A folder, a missing verifier and any unverified answer are all
-        ``member_only``: an unverifiable connector keeps the member surface and
-        never gains a privileged one.
+        A folder is member-only before any backend is consulted. A missing
+        backend is ``provider_fencing_unavailable``: a local store alone is not
+        a provider fence. A caller-built capability, a capability from another
+        backend, an expired one or one bound to another resource is refused.
         """
         if self._kind(connector) is ConnectorKind.FOLDER:
             raise AuthorityError("member_only")
-        if self._verifier is None:
-            raise AuthorityError("member_only")
-        evidence = self._verifier.verify(connector, principal)
-        if evidence is None:
-            raise AuthorityError("member_only")
-        if evidence.brain != connector.brain or evidence.storage != connector.storage:
+        if self._backend is None:
+            raise AuthorityError("provider_fencing_unavailable")
+        if not isinstance(capability, AuthenticatedPrincipal):
+            raise AuthorityError("forged_capability")
+        if (
+            not isinstance(capability.principal, str)
+            or not isinstance(capability.brain, str)
+            or not isinstance(capability.storage, str)
+            or not isinstance(capability.revision, str)
+            or not isinstance(capability.source, str)
+            or not isinstance(capability.member, bool)
+            or not isinstance(capability.admin, bool)
+            or type(capability.authenticated_at) not in (int, float)
+            or type(capability.expires_at) not in (int, float)
+        ):
+            raise AuthorityError("forged_capability")
+        try:
+            authentic = self._backend.verify_principal(capability)
+        except Exception as exc:  # noqa: BLE001 - an unverifiable backend is no authority
+            raise AuthorityError("provider_fencing_unavailable") from exc
+        if not authentic:
+            raise AuthorityError("forged_capability")
+        now = self._clock()
+        if now >= capability.expires_at or now < capability.authenticated_at:
+            raise AuthorityError("expired_capability")
+        if capability.brain != connector.brain or capability.storage != connector.storage:
             raise AuthorityError("wrong_resource")
-        if evidence.principal != principal:
-            raise AuthorityError("wrong_principal")
-        if not evidence.revision.strip() or not evidence.source.strip():
-            raise AuthorityError("member_only")
-        if not (evidence.member or evidence.admin):
+        if not capability.principal.strip():
+            raise AuthorityError("not_authenticated")
+        if not capability.revision.strip() or not capability.source.strip():
+            raise AuthorityError("forged_capability")
+        if not (capability.member or capability.admin):
             raise AuthorityError("not_member")
-        if admin and not evidence.admin:
+        if admin and not capability.admin:
             raise AuthorityError("not_admin")
-        return evidence
+        return capability
+
+    def _fenced_commit(
+        self,
+        *,
+        connector: BrainConnector,
+        operation: Operation,
+        generation: int,
+        actor: AuthenticatedPrincipal,
+        successor: AuthenticatedPrincipal,
+        condition_reason: str,
+        mutation: Callable[[], bool],
+    ) -> None:
+        """Apply one transition only through a provider-backed admission.
+
+        The backend mints the admission from the sealed actor and successor
+        capabilities after a fresh entitlement check, and runs ``mutation``
+        inside its own fence. The engine validates the admission's seal and
+        every binding first. A local permission check that happened earlier is
+        never accepted in place of this call.
+        """
+        if self._backend is None:
+            raise AuthorityError("provider_fencing_unavailable")
+        try:
+            admission = self._backend.admit(
+                connector=connector,
+                operation=operation,
+                generation=generation,
+                actor=actor,
+                successor=successor,
+            )
+        except Exception as exc:  # noqa: BLE001 - an unavailable fence is fail-closed
+            raise AuthorityError("provider_fencing_unavailable") from exc
+        if admission is None:
+            raise AuthorityError("provider_fencing_unavailable")
+        if not isinstance(admission, MutationAdmission):
+            raise AuthorityError("forged_admission")
+        try:
+            authentic = self._backend.verify_admission(admission)
+        except Exception:  # noqa: BLE001 - unverifiable admission is no admission
+            authentic = False
+        if not authentic:
+            raise AuthorityError("forged_admission")
+        if (
+            not isinstance(admission.actor, str)
+            or not isinstance(admission.successor, str)
+            or not isinstance(admission.brain, str)
+            or not isinstance(admission.storage, str)
+            or not isinstance(admission.fence, str)
+            or not isinstance(admission.admission_id, str)
+            or not isinstance(admission.operation, Operation)
+            or type(admission.generation) is not int
+            or type(admission.issued_at) not in (int, float)
+            or type(admission.expires_at) not in (int, float)
+        ):
+            raise AuthorityError("forged_admission")
+        if (
+            admission.actor != actor.principal
+            or admission.successor != successor.principal
+            or admission.brain != connector.brain
+            or admission.storage != connector.storage
+            or admission.operation is not operation
+            or admission.generation != generation
+        ):
+            raise AuthorityError("admission_mismatch")
+        now = self._clock()
+        if now >= admission.expires_at or now < admission.issued_at:
+            raise AuthorityError("admission_expired")
+        try:
+            outcome = self._backend.commit(admission, mutation)
+        except AuthorityError:
+            raise
+        except Exception as exc:  # noqa: BLE001 - an unavailable fence is fail-closed
+            raise AuthorityError("provider_fencing_unavailable") from exc
+        if outcome is CommitOutcome.REJECTED:
+            raise AuthorityError("admission_rejected")
+        if outcome is CommitOutcome.CONDITION_FAILED:
+            raise AuthorityError(condition_reason)
+        if outcome is not CommitOutcome.COMMITTED:
+            raise AuthorityError("provider_fencing_unavailable")
 
     def _record(self, connector: BrainConnector) -> AuthorityRecord | None:
         try:
@@ -867,7 +1087,7 @@ class StewardAuthority:
         self,
         *,
         connector: BrainConnector,
-        actor: str,
+        actor: AuthenticatedPrincipal,
         successor: str,
         operation: Operation,
         generation: int,
@@ -878,7 +1098,8 @@ class StewardAuthority:
         stored = _StoredChallenge(
             brain=connector.brain,
             storage=connector.storage,
-            actor=actor,
+            actor=actor.principal,
+            actor_capability=actor,
             successor=successor,
             operation=operation,
             generation=generation,
