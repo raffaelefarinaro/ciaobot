@@ -16,14 +16,22 @@ import hashlib
 import logging
 import os
 import re
+import secrets
 import subprocess
+from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
 from contextlib import asynccontextmanager
 from typing import Any, Literal
 
 from ciao import job_runs
-from ciao.config import SHARED_BRAIN_NAME_PATTERN, SharedBrainLink
+from ciao.config import (
+    DEFAULT_SHARING_POLICY,
+    SHARED_BRAIN_NAME_PATTERN,
+    SHARING_POLICIES,
+    SharedBrainLink,
+    SharingConsent,
+)
 from ciao.git_proc import EXACT_BYTES, GIT_TIMEOUT_DETAIL, run_git
 from ciao.os_support.files import open_fd
 from ciao.os_support.locks import lock_exclusive, unlock
@@ -128,6 +136,142 @@ async def _git_async(folder: Path, *args: str, timeout: float = GIT_TIMEOUT_S) -
 
 def _now() -> str:
     return datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+#: Grants this process observed as no longer valid (normally after an origin
+#: drift) but could not yet persist as review. Keyed by lifetime and generation
+#: so a fresh grant on the same lifetime is unaffected. This is the fail-closed
+#: memory guard for the window between the observation and a successful write.
+_invalidated_grants: set[tuple[str, int]] = set()
+
+
+def sharing_grant_stored(link: SharedBrainLink) -> bool:
+    """True when the registry row still carries an automatic consent."""
+    return link.sharing_policy == "automatic" and link.sharing_consent is not None
+
+
+def sharing_consent_active(link: SharedBrainLink) -> bool:
+    """True only when the link carries a consent matching its generation and target.
+
+    The three bindings are independent guards: a registry edit that changes the
+    identity, a relink that changes the lifetime, and a revocation that bumps
+    the generation each invalidate the consent on their own. A future publisher
+    must hold the shared checkout/registry fencing across this check, the
+    mutation and the receipt so a revocation cannot interleave.
+    """
+    consent = link.sharing_consent
+    return (
+        link.sharing_policy == "automatic"
+        and (link.lifetime_id, link.sharing_generation) not in _invalidated_grants
+        and consent is not None
+        and consent.generation == link.sharing_generation
+        and consent.identity == link.identity
+        and consent.lifetime_id == link.lifetime_id
+    )
+
+
+def set_sharing_policy(link: SharedBrainLink, policy: str) -> SharedBrainLink:
+    """The link with ``policy`` applied, rotating consent durably.
+
+    A grant stores a fresh consent at a new generation; a revocation clears the
+    consent and bumps the generation again, so neither an old consent nor a
+    publisher that captured one can survive a change of mind. Repeating the
+    current choice returns the same link, so a double-submitted Settings save
+    does not invent a new generation.
+    """
+    if not isinstance(policy, str) or policy not in SHARING_POLICIES:
+        raise ValueError("sharing policy must be review or automatic")
+    if policy == "review":
+        if link.sharing_policy == DEFAULT_SHARING_POLICY and link.sharing_consent is None:
+            return link
+        return replace(
+            link,
+            sharing_policy=DEFAULT_SHARING_POLICY,
+            sharing_generation=link.sharing_generation + 1,
+            sharing_consent=None,
+        )
+    if sharing_consent_active(link):
+        return link
+    generation = link.sharing_generation + 1
+    return replace(
+        link,
+        sharing_policy="automatic",
+        sharing_generation=generation,
+        sharing_consent=SharingConsent(
+            generation=generation,
+            identity=link.identity,
+            lifetime_id=link.lifetime_id,
+            granted_at=_now(),
+        ),
+    )
+
+
+def reset_link_for_restore(link: SharedBrainLink) -> SharedBrainLink:
+    """A restored link starts a new lifetime and a fresh review state.
+
+    An archive is a pause, not a durable standing permission. The old lifetime
+    is retired so a stale tab or publisher can never match the restored link,
+    the consent is dropped, and the generation advances for audit continuity.
+    """
+    return replace(
+        link,
+        lifetime_id=secrets.token_urlsafe(24),
+        sharing_policy=DEFAULT_SHARING_POLICY,
+        sharing_generation=link.sharing_generation + 1,
+        sharing_consent=None,
+    )
+
+
+def invalidate_sharing_on_drift(config: Any, link: SharedBrainLink) -> bool:
+    """Durably return every workspace's copy of this link to review.
+
+    Called only after the live folder's origin no longer gives the linked
+    identity. The registry write drops the consent and bumps the generation, so
+    a later origin repair cannot quietly resume the old standing grant: the
+    person has to choose automatic again.
+
+    Only the exact observed ``(path, lifetime, generation)`` is invalidated, so
+    a delayed observation cannot revoke a newer grant, and an independently
+    linked workspace at the same path keeps its own lifetime. Returns True when
+    a registry write happened, False when there was nothing to invalidate.
+    A persistence failure raises ``OSError`` after the process-local fail-closed
+    guard is set, so the caller can surface it and keep revocation available.
+    """
+    from ciao.workspaces import persist_workspaces, workspace_registry_lock
+
+    changed: dict[str, Any] = {}
+    with workspace_registry_lock(config):
+        for name, workspace in getattr(config, "workspaces", {}).items():
+            links = list(getattr(workspace, "shared_brains", None) or [])
+            kept: list[SharedBrainLink] = []
+            touched = False
+            for item in links:
+                if (
+                    item.path == link.path
+                    and item.lifetime_id == link.lifetime_id
+                    and item.sharing_generation == link.sharing_generation
+                    and sharing_grant_stored(item)
+                ):
+                    _invalidated_grants.add((item.lifetime_id, item.sharing_generation))
+                    kept.append(set_sharing_policy(item, DEFAULT_SHARING_POLICY))
+                    touched = True
+                else:
+                    kept.append(item)
+            if touched:
+                changed[name] = replace(workspace, shared_brains=kept)
+        if not changed:
+            return False
+        candidate_workspaces = dict(config.workspaces)
+        candidate_workspaces.update(changed)
+        try:
+            persist_workspaces(config, candidate_workspaces)
+        except OSError:
+            # The process-local guard already makes this grant inactive; the
+            # registry write is retried by the next observation or a revoke.
+            logger.exception("Could not persist a shared-brain consent invalidation")
+            raise
+        config.workspaces.update(changed)
+        return True
 
 
 _SCP_RE = re.compile(r"(?:[^@/\\:\s]+@)?[^@/\\:\s]+:[^\s]+")
@@ -372,10 +516,24 @@ def _is_own_checkout(folder: Path, top: str) -> bool:
 
 def brain_state(link: SharedBrainLink, config: Any) -> dict[str, Any]:
     """Live state of one linked folder. Its own config is vetted before any other git call."""
+    automatic = sharing_consent_active(link)
+    stored = sharing_grant_stored(link)
     state: dict[str, Any] = {
         "name": link.name,
         "identity": link.identity,
         "path": link.path,
+        "lifetime": link.lifetime_id,
+        "sharing_policy": "automatic" if automatic else DEFAULT_SHARING_POLICY,
+        "sharing_generation": link.sharing_generation,
+        "sharing_granted_at": (
+            link.sharing_consent.granted_at
+            if automatic and link.sharing_consent is not None
+            else ""
+        ),
+        # A stored grant that is not effective (origin drift, a revoked-in-
+        # memory generation, or an invalid row) still needs a revoke action.
+        "sharing_grant_pending": stored and not automatic,
+        "sharing_invalidation_failed": False,
         "origin_changed": False,
         "missing": False,
         "problem": "",
@@ -409,6 +567,12 @@ def brain_state(link: SharedBrainLink, config: Any) -> dict[str, Any]:
     state["origin_changed"] = _safe_identity(_origin_from_listing(listing)) != link.identity
     if state["origin_changed"]:
         state["problem"] = "origin_changed"
+        # A retargeted folder is not the audience the consent named. Report
+        # review even before the durable invalidation below has run, so no
+        # reader can mistake this observation for a live automatic grant.
+        state["sharing_policy"] = DEFAULT_SHARING_POLICY
+        state["sharing_granted_at"] = ""
+        state["sharing_grant_pending"] = stored
     code, head = _git(folder, "log", "-1", "--format=%h%x00%cs")
     if code == 0 and head.strip():
         sha, _, day = head.strip().partition("\x00")
@@ -476,6 +640,13 @@ async def update_brain(link: SharedBrainLink, config: Any) -> dict[str, Any]:
         try:
             async with _checkout_claim(key, config):
                 result = await _update_unlocked(config, Path(key), link.identity)
+                if result.get("reason") == "origin_changed":
+                    try:
+                        await asyncio.to_thread(
+                            invalidate_sharing_on_drift, config, link
+                        )
+                    except OSError:
+                        result["sharing_invalidation_failed"] = True
         except OSError:
             result = _result("failed", "lock_unavailable")
     _last_update[key] = result

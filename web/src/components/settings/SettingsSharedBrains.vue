@@ -23,7 +23,7 @@
     <template v-else>
       <div v-if="listStale" class="hint hint--warn" role="alert">
         <p class="shared-brain-stale">
-          Could not refresh the list: {{ loadError }}. Showing the last known list. Adding and removing wait until it is read again.
+          Could not refresh the list: {{ loadError }}. Showing the last known list. Adding, removing and changing sharing wait until it is read again.
         </p>
         <button type="button" class="btn-secondary btn-small" :disabled="loading" @click="load()">
           {{ loading ? 'Checking...' : 'Try again' }}
@@ -37,7 +37,7 @@
             <button
               type="button"
               class="set-link"
-              :disabled="saving || listStale"
+              :disabled="saving || listStale || !!sharingBusy"
               :aria-label="`Remove ${brain.name}`"
               @click="removeBrain(brain)"
             >Remove</button>
@@ -51,6 +51,23 @@
             {{ statusOf(brain).text }}
           </p>
           <p v-if="statusOf(brain).detail" class="hint hint--compact">{{ statusOf(brain).detail }}</p>
+          <p class="shared-brain-policy">{{ sharedBrainPolicyText(brain) }}</p>
+          <button
+            type="button"
+            class="set-link shared-brain-policy-toggle"
+            :disabled="saving || listStale || !!sharingBusy || (!isRevoking(brain) && !!brain.problem)"
+            :aria-busy="sharingBusy === brain.name ? 'true' : undefined"
+            @click="toggleAutomaticSharing(brain)"
+          >{{ isRevoking(brain) ? 'Turn off automatic sharing' : 'Share automatically…' }}</button>
+          <p
+            v-if="!isRevoking(brain) && brain.problem"
+            class="hint hint--compact"
+          >Fix this folder before choosing automatic sharing.</p>
+          <p
+            v-if="brain.sharing_invalidation_failed"
+            class="action-result action-result--error"
+            role="alert"
+          >The old automatic grant could not be removed. Turn it off to finish revoking it.</p>
           <p class="hint hint--compact">
             <span v-if="brain.branch">Branch {{ brain.branch }}</span>
             <span v-if="brain.branch"> · </span>
@@ -78,7 +95,7 @@
             autocomplete="off"
             spellcheck="false"
             placeholder="/absolute/path/to/team-notes"
-            :disabled="saving || listStale"
+            :disabled="saving || listStale || !!sharingBusy"
           />
         </label>
         <label class="shared-brain-field">
@@ -90,7 +107,7 @@
             autocomplete="off"
             spellcheck="false"
             placeholder="taken from the repository"
-            :disabled="saving || listStale"
+            :disabled="saving || listStale || !!sharingBusy"
           />
         </label>
         <p class="hint hint--compact">The name cannot be changed later. Remove the brain and add it again to rename it.</p>
@@ -98,7 +115,7 @@
           <button
             type="submit"
             class="btn-small"
-            :disabled="saving || listStale || !pathDraft.trim()"
+            :disabled="saving || listStale || !!sharingBusy || !pathDraft.trim()"
             :aria-busy="saving ? 'true' : undefined"
           >{{ saving ? 'Linking...' : 'Link folder' }}</button>
         </div>
@@ -115,7 +132,14 @@ import { computed, onMounted, ref, watch } from 'vue'
 import { api } from '../../lib/api'
 import { askConfirm } from '../../lib/confirm'
 import { apiErrorMessage } from '../../lib/errorMessage'
-import { MAX_SHARED_BRAINS, SHARED_BRAIN_PRIVACY, sharedBrainStatus } from '../../lib/sharedBrain'
+import {
+  MAX_SHARED_BRAINS,
+  SHARED_BRAIN_PRIVACY,
+  automaticSharingConfirm,
+  revokeAutomaticSharingConfirm,
+  sharedBrainPolicyText,
+  sharedBrainStatus,
+} from '../../lib/sharedBrain'
 import { useProjectStore } from '../../stores/projects'
 import type { SharedBrainRow, SharedBrainState, SharedBrainsResponse } from '../../lib/types'
 
@@ -130,6 +154,8 @@ const brains = ref<SharedBrainState[] | null>(null)
 const loading = ref(false)
 const loadError = ref('')
 const saving = ref(false)
+// The brain whose policy POST is in flight; only that row's toggle is busy.
+const sharingBusy = ref('')
 // True from a successful save until a re-read succeeds: the list on screen is then
 // older than the workspace, so adding or removing from it would resend a stale list.
 const listStale = ref(false)
@@ -140,6 +166,10 @@ let ticket = 0
 
 function statusOf(brain: SharedBrainState) {
   return sharedBrainStatus(brain)
+}
+
+function isRevoking(brain: SharedBrainState): boolean {
+  return brain.sharing_policy === 'automatic' || brain.sharing_grant_pending
 }
 
 /** The rows a save sends: every linked brain, as { path, name }. */
@@ -185,7 +215,7 @@ async function save(rows: SharedBrainRow[]): Promise<boolean> {
 
 async function linkFolder(): Promise<void> {
   const path = pathDraft.value.trim()
-  if (!path || saving.value || listStale.value) return
+  if (!path || saving.value || listStale.value || sharingBusy.value) return
   const name = nameDraft.value.trim()
   const row: SharedBrainRow = name ? { path, name } : { path }
   const ok = await save([...currentRows(), row])
@@ -196,7 +226,7 @@ async function linkFolder(): Promise<void> {
 }
 
 async function removeBrain(brain: SharedBrainState): Promise<void> {
-  if (saving.value || listStale.value) return
+  if (saving.value || listStale.value || sharingBusy.value) return
   const ok = await askConfirm(
     `Disconnect ${brain.name}? Only this brain is disconnected. The folder, the other shared brains and your private notes are left untouched.`,
     { title: 'Disconnect this shared brain?', confirmLabel: 'Remove', destructive: true },
@@ -207,6 +237,42 @@ async function removeBrain(brain: SharedBrainState): Promise<void> {
   if (ok2) await load()
 }
 
+async function toggleAutomaticSharing(brain: SharedBrainState): Promise<void> {
+  const ws = workspace.value
+  if (saving.value || listStale.value || sharingBusy.value) return
+  const revoking = isRevoking(brain)
+  if (!revoking && brain.problem) return
+  const ok = await askConfirm(
+    revoking
+      ? revokeAutomaticSharingConfirm(brain.name, brain.identity)
+      : automaticSharingConfirm(brain.name, brain.identity),
+    {
+      title: revoking ? `Stop sharing automatically to ${brain.name}?` : `Share automatically to ${brain.name}?`,
+      confirmLabel: revoking ? 'Stop automatic sharing' : 'Share automatically',
+      destructive: !revoking,
+    },
+  )
+  if (!ok || ws !== workspace.value || saving.value || sharingBusy.value) return
+  sharingBusy.value = brain.name
+  saveError.value = ''
+  try {
+    await api.post(
+      `/api/workspaces/${encodeURIComponent(ws)}/shared-brains/${encodeURIComponent(brain.name)}/sharing`,
+      { policy: revoking ? 'review' : 'automatic', identity: brain.identity, lifetime: brain.lifetime, generation: brain.sharing_generation },
+    )
+    if (ws === workspace.value) {
+      listStale.value = true
+      await load()
+    }
+  } catch (e) {
+    if (ws === workspace.value) {
+      saveError.value = apiErrorMessage(e, 'The sharing choice could not be saved.')
+    }
+  } finally {
+    if (sharingBusy.value === brain.name) sharingBusy.value = ''
+  }
+}
+
 onMounted(load)
 watch(workspace, () => {
   // Another workspace's list must never stand in for this one's.
@@ -214,6 +280,7 @@ watch(workspace, () => {
   loadError.value = ''
   listStale.value = false
   saving.value = false
+  sharingBusy.value = ''
   saveError.value = ''
   pathDraft.value = ''
   nameDraft.value = ''
@@ -245,6 +312,8 @@ watch(workspace, () => {
 .shared-brain-status--ok { color: var(--fg); }
 .shared-brain-status--warn { color: var(--warning); }
 .shared-brain-status--error { color: var(--error); }
+.shared-brain-policy { margin: var(--space-2) 0 var(--space-1); color: var(--fg); font-size: var(--text-sm); line-height: 1.5; overflow-wrap: anywhere; }
+.shared-brain-policy-toggle { margin: 0 0 var(--space-2); }
 .shared-brain-stale { margin: 0 0 var(--space-2); }
 .shared-brain-form { display: grid; gap: var(--space-3); margin-top: var(--space-3); min-width: 0; }
 .shared-brain-field { display: grid; gap: var(--space-1); min-width: 0; }
@@ -253,6 +322,7 @@ watch(workspace, () => {
 @media (pointer: coarse) {
   .shared-brain-input { min-height: var(--touch); font-size: 16px; }
   .shared-brain-head .set-link,
+  .shared-brain-policy-toggle,
   .shared-brain-form .btn-small { min-height: var(--touch); min-width: var(--touch); }
 }
 </style>

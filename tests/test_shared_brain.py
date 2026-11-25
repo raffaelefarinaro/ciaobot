@@ -1009,3 +1009,228 @@ def test_clone_of_a_local_bare_repo_with_https_origin_still_links(root: Path) ->
     git(clone, "remote", "set-url", "origin", "https://github.com/acme/notes.git")
     (link,) = sb.resolve_links(FakeConfig(root), "work", [{"path": str(clone)}], [])
     assert link.identity == "github.com/acme/notes"
+
+
+def test_sharing_policy_defaults_to_review_for_legacy_and_new_links() -> None:
+    """Every existing registry row and every new link starts at review."""
+    from ciao.config import SharedBrainLink, shared_brain_row, shared_brains_from_rows
+
+    legacy = {
+        "name": "notes", "path": "/away/notes",
+        "identity": "github.com/a/notes", "lifetime_id": "life-legacy",
+    }
+    [link] = shared_brains_from_rows([legacy])
+
+    assert link.sharing_policy == "review"
+    assert link.sharing_generation == 0
+    assert link.sharing_consent is None
+    # A default link writes the same row it always did: no invented consent keys.
+    assert shared_brain_row(link) == legacy
+    assert SharedBrainLink(
+        name="new", path="/away/new", identity="github.com/a/new",
+    ).sharing_policy == "review"
+
+
+def test_sharing_consent_is_durable_generation_stamped_and_revocable() -> None:
+    """A grant survives a restart; revocation and re-grant never reuse a generation."""
+    from ciao.config import SharedBrainLink, shared_brain_row, shared_brains_from_rows
+
+    link = SharedBrainLink(
+        name="notes", path="/away/notes", identity="github.com/a/notes",
+        lifetime_id="life-1",
+    )
+    assert not sb.sharing_consent_active(link)
+
+    granted = sb.set_sharing_policy(link, "automatic")
+    assert sb.sharing_consent_active(granted)
+    assert granted.sharing_generation == 1
+    row = shared_brain_row(granted)
+    assert row["sharing_policy"] == "automatic"
+    assert row["sharing_generation"] == 1
+    assert row["sharing_consent"] == {
+        "generation": 1,
+        "identity": "github.com/a/notes",
+        "lifetime_id": "life-1",
+        "granted_at": granted.sharing_consent.granted_at,  # type: ignore[union-attr]
+    }
+
+    [loaded] = shared_brains_from_rows([row])
+    assert sb.sharing_consent_active(loaded)
+    assert loaded.sharing_generation == 1
+    # Repeating the current choice is idempotent: no new generation.
+    assert sb.set_sharing_policy(loaded, "automatic") == loaded
+
+    revoked = sb.set_sharing_policy(loaded, "review")
+    assert not sb.sharing_consent_active(revoked)
+    assert revoked.sharing_generation == 2
+    assert revoked.sharing_consent is None
+    revoked_row = shared_brain_row(revoked)
+    assert revoked_row["sharing_policy"] == "review"
+    assert revoked_row["sharing_generation"] == 2
+    assert "sharing_consent" not in revoked_row
+
+    [loaded_revoked] = shared_brains_from_rows([revoked_row])
+    assert not sb.sharing_consent_active(loaded_revoked)
+    regranted = sb.set_sharing_policy(loaded_revoked, "automatic")
+    assert regranted.sharing_generation == 3
+    assert sb.sharing_consent_active(regranted)
+
+
+def test_relink_identity_drift_and_generation_drift_never_inherit_consent() -> None:
+    """A copied consent cannot follow a new lifetime, a new target or a stale generation."""
+    from ciao.config import SharedBrainLink, shared_brain_row, shared_brains_from_rows
+
+    link = SharedBrainLink(
+        name="notes", path="/away/notes", identity="github.com/a/notes",
+        lifetime_id="life-1",
+    )
+    row = shared_brain_row(sb.set_sharing_policy(link, "automatic"))
+
+    cases = {
+        "relinked": {**row, "lifetime_id": "life-2"},
+        "repointed": {**row, "identity": "github.com/other/notes"},
+        "future generation": {**row, "sharing_generation": row["sharing_generation"] + 1},
+        "unknown policy": {**row, "sharing_policy": "always"},
+        "policy list": {**row, "sharing_policy": ["automatic"]},
+        "malformed consent": {**row, "sharing_consent": "yes"},
+    }
+    for label, candidate in cases.items():
+        [loaded] = shared_brains_from_rows([candidate])
+        assert loaded.sharing_policy == "review", label
+        assert loaded.sharing_consent is None, label
+        assert not sb.sharing_consent_active(loaded), label
+
+
+def test_restore_rotates_lifetime_and_clears_consent() -> None:
+    link = sb.set_sharing_policy(SharedBrainLink(
+        name="notes", path="/away/notes", identity="github.com/a/notes",
+        lifetime_id="life-1",
+    ), "automatic")
+
+    restored = sb.reset_link_for_restore(link)
+
+    assert restored.name == link.name and restored.path == link.path
+    assert restored.identity == link.identity
+    assert restored.lifetime_id != link.lifetime_id
+    assert restored.sharing_policy == "review"
+    assert restored.sharing_generation == link.sharing_generation + 1
+    assert restored.sharing_consent is None
+    assert not sb.sharing_consent_active(restored)
+
+
+def test_origin_drift_durably_invalidates_consent(monkeypatch) -> None:
+    from ciao.config import WorkspaceConfig
+
+    link = sb.set_sharing_policy(SharedBrainLink(
+        name="notes", path="/away/notes", identity="github.com/a/notes",
+        lifetime_id="life-1",
+    ), "automatic")
+    config = FakeConfig(Path("/away-root"))
+    config.workspaces = {"work": WorkspaceConfig(
+        name="work", vault_root="memory-vault/work", shared_brains=[link],
+    )}
+    persisted: dict[str, object] = {}
+
+    def capture(config_arg, candidate=None):
+        persisted["candidate"] = candidate
+
+    monkeypatch.setattr("ciao.workspaces.persist_workspaces", capture)
+
+    assert sb.invalidate_sharing_on_drift(config, link) is True
+    stored = config.workspaces["work"].shared_brains[0]
+    assert stored.sharing_policy == "review"
+    assert stored.sharing_generation == link.sharing_generation + 1
+    assert stored.sharing_consent is None
+    assert stored.lifetime_id == link.lifetime_id
+    assert persisted["candidate"] is not None
+
+    # A second observation has nothing to invalidate.
+    assert sb.invalidate_sharing_on_drift(config, stored) is False
+
+
+@pytest.mark.asyncio
+async def test_update_brain_invalidates_consent_when_origin_drift_is_seen(
+    pair: SimpleNamespace, monkeypatch
+) -> None:
+    from ciao.config import WorkspaceConfig
+
+    link = sb.set_sharing_policy(link_of(pair.clone), "automatic")
+    config = FakeConfig(pair.root)
+    config.workspaces = {"work": WorkspaceConfig(
+        name="work", vault_root="memory-vault/work", shared_brains=[link],
+    )}
+    persisted: list[object] = []
+    monkeypatch.setattr(
+        "ciao.workspaces.persist_workspaces",
+        lambda config_arg, candidate=None: persisted.append(candidate),
+    )
+    git(pair.clone, "remote", "set-url", "origin", "https://github.com/x/elsewhere")
+
+    state = sb.brain_state(link, config)
+    assert state["problem"] == "origin_changed"
+    assert state["sharing_policy"] == "review"
+
+    result = await sb.update_brain(link, config)
+
+    assert result["reason"] == "origin_changed"
+    stored = config.workspaces["work"].shared_brains[0]
+    assert stored.sharing_policy == "review"
+    assert stored.sharing_consent is None
+    assert persisted
+
+
+def test_drift_invalidation_ignores_a_delayed_newer_generation(monkeypatch) -> None:
+    """An observation of generation 1 must not revoke a newer grant at generation 3."""
+    from ciao.config import WorkspaceConfig
+
+    observed = sb.set_sharing_policy(SharedBrainLink(
+        name="notes", path="/away/notes", identity="github.com/a/notes",
+        lifetime_id="delayed-lifetime",
+    ), "automatic")
+    newer = sb.set_sharing_policy(
+        sb.set_sharing_policy(observed, "review"), "automatic"
+    )
+    assert newer.sharing_generation == 3
+    config = FakeConfig(Path("/away-root"))
+    config.workspaces = {"work": WorkspaceConfig(
+        name="work", vault_root="memory-vault/work", shared_brains=[newer],
+    )}
+    monkeypatch.setattr("ciao.workspaces.persist_workspaces", lambda *a, **k: None)
+
+    assert sb.invalidate_sharing_on_drift(config, observed) is False
+    kept = config.workspaces["work"].shared_brains[0]
+    assert kept.sharing_generation == 3
+    assert sb.sharing_consent_active(kept)
+
+
+def test_drift_invalidation_leaves_an_independently_linked_workspace_alone(monkeypatch) -> None:
+    """Two workspaces linking the same path have different lifetimes and consents."""
+    from ciao.config import WorkspaceConfig
+
+    first = sb.set_sharing_policy(SharedBrainLink(
+        name="notes", path="/away/shared-notes", identity="github.com/a/notes",
+        lifetime_id="first-lifetime",
+    ), "automatic")
+    second = sb.set_sharing_policy(SharedBrainLink(
+        name="notes", path="/away/shared-notes", identity="github.com/a/notes",
+        lifetime_id="second-lifetime",
+    ), "automatic")
+    config = FakeConfig(Path("/away-root"))
+    config.workspaces = {
+        "first": WorkspaceConfig(
+            name="first", vault_root="memory-vault/first", shared_brains=[first],
+        ),
+        "second": WorkspaceConfig(
+            name="second", vault_root="memory-vault/second", shared_brains=[second],
+        ),
+    }
+    persist_calls: list[object] = []
+    monkeypatch.setattr(
+        "ciao.workspaces.persist_workspaces",
+        lambda config_arg, candidate=None: persist_calls.append(candidate),
+    )
+
+    assert sb.invalidate_sharing_on_drift(config, first) is True
+    assert not sb.sharing_consent_active(config.workspaces["first"].shared_brains[0])
+    assert sb.sharing_consent_active(config.workspaces["second"].shared_brains[0])
+    assert persist_calls

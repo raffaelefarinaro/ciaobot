@@ -28,6 +28,7 @@ from ciao.config import (
     coerce_provider_overrides,
     coerce_workspace_color,
     merge_memory_approval,
+    shared_brain_row,
 )
 from ciao import shared_brain
 from ciao.model_tiers import is_tier
@@ -39,7 +40,15 @@ _REGISTRY_LOCKS_GUARD = threading.Lock()
 
 
 def workspace_registry_lock(config: Any) -> threading.RLock:
-    """Serialize registry snapshots with initialization of legacy link IDs."""
+    """Serialize registry snapshots with initialization of legacy link IDs.
+
+    This is an in-process reentrant lock; the engine's process-lifetime
+    ``WorkspaceInstanceLock`` keeps one server per runtime directory, which is
+    the process-level writer guarantee for ``workspaces.json``. Shared-brain
+    policy writes are the exception that also take the cross-process checkout
+    claim and compare the on-disk link row under this lock before writing; a
+    broader authoritative registry/checkout CAS is the #3602 design.
+    """
     key = id(config)
     with _REGISTRY_LOCKS_GUARD:
         return _REGISTRY_LOCKS.setdefault(key, threading.RLock())
@@ -366,8 +375,7 @@ def persist_workspaces(config: Any, candidate_workspaces: dict[str, Any] | None 
                 row.pop("shared_brains", None)
         if workspace.shared_brains:
             row["shared_brains"] = [
-                {"name": link.name, "path": link.path, "identity": link.identity, "lifetime_id": link.lifetime_id}
-                for link in workspace.shared_brains
+                shared_brain_row(link) for link in workspace.shared_brains
             ]
     tmp = path.with_suffix(".json.tmp")
     tmp.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8", newline="")

@@ -106,6 +106,13 @@ export interface SharedBrainLink {
   identity: string
 }
 
+/**
+ * One link's sharing policy. `review` files every note as a proposal a human
+ * must accept; `automatic` is an explicit, durable standing consent for that
+ * one link. Every new and legacy link starts at `review`.
+ */
+export type SharedBrainSharingPolicy = 'review' | 'automatic'
+
 /** The last update attempt for a brain, as `ciao/shared_brain.py` records it. */
 export interface SharedBrainUpdate {
   outcome: 'updated' | 'up_to_date' | 'skipped' | 'failed'
@@ -119,6 +126,21 @@ export interface SharedBrainState {
   name: string
   identity: string
   path: string
+  // Opaque link lifetime; a relink changes it and invalidates older tabs.
+  lifetime: string
+  // Effective policy: `automatic` only through a consent matching the link's
+  // lifetime and repository identity; otherwise `review`.
+  sharing_policy: SharedBrainSharingPolicy
+  // Monotonic for the link: every grant and revocation bumps it.
+  sharing_generation: number
+  // The grant time in ISO UTC, or '' at `review`.
+  sharing_granted_at: string
+  // A stored automatic grant that is not effective and still needs a revoke
+  // action (origin drift or a failed invalidation).
+  sharing_grant_pending: boolean
+  // True when a drift invalidation could not be persisted; the old grant stays
+  // paused in this process and must be revoked explicitly.
+  sharing_invalidation_failed: boolean
   origin_changed: boolean
   missing: boolean
   // '' or why the folder cannot be used now: missing, moved, not_a_checkout,

@@ -84,6 +84,10 @@ BROWSER_OR_INTERNAL_ROUTES: dict[str, str] = {
     "/api/workspace-open": "browser file-viewer Open-in-default-app button; hidden and refused unless the PWA runs on the engine's own machine",
     "/api/workspaces": "browser workspaces list config",
     "/api/workspaces/{name}": "browser workspaces management endpoint",
+    "/api/workspaces/{name}/shared-brains/{brain}/sharing": (
+        "browser-only explicit Settings consent for one shared brain; signed session, "
+        "names the exact link identity and lifetime, no agent surface or publishing"
+    ),
     "/api/settings/providers/{provider}/{action}": "browser-only handoff to provider CLI login, verification, or logout",
     "/api/admin/skills/add": "deprecated GitHub skill add; returns 410, replaced by /api/skills/import",
     "/api/skills/import": "browser skills import; uploads validated zip",
