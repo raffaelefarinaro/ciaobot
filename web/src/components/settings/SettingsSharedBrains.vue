@@ -387,8 +387,12 @@ watch(workspace, () => {
 
 <style scoped>
 .shared-brain-list { list-style: none; margin: var(--space-2) 0 0; padding: 0; display: grid; gap: var(--space-3); }
-.guide-mapping { overflow-wrap: anywhere; }
-.guide-choice { display: flex; align-items: center; gap: var(--space-2); min-height: 44px; }
+.guide-mapping { display: grid; gap: var(--space-2); margin: var(--space-3) 0; overflow-wrap: anywhere; }
+.guide-mapping p { margin: 0; color: var(--fg2); font-size: var(--text-sm); line-height: 1.5; }
+.guide-mapping fieldset { min-width: 0; margin: 0; padding: var(--space-2); border: 1px solid var(--border); border-radius: var(--radius-sm); }
+.guide-mapping legend { color: var(--fg); font-size: var(--text-sm); }
+.guide-choice { display: flex; align-items: center; gap: var(--space-2); min-height: 44px; color: var(--fg); font-size: var(--text-sm); line-height: 1.5; }
+.guide-mapping button { justify-self: start; }
 .shared-brain-row {
   padding: var(--space-3);
   border: 1px solid var(--border);
