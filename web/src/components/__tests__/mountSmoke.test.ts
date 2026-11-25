@@ -458,6 +458,11 @@ describe('component mount smoke', () => {
     wrapper.unmount()
   })
 
+  it('CareRunOutcome mounts without throwing', async () => {
+    const errors = await mountAndSettle(() => import('../CareRunOutcome.vue'))
+    expect(errors).toEqual([])
+  })
+
   it('WebhookTriggers mounts without throwing', async () => {
     const errors = await mountAndSettle(() => import('../WebhookTriggers.vue'))
     expect(errors).toEqual([])

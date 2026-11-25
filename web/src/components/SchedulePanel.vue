@@ -246,10 +246,15 @@
                 > · open result</router-link>
               </dd>
             </div>
-            <div v-if="isCareSchedule(schedule.schedule_id) && schedule.last_run_chat_id" class="prop-row">
+            <div v-if="isCareSchedule(schedule.schedule_id) && schedule.last_run_chat_id && schedule.last_dispatch_id" class="prop-row">
               <dt>Outcome</dt>
               <dd>
-                <CareRunOutcome :schedule-id="schedule.schedule_id" :chat-id="schedule.last_run_chat_id" />
+                <CareRunOutcome
+                  :schedule-id="schedule.schedule_id"
+                  :chat-id="schedule.last_run_chat_id"
+                  :dispatch-id="schedule.last_dispatch_id"
+                  :workspace="schedule.workspace"
+                />
               </dd>
             </div>
           </dl>

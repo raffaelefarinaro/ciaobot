@@ -844,6 +844,7 @@ export interface Schedule {
   last_triggered_on: string
   last_dispatched_at?: string
   last_run_chat_id?: string
+  last_dispatch_id?: string
   days_of_week: string[] | null
   thread_id: number | null
   context_label: string

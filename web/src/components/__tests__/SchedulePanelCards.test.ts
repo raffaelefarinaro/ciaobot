@@ -13,7 +13,7 @@ import { api } from '../../lib/api'
 
 const confirmMock = vi.fn(async (_message: string) => true)
 // The outcome row fetches its own route; stub it so the panel never reaches the network.
-vi.mock('../../lib/api', () => ({ api: { get: vi.fn(async () => ({ care_run: null })) } }))
+vi.mock('../../lib/api', () => ({ api: { get: vi.fn(async () => ({ state: 'pending', care_run: null, report_available: false })) } }))
 vi.mock('../../lib/confirm', () => ({ askConfirm: (message: string) => confirmMock(message), pendingConfirm: { value: null } }))
 
 const Stub = defineComponent({ render: () => h('div') })
@@ -452,9 +452,20 @@ describe('SchedulePanel property cards', () => {
     const wrapper = await mountPanel(makeSchedule({
       schedule_id: 'system-memory-curation@personal',
       last_run_chat_id: 'chat-9',
+      last_dispatch_id: 'disp-1',
     }))
     expect(outcomeRows(wrapper)).toHaveLength(1)
-    expect(vi.mocked(api.get)).toHaveBeenCalledWith('/api/schedules/system-memory-curation%40personal/care-run')
+    expect(vi.mocked(api.get)).toHaveBeenCalledWith('/api/schedules/system-memory-curation%40personal/care-run?dispatch_id=disp-1')
+  })
+
+  it('hides the care outcome row when the row names no dispatch to bind to', async () => {
+    vi.mocked(api.get).mockClear()
+    const wrapper = await mountPanel(makeSchedule({
+      schedule_id: 'system-memory-curation@personal',
+      last_run_chat_id: 'chat-9',
+    }))
+    expect(outcomeRows(wrapper)).toHaveLength(0)
+    expect(vi.mocked(api.get)).not.toHaveBeenCalledWith(expect.stringContaining('/care-run'))
   })
 
   it('hides the care outcome row for a non-care schedule even when it has a run chat', async () => {
