@@ -932,6 +932,10 @@ def test_intake_resolves_mapped_destination_and_never_publishes(linked, monkeypa
     assert len(first) == 1 and isinstance(first[0], sp.ShareDraft)
     intent_path = next((sp._store_dir(config) / "candidate-intents").glob("*.json"))
     original_intent = intent_path.read_bytes()
+    share_evidence._write_private(intent_path, b"", limit=sp.MAX_SIDECAR_BYTES)
+    empty_intent = sp.draft_evidence_candidates(config, workspace="home", relation=relation)
+    assert isinstance(empty_intent[0], sp.ShareRefusal) and empty_intent[0].code == "draft_corrupt"
+    share_evidence._write_private(intent_path, original_intent, limit=sp.MAX_SIDECAR_BYTES)
     altered_intent = json.loads(original_intent)
     altered_intent["payload"]["proposed"] = "Zm9yZ2Vk"
     share_evidence._write_private(intent_path, json.dumps(altered_intent).encode(), limit=sp.MAX_SIDECAR_BYTES)
@@ -972,6 +976,13 @@ def test_intake_resolves_mapped_destination_and_never_publishes(linked, monkeypa
     unsafe_run = sp.draft_evidence_candidates(config, workspace="home", relation=relation)
     assert isinstance(unsafe_run[0], sp.ShareRefusal) and unsafe_run[0].code == "invalid_evidence"
     run_path.chmod(0o600)
+    if sys.platform == "darwin":
+        subprocess.run(["chmod", "+a", "everyone allow read", str(run_path)], check=True)
+        try:
+            acl_run = sp.draft_evidence_candidates(config, workspace="home", relation=relation)
+            assert isinstance(acl_run[0], sp.ShareRefusal) and acl_run[0].code == "invalid_evidence"
+        finally:
+            subprocess.run(["chmod", "-N", str(run_path)], check=True)
     share_evidence._write_private(run_path, b"{", limit=8192)
     malformed_run = sp.draft_evidence_candidates(config, workspace="home", relation=relation)
     assert isinstance(malformed_run[0], sp.ShareRefusal) and malformed_run[0].code == "draft_corrupt"
@@ -1469,6 +1480,13 @@ def test_intake_uses_settled_care_witness_and_current_consent(linked, tmp_path, 
         expected_revision=visible_artifact["review_token"],
     )
     assert isinstance(replacement, sp.ShareDraft)
+    journal_path, = (sp._store_dir(config) / "candidate-redrafts").glob("*.json")
+    original_journal = journal_path.read_bytes()
+    se._write_private(journal_path, b"", limit=16384)
+    refused = sp.redraft_evidence_candidate(config, workspace="home", proposal_id=replacement.proposal_id,
+                                            expected_revision=replacement.artifact["review_token"])
+    assert isinstance(refused, sp.ShareRefusal) and refused.code == "draft_corrupt"
+    se._write_private(journal_path, original_journal, limit=16384)
     assert replacement.proposal_id != drafts[0].proposal_id
     assert replacement.artifact["review_token"] != drafts[0].artifact["review_token"]
     assert replacement.artifact["immutable"]["base_commit"] == git(clone, "rev-parse", "refs/remotes/origin/main")

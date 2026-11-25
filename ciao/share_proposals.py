@@ -1010,6 +1010,8 @@ def _candidate_intent(
     path = store / "candidate-intents" / (name + ".json")
     record = share_evidence._read_json(path, limit=MAX_SIDECAR_BYTES, code="private_state_corrupt")
     if not record:
+        if path.exists():
+            _refuse("draft_corrupt", "The private candidate intent is corrupt.")
         if captured is None or proposed is None:
             return None
         original = captured[2]
@@ -1067,6 +1069,8 @@ def _candidate_redraft_journal(config: Any, workspace: str, root: str, payload: 
         return payload
     record = share_evidence._read_json(path, limit=16384, code="private_state_corrupt")
     if not record:
+        if path.exists():
+            _refuse("draft_corrupt", "The private candidate lineage is corrupt.")
         return None
     saved = record.get("payload")
     saved_signature = record.get("signature")
