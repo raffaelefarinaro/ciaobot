@@ -74,12 +74,20 @@
       <form v-if="brains.length < MAX_SHARED_BRAINS" class="shared-brain-form" @submit.prevent="linkFolder">
         <label class="shared-brain-field">
           <span class="shared-brain-label" id="shared-brain-kind-label">Link type</span>
-          <select v-model="kindDraft" class="routine-input shared-brain-input" aria-labelledby="shared-brain-kind-label" :disabled="saving || listStale">
+          <select
+            v-model="kindDraft"
+            class="routine-input shared-brain-input"
+            aria-labelledby="shared-brain-kind-label"
+            aria-describedby="shared-brain-kind-hint"
+            :disabled="saving || listStale"
+          >
             <option value="folder">Folder (reference only)</option>
             <option value="git">Git repository</option>
           </select>
-          <span class="hint hint--compact">Folders are reference-only and are not synced by Ciaobot. Git repositories use the existing update and approved-publishing flow.</span>
         </label>
+        <p id="shared-brain-kind-hint" class="hint hint--compact">
+          Folders are reference-only and are not synced by Ciaobot. Git repositories use the existing update and approved-publishing flow.
+        </p>
         <label class="shared-brain-field">
           <span class="shared-brain-label">Folder path</span>
           <input
