@@ -937,10 +937,24 @@ def test_cooperating(root: Path, protocol: str) -> dict[str, Any]:
         if result.get("conflict") or result.get("check_ok") is False
     ]
     final = _read(target) or b""
-    claim_evidence_ok = protocol != "claim_coop" or (
-        any(result.get("claim_hold_observed") for result in results.values())
-        and any(result.get("claim_waited") for result in results.values())
-    )
+    claim_evidence_ok = True
+    if protocol == "claim_coop":
+        if len(winners) == 1 and len(conflicts) == 1 and winners[0] != conflicts[0]:
+            winner = results[winners[0]]
+            loser = results[conflicts[0]]
+            claim_evidence_ok = (
+                winner.get("claim_acquired") is True
+                and winner.get("claim_hold_observed") is True
+                and winner.get("replace_ok") is True
+                and loser.get("claim_acquired") is True
+                and loser.get("check_ok") is False
+                and loser.get("conflict") is True
+                and loser.get("claim_contended") is True
+                and loser.get("claim_waited") is True
+                and loser.get("claim_attempts", 0) > 1
+            )
+        else:
+            claim_evidence_ok = False
     supported = (
         len(winners) == 1
         and len(conflicts) == 1
@@ -950,9 +964,9 @@ def test_cooperating(root: Path, protocol: str) -> dict[str, Any]:
     if supported and protocol == "claim_coop":
         detail = (
             "The winner held the O_EXCL claim until the other writer actually "
-            "attempted it; the loser retried, acquired it after release, "
-            "re-read the new version, and refused with a conflict. This is "
-            "cooperative serialization with retry, not external-writer "
+            "attempted it; the loser retried, acquired the claim after "
+            "release, re-read the new version, and refused with check_ok false. "
+            "This is cooperative serialization with retry, not external-writer "
             "exclusion."
         )
     else:
@@ -970,6 +984,7 @@ def test_cooperating(root: Path, protocol: str) -> dict[str, Any]:
         "evidence": {
             "winners": winners,
             "conflicts": conflicts,
+            "claim_evidence_ok": claim_evidence_ok,
             "final_sha256": _sha(final),
             "results": results,
             "writer_diagnostics": diagnostics,
@@ -1445,21 +1460,31 @@ def test_root_substitution_dirfd(root: Path) -> dict[str, Any]:
         os.close(check_fd)
 
     root_dir.unlink()
-    status = "partial" if contained and not visible_updated else "failed"
+    if contained and not visible_updated and symlink_root_refused:
+        status = "partial"
+        detail = (
+            "Descriptor-relative traversal kept the write inside the original "
+            "directory and did not follow the substituted root symlink, but "
+            "the user-visible root no longer received the write: the root "
+            "must be rebound before commit, which the exercised APFS "
+            "primitives did not make atomic. Opening a root that is already a "
+            "symlink was also refused with O_NOFOLLOW."
+        )
+    elif contained and not visible_updated:
+        status = "failed"
+        detail = (
+            "The descriptor-relative write was contained, but opening the "
+            "already-symlinked root was not refused as required, so the probe "
+            "cannot claim the O_NOFOLLOW refusal."
+        )
+    else:
+        status = "failed"
+        detail = "The descriptor-relative write did not behave as expected."
     return {
         "name": "root_substitution_dirfd_writer",
         "capability": "root substitution containment (descriptor-relative)",
         "status": status,
-        "detail": (
-            "Descriptor-relative traversal kept the write inside the original "
-            "directory and did not follow the substituted root symlink, but "
-            "the user-visible root no longer received the write: the root "
-            "must be rebound before commit, which an ordinary filesystem does "
-            "not make atomic. Opening a root that is already a symlink fails "
-            "closed with O_NOFOLLOW."
-            if status == "partial"
-            else "The descriptor-relative write did not behave as expected."
-        ),
+        "detail": detail,
         "evidence": {
             "outside_sha256": _sha(outside_after),
             "original_root_sha256": _sha(moved_after),
@@ -1467,6 +1492,7 @@ def test_root_substitution_dirfd(root: Path) -> dict[str, Any]:
             "contained": contained,
             "visible_root_updated": visible_updated,
             "symlink_root_refused": symlink_root_refused,
+            "partial_requires_symlink_refusal": True,
         },
     }
 

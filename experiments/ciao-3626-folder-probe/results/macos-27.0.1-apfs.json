@@ -1,5 +1,5 @@
 {
-  "generated_at": "2026-11-25T13:40:12Z",
+  "generated_at": "2026-11-25T13:42:21Z",
   "platform": {
     "executable": "/opt/homebrew/opt/python@3.15/bin/python3.15",
     "filesystem_type": "apfs",
@@ -7,7 +7,7 @@
     "machine": "arm64",
     "os_build": "26A434",
     "platform": "macOS-27.0.1-arm64-arm-64bit-Mach-O",
-    "probe_sha256": "48faeb50483aaa7dab9e7bb8d6693d43663f078facc590109afcda12aa89d96c",
+    "probe_sha256": "71b460983679a179d7ac85a746bce002b0c9cb9f4875645ad2486e36419fe817",
     "python": "3.15.2",
     "python_implementation": "CPython",
     "release": "27.0.0",
@@ -22,7 +22,7 @@
     ],
     "version": "Darwin Kernel Version 27.0.0: Tue Aug 11 21:02:57 PDT 2026; root:xnu-13432.1.9~1/RELEASE_ARM64_T8132"
   },
-  "root": "/var/folders/wz/j_xbzm9126q6x405bg6qvj300000gn/T/ciao-3626-probe-snh0comh",
+  "root": "/var/folders/wz/j_xbzm9126q6x405bg6qvj300000gn/T/ciao-3626-probe-be7z_0qg",
   "root_retained": false,
   "schema": "ciao-3626-folder-probe/1",
   "summary": {
@@ -67,7 +67,7 @@
                 "expected_sha256": "f34848ca92665c342abd5816c9e3eda0e82180671195362bcd0080544a3bc2ac",
                 "final_sha256": "c8bf0e3943cbe35bcf9978b6f43bd4499934b44cf42501d6e442c856dfea7460",
                 "initial_sha256": "f34848ca92665c342abd5816c9e3eda0e82180671195362bcd0080544a3bc2ac",
-                "pid": 9346,
+                "pid": 32005,
                 "protocol": "hash_then_rename",
                 "replace_ok": true,
                 "role": "A"
@@ -78,7 +78,7 @@
                 "expected_sha256": "f34848ca92665c342abd5816c9e3eda0e82180671195362bcd0080544a3bc2ac",
                 "final_sha256": "851ca2879d9bed3d9714eaf320a5d7a03fdd5ef1440c5fd79486e7b8a02c5ee9",
                 "initial_sha256": "f34848ca92665c342abd5816c9e3eda0e82180671195362bcd0080544a3bc2ac",
-                "pid": 9353,
+                "pid": 32006,
                 "protocol": "hash_then_rename",
                 "replace_ok": true,
                 "role": "B"
@@ -87,9 +87,9 @@
           },
           {
             "both_checked": true,
-            "final_is": "A",
+            "final_is": "B",
             "iteration": 1,
-            "lost": "B",
+            "lost": "A",
             "replacements": 2,
             "results": {
               "A": {
@@ -98,7 +98,7 @@
                 "expected_sha256": "f34848ca92665c342abd5816c9e3eda0e82180671195362bcd0080544a3bc2ac",
                 "final_sha256": "c8bf0e3943cbe35bcf9978b6f43bd4499934b44cf42501d6e442c856dfea7460",
                 "initial_sha256": "f34848ca92665c342abd5816c9e3eda0e82180671195362bcd0080544a3bc2ac",
-                "pid": 9367,
+                "pid": 32036,
                 "protocol": "hash_then_rename",
                 "replace_ok": true,
                 "role": "A"
@@ -109,7 +109,7 @@
                 "expected_sha256": "f34848ca92665c342abd5816c9e3eda0e82180671195362bcd0080544a3bc2ac",
                 "final_sha256": "851ca2879d9bed3d9714eaf320a5d7a03fdd5ef1440c5fd79486e7b8a02c5ee9",
                 "initial_sha256": "f34848ca92665c342abd5816c9e3eda0e82180671195362bcd0080544a3bc2ac",
-                "pid": 9368,
+                "pid": 32037,
                 "protocol": "hash_then_rename",
                 "replace_ok": true,
                 "role": "B"
@@ -129,7 +129,7 @@
                 "expected_sha256": "f34848ca92665c342abd5816c9e3eda0e82180671195362bcd0080544a3bc2ac",
                 "final_sha256": "c8bf0e3943cbe35bcf9978b6f43bd4499934b44cf42501d6e442c856dfea7460",
                 "initial_sha256": "f34848ca92665c342abd5816c9e3eda0e82180671195362bcd0080544a3bc2ac",
-                "pid": 9385,
+                "pid": 32063,
                 "protocol": "hash_then_rename",
                 "replace_ok": true,
                 "role": "A"
@@ -138,9 +138,9 @@
                 "check_ok": true,
                 "check_sha256": "f34848ca92665c342abd5816c9e3eda0e82180671195362bcd0080544a3bc2ac",
                 "expected_sha256": "f34848ca92665c342abd5816c9e3eda0e82180671195362bcd0080544a3bc2ac",
-                "final_sha256": "c8bf0e3943cbe35bcf9978b6f43bd4499934b44cf42501d6e442c856dfea7460",
+                "final_sha256": "851ca2879d9bed3d9714eaf320a5d7a03fdd5ef1440c5fd79486e7b8a02c5ee9",
                 "initial_sha256": "f34848ca92665c342abd5816c9e3eda0e82180671195362bcd0080544a3bc2ac",
-                "pid": 9386,
+                "pid": 32064,
                 "protocol": "hash_then_rename",
                 "replace_ok": true,
                 "role": "B"
@@ -194,6 +194,7 @@
       "capability": "cooperating-writer serialization (not external-writer exclusion)",
       "detail": "Two writers that both honor the same primitive serialized: one won and the other reported a conflict without writing.",
       "evidence": {
+        "claim_evidence_ok": true,
         "conflicts": [
           "A"
         ],
@@ -205,7 +206,7 @@
             "conflict": true,
             "expected_sha256": "f34848ca92665c342abd5816c9e3eda0e82180671195362bcd0080544a3bc2ac",
             "lock_acquired": true,
-            "pid": 9400,
+            "pid": 32077,
             "protocol": "flock_coop",
             "role": "A"
           },
@@ -215,7 +216,7 @@
             "expected_sha256": "f34848ca92665c342abd5816c9e3eda0e82180671195362bcd0080544a3bc2ac",
             "final_sha256": "851ca2879d9bed3d9714eaf320a5d7a03fdd5ef1440c5fd79486e7b8a02c5ee9",
             "lock_acquired": true,
-            "pid": 9403,
+            "pid": 32078,
             "protocol": "flock_coop",
             "replace_ok": true,
             "role": "B"
@@ -244,8 +245,9 @@
     },
     {
       "capability": "cooperating-writer serialization (not external-writer exclusion)",
-      "detail": "The winner held the O_EXCL claim until the other writer actually attempted it; the loser retried, acquired it after release, re-read the new version, and refused with a conflict. This is cooperative serialization with retry, not external-writer exclusion.",
+      "detail": "The winner held the O_EXCL claim until the other writer actually attempted it; the loser retried, acquired the claim after release, re-read the new version, and refused with check_ok false. This is cooperative serialization with retry, not external-writer exclusion.",
       "evidence": {
+        "claim_evidence_ok": true,
         "conflicts": [
           "A"
         ],
@@ -255,13 +257,13 @@
             "check_ok": false,
             "check_sha256": "851ca2879d9bed3d9714eaf320a5d7a03fdd5ef1440c5fd79486e7b8a02c5ee9",
             "claim_acquired": true,
-            "claim_attempts": 3,
+            "claim_attempts": 2,
             "claim_contended": true,
             "claim_hold_observed": true,
             "claim_waited": true,
             "conflict": true,
             "expected_sha256": "f34848ca92665c342abd5816c9e3eda0e82180671195362bcd0080544a3bc2ac",
-            "pid": 9417,
+            "pid": 32089,
             "protocol": "claim_coop",
             "role": "A"
           },
@@ -275,7 +277,7 @@
             "claim_waited": false,
             "expected_sha256": "f34848ca92665c342abd5816c9e3eda0e82180671195362bcd0080544a3bc2ac",
             "final_sha256": "851ca2879d9bed3d9714eaf320a5d7a03fdd5ef1440c5fd79486e7b8a02c5ee9",
-            "pid": 9418,
+            "pid": 32091,
             "protocol": "claim_coop",
             "replace_ok": true,
             "role": "B"
@@ -316,22 +318,22 @@
           "external_seen_sha256": "b9b62c30e864b42a61b160298eec920b9b44ce3f7d881e9e83b1bf7d7aac8884",
           "final_sha256": "7f0c8b9fb2d0b86f3f58318f1965cc377f5b20d9c10b917033702dcc7cec4790",
           "identity_after_external": {
-            "ctime_ns": 1795614011886587625,
+            "ctime_ns": 1795614139543725996,
             "dev": 16777233,
-            "ino": 1469152445,
-            "mtime_ns": 1795614011886587625,
+            "ino": 1469353495,
+            "mtime_ns": 1795614139543725996,
             "size": 23
           },
           "identity_before": {
-            "ctime_ns": 1795614011807257557,
+            "ctime_ns": 1795614139387010529,
             "dev": 16777233,
-            "ino": 1469152445,
-            "mtime_ns": 1795614011807257557,
+            "ino": 1469353495,
+            "mtime_ns": 1795614139387010529,
             "size": 5
           },
           "identity_check_ok": true,
           "initial_sha256": "f34848ca92665c342abd5816c9e3eda0e82180671195362bcd0080544a3bc2ac",
-          "pid": 9432,
+          "pid": 32109,
           "protocol": "hash_then_rename_external",
           "replace_ok": true,
           "role": "A"
@@ -362,23 +364,23 @@
           "external_seen_sha256": "b9b62c30e864b42a61b160298eec920b9b44ce3f7d881e9e83b1bf7d7aac8884",
           "final_sha256": "7f0c8b9fb2d0b86f3f58318f1965cc377f5b20d9c10b917033702dcc7cec4790",
           "identity_after_external": {
-            "ctime_ns": 1795614011974099866,
+            "ctime_ns": 1795614139746857042,
             "dev": 16777233,
-            "ino": 1469152575,
-            "mtime_ns": 1795614011974099866,
+            "ino": 1469353564,
+            "mtime_ns": 1795614139746857042,
             "size": 23
           },
           "identity_before": {
-            "ctime_ns": 1795614011893957048,
+            "ctime_ns": 1795614139621637478,
             "dev": 16777233,
-            "ino": 1469152575,
-            "mtime_ns": 1795614011893957048,
+            "ino": 1469353564,
+            "mtime_ns": 1795614139621637478,
             "size": 5
           },
           "identity_check_ok": true,
           "initial_sha256": "f34848ca92665c342abd5816c9e3eda0e82180671195362bcd0080544a3bc2ac",
           "lock_acquired": true,
-          "pid": 9449,
+          "pid": 32126,
           "protocol": "flock_external",
           "replace_ok": true,
           "role": "A"
@@ -410,22 +412,22 @@
           "external_seen_sha256": "b9b62c30e864b42a61b160298eec920b9b44ce3f7d881e9e83b1bf7d7aac8884",
           "final_sha256": "7f0c8b9fb2d0b86f3f58318f1965cc377f5b20d9c10b917033702dcc7cec4790",
           "identity_after_external": {
-            "ctime_ns": 1795614012054937059,
+            "ctime_ns": 1795614139871795690,
             "dev": 16777233,
-            "ino": 1469152751,
-            "mtime_ns": 1795614012054937059,
+            "ino": 1469353612,
+            "mtime_ns": 1795614139871795690,
             "size": 23
           },
           "identity_before": {
-            "ctime_ns": 1795614011984967292,
+            "ctime_ns": 1795614139766325433,
             "dev": 16777233,
-            "ino": 1469152751,
-            "mtime_ns": 1795614011984967292,
+            "ino": 1469353612,
+            "mtime_ns": 1795614139766325433,
             "size": 5
           },
           "identity_check_ok": true,
           "initial_sha256": "f34848ca92665c342abd5816c9e3eda0e82180671195362bcd0080544a3bc2ac",
-          "pid": 9470,
+          "pid": 32137,
           "protocol": "claim_external",
           "replace_ok": true,
           "role": "A"
@@ -456,22 +458,22 @@
           "external_seen_sha256": "b9b62c30e864b42a61b160298eec920b9b44ce3f7d881e9e83b1bf7d7aac8884",
           "final_sha256": "7f0c8b9fb2d0b86f3f58318f1965cc377f5b20d9c10b917033702dcc7cec4790",
           "identity_after_external": {
-            "ctime_ns": 1795614012140783091,
+            "ctime_ns": 1795614140050020591,
             "dev": 16777233,
-            "ino": 1469153003,
-            "mtime_ns": 1795614012140783091,
+            "ino": 1469353768,
+            "mtime_ns": 1795614140050020591,
             "size": 23
           },
           "identity_before": {
-            "ctime_ns": 1795614012063589025,
+            "ctime_ns": 1795614139892175374,
             "dev": 16777233,
-            "ino": 1469153003,
-            "mtime_ns": 1795614012063589025,
+            "ino": 1469353768,
+            "mtime_ns": 1795614139892175374,
             "size": 5
           },
           "identity_check_ok": true,
           "initial_sha256": "f34848ca92665c342abd5816c9e3eda0e82180671195362bcd0080544a3bc2ac",
-          "pid": 9482,
+          "pid": 32149,
           "protocol": "vnode_observation",
           "replace_ok": true,
           "role": "A"
@@ -502,22 +504,22 @@
           "external_seen_sha256": "b9b62c30e864b42a61b160298eec920b9b44ce3f7d881e9e83b1bf7d7aac8884",
           "final_sha256": "7f0c8b9fb2d0b86f3f58318f1965cc377f5b20d9c10b917033702dcc7cec4790",
           "identity_after_external": {
-            "ctime_ns": 1795614012221556076,
+            "ctime_ns": 1795614140208411350,
             "dev": 16777233,
-            "ino": 1469153130,
-            "mtime_ns": 1795614012221556076,
+            "ino": 1469353903,
+            "mtime_ns": 1795614140208411350,
             "size": 23
           },
           "identity_before": {
-            "ctime_ns": 1795614012149045973,
+            "ctime_ns": 1795614140081257992,
             "dev": 16777233,
-            "ino": 1469153130,
-            "mtime_ns": 1795614012149045973,
+            "ino": 1469353903,
+            "mtime_ns": 1795614140081257992,
             "size": 5
           },
           "identity_check_ok": true,
           "initial_sha256": "f34848ca92665c342abd5816c9e3eda0e82180671195362bcd0080544a3bc2ac",
-          "pid": 9509,
+          "pid": 32168,
           "prepared_after_swap_sha256": "b9b62c30e864b42a61b160298eec920b9b44ce3f7d881e9e83b1bf7d7aac8884",
           "protocol": "swap_external",
           "role": "A",
@@ -550,21 +552,21 @@
           "expected_sha256": "f34848ca92665c342abd5816c9e3eda0e82180671195362bcd0080544a3bc2ac",
           "external1_seen_sha256": "b9b62c30e864b42a61b160298eec920b9b44ce3f7d881e9e83b1bf7d7aac8884",
           "identity_after_external1": {
-            "ctime_ns": 1795614012297416640,
+            "ctime_ns": 1795614140550731266,
             "dev": 16777233,
-            "ino": 1469153302,
-            "mtime_ns": 1795614012297416640,
+            "ino": 1469354053,
+            "mtime_ns": 1795614140550731266,
             "size": 23
           },
           "identity_before": {
-            "ctime_ns": 1795614012228934082,
+            "ctime_ns": 1795614140228876076,
             "dev": 16777233,
-            "ino": 1469153302,
-            "mtime_ns": 1795614012228934082,
+            "ino": 1469354053,
+            "mtime_ns": 1795614140228876076,
             "size": 5
           },
           "initial_sha256": "f34848ca92665c342abd5816c9e3eda0e82180671195362bcd0080544a3bc2ac",
-          "pid": 9534,
+          "pid": 32186,
           "protocol": "reread_detect_external",
           "reread_ok": false,
           "reread_sha256": "b9b62c30e864b42a61b160298eec920b9b44ce3f7d881e9e83b1bf7d7aac8884",
@@ -598,28 +600,28 @@
           "external2_seen_sha256": "b9b62c30e864b42a61b160298eec920b9b44ce3f7d881e9e83b1bf7d7aac8884",
           "final_sha256": "7f0c8b9fb2d0b86f3f58318f1965cc377f5b20d9c10b917033702dcc7cec4790",
           "identity_after_external1": {
-            "ctime_ns": 1795614012371825120,
+            "ctime_ns": 1795614140865795699,
             "dev": 16777233,
-            "ino": 1469153700,
-            "mtime_ns": 1795614012371825120,
+            "ino": 1469354219,
+            "mtime_ns": 1795614140865795699,
             "size": 5
           },
           "identity_after_external2": {
-            "ctime_ns": 1795614012375270873,
+            "ctime_ns": 1795614140868826326,
             "dev": 16777233,
-            "ino": 1469153700,
-            "mtime_ns": 1795614012375270873,
+            "ino": 1469354219,
+            "mtime_ns": 1795614140868826326,
             "size": 23
           },
           "identity_before": {
-            "ctime_ns": 1795614012305050480,
+            "ctime_ns": 1795614140603748102,
             "dev": 16777233,
-            "ino": 1469153534,
-            "mtime_ns": 1795614012305050480,
+            "ino": 1469354147,
+            "mtime_ns": 1795614140603748102,
             "size": 5
           },
           "initial_sha256": "f34848ca92665c342abd5816c9e3eda0e82180671195362bcd0080544a3bc2ac",
-          "pid": 9565,
+          "pid": 32213,
           "protocol": "reread_window_external",
           "replace_ok": true,
           "reread_ok": true,
@@ -667,17 +669,17 @@
         "expected_sha256": "f34848ca92665c342abd5816c9e3eda0e82180671195362bcd0080544a3bc2ac",
         "final_sha256": "7f0c8b9fb2d0b86f3f58318f1965cc377f5b20d9c10b917033702dcc7cec4790",
         "identity_after": {
-          "ctime_ns": 1795614012385169798,
+          "ctime_ns": 1795614140895488266,
           "dev": 16777233,
-          "ino": 1469153716,
-          "mtime_ns": 1795614012385169798,
+          "ino": 1469354236,
+          "mtime_ns": 1795614140895488266,
           "size": 5
         },
         "identity_before": {
-          "ctime_ns": 1795614012385035131,
+          "ctime_ns": 1795614140895338474,
           "dev": 16777233,
-          "ino": 1469153715,
-          "mtime_ns": 1795614012385035131,
+          "ino": 1469354235,
+          "mtime_ns": 1795614140895338474,
           "size": 5
         },
         "identity_changed": true
@@ -692,27 +694,27 @@
         "accepted": true,
         "final_sha256": "7f0c8b9fb2d0b86f3f58318f1965cc377f5b20d9c10b917033702dcc7cec4790",
         "identity_after": {
-          "ctime_ns": 1795614012385807257,
+          "ctime_ns": 1795614140910333653,
           "dev": 16777233,
-          "ino": 1469153720,
-          "mtime_ns": 1795614012385592965,
+          "ino": 1469354241,
+          "mtime_ns": 1795614140897905684,
           "size": 5
         },
         "identity_before": {
-          "ctime_ns": 1795614012385592965,
+          "ctime_ns": 1795614140897905684,
           "dev": 16777233,
-          "ino": 1469153719,
-          "mtime_ns": 1795614012385592965,
+          "ino": 1469354240,
+          "mtime_ns": 1795614140897905684,
           "size": 5
         },
         "identity_changed": true,
         "weak_version_after": [
           5,
-          1795614012385592965
+          1795614140897905684
         ],
         "weak_version_before": [
           5,
-          1795614012385592965
+          1795614140897905684
         ]
       },
       "name": "mtime_size_delete_recreate_aba",
@@ -726,26 +728,26 @@
         "distinct_inodes": 200,
         "reuse_observed": false,
         "sample_inodes": [
-          1469153723,
-          1469153724,
-          1469153725,
-          1469153726,
-          1469153727,
-          1469153728,
-          1469153729,
-          1469153730,
-          1469153731,
-          1469153732,
-          1469153733,
-          1469153734,
-          1469153735,
-          1469153736,
-          1469153737,
-          1469153738,
-          1469153739,
-          1469153740,
-          1469153741,
-          1469153742
+          1469354246,
+          1469354247,
+          1469354249,
+          1469354250,
+          1469354251,
+          1469354252,
+          1469354253,
+          1469354254,
+          1469354255,
+          1469354256,
+          1469354260,
+          1469354262,
+          1469354263,
+          1469354264,
+          1469354265,
+          1469354266,
+          1469354267,
+          1469354268,
+          1469354269,
+          1469354270
         ]
       },
       "name": "inode_reuse_cycles",
@@ -763,11 +765,12 @@
     },
     {
       "capability": "root substitution containment (descriptor-relative)",
-      "detail": "Descriptor-relative traversal kept the write inside the original directory and did not follow the substituted root symlink, but the user-visible root no longer received the write: the root must be rebound before commit, which an ordinary filesystem does not make atomic. Opening a root that is already a symlink fails closed with O_NOFOLLOW.",
+      "detail": "Descriptor-relative traversal kept the write inside the original directory and did not follow the substituted root symlink, but the user-visible root no longer received the write: the root must be rebound before commit, which the exercised APFS primitives did not make atomic. Opening a root that is already a symlink was also refused with O_NOFOLLOW.",
       "evidence": {
         "contained": true,
         "original_root_sha256": "7f0c8b9fb2d0b86f3f58318f1965cc377f5b20d9c10b917033702dcc7cec4790",
         "outside_sha256": "fac3c134b4fccc1a264f8f8d7679e50116f3a13c395a7a7cfffade69f340331a",
+        "partial_requires_symlink_refusal": true,
         "symlink_root_refused": true,
         "visible_root_sha256": "fac3c134b4fccc1a264f8f8d7679e50116f3a13c395a7a7cfffade69f340331a",
         "visible_root_updated": false
@@ -803,7 +806,7 @@
             "created": true,
             "expected_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
             "final_sha256": "88b269fcee5840c28a90e10cb2cdc6de121d25d892257ec7313cf7273813abc1",
-            "pid": 9595,
+            "pid": 32236,
             "protocol": "excl_create",
             "role": "A"
           },
@@ -812,7 +815,7 @@
             "created": false,
             "error_errno": 17,
             "expected_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
-            "pid": 9596,
+            "pid": 32237,
             "protocol": "excl_create",
             "role": "B"
           }

@@ -112,7 +112,7 @@ Counts: **11 failed, 3 supported, 2 partial, 2 unverified**.
 |---|---|---|
 | `hash_then_rename_two_writers` | failed | Two processes both validated the same expected SHA-256 and both renamed over the target; one writer's change was lost with no conflict. |
 | `flock_coop_cooperating_writers` | supported | Two writers that both honor one advisory lock serialized: one wrote, one reported a conflict. |
-| `claim_coop_cooperating_writers` | supported | The winner held the `O_EXCL` claim until the other writer attempted it; the loser retried, acquired after release, re-read the new version, and refused with a conflict. Cooperative retry, not external exclusion. |
+| `claim_coop_cooperating_writers` | supported | The winner held the `O_EXCL` claim until the other writer attempted it; the loser retried, acquired after release, re-read the new version, and refused with `check_ok` false. Support requires that loser evidence plus the winner's contention observation. Cooperative retry, not external exclusion. |
 | `hash_then_rename_external_writer` | failed | A check-once hash-then-rename writer (no final reread) discarded an external write that landed after its check. |
 | `flock_external_writer` | failed | A check-once writer holding an advisory lock discarded an external write; the external writer ignores the lock. |
 | `claim_external_writer` | failed | A check-once writer holding an `O_EXCL` claim discarded an external write; the external writer ignores the claim. |
@@ -125,7 +125,7 @@ Counts: **11 failed, 3 supported, 2 partial, 2 unverified**.
 | `mtime_size_delete_recreate_aba` | failed | A size+mtime version accepted a delete/recreate after the mtime was restored. |
 | `inode_reuse_cycles` | unverified | 200 create/unlink cycles used 200 distinct inodes here; reuse was not observed, but inode identity is not atomic with replacement and cannot be assumed stable on another backend. |
 | `root_substitution_path_writer` | failed | A path-based writer followed a substituted root symlink and wrote into the decoy directory. |
-| `root_substitution_dirfd_writer` | partial | Descriptor-relative traversal stayed in the original directory and refused an already-symlinked root, but the user-visible root no longer received the write. Containment is not root binding. |
+| `root_substitution_dirfd_writer` | partial | Descriptor-relative traversal stayed in the original directory, and the probe observed `O_NOFOLLOW` refusing an already-symlinked root, but the user-visible root no longer received the write. `partial` is asserted only when that refusal is observed; containment is not root binding. |
 | `root_aba_identical_clone` | failed | An identical clone at the visible root left the bytes unchanged; the probe asserts that the writer's payload landed in the detached directory. |
 | `o_excl_new_note_create` | supported | Two writers creating the same new path produced exactly one file; the loser got `EEXIST` and wrote nothing. Namespace no-clobber only; not crash-safe or complete creation. |
 
