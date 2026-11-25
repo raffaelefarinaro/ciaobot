@@ -74,7 +74,7 @@ async def test_managed_care_acquisition_requires_the_active_scheduler_dispatch(t
     vault = Path(plane.config.workspace_vault_root("work"))
     (vault / "Workspace").mkdir(parents=True)
     with pytest.raises(ControlPlaneError):
-        plane.managed_care_begin(principal, 600.0, str(vault))
+        await plane.managed_care_begin(principal, 600.0, str(vault))
     result: list[dict] = []
     service = CiaoMcpService(plane.config)
     service.bind(plane)

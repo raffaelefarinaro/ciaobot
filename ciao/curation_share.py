@@ -436,19 +436,56 @@ def dispatch_ready(config: Any, *, workspace: str) -> None:
             or hashlib.sha256(payload["holder"].encode("utf-8")).hexdigest() + ".json" != name):
             continue
         holder = payload["holder"]
+        manifest = payload.get("outbox_manifest")
+        if not isinstance(manifest, list) or len(manifest) > MAX_CHECKPOINTS_PER_RUN:
+            continue
+        manifest_hash = hashlib.sha256(json.dumps(manifest, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+        with share_evidence._workspace_guard(config, workspace) as directory:
+            progress_dir = _private_dir(directory, "care-progress", create=True)
+            assert progress_dir is not None
+            progress_record = share_evidence._read_json(progress_dir / name, limit=65536, code="private_state_corrupt")
+            progress = _verified(config, b"care-progress\0", progress_record) if progress_record else None
+        if progress_record and (progress is None or progress.get("workspace") != workspace
+            or progress.get("holder") != holder or progress.get("manifest_hash") != manifest_hash):
+            continue
+        processed = progress.get("processed", []) if progress else []
+        if (not isinstance(processed, list) or len(processed) > MAX_CHECKPOINTS_PER_RUN
+            or any(not isinstance(item, str) for item in processed) or len(processed) != len(set(processed))):
+            continue
+        signatures = {entry.get("witness_signature") for entry in manifest if isinstance(entry, dict)}
+        if any(signature not in signatures for signature in processed):
+            continue
         items = settled_witnesses(config, workspace=workspace, holder=holder)
         if not items:
             continue
-        completed = True
-        for item in items:
+        pending_items = [item for item in items if item["witness"]["witness_signature"] not in processed]
+        if not pending_items:
+            with share_evidence._workspace_guard(config, workspace) as directory:
+                ready = _private_dir(directory, "care-ready")
+                if ready is not None:
+                    (ready / name).unlink(missing_ok=True)
+            continue
+        batch = pending_items[0]["batch_index"]
+        for item in pending_items:
+            if item["batch_index"] != batch:
+                break
             relation = share_evidence.recover_care_source_relation(
                 config, workspace=workspace, holder=holder,
                 witness_signature=item["witness"]["witness_signature"],
             )
             drafts = share_proposals.draft_evidence_candidates(config, workspace=workspace, relation=relation)
-            if not drafts or any(isinstance(draft, share_proposals.ShareRefusal) for draft in drafts):
-                completed = False
-        if completed:
+            if not drafts or any(isinstance(draft, share_proposals.ShareRefusal)
+                                 and draft.code != "already_settled" for draft in drafts):
+                break
+            processed.append(item["witness"]["witness_signature"])
+            with share_evidence._workspace_guard(config, workspace) as directory:
+                progress_dir = _private_dir(directory, "care-progress", create=True)
+                assert progress_dir is not None
+                _write_record(progress_dir / name, _seal(config, b"care-progress\0", {
+                    "workspace": workspace, "holder": holder, "manifest_hash": manifest_hash,
+                    "processed": processed,
+                }))
+        if all(item["witness"]["witness_signature"] in processed for item in items):
             with share_evidence._workspace_guard(config, workspace) as directory:
                 ready = _private_dir(directory, "care-ready")
                 if ready is not None:
