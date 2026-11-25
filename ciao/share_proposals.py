@@ -862,7 +862,7 @@ def draft_evidence_candidates(config: Any, *, workspace: str, relation: Any) -> 
     from ciao import share_evidence, shared_brain_mapping
     from ciao.workspaces import workspace_registry_claim, WorkspaceRegistryBusy, WorkspaceRegistryConflict
 
-    if not share_evidence._relation_is_sealed(config, relation) or relation.kind != "memory_checkpoint":
+    if not share_evidence._relation_is_sealed(config, relation) or relation.kind not in ("memory_checkpoint", "care_settlement"):
         share_evidence._refuse("invalid_relation", "A durable engine-attested source is required.")
     if relation.workspace != workspace:
         return []
@@ -878,85 +878,86 @@ def draft_evidence_candidates(config: Any, *, workspace: str, relation: Any) -> 
                 grant = next((item for item in mapped if item.note_type == "decision"), None)
                 if grant is None:
                     continue
-                authorizations = share_evidence.mint_evidence_authorizations(
-                    config, workspace=workspace, brain_name=link.name, relation=relation,
-                )
-                for authorization in authorizations[:MAX_CANDIDATES_PER_RUN - len(results)]:
-                    with share_evidence.evidence_authorization_guard(config, workspace=workspace, authorization=authorization) as row:
-                        identity = {key: row.get(key) for key in (
-                            "project_id", "source_id", "entry_id", "entry_revision", "snapshot_id",
-                            "digest", "consent_generation", "audience", "field_mask",
-                        )}
-                        identity.update(workspace=workspace, workspace_lifetime=relation.workspace_lifetime_id,
-                                        brain_lifetime=link.lifetime_id)
-                        encoded = json.dumps(identity, sort_keys=True, separators=(",", ":")).encode("utf-8")
-                        opaque = hmac.new(share_evidence._relation_secret(config), b"share-candidate-path\0" + encoded, hashlib.sha256).hexdigest()
-                        relative_path = f"{grant.path}/{opaque}.md" if grant.kind == "collection" else ""
-                        snapshot = shared_brain_mapping.resolve_workspace_destination(
-                            config, workspace, link.name, note_type="decision", relative_path=relative_path,
-                            operation=grant.operation, owner=owner,
-                        )
-                        if snapshot is None:
-                            continue
-                        destination = snapshot.destination.destination
-                        operation = "replace" if destination.operation == "append" else destination.operation
-                        if operation not in ("create", "replace"):
-                            continue
-                        captured = _qualify_owned(config, workspace, link, destination.path, operation, owner)
-                        proposed = _compose_candidate(captured[2], _render_evidence(row["canonical_bytes"], row["digest"]), destination)
-                        identity.update(destination=asdict(snapshot), operation=operation,
-                                        base_commit=captured[1], base_blob=captured[3], base_mode=captured[6],
-                                        base_digest=hashlib.sha256(captured[2]).hexdigest() if captured[2] is not None else None,
-                                        result_digest=hashlib.sha256(proposed).hexdigest())
-                        request = json.dumps(identity, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
-                        fingerprint = hashlib.sha256(request.encode("utf-8")).hexdigest()
-                        queue = Path(config.workspace_vault_root(workspace)) / _QUEUE
-                        lock = _thread_queue_lock(queue)
-                        if not lock.acquire(blocking=False):
-                            _refuse("draft_unavailable", "The proposal queue is currently unavailable.")
-                        try:
-                            with memory_receipts.queue_lock(queue, timeout_s=0):
-                                if not shared_brain_mapping.revalidate_snapshot(config, snapshot, owner=owner):
-                                    _refuse("brain_unavailable", "The reviewed destination mapping changed.")
-                                store = _storage_safe(config, workspace)
-                                parent_fd = folder_io.open_directory_nofollow(str(store))
-                                try:
-                                    run_fd, _ = folder_io.open_or_create_private_dir(parent_fd, "candidate-runs")
-                                    os.close(run_fd)
-                                finally:
-                                    os.close(parent_fd)
-                                run_id = hmac.new(share_evidence._relation_secret(config),
-                                    (workspace + "\0" + relation.workspace_lifetime_id + "\0" + relation.relation_id).encode(),
-                                    hashlib.sha256).hexdigest()
-                                ledger_path = store / "candidate-runs" / (run_id + ".json")
-                                ledger = share_evidence._read_json(ledger_path, limit=8192, code="private_state_corrupt")
-                                fingerprints = ledger.get("fingerprints", [])
-                                if not isinstance(fingerprints, list) or any(not isinstance(item, str) or not re.fullmatch(r"[0-9a-f]{64}", item) for item in fingerprints) or len(fingerprints) > MAX_CANDIDATES_PER_RUN:
-                                    _refuse("draft_corrupt", "The private candidate run is corrupt.")
-                                if fingerprint not in fingerprints:
-                                    if len(fingerprints) >= MAX_CANDIDATES_PER_RUN:
-                                        _refuse("capacity", "The candidate intake limit for this run is reached.", limit=MAX_CANDIDATES_PER_RUN, count=len(fingerprints))
-                                    fingerprints.append(fingerprint)
-                                    share_evidence._write_private(ledger_path, json.dumps({"schema": share_evidence.SCHEMA, "fingerprints": fingerprints}).encode(), limit=8192)
-                                draft = _draft_share(
-                                    config, workspace=workspace, brain=link.name, relative_path=destination.path,
-                                    operation=operation, proposed=proposed, request_key="candidate:" + fingerprint,
-                                    request_fingerprint=fingerprint, checkout_claimed=True, registry_owner=owner,
-                                    expected_qualification=captured,
-                                    candidate_binding={"authorization": authorization, **asdict(snapshot)},
-                                )
-                                artifact = draft.artifact
-                                provenance = artifact.setdefault("producer_provenance", [])
-                                if not isinstance(provenance, list):
-                                    _refuse("draft_corrupt", "The private candidate provenance is corrupt.")
-                                if authorization not in provenance:
-                                    provenance.append(authorization)
-                                    sidecar_id = artifact["immutable"]["sidecar_id"]
-                                    sidecar = _store_dir(config) / (hashlib.sha256((workspace + "\0sidecar\0" + sidecar_id).encode()).hexdigest() + ".json")
-                                    _write_private(sidecar, json.dumps(artifact, ensure_ascii=False, sort_keys=True).encode("utf-8"))
-                                results.append(draft)
-                        finally:
-                            lock.release()
+                with share_evidence.evidence_claim(config, workspace=workspace) as claim:
+                    authorizations = share_evidence.mint_evidence_authorizations(
+                        config, workspace=workspace, brain_name=link.name, relation=relation, claim=claim,
+                    )
+                    for authorization in authorizations[:MAX_CANDIDATES_PER_RUN - len(results)]:
+                        with share_evidence.evidence_authorization_guard(config, workspace=workspace, authorization=authorization, claim=claim) as row:
+                            identity = {key: row.get(key) for key in (
+                                "project_id", "source_id", "entry_id", "entry_revision", "snapshot_id",
+                                "digest", "consent_generation", "audience", "field_mask",
+                            )}
+                            identity.update(workspace=workspace, workspace_lifetime=relation.workspace_lifetime_id,
+                                            brain_lifetime=link.lifetime_id)
+                            encoded = json.dumps(identity, sort_keys=True, separators=(",", ":")).encode("utf-8")
+                            opaque = hmac.new(share_evidence._relation_secret(config), b"share-candidate-path\0" + encoded, hashlib.sha256).hexdigest()
+                            relative_path = f"{grant.path}/{opaque}.md" if grant.kind == "collection" else ""
+                            snapshot = shared_brain_mapping.resolve_workspace_destination(
+                                config, workspace, link.name, note_type="decision", relative_path=relative_path,
+                                operation=grant.operation, owner=owner,
+                            )
+                            if snapshot is None:
+                                continue
+                            destination = snapshot.destination.destination
+                            operation = "replace" if destination.operation == "append" else destination.operation
+                            if operation not in ("create", "replace"):
+                                continue
+                            captured = _qualify_owned(config, workspace, link, destination.path, operation, owner)
+                            proposed = _compose_candidate(captured[2], _render_evidence(row["canonical_bytes"], row["digest"]), destination)
+                            identity.update(destination=asdict(snapshot), operation=operation,
+                                            base_commit=captured[1], base_blob=captured[3], base_mode=captured[6],
+                                            base_digest=hashlib.sha256(captured[2]).hexdigest() if captured[2] is not None else None,
+                                            result_digest=hashlib.sha256(proposed).hexdigest())
+                            request = json.dumps(identity, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+                            fingerprint = hashlib.sha256(request.encode("utf-8")).hexdigest()
+                            queue = Path(config.workspace_vault_root(workspace)) / _QUEUE
+                            lock = _thread_queue_lock(queue)
+                            if not lock.acquire(blocking=False):
+                                _refuse("draft_unavailable", "The proposal queue is currently unavailable.")
+                            try:
+                                with memory_receipts.queue_lock(queue, timeout_s=0):
+                                    if not shared_brain_mapping.revalidate_snapshot(config, snapshot, owner=owner):
+                                        _refuse("brain_unavailable", "The reviewed destination mapping changed.")
+                                    store = _storage_safe(config, workspace)
+                                    parent_fd = folder_io.open_directory_nofollow(str(store))
+                                    try:
+                                        run_fd, _ = folder_io.open_or_create_private_dir(parent_fd, "candidate-runs")
+                                        os.close(run_fd)
+                                    finally:
+                                        os.close(parent_fd)
+                                    run_id = hmac.new(share_evidence._relation_secret(config),
+                                        (workspace + "\0" + relation.workspace_lifetime_id + "\0" + relation.relation_id).encode(),
+                                        hashlib.sha256).hexdigest()
+                                    ledger_path = store / "candidate-runs" / (run_id + ".json")
+                                    ledger = share_evidence._read_json(ledger_path, limit=8192, code="private_state_corrupt")
+                                    fingerprints = ledger.get("fingerprints", [])
+                                    if not isinstance(fingerprints, list) or any(not isinstance(item, str) or not re.fullmatch(r"[0-9a-f]{64}", item) for item in fingerprints) or len(fingerprints) > MAX_CANDIDATES_PER_RUN:
+                                        _refuse("draft_corrupt", "The private candidate run is corrupt.")
+                                    if fingerprint not in fingerprints:
+                                        if len(fingerprints) >= MAX_CANDIDATES_PER_RUN:
+                                            _refuse("capacity", "The candidate intake limit for this run is reached.", limit=MAX_CANDIDATES_PER_RUN, count=len(fingerprints))
+                                        fingerprints.append(fingerprint)
+                                        share_evidence._write_private(ledger_path, json.dumps({"schema": share_evidence.SCHEMA, "fingerprints": fingerprints}).encode(), limit=8192)
+                                    draft = _draft_share(
+                                        config, workspace=workspace, brain=link.name, relative_path=destination.path,
+                                        operation=operation, proposed=proposed, request_key="candidate:" + fingerprint,
+                                        request_fingerprint=fingerprint, checkout_claimed=True, registry_owner=owner,
+                                        expected_qualification=captured,
+                                        candidate_binding={"authorization": authorization, **asdict(snapshot)},
+                                    )
+                                    artifact = draft.artifact
+                                    provenance = artifact.setdefault("producer_provenance", [])
+                                    if not isinstance(provenance, list):
+                                        _refuse("draft_corrupt", "The private candidate provenance is corrupt.")
+                                    if authorization not in provenance:
+                                        provenance.append(authorization)
+                                        sidecar_id = artifact["immutable"]["sidecar_id"]
+                                        sidecar = _store_dir(config) / (hashlib.sha256((workspace + "\0sidecar\0" + sidecar_id).encode()).hexdigest() + ".json")
+                                        _write_private(sidecar, json.dumps(artifact, ensure_ascii=False, sort_keys=True).encode("utf-8"))
+                                    results.append(draft)
+                            finally:
+                                lock.release()
         except ShareDraftError as exc:
             results.append(exc.refusal)
         except (OSError, WorkspaceRegistryBusy, WorkspaceRegistryConflict, memory_receipts.QueueLockError):
