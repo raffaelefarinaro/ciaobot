@@ -1165,11 +1165,11 @@ def test_intake_uses_settled_care_witness_and_current_consent(linked, tmp_path, 
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize(("interrupt_dispatch", "fact_count", "revoke_before_retry", "crash_after_filing"), [
-    (False, 1, False, False), (True, 1, False, False), (True, 1, True, False),
-    (True, 21, False, False), (False, 1, False, True),
+@pytest.mark.parametrize(("interrupt_dispatch", "fact_count", "revoke_before_retry", "crash_after_filing", "flood_ready"), [
+    (False, 1, False, False, False), (True, 1, False, False, False), (True, 1, True, False, False),
+    (True, 21, False, False, False), (False, 1, False, True, False), (False, 1, False, False, True),
 ])
-async def test_managed_care_settlement_files_private_candidates(linked, tmp_path, monkeypatch, interrupt_dispatch, fact_count, revoke_before_retry, crash_after_filing):
+async def test_managed_care_settlement_files_private_candidates(linked, tmp_path, monkeypatch, interrupt_dispatch, fact_count, revoke_before_retry, crash_after_filing, flood_ready):
     from dataclasses import replace
     from tests.test_share_evidence import _memory_manager
     from ciao import curation_run, curation_share, share_evidence as se, share_publish, shared_brain_guide, shared_brain_mapping
@@ -1255,6 +1255,15 @@ async def test_managed_care_settlement_files_private_candidates(linked, tmp_path
         curation_run.record_done(vault, [key], holder=holder)
         status, checkpoint = await dispatcher.dispatch(token, "care_checkpoint", {"holder": holder, "key": key})
         assert status == 200 and checkpoint["data"]["staged"] == fact_count
+        if flood_ready:
+            assert int(hashlib.sha256(holder.encode()).hexdigest(), 16) > 101
+            with se._workspace_guard(config, "home") as private:
+                ready = curation_share._private_dir(private, "care-ready", create=True)
+                assert ready is not None
+                for index in range(101):
+                    curation_share._write_record(ready / f"{index:064x}.json", {
+                        "schema": se.SCHEMA, "payload": {}, "signature": "0" * 64,
+                    })
         status, ended = await dispatcher.dispatch(token, "care_end", {"holder": holder, "status": "ok", "reasons": []})
         assert status == 200
         outcomes.append(ended)
@@ -1266,6 +1275,13 @@ async def test_managed_care_settlement_files_private_candidates(linked, tmp_path
         created_at="2026-01-01T00:00:00Z", frequency="daily", web_chat_id=chat.chat_id, archive_policy="manual")
     await manager._schedule_dispatcher_for().dispatch_schedule(entry, "care", "opus", "auto", "claude")
     assert outcomes
+    if flood_ready:
+        assert not (vault / "Workspace" / "Memory-Proposals.md").exists()
+        curation_share.dispatch_ready(config, workspace="home")
+        assert (vault / "Workspace" / "Memory-Proposals.md").read_text().count("[share ") == 1
+        assert len(list((config.state_path.parent / "secrets" / "share-evidence").rglob("care-ready/*.json"))) == 101
+        assert not (clone / "decisions").exists()
+        return
     if crash_after_filing:
         from ciao.proposal_actions import record_decision
         from ciao.proposal_tracking import walk_proposal_queue
