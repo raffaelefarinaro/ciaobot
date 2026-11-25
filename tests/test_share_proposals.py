@@ -1379,11 +1379,16 @@ def test_intake_uses_settled_care_witness_and_current_consent(linked, tmp_path, 
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize(("interrupt_dispatch", "fact_count", "revoke_before_retry", "crash_after_filing", "flood_ready"), [
-    (False, 1, False, False, False), (True, 1, False, False, False), (True, 1, True, False, False),
-    (True, 21, False, False, False), (False, 1, False, True, False), (False, 1, False, False, True),
+@pytest.mark.parametrize(("interrupt_dispatch", "fact_count", "revoke_before_retry", "crash_after_filing", "flood_ready", "change_mapping"), [
+    (False, 1, False, False, False, False), (True, 1, False, False, False, False),
+    (True, 1, True, False, False, False), (True, 21, False, False, False, False),
+    (False, 1, False, True, False, False), (False, 1, False, False, True, False),
+    (True, 1, False, False, False, "changed"),
+    (True, 1, False, False, False, "absent"),
+    (True, 1, False, False, False, "relinked"),
+    (True, 1, False, False, False, "concurrent"),
 ])
-async def test_managed_care_settlement_files_private_candidates(linked, tmp_path, monkeypatch, interrupt_dispatch, fact_count, revoke_before_retry, crash_after_filing, flood_ready):
+async def test_managed_care_settlement_files_private_candidates(linked, tmp_path, monkeypatch, interrupt_dispatch, fact_count, revoke_before_retry, crash_after_filing, flood_ready, change_mapping):
     from dataclasses import replace
     from tests.test_share_evidence import _memory_manager
     from ciao import curation_run, curation_share, share_evidence as se, share_publish, shared_brain_guide, shared_brain_mapping
@@ -1400,7 +1405,8 @@ async def test_managed_care_settlement_files_private_candidates(linked, tmp_path
     loaded = shared_brain_guide.read_guide(clone, brain_identity=fixture_config.link.identity)
     assert loaded.guide is not None
     mapping = shared_brain_mapping.approve(fixture_config.link, loaded, ["decision"], expected_pin=loaded.guide.pin)
-    link = replace(fixture_config.link, guide_mapping=mapping, guide_mapping_generation=mapping.generation)
+    link = (fixture_config.link if change_mapping == "absent" else
+            replace(fixture_config.link, guide_mapping=mapping, guide_mapping_generation=mapping.generation))
     config.workspace("home").shared_brains = [link]
     config.persist_workspace_registry()
     project.vault_folder = "alpha"
@@ -1459,6 +1465,26 @@ async def test_managed_care_settlement_files_private_candidates(linked, tmp_path
 
     monkeypatch.setattr(curation_share, "_write_record", interrupt_progress)
 
+    if change_mapping == "concurrent":
+        from concurrent.futures import ThreadPoolExecutor
+        from ciao import shared_brain
+        from ciao.workspaces import WorkspaceRegistryBusy
+
+        capture = curation_share._capture_destinations
+
+        def capture_with_competing_mapping_change(*args, **kwargs):
+            def try_change():
+                with shared_brain.checkout_claims_nowait([link.path], config):
+                    pytest.fail("mapping change acquired the checkout during settlement")
+
+            with ThreadPoolExecutor(max_workers=1) as executor:
+                future = executor.submit(try_change)
+                with pytest.raises(WorkspaceRegistryBusy):
+                    future.result(timeout=5)
+            return capture(*args, **kwargs)
+
+        monkeypatch.setattr(curation_share, "_capture_destinations", capture_with_competing_mapping_change)
+
     async def fake_stream_chat(chat_id, prompt, images=None, **kwargs):
         dispatcher = AgentDispatcher(service)
         status, begun = await dispatcher.dispatch(token, "care_begin", {"ttl_s": 600, "vault": str(vault)})
@@ -1480,6 +1506,18 @@ async def test_managed_care_settlement_files_private_candidates(linked, tmp_path
                     })
         status, ended = await dispatcher.dispatch(token, "care_end", {"holder": holder, "status": "ok", "reasons": []})
         assert status == 200
+        settled = curation_share.settled_witnesses(config, workspace="home", holder=holder)
+        assert len(settled) == fact_count
+        for entry in settled:
+            destination = entry["settlement_destination"]
+            if change_mapping == "absent":
+                assert destination["status"] == "not_mapped"
+                assert destination["lifetime_id"] == link.lifetime_id
+                continue
+            assert destination["status"] == "mapped" and destination["path"] == "decisions"
+            assert destination["lifetime_id"] == link.lifetime_id
+            assert destination["generation"] == link.guide_mapping_generation
+            assert destination["pin"]["digest"] == loaded.guide.pin.digest
         outcomes.append(ended)
         yield {"type": "result", "text": "done", "is_error": False}
 
@@ -1489,6 +1527,36 @@ async def test_managed_care_settlement_files_private_candidates(linked, tmp_path
         created_at="2026-01-01T00:00:00Z", frequency="daily", web_chat_id=chat.chat_id, archive_policy="manual")
     await manager._schedule_dispatcher_for().dispatch_schedule(entry, "care", "opus", "auto", "claude")
     assert outcomes
+    if change_mapping:
+        assert not (vault / "Workspace" / "Memory-Proposals.md").exists()
+        if change_mapping == "absent":
+            config.workspace("home").shared_brains = [replace(link, guide_mapping=mapping,
+                                                               guide_mapping_generation=mapping.generation)]
+            config.persist_workspace_registry()
+            curation_share.dispatch_ready(config, workspace="home")
+            assert not (vault / "Workspace" / "Memory-Proposals.md").exists()
+            assert not (clone / "decisions").exists()
+            return
+        if change_mapping == "relinked":
+            config.workspace("home").shared_brains = [replace(link, lifetime_id="brain_lifetime_new0001")]
+            config.persist_workspace_registry()
+            curation_share.dispatch_ready(config, workspace="home")
+            assert not (vault / "Workspace" / "Memory-Proposals.md").exists()
+            assert not (clone / "decisions").exists()
+            return
+        changed_guide = {"version": 1, "scope": "Decisions", "exclusions": [], "types": {
+            "decision": {"kind": "collection", "path": "other-decisions", "operation": "create"}}}
+        (clone / shared_brain_guide.GUIDE_NAME).write_text("```ciao-guide\n" + json.dumps(changed_guide) + "\n```\n")
+        changed = shared_brain_guide.read_guide(clone, brain_identity=link.identity)
+        assert changed.guide is not None
+        changed_mapping = shared_brain_mapping.approve(link, changed, ["decision"], expected_pin=changed.guide.pin)
+        config.workspace("home").shared_brains = [replace(link, guide_mapping=changed_mapping,
+                                                           guide_mapping_generation=changed_mapping.generation)]
+        config.persist_workspace_registry()
+        curation_share.dispatch_ready(config, workspace="home")
+        assert not (vault / "Workspace" / "Memory-Proposals.md").exists()
+        assert not (clone / "other-decisions").exists()
+        return
     if flood_ready:
         assert not (vault / "Workspace" / "Memory-Proposals.md").exists()
         curation_share.dispatch_ready(config, workspace="home")
