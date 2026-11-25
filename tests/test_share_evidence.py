@@ -1086,7 +1086,8 @@ def test_completed_memory_checkpoint_survives_registry_restart_and_revocation(tm
         se.recover_memory_pass_source_relation(config, workspace="home", pass_chat_id=chat.chat_id)
 
 
-def test_care_witness_binds_exact_preview_revision_and_revocation(tmp_path: Path) -> None:
+@pytest.mark.parametrize("newline", ["\r\n", "\r"])
+def test_care_witness_binds_exact_preview_revision_and_revocation(tmp_path: Path, newline: str) -> None:
     config, manager, project, _source = _memory_manager(tmp_path)
     project.vault_folder = "alpha"
     directory = Path(config.workspace_vault_root("home")) / "projects" / "active" / "alpha"
@@ -1095,19 +1096,30 @@ def test_care_witness_binds_exact_preview_revision_and_revocation(tmp_path: Path
     se._reset_project_manager_for_tests()
     se.bind_project_manager(manager)
     document = directory / se.DOCUMENT_NAME
-    text = "## Decision\nDecision: Launch\nEffective date: 2026-11-20\n"
-    document.write_text(text, encoding="utf-8")
+    text = newline.join(["## Decision", "Decision: Launch", "Effective date: 2026-11-20", ""])
+    document.write_bytes(text.encode("utf-8"))
+    relative = document.relative_to(config.workspace_vault_root("home")).as_posix()
+    note = curation_run._ScannedNote(rendered=relative, relative=relative, title="Decisions", stale=True,
+        exempt=False, age_days=120, threshold_days=90, last_verified=None)
+    items, _, _ = curation_run._stale_note_items(
+        vault_root=config.workspace_vault_root("home"), scanned=[note], today=datetime(2026, 11, 25).date(), scan_unavailable=False,
+    )
+    assert len(items) == 1 and items[0].target is not None
+    revision = items[0].target.revision
     preview = se.preview(config, workspace="home", brain_name="notes", project_id=project.project_id,
         project_name="Alpha", project_dir=directory, source_id=se.DOCUMENT_SOURCE, grant_type="snapshot",
         field_mask=["decision"], producers=["nightly_curation"], entry_index=0, session="operator-one")
     subprocess.run([sys.executable, "-c", "from pathlib import Path; import sys; Path(sys.argv[1]).write_text(sys.argv[2], encoding='utf-8')", str(document), text + "changed"], check=True)
     grant = se.confirm(config, workspace="home", token=preview["preview_token"], session="operator-one")["grant"]
-    relative = document.relative_to(config.workspace_vault_root("home")).as_posix()
-    revision = se._digest(text.encode())
     rows = se.care_snapshot_witnesses(config, workspace="home", project_id=project.project_id, relative_path=relative, revision=revision)
     assert len(rows) == 1 and rows[0]["grant_id"] == grant["grant_id"]
     assert rows[0]["entry_index"] == 0
-    assert se.care_snapshot_witnesses(config, workspace="home", project_id=project.project_id, relative_path=relative, revision=se._digest(document.read_bytes())) == []
+    changed_items, _, _ = curation_run._stale_note_items(
+        vault_root=config.workspace_vault_root("home"), scanned=[note], today=datetime(2026, 11, 25).date(), scan_unavailable=False,
+    )
+    assert len(changed_items) == 1 and changed_items[0].target is not None
+    assert changed_items[0].target.revision != revision
+    assert se.care_snapshot_witnesses(config, workspace="home", project_id=project.project_id, relative_path=relative, revision=changed_items[0].target.revision) == []
     assert se.care_snapshot_witnesses(config, workspace="work", project_id=project.project_id, relative_path=relative, revision=revision) == []
     old_created = project.created_at
     project.created_at = "2099-01-01T00:00:00Z"
@@ -1131,14 +1143,15 @@ def test_care_witness_binds_exact_preview_revision_and_revocation(tmp_path: Path
     assert se.care_snapshot_witnesses(config, workspace="home", project_id=project.project_id, relative_path=relative, revision=revision) == []
 
 
-def test_document_revision_matches_planner_newline_normalization(tmp_path: Path) -> None:
+@pytest.mark.parametrize("newline", ["\r\n", "\r"])
+def test_document_revision_matches_planner_bytes(tmp_path: Path, newline: str) -> None:
     from ciao.memory_receipts import content_revision
 
     document = tmp_path / "Decisions.md"
-    document.write_bytes(b"## Decision\r\nDecision: Launch\r\nEffective date: 2026-11-20\r\n")
+    document.write_bytes(newline.join(["## Decision", "Decision: Launch", "Effective date: 2026-11-20", ""]).encode())
     entries, revision = se._read_document(document)
     assert entries[0]["decision"] == "Launch"
-    assert revision == content_revision(document.read_text(encoding="utf-8"))
+    assert revision == content_revision(document.read_bytes().decode("utf-8"))
 
 
 def test_real_memory_pass_archive_proves_positive_stream_eligibility(

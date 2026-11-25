@@ -928,8 +928,8 @@ def _read_document(path: Path) -> tuple[list[dict[str, str]], str]:
         entry["decision"] = _clean_text(entry.get("decision", ""), "Decision", MAX_DECISION_CHARS, required=True)
         entry["reason"] = _clean_text(entry.get("reason", ""), "Reason", MAX_REASON_CHARS, required=False)
         entry["effective_date"] = _clean_effective_date(entry.get("effective_date", ""))
-    # Path.read_text, used by the planner, applies universal newline translation.
-    return entries, _digest(text.replace("\r\n", "\n").replace("\r", "\n").encode("utf-8"))
+    # The planner hashes UTF-8 decoded from raw bytes without newline conversion.
+    return entries, _digest(raw)
 
 
 def _parse_document(path: Path) -> list[dict[str, str]]:
