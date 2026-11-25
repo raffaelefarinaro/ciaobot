@@ -576,17 +576,16 @@ def _ensure_store(config: Any, workspace: str) -> Path:
     return directory
 
 
-@dataclass(eq=False, slots=True)
+@dataclass(eq=False, slots=True, frozen=True)
 class EvidenceClaim:
     config: Any
     workspace: str
     directory: Path
     pid: int
     thread: int
-    active: bool = True
 
 
-_ACTIVE_CLAIMS: set[EvidenceClaim] = set()
+_ACTIVE_CLAIMS: dict[EvidenceClaim, tuple[Any, str, Path, int, int]] = {}
 _CLAIMS_GUARD = threading.Lock()
 
 
@@ -594,9 +593,11 @@ def _validate_claim(config: Any, workspace: str, claim: EvidenceClaim) -> None:
     if not isinstance(claim, EvidenceClaim):
         _refuse("invalid_evidence_claim", "Evidence ownership is not current.")
     with _CLAIMS_GUARD:
-        valid = claim in _ACTIVE_CLAIMS
-    if (not valid or not claim.active or claim.config is not config or claim.workspace != workspace
-            or claim.pid != os.getpid() or claim.thread != threading.get_ident()):
+        owned = _ACTIVE_CLAIMS.get(claim)
+    if (owned is None or owned[0] is not config or owned[1] != workspace
+            or owned[3] != os.getpid() or owned[4] != threading.get_ident()
+            or claim.config is not owned[0] or claim.workspace != owned[1]
+            or claim.directory != owned[2] or claim.pid != owned[3] or claim.thread != owned[4]):
         _refuse("invalid_evidence_claim", "Evidence ownership is not current.")
 
 
@@ -605,8 +606,8 @@ def evidence_claim(config: Any, *, workspace: str) -> Iterator[EvidenceClaim]:
     """Own the workspace evidence transaction in this process and thread."""
     directory = _ensure_store(config, workspace)
     with _CLAIMS_GUARD:
-        if any(item.directory == directory and item.pid == os.getpid()
-               and item.thread == threading.get_ident() for item in _ACTIVE_CLAIMS):
+        if any(item[2] == directory and item[3] == os.getpid()
+               and item[4] == threading.get_ident() for item in _ACTIVE_CLAIMS.values()):
             _refuse("nested_evidence_claim", "Pass the existing evidence claim to nested operations.")
     with _lock(directory):
         try:
@@ -622,13 +623,12 @@ def evidence_claim(config: Any, *, workspace: str) -> Iterator[EvidenceClaim]:
             lock_exclusive(descriptor)
             claim = EvidenceClaim(config, workspace, directory, os.getpid(), threading.get_ident())
             with _CLAIMS_GUARD:
-                _ACTIVE_CLAIMS.add(claim)
+                _ACTIVE_CLAIMS[claim] = (config, workspace, directory, os.getpid(), threading.get_ident())
             try:
                 yield claim
             finally:
                 with _CLAIMS_GUARD:
-                    _ACTIVE_CLAIMS.discard(claim)
-                    claim.active = False
+                    _ACTIVE_CLAIMS.pop(claim, None)
                 unlock(descriptor)
         finally:
             os.close(descriptor)
@@ -2183,6 +2183,57 @@ def curation_source_relation(
     ))
 
 
+def recover_care_source_relation(config: Any, *, workspace: str, holder: str, witness_signature: str, claim: EvidenceClaim | None = None, now: datetime | None = None) -> SourceRelation:
+    """Resolve one signed settled care witness without trusting caller-supplied rows."""
+    from ciao import curation_share  # noqa: PLC0415
+
+    with _claim_scope(config, workspace, claim) as owned:
+        matches = [item for item in curation_share.settled_witnesses(config, workspace=workspace, holder=holder, claim=owned)
+                   if item["witness"].get("witness_signature") == witness_signature]
+        if len(matches) != 1:
+            _refuse("source_unavailable", "The settled care witness is unavailable.")
+        witness = matches[0]["witness"]
+        moment = _now(now)
+        return _seal_relation(config, SourceRelation(
+            kind="care_settlement", producer="nightly_curation", workspace=workspace,
+            workspace_lifetime_id=_workspace_lifetime(config, workspace), project_id=str(witness["project_id"]),
+            source_id=DOCUMENT_SOURCE, relation_id=holder, evidence=witness_signature,
+            lease_vault="", lease_proof_hash="", nonce=secrets.token_hex(16),
+            attested_at=_iso(moment), expires_at=_iso(moment + RELATION_TTL), seal=b"",
+        ))
+
+
+def _care_settled_row(config: Any, workspace: str, brain_name: str, holder: str, signature: str, claim: EvidenceClaim) -> dict[str, Any] | None:
+    from ciao import curation_share  # noqa: PLC0415
+
+    matches = [item for item in curation_share.settled_witnesses(config, workspace=workspace, holder=holder, claim=claim)
+               if item["witness"].get("witness_signature") == signature]
+    if len(matches) != 1:
+        return None
+    witness = matches[0]["witness"]
+    state = _load_state(config, workspace)
+    grant = state["grants"].get(witness.get("grant_id"))
+    try:
+        link = _link(config, workspace, brain_name)
+    except EvidenceError:
+        return None
+    if not isinstance(grant, dict) or not _link_matches(link, grant):
+        return None
+    key = grant.get("evidence_key")
+    if not isinstance(key, str) or not re.fullmatch(r"[0-9a-f]{64}", key):
+        return None
+    evidence = _read_json(_evidence_dir(config, workspace) / (key + ".json"), limit=MAX_EVIDENCE_BYTES, code="evidence_corrupt")
+    canonical = evidence.get("canonical_bytes")
+    if not isinstance(canonical, str) or _digest(canonical.encode("utf-8")) != witness.get("masked_digest"):
+        return None
+    return {"grant_id": grant["grant_id"], "grant_type": "snapshot", "entry_id": "", "entry_revision": None,
+            "snapshot_id": key, "consent_generation": grant.get("consent_generation"), "audience": grant.get("audience", ""),
+            "project_id": witness["project_id"], "source_id": DOCUMENT_SOURCE, "producer": "nightly_curation",
+            "relation_kind": "care_settlement", "relation_id": holder, "relation_evidence": signature,
+            "field_mask": grant.get("field_mask"), "canonical_bytes": canonical, "digest": witness["masked_digest"],
+            "recorded_at": grant.get("issued_at", "")}
+
+
 def eligible_entries(
     config: Any,
     *,
@@ -2191,6 +2242,7 @@ def eligible_entries(
     relation: SourceRelation,
     limit: int = 20,
     now: datetime | None = None,
+    claim: EvidenceClaim | None = None,
 ) -> list[dict[str, Any]]:
     """Entries one engine-attested source relation may publish right now.
 
@@ -2213,6 +2265,12 @@ def eligible_entries(
     moment = _now(now)
     if relation.expires_at <= _iso(moment):
         return []
+    if relation.kind == "care_settlement":
+        with _claim_scope(config, workspace, claim) as owned:
+            row = _care_settled_row(config, workspace, brain_name, relation.relation_id, relation.evidence, owned)
+            if row is None or row["project_id"] != relation.project_id or relation.source_id != DOCUMENT_SOURCE or relation.producer != "nightly_curation":
+                return []
+            return [row]
     if relation.kind == "memory_checkpoint":
         try:
             checkpoint = _verified_memory_checkpoint(config, workspace, relation.relation_id)
@@ -2342,17 +2400,17 @@ def _authorization_signature(config: Any, payload: dict[str, Any]) -> str:
     return hmac.new(_relation_secret(config), b"evidence-authorization\0" + raw, hashlib.sha256).hexdigest()
 
 
-def mint_evidence_authorizations(config: Any, *, workspace: str, brain_name: str, relation: SourceRelation) -> list[dict[str, Any]]:
+def mint_evidence_authorizations(config: Any, *, workspace: str, brain_name: str, relation: SourceRelation, claim: EvidenceClaim | None = None) -> list[dict[str, Any]]:
     """Capture exact eligible rows while the managed producer relation is live.
 
     Only recovered memory checkpoints currently provide durable source proof.
     The signed payload is private artifact data, not an operator credential.
     """
-    if not _relation_is_sealed(config, relation) or relation.kind != "memory_checkpoint":
+    if not _relation_is_sealed(config, relation) or relation.kind not in ("memory_checkpoint", "care_settlement"):
         _refuse("invalid_relation", "A durable engine-attested source is required.")
-    with _workspace_guard(config, workspace):
+    with _claim_scope(config, workspace, claim) as owned:
         link = _link(config, workspace, brain_name)
-        rows = eligible_entries(config, workspace=workspace, brain_name=brain_name, relation=relation)
+        rows = eligible_entries(config, workspace=workspace, brain_name=brain_name, relation=relation, claim=owned)
         result = []
         for row in rows:
             payload = {
@@ -2383,7 +2441,7 @@ def evidence_authorization_guard(config: Any, *, workspace: str, authorization: 
     row = payload.get("row")
     if not isinstance(row, dict):
         _refuse("authorization_invalid", "The evidence authorization is unavailable.")
-    with _claim_scope(config, workspace, claim):
+    with _claim_scope(config, workspace, claim) as owned:
         state = _load_state(config, workspace)
         if (payload.get("workspace") != workspace
                 or payload.get("workspace_lifetime_id") != state.get("workspace_lifetime_id")):
@@ -2401,11 +2459,16 @@ def evidence_authorization_guard(config: Any, *, workspace: str, authorization: 
                 or grant.get("audience") != row.get("audience") or row.get("producer") not in (grant.get("producers") or [])
                 or grant.get("field_mask") != row.get("field_mask")):
             _refuse("authorization_stale", "The evidence permission changed.")
-        if row.get("relation_kind") != "memory_checkpoint":
+        if row.get("relation_kind") == "care_settlement":
+            current = _care_settled_row(config, workspace, link.name, str(row.get("relation_id") or ""), str(row.get("relation_evidence") or ""), owned)
+            if current != row:
+                _refuse("authorization_stale", "The settled care evidence changed.")
+        elif row.get("relation_kind") == "memory_checkpoint":
+            checkpoint = _verified_memory_checkpoint(config, workspace, str(row.get("relation_id") or ""))
+            if checkpoint.get("signature") != row.get("relation_evidence") or checkpoint.get("project_id") != row.get("project_id"):
+                _refuse("authorization_stale", "The evidence source changed.")
+        else:
             _refuse("authorization_stale", "The evidence source is unavailable.")
-        checkpoint = _verified_memory_checkpoint(config, workspace, str(row.get("relation_id") or ""))
-        if checkpoint.get("signature") != row.get("relation_evidence") or checkpoint.get("project_id") != row.get("project_id"):
-            _refuse("authorization_stale", "The evidence source changed.")
         canonical = row.get("canonical_bytes")
         if not isinstance(canonical, str) or _digest(canonical.encode("utf-8")) != row.get("digest"):
             _refuse("authorization_invalid", "The evidence bytes are invalid.")

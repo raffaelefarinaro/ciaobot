@@ -38,7 +38,8 @@ def _seal(config: Any, domain: bytes, payload: dict[str, Any]) -> dict[str, Any]
 
 def _verified(config: Any, domain: bytes, record: dict[str, Any]) -> dict[str, Any] | None:
     payload, signature = record.get("payload"), record.get("signature")
-    if not isinstance(payload, dict) or not isinstance(signature, str):
+    if (not isinstance(payload, dict) or not isinstance(signature, str) or len(signature) != 64
+            or any(char not in "0123456789abcdef" for char in signature)):
         return None
     expected = _seal(config, domain, payload)["signature"]
     return payload if hmac.compare_digest(signature, expected) else None
@@ -264,7 +265,11 @@ def settled_witnesses(config: Any, *, workspace: str, holder: str, claim: share_
         if outbox is None:
             return []
         with os.scandir(outbox) as rows:
-            names = [row.name for row in rows]
+            names = []
+            for row in rows:
+                names.append(row.name)
+                if len(names) > MAX_CHECKPOINTS_PER_RUN:
+                    break
         if len(names) > MAX_CHECKPOINTS_PER_RUN:
             return []
         items: list[dict[str, Any]] = []
@@ -273,6 +278,10 @@ def settled_witnesses(config: Any, *, workspace: str, holder: str, claim: share_
                 return []
             record = share_evidence._read_json(outbox / name, limit=16384, code="private_state_corrupt")
             item = _verified(config, b"care-outbox\0", record)
+            if item is not None:
+                encoded = json.dumps(item, sort_keys=True, separators=(",", ":")).encode("utf-8")
+                if name != hashlib.sha256(encoded).hexdigest() + ".json":
+                    return []
             if (item is None or item.get("workspace") != workspace or item.get("holder") != holder
                 or item.get("dispatch_id") != settlement.get("dispatch_id")
                 or item.get("lease_started_at") != settlement.get("lease_started_at")
