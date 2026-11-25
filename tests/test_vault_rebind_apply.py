@@ -396,3 +396,30 @@ def test_cli_preview_apply_recover_and_reverse(tmp_path: Path, capsys: pytest.Ca
     token = json.loads(capsys.readouterr().out)["token"]
     assert cli.main(["vault-rebind", "reverse", "personal", "--id", operation, "--token", token, *root]) == 0
     assert rows_of(registry)[0]["vault_root"] == str(old)
+
+
+def test_reverse_roots_come_from_verified_images_not_the_record_fields(tmp_path: Path) -> None:
+    install, old, new, registry = make_install(tmp_path)
+    result = apply(install, "personal", new, token=review(install, "personal", new).token)
+    record = state_dir(install) / f"done-{result['operation']}.json"
+    data = json.loads(record.read_text())
+    data["old_root"] = str(tmp_path / "elsewhere")  # digests still verify; the fields lie
+    record.write_text(json.dumps(data))
+    after = registry.read_bytes()
+    with pytest.raises(ValueError, match="images"):
+        review_reverse(install, "personal", result["operation"])
+    with pytest.raises(ValueError, match="images"):
+        reverse(install, "personal", result["operation"], token="0" * 64)
+    assert registry.read_bytes() == after
+
+
+def test_no_lock_file_is_created_when_a_notes_folder_contains_the_state(tmp_path: Path) -> None:
+    install, old, new, registry = make_install(tmp_path)
+    rows = rows_of(registry)
+    rows[0]["vault_root"] = str(install)  # the source notes folder contains .runtime
+    registry.write_bytes((json.dumps(rows, indent=2) + "\n").encode())
+    with pytest.raises(ValueError, match="contains"):
+        apply(install, "personal", new, token="0" * 64)
+    runtime = install / ".runtime"
+    assert sorted(p.name for p in runtime.iterdir()) == ["workspaces.json"]
+    assert not (install / "server.lock").exists()

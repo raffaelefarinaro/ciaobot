@@ -21,12 +21,14 @@
 
 ## Recovery
 
-`recover` validates the journal (kind, id, digests of both images) and compares the live registry to its two images. Equal to the before image: nothing was applied, the journal is removed and the same reviewed token can be used again. Equal to the after image: completion is recorded. Anything else (a later edit, a tampered journal) refuses and keeps every journal and backup file as evidence. Crashes are tested at each step (after backup, after journal, before replace, after replace, after record).
+`recover` validates the journal (kind, id, digests of both images) and compares the live registry to its two images. Equal to the before image: nothing was applied, the journal is removed and the same reviewed token can be used again. Equal to the after image: completion is recorded. Anything else (a later edit, a tampered journal) refuses and keeps every journal and backup file as evidence. If an engine (or anyone) edited the registry while a journal was pending, `recover` refuses forever by design. The operator then reads `.runtime/vault-rebind/pending.json` and the `<id>.before.json` backup, decides by hand which binding the workspace should have, and either keeps the live registry as it is or edits only that workspace's `vault_root`; only after that is `pending.json` deleted (with the engine stopped), which lets a new preview and apply proceed. Nothing deletes the journal automatically. Crashes are tested at each step (after backup, after journal, before replace, after replace, after record).
 
 ## Reversal
 
 A completed record names the old and new root. Reversal needs the workspace to still use the recorded new root, the old folder to be available and to match the current notes tree exactly, a fresh review token, and no earlier reversal of that record. It changes only that field, so later unrelated registry edits survive; it never restores a whole old registry and never deletes a notes tree. If notes were written to the new folder after the rebind, the trees differ and the reversal refuses; reconcile the folders yourself, nothing is discarded.
 
 ## Not covered
+
+Reversal reads the old and new root from the digest-verified registry images in the record, not from the record's other fields. The registry rewrite re-serialises JSON, so the file is not byte-identical apart from the one field. The feature is POSIX-only (it needs `O_NOFOLLOW`, `O_DIRECTORY` and `flock`).
 
 The comparison is a point-in-time check: a cloud client can change a tree after the final verification; the engine being stopped and the client being paused are the operator's responsibility. Existing installations (legacy, relative, cloud-hosted runtime roots) are not migrated silently; they are refused until explicit handling exists.

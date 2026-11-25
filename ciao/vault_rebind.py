@@ -296,10 +296,16 @@ def _engine_stopped(runtime: Path) -> Iterator[None]:
 
 
 @contextmanager
-def _exclusive(install: Path) -> Iterator[tuple[Path, WorkspaceRegistryOwnership]]:
-    """Instance lock, then the interprocess registry claim; both released on exit."""
+def _exclusive(install: Path, roots: Sequence[Path]) -> Iterator[tuple[Path, WorkspaceRegistryOwnership]]:
+    """Instance lock, then the interprocess registry claim; both released on exit.
+
+    `roots` are the notes folders involved. The private state must not lie inside
+    one, and that is checked before any lock file is created, so no file is ever
+    created under a notes folder.
+    """
     install = _directory(install)
     runtime = _directory(install / ".runtime")
+    _require_state_outside(runtime / STATE_DIRNAME, *roots)
     with _engine_stopped(runtime):
         try:
             owner = acquire_registry_at(runtime)
@@ -344,9 +350,22 @@ def _load_journal(path: Path) -> dict[str, Any]:
                 raise ValueError("journal image does not match its digest")
         if data["before_sha256"] == data["after_sha256"]:
             raise ValueError("journal images are identical")
+        # The roots that drive reversal come from the digest-verified images, not
+        # from the unauthenticated fields beside them.
+        for field, side in (("old_root", "before"), ("new_root", "after")):
+            if _row_root(_image(data, side), data["workspace"]) != data[field]:
+                raise ValueError("journal binding does not match its recorded images")
     except (OSError, KeyError, TypeError, ValueError) as exc:
         raise ValueError(f"rebind journal is invalid; evidence kept in {path.parent}: {exc}") from exc
     return data
+
+
+def _row_root(raw: bytes, workspace: str) -> str:
+    matches = [row for row in _parse_rows(raw) if row.get("name") == workspace]
+    root = matches[0].get("vault_root") if len(matches) == 1 else None
+    if not isinstance(root, str) or not root:
+        raise ValueError("recorded registry has no unique binding for the workspace")
+    return root
 
 
 def _image(journal: dict[str, Any], side: str) -> bytes:
@@ -395,8 +414,19 @@ def review_reverse(install: Path, workspace: str, operation: str) -> RebindPrevi
     return plan
 
 
+def _current_root(install: Path, workspace: str) -> Path:
+    """The workspace's registered root from an unlocked read (advisory; rechecked under the locks)."""
+    return Path(_row_root(_registry_bytes(_directory(install)), workspace))
+
+
 def _transact(install: Path, kind: str, workspace: str, destination: Path | None, token: str, operation: str | None) -> dict[str, Any]:
-    with _exclusive(install) as (runtime, owner):
+    if operation:
+        record = _reversal_record(_directory(install) / ".runtime", workspace, operation)
+        roots = [Path(record["old_root"]), Path(record["new_root"])]
+    else:
+        assert destination is not None
+        roots = [_current_root(install, workspace), destination]
+    with _exclusive(install, roots) as (runtime, owner):
         pending = runtime / STATE_DIRNAME / _PENDING
         if pending.exists() or pending.is_symlink():
             raise ValueError("an interrupted rebind is pending; run `ciao vault-rebind recover` first")
@@ -465,7 +495,12 @@ def reverse(install: Path, workspace: str, operation: str, *, token: str) -> dic
 
 def recover(install: Path) -> dict[str, Any]:
     """Resolve an interrupted operation from the recorded before and after images."""
-    with _exclusive(install) as (runtime, _owner):
+    pending_path = _directory(install) / ".runtime" / STATE_DIRNAME / _PENDING
+    roots: list[Path] = []
+    if pending_path.exists() and not pending_path.is_symlink():
+        pending_journal = _load_journal(pending_path)
+        roots = [Path(pending_journal["old_root"]), Path(pending_journal["new_root"])]
+    with _exclusive(install, roots) as (runtime, _owner):
         state = runtime / STATE_DIRNAME
         pending = state / _PENDING
         if not pending.exists() and not pending.is_symlink():
