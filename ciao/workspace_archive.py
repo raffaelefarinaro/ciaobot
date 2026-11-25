@@ -934,7 +934,7 @@ def register_restored(
             claude_trim=settings["claude_trim"],
             color=settings["color"],
             shared_brains=[
-                reset_link_for_restore(link)
+                reset_link_for_restore(link) if link.kind == "git" or link.guide_mapping_generation else link
                 for link in settings["shared_brains"]
             ],
         )
