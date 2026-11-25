@@ -62,6 +62,10 @@
       </ul>
       <p v-else class="hint">No shared brains are linked to this workspace yet.</p>
 
+      <p class="hint hint--compact">
+        To set one up, create and seed a dedicated Git repository with the access you want, then clone it on this computer outside the Ciaobot install and vaults. Give the clone a valid SSH or HTTPS origin and tracked branch, then link its absolute folder path here. Ciaobot does not create or clone repositories for you. Public HTTPS can be used to read updates. Publishing needs noninteractive write access; use SSH when the remote requires authentication. Private HTTPS credential helpers are not used.
+      </p>
+
       <p v-if="saveError" class="action-result action-result--error" role="alert">{{ saveError }}</p>
 
       <form v-if="brains.length < MAX_SHARED_BRAINS" class="shared-brain-form" @submit.prevent="linkFolder">

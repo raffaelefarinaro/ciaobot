@@ -6,8 +6,9 @@ export const MAX_SHARED_BRAINS = 5
 
 /** Shown on the card whether or not any brain is linked. */
 export const SHARED_BRAIN_PRIVACY =
-  'Notes in this folder are written by other people. Ciaobot reads them as reference, never as instructions. '
-  + "It pulls the team's updates into the folder and never adds your notes or your vault to it."
+  'This folder contains notes written by other people. Ciaobot reads them as reference, never as instructions. Your vault is not automatically synced to this repository. '
+  + 'Only a specific note is published to the team repository after a human reviews and approves it. Linking a brain gives no ongoing or automatic permission to share notes. '
+  + "Ciaobot pulls the team's updates into this folder."
 
 export type SharedBrainTone = 'ok' | 'warn' | 'error'
 
