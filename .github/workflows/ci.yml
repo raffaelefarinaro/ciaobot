@@ -405,7 +405,13 @@ jobs:
       run: |
         pip-audit --desc || true
 
+    # Recent successful macOS runs finished this step in 8-12 minutes. A
+    # 25-minute bound leaves more than twice the observed headroom; without it
+    # a hung worker held the runner for hours. `faulthandler_timeout` in
+    # pyproject dumps every thread's stack and exits the worker first, so the
+    # failure names the hang instead of only timing out the step.
     - name: Run pytest with coverage
+      timeout-minutes: 25
       run: |
         pytest -n auto --cov=ciao --cov-report=term-missing tests/
 
@@ -450,6 +456,15 @@ jobs:
       working-directory: web
       run: npx playwright install chromium
 
+    # The PWA build above is the bundle the fixture serves. Build only the
+    # terminal harness here and run Playwright directly, instead of going
+    # through `npm run test:e2e`, whose npm prehook would rebuild that PWA.
+    # A clean checkout still gets both builds from the prehook; only this job,
+    # which has just built the PWA, skips the duplicate.
+    - name: Build the terminal harness
+      working-directory: web
+      run: npm run build:harness
+
     # Blocking, with no retries configured. A browser test that only passes on
     # the second attempt is a broken test, and hiding that behind a retry is
     # how a suite ends up being ignored. The suite is hermetic (a synthetic
@@ -457,7 +472,7 @@ jobs:
     # flake the answer is to delete the offending spec, not to soften the gate.
     - name: Run PWA browser tests
       working-directory: web
-      run: npm run test:e2e
+      run: npx playwright test
 
     - name: Upload browser test traces
       if: failure()

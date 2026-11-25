@@ -213,8 +213,13 @@ while the server is running, because the live schedule store may be writing it.
   declares it a required check on `main`. The
   full macOS `test` job (coverage, browser tests, and the engine wheel this
   branch would publish, installed into a throwaway venv and cold-started — the
-  launchd, installer, engine-update and migration coverage — about 18 minutes)
-  runs on release PRs and manual full runs, not ordinary develop PRs. The Swift
+  launchd, installer, engine-update and migration coverage — about 23-32
+  minutes) runs on release PRs and manual full runs, not ordinary develop PRs.
+  Its browser steps reuse the PWA build the job already made
+  (`npm run build:harness` then `npx playwright test`) instead of running the
+  `test:e2e` prehook a second time. A hung coverage worker is bounded by the
+  pytest step's 25-minute timeout, after `faulthandler` dumps every worker
+  thread's stack and exits that worker. The Swift
   Mac app in `mac/` is built by its own `mac-app` job (`swift test`,
   `swift build`, `scripts/build-app.sh`, which builds the bundled engine, the
   asset test and a plist lint on `macos-15`), which runs on develop PRs whose

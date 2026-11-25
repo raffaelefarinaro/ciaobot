@@ -2,6 +2,7 @@
 
 from pathlib import Path
 import re
+import tomllib
 
 import yaml
 
@@ -156,3 +157,49 @@ def test_mac_full_runs_always_build_the_app() -> None:
         in full
     )
     assert "printf 'mac_changed=true\\n' >> \"$GITHUB_OUTPUT\"" in full
+
+
+def test_macos_browser_tests_reuse_the_pwa_build() -> None:
+    # The macOS job builds the PWA for the fixture, so it must build only the
+    # terminal harness and run Playwright directly. Going through
+    # `npm run test:e2e` would run the prehook's second PWA build. Linux-e2e
+    # checks out a clean tree and keeps that prehook.
+    jobs = yaml.safe_load(
+        (Path(__file__).parents[1] / ".github/workflows/ci.yml").read_text()
+    )["jobs"]
+    steps = jobs["test"]["steps"]
+    names = [step.get("name", "") for step in steps]
+    assert names.index("Build PWA") < names.index("Build the terminal harness")
+    assert names.index("Build the terminal harness") < names.index(
+        "Run PWA browser tests"
+    )
+    by_name = {step["name"]: step for step in steps if "name" in step}
+    assert by_name["Build the terminal harness"]["run"] == "npm run build:harness"
+    assert by_name["Build the terminal harness"]["working-directory"] == "web"
+    assert by_name["Run PWA browser tests"]["run"] == "npx playwright test"
+    assert by_name["Run PWA browser tests"]["working-directory"] == "web"
+    assert not any("test:e2e" in (step.get("run") or "") for step in steps)
+    assert any(
+        step.get("run") == "npm run test:e2e" for step in jobs["linux-e2e"]["steps"]
+    )
+
+
+def test_macos_coverage_hang_is_bounded_and_diagnosable() -> None:
+    # Successful macOS runs finish pytest in 8-12 minutes. A 25-minute step
+    # bound is more than twice that; faulthandler dumps every worker thread
+    # and exits the hung worker first, so the failure names the hang.
+    jobs = yaml.safe_load(
+        (Path(__file__).parents[1] / ".github/workflows/ci.yml").read_text()
+    )["jobs"]
+    step = next(
+        step
+        for step in jobs["test"]["steps"]
+        if step.get("name") == "Run pytest with coverage"
+    )
+    assert step["timeout-minutes"] == 25
+    pyproject = tomllib.loads(
+        (Path(__file__).parents[1] / "pyproject.toml").read_text(encoding="utf-8")
+    )
+    ini = pyproject["tool"]["pytest"]["ini_options"]
+    assert ini["faulthandler_timeout"] == 600
+    assert ini["faulthandler_exit_on_timeout"] is True
