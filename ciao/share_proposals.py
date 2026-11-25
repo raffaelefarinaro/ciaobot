@@ -953,6 +953,42 @@ def _check_candidate_capacity(config: Any, workspace: str, brain: str, store: Pa
         _refuse("capacity", "The shared brain share proposal limit is reached.", limit=MAX_PER_BRAIN, count=count)
 
 
+def _candidate_run_ledger(config: Any, path: Path, workspace: str, run_id: str,
+                          run_identity: dict[str, Any], fingerprints: list[str] | None = None) -> list[str]:
+    """Read or atomically write the authenticated reservation for one run.
+
+    The private store must prevent deletion or rollback to an older valid file;
+    the MAC detects mutation and substitution but cannot provide monotonicity.
+    """
+    from ciao import share_evidence
+
+    secret = share_evidence._relation_secret(config)
+    if fingerprints is not None:
+        payload = {"schema": share_evidence.SCHEMA, "workspace": workspace, "run_id": run_id,
+                   "identity": run_identity, "fingerprints": fingerprints}
+        encoded = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
+        signature = hmac.new(secret, b"candidate-run\0" + encoded, hashlib.sha256).hexdigest()
+        share_evidence._write_private(path, json.dumps({"schema": share_evidence.SCHEMA, "payload": payload, "signature": signature}).encode(), limit=8192)
+        return fingerprints
+    record = share_evidence._read_json(path, limit=8192, code="private_state_corrupt")
+    if not record:
+        return []
+    loaded_payload = record.get("payload")
+    loaded_signature = record.get("signature")
+    if not isinstance(loaded_payload, dict) or not isinstance(loaded_signature, str) or not re.fullmatch(r"[0-9a-f]{64}", loaded_signature):
+        _refuse("draft_corrupt", "The private candidate run is corrupt.")
+    encoded = json.dumps(loaded_payload, sort_keys=True, separators=(",", ":")).encode()
+    expected = hmac.new(secret, b"candidate-run\0" + encoded, hashlib.sha256).hexdigest()
+    saved = loaded_payload.get("fingerprints")
+    if (not hmac.compare_digest(loaded_signature, expected) or loaded_payload.get("workspace") != workspace
+            or loaded_payload.get("schema") != share_evidence.SCHEMA or loaded_payload.get("run_id") != run_id
+            or loaded_payload.get("identity") != run_identity or not isinstance(saved, list)
+            or any(not isinstance(item, str) or not re.fullmatch(r"[0-9a-f]{64}", item) for item in saved)
+            or len(saved) > MAX_CANDIDATES_PER_RUN or len(set(saved)) != len(saved)):
+        _refuse("draft_corrupt", "The private candidate run is corrupt.")
+    return saved
+
+
 def _candidate_intent(
     config: Any, workspace: str, fingerprint: str,
     captured: tuple[Any, ...] | None = None, proposed: bytes | None = None,
@@ -1167,10 +1203,11 @@ def draft_evidence_candidates(config: Any, *, workspace: str, relation: Any) -> 
                                         (workspace + "\0" + relation.workspace_lifetime_id + "\0" + relation.relation_id + batch).encode(),
                                         hashlib.sha256).hexdigest()
                                     ledger_path = store / "candidate-runs" / (run_id + ".json")
-                                    ledger = share_evidence._read_json(ledger_path, limit=8192, code="private_state_corrupt")
-                                    fingerprints = ledger.get("fingerprints", [])
-                                    if not isinstance(fingerprints, list) or any(not isinstance(item, str) or not re.fullmatch(r"[0-9a-f]{64}", item) for item in fingerprints) or len(fingerprints) > MAX_CANDIDATES_PER_RUN:
-                                        _refuse("draft_corrupt", "The private candidate run is corrupt.")
+                                    run_identity = {"workspace_lifetime_id": relation.workspace_lifetime_id,
+                                                    "relation_id": relation.relation_id, "kind": relation.kind,
+                                                    "batch_index": relation.batch_index if relation.kind == "care_settlement" else None,
+                                                    "destination_lifetime_id": snapshot.lifetime_id if relation.kind == "care_settlement" else None}
+                                    fingerprints = _candidate_run_ledger(config, ledger_path, workspace, run_id, run_identity)
                                     # Reservations without an intent were interrupted before allocating
                                     # private content. Reclaim them while holding the queue claim.
                                     retained = []
@@ -1183,14 +1220,14 @@ def draft_evidence_candidates(config: Any, *, workspace: str, relation: Any) -> 
                                                 _refuse("draft_corrupt", "The private candidate intent is missing.")
                                     if retained != fingerprints:
                                         fingerprints = retained
-                                        share_evidence._write_private(ledger_path, json.dumps({"schema": share_evidence.SCHEMA, "fingerprints": fingerprints}).encode(), limit=8192)
+                                        _candidate_run_ledger(config, ledger_path, workspace, run_id, run_identity, fingerprints)
                                     reserved_now = fingerprint not in fingerprints
                                     if reserved_now:
                                         if len(fingerprints) >= MAX_CANDIDATES_PER_RUN:
                                             _refuse("capacity", "The candidate intake limit for this run is reached.", limit=MAX_CANDIDATES_PER_RUN, count=len(fingerprints))
                                     if reserved_now:
                                         fingerprints.append(fingerprint)
-                                        share_evidence._write_private(ledger_path, json.dumps({"schema": share_evidence.SCHEMA, "fingerprints": fingerprints}).encode(), limit=8192)
+                                        _candidate_run_ledger(config, ledger_path, workspace, run_id, run_identity, fingerprints)
                                     if intent is None:
                                         intent = _candidate_intent(config, workspace, fingerprint, captured, proposed)
                                         assert intent is not None
@@ -1208,6 +1245,9 @@ def draft_evidence_candidates(config: Any, *, workspace: str, relation: Any) -> 
                                 lock.release()
         except ShareDraftError as exc:
             results.append(exc.refusal)
+        except share_evidence.EvidenceError as exc:
+            code = "draft_corrupt" if exc.code == "private_state_corrupt" else "invalid_evidence"
+            results.append(ShareRefusal(code, "The private candidate evidence is unavailable."))
         except (OSError, WorkspaceRegistryBusy, WorkspaceRegistryConflict, memory_receipts.QueueLockError):
             results.append(ShareRefusal("draft_unavailable", "The candidate could not be filed safely."))
     return results

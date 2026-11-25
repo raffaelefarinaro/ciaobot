@@ -951,6 +951,23 @@ def test_intake_resolves_mapped_destination_and_never_publishes(linked, monkeypa
     relation.evidence = "witness-three"
     refusal = sp.draft_evidence_candidates(config, workspace="home", relation=relation)
     assert isinstance(refusal[0], sp.ShareRefusal) and refusal[0].code == "capacity"
+    run_path, = (sp._store_dir(config) / "candidate-runs").glob("*.json")
+    saved_run = run_path.read_bytes()
+    signed_run = json.loads(saved_run)["payload"]
+    with pytest.raises(sp.ShareDraftError):
+        sp._candidate_run_ledger(config, run_path, "home", signed_run["run_id"],
+                                 {**signed_run["identity"], "batch_index": 99})
+    with pytest.raises(sp.ShareDraftError):
+        sp._candidate_run_ledger(config, run_path, "home", "another-run", signed_run["identity"])
+    forged_run = json.loads(saved_run)
+    forged_run["payload"]["fingerprints"] = []
+    share_evidence._write_private(run_path, json.dumps(forged_run).encode(), limit=8192)
+    corrupt_run = sp.draft_evidence_candidates(config, workspace="home", relation=relation)
+    assert isinstance(corrupt_run[0], sp.ShareRefusal) and corrupt_run[0].code == "draft_corrupt"
+    share_evidence._write_private(run_path, b"{", limit=8192)
+    malformed_run = sp.draft_evidence_candidates(config, workspace="home", relation=relation)
+    assert isinstance(malformed_run[0], sp.ShareRefusal) and malformed_run[0].code == "draft_corrupt"
+    share_evidence._write_private(run_path, saved_run, limit=8192)
     relation.batch_index = 1
     row["batch_index"] = 1
     monkeypatch.setattr(sp, "MAX_PER_BRAIN", 1)
@@ -959,7 +976,7 @@ def test_intake_resolves_mapped_destination_and_never_publishes(linked, monkeypa
     assert isinstance(refusal[0], sp.ShareRefusal) and refusal[0].code == "capacity"
     assert set((sp._store_dir(config) / "candidate-intents").glob("*.json")) == intents_before
     ledgers = list((sp._store_dir(config) / "candidate-runs").glob("*.json"))
-    assert sorted(len(json.loads(path.read_text())["fingerprints"]) for path in ledgers) == [1]
+    assert sorted(len(json.loads(path.read_text())["payload"]["fingerprints"]) for path in ledgers) == [1]
 
     from ciao import memory_proposals
     from ciao.web import proposal_service
@@ -1004,14 +1021,14 @@ def test_intake_resolves_mapped_destination_and_never_publishes(linked, monkeypa
     relation.evidence = "witness-four"
     monkeypatch.setattr(sp, "MAX_CANDIDATES_PER_RUN", 2)
     monkeypatch.setattr(sp, "MAX_PER_BRAIN", 10)
-    full_ledger = next(path for path in ledgers if first[0].artifact["request_fingerprint"] in json.loads(path.read_text())["fingerprints"])
-    ledger = json.loads(full_ledger.read_text())
+    full_ledger = next(path for path in ledgers if first[0].artifact["request_fingerprint"] in json.loads(path.read_text())["payload"]["fingerprints"])
+    ledger = json.loads(full_ledger.read_text())["payload"]
     extra_fingerprint = "a" * 64
     saved = sp._candidate_intent(config, "home", first[0].artifact["request_fingerprint"])
     assert saved is not None
     sp._candidate_intent(config, "home", extra_fingerprint, *saved)
     ledger["fingerprints"].append(extra_fingerprint)
-    share_evidence._write_private(full_ledger, json.dumps(ledger).encode(), limit=8192)
+    sp._candidate_run_ledger(config, full_ledger, "home", ledger["run_id"], ledger["identity"], ledger["fingerprints"])
     per_destination = sp.draft_evidence_candidates(config, workspace="home", relation=relation)
     assert len(per_destination) == 2
     assert isinstance(per_destination[0], sp.ShareRefusal) and per_destination[0].code == "capacity"
@@ -1147,7 +1164,7 @@ def test_intake_uses_real_checkpoint_and_consent(linked, tmp_path, monkeypatch, 
             _, status = os.waitpid(pid, 0)
             assert os.waitstatus_to_exitcode(status) == 20
         ledgers = list((sp._store_dir(config) / "candidate-runs").glob("*.json"))
-        assert len(ledgers) == 1 and json.loads(ledgers[0].read_text())["fingerprints"] == []
+        assert len(ledgers) == 1 and json.loads(ledgers[0].read_text())["payload"]["fingerprints"] == []
         pid = os.fork()
         if pid == 0:
             original_evidence_write = se._write_private
