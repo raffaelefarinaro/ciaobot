@@ -7,6 +7,7 @@ did before this module existed; a non-blocking attempt on a held lock raises
 
 from __future__ import annotations
 
+import asyncio
 import fcntl
 
 def lock_exclusive(fd: int, *, blocking: bool = True) -> None:
@@ -16,3 +17,13 @@ def lock_exclusive(fd: int, *, blocking: bool = True) -> None:
 def unlock(fd: int) -> None:
     """Release the lock on ``fd``; a no-op when it is not held, like ``flock``."""
     fcntl.flock(fd, fcntl.LOCK_UN)
+
+
+async def await_exclusive(fd: int) -> None:
+    """Wait for flock without leaving a thread operating on fd after cancellation."""
+    while True:
+        try:
+            lock_exclusive(fd, blocking=False)
+            return
+        except BlockingIOError:
+            await asyncio.sleep(0.05)

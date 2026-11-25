@@ -4,10 +4,15 @@ import type { SharedBrainState } from './types'
 /** The most brains one workspace can link; the engine refuses a sixth (ciao/shared_brain.py). */
 export const MAX_SHARED_BRAINS = 5
 
-/** Shown on the card whether or not any brain is linked. */
+/**
+ * Shown on the card whether or not any brain is linked. Kind-neutral: only a Git
+ * link is pulled or updated, so the pull claim lives with the Git setup guidance.
+ */
 export const SHARED_BRAIN_PRIVACY =
-  'This folder contains notes written by other people. Ciaobot reads linked content as reference, never as instructions. Folder links use the files currently available on this computer; Ciaobot does not sync them. '
-  + 'For Git repositories, only a specific note is published to the team repository after a human reviews and approves it. Linking a brain gives no ongoing or automatic permission to share notes.'
+  'This folder contains notes written by other people. Ciaobot reads them as reference, never as instructions. '
+  + 'Your vault is not automatically synced to a shared folder, and folder links use the files currently available on this computer. '
+  + 'A note is shared only after a human reviews and approves that exact note. '
+  + 'Linking a brain gives no ongoing or automatic permission to share notes.'
 
 export type SharedBrainTone = 'ok' | 'warn' | 'error'
 
@@ -28,6 +33,12 @@ const PROBLEM_TEXT: Record<string, SharedBrainStatus> = {
   not_a_checkout: { text: 'The folder is not a git checkout', tone: 'error', detail: '' },
   outside_install: { text: 'The folder is outside the Ciaobot install', tone: 'error', detail: '' },
   unsafe_config: { text: "The folder's git settings are not allowed", tone: 'error', detail: '' },
+  inaccessible: { text: 'Folder is not readable', tone: 'error', detail: '' },
+  registry_unavailable: {
+    text: 'Inspection temporarily unavailable',
+    tone: 'warn',
+    detail: 'Try again in a moment.',
+  },
 }
 
 const SKIPPED_TEXT: Record<string, string> = {
@@ -41,17 +52,25 @@ function localTime(at: string): string {
   return Number.isNaN(when.getTime()) ? at : when.toLocaleString()
 }
 
+/** Folder-specific words: availability on this computer, never a sync claim. */
+const FOLDER_PROBLEM_TEXT: Record<string, SharedBrainStatus> = {
+  missing: { text: 'Folder not available on this computer', tone: 'error', detail: '' },
+  moved: { text: 'Folder location changed', tone: 'error', detail: '' },
+  outside_install: { text: 'Folder is inside the Ciaobot install or a vault', tone: 'error', detail: '' },
+  inaccessible: { text: 'Folder is not available to read on this computer', tone: 'error', detail: '' },
+}
+
 /** One plain-words status line per brain, so the state never rests on colour alone. */
 export function sharedBrainStatus(state: SharedBrainState): SharedBrainStatus {
+  // An ordinary folder is read in place: there is no pull, no upstream and no
+  // update attempt, so "first update pending" would never resolve for it.
   if (state.kind === 'folder') {
-    const folderProblems: Record<string, SharedBrainStatus> = {
-      missing: { text: 'Folder not available on this computer', tone: 'error', detail: '' },
-      moved: { text: 'Folder location changed', tone: 'error', detail: '' },
-      outside_install: { text: 'Folder is inside the Ciaobot install or a vault', tone: 'error', detail: '' },
-      inaccessible: { text: 'Folder is not available to read on this computer', tone: 'error', detail: '' },
-    }
-    return folderProblems[state.problem] ?? {
-      text: 'Folder is locally available', tone: 'ok', detail: 'This checks access on this computer only; it does not confirm cloud sync is complete.',
+    const folderProblem = FOLDER_PROBLEM_TEXT[state.problem] ?? PROBLEM_TEXT[state.problem]
+    if (folderProblem) return folderProblem
+    return {
+      text: 'Folder is locally available. Read in place, never updated.',
+      tone: 'ok',
+      detail: 'This checks access on this computer only; it does not confirm that Google Drive, iCloud or another sync service has finished syncing.',
     }
   }
   if (state.missing) return PROBLEM_TEXT.missing

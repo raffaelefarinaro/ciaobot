@@ -101,6 +101,9 @@ export interface SharedBrainRow {
 /** The payload of a workspace PATCH: a shared-brain save sends rows, not the read links. */
 export type WorkspacePatch = Omit<Partial<WorkspaceInfo>, 'shared_brains'> & { shared_brains?: SharedBrainRow[] }
 
+/** A Git checkout the engine pulls, or an ordinary folder read in place. */
+export type SharedBrainKind = 'git' | 'folder'
+
 /** One linked shared-brain folder, as the workspace registry lists it. */
 export interface SharedBrainLink {
   name: string
@@ -120,13 +123,14 @@ export interface SharedBrainUpdate {
 /** Live state of one linked brain, from `GET /api/workspaces/{name}/shared-brains`. */
 export interface SharedBrainState {
   name: string
+  kind: SharedBrainKind
   identity: string
   path: string
-  kind?: 'git' | 'folder'
   origin_changed: boolean
   missing: boolean
   // '' or why the folder cannot be used now: missing, moved, not_a_checkout,
-  // outside_install, unsafe_config, origin_changed.
+  // outside_install, unsafe_config, origin_changed, inaccessible, or
+  // registry_unavailable (a Git link the engine could not inspect).
   problem: string
   branch: string
   head: string

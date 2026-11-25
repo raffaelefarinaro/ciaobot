@@ -677,6 +677,45 @@ def test_workspace_archive_restore_clears_memory_approval(tmp_path):
     assert config.workspaces["work"].memory_approval == {}
 
 
+def test_workspace_archive_restore_preserves_folder_shared_brain(tmp_path):
+    from ciao.config import SharedBrainLink
+
+    client, config, _pcm, _store = _app(tmp_path, rerooted=True)
+    folder = (tmp_path.parent / f"{tmp_path.name}-drive-team").resolve()
+    folder.mkdir()
+    link = SharedBrainLink(
+        "team", str(folder), f"folder:{folder}", lifetime_id="kept-lifetime", kind="folder"
+    )
+    config.workspaces["work"].shared_brains = [link]
+
+    archived_response = client.post("/api/workspaces/work/archive")
+    assert archived_response.status_code == 200
+    archived = archived_response.json()["archived"]
+    restored_response = client.post("/api/workspaces/archived/restore", json={"id": archived["id"]})
+
+    assert restored_response.status_code == 200, restored_response.json()
+    (restored,) = config.workspaces["work"].shared_brains
+    assert restored.kind == "folder"
+    assert restored.lifetime_id == "kept-lifetime"
+
+
+def test_move_back_refuses_archive_metadata_changed_after_claim_snapshot(tmp_path):
+    from ciao import workspace_archive
+
+    client, config, _pcm, _store = _app(tmp_path, rerooted=True)
+    response = client.post("/api/workspaces/work/archive")
+    assert response.status_code == 200
+    archive = response.json()["archived"]
+    folder = workspace_archive._archive_folder(config, archive["id"])
+    metadata = workspace_archive._read_metadata(folder)
+    assert metadata is not None
+    changed = dict(metadata, summary={"changed": True})
+    workspace_archive._write_metadata(folder, changed)
+    with pytest.raises(workspace_archive.WorkspaceArchiveError, match="metadata changed"):
+        workspace_archive.move_back(config, archive["id"], expected_metadata=metadata)
+    assert Path(config.workspace_vault_root("work")).exists() is False
+
+
 def test_workspace_archive_restore_does_not_restore_provider_overrides(tmp_path):
     """Overrides can carry bypass, so a restore comes back on engine defaults."""
     from ciao.workspace_archive import restored_settings
@@ -925,10 +964,10 @@ def test_restore_registry_save_failure_leaves_the_archive_restorable(
     real_persist = CiaoConfig.persist_workspace_registry
     failing = {"on": True}
 
-    def _disk_full(self: CiaoConfig) -> None:
+    def _disk_full(self: CiaoConfig, **kwargs) -> None:
         if failing["on"]:
             raise OSError(28, "No space left on device")
-        real_persist(self)
+        real_persist(self, **kwargs)
 
     monkeypatch.setattr(CiaoConfig, "persist_workspace_registry", _disk_full)
     refused = client.post("/api/workspaces/archived/restore", json={"id": archived["id"]})
@@ -1012,10 +1051,10 @@ def test_registry_save_failure_on_archive_restores_the_entry_and_the_folder(
     real_persist = CiaoConfig.persist_workspace_registry
     failing = {"on": True}
 
-    def _disk_full(self: CiaoConfig) -> None:
+    def _disk_full(self: CiaoConfig, **kwargs) -> None:
         if failing["on"]:
             raise OSError(28, "No space left on device")
-        real_persist(self)
+        real_persist(self, **kwargs)
 
     monkeypatch.setattr(CiaoConfig, "persist_workspace_registry", _disk_full)
     response = client.post("/api/workspaces/work/archive")
@@ -1043,7 +1082,7 @@ def test_unregister_failure_puts_the_entry_back_in_place(tmp_path, monkeypatch):
     config = _config(tmp_path, rerooted=True)
     order_before = list(config.workspaces)
 
-    def _disk_full(self: CiaoConfig) -> None:
+    def _disk_full(self: CiaoConfig, **kwargs) -> None:
         raise OSError(28, "No space left on device")
 
     monkeypatch.setattr(CiaoConfig, "persist_workspace_registry", _disk_full)
@@ -1103,7 +1142,7 @@ def test_rollback_keeps_archive_json_when_the_schedules_cannot_be_put_back(
     mine = _work_schedule(store)
     before = _tree(tmp_path / "work")
 
-    def _disk_full(self: CiaoConfig) -> None:
+    def _disk_full(self: CiaoConfig, **kwargs) -> None:
         raise OSError(28, "No space left on device")
 
     def _no_put_back(_items):
@@ -1140,7 +1179,7 @@ def test_rollback_removes_archive_json_only_after_the_schedules_are_back(
         seen.append(any(archive_root(config).glob("work-*/archive.json")))
         return real_put_back(items)
 
-    def _disk_full(self: CiaoConfig) -> None:
+    def _disk_full(self: CiaoConfig, **kwargs) -> None:
         raise OSError(28, "No space left on device")
 
     monkeypatch.setattr(CiaoConfig, "persist_workspace_registry", _disk_full)
@@ -1179,7 +1218,7 @@ def test_a_failed_archive_does_not_announce_a_registry_change(tmp_path, monkeypa
     client, _config, pcm, _store = _app(tmp_path, rerooted=True)
     events = _capture_events(monkeypatch, pcm)
 
-    def _disk_full(self: CiaoConfig) -> None:
+    def _disk_full(self: CiaoConfig, **kwargs) -> None:
         raise OSError(28, "No space left on device")
 
     monkeypatch.setattr(CiaoConfig, "persist_workspace_registry", _disk_full)
@@ -1197,8 +1236,8 @@ def test_restore_rechecks_the_name_after_the_folder_move(tmp_path, monkeypatch):
     real_move_back = workspace_archive.move_back
     created = WorkspaceConfig(name="work", vault_root="work/memory-vault", color="green")
 
-    def _move_then_create(cfg, archive_id):
-        result = real_move_back(cfg, archive_id)
+    def _move_then_create(cfg, archive_id, **kwargs):
+        result = real_move_back(cfg, archive_id, **kwargs)
         cfg.workspaces["work"] = created
         return result
 
@@ -1766,10 +1805,10 @@ def test_archive_registry_write_serializes_with_legacy_lifetime_initialization(t
     original_persist = workspaces.persist_workspaces
     original_lock = workspaces.workspace_registry_lock
 
-    def blocking_persist(candidate):
+    def blocking_persist(candidate, **kwargs):
         persist_entered.set()
         assert release_persist.wait(timeout=3)
-        return original_persist(candidate)
+        return original_persist(candidate, **kwargs)
 
     def observe_lock(candidate):
         if threading.current_thread().name == "legacy-lifetime-init":
@@ -1808,3 +1847,109 @@ def test_archive_registry_write_serializes_with_legacy_lifetime_initialization(t
     assert not archive_thread.is_alive() and not initializer.is_alive()
     assert failures == []
     assert "work" not in config.workspaces
+
+
+def _hold_registry(runtime, acquired, release):
+    from ciao.workspaces import acquire_registry_at
+    with acquire_registry_at(runtime):
+        acquired.set()
+        assert release.wait(15)
+
+
+def test_other_process_blocks_archive_setup_and_maintenance_before_changes(tmp_path):
+    import multiprocessing
+    from ciao import cli, vault_relocate, workspace_reroot
+    from ciao.workspaces import WorkspaceRegistryBusy
+
+    client, config, _, _ = _app(tmp_path, rerooted=True)
+    config.persist_workspace_registry()
+    runtime = config.state_path.parent
+    registry = runtime / "workspaces.json"
+    before = registry.read_bytes()
+    work = _tree(tmp_path / "work")
+    ctx = multiprocessing.get_context("spawn")
+    acquired, release = ctx.Event(), ctx.Event()
+    peer = ctx.Process(target=_hold_registry, args=(runtime, acquired, release))
+    peer.start()
+    try:
+        assert acquired.wait(10)
+        response = client.post("/api/workspaces/work/archive")
+        assert response.status_code == 409
+        assert "busy" in response.json()["error"]
+        with pytest.raises(WorkspaceRegistryBusy):
+            cli.setup_workspace(tmp_path)
+        assert workspace_reroot.undo(tmp_path, runtime)["reason"] == "workspace registry is busy"
+        assert vault_relocate.undo(config, "work", runtime)["reason"] == "workspace registry is busy"
+        assert _tree(tmp_path / "work") == work
+        assert registry.read_bytes() == before
+        assert not (runtime / "onboarding.json").exists()
+    finally:
+        release.set()
+        peer.join(15)
+    assert peer.exitcode == 0
+
+
+def test_cancel_after_restore_move_finishes_registration_and_releases_claim(tmp_path, monkeypatch):
+    import asyncio
+    from starlette.requests import Request
+    from ciao.workspaces import acquire_workspace_registry
+
+    client, config, _, _ = _app(tmp_path, rerooted=True)
+    archive = client.post("/api/workspaces/work/archive").json()["archived"]
+    original = workspace_archive.move_back
+
+    def cancel_after_move(*args, **kwargs):
+        moved = original(*args, **kwargs)
+        asyncio.current_task().cancel()
+        return moved
+
+    monkeypatch.setattr(workspace_archive, "move_back", cancel_after_move)
+    async def exercise():
+        request = Request({"type": "http", "app": client.app})
+        request._json = {"id": archive["id"]}
+        with pytest.raises(asyncio.CancelledError):
+            await asyncio.create_task(restore_archived_workspace(request))
+
+    asyncio.run(exercise())
+    with acquire_workspace_registry(config):
+        assert "work" in config.workspaces
+        assert "work" in {row["name"] for row in json.loads((config.state_path.parent / "workspaces.json").read_bytes())}
+        assert (tmp_path / "work" / "AGENTS.md").is_file()
+        assert not (archive_root(config) / archive["id"]).exists()
+
+
+def test_cancel_during_owned_worker_keeps_registry_until_worker_finishes(tmp_path):
+    import asyncio
+    from ciao.web.routes_api import _workspace_registry_claim
+    from ciao.workspaces import run_while_claimed
+    from ciao.workspaces import WorkspaceRegistryBusy, acquire_workspace_registry
+
+    _, config, _, _ = _app(tmp_path, rerooted=True)
+    entered, finish = threading.Event(), threading.Event()
+
+    def write():
+        entered.set()
+        assert finish.wait(5)
+        (tmp_path / "worker-finished").touch()
+
+    async def mutate():
+        async with _workspace_registry_claim(config):
+            await run_while_claimed(write)
+
+    async def exercise():
+        task = asyncio.create_task(mutate())
+        try:
+            assert await asyncio.to_thread(entered.wait, 3)
+            for _ in range(2):
+                task.cancel()
+                await asyncio.sleep(0)
+                with pytest.raises(WorkspaceRegistryBusy):
+                    acquire_workspace_registry(config)
+        finally:
+            finish.set()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        with acquire_workspace_registry(config):
+            assert (tmp_path / "worker-finished").exists()
+
+    asyncio.run(exercise())

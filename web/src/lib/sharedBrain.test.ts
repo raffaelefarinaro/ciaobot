@@ -5,6 +5,7 @@ import type { SharedBrainState } from './types'
 function brain(over: Partial<SharedBrainState> = {}): SharedBrainState {
   return {
     name: 'team-notes',
+    kind: 'git',
     identity: 'github.com/acme/team-notes',
     path: '/Users/me/team-notes',
     origin_changed: false,
@@ -29,9 +30,16 @@ const update = (outcome: 'updated' | 'up_to_date' | 'skipped' | 'failed', reason
 })
 
 describe('SHARED_BRAIN_PRIVACY', () => {
-  it('says the notes are other people\'s and read as reference only', () => {
+  it("says the notes are other people's and read as reference only", () => {
     expect(SHARED_BRAIN_PRIVACY).toContain('written by other people')
     expect(SHARED_BRAIN_PRIVACY).toContain('never as instructions')
+  })
+
+  it('claims no sync or approval for linking, and no pull for a plain folder', () => {
+    expect(SHARED_BRAIN_PRIVACY).toContain('not automatically synced')
+    expect(SHARED_BRAIN_PRIVACY).toContain('reviews and approves that exact note')
+    expect(SHARED_BRAIN_PRIVACY).toContain('no ongoing or automatic permission')
+    expect(SHARED_BRAIN_PRIVACY).not.toContain("pulls the team's updates")
   })
 })
 
@@ -64,6 +72,48 @@ describe('sharedBrainStatus', () => {
   it('says the first update is pending when no attempt has run', () => {
     expect(sharedBrainStatus(brain({ last_update: null })))
       .toMatchObject({ text: 'Linked. First update pending.', tone: 'ok' })
+  })
+
+  it('reports a healthy ordinary folder as locally available and read in place, never as an update pending forever', () => {
+    expect(sharedBrainStatus(brain({
+      kind: 'folder',
+      branch: '',
+      head: '',
+      fetched_at: null,
+      last_update: null,
+    }))).toEqual({
+      text: 'Folder is locally available. Read in place, never updated.',
+      tone: 'ok',
+      detail: 'This checks access on this computer only; it does not confirm that Google Drive, iCloud or another sync service has finished syncing.',
+    })
+  })
+
+  it('maps an unreadable folder to local unavailability, never to a healthy link', () => {
+    expect(sharedBrainStatus(brain({ kind: 'folder', problem: 'inaccessible', last_update: null })))
+      .toEqual({ text: 'Folder is not available to read on this computer', tone: 'error', detail: '' })
+  })
+
+  it.each([
+    ['missing', 'Folder not available on this computer'],
+    ['moved', 'Folder location changed'],
+    ['outside_install', 'Folder is inside the Ciaobot install or a vault'],
+  ])('describes a folder problem %s in folder terms', (problem, text) => {
+    expect(sharedBrainStatus(brain({ kind: 'folder', problem }))).toEqual({ text, tone: 'error', detail: '' })
+  })
+
+  it('says inspection is temporarily unavailable for a busy checkout, without guessing a cause', () => {
+    // A background update holding the checkout lock also reports this code, and
+    // the link may still carry an older successful attempt.
+    const status = sharedBrainStatus(brain({
+      problem: 'registry_unavailable',
+      last_update: update('up_to_date'),
+    }))
+    expect(status).toEqual({
+      text: 'Inspection temporarily unavailable',
+      tone: 'warn',
+      detail: 'Try again in a moment.',
+    })
+    expect(status.detail).not.toContain('Workspace settings')
   })
 
   it('shows when the last update brought changes in', () => {

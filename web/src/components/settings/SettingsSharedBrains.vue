@@ -64,7 +64,10 @@
       <p v-else class="hint">No shared brains are linked to this workspace yet.</p>
 
       <p v-if="kindDraft === 'git'" class="hint hint--compact">
-        To set up a Git repository, create and seed it with the access you want, then clone it on this computer outside the Ciaobot install and vaults. Give the clone a valid SSH or HTTPS origin and tracked branch, then link its absolute folder path here. Ciaobot does not create or clone repositories for you. Public HTTPS can be used to read updates. Publishing needs noninteractive write access; use SSH when the remote requires authentication. Private HTTPS credential helpers are not used.
+        To set up a Git repository, create and seed it with the access you want, then clone it on this computer outside the Ciaobot install and vaults. Give the clone a valid SSH or HTTPS origin and tracked branch, then link its absolute folder path here. Ciaobot does not create or clone repositories for you. It pulls the checkout's tracked branch with fast-forward-only updates. Public HTTPS can be used to read updates. Publishing needs noninteractive write access; use SSH when the remote requires authentication. Private HTTPS credential helpers are not used.
+      </p>
+      <p v-else class="hint hint--compact">
+        Folder links are read in place for reference. Ciaobot never pulls, fetches or updates them; changes on disk appear as they are. Availability is checked on this computer when Ciaobot uses the folder, and a locally available folder does not confirm that Google Drive, iCloud or another sync service has finished syncing.
       </p>
 
       <p v-if="saveError" class="action-result action-result--error" role="alert">{{ saveError }}</p>
@@ -77,7 +80,6 @@
           </select>
           <span class="hint hint--compact">Folders are reference-only and are not synced by Ciaobot. Git repositories use the existing update and approved-publishing flow.</span>
         </label>
-        <p v-if="kindDraft === 'folder'" class="hint hint--compact">Folder availability is checked on this computer when Ciaobot uses it. A locally available folder does not confirm that Google Drive, iCloud or another sync service has finished syncing.</p>
         <label class="shared-brain-field">
           <span class="shared-brain-label">Folder path</span>
           <input
@@ -98,7 +100,7 @@
             class="routine-input shared-brain-input"
             autocomplete="off"
             spellcheck="false"
-            placeholder="taken from the repository"
+            :placeholder="kindDraft === 'git' ? 'taken from the repository' : 'taken from the folder'"
             :disabled="saving || listStale"
           />
         </label>
@@ -109,7 +111,7 @@
             class="btn-small"
             :disabled="saving || listStale || !pathDraft.trim()"
             :aria-busy="saving ? 'true' : undefined"
-          >{{ saving ? 'Linking...' : 'Link folder' }}</button>
+          >{{ saving ? 'Linking...' : (kindDraft === 'git' ? 'Link Git repository' : 'Link folder') }}</button>
         </div>
       </form>
       <p v-else class="hint hint--compact" role="status">

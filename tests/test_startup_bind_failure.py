@@ -101,6 +101,12 @@ def test_the_bind_phase_is_only_done_once_the_port_is_bound(
     """
     source = Path(main.__file__).read_text(encoding="utf-8")
 
+    bind_check_at = source.index("exit_code = _bind_or_fail(")
+    bind_exit_at = source.index("return exit_code", bind_check_at)
+    serve_lifecycle_at = source.index("await _serve_with_shared_brain(server, config)")
+    assert bind_check_at < bind_exit_at < serve_lifecycle_at, (
+        "shared brain tasks must not start when the engine's early bind check fails"
+    )
     assert source.count("tracker.done(BIND_PHASE)") == 1
     watcher_at = source.index("def _mark_bound_when_serving")
     done_at = source.index("tracker.done(BIND_PHASE)")
@@ -111,6 +117,36 @@ def test_the_bind_phase_is_only_done_once_the_port_is_bound(
         "can only be finished after the server has stopped"
     )
     assert done_at > watcher_at, "the done call belongs to the bind watcher"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("bootstrap", [False, True])
+async def test_shared_brain_lifecycle_closes_after_serve_startup_failure(
+    monkeypatch: pytest.MonkeyPatch, bootstrap: bool
+) -> None:
+    calls: list[str] = []
+
+    class FailedServe:
+        async def serve(self) -> None:
+            raise OSError("serve startup failed")
+
+    monkeypatch.setattr(main.shared_brain, "begin_update_lifecycle", lambda: calls.append("begin"))
+    monkeypatch.setattr(
+        main.shared_brain,
+        "start_update_loop",
+        lambda _config: calls.append("periodic"),
+    )
+
+    async def shutdown() -> None:
+        calls.append("shutdown")
+
+    monkeypatch.setattr(main.shared_brain, "shutdown_updates", shutdown)
+    with pytest.raises(OSError, match="serve startup failed"):
+        await main._serve_with_shared_brain(
+            FailedServe(), SimpleNamespace(bootstrap_mode=bootstrap)
+        )
+
+    assert calls == (["begin", "shutdown"] if bootstrap else ["begin", "periodic", "shutdown"])
 
 
 async def test_overall_ready_is_true_while_the_server_is_still_serving() -> None:
