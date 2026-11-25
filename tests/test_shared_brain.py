@@ -11,6 +11,7 @@ import json
 import os
 import shutil
 import subprocess
+import sys
 import time
 from pathlib import Path
 from types import SimpleNamespace
@@ -101,6 +102,15 @@ def link_of(path: Path | str) -> SharedBrainLink:
     return SharedBrainLink(name="notes", path=str(Path(path)), identity="github.com/x/notes")
 
 
+@pytest.fixture
+def isolated_update_lifecycle(monkeypatch):
+    """Give lifecycle tests fresh process-owned task registries."""
+    monkeypatch.setattr(sb, "_pending", {})
+    monkeypatch.setattr(sb, "_updates_closed", False)
+    monkeypatch.setattr(sb, "_update_loop_task", None)
+    monkeypatch.setattr(sb, "_shutdown_task", None)
+
+
 def record_git(monkeypatch) -> list[list[str]]:
     calls: list[list[str]] = []
     real = sb.run_git
@@ -112,6 +122,226 @@ def record_git(monkeypatch) -> list[list[str]]:
 
     monkeypatch.setattr(sb, "run_git", recording)
     return calls
+
+
+@pytest.mark.asyncio
+async def test_shutdown_owns_periodic_and_deduplicated_scheduled_updates(
+    tmp_path: Path, monkeypatch, isolated_update_lifecycle
+) -> None:
+    started = asyncio.Event()
+    cancelled = asyncio.Event()
+    calls = 0
+
+    async def slow_update(link, config):
+        nonlocal calls
+        calls += 1
+        started.set()
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            cancelled.set()
+            raise
+
+    monkeypatch.setattr(sb, "update_brain", slow_update)
+    monkeypatch.setattr(sb, "FIRST_UPDATE_DELAY_S", 3600)
+    link = link_of(tmp_path / "brain")
+    config = SimpleNamespace(workspaces={})
+
+    periodic = sb.start_update_loop(config)
+    assert sb.start_update_loop(config) is periodic
+    sb.schedule_update(link, config)
+    sb.schedule_update(link, config)
+    assert len(sb._pending) == 1
+    await started.wait()
+
+    shutdown = asyncio.create_task(sb.shutdown_updates())
+    await asyncio.sleep(0)
+    sb.schedule_update(link_of(tmp_path / "late"), config)
+    await shutdown
+
+    assert calls == 1
+    assert cancelled.is_set()
+    assert periodic.done()
+    assert not sb._pending
+
+
+@pytest.mark.asyncio
+async def test_shutdown_awaits_a_scheduled_job_that_fails_during_cancellation(
+    tmp_path: Path, monkeypatch, isolated_update_lifecycle
+) -> None:
+    started = asyncio.Event()
+
+    async def broken_update(link, config):
+        started.set()
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError as exc:
+            raise RuntimeError("update teardown failed") from exc
+
+    monkeypatch.setattr(sb, "update_brain", broken_update)
+    config = SimpleNamespace(workspaces={})
+    sb.schedule_update(link_of(tmp_path / "brain"), config)
+    await started.wait()
+
+    await sb.shutdown_updates()
+
+    assert not sb._pending
+
+
+@pytest.mark.asyncio
+async def test_cancellation_of_shutdown_waits_for_owned_task_cleanup(
+    tmp_path: Path, monkeypatch, isolated_update_lifecycle
+) -> None:
+    started = asyncio.Event()
+    cancelling = asyncio.Event()
+    finish_cleanup = asyncio.Event()
+
+    async def slow_cleanup(link, config):
+        started.set()
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            cancelling.set()
+            await finish_cleanup.wait()
+            raise
+
+    monkeypatch.setattr(sb, "update_brain", slow_cleanup)
+    sb.schedule_update(link_of(tmp_path / "brain"), SimpleNamespace(workspaces={}))
+    await started.wait()
+    shutdown = asyncio.create_task(sb.shutdown_updates())
+    await cancelling.wait()
+
+    shutdown.cancel()
+    await asyncio.sleep(0)
+    assert not shutdown.done()
+
+    finish_cleanup.set()
+    with pytest.raises(asyncio.CancelledError):
+        await shutdown
+    assert not sb._pending
+
+
+@pytest.mark.asyncio
+async def test_shutdown_cancels_periodic_and_scheduled_jobs_contending_on_checkout(
+    tmp_path: Path, monkeypatch, isolated_update_lifecycle
+) -> None:
+    entered = asyncio.Event()
+    release = asyncio.Event()
+    calls = 0
+
+    async def blocked_update(config, folder, identity):
+        nonlocal calls
+        calls += 1
+        entered.set()
+        await release.wait()
+        return sb._result("up_to_date")
+
+    monkeypatch.setattr(sb, "_update_unlocked", blocked_update)
+    monkeypatch.setattr(sb, "FIRST_UPDATE_DELAY_S", 0)
+    monkeypatch.setattr(sb, "UPDATE_INTERVAL_S", 3600)
+    path = tmp_path / "brain"
+    path.mkdir()
+    link = link_of(path)
+    config = FakeConfig(tmp_path)
+    config.workspaces = {"personal": SimpleNamespace(shared_brains=[link])}
+
+    sb.schedule_update(link, config)
+    await entered.wait()
+    periodic = sb.start_update_loop(config)
+    await asyncio.sleep(0)
+    assert calls == 1  # the periodic update is waiting on this checkout's lock
+
+    await sb.shutdown_updates()
+
+    assert periodic.done()
+    assert not sb._pending
+    assert calls == 1
+
+
+@pytest.mark.skipif(sys.version_info[:2] != (3, 12), reason="Python 3.12 subprocess teardown regression")
+def test_shutdown_reaps_subprocess_pipes_before_asyncio_run_teardown() -> None:
+    """Cancellation while Python 3.12 connects subprocess pipes is joined."""
+    script = r'''
+import asyncio
+import sys
+from pathlib import Path
+from ciao import shared_brain as sb
+
+pipe_setup = asyncio.Event()
+finish_pipe_setup = asyncio.Event()
+loop = None
+connect_read_pipe = None
+
+async def pause_during_pipe_setup(protocol_factory, pipe):
+    pipe_setup.set()
+    await finish_pipe_setup.wait()
+    return await connect_read_pipe(protocol_factory, pipe)
+
+async def update(_link, _config):
+    proc = None
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            sys.executable, "-c", "import time; time.sleep(30)",
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        await proc.communicate()
+    finally:
+        if proc is not None and proc.returncode is None:
+            proc.kill()
+            await proc.communicate()
+
+async def main():
+    global loop, connect_read_pipe
+    loop = asyncio.get_running_loop()
+    connect_read_pipe = loop.connect_read_pipe
+    loop.connect_read_pipe = pause_during_pipe_setup
+    sb.update_brain = update
+    sb.schedule_update(type("Link", (), {"path": str(Path("/tmp/ciao-shutdown-pipe")), "kind": "git"})(), None)
+    await pipe_setup.wait()
+    shutdown = asyncio.create_task(sb.shutdown_updates())
+    await asyncio.sleep(0)
+    if shutdown.done():
+        raise AssertionError("shutdown returned before pipe setup was released")
+    finish_pipe_setup.set()
+    await shutdown
+
+asyncio.run(main())
+'''
+    completed = subprocess.run(
+        [sys.executable, "-c", script],
+        cwd=Path(__file__).resolve().parents[1],
+        capture_output=True,
+        text=True,
+        timeout=8,
+        check=False,
+    )
+    assert completed.returncode == 0, completed.stderr
+
+
+@pytest.mark.asyncio
+async def test_a_new_server_lifetime_reopens_admission_after_shutdown(
+    tmp_path: Path, monkeypatch, isolated_update_lifecycle
+) -> None:
+    calls = 0
+
+    async def update(link, config):
+        nonlocal calls
+        calls += 1
+        return sb._result("up_to_date")
+
+    monkeypatch.setattr(sb, "update_brain", update)
+    config = SimpleNamespace(workspaces={})
+    link = link_of(tmp_path / "brain")
+
+    sb.schedule_update(link, config)
+    await sb.shutdown_updates()
+    sb.begin_update_lifecycle()
+    sb.schedule_update(link, config)
+    await asyncio.sleep(0)
+    await sb.shutdown_updates()
+
+    assert calls == 2
 
 
 # --- identity and paths -------------------------------------------------------

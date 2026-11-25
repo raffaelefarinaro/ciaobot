@@ -79,6 +79,9 @@ _locks: dict[str, asyncio.Lock] = {}
 _last_update: dict[str, dict[str, Any]] = {}
 _pending: dict[str, asyncio.Task[Any]] = {}
 _cursor = 0
+_updates_closed = False
+_update_loop_task: asyncio.Task[None] | None = None
+_shutdown_task: asyncio.Task[None] | None = None
 
 
 def _git_env(folder: Path) -> dict[str, str]:
@@ -663,14 +666,16 @@ async def _update_unlocked(config: Any, folder: Path, identity: str) -> dict[str
 
 def schedule_update(link: SharedBrainLink, config: Any) -> None:
     """Start one background update for ``link`` unless one is already pending."""
-    if link.kind != "git":
+    if link.kind != "git" or _updates_closed:
         return
     key = _lock_key(link.path)
     if key in _pending:
         return
     task = asyncio.create_task(update_brain(link, config))
     _pending[key] = task
-    task.add_done_callback(lambda _done: _pending.pop(key, None))
+    task.add_done_callback(
+        lambda done: _pending.pop(key, None) if _pending.get(key) is done else None
+    )
 
 
 async def _run_pass(config: Any, links: list[SharedBrainLink]) -> dict[str, int]:
@@ -736,3 +741,62 @@ async def update_loop(config: Any) -> None:
         except Exception:
             logger.exception("Shared brain update loop failed")
         await asyncio.sleep(UPDATE_INTERVAL_S)
+
+
+def start_update_loop(config: Any) -> asyncio.Task[None]:
+    """Start and retain the engine's periodic shared brain updater."""
+    global _update_loop_task
+    if _updates_closed:
+        raise RuntimeError("shared brain updates are shut down")
+    if _update_loop_task is None or _update_loop_task.done():
+        _update_loop_task = asyncio.create_task(update_loop(config))
+    return _update_loop_task
+
+
+def begin_update_lifecycle() -> None:
+    """Open update admission for a new server lifetime after its predecessor drained."""
+    global _updates_closed, _update_loop_task, _shutdown_task
+    if not _updates_closed:
+        return
+    if _shutdown_task is None or not _shutdown_task.done():
+        raise RuntimeError("previous shared brain updates are still shutting down")
+    _shutdown_task.result()
+    if any(not task.done() for task in _pending.values()):
+        raise RuntimeError("previous shared brain updates are still running")
+    if _update_loop_task is not None and not _update_loop_task.done():
+        raise RuntimeError("previous shared brain update loop is still running")
+    _pending.clear()
+    _update_loop_task = None
+    _shutdown_task = None
+    _updates_closed = False
+
+
+async def shutdown_updates() -> None:
+    """Close update admission, then cancel and await every owned update task."""
+    global _updates_closed, _shutdown_task
+    _updates_closed = True
+    if _shutdown_task is None:
+        tasks = set(_pending.values())
+        if _update_loop_task is not None:
+            tasks.add(_update_loop_task)
+
+        async def cancel_and_wait() -> None:
+            for task in tasks:
+                if not task.done():
+                    task.cancel()
+            if tasks:
+                await asyncio.gather(*tasks, return_exceptions=True)
+
+        _shutdown_task = asyncio.create_task(cancel_and_wait())
+    cancelled = False
+    while True:
+        try:
+            await asyncio.shield(_shutdown_task)
+            break
+        except asyncio.CancelledError:
+            cancelled = True
+            if _shutdown_task.done():
+                break
+    _shutdown_task.result()
+    if cancelled:
+        raise asyncio.CancelledError

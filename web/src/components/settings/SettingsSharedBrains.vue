@@ -51,7 +51,7 @@
             {{ statusOf(brain).text }}
           </p>
           <p v-if="statusOf(brain).detail" class="hint hint--compact">{{ statusOf(brain).detail }}</p>
-          <p class="hint hint--compact">
+          <p v-if="brain.kind !== 'folder'" class="hint hint--compact">
             <span v-if="brain.branch">Branch {{ brain.branch }}</span>
             <span v-if="brain.branch"> · </span>
             <span v-if="brain.head">Checked-out commit {{ brain.head }}</span>
@@ -61,6 +61,13 @@
         </li>
       </ul>
       <p v-else class="hint">No shared brains are linked to this workspace yet.</p>
+
+      <p class="hint hint--compact">
+        Adding a path here links a Git checkout: create and seed a dedicated repository with the access you want, then clone it on this computer outside the Ciaobot install and vaults. Give the clone a valid SSH or HTTPS origin and tracked branch, then link its absolute folder path here. Ciaobot does not create or clone repositories for you. It pulls the checkout's tracked branch with fast-forward-only updates. Public HTTPS can be used to read updates. Publishing needs noninteractive write access; use SSH when the remote requires authentication. Private HTTPS credential helpers are not used.
+      </p>
+      <p v-if="hasFolderLinks" class="hint hint--compact">
+        An ordinary folder linked through another setup is read in place for reference. Ciaobot never pulls, fetches or updates it; changes on disk appear as they are.
+      </p>
 
       <p v-if="saveError" class="action-result action-result--error" role="alert">{{ saveError }}</p>
 
@@ -123,6 +130,9 @@ const projectStore = useProjectStore()
 const workspace = computed(() => projectStore.activeWorkspace)
 
 const brains = ref<SharedBrainState[] | null>(null)
+// Guidance is per kind: only a Git link is pulled, so only a Git setup claim is
+// made; ordinary folders get their own line when one is listed.
+const hasFolderLinks = computed(() => (brains.value ?? []).some((brain) => brain.kind === 'folder'))
 const loading = ref(false)
 const loadError = ref('')
 const saving = ref(false)
