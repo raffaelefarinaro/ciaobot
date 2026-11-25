@@ -1316,3 +1316,189 @@ def test_intake_uses_settled_care_witness_and_current_consent(linked, tmp_path, 
     assert isinstance(dismissed, sp.ShareRefusal) and dismissed.code == "already_settled"
     se.revoke(config, workspace="home", grant_id=grant["grant_id"])
     assert sp.draft_evidence_candidates(config, workspace="home", relation=relation) == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("interrupt_dispatch", "fact_count", "revoke_before_retry", "crash_after_filing", "flood_ready"), [
+    (False, 1, False, False, False), (True, 1, False, False, False), (True, 1, True, False, False),
+    (True, 21, False, False, False), (False, 1, False, True, False), (False, 1, False, False, True),
+])
+async def test_managed_care_settlement_files_private_candidates(linked, tmp_path, monkeypatch, interrupt_dispatch, fact_count, revoke_before_retry, crash_after_filing, flood_ready):
+    from dataclasses import replace
+    from tests.test_share_evidence import _memory_manager
+    from ciao import curation_run, curation_share, share_evidence as se, share_publish, shared_brain_guide, shared_brain_mapping
+    from ciao.agent_surface import AgentDispatcher
+    from ciao.control_plane import CiaoControlPlane
+    from ciao.mcp_server import CiaoMcpService
+    from ciao.schedules import ScheduleEntry
+
+    fixture_config, clone = linked
+    config, manager, project, _source = _memory_manager(tmp_path)
+    guide = {"version": 1, "scope": "Decisions", "exclusions": [], "types": {
+        "decision": {"kind": "collection", "path": "decisions", "operation": "create"}}}
+    (clone / shared_brain_guide.GUIDE_NAME).write_text("```ciao-guide\n" + json.dumps(guide) + "\n```\n")
+    loaded = shared_brain_guide.read_guide(clone, brain_identity=fixture_config.link.identity)
+    assert loaded.guide is not None
+    mapping = shared_brain_mapping.approve(fixture_config.link, loaded, ["decision"], expected_pin=loaded.guide.pin)
+    link = replace(fixture_config.link, guide_mapping=mapping, guide_mapping_generation=mapping.generation)
+    config.workspace("home").shared_brains = [link]
+    config.persist_workspace_registry()
+    project.vault_folder = "alpha"
+    vault = Path(config.workspace_vault_root("home"))
+    directory = vault / "projects" / "active" / "alpha"
+    directory.mkdir(parents=True)
+    (vault / "Workspace").mkdir(parents=True, exist_ok=True)
+    document = directory / se.DOCUMENT_NAME
+    content = "---\ntype: project\nupdated: 2024-01-01\n---\n\n" + "\n".join(
+        f"## Decision\nDecision: Share decision {index}\nEffective date: 2026-11-20\n"
+        for index in range(fact_count)
+    )
+    document.write_text(content, encoding="utf-8")
+    se._reset_project_manager_for_tests()
+    se.bind_project_manager(manager)
+    grants = []
+    for index in range(fact_count):
+        preview = se.preview(config, workspace="home", brain_name=link.name, project_id=project.project_id,
+            project_name="Alpha", project_dir=directory, source_id=se.DOCUMENT_SOURCE, grant_type="snapshot",
+            field_mask=["decision"], producers=["nightly_curation"], entry_index=index, session="operator")
+        grants.append(se.confirm(config, workspace="home", token=preview["preview_token"], session="operator")["grant"])
+    relative = document.relative_to(vault).as_posix()
+    key = curation_run.item_key(curation_run.PASS_STALE_NOTE, relative)
+    from tests.test_curation_run import _guide, _stale_items
+
+    items = _stale_items(vault, _guide(tmp_path))
+    item = next(candidate for candidate in items if key in candidate.keys)
+    assert item.target is not None and item.target.revision == hashlib.sha256(content.encode()).hexdigest()
+    chat = manager.create_chat(project.project_id, title="Care", provider="claude")
+    plane = CiaoControlPlane(config, project_chat_manager=manager, schedule_manager=SimpleNamespace())
+    service = CiaoMcpService(config)
+    service.bind(plane)
+    token, _ = service.registry.issue(chat_id=chat.chat_id, project_id=chat.project_id, workspace="home", provider="claude")
+    monkeypatch.setattr(share_publish, "publish_share", lambda *args, **kwargs: pytest.fail("candidate intake published"))
+    outcomes = []
+    actual_intake = sp.draft_evidence_candidates
+    attempts = 0
+
+    def interrupted_intake(*args, **kwargs):
+        nonlocal attempts
+        attempts += 1
+        if interrupt_dispatch and attempts == 1:
+            raise OSError("synthetic interrupted intake")
+        return actual_intake(*args, **kwargs)
+
+    monkeypatch.setattr(sp, "draft_evidence_candidates", interrupted_intake)
+    write_record = curation_share._write_record
+    failed_write = False
+
+    def interrupt_progress(path, record):
+        nonlocal failed_write
+        if crash_after_filing and path.parent.name == "care-progress" and not failed_write:
+            failed_write = True
+            raise OSError("synthetic interruption after filing")
+        write_record(path, record)
+
+    monkeypatch.setattr(curation_share, "_write_record", interrupt_progress)
+
+    async def fake_stream_chat(chat_id, prompt, images=None, **kwargs):
+        dispatcher = AgentDispatcher(service)
+        status, begun = await dispatcher.dispatch(token, "care_begin", {"ttl_s": 600, "vault": str(vault)})
+        assert status == 200
+        holder = begun["data"]["holder"]
+        curation_run.record_plan(vault, holder=holder, plan=curation_run.lease_plan(
+            curation_run.RunPlan(planned=(item,), deferred=(), budget=curation_run.RunBudget())))
+        curation_run.record_done(vault, [key], holder=holder)
+        status, checkpoint = await dispatcher.dispatch(token, "care_checkpoint", {"holder": holder, "key": key})
+        assert status == 200 and checkpoint["data"]["staged"] == fact_count
+        if flood_ready:
+            assert int(hashlib.sha256(holder.encode()).hexdigest(), 16) > 101
+            with se._workspace_guard(config, "home") as private:
+                ready = curation_share._private_dir(private, "care-ready", create=True)
+                assert ready is not None
+                for index in range(101):
+                    curation_share._write_record(ready / f"{index:064x}.json", {
+                        "schema": se.SCHEMA, "payload": {}, "signature": "0" * 64,
+                    })
+        status, ended = await dispatcher.dispatch(token, "care_end", {"holder": holder, "status": "ok", "reasons": []})
+        assert status == 200
+        outcomes.append(ended)
+        yield {"type": "result", "text": "done", "is_error": False}
+
+    manager.stream_chat = fake_stream_chat
+    entry = ScheduleEntry(schedule_id="system-memory-curation@home", scope="system", workspace="home",
+        last_dispatch_id="synthetic-dispatch", daily_time_utc="08:00", prompt="care", chat_id=0,
+        created_at="2026-01-01T00:00:00Z", frequency="daily", web_chat_id=chat.chat_id, archive_policy="manual")
+    await manager._schedule_dispatcher_for().dispatch_schedule(entry, "care", "opus", "auto", "claude")
+    assert outcomes
+    if flood_ready:
+        assert not (vault / "Workspace" / "Memory-Proposals.md").exists()
+        curation_share.dispatch_ready(config, workspace="home")
+        assert (vault / "Workspace" / "Memory-Proposals.md").read_text().count("[share ") == 1
+        assert len(list((config.state_path.parent / "secrets" / "share-evidence").rglob("care-ready/*.json"))) == 101
+        assert not (clone / "decisions").exists()
+        return
+    if crash_after_filing:
+        from ciao.proposal_actions import record_decision
+        from ciao.proposal_tracking import walk_proposal_queue
+
+        queue_path = vault / "Workspace" / "Memory-Proposals.md"
+        row, = walk_proposal_queue("home", "home/Workspace/Memory-Proposals.md", queue_path.read_text())
+        assert sp.share_dismissal_block(config, workspace="home", bullet=row.bullet, proposal_id=row.proposal_id) is None
+        record_decision(queue_path, action="dismiss", text=row.bullet.text, kind="share", via="pwa", outcome="dismissed", proposal_id=row.proposal_id)
+        queue_path.write_text("# Memory Proposals\n", encoding="utf-8")
+        curation_share.dispatch_ready(config, workspace="home")
+        assert "[share " not in queue_path.read_text()
+        assert not list((config.state_path.parent / "secrets" / "share-evidence").rglob("care-ready/*.json"))
+        assert not (clone / "decisions").exists()
+        return
+    if interrupt_dispatch:
+        assert not (vault / "Workspace" / "Memory-Proposals.md").exists()
+        if revoke_before_retry:
+            se.revoke(config, workspace="home", grant_id=grants[0]["grant_id"])
+            curation_share.dispatch_ready(config, workspace="home")
+            assert not list((config.state_path.parent / "secrets" / "share-evidence").rglob("care-ready/*.json"))
+            preview = se.preview(config, workspace="home", brain_name=link.name, project_id=project.project_id,
+                project_name="Alpha", project_dir=directory, source_id=se.DOCUMENT_SOURCE, grant_type="snapshot",
+                field_mask=["decision"], producers=["nightly_curation"], entry_index=0, session="operator")
+            se.confirm(config, workspace="home", token=preview["preview_token"], session="operator")
+            chat = manager.create_chat(project.project_id, title="Later care", provider="claude")
+            token, _ = service.registry.issue(chat_id=chat.chat_id, project_id=chat.project_id, workspace="home", provider="claude")
+            entry.web_chat_id = chat.chat_id
+            entry.last_dispatch_id = "later-dispatch"
+            await manager._schedule_dispatcher_for().dispatch_schedule(entry, "care", "opus", "auto", "claude")
+        else:
+            manager._save()
+            from ciao.sessions import StateStore
+            from ciao.transcripts import TranscriptStore
+            from ciao.web.project_chats import ProjectChatManager
+
+            restarted = ProjectChatManager(
+                config, state_store=StateStore(config.state_path, config.workspace_root, config.media_root),
+                transcript_store=TranscriptStore(config.state_path.parent, config.workspace_root / "transcripts"),
+                path=config.state_path.parent / "web_projects.json",
+            )
+            se._reset_project_manager_for_tests()
+            se.bind_project_manager(restarted)
+            curation_share.dispatch_ready(config, workspace="home")
+    curation_share.dispatch_ready(config, workspace="home")
+    queue_path = vault / "Workspace" / "Memory-Proposals.md"
+    if fact_count > 1:
+        from ciao.proposal_actions import record_decision
+        from ciao.proposal_tracking import walk_proposal_queue
+
+        seen: set[str] = set()
+        for _ in range(4):
+            rows = list(walk_proposal_queue("home", "home/Workspace/Memory-Proposals.md", queue_path.read_text()))
+            assert all(row.proposal_id not in seen for row in rows)
+            seen.update(row.proposal_id for row in rows)
+            if len(seen) == fact_count:
+                break
+            for row in rows:
+                assert sp.share_dismissal_block(config, workspace="home", bullet=row.bullet, proposal_id=row.proposal_id) is None
+                record_decision(queue_path, action="dismiss", text=row.bullet.text, kind="share", via="pwa", outcome="dismissed", proposal_id=row.proposal_id)
+            queue_path.write_text("# Memory Proposals\n", encoding="utf-8")
+            curation_share.dispatch_ready(config, workspace="home")
+        assert len(seen) == fact_count
+    else:
+        assert queue_path.read_text().count("[share ") == 1
+    assert not list((config.state_path.parent / "secrets" / "share-evidence").rglob("care-ready/*.json"))
+    assert not (clone / "decisions").exists()

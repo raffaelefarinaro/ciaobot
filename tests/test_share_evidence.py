@@ -1192,6 +1192,7 @@ def test_care_checkpoint_stages_only_completed_exact_witness_and_replays_once(
         curation_run.state_path(vault).write_text(curation_cycle.encode_state(state), encoding="utf-8")
     config.workspace("home").shared_brains = [SharedBrainLink(
         name="notes", path=str(tmp_path / "brain"), identity="team", lifetime_id="brain_lifetime_fixed01")]
+    config.persist_workspace_registry()
     se._reset_project_manager_for_tests()
     se.bind_project_manager(manager)
     document = directory / se.DOCUMENT_NAME
@@ -1247,13 +1248,17 @@ def test_care_checkpoint_stages_only_completed_exact_witness_and_replays_once(
     capabilities[0].write_text(original)
     assert curation_share.settled_witnesses(config, workspace="home", holder=lease.holder) == []
     script = "\n".join([
-        "import os, sys",
+        "import json, os, sys",
         "from pathlib import Path",
-        "from ciao.config import CiaoConfig, WorkspaceConfig",
+        "from ciao.config import CiaoConfig, WorkspaceConfig, shared_brains_from_rows",
         "from ciao import curation_share",
         "root, vault, lifetime, holder, key, crash_point = sys.argv[1:]",
         "root = Path(root)",
         "config = CiaoConfig(pwa_auth_token='t', workspace_root=root, state_path=root / '.runtime/state.json', media_root=root / '.runtime/media', workspaces={'home': WorkspaceConfig(name='home', vault_root=vault, lifetime_id=lifetime, _lifetime_persisted=True)})",
+        "raw = (root / '.runtime/workspaces.json').read_bytes()",
+        "row = next(row for row in json.loads(raw) if row['name'] == 'home')",
+        "config.workspace('home').shared_brains = shared_brains_from_rows(row.get('shared_brains'))",
+        "config._workspace_registry_bytes = raw",
         "write = curation_share._write_record",
         "def interrupted(path, record):",
         "    if path.parent.name == 'care-settlements' and crash_point == 'before_receipt': os._exit(42)",
@@ -1274,10 +1279,11 @@ def test_care_checkpoint_stages_only_completed_exact_witness_and_replays_once(
                             crash_point], check=False)
     assert crash.returncode == {"before_state": 43, "before_receipt": 42, "before_ready": 44}[crash_point]
     if crash_point == "before_state":
-        replacement = curation_run.begin_run(
-            vault, holder="replacement", chat_id="care", now=datetime.now(UTC) + timedelta(days=1),
-            before_acquire=lambda state: curation_share.recover(config, "home", state),
-        )
+        with se.evidence_claim(config, workspace="home") as claim:
+            replacement = curation_run.begin_run(
+                vault, holder="replacement", chat_id="care", now=datetime.now(UTC) + timedelta(days=1),
+                before_acquire=lambda state: curation_share.recover(config, "home", state, claim),
+            )
     else:
         replacement = curation_share.begin(config, workspace="home", chat_id="care", token_id="token",
                                            dispatch_id="replacement", ttl_s=600)
@@ -1290,6 +1296,8 @@ def test_care_checkpoint_stages_only_completed_exact_witness_and_replays_once(
         original = records[0].read_bytes()
         records[0].unlink()
         assert curation_share.settled_witnesses(config, workspace="home", holder=lease.holder) == []
+        curation_share.dispatch_ready(config, workspace="home")
+        assert list((config.state_path.parent / "secrets" / "share-evidence").rglob("care-ready/*.json"))
         records[0].write_bytes(original)
         records[0].chmod(0o600)
         extra = records[0].with_name("f" * 64 + ".json")
@@ -1428,7 +1436,8 @@ def test_care_batch_indices_do_not_shift_when_earlier_witness_is_withdrawn(confi
             encoded = json.dumps(item, sort_keys=True, separators=(",", ":")).encode()
             name = hashlib.sha256(encoded).hexdigest() + ".json"
             curation_share._write_record(outbox / name, curation_share._seal(config, b"care-outbox\0", item))
-            manifest.append({"name": name, "witness_signature": witness["witness_signature"]})
+            manifest.append({"name": name, "witness_signature": witness["witness_signature"],
+                             "destination": {"status": "not_mapped", "brain": "notes"}})
             witnesses.append(witness)
         manifest.sort(key=lambda row: row["name"])
         settlement = {"workspace": "home", "workspace_lifetime_id": config.lifetimes["home"], "holder": holder, "status": "ok", "dispatch_id": "dispatch", "lease_started_at": "start", "lease_proof_hash": "proof", "manifest_version": 1, "batch_width": 20, "outbox_manifest": manifest}
@@ -1452,6 +1461,47 @@ def test_care_private_storage_rejects_a_symlink(tmp_path: Path) -> None:
     (tmp_path / "care-outbox").symlink_to(outside, target_is_directory=True)
     with pytest.raises(se.EvidenceError, match="unsafe"):
         curation_share._private_dir(tmp_path, "care-outbox", create=True)
+
+
+def test_care_acquires_evidence_before_lease_state(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    import fcntl
+    from contextlib import contextmanager
+    from ciao import curation_share, memory_receipts
+
+    config, manager, _project, _source = _memory_manager(tmp_path)
+    vault = Path(config.workspace_vault_root("home"))
+    (vault / "Workspace").mkdir(parents=True, exist_ok=True)
+    original = se.evidence_claim
+    checks: list[str] = []
+
+    @contextmanager
+    def checked(config, *, workspace):
+        path = memory_receipts.lock_path_for(str(curation_run.state_path(vault).resolve()))
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with path.open("a+") as handle:
+            fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+            fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+        checks.append(workspace)
+        with original(config, workspace=workspace) as claim:
+            yield claim
+
+    monkeypatch.setattr(se, "evidence_claim", checked)
+    se._reset_project_manager_for_tests()
+    se.bind_project_manager(manager)
+    lease = curation_share.begin(config, workspace="home", chat_id="care", token_id="token", dispatch_id="dispatch", ttl_s=600)
+    relative = "People/Example.md"
+    key = curation_run.item_key(curation_run.PASS_STALE_NOTE, relative)
+    item = curation_run.WorklistItem(pass_id=curation_run.PASS_STALE_NOTE, label="note", reason="due", keys=(key,),
+                                     target=curation_run.StaleNoteTarget(relative_path=relative, revision="a" * 64))
+    curation_run.record_plan(vault, holder=lease.holder, plan=curation_run.lease_plan(
+        curation_run.RunPlan(planned=(item,), deferred=(), budget=curation_run.RunBudget())))
+    curation_run.record_done(vault, [key], holder=lease.holder)
+    assert curation_share.checkpoint(config, manager, workspace="home", chat_id="care", token_id="token",
+                                     dispatch_id="dispatch", holder=lease.holder, key=key) == 0
+    curation_share.end(config, workspace="home", chat_id="care", token_id="token", dispatch_id="dispatch",
+                       holder=lease.holder, status="ok", planned=0, completed=0, deferred=0,
+                       reasons=[], live_keys=frozenset(), failed=0, counts_complete=True, dispatch_active=lambda: True)
+    assert len(checks) >= 2
 
 
 def test_real_memory_pass_archive_proves_positive_stream_eligibility(

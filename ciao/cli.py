@@ -6444,15 +6444,18 @@ def _curation_begin_command(args: argparse.Namespace) -> int:
             print(f"curation could not begin: {error.get('message', 'engine unavailable')}", file=sys.stderr)
             return CURATION_BUSY_EXIT if error.get("code") == "curation_busy" else 1
         else:
-            before_acquire = None
+            lease = None
             if _name:
                 from ciao import curation_share, share_evidence
 
                 config = _installed_config(_workspace)
                 if share_evidence._store_root(config).exists():
-                    before_acquire = lambda state: curation_share.recover(config, _name, state)
-            lease = begin_run(vault, holder=args.holder, ttl_s=budget.max_seconds,
-                              chat_id=chat_id, before_acquire=before_acquire)
+                    name = _name
+                    with share_evidence.evidence_claim(config, workspace=name) as claim:
+                        lease = begin_run(vault, holder=args.holder, ttl_s=budget.max_seconds, chat_id=chat_id,
+                                          before_acquire=lambda state: curation_share.recover(config, name, state, claim))
+            if lease is None:
+                lease = begin_run(vault, holder=args.holder, ttl_s=budget.max_seconds, chat_id=chat_id)
     except CurationBusy as exc:
         print(f"curation is already running: {exc}", file=sys.stderr)
         return CURATION_BUSY_EXIT
@@ -6460,6 +6463,7 @@ def _curation_begin_command(args: argparse.Namespace) -> int:
         print(f"curation state error: {exc}", file=sys.stderr)
         return 1
 
+    assert lease is not None
     from ciao.curation_run import _category_cluster_items
 
     try:

@@ -1718,7 +1718,7 @@ class CiaoControlPlane:
         # callers and no second spelling of the fallback to drift from it.
         return self.workspace_vault_root(self._workspace(principal))
 
-    def managed_care_begin(self, principal: AgentPrincipal, ttl_s: float, vault: str) -> dict[str, Any]:
+    async def managed_care_begin(self, principal: AgentPrincipal, ttl_s: float, vault: str) -> dict[str, Any]:
         """Take a care lease only for the engine's currently running care dispatch."""
         import math  # noqa: PLC0415
         from ciao import curation_run, curation_share  # noqa: PLC0415
@@ -1739,6 +1739,10 @@ class CiaoControlPlane:
             )
         except curation_run.CurationBusy as exc:
             raise ControlPlaneError("curation_busy", str(exc)) from None
+        try:
+            await asyncio.to_thread(curation_share.dispatch_ready, self.config, workspace=workspace)
+        except Exception:  # noqa: BLE001 - private intake remains retryable
+            logger.warning("Unable to file settled Workspace care candidates; they remain private")
         return _ok({**lease.as_dict(), "vault": str(lease.vault_root.resolve())})
 
     def managed_care_checkpoint(self, principal: AgentPrincipal, holder: str, key: str) -> dict[str, Any]:
@@ -1790,13 +1794,18 @@ class CiaoControlPlane:
                 config=self.config, path_prefix=VAULT_RENDER_PREFIX, workspace=workspace,
             )
             live_keys = frozenset(key for item in views.remaining.items for key in item.keys)
-            return curation_share.end(
+            summary = curation_share.end(
                 self.config, workspace=workspace, chat_id=principal.chat_id, token_id=principal.token_id,
                 dispatch_id=dispatch_id, holder=holder, status=status, planned=counts.planned,
                 completed=counts.completed, deferred=counts.deferred, reasons=[*reasons, *counts.reasons],
                 live_keys=live_keys, failed=counts.failed, counts_complete=counts.complete,
                 dispatch_active=lambda: dispatcher.active_care_dispatch(principal.chat_id, workspace) == dispatch_id,
             )
+            try:
+                curation_share.dispatch_ready(self.config, workspace=workspace)
+            except Exception:  # noqa: BLE001 - the durable receipt is retried on the next run
+                logger.warning("Unable to file settled Workspace care candidates; they remain private")
+            return summary
 
         try:
             summary = await asyncio.to_thread(settle)
