@@ -6365,6 +6365,8 @@ async def setup_finish_endpoint(request: Request) -> JSONResponse:
             vault_root_arg = str(notes)
             notes_stat = notes.stat()
             notes_identity = (notes_stat.st_dev, notes_stat.st_ino)
+            if str(body.get("notes_identity", "")) != f"{notes_stat.st_dev}:{notes_stat.st_ino}":
+                raise ValueError("notes folder changed since inspection; inspect it again")
             vault_mode = "existing"
         except (OSError, ValueError) as exc:
             return JSONResponse({"error": str(exc)}, status_code=400)
@@ -6379,6 +6381,8 @@ async def setup_finish_endpoint(request: Request) -> JSONResponse:
         )
     except ValueError as exc:
         return JSONResponse({"error": str(exc)}, status_code=400)
+    if notes_folder and selection.existing_env.get("PWA_AUTH_TOKEN") not in (None, "", password):
+        return JSONResponse({"error": "Use the password chosen when setup began."}, status_code=400)
 
     # setup_workspace only writes workspace files and the bundled-engine
     # LaunchAgent. The release installer owns app downloads, so setup remains
@@ -6554,9 +6558,11 @@ async def setup_inspect_folder_endpoint(request: Request) -> JSONResponse:
     if notes_raw:
         try:
             notes = validate_external_setup_vault(target, notes_raw)
-        except ValueError as exc:
+            notes_stat = notes.stat()
+        except (OSError, ValueError) as exc:
             return JSONResponse({"error": str(exc)}, status_code=400)
         return JSONResponse({"path": str(target), "notes_resolved": str(notes),
+                             "notes_identity": f"{notes_stat.st_dev}:{notes_stat.st_ino}",
                              "cloud_sync_warning": cloud_sync_warning(target)})
     # The same read-only selection finish and direct setup use, so the wizard
     # reports the location the finish will write. An ambiguous or unusable

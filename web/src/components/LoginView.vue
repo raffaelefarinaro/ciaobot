@@ -519,6 +519,7 @@ const advancedOpen = ref(false)
 const separateNotes = ref(false)
 const notesFolder = ref('')
 const notesResolved = ref('')
+const notesIdentity = ref('')
 const notesError = ref('')
 let notesInspection = 0
 
@@ -527,16 +528,20 @@ async function inspectNotesFolder() {
   const root = workspace.value.trim()
   const id = ++notesInspection
   notesResolved.value = ''
+  notesIdentity.value = ''
   notesError.value = ''
   if (!requested || !root) return
   try {
-    const data = await api.get<{ notes_resolved: string }>(`/api/setup/inspect-folder?path=${encodeURIComponent(root)}&notes_folder=${encodeURIComponent(requested)}`)
-    if (id === notesInspection && requested === notesFolder.value.trim() && root === workspace.value.trim()) notesResolved.value = data.notes_resolved
+    const data = await api.get<{ notes_resolved: string; notes_identity: string }>(`/api/setup/inspect-folder?path=${encodeURIComponent(root)}&notes_folder=${encodeURIComponent(requested)}`)
+    if (id === notesInspection && requested === notesFolder.value.trim() && root === workspace.value.trim()) {
+      notesResolved.value = data.notes_resolved
+      notesIdentity.value = data.notes_identity
+    }
   } catch (e) {
     if (id === notesInspection) notesError.value = errorMessage(e, 'Could not inspect the notes folder.')
   }
 }
-watch([notesFolder, workspace, separateNotes], () => { notesInspection++; notesResolved.value = ''; notesError.value = '' })
+watch([notesFolder, workspace, separateNotes], () => { notesInspection++; notesResolved.value = ''; notesIdentity.value = ''; notesError.value = '' })
 
 // Folder inspection: when the chosen workspace folder already contains
 // nested workspace directories (e.g. memory-vault/personal/, memory-vault/work/),
@@ -809,7 +814,7 @@ const canFinish = computed(() => {
   if (!passwordReady.value) {
     return false
   }
-  if (separateNotes.value && !notesResolved.value) return false
+  if (separateNotes.value && (!notesResolved.value || !notesIdentity.value)) return false
   const currentProvider = provider.value
   const providerOk = setupStatus.value?.providers?.[currentProvider]?.ok
   if (!providerOk && !apiFallback.value) {
@@ -863,6 +868,7 @@ async function doFinish() {
     if (separateNotes.value) {
       finishBody.notes_folder = notesFolder.value.trim()
       finishBody.notes_resolved = notesResolved.value
+      finishBody.notes_identity = notesIdentity.value
     }
     await api.post('/api/setup/finish', finishBody)
     isRestarting.value = true

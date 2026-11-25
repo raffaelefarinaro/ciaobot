@@ -574,7 +574,7 @@ describe('LoginView setup wizard tests', () => {
 
   it('requires inspection of separate notes before submitting', async () => {
     mockApiGet.mockImplementation((path: string) => path.includes('notes_folder=')
-      ? Promise.resolve({ notes_resolved: '/notes' })
+      ? Promise.resolve({ notes_resolved: '/notes', notes_identity: '1:2' })
       : Promise.resolve({ bootstrap: true, providers: { claude: { ok: true } } }))
     mockApiPost.mockResolvedValue({ ok: true })
     const wrapper = await mountLoginView()
@@ -588,7 +588,7 @@ describe('LoginView setup wizard tests', () => {
     expect(wrapper.text()).toContain('Notes: /notes')
     await wrapper.get('form').trigger('submit.prevent')
     await flushPromises()
-    expect(mockApiPost).toHaveBeenCalledWith('/api/setup/finish', expect.objectContaining({ notes_folder: '/notes', notes_resolved: '/notes' }))
+    expect(mockApiPost).toHaveBeenCalledWith('/api/setup/finish', expect.objectContaining({ notes_folder: '/notes', notes_resolved: '/notes', notes_identity: '1:2' }))
   })
 
   it('finishes setup without collecting a notification email', async () => {

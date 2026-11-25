@@ -1195,8 +1195,26 @@ def validate_external_setup_vault(workspace: Path | str, vault: Path | str) -> P
     if notes == root or notes in root.parents or root in notes.parents:
         raise ValueError("notes folder and Ciaobot folder must be separate")
     selection = select_setup_vault(root, vault_mode="scratch")
+    marker = root / ".runtime" / "external-setup-pending.json"
+    if marker.exists():
+        try:
+            pending = json.loads(marker.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            pending = None
+        if pending != {"notes": str(notes)}:
+            raise ValueError("pending setup belongs to another notes folder")
+    else:
+        pending = None
     if is_set_up_workspace(root) or selection.source in {"env", "registry", "legacy"}:
-        raise ValueError("an existing installation cannot be rebound during setup")
+        if (
+            pending is None
+            or selection.source == "legacy"
+            or (selection.source == "env" and selection.vault_path.resolve() != notes)
+            or (selection.registered_vaults is not None and any(
+                path.resolve() != notes for _, path in selection.registered_vaults
+            ))
+        ):
+            raise ValueError("an existing installation cannot be rebound during setup")
     return notes
 
 
@@ -1416,6 +1434,10 @@ def setup_workspace(
         if initialize_git:
             raise ValueError("separate notes setup cannot initialize Git history")
         _check_external_setup_identity(selection.vault_path, _external_identity)
+        pending_path = root / ".runtime" / "external-setup-pending.json"
+        pending_path.parent.mkdir(parents=True, exist_ok=True)
+        if not pending_path.exists():
+            write_private_text(pending_path, json.dumps({"notes": str(selection.vault_path)}))
 
     from ciao.onboarding import ensure_receipt, read_receipt
     from ciao.setup_marker import is_set_up_workspace
@@ -1849,6 +1871,7 @@ def setup_workspace(
     # never double-initialized.
     if _adopt_exact_vault:
         _check_external_setup_identity(vault_path, _external_identity)
+        pending_path.unlink()
     else:
         ensure_vault_git(vault_path, initialize_if_missing=initialize_git)
 

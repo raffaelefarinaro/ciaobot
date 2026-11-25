@@ -5531,3 +5531,12 @@ def test_setup_cli_does_not_recreate_disappeared_notes(tmp_path, monkeypatch, re
         assert not list(notes.iterdir())
     assert moved.is_dir()
     assert (moved / "existing.md").read_text(encoding="utf-8") == "private"
+    if replace:
+        notes.rmdir()
+    moved.rename(notes)
+    monkeypatch.setattr(cli, "_write_if_missing", original)
+    assert cli.main(["setup", "--workspace", str(workspace), "--notes-folder", str(notes),
+        "--auth-token", "password", "--launch-agents-dir", str(tmp_path / "agents"),
+        "--app-dir", str(tmp_path / "apps")]) == 0
+    assert not (workspace / ".runtime" / "external-setup-pending.json").exists()
+    assert (notes / "existing.md").read_text(encoding="utf-8") == "private"

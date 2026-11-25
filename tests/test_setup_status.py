@@ -3071,3 +3071,58 @@ def test_separate_notes_setup_rejects_symlink_drift_before_writing(tmp_path) -> 
     assert response.status_code == 400
     assert not (ws / ".env").exists()
     assert not list(second.iterdir())
+
+
+def test_separate_notes_setup_rejects_same_path_replacement(tmp_path) -> None:
+    ws = tmp_path / "engine"
+    ws.mkdir()
+    notes = tmp_path / "notes"
+    notes.mkdir()
+    original = notes.stat()
+    notes.rename(tmp_path / "original")
+    notes.mkdir()
+    response = _finish_client(tmp_path).post("/api/setup/finish", json={
+        "password": "wizard-pass", "workspace": str(ws), "notes_folder": str(notes),
+        "notes_resolved": str(notes.resolve()),
+        "notes_identity": f"{original.st_dev}:{original.st_ino}",
+    })
+    assert response.status_code == 400
+    assert not (ws / ".env").exists()
+    assert not list(notes.iterdir())
+
+
+def test_separate_notes_setup_can_retry_after_late_disappearance(tmp_path, monkeypatch) -> None:
+    from ciao import cli
+
+    ws = tmp_path / "engine"
+    ws.mkdir()
+    notes = tmp_path / "notes"
+    notes.mkdir()
+    (notes / "private.md").write_text("private", encoding="utf-8")
+    moved = tmp_path / "moved"
+    original = cli._check_external_setup_identity
+    calls = 0
+
+    def disappear(path, identity):
+        nonlocal calls
+        calls += 1
+        if calls == 2:
+            notes.rename(moved)
+        original(path, identity)
+
+    monkeypatch.setattr(cli, "_check_external_setup_identity", disappear)
+    stat = notes.stat()
+    body = {"password": "wizard-pass", "workspace": str(ws), "notes_folder": str(notes),
+            "notes_resolved": str(notes.resolve()), "notes_identity": f"{stat.st_dev}:{stat.st_ino}",
+            "launch_agents_dir": str(tmp_path / "agents"), "app_dir": str(tmp_path / "apps"),
+            "restart": False}
+    client = _finish_client(tmp_path)
+    assert client.post("/api/setup/finish", json=body).status_code == 400
+    assert not notes.exists()
+    moved.rename(notes)
+    monkeypatch.setattr(cli, "_check_external_setup_identity", original)
+    for key in ("CIAO_WORKSPACE", "PWA_PORT", "PWA_AUTH_TOKEN"):
+        monkeypatch.setenv(key, "")
+    assert client.post("/api/setup/finish", json=body).status_code == 200
+    assert (notes / "private.md").read_text(encoding="utf-8") == "private"
+    assert not (ws / ".runtime" / "external-setup-pending.json").exists()
