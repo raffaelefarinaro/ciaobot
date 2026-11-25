@@ -492,6 +492,7 @@ def _fenced_grants_for_path(config: Any, link: SharedBrainLink) -> list[dict[str
                         "workspace": workspace_name,
                         "name": item.name,
                         "path": item.path,
+                        "identity": item.identity,
                         "lifetime_id": item.lifetime_id,
                         "generation": item.sharing_generation,
                     }
@@ -500,10 +501,11 @@ def _fenced_grants_for_path(config: Any, link: SharedBrainLink) -> list[dict[str
 
 
 def write_pending_sharing_fence(
-    config: Any, link: SharedBrainLink
+    config: Any, link: SharedBrainLink, grants: list[dict[str, Any]] | None = None
 ) -> tuple[Path, list[dict[str, Any]]]:
     """Persist the exact grants at risk BEFORE any authorization-relevant origin read."""
-    grants = _fenced_grants_for_path(config, link)
+    if grants is None:
+        grants = _fenced_grants_for_path(config, link)
     if not grants:
         return _sharing_fence_dir(config) / "none", []
     canonical = os.path.realpath(link.path)
@@ -530,6 +532,71 @@ def write_pending_sharing_fence(
     return path, grants
 
 
+def _live_origin_identity(link: SharedBrainLink) -> str:
+    """Read the live origin identity after a fence exists, under caller claims."""
+    if link.kind != "git":
+        return ""
+    try:
+        code, listing = _git(Path(link.path), "config", "--list", "--show-scope")
+    except (OSError, ValueError):
+        return ""
+    if code != 0 or _first_unsafe_key(listing) is not None:
+        return ""
+    return _safe_identity(_origin_from_listing(listing))
+
+
+def fence_before_origin_read(
+    config: Any, link: SharedBrainLink, owner: Any
+) -> tuple[Path | None, list[dict[str, Any]]]:
+    """Write a fence for persisted automatic grants before any origin read."""
+    if link.kind != "git" or path_problem(config, link.path):
+        return None, []
+    grants = _fenced_grants_for_path(config, link)
+    matching = _fence_matching_grants({"grants": grants}, owner.current)
+    if not matching:
+        return None, []
+    try:
+        return write_pending_sharing_fence(config, link, matching)
+    except OSError:
+        # No fence could be written. Fail closed in this process and try a
+        # durable global marker before the caller treats the read as unavailable.
+        changed = _demote_fenced_grants(config, matching)
+        config.workspaces.update(changed)
+        config._sharing_recovery_pending = True
+        try:
+            merge_sharing_revocations(
+                config, set(), registry_bytes=owner.current, force_fail_closed=True
+            )
+        except OSError:
+            logger.exception("No durable shared-brain fence or fail-closed marker could be written")
+        raise
+
+
+def settle_fence_after_healthy_probe(
+    fence_path: Path | None,
+    grants: list[dict[str, Any]],
+    live_identity: str,
+) -> None:
+    """Clear a fence only when every fenced grant still matches the live origin."""
+    if fence_path is None:
+        return
+    if live_identity and all(row.get("identity") == live_identity for row in grants):
+        try:
+            fence_path.unlink(missing_ok=True)
+        except OSError:
+            pass
+
+
+def probe_under_fence(config: Any, link: SharedBrainLink, owner: Any) -> dict[str, Any]:
+    """Fence, observe origin, then settle only on a healthy result."""
+    fence_path, grants = fence_before_origin_read(config, link, owner)
+    live_identity = _live_origin_identity(link) if fence_path is not None else ""
+    state = _brain_state_owned(link, config)
+    if not state.get("problem"):
+        settle_fence_after_healthy_probe(fence_path, grants, live_identity)
+    return state
+
+
 def _load_fence(path: Path) -> dict[str, Any] | None:
     try:
         raw = json.loads(path.read_text(encoding="utf-8"))
@@ -545,7 +612,7 @@ def _load_fence(path: Path) -> dict[str, Any] | None:
             return None
         if not all(
             isinstance(row.get(key), str) and row.get(key)
-            for key in ("workspace", "name", "path", "lifetime_id")
+            for key in ("workspace", "name", "path", "identity", "lifetime_id")
         ) or type(row.get("generation")) is not int:
             return None
     return raw
@@ -587,6 +654,7 @@ def _registry_grants(registry_bytes: bytes | None) -> list[dict[str, Any]] | Non
                         "workspace": workspace,
                         "name": link["name"],
                         "path": link["path"],
+                        "identity": link.get("identity", ""),
                         "lifetime_id": link["lifetime_id"],
                         "generation": link["sharing_generation"],
                     }
@@ -601,21 +669,21 @@ def _fence_matching_grants(
     if persisted is None:
         return []
     wanted = {
-        (row.get("workspace"), row.get("name"), row.get("lifetime_id"), row.get("generation"))
+        (row.get("workspace"), row.get("name"), row.get("identity"), row.get("lifetime_id"), row.get("generation"))
         for row in fence.get("grants", [])
         if isinstance(row, dict)
     }
     return [
         row
         for row in persisted
-        if (row["workspace"], row["name"], row["lifetime_id"], row["generation"]) in wanted
+        if (row["workspace"], row["name"], row["identity"], row["lifetime_id"], row["generation"]) in wanted
     ]
 
 
 def _demote_fenced_grants(config: Any, grants: list[dict[str, Any]]) -> dict[str, Any]:
     changed: dict[str, Any] = {}
     wanted = {
-        (row.get("workspace"), row.get("name"), row.get("lifetime_id"), row.get("generation"))
+        (row.get("workspace"), row.get("name"), row.get("identity"), row.get("lifetime_id"), row.get("generation"))
         for row in grants
     }
     for workspace_name, workspace in getattr(config, "workspaces", {}).items():
@@ -626,7 +694,7 @@ def _demote_fenced_grants(config: Any, grants: list[dict[str, Any]]) -> dict[str
             if (
                 item.kind == "git"
                 and sharing_grant_stored(item)
-                and (workspace_name, item.name, item.lifetime_id, item.sharing_generation) in wanted
+                and (workspace_name, item.name, item.identity, item.lifetime_id, item.sharing_generation) in wanted
             ):
                 kept.append(set_sharing_policy(item, DEFAULT_SHARING_POLICY))
                 touched = True
@@ -737,6 +805,7 @@ def recover_sharing_state(config: Any, owner: Any | None = None) -> bool:
             else:
                 fenced = [
                     {"workspace": workspace_name, "name": item.name,
+                     "identity": item.identity,
                      "lifetime_id": item.lifetime_id,
                      "generation": item.sharing_generation}
                     for workspace_name, workspace in getattr(config, "workspaces", {}).items()
@@ -790,7 +859,9 @@ def apply_persisted_sharing_revocations(config: Any) -> None:
     try:
         fences = list(directory.glob("*.json"))
     except OSError:
-        fences = []
+        # An inaccessible fence directory cannot be proven empty; fail closed.
+        config._sharing_recovery_pending = True
+        return
     if fences:
         config._sharing_recovery_pending = True
         return
@@ -895,6 +966,8 @@ def invalidate_sharing_on_drift(
             logger.exception("No durable shared-brain revocation record could be written")
         raise
     if not grants:
+        if own_owner and owner is not None:
+            owner.close()
         return False
     try:
         with workspace_registry_lock(config):
@@ -1301,7 +1374,8 @@ def brain_state(link: SharedBrainLink, config: Any, workspace: str) -> dict[str,
     from ciao.workspaces import WorkspaceRegistryConflict, persisted_checkout_links, workspace_registry_claim
 
     if link.kind == "git" and getattr(config, "_sharing_recovery_pending", False):
-        state = _brain_state_owned(link, config)
+        # Recovery is not settled: do not probe Git without claims.
+        state = _initial_state(link)
         state["sharing_policy"] = DEFAULT_SHARING_POLICY
         state["sharing_granted_at"] = ""
         state["sharing_grant_pending"] = sharing_grant_stored(link)
@@ -1320,9 +1394,16 @@ def brain_state(link: SharedBrainLink, config: Any, workspace: str) -> dict[str,
                 for name, row in matches
             ):
                 raise WorkspaceRegistryConflict("shared brain link changed")
-            return _brain_state_owned(link, config)
+            return probe_under_fence(config, link, owner)
     except (OSError, ValueError, WorkspaceRegistryConflict):
-        return {**_initial_state(link), "problem": "registry_unavailable"}
+        state = _initial_state(link)
+        state["problem"] = "registry_unavailable"
+        if getattr(config, "_sharing_recovery_pending", False):
+            state["sharing_policy"] = DEFAULT_SHARING_POLICY
+            state["sharing_granted_at"] = ""
+            state["sharing_grant_pending"] = sharing_grant_stored(link)
+            state["sharing_invalidation_failed"] = True
+        return state
 
 
 def _brain_state_owned(link: SharedBrainLink, config: Any) -> dict[str, Any]:
@@ -1438,30 +1519,77 @@ async def update_brain(link: SharedBrainLink, config: Any) -> dict[str, Any]:
     async with lock:
         try:
             async with _checkout_claim(key, config):
-                from ciao.workspaces import ensure_registry_current, persisted_checkout_links, WorkspaceRegistryConflict
+                from ciao.workspaces import (
+                    WorkspaceRegistryConflict,
+                    acquire_workspace_registry,
+                    persisted_checkout_links,
+                    run_while_claimed,
+                )
+
+                fence_path: Path | None = None
+                fenced_grants: list[dict[str, Any]] = []
+                owner = None
                 try:
-                    ensure_registry_current(config)
-                    raw = getattr(config, "_workspace_registry_bytes", None)
+                    owner = await asyncio.to_thread(
+                        acquire_workspace_registry, config, blocking=True
+                    )
+                    raw = owner.current
                     if raw is not None:
-                        links = persisted_checkout_links(raw, key)
-                        if not any(row.get("identity") == link.identity and row.get("name") == link.name
-                                   and row.get("lifetime_id", link.lifetime_id) == link.lifetime_id for _, row in links):
+                        if raw != getattr(config, "_workspace_registry_bytes", None):
                             return _result("skipped", "registry_changed")
-                except (ValueError, WorkspaceRegistryConflict):
-                    return _result("skipped", "registry_changed")
-                if conflicts_with_link_kind(config, "", key, "git"):
-                    return _result("skipped", "folder")
+                        links = persisted_checkout_links(raw, key)
+                        if not any(
+                            row.get("identity") == link.identity
+                            and row.get("name") == link.name
+                            and row.get("lifetime_id", link.lifetime_id) == link.lifetime_id
+                            for _, row in links
+                        ):
+                            return _result("skipped", "registry_changed")
+                    if conflicts_with_link_kind(config, "", key, "git"):
+                        return _result("skipped", "folder")
+                    fence_path, fenced_grants = await run_while_claimed(
+                        fence_before_origin_read, config, link, owner
+                    )
+                except WorkspaceRegistryConflict:
+                    return _result("skipped", "registry_busy")
+                except (OSError, ValueError):
+                    return _result("failed", "fence_unavailable")
+                finally:
+                    if owner is not None:
+                        owner.close()
                 result = await _update_unlocked(config, Path(key), link.identity)
                 if result.get("reason") == "origin_changed":
                     try:
-                        from ciao.workspaces import run_while_claimed
-
                         await run_while_claimed(
                             invalidate_sharing_on_drift, config, link
                         )
                     except (OSError, WorkspaceRegistryConflict):
                         result["sharing_invalidation_failed"] = True
                         config._sharing_recovery_pending = True
+                else:
+                    # Settle the fence only after proving the live origin still
+                    # matches every fenced grant.
+                    owner = None
+                    try:
+                        owner = await asyncio.to_thread(
+                            acquire_workspace_registry, config, blocking=True
+                        )
+                        live_identity = (
+                            await run_while_claimed(_live_origin_identity, link)
+                            if fence_path is not None
+                            else ""
+                        )
+                        await run_while_claimed(
+                            settle_fence_after_healthy_probe,
+                            fence_path,
+                            fenced_grants,
+                            live_identity,
+                        )
+                    except (OSError, WorkspaceRegistryConflict):
+                        pass
+                    finally:
+                        if owner is not None:
+                            owner.close()
         except OSError:
             result = _result("failed", "lock_unavailable")
     _last_update[key] = result

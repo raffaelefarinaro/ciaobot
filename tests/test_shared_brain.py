@@ -1955,3 +1955,27 @@ def test_fence_after_restore_rotation_is_settled_without_touching_new_link(tmp_p
     assert sb.recover_pending_sharing_fences(config) is True
     assert not fence_path.exists()
     assert config.workspaces["work"].shared_brains[0].sharing_policy == "review"
+
+
+@pytest.mark.asyncio
+async def test_update_brain_fences_before_the_origin_read(pair: SimpleNamespace, monkeypatch) -> None:
+    from ciao.config import WorkspaceConfig
+
+    link = sb.set_sharing_policy(link_of(pair.clone), "automatic")
+    config = FakeConfig(pair.root)
+    config.workspaces = {"work": WorkspaceConfig(
+        name="work", vault_root="memory-vault/work", shared_brains=[link],
+    )}
+    _install_registry(config, config.workspaces["work"])
+    observed: list[bool] = []
+
+    async def assert_fenced(config_arg, folder, identity):
+        observed.append(bool(list((Path(config_arg.state_path).parent / "sharing-pending").glob("*.json"))))
+        return sb._result("up_to_date")
+
+    monkeypatch.setattr(sb, "_update_unlocked", assert_fenced)
+    result = await sb.update_brain(link, config)
+
+    assert result["outcome"] == "up_to_date"
+    assert observed == [True]
+    assert list((Path(config.state_path).parent / "sharing-pending").glob("*.json")) == []

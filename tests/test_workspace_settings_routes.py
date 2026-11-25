@@ -3067,3 +3067,47 @@ def test_fence_write_failure_falls_back_to_a_global_fail_closed_journal(tmp_path
     restarted = _client(tmp_path)[1]
     assert shared_brain.recover_sharing_state(restarted)
     assert restarted.workspace("personal").shared_brains[0].sharing_policy == "review"
+
+
+def test_status_probe_writes_the_fence_before_the_origin_read(tmp_path, monkeypatch):
+    from ciao import shared_brain
+
+    monkeypatch.setattr(shared_brain, "schedule_update", lambda link, config: None)
+    client, config, _pcm = _client(tmp_path)
+    acme = _checkout(_away(tmp_path) / "acme", "https://github.com/acme/notes")
+    assert client.patch(
+        "/api/workspaces/personal", json={"shared_brains": [{"path": str(acme)}]}
+    ).status_code == 200
+    state = client.get("/api/workspaces/personal/shared-brains").json()["shared_brains"][0]
+    assert client.post(
+        "/api/workspaces/personal/shared-brains/notes/sharing",
+        json=_sharing_body(state),
+    ).status_code == 200
+    link = config.workspace("personal").shared_brains[0]
+    seen: list[bool] = []
+    original = shared_brain._brain_state_owned
+
+    def observe(config_arg, link_arg):
+        seen.append(bool(list((tmp_path / ".runtime" / "sharing-pending").glob("*.json"))))
+        return original(config_arg, link_arg)
+
+    monkeypatch.setattr(shared_brain, "_brain_state_owned", observe)
+    shared_brain.brain_state(link, config, "personal")
+    assert seen == [True]
+    assert list((tmp_path / ".runtime" / "sharing-pending").glob("*.json")) == []
+
+
+def test_inaccessible_fence_directory_marks_recovery_pending(tmp_path, monkeypatch):
+    from ciao import shared_brain
+
+    client, config, _pcm = _client(tmp_path)
+    real_glob = Path.glob
+
+    def fail_glob(self, pattern):
+        if self.name == "sharing-pending":
+            raise OSError("permission denied")
+        return real_glob(self, pattern)
+
+    monkeypatch.setattr(Path, "glob", fail_glob)
+    shared_brain.apply_persisted_sharing_revocations(config)
+    assert config._sharing_recovery_pending is True

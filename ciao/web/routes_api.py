@@ -638,7 +638,9 @@ async def _apply_sharing_policy(
         # A grant names a person's audience, so the folder has to be usable
         # and still its own checkout right now. Revocation never needs this:
         # it must work even when the folder is gone or broken.
-        probe = await run_while_claimed(shared_brain._brain_state_owned, link, config)
+        probe = await run_while_claimed(
+            shared_brain.probe_under_fence, config, link, owner
+        )
         if probe.get("problem"):
             if probe["problem"] == "origin_changed":
                 # A retargeted folder permanently loses the old standing
