@@ -166,7 +166,9 @@ scripts/dev-commands.sh all              # typecheck, coverage, lint, audit
   during a release becomes an issue, fixed on `develop` before the next cut.
 
 ## Repository-specific loop facts
-- A known failing required `develop` check stops merges until it is fixed.
+- A required `develop` check that fails reproducibly stops merges until it is
+  fixed. A failure that passes on a whole-workflow rerun is a flake: log it and
+  keep merging; a green PR may merge while develop reruns.
   Reviewed PRs with passing applicable checks may merge serially as a batch;
   use full-platform CI on the final combined SHA for integration acceptance.
 - `Closes #N` does not close an issue when merging into `develop`. Close an
