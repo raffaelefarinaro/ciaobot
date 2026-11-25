@@ -845,7 +845,12 @@ def _index_directory_pass(
             if captured is None:
                 text = (read_connected_note(root_dir, Path(root_rel)) if key_namespace
                     else Path(entry.path).read_text(encoding="utf-8"))
-        except (OSError, UnicodeDecodeError) as exc:
+        except UnicodeDecodeError:
+            # A note that is not UTF-8 is a known content error, not an
+            # unavailable root: keep its previous row and keep indexing others.
+            logger.warning("FTS search: failed to decode %s; keeping the prior row", entry.path)
+            continue
+        except OSError as exc:
             raise OSError(f"incomplete FTS scan at {entry.path}") from exc
 
         if _search_opted_out(text):

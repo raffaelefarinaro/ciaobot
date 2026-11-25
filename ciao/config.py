@@ -1231,7 +1231,6 @@ class CiaoConfig:
         try:
             local_roots = {
                 Path(self.agent_vault_root(workspace)).expanduser().resolve(),
-                Path(self.workspace_vault_root(workspace)).expanduser().resolve(),
             }
         except (ValueError, AttributeError):
             return decision
@@ -2134,13 +2133,18 @@ def configured_connected_workspace(env: Mapping[str, str], root: Path, *,
             and not config._rerooted() and not config.ciao_owned_vault_index(active)):
         wanted = config.workspace_vault_root(active)
     targets = config.index_scan_targets()
-    if any(root.resolve() == wanted and config.ciao_owned_vault_index(name or None)
-           for root, name, _prefix in targets):
-        return None
-    matches = [name for target, name, _ in targets
-               if name and not config.ciao_owned_vault_index(name)
-               and (not registered_brains_only or config.adopted_workspace_vault(name))
-               and wanted.is_relative_to(target.resolve())]
+    matches: list[str] = []
+    for target, name, _prefix in targets:
+        if not name or not wanted.is_relative_to(target.resolve()):
+            continue
+        if config.vault_index_ownership(name, target) == INDEX_OWNERSHIP_CIAO:
+            # The requested root is the aggregate Markdown destination itself;
+            # its search snapshot is the private install index, not a connected
+            # brain database.
+            return None
+        if registered_brains_only and not config.adopted_workspace_vault(name):
+            continue
+        matches.append(name)
     links: dict[str, SharedBrainLink] = {}
     for name, workspace in config.workspaces.items():
         for link in workspace.shared_brains:
@@ -2158,6 +2162,17 @@ def configured_connected_workspace(env: Mapping[str, str], root: Path, *,
     if len(matches) > 1:
         raise ValueError("select a workspace for this shared connected folder")
     return ConnectedWorkspace(links.get(matches[0]), config.vault_root, matches[0], wanted, config.index_source_roots()) if matches else None
+
+
+def configured_vault_index_ownership(
+    env: Mapping[str, str], destination: Path,
+) -> str:
+    """Classify one explicitly named aggregate destination for the CLI."""
+    source = installed_workspace_env(env)
+    if not source.get("PWA_AUTH_TOKEN", "").strip():
+        source["PWA_AUTH_TOKEN"] = "vault-root"
+    config = CiaoConfig.from_env(source, export=False)
+    return config.vault_index_ownership(None, destination)
 
 
 def configured_vault_index_is_ciao_owned(

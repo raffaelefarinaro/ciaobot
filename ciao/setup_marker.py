@@ -176,7 +176,7 @@ def _atomic_write_vault_index_ownership(
     )
     temp = Path(temp_name)
     try:
-        with os.fdopen(fd, "w", encoding="utf-8") as stream:
+        with os.fdopen(fd, "w", encoding="utf-8", newline="") as stream:
             stream.write(json.dumps(payload, sort_keys=True) + "\n")
             stream.flush()
             os.fsync(stream.fileno())

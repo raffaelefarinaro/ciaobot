@@ -3977,6 +3977,15 @@ def _vault_graph_payload(config: Any, workspace: str | None) -> dict[str, Any]:
         # from the targets whose vault exists, which is the same set the full
         # scan would have produced entries for.
         workspaces = sorted(ws for root, ws, _ in targets if ws and (connected.get(ws) or Path(root).is_dir()))
+        if not config._rerooted():
+            # Before the re-rooting a workspace that has no registry entry still
+            # exists as a first-level folder of the shared vault. Read the same
+            # shared target the un-scoped pass would have used so the picker
+            # keeps naming it; the entries above stay the scoped snapshot.
+            shared_entries, _shared_absolute = scan_targets(config.vault_scan_targets())
+            workspaces = sorted(
+                set(workspaces) | {e.workspace for e in shared_entries if e.workspace}
+            )
     else:
         workspaces = sorted({e.workspace for e in entries if e.workspace})
     scoped = filter_entries(entries, workspace=workspace) if workspace else entries

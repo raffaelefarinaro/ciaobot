@@ -1756,6 +1756,7 @@ def test_ensure_project_is_idempotent_and_stable(
             "created_at": reloaded.created_at,
             "order": reloaded.order,
             "vault_folder": "",
+            "vault_folder_only": False,
             "kind": "memory",
         }
     ]

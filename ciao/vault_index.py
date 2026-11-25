@@ -1942,7 +1942,21 @@ def main(argv: list[str] | None = None) -> int:
         dest = vault_root / "INDEX.md"
         from ciao.config import configured_vault_index_is_ciao_owned
 
-        replace_existing = configured_vault_index_is_ciao_owned(os.environ, vault_root)
+        explicit_target = args.vault_root is not None
+
+        def may_publish() -> bool:
+            from ciao.config import (
+                INDEX_OWNERSHIP_AMBIGUOUS,
+                INDEX_OWNERSHIP_CIAO,
+                configured_vault_index_ownership,
+            )
+
+            decision = configured_vault_index_ownership(os.environ, vault_root)
+            return decision == INDEX_OWNERSHIP_CIAO or (
+                explicit_target and decision == INDEX_OWNERSHIP_AMBIGUOUS
+            )
+
+        replace_existing = may_publish()
         if not replace_existing:
             from ciao.fts_search import lookup_connected_entries
 
@@ -1972,9 +1986,7 @@ def main(argv: list[str] | None = None) -> int:
             entries,
             dest,
             replace_existing=replace_existing,
-            authorize=lambda: configured_vault_index_is_ciao_owned(
-                os.environ, vault_root
-            ),
+            authorize=may_publish,
             ownership_runtime=runtime,
             registration_runtime=runtime,
         )
