@@ -54,6 +54,33 @@ def test_validate_rejects_subdirectory_of_checkout(tmp_path: Path) -> None:
     with pytest.raises(ValueError, match="top of the git checkout"):
         repo_link.validate_repo_path(str(repo / "pkg"))
 
+def test_git_output_line_removes_only_the_line_ending() -> None:
+    from ciao.git_proc import git_output_line
+
+    assert git_output_line("/tmp/repo \n") == "/tmp/repo "
+    assert git_output_line("/tmp/repo\r\n") == "/tmp/repo"
+    assert git_output_line("/tmp/repo\n") == "/tmp/repo"
+    assert git_output_line("/tmp/repo") == "/tmp/repo"
+    assert git_output_line("") == ""
+
+
+def test_validate_does_not_echo_git_stderr(tmp_path: Path) -> None:
+    plain = tmp_path / "plain"
+    plain.mkdir()
+    with pytest.raises(ValueError) as caught:
+        repo_link.validate_repo_path(str(plain), exact=True)
+    assert "Not a git repository" in str(caught.value)
+    assert "fatal:" not in str(caught.value)
+
+
+def test_validate_exact_accepts_a_checkout_ending_in_space(tmp_path: Path) -> None:
+    repo = _init(tmp_path / "repo ")
+    assert repo_link.validate_repo_path(str(repo), exact=True) == str(repo)
+    sibling = tmp_path / "repo"
+    sibling.mkdir()
+    with pytest.raises(ValueError, match="Not a git repository"):
+        repo_link.validate_repo_path(str(sibling), exact=True)
+
 
 def test_repo_state_reports_branch_and_dirty(tmp_path: Path) -> None:
     repo = _init(tmp_path / "repo")

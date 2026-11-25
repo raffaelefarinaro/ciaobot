@@ -9,18 +9,16 @@ validation or serialization rules.
 
 from __future__ import annotations
 
+import asyncio
 import contextvars
 import json
 import os
 import re
 import tempfile
 import threading
-import contextvars
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Any, Iterable, Iterator, cast
-
-from ciao.os_support.locks import lock_exclusive, lock_shared, unlock
+from typing import Any, Callable, Iterable, Iterator, TypeVar, cast
 
 from ciao import provider_registry
 from ciao.claude_trim import coerce_claude_trim
@@ -30,6 +28,7 @@ from ciao.config import (
     DEFAULT_NEW_WORKSPACE_MEMORY_HANDOVER,
     DEFAULT_WORKSPACE_COLOR,
     SHARED_BRAIN_NAME_PATTERN,
+    SharedBrainLink,
     WorkspaceConfig,
     coerce_memory_approval,
     coerce_memory_handover,
@@ -40,72 +39,146 @@ from ciao.config import (
 from ciao import shared_brain
 from ciao.model_tiers import is_tier
 from ciao.provider_service import capabilities_for
+from ciao.os_support.files import open_fd, replace_file
+from ciao.os_support.locks import lock_exclusive, lock_shared, unlock
+from ciao.os_support.private import is_private_descriptor_strict, make_private_dir
 
 WORKSPACE_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$")
 _REGISTRY_LOCKS: dict[int, threading.RLock] = {}
 _REGISTRY_LOCKS_GUARD = threading.Lock()
+
+_REGISTRY_CLAIMS: dict[str, threading.Lock] = {}
+
+
+_T = TypeVar("_T")
+
+
+async def run_while_claimed(function: Callable[..., _T], *args: Any, **kwargs: Any) -> _T:
+    """A cancelled request retains its claims until the filesystem worker stops."""
+    worker = asyncio.create_task(asyncio.to_thread(function, *args, **kwargs))
+    try:
+        return await asyncio.shield(worker)
+    except asyncio.CancelledError:
+        while not worker.done():
+            try:
+                await asyncio.shield(worker)
+            except asyncio.CancelledError:
+                continue
+            except Exception:
+                break
+        if not worker.cancelled():
+            worker.exception()
+        raise
+
+
+class WorkspaceRegistryConflict(RuntimeError):
+    """The persisted registry no longer matches this process's snapshot."""
+
+
+class WorkspaceRegistryBusy(WorkspaceRegistryConflict):
+    """Another process currently owns the workspace registry transaction."""
+
+
+WorkspaceRegistryChanged = WorkspaceRegistryConflict
+
 _ACTIVE_REGISTRY_OWNER: contextvars.ContextVar[WorkspaceRegistryOwnership | None] = (
     contextvars.ContextVar("active_workspace_registry_owner", default=None)
 )
 
 
-class WorkspaceRegistryChanged(OSError):
-    """The on-disk registry changed under a writer holding a stale snapshot."""
-
-
-class WorkspaceRegistryConflict(WorkspaceRegistryChanged):
-    """The persisted registry no longer matches this transaction's snapshot."""
-
-
 class WorkspaceRegistryOwnership:
-    """Explicit registry lock ownership carrying the exact loaded bytes."""
+    """Explicit descriptor ownership; safe to pass across async task threads."""
 
-    def __init__(self, runtime_root: Path, *, blocking: bool = False) -> None:
-        self.runtime_root = Path(runtime_root).resolve()
-        self.key = str(self.runtime_root)
-        self.current: bytes | None = None
+    def __init__(self, key: str, local_lock: threading.Lock, fd: int) -> None:
+        self.key = key
+        self.local_lock = local_lock
+        self.fd = fd
         self.closed = False
-        self._context = workspace_registry_file_lock(
-            self.runtime_root, exclusive=True, blocking=blocking
-        )
+        self.path = Path(key) / "workspaces.json"
+        self.current = _read_registry_bytes(self.path)
 
     def __enter__(self) -> WorkspaceRegistryOwnership:
-        self._context.__enter__()
-        self.current = (_read_registry_bytes(self.runtime_root))
         return self
 
     def __exit__(self, *exc: object) -> None:
         self.close()
 
     def replace(self, payload: bytes | None, *, expected: bytes | None) -> None:
-        if self.closed or self.current != expected:
+        if self.closed or self.current != expected or _read_registry_bytes(self.path) != expected:
             raise WorkspaceRegistryConflict("workspace registry changed since it was loaded")
-        path = self.runtime_root / "workspaces.json"
-        if _read_registry_bytes(self.runtime_root) != expected:
-            raise WorkspaceRegistryConflict("workspace registry changed on disk")
+        path = self.path
         if payload is None:
             path.unlink(missing_ok=True)
-        else:
-            _atomic_write_registry_bytes(path, payload)
+            self.current = None
+            return
+        path.parent.mkdir(parents=True, exist_ok=True)
+        fd, temp_name = tempfile.mkstemp(prefix=".workspaces-", suffix=".tmp", dir=path.parent)
+        temp = Path(temp_name)
+        try:
+            with os.fdopen(fd, "wb") as stream:
+                os.fchmod(stream.fileno(), 0o600)
+                stream.write(payload)
+                stream.flush()
+                os.fsync(stream.fileno())
+            replace_file(temp, path)
             self.current = payload
+        finally:
+            temp.unlink(missing_ok=True)
 
     def close(self) -> None:
         if self.closed:
             return
         self.closed = True
-        self._context.__exit__(None, None, None)
+        try:
+            unlock(self.fd)
+        finally:
+            os.close(self.fd)
+            self.local_lock.release()
+
+
+def acquire_workspace_registry(config: Any, *, blocking: bool = False) -> WorkspaceRegistryOwnership:
+    """Acquire explicit stable lock ownership; caller closes the returned owner."""
+    return acquire_registry_at(Path(config.state_path).parent, blocking=blocking)
 
 
 def acquire_registry_at(runtime_root: Path, *, blocking: bool = False) -> WorkspaceRegistryOwnership:
-    owner = WorkspaceRegistryOwnership(runtime_root, blocking=blocking)
-    owner.__enter__()
-    return owner
+    key = str(runtime_root.resolve())
+    with _REGISTRY_LOCKS_GUARD:
+        local_lock = _REGISTRY_CLAIMS.setdefault(key, threading.Lock())
+    if not local_lock.acquire(blocking=blocking):
+        raise WorkspaceRegistryBusy("workspace registry is busy")
+    fd = None
+    try:
+        root = Path(key)
+        lock_root = root / "locks"
+        lock_root.mkdir(parents=True, exist_ok=True, mode=0o700)
+        make_private_dir(lock_root)
+        path = lock_root / "workspaces-registry.lock"
+        fd = open_fd(path, os.O_CREAT | os.O_RDWR, 0o600, follow_symlinks=False)
+        if not is_private_descriptor_strict(fd):
+            raise OSError("workspace registry lock is not private")
+        try:
+            lock_exclusive(fd, blocking=blocking)
+        except BlockingIOError as exc:
+            raise WorkspaceRegistryBusy("workspace registry is busy") from exc
+        return WorkspaceRegistryOwnership(key, local_lock, fd)
+    except BaseException:
+        try:
+            local_lock.release()
+        finally:
+            if fd is not None:
+                os.close(fd)
+        raise
 
 
-def acquire_workspace_registry(
-    config: Any, *, blocking: bool = True,
-) -> WorkspaceRegistryOwnership:
-    return acquire_registry_at(Path(config.state_path).parent, blocking=blocking)
+@contextmanager
+def workspace_registry_claim(config: Any):
+    """Synchronous convenience claim; do not span awaits with this context."""
+    owner = acquire_workspace_registry(config)
+    try:
+        yield owner
+    finally:
+        owner.close()
 
 
 @contextmanager
@@ -124,43 +197,36 @@ def active_registry_owner(runtime_root: Path) -> WorkspaceRegistryOwnership | No
     return owner if owner.key == str(Path(runtime_root).resolve()) else None
 
 
-@contextmanager
-def workspace_registry_claim(config: Any) -> Iterator[WorkspaceRegistryOwnership]:
-    owner = acquire_registry_at(Path(config.state_path).parent, blocking=False)
+
+def ensure_registry_current(config: Any) -> None:
+    if read_workspace_registry_bytes(config) != getattr(config, "_workspace_registry_bytes", None):
+        raise WorkspaceRegistryConflict("workspace registry changed since it was loaded")
+
+
+def read_workspace_registry_bytes(config: Any) -> bytes | None:
+    """Read exact persisted registry bytes; None denotes a missing registry."""
+    return _read_registry_bytes(_workspaces_path(config))
+
+
+def _read_registry_bytes(path: Path) -> bytes | None:
     try:
-        yield owner
-    finally:
-        owner.close()
+        return path.read_bytes()
+    except FileNotFoundError:
+        return None
 
 
-def workspace_registry_lock(config: Any) -> threading.RLock:
-    """Serialize registry snapshots with initialization of legacy link IDs."""
-    key = id(config)
-    with _REGISTRY_LOCKS_GUARD:
-        return _REGISTRY_LOCKS.setdefault(key, threading.RLock())
-
-
-@contextmanager
-def workspace_registry_file_lock(
-    runtime_root: Path, *, exclusive: bool = True, blocking: bool = True,
-) -> Iterator[None]:
-    """Interprocess barrier for readers and writers of ``workspaces.json``."""
-    runtime_root.mkdir(parents=True, exist_ok=True)
-    lock_root = runtime_root / "locks"
-    lock_root.mkdir(parents=True, exist_ok=True, mode=0o700)
-    os.chmod(lock_root, 0o700)
-    lock_path = lock_root / "workspaces-registry.lock"
-    fd = os.open(lock_path, os.O_RDWR | os.O_CREAT, 0o600)
-    try:
-        (lock_exclusive if exclusive else lock_shared)(fd, blocking=blocking)
-        yield
-    finally:
-        unlock(fd)
-        os.close(fd)
+def replace_workspace_registry(
+    config: Any, payload: bytes, *, expected: bytes | None,
+    owner: WorkspaceRegistryOwnership,
+) -> None:
+    """Compare and atomically replace the registry under its interprocess claim."""
+    if owner.closed or owner.key != str(Path(config.state_path).resolve().parent):
+        raise WorkspaceRegistryConflict("workspace registry ownership is invalid")
+    owner.replace(payload, expected=expected)
 
 
 def registry_rows(data: Any) -> list[dict[str, Any]]:
-    """Read list and legacy name-keyed registries without dropping rows."""
+    """Read list and legacy name-keyed registries, retaining nested link records."""
     if isinstance(data, dict) and all(isinstance(value, dict) for value in data.values()):
         return [{"name": name, **value} for name, value in data.items()]
     if isinstance(data, list) and all(isinstance(row, dict) for row in data):
@@ -250,91 +316,185 @@ def authoritative_shared_links_from_bytes(raw: bytes | None) -> tuple[Path, ...]
 
 
 def authoritative_shared_links(runtime_root: Path) -> tuple[Path, ...] | None:
-    """Current linked roots, reusing an active claim when one is held."""
+    """Current linked roots, reusing an active claim when one is held.
+
+    Registry writers publish with atomic replace, so a reader does not need the
+    interprocess lock: it sees either the whole previous file or the whole new
+    one. Taking a shared lock here would deadlock the caller that already holds
+    the exclusive claim in this process (repair/archive run inside one).
+    """
     owner = active_registry_owner(runtime_root)
     if owner is not None:
         return authoritative_shared_links_from_bytes(owner.current)
-    path = runtime_root / "workspaces.json"
     try:
-        with workspace_registry_file_lock(runtime_root, exclusive=False):
-            try:
-                raw = path.read_bytes()
-            except FileNotFoundError:
-                return ()
+        raw = (Path(runtime_root) / "workspaces.json").read_bytes()
+    except FileNotFoundError:
+        return ()
     except OSError:
         return None
     return authoritative_shared_links_from_bytes(raw)
-    if not raw.strip():
-        return None
-    try:
-        parsed = json.loads(raw)
-    except (json.JSONDecodeError, TypeError, ValueError):
-        return None
-    if isinstance(parsed, dict):
-        items = [
-            {"name": name, **value}
-            for name, value in parsed.items()
-            if isinstance(value, dict)
-        ]
-        if len(items) != len(parsed):
-            return None
-    elif isinstance(parsed, list):
-        items = parsed
-    else:
-        return None
-    if any(not isinstance(item, dict) for item in items):
-        return None
-    workspace_names: set[str] = set()
-    for item in items:
-        name = item.get("name")
-        if not isinstance(name, str) or not name.strip() or name in workspace_names:
-            return None
-        workspace_names.add(name)
-        links = item.get("shared_brains")
-        if links is None:
-            continue
-        if not isinstance(links, list):
-            return None
-        seen_names: set[str] = set()
-        seen_paths: set[str] = set()
-        seen_identities: set[str] = set()
-        for link in links:
-            if not isinstance(link, dict):
-                return None
-            link_path = link.get("path")
-            link_name = link.get("name")
-            identity = link.get("identity")
-            if (
-                not isinstance(link_path, str)
-                or not link_path
-                or not os.path.isabs(link_path)
-                or any(ord(char) < 32 or ord(char) == 127 for char in link_path)
-                or not isinstance(link_name, str)
-                or re.fullmatch(SHARED_BRAIN_NAME_PATTERN, link_name) is None
-                or not isinstance(identity, str)
-                or not identity.strip()
-                or any(ord(char) < 32 or ord(char) == 127 for char in identity)
-            ):
-                return None
-            if (
-                link_name in seen_names
-                or link_path in seen_paths
-                or identity in seen_identities
-            ):
-                return None
-            seen_names.add(link_name)
-            seen_paths.add(link_path)
-            seen_identities.add(identity)
-    from ciao.config import _parse_workspaces_json  # noqa: PLC0415
 
-    workspaces = _parse_workspaces_json(raw)
-    if parsed and not workspaces:
-        return None
-    return tuple(
-        Path(link.path).expanduser()
-        for workspace in workspaces.values()
-        for link in workspace.shared_brains
-    )
+
+def restore_registry_entries(
+    runtime_root: Path,
+    prior_entries: list[dict[str, Any]] | None,
+    expected_entries: list[dict[str, Any]] | None,
+    *,
+    owner: WorkspaceRegistryOwnership | None = None,
+    fields: tuple[str, ...] | None = None,
+) -> bool:
+    """Restore only transaction-owned rows after validating ALL expectations.
+
+    Every named expected row must still be present and match the selected
+    fields before any registry byte is written. A mismatch returns False with
+    no partial restoration, leaving concurrent edits untouched.
+    """
+    if expected_entries is None:
+        return False
+    prior_by_name = {
+        str(row.get("name")): row
+        for row in (prior_entries or [])
+        if isinstance(row, dict) and isinstance(row.get("name"), str)
+    }
+    expected_by_name = {
+        str(row.get("name")): row
+        for row in expected_entries
+        if isinstance(row, dict) and isinstance(row.get("name"), str)
+    }
+    own_owner = owner is None
+    if owner is None:
+        owner = acquire_registry_at(runtime_root, blocking=True)
+    try:
+        if owner.current is None:
+            return False
+        try:
+            current = json.loads(owner.current)
+        except (ValueError, TypeError, UnicodeDecodeError):
+            return False
+        if not isinstance(current, list):
+            return False
+        by_name = {
+            str(row.get("name")): row
+            for row in current
+            if isinstance(row, dict) and isinstance(row.get("name"), str)
+        }
+        for name, expected_row in expected_by_name.items():
+            row = by_name.get(name)
+            if row is None:
+                return False
+            if fields is None:
+                if row != expected_row:
+                    return False
+            elif not all(row.get(key) == expected_row.get(key) for key in fields):
+                return False
+        rewritten: list[dict[str, Any]] = []
+        changed = False
+        for row in current:
+            name = str(row.get("name")) if isinstance(row, dict) else ""
+            if name and name in expected_by_name:
+                prior = prior_by_name.get(name)
+                if prior is None:
+                    changed = True
+                    continue
+                if fields is None:
+                    restored = json.loads(json.dumps(prior))
+                else:
+                    restored = json.loads(json.dumps(row))
+                    for key in fields:
+                        if key in prior:
+                            restored[key] = prior[key]
+                rewritten.append(restored)
+                changed = changed or restored != row
+            else:
+                rewritten.append(row)
+        if changed:
+            payload = (json.dumps(rewritten, indent=2) + "\n").encode("utf-8")
+            try:
+                owner.replace(payload, expected=owner.current)
+            except WorkspaceRegistryConflict:
+                return False
+    finally:
+        if own_owner:
+            owner.close()
+    return True
+
+
+def persisted_checkout_links(raw: bytes, path: str) -> list[tuple[str, dict[str, Any]]]:
+    """Collect current Git links, refusing any folder or unknown kind at this checkout."""
+    matches = []
+    canonical = os.path.realpath(path)
+    try:
+        rows = registry_rows(json.loads(raw))
+    except ValueError as exc:
+        raise WorkspaceRegistryConflict("workspace registry is unreadable") from exc
+    for row in rows:
+        links = row.get("shared_brains", [])
+        if not isinstance(links, list):
+            raise WorkspaceRegistryConflict("workspace shared brains are unreadable")
+        for candidate in links:
+            if not isinstance(candidate, dict) or not isinstance(candidate.get("path"), str):
+                raise WorkspaceRegistryConflict("workspace shared brain path is unreadable")
+            if os.path.realpath(candidate["path"]) != canonical:
+                continue
+            if candidate.get("kind", "git") != "git":
+                raise WorkspaceRegistryConflict("the checkout is linked with another storage kind")
+            matches.append((row.get("name", ""), candidate))
+    return matches
+
+
+def patch_shared_brain_lifetime(config: Any, workspace: str, link: Any, *, owner: WorkspaceRegistryOwnership) -> str:
+    """Set only the matching persisted Git row's missing lifetime; reuse a peer token."""
+    raw = read_workspace_registry_bytes(config)
+    if raw is None:
+        raise WorkspaceRegistryConflict("workspace registry is missing")
+    data = json.loads(raw)
+    rows = [row for row in registry_rows(data) if row.get("name") == workspace]
+    if len(rows) != 1 or not isinstance(rows[0].get("shared_brains"), list):
+        raise WorkspaceRegistryConflict("workspace registry entry is missing or ambiguous")
+    links = rows[0]["shared_brains"]
+    matches = [item for item in links if isinstance(item, dict) and item.get("name") == link.name]
+    if len(matches) != 1:
+        raise WorkspaceRegistryConflict("shared brain link is missing or ambiguous")
+    item = matches[0]
+    if (item.get("path"), item.get("kind", "git"), item.get("identity")) != (link.path, "git", link.identity):
+        raise WorkspaceRegistryConflict("shared brain link changed")
+    existing = item.get("lifetime_id")
+    if isinstance(existing, str) and existing:
+        return existing
+    if raw != getattr(config, "_workspace_registry_bytes", None):
+        raise WorkspaceRegistryConflict("workspace registry changed before lifetime initialization")
+    item["lifetime_id"] = link.lifetime_id
+    payload = (json.dumps(data, indent=2) + "\n").encode("utf-8")
+    replace_workspace_registry(config, payload, expected=raw, owner=owner)
+    config._workspace_registry_bytes = payload
+    return str(link.lifetime_id)
+
+
+def workspace_registry_lock(config: Any) -> threading.RLock:
+    """Serialize registry snapshots with initialization of legacy link IDs."""
+    key = id(config)
+    with _REGISTRY_LOCKS_GUARD:
+        return _REGISTRY_LOCKS.setdefault(key, threading.RLock())
+
+
+@contextmanager
+def workspace_registry_file_lock(
+    runtime_root: Path, *, exclusive: bool = True, blocking: bool = True,
+) -> Iterator[None]:
+    """Interprocess barrier for readers and writers of ``workspaces.json``."""
+    runtime_root.mkdir(parents=True, exist_ok=True)
+    lock_root = runtime_root / "locks"
+    lock_root.mkdir(parents=True, exist_ok=True, mode=0o700)
+    os.chmod(lock_root, 0o700)
+    lock_path = lock_root / "workspaces-registry.lock"
+    fd = os.open(lock_path, os.O_RDWR | os.O_CREAT, 0o600)
+    try:
+        (lock_exclusive if exclusive else lock_shared)(fd, blocking=blocking)
+        yield
+    finally:
+        unlock(fd)
+        os.close(fd)
+
 
 # Every selectable provider is a runtime provider, so the registry is the only
 # source for labels.
@@ -432,7 +592,7 @@ def workspace_to_dict(workspace: WorkspaceConfig, config: Any) -> dict:
         "memory_approval": memory_approval,
         "provider_overrides": provider_overrides,
         "shared_brains": [
-            {"name": link.name, "path": link.path, "identity": link.identity}
+            {"name": link.name, "path": link.path, "identity": link.identity, "kind": link.kind}
             for link in getattr(workspace, "shared_brains", [])
         ],
     }
@@ -451,8 +611,61 @@ def _shared_brain_rows(raw: object) -> list[dict[str, str]]:
         name = item.get("name")
         if name is not None and not isinstance(name, str):
             raise ValueError(_SHARED_BRAINS_SHAPE)
-        rows.append({"path": item["path"], "name": name} if name is not None else {"path": item["path"]})
+        kind = item.get("kind")
+        if "kind" in item and not isinstance(kind, str):
+            raise ValueError(_SHARED_BRAINS_SHAPE)
+        row = {"path": item["path"]}
+        if name is not None:
+            row["name"] = name
+        if "kind" in item:
+            row["kind"] = kind
+        rows.append(row)
     return rows
+
+
+def requested_brain_rows(raw: object) -> list[dict[str, str]]:
+    rows = _shared_brain_rows(raw)
+    if len(rows) > shared_brain.MAX_BRAINS_PER_WORKSPACE:
+        raise ValueError(f"A workspace can link at most {shared_brain.MAX_BRAINS_PER_WORKSPACE} shared brains")
+    paths: set[str] = set()
+    for row in rows:
+        value = row["path"]
+        if any(ord(ch) < 32 or ord(ch) == 127 for ch in value):
+            raise ValueError("Shared brain path contains a control character")
+        # The path is exact: a trailing or leading space can name a different
+        # existing folder, and trimming it would link the wrong one.
+        path = os.path.expanduser(value)
+        if not os.path.isabs(path):
+            raise ValueError("Shared brain folder path must be absolute")
+        canonical = os.path.realpath(path)
+        if canonical in paths:
+            raise ValueError(f"Shared brain folder is listed twice: {canonical}")
+        if any(ord(ch) < 32 or ord(ch) == 127 for ch in canonical):
+            raise ValueError("Shared brain path cannot be represented unambiguously")
+        paths.add(canonical)
+        row["path"] = canonical
+    return rows
+
+
+def check_requested_brain_kinds(
+    owner: WorkspaceRegistryOwnership, requested: list[dict[str, str]], existing: list[SharedBrainLink],
+) -> None:
+    if any(os.path.realpath(row["path"]) != row["path"] for row in requested):
+        raise WorkspaceRegistryConflict("shared brain path changed while acquiring checkout claims")
+    if owner.current is None:
+        return
+    retained = {os.path.realpath(link.path): link.kind for link in existing}
+    kinds = {row["path"]: row.get("kind", retained.get(row["path"], "git")) for row in requested}
+    for workspace in registry_rows(json.loads(owner.current)):
+        links = workspace.get("shared_brains", [])
+        if not isinstance(links, list):
+            raise WorkspaceRegistryConflict("workspace shared brains are unreadable")
+        for link in links:
+            if not isinstance(link, dict) or not isinstance(link.get("path"), str):
+                raise WorkspaceRegistryConflict("workspace shared brain path is unreadable")
+            path = os.path.realpath(link["path"])
+            if path in kinds and kinds[path] != link.get("kind", "git"):
+                raise ValueError("shared brain kind changed; unlink and add it again to change kind")
 
 
 def parse_disallowed_tools_value(raw: object) -> list[str] | None:
@@ -634,147 +847,8 @@ def _workspaces_path(config: Any) -> Path:
     return Path(config.state_path).resolve().parent / "workspaces.json"
 
 
-def _read_registry_bytes(runtime_root: Path) -> bytes | None:
-    try:
-        return (Path(runtime_root) / "workspaces.json").read_bytes()
-    except FileNotFoundError:
-        return None
-
-
-def _atomic_write_registry_bytes(path: Path, payload: bytes) -> None:
-    fd, temp_name = tempfile.mkstemp(prefix=".workspaces-", suffix=".tmp", dir=path.parent)
-    temp = Path(temp_name)
-    try:
-        with os.fdopen(fd, "wb") as stream:
-            os.fchmod(stream.fileno(), 0o600)
-            stream.write(payload)
-            stream.flush()
-            os.fsync(stream.fileno())
-        os.replace(temp, path)
-    finally:
-        try:
-            temp.unlink()
-        except FileNotFoundError:
-            pass
-
-
-def ensure_registry_current(config: Any) -> None:
-    """Refuse a transaction whose loaded registry bytes are stale."""
-    if read_workspace_registry_bytes(config) != getattr(
-        config, "_workspace_registry_bytes", None
-    ):
-        raise WorkspaceRegistryConflict("workspace registry changed since it was loaded")
-
-
-def read_workspace_registry_bytes(config: Any) -> bytes | None:
-    """Exact persisted registry bytes; None denotes a missing registry."""
-    try:
-        return _workspaces_path(config).read_bytes()
-    except FileNotFoundError:
-        return None
-
-
-
-def restore_registry_entries(
-    runtime_root: Path,
-    prior_entries: list[dict[str, Any]] | None,
-    expected_entries: list[dict[str, Any]] | None,
-    *,
-    owner: WorkspaceRegistryOwnership | None = None,
-    fields: tuple[str, ...] | None = None,
-) -> bool:
-    """Restore only transaction-owned rows after validating ALL expectations.
-
-    Every named expected row must still be present and match the selected
-    fields before any registry byte is written. A mismatch returns False with
-    no partial restoration, leaving concurrent edits untouched.
-    """
-    if expected_entries is None:
-        return False
-    prior_by_name = {
-        str(row.get("name")): row
-        for row in (prior_entries or [])
-        if isinstance(row, dict) and isinstance(row.get("name"), str)
-    }
-    expected_by_name = {
-        str(row.get("name")): row
-        for row in expected_entries
-        if isinstance(row, dict) and isinstance(row.get("name"), str)
-    }
-    own_owner = owner is None
-    if owner is None:
-        owner = acquire_registry_at(runtime_root, blocking=True)
-    try:
-        if owner.current is None:
-            return False
-        try:
-            current = json.loads(owner.current)
-        except (ValueError, TypeError, UnicodeDecodeError):
-            return False
-        if not isinstance(current, list):
-            return False
-        by_name = {
-            str(row.get("name")): row
-            for row in current
-            if isinstance(row, dict) and isinstance(row.get("name"), str)
-        }
-        for name, expected_row in expected_by_name.items():
-            row = by_name.get(name)
-            if row is None:
-                return False
-            if fields is None:
-                if row != expected_row:
-                    return False
-            elif not all(row.get(key) == expected_row.get(key) for key in fields):
-                return False
-        rewritten: list[dict[str, Any]] = []
-        changed = False
-        for row in current:
-            name = str(row.get("name")) if isinstance(row, dict) else ""
-            if name and name in expected_by_name:
-                prior = prior_by_name.get(name)
-                if prior is None:
-                    changed = True
-                    continue
-                if fields is None:
-                    restored = json.loads(json.dumps(prior))
-                else:
-                    restored = json.loads(json.dumps(row))
-                    for key in fields:
-                        if key in prior:
-                            restored[key] = prior[key]
-                rewritten.append(restored)
-                changed = changed or restored != row
-            else:
-                rewritten.append(row)
-        if changed:
-            payload = (json.dumps(rewritten, indent=2) + "\n").encode("utf-8")
-            owner.replace(payload, expected=owner.current)
-    finally:
-        if own_owner:
-            owner.close()
-    return True
-
-def replace_workspace_registry(
-    config: Any,
-    payload: bytes | None,
-    *,
-    expected: bytes | None,
-    owner: WorkspaceRegistryOwnership,
-) -> None:
-    """Exact-bytes CAS under explicit claim ownership."""
-    if owner.closed or owner.key != str(Path(config.state_path).resolve().parent):
-        raise WorkspaceRegistryConflict("workspace registry ownership is invalid")
-    owner.replace(payload, expected=expected)
-    if hasattr(config, "_workspace_registry_bytes"):
-        config._workspace_registry_bytes = payload
-
-
 def persist_workspaces(
-    config: Any,
-    candidate_workspaces: dict[str, Any] | None = None,
-    *,
-    owner: WorkspaceRegistryOwnership | None = None,
+    config: Any, candidate_workspaces: dict[str, Any] | None = None, *, owner: WorkspaceRegistryOwnership | None = None
 ) -> None:
     persist = getattr(config, "persist_workspace_registry", None)
     if candidate_workspaces is None and callable(persist):
@@ -783,8 +857,6 @@ def persist_workspaces(
         else:
             persist(owner=owner)
         return
-    path = _workspaces_path(config)
-    path.parent.mkdir(parents=True, exist_ok=True)
     workspaces = candidate_workspaces if candidate_workspaces is not None else config.workspaces
     payload = [workspace_to_dict(workspace, config) for workspace in workspaces.values()]
     for row, workspace in zip(payload, workspaces.values()):
@@ -802,20 +874,17 @@ def persist_workspaces(
                 row.pop("shared_brains", None)
         if workspace.shared_brains:
             row["shared_brains"] = [
-                {"name": link.name, "path": link.path, "identity": link.identity, "lifetime_id": link.lifetime_id}
+                {"name": link.name, "path": link.path, "identity": link.identity, "lifetime_id": link.lifetime_id, "kind": link.kind}
                 for link in workspace.shared_brains
             ]
+    expected = getattr(config, "_workspace_registry_bytes", None)
     content = (json.dumps(payload, indent=2) + "\n").encode("utf-8")
     own_owner = owner is None
     if owner is None:
-        owner = acquire_registry_at(path.parent, blocking=True)
+        owner = acquire_workspace_registry(config)
     try:
-        replace_workspace_registry(
-            config,
-            content,
-            expected=getattr(config, "_workspace_registry_bytes", None),
-            owner=owner,
-        )
+        replace_workspace_registry(config, content, expected=expected, owner=owner)
+        config._workspace_registry_bytes = content
     finally:
         if own_owner:
             owner.close()

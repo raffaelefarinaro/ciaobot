@@ -27,7 +27,9 @@ def _git(root: Path, *args: str) -> str:
 
 
 def _config(tmp_path: Path, workspaces: dict[str, str]) -> CiaoConfig:
+    registry = tmp_path / ".runtime" / "workspaces.json"
     return CiaoConfig(
+        _workspace_registry_bytes=registry.read_bytes() if registry.exists() else None,
         pwa_auth_token="test-token",
         workspace_root=tmp_path,
         state_path=tmp_path / ".runtime" / "state.json",

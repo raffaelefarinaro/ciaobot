@@ -451,7 +451,30 @@ def _preflight_registry(owner: Any, workspaces: list[str]) -> str | None:
     return None
 
 
-def _apply_locked(
+def apply(
+    install_root: Path,
+    vault_root: Path,
+    workspaces: list[str],
+    runtime_root: Path,
+    *,
+    primary: str,
+    source_config: Any = None,
+    expected_registry_bytes: bytes | None = None,
+) -> dict[str, Any]:
+    from ciao.workspaces import acquire_registry_at, WorkspaceRegistryBusy
+    try:
+        with acquire_registry_at(runtime_root) as owner:
+            expected = expected_registry_bytes
+            if source_config is not None:
+                expected = getattr(source_config, "_workspace_registry_bytes", None)
+            if expected is not None and owner.current != expected:
+                return {"status": "refused", "refusals": ["workspace registry changed before migration"]}
+            return _apply_owned(install_root, vault_root, workspaces, runtime_root, primary=primary, owner=owner)
+    except WorkspaceRegistryBusy as exc:
+        return {"status": "refused", "reason": str(exc)}
+
+
+def _apply_owned(
     install_root: Path,
     vault_root: Path,
     workspaces: list[str],
@@ -845,52 +868,8 @@ def _apply_locked(
     return payload
 
 
-def apply(
-    install_root: Path,
-    vault_root: Path,
-    workspaces: list[str],
-    runtime_root: Path,
-    *,
-    primary: str,
-    expected_registry_bytes: bytes | None = None,
-) -> dict[str, Any]:
-    """Acquire the registry claim once and hold it through the migration."""
-    from ciao.workspaces import acquire_registry_at  # noqa: PLC0415
-
-    owner = acquire_registry_at(Path(runtime_root), blocking=True)
-    try:
-        if (
-            expected_registry_bytes is not None
-            and owner.current != expected_registry_bytes
-        ):
-            return {
-                "status": "refused",
-                "refused": True,
-                "refusals": [
-                    "the workspace registry changed since it was loaded; "
-                    "nothing was moved"
-                ],
-            }
-        return _apply_locked(
-            install_root, vault_root, workspaces, runtime_root,
-            primary=primary, owner=owner,
-        )
-    finally:
-        owner.close()
-
-
 def _replace_across_filesystems(source: Path, destination: Path) -> None:
-    """Replace ``destination`` with ``source``, even across filesystems.
-
-    why: ``Path.replace`` is rename(2), which fails with EXDEV when the runtime
-    root (``CIAO_RUNTIME_ROOT``) sits on a different filesystem from the install
-    root. The forward migration stashes INTO the runtime root with
-    ``shutil.move`` precisely because that layout is supported, so this reverse
-    step needs the same reach. The fast path stays an atomic rename; on EXDEV
-    the fallback copies beside the DESTINATION and ``os.replace``s onto it, so
-    the overwrite stays atomic and a failed copy leaves the destination
-    untouched. Errors propagate: a failed restore still aborts the undo.
-    """
+    """Replace ``destination`` with ``source``, even across filesystems."""
     try:
         source.replace(destination)
         return
@@ -1210,7 +1189,16 @@ def _recover_undo_manifest(runtime_root: Path, owner: Any) -> str | None:
     return None
 
 
-def _undo_locked(install_root: Path, runtime_root: Path, *, owner: Any) -> dict[str, Any]:
+def undo(install_root: Path, runtime_root: Path) -> dict[str, Any]:
+    from ciao.workspaces import acquire_registry_at, WorkspaceRegistryBusy
+    try:
+        with acquire_registry_at(runtime_root) as owner:
+            return _undo_owned(install_root, runtime_root, owner=owner)
+    except WorkspaceRegistryBusy as exc:
+        return {"status": "refused", "reason": str(exc)}
+
+
+def _undo_owned(install_root: Path, runtime_root: Path, *, owner: Any) -> dict[str, Any]:
     """Reverse a completed re-rooting to a byte-identical tree.
 
     CLI only. Reverting the architecture is not a housekeeping button, and the
@@ -1598,17 +1586,6 @@ def _undo_locked(install_root: Path, runtime_root: Path, *, owner: Any) -> dict[
     }
 
 
-def undo(install_root: Path, runtime_root: Path) -> dict[str, Any]:
-    """Acquire the registry claim once and hold it through the undo."""
-    from ciao.workspaces import acquire_registry_at  # noqa: PLC0415
-
-    owner = acquire_registry_at(Path(runtime_root), blocking=True)
-    try:
-        return _undo_locked(install_root, runtime_root, owner=owner)
-    finally:
-        owner.close()
-
-
 def _walk_entries(base: Path) -> set[str]:
     """Every file, directory and symlink under ``base``, relative to it.
 
@@ -1772,8 +1749,14 @@ def _write_registry_unlocked(
     tmp.replace(path)
 
 
+def _write_registry(runtime_root: Path, entries: list[dict[str, Any]], *, owner: Any) -> None:
+    if owner.path != registry_file(runtime_root).resolve():
+        raise ValueError("registry owner belongs to another runtime")
+    owner.replace((json.dumps(entries, indent=2) + "\n").encode(), expected=owner.current)
+
+
 def _rewrite_registry(
-    runtime_root: Path, result: RerootPlan, *, owner: Any,
+    runtime_root: Path, result: RerootPlan, *, owner: Any
 ) -> tuple[list[dict[str, Any]] | None, list[dict[str, Any]] | None]:
     """Point every migrated workspace's ``vault_root`` at its new agent root.
 
@@ -1799,8 +1782,7 @@ def _rewrite_registry(
         destination = destinations.get(str(entry.get("name", "")))
         if destination:
             entry["vault_root"] = destination
-    payload = (json.dumps(entries, indent=2) + "\n").encode("utf-8")
-    owner.replace(payload, expected=owner.current)
+    _write_registry(runtime_root, entries, owner=owner)
     return before, entries
 
 
@@ -2736,6 +2718,7 @@ def rebuild_indexes(
     *,
     vault_name: str = VAULT_DIR_NAME,
     runtime_root: Path | None = None,
+    registry_owner: Any | None = None,
 ) -> dict[str, Any]:
     """Rebuild each root's INDEX.md/VOCABULARY.md or its private SQLite index.
 
@@ -2799,6 +2782,7 @@ def rebuild_indexes(
                 authorize=lambda: index_destination_is_ciao_owned(runtime, vault),
                 ownership_runtime=runtime,
                 registration_runtime=runtime,
+                registry_owner=registry_owner,
             )
             (vault / "VOCABULARY.md").write_text(
                 format_vocabulary(entries), encoding="utf-8", newline=""
@@ -3567,6 +3551,29 @@ def repair(
     shared_sources: Path | None = None,
     db_path: Path | None = None,
 ) -> dict[str, Any]:
+    from ciao.workspaces import acquire_registry_at, registry_rows, WorkspaceRegistryConflict
+    try:
+        with acquire_registry_at(runtime_root) as owner:
+            if owner.current is not None:
+                rows = registry_rows(json.loads(owner.current))
+                if sorted(row.get("name", "") for row in rows) != sorted(workspaces):
+                    raise WorkspaceRegistryConflict("workspace selection changed before repair")
+            return _repair_owned(install_root, runtime_root, workspaces,
+                                 shared_sources=shared_sources, db_path=db_path,
+                                 owner=owner)
+    except (WorkspaceRegistryConflict, ValueError) as exc:
+        return {"status": "refused", "repaired": [], "reported": [], "errors": [{"error": str(exc)}]}
+
+
+def _repair_owned(
+    install_root: Path,
+    runtime_root: Path,
+    workspaces: list[str],
+    *,
+    shared_sources: Path | None = None,
+    db_path: Path | None = None,
+    owner: Any | None = None,
+) -> dict[str, Any]:
     """Reconcile the filesystem to the registry. Idempotent; a no-op when correct.
 
     Refuses on an install that has not re-rooted, and the reason is not caution:
@@ -3621,7 +3628,8 @@ def repair(
     for name in sorted(workspaces):
         root = install_root / name
         try:
-            _repair_one_root(root, name, shared, record, vault_name=leaf, runtime_root=runtime_root)
+            _repair_one_root(root, name, shared, record, vault_name=leaf,
+                             runtime_root=runtime_root, owner=owner)
         except Exception as exc:  # noqa: BLE001 — one bad root must not stop the rest
             errors.append({"workspace": name, "error": str(exc)})
 
@@ -3698,6 +3706,7 @@ def _repair_one_root(
     *,
     vault_name: str = VAULT_DIR_NAME,
     runtime_root: Path | None = None,
+    owner: Any | None = None,
 ) -> None:
     """Reconcile one agent root. Every branch is safe to run twice."""
     from ciao.sync_skills import _ensure_workspace_guide  # noqa: PLC0415
@@ -3813,6 +3822,7 @@ def _repair_one_root(
         if vault.is_dir():
             rebuilt = rebuild_indexes(
                 root.parent, [name], vault_name=vault.name, runtime_root=runtime,
+                registry_owner=owner,
             )
             if rebuilt["errors"]:
                 raise OSError(rebuilt["errors"][0]["error"])
@@ -3825,6 +3835,7 @@ def _repair_one_root(
             [name],
             vault_name=vault.name,
             runtime_root=runtime_root,
+            registry_owner=owner,
         )
         if rebuilt["errors"]:
             raise OSError(rebuilt["errors"][0]["error"])

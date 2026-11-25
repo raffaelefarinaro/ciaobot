@@ -3215,10 +3215,10 @@ def preview_row(
             None,
         )
         blocked = None
-        if link is None or getattr(link, "lifetime_id", None) != fields.get("link_lifetime_id"):
+        if link is None or link.kind != "git" or getattr(link, "lifetime_id", None) != fields.get("link_lifetime_id"):
             blocked = "brain_unavailable"
         else:
-            state = shared_brain.brain_state(link, config)
+            state = shared_brain.brain_state(link, config, workspace)
             if state.get("problem"):
                 blocked = "brain_changed" if state.get("problem") == "origin_changed" else "brain_unavailable"
         if text:

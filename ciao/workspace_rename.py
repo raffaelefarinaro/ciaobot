@@ -22,6 +22,7 @@ import dataclasses
 import logging
 import os
 import stat
+import tempfile
 from pathlib import Path
 from typing import Any
 
@@ -72,6 +73,8 @@ def rename_workspace(
     schedules: Any,
     webhooks: Any,
     imports: Any,
+    owner: Any = None,
+    updated: Any = None,
 ) -> dict[str, str]:
     """Rename workspace ``old`` to ``new`` and return ``{"from": old, "to": new}``.
 
@@ -82,6 +85,18 @@ def rename_workspace(
     required. The caller holds the workspace archive lock: the registry is
     mutated here, on the event loop.
     """
+    from ciao.workspaces import ensure_registry_current, workspace_registry_claim
+    if owner is None:
+        from ciao.shared_brain import checkout_claims_nowait
+        links = [*getattr(config.workspace(old), "shared_brains", []), *getattr(updated, "shared_brains", [])]
+        with checkout_claims_nowait((link.path for link in links), config), workspace_registry_claim(config) as claim:
+            return rename_workspace(config, old=old, new=new, projects=projects, schedules=schedules,
+                                    webhooks=webhooks, imports=imports, owner=claim, updated=updated)
+    ensure_registry_current(config)
+    return _rename_owned(config, old, new, projects, schedules, webhooks, imports, owner, updated)
+
+
+def _rename_owned(config: Any, old: str, new: str, projects: Any, schedules: Any, webhooks: Any, imports: Any, owner: Any, updated: Any) -> dict[str, str]:
     if not WORKSPACE_NAME_RE.match(new):
         raise ValueError(
             "workspace name must use letters, numbers, dashes, or underscores"
@@ -148,11 +163,13 @@ def rename_workspace(
             Path(config.workspace_vault_root(old)), Path(config.workspace_root)
         )
 
-    updated = preview_renamed_config(existing, old=old, new=new)
+    if updated is None:
+        updated = preview_renamed_config(existing, old=old, new=new)
 
     snapshot = _take_snapshot(
-        config, projects, schedules, webhooks, imports
+        config, projects, schedules
     )
+    snapshot["rename_pair"] = (old, new)
     if projects is not None:
         # Cached providers were built with the old agent root and workspace
         # name. Evicted before the agent root and the project rows move: the
@@ -204,7 +221,8 @@ def rename_workspace(
         with workspace_registry_lock(config):
             config.workspaces.clear()
             config.workspaces.update(renamed)
-            config.persist_workspace_registry()
+            config.persist_workspace_registry(owner=owner)
+            snapshot["registry_written_bytes"] = config._workspace_registry_bytes
         if projects is not None:
             entries = getattr(projects, "_projects", None)
             if isinstance(entries, dict):
@@ -222,17 +240,18 @@ def rename_workspace(
         # exactly like what the rename wrote, and otherwise moves just the
         # renamed rows back.
         snapshot["schedule_store"] = schedules
-        snapshot["rename_pair"] = (old, new)
         with _schedule_lock(snapshot):
             snapshot["schedule_bytes"] = _read_bytes_if_present(snapshot.get("schedule_path"))
             snapshot["system_state_bytes"] = _read_bytes_if_present(snapshot.get("system_state_path"))
             schedules.rename_workspace(old, new)
             snapshot["schedule_written"] = _read_bytes_if_present(snapshot.get("schedule_path"))
             snapshot["system_state_written"] = _read_bytes_if_present(snapshot.get("system_state_path"))
-        webhooks.rename_workspace(old, new)
-        imports.rename_workspace(old, new)
+        for store in (webhooks, imports):
+            undo: list[tuple[bytes, bytes]] = []
+            snapshot["store_undo"].append((store, undo))
+            store.rename_workspace(old, new, undo=undo)
     except Exception:
-        _roll_back(config, projects, snapshot, move)
+        _roll_back(config, projects, snapshot, move, owner)
         raise
     if search_prefix is not None:
         # Derived state, pruned only once every reference write succeeded: a
@@ -290,8 +309,6 @@ def _take_snapshot(
     config: Any,
     projects: Any,
     schedules: Any,
-    webhooks: Any,
-    imports: Any,
 ) -> dict[str, Any]:
     """Record every piece of rename-mutated state, before anything is written."""
     project_workspaces: dict[Any, str] | None = None
@@ -302,11 +319,8 @@ def _take_snapshot(
                 key: str(getattr(info, "workspace", "") or "")
                 for key, info in entries.items()
             }
-    project_path = _store_path(projects, "_path") if projects is not None else None
     schedule_path = _store_path(schedules, "_path")
     system_state_path = _store_path(schedules, "_system_state_path")
-    webhook_path = _store_path(webhooks, "_path")
-    import_path = _store_path(imports, "_path")
     return {
         "workspaces": dict(config.workspaces),
         "onboarding_path": Path(config.state_path).parent / "onboarding.json",
@@ -316,17 +330,13 @@ def _take_snapshot(
         "onboarding_revision": _onboarding_revision(
             Path(config.state_path).parent / "onboarding.json"
         ),
+        "registry_bytes": config._workspace_registry_bytes,
         "project_workspaces": project_workspaces,
-        "project_path": project_path,
-        "project_bytes": _read_bytes_if_present(project_path),
         "schedule_path": schedule_path,
         "schedule_bytes": _read_bytes_if_present(schedule_path),
         "system_state_path": system_state_path,
         "system_state_bytes": _read_bytes_if_present(system_state_path),
-        "webhook_path": webhook_path,
-        "webhook_bytes": _read_bytes_if_present(webhook_path),
-        "import_path": import_path,
-        "import_bytes": _read_bytes_if_present(import_path),
+        "store_undo": [],
     }
 
 
@@ -352,10 +362,14 @@ def _restore_file(path: Path | None, snapshot: bytes | None) -> None:
         # Secret-bearing stores (webhooks, imports) are owner-only; a
         # rollback must not widen them to the default umask mode.
         mode = 0o600
-    tmp = path.with_name(f".{path.name}.rename-rollback.tmp")
-    tmp.write_bytes(snapshot)
-    os.chmod(tmp, mode)
-    os.replace(tmp, path)
+    fd, tmp = tempfile.mkstemp(dir=path.parent, prefix=".rename-")
+    try:
+        with os.fdopen(fd, "wb") as stream:
+            os.fchmod(stream.fileno(), mode)
+            stream.write(snapshot)
+        os.replace(tmp, path)
+    finally:
+        Path(tmp).unlink(missing_ok=True)
 
 
 def _roll_back(
@@ -363,6 +377,7 @@ def _roll_back(
     projects: Any,
     snapshot: dict[str, Any],
     move: tuple[Path, Path] | None,
+    owner: Any,
 ) -> None:
     """Restore every reference the failed rename may have rewritten.
 
@@ -370,33 +385,30 @@ def _roll_back(
     every failure is logged loudly: the original exception still propagates,
     so a failed rollback never masquerades as a clean refusal.
     """
+    from ciao.workspaces import WorkspaceRegistryConflict, read_workspace_registry_bytes, workspace_registry_lock
+
+    raw = snapshot["registry_bytes"]
+    written = snapshot.get("registry_written_bytes")
+    expected = written if written is not None else raw
+    if read_workspace_registry_bytes(config) != expected:
+        raise WorkspaceRegistryConflict("registry changed during rename; inspect the workspace before retrying")
+
     if move is not None:
         source, dest = move
-        try:
-            os.rename(dest, source)
-        except OSError:
-            logger.exception(
-                "Could not move the agent root back after a failed rename"
-            )
-    from ciao.workspaces import workspace_registry_lock  # noqa: PLC0415
-
+        if source.exists() or source.is_symlink():
+            raise FileExistsError(f"the old workspace path was recreated: {source}")
+        os.rename(dest, source)
     with workspace_registry_lock(config):
+        if written is not None:
+            try:
+                owner.replace(raw, expected=written)
+            except Exception:
+                if move is not None and not dest.exists() and not dest.is_symlink():
+                    os.rename(source, dest)
+                raise
+            config._workspace_registry_bytes = raw
         config.workspaces.clear()
-        config.workspaces.update(snapshot.get("workspaces", {}))
-        try:
-            config.persist_workspace_registry()
-        except Exception:
-            logger.exception(
-                "Could not restore the workspace registry after a failed rename"
-            )
-            # Do not restore the raw pre-rename snapshot here: another process
-            # may have linked a shared brain since it was taken. Leaving the
-            # live registry alone is fail-closed; the failure above already
-            # says the rename needs operator attention.
-            logger.error(
-                "Workspace registry was not rewound from the rename snapshot; "
-                "inspect it for a concurrent registration before retrying"
-            )
+        config.workspaces.update(snapshot["workspaces"])
     if projects is not None:
         project_workspaces = snapshot.get("project_workspaces")
         if isinstance(project_workspaces, dict):
@@ -404,9 +416,10 @@ def _roll_back(
             if isinstance(entries, dict):
                 for key, workspace in project_workspaces.items():
                     info = entries.get(key)
-                    if info is not None:
+                    old, new = snapshot["rename_pair"]
+                    if info is not None and workspace == old and info.workspace == new:
                         try:
-                            info.workspace = workspace
+                            info.workspace = old
                         except Exception:  # noqa: BLE001 - keep restoring the rest
                             logger.exception(
                                 "Could not restore project %r after a failed rename",
@@ -420,26 +433,25 @@ def _roll_back(
                     logger.exception(
                         "Could not re-save projects after a failed workspace rename"
                     )
-        project_path = _store_path(projects, "_path")
-        if project_path is not None and snapshot.get("project_bytes") is not None:
-            try:
-                _restore_file(project_path, snapshot["project_bytes"])
-            except Exception:
-                logger.exception(
-                    "Could not restore the project registry file after a failed rename"
-                )
-    # File restores below run reverse to the forward writes (imports first,
-    # schedules last); each is independent, so one failing still leaves the
-    # others restored.
     _restore_snapshot_files(snapshot)
 
 
 def _restore_snapshot_files(snapshot: dict[str, Any]) -> None:
     """Write every snapshotted store file back, logging rather than raising."""
     _restore_onboarding_receipt(snapshot)
-    _restore_logged("import batches", snapshot.get("import_bytes"), snapshot)
-    _restore_logged("webhook triggers", snapshot.get("webhook_bytes"), snapshot)
     _restore_schedule_files(snapshot)
+    conflicts = []
+    for store, undo in reversed(snapshot["store_undo"]):
+        for before, written in undo:
+            if written == before:
+                continue
+            with store._mutation():
+                if store._path.read_bytes() != written:
+                    conflicts.append(store._path.name)
+                else:
+                    _restore_file(store._path, before)
+    if conflicts:
+        raise RuntimeError("Newer edits were preserved during rename rollback; inspect " + ", ".join(conflicts))
 
 
 def _schedule_lock(snapshot: dict[str, Any]) -> Any:
@@ -529,8 +541,6 @@ def _restore_logged(label: str, raw: Any, snapshot: dict[str, Any]) -> None:
     if not isinstance(raw, bytes):
         return
     key = {
-        "import batches": "import_path",
-        "webhook triggers": "webhook_path",
         "schedules": "schedule_path",
         "system schedule state": "system_state_path",
     }[label]

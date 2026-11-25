@@ -300,7 +300,7 @@ def test_failed_persist_after_the_directory_rename_moves_it_back(
     projects = _Projects()
     schedules, webhooks, imports = _stores(config, tmp_path)
 
-    def _boom(self: CiaoConfig) -> None:
+    def _boom(self: CiaoConfig, **kwargs) -> None:
         raise OSError("disk full")
 
     monkeypatch.setattr(CiaoConfig, "persist_workspace_registry", _boom)
@@ -479,8 +479,8 @@ def test_failed_webhook_write_restores_schedules_and_projects(
 
     original = WebhookStore.rename_workspace
 
-    def _write_then_fail(self: WebhookStore, old: str, new: str) -> int:
-        original(self, old, new)
+    def _write_then_fail(self: WebhookStore, old: str, new: str, **kwargs) -> int:
+        original(self, old, new, **kwargs)
         raise OSError("disk full")
 
     monkeypatch.setattr(WebhookStore, "rename_workspace", _write_then_fail)
@@ -516,8 +516,8 @@ def test_failed_import_write_restores_webhooks(
 
     original = ImportStore.rename_workspace
 
-    def _write_then_fail(self: ImportStore, old: str, new: str) -> int:
-        original(self, old, new)
+    def _write_then_fail(self: ImportStore, old: str, new: str, **kwargs) -> int:
+        original(self, old, new, **kwargs)
         raise OSError("disk full")
 
     monkeypatch.setattr(ImportStore, "rename_workspace", _write_then_fail)
@@ -553,8 +553,8 @@ def test_failed_import_write_restores_everything_on_a_rerooted_install(
 
     original = ImportStore.rename_workspace
 
-    def _write_then_fail(self: ImportStore, old: str, new: str) -> int:
-        original(self, old, new)
+    def _write_then_fail(self: ImportStore, old: str, new: str, **kwargs) -> int:
+        original(self, old, new, **kwargs)
         raise OSError("disk full")
 
     monkeypatch.setattr(ImportStore, "rename_workspace", _write_then_fail)
@@ -750,8 +750,8 @@ def test_rollback_keeps_a_schedule_edit_made_after_the_rename_wrote(
 
     original = WebhookStore.rename_workspace
 
-    def _edit_then_fail(self: WebhookStore, old: str, new: str) -> int:
-        original(self, old, new)
+    def _edit_then_fail(self: WebhookStore, old: str, new: str, **kwargs) -> int:
+        original(self, old, new, **kwargs)
         current = schedules.get(target.schedule_id)
         base = dataclasses.replace(current)
         current.title = "edited meanwhile"
@@ -802,3 +802,23 @@ def test_failure_inside_the_schedule_rename_step_is_rolled_back(
     monkeypatch.undo()
     row = schedules.get(target.schedule_id)
     assert row is not None and row.workspace == "personal"
+
+
+def test_rollback_preserves_a_verifier_revoked_after_rename(tmp_path, monkeypatch):
+    config = _shared_config(tmp_path, ["personal", "work"])
+    config.persist_workspace_registry()
+    projects = _Projects()
+    ids = _seed_all(config, tmp_path, projects)
+    schedules, webhooks, imports = _stores(config, tmp_path)
+
+    def revoke_then_fail(*args, **kwargs):
+        assert webhooks.revoke_workspace("renamed") == 1
+        raise OSError("import save failed")
+
+    monkeypatch.setattr(imports, "rename_workspace", revoke_then_fail)
+    with pytest.raises(RuntimeError, match="Newer edits were preserved"):
+        rename_workspace(config, old="personal", new="renamed", projects=projects,
+                         schedules=schedules, webhooks=webhooks, imports=imports)
+    assert webhooks.authenticate(ids["trigger_id"], ids["secret"]) is None
+    assert "personal" in config.workspaces
+    assert "renamed" not in config.workspaces

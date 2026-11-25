@@ -3765,6 +3765,7 @@ def _trigger_config(install: Path, runtime: Path, workspaces=("personal", "work"
         pwa_auth_token="test-token",
         workspace_root=install,
         vault_root=install / "memory-vault",
+        _workspace_registry_bytes=(runtime / "workspaces.json").read_bytes() if (runtime / "workspaces.json").exists() else None,
         state_path=runtime / "state.json",
         media_root=runtime / "media",
         workspaces={
@@ -4673,6 +4674,7 @@ def test_an_unmigrated_install_still_runs_the_real_migration(tmp_path: Path) -> 
     )
     config = SimpleNamespace(
         workspace_root=install,
+        _workspace_registry_bytes=(runtime / "workspaces.json").read_bytes(),
         state_path=runtime / "state.json",
         vault_root=vault,
         workspace_names=lambda: ["personal", "work"],
@@ -4890,6 +4892,55 @@ def test_read_receipt_raises_when_the_receipt_is_denied(
     assert peek_exc.value.path == receipt
 
 
+def test_from_env_registry_generation_matches_loaded_bytes(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from ciao.config import CiaoConfig
+
+    runtime = tmp_path / ".runtime"
+    runtime.mkdir()
+    registry = runtime / "workspaces.json"
+    registry.write_text(json.dumps([{"name": "old", "vault_root": "old"}]), encoding="utf-8")
+    replacement = runtime / "replacement"
+    replacement.write_text(json.dumps([{"name": "new", "vault_root": "new"}]), encoding="utf-8")
+    original = Path.open
+
+    class ReplacingReader:
+        def __init__(self, stream):
+            self.stream = stream
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            self.stream.close()
+
+        def read(self):
+            data = self.stream.read()
+            replacement.replace(registry)
+            return data
+
+        def fileno(self):
+            return self.stream.fileno()
+
+    def open_registry(path, *args, **kwargs):
+        stream = original(path, *args, **kwargs)
+        return ReplacingReader(stream) if path == registry else stream
+
+    monkeypatch.setattr(Path, "open", open_registry)
+    import ciao.config as config_module
+    captured = []
+    parse = config_module._parse_workspaces_json
+    def capture(raw, *, generation=None):
+        captured.append(generation)
+        return parse(raw, generation=generation)
+    monkeypatch.setattr(config_module, "_parse_workspaces_json", capture)
+    config = CiaoConfig.from_env({"PWA_AUTH_TOKEN": "x", "CIAO_WORKSPACE": str(tmp_path), "CIAO_RUNTIME_ROOT": str(runtime)})
+    info = registry.stat()
+    generation = (info.st_dev, info.st_ino, info.st_ctime_ns, info.st_size)
+    with original(registry, "rb") as stream:
+        current_bytes = stream.read()
+    assert captured[0] != generation or config._workspace_registry_bytes == current_bytes
+
+
 def test_from_env_raises_when_the_registry_is_denied(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -4899,7 +4950,12 @@ def test_from_env_raises_when_the_registry_is_denied(
     runtime.mkdir()
     registry = runtime / "workspaces.json"
     registry.write_text("{}", encoding="utf-8")
-    _deny_is_file(monkeypatch, registry)
+    original = Path.open
+    def denied(path, *args, **kwargs):
+        if path == registry:
+            raise PermissionError("denied")
+        return original(path, *args, **kwargs)
+    monkeypatch.setattr(Path, "open", denied)
 
     with pytest.raises(workspace_reroot.RuntimeStateUnreadable) as exc:
         CiaoConfig.from_env(
@@ -4985,13 +5041,30 @@ def test_reroot_registry_rewrite_keeps_shared_brains(tmp_path):
     plan = SimpleNamespace(moves=[SimpleNamespace(workspace="work", destination="/new/work")])
 
     from ciao.workspaces import acquire_registry_at
-
-    owner = acquire_registry_at(runtime, blocking=True)
-    try:
+    with acquire_registry_at(runtime) as owner:
         workspace_reroot._rewrite_registry(runtime, plan, owner=owner)
-    finally:
-        owner.close()
 
     written = _json.loads(workspace_reroot.registry_file(runtime).read_text(encoding="utf-8"))
     assert written[0]["vault_root"] == "/new/work"
     assert written[0]["shared_brains"] == links
+
+
+def test_undo_preserves_a_peer_field_change_before_moving_notes(tmp_path):
+    """A peer's unrelated field is not owned by the migration; undo keeps it."""
+    install, vault, runtime = _git_install(tmp_path)
+    _registry(runtime, [{"name": name, "vault_root": f"memory-vault/{name}"} for name in ("personal", "work")])
+    assert apply(install, vault, ["personal", "work"], runtime, primary="personal")["status"] == "migrated"
+    path = runtime / "workspaces.json"
+    rows = json.loads(path.read_bytes())
+    rows[0]["color"] = "green"
+    _registry(runtime, rows)
+
+    result = undo(install, runtime)
+
+    assert result["status"] == "undone", result
+    after = json.loads(path.read_text(encoding="utf-8"))
+    personal = next(row for row in after if row["name"] == "personal")
+    assert personal["color"] == "green"
+    assert personal["vault_root"] == "memory-vault/personal"
+    assert (install / "memory-vault" / "personal" / "People" / "Peter.md").is_file()
+    assert not (install / "personal").exists()

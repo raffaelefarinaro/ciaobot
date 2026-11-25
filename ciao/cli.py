@@ -212,7 +212,7 @@ def _copy_tree_if_missing(src, dest: Path) -> list[Path]:
     return written
 
 
-def _import_legacy_workspaces_for_setup(root: Path, existing_env: dict[str, str]) -> None:
+def _import_legacy_workspaces_for_setup(root: Path, existing_env: dict[str, str], *, owner: Any = None) -> None:
     """Run the one-time ``CIAO_WORKSPACES`` import against ``root``'s ``.env``.
 
     Built from the install's own ``.env`` (not the ambient environment) so the
@@ -226,27 +226,13 @@ def _import_legacy_workspaces_for_setup(root: Path, existing_env: dict[str, str]
         "CIAO_RUNTIME_ROOT": str((root / RUNTIME_DIR_NAME).resolve()),
         "PWA_AUTH_TOKEN": existing_env.get("PWA_AUTH_TOKEN") or "setup",
     }
-    CiaoConfig.from_env(source).import_legacy_workspaces_env()
+    CiaoConfig.from_env(source).import_legacy_workspaces_env(owner=owner)
 
 
 def _write_if_missing(path: Path, text: str) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     if not path.exists():
         path.write_text(text, encoding="utf-8", newline="")
-
-
-def _write_registry_if_missing(path: Path, text: str) -> None:
-    if path.exists():
-        return
-    from ciao.workspaces import workspace_registry_file_lock  # noqa: PLC0415
-
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with workspace_registry_file_lock(path.parent, exclusive=True):
-        if path.exists():
-            return
-        tmp = path.with_suffix(".json.tmp")
-        tmp.write_text(text, encoding="utf-8", newline="")
-        os.replace(tmp, path)
 
 
 def _host_service_arguments(
@@ -1393,6 +1379,41 @@ def setup_workspace(
     else:
         selection = _vault_selection
 
+    from ciao.workspaces import acquire_registry_at, WorkspaceRegistryConflict
+
+    with acquire_registry_at(root / RUNTIME_DIR_NAME) as owner:
+        current = select_setup_vault(root, vault_mode=vault_mode, vault_root=vault_root)
+        if current != selection:
+            raise WorkspaceRegistryConflict("setup selection changed during preflight")
+        return _setup_selected_workspace(
+            root, current, owner, auth_token=auth_token, vault_root=vault_root,
+            vault_mode=vault_mode, requested_name=requested_name, default_provider=default_provider,
+            python_path=python_path, port=port, launch_agents_dir=launch_agents_dir,
+            app_dir=app_dir, confirm_repoint=confirm_repoint, initialize_git=initialize_git,
+            sync_failures=sync_failures, write_launchd=write_launchd, host=host,
+        )
+
+
+def _setup_selected_workspace(
+    root: Path,
+    selection: SetupVaultSelection,
+    owner: Any,
+    *,
+    auth_token: str | None,
+    vault_root: Path | str | None,
+    vault_mode: str,
+    requested_name: str,
+    default_provider: str,
+    python_path: str | None,
+    port: int,
+    launch_agents_dir: Path | str | None,
+    app_dir: Path | str | None,
+    confirm_repoint: bool,
+    initialize_git: bool,
+    sync_failures: list[str] | None,
+    write_launchd: bool,
+    host: HostOwnership | None,
+) -> list[Path]:
     from ciao.onboarding import ensure_receipt, read_receipt
     from ciao.setup_marker import is_set_up_workspace
 
@@ -1412,6 +1433,10 @@ def setup_workspace(
     vault_path = selection.vault_path
     env_path = root / ".env"
     workspaces_registry = root / ".runtime" / "workspaces.json"
+    def create_registry(text: str) -> None:
+        if owner.current is None:
+            owner.replace(text.encode("utf-8"), expected=None)
+
     if selection.import_legacy:
         # An install that still configures workspaces through the retired
         # variable usually has no registry file (the server never persisted
@@ -1421,7 +1446,7 @@ def setup_workspace(
         # import keep that synthetic entry and drop the variable's real
         # vault_root / disallowed_tools for the same name. Import
         # the variable first so the registry setup sees is the real one.
-        _import_legacy_workspaces_for_setup(root, existing_env)
+        _import_legacy_workspaces_for_setup(root, existing_env, owner=owner)
     # No registry yet means this folder has never been set up, even when it
     # already holds a `.env` of its own (a notes folder or a project checkout).
     first_setup = not workspaces_registry.exists()
@@ -1561,8 +1586,7 @@ def setup_workspace(
         # attempt at this still put `.claude/`, `commands/` and a stock CLAUDE.md
         # beside the nested vault instead of inside the workspace's own folder.
         # The later branch is `_write_if_missing`, so this does not fight it.
-        _write_registry_if_missing(
-            root / ".runtime" / "workspaces.json",
+        create_registry(
             json.dumps(
                 [{
                     "name": name,
@@ -1690,8 +1714,7 @@ def setup_workspace(
                 nested_vault / "projects" / "active" / "general" / "general.md",
                 "---\ntype: project\ntitle: General\ndescription: Default project.\nstatus: active\ntags: [project]\n---\n\n# General\n",
             )
-        _write_registry_if_missing(
-            workspaces_registry,
+        create_registry(
             json.dumps(entries, indent=2) + "\n",
         )
         written.append(workspaces_registry)
@@ -1710,8 +1733,7 @@ def setup_workspace(
             stored_root = scaffold_vault_path.relative_to(root).as_posix()
         except ValueError:
             stored_root = str(scaffold_vault_path)
-        _write_registry_if_missing(
-            workspaces_registry,
+        create_registry(
             json.dumps(
                 [
                     {
@@ -4091,6 +4113,7 @@ def _workspace_reroot_command(args: argparse.Namespace) -> int:
     config = CiaoConfig.from_env({
         **os.environ,
         "CIAO_WORKSPACE": str(workspace),
+        "CIAO_RUNTIME_ROOT": str(runtime),
         "PWA_AUTH_TOKEN": os.environ.get("PWA_AUTH_TOKEN") or "workspace-reroot",
     })
     names = sorted(config.workspace_names())
@@ -4106,62 +4129,13 @@ def _workspace_reroot_command(args: argparse.Namespace) -> int:
         # files sit in the new one — the one combination that
         # breaks every layout-dependent path. Verified, not asserted: the folders
         # have to actually be there, or this would tell the app a comforting lie.
-        from ciao.workspace_reroot import mark_born_per_root, read_receipt
-
-        if read_receipt(runtime) is not None:
-            print("Already recorded as migrated; nothing to do.")
-            return 0
-        # Straight off the registry file, the way `agent_roots_for` does: this
-        # command runs before any config exists that would answer per-root.
+        from ciao.workspaces import acquire_registry_at, WorkspaceRegistryBusy
         try:
-            entries = json.loads(
-                (runtime / "workspaces.json").read_text(encoding="utf-8")
-            )
-        except (OSError, ValueError):
-            entries = []
-        names = [
-            str(e.get("name", "")).strip()
-            for e in entries
-            if isinstance(e, dict) and str(e.get("name", "")).strip()
-        ]
-        if not names:
-            print(
-                f"Refusing: no workspaces registered in {runtime / 'workspaces.json'}.",
-                file=sys.stderr,
-            )
+            with acquire_registry_at(runtime):
+                return _record_hand_migration(workspace, runtime, vault)
+        except WorkspaceRegistryBusy as exc:
+            print(str(exc), file=sys.stderr)
             return 1
-        missing = [
-            n for n in names
-            if not (workspace / n / vault.name).is_dir()
-        ]
-        if missing:
-            # #812: this used to send the reader to docs/VAULT_MIGRATION_PROMPT.md
-            # as the place to move the vaults by hand, and that document was
-            # rewritten to stop teaching exactly that (#800/#815) — so the refusal
-            # and the reader it named contradicted each other, and the document
-            # was the right one. Name the command that does the move instead,
-            # with the one caveat the refusal cannot check for the operator: an
-            # `--apply` run from the wrong engine boots with no vault at all. The
-            # document stays named, because it is still the reader for what
-            # `--apply` refuses on and for an install already moved by hand.
-            print(
-                "Refusing: these workspaces have no "
-                f"<workspace>/{vault.name} directory yet: {', '.join(missing)}.\n"
-                "The move is `ciao workspace-reroot --apply`, run from the engine "
-                "that will serve this install and with the app stopped.\n"
-                "docs/VAULT_MIGRATION_PROMPT.md is the reader for what it refuses "
-                "on.\n"
-                "Only if these vaults are already where they belong because "
-                "someone moved them by hand: finish the directories named above, "
-                "then re-run this.",
-                file=sys.stderr,
-            )
-            return 1
-        written = mark_born_per_root(workspace, runtime, names, origin="hand")
-        for path in written:
-            print(f"Recorded the per-workspace layout: {path}")
-        print("Run `ciao workspace-reroot --repair` next to rebuild the derived files.")
-        return 0
 
     if args.repair:
         result = workspace_reroot.repair(workspace, runtime, names)
@@ -4178,7 +4152,7 @@ def _workspace_reroot_command(args: argparse.Namespace) -> int:
         if refused is not None:
             return refused
         result = workspace_reroot.apply(
-            workspace, vault, names, runtime, primary=config.primary_workspace()
+            workspace, vault, names, runtime, primary=config.primary_workspace(), source_config=config
         )
         if result["status"] == "migrated":
             # The leaf of the vault that was just moved, not a constant: an
@@ -4223,6 +4197,65 @@ def _workspace_reroot_command(args: argparse.Namespace) -> int:
     print(json.dumps(payload, indent=2))
     # Exit 1 on a refusal so a script can gate on it, 0 when the plan is clean.
     return 1 if payload["refused"] else 0
+
+
+def _record_hand_migration(workspace: Path, runtime: Path, vault: Path) -> int:
+    from ciao.workspace_reroot import mark_born_per_root, read_receipt
+
+    if read_receipt(runtime) is not None:
+        print("Already recorded as migrated; nothing to do.")
+        return 0
+    # Straight off the registry file, the way `agent_roots_for` does: this
+    # command runs before any config exists that would answer per-root.
+    try:
+        entries = json.loads(
+            (runtime / "workspaces.json").read_text(encoding="utf-8")
+        )
+    except (OSError, ValueError):
+        entries = []
+    names = [
+        str(e.get("name", "")).strip()
+        for e in entries
+        if isinstance(e, dict) and str(e.get("name", "")).strip()
+    ]
+    if not names:
+        print(
+            f"Refusing: no workspaces registered in {runtime / 'workspaces.json'}.",
+            file=sys.stderr,
+        )
+        return 1
+    missing = [
+        n for n in names
+        if not (workspace / n / vault.name).is_dir()
+    ]
+    if missing:
+        # #812: this used to send the reader to docs/VAULT_MIGRATION_PROMPT.md
+        # as the place to move the vaults by hand, and that document was
+        # rewritten to stop teaching exactly that (#800/#815) — so the refusal
+        # and the reader it named contradicted each other, and the document
+        # was the right one. Name the command that does the move instead,
+        # with the one caveat the refusal cannot check for the operator: an
+        # `--apply` run from the wrong engine boots with no vault at all. The
+        # document stays named, because it is still the reader for what
+        # `--apply` refuses on and for an install already moved by hand.
+        print(
+            "Refusing: these workspaces have no "
+            f"<workspace>/{vault.name} directory yet: {', '.join(missing)}.\n"
+            "The move is `ciao workspace-reroot --apply`, run from the engine "
+            "that will serve this install and with the app stopped.\n"
+            "docs/VAULT_MIGRATION_PROMPT.md is the reader for what it refuses "
+            "on.\n"
+            "Only if these vaults are already where they belong because "
+            "someone moved them by hand: finish the directories named above, "
+            "then re-run this.",
+            file=sys.stderr,
+        )
+        return 1
+    written = mark_born_per_root(workspace, runtime, names, origin="hand")
+    for path in written:
+        print(f"Recorded the per-workspace layout: {path}")
+    print("Run `ciao workspace-reroot --repair` next to rebuild the derived files.")
+    return 0
 
 
 def _workspace_census_command(args: argparse.Namespace) -> int:
