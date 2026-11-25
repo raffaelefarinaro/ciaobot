@@ -779,7 +779,10 @@ lock = os.path.join(runtime, "locks", "workspaces-registry.lock")
 fd = os.open(lock, os.O_RDWR | os.O_CREAT, 0o600)
 fcntl.flock(fd, fcntl.LOCK_EX)
 open(ready, "w").write("ready")
+deadline = time.monotonic() + 30
 while not os.path.exists(release):
+    if time.monotonic() > deadline:
+        sys.exit(2)
     time.sleep(0.02)
 registry = os.path.join(runtime, "workspaces.json")
 rows = json.load(open(registry))
@@ -858,7 +861,10 @@ lock = os.path.join(runtime, "locks", "workspaces-registry.lock")
 fd = os.open(lock, os.O_RDWR | os.O_CREAT, 0o600)
 fcntl.flock(fd, fcntl.LOCK_EX)
 open(ready, "w").write("ready")
+deadline = time.monotonic() + 30
 while not os.path.exists(release):
+    if time.monotonic() > deadline:
+        sys.exit(2)
     time.sleep(0.02)
 path = os.path.join(runtime, "workspaces.json")
 rows = json.load(open(path))

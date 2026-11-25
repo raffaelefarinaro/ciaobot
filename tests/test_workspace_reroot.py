@@ -74,6 +74,24 @@ def _tree_hashes(root: Path) -> dict[str, str]:
     return out
 
 
+def _wait_child(pid: int, timeout: float = 60.0) -> tuple[int, int]:
+    """Reap a forked child, killing it rather than hanging the suite on a stuck one."""
+    import os
+    import signal
+    import time
+
+    deadline = time.monotonic() + timeout
+    while True:
+        reaped, status = os.waitpid(pid, os.WNOHANG)
+        if reaped:
+            return reaped, status
+        if time.monotonic() > deadline:
+            os.kill(pid, signal.SIGKILL)
+            os.waitpid(pid, 0)
+            raise AssertionError(f"forked child {pid} did not finish within {timeout}s")
+        time.sleep(0.01)
+
+
 def test_plan_classifies_every_path_and_does_not_refuse(tmp_path: Path) -> None:
     vault = _vault(tmp_path)
     result = plan(tmp_path, vault, ["personal", "work"])
@@ -972,14 +990,17 @@ def test_recovery_after_manifest_kill_preserves_post_migration_queue(tmp_path: P
     artifact_before = artifact.read_bytes()
     pid = os.fork()
     if pid == 0:
-        original = workspace_reroot._write_json_atomic
-        def kill_after_write(path, payload):
-            original(path, payload)
-            os.kill(os.getpid(), signal.SIGKILL)
-        workspace_reroot._write_json_atomic = kill_after_write
-        undo(install, runtime)
-        os._exit(0)
-    _, status = os.waitpid(pid, 0)
+        try:
+            original = workspace_reroot._write_json_atomic
+            def kill_after_write(path, payload):
+                original(path, payload)
+                os.kill(os.getpid(), signal.SIGKILL)
+            workspace_reroot._write_json_atomic = kill_after_write
+            undo(install, runtime)
+            os._exit(0)
+        except BaseException:  # a failed child must never run on as a second pytest
+            os._exit(1)
+    _, status = _wait_child(pid)
     assert os.WIFSIGNALED(status)
     with workspaces.acquire_registry_at(runtime) as owner:
         assert workspace_reroot._recover_undo_manifest(runtime, owner) is None
@@ -1017,10 +1038,13 @@ def test_stash_copy_interruption_keeps_original_queue(tmp_path: Path, monkeypatc
     if failure == "kill":
         pid = os.fork()
         if pid == 0:
-            workspace_reroot.shutil.copy2 = fail_during_copy
-            undo(install, runtime)
-            os._exit(0)
-        _, status = os.waitpid(pid, 0)
+            try:
+                workspace_reroot.shutil.copy2 = fail_during_copy
+                undo(install, runtime)
+                os._exit(0)
+            except BaseException:  # a failed child must never run on as a second pytest
+                os._exit(1)
+        _, status = _wait_child(pid)
         assert os.WIFSIGNALED(status)
     else:
         with monkeypatch.context() as patch:
@@ -1103,15 +1127,18 @@ def test_recovery_copy_failure_preserves_postimage_and_retry(tmp_path: Path, mon
     artifact_before = artifact.read_bytes()
     pid = os.fork()
     if pid == 0:
-        original = workspace_reroot._atomic_copy_stash
-        def stop_after_publish(src, dst, expected, **kwargs):
-            original(src, dst, expected, **kwargs)
-            if dst == queue:
-                os.kill(os.getpid(), signal.SIGKILL)
-        workspace_reroot._atomic_copy_stash = stop_after_publish
-        undo(install, runtime)
-        os._exit(0)
-    _, status = os.waitpid(pid, 0)
+        try:
+            original = workspace_reroot._atomic_copy_stash
+            def stop_after_publish(src, dst, expected, **kwargs):
+                original(src, dst, expected, **kwargs)
+                if dst == queue:
+                    os.kill(os.getpid(), signal.SIGKILL)
+            workspace_reroot._atomic_copy_stash = stop_after_publish
+            undo(install, runtime)
+            os._exit(0)
+        except BaseException:  # a failed child must never run on as a second pytest
+            os._exit(1)
+    _, status = _wait_child(pid)
     assert os.WIFSIGNALED(status)
     postimage = queue.read_bytes()
     rename = workspace_reroot._exclusive_rename
@@ -1148,16 +1175,19 @@ def test_recovery_refuses_independent_edit_of_restored_stash(tmp_path: Path) -> 
     artifact_before = artifact.read_bytes()
     pid = os.fork()
     if pid == 0:
-        original = workspace_reroot._atomic_copy_stash
-        def kill_after_copy(src, dst, *args, **kwargs):
-            result = original(src, dst, *args, **kwargs)
-            if Path(dst) == queue:
-                os.kill(os.getpid(), signal.SIGKILL)
-            return result
-        workspace_reroot._atomic_copy_stash = kill_after_copy
-        undo(install, runtime)
-        os._exit(0)
-    _, status = os.waitpid(pid, 0)
+        try:
+            original = workspace_reroot._atomic_copy_stash
+            def kill_after_copy(src, dst, *args, **kwargs):
+                result = original(src, dst, *args, **kwargs)
+                if Path(dst) == queue:
+                    os.kill(os.getpid(), signal.SIGKILL)
+                return result
+            workspace_reroot._atomic_copy_stash = kill_after_copy
+            undo(install, runtime)
+            os._exit(0)
+        except BaseException:  # a failed child must never run on as a second pytest
+            os._exit(1)
+    _, status = _wait_child(pid)
     assert os.WIFSIGNALED(status)
     queue.write_bytes(b"independent edit\n")
     failed = undo(install, runtime)
@@ -1195,17 +1225,20 @@ def test_undo_process_kill_leaves_manifest_and_retry_recovers(
 
     pid = os.fork()
     if pid == 0:
-        def kill_at_registry(*args, **kwargs):
-            os.kill(os.getpid(), signal.SIGKILL)
-
-        workspaces.restore_registry_entries = kill_at_registry
         try:
-            undo(install, runtime)
-        except BaseException:
-            pass
-        os._exit(0)
+            def kill_at_registry(*args, **kwargs):
+                os.kill(os.getpid(), signal.SIGKILL)
 
-    _pid, status = os.waitpid(pid, 0)
+            workspaces.restore_registry_entries = kill_at_registry
+            try:
+                undo(install, runtime)
+            except BaseException:
+                pass
+            os._exit(0)
+        except BaseException:  # a failed child must never run on as a second pytest
+            os._exit(1)
+
+    _pid, status = _wait_child(pid)
     assert os.WIFSIGNALED(status)
     manifest = runtime / "migration" / UNDO_MANIFEST_NAME
     assert manifest.is_file()
@@ -1245,22 +1278,25 @@ def test_undo_process_death_during_cleanup_recovers_committed_state(
 
     pid = os.fork()
     if pid == 0:
-        real_unlink = workspace_reroot._unlink_durable
-        target_receipt = receipt_path(runtime)
-
-        def kill_after_receipt(path: Path) -> None:
-            real_unlink(path)
-            if Path(path) == target_receipt:
-                os.kill(os.getpid(), signal.SIGKILL)
-
-        workspace_reroot._unlink_durable = kill_after_receipt
         try:
-            undo(install, runtime)
-        except BaseException:
-            pass
-        os._exit(0)
+            real_unlink = workspace_reroot._unlink_durable
+            target_receipt = receipt_path(runtime)
 
-    _pid, status = os.waitpid(pid, 0)
+            def kill_after_receipt(path: Path) -> None:
+                real_unlink(path)
+                if Path(path) == target_receipt:
+                    os.kill(os.getpid(), signal.SIGKILL)
+
+            workspace_reroot._unlink_durable = kill_after_receipt
+            try:
+                undo(install, runtime)
+            except BaseException:
+                pass
+            os._exit(0)
+        except BaseException:  # a failed child must never run on as a second pytest
+            os._exit(1)
+
+    _pid, status = _wait_child(pid)
     assert os.WIFSIGNALED(status)
     manifest = runtime / "migration" / UNDO_MANIFEST_NAME
     assert manifest.is_file()
@@ -1294,17 +1330,20 @@ def test_undo_recovery_registry_conflict_retains_manifest_then_retries(
 
     pid = os.fork()
     if pid == 0:
-        def kill_at_registry(*args, **kwargs):
-            os.kill(os.getpid(), signal.SIGKILL)
-
-        workspaces.restore_registry_entries = kill_at_registry
         try:
-            undo(install, runtime)
-        except BaseException:
-            pass
-        os._exit(0)
+            def kill_at_registry(*args, **kwargs):
+                os.kill(os.getpid(), signal.SIGKILL)
 
-    _pid, status = os.waitpid(pid, 0)
+            workspaces.restore_registry_entries = kill_at_registry
+            try:
+                undo(install, runtime)
+            except BaseException:
+                pass
+            os._exit(0)
+        except BaseException:  # a failed child must never run on as a second pytest
+            os._exit(1)
+
+    _pid, status = _wait_child(pid)
     assert os.WIFSIGNALED(status)
     manifest = runtime / "migration" / UNDO_MANIFEST_NAME
     assert manifest.is_file()
@@ -1441,17 +1480,20 @@ def test_undo_interruption_then_schedule_edit_is_preserved_on_retry(
 
     pid = os.fork()
     if pid == 0:
-        def kill_before_schedule_restore(*args, **kwargs):
-            os.kill(os.getpid(), signal.SIGKILL)
-
-        workspace_reroot._apply_schedule_prompt_restore = kill_before_schedule_restore
         try:
-            undo(install, runtime)
-        except BaseException:
-            pass
-        os._exit(0)
+            def kill_before_schedule_restore(*args, **kwargs):
+                os.kill(os.getpid(), signal.SIGKILL)
 
-    _pid, status = os.waitpid(pid, 0)
+            workspace_reroot._apply_schedule_prompt_restore = kill_before_schedule_restore
+            try:
+                undo(install, runtime)
+            except BaseException:
+                pass
+            os._exit(0)
+        except BaseException:  # a failed child must never run on as a second pytest
+            os._exit(1)
+
+    _pid, status = _wait_child(pid)
     assert os.WIFSIGNALED(status)
     manifest = runtime / "migration" / UNDO_MANIFEST_NAME
     assert manifest.is_file()
@@ -1530,17 +1572,20 @@ def test_undo_interruption_after_schedule_restore_rolls_schedule_back(
 
     pid = os.fork()
     if pid == 0:
-        def kill_after_schedule_restore(*args, **kwargs):
-            os.kill(os.getpid(), signal.SIGKILL)
-
-        workspace_reroot.clear_stranded_sessions = kill_after_schedule_restore
         try:
-            undo(install, runtime)
-        except BaseException:
-            pass
-        os._exit(0)
+            def kill_after_schedule_restore(*args, **kwargs):
+                os.kill(os.getpid(), signal.SIGKILL)
 
-    _pid, status = os.waitpid(pid, 0)
+            workspace_reroot.clear_stranded_sessions = kill_after_schedule_restore
+            try:
+                undo(install, runtime)
+            except BaseException:
+                pass
+            os._exit(0)
+        except BaseException:  # a failed child must never run on as a second pytest
+            os._exit(1)
+
+    _pid, status = _wait_child(pid)
     assert os.WIFSIGNALED(status)
     manifest = runtime / "migration" / UNDO_MANIFEST_NAME
     assert manifest.is_file()
@@ -1593,17 +1638,20 @@ def test_undo_recovery_schedule_conflict_retains_journal_then_retries(
 
     pid = os.fork()
     if pid == 0:
-        def kill_after_schedule_restore(*args, **kwargs):
-            os.kill(os.getpid(), signal.SIGKILL)
-
-        workspace_reroot.clear_stranded_sessions = kill_after_schedule_restore
         try:
-            undo(install, runtime)
-        except BaseException:
-            pass
-        os._exit(0)
+            def kill_after_schedule_restore(*args, **kwargs):
+                os.kill(os.getpid(), signal.SIGKILL)
 
-    _pid, status = os.waitpid(pid, 0)
+            workspace_reroot.clear_stranded_sessions = kill_after_schedule_restore
+            try:
+                undo(install, runtime)
+            except BaseException:
+                pass
+            os._exit(0)
+        except BaseException:  # a failed child must never run on as a second pytest
+            os._exit(1)
+
+    _pid, status = _wait_child(pid)
     assert os.WIFSIGNALED(status)
     manifest = runtime / "migration" / UNDO_MANIFEST_NAME
     assert manifest.is_file()
@@ -1657,17 +1705,20 @@ def test_undo_recovery_holds_schedule_lock_across_comparison_and_write(
 
     pid = os.fork()
     if pid == 0:
-        def kill_after_schedule_restore(*args, **kwargs):
-            os.kill(os.getpid(), signal.SIGKILL)
-
-        workspace_reroot.clear_stranded_sessions = kill_after_schedule_restore
         try:
-            undo(install, runtime)
-        except BaseException:
-            pass
-        os._exit(0)
+            def kill_after_schedule_restore(*args, **kwargs):
+                os.kill(os.getpid(), signal.SIGKILL)
 
-    _pid, status = os.waitpid(pid, 0)
+            workspace_reroot.clear_stranded_sessions = kill_after_schedule_restore
+            try:
+                undo(install, runtime)
+            except BaseException:
+                pass
+            os._exit(0)
+        except BaseException:  # a failed child must never run on as a second pytest
+            os._exit(1)
+
+    _pid, status = _wait_child(pid)
     assert os.WIFSIGNALED(status)
     manifest = runtime / "migration" / UNDO_MANIFEST_NAME
     assert manifest.is_file()
@@ -5339,24 +5390,27 @@ def test_killed_undo_recovers_capture_and_index(tmp_path: Path, boundary: str) -
     index = _git(install, "ls-files", "--stage")
     pid = os.fork()
     if pid == 0:
-        rename = workspace_reroot._exclusive_rename
-        link = os.link
-        def crash_after_rename(source, target):
-            rename(source, target)
-            if (boundary == "capture" and target.name.startswith("stash-")
-                    or boundary == "move" and target == install / "AGENTS.md"):
-                os.kill(os.getpid(), signal.SIGKILL)
-        def crash_after_link(source, target):
-            link(source, target)
-            if boundary == "publication" and source.suffix == ".stage":
-                os.kill(os.getpid(), signal.SIGKILL)
-        workspace_reroot._exclusive_rename = crash_after_rename
-        os.link = crash_after_link
         try:
-            undo(install, runtime)
-        finally:
+            rename = workspace_reroot._exclusive_rename
+            link = os.link
+            def crash_after_rename(source, target):
+                rename(source, target)
+                if (boundary == "capture" and target.name.startswith("stash-")
+                        or boundary == "move" and target == install / "AGENTS.md"):
+                    os.kill(os.getpid(), signal.SIGKILL)
+            def crash_after_link(source, target):
+                link(source, target)
+                if boundary == "publication" and source.suffix == ".stage":
+                    os.kill(os.getpid(), signal.SIGKILL)
+            workspace_reroot._exclusive_rename = crash_after_rename
+            os.link = crash_after_link
+            try:
+                undo(install, runtime)
+            finally:
+                os._exit(1)
+        except BaseException:  # a failed child must never run on as a second pytest
             os._exit(1)
-    _, status = os.waitpid(pid, 0)
+    _, status = _wait_child(pid)
     assert os.WIFSIGNALED(status)
     with acquire_registry_at(runtime) as owner:
         assert workspace_reroot._recover_undo_manifest(runtime, owner) is None
