@@ -80,3 +80,48 @@ Verification in `AGENTS.md`.
   test through an editable venv. Run them from a detached worktree with its own
   venv, never from an issue worktree: the merge queue removes that worktree and
   every later run in the batch errors.
+
+## Plan traps
+
+Repo-specific traps for loop plans. Planners and the goldfish `codebase_details`
+check read them alongside the generic list in the skill's `planning.md`.
+
+- **Vitest environment.** Many web test files run in `node`, not `jsdom`. A plan
+  that sets a `window` global in one with no `// @vitest-environment jsdom`
+  header (and none in the config) makes every case throw. Check the header and
+  config; use `globalThis` or name the environment change.
+- **Guard tests assemble banned names.** A guard test builds a removed global
+  from fragments (`'__CIAOBOT' + '_DESKTOP__'`), so `git grep` misses it. A plan
+  that brings back a removed name runs the frontend suite on a scratch edit.
+- **Hidden UI is pinned by e2e hooks, not labels.** Hiding a phone header
+  control and making a strip non-scrollable broke four specs that asserted
+  through `scroll-snap-type`, native touch events, `.work-inspector-trigger`
+  and focus on the hidden control. Grep `web/e2e` for every such hook.
+- **Class prefixes are taken.** A new header named `chat-rail` collided with
+  another panel's scoped `chat-rail-*` rules and broke two e2e specs. Check
+  with `git grep -ohE "<prefix>[a-z-]*" -- web/src web/e2e | sort -u`.
+- **Shared `<style scoped src>` sheets need a stated cascade.** Shared block
+  last, legacy rules scoped to the variant that still uses them, overrides as
+  compound selectors (`.cd-detail.my-warning`); a lone class loses to
+  `.cd-detail`. Rows bleeding with negative margins break section-level
+  `scrollWidth <= clientWidth` checks: measure the padded container. See
+  `web/README.md`.
+- **Leftover greps vs absence tests.** A Verify step
+  `git grep -n "<removed hook>" -- web/src web/e2e  # expect no output` can
+  never pass when the plan's own tests assert `.exists()).toBe(false)`. Scope it
+  with `':!**/__tests__/**'` or list the allowed hits.
+- **macOS-only coordinators fail on the Linux runner.** A module gated on
+  `sys.platform != "darwin"` passed 115 tests on a Mac and failed every
+  lifecycle test on the Linux PR runner. Its tests force the gate with an
+  autouse fixture, as the existing suites for that area do.
+- **The real classifier and lock in one test.** A repair coordinator's tests
+  injected `classify`; the real classifier, run under the coordinator's own
+  lock, read that lock as "another install in progress" and refused every real
+  run. Keep one end-to-end test with the real classifier and lock, faking only
+  launchctl, network and codesign.
+- **Stock skill size caps.** A test asserts `len(skill.encode()) <= 13200` on a
+  stock skill; a plan that adds text to one checks the cap first.
+- **Every `last_error` writer.** A plan changed one `last_error` writer and
+  missed the second in the wake-turn path. `git grep -n "last_error ="`.
+- **e2e runs through `npm run test:e2e`.** Its `pretest:e2e` rebuilds the
+  bundle; a bare `npx playwright test` serves the last build.
