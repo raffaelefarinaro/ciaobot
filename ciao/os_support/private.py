@@ -102,6 +102,9 @@ if sys.platform == "darwin":
             self.get_fd_np = _bind(
                 libc, "acl_get_fd_np", [ctypes.c_int, ctypes.c_int], ctypes.c_void_p
             )
+            self.get_link_np = _bind(
+                libc, "acl_get_link_np", [ctypes.c_char_p, ctypes.c_int], ctypes.c_void_p
+            )
             self.get_entry = _bind(
                 libc,
                 "acl_get_entry",
@@ -154,7 +157,14 @@ if sys.platform == "darwin":
         the host's libc decide.
         """
         acl_api = _macos_acl_calls()
-        acl = acl_api.get_fd_np(fd, _ACL_TYPE_EXTENDED)
+        return _grants_other(acl_api, acl_api.get_fd_np(fd, _ACL_TYPE_EXTENDED))
+
+    def path_acl_grants_another_account(path: str | os.PathLike[str]) -> bool:
+        """Inspect a path in a private directory without opening an SQLite descriptor."""
+        acl_api = _macos_acl_calls()
+        return _grants_other(acl_api, acl_api.get_link_np(os.fsencode(path), _ACL_TYPE_EXTENDED))
+
+    def _grants_other(acl_api: _MacosAcl, acl: int | None) -> bool:
         if not acl:
             error = ctypes.get_errno()
             if error == errno.ENOENT:
@@ -192,6 +202,11 @@ if sys.platform == "darwin":
             acl_api.free(acl)
 
 else:
+
+    def path_acl_grants_another_account(path: str | os.PathLike[str]) -> bool:
+        # Linux's POSIX ACL mask is represented by the group mode bits. The
+        # SQLite caller requires all group and other bits to be zero.
+        return False
 
     def _acl_grants_another_account(fd: int) -> bool:
         """Linux POSIX ACLs are not inspected; see the module docstring."""

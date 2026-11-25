@@ -648,6 +648,7 @@ async def archive_workspace_setting(request: Request) -> JSONResponse:
     entry goes last. A failure after the move puts the folder and schedules
     back so the workspace stays registered and the archive can be retried.
     """
+    from ciao.fts_search import ConnectedIndexBusy
     from ciao import workspace_archive  # noqa: PLC0415
     from ciao.web.routes_webhooks import webhook_store  # noqa: PLC0415
 
@@ -656,6 +657,8 @@ async def archive_workspace_setting(request: Request) -> JSONResponse:
     async with _workspace_archive_lock(request), _workspace_checkout_claims(config, name):
         try:
             target = workspace_archive.plan_archive(config, name)
+            index_sources = config.index_source_roots()
+            linked_roots = tuple(Path(link.path) for link in config.workspaces[name].shared_brains)
         except workspace_archive.WorkspaceArchiveError as exc:
             return JSONResponse({"error": exc.message}, status_code=exc.status)
 
@@ -839,20 +842,28 @@ async def archive_workspace_setting(request: Request) -> JSONResponse:
         if schedules:
             _publish_automations_changed(request)
 
-        def _forget() -> tuple[int, bool]:
-            rows = 0
-            rebuilt = False
-            try:
-                rows = workspace_archive.forget_search_rows(config, target.vault)
-            except Exception:  # noqa: BLE001 - derived state; the next index pass prunes it
-                logger.exception("Could not drop search rows for archived workspace %s", name)
-            try:
-                rebuilt = workspace_archive.refresh_shared_index(config)
-            except Exception:  # noqa: BLE001 - regenerated at the next startup
-                logger.exception("Could not rebuild INDEX.md after archiving %s", name)
-            return rows, rebuilt
-
-        search_rows, index_rebuilt = await asyncio.to_thread(_forget)
+        # The archive is durable before this await. Report its identity even
+        # when pruning fails so the operator can recover this specific archive.
+        search_rows: int | None = None
+        cleanup_error = ""
+        status = 200
+        try:
+            search_rows = await asyncio.to_thread(
+                workspace_archive.forget_search_rows, config, target.vault, workspace=name,
+                source_roots=index_sources, linked_roots=linked_roots,
+            )
+        except Exception as exc:
+            logger.exception("Could not clear the search index for archived workspace %s", name)
+            status = 503 if isinstance(exc, ConnectedIndexBusy) else 500
+            cleanup_error = (
+                f"Workspace '{name}' was archived, but its search index cleanup failed ({exc}). "
+                "After resolving the error, restore this archive and archive the workspace again."
+            )
+        try:
+            index_rebuilt = await asyncio.to_thread(workspace_archive.refresh_shared_index, config)
+        except Exception:  # regenerated at the next startup
+            logger.exception("Could not rebuild INDEX.md after archiving %s", name)
+            index_rebuilt = False
         payload = _workspaces_payload(config)
         payload["archived"] = {
             "id": archived["id"],
@@ -865,7 +876,9 @@ async def archive_workspace_setting(request: Request) -> JSONResponse:
             "search_rows_removed": search_rows,
             "index_rebuilt": index_rebuilt,
         }
-        return JSONResponse(payload)
+        if cleanup_error:
+            payload["error"] = cleanup_error
+        return JSONResponse(payload, status_code=status)
 
 
 async def list_archived_workspaces(request: Request) -> JSONResponse:
@@ -3931,7 +3944,10 @@ def _vault_graph_payload(config: Any, workspace: str | None) -> dict[str, Any]:
     # Every vault in the install, which is ONE shared vault before the
     # re-rooting and one per agent root after it. Scanning `config.vault_root`
     # returned zero notes on a migrated install, so the whole map went blank.
-    targets = config.vault_scan_targets()
+    from ciao.fts_search import ConnectedRegistration, lookup_connected_entries
+
+    registration = ConnectedRegistration.capture(Path(config.state_path).parent)
+    targets = config.index_scan_targets()
     # After the re-rooting each target IS one workspace, so a `?workspace=`
     # request can drop the other roots before the scan instead of reading and
     # parsing every note in the install only to filter them out below — the
@@ -3943,12 +3959,24 @@ def _vault_graph_payload(config: Any, workspace: str | None) -> dict[str, Any]:
     # Reads and parses every markdown file. The caller threads the whole
     # payload, so this scan runs off the event loop with the rest of it (a
     # large vault otherwise stalls the 5s chat-socket keepalives too).
-    entries, absolute = scan_targets(scan_list)
+    registration.verify()
+    connected = {}
+    for root, name, _prefix in scan_list:
+        if name and not config.ciao_owned_vault_index(name):
+            try:
+                connected[name] = lookup_connected_entries(
+                    root, name, Path(config.state_path).parent, Path(config.workspace_root),
+                    source_roots=config.index_source_roots(), registration=registration, vault_base=config.vault_root,
+                )
+            except OSError as exc:
+                logger.warning("Cannot build the local index for %s: %s", name, exc)
+                connected[name] = []
+    entries, absolute = scan_targets(scan_list, connected=connected)
     if in_scope:
         # The picker lists every workspace, and this scan only saw one. Taken
         # from the targets whose vault exists, which is the same set the full
         # scan would have produced entries for.
-        workspaces = sorted(ws for root, ws, _ in targets if ws and Path(root).is_dir())
+        workspaces = sorted(ws for root, ws, _ in targets if ws and (connected.get(ws) or Path(root).is_dir()))
     else:
         workspaces = sorted({e.workspace for e in entries if e.workspace})
     scoped = filter_entries(entries, workspace=workspace) if workspace else entries
@@ -4279,7 +4307,14 @@ async def vault_graph(request: Request) -> JSONResponse:
     # Scanning, parsing every note body for entry coverage and reading the
     # check state are all synchronous file and CPU work; on the loop they
     # stalled every other request for over a second on a real vault.
-    return JSONResponse(await asyncio.to_thread(_vault_graph_payload, config, workspace))
+    from ciao.fts_search import ConnectedIndexBusy, ConnectedWorkspaceChanged
+
+    try:
+        return JSONResponse(await asyncio.to_thread(_vault_graph_payload, config, workspace))
+    except ConnectedWorkspaceChanged as exc:
+        return JSONResponse({"error": str(exc)}, status_code=409)
+    except ConnectedIndexBusy as exc:
+        return JSONResponse({"error": str(exc)}, status_code=503)
 
 
 async def vault_review(request: Request) -> JSONResponse:
@@ -4454,7 +4489,7 @@ async def vault_delete_note(request: Request) -> JSONResponse:
     vault_root = None
     resolved = None
     vault_prefix = None
-    for target, _name, prefix in config.vault_scan_targets():
+    for target, _name, prefix in config.index_scan_targets():
         marker = f"{prefix.as_posix()}/"
         if not raw.startswith(marker):
             continue

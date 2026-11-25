@@ -616,7 +616,13 @@ def _perform_rehome_move(config, row: dict[str, Any], target: str) -> dict[str, 
         }
     source = (relative_vault / Path(*parts[1:])).as_posix()
     result = move_note_between_roots(
-        install_root, source, target, targets=targets, workspaces=names, apply=True
+        install_root,
+        source,
+        target,
+        targets=targets,
+        workspaces=names,
+        apply=True,
+        runtime_root=Path(config.state_path).parent,
     )
     if result["refusals"]:
         return {"ok": False, "error": result["refusals"][0], "move": result}

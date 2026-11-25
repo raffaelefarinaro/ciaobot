@@ -99,6 +99,21 @@ describe('ProjectView header', () => {
     expect(wrapper.find('input.title-input').exists()).toBe(true)
   })
 
+  it('explains that a folder-only adopted project has no canonical note yet', async () => {
+    const store = seed(1)
+    store.projects[0] = {
+      ...store.projects[0],
+      vault_folder: 'garden-plan',
+      vault_folder_only: true,
+      vault_doc_path: '',
+    } as typeof store.projects[number]
+
+    const wrapper = await mountView('general')
+
+    expect(wrapper.get('.context-hint').text()).toContain('Folder linked; add a note there')
+    expect(wrapper.get('.rail-note').text()).toContain('no project note has been found yet')
+  })
+
   it('renames from a double-click on the rail\'s title', async () => {
     seed()
     const wrapper = await mountView()

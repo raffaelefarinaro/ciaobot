@@ -20,6 +20,7 @@ Filters: --workspace, --type, --tag, --name, --related-to, --neighbors
 from __future__ import annotations
 
 import argparse
+import errno
 import json
 import os
 import posixpath
@@ -30,10 +31,11 @@ from collections import defaultdict, deque
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path, PurePath
-from typing import Any, Iterable, Sequence
+from typing import Any, Callable, Iterable, Sequence
 from urllib.parse import unquote
 
 import yaml
+from ciao.os_support.files import write_all
 
 # The one direction the dependency runs: the registry never imports this module
 # (it is the module a consumer will import), and the Categories renderer takes
@@ -764,6 +766,8 @@ def scan_vault(
     path_prefix: Path | None = None,
     registry: EntityTypeRegistry | None = None,
     include_unheaded: bool = False,
+    strict: bool = False,
+    captured: dict[Path, str] | None = None,
 ) -> list[Entry]:
     """Scan one vault into entries.
 
@@ -787,6 +791,10 @@ def scan_vault(
     file's mtime, so a hot path pays it once.
 
     ``include_unheaded`` keeps Markdown files with neither frontmatter nor an H1, which the index skips as placeholders. A caller that must see every note — moving a folder and repointing the links into and out of it — passes it; the index, graph and search do not.
+
+    ``strict`` is for snapshot writers: filesystem traversal and note-read
+    errors raise instead of yielding a partial list that could replace a good
+    generated index.
     """
     vault_root = (vault_root or default_vault_root()).resolve()
     if registry is None:
@@ -795,7 +803,21 @@ def scan_vault(
     prefix = VAULT_RENDER_PREFIX if path_prefix is None else Path(path_prefix)
     ignore = load_vault_ignore(vault_root)
     entries: list[Entry] = []
-    for md_path in sorted(vault_root.rglob("*.md")):
+    if captured is not None:
+        md_paths = [vault_root / relative for relative in sorted(captured)]
+    elif strict:
+        def traversal_error(exc: OSError) -> None:
+            raise exc
+
+        md_paths = sorted(
+            Path(directory) / name
+            for directory, _dirs, files in os.walk(vault_root, onerror=traversal_error)
+            for name in files
+            if name.endswith(".md")
+        )
+    else:
+        md_paths = sorted(vault_root.rglob("*.md"))
+    for md_path in md_paths:
         rel_from_vault = md_path.relative_to(vault_root)
         if is_excluded(rel_from_vault):
             continue
@@ -807,8 +829,13 @@ def scan_vault(
         if is_generated_vault_file(rel_from_vault.name):
             continue
         try:
-            text = md_path.read_text(encoding="utf-8")
+            if captured is not None:
+                text = captured[rel_from_vault]
+            else:
+                text = md_path.read_text(encoding="utf-8")
         except (OSError, UnicodeDecodeError):
+            if strict:
+                raise
             continue
         fm = _parse_frontmatter(text)
         h1 = _first_h1(text)
@@ -1370,7 +1397,33 @@ def format_md(entries: list[Entry]) -> str:
     return "\n".join(sections).rstrip() + "\n"
 
 
-def write_index_file(entries: list[Entry], dest: Path) -> None:
+def write_index_file(
+    entries: list[Entry],
+    dest: Path,
+    *,
+    replace_existing: bool = False,
+    authorize: Callable[[], bool] | None = None,
+    ownership_runtime: Path | None = None,
+    registration_runtime: Path | None = None,
+    registry_owner: Any | None = None,
+) -> None:
+    """Write the generated index with ordinary same-directory atomic replacement.
+
+    A managed local root is trusted product state: the temporary file lives in
+    the destination directory, so ``os.replace`` is atomic against a crash or
+    an ordinary concurrent writer. A create-if-absent writer hard-links the
+    same temp into place so an external index that appeared meanwhile is never
+    overwritten.
+
+    This is not an isolation boundary against a malicious same-UID process.
+    Such a process can already write the vault and the index directly; the
+    guarantee here is atomic publication for Ciao-owned local roots, not
+    defence against the account that owns them.
+
+    Callers classify ownership once before coming here. Connected, explicitly
+    external and ambiguous roots never call this function; they use the
+    private SQLite index and leave any Markdown INDEX untouched.
+    """
     now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     # Link MEMORY.md only when it is actually there. A generated file must never
     # manufacture a permanent lint finding: an unconditional link would be a
@@ -1389,11 +1442,80 @@ def write_index_file(entries: list[Entry], dest: Path) -> None:
         f"{memory}"
         "For filtered queries run `ciao vault-index --help`.\n\n"
     )
-    dest.write_text(header + format_md(entries), encoding="utf-8", newline="")
+    content = header + format_md(entries)
+    destination = Path(dest)
+    parent = destination.parent
+    fd, temp_name = tempfile.mkstemp(
+        prefix=".ciao-index-", suffix=".tmp", dir=parent,
+    )
+    temp = Path(temp_name)
+    try:
+        try:
+            write_all(fd, content.encode("utf-8"))
+            os.fsync(fd)
+        finally:
+            os.close(fd)
+        def commit() -> None:
+            if replace_existing:
+                os.replace(temp, destination)
+            else:
+                # Atomic create-if-absent: linking never overwrites an index
+                # that an external writer installed while the scan was running.
+                os.link(temp, destination)
+                os.unlink(temp)
+
+        if authorize is not None and ownership_runtime is not None:
+            from ciao.setup_marker import vault_index_ownership_lock
+
+            # Lock order is ownership then registry. Ownership updates take only
+            # the ownership lock; registry writers take only the registry lock,
+            # so there is no cycle. Both are held through the final publication.
+            with vault_index_ownership_lock(Path(ownership_runtime), exclusive=False):
+                if registration_runtime is not None:
+                    from ciao.workspaces import (
+                        acquire_registry_at,
+                        registry_owner_scope,
+                    )
+
+                    own_owner = registry_owner is None
+                    owner = registry_owner or acquire_registry_at(
+                        Path(registration_runtime), blocking=True
+                    )
+                    try:
+                        with registry_owner_scope(owner):
+                            if not authorize():
+                                raise OSError(
+                                    errno.EACCES,
+                                    "index ownership changed before publication",
+                                )
+                            commit()
+                    finally:
+                        if own_owner:
+                            owner.close()
+                else:
+                    if not authorize():
+                        raise OSError(
+                            errno.EACCES,
+                            "index ownership changed before publication",
+                        )
+                    commit()
+        else:
+            commit()
+        dir_fd = os.open(parent, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+        try:
+            os.fsync(dir_fd)
+        finally:
+            os.close(dir_fd)
+    finally:
+        try:
+            temp.unlink()
+        except FileNotFoundError:
+            pass
 
 
 def scan_targets(
     targets: list[tuple[Path, str, Path]],
+    *, connected: dict[str, list[Entry]] | None = None,
 ) -> tuple[list[Entry], dict[str, Path]]:
     """Scan several vaults into one entry list, plus rendered-path -> file map.
 
@@ -1413,9 +1535,16 @@ def scan_targets(
     prefixes: dict[str, Path] = {}
     for vault_root, workspace, prefix in targets:
         root = Path(vault_root)
-        if not root.is_dir():
-            continue
-        scanned = scan_vault(root, workspace=workspace, path_prefix=prefix)
+        if connected is not None and workspace in connected:
+            from dataclasses import replace
+
+            scanned = [replace(entry, path=prefix / entry.path,
+                               related=[(prefix / path).as_posix() for path in entry.related])
+                       for entry in connected[workspace]]
+        else:
+            if not root.is_dir():
+                continue
+            scanned = scan_vault(root, workspace=workspace, path_prefix=prefix)
         prefixes[workspace] = Path(prefix)
         for entry in scanned:
             rendered = entry.path_key
@@ -1753,6 +1882,15 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p.add_argument("--format", choices=["tsv", "md", "json"], default="tsv")
     p.add_argument("--write", action="store_true",
                    help="Regenerate memory-vault/INDEX.md (ignores other filters).")
+    ownership = p.add_mutually_exclusive_group()
+    ownership.add_argument(
+        "--claim-ownership", action="store_true",
+        help="Record that Ciao owns this vault's INDEX.md, then exit.",
+    )
+    ownership.add_argument(
+        "--declare-external", action="store_true",
+        help="Record that this vault's INDEX.md is externally owned, then exit.",
+    )
     return p.parse_args(argv)
 
 
@@ -1762,16 +1900,84 @@ def main(argv: list[str] | None = None) -> int:
         refused = refuse_conflicting_vault_write()
         if refused is not None:
             return refused
+    from ciao.config import configured_connected_workspace, configured_runtime_root, installed_workspace_env
+    from ciao.fts_search import ConnectedRegistration, ConnectedWorkspaceChanged
+
+    runtime = configured_runtime_root(os.environ)
+    registration = ConnectedRegistration.capture(runtime)
     vault_root = (args.vault_root or default_vault_root()).resolve()
-    # The scan and the two renderings below must share one closed set, or a
-    # folder-inferred custom type shows in INDEX.md while VOCABULARY.md calls
-    # its own scan's notes drift. Load once and thread it through.
-    registry = load_entity_types(vault_root)
-    entries = scan_vault(vault_root, registry=registry)
+    if args.claim_ownership or args.declare_external:
+        from ciao.setup_marker import record_vault_index_ownership
+
+        owner = "ciao" if args.claim_ownership else "external"
+        record_vault_index_ownership(runtime, vault_root, owner=owner)
+        print(f"recorded {owner} ownership for {vault_root / 'INDEX.md'}", file=sys.stderr)
+        return 0
+    connected = configured_connected_workspace(os.environ, vault_root, implicit_root=args.vault_root is None)
+    try:
+        registration.verify()
+    except ConnectedWorkspaceChanged as exc:
+        print(str(exc), file=sys.stderr)
+        return 1
+    if connected:
+        vault_root = connected.root
+        from ciao.fts_search import ConnectedIndexBusy, lookup_connected_entries
+
+        base = Path(installed_workspace_env(os.environ).get("CIAO_WORKSPACE") or runtime.parent).resolve()
+        try:
+            entries = lookup_connected_entries(vault_root, connected.name, runtime, base,
+                                               refresh=args.write, source_roots=connected.source_roots,
+                                               registration=registration, vault_base=connected.vault_base, link=connected.link)
+        except (ConnectedIndexBusy, ConnectedWorkspaceChanged) as exc:
+            print(str(exc), file=sys.stderr)
+            return 1
+        if args.write:
+            print(f"Updated local index for {connected.name} ({len(entries)} entries)", file=sys.stderr)
+            return 0
+    else:
+        registry = load_entity_types(vault_root)
+        entries = scan_vault(vault_root, registry=registry, strict=args.write)
 
     if args.write:
         dest = vault_root / "INDEX.md"
-        write_index_file(entries, dest)
+        from ciao.config import configured_vault_index_is_ciao_owned
+
+        replace_existing = configured_vault_index_is_ciao_owned(os.environ, vault_root)
+        if not replace_existing:
+            from ciao.fts_search import lookup_connected_entries
+
+            base = Path(
+                installed_workspace_env(os.environ).get("CIAO_WORKSPACE")
+                or runtime.parent
+            ).resolve()
+            workspace_name = str(
+                os.environ.get("CIAO_ACTIVE_WORKSPACE") or "personal"
+            )
+            try:
+                entries = lookup_connected_entries(
+                    vault_root, workspace_name, runtime, base,
+                    refresh=True, registration=registration,
+                )
+            except OSError as exc:
+                print(str(exc), file=sys.stderr)
+                return 1
+            print(
+                f"updated private index for {workspace_name} "
+                f"({len(entries)} entries); preserved {dest}",
+                file=sys.stderr,
+            )
+            return 0
+
+        write_index_file(
+            entries,
+            dest,
+            replace_existing=replace_existing,
+            authorize=lambda: configured_vault_index_is_ciao_owned(
+                os.environ, vault_root
+            ),
+            ownership_runtime=runtime,
+            registration_runtime=runtime,
+        )
         print(f"wrote {dest} ({len(entries)} entries)", file=sys.stderr)
         # Same parsed frontmatter, no extra I/O: the vocabulary is a second
         # rendering of the entries already in hand.
@@ -1785,12 +1991,14 @@ def main(argv: list[str] | None = None) -> int:
         )
         return 0
 
-    if args.related_to:
-        start = _normalize_path_arg(args.related_to)
-        hopped = neighbors(entries, start, depth=1)
-    elif args.neighbors:
-        start = _normalize_path_arg(args.neighbors)
-        hopped = neighbors(entries, start, depth=args.depth)
+    reference = args.related_to or args.neighbors
+    if reference:
+        path = Path(reference)
+        if connected and path.is_absolute() and path.is_relative_to(vault_root):
+            start = path.relative_to(vault_root).as_posix()
+        else:
+            start = _normalize_path_arg(reference)
+        hopped = neighbors(entries, start, depth=1 if args.related_to else args.depth)
     else:
         hopped = None
 

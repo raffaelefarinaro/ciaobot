@@ -316,9 +316,6 @@ def _take_snapshot(
         "onboarding_revision": _onboarding_revision(
             Path(config.state_path).parent / "onboarding.json"
         ),
-        "registry_bytes": _read_bytes_if_present(
-            Path(config.state_path).parent / "workspaces.json"
-        ),
         "project_workspaces": project_workspaces,
         "project_path": project_path,
         "project_bytes": _read_bytes_if_present(project_path),
@@ -392,15 +389,14 @@ def _roll_back(
             logger.exception(
                 "Could not restore the workspace registry after a failed rename"
             )
-            try:
-                registry_path = Path(config.state_path).parent / "workspaces.json"
-                raw = snapshot.get("registry_bytes")
-                if isinstance(raw, bytes):
-                    _restore_file(registry_path, raw)
-            except Exception:
-                logger.exception(
-                    "Could not restore the workspace registry file after a failed rename"
-                )
+            # Do not restore the raw pre-rename snapshot here: another process
+            # may have linked a shared brain since it was taken. Leaving the
+            # live registry alone is fail-closed; the failure above already
+            # says the rename needs operator attention.
+            logger.error(
+                "Workspace registry was not rewound from the rename snapshot; "
+                "inspect it for a concurrent registration before retrying"
+            )
     if projects is not None:
         project_workspaces = snapshot.get("project_workspaces")
         if isinstance(project_workspaces, dict):

@@ -8,15 +8,24 @@ import logging
 import os
 import re
 import sqlite3
+import stat
+import weakref
 from collections.abc import Iterator, Sequence
+from contextlib import closing, contextmanager
+from dataclasses import asdict, dataclass, field, replace
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 import yaml
 
 from ciao import vault_index
 from ciao.async_reads import keyed_lock
+from ciao.os_support.files import read_connected_note
+from ciao.os_support.private import descriptor_acl_grants_another_account, is_private_descriptor_strict, path_acl_grants_another_account
 from ciao.redact import redact_secret_line
+
+if TYPE_CHECKING:
+    from ciao.config import SharedBrainLink, WorkspaceConfig
 
 logger = logging.getLogger(__name__)
 
@@ -139,19 +148,16 @@ def _walk_notes(
         rel, path = stack.pop()
         try:
             scan = os.scandir(path)
-        except OSError:
-            # An unreadable directory is skipped, not fatal — the same outcome
-            # rglob produces, and the caller's prune is what decides whether
-            # its rows survive.
-            continue
+        except OSError as exc:
+            raise OSError(f"incomplete FTS scan at {path}") from exc
         with scan:
             for entry in scan:
                 name = entry.name
                 child_rel = name if not rel else rel + KEY_SEPARATOR + name
                 try:
                     is_dir = entry.is_dir(follow_symlinks=False)
-                except OSError:
-                    continue
+                except OSError as exc:
+                    raise OSError(f"incomplete FTS scan at {entry.path}") from exc
                 if is_dir:
                     if name not in exclude_dirs:
                         stack.append((child_rel, entry.path))
@@ -189,7 +195,7 @@ NO_MATCH_KEY_PREFIX = KEY_SEPARATOR
 SEARCH_DB_NAME = "vault-fts.db"
 
 
-def get_db_path(runtime_dir: Path | None = None) -> Path:
+def get_db_path(runtime_dir: Path | None = None, *, create: bool = True) -> Path:
     """Resolve the path to the SQLite search database for one install.
 
     The default is INSTALL-OWNED: ``<runtime_dir>/vault-fts.db``. Derived state
@@ -219,8 +225,234 @@ def get_db_path(runtime_dir: Path | None = None) -> Path:
         db_dir = Path(runtime_dir).expanduser()
     else:
         db_dir = Path.home() / ".ciao"
-    db_dir.mkdir(parents=True, exist_ok=True)
+    if create:
+        db_dir.mkdir(parents=True, exist_ok=True)
     return db_dir / SEARCH_DB_NAME
+
+
+def connected_db_path(runtime: Path, root: Path, source_roots: frozenset[Path] = frozenset(),
+                      *, create: bool = True) -> Path:
+    """Keep the local index out of a connected folder, including a root adopted as '.'."""
+    base = Path(os.environ.get("CIAO_MEMORY_DIR") or runtime).expanduser().absolute()
+    roots = source_roots | {root.resolve()}
+    if any(base.resolve().is_relative_to(tree) for tree in roots):
+        install = hashlib.sha256(os.fsencode(runtime.resolve())).hexdigest()
+        base = Path.home() / ".ciao" / "connected-indexes" / install
+    directory = base / "connected"
+    if any(directory.resolve().is_relative_to(tree) for tree in roots):
+        raise OSError("no local index location outside the connected folder")
+
+    # SQLite reopens the path and creates its journals by name. Walk trusted
+    # ancestors before creating anything. A root-owned sticky temp ancestor
+    # protects the next (owner-checked) entry against another user's rename.
+    flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+    parent = os.open("/", flags)
+    try:
+        for position, component in enumerate(directory.parts[1:], start=1):
+            try:
+                child = os.open(component, flags, dir_fd=parent)
+            except FileNotFoundError:
+                if not create:
+                    raise
+                try:
+                    os.mkdir(component, 0o700, dir_fd=parent)
+                except FileExistsError:
+                    pass
+                child = os.open(component, flags, dir_fd=parent)
+            os.close(parent)
+            parent = child
+            info = os.fstat(child)
+            if position == len(base.parts) - 1 and info.st_uid != os.geteuid():
+                raise PermissionError("connected index storage must belong to the current user")
+            sticky_system = info.st_uid == 0 and bool(info.st_mode & stat.S_ISVTX)
+            if (info.st_uid not in (0, os.geteuid())
+                or (info.st_mode & 0o022 and not sticky_system)
+                or descriptor_acl_grants_another_account(child)):
+                raise PermissionError("untrusted connected index directory")
+        if not is_private_descriptor_strict(parent):
+            raise PermissionError("connected index directory must be owner-private")
+        # Closing an independent fd on an open SQLite database can release
+        # this process's SQLite locks. Only open a newly created file.
+        with keyed_lock(f"connected-file:{directory}"):
+            for suffix in ("", "-journal", "-wal", "-shm"):
+                name = SEARCH_DB_NAME + suffix
+                try:
+                    info = os.stat(name, dir_fd=parent, follow_symlinks=False)
+                except FileNotFoundError:
+                    if suffix:
+                        continue
+                    if not create:
+                        raise
+                    try:
+                        fd = os.open(name, os.O_CREAT | os.O_EXCL | os.O_RDWR | os.O_NOFOLLOW,
+                                     0o600, dir_fd=parent)
+                    except FileExistsError:
+                        pass
+                    else:
+                        os.close(fd)
+                    info = os.stat(name, dir_fd=parent, follow_symlinks=False)
+                if (not stat.S_ISREG(info.st_mode) or info.st_nlink != 1
+                    or info.st_uid != os.geteuid() or stat.S_IMODE(info.st_mode) != 0o600
+                    or path_acl_grants_another_account(directory / name)):
+                    raise PermissionError("connected index database must be owner-private")
+    finally:
+        os.close(parent)
+    return directory / SEARCH_DB_NAME
+
+
+def connected_entries(conn: sqlite3.Connection, namespace: str) -> list[vault_index.Entry] | None:
+    row = conn.execute("SELECT entries FROM connected_indexes WHERE namespace=?", (namespace,)).fetchone()
+    if row is None:
+        return None
+    entries = json.loads(row[0])
+    for entry in entries:
+        entry["path"] = Path(entry["path"])
+    return [vault_index.Entry(**entry) for entry in entries]
+
+
+# Scanning a large connected vault may hold the SQLite writer for many seconds.
+# This bounds SQLite's retries per contended operation across processes.
+CONNECTED_INDEX_BUSY_SECONDS = 30.0
+
+
+class ConnectedIndexBusy(RuntimeError):
+    """SQLite could not acquire the connected index lock within its wait budget."""
+
+
+@contextmanager
+def connected_index_connection(database: Path) -> Iterator[sqlite3.Connection]:
+    try:
+        with closing(sqlite3.connect(database, timeout=CONNECTED_INDEX_BUSY_SECONDS)) as conn:
+            yield conn
+    except sqlite3.OperationalError as exc:
+        if getattr(exc, "sqlite_errorcode", 0) & 0xff != sqlite3.SQLITE_BUSY:
+            raise
+        raise ConnectedIndexBusy(
+            f"Connected index busy (wait limit {CONNECTED_INDEX_BUSY_SECONDS:g}s). Retry the operation."
+        ) from exc
+
+
+class ConnectedWorkspaceChanged(RuntimeError):
+    """A request lost its workspace registration while waiting for the index."""
+
+
+@dataclass(frozen=True)
+class ConnectedRegistration:
+    registry: Path
+    generation: tuple[int, int, int, int] | None
+    workspaces: dict[str, WorkspaceConfig] | None = field(repr=False, compare=False)
+
+    @staticmethod
+    def _generation(info: os.stat_result) -> tuple[int, int, int, int]:
+        return info.st_dev, info.st_ino, info.st_ctime_ns, info.st_size
+
+    @classmethod
+    def capture(cls, runtime: Path) -> ConnectedRegistration:
+        # Both registry writers publish with atomic replace. Capture the file
+        # that authorized this request, including legacy bootstrap's absent file.
+        from ciao.config import _parse_workspaces_json
+
+        registry = runtime / "workspaces.json"
+        try:
+            stream = registry.open(encoding="utf-8")
+        except FileNotFoundError:
+            return cls(registry, None, None)
+        with stream:
+            generation = cls._generation(os.fstat(stream.fileno()))
+            registration = cls(registry, generation, _parse_workspaces_json(stream.read(), generation=generation))
+            # Keep the old inode allocated even if archive and restore both
+            # finish while this request is queued. A cancelled asyncio caller
+            # may leave a worker running, so the pin follows the shared token.
+            weakref.finalize(registration, os.close, os.dup(stream.fileno()))
+            return registration
+
+    def authorize(self, root: Path, workspace: str, base: Path, vault_base: Path | None, *,
+                  allow_subfolders: bool = False, link: SharedBrainLink | None = None) -> None:
+        self.verify()
+        if not root.is_absolute() or root.resolve() != root:
+            raise ConnectedWorkspaceChanged("Connected index source is no longer canonical")
+        if self.workspaces is None:
+            if link is not None:
+                raise ConnectedWorkspaceChanged("Shared brain has no persisted registration")
+            return  # Bootstrap has no disk registry; the caller resolved its configured source.
+        from ciao.config import CiaoConfig
+
+        row = self.workspaces.get(workspace)
+        if row is None:
+            raise ConnectedWorkspaceChanged("Workspace is no longer registered for connected indexing")
+        if allow_subfolders or link is not None:
+            selected = max((item for item in row.shared_brains if root.is_relative_to(Path(item.path))),
+                           key=lambda item: len(item.path), default=None)
+            if selected is not None or link is not None:
+                # SharedBrainLink equality deliberately omits lifetime_id.
+                if (link is None or selected != link or selected.lifetime_id != link.lifetime_id
+                        or Path(link.path).resolve() != Path(link.path)):
+                    raise ConnectedWorkspaceChanged("Shared brain registration changed; select the link again")
+                return
+        # Reuse the normal layout and legacy-root resolver with only the pinned
+        # registry data. Never authorize an old source from its workspace name.
+        config = CiaoConfig(pwa_auth_token="", workspace_root=base,
+                            state_path=self.registry.parent / "state.json", media_root=self.registry.parent,
+                            vault_root=vault_base or base / "memory-vault", workspaces={workspace: replace(row)})
+        sources = [config.workspace_vault_root(workspace)]
+        if config._rerooted():
+            sources.append(config.agent_vault_root(workspace))
+        if not any((root == source or (allow_subfolders and root.is_relative_to(source)))
+                   and source.resolve() == source for source in sources):
+            raise ConnectedWorkspaceChanged("Source is no longer registered for this workspace")
+
+    def verify(self) -> None:
+        try:
+            current = self._generation(self.registry.stat())
+        except FileNotFoundError:
+            current = None
+        if current != self.generation:
+            raise ConnectedWorkspaceChanged("Workspace registration changed; start a new index request")
+
+
+def refresh_connected_index(conn: sqlite3.Connection, root: Path, workspace: str,
+                            base: Path, namespace: str, registration: ConnectedRegistration) -> tuple[list[vault_index.Entry], int, int]:
+    # Reserve the writer before reading any source data. CLI processes and
+    # server threads then publish in capture order on independent connections.
+    conn.execute("BEGIN IMMEDIATE")
+    with conn:
+        registration.verify()
+        captured: dict[Path, str] = {}
+        indexed, removed = _index_directory_pass(
+            conn, root, "vault_meta", "vault_fts", exclude_dirs=EXCLUDED_VAULT_DIRS,
+            exclude_files=set(vault_index.GENERATED_VAULT_FILES), path_base=base,
+            key_namespace=namespace, captured=captured,
+        )
+        entries = vault_index.scan_vault(
+            root, workspace=workspace, strict=True, path_prefix=Path("."), captured=captured,
+        )
+        payload = [dict(asdict(entry), path=entry.path_key) for entry in entries]
+        conn.execute("INSERT OR REPLACE INTO connected_indexes VALUES (?, ?)",
+                     (namespace, json.dumps(payload)))
+        conn.execute("INSERT OR REPLACE INTO connected_index_owners VALUES (?, ?, ?)",
+                     (namespace, str(registration.registry.parent.resolve()), workspace))
+        registration.verify()
+    return entries, indexed, removed
+
+
+def lookup_connected_entries(root: Path, workspace: str, runtime: Path, base: Path, *,
+                             refresh: bool = False, source_roots: frozenset[Path] = frozenset(),
+                             registration: ConnectedRegistration | None = None, vault_base: Path | None = None,
+                             link: SharedBrainLink | None = None) -> list[vault_index.Entry]:
+    """Read the local snapshot, or build one transactionally from its original root."""
+    registration = registration or ConnectedRegistration.capture(runtime)
+    registration.authorize(root, workspace, base, vault_base, allow_subfolders=True, link=link)
+    database = connected_db_path(runtime, root, source_roots)
+    namespace = adopted_vault_key_prefix(root, workspace, link=link)
+    with connected_index_connection(database) as conn:
+        init_db(conn)
+        if not refresh:
+            cached = connected_entries(conn, namespace)
+            if cached is not None:
+                registration.verify()
+                return cached
+        entries, _, _ = refresh_connected_index(conn, root, workspace, base, namespace, registration)
+        return entries
 
 
 def init_db(conn: sqlite3.Connection) -> None:
@@ -264,6 +496,9 @@ def init_db(conn: sqlite3.Connection) -> None:
             value TEXT
         )
     """)
+    conn.execute("CREATE TABLE IF NOT EXISTS connected_indexes (namespace TEXT PRIMARY KEY, entries TEXT NOT NULL)")
+    conn.execute("CREATE TABLE IF NOT EXISTS connected_index_owners "
+                 "(namespace TEXT PRIMARY KEY, runtime TEXT NOT NULL, workspace TEXT NOT NULL)")
     _migrate_meta_signature(conn)
     conn.commit()
 
@@ -324,13 +559,12 @@ def _ensure_path_base(conn: sqlite3.Connection, base: Path) -> None:
             row[0],
             resolved,
         )
-        for table in ("vault_fts", "vault_meta", "transcript_fts", "transcript_meta"):
+        for table in ("vault_fts", "vault_meta", "transcript_fts", "transcript_meta", "connected_indexes", "connected_index_owners"):
             conn.execute(f"DELETE FROM {table}")
     conn.execute(
         "INSERT OR REPLACE INTO search_config (key, value) VALUES ('path_base', ?)",
         (resolved,),
     )
-    conn.commit()
 
 
 def _parse_title(text: str, filename_stem: str) -> str:
@@ -450,19 +684,65 @@ def _index_directory(
     exclude_dirs: set[str] | None = None,
     exclude_files: set[str] | None = None,
     path_base: Path | None = None,
+    key_namespace: str | None = None,
+) -> tuple[int, int]:
+    """Index a complete traversal atomically, preserving prior rows on error."""
+    conn.execute("SAVEPOINT fts_index_pass")
+    try:
+        result = _index_directory_pass(
+            conn, root_dir, meta_table, fts_table, file_suffix, exclude_dirs,
+            exclude_files, path_base, key_namespace,
+        )
+        conn.execute("RELEASE SAVEPOINT fts_index_pass")
+        conn.commit()
+        return result
+    except BaseException:
+        conn.execute("ROLLBACK TO SAVEPOINT fts_index_pass")
+        conn.execute("RELEASE SAVEPOINT fts_index_pass")
+        conn.rollback()
+        raise
+
+
+def _index_directory_pass(
+    conn: sqlite3.Connection,
+    root_dir: Path,
+    meta_table: str,
+    fts_table: str,
+    file_suffix: str = ".md",
+    exclude_dirs: set[str] | None = None,
+    exclude_files: set[str] | None = None,
+    path_base: Path | None = None,
+    key_namespace: str | None = None,
+    captured: dict[Path, str] | None = None,
 ) -> tuple[int, int]:
     """Incrementally index markdown files. Returns (indexed_count, removed_count)."""
     exclude_dirs = exclude_dirs or set()
     exclude_files = exclude_files or set()
     base = _key_base(root_dir, path_base)
-    if path_base is not None:
+    if path_base is not None and captured is None:
         _ensure_path_base(conn, base)
+
+    if key_namespace is None:
+        # A standard vault may still be awaiting initial setup. Preserve its
+        # existing rows and the install's base registration in that case.
+        try:
+            root_dir.stat()
+        except FileNotFoundError:
+            return 0, 0
+
+    if key_namespace is not None and (
+        not key_namespace.endswith("/")
+        or key_namespace.startswith("/")
+        or ".." in Path(key_namespace).parts
+        or "\x00" in key_namespace
+    ):
+        raise ValueError("FTS key namespace must be a safe relative directory prefix")
 
     # The prune below must only consider rows under the directory being indexed.
     # Unscoped, indexing one agent root DELETED every row belonging to the
     # others, so a two-workspace install kept exactly one workspace's notes
     # searchable at a time and every switch paid a full re-index.
-    scope_prefix = _scope_prefix(root_dir, base)
+    scope_prefix = key_namespace if key_namespace is not None else _scope_prefix(root_dir, base)
 
     # Only this pass's rows, not the whole table. One database holds every
     # workspace's notes and every transcript archive, so the unscoped SELECT
@@ -495,6 +775,12 @@ def _index_directory(
         else _walk_notes(str(root_dir), file_suffix, exclude_dirs)
     )
 
+    # FTS has no path index. Resolve row IDs once so content comparisons
+    # against a captured source read do not scan the table for each note.
+    prior_rows = dict(conn.execute(
+        f"SELECT path, rowid FROM {fts_table} WHERE path LIKE ? ESCAPE '\\'",
+        (_like_prefix_pattern(key_prefix),),
+    )) if captured is not None else {}
     found_paths: set[str] = set()
     indexed_count = 0
 
@@ -511,21 +797,31 @@ def _index_directory(
         if _is_reserved_key(root_rel):
             continue
 
+        if key_namespace and entry.is_symlink():
+            continue
         rel_str = key_prefix + root_rel
         found_paths.add(rel_str)
 
         try:
             # The walk's own stat, not a second syscall against the same path.
             st = entry.stat()
-        except OSError:
-            continue
+        except OSError as exc:
+            raise OSError(f"incomplete FTS scan at {entry.path}") from exc
 
         # Check if file changed
         signature = _signature(st)
         prior = existing.get(rel_str)
-        if prior == signature:
+        if captured is not None:
+            relative = Path(root_rel)
+            text = read_connected_note(root_dir, relative)
+            captured[relative] = text
+            if prior == signature and conn.execute(
+                f"SELECT 1 FROM {fts_table} WHERE rowid = ? AND body = ?", (prior_rows.get(rel_str), text)
+            ).fetchone():
+                continue
+        elif prior == signature:
             continue
-        if prior is not None and _is_legacy_row(prior) and prior[0] == signature[0]:
+        if captured is None and prior is not None and _is_legacy_row(prior) and prior[0] == signature[0]:
             # An upgraded install: every row has a mtime and no size/ctime, and
             # a NULL can never equal a real signature. Re-reading them all costs
             # 82s on a 10,000-note vault — DELETE+INSERT against a POPULATED
@@ -546,10 +842,11 @@ def _index_directory(
             continue
 
         try:
-            text = Path(entry.path).read_text(encoding="utf-8")
-        except (OSError, UnicodeDecodeError):
-            logger.warning("FTS search: failed to read %s", entry.path)
-            continue
+            if captured is None:
+                text = (read_connected_note(root_dir, Path(root_rel)) if key_namespace
+                    else Path(entry.path).read_text(encoding="utf-8"))
+        except (OSError, UnicodeDecodeError) as exc:
+            raise OSError(f"incomplete FTS scan at {entry.path}") from exc
 
         if _search_opted_out(text):
             # Remove any FTS rows indexed before the note opted out, but keep
@@ -595,8 +892,6 @@ def _index_directory(
     # default transaction control every caller uses, and a counter-based gate
     # silently rolls back any write path that forgets to reach it — the
     # opt-out settle had exactly that bug.
-    conn.commit()
-
     return indexed_count, removed_count
 
 
@@ -605,6 +900,7 @@ def index_vault(
     vault_root: Path,
     *,
     path_base: Path | None = None,
+    key_namespace: str | None = None,
 ) -> tuple[int, int]:
     """Incremental indexer for core vault files (excludes Logs, Templates)."""
     return _index_directory(
@@ -615,6 +911,7 @@ def index_vault(
         exclude_dirs=EXCLUDED_VAULT_DIRS,
         exclude_files=set(vault_index.GENERATED_VAULT_FILES),
         path_base=path_base,
+        key_namespace=key_namespace,
     )
 
 
@@ -643,7 +940,17 @@ def index_logs(
     )
 
 
-def vault_key_prefix(vault_root: Path, path_base: Path | None) -> str:
+def adopted_vault_key_prefix(vault_root: Path, workspace: str, *, link: SharedBrainLink | None = None) -> str:
+    """Opaque local FTS namespace for an adopted root outside the install tree."""
+    identity = f"{workspace}\0{Path(vault_root).resolve()}".encode("utf-8")
+    if link is not None:
+        identity += b"\0" + json.dumps([link.name, link.path, link.identity, link.lifetime_id]).encode()
+    return f"adopted/{hashlib.sha256(identity).hexdigest()[:20]}/"
+
+
+def vault_key_prefix(
+    vault_root: Path, path_base: Path | None, *, key_namespace: str | None = None,
+) -> str:
     """The stored-key prefix that identifies one vault's rows.
 
     Callers pass this to :func:`search_vault` so a search cannot return a note
@@ -659,6 +966,10 @@ def vault_key_prefix(vault_root: Path, path_base: Path | None) -> str:
     key can carry, so the search returns nothing until that vault is keyed under
     the same base as the rest.
     """
+    if key_namespace is not None:
+        if not key_namespace.endswith("/") or key_namespace.startswith("/") or ".." in Path(key_namespace).parts:
+            return NO_MATCH_KEY_PREFIX
+        return key_namespace
     base = _key_base(vault_root, path_base)
     # Compare unresolved first, exactly as the key-writing loop does
     # (_scope_prefix's own contract): a vault reached through a symlink under
@@ -685,14 +996,33 @@ def forget_subtree(conn: sqlite3.Connection, prefix: str) -> int:
     and :data:`NO_MATCH_KEY_PREFIX` (a vault outside the key base, whose rows
     this prefix cannot identify).
     """
+    with conn:
+        return _forget_subtree(conn, prefix)
+
+
+def forget_connected_workspace(conn: sqlite3.Connection, runtime: Path, workspace: str,
+                               known_namespaces: set[str]) -> int:
+    # Acquire the same writer as refresh BEFORE enumerating ownership. A
+    # finishing capture can otherwise commit a new subfolder after enumeration.
+    conn.execute("BEGIN IMMEDIATE")
+    with conn:
+        namespaces = known_namespaces | {row[0] for row in conn.execute(
+            "SELECT namespace FROM connected_index_owners WHERE runtime = ? AND workspace = ?",
+            (str(runtime.resolve()), workspace),
+        )}
+        return sum(_forget_subtree(conn, namespace) for namespace in namespaces)
+
+
+def _forget_subtree(conn: sqlite3.Connection, prefix: str) -> int:
     if not prefix or prefix == NO_MATCH_KEY_PREFIX:
         return 0
     pattern = _like_prefix_pattern(prefix)
+    conn.execute("DELETE FROM connected_index_owners WHERE namespace = ?", (prefix,))
+    conn.execute("DELETE FROM connected_indexes WHERE namespace = ?", (prefix,))
     removed = conn.execute(
         "DELETE FROM vault_fts WHERE path LIKE ? ESCAPE '\\'", (pattern,)
     ).rowcount
     conn.execute("DELETE FROM vault_meta WHERE path LIKE ? ESCAPE '\\'", (pattern,))
-    conn.commit()
     return int(removed or 0)
 
 

@@ -9,11 +9,18 @@ validation or serialization rules.
 
 from __future__ import annotations
 
+import contextvars
 import json
+import os
 import re
+import tempfile
 import threading
+import contextvars
+from contextlib import contextmanager
 from pathlib import Path
-from typing import Any, Iterable, cast
+from typing import Any, Iterable, Iterator, cast
+
+from ciao.os_support.locks import lock_exclusive, lock_shared, unlock
 
 from ciao import provider_registry
 from ciao.claude_trim import coerce_claude_trim
@@ -22,6 +29,7 @@ from ciao.config import (
     DEFAULT_MEMORY_HANDOVER,
     DEFAULT_NEW_WORKSPACE_MEMORY_HANDOVER,
     DEFAULT_WORKSPACE_COLOR,
+    SHARED_BRAIN_NAME_PATTERN,
     WorkspaceConfig,
     coerce_memory_approval,
     coerce_memory_handover,
@@ -36,6 +44,93 @@ from ciao.provider_service import capabilities_for
 WORKSPACE_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$")
 _REGISTRY_LOCKS: dict[int, threading.RLock] = {}
 _REGISTRY_LOCKS_GUARD = threading.Lock()
+_ACTIVE_REGISTRY_OWNER: contextvars.ContextVar[WorkspaceRegistryOwnership | None] = (
+    contextvars.ContextVar("active_workspace_registry_owner", default=None)
+)
+
+
+class WorkspaceRegistryChanged(OSError):
+    """The on-disk registry changed under a writer holding a stale snapshot."""
+
+
+class WorkspaceRegistryConflict(WorkspaceRegistryChanged):
+    """The persisted registry no longer matches this transaction's snapshot."""
+
+
+class WorkspaceRegistryOwnership:
+    """Explicit registry lock ownership carrying the exact loaded bytes."""
+
+    def __init__(self, runtime_root: Path, *, blocking: bool = False) -> None:
+        self.runtime_root = Path(runtime_root).resolve()
+        self.key = str(self.runtime_root)
+        self.current: bytes | None = None
+        self.closed = False
+        self._context = workspace_registry_file_lock(
+            self.runtime_root, exclusive=True, blocking=blocking
+        )
+
+    def __enter__(self) -> WorkspaceRegistryOwnership:
+        self._context.__enter__()
+        self.current = (_read_registry_bytes(self.runtime_root))
+        return self
+
+    def __exit__(self, *exc: object) -> None:
+        self.close()
+
+    def replace(self, payload: bytes | None, *, expected: bytes | None) -> None:
+        if self.closed or self.current != expected:
+            raise WorkspaceRegistryConflict("workspace registry changed since it was loaded")
+        path = self.runtime_root / "workspaces.json"
+        if _read_registry_bytes(self.runtime_root) != expected:
+            raise WorkspaceRegistryConflict("workspace registry changed on disk")
+        if payload is None:
+            path.unlink(missing_ok=True)
+        else:
+            _atomic_write_registry_bytes(path, payload)
+            self.current = payload
+
+    def close(self) -> None:
+        if self.closed:
+            return
+        self.closed = True
+        self._context.__exit__(None, None, None)
+
+
+def acquire_registry_at(runtime_root: Path, *, blocking: bool = False) -> WorkspaceRegistryOwnership:
+    owner = WorkspaceRegistryOwnership(runtime_root, blocking=blocking)
+    owner.__enter__()
+    return owner
+
+
+def acquire_workspace_registry(
+    config: Any, *, blocking: bool = True,
+) -> WorkspaceRegistryOwnership:
+    return acquire_registry_at(Path(config.state_path).parent, blocking=blocking)
+
+
+@contextmanager
+def registry_owner_scope(owner: WorkspaceRegistryOwnership):
+    token = _ACTIVE_REGISTRY_OWNER.set(owner)
+    try:
+        yield owner
+    finally:
+        _ACTIVE_REGISTRY_OWNER.reset(token)
+
+
+def active_registry_owner(runtime_root: Path) -> WorkspaceRegistryOwnership | None:
+    owner = _ACTIVE_REGISTRY_OWNER.get()
+    if owner is None or owner.closed:
+        return None
+    return owner if owner.key == str(Path(runtime_root).resolve()) else None
+
+
+@contextmanager
+def workspace_registry_claim(config: Any) -> Iterator[WorkspaceRegistryOwnership]:
+    owner = acquire_registry_at(Path(config.state_path).parent, blocking=False)
+    try:
+        yield owner
+    finally:
+        owner.close()
 
 
 def workspace_registry_lock(config: Any) -> threading.RLock:
@@ -43,6 +138,203 @@ def workspace_registry_lock(config: Any) -> threading.RLock:
     key = id(config)
     with _REGISTRY_LOCKS_GUARD:
         return _REGISTRY_LOCKS.setdefault(key, threading.RLock())
+
+
+@contextmanager
+def workspace_registry_file_lock(
+    runtime_root: Path, *, exclusive: bool = True, blocking: bool = True,
+) -> Iterator[None]:
+    """Interprocess barrier for readers and writers of ``workspaces.json``."""
+    runtime_root.mkdir(parents=True, exist_ok=True)
+    lock_root = runtime_root / "locks"
+    lock_root.mkdir(parents=True, exist_ok=True, mode=0o700)
+    os.chmod(lock_root, 0o700)
+    lock_path = lock_root / "workspaces-registry.lock"
+    fd = os.open(lock_path, os.O_RDWR | os.O_CREAT, 0o600)
+    try:
+        (lock_exclusive if exclusive else lock_shared)(fd, blocking=blocking)
+        yield
+    finally:
+        unlock(fd)
+        os.close(fd)
+
+
+def registry_rows(data: Any) -> list[dict[str, Any]]:
+    """Read list and legacy name-keyed registries without dropping rows."""
+    if isinstance(data, dict) and all(isinstance(value, dict) for value in data.values()):
+        return [{"name": name, **value} for name, value in data.items()]
+    if isinstance(data, list) and all(isinstance(row, dict) for row in data):
+        return data
+    raise WorkspaceRegistryConflict("workspace registry is invalid")
+
+
+def authoritative_shared_links_from_bytes(raw: bytes | None) -> tuple[Path, ...] | None:
+    """Strict linked roots from exact registry bytes; None when untrustworthy."""
+    if raw is None:
+        return ()
+    try:
+        text = raw.decode("utf-8")
+    except UnicodeDecodeError:
+        return None
+    if not text.strip():
+        return None
+    try:
+        parsed = json.loads(text)
+    except (json.JSONDecodeError, TypeError, ValueError):
+        return None
+    if isinstance(parsed, dict):
+        items = [
+            {"name": name, **value}
+            for name, value in parsed.items()
+            if isinstance(value, dict)
+        ]
+        if len(items) != len(parsed):
+            return None
+    elif isinstance(parsed, list):
+        items = parsed
+    else:
+        return None
+    if any(not isinstance(item, dict) for item in items):
+        return None
+    workspace_names: set[str] = set()
+    for item in items:
+        name = item.get("name")
+        if not isinstance(name, str) or not name.strip() or name in workspace_names:
+            return None
+        workspace_names.add(name)
+        links = item.get("shared_brains")
+        if links is None:
+            continue
+        if not isinstance(links, list):
+            return None
+        seen_names: set[str] = set()
+        seen_paths: set[str] = set()
+        seen_identities: set[str] = set()
+        for link in links:
+            if not isinstance(link, dict):
+                return None
+            link_path = link.get("path")
+            link_name = link.get("name")
+            identity = link.get("identity")
+            if (
+                not isinstance(link_path, str)
+                or not link_path
+                or not os.path.isabs(link_path)
+                or any(ord(char) < 32 or ord(char) == 127 for char in link_path)
+                or not isinstance(link_name, str)
+                or re.fullmatch(SHARED_BRAIN_NAME_PATTERN, link_name) is None
+                or not isinstance(identity, str)
+                or not identity.strip()
+                or any(ord(char) < 32 or ord(char) == 127 for char in identity)
+            ):
+                return None
+            if (
+                link_name in seen_names
+                or link_path in seen_paths
+                or identity in seen_identities
+            ):
+                return None
+            seen_names.add(link_name)
+            seen_paths.add(link_path)
+            seen_identities.add(identity)
+    from ciao.config import _parse_workspaces_json  # noqa: PLC0415
+
+    workspaces = _parse_workspaces_json(text)
+    if parsed and not workspaces:
+        return None
+    return tuple(
+        Path(link.path).expanduser()
+        for workspace in workspaces.values()
+        for link in workspace.shared_brains
+    )
+
+
+def authoritative_shared_links(runtime_root: Path) -> tuple[Path, ...] | None:
+    """Current linked roots, reusing an active claim when one is held."""
+    owner = active_registry_owner(runtime_root)
+    if owner is not None:
+        return authoritative_shared_links_from_bytes(owner.current)
+    path = runtime_root / "workspaces.json"
+    try:
+        with workspace_registry_file_lock(runtime_root, exclusive=False):
+            try:
+                raw = path.read_bytes()
+            except FileNotFoundError:
+                return ()
+    except OSError:
+        return None
+    return authoritative_shared_links_from_bytes(raw)
+    if not raw.strip():
+        return None
+    try:
+        parsed = json.loads(raw)
+    except (json.JSONDecodeError, TypeError, ValueError):
+        return None
+    if isinstance(parsed, dict):
+        items = [
+            {"name": name, **value}
+            for name, value in parsed.items()
+            if isinstance(value, dict)
+        ]
+        if len(items) != len(parsed):
+            return None
+    elif isinstance(parsed, list):
+        items = parsed
+    else:
+        return None
+    if any(not isinstance(item, dict) for item in items):
+        return None
+    workspace_names: set[str] = set()
+    for item in items:
+        name = item.get("name")
+        if not isinstance(name, str) or not name.strip() or name in workspace_names:
+            return None
+        workspace_names.add(name)
+        links = item.get("shared_brains")
+        if links is None:
+            continue
+        if not isinstance(links, list):
+            return None
+        seen_names: set[str] = set()
+        seen_paths: set[str] = set()
+        seen_identities: set[str] = set()
+        for link in links:
+            if not isinstance(link, dict):
+                return None
+            link_path = link.get("path")
+            link_name = link.get("name")
+            identity = link.get("identity")
+            if (
+                not isinstance(link_path, str)
+                or not link_path
+                or not os.path.isabs(link_path)
+                or any(ord(char) < 32 or ord(char) == 127 for char in link_path)
+                or not isinstance(link_name, str)
+                or re.fullmatch(SHARED_BRAIN_NAME_PATTERN, link_name) is None
+                or not isinstance(identity, str)
+                or not identity.strip()
+                or any(ord(char) < 32 or ord(char) == 127 for char in identity)
+            ):
+                return None
+            if (
+                link_name in seen_names
+                or link_path in seen_paths
+                or identity in seen_identities
+            ):
+                return None
+            seen_names.add(link_name)
+            seen_paths.add(link_path)
+            seen_identities.add(identity)
+    from ciao.config import _parse_workspaces_json  # noqa: PLC0415
+
+    workspaces = _parse_workspaces_json(raw)
+    if parsed and not workspaces:
+        return None
+    return tuple(
+        Path(link.path).expanduser()
+        for workspace in workspaces.values()
+        for link in workspace.shared_brains
+    )
 
 # Every selectable provider is a runtime provider, so the registry is the only
 # source for labels.
@@ -342,10 +634,154 @@ def _workspaces_path(config: Any) -> Path:
     return Path(config.state_path).resolve().parent / "workspaces.json"
 
 
-def persist_workspaces(config: Any, candidate_workspaces: dict[str, Any] | None = None) -> None:
+def _read_registry_bytes(runtime_root: Path) -> bytes | None:
+    try:
+        return (Path(runtime_root) / "workspaces.json").read_bytes()
+    except FileNotFoundError:
+        return None
+
+
+def _atomic_write_registry_bytes(path: Path, payload: bytes) -> None:
+    fd, temp_name = tempfile.mkstemp(prefix=".workspaces-", suffix=".tmp", dir=path.parent)
+    temp = Path(temp_name)
+    try:
+        with os.fdopen(fd, "wb") as stream:
+            os.fchmod(stream.fileno(), 0o600)
+            stream.write(payload)
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temp, path)
+    finally:
+        try:
+            temp.unlink()
+        except FileNotFoundError:
+            pass
+
+
+def ensure_registry_current(config: Any) -> None:
+    """Refuse a transaction whose loaded registry bytes are stale."""
+    if read_workspace_registry_bytes(config) != getattr(
+        config, "_workspace_registry_bytes", None
+    ):
+        raise WorkspaceRegistryConflict("workspace registry changed since it was loaded")
+
+
+def read_workspace_registry_bytes(config: Any) -> bytes | None:
+    """Exact persisted registry bytes; None denotes a missing registry."""
+    try:
+        return _workspaces_path(config).read_bytes()
+    except FileNotFoundError:
+        return None
+
+
+
+def restore_registry_entries(
+    runtime_root: Path,
+    prior_entries: list[dict[str, Any]] | None,
+    expected_entries: list[dict[str, Any]] | None,
+    *,
+    owner: WorkspaceRegistryOwnership | None = None,
+    fields: tuple[str, ...] | None = None,
+) -> bool:
+    """Restore only transaction-owned rows after validating ALL expectations.
+
+    Every named expected row must still be present and match the selected
+    fields before any registry byte is written. A mismatch returns False with
+    no partial restoration, leaving concurrent edits untouched.
+    """
+    if expected_entries is None:
+        return False
+    prior_by_name = {
+        str(row.get("name")): row
+        for row in (prior_entries or [])
+        if isinstance(row, dict) and isinstance(row.get("name"), str)
+    }
+    expected_by_name = {
+        str(row.get("name")): row
+        for row in expected_entries
+        if isinstance(row, dict) and isinstance(row.get("name"), str)
+    }
+    own_owner = owner is None
+    if owner is None:
+        owner = acquire_registry_at(runtime_root, blocking=True)
+    try:
+        if owner.current is None:
+            return False
+        try:
+            current = json.loads(owner.current)
+        except (ValueError, TypeError, UnicodeDecodeError):
+            return False
+        if not isinstance(current, list):
+            return False
+        by_name = {
+            str(row.get("name")): row
+            for row in current
+            if isinstance(row, dict) and isinstance(row.get("name"), str)
+        }
+        for name, expected_row in expected_by_name.items():
+            row = by_name.get(name)
+            if row is None:
+                return False
+            if fields is None:
+                if row != expected_row:
+                    return False
+            elif not all(row.get(key) == expected_row.get(key) for key in fields):
+                return False
+        rewritten: list[dict[str, Any]] = []
+        changed = False
+        for row in current:
+            name = str(row.get("name")) if isinstance(row, dict) else ""
+            if name and name in expected_by_name:
+                prior = prior_by_name.get(name)
+                if prior is None:
+                    changed = True
+                    continue
+                if fields is None:
+                    restored = json.loads(json.dumps(prior))
+                else:
+                    restored = json.loads(json.dumps(row))
+                    for key in fields:
+                        if key in prior:
+                            restored[key] = prior[key]
+                rewritten.append(restored)
+                changed = changed or restored != row
+            else:
+                rewritten.append(row)
+        if changed:
+            payload = (json.dumps(rewritten, indent=2) + "\n").encode("utf-8")
+            owner.replace(payload, expected=owner.current)
+    finally:
+        if own_owner:
+            owner.close()
+    return True
+
+def replace_workspace_registry(
+    config: Any,
+    payload: bytes | None,
+    *,
+    expected: bytes | None,
+    owner: WorkspaceRegistryOwnership,
+) -> None:
+    """Exact-bytes CAS under explicit claim ownership."""
+    if owner.closed or owner.key != str(Path(config.state_path).resolve().parent):
+        raise WorkspaceRegistryConflict("workspace registry ownership is invalid")
+    owner.replace(payload, expected=expected)
+    if hasattr(config, "_workspace_registry_bytes"):
+        config._workspace_registry_bytes = payload
+
+
+def persist_workspaces(
+    config: Any,
+    candidate_workspaces: dict[str, Any] | None = None,
+    *,
+    owner: WorkspaceRegistryOwnership | None = None,
+) -> None:
     persist = getattr(config, "persist_workspace_registry", None)
     if candidate_workspaces is None and callable(persist):
-        persist()
+        if owner is None:
+            persist()
+        else:
+            persist(owner=owner)
         return
     path = _workspaces_path(config)
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -369,6 +805,17 @@ def persist_workspaces(config: Any, candidate_workspaces: dict[str, Any] | None 
                 {"name": link.name, "path": link.path, "identity": link.identity, "lifetime_id": link.lifetime_id}
                 for link in workspace.shared_brains
             ]
-    tmp = path.with_suffix(".json.tmp")
-    tmp.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8", newline="")
-    tmp.replace(path)
+    content = (json.dumps(payload, indent=2) + "\n").encode("utf-8")
+    own_owner = owner is None
+    if owner is None:
+        owner = acquire_registry_at(path.parent, blocking=True)
+    try:
+        replace_workspace_registry(
+            config,
+            content,
+            expected=getattr(config, "_workspace_registry_bytes", None),
+            owner=owner,
+        )
+    finally:
+        if own_owner:
+            owner.close()

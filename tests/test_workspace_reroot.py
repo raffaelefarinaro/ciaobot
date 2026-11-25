@@ -341,10 +341,58 @@ def _git_install(tmp_path: Path, **kwargs) -> tuple[Path, Path, Path]:
     vault = _vault(install, **kwargs)
     runtime = install / ".runtime"
     runtime.mkdir()
+    from ciao.setup_marker import write_vault_index_ownership
+
+    write_vault_index_ownership(runtime, [vault], owner="ciao")
     (install / ".gitignore").write_text(".runtime/\n", encoding="utf-8")
     _git(install, "add", "-A")
     _git(install, "commit", "-m", "seed")
     return install, vault, runtime
+
+
+def test_apply_refuses_before_first_move_when_registry_row_is_missing(
+    tmp_path: Path,
+) -> None:
+    install, vault, runtime = _git_install(tmp_path)
+    _registry(runtime, [{"name": "personal", "vault_root": "memory-vault/personal"}])
+    before = _install_hashes(install)
+
+    result = apply(install, vault, ["personal", "work"], runtime, primary="personal")
+
+    assert result["status"] == "refused"
+    assert any("no entry for 'work'" in reason for reason in result["refusals"])
+    assert _install_hashes(install) == before
+
+
+def test_apply_refuses_before_first_move_when_registry_bytes_changed(
+    tmp_path: Path,
+) -> None:
+    import json
+
+    install, vault, runtime = _git_install(tmp_path)
+    _registry(runtime, [
+        {"name": "personal", "vault_root": "memory-vault/personal"},
+        {"name": "work", "vault_root": "memory-vault/work"},
+    ])
+    registry = runtime / "workspaces.json"
+    expected = registry.read_bytes()
+    rows = json.loads(expected)
+    rows[0]["shared_brains"] = [{
+        "name": "team",
+        "path": str(tmp_path / "team"),
+        "identity": "github.com/example/team",
+    }]
+    registry.write_text(json.dumps(rows), encoding="utf-8")
+    before = _install_hashes(install)
+
+    result = apply(
+        install, vault, ["personal", "work"], runtime, primary="personal",
+        expected_registry_bytes=expected,
+    )
+
+    assert result["status"] == "refused"
+    assert any("registry changed" in reason for reason in result["refusals"])
+    assert _install_hashes(install) == before
 
 
 def test_apply_then_undo_restores_a_byte_identical_tree(tmp_path: Path) -> None:
@@ -860,6 +908,712 @@ def test_a_migrated_receipt_records_the_reverse_map(tmp_path: Path) -> None:
     assert receipt["git_head_before"]
 
 
+def test_undo_registry_failure_compensates_artifacts_and_retry_succeeds(
+    tmp_path: Path, monkeypatch,
+) -> None:
+    from ciao import workspaces
+
+    install, vault, runtime = _with_guide(tmp_path)
+    applied = apply(install, vault, ["personal", "work"], runtime, primary="personal")
+    assert applied["status"] == "migrated", applied.get("refusals")
+    receipt = json.loads(receipt_path(runtime).read_text(encoding="utf-8"))
+    created = receipt["created_files"][0]
+    stashed = receipt["stashed_files"][0]
+    created_path = install / created
+    backup_path = runtime / stashed["backup"]
+    assert created_path.exists()
+    assert backup_path.exists()
+
+    original_restore = workspaces.restore_registry_entries
+    monkeypatch.setattr(workspaces, "restore_registry_entries", lambda *a, **k: False)
+    failed = undo(install, runtime)
+
+    assert failed["status"] == "failed"
+    assert receipt_path(runtime).is_file()
+    assert created_path.exists(), "created artifact was consumed despite registry failure"
+    assert backup_path.exists(), "stashed backup was consumed despite registry failure"
+
+    monkeypatch.setattr(workspaces, "restore_registry_entries", original_restore)
+    retried = undo(install, runtime)
+
+    assert retried["status"] == "undone", retried
+    assert not created_path.exists()
+    assert not receipt_path(runtime).exists()
+    assert (install / "memory-vault" / "personal" / "People" / "Peter.md").is_file()
+
+
+def test_undo_process_kill_leaves_manifest_and_retry_recovers(
+    tmp_path: Path,
+) -> None:
+    import os
+    import signal
+
+    from ciao import workspaces
+    from ciao.workspace_reroot import UNDO_MANIFEST_NAME
+
+    if not hasattr(os, "fork"):
+        pytest.skip("requires fork")
+    install, vault, runtime = _with_guide(tmp_path)
+    applied = apply(install, vault, ["personal", "work"], runtime, primary="personal")
+    assert applied["status"] == "migrated", applied.get("refusals")
+    receipt = json.loads(receipt_path(runtime).read_text(encoding="utf-8"))
+    created_path = install / receipt["created_files"][0]
+    backup_path = runtime / receipt["stashed_files"][0]["backup"]
+
+    pid = os.fork()
+    if pid == 0:
+        def kill_at_registry(*args, **kwargs):
+            os.kill(os.getpid(), signal.SIGKILL)
+
+        workspaces.restore_registry_entries = kill_at_registry
+        try:
+            undo(install, runtime)
+        except BaseException:
+            pass
+        os._exit(0)
+
+    _pid, status = os.waitpid(pid, 0)
+    assert os.WIFSIGNALED(status)
+    manifest = runtime / "migration" / UNDO_MANIFEST_NAME
+    assert manifest.is_file()
+    assert receipt_path(runtime).is_file()
+    data = json.loads(manifest.read_text(encoding="utf-8"))
+    created_backups = [
+        Path(item["backup"]) for item in data["created"]
+        if item["source"] == str(created_path.relative_to(install))
+    ]
+    assert created_backups and created_backups[0].exists()
+    assert backup_path.exists()
+
+    retried = undo(install, runtime)
+
+    assert retried["status"] == "undone", retried
+    assert not manifest.exists()
+    assert not receipt_path(runtime).exists()
+    assert (install / "memory-vault" / "personal" / "People" / "Peter.md").is_file()
+
+
+def test_undo_process_death_during_cleanup_recovers_committed_state(
+    tmp_path: Path,
+) -> None:
+    import os
+    import signal
+
+    from ciao import workspace_reroot
+    from ciao.workspace_reroot import UNDO_MANIFEST_NAME
+
+    if not hasattr(os, "fork"):
+        pytest.skip("requires fork")
+    install, vault, runtime = _with_guide(tmp_path)
+    applied = apply(install, vault, ["personal", "work"], runtime, primary="personal")
+    assert applied["status"] == "migrated", applied.get("refusals")
+    receipt = json.loads(receipt_path(runtime).read_text(encoding="utf-8"))
+    backup = runtime / receipt["stashed_files"][0]["backup"]
+
+    pid = os.fork()
+    if pid == 0:
+        real_unlink = workspace_reroot._unlink_durable
+        target_receipt = receipt_path(runtime)
+
+        def kill_after_receipt(path: Path) -> None:
+            real_unlink(path)
+            if Path(path) == target_receipt:
+                os.kill(os.getpid(), signal.SIGKILL)
+
+        workspace_reroot._unlink_durable = kill_after_receipt
+        try:
+            undo(install, runtime)
+        except BaseException:
+            pass
+        os._exit(0)
+
+    _pid, status = os.waitpid(pid, 0)
+    assert os.WIFSIGNALED(status)
+    manifest = runtime / "migration" / UNDO_MANIFEST_NAME
+    assert manifest.is_file()
+    assert json.loads(manifest.read_text(encoding="utf-8"))["phase"] == "committed"
+    assert not receipt_path(runtime).exists()
+    assert backup.exists()
+
+    recovered = undo(install, runtime)
+
+    assert recovered["status"] == "nothing_to_undo"
+    assert not manifest.exists()
+    assert not backup.exists()
+    assert (install / "memory-vault" / "personal" / "People" / "Peter.md").is_file()
+
+
+def test_undo_recovery_registry_conflict_retains_manifest_then_retries(
+    tmp_path: Path,
+) -> None:
+    import os
+    import signal
+
+    from ciao import workspaces
+    from ciao.workspace_reroot import UNDO_MANIFEST_NAME
+
+    if not hasattr(os, "fork"):
+        pytest.skip("requires fork")
+    install, vault, runtime = _with_guide(tmp_path)
+    applied = apply(install, vault, ["personal", "work"], runtime, primary="personal")
+    assert applied["status"] == "migrated", applied.get("refusals")
+    registry = runtime / "workspaces.json"
+
+    pid = os.fork()
+    if pid == 0:
+        def kill_at_registry(*args, **kwargs):
+            os.kill(os.getpid(), signal.SIGKILL)
+
+        workspaces.restore_registry_entries = kill_at_registry
+        try:
+            undo(install, runtime)
+        except BaseException:
+            pass
+        os._exit(0)
+
+    _pid, status = os.waitpid(pid, 0)
+    assert os.WIFSIGNALED(status)
+    manifest = runtime / "migration" / UNDO_MANIFEST_NAME
+    assert manifest.is_file()
+    rows = json.loads(registry.read_text(encoding="utf-8"))
+    for row in rows:
+        if row["name"] == "personal":
+            row["vault_root"] = "conflicting/personal"
+    registry.write_text(json.dumps(rows), encoding="utf-8")
+
+    conflicted = undo(install, runtime)
+    assert conflicted["status"] == "failed"
+    assert "registry" in conflicted["reason"].lower()
+    assert manifest.is_file()
+    assert receipt_path(runtime).is_file()
+
+    rows = json.loads(registry.read_text(encoding="utf-8"))
+    for row in rows:
+        if row["name"] == "personal":
+            row["vault_root"] = "personal/memory-vault"
+        if row["name"] == "work":
+            row["vault_root"] = "work/memory-vault"
+    registry.write_text(json.dumps(rows), encoding="utf-8")
+    retried = undo(install, runtime)
+
+    assert retried["status"] == "undone", retried
+    assert not manifest.exists()
+    assert not receipt_path(runtime).exists()
+    assert (install / "memory-vault" / "personal" / "People" / "Peter.md").is_file()
+
+
+def test_undo_reverse_move_failure_compensates_and_retry_succeeds(
+    tmp_path: Path, monkeypatch,
+) -> None:
+    from ciao import workspace_reroot
+
+    install, vault, runtime = _with_guide(tmp_path)
+    applied = apply(install, vault, ["personal", "work"], runtime, primary="personal")
+    assert applied["status"] == "migrated", applied.get("refusals")
+    receipt = json.loads(receipt_path(runtime).read_text(encoding="utf-8"))
+    created_path = install / receipt["created_files"][0]
+    backup_path = runtime / receipt["stashed_files"][0]["backup"]
+    real_git = workspace_reroot.run_git
+    moves = {"n": 0, "failed": False}
+
+    def fail_second_reverse(root: Path, *args: str):
+        if args[:1] == ("mv",):
+            moves["n"] += 1
+            if moves["n"] == 2 and not moves["failed"]:
+                moves["failed"] = True
+                return 1, "injected reverse failure"
+        return real_git(root, *args)
+
+    monkeypatch.setattr(workspace_reroot, "run_git", fail_second_reverse)
+    failed = undo(install, runtime)
+
+    assert failed["status"] == "failed"
+    assert receipt_path(runtime).is_file()
+    assert created_path.exists()
+    assert backup_path.exists()
+    assert (install / "personal" / "memory-vault" / "People" / "Peter.md").is_file()
+
+    monkeypatch.setattr(workspace_reroot, "run_git", real_git)
+    retried = undo(install, runtime)
+    assert retried["status"] == "undone", retried
+    assert not receipt_path(runtime).exists()
+    assert (install / "memory-vault" / "personal" / "People" / "Peter.md").is_file()
+
+
+def test_undo_schedule_failure_compensates_and_retry_succeeds(
+    tmp_path: Path, monkeypatch,
+) -> None:
+    from ciao import workspace_reroot
+
+    install, vault, runtime = _git_install(tmp_path)
+    _registry(runtime, [
+        {"name": "personal", "vault_root": "memory-vault/personal"},
+        {"name": "work", "vault_root": "memory-vault/work"},
+    ])
+    store = _schedule_store(
+        runtime, [{"schedule_id": "target", "prompt": "memory-vault/work"}]
+    )
+    applied = apply(install, vault, ["personal", "work"], runtime, primary="personal")
+    assert applied["status"] == "migrated", applied.get("refusals")
+    real_restore = workspace_reroot._apply_schedule_prompt_restore
+
+    def fail_schedule(*args, **kwargs):
+        raise OSError("schedule restore failed")
+
+    monkeypatch.setattr(
+        workspace_reroot, "_apply_schedule_prompt_restore", fail_schedule
+    )
+    failed = undo(install, runtime)
+
+    assert failed["status"] == "failed"
+    assert receipt_path(runtime).is_file()
+    assert (install / "work" / "memory-vault" / "People" / "Peter.md").is_file()
+    rows = json.loads((runtime / "workspaces.json").read_text(encoding="utf-8"))
+    assert next(row for row in rows if row["name"] == "work")["vault_root"] == "work/memory-vault"
+    schedule = json.loads(store.read_text(encoding="utf-8"))
+    assert schedule["schedules"][0]["prompt"] == "work/memory-vault"
+
+    monkeypatch.setattr(
+        workspace_reroot, "_apply_schedule_prompt_restore", real_restore
+    )
+    retried = undo(install, runtime)
+    assert retried["status"] == "undone", retried
+    assert not receipt_path(runtime).exists()
+    assert json.loads(store.read_text(encoding="utf-8"))["schedules"][0]["prompt"] == "memory-vault/work"
+
+
+def test_undo_interruption_then_schedule_edit_is_preserved_on_retry(
+    tmp_path: Path,
+) -> None:
+    """Recovery must not rewind a schedule the undo never touched."""
+    import os
+    import signal
+
+    from ciao.workspace_reroot import UNDO_MANIFEST_NAME
+
+    if not hasattr(os, "fork"):
+        pytest.skip("requires fork")
+    install, vault, runtime = _with_guide(tmp_path)
+    store = _schedule_store(
+        runtime,
+        [
+            {"schedule_id": "target", "prompt": "memory-vault/work", "scope": "user"},
+            {"schedule_id": "other", "prompt": "Review memory-vault/Logs", "scope": "user"},
+        ],
+    )
+    applied = apply(install, vault, ["personal", "work"], runtime, primary="personal")
+    assert applied["status"] == "migrated", applied.get("refusals")
+    migrated = json.loads(store.read_text(encoding="utf-8"))
+    assert migrated["schedules"][0]["prompt"] == "work/memory-vault"
+    assert migrated["schedules"][1]["prompt"] == "Review Logs"
+
+    pid = os.fork()
+    if pid == 0:
+        def kill_before_schedule_restore(*args, **kwargs):
+            os.kill(os.getpid(), signal.SIGKILL)
+
+        workspace_reroot._apply_schedule_prompt_restore = kill_before_schedule_restore
+        try:
+            undo(install, runtime)
+        except BaseException:
+            pass
+        os._exit(0)
+
+    _pid, status = os.waitpid(pid, 0)
+    assert os.WIFSIGNALED(status)
+    manifest = runtime / "migration" / UNDO_MANIFEST_NAME
+    assert manifest.is_file()
+    data = json.loads(manifest.read_text(encoding="utf-8"))
+    assert data["phase"] == "in_progress"
+    assert data["schedule_rewrites"]
+    # The undo had reverted the registry and moves before it died, but it never
+    # wrote the schedule back, so the live store still reads as the migration left
+    # it. Everything but the schedule must be rolled forward on recovery.
+    assert json.loads(store.read_text(encoding="utf-8"))["schedules"][0][
+        "prompt"
+    ] == "work/memory-vault"
+
+    edited = json.loads(store.read_text(encoding="utf-8"))
+    edited["unknown_store_key"]["independent_after_undo"] = "keep-me"
+    edited["schedules"].append(
+        {
+            "schedule_id": "independent",
+            "prompt": "A schedule added after the interruption",
+            "scope": "user",
+        }
+    )
+    store.write_text(json.dumps(edited, indent=2) + "\n", encoding="utf-8")
+
+    retried = undo(install, runtime)
+
+    assert retried["status"] == "undone", retried
+    assert not manifest.exists()
+    assert not receipt_path(runtime).exists()
+    saved = json.loads(store.read_text(encoding="utf-8"))
+    # Undo owns only the target prompt; the independent edit and the added row
+    # survive exactly outside that one rewrite.
+    assert saved["unknown_store_key"]["independent_after_undo"] == "keep-me"
+    assert saved["schedules"][2] == {
+        "schedule_id": "independent",
+        "prompt": "A schedule added after the interruption",
+        "scope": "user",
+    }
+    assert saved["schedules"][0]["prompt"] == "memory-vault/work"
+    rows = json.loads((runtime / "workspaces.json").read_text(encoding="utf-8"))
+    assert {row["name"]: row["vault_root"] for row in rows} == {
+        "personal": "memory-vault/personal",
+        "work": "memory-vault/work",
+    }
+    assert (install / "memory-vault" / "personal" / "People" / "Peter.md").is_file()
+    assert (install / "memory-vault" / "Logs" / "Chats" / "chat-1" / "session.md").is_file()
+
+
+def test_undo_interruption_after_schedule_restore_rolls_schedule_back(
+    tmp_path: Path,
+) -> None:
+    """A later unrelated edit must not stop recovery reversing the owned prompt."""
+    import os
+    import signal
+
+    from ciao.workspace_reroot import UNDO_MANIFEST_NAME
+
+    if not hasattr(os, "fork"):
+        pytest.skip("requires fork")
+    install, vault, runtime = _with_guide(tmp_path)
+    store = _schedule_store(
+        runtime,
+        [
+            {"schedule_id": "target", "prompt": "memory-vault/work", "scope": "user"},
+            {"schedule_id": "other", "prompt": "Review memory-vault/Logs", "scope": "user"},
+        ],
+    )
+    applied = apply(install, vault, ["personal", "work"], runtime, primary="personal")
+    assert applied["status"] == "migrated", applied.get("refusals")
+    assert json.loads(store.read_text(encoding="utf-8"))["schedules"][0][
+        "prompt"
+    ] == "work/memory-vault"
+    assert json.loads(store.read_text(encoding="utf-8"))["schedules"][1][
+        "prompt"
+    ] == "Review Logs"
+
+    pid = os.fork()
+    if pid == 0:
+        def kill_after_schedule_restore(*args, **kwargs):
+            os.kill(os.getpid(), signal.SIGKILL)
+
+        workspace_reroot.clear_stranded_sessions = kill_after_schedule_restore
+        try:
+            undo(install, runtime)
+        except BaseException:
+            pass
+        os._exit(0)
+
+    _pid, status = os.waitpid(pid, 0)
+    assert os.WIFSIGNALED(status)
+    manifest = runtime / "migration" / UNDO_MANIFEST_NAME
+    assert manifest.is_file()
+    assert json.loads(manifest.read_text(encoding="utf-8"))["phase"] == "in_progress"
+    # The dead attempt did write the pre-migration prompt. Recovery has to put the
+    # migration text back before a retry can run, even though the store was edited
+    # independently after the interruption.
+    assert json.loads(store.read_text(encoding="utf-8"))["schedules"][0][
+        "prompt"
+    ] == "memory-vault/work"
+
+    edited = json.loads(store.read_text(encoding="utf-8"))
+    edited["unknown_store_key"]["independent_after_undo"] = "keep-me"
+    edited["schedules"][0]["title"] = "edited after the interruption"
+    edited["schedules"][1]["last_run"] = "2026-11-25T00:00:00Z"
+    store.write_text(json.dumps(edited, indent=2) + "\n", encoding="utf-8")
+
+    retried = undo(install, runtime)
+
+    assert retried["status"] == "undone", retried
+    assert not manifest.exists()
+    assert not receipt_path(runtime).exists()
+    saved = json.loads(store.read_text(encoding="utf-8"))
+    assert saved["unknown_store_key"]["independent_after_undo"] == "keep-me"
+    assert saved["schedules"][0]["prompt"] == "memory-vault/work"
+    assert saved["schedules"][0]["title"] == "edited after the interruption"
+    assert saved["schedules"][1]["prompt"] == "Review memory-vault/Logs"
+    assert saved["schedules"][1]["last_run"] == "2026-11-25T00:00:00Z"
+    assert (install / "memory-vault" / "work" / "People" / "Peter.md").is_file()
+    assert (install / "memory-vault" / "Logs" / "Chats" / "chat-1" / "session.md").is_file()
+
+
+def test_undo_recovery_schedule_conflict_retains_journal_then_retries(
+    tmp_path: Path,
+) -> None:
+    """A hand-edited prompt is a conflict: no write, manifest and receipt kept."""
+    import os
+    import signal
+
+    from ciao.workspace_reroot import UNDO_MANIFEST_NAME
+
+    if not hasattr(os, "fork"):
+        pytest.skip("requires fork")
+    install, vault, runtime = _with_guide(tmp_path)
+    store = _schedule_store(
+        runtime, [{"schedule_id": "target", "prompt": "memory-vault/work", "scope": "user"}]
+    )
+    applied = apply(install, vault, ["personal", "work"], runtime, primary="personal")
+    assert applied["status"] == "migrated", applied.get("refusals")
+
+    pid = os.fork()
+    if pid == 0:
+        def kill_after_schedule_restore(*args, **kwargs):
+            os.kill(os.getpid(), signal.SIGKILL)
+
+        workspace_reroot.clear_stranded_sessions = kill_after_schedule_restore
+        try:
+            undo(install, runtime)
+        except BaseException:
+            pass
+        os._exit(0)
+
+    _pid, status = os.waitpid(pid, 0)
+    assert os.WIFSIGNALED(status)
+    manifest = runtime / "migration" / UNDO_MANIFEST_NAME
+    assert manifest.is_file()
+
+    edited = json.loads(store.read_text(encoding="utf-8"))
+    edited["schedules"][0]["prompt"] = "hand-edited during the interruption"
+    store.write_text(json.dumps(edited, indent=2) + "\n", encoding="utf-8")
+    contested = store.read_bytes()
+
+    conflicted = undo(install, runtime)
+
+    assert conflicted["status"] == "failed"
+    assert "edited independently" in conflicted["reason"]
+    assert store.read_bytes() == contested
+    assert manifest.is_file()
+    assert receipt_path(runtime).is_file()
+
+    edited["schedules"][0]["prompt"] = "memory-vault/work"
+    store.write_text(json.dumps(edited, indent=2) + "\n", encoding="utf-8")
+    retried = undo(install, runtime)
+
+    assert retried["status"] == "undone", retried
+    assert not manifest.exists()
+    assert not receipt_path(runtime).exists()
+    assert json.loads(store.read_text(encoding="utf-8"))["schedules"][0][
+        "prompt"
+    ] == "memory-vault/work"
+    assert (install / "memory-vault" / "work" / "People" / "Peter.md").is_file()
+
+
+def test_undo_recovery_holds_schedule_lock_across_comparison_and_write(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A writer at the comparison seam cannot land between read and write."""
+    import os
+    import signal
+    import threading
+
+    from ciao.os_support.locks import lock_exclusive
+    from ciao.schedules import schedule_store_lock
+    from ciao.workspace_reroot import UNDO_MANIFEST_NAME
+
+    if not hasattr(os, "fork"):
+        pytest.skip("requires fork")
+    install, vault, runtime = _with_guide(tmp_path)
+    store = _schedule_store(
+        runtime, [{"schedule_id": "target", "prompt": "memory-vault/work", "scope": "user"}]
+    )
+    applied = apply(install, vault, ["personal", "work"], runtime, primary="personal")
+    assert applied["status"] == "migrated", applied.get("refusals")
+
+    pid = os.fork()
+    if pid == 0:
+        def kill_after_schedule_restore(*args, **kwargs):
+            os.kill(os.getpid(), signal.SIGKILL)
+
+        workspace_reroot.clear_stranded_sessions = kill_after_schedule_restore
+        try:
+            undo(install, runtime)
+        except BaseException:
+            pass
+        os._exit(0)
+
+    _pid, status = os.waitpid(pid, 0)
+    assert os.WIFSIGNALED(status)
+    manifest = runtime / "migration" / UNDO_MANIFEST_NAME
+    assert manifest.is_file()
+    assert json.loads(store.read_text(encoding="utf-8"))["schedules"][0][
+        "prompt"
+    ] == "memory-vault/work"
+
+    real_write = workspace_reroot._write_schedule_store
+    seam: dict[str, object] = {}
+
+    def interpose_writer(path: Path, payload: dict) -> None:
+        if not seam:
+            fd = os.open(runtime / "schedules.lock", os.O_RDWR)
+            try:
+                with pytest.raises(BlockingIOError):
+                    lock_exclusive(fd, blocking=False)
+            finally:
+                os.close(fd)
+
+            def write_unrelated_field() -> None:
+                with schedule_store_lock(runtime):
+                    current = json.loads(store.read_text(encoding="utf-8"))
+                    current["unknown_store_key"]["writer_after_seam"] = "kept"
+                    store.write_text(
+                        json.dumps(current, indent=2) + "\n", encoding="utf-8"
+                    )
+
+            writer = threading.Thread(target=write_unrelated_field)
+            seam["writer"] = writer
+            writer.start()
+        return real_write(path, payload)
+
+    monkeypatch.setattr(workspace_reroot, "_write_schedule_store", interpose_writer)
+    retried = undo(install, runtime)
+
+    writer = seam["writer"]
+    assert isinstance(writer, threading.Thread)
+    writer.join(timeout=10)
+    assert not writer.is_alive()
+    assert retried["status"] == "undone", retried
+    assert not manifest.exists()
+    assert not receipt_path(runtime).exists()
+    saved = json.loads(store.read_text(encoding="utf-8"))
+    assert saved["unknown_store_key"]["writer_after_seam"] == "kept"
+    assert saved["schedules"][0]["prompt"] == "memory-vault/work"
+    assert (install / "memory-vault" / "work" / "People" / "Peter.md").is_file()
+
+
+def test_undo_failed_reverse_move_compensation_retains_manifest_then_retries(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A compensation that cannot re-apply the reversed move keeps the manifest."""
+    from ciao.workspace_reroot import UNDO_MANIFEST_NAME
+
+    install, vault, runtime = _with_guide(tmp_path)
+    applied = apply(install, vault, ["personal", "work"], runtime, primary="personal")
+    assert applied["status"] == "migrated", applied.get("refusals")
+    receipt = json.loads(receipt_path(runtime).read_text(encoding="utf-8"))
+    created_path = install / receipt["created_files"][0]
+    backup_path = runtime / receipt["stashed_files"][0]["backup"]
+    real_git = workspace_reroot.run_git
+    calls = {"mv": 0}
+
+    def fail_every_later_move(root: Path, *args: str):
+        if args[:1] == ("mv",):
+            calls["mv"] += 1
+            if calls["mv"] >= 2:
+                return 1, "injected move failure"
+        return real_git(root, *args)
+
+    monkeypatch.setattr(workspace_reroot, "run_git", fail_every_later_move)
+    failed = undo(install, runtime)
+
+    assert failed["status"] == "failed"
+    assert "re-applying the already reversed moves also failed" in failed["reason"]
+    manifest = runtime / "migration" / UNDO_MANIFEST_NAME
+    assert manifest.is_file()
+    assert json.loads(manifest.read_text(encoding="utf-8"))["phase"] == "in_progress"
+    assert receipt_path(runtime).is_file()
+    assert created_path.exists(), "artifact compensation did not restore the created file"
+    assert backup_path.exists()
+    # The first reversal (the last applied move, the shared guide) stands because
+    # its compensation failed; the workspace moves were never touched.
+    assert (install / "AGENTS.md").is_file()
+    assert (install / "personal" / "memory-vault" / "People" / "Peter.md").is_file()
+    assert (install / "work" / "memory-vault" / "People" / "Peter.md").is_file()
+
+    monkeypatch.setattr(workspace_reroot, "run_git", real_git)
+    retried = undo(install, runtime)
+
+    assert retried["status"] == "undone", retried
+    assert not manifest.exists()
+    assert not receipt_path(runtime).exists()
+    assert not created_path.exists()
+    assert not backup_path.exists()
+    assert (install / "memory-vault" / "personal" / "People" / "Peter.md").is_file()
+    assert (install / "memory-vault" / "work" / "People" / "Peter.md").is_file()
+
+
+def test_undo_failed_registry_compensation_retains_manifest_then_retries(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A schedule failure whose registry roll-forward also fails keeps recovery state."""
+    from ciao import workspaces
+    from ciao.workspace_reroot import UNDO_MANIFEST_NAME
+
+    install, vault, runtime = _with_guide(tmp_path)
+    store = _schedule_store(
+        runtime, [{"schedule_id": "target", "prompt": "memory-vault/work", "scope": "user"}]
+    )
+    applied = apply(install, vault, ["personal", "work"], runtime, primary="personal")
+    assert applied["status"] == "migrated", applied.get("refusals")
+    receipt = json.loads(receipt_path(runtime).read_text(encoding="utf-8"))
+    created_path = install / receipt["created_files"][0]
+    backup_path = runtime / receipt["stashed_files"][0]["backup"]
+    real_apply = workspace_reroot._apply_schedule_prompt_restore
+    real_restore = workspaces.restore_registry_entries
+    calls = {"registry": 0}
+
+    def restore_once_then_refuse(runtime_root, prior, expected, **kwargs):
+        calls["registry"] += 1
+        if calls["registry"] == 1:
+            return real_restore(runtime_root, prior, expected, **kwargs)
+        return False
+
+    def fail_schedule(*args, **kwargs):
+        raise OSError("schedule restore failed")
+
+    monkeypatch.setattr(
+        workspace_reroot, "_apply_schedule_prompt_restore", fail_schedule
+    )
+    monkeypatch.setattr(
+        workspaces, "restore_registry_entries", restore_once_then_refuse
+    )
+    failed = undo(install, runtime)
+
+    assert failed["status"] == "failed"
+    assert "restoring the post-migration registry also failed" in failed["reason"]
+    manifest = runtime / "migration" / UNDO_MANIFEST_NAME
+    assert manifest.is_file()
+    assert json.loads(manifest.read_text(encoding="utf-8"))["phase"] == "in_progress"
+    assert receipt_path(runtime).is_file()
+    assert created_path.exists(), "artifact compensation did not restore the created file"
+    assert backup_path.exists()
+    assert (install / "work" / "memory-vault" / "People" / "Peter.md").is_file()
+    rows = json.loads((runtime / "workspaces.json").read_text(encoding="utf-8"))
+    # The normal undo restore ran before the schedule failure; the roll-forward
+    # that should have put the post-migration roots back was refused.
+    assert {row["name"]: row["vault_root"] for row in rows} == {
+        "personal": "memory-vault/personal",
+        "work": "memory-vault/work",
+    }
+    assert json.loads(store.read_text(encoding="utf-8"))["schedules"][0][
+        "prompt"
+    ] == "work/memory-vault"
+
+    monkeypatch.setattr(
+        workspace_reroot, "_apply_schedule_prompt_restore", real_apply
+    )
+    monkeypatch.setattr(workspaces, "restore_registry_entries", real_restore)
+    retried = undo(install, runtime)
+
+    assert retried["status"] == "undone", retried
+    assert not manifest.exists()
+    assert not receipt_path(runtime).exists()
+    assert not created_path.exists()
+    assert not backup_path.exists()
+    rows = json.loads((runtime / "workspaces.json").read_text(encoding="utf-8"))
+    assert {row["name"]: row["vault_root"] for row in rows} == {
+        "personal": "memory-vault/personal",
+        "work": "memory-vault/work",
+    }
+    assert json.loads(store.read_text(encoding="utf-8"))["schedules"][0][
+        "prompt"
+    ] == "memory-vault/work"
+    assert (install / "memory-vault" / "personal" / "People" / "Peter.md").is_file()
+
+
 def test_undo_with_no_migrated_receipt_does_nothing(tmp_path: Path) -> None:
     install, _vault_root, runtime = _git_install(tmp_path)
 
@@ -1028,6 +1782,95 @@ def test_undo_restores_the_previous_registry(tmp_path: Path) -> None:
 
     after = json.loads((runtime / "workspaces.json").read_text(encoding="utf-8"))
     assert after == original
+
+
+def test_undo_preserves_same_workspace_link_added_after_migration(
+    tmp_path: Path,
+) -> None:
+    install, vault, runtime = _git_install(tmp_path)
+    _registry(runtime, [
+        {"name": "personal", "vault_root": "memory-vault/personal"},
+        {"name": "work", "vault_root": "memory-vault/work"},
+    ])
+    apply(install, vault, ["personal", "work"], runtime, primary="personal")
+    registry = runtime / "workspaces.json"
+    rows = json.loads(registry.read_text(encoding="utf-8"))
+    personal = next(row for row in rows if row["name"] == "personal")
+    personal["shared_brains"] = [{
+        "name": "team",
+        "path": str(tmp_path / "team"),
+        "identity": "github.com/example/team",
+    }]
+    registry.write_text(json.dumps(rows), encoding="utf-8")
+
+    result = undo(install, runtime)
+
+    assert result["status"] == "undone", result
+    after = json.loads(registry.read_text(encoding="utf-8"))
+    restored = next(row for row in after if row["name"] == "personal")
+    assert restored["vault_root"] == "memory-vault/personal"
+    assert restored["shared_brains"][0]["path"] == str(tmp_path / "team")
+    assert (install / "memory-vault" / "personal" / "People" / "Peter.md").is_file()
+
+
+def test_undo_keeps_receipt_when_registry_changes_after_preflight(
+    tmp_path: Path, monkeypatch,
+) -> None:
+    from ciao import workspace_reroot
+
+    install, vault, runtime = _git_install(tmp_path)
+    _registry(runtime, [
+        {"name": "personal", "vault_root": "memory-vault/personal"},
+        {"name": "work", "vault_root": "memory-vault/work"},
+    ])
+    apply(install, vault, ["personal", "work"], runtime, primary="personal")
+    registry = runtime / "workspaces.json"
+    real_git = workspace_reroot.run_git
+    injected = {"done": False}
+
+    def git_with_concurrent_edit(root: Path, *args: str):
+        code, out = real_git(root, *args)
+        if not injected["done"] and args[:1] == ("mv",):
+            injected["done"] = True
+            rows = json.loads(registry.read_text(encoding="utf-8"))
+            personal = next(row for row in rows if row["name"] == "personal")
+            personal["vault_root"] = "elsewhere/personal"
+            registry.write_text(json.dumps(rows), encoding="utf-8")
+        return code, out
+
+    monkeypatch.setattr(workspace_reroot, "run_git", git_with_concurrent_edit)
+    result = workspace_reroot.undo(install, runtime)
+
+    assert result["status"] == "failed"
+    assert receipt_path(runtime).is_file()
+    assert (install / "personal" / "memory-vault" / "People" / "Peter.md").is_file()
+    rows = json.loads(registry.read_text(encoding="utf-8"))
+    personal = next(row for row in rows if row["name"] == "personal")
+    assert personal["vault_root"] == "elsewhere/personal"
+
+
+def test_undo_succeeds_when_an_unmigrated_workspace_vault_root_changes(
+    tmp_path: Path,
+) -> None:
+    install, vault, runtime = _git_install(tmp_path)
+    _registry(runtime, [
+        {"name": "personal", "vault_root": "memory-vault/personal"},
+        {"name": "work", "vault_root": "memory-vault/work"},
+        {"name": "extra", "vault_root": "extra-notes"},
+    ])
+    apply(install, vault, ["personal", "work"], runtime, primary="personal")
+    registry = runtime / "workspaces.json"
+    rows = json.loads(registry.read_text(encoding="utf-8"))
+    extra = next(row for row in rows if row["name"] == "extra")
+    extra["vault_root"] = "extra-notes-moved"
+    registry.write_text(json.dumps(rows), encoding="utf-8")
+
+    result = undo(install, runtime)
+
+    assert result["status"] == "undone", result
+    after = json.loads(registry.read_text(encoding="utf-8"))
+    assert next(row for row in after if row["name"] == "extra")["vault_root"] == "extra-notes-moved"
+    assert (install / "memory-vault" / "personal" / "People" / "Peter.md").is_file()
 
 
 def test_agent_root_flips_only_after_a_migrated_receipt(tmp_path: Path) -> None:
@@ -1758,6 +2601,154 @@ def test_repair_is_a_no_op_on_a_correct_install(tmp_path: Path) -> None:
 
     assert result["status"] == "clean", result["repaired"]
     assert result["repaired"] == []
+
+
+def test_migration_index_rebuild_uses_strict_scan(tmp_path: Path, monkeypatch) -> None:
+    from ciao import vault_index
+
+    install = tmp_path / "install"
+    runtime = install / ".runtime"
+    runtime.mkdir(parents=True)
+    vault = install / "personal" / "memory-vault"
+    vault.mkdir(parents=True)
+    prior = vault / "INDEX.md"
+    prior.write_text("previous complete snapshot\n", encoding="utf-8")
+
+    def partial_scan(root, **kwargs):
+        assert kwargs.get("strict") is True
+        raise OSError("migration scan failed")
+
+    monkeypatch.setattr(vault_index, "scan_vault", partial_scan)
+    result = rebuild_indexes(install, ["personal"])
+
+    assert result["errors"]
+    assert prior.read_text(encoding="utf-8") == "previous complete snapshot\n"
+
+
+def test_repair_keeps_a_prefixed_index_when_legacy_ownership_is_ambiguous(
+    tmp_path: Path,
+) -> None:
+    from ciao.workspace_reroot import mark_born_per_root
+
+    install, runtime = _migrated(tmp_path)
+    # A born/hand-moved install has a completed receipt but no applied vault
+    # move. With no ownership map there is nothing that says Ciao wrote the
+    # existing snapshot, so repair must not replace it.
+    (runtime / "vault-index-ownership.json").unlink()
+    mark_born_per_root(install, runtime, ["personal", "work"], origin="hand")
+    index = install / "personal" / "memory-vault" / "INDEX.md"
+    index.write_text(
+        "# Vault Index\n\n- [personal/People/Peter](./personal/People/Peter.md)\n",
+        encoding="utf-8",
+    )
+
+    result = rebuild_indexes(install, ["personal"])
+
+    assert result["errors"] == []
+    assert "index" not in result["rebuilt"][0]
+    assert "personal/People" not in index.read_text(encoding="utf-8")
+
+
+def test_explicit_external_provenance_outranks_a_migration_receipt(
+    tmp_path: Path,
+) -> None:
+    from ciao.setup_marker import write_vault_index_ownership
+
+    install, runtime = _migrated(tmp_path)
+    vault = install / "personal" / "memory-vault"
+    write_vault_index_ownership(runtime, [vault], owner="external")
+    sentinel = b"sync-owned sentinel\r\n"
+    index = vault / "INDEX.md"
+    index.write_bytes(sentinel)
+
+    result = rebuild_indexes(install, ["personal"])
+
+    assert result["errors"] == []
+    assert result["rebuilt"][0]["storage"] == "sqlite"
+    assert index.read_bytes() == sentinel
+
+
+def test_reroot_classifier_honors_current_linked_root_registration(
+    tmp_path: Path,
+) -> None:
+    from ciao.workspace_reroot import index_destination_is_ciao_owned
+
+    install, runtime = _migrated(tmp_path)
+    vault = install / "personal" / "memory-vault"
+    registry = runtime / "workspaces.json"
+    rows = json.loads(registry.read_text(encoding="utf-8"))
+    for row in rows:
+        if row["name"] == "personal":
+            row["shared_brains"] = [{
+                "name": "team",
+                "path": str(vault),
+                "identity": "github.com/example/team",
+            }]
+    registry.write_text(json.dumps(rows), encoding="utf-8")
+
+    assert not index_destination_is_ciao_owned(runtime, vault)
+    result = rebuild_indexes(install, ["personal"], runtime_root=runtime)
+    assert result["rebuilt"][0]["storage"] == "sqlite"
+    assert result["rebuilt"][0]["markdown_index"] == "preserved"
+
+
+def test_external_root_without_index_gets_sqlite_only(tmp_path: Path) -> None:
+    from ciao.setup_marker import write_vault_index_ownership
+
+    install, runtime = _migrated(tmp_path)
+    vault = install / "personal" / "memory-vault"
+    write_vault_index_ownership(runtime, [vault], owner="external")
+    index = vault / "INDEX.md"
+    assert not index.exists()
+
+    result = rebuild_indexes(install, ["personal"])
+
+    assert result["errors"] == []
+    assert result["rebuilt"][0]["storage"] == "sqlite"
+    assert result["rebuilt"][0]["markdown_index"] == "preserved"
+    assert not index.exists()
+
+
+def test_external_destination_ancestor_provenance_blocks_receipt_inference(
+    tmp_path: Path,
+) -> None:
+    from ciao.setup_marker import write_vault_index_ownership
+
+    install, runtime = _migrated(tmp_path)
+    # An aggregate external record that contains the final destination is
+    # authoritative too, even when the exact destination has no row.
+    write_vault_index_ownership(runtime, [install / "personal"], owner="external")
+    sentinel = b"sync-owned sentinel\r\n"
+    index = install / "personal" / "memory-vault" / "INDEX.md"
+    index.write_bytes(sentinel)
+
+    result = rebuild_indexes(install, ["personal"])
+
+    assert result["errors"] == []
+    assert result["rebuilt"][0]["storage"] == "sqlite"
+    assert index.read_bytes() == sentinel
+
+
+def test_external_source_ancestor_provenance_blocks_receipt_inference(
+    tmp_path: Path,
+) -> None:
+    from ciao.setup_marker import write_vault_index_ownership
+
+    install, runtime = _migrated(tmp_path)
+    # An existing-folder setup records the chosen aggregate vault, not each
+    # nested workspace source. A completed move from below that external
+    # ancestor must not be read as Ciao's authority to replace the destination
+    # index.
+    write_vault_index_ownership(runtime, [install / "memory-vault"], owner="external")
+    sentinel = b"sync-owned sentinel\r\n"
+    index = install / "personal" / "memory-vault" / "INDEX.md"
+    index.write_bytes(sentinel)
+
+    result = rebuild_indexes(install, ["personal"])
+
+    assert result["errors"] == []
+    assert result["rebuilt"][0]["storage"] == "sqlite"
+    assert index.read_bytes() == sentinel
 
 
 def test_repair_recreates_a_missing_root(tmp_path: Path) -> None:
@@ -2978,6 +3969,9 @@ def _custom_leaf_install(tmp_path: Path) -> tuple[Path, Path, Path]:
     default.rename(vault)
     runtime = install / ".runtime"
     runtime.mkdir()
+    from ciao.setup_marker import write_vault_index_ownership
+
+    write_vault_index_ownership(runtime, [vault], owner="ciao")
     (install / ".gitignore").write_text(".runtime/\n", encoding="utf-8")
     _git(install, "add", "-A")
     _git(install, "commit", "-m", "seed")
@@ -3990,7 +4984,13 @@ def test_reroot_registry_rewrite_keeps_shared_brains(tmp_path):
     workspace_reroot.registry_file(runtime).write_text(_json.dumps(rows), encoding="utf-8")
     plan = SimpleNamespace(moves=[SimpleNamespace(workspace="work", destination="/new/work")])
 
-    workspace_reroot._rewrite_registry(runtime, plan)
+    from ciao.workspaces import acquire_registry_at
+
+    owner = acquire_registry_at(runtime, blocking=True)
+    try:
+        workspace_reroot._rewrite_registry(runtime, plan, owner=owner)
+    finally:
+        owner.close()
 
     written = _json.loads(workspace_reroot.registry_file(runtime).read_text(encoding="utf-8"))
     assert written[0]["vault_root"] == "/new/work"

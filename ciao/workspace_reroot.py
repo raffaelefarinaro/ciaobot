@@ -34,6 +34,7 @@ import logging
 import os
 import re
 import shutil
+import uuid
 from dataclasses import asdict, dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path, PurePosixPath
@@ -426,13 +427,38 @@ def dirty_tracked_paths(install_root: Path, *relatives: str) -> list[str]:
 _REGENERATED_BACKUP = "migration/reroot-regenerated"
 
 
-def apply(
+def _preflight_registry(owner: Any, workspaces: list[str]) -> str | None:
+    """Validate touched rows against the owned bytes before any filesystem move."""
+    from ciao.workspaces import registry_rows  # noqa: PLC0415
+
+    if owner.current is None:
+        return None  # no persisted rows to preflight; migration creates none
+    try:
+        rows = registry_rows(json.loads(owner.current))
+    except (ValueError, TypeError):
+        return "workspace registry is unreadable"
+    by_name = {
+        str(row.get("name")): row
+        for row in rows
+        if isinstance(row, dict) and isinstance(row.get("name"), str)
+    }
+    for name in workspaces:
+        row = by_name.get(name)
+        if row is None:
+            return f"workspace registry has no entry for '{name}'"
+        if not isinstance(row.get("vault_root"), str) or not row["vault_root"]:
+            return f"workspace registry entry '{name}' has no vault_root"
+    return None
+
+
+def _apply_locked(
     install_root: Path,
     vault_root: Path,
     workspaces: list[str],
     runtime_root: Path,
     *,
     primary: str,
+    owner: Any,
 ) -> dict[str, Any]:
     """Re-root every registered workspace, or none of them.
 
@@ -501,6 +527,14 @@ def apply(
             f"primary workspace '{primary}' is not registered, so the guide "
             "regions and the skill catalog have nowhere to go"
         ]
+        payload["receipt_path"] = str(write_receipt(runtime_root, payload))
+        return payload
+
+    preflight_error = _preflight_registry(owner, list(result.workspaces))
+    if preflight_error is not None:
+        payload["status"] = "refused"
+        payload["refused"] = True
+        payload["refusals"] = [preflight_error + "; nothing was moved"]
         payload["receipt_path"] = str(write_receipt(runtime_root, payload))
         return payload
 
@@ -604,6 +638,7 @@ def apply(
     # the unwind can restore it; if the rewrite itself is what failed, the file
     # was never touched (it writes atomically) and None is exactly right.
     registry_before: list[dict[str, Any]] | None = None
+    registry_after: list[dict[str, Any]] | None = None
     schedule_path = _schedule_store_path(runtime_root)
     schedule_before: bytes | None = None
     schedule_written: bytes | None = None
@@ -658,7 +693,7 @@ def apply(
         # every entry still names memory-vault/<name> while the directory now lives
         # at <name>/memory-vault, so the vault resolves to a path that is gone. The
         # before-image goes in the receipt so undo restores it exactly.
-        registry_before, registry_after = _rewrite_registry(runtime_root, result)
+        registry_before, registry_after = _rewrite_registry(runtime_root, result, owner=owner)
         payload["registry_before"] = registry_before
         payload["registry_after"] = registry_after
 
@@ -766,11 +801,18 @@ def apply(
         refusals = [f"migration failed after moving files: {exc}"]
         if registry_before is not None:
             try:
-                _write_registry(runtime_root, registry_before)
+                from ciao.workspaces import restore_registry_entries  # noqa: PLC0415
+
+                if not restore_registry_entries(
+                    runtime_root, registry_before, registry_after, owner=owner
+                ):
+                    raise OSError(
+                        "no authoritative post-migration registry snapshot"
+                    )
             except Exception as restore_exc:  # noqa: BLE001 - surfaced, never swallowed
                 refusals.append(
                     "the workspace registry could not be restored either "
-                    f"({restore_exc}); its entries still name per-root paths "
+                    f"({restore_exc}); its entries may still name per-root paths "
                     "while the vaults are back under the shared root, so repair "
                     "it by hand before starting the app"
                 )
@@ -803,6 +845,40 @@ def apply(
     return payload
 
 
+def apply(
+    install_root: Path,
+    vault_root: Path,
+    workspaces: list[str],
+    runtime_root: Path,
+    *,
+    primary: str,
+    expected_registry_bytes: bytes | None = None,
+) -> dict[str, Any]:
+    """Acquire the registry claim once and hold it through the migration."""
+    from ciao.workspaces import acquire_registry_at  # noqa: PLC0415
+
+    owner = acquire_registry_at(Path(runtime_root), blocking=True)
+    try:
+        if (
+            expected_registry_bytes is not None
+            and owner.current != expected_registry_bytes
+        ):
+            return {
+                "status": "refused",
+                "refused": True,
+                "refusals": [
+                    "the workspace registry changed since it was loaded; "
+                    "nothing was moved"
+                ],
+            }
+        return _apply_locked(
+            install_root, vault_root, workspaces, runtime_root,
+            primary=primary, owner=owner,
+        )
+    finally:
+        owner.close()
+
+
 def _replace_across_filesystems(source: Path, destination: Path) -> None:
     """Replace ``destination`` with ``source``, even across filesystems.
 
@@ -830,7 +906,311 @@ def _replace_across_filesystems(source: Path, destination: Path) -> None:
         raise
 
 
-def undo(install_root: Path, runtime_root: Path) -> dict[str, Any]:
+def _preflight_undo_registry(owner: Any, receipt: dict[str, Any]) -> str | None:
+    """Check transaction-owned vault_root fields against the owned live bytes."""
+    from ciao.workspaces import registry_rows  # noqa: PLC0415
+
+    after = receipt.get("registry_after")
+    if owner.current is None:
+        return (
+            None
+            if after is None
+            else "the live workspace registry disappeared after the migration"
+        )
+    if not isinstance(after, list):
+        return "the migration receipt has no authoritative post-migration registry snapshot"
+    try:
+        live_rows = registry_rows(json.loads(owner.current))
+    except (ValueError, TypeError):
+        return "the live workspace registry is unreadable"
+    live = {
+        str(row.get("name")): row
+        for row in live_rows
+        if isinstance(row, dict) and isinstance(row.get("name"), str)
+    }
+    names = set(receipt.get("workspaces") or [])
+    for row in after:
+        if not isinstance(row, dict) or str(row.get("name")) not in names:
+            continue
+        name = str(row["name"])
+        current = live.get(name)
+        if current is None or current.get("vault_root") != row.get("vault_root"):
+            return f"workspace registry row '{name}' changed since the migration; nothing was undone"
+    return None
+
+
+def _reverse_undo_moves(
+    install_root: Path, receipt: dict[str, Any], reversed_moves: list[str]
+) -> str | None:
+    """Re-apply moves an undo had reversed when its registry restore fails."""
+    for source in reversed(reversed_moves):
+        entry = next(
+            (
+                item for item in receipt.get("applied", [])
+                if isinstance(item, dict) and item.get("source") == source
+            ),
+            None,
+        )
+        if entry is None:
+            continue
+        (install_root / str(entry["destination"])).parent.mkdir(
+            parents=True, exist_ok=True
+        )
+        code, out = run_git(
+            install_root, "mv", str(entry["source"]), str(entry["destination"])
+        )
+        if code != 0:
+            return out
+    return None
+
+
+UNDO_MANIFEST_NAME = "undo-in-progress.json"
+
+
+def _fsync_directory(path: Path) -> None:
+    fd = os.open(path, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+    try:
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+
+
+def _fsync_file(path: Path) -> None:
+    fd = os.open(path, os.O_RDONLY)
+    try:
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+
+
+def _unlink_durable(path: Path) -> None:
+    path.unlink(missing_ok=True)
+    if path.parent.is_dir():
+        _fsync_directory(path.parent)
+
+
+def _undo_manifest_path(runtime_root: Path) -> Path:
+    return Path(runtime_root) / "migration" / UNDO_MANIFEST_NAME
+
+
+def _write_json_atomic(path: Path, payload: dict[str, Any]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_name(path.name + ".tmp")
+    tmp.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
+    _fsync_file(tmp)
+    os.replace(tmp, path)
+    _fsync_directory(path.parent)
+
+
+def _restore_owned_schedule_prompts(runtime_root: Path, rewrites: Any) -> list[str]:
+    """Reverse only the prompt fields this undo wrote, against their post-images.
+
+    The read, the ownership comparison and the write all happen under the store's
+    writer lock, so a concurrent edit cannot land between them. A prompt that reads
+    as neither the migration's text nor the restored text was edited independently;
+    that is an explicit conflict and nothing is written.
+    """
+    if not rewrites:
+        return []
+    if not isinstance(rewrites, list):
+        return ["schedule: the undo manifest has invalid prompt rewrite records"]
+    records: list[dict[str, str]] = []
+    for record in rewrites:
+        if (
+            not isinstance(record, dict)
+            or not isinstance(record.get("schedule_id"), str)
+            or not isinstance(record.get("before"), str)
+            or not isinstance(record.get("after"), str)
+        ):
+            return ["schedule: the undo manifest has invalid prompt rewrite records"]
+        records.append(
+            {
+                "schedule_id": record["schedule_id"],
+                "before": record["before"],
+                "after": record["after"],
+            }
+        )
+    errors: list[str] = []
+    with schedule_store_lock(runtime_root):
+        path, _original, store = _read_schedule_store(runtime_root)
+        if store is None:
+            return ["schedule: the store disappeared during recovery"]
+        restored = json.loads(json.dumps(store))
+        by_id: dict[str, list[dict[str, Any]]] = {}
+        for row in restored["schedules"]:
+            schedule_id = row.get("schedule_id")
+            if isinstance(schedule_id, str):
+                by_id.setdefault(schedule_id, []).append(row)
+        changed = False
+        for record in records:
+            rows = by_id.get(record["schedule_id"], [])
+            if len(rows) != 1:
+                errors.append(
+                    f"schedule {record['schedule_id']!r} is missing or duplicated"
+                )
+                continue
+            prompt = rows[0].get("prompt")
+            if prompt == record["after"]:
+                # The undo never wrote this row, or recovery already reversed it.
+                continue
+            if prompt != record["before"]:
+                errors.append(
+                    f"schedule {record['schedule_id']!r} was edited independently; "
+                    "its prompt is neither the migration text nor the restored text"
+                )
+                continue
+            rows[0]["prompt"] = record["after"]
+            bump_row_revision(rows[0])
+            changed = True
+        if errors:
+            return errors
+        if changed:
+            _write_schedule_store(path, restored)
+    return []
+
+
+def _recover_undo_manifest(runtime_root: Path, owner: Any) -> str | None:
+    """Roll an interrupted undo back to its post-apply state before retrying."""
+    path = _undo_manifest_path(runtime_root)
+    if not path.is_file():
+        return None
+    try:
+        manifest = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError, TypeError):
+        return "an interrupted undo manifest is unreadable; repair it by hand"
+    install_root = Path(str(manifest.get("install_root") or "")).resolve()
+    if manifest.get("phase") == "committed":
+        stored_receipt = manifest.get("receipt_path")
+        if isinstance(stored_receipt, str):
+            _unlink_durable(Path(stored_receipt))
+        for item in manifest.get("stashes") or []:
+            if isinstance(item, dict):
+                _unlink_durable(runtime_root / str(item.get("backup") or ""))
+        compensation = manifest.get("compensation_dir")
+        if isinstance(compensation, str):
+            shutil.rmtree(compensation, ignore_errors=True)
+            _fsync_directory(Path(compensation).parent)
+        _unlink_durable(path)
+        return None
+    errors: list[str] = []
+    try:
+        errors.extend(
+            _restore_owned_schedule_prompts(
+                runtime_root, manifest.get("schedule_rewrites")
+            )
+        )
+    except (OSError, ValueError, TypeError) as exc:
+        errors.append(f"schedule: {exc}")
+    created = manifest.get("created") or []
+    for item in reversed(created):
+        if not isinstance(item, dict):
+            continue
+        source = install_root / str(item.get("source") or "")
+        backup = Path(str(item.get("backup") or ""))
+        if backup.exists():
+            try:
+                if source.exists() or source.is_symlink():
+                    raise OSError(f"compensation target exists: {source}")
+                source.parent.mkdir(parents=True, exist_ok=True)
+                shutil.move(str(backup), str(source))
+                if item.get("tracked"):
+                    run_git(install_root, "add", "--", str(item.get("source") or ""))
+            except OSError as exc:
+                errors.append(str(exc))
+    for item in manifest.get("stashes") or []:
+        if not isinstance(item, dict):
+            continue
+        target = install_root / str(item.get("source") or "")
+        backup = runtime_root / str(item.get("backup") or "")
+        if backup.is_file() and (target.exists() or target.is_symlink()):
+            try:
+                target.unlink()
+                if item.get("tracked"):
+                    run_git(
+                        install_root, "rm", "--cached", "--quiet", "--",
+                        str(item.get("source") or ""),
+                    )
+            except OSError as exc:
+                errors.append(f"{target}: {exc}")
+    for move in manifest.get("moves") or []:
+        if not isinstance(move, dict):
+            continue
+        source = install_root / str(move.get("source") or "")
+        destination = install_root / str(move.get("destination") or "")
+        if (source.exists() or source.is_symlink()) and not destination.exists():
+            try:
+                destination.parent.mkdir(parents=True, exist_ok=True)
+                code, out = run_git(
+                    install_root, "mv", str(move.get("source") or ""),
+                    str(move.get("destination") or ""),
+                )
+                if code != 0:
+                    shutil.move(str(source), str(destination))
+            except OSError as exc:
+                errors.append(f"{destination}: {exc}")
+        elif not destination.exists():
+            errors.append(f"neither path exists for {source}")
+    before = manifest.get("registry_before")
+    after = manifest.get("registry_after")
+    migrated = set(manifest.get("workspaces") or [])
+    current_registry = owner.current
+    if (
+        isinstance(before, list)
+        and isinstance(after, list)
+        and current_registry is not None
+    ):
+        before_rows = [
+            row for row in before
+            if isinstance(row, dict) and str(row.get("name")) in migrated
+        ]
+        after_rows = [
+            row for row in after
+            if isinstance(row, dict) and str(row.get("name")) in migrated
+        ]
+        if before_rows and after_rows:
+            from ciao.workspaces import registry_rows, restore_registry_entries  # noqa: PLC0415
+
+            try:
+                live_rows = registry_rows(json.loads(current_registry))
+                live_by_name = {
+                    str(row.get("name")): row
+                    for row in live_rows
+                    if isinstance(row, dict) and isinstance(row.get("name"), str)
+                }
+                if all(
+                    live_by_name.get(str(row.get("name")), {}).get("vault_root")
+                    == row.get("vault_root")
+                    for row in after_rows
+                ):
+                    pass
+                elif all(
+                    live_by_name.get(str(row.get("name")), {}).get("vault_root")
+                    == row.get("vault_root")
+                    for row in before_rows
+                ):
+                    if not restore_registry_entries(
+                        runtime_root, after_rows, before_rows, owner=owner,
+                        fields=("vault_root",),
+                    ):
+                        errors.append("registry: conditional restore refused")
+                else:
+                    errors.append(
+                        "registry: migrated rows no longer match either the "
+                        "pre- or post-undo image"
+                    )
+            except (OSError, ValueError, TypeError) as exc:
+                errors.append(f"registry: {exc}")
+    if errors:
+        return "an interrupted undo could not be compensated: " + "; ".join(errors)
+    _unlink_durable(path)
+    compensation = manifest.get("compensation_dir")
+    if isinstance(compensation, str):
+        shutil.rmtree(compensation, ignore_errors=True)
+        _fsync_directory(Path(compensation).parent)
+    return None
+
+
+def _undo_locked(install_root: Path, runtime_root: Path, *, owner: Any) -> dict[str, Any]:
     """Reverse a completed re-rooting to a byte-identical tree.
 
     CLI only. Reverting the architecture is not a housekeeping button, and the
@@ -855,9 +1235,18 @@ def undo(install_root: Path, runtime_root: Path) -> dict[str, Any]:
     """
     install_root = Path(install_root).resolve()
     runtime_root = Path(runtime_root)
+    recovery_error = _recover_undo_manifest(runtime_root, owner)
+    if recovery_error is not None:
+        return {"status": "failed", "reason": recovery_error + "; receipt retained"}
     receipt = read_receipt(runtime_root)
     if receipt is None:
         return {"status": "nothing_to_undo", "reason": "no migrated receipt"}
+    registry_conflict = _preflight_undo_registry(owner, receipt)
+    if registry_conflict is not None:
+        return {
+            "status": "refused",
+            "reason": registry_conflict + "; the migration receipt is retained",
+        }
 
     try:
         schedule_restore = _prepare_schedule_prompt_restore(
@@ -886,9 +1275,96 @@ def undo(install_root: Path, runtime_root: Path) -> dict[str, Any]:
             "unexpected_paths": blocked,
         }
 
+    compensation_dir = runtime_root / "migration" / f"undo-compensation-{uuid.uuid4().hex}"
+    created_map: dict[str, Path] = {}
+    created_tracked: dict[str, bool] = {}
+    created_payload: list[dict[str, Any]] = []
+    for index, relative in enumerate(
+        [*receipt.get("created_files", []), *receipt.get("created_dirs", [])]
+    ):
+        backup = compensation_dir / "artifacts" / str(index)
+        created_map[str(relative)] = backup
+        tracked = run_git(
+            install_root, "ls-files", "--error-unmatch", "--", str(relative)
+        )[0] == 0
+        created_tracked[str(relative)] = tracked
+        created_payload.append(
+            {"source": str(relative), "backup": str(backup), "tracked": tracked}
+        )
+    schedule_rewrites = (
+        receipt.get("schedule_prompt_rewrites") if schedule_restore is not None else []
+    )
+    manifest = {
+        "install_root": str(install_root),
+        "compensation_dir": str(compensation_dir),
+        "created": created_payload,
+        "stashes": [
+            {
+                "source": str(entry.get("source")),
+                "backup": str(entry.get("backup")),
+                "tracked": bool(entry.get("tracked")),
+            }
+            for entry in receipt.get("stashed_files", [])
+            if isinstance(entry, dict)
+        ],
+        "moves": receipt.get("applied", []),
+        "workspaces": list(receipt.get("workspaces") or []),
+        "registry_before": receipt.get("registry_before"),
+        "registry_after": receipt.get("registry_after"),
+        "schedule_rewrites": schedule_rewrites,
+        "phase": "in_progress",
+        "receipt_path": str(receipt_path(runtime_root)),
+    }
+    _write_json_atomic(_undo_manifest_path(runtime_root), manifest)
+
     vault_name = Path(receipt.get("vault_root", "")).name or VAULT_DIR_NAME
     if receipt.get("removed_vault_dir"):
         (install_root / vault_name).mkdir(parents=True, exist_ok=True)
+
+    created_backups: list[tuple[Path, Path]] = []
+    stash_restores: list[tuple[Path, Path]] = []
+
+    def stash_for_compensation(target: Path) -> Path:
+        relative = target.relative_to(install_root).as_posix()
+        bucket = created_map.get(relative)
+        if bucket is None:
+            bucket = compensation_dir / "artifacts" / f"extra-{len(created_backups)}"
+            created_map[relative] = bucket
+        bucket.parent.mkdir(parents=True, exist_ok=True)
+        shutil.move(str(target), str(bucket))
+        created_backups.append((target, bucket))
+        return bucket
+
+    def compensate_artifacts() -> list[str]:
+        errors: list[str] = []
+        for target, backup in reversed(created_backups):
+            try:
+                target.parent.mkdir(parents=True, exist_ok=True)
+                shutil.move(str(backup), str(target))
+                relative = target.relative_to(install_root).as_posix()
+                if created_tracked.get(relative):
+                    run_git(install_root, "add", "--", relative)
+            except OSError as exc:
+                errors.append(f"{target}: {exc}")
+        for target, backup in reversed(stash_restores):
+            try:
+                backup.parent.mkdir(parents=True, exist_ok=True)
+                _replace_across_filesystems(target, backup)
+                relative = target.relative_to(install_root).as_posix()
+                if any(
+                    entry.get("source") == relative and entry.get("tracked")
+                    for entry in receipt.get("stashed_files", [])
+                    if isinstance(entry, dict)
+                ):
+                    run_git(install_root, "rm", "--cached", "--quiet", "--", relative)
+            except OSError as exc:
+                errors.append(f"{backup}: {exc}")
+        return errors
+
+    def cleanup_compensation_state() -> None:
+        shutil.rmtree(compensation_dir, ignore_errors=True)
+        _fsync_directory(compensation_dir.parent)
+        _unlink_durable(_undo_manifest_path(runtime_root))
 
     restored: list[str] = []
     for entry in receipt.get("stashed_files", []):
@@ -896,7 +1372,8 @@ def undo(install_root: Path, runtime_root: Path) -> dict[str, Any]:
         target = install_root / entry["source"]
         if backup.is_file():
             target.parent.mkdir(parents=True, exist_ok=True)
-            _replace_across_filesystems(backup, target)
+            shutil.copy2(backup, target)
+            stash_restores.append((target, backup))
             # Re-stage only what WAS tracked. `git add` on a file that was
             # untracked before would newly track it, which is not a restoration.
             if entry.get("tracked"):
@@ -913,7 +1390,7 @@ def undo(install_root: Path, runtime_root: Path) -> dict[str, Any]:
         # is_symlink first: AGENTS.md is a symlink, and `is_file()` follows it,
         # so a link whose target already moved back would be left dangling.
         if target.is_symlink() or target.is_file():
-            target.unlink()
+            stash_for_compensation(target)
             # If the migration was COMMITTED, these paths are tracked. Deleting
             # the file without staging it leaves the index claiming a file that
             # is gone, and `git mv` of any ancestor directory then fails with
@@ -933,12 +1410,10 @@ def undo(install_root: Path, runtime_root: Path) -> dict[str, Any]:
     # every descendant against the name-and-fingerprint capture the receipt
     # recorded; anything added, edited or deleted since refused the undo before
     # this line ran.
-    import shutil  # noqa: PLC0415
-
     for relative in receipt.get("created_dirs", []):
         target = install_root / relative
         if target.is_dir():
-            shutil.rmtree(target)
+            stash_for_compensation(target)
             # Same reason as the created files: once the migration is committed
             # everything under here is tracked, so the index has to follow the
             # worktree or `git mv` of an ancestor fails.
@@ -964,10 +1439,21 @@ def undo(install_root: Path, runtime_root: Path) -> dict[str, Any]:
         source.parent.mkdir(parents=True, exist_ok=True)
         code, out = run_git(install_root, "mv", entry["destination"], entry["source"])
         if code != 0:
+            rollback_error = _reverse_undo_moves(
+                install_root, receipt, reversed_moves
+            )
+            artifact_errors = compensate_artifacts()
+            reason = f"git mv failed reversing {entry['destination']}: {out}"
+            if artifact_errors:
+                reason += "; artifact compensation also failed: " + "; ".join(artifact_errors)
+            if rollback_error:
+                reason += f"; re-applying the already reversed moves also failed: {rollback_error}"
+            if not artifact_errors and not rollback_error:
+                cleanup_compensation_state()
             return {
                 "status": "failed",
-                "reason": f"git mv failed reversing {entry['destination']}: {out}",
-                "reversed": reversed_moves,
+                "reason": reason,
+                "reversed": [],
                 "already_reversed": already,
                 "remaining": [
                     e["destination"]
@@ -983,7 +1469,65 @@ def undo(install_root: Path, runtime_root: Path) -> dict[str, Any]:
 
     before = receipt.get("registry_before")
     if before is not None:
-        _write_registry(runtime_root, before)
+        from ciao.workspaces import restore_registry_entries  # noqa: PLC0415
+
+        migrated = set(receipt.get("workspaces") or [])
+        expected_after = [
+            row for row in (receipt.get("registry_after") or [])
+            if isinstance(row, dict) and str(row.get("name")) in migrated
+        ]
+        prior_rows = [
+            row for row in before
+            if isinstance(row, dict) and str(row.get("name")) in migrated
+        ]
+        try:
+            restored_registry = bool(expected_after) and restore_registry_entries(
+                runtime_root, prior_rows, expected_after, owner=owner,
+                fields=("vault_root",),
+            )
+        except OSError as exc:
+            rollback_error = _reverse_undo_moves(
+                install_root, receipt, reversed_moves
+            )
+            artifact_errors = compensate_artifacts()
+            reason = (
+                "could not restore the workspace registry; migration receipt "
+                f"retained: {exc}"
+            )
+            if artifact_errors:
+                reason += "; artifact compensation also failed: " + "; ".join(artifact_errors)
+            if rollback_error:
+                reason += f"; re-applying the reversed moves also failed: {rollback_error}"
+            if not artifact_errors and not rollback_error:
+                cleanup_compensation_state()
+            return {
+                "status": "failed",
+                "reason": reason,
+                "reversed": [],
+                "already_reversed": already,
+            }
+        if not restored_registry:
+            rollback_error = _reverse_undo_moves(
+                install_root, receipt, reversed_moves
+            )
+            artifact_errors = compensate_artifacts()
+            reason = (
+                "the migration receipt has no authoritative post-migration "
+                "registry snapshot; refusing to overwrite a live registry and "
+                "keeping the receipt"
+            )
+            if artifact_errors:
+                reason += "; artifact compensation also failed: " + "; ".join(artifact_errors)
+            if rollback_error:
+                reason += f"; re-applying the reversed moves also failed: {rollback_error}"
+            if not artifact_errors and not rollback_error:
+                cleanup_compensation_state()
+            return {
+                "status": "failed",
+                "reason": reason,
+                "reversed": [],
+                "already_reversed": already,
+            }
 
     if schedule_restore is not None:
         try:
@@ -991,18 +1535,56 @@ def undo(install_root: Path, runtime_root: Path) -> dict[str, Any]:
                 runtime_root, receipt.get("schedule_prompt_rewrites")
             )
         except (OSError, ValueError) as exc:
+            rollback_error = _reverse_undo_moves(
+                install_root, receipt, reversed_moves
+            )
+            artifact_errors = compensate_artifacts()
+            registry_forward_error: str | None = None
+            if before is not None and expected_after and prior_rows:
+                try:
+                    from ciao.workspaces import restore_registry_entries  # noqa: PLC0415
+
+                    if not restore_registry_entries(
+                        runtime_root, expected_after, prior_rows, owner=owner,
+                        fields=("vault_root",),
+                    ):
+                        registry_forward_error = (
+                            "the workspace registry no longer matches the "
+                            "post-migration image"
+                        )
+                except OSError as registry_exc:
+                    registry_forward_error = str(registry_exc)
+            reason = (
+                "could not restore schedule prompts; migration receipt "
+                f"retained: {exc}"
+            )
+            if artifact_errors:
+                reason += "; artifact compensation also failed: " + "; ".join(artifact_errors)
+            if rollback_error:
+                reason += f"; re-applying the reversed moves also failed: {rollback_error}"
+            if registry_forward_error:
+                reason += f"; restoring the post-migration registry also failed: {registry_forward_error}"
+            if not artifact_errors and not rollback_error and not registry_forward_error:
+                cleanup_compensation_state()
             return {
                 "status": "failed",
-                "reason": f"could not restore schedule prompts; migration receipt retained: {exc}",
-                "reversed": reversed_moves,
+                "reason": reason,
+                "reversed": [],
                 "already_reversed": already,
             }
 
     cleared = clear_stranded_sessions(
         runtime_root, list((receipt.get("stranded_sessions") or {}).get("flagged") or [])
     )
-
-    remove_receipt(runtime_root)
+    manifest["phase"] = "committed"
+    _write_json_atomic(_undo_manifest_path(runtime_root), manifest)
+    _unlink_durable(receipt_path(runtime_root))
+    for entry in receipt.get("stashed_files", []):
+        if isinstance(entry, dict):
+            _unlink_durable(runtime_root / str(entry.get("backup") or ""))
+    shutil.rmtree(compensation_dir, ignore_errors=True)
+    _fsync_directory(compensation_dir.parent)
+    _unlink_durable(_undo_manifest_path(runtime_root))
     from ciao.config import reset_reroot_cache
 
     reset_reroot_cache()
@@ -1014,6 +1596,17 @@ def undo(install_root: Path, runtime_root: Path) -> dict[str, Any]:
         "cleared_handover_flags": cleared,
         "already_reversed": already,
     }
+
+
+def undo(install_root: Path, runtime_root: Path) -> dict[str, Any]:
+    """Acquire the registry claim once and hold it through the undo."""
+    from ciao.workspaces import acquire_registry_at  # noqa: PLC0415
+
+    owner = acquire_registry_at(Path(runtime_root), blocking=True)
+    try:
+        return _undo_locked(install_root, runtime_root, owner=owner)
+    finally:
+        owner.close()
 
 
 def _walk_entries(base: Path) -> set[str]:
@@ -1169,8 +1762,9 @@ def registry_file(runtime_root: Path) -> Path:
     return Path(runtime_root) / "workspaces.json"
 
 
-def _write_registry(runtime_root: Path, entries: list[dict[str, Any]]) -> None:
-    """Persist the registry atomically, preserving key order and unknown keys."""
+def _write_registry_unlocked(
+    runtime_root: Path, entries: list[dict[str, Any]],
+) -> None:
     path = registry_file(runtime_root)
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_suffix(".json.tmp")
@@ -1179,7 +1773,7 @@ def _write_registry(runtime_root: Path, entries: list[dict[str, Any]]) -> None:
 
 
 def _rewrite_registry(
-    runtime_root: Path, result: RerootPlan
+    runtime_root: Path, result: RerootPlan, *, owner: Any,
 ) -> tuple[list[dict[str, Any]] | None, list[dict[str, Any]] | None]:
     """Point every migrated workspace's ``vault_root`` at its new agent root.
 
@@ -1188,12 +1782,11 @@ def _rewrite_registry(
     WorkspaceConfig, because an unknown key a future release adds must survive a
     migration that only means to change one field.
     """
-    path = registry_file(runtime_root)
-    if not path.is_file():
+    if owner.current is None:
         return None, None
     try:
-        entries = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, ValueError, TypeError):
+        entries = json.loads(owner.current)
+    except (ValueError, TypeError, UnicodeDecodeError):
         return None, None
     if not isinstance(entries, list):
         return None, None
@@ -1206,7 +1799,8 @@ def _rewrite_registry(
         destination = destinations.get(str(entry.get("name", "")))
         if destination:
             entry["vault_root"] = destination
-    _write_registry(runtime_root, entries)
+    payload = (json.dumps(entries, indent=2) + "\n").encode("utf-8")
+    owner.replace(payload, expected=owner.current)
     return before, entries
 
 
@@ -2090,10 +2684,60 @@ def _write_snapshot_gitignore(root: Path) -> None:
 # -- P10.6: rebuild the derived artefacts per root ---------------------------
 
 
+def index_destination_is_ciao_owned(runtime_root: Path, vault: Path) -> bool:
+    """Whether the shared classifier proves this exact root Ciao-owned."""
+    from ciao.config import classify_vault_index_destination, INDEX_OWNERSHIP_CIAO
+    from ciao.setup_marker import read_vault_index_ownership_status
+    from ciao.workspaces import authoritative_shared_links
+
+    links = authoritative_shared_links(runtime_root)
+    if links is None:
+        return False
+    receipt = read_receipt(runtime_root)
+    ownership, ownership_trusted = read_vault_index_ownership_status(runtime_root)
+    if not ownership_trusted:
+        return False
+    if receipt is None:
+        return (
+            classify_vault_index_destination(
+                Path(vault), ownership=ownership, linked_roots=links,
+            )
+            == INDEX_OWNERSHIP_CIAO
+        )
+    install = Path(str(receipt.get("install_root") or "")).expanduser().resolve()
+    leaf = Path(str(receipt.get("vault_root") or "")).name
+    try:
+        relative = Path(vault).expanduser().resolve().relative_to(install)
+    except (OSError, ValueError):
+        return False
+    from ciao.config import INDEX_OWNERSHIP_AMBIGUOUS, INDEX_OWNERSHIP_CIAO
+
+    decision = classify_vault_index_destination(
+        Path(vault),
+        ownership=ownership,
+        linked_roots=links,
+        receipt=receipt,
+        install_root=install,
+    )
+    if decision == INDEX_OWNERSHIP_CIAO:
+        return True
+    if decision != INDEX_OWNERSHIP_AMBIGUOUS:
+        return False
+    # Maintainer decision: an existing registered per-root local workspace
+    # index is generated and refreshed even when older installs lack a
+    # provenance row. Connected/external/synchronized destinations returned
+    # above and are never written.
+    return len(relative.parts) == 2 and relative.name == leaf
+
+
 def rebuild_indexes(
-    install_root: Path, workspaces: list[str], *, vault_name: str = VAULT_DIR_NAME
+    install_root: Path,
+    workspaces: list[str],
+    *,
+    vault_name: str = VAULT_DIR_NAME,
+    runtime_root: Path | None = None,
 ) -> dict[str, Any]:
-    """Rebuild each root's INDEX.md and VOCABULARY.md, with no path prefix.
+    """Rebuild each root's INDEX.md/VOCABULARY.md or its private SQLite index.
 
     ``vault_name`` is the vault directory's leaf, which is configurable
     (``CIAO_VAULT_ROOT``) and is NOT always ``memory-vault``. Hardcoding it meant
@@ -2111,20 +2755,51 @@ def rebuild_indexes(
     copies are stashed rather than left in place.
 
     Reports per root rather than aggregating: a failure in one root's rebuild
-    must be attributable to that root, not hidden in a total.
+    must be attributable to that root, not hidden in a total. Connected,
+    explicitly external and ambiguous roots are refreshed into the private
+    SQLite index only; their Markdown INDEX is never created or replaced.
     """
+    from ciao.config import configured_connected_workspace
+    from ciao.fts_search import lookup_connected_entries
     from ciao.vault_index import format_vocabulary, scan_vault, write_index_file
 
     out: dict[str, Any] = {"rebuilt": [], "errors": []}
     leaf = vault_name or VAULT_DIR_NAME
+    runtime = Path(runtime_root) if runtime_root else Path(install_root) / ".runtime"
+    local_roots = [Path(install_root) / name / leaf for name in workspaces]
     for name in workspaces:
         vault = Path(install_root) / name / leaf
         if not vault.is_dir():
             out["errors"].append({"workspace": name, "error": f"no vault at {vault}"})
             continue
         try:
-            entries = scan_vault(vault)
-            write_index_file(entries, vault / "INDEX.md")
+            owned = index_destination_is_ciao_owned(runtime, vault)
+            connected = configured_connected_workspace(
+                {"CIAO_WORKSPACE": str(install_root), "CIAO_RUNTIME_ROOT": str(runtime),
+                 "CIAO_ACTIVE_WORKSPACE": name}, vault, registered_brains_only=True,
+            )
+            if connected or not owned:
+                entries = lookup_connected_entries(
+                    vault, name, runtime, install_root,
+                    refresh=True,
+                    source_roots=connected.source_roots if connected else frozenset(local_roots),
+                    vault_base=connected.vault_base if connected else install_root,
+                    link=connected.link if connected else None,
+                )
+                out["rebuilt"].append({
+                    "workspace": name, "entries": len(entries),
+                    "storage": "sqlite", "markdown_index": "preserved",
+                })
+                continue
+            entries = scan_vault(vault, strict=True)
+            write_index_file(
+                entries,
+                vault / "INDEX.md",
+                replace_existing=True,
+                authorize=lambda: index_destination_is_ciao_owned(runtime, vault),
+                ownership_runtime=runtime,
+                registration_runtime=runtime,
+            )
             (vault / "VOCABULARY.md").write_text(
                 format_vocabulary(entries), encoding="utf-8", newline=""
             )
@@ -2804,7 +3479,10 @@ def migrate_if_needed(config: Any) -> dict[str, Any]:
         return {"status": "not_applicable", "reason": "the vault is the install folder, kept in place"}
 
     try:
-        outcome = apply(install_root, vault_root, names, runtime_root, primary=primary)
+        outcome = apply(
+            install_root, vault_root, names, runtime_root, primary=primary,
+            expected_registry_bytes=getattr(config, "_workspace_registry_bytes", None),
+        )
     except Exception as exc:  # noqa: BLE001 — see the docstring
         logger.exception("re-root: apply failed")
         return {"status": "error", "reason": str(exc)}
@@ -2825,7 +3503,12 @@ def migrate_if_needed(config: Any) -> dict[str, Any]:
     # CIAO_VAULT_ROOT does not end in `memory-vault`.
     leaf = vault_root.name or VAULT_DIR_NAME
     try:
-        outcome["indexes"] = rebuild_indexes(install_root, names, vault_name=leaf)
+        outcome["indexes"] = rebuild_indexes(
+            install_root,
+            names,
+            vault_name=leaf,
+            runtime_root=runtime_root,
+        )
         outcome["search"] = rebuild_search_index(
             install_root, names, runtime_root=runtime_root, vault_name=leaf
         )
@@ -2938,7 +3621,7 @@ def repair(
     for name in sorted(workspaces):
         root = install_root / name
         try:
-            _repair_one_root(root, name, shared, record, vault_name=leaf)
+            _repair_one_root(root, name, shared, record, vault_name=leaf, runtime_root=runtime_root)
         except Exception as exc:  # noqa: BLE001 — one bad root must not stop the rest
             errors.append({"workspace": name, "error": str(exc)})
 
@@ -3014,6 +3697,7 @@ def _repair_one_root(
     record: Any,
     *,
     vault_name: str = VAULT_DIR_NAME,
+    runtime_root: Path | None = None,
 ) -> None:
     """Reconcile one agent root. Every branch is safe to run twice."""
     from ciao.sync_skills import _ensure_workspace_guide  # noqa: PLC0415
@@ -3117,10 +3801,33 @@ def _repair_one_root(
             )
         )
 
+    from ciao.config import configured_connected_workspace
+
+    runtime = Path(runtime_root or root.parent / ".runtime")
+    if configured_connected_workspace(
+        {"CIAO_WORKSPACE": str(root.parent), "CIAO_ACTIVE_WORKSPACE": name,
+         "CIAO_RUNTIME_ROOT": str(runtime)}, vault, registered_brains_only=True,
+    ) or not index_destination_is_ciao_owned(runtime, vault):
+        # Connected, external and ambiguous roots get the private SQLite index
+        # only; an absent Markdown INDEX is not drift we may create.
+        if vault.is_dir():
+            rebuilt = rebuild_indexes(
+                root.parent, [name], vault_name=vault.name, runtime_root=runtime,
+            )
+            if rebuilt["errors"]:
+                raise OSError(rebuilt["errors"][0]["error"])
+        return
     index = vault / "INDEX.md"
     prefixed = index_workspace_prefixes(index, [name])
     if vault.is_dir() and (not index.is_file() or prefixed):
-        rebuild_indexes(root.parent, [name], vault_name=vault.name)
+        rebuilt = rebuild_indexes(
+            root.parent,
+            [name],
+            vault_name=vault.name,
+            runtime_root=runtime_root,
+        )
+        if rebuilt["errors"]:
+            raise OSError(rebuilt["errors"][0]["error"])
         record(
             RepairItem(
                 workspace=name,

@@ -464,8 +464,20 @@ def refresh_shared_index(config: Any) -> bool:
         return False
     from ciao import vault_index  # noqa: PLC0415
 
-    entries = vault_index.scan_vault(root)
-    vault_index.write_index_file(entries, root / "INDEX.md")
+    ownership = getattr(config, "vault_index_ownership", None)
+    if not callable(ownership) or ownership(None) != "ciao":
+        # Connected, external and ambiguous snapshots use the private SQLite
+        # index only; their Markdown INDEX is not ours to rewrite.
+        return False
+    entries = vault_index.scan_vault(root, strict=True)
+    vault_index.write_index_file(
+        entries,
+        root / "INDEX.md",
+        replace_existing=True,
+        authorize=lambda: ownership(None) == "ciao",
+        ownership_runtime=Path(config.state_path).parent,
+        registration_runtime=Path(config.state_path).parent,
+    )
     return True
 
 
@@ -486,10 +498,15 @@ def _workspace_logs_root(config: Any, vault: Path) -> Path | None:
     return install / parts[0] / "Logs"
 
 
-def forget_search_rows(config: Any, vault: Path) -> int:
+def forget_search_rows(config: Any, vault: Path, *, workspace: str = "",
+                       source_roots: frozenset[Path] | None = None, linked_roots: tuple[Path, ...] = ()) -> int:
     """Drop the archived vault's rows, and its transcripts', from search."""
     from ciao.async_reads import keyed_lock  # noqa: PLC0415
     from ciao.fts_search import (  # noqa: PLC0415
+        adopted_vault_key_prefix,
+        connected_db_path,
+        connected_index_connection,
+        forget_connected_workspace,
         forget_subtree,
         forget_transcript_subtree,
         get_db_path,
@@ -498,9 +515,27 @@ def forget_search_rows(config: Any, vault: Path) -> int:
         vault_key_prefix,
     )
 
-    db_path = get_db_path(Path(config.state_path).parent)
+    db_path = get_db_path(Path(config.state_path).parent, create=False)
+    connected_removed = 0
+    if workspace:
+        sources = (config.index_source_roots() if source_roots is None else source_roots) | {vault.resolve()}
+        try:
+            brain_db = connected_db_path(Path(config.state_path).parent, vault, sources, create=False)
+        except FileNotFoundError:
+            pass
+        else:
+            with connected_index_connection(brain_db) as conn:
+                init_db(conn)
+                # Include CLI indexes of subfolders as well as the historic
+                # root namespaces from before ownership was recorded.
+                namespaces = {adopted_vault_key_prefix(root, workspace) for root in (vault, *linked_roots)}
+                connected_removed = forget_connected_workspace(
+                    conn, Path(config.state_path).parent, workspace, namespaces
+                )
+        if any(db_path.resolve().is_relative_to(source) for source in sources):
+            return connected_removed
     if not db_path.exists():
-        return 0
+        return connected_removed
     install = Path(config.workspace_root)
     prefix = vault_key_prefix(vault, install)
     logs_root = _workspace_logs_root(config, vault)
@@ -512,7 +547,7 @@ def forget_search_rows(config: Any, vault: Path) -> int:
             removed = forget_subtree(conn, prefix)
             if logs_prefix is not None:
                 removed += forget_transcript_subtree(conn, logs_prefix)
-            return removed
+            return removed + connected_removed
     finally:
         conn.close()
 

@@ -2,16 +2,107 @@
 
 from __future__ import annotations
 
+import hashlib
 import logging
 import json
 import os
 import re
 import secrets
-from collections.abc import Mapping
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast
+
+INDEX_OWNERSHIP_CIAO = "ciao"
+INDEX_OWNERSHIP_EXTERNAL = "external"
+INDEX_OWNERSHIP_CONNECTED = "connected"
+INDEX_OWNERSHIP_AMBIGUOUS = "ambiguous"
+
+
+def _recorded_index_owner(ownership: Mapping[str, str], path: Path) -> str | None:
+    """The nearest explicit owner row for ``path``, if any."""
+    resolved = Path(path).expanduser().resolve()
+    best: tuple[int, str] | None = None
+    for raw, owner in ownership.items():
+        if owner not in {INDEX_OWNERSHIP_CIAO, INDEX_OWNERSHIP_EXTERNAL}:
+            continue
+        recorded = Path(raw).expanduser().resolve()
+        if resolved == recorded or recorded in resolved.parents:
+            rank = len(recorded.parts)
+            if best is None or rank > best[0]:
+                best = (rank, owner)
+    return best[1] if best else None
+
+
+def _has_external_index_ancestor(ownership: Mapping[str, str], path: Path) -> bool:
+    """An explicit external row on ``path`` or any ancestor overrides ciao."""
+    resolved = Path(path).expanduser().resolve()
+    return any(
+        owner == INDEX_OWNERSHIP_EXTERNAL
+        and (
+            resolved == Path(raw).expanduser().resolve()
+            or Path(raw).expanduser().resolve() in resolved.parents
+        )
+        for raw, owner in ownership.items()
+    )
+
+
+def classify_vault_index_destination(
+    destination: Path,
+    *,
+    ownership: Mapping[str, str],
+    linked_roots: Iterable[Path] = (),
+    receipt: Mapping[str, Any] | None = None,
+    install_root: Path | None = None,
+) -> str:
+    """Classify one aggregate index destination exactly once.
+
+    Connected links are never Markdown-managed. A synchronized destination, an
+    explicit external row on the destination or an ancestor, overrides
+    everything else, including a receipt move. Otherwise setup's exact
+    ``ciao`` row for *this destination*, or a completed move whose source is
+    proven managed, is the only Ciao evidence. A generic scratch marker, an
+    ancestor row, a path spelling, UID or generated header is never enough.
+    Anything else is ambiguous and must use the private SQLite index only.
+    """
+    resolved = Path(destination).expanduser().resolve()
+    for link in linked_roots:
+        linked = Path(link).expanduser().resolve()
+        if resolved == linked or linked in resolved.parents:
+            return INDEX_OWNERSHIP_CONNECTED
+    if _has_external_index_ancestor(ownership, resolved):
+        return INDEX_OWNERSHIP_EXTERNAL
+    from ciao.setup_status import cloud_synced_location  # noqa: PLC0415
+
+    if cloud_synced_location(resolved):
+        return INDEX_OWNERSHIP_EXTERNAL
+    if ownership.get(str(resolved)) == INDEX_OWNERSHIP_CIAO:
+        return INDEX_OWNERSHIP_CIAO
+    if receipt is not None and install_root is not None:
+        install = Path(install_root).expanduser().resolve()
+        try:
+            relative = resolved.relative_to(install).as_posix()
+        except ValueError:
+            relative = ""
+        leaf = Path(str(receipt.get("vault_root") or "")).name
+        if relative and relative.count("/") == 1 and leaf:
+            workspace = relative.split("/", 1)[0]
+            for move in receipt.get("applied") or []:
+                if not isinstance(move, dict):
+                    continue
+                source = move.get("source")
+                if move.get("destination") != relative or source != f"{leaf}/{workspace}":
+                    continue
+                source_path = install / str(source)
+                if _has_external_index_ancestor(ownership, source_path):
+                    return INDEX_OWNERSHIP_EXTERNAL
+                if cloud_synced_location(source_path):
+                    return INDEX_OWNERSHIP_EXTERNAL
+                if _recorded_index_owner(ownership, source_path) == INDEX_OWNERSHIP_CIAO:
+                    return INDEX_OWNERSHIP_CIAO
+    return INDEX_OWNERSHIP_AMBIGUOUS
+
 
 # The one direction the dependency runs: `entity_types` imports no `ciao` module,
 # so the stock workspace-evidence set below can be derived from it (see
@@ -649,7 +740,7 @@ def _workspace_from_mapping(data: dict) -> WorkspaceConfig | None:
     )
 
 
-def _parse_workspaces_json(raw: str) -> dict[str, WorkspaceConfig]:
+def _parse_workspaces_json(raw: str, *, generation: tuple[int, ...] | None = None) -> dict[str, WorkspaceConfig]:
     if not raw.strip():
         return {}
     try:
@@ -670,6 +761,14 @@ def _parse_workspaces_json(raw: str) -> dict[str, WorkspaceConfig]:
         return {}
     out: dict[str, WorkspaceConfig] = {}
     for item in items:
+        # Independent readers of a legacy row must derive the same lifetime
+        # from this registry generation. Settings persists it on the next save.
+        links = item.get("shared_brains")
+        if generation is not None and isinstance(links, list):
+            for link in links:
+                if isinstance(link, dict) and not (isinstance(link.get("lifetime_id"), str) and link["lifetime_id"]):
+                    seed = [generation, item.get("name"), link.get("name"), link.get("path"), link.get("identity")]
+                    link["lifetime_id"] = hashlib.sha256(json.dumps(seed).encode()).hexdigest()
         workspace = _workspace_from_mapping(item)
         if workspace is not None:
             out[workspace.name] = workspace
@@ -845,6 +944,9 @@ class CiaoConfig:
     workspaces: dict[str, WorkspaceConfig] = field(default_factory=dict)
     _workspace_registry_changed: bool = field(
         init=False, default=False, repr=False
+    )
+    _workspace_registry_bytes: bytes | None = field(
+        init=False, default=None, repr=False
     )
     # Raw value of the retired ``CIAO_WORKSPACES`` variable, if an install
     # still sets it. Never used as a workspace source; server startup imports
@@ -1080,6 +1182,69 @@ class CiaoConfig:
             self.agent_root(name) / self.vault_root.name,
         )
 
+    def vault_index_ownership(
+        self, workspace: str | None, destination: Path | None = None,
+    ) -> str:
+        """Classify one aggregate INDEX destination.
+
+        This is the single ownership decision for setup, startup, search,
+        refresh, CLI, archive and repair. Connected links, synchronized paths
+        and explicit external ancestors are never Markdown-managed. A persisted
+        exact ``ciao`` row or a completed migration move is direct proof; an
+        existing registered local workspace root is also refreshed by the
+        maintainer decision, even when older installs lack provenance. Only an
+        unregistered or adopted/ambiguous destination stays on SQLite.
+        """
+        from ciao.setup_marker import read_vault_index_ownership_status
+
+        runtime = self.state_path.parent
+        if destination is None:
+            try:
+                destination = self.agent_vault_root(workspace or self.primary_workspace())
+            except (ValueError, AttributeError):
+                return INDEX_OWNERSHIP_AMBIGUOUS
+        resolved = Path(destination).expanduser().resolve()
+        from ciao.workspaces import authoritative_shared_links
+
+        links = authoritative_shared_links(runtime)
+        if links is None:
+            return INDEX_OWNERSHIP_EXTERNAL
+        from ciao.workspace_reroot import read_receipt
+
+        ownership, ownership_trusted = read_vault_index_ownership_status(runtime)
+        if not ownership_trusted:
+            return INDEX_OWNERSHIP_EXTERNAL
+        receipt = read_receipt(runtime)
+        decision = classify_vault_index_destination(
+            resolved,
+            ownership=ownership,
+            linked_roots=links,
+            receipt=receipt,
+            install_root=self.workspace_root,
+        )
+        if decision != INDEX_OWNERSHIP_AMBIGUOUS:
+            return decision
+        if not workspace or self.workspace(workspace) is None:
+            return decision
+        if self.adopted_workspace_vault(workspace):
+            return decision
+        try:
+            local_roots = {
+                Path(self.agent_vault_root(workspace)).expanduser().resolve(),
+                Path(self.workspace_vault_root(workspace)).expanduser().resolve(),
+            }
+        except (ValueError, AttributeError):
+            return decision
+        return (
+            INDEX_OWNERSHIP_CIAO
+            if resolved in local_roots
+            else decision
+        )
+
+    def ciao_owned_vault_index(self, workspace: str | None) -> bool:
+        """Whether Ciao owns the index destination for this scan target."""
+        return self.vault_index_ownership(workspace) == INDEX_OWNERSHIP_CIAO
+
     @property
     def logs_root(self) -> Path:
         """The shared logs root. See :func:`logs_root_for`.
@@ -1146,6 +1311,24 @@ class CiaoConfig:
         return [
             (self.agent_root(name), name) for name in self.workspace_names() if name
         ]
+
+    def index_scan_targets(self) -> list[tuple[Path, str, Path]]:
+        if self._rerooted() or self.ciao_owned_vault_index(None):
+            return self.vault_scan_targets()
+        targets = []
+        for name in self.workspace_names():
+            root = self.workspace_vault_root(name)
+            prefix = (Path("memory-vault") / root.relative_to(self.vault_root)
+                      if root.is_relative_to(self.vault_root) else Path(name) / root.name)
+            targets.append((root, name, prefix))
+        return targets
+
+    def index_source_roots(self) -> frozenset[Path]:
+        """Every notes tree that must remain outside the connected index store."""
+        return frozenset(
+            [root.resolve() for root, _, _ in self.vault_scan_targets() + self.index_scan_targets()]
+            + [Path(link.path).resolve() for ws in self.workspaces.values() for link in ws.shared_brains]
+        )
 
     def vault_scan_targets(self) -> list[tuple[Path, str, Path]]:
         """Every vault in this install, as ``(root, workspace, path prefix)``.
@@ -1349,17 +1532,32 @@ class CiaoConfig:
                 changed = True
         return changed
 
-    def persist_workspace_registry(self) -> None:
-        """Atomically persist the live workspace registry."""
-        from ciao.workspaces import workspace_registry_lock  # noqa: PLC0415
+    def persist_workspace_registry(self, *, owner: Any | None = None) -> None:
+        """Atomically persist the live registry under exact-byte CAS."""
+        from ciao.workspaces import (
+            acquire_workspace_registry,
+            replace_workspace_registry,
+            workspace_registry_lock,
+        )
 
         with workspace_registry_lock(self):
-            self._persist_workspace_registry_locked()
+            own_owner = owner is None
+            if owner is None:
+                owner = acquire_workspace_registry(self, blocking=True)
+            try:
+                replace_workspace_registry(
+                    self,
+                    self._workspace_registry_payload(),
+                    expected=self._workspace_registry_bytes,
+                    owner=owner,
+                )
+                self._workspace_registry_changed = False
+            finally:
+                if own_owner:
+                    owner.close()
 
-    def _persist_workspace_registry_locked(self) -> None:
-        """Write a registry snapshot while its shared serialization lock is held."""
-        path = self.state_path.parent / "workspaces.json"
-        path.parent.mkdir(parents=True, exist_ok=True)
+    def _workspace_registry_payload(self) -> bytes:
+        """Serialize the live registry as an exact persisted byte image."""
         payload: list[dict[str, Any]] = []
         for workspace in self.workspaces.values():
             row: dict[str, Any] = {
@@ -1391,10 +1589,7 @@ class CiaoConfig:
             if workspace.provider_overrides:
                 row["provider_overrides"] = workspace.provider_overrides
             payload.append(row)
-        tmp = path.with_suffix(".json.tmp")
-        tmp.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8", newline="")
-        tmp.replace(path)
-        self._workspace_registry_changed = False
+        return (json.dumps(payload, indent=2) + "\n").encode("utf-8")
 
     def _archived_workspace_names(self) -> set[str]:
         """Casefolded names recorded in ``<install>/.archived-workspaces/*/archive.json``."""
@@ -1819,10 +2014,14 @@ class CiaoConfig:
         # read as a source; its raw value is kept only so server startup can
         # import it once (see ``import_legacy_workspaces_env``).
         workspaces_json = ""
+        generation = None
         workspaces_path = runtime_root / "workspaces.json"
         try:
             if workspaces_path.is_file():
-                workspaces_json = workspaces_path.read_text(encoding="utf-8")
+                with workspaces_path.open(encoding="utf-8") as stream:
+                    info = os.fstat(stream.fileno())
+                    generation = (info.st_dev, info.st_ino, info.st_ctime_ns, info.st_size)
+                    workspaces_json = stream.read()
         except PermissionError as exc:
             from ciao.workspace_reroot import RuntimeStateUnreadable  # noqa: PLC0415
 
@@ -1830,7 +2029,7 @@ class CiaoConfig:
         except OSError:
             workspaces_json = ""
 
-        workspaces = _parse_workspaces_json(workspaces_json) or _bootstrap_registry(vault_root)
+        workspaces = _parse_workspaces_json(workspaces_json, generation=generation) or _bootstrap_registry(vault_root)
 
         # Settings the server needs before it exists (bind address, log level),
         # read from the runtime root like the registry above. Read-only: the
@@ -1851,7 +2050,7 @@ class CiaoConfig:
             if str(source.get(name, "") or "").strip()
         }
 
-        return cls(
+        config = cls(
             pwa_auth_token=pwa_auth_token,
             workspace_root=workspace_root,
             state_path=state_path,
@@ -1868,6 +2067,10 @@ class CiaoConfig:
             workspaces=workspaces,
             legacy_workspaces_env=str(source.get("CIAO_WORKSPACES", "") or "").strip(),
         )
+        config._workspace_registry_bytes = (
+            workspaces_json.encode("utf-8") if generation is not None else None
+        )
+        return config
 
 
 logger = logging.getLogger(__name__)
@@ -1890,6 +2093,99 @@ def active_workspace_vault_root(env: Mapping[str, str]) -> Path | None:
     if config.workspace(active) is None:
         return None
     return Path(config.agent_vault_root(active)).resolve()
+
+
+def active_workspace_index_is_ciao_owned(env: Mapping[str, str]) -> bool | None:
+    """Ownership decision for the active workspace's aggregate index, if known."""
+    active = str(env.get("CIAO_ACTIVE_WORKSPACE", "") or "").strip()
+    if not active:
+        return None
+    source = installed_workspace_env(env)
+    if not source.get("PWA_AUTH_TOKEN", "").strip():
+        source["PWA_AUTH_TOKEN"] = "vault-root"
+    config = CiaoConfig.from_env(source, export=False)
+    if config.workspace(active) is None:
+        return None
+    return config.ciao_owned_vault_index(active)
+
+
+@dataclass(frozen=True)
+class ConnectedWorkspace:
+    link: SharedBrainLink | None
+    vault_base: Path
+    name: str
+    root: Path
+    source_roots: frozenset[Path]
+
+
+def configured_connected_workspace(env: Mapping[str, str], root: Path, *,
+                                   registered_brains_only: bool = False,
+                                   implicit_root: bool = False) -> ConnectedWorkspace | None:
+    """Identify a registered connected brain for CLI index and search operations."""
+    source = installed_workspace_env(env)
+    if not source.get("PWA_AUTH_TOKEN"):
+        source["PWA_AUTH_TOKEN"] = "vault-root"
+    config = CiaoConfig.from_env(source, export=False)
+    wanted = root.resolve()
+    active = str(env.get("CIAO_ACTIVE_WORKSPACE") or "")
+    # Agent environments historically export the shared aggregate. An implicit
+    # CLI lookup for an unmanaged workspace uses its own snapshot.
+    if (implicit_root and active in config.workspaces and wanted == config.vault_root
+            and not config._rerooted() and not config.ciao_owned_vault_index(active)):
+        wanted = config.workspace_vault_root(active)
+    targets = config.index_scan_targets()
+    if any(root.resolve() == wanted and config.ciao_owned_vault_index(name or None)
+           for root, name, _prefix in targets):
+        return None
+    matches = [name for target, name, _ in targets
+               if name and not config.ciao_owned_vault_index(name)
+               and (not registered_brains_only or config.adopted_workspace_vault(name))
+               and wanted.is_relative_to(target.resolve())]
+    links: dict[str, SharedBrainLink] = {}
+    for name, workspace in config.workspaces.items():
+        for link in workspace.shared_brains:
+            recorded = Path(link.path)
+            resolved = recorded.resolve()
+            if wanted.is_relative_to(resolved):
+                if recorded != resolved:
+                    raise OSError("linked brain path changed since registration")
+                if name not in links or len(link.path) > len(links[name].path):
+                    links[name] = link
+                if name not in matches:
+                    matches.append(name)
+    if active in matches:
+        return ConnectedWorkspace(links.get(active), config.vault_root, active, wanted, config.index_source_roots())
+    if len(matches) > 1:
+        raise ValueError("select a workspace for this shared connected folder")
+    return ConnectedWorkspace(links.get(matches[0]), config.vault_root, matches[0], wanted, config.index_source_roots()) if matches else None
+
+
+def configured_vault_index_is_ciao_owned(
+    env: Mapping[str, str], destination: Path,
+) -> bool:
+    """Whether an exact configured scan destination has setup ownership."""
+    source = installed_workspace_env(env)
+    if not source.get("PWA_AUTH_TOKEN", "").strip():
+        source["PWA_AUTH_TOKEN"] = "vault-root"
+    config = CiaoConfig.from_env(source, export=False)
+    wanted = destination.expanduser().resolve()
+    return any(
+        root.expanduser().resolve() == wanted
+        and config.vault_index_ownership(workspace or None, root)
+        == INDEX_OWNERSHIP_CIAO
+        for root, workspace, _prefix in config.index_scan_targets()
+    )
+
+
+def configured_runtime_root(env: Mapping[str, str]) -> Path:
+    """Resolve the engine runtime directory using the installed-workspace contract."""
+    source = installed_workspace_env(env)
+    workspace = Path(_workspace_env(source) or ".").expanduser().resolve()
+    raw_runtime = str(source.get("CIAO_RUNTIME_ROOT", "") or ".runtime").strip()
+    runtime = Path(raw_runtime).expanduser()
+    if not runtime.is_absolute():
+        runtime = workspace / runtime
+    return runtime.resolve()
 
 
 # Backward-compatible alias used by project_chats.py and other modules

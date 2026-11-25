@@ -980,12 +980,21 @@ def _pin_workspace_model(registry: Path, provider: str, model: str) -> None:
     the entry, so delegated chats (which take the workspace default) resolve to
     the requested model.
     """
-    entries: Any = json.loads(registry.read_text(encoding="utf-8"))
-    for entry in entries:
-        if isinstance(entry, dict) and entry.get("name") == WORKSPACE:
-            entry["provider_overrides"] = {provider: {"model": model}}
-            registry.write_text(json.dumps(entries, indent=2) + "\n", encoding="utf-8", newline="")
-            return
+    from ciao.workspaces import workspace_registry_file_lock  # noqa: PLC0415
+
+    with workspace_registry_file_lock(registry.parent, exclusive=True):
+        entries: Any = json.loads(registry.read_text(encoding="utf-8"))
+        for entry in entries:
+            if isinstance(entry, dict) and entry.get("name") == WORKSPACE:
+                entry["provider_overrides"] = {provider: {"model": model}}
+                tmp = registry.with_suffix(".json.tmp")
+                tmp.write_text(
+                    json.dumps(entries, indent=2) + "\n",
+                    encoding="utf-8",
+                    newline="",
+                )
+                os.replace(tmp, registry)
+                return
     raise RuntimeError(f"workspace registry has no {WORKSPACE!r} entry: {registry}")
 
 
