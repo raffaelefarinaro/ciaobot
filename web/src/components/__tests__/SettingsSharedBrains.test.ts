@@ -519,6 +519,7 @@ function evidence(over: Partial<ShareEvidenceState> = {}): ShareEvidenceState {
   return {
     disclosure_tokens: { 'proj-alpha': 'scope' },
     workspace: 'personal',
+    chat_evidence: { available: false, reason: 'protected_authority_unavailable' },
     mode: 'review',
     fields: ['decision', 'reason', 'effective_date'],
     producers: ['memory_extraction', 'nightly_curation'],
@@ -578,6 +579,11 @@ async function openSources() {
 }
 
 describe('SettingsSharedBrains sources and consent', () => {
+  it('explains that ordinary chat stays private', async () => {
+    apiGet.mockImplementation(routeGet({ personal: () => evidence() }))
+    const view = await openSources()
+    expect(view.text()).toContain('Ordinary chat messages remain private')
+  })
   it('server-filters the brain, project and actual source and states the review default', async () => {
     apiGet.mockImplementation(routeGet({ personal: () => evidence() }))
     const view = await openSources()

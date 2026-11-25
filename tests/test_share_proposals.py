@@ -1868,6 +1868,63 @@ async def test_memory_pass_files_private_candidate_and_replays_idempotently(link
         se._reset_project_manager_for_tests()
 
 
+async def test_ordinary_chat_is_not_admitted_by_a_structured_decision_grant(linked, tmp_path, monkeypatch):
+    from dataclasses import replace
+    from tests.test_share_evidence import _memory_manager
+    from ciao import share_evidence as se, share_publish, shared_brain_guide, shared_brain_mapping
+    from ciao.mcp_server import AgentSessionRegistry
+    from ciao.web import memory_pass
+
+    fixture_config, clone = linked
+    config, manager, project, source = _memory_manager(tmp_path)
+    Path(source.archive_path).write_text(
+        "## Turn 1\nUser: In this project, we call the weekly planning meeting the Monday huddle.\n",
+        encoding="utf-8",
+    )
+    guide = {"version": 1, "scope": "Decisions", "exclusions": [], "types": {
+        "decision": {"kind": "collection", "path": "decisions", "operation": "create"}}}
+    (clone / shared_brain_guide.GUIDE_NAME).write_text("```ciao-guide\n" + json.dumps(guide) + "\n```\n")
+    load = shared_brain_guide.read_guide(clone, brain_identity=fixture_config.link.identity)
+    mapping = shared_brain_mapping.approve(fixture_config.link, load, ["decision"], expected_pin=load.guide.pin)
+    link = replace(fixture_config.link, guide_mapping=mapping, guide_mapping_generation=mapping.generation)
+    config.workspace("home").shared_brains = [link]
+    config.persist_workspace_registry()
+    project.vault_folder = "alpha"
+    project_dir = Path(config.workspace_vault_root("home")) / "projects" / "active" / "alpha"
+    project_dir.mkdir(parents=True)
+    se._reset_project_manager_for_tests()
+    se.bind_project_manager(manager)
+    se.record_operator_decision(config, workspace="home", project_id=project.project_id, decision="Earlier decision", reason="", effective_date="2026-11-20", session="operator")
+    preview = se.preview(config, workspace="home", brain_name=link.name, project_id=project.project_id, project_name="Alpha", project_dir=project_dir, source_id=f"stream:{project.project_id}", grant_type="standing", field_mask=["decision"], producers=["memory_extraction"], session="operator")
+    se.confirm(config, workspace="home", token=preview["preview_token"], session="operator")
+    chat = next(item for item in manager.list_chats() if (item.helper or {}).get("kind") == memory_pass.MEMORY_PASS_KIND)
+    chat.helper["state"] = "running"
+    chat.last_response = "The Monday huddle is a durable project convention."
+    chat.last_response_status = "success"
+    registry = AgentSessionRegistry()
+    registry.issue(chat_id=chat.chat_id, project_id=chat.project_id, workspace="home", provider="claude")
+    manager._mcp_service = SimpleNamespace(registry=registry)
+    monkeypatch.setattr(share_publish, "publish_share", lambda *a, **kw: pytest.fail("intake published"))
+    intake = sp.draft_evidence_candidates
+    results = []
+
+    def record_intake(*args, **kwargs):
+        rows = intake(*args, **kwargs)
+        results.append(rows)
+        return rows
+
+    monkeypatch.setattr(sp, "draft_evidence_candidates", record_intake)
+    try:
+        assert await manager._memory_pass.on_turn_finished(chat.chat_id)
+        await asyncio.gather(*list(manager._detached_tasks))
+        assert results == [[]]
+        queue = Path(config.workspace_vault_root("home")) / "Workspace" / "Memory-Proposals.md"
+        assert not queue.exists() or "[share " not in queue.read_text()
+        assert not (clone / "decisions").exists()
+    finally:
+        se._reset_project_manager_for_tests()
+
+
 @pytest.mark.parametrize("attest_failure", [False, True])
 def test_killed_memory_completion_files_candidate_after_restart(linked, tmp_path, monkeypatch, attest_failure):
     from dataclasses import replace

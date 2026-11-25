@@ -499,6 +499,7 @@ async def share_evidence_state(request: Request) -> JSONResponse:
         return JSONResponse({
             "workspace": workspace,
             "mode": share_evidence.workspace_mode(config, workspace=workspace),
+            "chat_evidence": {"available": False, "reason": "protected_authority_unavailable"},
             "fields": list(share_evidence.FIELDS),
             "producers": list(share_evidence.PRODUCERS),
             "brains": [
