@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import dataclasses
+import asyncio
 import json
 import subprocess
 import sys
@@ -1257,6 +1258,61 @@ def test_care_checkpoint_stages_only_completed_exact_witness_and_replays_once(
     receipts = list((config.state_path.parent / "secrets" / "share-evidence").rglob("care-settlements/*.json"))
     assert len(receipts) == (0 if crash_before_state else 1)
     assert len(curation_share.settled_witnesses(config, workspace="home", holder=lease.holder)) == (0 if crash_before_state else 1)
+    if not crash_before_state:
+        obtained = threading.Event()
+        release = threading.Event()
+        finished = threading.Event()
+        errors: list[BaseException] = []
+        def reader() -> None:
+            try:
+                async def ordered() -> None:
+                    from ciao import shared_brain
+                    from ciao.workspaces import acquire_workspace_registry
+                    path = str(tmp_path / "brain")
+                    async with shared_brain._checkout_lock(path), shared_brain._checkout_claim(path, config):
+                        owner = acquire_workspace_registry(config)
+                        try:
+                            with se.evidence_claim(config, workspace="home") as claim:
+                                assert len(curation_share.settled_witnesses(config, workspace="home", holder=lease.holder, claim=claim)) == 1
+                                foreign_thread_errors: list[str] = []
+                                def check_foreign_thread() -> None:
+                                    try:
+                                        curation_share.settled_witnesses(config, workspace="home", holder=lease.holder, claim=claim)
+                                    except se.EvidenceError as exc:
+                                        foreign_thread_errors.append(exc.code)
+                                foreign_thread = threading.Thread(target=check_foreign_thread)
+                                foreign_thread.start()
+                                foreign_thread.join(2)
+                                assert foreign_thread_errors == ["invalid_evidence_claim"]
+                                with pytest.raises(se.EvidenceError):
+                                    curation_share.settled_witnesses(config, workspace="work", holder=lease.holder, claim=claim)
+                                with pytest.raises(se.EvidenceError, match="existing evidence claim"):
+                                    curation_share.settled_witnesses(config, workspace="home", holder=lease.holder)
+                                obtained.set()
+                                assert release.wait(5)
+                            with pytest.raises(se.EvidenceError):
+                                curation_share.settled_witnesses(config, workspace="home", holder=lease.holder, claim=claim)
+                        finally:
+                            owner.close()
+                asyncio.run(ordered())
+            except BaseException as exc:
+                errors.append(exc)
+                obtained.set()
+        def revoke() -> None:
+            se.revoke(config, workspace="home", grant_id=grant["grant_id"])
+            finished.set()
+        reader_thread = threading.Thread(target=reader, daemon=True)
+        reader_thread.start()
+        assert obtained.wait(3), "nested settlement lookup deadlocked"
+        assert not errors
+        revoker = threading.Thread(target=revoke, daemon=True)
+        revoker.start()
+        assert not finished.wait(0.1)
+        release.set()
+        reader_thread.join(3)
+        revoker.join(3)
+        assert not reader_thread.is_alive() and not revoker.is_alive()
+        assert not errors and finished.is_set()
     se.revoke(config, workspace="home", grant_id=grant["grant_id"])
     assert curation_share.settled_witnesses(config, workspace="home", holder=lease.holder) == []
     assert curation_share.checkpoint(config, manager, **args) == 0

@@ -243,10 +243,11 @@ def end(config: Any, *, workspace: str, chat_id: str, token_id: str, dispatch_id
     )
 
 
-def settled_witnesses(config: Any, *, workspace: str, holder: str) -> list[dict[str, Any]]:
+def settled_witnesses(config: Any, *, workspace: str, holder: str, claim: share_evidence.EvidenceClaim | None = None) -> list[dict[str, Any]]:
     """Read only references whose run settled and whose source grant is still current."""
     run_id = hashlib.sha256(holder.encode("utf-8")).hexdigest()
-    with share_evidence._workspace_guard(config, workspace) as directory:
+    with share_evidence._claim_scope(config, workspace, claim) as owned:
+        directory = owned.directory
         receipts = _private_dir(directory, "care-settlements")
         if receipts is None:
             return []
@@ -280,13 +281,14 @@ def settled_witnesses(config: Any, *, workspace: str, holder: str) -> list[dict[
                 or not isinstance(item.get("witness"), dict)):
                 return []
             items.append(item)
-    eligible: list[dict[str, Any]] = []
-    for item in items:
-        witness = item["witness"]
-        witnesses = share_evidence.care_snapshot_witnesses(
-            config, workspace=workspace, project_id=witness.get("project_id", ""),
-            relative_path=witness.get("source_path", ""), revision=witness.get("source_revision", ""),
-        )
-        if witness in witnesses:
-            eligible.append(item)
-    return eligible
+        eligible: list[dict[str, Any]] = []
+        for item in items:
+            witness = item["witness"]
+            witnesses = share_evidence.care_snapshot_witnesses(
+                config, workspace=workspace, project_id=witness.get("project_id", ""),
+                relative_path=witness.get("source_path", ""), revision=witness.get("source_revision", ""),
+                claim=owned,
+            )
+            if witness in witnesses:
+                eligible.append(item)
+        return eligible
