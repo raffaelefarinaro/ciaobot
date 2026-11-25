@@ -23,6 +23,7 @@ Scenario JSON (every key optional):
   A prompt with no ``stop`` step stops with ``end_turn``.
 - ``after_prompt``: steps sent after the prompt response (late updates).
   ``after_prompt_delay_ms`` waits that long before sending them (default 50).
+  ``after_prompt_release_file`` instead waits for the named test-owned file.
 - ``load_error`` / ``resume_error``: fail ``session/load`` or ``session/resume``
   with that message.
 - ``new_error``: fail ``session/new`` with that message.
@@ -286,9 +287,19 @@ class FakeAgent:
         response = await self._run_steps(session_id, entry.get("steps", []))
         after = self.scenario.get("after_prompt")
         if after:
-            delay = self.scenario.get("after_prompt_delay_ms", 50) / 1000
-            asyncio.get_running_loop().call_later(
-                delay, lambda: asyncio.ensure_future(self._run_steps(session_id, after)))
+            release = self.scenario.get("after_prompt_release_file")
+            if release:
+                async def send_after_release() -> None:
+                    self.log("late_update_waiting", {})
+                    while not Path(release).exists():
+                        await asyncio.sleep(0.01)
+                    await self._run_steps(session_id, after)
+
+                asyncio.create_task(send_after_release())
+            else:
+                delay = self.scenario.get("after_prompt_delay_ms", 50) / 1000
+                asyncio.get_running_loop().call_later(
+                    delay, lambda: asyncio.ensure_future(self._run_steps(session_id, after)))
         return response or PromptResponse(stop_reason="end_turn")
 
     async def ext_method(self, method: str, params: dict[str, Any]) -> dict[str, Any]:
