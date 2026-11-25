@@ -186,6 +186,13 @@ The route source of truth is `ciao/web/app.py`. This file is kept in sync by `te
 | GET | `/api/agent/status` | Agent CLI surface status: `{ready, operations, telemetry_path, version}` for the Settings → Agent CLI panel |
 | GET | `/api/workspaces` | List configured logical workspaces |
 | POST | `/api/workspaces/{name}` | Add or update a logical workspace config. A genuinely new workspace registers workspace-scoped onboarding at `runtime` before registry persistence and adds `onboarding_target: {kind: "workspace", name}` to the response; updating an existing workspace does not register progress. Restore does not create progress; reusing an archived name is a new creation. |
+| GET | `/api/workspaces/{name}/share-evidence` | Read one workspace's private evidence panel: `{workspace, mode, fields, producers, brains, projects, grants}`. `mode` is `review` for every existing install until a live standing grant on a still-linked brain exists, otherwise `automatic`; `projects` are that workspace's own projects with only the actual sources the server offers (`stream:<project>` or `document:Decisions.md`); `grants` omit evidence bytes, preview tokens and entry ids; each row carries `active`, `linked`, `status` (`active`, `unlinked`, `revoked`, `withdrawn` or `inactive`) and a non-secret `brain.link_fingerprint`, so a still-named relink reads `unlinked` rather than live. Every grant is bound to the persisted workspace lifetime, so a delete/recreate or archive restore never inherits it. 404 for an unknown workspace. |
+| POST | `/api/workspaces/{name}/share-evidence/decisions` | Authenticated operator save of one structured decision: body `{project_id, decision, reason, effective_date}` bounded to 2,000 characters each, a real `YYYY-MM-DD` date, valid UTF-8 with no control characters and no credential-shaped text. The engine owns the project stream and records private provenance; a first save creates it. Returns `{entry, stream, mode}`; a model, file write or import has no equivalent path. This authenticated operator save is the sole ingress for standing-stream text; the engine signs an event over its exact fields, revision, project, workspace lifetime and session fingerprint, and producers select these existing masked entries rather than authoring new text. Editing the stored text without that signature makes the event inert |
+| POST | `/api/workspaces/{name}/share-evidence/preview` | Render the exact scope: body `{brain, project_id, source_id, grant_type, field_mask, producers, entry_index?}` with `grant_type` `standing` (a stream, future entries) or `snapshot` (one `Decisions.md` entry, `entry_index`). Returns a one-use, 15-minute preview token bound to the operator session, workspace, brain lifetime, project, source, field mask/bytes and expected generation, plus sample fields (stream) or all exact values (snapshot), recipient, producers and excluded fields. 409/400 refusals use `{error, code}` |
+| POST | `/api/workspaces/{name}/share-evidence/confirm` | Persist exactly the previewed scope: body `{preview_token, confirm: true}`. A stale stream revision, an expired or reused token, another operator session or a changed brain link is refused (409); grant persistence and token consumption are one atomic state replacement under a cross-process lock, so a crash cannot leave a replayable token or a duplicate grant. A snapshot persists the previewed bytes even after the document changed. Returns `{grant, mode}` |
+| GET | `/api/workspaces/{name}/share-evidence/grants/{grant_id}` | Exact scope and immutable history of one grant in this workspace (404 otherwise) |
+| POST | `/api/workspaces/{name}/share-evidence/grants/{grant_id}/revoke` | Revoke one grant. Returns `{grant, fresh_grant_required: true}`; the revoked generation and time are kept, and earlier authorized evidence no longer resolves |
+| POST | `/api/workspaces/{name}/share-evidence/grants/{grant_id}/withdraw` | Engine-recorded withdrawal with an optional bounded `{reason}`. Returns the grant; the old generation can no longer resolve as eligible |
 | GET | `/api/workspaces/{name}/shared-brains` | Live state of each shared brain the workspace links: `{shared_brains: [{name, identity, path, origin_changed, missing, problem, branch, head, head_date, dirty, upstream, fetched_at, last_update}]}`; `problem` is "" or why the folder cannot be used now (`missing`, `moved` for a symlink, `not_a_checkout` for a missing or linked-worktree `.git`, `outside_install` for a link kept from before it moved into the install or a vault, `unsafe_config` for a folder whose own git settings are outside the allowlist or whose branch fetches from a remote other than origin, `origin_changed` when its origin no longer gives the linked identity), and git is not read then, `[]` when none. Read-only; 404 `{"error": "unknown workspace"}` for an unknown name. |
 | POST | `/api/workspaces/reorder` | Persist a new workspace order: body `{order: [name, ...]}` must list every registered (non-archived) workspace exactly once, else 400. The order is the registry's list order: it drives the switcher, the 1-9 shortcuts and every workspace list. Returns the `GET /api/workspaces` payload. When no workspace is named `personal` the first one is the main workspace and stays first: an order that would change it is refused with 409. A restored workspace is appended last |
 | POST | `/api/workspaces/{name}/archive` | Archive a workspace: unregister it, archive its chats, take its user schedules (chat-owned loops are not taken: they are deleted with their chat in the same pass), and move its folder intact into `<install>/.archived-workspaces/<name>-<YYYYMMDD-HHMMSS>/`. Refuses the primary or last workspace, a workspace with a running chat or one still stopping (before anything moves), and layouts it cannot move safely (409) |
@@ -312,6 +319,41 @@ curl -sS -b /tmp/ciao.jar -X POST "http://localhost:${PWA_PORT:-8443}/api/import
 # Drop a batch record. Queue and vault are untouched: filed proposals stay
 # queued and accepted facts stay in the vault.
 curl -sS -b /tmp/ciao.jar -X DELETE "http://localhost:${PWA_PORT:-8443}/api/import/batches/$BATCH?workspace=default"
+```
+
+### Shared-brain evidence and consent
+
+The structured-decision path is operator-only by construction: these routes exist
+for Settings, and no agent tool appends a trusted decision or grants disclosure.
+A standing grant authorizes future matching entries with no per-fact approval;
+an individual snapshot freezes the exact previewed bytes. The preview token is
+one-use and session-bound, so preview and confirm must come from the same
+cookie jar.
+
+```bash
+# Read the workspace's actual sources and existing grants (review by default).
+curl -sS -b /tmp/ciao.jar "http://localhost:${PWA_PORT:-8443}/api/workspaces/default/share-evidence"
+
+# Record one operator-authored structured decision; the engine creates the stream.
+curl -sS -b /tmp/ciao.jar -X POST "http://localhost:${PWA_PORT:-8443}/api/workspaces/default/share-evidence/decisions" \
+  -H 'content-type: application/json' \
+  -d '{"project_id":"<project>","decision":"Use the new vendor","reason":"cheaper","effective_date":"2026-11-25"}'
+
+# Preview a standing grant over the exact fields, then confirm the same token.
+PREVIEW=$(curl -sS -b /tmp/ciao.jar -X POST "http://localhost:${PWA_PORT:-8443}/api/workspaces/default/share-evidence/preview" \
+  -H 'content-type: application/json' \
+  -d '{"brain":"team-notes","project_id":"<project>","source_id":"stream:<project>","grant_type":"standing","field_mask":["decision","effective_date"],"producers":["memory_extraction"]}')
+TOKEN=$(printf %s "$PREVIEW" | python3 -c 'import json,sys; print(json.load(sys.stdin)["preview_token"])')
+curl -sS -b /tmp/ciao.jar -X POST "http://localhost:${PWA_PORT:-8443}/api/workspaces/default/share-evidence/confirm" \
+  -H 'content-type: application/json' \
+  -d "{\"preview_token\":\"$TOKEN\",\"confirm\":true}"
+
+# Revoke the returned grant; a fresh preview and grant are required afterwards.
+curl -sS -b /tmp/ciao.jar -X POST "http://localhost:${PWA_PORT:-8443}/api/workspaces/default/share-evidence/grants/$GRANT/revoke"
+
+# Engine-recorded withdrawal (for a correction or supersession).
+curl -sS -b /tmp/ciao.jar -X POST "http://localhost:${PWA_PORT:-8443}/api/workspaces/default/share-evidence/grants/$GRANT/withdraw" \
+  -H 'content-type: application/json' -d '{"reason":"superseded by a corrected decision"}'
 ```
 
 ### Restart an installed server

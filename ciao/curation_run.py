@@ -40,8 +40,10 @@ import hashlib
 import json
 import logging
 import os
+import secrets
 import socket
 import stat
+import tempfile
 import uuid
 from contextlib import contextmanager
 from dataclasses import dataclass, field, replace
@@ -2186,6 +2188,12 @@ def _load(path: Path) -> CurationState:
             _check_lease_plan(path, lease["plan"])
         if "chat_id" in lease and not isinstance(lease["chat_id"], str):
             raise _state_error(path, "lease chat_id is invalid")
+        if "proof_hash" in lease and (
+            not isinstance(lease["proof_hash"], str)
+            or len(lease["proof_hash"]) != 64
+            or any(ch not in "0123456789abcdef" for ch in lease["proof_hash"])
+        ):
+            raise _state_error(path, "lease proof hash is invalid")
     if last_run:
         if (
             not isinstance(last_run.get("status"), str)
@@ -2363,12 +2371,19 @@ def _state_lock(vault_root: Path) -> Iterator[None]:
 
 @dataclass(frozen=True, slots=True)
 class Lease:
-    """A held curation lease."""
+    """A held curation lease.
+
+    ``proof`` is returned only to the process that took the lease; the state
+    stores only ``proof_hash``. A reader of the state can copy the holder but
+    cannot present the proof.
+    """
 
     holder: str
     started_at: str
     expires_at: str
     vault_root: Path
+    proof: str = field(default="", repr=False)
+    proof_hash: str = ""
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -2376,6 +2391,108 @@ class Lease:
             "started_at": self.started_at,
             "expires_at": self.expires_at,
         }
+
+
+def _capability_path(vault_root: Path, holder: str) -> Path:
+    from ciao.memory_receipts import lock_path_for  # noqa: PLC0415
+
+    lock = lock_path_for(f"{Path(vault_root).resolve()}\0{holder}")
+    return lock.with_name(lock.stem + ".lease.json")
+
+
+def _store_lease_capability(lease: Lease) -> None:
+    """Persist the one-time proof outside the vault, owner-only, never in argv/logs."""
+    path = _capability_path(lease.vault_root, lease.holder)
+    path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    os.chmod(path.parent, 0o700)
+    payload = json.dumps(
+        {
+            "vault": str(lease.vault_root.resolve()),
+            "holder": lease.holder,
+            "proof": lease.proof,
+            "proof_hash": lease.proof_hash,
+            "started_at": lease.started_at,
+            "expires_at": lease.expires_at,
+        },
+        ensure_ascii=False,
+        sort_keys=True,
+    ).encode("utf-8")
+    fd, tmp = tempfile.mkstemp(dir=path.parent, prefix=".lease-cap-")
+    try:
+        os.chmod(tmp, 0o600)
+        with os.fdopen(fd, "wb") as handle:
+            handle.write(payload)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(tmp, path)
+    except BaseException:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
+
+
+def _clear_lease_capability(vault_root: Path, holder: str) -> None:
+    try:
+        _capability_path(vault_root, holder).unlink()
+    except FileNotFoundError:
+        pass
+    except OSError:
+        logger.warning("Could not remove a curation lease capability")
+
+
+def load_lease_capability(
+    vault_root: Path, holder: str, *, now: datetime | None = None
+) -> Lease | None:
+    """Load the private capability a prior process wrote for this lease.
+
+    Returns None when it is absent, expired, malformed or not owner-only. The
+    proof itself never appears in argv, stdout, stderr or logs.
+    """
+    if not isinstance(holder, str) or not holder:
+        return None
+    path = _capability_path(Path(vault_root), holder)
+    try:
+        descriptor = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+    except OSError:
+        return None
+    try:
+        info = os.fstat(descriptor)
+        if stat.S_IMODE(info.st_mode) != 0o600:
+            return None
+        with os.fdopen(descriptor, "rb", closefd=False) as handle:
+            raw = handle.read(16_384 + 1)
+    finally:
+        os.close(descriptor)
+    if len(raw) > 16_384:
+        return None
+    try:
+        data = json.loads(raw.decode("utf-8", "strict"))
+    except (UnicodeError, json.JSONDecodeError):
+        return None
+    if not isinstance(data, dict):
+        return None
+    moment = (now or datetime.now(UTC)).astimezone(UTC)
+    expires = _parse_iso(str(data.get("expires_at") or ""))
+    if (
+        data.get("vault") != str(Path(vault_root).resolve())
+        or data.get("holder") != holder
+        or not isinstance(data.get("proof"), str)
+        or not data["proof"]
+        or data.get("proof_hash") != hashlib.sha256(data["proof"].encode("utf-8")).hexdigest()
+        or expires is None
+        or expires <= moment
+    ):
+        return None
+    return Lease(
+        holder=holder,
+        started_at=str(data.get("started_at") or ""),
+        expires_at=str(data.get("expires_at") or ""),
+        vault_root=Path(vault_root),
+        proof=data["proof"],
+        proof_hash=data["proof_hash"],
+    )
 
 
 def _live_lease(state: CurationState, now: datetime) -> dict[str, Any] | None:
@@ -2454,6 +2571,7 @@ def begin_run(
                 f"{held.get('expires_at', 'its lease expires')}"
             )
         _settle_pending(Path(vault_root), state, holder="", clock=_recheck_clock(now, None))
+        proof = secrets.token_urlsafe(32)
         lease = Lease(
             holder=f"{holder}:{uuid.uuid4()}",
             started_at=now.replace(microsecond=0).isoformat().replace("+00:00", "Z"),
@@ -2462,9 +2580,22 @@ def begin_run(
             .isoformat()
             .replace("+00:00", "Z"),
             vault_root=Path(vault_root),
+            proof=proof,
+            proof_hash=hashlib.sha256(proof.encode("utf-8")).hexdigest(),
         )
-        state.lease = {**lease.as_dict(), **({"chat_id": chat_id} if chat_id else {})}
+        state.lease = {
+            **lease.as_dict(),
+            # v1 byte compatibility: only the cycle (v2) writer records the
+            # capability hash; a v1 lease has no source capability.
+            **({"proof_hash": lease.proof_hash} if state.cycle is not None else {}),
+            **({"chat_id": chat_id} if chat_id else {}),
+        }
         _store(state_path(vault_root), state)
+        if state.cycle is not None:
+            try:
+                _store_lease_capability(lease)
+            except OSError:
+                logger.warning("Could not store a curation lease capability")
     return lease
 
 
@@ -2794,6 +2925,7 @@ def end_run(
         state.last_run = summary
         state.lease = {}
         _store(state_path(vault_root), state)
+        _clear_lease_capability(Path(vault_root), holder)
     return {**summary, "full_pass_advanced": advanced, "marker_error": marker_error}
 
 

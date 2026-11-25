@@ -297,11 +297,13 @@ def test_post_workspace_persists_runtime_registry_and_updates_live_config(tmp_pa
     assert client_workspace == {
         "name": "client-a",
         "vault_root": "memory-vault/client-a",
+        "lifetime_id": client_workspace["lifetime_id"],
         "default_provider": "claude",
         "disallowed_tools": ["mcp__claude_ai_Slack", "Bash"],
         "color": "amber",
         "memory_handover": "all",
     }
+    assert client_workspace["lifetime_id"]
 
 
 def test_patch_and_delete_workspace_update_runtime_registry(tmp_path):
@@ -329,6 +331,7 @@ def test_patch_and_delete_workspace_update_runtime_registry(tmp_path):
         {
             "name": "personal",
             "vault_root": "memory-vault/personal",
+            "lifetime_id": json.loads((tmp_path / ".runtime" / "workspaces.json").read_text())[0]["lifetime_id"],
             "default_provider": "claude",
             "disallowed_tools": None,
             "color": "amber",
@@ -2044,3 +2047,23 @@ def test_status_holds_checkout_and_registry_during_git(tmp_path, monkeypatch):
     assert response.status_code == 200
     assert response.json()["shared_brains"][0]["problem"] == ""
     assert observed
+
+
+def test_workspace_lifetime_persists_and_recreate_gets_a_fresh_one(tmp_path):
+    client, config, _pcm = _client(tmp_path)
+    assert client.post("/api/workspaces", json={"name": "client-a"}).status_code == 201
+    lifetime = config.workspace("client-a").lifetime_id
+    assert lifetime
+
+    env = {
+        "PWA_AUTH_TOKEN": "t",
+        "CIAO_WORKSPACE": str(tmp_path),
+        "CIAO_RUNTIME_ROOT": str(tmp_path / ".runtime"),
+    }
+    reloaded = CiaoConfig.from_env(env)
+    assert reloaded.workspace("client-a").lifetime_id == lifetime
+
+    assert client.delete("/api/workspaces/client-a").status_code == 200
+    assert client.post("/api/workspaces", json={"name": "client-a"}).status_code == 201
+    assert config.workspace("client-a").lifetime_id
+    assert config.workspace("client-a").lifetime_id != lifetime

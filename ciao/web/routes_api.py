@@ -265,7 +265,14 @@ def _persist_workspaces(config, candidate_workspaces=None, *, owner=None) -> Non
 def _workspace_registry_snapshot(config) -> tuple[tuple[str, dict[str, Any]], ...]:
     """Comparable snapshot for detecting registry edits across claim awaits."""
     return tuple(
-        (name, dataclasses.asdict(workspace))
+        (
+            name,
+            {
+                key: value
+                for key, value in dataclasses.asdict(workspace).items()
+                if not key.startswith("_")
+            },
+        )
         for name, workspace in config.workspaces.items()
     )
 
@@ -329,6 +336,233 @@ async def workspace_shared_brains(request: Request) -> JSONResponse:
     for link in list(workspace.shared_brains):
         states.append(await asyncio.to_thread(shared_brain.brain_state, link, config, workspace.name))
     return JSONResponse({"shared_brains": states})
+
+
+# --- Share evidence: private typed decisions and permission to disclose one ---
+
+def _share_evidence_error(exc: Any, *, status: int = 400) -> JSONResponse:
+    return JSONResponse(
+        {"error": str(getattr(exc, "message", exc)), "code": getattr(exc, "code", "")},
+        status_code=status,
+    )
+
+
+def _share_project(request: Request, workspace: str, project_id: str) -> tuple[Any, Path]:
+    """Resolve one project that actually belongs to this workspace and its folder."""
+    from ciao import share_evidence  # noqa: PLC0415
+
+    pcm = getattr(request.app.state, "project_chat_manager", None)
+    if pcm is None:
+        raise share_evidence.EvidenceError("project_unavailable", "Projects are not available.")
+    project = pcm.get_project(project_id) if project_id else None
+    if project is None or getattr(project, "workspace", "") != workspace:
+        raise share_evidence.EvidenceError("invalid_project", "Choose a project in this workspace.")
+    folder = pcm.active_project_vault_dir(project.project_id)
+    if folder is None:
+        raise share_evidence.EvidenceError(
+            "invalid_project", "The project has no active folder in this workspace."
+        )
+    return project, Path(folder)
+
+
+def _share_session(request: Request) -> str:
+    from ciao.web.auth import SESSION_COOKIE  # noqa: PLC0415
+
+    return str(request.cookies.get(SESSION_COOKIE) or "")
+
+
+def _share_workspace(request: Request) -> str:
+    config = request.app.state.config
+    name = str(request.path_params.get("name", ""))
+    if config.workspace(name) is None:
+        from ciao import share_evidence  # noqa: PLC0415
+
+        raise share_evidence.EvidenceError("unknown_workspace", "The workspace is not available.")
+    return name
+
+
+async def share_evidence_state(request: Request) -> JSONResponse:
+    """Read the private Sources panel for one workspace; review is the default."""
+    from ciao import share_evidence  # noqa: PLC0415
+
+    config = request.app.state.config
+    try:
+        workspace = _share_workspace(request)
+        pcm = getattr(request.app.state, "project_chat_manager", None)
+        projects = []
+        for project in (pcm.list_projects(workspace) if pcm is not None else []):
+            if getattr(project, "workspace", workspace) != workspace:
+                continue
+            folder = pcm.active_project_vault_dir(project.project_id) if pcm is not None else None
+            sources = []
+            if folder is not None:
+                try:
+                    sources = share_evidence.list_sources(
+                        config, workspace=workspace, project_id=project.project_id,
+                        project_name=project.name, project_dir=Path(folder),
+                    )
+                except share_evidence.EvidenceError:
+                    sources = []
+            projects.append({
+                "project_id": project.project_id,
+                "name": project.name,
+                "sources": sources,
+            })
+        record = config.workspace(workspace)
+        return JSONResponse({
+            "workspace": workspace,
+            "mode": share_evidence.workspace_mode(config, workspace=workspace),
+            "fields": list(share_evidence.FIELDS),
+            "producers": list(share_evidence.PRODUCERS),
+            "brains": [
+                {"name": link.name, "identity": link.identity}
+                for link in list(getattr(record, "shared_brains", []) or [])
+            ],
+            "projects": projects,
+            "grants": share_evidence.list_grants(config, workspace=workspace),
+        })
+    except share_evidence.EvidenceError as exc:
+        return _share_evidence_error(exc, status=404 if exc.code == "unknown_workspace" else 400)
+
+
+async def share_evidence_record_decision(request: Request) -> JSONResponse:
+    """Authenticated operator save: append one trusted structured decision."""
+    from ciao import share_evidence  # noqa: PLC0415
+
+    config = request.app.state.config
+    try:
+        body = await request.json()
+    except ValueError:
+        return JSONResponse({"error": "invalid JSON"}, status_code=400)
+    if not isinstance(body, dict):
+        return JSONResponse({"error": "expected an object"}, status_code=400)
+    try:
+        workspace = _share_workspace(request)
+        project, _folder = _share_project(request, workspace, str(body.get("project_id", "")).strip())
+        result = share_evidence.record_operator_decision(
+            config, workspace=workspace, project_id=project.project_id,
+            decision=body.get("decision"), reason=body.get("reason", ""),
+            effective_date=body.get("effective_date"),
+            session=_share_session(request),
+        )
+        return JSONResponse({**result, "mode": share_evidence.workspace_mode(config, workspace=workspace)})
+    except share_evidence.EvidenceError as exc:
+        return _share_evidence_error(exc, status=404 if exc.code == "unknown_workspace" else 400)
+
+
+async def share_evidence_preview(request: Request) -> JSONResponse:
+    """Render the exact scope and mint a session-bound preview token."""
+    from ciao import share_evidence  # noqa: PLC0415
+
+    config = request.app.state.config
+    try:
+        body = await request.json()
+    except ValueError:
+        return JSONResponse({"error": "invalid JSON"}, status_code=400)
+    if not isinstance(body, dict):
+        return JSONResponse({"error": "expected an object"}, status_code=400)
+    try:
+        workspace = _share_workspace(request)
+        project, folder = _share_project(request, workspace, str(body.get("project_id", "")).strip())
+        result = share_evidence.preview(
+            config, workspace=workspace,
+            brain_name=str(body.get("brain", "")),
+            project_id=project.project_id, project_name=project.name, project_dir=folder,
+            source_id=str(body.get("source_id", "")),
+            grant_type=str(body.get("grant_type", "")),
+            field_mask=body.get("field_mask"),
+            producers=body.get("producers"),
+            entry_index=body.get("entry_index"),
+            session=_share_session(request),
+        )
+        return JSONResponse(result)
+    except share_evidence.EvidenceError as exc:
+        return _share_evidence_error(exc, status=404 if exc.code == "unknown_workspace" else 400)
+
+
+async def share_evidence_confirm(request: Request) -> JSONResponse:
+    """Persist exactly the previewed scope after re-resolving authorization."""
+    from ciao import share_evidence  # noqa: PLC0415
+
+    config = request.app.state.config
+    try:
+        body = await request.json()
+    except ValueError:
+        return JSONResponse({"error": "invalid JSON"}, status_code=400)
+    if not isinstance(body, dict):
+        return JSONResponse({"error": "expected an object"}, status_code=400)
+    if body.get("confirm") is not True:
+        return JSONResponse({"error": "Explicit confirmation is required."}, status_code=400)
+    try:
+        workspace = _share_workspace(request)
+        token = str(body.get("preview_token", ""))
+        target = share_evidence.preview_target(
+            config, workspace=workspace, token=token, session=_share_session(request)
+        )
+        # Re-resolve the previewed project through the live manager before persisting.
+        _share_project(request, workspace, target["project_id"])
+        result = share_evidence.confirm(
+            config, workspace=workspace, token=token, session=_share_session(request)
+        )
+        return JSONResponse(result)
+    except share_evidence.EvidenceError as exc:
+        status = 404 if exc.code == "unknown_workspace" else 409 if exc.code in {
+            "stale_preview", "preview_used", "preview_expired", "brain_changed",
+            "preview_session_mismatch",
+        } else 400
+        return _share_evidence_error(exc, status=status)
+
+
+async def share_evidence_grant(request: Request) -> JSONResponse:
+    """Read one grant's exact scope and history inside its workspace."""
+    from ciao import share_evidence  # noqa: PLC0415
+
+    config = request.app.state.config
+    try:
+        workspace = _share_workspace(request)
+        return JSONResponse({"grant": share_evidence.grant_detail(
+            config, workspace=workspace,
+            grant_id=str(request.path_params.get("grant_id", "")),
+        )})
+    except share_evidence.EvidenceError as exc:
+        return _share_evidence_error(exc, status=404)
+
+
+async def share_evidence_revoke(request: Request) -> JSONResponse:
+    """Revoke one grant; a fresh preview and grant are required afterwards."""
+    from ciao import share_evidence  # noqa: PLC0415
+
+    config = request.app.state.config
+    try:
+        workspace = _share_workspace(request)
+        return JSONResponse(share_evidence.revoke(
+            config, workspace=workspace,
+            grant_id=str(request.path_params.get("grant_id", "")),
+        ))
+    except share_evidence.EvidenceError as exc:
+        return _share_evidence_error(exc, status=404 if exc.code == "unknown_workspace" else 400)
+
+
+async def share_evidence_withdraw(request: Request) -> JSONResponse:
+    """Engine-recorded withdrawal; the old generation can no longer resolve."""
+    from ciao import share_evidence  # noqa: PLC0415
+
+    config = request.app.state.config
+    try:
+        body = await request.json()
+    except ValueError:
+        body = {}
+    if not isinstance(body, dict):
+        return JSONResponse({"error": "expected an object"}, status_code=400)
+    try:
+        workspace = _share_workspace(request)
+        return JSONResponse(share_evidence.withdraw(
+            config, workspace=workspace,
+            grant_id=str(request.path_params.get("grant_id", "")),
+            reason=body.get("reason", ""),
+        ))
+    except share_evidence.EvidenceError as exc:
+        return _share_evidence_error(exc, status=404 if exc.code == "unknown_workspace" else 400)
 
 
 def _registry_conflicts(handler):

@@ -37,7 +37,7 @@ describe('SHARED_BRAIN_PRIVACY', () => {
 
   it('claims no sync or approval for linking, and no pull for a plain folder', () => {
     expect(SHARED_BRAIN_PRIVACY).toContain('not automatically synced')
-    expect(SHARED_BRAIN_PRIVACY).toContain('reviews and approves that exact note')
+    expect(SHARED_BRAIN_PRIVACY).toContain('under an explicit grant you review in Sources')
     expect(SHARED_BRAIN_PRIVACY).toContain('no ongoing or automatic permission')
     expect(SHARED_BRAIN_PRIVACY).not.toContain("pulls the team's updates")
   })

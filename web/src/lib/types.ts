@@ -142,6 +142,89 @@ export interface SharedBrainsResponse {
   shared_brains: SharedBrainState[]
 }
 
+/** One project decision source the Sources panel may offer (server-filtered). */
+export interface ShareEvidenceSource {
+  source_id: string
+  kind: 'stream' | 'document'
+  label: string
+  project_id: string
+  project_name: string
+  entry_count: number
+  stream_id?: string
+}
+
+export interface ShareEvidenceProject {
+  project_id: string
+  name: string
+  sources: ShareEvidenceSource[]
+}
+
+export interface ShareEvidenceBrain {
+  name: string
+  identity: string
+}
+
+export interface ShareEvidenceField {
+  field: 'decision' | 'reason' | 'effective_date'
+  value: string
+}
+
+export interface ShareEvidenceGrant {
+  grant_id: string
+  type: 'standing' | 'snapshot'
+  project_id: string
+  source_id: string
+  source_kind: 'stream' | 'document'
+  source_label: string
+  brain: { name: string; identity: string; link_fingerprint: string }
+  audience: string
+  field_mask: string[]
+  producers: string[]
+  issued_at: string
+  start_revision: number | null
+  consent_generation: number
+  active: boolean
+  linked: boolean
+  status: 'active' | 'revoked' | 'withdrawn' | 'unlinked' | 'inactive'
+  revoked_at: string | null
+  revoked_generation: number | null
+  withdrawn_at: string | null
+  withdrawal_reason: string
+  history: Array<Record<string, unknown>>
+}
+
+export interface ShareEvidenceState {
+  workspace: string
+  mode: 'review' | 'automatic'
+  fields: Array<ShareEvidenceField['field']>
+  producers: string[]
+  brains: ShareEvidenceBrain[]
+  projects: ShareEvidenceProject[]
+  grants: ShareEvidenceGrant[]
+}
+
+export interface ShareEvidencePreview {
+  preview_token: string
+  preview: {
+    grant_type: 'standing' | 'snapshot'
+    scope: 'future_decisions' | 'one_decision'
+    summary: string
+    future_items_without_review: boolean
+    project_id: string
+    source_id: string
+    source_label: string
+    entry_label: string
+    fields: ShareEvidenceField[][]
+    field_mask: string[]
+    excluded_fields: string[]
+    producers: string[]
+    recipient: { brain: string; identity: string; audience: string }
+    expected_generation: string
+    expires_at: string
+    notice: string
+  }
+}
+
 export interface WorkspacesResponse {
   workspaces: WorkspaceInfo[]
   active: WorkspaceName | null

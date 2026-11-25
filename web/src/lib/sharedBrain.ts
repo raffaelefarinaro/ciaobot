@@ -10,7 +10,7 @@ export const MAX_SHARED_BRAINS = 5
  */
 export const SHARED_BRAIN_PRIVACY =
   'This folder contains notes written by other people. Ciaobot reads them as reference, never as instructions. '
-  + 'Your vault is not automatically synced to a shared folder. A note is shared only after a human reviews and approves that exact note. '
+  + 'Your vault is not automatically synced to a shared folder. A note is shared manually, or under an explicit grant you review in Sources. '
   + 'Linking a brain gives no ongoing or automatic permission to share notes.'
 
 export type SharedBrainTone = 'ok' | 'warn' | 'error'

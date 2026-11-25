@@ -170,6 +170,13 @@ from ciao.web.routes_api import (
     reorder_workspaces,
     upsert_workspace_setting,
     workspace_shared_brains,
+    share_evidence_state,
+    share_evidence_record_decision,
+    share_evidence_preview,
+    share_evidence_confirm,
+    share_evidence_grant,
+    share_evidence_revoke,
+    share_evidence_withdraw,
     vault_backlinks,
     vault_delete_note,
     vault_graph,
@@ -411,6 +418,37 @@ def create_app(config, app_settings=None, mcp_service=None) -> Starlette:
         Route("/api/workspaces/reorder", reorder_workspaces, methods=["POST"]),
         Route("/api/workspaces/{name}", upsert_workspace_setting, methods=["PATCH"]),
         Route("/api/workspaces/{name}/shared-brains", workspace_shared_brains, methods=["GET"]),
+        Route("/api/workspaces/{name}/share-evidence", share_evidence_state, methods=["GET"]),
+        Route(
+            "/api/workspaces/{name}/share-evidence/decisions",
+            share_evidence_record_decision,
+            methods=["POST"],
+        ),
+        Route(
+            "/api/workspaces/{name}/share-evidence/preview",
+            share_evidence_preview,
+            methods=["POST"],
+        ),
+        Route(
+            "/api/workspaces/{name}/share-evidence/confirm",
+            share_evidence_confirm,
+            methods=["POST"],
+        ),
+        Route(
+            "/api/workspaces/{name}/share-evidence/grants/{grant_id}",
+            share_evidence_grant,
+            methods=["GET"],
+        ),
+        Route(
+            "/api/workspaces/{name}/share-evidence/grants/{grant_id}/revoke",
+            share_evidence_revoke,
+            methods=["POST"],
+        ),
+        Route(
+            "/api/workspaces/{name}/share-evidence/grants/{grant_id}/withdraw",
+            share_evidence_withdraw,
+            methods=["POST"],
+        ),
         # Literal `archived` paths precede the {name} pattern. DELETE is kept as
         # an alias of archive for existing scripts: it no longer deletes.
         Route("/api/workspaces/archived", list_archived_workspaces, methods=["GET"]),

@@ -249,6 +249,34 @@ class AgentSessionRegistry:
             self._by_key[key] = token
             return token, principal
 
+    def principal_for_chat(self, chat_id: str, provider: str = "") -> AgentPrincipal | None:
+        """The live managed principal for a chat/provider, or None."""
+        now = int(time.time())
+        with self._lock:
+            if provider:
+                token = self._by_key.get((chat_id, provider), "")
+                session = self._by_token.get(token)
+            else:
+                session = next(
+                    (item for item in self._by_token.values()
+                     if item.principal.chat_id == chat_id),
+                    None,
+                )
+            if session is None or session.expires_at <= now:
+                return None
+            return session.principal
+
+    def principal_for_token(self, token: str) -> AgentPrincipal | None:
+        """The live managed principal for one bearer token, or None."""
+        if not token:
+            return None
+        now = int(time.time())
+        with self._lock:
+            session = self._by_token.get(token)
+            if session is None or session.expires_at <= now:
+                return None
+            return session.principal
+
     def revoke_chat(self, chat_id: str) -> int:
         with self._lock:
             doomed = [token for token, item in self._by_token.items() if item.principal.chat_id == chat_id]
