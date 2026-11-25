@@ -3210,7 +3210,9 @@ def preview_row(
         )
         blocked = None
         expected_kind = str(fields.get("link_kind") or "git")
-        if link is None or link.kind != expected_kind or getattr(link, "lifetime_id", None) != fields.get("link_lifetime_id"):
+        if "evidence_authorization" in fields:
+            blocked = "draft_unavailable"
+        elif link is None or link.kind != expected_kind or getattr(link, "lifetime_id", None) != fields.get("link_lifetime_id"):
             blocked = "brain_unavailable"
         elif expected_kind == "folder" and str(fields.get("operation") or "") != "create":
             blocked = "folder_update_unsupported"

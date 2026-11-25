@@ -7,6 +7,8 @@ import subprocess
 import hashlib
 import json
 import os
+import select
+import sys
 import threading
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
@@ -868,6 +870,11 @@ def test_intake_resolves_mapped_destination_and_never_publishes(linked, monkeypa
         yield row
 
     monkeypatch.setattr(share_evidence, "evidence_authorization_guard", guard)
+    @contextmanager
+    def claim(*args, **kwargs):
+        yield object()
+
+    monkeypatch.setattr(share_evidence, "evidence_claim", claim)
     monkeypatch.setattr(share_publish, "publish_share", lambda *args, **kwargs: pytest.fail("intake published"))
     first = sp.draft_evidence_candidates(config, workspace="home", relation=relation)
     assert len(first) == 1 and isinstance(first[0], sp.ShareDraft)
@@ -884,7 +891,8 @@ def test_intake_resolves_mapped_destination_and_never_publishes(linked, monkeypa
     assert isinstance(refusal[0], sp.ShareRefusal) and refusal[0].code == "capacity"
 
 
-def test_intake_uses_real_checkpoint_and_consent(linked, tmp_path, monkeypatch):
+@pytest.mark.parametrize("destination_kind", ["collection", "section"])
+def test_intake_uses_real_checkpoint_and_consent(linked, tmp_path, monkeypatch, destination_kind):
     from dataclasses import replace
     from tests.test_share_evidence import _memory_manager
     from ciao import share_evidence as se, shared_brain_guide, shared_brain_mapping
@@ -893,8 +901,15 @@ def test_intake_uses_real_checkpoint_and_consent(linked, tmp_path, monkeypatch):
 
     fixture_config, clone = linked
     config, manager, project, _source = _memory_manager(tmp_path)
-    guide = {"version": 1, "scope": "Decisions", "exclusions": [], "types": {
-        "decision": {"kind": "collection", "path": "decisions", "operation": "create"}}}
+    if destination_kind == "section":
+        (clone / "n.md").write_bytes(b"# Notes\r\n\r\n## Decisions\r\nExisting\r\n\r\n## Other\r\nKeep\r\n")
+        git(clone, "add", "n.md")
+        git(clone, "commit", "--quiet", "-m", "prepare section")
+        git(clone, "update-ref", "refs/remotes/origin/main", "HEAD")
+        destination = {"kind": "section", "path": "n.md", "section": "Decisions", "operation": "append"}
+    else:
+        destination = {"kind": "collection", "path": "decisions", "operation": "create"}
+    guide = {"version": 1, "scope": "Decisions", "exclusions": [], "types": {"decision": destination}}
     (clone / shared_brain_guide.GUIDE_NAME).write_text("```ciao-guide\n" + json.dumps(guide) + "\n```\n")
     load = shared_brain_guide.read_guide(clone, brain_identity=fixture_config.link.identity)
     assert load.guide is not None
@@ -919,9 +934,201 @@ def test_intake_uses_real_checkpoint_and_consent(linked, tmp_path, monkeypatch):
     manager._save()
     se.checkpoint_completed_memory_pass(config, registry, workspace="home", pass_chat_id=chat.chat_id)
     relation = se.recover_memory_pass_source_relation(config, workspace="home", pass_chat_id=chat.chat_id)
+    if destination_kind in {"collection", "section"}:
+        registry_lock = config.state_path.parent / "locks" / "workspaces-registry.lock"
+        child = subprocess.Popen(
+            [sys.executable, "-c", "import fcntl,sys; f=open(sys.argv[1], 'r+'); fcntl.flock(f, fcntl.LOCK_EX); print('ready', flush=True); sys.stdin.read()", str(registry_lock)],
+            stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True,
+        )
+        try:
+            assert child.stdout is not None and child.stdout.readline().strip() == "ready"
+            blocked = sp.draft_evidence_candidates(config, workspace="home", relation=relation)
+            assert len(blocked) == 1 and isinstance(blocked[0], sp.ShareRefusal)
+            assert blocked[0].code == "draft_unavailable"
+        finally:
+            assert child.stdin is not None
+            child.stdin.close()
+            child.wait(timeout=5)
+        pid = os.fork()
+        if pid == 0:
+            original_evidence_write = se._write_private
+
+            def die_after_ledger(path, data, *, limit):
+                original_evidence_write(path, data, limit=limit)
+                if path.parent.name == "candidate-runs":
+                    os._exit(21)
+
+            se._write_private = die_after_ledger
+            sp.draft_evidence_candidates(config, workspace="home", relation=relation)
+            os._exit(0)
+        _, status = os.waitpid(pid, 0)
+        assert os.waitstatus_to_exitcode(status) == 21
+        pid = os.fork()
+        if pid == 0:
+            sp._write_private = lambda *args, **kwargs: os._exit(23)
+            sp.draft_evidence_candidates(config, workspace="home", relation=relation)
+            os._exit(0)
+        _, status = os.waitpid(pid, 0)
+        assert os.waitstatus_to_exitcode(status) == 23
+        queue = Path(config.workspace_vault_root("home")) / "Workspace" / "Memory-Proposals.md"
+        assert not queue.exists()
+        pid = os.fork()
+        if pid == 0:
+            original_artifact_write = sp._write_private
+
+            def die_after_canonical(path, data):
+                original_artifact_write(path, data)
+                os._exit(25)
+
+            sp._write_private = die_after_canonical
+            sp.draft_evidence_candidates(config, workspace="home", relation=relation)
+            os._exit(0)
+        _, status = os.waitpid(pid, 0)
+        assert os.waitstatus_to_exitcode(status) == 25
+        assert not queue.exists()
+        pid = os.fork()
+        if pid == 0:
+            sp.memory_receipts.write_queue_atomically = lambda *args, **kwargs: os._exit(24)
+            sp.draft_evidence_candidates(config, workspace="home", relation=relation)
+            os._exit(0)
+        _, status = os.waitpid(pid, 0)
+        assert os.waitstatus_to_exitcode(status) == 24
+        assert not queue.exists()
+        pid = os.fork()
+        if pid == 0:
+            original_queue_write = sp.memory_receipts.write_queue_atomically
+
+            def die_after_queue(*args, **kwargs):
+                original_queue_write(*args, **kwargs)
+                os._exit(26)
+
+            sp.memory_receipts.write_queue_atomically = die_after_queue
+            sp.draft_evidence_candidates(config, workspace="home", relation=relation)
+            os._exit(0)
+        _, status = os.waitpid(pid, 0)
+        assert os.waitstatus_to_exitcode(status) == 26
+        assert queue.read_text().count("[share ") == 1
     drafts = sp.draft_evidence_candidates(config, workspace="home", relation=relation)
     assert len(drafts) == 1 and isinstance(drafts[0], sp.ShareDraft)
+    queue = Path(config.workspace_vault_root("home")) / "Workspace" / "Memory-Proposals.md"
+    assert queue.read_text().count("[share ") == 1
     assert "Share this decision" in drafts[0].artifact["immutable"]["proposed"]
     assert "private reason" not in drafts[0].artifact["immutable"]["proposed"]
+    if destination_kind == "section":
+        fields = drafts[0].artifact["immutable"]
+        assert fields["operation"] == "replace"
+        assert fields["original"].encode() == b"# Notes\r\n\r\n## Decisions\r\nExisting\r\n\r\n## Other\r\nKeep\r\n"
+        assert fields["proposed"].encode() == (
+            b"# Notes\r\n\r\n## Decisions\r\nExisting\r\n\r\n"
+            b'```json\n{\n  "decision": "Share this decision"\n}\n```\n\n## Other\r\nKeep\r\n'
+        )
+    if destination_kind == "collection":
+        se.record_operator_decision(config, workspace="home", project_id=project.project_id, decision="Second candidate", reason="", effective_date="2026-11-22", session="operator")
+        program = (
+            "import sys; from ciao.config import CiaoConfig; from ciao import share_evidence; "
+            "c=CiaoConfig.from_env({'CIAO_WORKSPACE':sys.argv[1], 'CIAO_RUNTIME_ROOT':sys.argv[2], 'PWA_AUTH_TOKEN':'test'}); "
+            "print('ready',flush=True); share_evidence.revoke(c,workspace='home',grant_id=sys.argv[3]); print('done',flush=True)"
+        )
+        ready_read, ready_write = os.pipe()
+        resume_read, resume_write = os.pipe()
+        pid = os.fork()
+        if pid == 0:
+            os.close(ready_read)
+            os.close(resume_write)
+            original_filer = sp._draft_share
+
+            def paused_filer(*args, **kwargs):
+                if b"Second candidate" in kwargs.get("proposed", b""):
+                    os.write(ready_write, b"1")
+                    os.read(resume_read, 1)
+                return original_filer(*args, **kwargs)
+
+            sp._draft_share = paused_filer
+            result = sp.draft_evidence_candidates(config, workspace="home", relation=relation)
+            os._exit(0 if len(result) == 2 and all(isinstance(item, sp.ShareDraft) for item in result) else 1)
+        os.close(ready_write)
+        os.close(resume_read)
+        assert select.select([ready_read], [], [], 10)[0]
+        assert os.read(ready_read, 1) == b"1"
+        try:
+            child = subprocess.Popen([sys.executable, "-c", program, str(config.workspace_root), str(config.state_path.parent), grant["grant_id"]], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+            assert child.stdout is not None and child.stdout.readline().strip() == "ready"
+            assert not select.select([child.stdout], [], [], 0.2)[0]
+        finally:
+            os.write(resume_write, b"1")
+            os.close(resume_write)
+            os.close(ready_read)
+        _, status = os.waitpid(pid, 0)
+        assert os.waitstatus_to_exitcode(status) == 0
+        assert queue.read_text().count("[share ") == 2
+        stdout, stderr = child.communicate(timeout=10)
+        assert child.returncode == 0, stderr
+        assert stdout.strip() == "done"
+    else:
+        se.revoke(config, workspace="home", grant_id=grant["grant_id"])
+    assert sp.draft_evidence_candidates(config, workspace="home", relation=relation) == []
+
+
+def test_intake_uses_settled_care_witness_and_current_consent(linked, tmp_path, monkeypatch):
+    from dataclasses import replace
+    from tests.test_share_evidence import _memory_manager
+    from ciao import curation_run, curation_share, share_evidence as se, share_publish, shared_brain_guide, shared_brain_mapping
+    from ciao.mcp_server import AgentSessionRegistry
+    from ciao.web import memory_pass
+
+    fixture_config, clone = linked
+    config, manager, project, _ = _memory_manager(tmp_path)
+    guide = {"version": 1, "scope": "Decisions", "exclusions": [], "types": {
+        "decision": {"kind": "collection", "path": "decisions", "operation": "create"}}}
+    (clone / shared_brain_guide.GUIDE_NAME).write_text("```ciao-guide\n" + json.dumps(guide) + "\n```\n")
+    load = shared_brain_guide.read_guide(clone, brain_identity=fixture_config.link.identity)
+    assert load.guide is not None
+    mapping = shared_brain_mapping.approve(fixture_config.link, load, ["decision"], expected_pin=load.guide.pin)
+    link = replace(fixture_config.link, guide_mapping=mapping, guide_mapping_generation=mapping.generation)
+    config.workspace("home").shared_brains = [link]
+    config.persist_workspace_registry()
+    project.vault_folder = "alpha"
+    vault = Path(config.workspace_vault_root("home"))
+    directory = vault / "projects" / "active" / "alpha"
+    directory.mkdir(parents=True)
+    (vault / "Workspace").mkdir(parents=True, exist_ok=True)
+    se._reset_project_manager_for_tests()
+    se.bind_project_manager(manager)
+    document = directory / se.DOCUMENT_NAME
+    text = "## Decision\nDecision: Launch\nEffective date: 2026-11-20\n"
+    document.write_text(text)
+    preview = se.preview(config, workspace="home", brain_name=link.name, project_id=project.project_id,
+        project_name="Alpha", project_dir=directory, source_id=se.DOCUMENT_SOURCE, grant_type="snapshot",
+        field_mask=["decision"], producers=["memory_extraction", "nightly_curation"], entry_index=0, session="operator")
+    grant = se.confirm(config, workspace="home", token=preview["preview_token"], session="operator")["grant"]
+    chat = next(item for item in manager.list_chats() if (item.helper or {}).get("kind") == memory_pass.MEMORY_PASS_KIND)
+    chat.last_response = "Completed the pass"
+    chat.last_response_status = "success"
+    registry = AgentSessionRegistry()
+    registry.issue(chat_id=chat.chat_id, project_id=chat.project_id, workspace="home", provider="claude")
+    manager._save()
+    se.checkpoint_completed_memory_pass(config, registry, workspace="home", pass_chat_id=chat.chat_id)
+    memory_relation = se.recover_memory_pass_source_relation(config, workspace="home", pass_chat_id=chat.chat_id, source_id=se.DOCUMENT_SOURCE)
+    relative = document.relative_to(vault).as_posix()
+    key = curation_run.item_key(curation_run.PASS_STALE_NOTE, relative)
+    target = curation_run.StaleNoteTarget(relative_path=relative, revision=se._digest(text.encode()))
+    item = curation_run.WorklistItem(pass_id=curation_run.PASS_STALE_NOTE, label="note", reason="due", keys=(key,), target=target)
+    lease = curation_share.begin(config, workspace="home", chat_id="care", token_id="token", dispatch_id="dispatch", ttl_s=600)
+    curation_run.record_plan(vault, holder=lease.holder, plan=curation_run.lease_plan(curation_run.RunPlan(planned=(item,), deferred=(), budget=curation_run.RunBudget())))
+    curation_run.record_done(vault, [key], holder=lease.holder)
+    assert curation_share.checkpoint(config, manager, workspace="home", chat_id="care", token_id="token", dispatch_id="dispatch", holder=lease.holder, key=key) == 1
+    curation_share.end(config, workspace="home", chat_id="care", token_id="token", dispatch_id="dispatch", holder=lease.holder, status="ok", planned=1, completed=1, deferred=0, reasons=[], live_keys=frozenset({key}), failed=0, counts_complete=True, dispatch_active=lambda: True)
+    with se.evidence_claim(config, workspace="home") as claim:
+        witness = curation_share.settled_witnesses(config, workspace="home", holder=lease.holder, claim=claim)[0]
+        relation = se.recover_care_source_relation(config, workspace="home", holder=lease.holder, witness_signature=witness["witness"]["witness_signature"], claim=claim)
+    monkeypatch.setattr(share_publish, "publish_share", lambda *args, **kwargs: pytest.fail("intake published"))
+    drafts = sp.draft_evidence_candidates(config, workspace="home", relation=relation)
+    assert len(drafts) == 1 and isinstance(drafts[0], sp.ShareDraft)
+    assert "Launch" in drafts[0].artifact["immutable"]["proposed"]
+    assert sp.draft_evidence_candidates(config, workspace="home", relation=relation)[0].proposal_id == drafts[0].proposal_id
+    memory_drafts = sp.draft_evidence_candidates(config, workspace="home", relation=memory_relation)
+    assert len(memory_drafts) == 1 and isinstance(memory_drafts[0], sp.ShareDraft)
+    assert memory_drafts[0].proposal_id == drafts[0].proposal_id
+    assert {item["payload"]["row"]["producer"] for item in memory_drafts[0].artifact["producer_provenance"]} == {"memory_extraction", "nightly_curation"}
     se.revoke(config, workspace="home", grant_id=grant["grant_id"])
     assert sp.draft_evidence_candidates(config, workspace="home", relation=relation) == []

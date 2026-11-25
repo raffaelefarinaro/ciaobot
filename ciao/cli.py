@@ -6431,7 +6431,7 @@ def _curation_begin_command(args: argparse.Namespace) -> int:
         if token and url:
             from ciao.agent_cli import post
 
-            managed = post("care_begin", {"ttl_s": budget.max_seconds}, url=url, token=token)
+            managed = post("care_begin", {"ttl_s": budget.max_seconds, "vault": str(vault)}, url=url, token=token)
         if managed and managed.get("ok"):
             data = managed["data"]
             if Path(data["vault"]).resolve() != vault.resolve():

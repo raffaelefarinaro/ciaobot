@@ -521,10 +521,10 @@ async def _op_vault_review(service: CiaoMcpService, action: str = "list", path: 
     )
 
 
-async def _op_care_begin(service: CiaoMcpService, ttl_s: float) -> dict[str, Any]:
+async def _op_care_begin(service: CiaoMcpService, ttl_s: float, vault: str) -> dict[str, Any]:
     """Begin a lease for the active engine-owned Workspace care dispatch."""
     return await service._invoke(
-        "care_begin", lambda cp, principal: cp.managed_care_begin(principal, ttl_s), mutating=True
+        "care_begin", lambda cp, principal: cp.managed_care_begin(principal, ttl_s, vault), mutating=True
     )
 
 
