@@ -45,6 +45,24 @@
           <p class="shared-brain-identity">{{ brain.identity }}</p>
           <p class="shared-brain-path">{{ brain.path }}</p>
           <p class="shared-brain-kind">{{ kindLabel(brain) }}</p>
+          <button type="button" class="btn-secondary btn-small" :disabled="!!mappingBusy || listStale" @click="openMapping(brain)">Review content guide</button>
+          <div v-if="mappingBrain === brain.name && mapping" class="guide-mapping">
+            <p>Audience unknown; readers and access have not been verified. Recording destinations does not change your sharing policy.</p>
+            <p>Scope: {{ mapping.scope }}</p>
+            <p v-if="mapping.exclusions.length">Exclusions: {{ mapping.exclusions.join(', ') }}</p>
+            <p v-if="mapping.pin">Guide version {{ mapping.pin.version }} · {{ mapping.pin.digest }}</p>
+            <p v-else role="status">The guide is {{ mapping.guide_status }}. You can clear the saved mapping.</p>
+            <fieldset>
+              <legend>Choose destinations to record for review</legend>
+              <label v-for="item in mapping.types" :key="item.name" class="guide-choice">
+                <input v-model="mappingSelected" type="checkbox" :value="item.name" />
+                <span>{{ item.name }}: {{ item.operation }} {{ item.kind }} {{ item.path }}<span v-if="item.section">, section {{ item.section }}</span><span v-if="item.example"> — {{ item.example }}</span></span>
+              </label>
+            </fieldset>
+            <button type="button" class="btn-small" :disabled="!!mappingBusy" @click="saveMapping()">Save reviewed destinations</button>
+            <button type="button" class="btn-secondary btn-small" :disabled="!!mappingBusy" @click="mapping = null">Close</button>
+          </div>
+          <p v-if="mappingBrain === brain.name && mappingError" class="action-result action-result--error" role="alert">{{ mappingError }}</p>
           <p
             class="shared-brain-status"
             :class="`shared-brain-status--${statusOf(brain).tone}`"
@@ -184,7 +202,52 @@ const saveError = ref('')
 const pathDraft = ref('')
 const nameDraft = ref('')
 const kindDraft = ref<'git' | 'folder'>('folder')
+interface GuidePreview {
+  identity: string; lifetime: string; generation: number
+  pin: { identity: string; version: number; digest: string } | null
+  guide_status?: string
+  scope: string; exclusions: string[]; selected: string[]
+  types: Array<{ name: string; kind: string; path: string; section: string; operation: string; example: string }>
+}
+const mapping = ref<GuidePreview | null>(null)
+const mappingBrain = ref('')
+const mappingSelected = ref<string[]>([])
+const mappingBusy = ref(false)
+const mappingError = ref('')
 let ticket = 0
+
+function mappingPath(ws: string, brain: string): string {
+  return `/api/workspaces/${encodeURIComponent(ws)}/shared-brains/${encodeURIComponent(brain)}/guide-mapping`
+}
+async function openMapping(brain: SharedBrainState): Promise<void> {
+  const ws = workspace.value
+  mappingBrain.value = brain.name
+  mapping.value = null
+  mappingError.value = ''
+  mappingBusy.value = true
+  try {
+    const result = await api.get<GuidePreview>(mappingPath(ws, brain.name))
+    if (workspace.value !== ws || mappingBrain.value !== brain.name) return
+    mapping.value = result
+    mappingSelected.value = [...result.selected]
+  } catch (e) {
+    if (workspace.value === ws) mappingError.value = apiErrorMessage(e, 'The guide could not be read.')
+  } finally { mappingBusy.value = false }
+}
+async function saveMapping(): Promise<void> {
+  const view = mapping.value
+  const ws = workspace.value
+  const brain = mappingBrain.value
+  if (!view || mappingBusy.value) return
+  mappingBusy.value = true
+  mappingError.value = ''
+  try {
+    await api.post(mappingPath(ws, brain), { identity: view.identity, lifetime: view.lifetime, generation: view.generation, pin: view.pin, types: mappingSelected.value })
+    if (workspace.value === ws && mappingBrain.value === brain) mapping.value = null
+  } catch (e) {
+    if (workspace.value === ws) mappingError.value = apiErrorMessage(e, 'The mapping could not be saved. Reload the guide and try again.')
+  } finally { mappingBusy.value = false }
+}
 
 function statusOf(brain: SharedBrainState) {
   return sharedBrainStatus(brain)
@@ -313,6 +376,9 @@ watch(workspace, () => {
   pathDraft.value = ''
   nameDraft.value = ''
   kindDraft.value = 'folder'
+  mapping.value = null
+  mappingBrain.value = ''
+  mappingError.value = ''
   void load()
 })
 </script>
@@ -321,6 +387,12 @@ watch(workspace, () => {
 
 <style scoped>
 .shared-brain-list { list-style: none; margin: var(--space-2) 0 0; padding: 0; display: grid; gap: var(--space-3); }
+.guide-mapping { display: grid; gap: var(--space-2); margin: var(--space-3) 0; overflow-wrap: anywhere; }
+.guide-mapping p { margin: 0; color: var(--fg2); font-size: var(--text-sm); line-height: 1.5; }
+.guide-mapping fieldset { min-width: 0; margin: 0; padding: var(--space-2); border: 1px solid var(--border); border-radius: var(--radius-sm); }
+.guide-mapping legend { color: var(--fg); font-size: var(--text-sm); }
+.guide-choice { display: flex; align-items: center; gap: var(--space-2); min-height: 44px; color: var(--fg); font-size: var(--text-sm); line-height: 1.5; }
+.guide-mapping button { justify-self: start; }
 .shared-brain-row {
   padding: var(--space-3);
   border: 1px solid var(--border);

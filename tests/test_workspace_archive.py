@@ -759,6 +759,32 @@ def test_workspace_archive_restore_preserves_folder_shared_brain(tmp_path):
     assert restored.lifetime_id == "kept-lifetime"
 
 
+@pytest.mark.parametrize("revoked", [False, True])
+def test_workspace_archive_restore_clears_folder_guide_mapping(tmp_path, revoked):
+    from ciao.config import SharedBrainLink
+    from ciao.shared_brain_guide import ConsentGrant, GuidePin
+    from ciao.shared_brain_mapping import GuideMapping
+
+    client, config, _pcm, _store = _app(tmp_path, rerooted=True)
+    folder = (tmp_path.parent / f"{tmp_path.name}-drive-team").resolve()
+    folder.mkdir()
+    identity = f"folder:{folder}"
+    mapping = GuideMapping(identity, "old-lifetime", 1, GuidePin(identity, 1, "a" * 64), (
+        ConsentGrant("decision", "section", "notes/decisions.md", frozenset({"append"}), "Decisions"),
+    ))
+    config.workspaces["work"].shared_brains = [SharedBrainLink(
+        "team", str(folder), identity, lifetime_id="old-lifetime", kind="folder",
+        guide_mapping_generation=2 if revoked else 1, guide_mapping=None if revoked else mapping,
+    )]
+    archived = client.post("/api/workspaces/work/archive").json()["archived"]
+    response = client.post("/api/workspaces/archived/restore", json={"id": archived["id"]})
+    assert response.status_code == 200, response.json()
+    restored = config.workspaces["work"].shared_brains[0]
+    assert restored.lifetime_id != "old-lifetime"
+    assert restored.guide_mapping is None
+    assert restored.guide_mapping_generation == (3 if revoked else 2)
+
+
 def test_move_back_refuses_archive_metadata_changed_after_claim_snapshot(tmp_path):
     from ciao import workspace_archive
 

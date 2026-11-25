@@ -118,6 +118,26 @@ afterEach(() => {
   document.body.innerHTML = ''
 })
 
+it('previews unknown audience and saves only selected guide destinations', async () => {
+  apiGet.mockResolvedValueOnce({ shared_brains: [state({ sharing_policy: 'automatic' })] }).mockResolvedValueOnce({
+    identity: TEAM.identity, lifetime: TEAM.lifetime, generation: 0,
+    pin: { identity: TEAM.identity, version: 1, digest: 'a'.repeat(64) },
+    scope: 'Team decisions', exclusions: ['personal notes'], selected: [],
+    types: [{ name: 'decision', kind: 'section', path: 'notes/decisions.md', section: 'Decisions', operation: 'append', example: '' }],
+  })
+  const view = await mountCard()
+  await button(view, 'Review content guide')!.trigger('click')
+  await flushPromises()
+  expect(view.text()).toContain('Audience unknown')
+  expect(view.text()).toContain('Recording destinations does not change your sharing policy')
+  expect(view.text()).not.toContain('Sharing remains in Review')
+  expect(view.text()).toContain('append section notes/decisions.md')
+  await view.find('input[type="checkbox"]').setValue(true)
+  await button(view, 'Save reviewed destinations')!.trigger('click')
+  await flushPromises()
+  expect(apiPost).toHaveBeenCalledWith('/api/workspaces/personal/shared-brains/team-notes/guide-mapping', expect.objectContaining({ types: ['decision'], generation: 0 }))
+})
+
 describe('SettingsSharedBrains loading and failures', () => {
   it("reads the active workspace's brains on mount", async () => {
     await mountCard()
