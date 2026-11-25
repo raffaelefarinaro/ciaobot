@@ -771,16 +771,16 @@ async def workspace_shared_brain_guide_mapping(request: Request) -> JSONResponse
                                 problem = shared_brain.link_problem(config, current)
                             if problem:
                                 if body is None:
-                                    return JSONResponse({"identity": current.identity, "lifetime": current.lifetime_id, "generation": current.guide_mapping_generation, "pin": None, "scope": "", "exclusions": [], "types": [], "selected": [], "guide_status": "unavailable", "audience": {"status": "unknown", "verified": False}, "policy": "review"})
+                                    return JSONResponse({"identity": current.identity, "lifetime": current.lifetime_id, "generation": current.guide_mapping_generation, "pin": None, "scope": "", "exclusions": [], "types": [], "selected": [], "guide_status": "unavailable", "audience": {"status": "unknown", "verified": False}, "mapping_mode": "review"})
                                 return JSONResponse({"error": "shared brain unavailable", "problem": problem}, status_code=409)
                             load = await run_while_claimed(guide.read_guide, current.path, brain_identity=current.identity)
                             if not load.ok or load.guide is None:
                                 if body is None:
-                                    return JSONResponse({"identity": current.identity, "lifetime": current.lifetime_id, "generation": current.guide_mapping_generation, "pin": None, "scope": "", "exclusions": [], "types": [], "selected": [], "guide_status": load.status, "audience": {"status": "unknown", "verified": False}, "policy": "review"})
+                                    return JSONResponse({"identity": current.identity, "lifetime": current.lifetime_id, "generation": current.guide_mapping_generation, "pin": None, "scope": "", "exclusions": [], "types": [], "selected": [], "guide_status": load.status, "audience": {"status": "unknown", "verified": False}, "mapping_mode": "review"})
                                 return JSONResponse({"error": "guide unavailable", "status": load.status}, status_code=409)
                             pin = {"identity": load.guide.pin.brain_identity, "version": load.guide.pin.version, "digest": load.guide.pin.digest}
                             if body is None:
-                                return JSONResponse({"identity": current.identity, "lifetime": current.lifetime_id, "generation": current.guide_mapping_generation, "pin": pin, "scope": load.guide.scope, "exclusions": load.guide.exclusions, "types": [{"name": n.name, "kind": n.destination.kind, "path": n.destination.path, "section": n.destination.section, "operation": n.destination.operation, "example": n.example} for n in load.guide.types.values()], "selected": [g.note_type for g in current.guide_mapping.grants] if current.guide_mapping and current.guide_mapping.pin == load.guide.pin else [], "audience": {"status": "unknown", "verified": False}, "policy": "review"})
+                                return JSONResponse({"identity": current.identity, "lifetime": current.lifetime_id, "generation": current.guide_mapping_generation, "pin": pin, "scope": load.guide.scope, "exclusions": load.guide.exclusions, "types": [{"name": n.name, "kind": n.destination.kind, "path": n.destination.path, "section": n.destination.section, "operation": n.destination.operation, "example": n.example} for n in load.guide.types.values()], "selected": [g.note_type for g in current.guide_mapping.grants] if current.guide_mapping and current.guide_mapping.pin == load.guide.pin else [], "audience": {"status": "unknown", "verified": False}, "mapping_mode": "review"})
                             if body["pin"] != pin:
                                 return JSONResponse({"error": "guide changed; review again", "code": "guide_changed"}, status_code=409)
                             try:
@@ -797,7 +797,7 @@ async def workspace_shared_brain_guide_mapping(request: Request) -> JSONResponse
                                 workspaces[workspace_name] = candidate
                                 _persist_workspaces(config, workspaces, owner=owner)
                                 config.workspaces[workspace_name] = candidate
-                        return JSONResponse({"generation": updated.guide_mapping_generation, "policy": "review", "audience": {"status": "unknown", "verified": False}})
+                        return JSONResponse({"generation": updated.guide_mapping_generation, "mapping_mode": "review", "audience": {"status": "unknown", "verified": False}})
         except (OSError, WorkspaceRegistryConflict):
             return JSONResponse({"error": "mapping unavailable; reload and retry", "code": "mapping_locked"}, status_code=409)
 
