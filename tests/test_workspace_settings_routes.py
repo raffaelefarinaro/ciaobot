@@ -2624,3 +2624,72 @@ def test_status_holds_checkout_and_registry_during_git(tmp_path, monkeypatch):
     assert response.status_code == 200
     assert response.json()["shared_brains"][0]["problem"] == ""
     assert observed
+
+
+def test_origin_drift_retires_the_same_path_in_another_workspace(tmp_path, monkeypatch):
+    """Drift is a path property: one workspace observing it also retires the peer link."""
+    import subprocess
+
+    from ciao import shared_brain
+    from ciao.config import WorkspaceConfig
+
+    monkeypatch.setattr(shared_brain, "schedule_update", lambda link, config: None)
+    client, config, _pcm = _client(tmp_path)
+    acme = _checkout(_away(tmp_path) / "acme", "https://github.com/acme/notes")
+    assert client.patch(
+        "/api/workspaces/personal", json={"shared_brains": [{"path": str(acme)}]}
+    ).status_code == 200
+    config.workspaces["research"] = WorkspaceConfig(
+        name="research", vault_root="memory-vault/research"
+    )
+    config.persist_workspace_registry()
+    assert client.patch(
+        "/api/workspaces/research", json={"shared_brains": [{"path": str(acme)}]}
+    ).status_code == 200
+    for workspace in ("personal", "research"):
+        state = client.get(f"/api/workspaces/{workspace}/shared-brains").json()["shared_brains"][0]
+        granted = client.post(
+            f"/api/workspaces/{workspace}/shared-brains/notes/sharing",
+            json=_sharing_body(state),
+        )
+        assert granted.status_code == 200, granted.text
+
+    subprocess.run(
+        ["git", "-C", str(acme), "remote", "set-url", "origin", "https://github.com/other/notes"],
+        check=True,
+    )
+    personal = client.get("/api/workspaces/personal/shared-brains").json()["shared_brains"][0]
+    assert personal["sharing_policy"] == "review"
+    peer = config.workspace("research").shared_brains[0]
+    assert peer.sharing_policy == "review"
+    assert peer.sharing_consent is None
+    journal = tmp_path / ".runtime" / "sharing-revocations.json"
+    assert journal.is_file()
+    text = journal.read_text()
+    assert personal["lifetime"] in text
+    assert peer.lifetime_id in text
+
+
+def test_shared_brain_policy_refuses_while_the_registry_claim_is_held(tmp_path, monkeypatch):
+    """A held authoritative registry claim blocks both grant and revoke without writing."""
+    from ciao import shared_brain
+    from ciao.workspaces import acquire_workspace_registry
+
+    monkeypatch.setattr(shared_brain, "schedule_update", lambda link, config: None)
+    client, config, _pcm = _client(tmp_path)
+    acme = _checkout(_away(tmp_path) / "acme", "https://github.com/acme/notes")
+    assert client.patch(
+        "/api/workspaces/personal", json={"shared_brains": [{"path": str(acme)}]}
+    ).status_code == 200
+    path = "/api/workspaces/personal/shared-brains/notes/sharing"
+    state = client.get("/api/workspaces/personal/shared-brains").json()["shared_brains"][0]
+
+    holder = acquire_workspace_registry(config)
+    try:
+        for policy in ("automatic", "review"):
+            refused = client.post(path, json=_sharing_body(state, policy))
+            assert refused.status_code == 409
+            assert refused.json()["code"] == "policy_locked"
+    finally:
+        holder.close()
+    assert config.workspace("personal").shared_brains[0].sharing_policy == "review"
