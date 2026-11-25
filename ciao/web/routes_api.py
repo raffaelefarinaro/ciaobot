@@ -363,6 +363,17 @@ async def workspace_shared_brains(request: Request) -> JSONResponse:
             try:
                 changed = await _invalidate_sharing_claim(config, link)
             except (OSError, WorkspaceRegistryConflict):
+                # Even when a claim cannot be taken, the observed grant can be
+                # journaled under the journal's own interprocess lock. This is
+                # durable across restart and never leaves the grant active.
+                try:
+                    await run_while_claimed(
+                        shared_brain.record_sharing_revocation_without_registry,
+                        config,
+                        link,
+                    )
+                except OSError:
+                    pass
                 current = _sharing_link(config, workspace_name, link.name)
                 if current is not None:
                     state = await asyncio.to_thread(

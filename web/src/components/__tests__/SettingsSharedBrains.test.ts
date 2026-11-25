@@ -383,7 +383,7 @@ describe('SettingsSharedBrains automatic sharing choice', () => {
     expect(words).toContain('private details from your memory or vault')
     expect(words).toContain('memory pass and nightly care can choose private material')
     expect(words).toContain('does not prove who can see it today')
-    expect(words).toContain('standing permission for when the producer ships')
+    expect(words).toContain('kept only for this engine session')
 
     askConfirm.mockResolvedValueOnce(true)
     apiGet.mockResolvedValueOnce({
@@ -402,7 +402,7 @@ describe('SettingsSharedBrains automatic sharing choice', () => {
     )
     expect(apiGet).toHaveBeenCalledTimes(2)
     expect(view.find('.shared-brain-row').text()).toContain(
-      'Automatic sharing is chosen for everyone who can access github.com/acme/team-notes; it is not active yet.',
+      'Automatic sharing is chosen for this engine session for everyone who can access github.com/acme/team-notes; it is not active yet and returns to review on restart.',
     )
     expect(view.find('.shared-brain-policy-toggle').text()).toBe('Turn off automatic sharing')
   })

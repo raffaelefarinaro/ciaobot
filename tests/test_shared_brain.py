@@ -1747,3 +1747,51 @@ def test_unreadable_revocation_journal_fails_closed(tmp_path) -> None:
     sb.apply_persisted_sharing_revocations(config)
     assert config.workspaces["work"].shared_brains[0].sharing_policy == "review"
     assert config.workspaces["work"].shared_brains[0].sharing_consent is None
+
+
+def test_distinct_path_journal_writers_merge_without_losing_revocations(tmp_path, monkeypatch) -> None:
+    import threading
+    import time
+
+    config = FakeConfig(tmp_path)
+    entered, release = threading.Event(), threading.Event()
+    original = sb.save_sharing_revocations
+    calls = 0
+
+    def slow_save(config_arg, keys, **kwargs):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            entered.set()
+            assert release.wait(5)
+        return original(config_arg, keys, **kwargs)
+
+    monkeypatch.setattr(sb, "save_sharing_revocations", slow_save)
+    errors: list[BaseException] = []
+
+    def writer(lifetime: str):
+        try:
+            sb.merge_sharing_revocations(config, {(lifetime, 1)})
+        except BaseException as exc:  # noqa: BLE001 - surfaced below
+            errors.append(exc)
+
+    first = threading.Thread(target=writer, args=("path-one",))
+    first.start()
+    assert entered.wait(3)
+    second = threading.Thread(target=writer, args=("path-two",))
+    second.start()
+    time.sleep(0.05)
+    release.set()
+    first.join(5)
+    second.join(5)
+
+    assert not errors
+    state = sb.load_sharing_revocations(config)
+    assert state.keys == frozenset({("path-one", 1), ("path-two", 1)})
+
+
+def test_missing_revocation_journal_is_not_treated_as_healthy(tmp_path) -> None:
+    config = FakeConfig(tmp_path)
+    state = sb.load_sharing_revocations(config)
+    assert state.healthy is False
+    assert state.fail_closed is True

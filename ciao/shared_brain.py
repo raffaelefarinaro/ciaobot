@@ -35,7 +35,7 @@ from ciao.config import (
 )
 from ciao.git_proc import EXACT_BYTES, GIT_TIMEOUT_DETAIL, run_git
 from ciao.os_support.files import open_fd, replace_file
-from ciao.os_support.locks import await_exclusive, lock_exclusive
+from ciao.os_support.locks import await_exclusive, lock_exclusive, unlock
 from ciao.os_support.private import (
     is_private_descriptor_strict,
     make_private_dir,
@@ -224,6 +224,12 @@ def reset_link_for_restore(link: SharedBrainLink) -> SharedBrainLink:
 
 MAX_SHARING_REVOCATIONS = 256
 _SHARING_REVOCATIONS_SCHEMA = 2
+#: No publisher exists yet, so a persisted automatic grant is not authority
+#: across a process restart. Every config load demotes automatic Git links to
+#: review; the user must choose again in the new session. This is the explicit
+#: fail-closed fallback for a dual journal+registry persistence failure that no
+#: available storage can make durable.
+AUTOMATIC_AUTHORITY_SESSION_ONLY = True
 
 
 @dataclass(frozen=True, slots=True)
@@ -242,15 +248,19 @@ def _sharing_revocations_path(config: Any) -> Path:
 def load_sharing_revocations(config: Any) -> SharingRevocations:
     """Load the durable revocation journal.
 
-    A missing file is a healthy empty journal. An existing file that cannot be
-    read, is not JSON, or has the wrong shape is UNHEALTHY: callers must fail
-    closed (demote every stored automatic grant), never treat it as empty. A
+    A missing file is UNHEALTHY: the journal is required to prove that a
+    persisted automatic grant was not revoked. An existing file that cannot be
+    read, is not JSON, or has the wrong shape is also UNHEALTHY: callers must
+    fail closed (demote every stored automatic grant), never treat it as empty. A
     journal marked ``fail_closed`` means the bounded journal overflowed and all
     automatic grants must stay review until a later successful write replaces it.
     """
     path = _sharing_revocations_path(config)
     if not path.exists():
-        return SharingRevocations()
+        # The journal is required to prove that a persisted automatic grant has
+        # not been revoked. Missing is not proof of an empty healthy journal.
+        logger.error("The shared-brain revocation journal is missing; failing closed")
+        return SharingRevocations(healthy=False, fail_closed=True)
     try:
         raw = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, UnicodeError, ValueError):
@@ -393,17 +403,73 @@ def save_sharing_revocations(
         raise
 
 
-def apply_persisted_sharing_revocations(config: Any) -> None:
-    """Load the journal and make matching stored grants review in memory.
+@contextmanager
+def _sharing_journal_claim(config: Any):
+    """One interprocess read-modify-write lock for the revocation journal."""
+    root = Path(config.state_path).parent / "locks"
+    root.mkdir(parents=True, exist_ok=True, mode=0o700)
+    make_private_dir(root)
+    fd = open_fd(
+        root / "sharing-revocations.lock",
+        os.O_CREAT | os.O_RDWR,
+        0o600,
+        follow_symlinks=False,
+    )
+    try:
+        if not is_private_descriptor_strict(fd):
+            raise OSError("shared-brain journal lock is not private")
+        lock_exclusive(fd)
+        yield
+    finally:
+        try:
+            unlock(fd)
+        finally:
+            os.close(fd)
 
-    An unhealthy journal or a fail-closed marker demotes every stored automatic
-    grant. The registry row is not rewritten here: a later successful policy
-    write persists it, while the journal keeps grants inert across restarts.
+
+def merge_sharing_revocations(
+    config: Any,
+    new_keys: set[tuple[str, int]],
+    *,
+    registry_bytes: bytes | None = None,
+    force_fail_closed: bool | None = None,
+) -> None:
+    """Merge revocations under one interprocess journal lock.
+
+    Distinct checkout paths can record drift concurrently without losing each
+    other's keys. The locked read-modify-write is what makes the journal
+    authoritative; each caller's ``registry_bytes`` only guides compaction.
     """
-    state = load_sharing_revocations(config)
-    if state.healthy and not state.fail_closed and not state.keys:
-        return
-    fail_all = not state.healthy or state.fail_closed
+    with _sharing_journal_claim(config):
+        state = load_sharing_revocations(config)
+        keys = set(state.keys) | set(new_keys)
+        if force_fail_closed is None:
+            force_fail_closed = state.fail_closed or not state.healthy
+        save_sharing_revocations(
+            config,
+            keys,
+            registry_bytes=registry_bytes,
+            force_fail_closed=force_fail_closed,
+        )
+
+
+def apply_persisted_sharing_revocations(config: Any) -> None:
+    """Return stored grants to review on a new engine session.
+
+    Until a publisher exists, automatic authority is session-scoped: every
+    config load demotes stored automatic Git grants, so neither an unhealthy
+    journal nor a failed journal+registry write can silently revive consent
+    after a restart. The registry row is not rewritten here; a later successful
+    policy write persists the review state.
+    """
+    if AUTOMATIC_AUTHORITY_SESSION_ONLY:
+        state = SharingRevocations()
+        fail_all = True
+    else:
+        state = load_sharing_revocations(config)
+        if state.healthy and not state.fail_closed and not state.keys:
+            return
+        fail_all = not state.healthy or state.fail_closed
     for workspace in getattr(config, "workspaces", {}).values():
         links = list(getattr(workspace, "shared_brains", None) or [])
         kept: list[SharedBrainLink] = []
@@ -483,12 +549,10 @@ def record_sharing_revocation_without_registry(
         return False
     from ciao.workspaces import read_workspace_registry_bytes
 
-    state = load_sharing_revocations(config)
-    save_sharing_revocations(
+    merge_sharing_revocations(
         config,
-        set(state.keys) | revoked,
+        revoked,
         registry_bytes=read_workspace_registry_bytes(config),
-        force_fail_closed=state.fail_closed or not state.healthy,
     )
     config.workspaces.update(changed)
     return True
@@ -528,14 +592,11 @@ def invalidate_sharing_on_drift(
             changed, revoked = _drifted_grants(config, link)
             if not changed:
                 return False
-            state = load_sharing_revocations(config)
-            journal_keys = set(state.keys) | revoked
             try:
-                save_sharing_revocations(
+                merge_sharing_revocations(
                     config,
-                    journal_keys,
+                    revoked,
                     registry_bytes=owner.current,
-                    force_fail_closed=state.fail_closed or not state.healthy,
                 )
             except OSError:
                 # The registry write below is still attempted: if it lands, the
@@ -553,9 +614,9 @@ def invalidate_sharing_on_drift(
             # The registry write succeeded, so old entries no longer match a
             # stored automatic grant; compact them away.
             try:
-                save_sharing_revocations(
+                merge_sharing_revocations(
                     config,
-                    set(load_sharing_revocations(config).keys) | revoked,
+                    revoked,
                     registry_bytes=getattr(config, "_workspace_registry_bytes", None),
                     force_fail_closed=False,
                 )

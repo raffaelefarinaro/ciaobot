@@ -1915,8 +1915,8 @@ def _sharing_body(
     }
 
 
-def test_shared_brain_sharing_defaults_review_and_a_grant_is_durable(tmp_path, monkeypatch):
-    """The Settings choice is stored per link; review is the default and revocation is explicit."""
+def test_shared_brain_sharing_defaults_review_and_grant_is_session_scoped(tmp_path, monkeypatch):
+    """Review is the default; a grant works for this engine session only."""
     from ciao import shared_brain
 
     monkeypatch.setattr(shared_brain, "schedule_update", lambda link, config: None)
@@ -1949,8 +1949,11 @@ def test_shared_brain_sharing_defaults_review_and_a_grant_is_durable(tmp_path, m
     assert stored["sharing_consent"]["generation"] == 1
 
     reloaded = _client(tmp_path)[1].workspace("personal").shared_brains[0]
-    assert shared_brain.sharing_consent_active(reloaded)
-    assert reloaded.sharing_generation == 1
+    # No publisher exists yet: a persisted automatic grant is not authority
+    # across a restart, so loading returns it to review for a fresh choice.
+    assert reloaded.sharing_policy == "review"
+    assert reloaded.sharing_consent is None
+    assert not shared_brain.sharing_consent_active(reloaded)
 
     # A whole-list save for the same folder keeps the link, its lifetime and its consent.
     resent = client.patch(
@@ -2793,7 +2796,9 @@ def test_registry_claim_failure_records_a_durable_journal_revocation(tmp_path, m
     assert config.workspace("personal").shared_brains[0].sharing_policy == "review"
     journal = tmp_path / ".runtime" / "sharing-revocations.json"
     payload = json.loads(journal.read_text())
-    assert payload["fail_closed"] is False
+    # No journal existed yet, so the claimless write is marked fail-closed while
+    # still recording the observed grant; a restart returns it to review.
+    assert payload["fail_closed"] is True
     assert any(row["lifetime_id"] == link.lifetime_id for row in payload["grants"])
     restarted = _client(tmp_path)[1]
     assert restarted.workspace("personal").shared_brains[0].sharing_policy == "review"
@@ -2841,3 +2846,143 @@ def test_cancel_during_sharing_invalidation_keeps_the_claims(tmp_path, monkeypat
         await asyncio.to_thread(owner.close)
 
     asyncio.run(exercise())
+
+
+def test_dual_persistence_failure_never_revives_consent_after_restart(tmp_path, monkeypatch):
+    """If both journal and registry writes fail, a restart still demotes the grant."""
+    import subprocess
+
+    from ciao import shared_brain
+
+    monkeypatch.setattr(shared_brain, "schedule_update", lambda link, config: None)
+    client, config, _pcm = _client(tmp_path)
+    acme = _checkout(_away(tmp_path) / "acme", "https://github.com/acme/notes")
+    assert client.patch(
+        "/api/workspaces/personal", json={"shared_brains": [{"path": str(acme)}]}
+    ).status_code == 200
+    state = client.get("/api/workspaces/personal/shared-brains").json()["shared_brains"][0]
+    assert client.post(
+        "/api/workspaces/personal/shared-brains/notes/sharing",
+        json=_sharing_body(state),
+    ).status_code == 200
+    subprocess.run(
+        ["git", "-C", str(acme), "remote", "set-url", "origin", "https://github.com/other/notes"],
+        check=True,
+    )
+
+    def fail_journal(*_args, **_kwargs):
+        raise OSError("journal disk full")
+
+    def fail_registry(*_args, **_kwargs):
+        raise OSError("registry disk full")
+
+    monkeypatch.setattr(shared_brain, "save_sharing_revocations", fail_journal)
+    monkeypatch.setattr("ciao.workspaces.persist_workspaces", fail_registry)
+    listed = client.get("/api/workspaces/personal/shared-brains").json()["shared_brains"][0]
+    assert listed["sharing_policy"] == "review"
+    assert listed["sharing_invalidation_failed"] is True
+    assert config.workspace("personal").shared_brains[0].sharing_policy == "review"
+
+    # Repairing the origin before the restart must not revive the persisted row.
+    subprocess.run(
+        ["git", "-C", str(acme), "remote", "set-url", "origin", "https://github.com/acme/notes"],
+        check=True,
+    )
+    restarted = _client(tmp_path)[1]
+    link = restarted.workspace("personal").shared_brains[0]
+    assert link.sharing_policy == "review"
+    assert link.sharing_consent is None
+    assert not shared_brain.sharing_consent_active(link)
+
+
+def test_fail_closed_journal_marker_is_cleared_only_after_the_registry_persists(tmp_path, monkeypatch):
+    """A fail-closed marker forces review, then a successful registry write clears it."""
+    import subprocess
+
+    from ciao import shared_brain
+
+    monkeypatch.setattr(shared_brain, "schedule_update", lambda link, config: None)
+    client, config, _pcm = _client(tmp_path)
+    acme = _checkout(_away(tmp_path) / "acme", "https://github.com/acme/notes")
+    assert client.patch(
+        "/api/workspaces/personal", json={"shared_brains": [{"path": str(acme)}]}
+    ).status_code == 200
+    state = client.get("/api/workspaces/personal/shared-brains").json()["shared_brains"][0]
+    assert client.post(
+        "/api/workspaces/personal/shared-brains/notes/sharing",
+        json=_sharing_body(state),
+    ).status_code == 200
+    journal = tmp_path / ".runtime" / "sharing-revocations.json"
+    journal.write_text(json.dumps({"schema": 2, "fail_closed": True, "grants": []}))
+    subprocess.run(
+        ["git", "-C", str(acme), "remote", "set-url", "origin", "https://github.com/other/notes"],
+        check=True,
+    )
+
+    listed = client.get("/api/workspaces/personal/shared-brains").json()["shared_brains"][0]
+    assert listed["sharing_policy"] == "review"
+    payload = json.loads(journal.read_text())
+    assert payload["fail_closed"] is False
+    assert payload["grants"] == []
+    restarted = _client(tmp_path)[1]
+    assert restarted.workspace("personal").shared_brains[0].sharing_policy == "review"
+
+
+def test_checkout_claim_failure_still_journals_the_observed_drift(tmp_path, monkeypatch):
+    """If the checkout claim cannot be taken, GET records a journal-only revocation."""
+    import subprocess
+
+    from ciao import shared_brain
+
+    monkeypatch.setattr(shared_brain, "schedule_update", lambda link, config: None)
+    client, config, _pcm = _client(tmp_path)
+    acme = _checkout(_away(tmp_path) / "acme", "https://github.com/acme/notes")
+    assert client.patch(
+        "/api/workspaces/personal", json={"shared_brains": [{"path": str(acme)}]}
+    ).status_code == 200
+    state = client.get("/api/workspaces/personal/shared-brains").json()["shared_brains"][0]
+    assert client.post(
+        "/api/workspaces/personal/shared-brains/notes/sharing",
+        json=_sharing_body(state),
+    ).status_code == 200
+    link = config.workspace("personal").shared_brains[0]
+    subprocess.run(
+        ["git", "-C", str(acme), "remote", "set-url", "origin", "https://github.com/other/notes"],
+        check=True,
+    )
+    fake_state = {
+        "name": link.name,
+        "kind": "git",
+        "identity": link.identity,
+        "path": link.path,
+        "lifetime": link.lifetime_id,
+        "sharing_policy": "review",
+        "sharing_generation": link.sharing_generation,
+        "sharing_granted_at": "",
+        "sharing_grant_pending": True,
+        "sharing_invalidation_failed": False,
+        "origin_changed": True,
+        "missing": False,
+        "problem": "origin_changed",
+        "branch": "main",
+        "head": "",
+        "head_date": "",
+        "dirty": False,
+        "upstream": False,
+        "fetched_at": None,
+        "last_update": None,
+    }
+    monkeypatch.setattr(shared_brain, "brain_state", lambda *args: dict(fake_state))
+
+    def fail_checkout_claim(*_args, **_kwargs):
+        raise OSError("checkout claim unavailable")
+
+    monkeypatch.setattr(shared_brain, "_checkout_claim", fail_checkout_claim)
+    listed = client.get("/api/workspaces/personal/shared-brains").json()["shared_brains"][0]
+    assert listed["sharing_policy"] == "review"
+    assert listed["sharing_invalidation_failed"] is True
+    journal = tmp_path / ".runtime" / "sharing-revocations.json"
+    payload = json.loads(journal.read_text())
+    assert any(row["lifetime_id"] == link.lifetime_id for row in payload["grants"])
+    restarted = _client(tmp_path)[1]
+    assert restarted.workspace("personal").shared_brains[0].sharing_policy == "review"
