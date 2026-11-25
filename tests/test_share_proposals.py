@@ -1403,9 +1403,14 @@ def test_intake_uses_settled_care_witness_and_current_consent(linked, tmp_path, 
             return compose(*args, **kwargs)
 
         monkeypatch.setattr(sp, "_compose_candidate", held_compose)
-        drafting = threading.Thread(target=lambda: results.append(sp.redraft_evidence_candidate(
-            config, workspace="home", proposal_id=drafts[0].proposal_id,
-            expected_revision=drafts[0].artifact["review_token"])))
+        from starlette.testclient import TestClient
+        from ciao.web.app import create_app
+        from tests.session import signed_in
+        client = TestClient(create_app(config))
+        signed_in(client)
+        url = f"/api/proposals/{drafts[0].proposal_id}/redraft"
+        drafting = threading.Thread(target=lambda: results.append(client.post(url, json={
+            "workspace": "home", "expected_revision": drafts[0].artifact["review_token"]})))
         def revoke():
             se.revoke(config, workspace="home", grant_id=grant["grant_id"])
             revoked.set()
@@ -1426,11 +1431,12 @@ def test_intake_uses_settled_care_witness_and_current_consent(linked, tmp_path, 
         drafting.join(5)
         revoking.join(5)
         assert not drafting.is_alive() and not revoking.is_alive() and revoked.is_set()
-        assert len(results) == 1 and isinstance(results[0], sp.ShareDraft)
+        assert len(results) == 1 and results[0].status_code == 200
+        replacement = results[0].json()["replacement"]
         assert sp.draft_evidence_candidates(config, workspace="home", relation=relation) == []
-        refused = sp.redraft_evidence_candidate(config, workspace="home", proposal_id=results[0].proposal_id,
-                                                expected_revision=results[0].artifact["review_token"])
-        assert isinstance(refused, sp.ShareRefusal) and refused.code == "invalid_evidence"
+        refused = client.post(f"/api/proposals/{replacement['id']}/redraft", json={
+            "workspace": "home", "expected_revision": replacement["revision"]})
+        assert refused.status_code == 409 and refused.json()["share_status"] == "invalid_evidence"
         return
     pid = os.fork()
     if pid == 0:
