@@ -2004,7 +2004,7 @@ def _check_lease_plan(path: Path, plan: object) -> None:
     command that loads the state stops with a state error and does not release
     or rewrite the lease.
     """
-    if not isinstance(plan, dict) or set(plan) != _LEASE_PLAN_FIELDS:
+    if not isinstance(plan, dict) or set(plan) not in (_LEASE_PLAN_FIELDS, _LEASE_PLAN_FIELDS | {"stale_note_targets", "completed_stale_notes"}):
         raise _state_error(path, "lease plan has missing or unknown fields")
     planned, blocked = plan["planned"], plan["blocked"]
     if (
@@ -2027,6 +2027,23 @@ def _check_lease_plan(path: Path, plan: object) -> None:
     for count in (plan["blocked_overflow"], plan["deferred_count"]):
         if type(count) is not int or count < 0:
             raise _state_error(path, "lease plan counts are malformed")
+    targets = plan.get("stale_note_targets", {})
+    if not isinstance(targets, dict) or len(targets) > len(planned):
+        raise _state_error(path, "lease plan stale-note targets are malformed")
+    for key, target in targets.items():
+        if not isinstance(key, str) or not isinstance(target, dict) or set(target) != {"relative_path", "revision"}:
+            raise _state_error(path, "lease plan stale-note target is malformed")
+        relative, revision = target["relative_path"], target["revision"]
+        if (not isinstance(relative, str) or not relative or len(relative) > LEASE_PLAN_KEY_MAX_CHARS
+            or Path(relative).is_absolute() or any(part in (".", "..", "") for part in relative.split("/"))
+            or not isinstance(revision, str) or len(revision) != 64
+            or any(c not in "0123456789abcdef" for c in revision)
+            or key != item_key(PASS_STALE_NOTE, relative) or [PASS_STALE_NOTE, key] not in planned):
+            raise _state_error(path, "lease plan stale-note target is invalid")
+    completed = plan.get("completed_stale_notes", [])
+    if (not isinstance(completed, list) or any(not isinstance(key, str) or key not in targets for key in completed)
+        or len(completed) != len(set(completed))):
+        raise _state_error(path, "lease plan completed stale-note targets are malformed")
 
 
 def lease_plan(run_plan: RunPlan) -> dict[str, Any]:
@@ -2038,6 +2055,12 @@ def lease_plan(run_plan: RunPlan) -> dict[str, Any]:
     blocked_pairs = [[item.pass_id, key] for item in run_plan.blocked for key in item.keys]
     return {
         "planned": [[item.pass_id, key] for item in run_plan.planned for key in item.keys],
+        "stale_note_targets": {
+            key: {"relative_path": item.target.relative_path, "revision": item.target.revision}
+            for item in run_plan.planned if item.pass_id == PASS_STALE_NOTE and item.target is not None
+            for key in item.keys
+        },
+        "completed_stale_notes": [],
         "blocked": blocked_pairs[:LEASE_PLAN_BLOCKED_CAP],
         "blocked_overflow": max(0, len(blocked_pairs) - LEASE_PLAN_BLOCKED_CAP),
         "deferred_count": run_plan.deferred_count,
@@ -2666,6 +2689,12 @@ def record_done(
             if key not in state.done_keys:
                 added += 1
             state.done_keys[key] = stamp
+        plan = state.lease.get("plan") if holder else None
+        if isinstance(plan, dict) and "stale_note_targets" in plan:
+            completed = plan["completed_stale_notes"]
+            for key in keys:
+                if key in plan["stale_note_targets"] and key not in completed:
+                    completed.append(key)
         if ttl_s is not None:
             state.lease["expires_at"] = (
                 (effective_now + timedelta(seconds=max(1.0, ttl_s)))

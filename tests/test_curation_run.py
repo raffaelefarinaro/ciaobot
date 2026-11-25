@@ -5224,6 +5224,41 @@ def test_lease_plan_stores_the_planned_pairs_and_caps_the_blocked_ones() -> None
     assert plan["deferred_count"] == cr.LEASE_PLAN_BLOCKED_CAP + 5
 
 
+def test_lease_plan_retains_the_revision_of_each_planned_stale_note(tmp_path: Path) -> None:
+    vault = _vault(tmp_path)
+    target = cr.StaleNoteTarget(relative_path="Projects/alpha/Decisions.md", revision="a" * 64)
+    key = cr.item_key(cr.PASS_STALE_NOTE, target.relative_path)
+    item = cr.WorklistItem(pass_id=cr.PASS_STALE_NOTE, label="note", reason="due", keys=(key,), target=target)
+    plan = cr.lease_plan(cr.RunPlan(planned=(item,), deferred=(), budget=cr.RunBudget()))
+    lease = cr.begin_run(vault, holder="nightly")
+    cr.record_plan(vault, holder=lease.holder, plan=plan)
+    assert cr.load_state(vault).lease["plan"]["stale_note_targets"] == {
+        key: {"relative_path": target.relative_path, "revision": target.revision}
+    }
+    assert cr.load_state(vault).lease["plan"]["completed_stale_notes"] == []
+    with pytest.raises(cr.CurationBusy):
+        cr.record_done(vault, [key], holder="different-holder")
+    cr.record_done(vault, [key], holder=lease.holder)
+    assert cr.load_state(vault).lease["plan"]["completed_stale_notes"] == [key]
+
+
+def test_stale_note_checkpoint_rejects_a_replaced_lease(tmp_path: Path) -> None:
+    vault = _vault(tmp_path)
+    moment = datetime(2026, 1, 1, tzinfo=UTC)
+    target = cr.StaleNoteTarget(relative_path="Projects/alpha/Decisions.md", revision="a" * 64)
+    key = cr.item_key(cr.PASS_STALE_NOTE, target.relative_path)
+    item = cr.WorklistItem(pass_id=cr.PASS_STALE_NOTE, label="note", reason="due", keys=(key,), target=target)
+    plan = cr.lease_plan(cr.RunPlan(planned=(item,), deferred=(), budget=cr.RunBudget()))
+    old = cr.begin_run(vault, holder="old", ttl_s=1, now=moment)
+    cr.record_plan(vault, holder=old.holder, plan=plan, now=moment)
+    later = moment + timedelta(seconds=2)
+    new = cr.begin_run(vault, holder="new", ttl_s=60, now=later)
+    cr.record_plan(vault, holder=new.holder, plan=plan, now=later)
+    with pytest.raises(cr.CurationBusy):
+        cr.record_done(vault, [key], holder=old.holder, now=later)
+    assert cr.load_state(vault).lease["plan"]["completed_stale_notes"] == []
+
+
 # ── S2: curation-end derives planned and completed from receipts ──
 
 
