@@ -214,6 +214,9 @@ def reset_link_for_restore(link: SharedBrainLink) -> SharedBrainLink:
         return replace(
             link, guide_mapping_generation=link.guide_mapping_generation + 1,
             guide_generation_from_restore_only=True,
+            sharing_policy=DEFAULT_SHARING_POLICY,
+            sharing_generation=link.sharing_generation + 1,
+            sharing_consent=None,
         )
     return replace(
         link,

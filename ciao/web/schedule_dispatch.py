@@ -182,6 +182,15 @@ class ScheduleDispatcher:
 
     def __init__(self, host: ScheduleDispatchHost) -> None:
         self._host = host
+        self._active_care: dict[str, tuple[str, str, object]] = {}
+
+    def active_care_dispatch(self, chat_id: str, workspace: str) -> str | None:
+        """Identify a live care stream created by this dispatcher in this workspace."""
+        active = self._active_care.get(chat_id)
+        broker = getattr(self._host, "_broker", None)
+        if active is None or active[0] != workspace or broker is None or broker.get(chat_id) is not active[2]:
+            return None
+        return active[1]
 
     async def _schedule_run_needs_user(
         self, entry: ScheduleEntry, outcome: chat_service.ScheduleRunOutcome,
@@ -714,10 +723,19 @@ class ScheduleDispatcher:
         if loop_owned:
             prompt = loop_wake.loop_wake_prompt(entry, now=datetime.now(UTC))
             stream_origin = "loop"
+        broker = getattr(self._host, "_broker", None)
+        prior_stream = broker.get(target_id) if broker is not None else None
+        registered_care = False
         try:
             stream = self._host.start_stream(
                 target_id, prompt, unattended=True, origin=stream_origin
             )
+            if (broker is not None and prior_stream is None and broker.get(target_id) is stream
+                and _sched_dispatch_id and entry.scope == "system" and not loop_owned
+                and schedule_support.system_base_id(_sched_schedule_id) == MEMORY_CURATION_SCHEDULE_BASE_ID
+                and _sched_workspace and _sched_workspace == getattr(entry, "workspace", "")):
+                self._active_care[target_id] = (_sched_workspace, _sched_dispatch_id, stream)
+                registered_care = True
             async for raw_payload in stream.subscribe():
                 if not isinstance(raw_payload, dict):
                     continue
@@ -758,6 +776,8 @@ class ScheduleDispatcher:
             outcome.stream_error = True
             logger.exception("Schedule dispatch to %s failed", target_id)
         finally:
+            if registered_care and self._active_care.get(target_id, (None, None, None))[2] is stream:
+                del self._active_care[target_id]
             if (
                 orig_model is not None
                 and not interval

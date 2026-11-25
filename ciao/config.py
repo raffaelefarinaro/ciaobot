@@ -654,6 +654,13 @@ class WorkspaceConfig:
     name: str
     vault_root: str
     default_provider: str = "claude"
+    # Stable engine lifetime for this registered workspace. A delete and
+    # recreate (or an archive restore) gets a fresh one, so private consent
+    # keyed by it is never inherited by a different workspace instance.
+    lifetime_id: str = field(default_factory=lambda: secrets.token_urlsafe(24), compare=False)
+    # True only once this lifetime was written to the workspace registry. A
+    # generated fallback is not authority until the registry CAS accepts it.
+    _lifetime_persisted: bool = field(default=False, repr=False, compare=False)
     # Extra tools to deny on top of the trim catalog. None, [] and 'none' all mean no extras.
     disallowed_tools: list[str] | None = None
     # PWA accent preset id. Defaults to Ciao orange (amber).
@@ -867,9 +874,14 @@ def _workspace_from_mapping(data: dict) -> WorkspaceConfig | None:
             "Ignoring invalid provider_overrides for workspace %r: %s", name, exc
         )
         provider_overrides = {}
+    raw_lifetime = data.get("lifetime_id")
+    persisted_lifetime = isinstance(raw_lifetime, str) and bool(raw_lifetime)
+    lifetime_id: str = str(raw_lifetime) if persisted_lifetime else secrets.token_urlsafe(24)
     return WorkspaceConfig(
         name=name,
         vault_root=vault_root,
+        lifetime_id=lifetime_id,
+        _lifetime_persisted=persisted_lifetime,
         default_provider=str(data.get("default_provider", "claude")).strip() or "claude",
         disallowed_tools=_coerce_workspace_disallowed(data.get("disallowed_tools")),
         claude_trim=absorb_legacy_claude_ai_connectors(
@@ -1695,6 +1707,8 @@ class CiaoConfig:
                 )
                 self._workspace_registry_bytes = payload
                 self._workspace_registry_changed = False
+                for workspace in self.workspaces.values():
+                    workspace._lifetime_persisted = True
             finally:
                 if own_owner:
                     owner.close()
@@ -1706,6 +1720,7 @@ class CiaoConfig:
             row: dict[str, Any] = {
                 "name": workspace.name,
                 "vault_root": workspace.vault_root,
+                "lifetime_id": workspace.lifetime_id,
                 # Persist the effective provider, not a stale registry value
                 # left behind after a provider was removed.  The route layer
                 # already serializes this way; keeping the config registry

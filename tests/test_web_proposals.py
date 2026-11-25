@@ -1174,6 +1174,7 @@ def test_the_real_app_serves_every_documented_proposal_route() -> None:
         "/api/proposals/{id}/preview",
         "/api/proposals/{id}/implement",
         "/api/proposals/{id}/reconcile",
+        "/api/proposals/{id}/redraft",
         "/api/proposals/{id}/{action}",
     }
     assert registered == expected, f"app.py route table drifted: {registered}"

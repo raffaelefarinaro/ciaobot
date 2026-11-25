@@ -108,6 +108,27 @@ def _draft(config: Config, content: bytes = b"# exact\r\n\xce\xbb\n", path: str 
     return draft
 
 
+def test_evidence_blocked_preview_never_probes_or_stages_folder(folder, monkeypatch):
+    config, shared, _ = folder
+    draft = _draft(config)
+    artifact = draft.artifact
+    artifact["immutable"]["evidence_authorization"] = {"proof": "do-not-expose-proof"}
+    artifact["review_token"] = share_proposals._review_token(artifact["immutable"])
+    for path in share_proposals._store_dir(config).glob("*.json"):
+        stored = share_proposals._load_sidecar(path)
+        if stored["immutable"]["sidecar_id"] == artifact["immutable"]["sidecar_id"]:
+            share_proposals._write_private(path, json.dumps(artifact, sort_keys=True).encode())
+    before = sorted(str(path.relative_to(shared)) for path in shared.rglob("*"))
+    _, rows = proposal_service._scan_proposal_rows(config)
+    for name in ("_folder_target", "_folder_staging_root", "_folder_same_mount"):
+        monkeypatch.setattr(share_publish, name, lambda *args, **kwargs: pytest.fail("blocked preview touched the folder"))
+    monkeypatch.setattr(shared_brain, "brain_state", lambda *args, **kwargs: pytest.fail("blocked preview probed the folder"))
+    preview = proposal_service.preview_row(config, rows[draft.proposal_id])
+    assert preview["blocked_reason"] == "draft_unavailable"
+    assert "do-not-expose-proof" not in json.dumps(preview)
+    assert sorted(str(path.relative_to(shared)) for path in shared.rglob("*")) == before
+
+
 def _publish(config: Config, draft: share_proposals.ShareDraft) -> share_publish.PublishOutcome:
     return asyncio.run(share_publish.publish_share(
         config, workspace="home", proposal_id=draft.proposal_id,

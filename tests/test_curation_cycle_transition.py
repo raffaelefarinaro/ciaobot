@@ -620,7 +620,7 @@ def test_an_expired_preparer_is_published_once_and_the_entrant_keeps_its_own_lea
     assert published == [TARGET_BYTES]
     assert _log(vault) == TARGET_BYTES
     state = cr.load_state(vault)
-    assert state.lease == lease_b.as_dict()
+    assert state.lease == {**lease_b.as_dict(), "proof_hash": lease_b.proof_hash}
     assert state.lease["holder"] != lease_a.holder
     assert state.lease["expires_at"] == "2026-11-18T14:30:00Z"
     assert cc.decode_state(_text(vault)).pending is None

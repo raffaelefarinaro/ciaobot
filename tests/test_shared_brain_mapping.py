@@ -44,3 +44,16 @@ def test_restore_drops_mapping_even_for_folder(tmp_path):
     restored = reset_link_for_restore(replace(link, guide_mapping=choice, guide_mapping_generation=choice.generation))
     assert restored.lifetime_id != link.lifetime_id
     assert restored.guide_mapping is None
+
+
+def test_restore_of_unmapped_folder_revokes_sharing_permission(tmp_path):
+    from ciao.config import SharingConsent
+    from ciao.shared_brain import reset_link_for_restore
+
+    link = SharedBrainLink("team", str(tmp_path), "team", kind="folder")
+    consent = SharingConsent(1, link.identity, link.lifetime_id, "2026-11-25T00:00:00Z")
+    link = replace(link, sharing_policy="automatic", sharing_generation=1, sharing_consent=consent)
+    restored = reset_link_for_restore(link)
+    assert restored.lifetime_id == link.lifetime_id
+    assert restored.sharing_policy == "review" and restored.sharing_consent is None
+    assert restored.sharing_generation == 2 and restored.guide_mapping_generation == 1
