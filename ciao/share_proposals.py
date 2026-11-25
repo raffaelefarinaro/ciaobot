@@ -6,6 +6,8 @@ destination details stay in owner-only runtime state until a human reviews them.
 
 from __future__ import annotations
 
+import base64
+import binascii
 import hashlib
 import hmac
 import json
@@ -588,6 +590,7 @@ def _draft_share(
     registry_owner: Any = None,
     expected_qualification: tuple[Any, ...] | None = None,
     candidate_binding: dict[str, Any] | None = None,
+    intent_qualification: tuple[Any, ...] | None = None,
 ) -> ShareDraft:
     """Qualify and privately file one immutable shared-note proposal."""
     if operation not in (None, "create", "replace", "delete"):
@@ -599,53 +602,9 @@ def _draft_share(
         or not isinstance(candidate_binding.get("authorization"), dict)
     ):
         _refuse("invalid_evidence", "The candidate requires owned destination and evidence claims.")
+    if intent_qualification is not None and candidate_binding is None:
+        _refuse("invalid_evidence", "The candidate intent is unavailable.")
     link = _brain_for(config, workspace, brain)
-    from ciao.workspaces import workspace_registry_claim, WorkspaceRegistryBusy, WorkspaceRegistryConflict
-
-    claim = (
-        nullcontext()
-        if checkout_claimed or link.kind != "git"
-        else shared_brain.checkout_claims_nowait([link.path], config)
-    )
-    try:
-        registry = nullcontext(registry_owner) if registry_owner is not None else workspace_registry_claim(config)
-        with claim, registry as owner:
-            qualified = _qualify_owned(config, workspace, link, relative_path, operation, owner)
-            if expected_qualification is not None and qualified != expected_qualification:
-                _refuse("changed_upstream", "The reviewed note changed while composing; draft it again.")
-            (
-                op_ref,
-                base_commit,
-                original,
-                original_oid,
-                destination_fingerprint,
-                folder_chain,
-                original_mode,
-            ) = qualified
-    except (WorkspaceRegistryBusy, WorkspaceRegistryConflict):
-        _refuse("brain_unavailable", "The shared brain changed while drafting.")
-    operation = operation or ("replace" if original is not None else "create")
-    if operation == "create" and original is not None or operation in ("replace", "delete") and original is None:
-        _refuse("invalid_operation", "The requested operation does not match the upstream note.")
-    if operation == "delete":
-        if proposed is not None:
-            _refuse("invalid_operation", "A deletion has no proposed content.")
-    elif not isinstance(proposed, bytes):
-        _refuse("invalid_operation", "Create and replace require exact bytes.")
-    if proposed is not None and len(proposed) > MAX_BYTES:
-        _refuse("too_large", "The proposed note exceeds the 65,536-byte limit.")
-    try:
-        original_text = original.decode("utf-8", "strict") if original is not None else None
-        proposed_text = proposed.decode("utf-8", "strict") if proposed is not None else None
-    except UnicodeDecodeError:
-        _refuse("invalid_utf8", "The note content is not valid UTF-8.")
-    home = str(Path.home())
-    for content in (original_text, proposed_text):
-        if content is not None:
-            if redact_text(content) != content:
-                _refuse("secret_detected", "The note contains credential-shaped text.")
-            if home in content or str(Path(config.workspace_root)) in content:
-                _refuse("private_path_mentioned", "The note mentions a private local path.")
     store = _storage_safe(config, workspace)
     key_hash = hashlib.sha256((workspace + "\0" + request_key).encode()).hexdigest()
     index_path = store / (key_hash + ".json")
@@ -722,6 +681,52 @@ def _draft_share(
             fields["proposal_id"], canonical,
             proposal_review_path(workspace, canonical_fields["review_key"]),
         )
+    from ciao.workspaces import workspace_registry_claim, WorkspaceRegistryBusy, WorkspaceRegistryConflict
+
+    claim = (
+        nullcontext()
+        if checkout_claimed or link.kind != "git"
+        else shared_brain.checkout_claims_nowait([link.path], config)
+    )
+    try:
+        registry = nullcontext(registry_owner) if registry_owner is not None else workspace_registry_claim(config)
+        with claim, registry as owner:
+            qualified = intent_qualification if intent_qualification is not None else _qualify_owned(config, workspace, link, relative_path, operation, owner)
+            if expected_qualification is not None and qualified != expected_qualification:
+                _refuse("changed_upstream", "The reviewed note changed while composing; draft it again.")
+            (
+                op_ref,
+                base_commit,
+                original,
+                original_oid,
+                destination_fingerprint,
+                folder_chain,
+                original_mode,
+            ) = qualified
+    except (WorkspaceRegistryBusy, WorkspaceRegistryConflict):
+        _refuse("brain_unavailable", "The shared brain changed while drafting.")
+    operation = operation or ("replace" if original is not None else "create")
+    if operation == "create" and original is not None or operation in ("replace", "delete") and original is None:
+        _refuse("invalid_operation", "The requested operation does not match the upstream note.")
+    if operation == "delete":
+        if proposed is not None:
+            _refuse("invalid_operation", "A deletion has no proposed content.")
+    elif not isinstance(proposed, bytes):
+        _refuse("invalid_operation", "Create and replace require exact bytes.")
+    if proposed is not None and len(proposed) > MAX_BYTES:
+        _refuse("too_large", "The proposed note exceeds the 65,536-byte limit.")
+    try:
+        original_text = original.decode("utf-8", "strict") if original is not None else None
+        proposed_text = proposed.decode("utf-8", "strict") if proposed is not None else None
+    except UnicodeDecodeError:
+        _refuse("invalid_utf8", "The note content is not valid UTF-8.")
+    home = str(Path.home())
+    for content in (original_text, proposed_text):
+        if content is not None:
+            if redact_text(content) != content:
+                _refuse("secret_detected", "The note contains credential-shaped text.")
+            if home in content or str(Path(config.workspace_root)) in content:
+                _refuse("private_path_mentioned", "The note mentions a private local path.")
     sidecar_id = secrets.token_urlsafe(18)
     text = f"Shared note change proposal {sidecar_id}"
     rel_queue = (PurePosixPath(workspace) / _QUEUE).as_posix()
@@ -911,6 +916,71 @@ def _freeze_care_destination(config: Any, workspace: str, relation: Any, snapsho
                                                         "signature": signature}, ensure_ascii=False).encode("utf-8"), limit=16384)
 
 
+def _add_candidate_provenance(config: Any, workspace: str, draft: ShareDraft, authorization: dict[str, Any]) -> None:
+    artifact = draft.artifact
+    provenance = artifact.setdefault("producer_provenance", [])
+    if not isinstance(provenance, list):
+        _refuse("draft_corrupt", "The private candidate provenance is corrupt.")
+    if authorization not in provenance:
+        provenance.append(authorization)
+        sidecar_id = artifact["immutable"]["sidecar_id"]
+        sidecar = _store_dir(config) / (hashlib.sha256((workspace + "\0sidecar\0" + sidecar_id).encode()).hexdigest() + ".json")
+        _write_private(sidecar, json.dumps(artifact, ensure_ascii=False, sort_keys=True).encode("utf-8"))
+
+
+def _candidate_intent(
+    config: Any, workspace: str, fingerprint: str,
+    captured: tuple[Any, ...] | None = None, proposed: bytes | None = None,
+) -> tuple[tuple[Any, ...], bytes] | None:
+    """Persist the exact first composition before any candidate artifact is written."""
+    from ciao import share_evidence
+
+    store = _storage_safe(config, workspace)
+    parent_fd = folder_io.open_directory_nofollow(str(store))
+    try:
+        child_fd, _ = folder_io.open_or_create_private_dir(parent_fd, "candidate-intents")
+        os.close(child_fd)
+    finally:
+        os.close(parent_fd)
+    secret = share_evidence._relation_secret(config)
+    name = hmac.new(secret, (workspace + "\0" + fingerprint).encode(), hashlib.sha256).hexdigest()
+    path = store / "candidate-intents" / (name + ".json")
+    record = share_evidence._read_json(path, limit=MAX_SIDECAR_BYTES, code="private_state_corrupt")
+    if not record:
+        if captured is None or proposed is None:
+            return None
+        original = captured[2]
+        payload = {"workspace": workspace, "fingerprint": fingerprint,
+                   "qualified": [captured[0], captured[1], base64.b64encode(original).decode("ascii") if original is not None else None,
+                                 captured[3], captured[4], captured[5], captured[6]],
+                   "proposed": base64.b64encode(proposed).decode("ascii")}
+        encoded = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
+        signature = hmac.new(secret, b"candidate-intent\0" + encoded, hashlib.sha256).hexdigest()
+        share_evidence._write_private(path, json.dumps({"schema": share_evidence.SCHEMA, "payload": payload,
+                                                        "signature": signature}, ensure_ascii=False).encode("utf-8"), limit=MAX_SIDECAR_BYTES)
+        return captured, proposed
+    saved_payload = record.get("payload")
+    saved_signature = record.get("signature")
+    if not isinstance(saved_payload, dict) or not isinstance(saved_signature, str) or not re.fullmatch(r"[0-9a-f]{64}", saved_signature):
+        _refuse("draft_corrupt", "The private candidate intent is corrupt.")
+    encoded = json.dumps(saved_payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    expected = hmac.new(secret, b"candidate-intent\0" + encoded, hashlib.sha256).hexdigest()
+    qualified = saved_payload.get("qualified")
+    if (not hmac.compare_digest(saved_signature, expected) or saved_payload.get("workspace") != workspace
+            or saved_payload.get("fingerprint") != fingerprint or not isinstance(qualified, list) or len(qualified) != 7
+            or (qualified[2] is not None and not isinstance(qualified[2], str))
+            or not isinstance(saved_payload.get("proposed"), str)):
+        _refuse("draft_corrupt", "The private candidate intent is corrupt.")
+    try:
+        original = base64.b64decode(qualified[2], validate=True) if qualified[2] is not None else None
+        result = base64.b64decode(saved_payload["proposed"], validate=True)
+    except (binascii.Error, TypeError, ValueError):
+        _refuse("draft_corrupt", "The private candidate intent is corrupt.")
+    if (original is not None and len(original) > MAX_BYTES) or len(result) > MAX_BYTES:
+        _refuse("draft_corrupt", "The private candidate intent is corrupt.")
+    return (qualified[0], qualified[1], original, qualified[3], qualified[4], qualified[5], qualified[6]), result
+
+
 def draft_evidence_candidates(config: Any, *, workspace: str, relation: Any) -> list[ShareDraft | ShareRefusal]:
     """File bounded, individually reviewed candidates from engine-attested evidence."""
     from ciao import share_evidence, shared_brain_mapping
@@ -959,15 +1029,42 @@ def draft_evidence_candidates(config: Any, *, workspace: str, relation: Any) -> 
                             operation = "replace" if destination.operation == "append" else destination.operation
                             if operation not in ("create", "replace"):
                                 continue
-                            captured = _qualify_owned(config, workspace, link, destination.path, operation, owner)
-                            proposed = _compose_candidate(captured[2], _render_evidence(row["canonical_bytes"], row["digest"]), destination)
-                            identity.update(destination=asdict(snapshot), operation=operation,
-                                            base_commit=captured[1], base_blob=captured[3], base_mode=captured[6],
-                                            base_digest=hashlib.sha256(captured[2]).hexdigest() if captured[2] is not None else None,
-                                            result_digest=hashlib.sha256(proposed).hexdigest())
+                            identity.update(destination=asdict(snapshot), operation=operation)
                             request = json.dumps(identity, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
                             fingerprint = hashlib.sha256(request.encode("utf-8")).hexdigest()
+                            store = _storage_safe(config, workspace)
+                            index_hash = hashlib.sha256((workspace + "\0candidate:" + fingerprint).encode()).hexdigest()
                             queue = Path(config.workspace_vault_root(workspace)) / _QUEUE
+                            intent = _candidate_intent(config, workspace, fingerprint)
+                            if (store / (index_hash + ".json")).exists():
+                                if intent is None:
+                                    _refuse("draft_corrupt", "The private candidate intent is missing.")
+                                lock = _thread_queue_lock(queue)
+                                if not lock.acquire(blocking=False):
+                                    _refuse("draft_unavailable", "The proposal queue is currently unavailable.")
+                                try:
+                                    with memory_receipts.queue_lock(queue, timeout_s=0):
+                                        if not shared_brain_mapping.revalidate_snapshot(config, snapshot, owner=owner):
+                                            _refuse("brain_unavailable", "The reviewed destination mapping changed.")
+                                        draft = _draft_share(
+                                            config, workspace=workspace, brain=link.name, relative_path=destination.path,
+                                            operation=operation, proposed=b"", request_key="candidate:" + fingerprint,
+                                            request_fingerprint=fingerprint, checkout_claimed=True, registry_owner=owner,
+                                            expected_qualification=(),
+                                            candidate_binding={"authorization": authorization, **asdict(snapshot)},
+                                        )
+                                        _add_candidate_provenance(config, workspace, draft, authorization)
+                                        results.append(draft)
+                                finally:
+                                    lock.release()
+                                continue
+                            recovered_intent = intent is not None
+                            if intent is None:
+                                captured = _qualify_owned(config, workspace, link, destination.path, operation, owner)
+                                proposed = _compose_candidate(captured[2], _render_evidence(row["canonical_bytes"], row["digest"]), destination)
+                                intent = _candidate_intent(config, workspace, fingerprint, captured, proposed)
+                                assert intent is not None
+                            captured, proposed = intent
                             lock = _thread_queue_lock(queue)
                             if not lock.acquire(blocking=False):
                                 _refuse("draft_unavailable", "The proposal queue is currently unavailable.")
@@ -1007,6 +1104,7 @@ def draft_evidence_candidates(config: Any, *, workspace: str, relation: Any) -> 
                                             operation=operation, proposed=proposed, request_key="candidate:" + fingerprint,
                                             request_fingerprint=fingerprint, checkout_claimed=True, registry_owner=owner,
                                             expected_qualification=captured,
+                                            intent_qualification=captured if recovered_intent else None,
                                             candidate_binding={"authorization": authorization, **asdict(snapshot)},
                                         )
                                     except ShareDraftError as exc:
@@ -1015,15 +1113,7 @@ def draft_evidence_candidates(config: Any, *, workspace: str, relation: Any) -> 
                                             fingerprints.remove(fingerprint)
                                             share_evidence._write_private(ledger_path, json.dumps({"schema": share_evidence.SCHEMA, "fingerprints": fingerprints}).encode(), limit=8192)
                                         raise
-                                    artifact = draft.artifact
-                                    provenance = artifact.setdefault("producer_provenance", [])
-                                    if not isinstance(provenance, list):
-                                        _refuse("draft_corrupt", "The private candidate provenance is corrupt.")
-                                    if authorization not in provenance:
-                                        provenance.append(authorization)
-                                        sidecar_id = artifact["immutable"]["sidecar_id"]
-                                        sidecar = _store_dir(config) / (hashlib.sha256((workspace + "\0sidecar\0" + sidecar_id).encode()).hexdigest() + ".json")
-                                        _write_private(sidecar, json.dumps(artifact, ensure_ascii=False, sort_keys=True).encode("utf-8"))
+                                    _add_candidate_provenance(config, workspace, draft, authorization)
                                     results.append(draft)
                             finally:
                                 lock.release()

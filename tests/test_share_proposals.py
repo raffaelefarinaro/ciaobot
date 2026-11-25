@@ -878,6 +878,15 @@ def test_intake_resolves_mapped_destination_and_never_publishes(linked, monkeypa
     monkeypatch.setattr(share_publish, "publish_share", lambda *args, **kwargs: pytest.fail("intake published"))
     first = sp.draft_evidence_candidates(config, workspace="home", relation=relation)
     assert len(first) == 1 and isinstance(first[0], sp.ShareDraft)
+    intent_path = next((sp._store_dir(config) / "candidate-intents").glob("*.json"))
+    original_intent = intent_path.read_bytes()
+    altered_intent = json.loads(original_intent)
+    altered_intent["payload"]["proposed"] = "Zm9yZ2Vk"
+    share_evidence._write_private(intent_path, json.dumps(altered_intent).encode(), limit=sp.MAX_SIDECAR_BYTES)
+    corrupt_intent = sp.draft_evidence_candidates(config, workspace="home", relation=relation)
+    assert len(corrupt_intent) == 1 and isinstance(corrupt_intent[0], sp.ShareRefusal)
+    assert corrupt_intent[0].code == "draft_corrupt"
+    share_evidence._write_private(intent_path, original_intent, limit=sp.MAX_SIDECAR_BYTES)
     second = sp.draft_evidence_candidates(config, workspace="home", relation=relation)
     assert second[0].proposal_id == first[0].proposal_id
     fields = first[0].artifact["immutable"]
@@ -1024,6 +1033,7 @@ def test_intake_uses_real_checkpoint_and_consent(linked, tmp_path, monkeypatch, 
     se.checkpoint_completed_memory_pass(config, registry, workspace="home", pass_chat_id=chat.chat_id)
     relation = se.recover_memory_pass_source_relation(config, workspace="home", pass_chat_id=chat.chat_id)
     if destination_kind in {"collection", "section"}:
+        intended_base = git(clone, "rev-parse", "refs/remotes/origin/main")
         registry_lock = config.state_path.parent / "locks" / "workspaces-registry.lock"
         child = subprocess.Popen(
             [sys.executable, "-c", "import fcntl,sys; f=open(sys.argv[1], 'r+'); fcntl.flock(f, fcntl.LOCK_EX); print('ready', flush=True); sys.stdin.read()", str(registry_lock)],
@@ -1052,6 +1062,10 @@ def test_intake_uses_real_checkpoint_and_consent(linked, tmp_path, monkeypatch, 
             os._exit(0)
         _, status = os.waitpid(pid, 0)
         assert os.waitstatus_to_exitcode(status) == 21
+        (clone / "later.md").write_text("upstream moved after intent\n")
+        git(clone, "add", "later.md")
+        git(clone, "commit", "--quiet", "-m", "move after intent")
+        git(clone, "update-ref", "refs/remotes/origin/main", "HEAD")
         pid = os.fork()
         if pid == 0:
             sp._write_private = lambda *args, **kwargs: os._exit(23)
@@ -1099,6 +1113,7 @@ def test_intake_uses_real_checkpoint_and_consent(linked, tmp_path, monkeypatch, 
         assert queue.read_text().count("[share ") == 1
     drafts = sp.draft_evidence_candidates(config, workspace="home", relation=relation)
     assert len(drafts) == 1 and isinstance(drafts[0], sp.ShareDraft)
+    assert drafts[0].artifact["immutable"]["base_commit"] == intended_base
     queue = Path(config.workspace_vault_root("home")) / "Workspace" / "Memory-Proposals.md"
     assert queue.read_text().count("[share ") == 1
     assert "Share this decision" in drafts[0].artifact["immutable"]["proposed"]
@@ -1158,7 +1173,8 @@ def test_intake_uses_real_checkpoint_and_consent(linked, tmp_path, monkeypatch, 
     assert sp.draft_evidence_candidates(config, workspace="home", relation=relation) == []
 
 
-def test_intake_uses_settled_care_witness_and_current_consent(linked, tmp_path, monkeypatch):
+@pytest.mark.parametrize("change_mapping_after_settlement", [False, True])
+def test_intake_uses_settled_care_witness_and_current_consent(linked, tmp_path, monkeypatch, change_mapping_after_settlement):
     from dataclasses import replace
     from tests.test_share_evidence import _memory_manager
     from ciao import curation_run, curation_share, share_evidence as se, share_publish, shared_brain_guide, shared_brain_mapping
@@ -1211,13 +1227,28 @@ def test_intake_uses_settled_care_witness_and_current_consent(linked, tmp_path, 
         witness = curation_share.settled_witnesses(config, workspace="home", holder=lease.holder, claim=claim)[0]
         relation = se.recover_care_source_relation(config, workspace="home", holder=lease.holder, witness_signature=witness["witness"]["witness_signature"], claim=claim)
     monkeypatch.setattr(share_publish, "publish_share", lambda *args, **kwargs: pytest.fail("intake published"))
+    if change_mapping_after_settlement:
+        new_guide = {**guide, "types": {"decision": {"kind": "collection", "path": "changed", "operation": "create"}}}
+        (clone / shared_brain_guide.GUIDE_NAME).write_text("```ciao-guide\n" + json.dumps(new_guide) + "\n```\n")
+        new_load = shared_brain_guide.read_guide(clone, brain_identity=link.identity)
+        assert new_load.guide is not None
+        new_mapping = shared_brain_mapping.approve(link, new_load, ["decision"], expected_pin=new_load.guide.pin)
+        config.workspace("home").shared_brains = [replace(link, guide_mapping=new_mapping, guide_mapping_generation=new_mapping.generation)]
+        config.persist_workspace_registry()
+        refused = sp.draft_evidence_candidates(config, workspace="home", relation=relation)
+        assert all(isinstance(item, sp.ShareRefusal) for item in refused)
+        return
     drafts = sp.draft_evidence_candidates(config, workspace="home", relation=relation)
     assert len(drafts) == 1 and isinstance(drafts[0], sp.ShareDraft)
     assert "Launch" in drafts[0].artifact["immutable"]["proposed"]
-    assert sp.draft_evidence_candidates(config, workspace="home", relation=relation)[0].proposal_id == drafts[0].proposal_id
     memory_drafts = sp.draft_evidence_candidates(config, workspace="home", relation=memory_relation)
     assert len(memory_drafts) == 1 and isinstance(memory_drafts[0], sp.ShareDraft)
     assert memory_drafts[0].proposal_id == drafts[0].proposal_id
     assert {item["payload"]["row"]["producer"] for item in memory_drafts[0].artifact["producer_provenance"]} == {"memory_extraction", "nightly_curation"}
+    (clone / "unrelated.md").write_text("another upstream change\n")
+    git(clone, "add", "unrelated.md")
+    git(clone, "commit", "--quiet", "-m", "advance upstream")
+    git(clone, "update-ref", "refs/remotes/origin/main", "HEAD")
+    assert sp.draft_evidence_candidates(config, workspace="home", relation=relation)[0].proposal_id == drafts[0].proposal_id
     se.revoke(config, workspace="home", grant_id=grant["grant_id"])
     assert sp.draft_evidence_candidates(config, workspace="home", relation=relation) == []
