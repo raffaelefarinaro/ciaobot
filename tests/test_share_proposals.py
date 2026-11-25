@@ -946,6 +946,20 @@ def test_intake_uses_real_checkpoint_and_consent(linked, tmp_path, monkeypatch, 
             child.wait(timeout=5)
         pid = os.fork()
         if pid == 0:
+            original_evidence_write = se._write_private
+
+            def die_after_ledger(path, data, *, limit):
+                original_evidence_write(path, data, limit=limit)
+                if path.parent.name == "candidate-runs":
+                    os._exit(21)
+
+            se._write_private = die_after_ledger
+            sp.draft_evidence_candidates(config, workspace="home", relation=relation)
+            os._exit(0)
+        _, status = os.waitpid(pid, 0)
+        assert os.waitstatus_to_exitcode(status) == 21
+        pid = os.fork()
+        if pid == 0:
             sp._write_private = lambda *args, **kwargs: os._exit(23)
             sp.draft_evidence_candidates(config, workspace="home", relation=relation)
             os._exit(0)
@@ -955,12 +969,40 @@ def test_intake_uses_real_checkpoint_and_consent(linked, tmp_path, monkeypatch, 
         assert not queue.exists()
         pid = os.fork()
         if pid == 0:
+            original_artifact_write = sp._write_private
+
+            def die_after_canonical(path, data):
+                original_artifact_write(path, data)
+                os._exit(25)
+
+            sp._write_private = die_after_canonical
+            sp.draft_evidence_candidates(config, workspace="home", relation=relation)
+            os._exit(0)
+        _, status = os.waitpid(pid, 0)
+        assert os.waitstatus_to_exitcode(status) == 25
+        assert not queue.exists()
+        pid = os.fork()
+        if pid == 0:
             sp.memory_receipts.write_queue_atomically = lambda *args, **kwargs: os._exit(24)
             sp.draft_evidence_candidates(config, workspace="home", relation=relation)
             os._exit(0)
         _, status = os.waitpid(pid, 0)
         assert os.waitstatus_to_exitcode(status) == 24
         assert not queue.exists()
+        pid = os.fork()
+        if pid == 0:
+            original_queue_write = sp.memory_receipts.write_queue_atomically
+
+            def die_after_queue(*args, **kwargs):
+                original_queue_write(*args, **kwargs)
+                os._exit(26)
+
+            sp.memory_receipts.write_queue_atomically = die_after_queue
+            sp.draft_evidence_candidates(config, workspace="home", relation=relation)
+            os._exit(0)
+        _, status = os.waitpid(pid, 0)
+        assert os.waitstatus_to_exitcode(status) == 26
+        assert queue.read_text().count("[share ") == 1
     drafts = sp.draft_evidence_candidates(config, workspace="home", relation=relation)
     assert len(drafts) == 1 and isinstance(drafts[0], sp.ShareDraft)
     assert "Share this decision" in drafts[0].artifact["immutable"]["proposed"]
@@ -974,18 +1016,41 @@ def test_intake_uses_real_checkpoint_and_consent(linked, tmp_path, monkeypatch, 
             b'```json\n{\n  "decision": "Share this decision"\n}\n```\n\n## Other\r\nKeep\r\n'
         )
     if destination_kind == "collection":
-        from ciao.workspaces import workspace_registry_claim
-
-        authorization = se.mint_evidence_authorizations(config, workspace="home", brain_name=link.name, relation=relation)[0]
         program = (
             "import sys; from ciao.config import CiaoConfig; from ciao import share_evidence; "
             "c=CiaoConfig.from_env({'CIAO_WORKSPACE':sys.argv[1], 'CIAO_RUNTIME_ROOT':sys.argv[2], 'PWA_AUTH_TOKEN':'test'}); "
             "print('ready',flush=True); share_evidence.revoke(c,workspace='home',grant_id=sys.argv[3]); print('done',flush=True)"
         )
-        with sp.shared_brain.checkout_claims_nowait([link.path], config), workspace_registry_claim(config), se.evidence_authorization_guard(config, workspace="home", authorization=authorization):
+        ready_read, ready_write = os.pipe()
+        resume_read, resume_write = os.pipe()
+        pid = os.fork()
+        if pid == 0:
+            os.close(ready_read)
+            os.close(resume_write)
+            original_filer = sp._draft_share
+
+            def paused_filer(*args, **kwargs):
+                os.write(ready_write, b"1")
+                os.read(resume_read, 1)
+                return original_filer(*args, **kwargs)
+
+            sp._draft_share = paused_filer
+            result = sp.draft_evidence_candidates(config, workspace="home", relation=relation)
+            os._exit(0 if len(result) == 1 and isinstance(result[0], sp.ShareDraft) else 1)
+        os.close(ready_write)
+        os.close(resume_read)
+        assert select.select([ready_read], [], [], 10)[0]
+        assert os.read(ready_read, 1) == b"1"
+        try:
             child = subprocess.Popen([sys.executable, "-c", program, str(config.workspace_root), str(config.state_path.parent), grant["grant_id"]], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
             assert child.stdout is not None and child.stdout.readline().strip() == "ready"
             assert not select.select([child.stdout], [], [], 0.2)[0]
+        finally:
+            os.write(resume_write, b"1")
+            os.close(resume_write)
+            os.close(ready_read)
+        _, status = os.waitpid(pid, 0)
+        assert os.waitstatus_to_exitcode(status) == 0
         stdout, stderr = child.communicate(timeout=10)
         assert child.returncode == 0, stderr
         assert stdout.strip() == "done"
