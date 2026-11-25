@@ -49,18 +49,17 @@ test.describe('Settings › Appearance', () => {
 
   test('shows the vector brand mark with theme ink and accent dots', async ({ page }) => {
     await boot(page, '/settings/appearance', SETTINGS)
-    const brand = page.locator('.sidebar-brand[role="img"]')
+    const brand = page.locator('button.sidebar-brand')
     for (const [theme, color] of [['Light', 'rgb(26, 26, 46)'], ['Dark', 'rgb(232, 232, 240)']]) {
       await page.getByRole('radio', { name: theme, exact: true }).click()
       await expect(brand).toBeVisible()
-      await expect(brand).toHaveAttribute('aria-label', 'Ciaobot')
+      await expect(brand).toHaveAttribute('aria-label', 'Reload Ciaobot')
       await expect(brand).toHaveCSS('width', '30px')
       await expect(brand).toHaveCSS('height', '30px')
       await expect(brand.locator('svg path')).toHaveAttribute('stroke', 'currentColor')
       await expect(brand).toHaveCSS('color', color)
       await expect(brand.locator('svg circle').first()).toHaveAttribute('fill', 'var(--accent)')
       await expect(brand.locator('svg circle').last()).toHaveAttribute('fill', 'var(--accent)')
-      await expect(page.getByRole('button', { name: 'Reload Ciaobot' })).toHaveCount(0)
     }
   })
 
