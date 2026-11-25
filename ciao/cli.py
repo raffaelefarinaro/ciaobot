@@ -1195,6 +1195,8 @@ def validate_external_setup_vault(workspace: Path | str, vault: Path | str) -> P
     if notes == root or notes in root.parents or root in notes.parents:
         raise ValueError("notes folder and Ciaobot folder must be separate")
     selection = select_setup_vault(root, vault_mode="scratch")
+    if is_set_up_workspace(root):
+        raise ValueError("an existing installation cannot be rebound during setup")
     marker = root / ".runtime" / "external-setup-pending.json"
     root_stat = root.stat() if root.exists() else None
     notes_stat = notes.stat()
@@ -1209,16 +1211,8 @@ def validate_external_setup_vault(workspace: Path | str, vault: Path | str) -> P
             raise ValueError("pending setup belongs to another notes folder")
     else:
         pending = None
-    if is_set_up_workspace(root) or selection.source in {"env", "registry", "legacy"}:
-        if (
-            pending is None
-            or selection.source == "legacy"
-            or (selection.source == "env" and selection.vault_path.resolve() != notes)
-            or (selection.registered_vaults is not None and any(
-                path.resolve() != notes for _, path in selection.registered_vaults
-            ))
-        ):
-            raise ValueError("an existing installation cannot be rebound during setup")
+    if selection.source in {"env", "registry", "legacy"}:
+        raise ValueError("an existing installation cannot be rebound during setup")
     return notes
 
 

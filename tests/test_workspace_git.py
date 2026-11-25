@@ -1615,3 +1615,24 @@ def test_external_setup_validation_refuses_unreadable_or_established_install(
     with pytest.raises(ValueError, match="cannot be rebound"):
         validate_external_setup_vault(workspace, notes)
     assert not list(notes.iterdir())
+
+
+def test_external_setup_pending_record_cannot_authorize_established_install(tmp_path: Path) -> None:
+    from ciao.cli import validate_external_setup_vault
+
+    workspace = tmp_path / "engine"
+    notes = tmp_path / "notes"
+    workspace.mkdir()
+    notes.mkdir()
+    runtime = workspace / ".runtime"
+    runtime.mkdir()
+    (workspace / ".env").write_text(f"CIAO_VAULT_ROOT={notes}\n", encoding="utf-8")
+    (runtime / "workspaces.json").write_text(json.dumps([{"name": "personal", "vault_root": str(notes)}]), encoding="utf-8")
+    ws_stat, notes_stat = workspace.stat(), notes.stat()
+    (runtime / "external-setup-pending.json").write_text(json.dumps({
+        "notes": str(notes.resolve()),
+        "notes_identity": [notes_stat.st_dev, notes_stat.st_ino],
+        "install_identity": [ws_stat.st_dev, ws_stat.st_ino],
+    }), encoding="utf-8")
+    with pytest.raises(ValueError, match="cannot be rebound"):
+        validate_external_setup_vault(workspace, notes)
