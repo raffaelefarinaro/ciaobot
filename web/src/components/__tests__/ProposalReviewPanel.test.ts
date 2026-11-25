@@ -5,6 +5,7 @@ import { createPinia, setActivePinia } from 'pinia'
 import { flushPromises, mount } from '@vue/test-utils'
 import { nextTick } from 'vue'
 import ProposalReviewPanel from '../ProposalReviewPanel.vue'
+import InAppToast from '../InAppToast.vue'
 import { useProposalsStore } from '../../stores/proposals'
 import { useProjectStore } from '../../stores/projects'
 import { useFileViewerStore } from '../../stores/fileViewer'
@@ -16,6 +17,9 @@ const apiPost = vi.hoisted(() => vi.fn())
 
 vi.mock('../../lib/api', () => ({
   api: { get: apiGet, post: apiPost, patch: vi.fn(), del: vi.fn() },
+}))
+vi.mock('vue-router', () => ({
+  useRouter: () => ({ push: vi.fn() }),
 }))
 
 /**
@@ -904,6 +908,87 @@ describe('shared-note review', () => {
     release({ share_status: 'published' })
     await flushPromises()
     wrapper.unmount()
+  })
+
+  it('announces a confirmed Git publication after the review panel closes', async () => {
+    const share = row({ id: 'share-git', kind: 'share', workspace: 'research' })
+    const sharePreview = preview({
+      id: share.id, workspace: share.workspace, kind: 'share',
+      operation: 'replace', before: 'before\n', after: 'after\n',
+      brain: 'Team', identity: 'https://example.test/team.git',
+      branch: 'main', path: 'docs/n.md', revision: 'git-token',
+      link_kind: 'git', blocked_reason: '',
+    })
+    apiGet.mockImplementation((url: string) => {
+      if (url.startsWith('/api/proposals/history')) return Promise.resolve({ rows: [], total: 0, truncated: false })
+      if (url.includes('/preview')) return Promise.resolve({ ok: true, preview: sharePreview })
+      return Promise.resolve({ rows: [share] })
+    })
+    apiPost.mockResolvedValue({
+      share_status: 'published',
+      receipt: { id: 'shrpub_git', commit_oid: 'a'.repeat(40) },
+    })
+
+    const wrapper = mount(ProposalReviewPanel, { global: { plugins: [pinia] } })
+    await flushPromises()
+    await wrapper.find('.pr-row-action').trigger('click')
+    await flushPromises()
+    await wrapper.find('.pr-card button.btn-primary').trigger('click')
+    await flushPromises()
+
+    const store = useProjectStore()
+    expect(store.toasts).toHaveLength(1)
+    expect(store.toasts[0].title).toBe('Published to Team')
+    expect(store.toasts[0].body).toContain('remote commit was confirmed')
+    wrapper.unmount()
+
+    // The success notification is owned by the app, not the closing card.
+    const toast = mount(InAppToast, { global: { plugins: [pinia] } })
+    await nextTick()
+    expect(toast.get('.toast').attributes('role')).toBe('status')
+    expect(toast.text()).toContain('Published to Team')
+    expect(toast.text()).toContain('remote commit was confirmed')
+    toast.unmount()
+  })
+
+  it('announces a folder note saved locally after the review panel closes', async () => {
+    const share = row({ id: 'share-folder', kind: 'share', workspace: 'research' })
+    const sharePreview = preview({
+      id: share.id, workspace: share.workspace, kind: 'share',
+      operation: 'create', before: null, after: 'new\n',
+      brain: 'Team folder', identity: 'folder:/notes',
+      branch: '', path: 'notes/new.md', revision: 'folder-token',
+      link_kind: 'folder', blocked_reason: '',
+    })
+    apiGet.mockImplementation((url: string) => {
+      if (url.startsWith('/api/proposals/history')) return Promise.resolve({ rows: [], total: 0, truncated: false })
+      if (url.includes('/preview')) return Promise.resolve({ ok: true, preview: sharePreview })
+      return Promise.resolve({ rows: [share] })
+    })
+    apiPost.mockResolvedValue({
+      share_status: 'published',
+      receipt: { id: 'shrpub_folder', scope: 'historical_local_write' },
+    })
+
+    const wrapper = mount(ProposalReviewPanel, { global: { plugins: [pinia] } })
+    await flushPromises()
+    await wrapper.find('.pr-row-action').trigger('click')
+    await flushPromises()
+    await wrapper.find('.pr-card button.btn-primary').trigger('click')
+    await flushPromises()
+
+    const store = useProjectStore()
+    expect(store.toasts).toHaveLength(1)
+    expect(store.toasts[0].title).toBe('Saved locally to Team folder')
+    expect(store.toasts[0].body).toContain('Cloud delivery and current availability are unknown')
+    wrapper.unmount()
+
+    const toast = mount(InAppToast, { global: { plugins: [pinia] } })
+    await nextTick()
+    expect(toast.get('.toast').attributes('role')).toBe('status')
+    expect(toast.text()).toContain('Saved locally to Team folder')
+    expect(toast.text()).toContain('Cloud delivery and current availability are unknown')
+    toast.unmount()
   })
 
   it('shows a canonical publication refusal when rejecting a share review', async () => {

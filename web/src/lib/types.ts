@@ -2021,6 +2021,8 @@ export interface ProposalPreview {
   /** Revision-bound shared-note publication projection (#3576). */
   brain?: string
   identity?: string
+  /** `git` or `folder`; a folder preview is create-only. */
+  link_kind?: 'git' | 'folder'
   branch?: string
   path?: string
   blocked_reason?: string | null
@@ -2297,6 +2299,11 @@ export interface ProposalHistoryChange {
   source_turns?: number[]
   commit_oid?: string
   branch?: string
+  /** Folder receipts only: the recorded local write, not the path's current
+   * content or any provider synchronization. */
+  scope?: string
+  local_only?: boolean
+  sync_claimed?: boolean
 }
 
 /** One line of a receipt's before/after. Context lines are not sent: what a
@@ -2338,6 +2345,10 @@ export interface MemoryReceiptDetail {
   identity?: string
   commit_oid?: string
   review_path?: string
+  /** Folder receipts only: historical local write scope. */
+  scope?: string
+  local_only?: boolean
+  sync_claimed?: boolean
 }
 
 export interface ProposalHistoryResponse {
