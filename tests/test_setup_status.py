@@ -3121,8 +3121,38 @@ def test_separate_notes_setup_can_retry_after_late_disappearance(tmp_path, monke
     assert not notes.exists()
     moved.rename(notes)
     monkeypatch.setattr(cli, "_check_external_setup_identity", original)
+    env_path = ws / ".env"
+    env_before = env_path.read_text(encoding="utf-8")
+    env_path.write_text(env_before.replace("PWA_AUTH_TOKEN=wizard-pass", "PWA_AUTH_TOKEN="), encoding="utf-8")
+    assert client.post("/api/setup/finish", json=body).status_code == 400
+    env_path.write_text(env_before, encoding="utf-8")
     for key in ("CIAO_WORKSPACE", "PWA_PORT", "PWA_AUTH_TOKEN"):
         monkeypatch.setenv(key, "")
     assert client.post("/api/setup/finish", json=body).status_code == 200
     assert (notes / "private.md").read_text(encoding="utf-8") == "private"
     assert not (ws / ".runtime" / "external-setup-pending.json").exists()
+
+
+def test_separate_notes_setup_keeps_pending_when_environment_publication_fails(tmp_path, monkeypatch) -> None:
+    from ciao.web import routes_api
+
+    ws = tmp_path / "engine"
+    ws.mkdir()
+    notes = tmp_path / "notes"
+    notes.mkdir()
+    stat = notes.stat()
+    body = {"password": "wizard-pass", "workspace": str(ws), "notes_folder": str(notes),
+            "notes_resolved": str(notes.resolve()), "notes_identity": f"{stat.st_dev}:{stat.st_ino}",
+            "launch_agents_dir": str(tmp_path / "agents"), "app_dir": str(tmp_path / "apps"),
+            "restart": False}
+    client = _finish_client(tmp_path)
+    original = routes_api._publish_setup_environment
+    with monkeypatch.context() as patch:
+        patch.setattr(routes_api, "_publish_setup_environment", lambda *args: (_ for _ in ()).throw(RuntimeError("interrupted")))
+        with pytest.raises(RuntimeError, match="interrupted"):
+            client.post("/api/setup/finish", json=body)
+    assert (ws / ".runtime" / "external-setup-pending.json").is_file()
+    for key in ("CIAO_WORKSPACE", "PWA_PORT", "PWA_AUTH_TOKEN"):
+        monkeypatch.setenv(key, "")
+    assert routes_api._publish_setup_environment is original
+    assert client.post("/api/setup/finish", json=body).status_code == 200

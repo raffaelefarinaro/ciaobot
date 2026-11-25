@@ -6381,7 +6381,7 @@ async def setup_finish_endpoint(request: Request) -> JSONResponse:
         )
     except ValueError as exc:
         return JSONResponse({"error": str(exc)}, status_code=400)
-    if notes_folder and selection.existing_env.get("PWA_AUTH_TOKEN") not in (None, "", password):
+    if notes_folder and "PWA_AUTH_TOKEN" in selection.existing_env and selection.existing_env["PWA_AUTH_TOKEN"] != password:
         return JSONResponse({"error": "Use the password chosen when setup began."}, status_code=400)
 
     # setup_workspace only writes workspace files and the bundled-engine
@@ -6397,6 +6397,7 @@ async def setup_finish_endpoint(request: Request) -> JSONResponse:
         "_vault_selection": selection,
         "_adopt_exact_vault": bool(notes_folder),
         "_external_identity": notes_identity,
+        "_complete_external_setup": not bool(notes_folder),
     }
     setup_kwargs["python_path"] = str(body.get("python", "")).strip() or None
     setup_kwargs["launch_agents_dir"] = str(body.get("launch_agents_dir", "")).strip() or None
@@ -6410,6 +6411,8 @@ async def setup_finish_endpoint(request: Request) -> JSONResponse:
     except ValueError as exc:
         return JSONResponse({"error": str(exc)}, status_code=400)
     _publish_setup_environment(resolved_workspace, port, password)
+    if notes_folder:
+        (resolved_workspace / ".runtime" / "external-setup-pending.json").unlink()
     # Only the real per-user LaunchAgents dir may be registered with launchd —
     # scripted/test setups pass a custom dir and must not touch it. App mode is
     # the third exclusion: the Mac app owns the bundled engine, so setup must

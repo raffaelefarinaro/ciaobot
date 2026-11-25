@@ -1196,12 +1196,16 @@ def validate_external_setup_vault(workspace: Path | str, vault: Path | str) -> P
         raise ValueError("notes folder and Ciaobot folder must be separate")
     selection = select_setup_vault(root, vault_mode="scratch")
     marker = root / ".runtime" / "external-setup-pending.json"
+    root_stat = root.stat() if root.exists() else None
+    notes_stat = notes.stat()
+    expected = {"notes": str(notes), "notes_identity": [notes_stat.st_dev, notes_stat.st_ino],
+                "install_identity": [root_stat.st_dev, root_stat.st_ino] if root_stat else None}
     if marker.exists():
         try:
             pending = json.loads(marker.read_text(encoding="utf-8"))
         except (OSError, ValueError):
             pending = None
-        if pending != {"notes": str(notes)}:
+        if pending != expected:
             raise ValueError("pending setup belongs to another notes folder")
     else:
         pending = None
@@ -1344,6 +1348,7 @@ def setup_workspace(
     _vault_selection: SetupVaultSelection | None = None,
     _adopt_exact_vault: bool = False,
     _external_identity: tuple[int, int] | None = None,
+    _complete_external_setup: bool = True,
 ) -> list[Path]:
     requested_name = (workspace_name or "").strip()
     if workspace_name is not None and not _WORKSPACE_NAME_RE.fullmatch(
@@ -1437,7 +1442,17 @@ def setup_workspace(
         pending_path = root / ".runtime" / "external-setup-pending.json"
         pending_path.parent.mkdir(parents=True, exist_ok=True)
         if not pending_path.exists():
-            write_private_text(pending_path, json.dumps({"notes": str(selection.vault_path)}))
+            from ciao.onboarding import _atomic_write
+
+            root_stat = root.stat()
+            _atomic_write(pending_path, json.dumps({
+                "notes": str(selection.vault_path),
+                "notes_identity": list(_external_identity or ()),
+                "install_identity": [root_stat.st_dev, root_stat.st_ino],
+            }).encode())
+        if auth_token is not None and "PWA_AUTH_TOKEN" in selection.existing_env:
+            if selection.existing_env["PWA_AUTH_TOKEN"] != auth_token:
+                raise ValueError("Use the password chosen when setup began.")
 
     from ciao.onboarding import ensure_receipt, read_receipt
     from ciao.setup_marker import is_set_up_workspace
@@ -1871,7 +1886,8 @@ def setup_workspace(
     # never double-initialized.
     if _adopt_exact_vault:
         _check_external_setup_identity(vault_path, _external_identity)
-        pending_path.unlink()
+        if _complete_external_setup:
+            pending_path.unlink()
     else:
         ensure_vault_git(vault_path, initialize_if_missing=initialize_git)
 
