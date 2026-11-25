@@ -6317,7 +6317,7 @@ async def setup_finish_endpoint(request: Request) -> JSONResponse:
             {"error": f"unknown provider '{default_provider}'"}, status_code=400
         )
 
-    from ciao.cli import detect_vault_mode, select_setup_vault, setup_workspace
+    from ciao.cli import detect_vault_mode, select_setup_vault, setup_workspace, validate_external_setup_vault
 
     # The wizard no longer asks scratch-vs-existing: when the request does
     # not pin a mode, inspect the folder — empty starts from scratch, one
@@ -6355,6 +6355,16 @@ async def setup_finish_endpoint(request: Request) -> JSONResponse:
 
     resolved_workspace = Path(workspace).expanduser().resolve()
     vault_root_arg = str(body.get("vault_root", "")).strip() or None
+    notes_folder = str(body.get("notes_folder", "")).strip()
+    if notes_folder:
+        try:
+            notes = validate_external_setup_vault(resolved_workspace, notes_folder)
+            if str(notes) != str(body.get("notes_resolved", "")):
+                raise ValueError("notes folder changed since inspection; inspect it again")
+            vault_root_arg = str(notes)
+            vault_mode = "existing"
+        except ValueError as exc:
+            return JSONResponse({"error": str(exc)}, status_code=400)
 
     # Read-only preflight: the same selection inspection reported. An ambiguous
     # or unusable location is refused here, before any claim, write or exit.
@@ -6378,6 +6388,7 @@ async def setup_finish_endpoint(request: Request) -> JSONResponse:
         "default_provider": default_provider,
         "port": port,
         "_vault_selection": selection,
+        "_adopt_exact_vault": bool(notes_folder),
     }
     setup_kwargs["python_path"] = str(body.get("python", "")).strip() or None
     setup_kwargs["launch_agents_dir"] = str(body.get("launch_agents_dir", "")).strip() or None
@@ -6519,7 +6530,7 @@ async def setup_inspect_folder_endpoint(request: Request) -> JSONResponse:
     name that will be assigned to the selected folder.
     """
     from ciao import cli
-    from ciao.cli import detect_vault_mode, select_setup_vault
+    from ciao.cli import detect_vault_mode, select_setup_vault, validate_external_setup_vault
     from ciao.setup_status import (
         cloud_sync_warning,
         detect_nested_workspaces,
@@ -6535,6 +6546,14 @@ async def setup_inspect_folder_endpoint(request: Request) -> JSONResponse:
     target = _resolve_setup_dir(raw)
     if target is None:
         return JSONResponse({"error": f"not a directory: {raw}"}, status_code=400)
+    notes_raw = str(request.query_params.get("notes_folder") or "").strip()
+    if notes_raw:
+        try:
+            notes = validate_external_setup_vault(target, notes_raw)
+        except ValueError as exc:
+            return JSONResponse({"error": str(exc)}, status_code=400)
+        return JSONResponse({"path": str(target), "notes_resolved": str(notes),
+                             "cloud_sync_warning": cloud_sync_warning(target)})
     # The same read-only selection finish and direct setup use, so the wizard
     # reports the location the finish will write. An ambiguous or unusable
     # location is refused here, with the same message finish returns.

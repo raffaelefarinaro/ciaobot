@@ -3051,3 +3051,23 @@ def test_codex_not_installed_links_the_codex_install_guide(
     assert row["state"] == "not_installed"
     assert row["install_url"] == CODEX_INSTALL_DOCS_URL
 
+
+
+def test_separate_notes_setup_rejects_symlink_drift_before_writing(tmp_path) -> None:
+    ws = tmp_path / "engine"
+    ws.mkdir()
+    first = tmp_path / "first"
+    first.mkdir()
+    second = tmp_path / "second"
+    second.mkdir()
+    link = tmp_path / "notes"
+    link.symlink_to(first, target_is_directory=True)
+    inspected = str(link.resolve())
+    link.unlink()
+    link.symlink_to(second, target_is_directory=True)
+    response = _finish_client(tmp_path).post(
+        "/api/setup/finish", json={"password": "wizard-pass", "workspace": str(ws),
+        "notes_folder": str(link), "notes_resolved": inspected})
+    assert response.status_code == 400
+    assert not (ws / ".env").exists()
+    assert not list(second.iterdir())

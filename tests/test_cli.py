@@ -5479,3 +5479,24 @@ def _coverage_fixture(**overrides: object):
 )
 def test_stale_coverage_line_names_only_what_was_not_covered(coverage, expected) -> None:
     assert cli._stale_coverage_line(coverage) == expected
+
+
+def test_setup_cli_accepts_existing_separate_notes_without_git(tmp_path, monkeypatch, capsys):
+    from ciao import cli
+    workspace = tmp_path / "engine"
+    notes = tmp_path / "notes"
+    notes.mkdir()
+    (notes / "idea.md").write_text("private", encoding="utf-8")
+    (notes / "nested").mkdir()
+    (notes / "nested" / "MEMORY.md").write_text("nested", encoding="utf-8")
+    monkeypatch.setenv("PATH", str(tmp_path / "no-executables"))
+    result = cli.main(["setup", "--workspace", str(workspace), "--notes-folder", str(notes),
+        "--auth-token", "password", "--launch-agents-dir", str(tmp_path / "agents"),
+        "--app-dir", str(tmp_path / "apps")])
+    assert result == 0
+    assert (notes / "idea.md").read_text(encoding="utf-8") == "private"
+    assert not (notes / ".git").exists()
+    registry = json.loads((workspace / ".runtime" / "workspaces.json").read_text())
+    assert registry[0]["vault_root"] == str(notes.resolve())
+    assert len(registry) == 1
+    assert str(notes.resolve()) in capsys.readouterr().out

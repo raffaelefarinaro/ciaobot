@@ -1179,6 +1179,27 @@ def _preview_legacy_workspaces(
     }
 
 
+def validate_external_setup_vault(workspace: Path | str, vault: Path | str) -> Path:
+    """Validate a first-run notes folder without creating or changing it."""
+    from ciao.setup_marker import is_set_up_workspace
+
+    root = Path(workspace).expanduser().resolve()
+    try:
+        notes = Path(vault).expanduser().resolve(strict=True)
+        if not notes.is_dir() or not os.access(notes, os.R_OK | os.W_OK | os.X_OK):
+            raise ValueError("notes folder must be an accessible, writable directory")
+        with os.scandir(notes) as entries:
+            next(entries, None)
+    except OSError as exc:
+        raise ValueError(f"notes folder is unavailable: {exc}") from exc
+    if notes == root or notes in root.parents or root in notes.parents:
+        raise ValueError("notes folder and Ciaobot folder must be separate")
+    selection = select_setup_vault(root, vault_mode="scratch")
+    if is_set_up_workspace(root) or selection.source in {"env", "registry", "legacy"}:
+        raise ValueError("an existing installation cannot be rebound during setup")
+    return notes
+
+
 def select_setup_vault(
     workspace: Path | str,
     *,
@@ -1294,6 +1315,7 @@ def setup_workspace(
     initialize_git: bool = False,
     sync_failures: list[str] | None = None,
     _vault_selection: SetupVaultSelection | None = None,
+    _adopt_exact_vault: bool = False,
 ) -> list[Path]:
     requested_name = (workspace_name or "").strip()
     if workspace_name is not None and not _WORKSPACE_NAME_RE.fullmatch(
@@ -1378,6 +1400,9 @@ def setup_workspace(
         raise ValueError("the validated setup selection belongs to another folder")
     else:
         selection = _vault_selection
+
+    if _adopt_exact_vault:
+        validate_external_setup_vault(root, selection.vault_path)
 
     from ciao.onboarding import ensure_receipt, read_receipt
     from ciao.setup_marker import is_set_up_workspace
@@ -1524,7 +1549,7 @@ def setup_workspace(
         and receipt.installation.status == "in_progress"
         and registered_vaults is None
         and vault_mode == "existing"
-        and not detect_nested_workspaces(vault_path)
+        and (_adopt_exact_vault or not detect_nested_workspaces(vault_path))
     )
     if fresh_per_root or fresh_adopted_notes:
         from ciao.workspace_reroot import mark_born_per_root
@@ -1636,7 +1661,7 @@ def setup_workspace(
         # the vaults it already names.
         scaffold_vaults = registered_vaults
     else:
-        nested = detect_nested_workspaces(vault_path)
+        nested = [] if _adopt_exact_vault else detect_nested_workspaces(vault_path)
         scaffold_vaults = []
     if registered_vaults is None and nested:
         entries: list[dict[str, str]] = []
@@ -1918,9 +1943,13 @@ def _setup_command(args: argparse.Namespace) -> int:
         had_token = False
     sync_failures: list[str] = []
     try:
+        notes = validate_external_setup_vault(root, args.notes_folder) if args.notes_folder else None
         written = setup_workspace(
             args.workspace,
             auth_token=args.auth_token,
+            vault_root=notes,
+            vault_mode="existing" if notes else "scratch",
+            _adopt_exact_vault=bool(notes),
             workspace_name=args.workspace_name,
             python_path=args.python,
             port=args.port,
@@ -1930,11 +1959,13 @@ def _setup_command(args: argparse.Namespace) -> int:
             initialize_git=args.initialize_git,
             sync_failures=sync_failures,
         )
-    except RuntimeError as exc:
+    except (RuntimeError, ValueError) as exc:
         print(f"Error: {exc}", file=sys.stderr)
         return 1
     for path in written:
         print(path)
+    if notes:
+        print(f"Ciaobot data: {root}\nNotes: {notes}")
     from ciao.setup_status import macos_access_note
 
     access_note = macos_access_note(root)
@@ -8514,6 +8545,10 @@ def build_parser() -> argparse.ArgumentParser:
         type=Path,
         default=Path("."),
         help="Workspace directory to initialize.",
+    )
+    setup_parser.add_argument(
+        "--notes-folder", type=Path, default=None,
+        help="Use an existing separate notes directory for a new installation.",
     )
     setup_parser.add_argument(
         "--initialize-git",

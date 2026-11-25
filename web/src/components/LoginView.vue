@@ -102,6 +102,17 @@
         </div>
 
         <div class="form-group">
+          <label class="notes-choice"><input v-model="separateNotes" type="checkbox" :disabled="loading"> Use a separate existing notes folder</label>
+          <template v-if="separateNotes">
+            <label for="setup-notes-folder">Notes folder on the Ciaobot computer</label>
+            <input id="setup-notes-folder" v-model="notesFolder" class="form-input" autocomplete="off" :disabled="loading" @change="inspectNotesFolder">
+            <span class="hint">Application data and credentials stay in the Ciaobot folder. Notes stay in this existing folder; your cloud client manages any synchronization.</span>
+            <span v-if="notesError" class="hint hint--warn" role="alert">{{ notesError }}</span>
+            <span v-else-if="notesResolved" class="hint">Notes: {{ notesResolved }} · Ciaobot data: {{ workspace }}</span>
+          </template>
+        </div>
+
+        <div class="form-group">
           <label>Workspaces Found</label>
           <div v-if="folderInspecting" class="hint">
             Checking the folder for existing workspaces…
@@ -505,6 +516,27 @@ const copyStatus = ref('')
 const copiedCommand = ref('')
 let copyTimer: ReturnType<typeof setTimeout> | null = null
 const advancedOpen = ref(false)
+const separateNotes = ref(false)
+const notesFolder = ref('')
+const notesResolved = ref('')
+const notesError = ref('')
+let notesInspection = 0
+
+async function inspectNotesFolder() {
+  const requested = notesFolder.value.trim()
+  const root = workspace.value.trim()
+  const id = ++notesInspection
+  notesResolved.value = ''
+  notesError.value = ''
+  if (!requested || !root) return
+  try {
+    const data = await api.get<{ notes_resolved: string }>(`/api/setup/inspect-folder?path=${encodeURIComponent(root)}&notes_folder=${encodeURIComponent(requested)}`)
+    if (id === notesInspection && requested === notesFolder.value.trim() && root === workspace.value.trim()) notesResolved.value = data.notes_resolved
+  } catch (e) {
+    if (id === notesInspection) notesError.value = errorMessage(e, 'Could not inspect the notes folder.')
+  }
+}
+watch([notesFolder, workspace, separateNotes], () => { notesInspection++; notesResolved.value = ''; notesError.value = '' })
 
 // Folder inspection: when the chosen workspace folder already contains
 // nested workspace directories (e.g. memory-vault/personal/, memory-vault/work/),
@@ -777,6 +809,7 @@ const canFinish = computed(() => {
   if (!passwordReady.value) {
     return false
   }
+  if (separateNotes.value && !notesResolved.value) return false
   const currentProvider = provider.value
   const providerOk = setupStatus.value?.providers?.[currentProvider]?.ok
   if (!providerOk && !apiFallback.value) {
@@ -811,7 +844,7 @@ async function doFinish() {
     // the server adopts them via detect_nested_workspaces. The text field is
     // hidden in that case, so skip sending workspace_name to avoid clobbering
     // the discovered set.
-    const sendName = detectedWorkspaces.value.length === 0
+    const sendName = separateNotes.value || detectedWorkspaces.value.length === 0
     const finishBody: Record<string, unknown> = {
       workspace: workspace.value,
       // vault_root and vault_mode are intentionally omitted: the server
@@ -826,6 +859,10 @@ async function doFinish() {
     }
     if (sendName) {
       finishBody.workspace_name = workspaceName.value.trim() || 'personal'
+    }
+    if (separateNotes.value) {
+      finishBody.notes_folder = notesFolder.value.trim()
+      finishBody.notes_resolved = notesResolved.value
     }
     await api.post('/api/setup/finish', finishBody)
     isRestarting.value = true
@@ -1186,6 +1223,8 @@ onUnmounted(() => {
   font-size: var(--text-sm);
   font-weight: 600;
 }
+.notes-choice { display: flex; align-items: center; gap: 8px; min-height: 44px; cursor: pointer; }
+.notes-choice input:focus-visible, #setup-notes-folder:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 .form-input {
   background: var(--bg);
   border: 1px solid var(--border);
