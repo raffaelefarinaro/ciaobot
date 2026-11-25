@@ -49,6 +49,7 @@ const decision = ref('')
 const reason = ref('')
 const date = ref('')
 const grants = ref<ShareEvidenceGrant[]>([])
+const disclosureToken = ref('')
 const endpoint = `/api/workspaces/${encodeURIComponent(props.workspace)}/share-evidence`
 
 async function show() {
@@ -62,6 +63,8 @@ async function load() {
   try {
     const state = await api.get<ShareEvidenceState>(endpoint)
     grants.value = state.grants.filter(grant => grant.project_id === props.projectId && grant.type === 'standing' && grant.status === 'active')
+    disclosureToken.value = state.disclosure_tokens[props.projectId] || ''
+    if (!disclosureToken.value) throw new Error('Sharing permissions could not be verified.')
   } catch (e) {
     loadError.value = apiErrorMessage(e, 'Sharing permissions could not be loaded.')
   } finally {
@@ -75,13 +78,14 @@ async function save() {
   error.value = ''
   saved.value = false
   try {
-    await api.post(`${endpoint}/decisions`, { project_id: props.projectId, decision: decision.value, reason: reason.value, effective_date: date.value })
+    await api.post(`${endpoint}/decisions`, { project_id: props.projectId, decision: decision.value, reason: reason.value, effective_date: date.value, disclosure_token: disclosureToken.value })
     decision.value = ''
     reason.value = ''
     date.value = ''
     saved.value = true
   } catch (e) {
     error.value = apiErrorMessage(e, 'The decision could not be recorded.')
+    if ((e as { status?: number }).status === 409) await load()
   } finally {
     saving.value = false
   }

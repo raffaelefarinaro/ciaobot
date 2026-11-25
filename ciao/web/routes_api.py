@@ -492,6 +492,10 @@ async def share_evidence_state(request: Request) -> JSONResponse:
                 "sources": sources,
             })
         record = config.workspace(workspace)
+        grants, disclosure_tokens = share_evidence.disclosure_state(
+            config, workspace=workspace, projects=[p["project_id"] for p in projects],
+            session=_share_session(request),
+        )
         return JSONResponse({
             "workspace": workspace,
             "mode": share_evidence.workspace_mode(config, workspace=workspace),
@@ -502,7 +506,8 @@ async def share_evidence_state(request: Request) -> JSONResponse:
                 for link in list(getattr(record, "shared_brains", []) or [])
             ],
             "projects": projects,
-            "grants": share_evidence.list_grants(config, workspace=workspace),
+            "grants": grants,
+            "disclosure_tokens": disclosure_tokens,
         })
     except share_evidence.EvidenceError as exc:
         return _share_evidence_error(exc, status=404 if exc.code == "unknown_workspace" else 400)
@@ -522,15 +527,19 @@ async def share_evidence_record_decision(request: Request) -> JSONResponse:
     try:
         workspace = _share_workspace(request)
         project, _folder = _share_project(request, workspace, str(body.get("project_id", "")).strip())
+        token = body.get("disclosure_token")
+        if not isinstance(token, str) or len(token) != 64 or any(c not in '0123456789abcdef' for c in token):
+            raise share_evidence.EvidenceError("disclosure_changed", "Sharing permissions changed. Review them before saving.")
         result = share_evidence.record_operator_decision(
             config, workspace=workspace, project_id=project.project_id,
             decision=body.get("decision"), reason=body.get("reason", ""),
             effective_date=body.get("effective_date"),
             session=_share_session(request),
+            disclosure_token=token,
         )
         return JSONResponse({**result, "mode": share_evidence.workspace_mode(config, workspace=workspace)})
     except share_evidence.EvidenceError as exc:
-        return _share_evidence_error(exc, status=404 if exc.code == "unknown_workspace" else 400)
+        return _share_evidence_error(exc, status=404 if exc.code == "unknown_workspace" else 409 if exc.code == "disclosure_changed" else 400)
 
 
 async def share_evidence_preview(request: Request) -> JSONResponse:

@@ -219,6 +219,7 @@ export interface ShareEvidenceGrant {
 }
 
 export interface ShareEvidenceState {
+  disclosure_tokens: Record<string, string>
   workspace: string
   mode: 'review' | 'automatic'
   fields: Array<ShareEvidenceField['field']>

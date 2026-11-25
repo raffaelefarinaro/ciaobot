@@ -38,6 +38,7 @@ function card(page: Page): Locator {
 
 function state(grants: Grant[]) {
   return {
+    disclosure_tokens: { 'proj-alpha': 'scope' },
     workspace: 'alpha',
     mode: grants.some((grant) => grant.active && grant.type === 'standing') ? 'automatic' : 'review',
     fields: ['decision', 'reason', 'effective_date'],

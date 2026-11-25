@@ -505,7 +505,7 @@ def test_routes_require_a_session_and_scope_every_action(client: TestClient) -> 
     recorded = client.post(
         "/api/workspaces/home/share-evidence/decisions",
         headers=headers(),
-        json={"project_id": "proj-alpha", "decision": "Use the new vendor", "reason": "cheaper", "effective_date": "2026-11-20"},
+        json={"project_id": "proj-alpha", "decision": "Use the new vendor", "reason": "cheaper", "effective_date": "2026-11-20", "disclosure_token": body["disclosure_tokens"]["proj-alpha"]},
     )
     assert recorded.status_code == 200, recorded.text
     assert recorded.json()["entry"]["decision"] == "Use the new vendor"
@@ -552,6 +552,31 @@ def test_routes_require_a_session_and_scope_every_action(client: TestClient) -> 
     assert revoked.status_code == 200
     assert revoked.json()["grant"]["revoked_generation"] == 1
     assert revoked.json()["fresh_grant_required"] is True
+
+
+def test_decision_save_refuses_changed_disclosure_and_foreign_token(client: TestClient, config: Config) -> None:
+    def state(workspace: str = "home") -> dict:
+        return client.get(f"/api/workspaces/{workspace}/share-evidence", headers=headers()).json()
+
+    def save(token: str) -> object:
+        return client.post("/api/workspaces/home/share-evidence/decisions", headers=headers(), json={
+            "project_id": "proj-alpha", "decision": "A", "effective_date": "2026-11-20",
+            "disclosure_token": token,
+        })
+
+    record(config, "Baseline")
+    old = state()["disclosure_tokens"]["proj-alpha"]
+    foreign = state("work")["disclosure_tokens"]["proj-alpha"]
+    assert save(foreign).status_code == 409
+    grant = live_grant(config)["grant"]
+    assert save(old).status_code == 409
+    assert se.stream_for_project(config, workspace="home", project_id="proj-alpha")["revision"] == 1
+    fresh = state()["disclosure_tokens"]["proj-alpha"]
+    se.revoke(config, workspace="home", grant_id=grant["grant_id"])
+    assert save(fresh).status_code == 409
+    assert save(old).status_code == 409  # Grant and revoke must not restore an old token.
+    assert se.stream_for_project(config, workspace="home", project_id="proj-alpha")["revision"] == 1
+    assert save(state()["disclosure_tokens"]["proj-alpha"]).status_code == 200
 
 
 def test_routes_refuse_a_foreign_workspace_and_invalid_preview_session(client: TestClient) -> None:
@@ -1306,6 +1331,8 @@ def test_authenticated_route_decision_is_positive_and_forgery_is_refused(tmp_pat
     app.state.config = config
     app.state.project_chat_manager = manager
     client = TestClient(app, base_url="http://localhost:8443", client=("127.0.0.1", 50000))
+    session = headers()["Cookie"].split("=", 1)[1]
+    _, tokens = se.disclosure_state(config, workspace="home", projects=[project.project_id], session=session)
     response = client.post(
         "/api/workspaces/home/share-evidence/decisions",
         headers=headers(),
@@ -1314,6 +1341,7 @@ def test_authenticated_route_decision_is_positive_and_forgery_is_refused(tmp_pat
             "decision": "Route-authored decision",
             "reason": "",
             "effective_date": "2026-11-21",
+            "disclosure_token": tokens[project.project_id],
         },
     )
     assert response.status_code == 200, response.text
