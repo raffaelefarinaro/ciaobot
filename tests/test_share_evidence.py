@@ -1074,6 +1074,7 @@ def test_memory_completion_attestation_is_persisted_without_browser_exposure(tmp
 
 def test_process_killed_after_done_recovers_completed_pass(tmp_path: Path) -> None:
     config, manager, project, _ = _memory_manager(tmp_path)
+    config.workspace("home").shared_brains = [SharedBrainLink("notes", str(tmp_path / "brain"), "team")]
     se._workspace_lifetime(config, "home")
     se._reset_project_manager_for_tests()
     se.bind_project_manager(manager)
@@ -1122,6 +1123,7 @@ def test_process_killed_after_done_recovers_completed_pass(tmp_path: Path) -> No
 
 async def test_checkpoint_survives_interruption_before_pass_archive(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     config, manager, project, _ = _memory_manager(tmp_path)
+    config.workspace("home").shared_brains = [SharedBrainLink("notes", str(tmp_path / "brain"), "team")]
     se._reset_project_manager_for_tests()
     se.bind_project_manager(manager)
     registry = AgentSessionRegistry()

@@ -22,7 +22,7 @@ from urllib.parse import quote
 
 import pytest
 
-from ciao.config import CiaoConfig
+from ciao.config import CiaoConfig, SharedBrainLink, WorkspaceConfig
 from ciao.models import AgentRequest, ChatContext, ResultEvent, StreamEvent
 from ciao.sessions import StateStore
 from ciao.transcripts import TranscriptStore
@@ -703,6 +703,12 @@ def _source(
 def _replied(chat: ChatInfo, text: str, status: str = "success") -> None:
     chat.last_response = text
     chat.last_response_status = status
+
+
+def _enable_sharing(manager: ProjectChatManager) -> None:
+    manager._config.workspaces["work"] = WorkspaceConfig(
+        name="work", vault_root="work", shared_brains=[SharedBrainLink("notes", "/synthetic", "team")]
+    )
 
 
 class _TerminalProvider:
@@ -1982,6 +1988,7 @@ async def test_successful_pass_attests_before_done_and_archive(
     from ciao import share_evidence
 
     manager = _make_manager(tmp_path)
+    _enable_sharing(manager)
     source = _source(manager)
     memory_id = manager.enqueue_memory_pass(source, None, _archive_file(tmp_path), "")
     memory = manager.get_chat(memory_id)
@@ -2021,6 +2028,7 @@ async def test_checkpoint_failure_does_not_block_successful_pass(
     from ciao import share_evidence
 
     manager = _make_manager(tmp_path)
+    _enable_sharing(manager)
     source = _source(manager)
     memory_id = manager.enqueue_memory_pass(source, None, _archive_file(tmp_path), "")
     memory = manager.get_chat(memory_id)
@@ -2047,6 +2055,7 @@ async def test_failed_attestation_does_not_commit_an_unproved_completion(
     from ciao import share_evidence
 
     manager = _make_manager(tmp_path)
+    _enable_sharing(manager)
     source = _source(manager)
     memory_id = manager.enqueue_memory_pass(source, None, _archive_file(tmp_path), "")
     memory = manager.get_chat(memory_id)
@@ -2070,6 +2079,7 @@ async def test_completed_pass_offers_candidates_after_releasing_slot(
     from ciao import share_evidence, share_proposals
 
     manager = _make_manager(tmp_path)
+    _enable_sharing(manager)
     source = _source(manager)
     first = manager.enqueue_memory_pass(source, None, _archive_file(tmp_path), "")
     second = manager.enqueue_memory_pass(_source(manager, "Next"), None, _archive_file(tmp_path), "")

@@ -1075,7 +1075,11 @@ class MemoryPassCoordinator:
 
             registry = getattr(host._mcp_service, "registry", None)
             candidate_outcome = ""
-            if registry is not None and source_chat_id and not helper.get("source_kind"):
+            record = host._config.workspace(workspace)
+            if (
+                registry is not None and source_chat_id and not helper.get("source_kind")
+                and getattr(record, "shared_brains", None)
+            ):
                 try:
                     attestation = share_evidence.prepare_memory_completion(
                         host._config, registry, workspace=workspace, pass_chat_id=chat_id
