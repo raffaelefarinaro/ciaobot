@@ -997,8 +997,60 @@ function sharePreview(kind) {
   }
 }
 
+/**
+ * The care run report for one schedule dispatch (GET /api/schedules/{id}/care-run?dispatch_id=).
+ * The dispatch id names the scenario, so a spec picks a state by patching the
+ * schedule's last_dispatch_id. Counts and keys are synthetic.
+ */
+const CARE_PROPOSAL_KEY = `prv_${'c'.repeat(64)}`
+const CARE_COUNTS = { planned: 6, completed: 2, deferred: 1, failed: 1 }
+const careItem = (status, detail, item_key) => ({ item_key, pass_id: 'pass-1', status, detail, receipt_ids: [] })
+const CARE_RUNS = {
+  'd-ok': {
+    state: 'ok',
+    care_run: { run_id: 'run-1', ...CARE_COUNTS, counts_complete: true, reasons: [] },
+    report_available: true,
+    job_status: 'ok',
+    run_id: 'run-1',
+    counts: CARE_COUNTS,
+    outcomes: [
+      careItem('applied', 'filed', 'Notes/applied-one'),
+      careItem('applied', 'filed', 'Notes/applied-two'),
+      careItem('failed', 'The write was refused', 'Notes/refused'),
+      careItem('blocked', 'The note is locked by another run', 'Notes/locked'),
+      careItem('deferred_budget', 'Left for the next run', 'Notes/later'),
+      careItem('queued', 'Waiting for your decision', CARE_PROPOSAL_KEY),
+    ],
+    weekly: { marker: 'not_advanced' },
+  },
+  'd-noop': {
+    state: 'ok',
+    care_run: { run_id: 'run-2', planned: 0, completed: 0, deferred: 0, failed: 0, counts_complete: true, reasons: [] },
+    report_available: true,
+    job_status: 'ok',
+    run_id: 'run-2',
+    counts: { planned: 0, completed: 0, deferred: 0, failed: 0 },
+    outcomes: [careItem('no_change', '', 'Notes/steady')],
+    weekly: { marker: 'advanced' },
+  },
+  'd-legacy': {
+    state: 'ok',
+    care_run: null,
+    report_available: false,
+    job_status: 'ok',
+    run_id: 'run-3',
+    counts: { planned: 3, completed: 3, deferred: 0, failed: 0 },
+  },
+  'd-pending': { state: 'pending', care_run: null, report_available: false },
+  'd-superseded': { state: 'superseded', care_run: null, report_available: false },
+  'd-ambiguous': { state: 'ambiguous', care_run: null, report_available: false },
+  'd-unavailable': { state: 'unavailable', care_run: null, report_available: false },
+}
+
 /** Path patterns, for the routes that carry an id. */
 const GET_PATTERNS = [
+  [/^\/api\/schedules\/[^/]+\/care-run$/, (_req, url) =>
+    CARE_RUNS[url.searchParams.get('dispatch_id') || ''] || { state: 'pending', care_run: null, report_available: false }],
   [/^\/api\/proposals\/share-(git|folder)\/preview$/, (_req, url) => {
     const kind = /share-(git|folder)/.exec(url.pathname)?.[1] || 'git'
     return { ok: true, preview: sharePreview(kind) }

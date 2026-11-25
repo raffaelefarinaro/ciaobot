@@ -5287,18 +5287,48 @@ export const inventory: InventoryEntry[] = [
       "web/src/components/SchedulePanel.vue"
     ],
     "variants": [],
-    "variantNotes": "No configurable variants; variants are unassessed. The states (loading, counts, incomplete, reasons, null, error with Retry) are exercised by CareRunOutcome.test.ts, not by a story.",
+    "variantNotes": "No configurable variants; the answer states are stories.",
     "states": [
       {
         "name": "default",
-        "coverage": "uncovered",
-        "storyIds": [],
-        "note": "Rendered state is covered by CareRunOutcome.test.ts, not by a story."
+        "coverage": "covered",
+        "storyIds": ["care-run-outcome--ok", "care-run-outcome--no-op", "care-run-outcome--job-failed", "care-run-outcome--incomplete-with-notes", "care-run-outcome--no-item-detail"],
+        "note": "Ok shows counts, grouped outstanding reasons, weekly state and the run chat and exact Memory Review links; NoOp, JobFailed, IncompleteWithNotes and NoItemDetail render the other ok answers."
+      },
+      {
+        "name": "loading",
+        "coverage": "covered",
+        "storyIds": ["care-run-outcome--loading"],
+        "note": "Loading holds the request and shows the status line."
+      },
+      {
+        "name": "error",
+        "coverage": "covered",
+        "storyIds": ["care-run-outcome--error-with-retry", "care-run-outcome--unavailable"],
+        "note": "ErrorWithRetry and Unavailable show their message with a Retry button."
+      },
+      {
+        "name": "empty",
+        "coverage": "covered",
+        "storyIds": ["care-run-outcome--pending", "care-run-outcome--superseded", "care-run-outcome--ambiguous"],
+        "note": "Pending, Superseded and Ambiguous say so in words and show no counts."
+      },
+      {
+        "name": "narrow",
+        "coverage": "covered",
+        "storyIds": ["care-run-outcome--narrow"],
+        "note": "Narrow renders the ok answer in a maximum 390px container."
+      },
+      {
+        "name": "keyboard-focus",
+        "coverage": "covered",
+        "storyIds": ["care-run-outcome--keyboard-focus"],
+        "note": "The Memory Review link takes focus and shows its focus-visible outline."
       }
     ],
     "loading": {
       "status": "known",
-      "detail": "Loading, first-load error with Retry, and a stale answer for a previous chat are handled and tested in CareRunOutcome.vue."
+      "detail": "Loading and first-load error with Retry are stories; a stale answer for a previous dispatch is dropped and tested in CareRunOutcome.test.ts."
     },
     "migration": {
       "status": "unassessed",
