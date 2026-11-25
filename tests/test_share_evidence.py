@@ -5,6 +5,8 @@ from __future__ import annotations
 import dataclasses
 import asyncio
 import json
+import os
+import signal
 import subprocess
 import sys
 import threading
@@ -970,6 +972,191 @@ def _memory_manager(tmp_path: Path) -> tuple[CiaoConfig, ProjectChatManager, obj
         },
     )
     return config, manager, project, source
+
+
+async def test_real_memory_pass_completion_checkpoints_before_archival(tmp_path: Path) -> None:
+    config, manager, project, source = _memory_manager(tmp_path)
+    se._reset_project_manager_for_tests()
+    se.bind_project_manager(manager)
+    project.vault_folder = "alpha"
+    project_dir = Path(config.workspace_vault_root("home")) / "projects" / "active" / "alpha"
+    project_dir.mkdir(parents=True)
+    config.workspace("home").shared_brains = [SharedBrainLink(
+        name="notes", path=str(tmp_path / "brain"), identity="github.com/acme/home",
+        lifetime_id="brain_lifetime_fixed01",
+    )]
+    se.record_decision(
+        config, workspace="home", project_id=project.project_id,
+        decision="Baseline", reason="", effective_date="2026-11-20",
+    )
+    preview = se.preview(
+        config, workspace="home", brain_name="notes", project_id=project.project_id,
+        project_name="Alpha", project_dir=project_dir,
+        source_id=f"stream:{project.project_id}", grant_type="standing",
+        field_mask=["decision"], producers=["memory_extraction"], session="operator-one",
+    )
+    se.confirm(config, workspace="home", token=preview["preview_token"], session="operator-one")
+    se.record_operator_decision(
+        config, workspace="home", project_id=project.project_id,
+        decision="Synthetic decision", reason="", effective_date="2026-11-21",
+        session="operator-one",
+    )
+    registry = AgentSessionRegistry()
+    manager._mcp_service = SimpleNamespace(registry=registry)
+    pass_chat = next(chat for chat in manager.list_chats() if (chat.helper or {}).get("kind") == "memory_pass")
+    pass_chat.helper["state"] = "running"
+    pass_chat.last_response = "Updated synthetic memory."
+    pass_chat.last_response_status = "success"
+    registry.issue(chat_id=pass_chat.chat_id, project_id=pass_chat.project_id, workspace="home", provider="claude")
+
+    try:
+        assert await manager._memory_pass.on_turn_finished(pass_chat.chat_id)
+        if manager._detached_tasks:
+            await asyncio.gather(*list(manager._detached_tasks))
+        assert pass_chat.archived
+        assert registry.principal_for_chat(pass_chat.chat_id) is None
+        se._reset_project_manager_for_tests()
+        restarted = ProjectChatManager(
+            config,
+            state_store=StateStore(config.state_path, config.workspace_root, config.media_root),
+            transcript_store=TranscriptStore(config.state_path.parent, config.workspace_root / "transcripts"),
+            path=config.state_path.parent / "web_projects.json",
+        )
+        se.bind_project_manager(restarted)
+        relation = se.recover_memory_pass_source_relation(config, workspace="home", pass_chat_id=pass_chat.chat_id)
+        assert relation.project_id == project.project_id
+        assert relation.relation_id == pass_chat.chat_id
+        assert source.chat_id == pass_chat.helper["source_chat_id"]
+        rows = se.eligible_entries(config, workspace="home", brain_name="notes", relation=relation)
+        assert [row["canonical_bytes"] for row in rows] == ['{"decision":"Synthetic decision"}']
+        assert se.eligible_entries(config, workspace="work", brain_name="notes", relation=relation) == []
+        se.revoke(config, workspace="home", grant_id=rows[0]["grant_id"])
+        assert se.eligible_entries(config, workspace="home", brain_name="notes", relation=relation) == []
+    finally:
+        se._reset_project_manager_for_tests()
+
+
+def test_done_without_checkpoint_cannot_recover_source_after_restart(tmp_path: Path) -> None:
+    config, manager, _, _ = _memory_manager(tmp_path)
+    pass_chat = next(chat for chat in manager.list_chats() if (chat.helper or {}).get("kind") == "memory_pass")
+    pass_chat.last_response = "Updated synthetic memory."
+    pass_chat.last_response_status = "success"
+    manager._save()
+    restarted = ProjectChatManager(
+        config,
+        state_store=StateStore(config.state_path, config.workspace_root, config.media_root),
+        transcript_store=TranscriptStore(config.state_path.parent, config.workspace_root / "transcripts"),
+        path=config.state_path.parent / "web_projects.json",
+    )
+    se._reset_project_manager_for_tests()
+    se.bind_project_manager(restarted)
+    try:
+        with pytest.raises(se.EvidenceError, match="checkpoint is unavailable"):
+            se.recover_memory_pass_source_relation(config, workspace="home", pass_chat_id=pass_chat.chat_id)
+    finally:
+        se._reset_project_manager_for_tests()
+
+
+def test_memory_completion_attestation_is_persisted_without_browser_exposure(tmp_path: Path) -> None:
+    config, manager, _, _ = _memory_manager(tmp_path)
+    chat = next(item for item in manager.list_chats() if (item.helper or {}).get("kind") == "memory_pass")
+    chat.memory_completion_attestation = {"payload": {"source": "private"}, "signature": "signed"}
+    manager._save()
+    restarted = ProjectChatManager(
+        config,
+        state_store=StateStore(config.state_path, config.workspace_root, config.media_root),
+        transcript_store=TranscriptStore(config.state_path.parent, config.workspace_root / "transcripts"),
+        path=config.state_path.parent / "web_projects.json",
+    )
+    restored = restarted.get_chat(chat.chat_id)
+    assert restored.memory_completion_attestation == chat.memory_completion_attestation
+    assert "memory_completion_attestation" not in restored.to_dict()
+
+
+def test_process_killed_after_done_recovers_completed_pass(tmp_path: Path) -> None:
+    config, manager, project, _ = _memory_manager(tmp_path)
+    config.workspace("home").shared_brains = [SharedBrainLink("notes", str(tmp_path / "brain"), "team")]
+    se._workspace_lifetime(config, "home")
+    se._reset_project_manager_for_tests()
+    se.bind_project_manager(manager)
+    registry = AgentSessionRegistry()
+    manager._mcp_service = SimpleNamespace(registry=registry)
+    chat = next(item for item in manager.list_chats() if (item.helper or {}).get("kind") == "memory_pass")
+    chat.helper["state"] = "running"
+    chat.last_response = "Completed synthetic pass"
+    chat.last_response_status = "success"
+    manager._save()
+    registry.issue(chat_id=chat.chat_id, project_id=chat.project_id, workspace="home", provider="claude")
+    pid = os.fork()
+    if pid == 0:
+        original = manager._memory_pass._settle_success
+
+        def kill_after_done(item, source_id, outcome):
+            original(item, source_id, outcome)
+            os.kill(os.getpid(), signal.SIGKILL)
+
+        manager._memory_pass._settle_success = kill_after_done
+        asyncio.run(manager._memory_pass.on_turn_finished(chat.chat_id))
+        os._exit(1)
+    _, status = os.waitpid(pid, 0)
+    assert os.WIFSIGNALED(status) and os.WTERMSIG(status) == signal.SIGKILL
+    restarted = ProjectChatManager(
+        config,
+        state_store=StateStore(config.state_path, config.workspace_root, config.media_root),
+        transcript_store=TranscriptStore(config.state_path.parent, config.workspace_root / "transcripts"),
+        path=config.state_path.parent / "web_projects.json",
+    )
+    se._reset_project_manager_for_tests()
+    se.bind_project_manager(restarted)
+    try:
+        async def resume_and_wait():
+            await restarted.resume_memory_passes()
+            if restarted._detached_tasks:
+                await asyncio.gather(*list(restarted._detached_tasks))
+
+        asyncio.run(resume_and_wait())
+        relation = se.recover_memory_pass_source_relation(config, workspace="home", pass_chat_id=chat.chat_id)
+        assert relation.project_id == project.project_id
+    finally:
+        se._reset_project_manager_for_tests()
+
+
+async def test_checkpoint_survives_interruption_before_pass_archive(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    config, manager, project, _ = _memory_manager(tmp_path)
+    config.workspace("home").shared_brains = [SharedBrainLink("notes", str(tmp_path / "brain"), "team")]
+    se._reset_project_manager_for_tests()
+    se.bind_project_manager(manager)
+    registry = AgentSessionRegistry()
+    manager._mcp_service = SimpleNamespace(registry=registry)
+    chat = next(item for item in manager.list_chats() if (item.helper or {}).get("kind") == "memory_pass")
+    chat.helper["state"] = "running"
+    chat.last_response = "Updated synthetic memory."
+    chat.last_response_status = "success"
+    registry.issue(chat_id=chat.chat_id, project_id=chat.project_id, workspace="home", provider="claude")
+
+    async def interrupted(_chat):
+        raise RuntimeError("simulated interruption before archive")
+
+    monkeypatch.setattr(manager._memory_pass, "_archive_finished", interrupted)
+    try:
+        with pytest.raises(RuntimeError, match="simulated interruption"):
+            await manager._memory_pass.on_turn_finished(chat.chat_id)
+        restarted = ProjectChatManager(
+            config,
+            state_store=StateStore(config.state_path, config.workspace_root, config.media_root),
+            transcript_store=TranscriptStore(config.state_path.parent, config.workspace_root / "transcripts"),
+            path=config.state_path.parent / "web_projects.json",
+        )
+        se._reset_project_manager_for_tests()
+        se.bind_project_manager(restarted)
+        await restarted.resume_memory_passes()
+        if restarted._detached_tasks:
+            await asyncio.gather(*list(restarted._detached_tasks))
+        assert restarted.get_chat(chat.chat_id).archived
+        relation = se.recover_memory_pass_source_relation(config, workspace="home", pass_chat_id=chat.chat_id)
+        assert relation.project_id == project.project_id
+    finally:
+        se._reset_project_manager_for_tests()
 
 
 def test_completed_memory_checkpoint_survives_registry_restart_and_revocation(tmp_path: Path) -> None:
