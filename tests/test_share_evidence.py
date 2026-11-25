@@ -6,9 +6,11 @@ import dataclasses
 import json
 import subprocess
 import sys
+import threading
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import patch
 
 import pytest
 from itsdangerous import URLSafeTimedSerializer
@@ -1004,7 +1006,68 @@ def test_completed_memory_checkpoint_survives_registry_restart_and_revocation(tm
     assert relation.project_id == project.project_id
     assert relation.source_id == f"stream:{project.project_id}"
     assert [row["canonical_bytes"] for row in se.eligible_entries(config, workspace="home", brain_name="notes", relation=relation)] == ['{"decision":"Later"}']
-    se.revoke(config, workspace="home", grant_id=grant["grant_id"])
+    authorizations = se.mint_evidence_authorizations(config, workspace="home", brain_name="notes", relation=relation)
+    assert len(authorizations) == 1
+    authorization = authorizations[0]
+    later = se.record_operator_decision(config, workspace="home", project_id=project.project_id, decision="Superseded", reason="", effective_date="2026-11-22", session="operator-one")
+    newer = se.mint_evidence_authorizations(config, workspace="home", brain_name="notes", relation=relation)
+    superseded = next(item for item in newer if item["payload"]["row"]["entry_id"] == later["entry"]["entry_id"])
+    se.supersede_entry(config, workspace="home", project_id=project.project_id, entry_id=later["entry"]["entry_id"])
+    with pytest.raises(se.EvidenceError):
+        with se.evidence_authorization_guard(config, workspace="home", authorization=superseded):
+            pass
+    with patch.object(se, "_now", return_value=datetime.now(UTC) + timedelta(hours=2)):
+        assert se.eligible_entries(config, workspace="home", brain_name="notes", relation=relation) == []
+        with se.evidence_authorization_guard(config, workspace="home", authorization=authorization) as durable:
+            assert durable["entry_revision"] == 2
+    document = project_dir / se.DOCUMENT_NAME
+    document.write_text("## Decision\nDecision: Snapshot\nEffective date: 2026-11-20\n", encoding="utf-8")
+    snapshot = se.preview(config, workspace="home", brain_name="notes", project_id=project.project_id, project_name="Alpha", project_dir=project_dir, source_id=se.DOCUMENT_SOURCE, grant_type="snapshot", field_mask=["decision"], producers=["memory_extraction"], entry_index=0, session="operator-one")
+    snapshot_grant = se.confirm(config, workspace="home", token=snapshot["preview_token"], session="operator-one")["grant"]
+    snapshot_relation = se.recover_memory_pass_source_relation(config, workspace="home", pass_chat_id=chat.chat_id, source_id=se.DOCUMENT_SOURCE)
+    snapshot_authorization = se.mint_evidence_authorizations(config, workspace="home", brain_name="notes", relation=snapshot_relation)[0]
+    document.unlink()
+    with se.evidence_authorization_guard(config, workspace="home", authorization=snapshot_authorization) as snapshot_row:
+        assert snapshot_row["canonical_bytes"] == '{"decision":"Snapshot"}'
+        assert snapshot_row["entry_revision"] is None
+    se.withdraw(config, workspace="home", grant_id=snapshot_grant["grant_id"], reason="withdrawn")
+    with pytest.raises(se.EvidenceError):
+        with se.evidence_authorization_guard(config, workspace="home", authorization=snapshot_authorization):
+            pass
+    with pytest.raises(se.EvidenceError):
+        with se.evidence_authorization_guard(config, workspace="work", authorization=authorization):
+            pass
+    forged = json.loads(json.dumps(authorization))
+    forged["payload"]["row"]["canonical_bytes"] = '{"decision":"forged"}'
+    with pytest.raises(se.EvidenceError):
+        with se.evidence_authorization_guard(config, workspace="home", authorization=forged):
+            pass
+    entered = threading.Event()
+    finished = threading.Event()
+    def revoke() -> None:
+        entered.set()
+        se.revoke(config, workspace="home", grant_id=grant["grant_id"])
+        finished.set()
+    with se.evidence_authorization_guard(config, workspace="home", authorization=authorization) as admitted:
+        assert admitted["entry_revision"] == 2
+        assert admitted["audience"] == "github.com/acme/home"
+        thread = threading.Thread(target=revoke)
+        thread.start()
+        assert entered.wait(2)
+        assert not finished.wait(0.05)
+        lock_path = se._workspace_dir(config, "home") / ".state.lock"
+        marker = tmp_path / "child-acquired"
+        child = subprocess.Popen([sys.executable, "-c", "import fcntl,sys; f=open(sys.argv[1], 'r+'); fcntl.flock(f, fcntl.LOCK_EX); open(sys.argv[2], 'w').close()", str(lock_path), str(marker)])
+        with pytest.raises(subprocess.TimeoutExpired):
+            child.wait(timeout=0.2)
+        assert not marker.exists()
+    assert child.wait(timeout=5) == 0
+    assert marker.exists()
+    thread.join(2)
+    assert finished.is_set()
+    with pytest.raises(se.EvidenceError):
+        with se.evidence_authorization_guard(config, workspace="home", authorization=authorization):
+            pass
     assert se.eligible_entries(config, workspace="home", brain_name="notes", relation=relation) == []
     with pytest.raises(se.EvidenceError):
         se.recover_memory_pass_source_relation(config, workspace="work", pass_chat_id=chat.chat_id)
@@ -1023,7 +1086,8 @@ def test_completed_memory_checkpoint_survives_registry_restart_and_revocation(tm
         se.recover_memory_pass_source_relation(config, workspace="home", pass_chat_id=chat.chat_id)
 
 
-def test_care_witness_binds_exact_preview_revision_and_revocation(tmp_path: Path) -> None:
+@pytest.mark.parametrize("newline", ["\r\n", "\r"])
+def test_care_witness_binds_exact_preview_revision_and_revocation(tmp_path: Path, newline: str) -> None:
     config, manager, project, _source = _memory_manager(tmp_path)
     project.vault_folder = "alpha"
     directory = Path(config.workspace_vault_root("home")) / "projects" / "active" / "alpha"
@@ -1032,19 +1096,30 @@ def test_care_witness_binds_exact_preview_revision_and_revocation(tmp_path: Path
     se._reset_project_manager_for_tests()
     se.bind_project_manager(manager)
     document = directory / se.DOCUMENT_NAME
-    text = "## Decision\nDecision: Launch\nEffective date: 2026-11-20\n"
-    document.write_text(text, encoding="utf-8")
+    text = newline.join(["## Decision", "Decision: Launch", "Effective date: 2026-11-20", ""])
+    document.write_bytes(text.encode("utf-8"))
+    relative = document.relative_to(config.workspace_vault_root("home")).as_posix()
+    note = curation_run._ScannedNote(rendered=relative, relative=relative, title="Decisions", stale=True,
+        exempt=False, age_days=120, threshold_days=90, last_verified=None)
+    items, _, _ = curation_run._stale_note_items(
+        vault_root=config.workspace_vault_root("home"), scanned=[note], today=datetime(2026, 11, 25).date(), scan_unavailable=False,
+    )
+    assert len(items) == 1 and items[0].target is not None
+    revision = items[0].target.revision
     preview = se.preview(config, workspace="home", brain_name="notes", project_id=project.project_id,
         project_name="Alpha", project_dir=directory, source_id=se.DOCUMENT_SOURCE, grant_type="snapshot",
         field_mask=["decision"], producers=["nightly_curation"], entry_index=0, session="operator-one")
     subprocess.run([sys.executable, "-c", "from pathlib import Path; import sys; Path(sys.argv[1]).write_text(sys.argv[2], encoding='utf-8')", str(document), text + "changed"], check=True)
     grant = se.confirm(config, workspace="home", token=preview["preview_token"], session="operator-one")["grant"]
-    relative = document.relative_to(config.workspace_vault_root("home")).as_posix()
-    revision = se._digest(text.encode())
     rows = se.care_snapshot_witnesses(config, workspace="home", project_id=project.project_id, relative_path=relative, revision=revision)
     assert len(rows) == 1 and rows[0]["grant_id"] == grant["grant_id"]
     assert rows[0]["entry_index"] == 0
-    assert se.care_snapshot_witnesses(config, workspace="home", project_id=project.project_id, relative_path=relative, revision=se._digest(document.read_bytes())) == []
+    changed_items, _, _ = curation_run._stale_note_items(
+        vault_root=config.workspace_vault_root("home"), scanned=[note], today=datetime(2026, 11, 25).date(), scan_unavailable=False,
+    )
+    assert len(changed_items) == 1 and changed_items[0].target is not None
+    assert changed_items[0].target.revision != revision
+    assert se.care_snapshot_witnesses(config, workspace="home", project_id=project.project_id, relative_path=relative, revision=changed_items[0].target.revision) == []
     assert se.care_snapshot_witnesses(config, workspace="work", project_id=project.project_id, relative_path=relative, revision=revision) == []
     old_created = project.created_at
     project.created_at = "2099-01-01T00:00:00Z"
@@ -1149,14 +1224,15 @@ def test_care_checkpoint_stages_only_completed_exact_witness_and_replays_once(tm
     curation_run.end_run(vault, holder=replacement.holder)
 
 
-def test_document_revision_matches_planner_newline_normalization(tmp_path: Path) -> None:
+@pytest.mark.parametrize("newline", ["\r\n", "\r"])
+def test_document_revision_matches_planner_bytes(tmp_path: Path, newline: str) -> None:
     from ciao.memory_receipts import content_revision
 
     document = tmp_path / "Decisions.md"
-    document.write_bytes(b"## Decision\r\nDecision: Launch\r\nEffective date: 2026-11-20\r\n")
+    document.write_bytes(newline.join(["## Decision", "Decision: Launch", "Effective date: 2026-11-20", ""]).encode())
     entries, revision = se._read_document(document)
     assert entries[0]["decision"] == "Launch"
-    assert revision == content_revision(document.read_text(encoding="utf-8"))
+    assert revision == content_revision(document.read_bytes().decode("utf-8"))
 
 
 def test_real_memory_pass_archive_proves_positive_stream_eligibility(
