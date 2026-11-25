@@ -914,44 +914,6 @@ def _request_fingerprint(
     return hashlib.sha256(payload).hexdigest()
 
 
-def _freeze_care_destination(config: Any, workspace: str, relation: Any, snapshot: Any) -> None:
-    """Pin one authenticated care witness to its first reviewed destination."""
-    from ciao import share_evidence
-
-    store = _storage_safe(config, workspace)
-    parent_fd = folder_io.open_directory_nofollow(str(store))
-    try:
-        child_fd, _ = folder_io.open_or_create_private_dir(parent_fd, "candidate-destinations")
-        os.close(child_fd)
-    finally:
-        os.close(parent_fd)
-    secret = share_evidence._relation_secret(config)
-    identity = "\0".join((workspace, relation.workspace_lifetime_id, relation.relation_id,
-                          relation.evidence, snapshot.lifetime_id)).encode("utf-8")
-    name = hmac.new(secret, b"care-destination-key\0" + identity, hashlib.sha256).hexdigest()
-    path = store / "candidate-destinations" / (name + ".json")
-    payload = {"workspace": workspace, "workspace_lifetime_id": relation.workspace_lifetime_id,
-               "holder": relation.relation_id, "witness": relation.evidence,
-               "destination": asdict(snapshot)}
-    encoded = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
-    signature = hmac.new(secret, b"care-destination\0" + encoded, hashlib.sha256).hexdigest()
-    previous = share_evidence._read_json(path, limit=16384, code="private_state_corrupt")
-    if previous:
-        old_payload = previous.get("payload")
-        old_signature = previous.get("signature")
-        if not isinstance(old_payload, dict) or not isinstance(old_signature, str) or not re.fullmatch(r"[0-9a-f]{64}", old_signature):
-            _refuse("draft_corrupt", "The private candidate destination is corrupt.")
-        old_encoded = json.dumps(old_payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
-        expected = hmac.new(secret, b"care-destination\0" + old_encoded, hashlib.sha256).hexdigest()
-        if not hmac.compare_digest(old_signature, expected):
-            _refuse("draft_corrupt", "The private candidate destination is corrupt.")
-        if old_payload != payload:
-            _refuse("destination_changed", "The candidate destination changed after it was bound.")
-    else:
-        share_evidence._write_private(path, json.dumps({"schema": share_evidence.SCHEMA, "payload": payload,
-                                                        "signature": signature}, ensure_ascii=False).encode("utf-8"), limit=16384)
-
-
 def _add_candidate_provenance(config: Any, workspace: str, draft: ShareDraft, authorization: dict[str, Any]) -> None:
     artifact = draft.artifact
     provenance = artifact.setdefault("producer_provenance", [])
@@ -1136,8 +1098,6 @@ def draft_evidence_candidates(config: Any, *, workspace: str, relation: Any) -> 
                             )
                             if snapshot is None:
                                 continue
-                            if relation.kind == "care_settlement":
-                                _freeze_care_destination(config, workspace, relation, snapshot)
                             destination = snapshot.destination.destination
                             operation = "replace" if destination.operation == "append" else destination.operation
                             if operation not in ("create", "replace"):
@@ -1267,6 +1227,23 @@ def redraft_evidence_candidate(config: Any, *, workspace: str, proposal_id: str,
         mapping = fields.get("destination_mapping")
         root = fields.get("candidate_root_fingerprint", old.get("request_fingerprint"))
         history = fields.get("redraft_history", [])
+        # A crash after the queue swap leaves the replacement visible before the
+        # root index is committed. The operator can retry from that visible row.
+        if isinstance(root, str):
+            pending = _candidate_redraft_journal(config, workspace, root)
+            if pending and pending.get("status") == "pending" and pending.get("old_id") != proposal_id:
+                if old.get("request_fingerprint") != pending.get("fingerprint"):
+                    _refuse("draft_corrupt", "The private candidate lineage is corrupt.")
+                queue = Path(config.workspace_vault_root(workspace)) / _QUEUE
+                with _thread_queue_lock(queue), memory_receipts.queue_lock(queue, timeout_s=0):
+                    text = queue.read_text(encoding="utf-8") if queue.exists() else ""
+                    rows = proposal_tracking.walk_proposal_queue(workspace, (PurePosixPath(workspace) / _QUEUE).as_posix(), text)
+                    if not any(item.proposal_id == proposal_id and item.bullet.kind == KIND for item in rows):
+                        _refuse("stale_review", "The candidate is no longer pending.")
+                old_id, old_token = pending.get("old_id"), pending.get("old_token")
+                if not isinstance(old_id, str) or not isinstance(old_token, str):
+                    _refuse("draft_corrupt", "The private candidate lineage is corrupt.")
+                return redraft_evidence_candidate(config, workspace=workspace, proposal_id=old_id, expected_revision=old_token)
         if not isinstance(authorization, dict) or not isinstance(mapping, dict) or not isinstance(root, str) or not isinstance(history, list) or len(history) > MAX_CANDIDATE_REDRAFTS:
             _refuse("draft_corrupt", "The private candidate lineage is corrupt.")
         link = _brain_for(config, workspace, fields["brain"])

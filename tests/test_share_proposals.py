@@ -1036,13 +1036,38 @@ def test_intake_resolves_mapped_destination_and_never_publishes(linked, monkeypa
     config.links = [second_link]
     registry.write_text(json.dumps([{"name": "home", "vault_root": str(config.vault), "shared_brains": [shared_brain_row(second_link)]}]))
     config._workspace_registry_bytes = registry.read_bytes()
-    pins = list((sp._store_dir(config) / "candidate-destinations").glob("*.json"))
-    pinned = next(path for path in pins if json.loads(path.read_text())["payload"]["destination"]["lifetime_id"] == second_link.lifetime_id)
-    altered = json.loads(pinned.read_text())
-    altered["payload"]["holder"] = "forged"
-    share_evidence._write_private(pinned, json.dumps(altered).encode(), limit=16384)
-    corrupt = sp.draft_evidence_candidates(config, workspace="home", relation=relation)
-    assert len(corrupt) == 1 and isinstance(corrupt[0], sp.ShareRefusal) and corrupt[0].code == "draft_corrupt"
+    # Distinct interrupted candidates each consume a reserved slot before
+    # their intent is written; retries cannot allocate past the run limit.
+    relation.batch_index = 7
+    row["batch_index"] = 7
+    before_intents = set((sp._store_dir(config) / "candidate-intents").glob("*.json"))
+    for revision in (100, 101):
+        row["entry_revision"] = revision
+        relation.evidence = f"crash-{revision}"
+        pid = os.fork()
+        if pid == 0:
+            original_write = share_evidence._write_private
+
+            def crash_after_intent(path, data, *, limit):
+                original_write(path, data, limit=limit)
+                if path.parent.name == "candidate-intents":
+                    os._exit(29)
+
+            share_evidence._write_private = crash_after_intent
+            sp.draft_evidence_candidates(config, workspace="home", relation=relation)
+            os._exit(0)
+        _, status = os.waitpid(pid, 0)
+        assert os.waitstatus_to_exitcode(status) == 29
+    row["entry_revision"] = 102
+    relation.evidence = "crash-102"
+    limited = sp.draft_evidence_candidates(config, workspace="home", relation=relation)
+    assert isinstance(limited[0], sp.ShareRefusal) and limited[0].code == "capacity"
+    assert len(set((sp._store_dir(config) / "candidate-intents").glob("*.json")) - before_intents) == 2
+    row["entry_revision"] = 100
+    relation.evidence = "crash-100"
+    recovered = sp.draft_evidence_candidates(config, workspace="home", relation=relation)
+    assert isinstance(recovered[0], sp.ShareDraft)
+    assert sp.draft_evidence_candidates(config, workspace="home", relation=relation)[0].proposal_id == recovered[0].proposal_id
     config.links = [replace(second_link, lifetime_id="relinked-lifetime")]
     assert sp.draft_evidence_candidates(config, workspace="home", relation=relation) == []
 
@@ -1106,7 +1131,7 @@ def test_intake_uses_real_checkpoint_and_consent(linked, tmp_path, monkeypatch, 
             assert child.stdin is not None
             child.stdin.close()
             child.wait(timeout=5)
-        for _ in range(1):
+        for _ in range(2):
             pid = os.fork()
             if pid == 0:
                 original_evidence_write = se._write_private
@@ -1120,12 +1145,9 @@ def test_intake_uses_real_checkpoint_and_consent(linked, tmp_path, monkeypatch, 
                 sp.draft_evidence_candidates(config, workspace="home", relation=relation)
                 os._exit(0)
             _, status = os.waitpid(pid, 0)
-            # The first crash reserves the slot; retry advances to intent.
-            if os.waitstatus_to_exitcode(status) == 0:
-                break
             assert os.waitstatus_to_exitcode(status) == 20
         ledgers = list((sp._store_dir(config) / "candidate-runs").glob("*.json"))
-        assert len(ledgers) == 1 and len(json.loads(ledgers[0].read_text())["fingerprints"]) == 1
+        assert len(ledgers) == 1 and json.loads(ledgers[0].read_text())["fingerprints"] == []
         pid = os.fork()
         if pid == 0:
             original_evidence_write = se._write_private
@@ -1251,8 +1273,9 @@ def test_intake_uses_real_checkpoint_and_consent(linked, tmp_path, monkeypatch, 
     assert sp.draft_evidence_candidates(config, workspace="home", relation=relation) == []
 
 
-@pytest.mark.parametrize("change_mapping_after_settlement", [False, True])
-def test_intake_uses_settled_care_witness_and_current_consent(linked, tmp_path, monkeypatch, change_mapping_after_settlement):
+@pytest.mark.parametrize(("change_mapping_after_settlement", "crash_seam"),
+                         [(True, "none"), *[(False, seam) for seam in ("intent", "journal", "artifact", "index", "queue", "alias")]])
+def test_intake_uses_settled_care_witness_and_current_consent(linked, tmp_path, monkeypatch, change_mapping_after_settlement, crash_seam):
     from dataclasses import replace
     from tests.test_share_evidence import _memory_manager
     from ciao import curation_run, curation_share, share_evidence as se, share_publish, shared_brain_guide, shared_brain_mapping
@@ -1331,22 +1354,49 @@ def test_intake_uses_settled_care_witness_and_current_consent(linked, tmp_path, 
     pid = os.fork()
     if pid == 0:
         write_queue = sp.memory_receipts.write_queue_atomically
+        write_private = sp._write_private
+        write_evidence = se._write_private
+        writes = 0
 
-        def crash_after_swap(*args, **kwargs):
+        def crash_queue(*args, **kwargs):
             write_queue(*args, **kwargs)
-            os._exit(27)
+            if crash_seam == "queue":
+                os._exit(27)
 
-        sp.memory_receipts.write_queue_atomically = crash_after_swap
+        def crash_private(path, data):
+            nonlocal writes
+            write_private(path, data)
+            writes += 1
+            if writes == {"artifact": 1, "index": 2, "alias": 5}.get(crash_seam):
+                os._exit(27)
+
+        def crash_evidence(path, data, *, limit):
+            write_evidence(path, data, limit=limit)
+            if (crash_seam == "intent" and path.parent.name == "candidate-intents"
+                    or crash_seam == "journal" and path.parent.name == "candidate-redrafts"):
+                os._exit(27)
+
+        sp.memory_receipts.write_queue_atomically = crash_queue
+        sp._write_private = crash_private
+        se._write_private = crash_evidence
         sp.redraft_evidence_candidate(config, workspace="home", proposal_id=drafts[0].proposal_id,
                                       expected_revision=drafts[0].artifact["review_token"])
         os._exit(0)
     _, status = os.waitpid(pid, 0)
     assert os.waitstatus_to_exitcode(status) == 27
     blocked_replay = sp.draft_evidence_candidates(config, workspace="home", relation=relation)
-    assert isinstance(blocked_replay[0], sp.ShareRefusal) and blocked_replay[0].code == "draft_unavailable"
+    if crash_seam == "intent":
+        assert isinstance(blocked_replay[0], sp.ShareDraft) and blocked_replay[0].proposal_id == drafts[0].proposal_id
+    else:
+        assert isinstance(blocked_replay[0], sp.ShareRefusal) and blocked_replay[0].code == "draft_unavailable"
+    from ciao.proposal_tracking import walk_proposal_queue
+    queue_path = vault / "Workspace" / "Memory-Proposals.md"
+    visible, = list(walk_proposal_queue("home", "home/Workspace/Memory-Proposals.md", queue_path.read_text()))
+    visible_artifact = share_publish._artifact_for(config, "home", visible.proposal_id)
+    assert visible_artifact is not None
     replacement = sp.redraft_evidence_candidate(
-        config, workspace="home", proposal_id=drafts[0].proposal_id,
-        expected_revision=drafts[0].artifact["review_token"],
+        config, workspace="home", proposal_id=visible.proposal_id,
+        expected_revision=visible_artifact["review_token"],
     )
     assert isinstance(replacement, sp.ShareDraft)
     assert replacement.proposal_id != drafts[0].proposal_id
