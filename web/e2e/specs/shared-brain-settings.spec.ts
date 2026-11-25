@@ -67,16 +67,16 @@ test.describe('shared brains card', () => {
     expect(((await folderButton.boundingBox()) ?? { height: 0 }).height).toBeGreaterThanOrEqual(44)
 
     // The setup guidance follows the explicit choice, not the rows already listed.
-    await expect(panel.getByText('Folder links are read in place for reference')).toBeVisible()
+    await expect(panel.getByText('Folder links are read in place')).toBeVisible()
     await expect(panel.getByText('To set up a Git repository')).toHaveCount(0)
     await type.selectOption('git')
     await expect(panel.getByText('To set up a Git repository')).toBeVisible()
-    await expect(panel.getByText('Folder links are read in place for reference')).toHaveCount(0)
+    await expect(panel.getByText('Folder links are read in place')).toHaveCount(0)
     await type.selectOption('folder')
 
     await link(panel, FOLDER)
     await expect(panel.getByText('local-folder', { exact: true })).toBeVisible()
-    await expect(panel.locator('.shared-brain-kind', { hasText: 'Folder · reference only' })).toHaveCount(1)
+    await expect(panel.locator('.shared-brain-kind', { hasText: 'Folder' })).toHaveCount(1)
     await expect(panel.getByText('Folder is locally available. Read in place, never updated.')).toBeVisible()
     await expect(panel.getByText('Checked-out commit')).toHaveCount(0)
 
@@ -84,12 +84,12 @@ test.describe('shared brains card', () => {
     await expect(panel.getByText('team-notes', { exact: true })).toBeVisible()
     await expect(panel.locator('.shared-brain-kind', { hasText: 'Git repository' })).toHaveCount(1)
     await expect(panel.getByText('Up to date')).toHaveCount(1)
-    await expect(panel.locator('.shared-brain-kind', { hasText: 'Folder · reference only' })).toHaveCount(1)
+    await expect(panel.locator('.shared-brain-kind', { hasText: 'Folder' })).toHaveCount(1)
 
     await page.reload()
     await quiesce(page)
     await expect(card(page).getByText('local-folder', { exact: true })).toBeVisible()
-    await expect(card(page).locator('.shared-brain-kind', { hasText: 'Folder · reference only' })).toHaveCount(1)
+    await expect(card(page).locator('.shared-brain-kind', { hasText: 'Folder' })).toHaveCount(1)
     await expect(card(page).locator('.shared-brain-kind', { hasText: 'Git repository' })).toHaveCount(1)
   })
 
@@ -161,6 +161,6 @@ test.describe('shared brains card', () => {
 
     await expect(panel.getByText('team-notes', { exact: true })).toHaveCount(0)
     await expect(panel.getByText('local-folder', { exact: true })).toBeVisible()
-    await expect(panel.locator('.shared-brain-kind', { hasText: 'Folder · reference only' })).toHaveCount(1)
+    await expect(panel.locator('.shared-brain-kind', { hasText: 'Folder' })).toHaveCount(1)
   })
 })

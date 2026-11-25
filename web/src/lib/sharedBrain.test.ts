@@ -84,7 +84,7 @@ describe('sharedBrainStatus', () => {
     }))).toEqual({
       text: 'Folder is locally available. Read in place, never updated.',
       tone: 'ok',
-      detail: 'This checks access on this computer only; it does not confirm that Google Drive, iCloud or another sync service has finished syncing.',
+      detail: 'New notes are saved only after individual review; Ciaobot never replaces or deletes an existing folder file. This checks access on this computer only; it does not confirm that Google Drive, iCloud or another sync service has finished syncing.',
     })
   })
 

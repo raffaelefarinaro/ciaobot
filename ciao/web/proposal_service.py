@@ -3215,12 +3215,36 @@ def preview_row(
             None,
         )
         blocked = None
-        if link is None or link.kind != "git" or getattr(link, "lifetime_id", None) != fields.get("link_lifetime_id"):
+        expected_kind = str(fields.get("link_kind") or "git")
+        if link is None or link.kind != expected_kind or getattr(link, "lifetime_id", None) != fields.get("link_lifetime_id"):
             blocked = "brain_unavailable"
+        elif expected_kind == "folder" and str(fields.get("operation") or "") != "create":
+            blocked = "folder_update_unsupported"
         else:
             state = shared_brain.brain_state(link, config, workspace)
             if state.get("problem"):
                 blocked = "brain_changed" if state.get("problem") == "origin_changed" else "brain_unavailable"
+            elif expected_kind == "folder" and str(fields.get("operation") or "") == "create":
+                from ciao.os_support import folder_io
+
+                try:
+                    with share_publish._folder_target(fields) as (parent_fd, _chain):
+                        name = str(fields.get("path") or "").rsplit("/", 1)[-1]
+                        staging_root = share_publish._folder_staging_root(
+                            config, workspace, fields, parent_fd
+                        )
+                        if (
+                            not share_publish._folder_same_mount(staging_root, parent_fd)
+                            or not folder_io.verified_hardlink_support(staging_root)
+                            or not folder_io.verified_rename_observability(staging_root)
+                        ):
+                            blocked = "manual_export_required"
+                        elif folder_io.stat_entry(parent_fd, name) is not None:
+                            blocked = "folder_update_unsupported"
+                except folder_io.FolderChanged:
+                    blocked = "unsafe_target"
+                except (FileNotFoundError, OSError):
+                    blocked = "brain_unavailable"
         if text:
             blocked = "share_text_edits_not_supported"
         operation = str(fields.get("operation") or "")
@@ -3240,6 +3264,7 @@ def preview_row(
             "operation": operation, "before": fields.get("original"),
             "after": fields.get("proposed"), "brain": str(fields.get("brain") or ""),
             "identity": str(fields.get("origin_identity") or ""),
+            "link_kind": expected_kind,
             "branch": str(fields.get("upstream_ref") or "").removeprefix("refs/heads/"),
             "path": str(fields.get("path") or ""),
             "revision": revision,
