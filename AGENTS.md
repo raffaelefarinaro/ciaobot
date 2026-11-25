@@ -22,40 +22,21 @@ Before changing code:
 - Do not commit secrets, private workspace data, or operator credentials.
 
 ## Project shape
-- `ciao/cli.py` is the `ciao` CLI; `ciao/main.py` is the server entry.
-- `ciao/web/app.py` lists every route as an explicit `Route(...)`; handlers
-  live in `ciao/web/routes_*.py`.
-- `ciao/providers/` holds the ACP agent layer (`acp/`, one `AgentSpec` per CLI) and the
-  shared `base.py`; `ciao/opencode_cli.py` holds the OpenCode CLI helpers. One-shot model calls go through `providers/oneshot.py`;
-  there is no Messages API and no provider-enforced structured output, so
-  validate model JSON locally.
-- `ciao/stock/` holds generic assets shipped in the wheel (skills, commands,
-  schedules, workspace templates). User vaults and runtime data belong in a
+- `ciao/providers/oneshot.py` runs one-shot model calls. There is no Messages API
+  and no provider-enforced structured output, so validate model JSON locally.
+- `ciao/stock/` ships in the wheel. User vaults and runtime data belong in a
   separate workspace, never in this repo.
-- `web/src/lib/` holds pure helpers with no Vue imports. Tests sit in
-  `__tests__/` beside the code, or as `foo.test.ts` next to `lib/foo.ts`.
-- There is no client/host split any more: one engine, one origin, one session.
-  Keep `/api/*` behind the signed session cookie, keep every `/ws/*` handshake
-  same-origin-gated, and keep the loopback-only set (`_LOOPBACK_ONLY_API` in
-  `ciao/web/auth.py`) gated on the TCP peer. The boundary audit is in
+- One engine, one origin, one session. Keep `/api/*` behind the signed session
+  cookie, every `/ws/*` handshake same-origin-gated, and the loopback-only set
+  (`_LOOPBACK_ONLY_API` in `ciao/web/auth.py`) gated on the TCP peer. See
   `docs/REMOTE_BOUNDARY.md`.
-- `mac/` is the Swift Mac app (SwiftPM package `CiaobotMac`, Sparkle updates),
-  imported from `ciaobot-mac` with its history. It does not bundle or import
-  the engine yet and is never part of the wheel; `mac/docs/reference.md` is
-  its reference and `/release-mac` its (operator-only) release skill.
+- `mac/` is never part of the wheel; `mac/docs/reference.md` is its reference.
 
 ## Commands
-```bash
-.venv/bin/pytest tests/test_x.py -q      # focused; use the venv, not pytest on PATH
-.venv/bin/pytest -n auto tests/          # full backend suite, about a minute
-.venv/bin/mypy ciao
-cd web && npm test                       # vitest
-cd web && npm run build                  # vue-tsc + vite build
-cd web && npm run test:e2e               # Playwright
-cd web && npm run build-storybook && npm run test-storybook  # Storybook workshop build + browser interaction runner
-ciao dev                                 # backend :8543 + Vite :5173
-scripts/dev-commands.sh all              # typecheck, coverage, lint, audit
-```
+- Use the venv, not pytest on PATH: `.venv/bin/pytest tests/test_x.py -q`,
+  `.venv/bin/pytest -n auto tests/`, `.venv/bin/mypy ciao`.
+- Frontend: `cd web && npm test`, never `npx vitest` (see the Node floor below).
+- `scripts/dev-commands.sh all` runs typecheck, coverage, lint and audit.
 
 ## Verification
 - Run focused tests for the changed behavior.
@@ -77,22 +58,12 @@ scripts/dev-commands.sh all              # typecheck, coverage, lint, audit
      must agree: `web/package.json` `engines`, `SUPPORTED_RANGE` in
      `web/scripts/check-node.mjs`, and `docs/DEVELOPMENT.md`.
   4. `cd web && npm run build` after frontend changes.
-  PRs into `develop` run the Linux backend and frontend gates in parallel
-  (`linux-server` and `linux-web`). A develop PR whose diff changes `web/`
-  also runs the conditional `linux-e2e` Chromium check alongside `linux-web`,
-  after the fast `web-scope` detector. Its stable check fails if detection fails;
-  non-web PRs run only that scope validation.
-  A develop PR whose diff changes `mac/`, `pyproject.toml`, `uv.lock` (or
-  `web/src/lib/workspaceColors.ts`) also runs `mac-app` (Swift tests, the app
-  bundle with its full engine, on macOS 15) after
-  the fast `mac-scope` detector; release PRs and manual runs always run it.
-  `npm run test:e2e` invokes its npm prehook, which builds both the PWA and
-  terminal harness before Playwright. Python 3.14
-  (`linux-server-latest-python`) and macOS (`test`) run on release PRs and
-  manual full runs; a green develop PR is not proof the release PR's macOS
-  job will pass.
-  `pip-audit`, `npm audit` and `npm run lint` are advisory in CI (`|| true`).
-  Lint is still worth running; it just will not fail the build for you.
+  PRs into `develop` run `linux-server` and `linux-web`; `linux-e2e` and
+  `mac-app` run only when the diff touches `web/` or `mac/`, `pyproject.toml`
+  or `uv.lock`. Python 3.14 and macOS (`test`) run on release PRs and manual
+  runs, so a green develop PR does not prove the release PR's macOS job.
+  `npm run test:e2e` builds the PWA and terminal harness first. `pip-audit`,
+  `npm audit` and `npm run lint` are advisory in CI.
 - Run one full backend suite and one frontend run at a time; concurrent suites
   time out the 20 s component tests. Re-run a single failure (`--lf`) before
   calling it red. Timing tests assert relative behaviour, not fixed budgets.
