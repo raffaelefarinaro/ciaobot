@@ -684,6 +684,7 @@ def record_decision(
     reason: object,
     effective_date: object,
     operator_session: str = "",
+    disclosure_token: str | None = None,
     now: datetime | None = None,
 ) -> dict[str, Any]:
     """Append one engine-recorded structured decision to the project's stream.
@@ -701,6 +702,10 @@ def record_decision(
     moment = _now(now)
     with _workspace_guard(config, workspace):
         data = _load_state(config, workspace)
+        if disclosure_token is not None:
+            expected = _disclosure_token(config, workspace, project, operator_session, data)
+            if not hmac.compare_digest(disclosure_token, expected):
+                _refuse("disclosure_changed", "Sharing permissions changed. Review them before saving.")
         stream = _stream_for(data, project)
         if stream is None:
             stream_id = "strm_" + secrets.token_hex(16)
@@ -790,6 +795,7 @@ def record_operator_decision(
     reason: object,
     effective_date: object,
     session: str,
+    disclosure_token: str | None = None,
     now: datetime | None = None,
 ) -> dict[str, Any]:
     """Authenticated operator route entry, signed as a per-event operator event."""
@@ -799,6 +805,7 @@ def record_operator_decision(
         config, workspace=workspace, project_id=project_id, decision=decision,
         reason=reason, effective_date=effective_date,
         operator_session=session, now=now,
+        disclosure_token=disclosure_token,
     )
 
 
@@ -1130,6 +1137,37 @@ def list_grants(config: Any, *, workspace: str) -> list[dict[str, Any]]:
         _public_grant(row, linked=_grant_linked(config, workspace, row))
         for row in rows if isinstance(row, dict)
     ]
+
+
+def _disclosure_token(config: Any, workspace: str, project: str, session: str, data: dict[str, Any]) -> str:
+    grants = data.get("grants")
+    rows = grants.values() if isinstance(grants, dict) else []
+    scope = sorted(
+        (_public_grant(row, linked=_grant_linked(config, workspace, row))
+         for row in rows if isinstance(row, dict) and row.get("project_id") == project
+         and row.get("type") == "standing"),
+        key=lambda row: str(row["grant_id"]),
+    )
+    payload = json.dumps(
+        {"workspace": workspace, "lifetime": data.get("workspace_lifetime_id"),
+         "project": project, "session": _session_hash(session), "grants": scope},
+        ensure_ascii=False, sort_keys=True, separators=(",", ":"),
+    ).encode("utf-8")
+    return hmac.new(_relation_secret(config), payload, hashlib.sha256).hexdigest()
+
+
+def disclosure_state(config: Any, *, workspace: str, projects: list[str], session: str) -> tuple[list[dict[str, Any]], dict[str, str]]:
+    """Read displayed grants and their save tokens in the same transaction."""
+    _require_workspace(config, workspace)
+    with _workspace_guard(config, workspace):
+        data = _load_state(config, workspace)
+        grants = data.get("grants")
+        rows = grants.values() if isinstance(grants, dict) else []
+        public = [_public_grant(row, linked=_grant_linked(config, workspace, row))
+                  for row in rows if isinstance(row, dict)]
+        tokens = {project: _disclosure_token(config, workspace, project, session, data)
+                  for project in projects}
+        return public, tokens
 
 
 def grant_detail(config: Any, *, workspace: str, grant_id: str) -> dict[str, Any]:

@@ -497,6 +497,7 @@ function grant(over: Partial<ShareEvidenceGrant> = {}): ShareEvidenceGrant {
 
 function evidence(over: Partial<ShareEvidenceState> = {}): ShareEvidenceState {
   return {
+    disclosure_tokens: { 'proj-alpha': 'scope' },
     workspace: 'personal',
     mode: 'review',
     fields: ['decision', 'reason', 'effective_date'],
@@ -729,7 +730,7 @@ describe('SettingsSharedBrains sources and consent', () => {
     await flushPromises()
     expect(apiPost).toHaveBeenCalledWith(
       '/api/workspaces/personal/share-evidence/decisions',
-      { project_id: 'proj-alpha', decision: 'Use the new vendor', reason: '', effective_date: '2026-11-20' },
+      { project_id: 'proj-alpha', decision: 'Use the new vendor', reason: '', effective_date: '2026-11-20', disclosure_token: 'scope' },
     )
     expect(view.text()).toContain('Standing disclosures active for this project stream')
     expect(view.text()).toContain('decision, effective_date are permitted for future automatic sharing by memory_extraction')

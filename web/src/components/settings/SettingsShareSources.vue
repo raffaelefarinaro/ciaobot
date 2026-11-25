@@ -425,6 +425,7 @@ async function recordDecision(): Promise<void> {
       decision: decisionDraft.value.trim(),
       reason: reasonDraft.value.trim(),
       effective_date: dateDraft.value,
+      disclosure_token: data.value?.disclosure_tokens[projectId.value],
     })
     if (ws === workspace.value) {
       decisionDraft.value = ''
@@ -433,7 +434,10 @@ async function recordDecision(): Promise<void> {
       await load()
     }
   } catch (e) {
-    if (ws === workspace.value) actionError.value = apiErrorMessage(e, 'The decision could not be saved.')
+    if (ws === workspace.value) {
+      actionError.value = apiErrorMessage(e, 'The decision could not be saved.')
+      if ((e as { status?: number }).status === 409) await load()
+    }
   } finally {
     busy.value = false
   }
