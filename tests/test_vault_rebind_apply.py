@@ -423,3 +423,82 @@ def test_no_lock_file_is_created_when_a_notes_folder_contains_the_state(tmp_path
     runtime = install / ".runtime"
     assert sorted(p.name for p in runtime.iterdir()) == ["workspaces.json"]
     assert not (install / "server.lock").exists()
+
+
+def real_setup(tmp_path: Path) -> tuple[Path, Path, Path]:
+    """A default-layout install made by the real `ciao setup` plus a copy of its vault."""
+    import shutil
+
+    from ciao import cli
+
+    install = tmp_path / "ws"
+    assert cli.main(["setup", "--workspace", str(install), "--launch-agents-dir", str(tmp_path / "la")]) == 0
+    vault = install / "personal" / "memory-vault"
+    cloud = tmp_path / "cloud-notes"
+    shutil.copytree(vault, cloud)
+    return install, vault, cloud
+
+
+def test_default_layout_relative_root_rebinds_to_absolute_and_reverses(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    install, vault, cloud = real_setup(tmp_path)
+    registry = install / ".runtime" / "workspaces.json"
+    assert rows_of(registry)[0]["vault_root"] == "personal/memory-vault"  # what setup really writes
+    before_rows = rows_of(registry)
+    plan = review(install, "personal", cloud)
+    assert plan.source == vault
+    result = apply(install, "personal", cloud, token=plan.token)
+    after_rows = rows_of(registry)
+    assert after_rows[0]["vault_root"] == str(cloud)  # converted to absolute
+    assert {k: v for k, v in after_rows[0].items() if k != "vault_root"} == {
+        k: v for k, v in before_rows[0].items() if k != "vault_root"
+    }
+    # The old vault lives inside the install; reversing into it is valid.
+    back = review_reverse(install, "personal", result["operation"])
+    assert back.destination == vault
+    reverse(install, "personal", result["operation"], token=back.token)
+    assert rows_of(registry) == before_rows  # the exact relative value is restored
+
+
+@pytest.mark.parametrize("raw", ["personal/../escape", "../outside/x", "./", "single"])
+def test_relative_roots_that_traverse_or_are_ambiguous_are_refused(tmp_path: Path, raw: str) -> None:
+    install, old, new, registry = make_install(tmp_path)
+    rows = rows_of(registry)
+    rows[0]["vault_root"] = raw
+    registry.write_bytes((json.dumps(rows, indent=2) + "\n").encode())
+    with pytest.raises(ValueError):
+        review(install, "personal", new)
+    assert not state_dir(install).exists()
+
+
+def test_relative_root_through_a_symlink_is_refused(tmp_path: Path) -> None:
+    install, old, new, registry = make_install(tmp_path)
+    (install / "personal").symlink_to(old, target_is_directory=True)
+    (old / "memory-vault").mkdir()
+    rows = rows_of(registry)
+    rows[0]["vault_root"] = "personal/memory-vault"
+    registry.write_bytes((json.dumps(rows, indent=2) + "\n").encode())
+    with pytest.raises(ValueError, match="symlink"):
+        review(install, "personal", new)
+
+
+def test_runtime_and_state_stay_protected_inside_the_install(tmp_path: Path) -> None:
+    install, old, new, registry = make_install(tmp_path)
+    inside_runtime = install / ".runtime" / "notes"
+    inside_runtime.mkdir()
+    (inside_runtime / "note.md").write_text("alpha")
+    (inside_runtime / "sub").mkdir()
+    (inside_runtime / "sub" / "deep.md").write_text("beta")
+    with pytest.raises(ValueError, match="protected"):
+        review(install, "personal", inside_runtime)  # destination inside .runtime
+    rows = rows_of(registry)
+    rows[0]["vault_root"] = str(inside_runtime)
+    registry.write_bytes((json.dumps(rows, indent=2) + "\n").encode())
+    with pytest.raises(ValueError, match="runtime"):
+        review(install, "personal", new)  # source inside .runtime
+    rows[0]["vault_root"] = str(install)
+    registry.write_bytes((json.dumps(rows, indent=2) + "\n").encode())
+    with pytest.raises(ValueError):
+        review(install, "personal", new)  # notes folder that contains .runtime and its state
+    assert not state_dir(install).exists()

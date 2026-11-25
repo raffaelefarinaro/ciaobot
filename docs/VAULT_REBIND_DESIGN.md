@@ -4,7 +4,7 @@
 
 ## Commands
 
-- `preview NAME DEST` (read-only): derives the current binding and every other registered root from the strictly validated registry (an explicit list of rows with absolute, symlink-free roots; legacy name-keyed, relative, duplicate-key or ambiguous registries are refused), compares both trees (regular files only, no symlinks, matching content, no overlap with protected roots) and prints the exact old and new path, the file count and a review token. The token binds the full registry bytes, every file digest and the file and directory identities of both trees, so a replaced folder with identical content invalidates it.
+- `preview NAME DEST` (read-only): derives the current binding and every other registered root from the strictly validated registry (an explicit list of rows; duplicate-key, name-keyed legacy or ambiguous registries are refused). Roots resolve as the engine resolves them: an absolute root is kept, `.` is the install, and a relative root of several segments (what `ciao setup` writes, for example `personal/memory-vault`) is joined to the install. `..`, a symlink anywhere on the path and a single-segment legacy root are refused. The install's `.runtime` directory (registry, locks, journal, backups) is protected: no notes root may overlap it; the rest of the install, including a default-layout vault, is a valid source or destination, compares both trees (regular files only, no symlinks, matching content, no overlap with protected roots) and prints the exact old and new path, the file count and a review token. The token binds the full registry bytes, every file digest and the file and directory identities of both trees, so a replaced folder with identical content invalidates it.
 - `apply NAME DEST --token T`: the explicit reviewed action.
 - `reverse-preview NAME --id ID` and `reverse NAME --id ID --token T`: put the old folder of a completed rebind back.
 - `recover`: resolve an interrupted operation.
@@ -16,7 +16,7 @@
 3. Re-derive the preview under both locks and compare the token in constant time. Any change to the registry, paths, files or identities refuses before anything is written. The private state directory must not lie inside a notes folder.
 4. Write a private (0600, directory 0700) backup of the exact registry bytes under `.runtime/vault-rebind/`, read it back and verify it.
 5. Write the durable journal `pending.json` (old and new registry bytes, digests, binding, operation id), fsync file and directory. Re-verify the trees once more; a change here removes the journal and refuses, since nothing has changed yet.
-6. Replace the registry through `WorkspaceRegistryOwnership.replace` (byte-exact compare-and-swap, fsync), changing only `vault_root` of one row; unknown fields and other rows are preserved (the file is re-serialised as indented JSON).
+6. Replace the registry (the swap writes the absolute destination, so a relative `vault_root` becomes absolute) through `WorkspaceRegistryOwnership.replace` (byte-exact compare-and-swap, fsync), changing only `vault_root` of one row; unknown fields and other rows are preserved (the file is re-serialised as indented JSON).
 7. Write `done-<id>.json`, then remove `pending.json`.
 
 ## Recovery
@@ -25,10 +25,10 @@
 
 ## Reversal
 
-A completed record names the old and new root. Reversal needs the workspace to still use the recorded new root, the old folder to be available and to match the current notes tree exactly, a fresh review token, and no earlier reversal of that record. It changes only that field, so later unrelated registry edits survive; it never restores a whole old registry and never deletes a notes tree. If notes were written to the new folder after the rebind, the trees differ and the reversal refuses; reconcile the folders yourself, nothing is discarded.
+A completed record names the old and new root. Reversal needs the workspace to still use the recorded new root, the old folder to be available and to match the current notes tree exactly, a fresh review token, and no earlier reversal of that record. It changes only that field and writes back the exact value the rebind replaced (so a default install's relative root returns), so later unrelated registry edits survive; it never restores a whole old registry and never deletes a notes tree. If notes were written to the new folder after the rebind, the trees differ and the reversal refuses; reconcile the folders yourself, nothing is discarded.
 
 ## Not covered
 
 Reversal reads the old and new root from the digest-verified registry images in the record, not from the record's other fields. The registry rewrite re-serialises JSON, so the file is not byte-identical apart from the one field. The feature is POSIX-only (it needs `O_NOFOLLOW`, `O_DIRECTORY` and `flock`).
 
-The comparison is a point-in-time check: a cloud client can change a tree after the final verification; the engine being stopped and the client being paused are the operator's responsibility. Existing installations (legacy, relative, cloud-hosted runtime roots) are not migrated silently; they are refused until explicit handling exists.
+The comparison is a point-in-time check: a cloud client can change a tree after the final verification; the engine being stopped and the client being paused are the operator's responsibility. Existing installations are not migrated silently: a legacy single-segment root is refused until explicit handling exists.

@@ -201,8 +201,8 @@ def _registry_bytes(install: Path) -> bytes:
 def authoritative_preview(install: Path, workspace: str, destination: Path, *, expected_registry: bytes) -> RebindPreview:
     """Derive absolute vault roots from a strict registry, without writing anything.
 
-    Legacy and relative registry roots are refused until their authoritative
-    resolution is integrated with setup; this is not apply authorization.
+    Roots resolve as the engine resolves them (see `_resolve_root`); a legacy
+    single-segment root is refused. Not apply authorization by itself.
     """
     install = _directory(install)
     if not _NAME.fullmatch(workspace):
@@ -219,14 +219,50 @@ def authoritative_preview(install: Path, workspace: str, destination: Path, *, e
         if not isinstance(name, str) or not _NAME.fullmatch(name) or name.casefold() in folded_names or not isinstance(root, str):
             raise ValueError("ambiguous registry")
         folded_names.add(name.casefold())
-        roots[name] = _directory(Path(root))
+        roots[name] = _resolve_root(install, root)
     if workspace not in roots:
         raise ValueError("workspace is not registered")
-    result = preview(roots[workspace], destination, expected_registry=expected_registry, protected_roots=[install, *(root for name, root in roots.items() if name != workspace)])
+    # The install's runtime directory holds the registry, locks, journal and
+    # backups. The rest of the install (a default layout keeps its vault there)
+    # is not protected, only the other workspaces' roots and the runtime.
+    if _overlaps(roots[workspace], install / ".runtime"):
+        raise ValueError("the workspace's notes root overlaps the install's runtime state")
+    protected = [install / ".runtime", *(root for name, root in roots.items() if name != workspace)]
+    result = preview(roots[workspace], destination, expected_registry=expected_registry, protected_roots=protected)
     if _registry_bytes(install) != expected_registry:
         raise ValueError("registry changed during preview")
     token = hashlib.sha256(json.dumps([workspace, result.token], separators=(",", ":")).encode()).hexdigest()
     return RebindPreview(result.source, result.destination, result.files, token)
+
+
+def _overlaps(a: Path, b: Path) -> bool:
+    return a == b or a in b.parents or b in a.parents
+
+
+def _lexical_root(install: Path, raw: str) -> Path:
+    """Where the engine puts a registered `vault_root`, without touching the disk.
+
+    Mirrors `Config._resolve_vault_root`: absolute is kept, `.` is the install,
+    several relative segments are joined to the install. `..` is refused, and so
+    is a single relative segment (a legacy layout whose meaning depends on the
+    engine's configured vault folder).
+    """
+    if not isinstance(raw, str) or not raw.strip():
+        raise ValueError("vault_root must not be empty")
+    path = Path(raw.strip())
+    if path.is_absolute():
+        return path
+    parts = [part for part in path.parts if part not in {".", ""}]
+    if ".." in parts:
+        raise ValueError("relative vault_root must not contain '..'")
+    if len(parts) == 1:
+        raise ValueError("a single-segment relative vault_root is a legacy layout and is not supported")
+    return install.joinpath(*parts)
+
+
+def _resolve_root(install: Path, raw: str) -> Path:
+    """The registered root as a verified absolute directory (no symlinks, no traversal)."""
+    return _directory(_lexical_root(install, raw))
 
 
 def _reject_duplicates(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
@@ -408,7 +444,7 @@ def review_reverse(install: Path, workspace: str, operation: str) -> RebindPrevi
     """Read-only preview of putting a completed rebind's old folder back."""
     install = _directory(install)
     record = _reversal_record(install / ".runtime", workspace, operation)
-    plan = authoritative_preview(install, workspace, Path(record["old_root"]), expected_registry=_registry_bytes(install))
+    plan = authoritative_preview(install, workspace, _resolve_root(install, record["old_root"]), expected_registry=_registry_bytes(install))
     if plan.source != Path(record["new_root"]):
         raise ValueError("the workspace no longer uses the folder this rebind set")
     return plan
@@ -416,13 +452,14 @@ def review_reverse(install: Path, workspace: str, operation: str) -> RebindPrevi
 
 def _current_root(install: Path, workspace: str) -> Path:
     """The workspace's registered root from an unlocked read (advisory; rechecked under the locks)."""
-    return Path(_row_root(_registry_bytes(_directory(install)), workspace))
+    install = _directory(install)
+    return _lexical_root(install, _row_root(_registry_bytes(install), workspace))
 
 
 def _transact(install: Path, kind: str, workspace: str, destination: Path | None, token: str, operation: str | None) -> dict[str, Any]:
     if operation:
         record = _reversal_record(_directory(install) / ".runtime", workspace, operation)
-        roots = [Path(record["old_root"]), Path(record["new_root"])]
+        roots = [_lexical_root(_directory(install), record["old_root"]), _lexical_root(_directory(install), record["new_root"])]
     else:
         assert destination is not None
         roots = [_current_root(install, workspace), destination]
@@ -432,7 +469,7 @@ def _transact(install: Path, kind: str, workspace: str, destination: Path | None
             raise ValueError("an interrupted rebind is pending; run `ciao vault-rebind recover` first")
         reversed_record = _reversal_record(runtime, workspace, operation) if operation else None
         if reversed_record is not None:
-            destination = Path(reversed_record["old_root"])
+            destination = _resolve_root(install, reversed_record["old_root"])
         assert destination is not None
         before = _registry_bytes(install)
 
@@ -447,7 +484,11 @@ def _transact(install: Path, kind: str, workspace: str, destination: Path | None
             raise ValueError("the reviewed token no longer matches the registry or notes; review again")
         state = runtime / STATE_DIRNAME
         _require_state_outside(state, plan.source, plan.destination)
-        rows = repoint_registry(_parse_rows(before), workspace, expected_root=str(plan.source), new_root=str(plan.destination))
+        # The field is written absolute for a rebind; a reversal puts back the
+        # exact value the rebind replaced (a default install stores it relative).
+        old_value = _row_root(before, workspace)
+        new_value = reversed_record["old_root"] if reversed_record is not None else str(plan.destination)
+        rows = repoint_registry(_parse_rows(before), workspace, expected_root=old_value, new_root=new_value)
         after = (json.dumps(rows, indent=2) + "\n").encode()
         state = _state_dir(runtime, create=True)
         op = secrets.token_hex(16)
@@ -459,7 +500,7 @@ def _transact(install: Path, kind: str, workspace: str, destination: Path | None
         _checkpoint("after_backup")
         journal: dict[str, Any] = {
             "version": 1, "kind": kind, "operation": op, "workspace": workspace,
-            "old_root": str(plan.source), "new_root": str(plan.destination), "reverses": operation,
+            "old_root": old_value, "new_root": new_value, "reverses": operation,
             "before_sha256": hashlib.sha256(before).hexdigest(), "after_sha256": hashlib.sha256(after).hexdigest(),
             "before_b64": base64.b64encode(before).decode(), "after_b64": base64.b64encode(after).decode(),
         }
@@ -499,7 +540,8 @@ def recover(install: Path) -> dict[str, Any]:
     roots: list[Path] = []
     if pending_path.exists() and not pending_path.is_symlink():
         pending_journal = _load_journal(pending_path)
-        roots = [Path(pending_journal["old_root"]), Path(pending_journal["new_root"])]
+        base = _directory(install)
+        roots = [_lexical_root(base, pending_journal["old_root"]), _lexical_root(base, pending_journal["new_root"])]
     with _exclusive(install, roots) as (runtime, _owner):
         state = runtime / STATE_DIRNAME
         pending = state / _PENDING
