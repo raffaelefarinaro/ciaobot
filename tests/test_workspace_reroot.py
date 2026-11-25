@@ -5602,6 +5602,12 @@ def test_real_git_writer_is_excluded_during_undo_index_publication(tmp_path: Pat
     independent.write_bytes(b"staged beforehand")
     subprocess.run(["git", "-C", str(install), "add", "--", independent.name], check=True)
     independent.write_bytes(b"unstaged change")
+    intent = install / "independent\nintent\t.txt"
+    intent.write_bytes(b"unstaged addition")
+    git = ["git", "-C", str(install)]
+    subprocess.run([*git, "add", "-N", "--", intent.name], check=True)
+    intent_state = [*git, "ls-files", "--stage", "--debug", "-z", "--", intent.name]
+    flags_before = subprocess.check_output(intent_state)
     write_rows = workspace_reroot._write_index_rows
     attempted = []
     def compete(root, shadow, previous, wanted):
@@ -5617,6 +5623,8 @@ def test_real_git_writer_is_excluded_during_undo_index_publication(tmp_path: Pat
     assert attempted
     assert subprocess.check_output(["git", "-C", str(install), "show", ":independent.txt"]) == b"staged beforehand"
     assert independent.read_bytes() == b"unstaged change"
+    assert subprocess.check_output(intent_state) == flags_before
+    assert subprocess.check_output([*git, "diff", "--cached", "--", intent.name]) == b""
     assert not receipt_path(runtime).exists()
 
 
@@ -5646,3 +5654,72 @@ def test_existing_git_lock_refuses_undo_before_mutation(tmp_path: Path, monkeypa
     assert (runtime / "workspaces.json").read_bytes() == registry
     assert receipt_path(runtime).read_bytes() == receipt
     assert workspace_reroot._undo_manifest_path(runtime).exists() == recovering
+
+
+@pytest.mark.parametrize("phase", ["undo", "recovery"])
+@pytest.mark.parametrize("flag", ["intent-to-add", "assume-unchanged", "skip-worktree"])
+def test_undo_preserves_flagged_index_entry_in_directory_move(tmp_path: Path, monkeypatch, phase, flag):
+    install, vault, runtime = _with_guide(tmp_path)
+    receipt = apply(install, vault, ["personal", "work"], runtime, primary="personal")
+    assert receipt["status"] == "migrated"
+    relative = "work/memory-vault/flagged.md"
+    if phase == "recovery":
+        class SimulatedProcessExit(BaseException):
+            pass
+
+        move_entry = workspace_reroot._move_undo_entry
+        def stop_after_move(root, move, *, recovering):
+            move_entry(root, move, recovering=recovering)
+            if move["destination"] == "work/memory-vault":
+                raise SimulatedProcessExit("directory reversed")
+        with monkeypatch.context() as patch:
+            patch.setattr(workspace_reroot, "_move_undo_entry", stop_after_move)
+            with pytest.raises(SimulatedProcessExit, match="directory reversed"):
+                undo(install, runtime)
+        relative = "memory-vault/work/flagged.md"
+    target = install / relative
+    target.write_bytes(b"operator data")
+    def git(*args):
+        return subprocess.check_output(["git", "-C", str(install), *args])
+    if flag == "intent-to-add":
+        git("add", "-N", "--", relative)
+    else:
+        git("add", "--", relative)
+        git("update-index", "--" + flag, "--", relative)
+    def snapshot():
+        return (git("diff", "--cached", "--binary"), git("ls-files", "--debug", "--stage", "-z"),
+                _install_hashes(install), receipt_path(runtime).read_bytes(), (runtime / "workspaces.json").read_bytes())
+    before = snapshot()
+    result = undo(install, runtime)
+    assert result["status"] == ("refused" if phase == "undo" else "failed"), result
+    assert relative in result["reason"]
+    assert snapshot() == before
+    assert workspace_reroot._undo_manifest_path(runtime).exists() == (phase == "recovery")
+
+
+def test_flag_only_change_between_undo_preflight_and_index_lock(tmp_path: Path, monkeypatch):
+    install, vault, runtime = _with_guide(tmp_path)
+    receipt = apply(install, vault, ["personal", "work"], runtime, primary="personal")
+    _git(install, "add", "-A")
+    _git(install, "commit", "-m", "migrated")
+    relative = receipt["created_files"][0]
+    git = ["git", "-C", str(install)]
+    staged = [*git, "ls-files", "--stage", "-z", "--", relative]
+    before = subprocess.check_output(staged)
+    assert before
+    update = workspace_reroot._set_index
+
+    def flag_before_lock(root, previous, wanted, *paths):
+        if relative in paths:
+            subprocess.run([*git, "update-index", "--assume-unchanged", "--", relative], check=True)
+            assert subprocess.check_output(staged) == before
+        update(root, previous, wanted, *paths)
+
+    monkeypatch.setattr(workspace_reroot, "_set_index", flag_before_lock)
+    result = undo(install, runtime)
+    assert result["status"] == "failed", result
+    assert relative in result["reason"]
+    assert subprocess.check_output(staged) == before
+    assert subprocess.check_output([*git, "ls-files", "-v", "--", relative]).startswith(b"h ")
+    assert receipt_path(runtime).is_file()
+    assert workspace_reroot._undo_manifest_path(runtime).is_file()

@@ -926,21 +926,58 @@ def _preflight_undo_registry(owner: Any, receipt: dict[str, Any]) -> str | None:
     return None
 
 
-def _index_rows(root: Path, relative: str, *, index: Path | None = None) -> dict[str, str]:
+# Git's debug format is not a stable serialization. Only accept the known
+# record layout. The NUL ends the raw pathname, including any embedded tabs or
+# newlines, before the fixed ASCII stat fields and hexadecimal flags.
+_INDEX_RECORD = re.compile(
+    rb"([0-7]{6} [0-9a-f]+ [0-3])\t([^\0]+)\0"
+    rb"  ctime: [0-9]+:[0-9]+\n  mtime: [0-9]+:[0-9]+\n"
+    rb"  dev: [0-9]+\tino: [0-9]+\n  uid: [0-9]+\tgid: [0-9]+\n"
+    rb"  size: [0-9]+\tflags: ([0-9a-fA-F]+)\n"
+)
+
+
+def _index_snapshot(
+    root: Path, relative: str, *, index: Path | None = None
+) -> tuple[dict[str, str], dict[str, int]]:
     result = subprocess.run(
-        ["git", "-C", str(root), "--literal-pathspecs", "ls-files", "--stage", "-z", "--", relative],
+        ["git", "-C", str(root), "--literal-pathspecs", "ls-files", "--stage", "--debug", "-z", "--", relative],
         capture_output=True,
         env={**os.environ, "GIT_INDEX_FILE": str(index)} if index is not None else None,
     )
     if result.returncode:
         raise UndoIndexConflict(os.fsdecode(result.stderr))
     rows = {}
-    for record in result.stdout.split(b"\0"):
-        if record:
-            metadata, name = record.split(b"\t", 1)
-            if not metadata.endswith(b" 0"):
-                raise UndoIndexConflict(f"unmerged index entry: {os.fsdecode(name)}")
-            rows[os.fsdecode(name)] = metadata.decode("ascii")
+    flags = {}
+    offset = 0
+    while offset < len(result.stdout):
+        record = _INDEX_RECORD.match(result.stdout, offset)
+        if record is None:
+            raise UndoIndexConflict("unsupported Git index entry format")
+        metadata, raw_name, raw_flags = record.groups()
+        name = os.fsdecode(raw_name)
+        if not metadata.endswith(b" 0"):
+            raise UndoIndexConflict(f"unmerged index entry: {name}")
+        rows[name] = metadata.decode("ascii")
+        bits = int(raw_flags, 16)
+        if bits:
+            flags[name] = bits
+        offset = record.end()
+    return rows, flags
+
+
+def _refuse_index_flags(flags: dict[str, int], paths: list[str] | tuple[str, ...]) -> None:
+    for name, bits in flags.items():
+        if any(
+            path == "." or name == path or name.startswith(path + "/") or path.startswith(name + "/")
+            for path in paths
+        ):
+            raise UndoIndexConflict(f"Git index flags 0x{bits:x} require operator inspection: {name}")
+
+
+def _index_rows(root: Path, relative: str) -> dict[str, str]:
+    rows, flags = _index_snapshot(root, relative)
+    _refuse_index_flags(flags, [relative])
     return rows
 
 
@@ -981,7 +1018,8 @@ def _set_index(
     root: Path, previous: dict[str, str], wanted: dict[str, str], *paths: str
 ) -> None:
     with _own_index(root) as index:
-        original = _index_rows(root, ".")
+        original, flags = _index_snapshot(root, ".")
+        _refuse_index_flags(flags, paths)
         live = {
             name: value for name, value in original.items()
             if any(name == path or name.startswith(path + "/") for path in paths)
@@ -1000,7 +1038,7 @@ def _set_index(
             # Verify Git produced exactly the requested row changes.
             expected = {name: value for name, value in original.items() if name not in previous}
             expected.update(wanted)
-            if _index_rows(root, ".", index=shadow) != expected:
+            if _index_snapshot(root, ".", index=shadow) != (expected, flags):
                 raise UndoIndexConflict("Git index update would change other staged entries")
             shutil.copymode(index, shadow)
             _fsync_file(shadow)
@@ -1353,8 +1391,12 @@ def _recover_undo_manifest(
         _unlink_durable(path)
         return None
     try:
+        affected = [item["source"] for item in manifest["created"] + manifest["stashes"]]
+        for move in manifest["moves"]:
+            affected.extend((move["source"], move["destination"]))
         with _own_index(install_root):
-            _index_rows(install_root, ".")
+            _, flags = _index_snapshot(install_root, ".")
+            _refuse_index_flags(flags, affected)
     except OSError as exc:
         return str(exc)
     errors: list[str] = []
@@ -1574,7 +1616,8 @@ def _undo_owned(install_root: Path, runtime_root: Path, *, owner: Any) -> dict[s
             if backup.is_symlink() or not backup.is_file():
                 raise OSError(f"stash backup missing or invalid: {backup}")
         with _own_index(install_root):
-            _index_rows(install_root, ".")
+            _, flags = _index_snapshot(install_root, ".")
+            _refuse_index_flags(flags, relatives)
         compensation_dir = _new_anchor(install_root, relatives)
     except OSError as exc:
         return {"status": "refused", "reason": str(exc)}
