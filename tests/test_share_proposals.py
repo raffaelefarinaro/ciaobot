@@ -927,7 +927,8 @@ def test_intake_uses_real_checkpoint_and_consent(linked, tmp_path, monkeypatch):
     assert sp.draft_evidence_candidates(config, workspace="home", relation=relation) == []
 
 
-async def test_memory_pass_files_private_candidate_and_replays_idempotently(linked, tmp_path, monkeypatch):
+@pytest.mark.parametrize("failure", ["checkpoint", "intake"])
+async def test_memory_pass_files_private_candidate_and_replays_idempotently(linked, tmp_path, monkeypatch, failure):
     from dataclasses import replace
     from tests.test_share_evidence import _memory_manager
     from ciao import share_evidence as se, share_publish, shared_brain_guide, shared_brain_mapping
@@ -962,19 +963,28 @@ async def test_memory_pass_files_private_candidate_and_replays_idempotently(link
     se.record_operator_decision(config, workspace="home", project_id=project.project_id, decision="Share this decision", reason="private reason", effective_date="2026-11-21", session="operator")
     monkeypatch.setattr(share_publish, "publish_share", lambda *a, **kw: pytest.fail("intake published"))
     intake = sp.draft_evidence_candidates
+    checkpoint = se.checkpoint_completed_memory_pass_from_attestation
 
     def interrupted(*args, **kwargs):
         intake(*args, **kwargs)
         raise OSError("simulated interruption after filing")
 
-    monkeypatch.setattr(sp, "draft_evidence_candidates", interrupted)
+    def checkpoint_unavailable(*args, **kwargs):
+        raise OSError("simulated checkpoint storage failure")
+
+    if failure == "intake":
+        monkeypatch.setattr(sp, "draft_evidence_candidates", interrupted)
+    else:
+        monkeypatch.setattr(se, "checkpoint_completed_memory_pass_from_attestation", checkpoint_unavailable)
     try:
         assert await manager._memory_pass.on_turn_finished(chat.chat_id)
         await asyncio.gather(*list(manager._detached_tasks))
         queue = Path(config.workspace_vault_root("home")) / "Workspace" / "Memory-Proposals.md"
-        assert queue.read_text().count("[share ") == 1
+        initial_count = queue.read_text().count("[share ") if queue.exists() else 0
+        assert initial_count == (1 if failure == "intake" else 0)
         assert source.postprocess["steps"]["memory_pass"]["extra"]["candidate_outcome"] == "unavailable"
         monkeypatch.setattr(sp, "draft_evidence_candidates", intake)
+        monkeypatch.setattr(se, "checkpoint_completed_memory_pass_from_attestation", checkpoint)
         from ciao.sessions import StateStore
         from ciao.transcripts import TranscriptStore
         from ciao.web.project_chats import ProjectChatManager

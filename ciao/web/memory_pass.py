@@ -1071,20 +1071,27 @@ class MemoryPassCoordinator:
         source_chat_id = str(helper.get("source_chat_id") or "")
         workspace = self._workspace_of(chat)
         if chat.last_response_status == "success" and chat.last_response.strip():
-            self._set_state(chat, "done")
             from ciao import share_evidence
 
             registry = getattr(host._mcp_service, "registry", None)
             candidate_outcome = ""
-            if registry is not None:
+            if registry is not None and source_chat_id and not helper.get("source_kind"):
                 try:
-                    share_evidence.checkpoint_completed_memory_pass(
+                    attestation = share_evidence.prepare_memory_completion(
                         host._config, registry, workspace=workspace, pass_chat_id=chat_id
                     )
+                    from ciao.web.project_chats import _restore_memory_completion_attestation
+                    chat.memory_completion_attestation = _restore_memory_completion_attestation(attestation)
+                    if not chat.memory_completion_attestation:
+                        raise share_evidence.EvidenceError("invalid_attestation", "Completion proof is unavailable.")
                     candidate_outcome = "pending"
                 except (share_evidence.EvidenceError, OSError):
-                    candidate_outcome = "checkpoint_unavailable"
                     logger.warning("Memory pass evidence checkpoint unavailable for %s", chat_id)
+                    self._set_state(chat, "attention")
+                    self._set_source_step(source_chat_id, "attention", chat_id)
+                    self.pump(workspace)
+                    return False
+            self._set_state(chat, "done")
             self._set_source_step(source_chat_id, "ok", chat_id, candidate_outcome=candidate_outcome)
             await self._archive_finished(chat)
             self.pump(workspace)
@@ -1118,6 +1125,11 @@ class MemoryPassCoordinator:
                     candidates.append(chat)
                 continue
             state = helper.get("state")
+            if state == "done" and chat.memory_completion_attestation and not self._candidate_outcome(chat):
+                self._set_source_step(
+                    str(helper.get("source_chat_id") or ""), "ok", chat.chat_id,
+                    candidate_outcome="pending",
+                )
             if state == "running":
                 self._set_state(chat, "attention")
                 self._set_source_step(
@@ -1164,6 +1176,9 @@ class MemoryPassCoordinator:
         source_id = str(self._helper(chat).get("source_chat_id") or "")
 
         def file() -> bool:
+            share_evidence.checkpoint_completed_memory_pass_from_attestation(
+                self._host._config, workspace=workspace, pass_chat_id=chat.chat_id
+            )
             relation = share_evidence.recover_memory_pass_source_relation(
                 self._host._config, workspace=workspace, pass_chat_id=chat.chat_id
             )

@@ -1975,7 +1975,7 @@ async def test_clean_finish_archives_and_marks_source_ok(
     }
 
 
-async def test_successful_pass_checkpoints_before_archive(
+async def test_successful_pass_attests_before_done_and_archive(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
     passes_enabled: None, streams: _FakeStreams,
 ) -> None:
@@ -1990,16 +1990,17 @@ async def test_successful_pass_checkpoints_before_archive(
     registry = object()
     manager._mcp_service = SimpleNamespace(registry=registry)
 
-    def checkpoint(config, actual_registry, *, workspace, pass_chat_id):
+    def prepare(config, actual_registry, *, workspace, pass_chat_id):
         assert config is manager._config
         assert actual_registry is registry
         assert workspace == "work"
         assert pass_chat_id == memory_id
-        assert memory.helper["state"] == "done"
+        assert memory.helper["state"] == "running"
         assert not memory.archived
-        events.append("checkpoint")
+        events.append("attest")
+        return {"signature": "test"}
 
-    monkeypatch.setattr(share_evidence, "checkpoint_completed_memory_pass", checkpoint, raising=False)
+    monkeypatch.setattr(share_evidence, "prepare_memory_completion", prepare)
 
     async def archive(chat_id):
         events.append("archive")
@@ -2008,7 +2009,9 @@ async def test_successful_pass_checkpoints_before_archive(
 
     monkeypatch.setattr(manager, "archive_chat", archive)
     assert await manager._memory_pass.on_turn_finished(memory_id)
-    assert events == ["checkpoint", "archive"]
+    assert events == ["attest", "archive"]
+    assert memory.memory_completion_attestation == {"signature": "test"}
+    await _await_detached(manager)
 
 
 async def test_checkpoint_failure_does_not_block_successful_pass(
@@ -2027,12 +2030,37 @@ async def test_checkpoint_failure_does_not_block_successful_pass(
     def unavailable(*args, **kwargs):
         raise share_evidence.EvidenceError("unavailable", "Unavailable")
 
-    monkeypatch.setattr(share_evidence, "checkpoint_completed_memory_pass", unavailable, raising=False)
+    monkeypatch.setattr(share_evidence, "prepare_memory_completion", lambda *a, **kw: {"signature": "test"})
+    monkeypatch.setattr(share_evidence, "checkpoint_completed_memory_pass_from_attestation", unavailable)
     archived = _stub_archive(manager, monkeypatch)
     assert await manager._memory_pass.on_turn_finished(memory_id)
+    await _await_detached(manager)
     assert archived == [memory_id]
     assert memory.helper["state"] == "done"
-    assert source.postprocess["steps"]["memory_pass"]["extra"]["candidate_outcome"] == "checkpoint_unavailable"
+    assert source.postprocess["steps"]["memory_pass"]["extra"]["candidate_outcome"] == "unavailable"
+
+
+async def test_failed_attestation_does_not_commit_an_unproved_completion(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    passes_enabled: None, streams: _FakeStreams,
+) -> None:
+    from ciao import share_evidence
+
+    manager = _make_manager(tmp_path)
+    source = _source(manager)
+    memory_id = manager.enqueue_memory_pass(source, None, _archive_file(tmp_path), "")
+    memory = manager.get_chat(memory_id)
+    _replied(memory, "Updated memory.")
+    manager._mcp_service = SimpleNamespace(registry=object())
+
+    def unavailable(*args, **kwargs):
+        raise share_evidence.EvidenceError("unavailable", "Unavailable")
+
+    monkeypatch.setattr(share_evidence, "prepare_memory_completion", unavailable)
+    assert not await manager._memory_pass.on_turn_finished(memory_id)
+    assert memory.helper["state"] == "attention"
+    assert not memory.archived
+    assert not memory.memory_completion_attestation
 
 
 async def test_completed_pass_offers_candidates_after_releasing_slot(
@@ -2048,7 +2076,8 @@ async def test_completed_pass_offers_candidates_after_releasing_slot(
     chat = manager.get_chat(first)
     _replied(chat, "Updated memory.")
     manager._mcp_service = SimpleNamespace(registry=object())
-    monkeypatch.setattr(share_evidence, "checkpoint_completed_memory_pass", lambda *a, **kw: None)
+    monkeypatch.setattr(share_evidence, "prepare_memory_completion", lambda *a, **kw: {"signature": "test"})
+    monkeypatch.setattr(share_evidence, "checkpoint_completed_memory_pass_from_attestation", lambda *a, **kw: None)
     monkeypatch.setattr(share_evidence, "recover_memory_pass_source_relation", lambda *a, **kw: "attested")
     calls = []
 
