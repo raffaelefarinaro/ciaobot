@@ -1964,16 +1964,19 @@ def test_guide_mapping_preview_save_stale_and_relink(tmp_path, monkeypatch):
     assert config.workspace("personal").shared_brains[0].guide_mapping is not None
     assert client.post(path, json=choice).status_code == 409
     assert _client(tmp_path)[1].workspace("personal").shared_brains[0].guide_mapping is not None
-    from ciao.shared_brain_mapping import resolve_workspace_destination, revalidate_snapshot
+    from ciao.shared_brain_mapping import discover_workspace_destinations, resolve_workspace_destination, revalidate_snapshot
     from ciao.workspaces import workspace_registry_claim
     with shared_brain.checkout_claims_nowait([str(acme)], config), workspace_registry_claim(config) as owner:
         snapshot = resolve_workspace_destination(config, "personal", "notes", note_type="decision", owner=owner)
         assert snapshot is not None and snapshot.destination.destination.path == "notes/decisions.md"
+        discovered = discover_workspace_destinations(config, "personal", "notes", owner=owner)
+        assert [(item.note_type, item.path, item.operation) for item in discovered] == [("decision", "notes/decisions.md", "append")]
         assert revalidate_snapshot(config, snapshot, owner=owner)
         assert resolve_workspace_destination(config, "personal", "notes", note_type="decision", relative_path="notes/other.md", owner=owner) is None
     (acme / "CIAO-CONTENT-GUIDE.md").write_text("changed")
     with shared_brain.checkout_claims_nowait([str(acme)], config), workspace_registry_claim(config) as owner:
         assert not revalidate_snapshot(config, snapshot, owner=owner)
+        assert discover_workspace_destinations(config, "personal", "notes", owner=owner) == ()
     assert client.get(path).json()["guide_status"] == "malformed"
     assert client.patch("/api/workspaces/personal", json={"shared_brains": []}).status_code == 200
     assert client.patch("/api/workspaces/personal", json={"shared_brains": [{"path": str(acme)}]}).status_code == 200

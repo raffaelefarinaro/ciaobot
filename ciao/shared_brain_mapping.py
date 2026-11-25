@@ -81,6 +81,19 @@ class MappingSnapshot:
     destination: guide.ResolvedDestination
 
 
+@dataclass(frozen=True, slots=True)
+class MappedType:
+    note_type: str
+    kind: guide.DestinationKind
+    path: str
+    section: str
+    operation: str
+    pin: guide.GuidePin
+    lifetime_id: str
+    generation: int
+    sharing_generation: int
+
+
 def resolve_workspace_destination(config: Any, workspace: str, brain: str, *, note_type: str, relative_path: str = "", operation: str | None = None, owner: Any) -> MappingSnapshot | None:
     """Resolve under the caller's registry and checkout claims, with fresh guide bytes.
 
@@ -117,3 +130,27 @@ def revalidate_snapshot(config: Any, snapshot: MappingSnapshot, *, owner: Any) -
     destination = snapshot.destination.destination
     current = resolve_workspace_destination(config, snapshot.workspace, snapshot.brain, note_type=snapshot.destination.note_type, relative_path=destination.path, operation=destination.operation, owner=owner)
     return current == snapshot
+
+
+def discover_workspace_destinations(config: Any, workspace: str, brain: str, *, owner: Any) -> tuple[MappedType, ...]:
+    """List only currently mapped types under the caller's registry and checkout claims.
+
+    A collection path here is the approved directory, not a filename. Callers
+    generate their own filename and resolve it before using the result.
+    """
+    from ciao.workspaces import workspace_registry_lock
+
+    with workspace_registry_lock(config):
+        ws = config.workspace(workspace)
+        link = next((item for item in ws.shared_brains if item.name == brain), None) if ws else None
+        if link is None or link.guide_mapping is None:
+            return ()
+        grants = link.guide_mapping.grants
+        found = []
+        for grant in grants:
+            path = f"{grant.path}/preview.md" if grant.kind == "collection" else grant.path
+            for operation in grant.operations:
+                snapshot = resolve_workspace_destination(config, workspace, brain, note_type=grant.note_type, relative_path=path, operation=operation, owner=owner)
+                if snapshot is not None:
+                    found.append(MappedType(grant.note_type, grant.kind, grant.path, grant.section, operation, snapshot.destination.guide, snapshot.lifetime_id, snapshot.generation, snapshot.sharing_generation))
+        return tuple(found)
