@@ -1274,7 +1274,7 @@ def test_intake_uses_real_checkpoint_and_consent(linked, tmp_path, monkeypatch, 
 
 
 @pytest.mark.parametrize(("change_mapping_after_settlement", "crash_seam"),
-                         [(True, "none"), *[(False, seam) for seam in ("intent", "journal", "artifact", "index", "queue", "alias")]])
+                         [(True, "none"), *[(False, seam) for seam in ("intent", "journal", "artifact", "index", "queue", "alias", "revoke")]])
 def test_intake_uses_settled_care_witness_and_current_consent(linked, tmp_path, monkeypatch, change_mapping_after_settlement, crash_seam):
     from dataclasses import replace
     from tests.test_share_evidence import _memory_manager
@@ -1351,6 +1351,51 @@ def test_intake_uses_settled_care_witness_and_current_consent(linked, tmp_path, 
     git(clone, "commit", "--quiet", "-m", "advance upstream")
     git(clone, "update-ref", "refs/remotes/origin/main", "HEAD")
     assert sp.draft_evidence_candidates(config, workspace="home", relation=relation)[0].proposal_id == drafts[0].proposal_id
+    if crash_seam == "revoke":
+        import threading
+
+        entered = threading.Event()
+        proceed = threading.Event()
+        revoked = threading.Event()
+        revoke_entered = threading.Event()
+        results = []
+        compose = sp._compose_candidate
+
+        def held_compose(*args, **kwargs):
+            entered.set()
+            assert proceed.wait(5)
+            return compose(*args, **kwargs)
+
+        monkeypatch.setattr(sp, "_compose_candidate", held_compose)
+        drafting = threading.Thread(target=lambda: results.append(sp.redraft_evidence_candidate(
+            config, workspace="home", proposal_id=drafts[0].proposal_id,
+            expected_revision=drafts[0].artifact["review_token"])))
+        def revoke():
+            se.revoke(config, workspace="home", grant_id=grant["grant_id"])
+            revoked.set()
+        drafting.start()
+        assert entered.wait(5)
+        original_lock = se._lock
+        @contextmanager
+        def tracked_lock(directory):
+            revoke_entered.set()
+            with original_lock(directory):
+                yield
+        monkeypatch.setattr(se, "_lock", tracked_lock)
+        revoking = threading.Thread(target=revoke)
+        revoking.start()
+        assert revoke_entered.wait(5)
+        assert not revoked.wait(0.1)
+        proceed.set()
+        drafting.join(5)
+        revoking.join(5)
+        assert not drafting.is_alive() and not revoking.is_alive() and revoked.is_set()
+        assert len(results) == 1 and isinstance(results[0], sp.ShareDraft)
+        assert sp.draft_evidence_candidates(config, workspace="home", relation=relation) == []
+        refused = sp.redraft_evidence_candidate(config, workspace="home", proposal_id=results[0].proposal_id,
+                                                expected_revision=results[0].artifact["review_token"])
+        assert isinstance(refused, sp.ShareRefusal) and refused.code == "invalid_evidence"
+        return
     pid = os.fork()
     if pid == 0:
         write_queue = sp.memory_receipts.write_queue_atomically
