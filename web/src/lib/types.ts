@@ -2133,6 +2133,7 @@ export interface ProposalPreview {
   path?: string
   blocked_reason?: string | null
   /** True only when this exact canonical review has a recorded attempt that can be reconciled. */
+  redraft_available?: boolean
   reconcile_available?: boolean
   /** True only when every exact recorded attempt was definitively rejected as retryable. */
   publish_retry_available?: boolean

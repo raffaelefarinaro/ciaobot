@@ -1475,41 +1475,57 @@ def test_intake_uses_settled_care_witness_and_current_consent(linked, tmp_path, 
     visible, = list(walk_proposal_queue("home", "home/Workspace/Memory-Proposals.md", queue_path.read_text()))
     visible_artifact = share_publish._artifact_for(config, "home", visible.proposal_id)
     assert visible_artifact is not None
-    replacement = sp.redraft_evidence_candidate(
-        config, workspace="home", proposal_id=visible.proposal_id,
-        expected_revision=visible_artifact["review_token"],
-    )
-    assert isinstance(replacement, sp.ShareDraft)
+    from starlette.testclient import TestClient
+    from ciao.web.app import create_app
+    from tests.session import signed_in
+
+    client = TestClient(create_app(config))
+    # After the queue swap, the interrupted caller can still hold the old
+    # review, while a newly opened card sees the replacement.
+    retry = drafts[0] if crash_seam == "alias" else None
+    retry_id = retry.proposal_id if retry else visible.proposal_id
+    token = retry.artifact["review_token"] if retry else visible_artifact["review_token"]
+    url = f"/api/proposals/{retry_id}/redraft"
+    body = {"workspace": "home", "expected_revision": token}
+    assert client.post(url, json=body).status_code == 401
+    signed_in(client)
+    assert client.post(url, json={**body, "workspace": "other"}).status_code in (404, 409)
+    assert client.post(url, json={**body, "expected_revision": "stale"}).status_code == 409
+    response = client.post(url, json=body)
+    assert response.status_code == 200, response.text
+    replacement_id = response.json()["replacement"]["id"]
+    artifact = share_publish._artifact_for(config, "home", replacement_id)
+    assert artifact and artifact["review_token"] == response.json()["replacement"]["revision"]
     journal_path, = (sp._store_dir(config) / "candidate-redrafts").glob("*.json")
     original_journal = journal_path.read_bytes()
     se._write_private(journal_path, b"", limit=16384)
-    refused = sp.redraft_evidence_candidate(config, workspace="home", proposal_id=replacement.proposal_id,
-                                            expected_revision=replacement.artifact["review_token"])
+    refused = sp.redraft_evidence_candidate(config, workspace="home", proposal_id=replacement_id,
+                                            expected_revision=artifact["review_token"])
     assert isinstance(refused, sp.ShareRefusal) and refused.code == "draft_corrupt"
     se._write_private(journal_path, original_journal, limit=16384)
-    assert replacement.proposal_id != drafts[0].proposal_id
-    assert replacement.artifact["review_token"] != drafts[0].artifact["review_token"]
-    assert replacement.artifact["immutable"]["base_commit"] == git(clone, "rev-parse", "refs/remotes/origin/main")
+    assert replacement_id != drafts[0].proposal_id
+    assert artifact["review_token"] != drafts[0].artifact["review_token"]
+    assert artifact["immutable"]["base_commit"] == git(clone, "rev-parse", "refs/remotes/origin/main")
     assert (vault / "Workspace" / "Memory-Proposals.md").read_text().count("[share ") == 1
-    share_publish._write_state(config, "home", replacement.artifact["immutable"], {"attempts": [{"status": "pending"}]})
+    share_publish._write_state(config, "home", artifact["immutable"], {"attempts": [{"status": "pending"}]})
     blocked = sp.redraft_evidence_candidate(
-        config, workspace="home", proposal_id=replacement.proposal_id,
-        expected_revision=replacement.artifact["review_token"],
+        config, workspace="home", proposal_id=replacement_id,
+        expected_revision=artifact["review_token"],
     )
     assert isinstance(blocked, sp.ShareRefusal) and blocked.code == "publication_pending"
-    share_publish._write_state(config, "home", replacement.artifact["immutable"], {"attempts": []})
+    share_publish._write_state(config, "home", artifact["immutable"], {"attempts": []})
     from ciao import memory_proposals
     from ciao.web import proposal_service
 
     queue = vault / "Workspace" / "Memory-Proposals.md"
     _, by_id = proposal_service._scan_proposal_rows(config)
-    item = by_id[replacement.proposal_id]["row"]
+    item = by_id[replacement_id]["row"]
     assert proposal_service._rewrite_queue_single(queue, item["line"], item["raw"], item["text"], "share", False,
                                                   "home", vault, config=config, proposal_id=item["id"])
     memory_proposals.record_dismissal(queue, text=item["text"], kind="share", via="pwa", proposal_id=item["id"])
     dismissed = sp.redraft_evidence_candidate(
-        config, workspace="home", proposal_id=replacement.proposal_id,
-        expected_revision=replacement.artifact["review_token"],
+        config, workspace="home", proposal_id=replacement_id,
+        expected_revision=artifact["review_token"],
     )
     assert isinstance(dismissed, sp.ShareRefusal) and dismissed.code == "already_settled"
     se.revoke(config, workspace="home", grant_id=grant["grant_id"])

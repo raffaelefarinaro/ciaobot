@@ -154,6 +154,7 @@ from ciao.web.routes_api import (
     memory_entity_types,
     proposal_action,
     proposal_reconcile_action,
+    proposal_redraft_action,
     proposal_implement,
     proposal_preview,
     proposals_batch,
@@ -623,6 +624,7 @@ def create_app(config, app_settings=None, mcp_service=None) -> Starlette:
         # `/api/proposals/{id}/implement` would otherwise be read as an `accept`
         # or `dismiss` action and refused.
         Route("/api/proposals/{id}/implement", proposal_implement, methods=["POST"]),
+        Route("/api/proposals/{id}/redraft", proposal_redraft_action, methods=["POST"]),
         # Reconciliation checks a persisted share attempt and cannot publish.
         Route("/api/proposals/{id}/reconcile", proposal_reconcile_action, methods=["POST"]),
         Route("/api/proposals/dismiss-older-than", dismiss_older_than, methods=["POST"]),

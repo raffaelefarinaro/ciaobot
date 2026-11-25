@@ -499,7 +499,7 @@ export const useProposalsStore = defineStore('proposals', () => {
    */
   async function act(
     id: string,
-    action: 'accept' | 'dismiss' | 'reconcile',
+    action: 'accept' | 'dismiss' | 'reconcile' | 'redraft',
     workspace = '',
     opts?: { expectedRevision?: string; text?: string; reconcile?: boolean; reason?: string },
   ): Promise<{ ok: boolean; error?: string; conflict?: boolean; payload?: unknown; replacementId?: string }> {
@@ -530,6 +530,12 @@ export const useProposalsStore = defineStore('proposals', () => {
       await fetch({ force: true })
       refetchPreviews(stale)
       invalidateHistory()
+      if (action === 'redraft') {
+        const replacementId = (reply as { replacement?: { id?: string } }).replacement?.id
+        dropPreview(id)
+        if (replacementId) revealRow(replacementId)
+        return { ok: true, payload: reply, replacementId }
+      }
       return { ok: true, payload: reply }
     } catch (e) {
       const payload = (e as { payload?: unknown } | null)?.payload

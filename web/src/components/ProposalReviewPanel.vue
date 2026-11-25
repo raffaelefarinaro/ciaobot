@@ -354,6 +354,20 @@ function shareTextFormat(text: string | null): string {
   return `${text.endsWith('\n') || text.endsWith('\r') ? 'ends with newline' : 'no trailing newline'} · ${ending}`
 }
 
+async function redraftCandidate(row: ProposalRow) {
+  const preview = store.previews[row.id]
+  if (!preview?.redraft_available || !preview.revision || store.isBusy(row.id)) return
+  const result = await store.act(row.id, 'redraft', row.workspace, { expectedRevision: preview.revision })
+  const replacement = store.rows.find(item => item.id === result.replacementId && item.workspace === row.workspace)
+  if (!replacement) {
+    shareActionErrors.value = { ...shareActionErrors.value, [row.id]: result.error || 'Refresh the queue to review the replacement.' }
+    return
+  }
+  closePreview()
+  await nextTick()
+  await reviewAccept(replacement, 'review')
+}
+
 /** Confirm the change the card is showing, pinned to the revision it was
  * computed against. A destination that moved since then comes back as a
  * conflict with a refreshed preview, and the card stays open on it. */
@@ -2137,7 +2151,8 @@ watch(
                 <p class="pr-share-warning hint hint--warn">
                   Sharing publishes this text to everyone with access to {{ store.previews[row.id].identity }}. It stays in the repository’s history even if it is later removed.
                 </p>
-                <p v-if="store.previews[row.id].blocked_reason" class="pr-card-error" role="alert">
+                <p v-if="store.previews[row.id].redraft_available" class="hint">Redrafting replaces this private proposal with a new version for review.</p>
+                <p v-else-if="store.previews[row.id].blocked_reason" class="pr-card-error" role="alert">
                   {{ shareBlockedMessage(store.previews[row.id].blocked_reason!) }}
                 </p>
                 <p v-if="store.previews[row.id].reconcile_available" class="hint">
@@ -2148,6 +2163,8 @@ watch(
                 </p>
                 <p v-if="shareActionErrors[row.id]" class="pr-card-error" role="alert">{{ shareActionErrors[row.id] }}</p>
                 <div class="pr-actions pr-actions--card">
+                  <button v-if="store.previews[row.id].redraft_available" type="button" class="btn-small btn-chip"
+                    :disabled="store.isBusy(row.id) || store.isPreviewLoading(row.id)" @click="redraftCandidate(row)">Redraft for review</button>
                   <button
                     v-if="store.previews[row.id].revision && (store.previews[row.id].reconcile_available || store.previews[row.id].publish_retry_available || !store.previews[row.id].blocked_reason)"
                     type="button"
@@ -2414,7 +2431,7 @@ watch(
               data-pr-action="review"
               :disabled="store.isBusy(row.id) || (row.kind === 'share' && store.isPreviewLoading(row.id))"
               @click="reviewAccept(row, 'review')"
-            >{{ store.isBusy(row.id) ? 'working…' : row.kind === 'share' ? 'Review to publish' : (isRehome(row) ? `Move to ${rehomeTarget(row)}` : 'Review') }}</button>
+            >{{ store.isBusy(row.id) ? 'working…' : row.kind === 'share' ? (store.previews[row.id]?.redraft_available ? 'Review candidate' : 'Review to publish') : (isRehome(row) ? `Move to ${rehomeTarget(row)}` : 'Review') }}</button>
             <button
               v-if="canAccept(row) && !isRehome(row) && isEditable(row)"
               type="button"

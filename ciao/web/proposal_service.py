@@ -3265,6 +3265,7 @@ def preview_row(
             "path": str(fields.get("path") or ""),
             "revision": revision,
             "blocked_reason": blocked,
+            "redraft_available": "evidence_authorization" in fields and not attempt_available,
             "reconcile_available": attempt_available and not retry_available,
             "publish_retry_available": retry_available,
         }

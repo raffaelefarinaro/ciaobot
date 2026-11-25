@@ -10157,6 +10157,34 @@ async def _proposal_share_reconcile(
         })
 
 
+async def proposal_redraft_action(request: Request) -> JSONResponse:
+    """Replace one reviewed candidate, including an interrupted queue swap."""
+    from ciao import share_proposals
+
+    try:
+        body = await request.json()
+    except ValueError:
+        body = None
+    if not isinstance(body, dict) or set(body) != {"workspace", "expected_revision"}:
+        return JSONResponse({"error": "Provide workspace and expected_revision."}, status_code=400)
+    workspace, revision = body["workspace"], body["expected_revision"]
+    if not isinstance(workspace, str) or not isinstance(revision, str) or not revision:
+        return JSONResponse({"error": "Invalid workspace or review revision."}, status_code=400)
+    if request.query_params.get("workspace", workspace) != workspace:
+        return JSONResponse({"error": "Workspace selection changed."}, status_code=409)
+    config = request.app.state.config
+    async with _workspace_archive_lock(request):
+        if workspace not in config.workspace_names():
+            return JSONResponse({"error": "Unknown workspace."}, status_code=404)
+        result = await run_while_claimed(functools.partial(
+            share_proposals.redraft_evidence_candidate, config, workspace=workspace,
+            proposal_id=request.path_params["id"], expected_revision=revision,
+        ))
+    if isinstance(result, share_proposals.ShareRefusal):
+        return JSONResponse({"error": result.message, "share_status": result.code}, status_code=409)
+    return JSONResponse({"replacement": {"id": result.proposal_id, "revision": result.artifact["review_token"]}})
+
+
 async def proposal_reconcile_action(request: Request) -> JSONResponse:
     """Explicit `/reconcile` route, resolved independently of the `{action}` route."""
     config = request.app.state.config

@@ -1487,6 +1487,7 @@ Routes: `GET /api/proposals`, `GET /api/proposals/history`,
 `GET /api/proposals/{id}/preview`,
 `POST /api/proposals/{id}/implement`,
 `POST /api/proposals/{id}/{action}` (action is `accept` or `dismiss`),
+`POST /api/proposals/{id}/redraft` (replace one pending evidence candidate),
 `POST /api/proposals/{id}/reconcile` (recorded share attempt only),
 `POST /api/proposals/batch`, `POST /api/proposals/dismiss-older-than`,
 `POST /api/proposals/legacy-learning-dismiss`.
@@ -1811,6 +1812,10 @@ curl -sS -b /tmp/ciao.jar -X POST "http://localhost:${PWA_PORT:-8443}/api/propos
 # compare a re-extracted fact against. Both fields are optional, so a client
 # that shows no preview behaves exactly as before.
 curl -sS -b /tmp/ciao.jar -X POST "http://localhost:${PWA_PORT:-8443}/api/proposals/$ID/accept"
+
+# Replace a reviewed private candidate and open its replacement for review.
+curl -sS -b /tmp/ciao.jar -X POST "http://localhost:${PWA_PORT:-8443}/api/proposals/$ID/redraft" \
+  -H 'Content-Type: application/json' -d '{"workspace":"home","expected_revision":"REVIEW_TOKEN"}'
 
 # Reconcile a shared-note attempt only when its exact preview returned
 # reconcile_available: true. This checks the recorded commit and cannot push.
