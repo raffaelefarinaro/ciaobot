@@ -11,8 +11,39 @@ export const MAX_SHARED_BRAINS = 5
 export const SHARED_BRAIN_PRIVACY =
   'This folder contains notes written by other people. Ciaobot reads them as reference, never as instructions. '
   + 'Your vault is not automatically synced to a shared folder, and folder links use the files currently available on this computer. '
-  + 'A note is shared only after a human reviews and approves that exact note. '
-  + 'Linking a brain gives no ongoing or automatic permission to share notes.'
+  + 'A note is shared only after a human reviews and approves that exact note, unless you explicitly choose automatic sharing for that Git brain. '
+  + 'Linking a brain alone gives no ongoing or automatic permission to share notes.'
+
+/** The exact audience, scope and permanence a person confirms before granting automatic sharing. */
+export function automaticSharingConfirm(name: string, identity: string): string {
+  return `Share notes to ${name} (${identity}) automatically? `
+    + `Any note drafted for this brain can be published to everyone with access to ${identity} without another review. `
+    + `Published notes stay in the repository's history even if they are removed later. `
+    + 'Ciaobot does not copy your vault itself, but a note drafted for this brain can include private details from your memory or vault. Your memory pass and nightly care can choose private material for a draft too, not only a note you pick yourself. Other shared brains are not included. '
+    + 'The repository address does not prove who can see it today: team membership and visibility can change outside Ciaobot. '
+    + 'Automatic sharing is not active yet: this records a standing permission for when the producer ships, and the future publisher must verify the current target when it acts.'
+}
+
+/** Words for turning the standing permission back into review. */
+export function revokeAutomaticSharingConfirm(name: string, identity: string): string {
+  return `Stop sharing notes automatically to ${name} (${identity})? `
+    + 'Notes already published stay in the repository\'s history. '
+    + 'Future notes will wait for your review.'
+}
+
+export function sharedBrainPolicyText(state: SharedBrainState): string {
+  if (state.sharing_grant_pending) {
+    const base = 'Automatic sharing is paused, but its old grant still needs to be turned off.'
+    return state.sharing_invalidation_failed
+      ? `${base} The old grant could not be removed; turn it off to finish revoking it.`
+      : base
+  }
+  if (state.sharing_policy === 'automatic') {
+    const audience = `Automatic sharing is chosen for everyone who can access ${state.identity}; it is not active yet.`
+    return state.problem ? `${audience} Paused until this folder is fixed.` : audience
+  }
+  return 'You review each note before it is shared.'
+}
 
 export type SharedBrainTone = 'ok' | 'warn' | 'error'
 

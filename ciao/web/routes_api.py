@@ -78,12 +78,15 @@ from ciao.config import (
     MEMORY_APPROVAL_KINDS,
     CiaoConfig,
     RESTART_EXIT_CODE,
+    SHARING_POLICIES,
+    SharedBrainLink,
     WorkspaceConfig,
 )
 from ciao.model_tiers import MAX_MODEL_ID_CHARS
 from ciao.models import THINKING_LEVELS, ChatContext
 from ciao.workspaces import (
     WORKSPACE_NAME_RE,
+    WorkspaceRegistryBusy,
     WorkspaceRegistryConflict,
     agent_root_for,
     persist_workspaces,
@@ -319,16 +322,431 @@ async def _workspace_from_request_async(
     return _workspace_from_request(data, config=config, existing=existing)
 
 
+async def _invalidate_sharing_claim(config: Any, link: SharedBrainLink) -> bool:
+    """Persist a drift invalidation under checkout + authoritative registry claims.
+
+    When the registry claim is already held, record only the durable journal;
+    the next writer persists the review state. The worker is shielded so a
+    cancelled request cannot release the checkout claim before it finishes.
+    """
+    async with shared_brain._checkout_lock(link.path):
+        async with shared_brain._checkout_claim(link.path, config):
+            try:
+                async with _workspace_registry_claim(config) as owner:
+                    return await run_while_claimed(
+                        shared_brain.invalidate_sharing_on_drift,
+                        config,
+                        link,
+                        owner,
+                    )
+            except WorkspaceRegistryBusy:
+                return await run_while_claimed(
+                    shared_brain.record_sharing_revocation_without_registry,
+                    config,
+                    link,
+                )
+
+
 async def workspace_shared_brains(request: Request) -> JSONResponse:
-    """Live state of each shared brain a workspace links (read-only)."""
+    """Live state of each linked brain; a drift observation retires its grant."""
     config = request.app.state.config
-    workspace = config.workspace(str(request.path_params.get("name", "")))
+    workspace_name = str(request.path_params.get("name", ""))
+    workspace = config.workspace(workspace_name)
     if workspace is None:
         return JSONResponse({"error": "unknown workspace"}, status_code=404)
     states = []
     for link in list(workspace.shared_brains):
-        states.append(await asyncio.to_thread(shared_brain.brain_state, link, config, workspace.name))
+        state = await asyncio.to_thread(shared_brain.brain_state, link, config, workspace.name)
+        if state.get("problem") == "origin_changed":
+            # Seeing a retargeted folder is the moment to retire its standing
+            # grant durably; a repaired origin must ask again.
+            try:
+                changed = await _invalidate_sharing_claim(config, link)
+            except (OSError, WorkspaceRegistryConflict):
+                # Even when a claim cannot be taken, the observed grant can be
+                # journaled under the journal's own interprocess lock. This is
+                # durable across restart and never leaves the grant active.
+                try:
+                    await run_while_claimed(
+                        shared_brain.record_sharing_revocation_without_registry,
+                        config,
+                        link,
+                    )
+                except OSError:
+                    # Nothing durable could be written; fail closed in this
+                    # process and report the result as unavailable/unconfirmed.
+                    from ciao.workspaces import workspace_registry_lock
+
+                    with workspace_registry_lock(config):
+                        demotions = shared_brain._demote_fenced_grants(
+                            config,
+                            shared_brain._fenced_grants_for_path(config, link),
+                        )
+                        config.workspaces.update(demotions)
+                    config._sharing_recovery_pending = True
+                    try:
+                        from ciao.workspaces import read_workspace_registry_bytes
+
+                        await run_while_claimed(
+                            shared_brain.merge_sharing_revocations,
+                            config,
+                            set(),
+                            registry_bytes=read_workspace_registry_bytes(config),
+                            force_fail_closed=True,
+                        )
+                    except OSError:
+                        pass
+                current = _sharing_link(config, workspace_name, link.name)
+                if current is not None:
+                    state = await asyncio.to_thread(
+                        shared_brain.brain_state, current, config, workspace_name
+                    )
+                state["sharing_invalidation_failed"] = True
+                state["sharing_grant_pending"] = True
+            else:
+                if changed:
+                    current = _sharing_link(config, workspace_name, link.name)
+                    if current is not None:
+                        state = await asyncio.to_thread(
+                            shared_brain.brain_state, current, config, workspace_name
+                        )
+        states.append(state)
     return JSONResponse({"shared_brains": states})
+
+
+def _sharing_link(
+    config: Any, workspace_name: str, brain_name: str
+) -> SharedBrainLink | None:
+    workspace = config.workspace(workspace_name)
+    if workspace is None:
+        return None
+    return next(
+        (link for link in workspace.shared_brains if link.name == brain_name), None
+    )
+
+
+def _disk_shared_brain_row(
+    config: Any, workspace_name: str, brain_name: str
+) -> dict[str, Any] | None:
+    """The target link exactly as ``workspaces.json`` holds it now.
+
+    The in-memory registry is authoritative for one engine process, but the
+    file is the cross-process source of truth. Reading it under the checkout
+    claim gives the policy route a compare-and-swap instead of blindly writing a
+    stale snapshot.
+    """
+    path = Path(config.state_path).parent / "workspaces.json"
+    try:
+        rows = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, ValueError):
+        return None
+    if not isinstance(rows, list):
+        return None
+    for row in rows:
+        if not isinstance(row, dict) or row.get("name") != workspace_name:
+            continue
+        links = row.get("shared_brains")
+        if not isinstance(links, list):
+            return None
+        for link in links:
+            if isinstance(link, dict) and link.get("name") == brain_name:
+                return link
+        return None
+    return None
+
+
+def _disk_link_matches(link: SharedBrainLink, row: dict[str, Any] | None) -> bool:
+    if not isinstance(row, dict):
+        return False
+    # Generation/policy changes are covered by the authoritative registry claim:
+    # `_workspace_registry_claim` refuses a stale in-memory snapshot, and the
+    # owner CAS refuses a file changed between that check and the write.
+    return (
+        row.get("identity") == link.identity
+        and row.get("lifetime_id") == link.lifetime_id
+        and row.get("kind", "git") == link.kind
+    )
+
+
+def _disk_link_state_matches(link: SharedBrainLink, row: dict[str, Any] | None) -> bool:
+    """Whether the persisted row already carries this exact policy state."""
+    if not isinstance(row, dict):
+        return False
+    consent = row.get("sharing_consent")
+    consent_generation = consent.get("generation") if isinstance(consent, dict) else None
+    current_generation = (
+        link.sharing_consent.generation if link.sharing_consent is not None else None
+    )
+    return (
+        row.get("sharing_policy", "review") == link.sharing_policy
+        and row.get("sharing_generation", 0) == link.sharing_generation
+        and consent_generation == current_generation
+    )
+
+
+async def set_workspace_shared_brain_sharing(request: Request) -> JSONResponse:
+    """Choose one link's sharing policy, explicitly, from authenticated Settings.
+
+    ``review`` is the default and the only state a legacy or new link starts in.
+    ``automatic`` records a durable, generation-stamped consent for that exact
+    link lifetime and repository identity. Revocation bumps the generation and
+    drops the consent. No publishing exists in this slice: the policy is stored
+    for the engine's later producer and publisher to consult, never applied here.
+
+    The caller must name the identity, opaque lifetime and generation it saw, so
+    a stale Settings tab cannot grant a relinked folder or overwrite a newer
+    choice. The checks and the write happen under the same registry lock.
+    """
+    config = request.app.state.config
+    workspace_name = str(request.path_params.get("name") or "")
+    brain_name = str(request.path_params.get("brain") or "")
+    try:
+        body = await request.json()
+    except ValueError:
+        return JSONResponse({"error": "invalid JSON"}, status_code=400)
+    if not isinstance(body, dict):
+        return JSONResponse({"error": "expected an object"}, status_code=400)
+    policy = body.get("policy")
+    if not isinstance(policy, str) or policy not in SHARING_POLICIES:
+        return JSONResponse(
+            {"error": "policy must be one of: review, automatic"}, status_code=400
+        )
+    expected_identity = body.get("identity")
+    if not isinstance(expected_identity, str) or not expected_identity:
+        return JSONResponse(
+            {"error": "identity is required to confirm the shared brain"}, status_code=400
+        )
+    expected_lifetime = body.get("lifetime")
+    if not isinstance(expected_lifetime, str) or not expected_lifetime:
+        return JSONResponse(
+            {"error": "lifetime is required to confirm the shared brain"}, status_code=400
+        )
+    expected_generation = body.get("generation")
+    if type(expected_generation) is not int or expected_generation < 0:
+        return JSONResponse(
+            {"error": "generation is required to confirm the shared brain"},
+            status_code=400,
+        )
+
+    # Serialized with create, update, rename, archive and restore, which also
+    # replace the registry and the link list. Automatic grants additionally
+    # take the cross-process checkout claim: the registry file CAS inside
+    # `_apply_sharing_policy` then rejects a stale snapshot from another writer.
+    async with _workspace_archive_lock(request):
+        from ciao.workspaces import workspace_registry_lock  # noqa: PLC0415
+
+        with workspace_registry_lock(config):
+            link = _sharing_link(config, workspace_name, brain_name)
+        if link is None:
+            if config.workspace(workspace_name) is None:
+                return JSONResponse({"error": "unknown workspace"}, status_code=404)
+            return JSONResponse({"error": "unknown shared brain"}, status_code=404)
+
+        async def apply(owner: Any) -> JSONResponse:
+            return await _apply_sharing_policy(
+                config,
+                workspace_name=workspace_name,
+                brain_name=brain_name,
+                policy=policy,
+                expected_identity=expected_identity,
+                expected_lifetime=expected_lifetime,
+                expected_generation=expected_generation,
+                owner=owner,
+            )
+
+        claimed = False
+        try:
+            async with shared_brain._checkout_lock(link.path):
+                async with shared_brain._checkout_claim(link.path, config):
+                    async with _workspace_registry_claim(config) as owner:
+                        claimed = True
+                        return await apply(owner)
+        except (OSError, WorkspaceRegistryConflict):
+            if claimed:
+                return JSONResponse(
+                    {
+                        "error": "The sharing choice could not be saved. "
+                        "Nothing was changed.",
+                        "code": "policy_write_failed",
+                    },
+                    status_code=503,
+                )
+            return JSONResponse(
+                {
+                    "error": "The sharing choice is unavailable while another "
+                    "registry or shared-brain operation is running. Try again.",
+                    "code": "policy_locked",
+                },
+                status_code=409,
+            )
+
+
+async def _apply_sharing_policy(
+    config: Any,
+    *,
+    workspace_name: str,
+    brain_name: str,
+    policy: str,
+    expected_identity: str,
+    expected_lifetime: str,
+    expected_generation: int,
+    owner: Any,
+) -> JSONResponse:
+    """Revalidate one policy change against memory and disk, then write it."""
+    from ciao.workspaces import workspace_registry_lock  # noqa: PLC0415
+
+    def changed() -> JSONResponse:
+        return JSONResponse(
+            {
+                "error": "This shared brain changed since the page was loaded. "
+                "Reload it and choose again.",
+                "code": "brain_changed",
+            },
+            status_code=409,
+        )
+
+    def matches(link: SharedBrainLink) -> bool:
+        return (
+            link.identity == expected_identity
+            and link.lifetime_id == expected_lifetime
+            and link.sharing_generation == expected_generation
+        )
+
+    with workspace_registry_lock(config):
+        link = _sharing_link(config, workspace_name, brain_name)
+    if link is None:
+        if config.workspace(workspace_name) is None:
+            return JSONResponse({"error": "unknown workspace"}, status_code=404)
+        return JSONResponse({"error": "unknown shared brain"}, status_code=404)
+    if link.kind != "git":
+        return JSONResponse(
+            {"error": "Ordinary folder links do not have a sharing policy.", "code": "unsupported_brain_kind"},
+            status_code=409,
+        )
+    if not matches(link):
+        return changed()
+    if policy == "automatic":
+        if getattr(config, "_sharing_recovery_pending", False):
+            return JSONResponse(
+                {
+                    "error": "Automatic sharing is unavailable until shared-brain "
+                    "consent recovery completes.",
+                    "code": "consent_journal_unavailable",
+                },
+                status_code=409,
+            )
+        # A grant names a person's audience, so the folder has to be usable
+        # and still its own checkout right now. Revocation never needs this:
+        # it must work even when the folder is gone or broken.
+        probe = await run_while_claimed(
+            shared_brain.probe_under_fence, config, link, owner
+        )
+        if probe.get("problem"):
+            if probe["problem"] == "origin_changed":
+                # A retargeted folder permanently loses the old standing
+                # grant; restoring the old origin later needs a fresh choice.
+                try:
+                    await run_while_claimed(
+                        shared_brain.invalidate_sharing_on_drift, config, link, owner
+                    )
+                except OSError:
+                    return JSONResponse(
+                        {
+                            "error": "Automatic sharing is unavailable. The old "
+                            "grant could not be cleared and remains paused; "
+                            "reload the shared brains and turn it off.",
+                            "code": "consent_invalidation_failed",
+                            "problem": probe["problem"],
+                        },
+                        status_code=409,
+                    )
+            return JSONResponse(
+                {
+                    "error": "Automatic sharing needs a usable linked folder. "
+                    "Fix the folder or remove it, then try again.",
+                    "code": "brain_unavailable",
+                    "problem": probe["problem"],
+                },
+                status_code=409,
+            )
+        journal_state = shared_brain.load_sharing_revocations(config)
+        if not journal_state.healthy or journal_state.fail_closed:
+            if shared_brain.has_automatic_grants(config):
+                return JSONResponse(
+                    {
+                        "error": "Automatic sharing is unavailable until the "
+                        "revocation journal is recovered.",
+                        "code": "consent_journal_unavailable",
+                    },
+                    status_code=409,
+                )
+            try:
+                await run_while_claimed(
+                    shared_brain.merge_sharing_revocations,
+                    config,
+                    set(),
+                    registry_bytes=owner.current,
+                    force_fail_closed=False,
+                )
+            except OSError:
+                return JSONResponse(
+                    {
+                        "error": "The sharing journal could not be initialized. "
+                        "Nothing was changed.",
+                        "code": "consent_journal_unavailable",
+                    },
+                    status_code=503,
+                )
+    with workspace_registry_lock(config):
+        workspace = config.workspace(workspace_name)
+        if workspace is None:
+            return JSONResponse({"error": "unknown workspace"}, status_code=404)
+        links = list(workspace.shared_brains)
+        index = next(
+            (i for i, item in enumerate(links) if item.name == brain_name), None
+        )
+        if index is None:
+            return JSONResponse({"error": "unknown shared brain"}, status_code=404)
+        current = links[index]
+        if not matches(current):
+            return changed()
+        disk_row = _disk_shared_brain_row(config, workspace_name, brain_name)
+        if not _disk_link_matches(current, disk_row):
+            return changed()
+        updated = shared_brain.set_sharing_policy(current, policy)
+        if updated != current or not _disk_link_state_matches(current, disk_row):
+            links[index] = updated
+            candidate = dataclasses.replace(workspace, shared_brains=links)
+            candidate_workspaces = dict(config.workspaces)
+            candidate_workspaces[workspace_name] = candidate
+            _persist_workspaces(config, candidate_workspaces, owner=owner)
+            config.workspaces[workspace_name] = candidate
+    state = await run_while_claimed(
+        shared_brain.probe_under_fence, config, updated, owner
+    )
+    if state.get("problem") == "origin_changed":
+        # A race after the commit must not return an automatic response. The
+        # probe already left a fence; commit the demotion before replying.
+        try:
+            await run_while_claimed(
+                shared_brain.invalidate_sharing_on_drift, config, updated, owner
+            )
+        except OSError:
+            return JSONResponse(
+                {
+                    "error": "The sharing change was committed but could not be "
+                    "confirmed; it remains paused and revocable.",
+                    "code": "consent_invalidation_failed",
+                },
+                status_code=409,
+            )
+        current = _sharing_link(config, workspace_name, brain_name)
+        if current is not None:
+            updated = current
+        state = await run_while_claimed(
+            shared_brain.probe_under_fence, config, updated, owner
+        )
+    return JSONResponse({"shared_brain": state})
 
 
 def _registry_conflicts(handler):

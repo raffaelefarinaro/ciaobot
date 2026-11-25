@@ -1789,15 +1789,16 @@ def test_carry_skips_a_symlink_without_moving_or_following_it(tmp_path):
 
 
 
-def test_archive_restore_carries_shared_brains(tmp_path, monkeypatch):
+def test_archive_restore_rotates_lifetime_and_resets_shared_brain_sharing(tmp_path, monkeypatch):
+    from ciao import shared_brain
     from ciao.config import SharedBrainLink
 
     client, config, _pcm, _store = _app(tmp_path, rerooted=True)
     away = tmp_path.parent / f"brain-away-{tmp_path.name}"
     link = SharedBrainLink(name="notes", path=str(away), identity="github.com/acme/notes")
+    link = shared_brain.set_sharing_policy(link, "automatic")
     config.workspaces["work"].shared_brains = [link]
     archived = client.post("/api/workspaces/work/archive").json()["archived"]
-    from ciao import shared_brain
     original_move_back = workspace_archive.move_back
     restore_claimed: list[bool] = []
 
@@ -1810,8 +1811,15 @@ def test_archive_restore_carries_shared_brains(tmp_path, monkeypatch):
     restored = client.post("/api/workspaces/archived/restore", json={"id": archived["id"]})
 
     assert restored.status_code == 200, restored.json()
-    assert config.workspaces["work"].shared_brains == [link]
-    assert config.workspaces["work"].shared_brains[0].lifetime_id == link.lifetime_id
+    [restored_link] = config.workspaces["work"].shared_brains
+    assert (restored_link.name, restored_link.path, restored_link.identity) == (
+        link.name, link.path, link.identity,
+    )
+    assert restored_link.lifetime_id != link.lifetime_id
+    assert restored_link.sharing_policy == "review"
+    assert restored_link.sharing_generation == link.sharing_generation + 1
+    assert restored_link.sharing_consent is None
+    assert not shared_brain.sharing_consent_active(restored_link)
     assert restore_claimed == [True]
 
 

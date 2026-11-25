@@ -612,6 +612,18 @@ async def _async_main(
         config.import_legacy_workspaces_env()
         if config._workspace_registry_changed:
             config.persist_workspace_registry()
+        from ciao.shared_brain import recover_sharing_state
+        try:
+            config._sharing_recovery_pending = not recover_sharing_state(config)
+        except Exception:
+            logging.getLogger(__name__).exception(
+                "Could not recover the shared-brain consent journal or fences"
+            )
+            config._sharing_recovery_pending = True
+        if config._sharing_recovery_pending:
+            logging.getLogger(__name__).warning(
+                "Shared-brain consent recovery is pending; automatic authority is disabled"
+            )
         if app_engine:
             # App mode: publish the readiness record for the app's probe and
             # hand the engine's lifetime to the parent watcher, which SIGTERMs

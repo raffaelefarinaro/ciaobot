@@ -63,7 +63,20 @@ def linked(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> tuple[Config, Pat
     clone = tmp_path / "brain"
     subprocess.run(["git", "clone", "--quiet", str(origin), str(clone)], check=True)
     git(clone, "remote", "set-url", "origin", HOSTED)
-    monkeypatch.setattr(sp.shared_brain, "_HARDEN", sp.shared_brain._HARDEN + ("-c", f"url.{origin}.insteadOf={HOSTED}", "-c", "protocol.file.allow=always"))
+    monkeypatch.setattr(sp.shared_brain, "_HARDEN", sp.shared_brain._HARDEN + ("-c", "protocol.file.allow=always"))
+    real_bounded = sp.run_git_sync_bounded
+
+    def bounded_with_local_transport(folder, *args, timeout, max_output, env):
+        child_env = dict(env)
+        count = int(child_env.get("GIT_CONFIG_COUNT", "0"))
+        child_env["GIT_CONFIG_COUNT"] = str(count + 1)
+        child_env[f"GIT_CONFIG_KEY_{count}"] = f"url.{origin}.insteadOf"
+        child_env[f"GIT_CONFIG_VALUE_{count}"] = HOSTED
+        return real_bounded(
+            folder, *args, timeout=timeout, max_output=max_output, env=child_env
+        )
+
+    monkeypatch.setattr(sp, "run_git_sync_bounded", bounded_with_local_transport)
     link = SharedBrainLink(name="notes", path=str(clone), identity="github.com/x/notes")
     vault = tmp_path / "vault"
     vault.mkdir()

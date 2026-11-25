@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { MAX_SHARED_BRAINS, SHARED_BRAIN_PRIVACY, sharedBrainStatus } from './sharedBrain'
+import { MAX_SHARED_BRAINS, SHARED_BRAIN_PRIVACY, sharedBrainPolicyText, sharedBrainStatus } from './sharedBrain'
 import type { SharedBrainState } from './types'
 
 function brain(over: Partial<SharedBrainState> = {}): SharedBrainState {
@@ -8,6 +8,12 @@ function brain(over: Partial<SharedBrainState> = {}): SharedBrainState {
     kind: 'git',
     identity: 'github.com/acme/team-notes',
     path: '/Users/me/team-notes',
+    lifetime: 'lifetime-team-notes',
+    sharing_policy: 'review',
+    sharing_generation: 0,
+    sharing_granted_at: '',
+    sharing_grant_pending: false,
+    sharing_invalidation_failed: false,
     origin_changed: false,
     missing: false,
     problem: '',
@@ -166,5 +172,40 @@ describe('sharedBrainStatus', () => {
   it('reads a stale problem code in last_update as the same words as the problem', () => {
     expect(sharedBrainStatus(brain({ last_update: update('failed', 'moved') })))
       .toEqual(sharedBrainStatus(brain({ problem: 'moved' })))
+  })
+})
+
+
+describe('sharedBrainPolicyText', () => {
+  it('says a review link waits for a person and names an automatic link\'s audience', () => {
+    expect(sharedBrainPolicyText(brain())).toBe('You review each note before it is shared.')
+    expect(sharedBrainPolicyText(brain({ sharing_policy: 'automatic', sharing_generation: 1 })))
+      .toBe('Automatic sharing is chosen for everyone who can access github.com/acme/team-notes; it is not active yet.')
+  })
+
+  it('says an automatic link is paused while its folder cannot be used', () => {
+    expect(sharedBrainPolicyText(brain({
+      sharing_policy: 'automatic',
+      sharing_generation: 1,
+      problem: 'origin_changed',
+    }))).toBe(
+      'Automatic sharing is chosen for everyone who can access github.com/acme/team-notes; it is not active yet. Paused until this folder is fixed.',
+    )
+  })
+
+  it('asks for the old grant to be turned off when a drift invalidation is pending or failed', () => {
+    expect(sharedBrainPolicyText(brain({
+      sharing_policy: 'review',
+      sharing_generation: 2,
+      sharing_grant_pending: true,
+    }))).toBe('Automatic sharing is paused, but its old grant still needs to be turned off.')
+    expect(sharedBrainPolicyText(brain({
+      sharing_policy: 'review',
+      sharing_generation: 2,
+      sharing_grant_pending: true,
+      sharing_invalidation_failed: true,
+    }))).toBe(
+      'Automatic sharing is paused, but its old grant still needs to be turned off. The old grant could not be removed; turn it off to finish revoking it.',
+    )
   })
 })
