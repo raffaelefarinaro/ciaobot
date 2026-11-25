@@ -338,37 +338,37 @@ def end(config: Any, *, workspace: str, chat_id: str, token_id: str, dispatch_id
     )
 
 
-def settled_witnesses(config: Any, *, workspace: str, holder: str, claim: share_evidence.EvidenceClaim | None = None) -> list[dict[str, Any]]:
-    """Read only references whose run settled and whose source grant is still current."""
+def _validated_outbox(config: Any, *, workspace: str, holder: str, claim: share_evidence.EvidenceClaim | None = None) -> list[dict[str, Any]] | None:
+    """Verify the complete signed outbox; its entries alone grant no disclosure."""
     run_id = hashlib.sha256(holder.encode("utf-8")).hexdigest()
     with share_evidence._claim_scope(config, workspace, claim) as owned:
         directory = owned.directory
         receipts = _private_dir(directory, "care-settlements")
         if receipts is None:
-            return []
+            return None
         receipt = share_evidence._read_json(receipts / (run_id + ".json"),
                                             limit=65536, code="private_state_corrupt")
         settlement = _verified(config, b"care-settlement\0", receipt)
         if (settlement is None or settlement.get("workspace") != workspace
             or settlement.get("workspace_lifetime_id") != share_evidence._workspace_lifetime(config, workspace)
             or settlement.get("holder") != holder or settlement.get("status") != "ok"):
-            return []
+            return None
         manifest = settlement.get("outbox_manifest")
         if (settlement.get("manifest_version") != 1 or settlement.get("batch_width") != CARE_BATCH_WIDTH
             or not isinstance(manifest, list) or len(manifest) > MAX_CHECKPOINTS_PER_RUN
             or any(not isinstance(entry, dict) or set(entry) != {"name", "witness_signature"}
                    or not isinstance(entry["name"], str) or not isinstance(entry["witness_signature"], str)
                    for entry in manifest)):
-            return []
+            return None
         manifest_names = [entry["name"] for entry in manifest]
         if manifest_names != sorted(set(manifest_names)):
-            return []
+            return None
         root = _private_dir(directory, "care-outbox")
         if root is None:
-            return []
+            return None
         outbox = _private_dir(root, run_id)
         if outbox is None:
-            return []
+            return None
         with os.scandir(outbox) as rows:
             names = []
             for row in rows:
@@ -376,28 +376,37 @@ def settled_witnesses(config: Any, *, workspace: str, holder: str, claim: share_
                 if len(names) > MAX_CHECKPOINTS_PER_RUN:
                     break
         if len(names) > MAX_CHECKPOINTS_PER_RUN:
-            return []
+            return None
         if sorted(names) != manifest_names:
-            return []
+            return None
         items: list[dict[str, Any]] = []
         for ordinal, entry in enumerate(manifest):
             name = entry["name"]
             if len(name) != 69 or not name.endswith(".json") or any(c not in "0123456789abcdef" for c in name[:-5]):
-                return []
+                return None
             record = share_evidence._read_json(outbox / name, limit=16384, code="private_state_corrupt")
             item = _verified(config, b"care-outbox\0", record)
             if item is not None:
                 encoded = json.dumps(item, sort_keys=True, separators=(",", ":")).encode("utf-8")
                 if name != hashlib.sha256(encoded).hexdigest() + ".json":
-                    return []
+                    return None
             if (item is None or item.get("workspace") != workspace or item.get("holder") != holder
                 or item.get("dispatch_id") != settlement.get("dispatch_id")
                 or item.get("lease_started_at") != settlement.get("lease_started_at")
                 or item.get("lease_proof_hash") != settlement.get("lease_proof_hash")
                 or not isinstance(item.get("witness"), dict)
                 or item["witness"].get("witness_signature") != entry["witness_signature"]):
-                return []
+                return None
             items.append({**item, "batch_index": ordinal // CARE_BATCH_WIDTH})
+        return items
+
+
+def settled_witnesses(config: Any, *, workspace: str, holder: str, claim: share_evidence.EvidenceClaim | None = None) -> list[dict[str, Any]]:
+    """Read only references whose run settled and whose source grant is still current."""
+    with share_evidence._claim_scope(config, workspace, claim) as owned:
+        items = _validated_outbox(config, workspace=workspace, holder=holder, claim=owned)
+        if items is None:
+            return []
         eligible: list[dict[str, Any]] = []
         for item in items:
             witness = item["witness"]
@@ -409,6 +418,18 @@ def settled_witnesses(config: Any, *, workspace: str, holder: str, claim: share_
             if witness in witnesses:
                 eligible.append(item)
         return eligible
+
+
+def _explicitly_revoked(state: dict[str, Any], workspace: str, witness: dict[str, Any]) -> bool:
+    grants = state.get("grants")
+    grant = grants.get(witness.get("grant_id")) if isinstance(grants, dict) else None
+    return bool(
+        isinstance(grant, dict) and grant.get("workspace") == workspace
+        and grant.get("workspace_lifetime_id") == state.get("workspace_lifetime_id")
+        and grant.get("project_id") == witness.get("project_id")
+        and grant.get("consent_generation") == witness.get("consent_generation")
+        and grant.get("active") is False and (grant.get("revoked_at") or grant.get("withdrawn_at"))
+    )
 
 
 def dispatch_ready(config: Any, *, workspace: str) -> None:
@@ -455,9 +476,17 @@ def dispatch_ready(config: Any, *, workspace: str) -> None:
         signatures = {entry.get("witness_signature") for entry in manifest if isinstance(entry, dict)}
         if any(signature not in signatures for signature in processed):
             continue
-        items = settled_witnesses(config, workspace=workspace, holder=holder)
-        if not items:
-            continue
+        with share_evidence.evidence_claim(config, workspace=workspace) as claim:
+            items = _validated_outbox(config, workspace=workspace, holder=holder, claim=claim)
+            if items is None or not items:
+                continue
+            eligible = settled_witnesses(config, workspace=workspace, holder=holder, claim=claim)
+            eligible_signatures = {item["witness"]["witness_signature"] for item in eligible}
+            state = share_evidence._load_state(config, workspace)
+            revoked_signatures = {
+                item["witness"]["witness_signature"] for item in items
+                if _explicitly_revoked(state, workspace, item["witness"])
+            }
         pending_items = [item for item in items if item["witness"]["witness_signature"] not in processed]
         if not pending_items:
             with share_evidence._workspace_guard(config, workspace) as directory:
@@ -469,15 +498,18 @@ def dispatch_ready(config: Any, *, workspace: str) -> None:
         for item in pending_items:
             if item["batch_index"] != batch:
                 break
-            relation = share_evidence.recover_care_source_relation(
-                config, workspace=workspace, holder=holder,
-                witness_signature=item["witness"]["witness_signature"],
-            )
-            drafts = share_proposals.draft_evidence_candidates(config, workspace=workspace, relation=relation)
-            if not drafts or any(isinstance(draft, share_proposals.ShareRefusal)
-                                 and draft.code != "already_settled" for draft in drafts):
+            signature = item["witness"]["witness_signature"]
+            if signature in eligible_signatures:
+                relation = share_evidence.recover_care_source_relation(
+                    config, workspace=workspace, holder=holder, witness_signature=signature,
+                )
+                drafts = share_proposals.draft_evidence_candidates(config, workspace=workspace, relation=relation)
+                if not drafts or any(isinstance(draft, share_proposals.ShareRefusal)
+                                     and draft.code != "already_settled" for draft in drafts):
+                    break
+            elif signature not in revoked_signatures:
                 break
-            processed.append(item["witness"]["witness_signature"])
+            processed.append(signature)
             with share_evidence._workspace_guard(config, workspace) as directory:
                 progress_dir = _private_dir(directory, "care-progress", create=True)
                 assert progress_dir is not None

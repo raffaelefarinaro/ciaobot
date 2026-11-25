@@ -1290,6 +1290,8 @@ def test_care_checkpoint_stages_only_completed_exact_witness_and_replays_once(
         original = records[0].read_bytes()
         records[0].unlink()
         assert curation_share.settled_witnesses(config, workspace="home", holder=lease.holder) == []
+        curation_share.dispatch_ready(config, workspace="home")
+        assert list((config.state_path.parent / "secrets" / "share-evidence").rglob("care-ready/*.json"))
         records[0].write_bytes(original)
         records[0].chmod(0o600)
         extra = records[0].with_name("f" * 64 + ".json")
