@@ -5,9 +5,7 @@
 //
 // The claims pinned here are the ones a card silently breaks:
 //
-//  - each lifecycle offers the *right* action, and only that one. `waiting_review`
-//    must name the review queue (it has per-row accept/dismiss and a destination
-//    picker) rather than sending the operator to re-decide proposals in prose.
+//  - each lifecycle offers the *right* action, and only that one.
 //  - `unknown` is never drawn as "done" and never offers a Start button. Nobody
 //    can say the work applies, and offering a button invites running instructions
 //    for a condition this install has not established exists.
@@ -260,16 +258,6 @@ describe('one card per lifecycle', () => {
     wrapper.unmount()
   })
 
-  it('offers Resume for a chat parked on a decision, and nothing that opens a queue', async () => {
-    const { wrapper } = await mountGroup([
-      task({ status: 'waiting_review', chat_id: 'chat-9', chat_live: true }),
-    ])
-    expect(await buttons(wrapper)).toContain('Resume chat')
-    expect(await buttons(wrapper)).not.toContain('Review proposals')
-    expect(cards(wrapper)[0].text()).toContain('waiting for you to decide')
-    wrapper.unmount()
-  })
-
   it('shows the failure and a retry for an attempt that did not get going', async () => {
     const { wrapper } = await mountGroup([
       task({ status: 'failed', chat_id: 'chat-9', chat_live: true, updated_at: '2026-09-05T18:30:00+00:00' }),
@@ -375,7 +363,6 @@ describe('which control leads each lifecycle', () => {
     ['an offer that applies', {}, 'Start in chat', ['Hide it', 'Hide for now']],
     ['an attempt under way', { status: 'in_progress', chat_id: 'c', chat_live: true }, 'Resume chat', ['Open its chat', 'Hide it', 'Hide for now']],
     ['a failed attempt', { status: 'failed', chat_id: 'c', chat_live: true }, 'Try again', ['Open its chat', 'Hide it', 'Hide for now']],
-    ['a chat parked on a decision', { status: 'waiting_review', chat_id: 'c', chat_live: true }, 'Resume chat', ['Open its chat', 'Hide it', 'Hide for now']],
     ['an offer nobody can say applies', { applicability: 'unknown', offered: false }, 'Check again', ['Hide it', 'Hide for now']],
   ] as const)('%s', async (_name, overrides, lead, menu) => {
     const { wrapper } = await mountGroup([task(overrides as Partial<UpdateTaskRow>)])

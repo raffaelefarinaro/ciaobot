@@ -1609,7 +1609,6 @@ export interface TaskCompletion {
 export type UpdateTaskLifecycle =
   | 'offered'
   | 'in_progress'
-  | 'waiting_review'
   | 'failed'
   | 'completed'
   | 'dismissed'

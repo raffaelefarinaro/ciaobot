@@ -25,17 +25,12 @@ from ciao import provider_registry
 from ciao.claude_trim import coerce_claude_trim
 from ciao.config import (
     CLAUDE_MODELS,
-    DEFAULT_MEMORY_HANDOVER,
-    DEFAULT_NEW_WORKSPACE_MEMORY_HANDOVER,
     DEFAULT_WORKSPACE_COLOR,
     SHARED_BRAIN_NAME_PATTERN,
     SharedBrainLink,
     WorkspaceConfig,
-    coerce_memory_approval,
-    coerce_memory_handover,
     coerce_provider_overrides,
     coerce_workspace_color,
-    merge_memory_approval,
     shared_brain_row,
 )
 from ciao import shared_brain
@@ -580,14 +575,6 @@ def workspace_to_dict(workspace: WorkspaceConfig, config: Any) -> dict:
     except ValueError:
         color = DEFAULT_WORKSPACE_COLOR
     try:
-        memory_handover = coerce_memory_handover(workspace.memory_handover)
-    except ValueError:
-        memory_handover = DEFAULT_MEMORY_HANDOVER
-    try:
-        memory_approval = coerce_memory_approval(workspace.memory_approval)
-    except ValueError:
-        memory_approval = {}
-    try:
         provider_overrides = coerce_provider_overrides(workspace.provider_overrides)
     except ValueError:
         provider_overrides = {}
@@ -607,8 +594,6 @@ def workspace_to_dict(workspace: WorkspaceConfig, config: Any) -> dict:
         ),
         "claude_trim": dict(getattr(workspace, "claude_trim", None) or {}),
         "color": color,
-        "memory_handover": memory_handover,
-        "memory_approval": memory_approval,
         "provider_overrides": provider_overrides,
         "shared_brains": [
             {
@@ -792,23 +777,6 @@ def workspace_from_request(
             color = DEFAULT_WORKSPACE_COLOR
     else:
         color = DEFAULT_WORKSPACE_COLOR
-    if "memory_handover" in data:
-        memory_handover = coerce_memory_handover(data.get("memory_handover"))
-    elif existing is not None:
-        memory_handover = existing.memory_handover
-    else:
-        memory_handover = DEFAULT_NEW_WORKSPACE_MEMORY_HANDOVER
-    if "memory_approval" in data:
-        # A partial save: each named kind is set or, with null, reset to inherited.
-        # Validated whole before anything is returned, so a bad entry changes nothing.
-        memory_approval = merge_memory_approval(
-            existing.memory_approval if existing is not None else {},
-            data.get("memory_approval"),
-        )
-    elif existing is not None:
-        memory_approval = dict(existing.memory_approval)
-    else:
-        memory_approval = {}
     if "provider_overrides" in data:
         provider_overrides = coerce_provider_overrides(data.get("provider_overrides"))
         _check_override_models(provider_overrides)
@@ -848,9 +816,7 @@ def workspace_from_request(
         disallowed_tools=disallowed_tools,
         claude_trim=claude_trim,
         color=color,
-        memory_handover=memory_handover,
         shared_brains=shared_brains,
-        memory_approval=memory_approval,
         provider_overrides=provider_overrides,
     )
 
@@ -895,10 +861,6 @@ def persist_workspaces(
             row["default_provider"] = workspace.default_provider
             if not workspace.claude_trim:
                 row.pop("claude_trim", None)
-            if workspace.memory_handover == DEFAULT_MEMORY_HANDOVER:
-                row.pop("memory_handover", None)
-            if not workspace.memory_approval:
-                row.pop("memory_approval", None)
             if not workspace.provider_overrides:
                 row.pop("provider_overrides", None)
             if not workspace.shared_brains:
