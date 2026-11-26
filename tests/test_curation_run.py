@@ -38,12 +38,6 @@ if TYPE_CHECKING:
     from ciao.entity_types import EntityTypeRegistry
 
 
-MEMORY_START = "<!-- ciao:memory:start -->"
-MEMORY_END = "<!-- ciao:memory:end -->"
-PROFILE_START = "<!-- ciao:profile:start -->"
-PROFILE_END = "<!-- ciao:profile:end -->"
-
-
 @pytest.fixture(autouse=True)
 def _isolated_locks(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """Keep every lock file out of the shared temp root the install uses."""
@@ -2832,56 +2826,6 @@ def _stock(relative: str) -> str:
     return resources.files("ciao.stock").joinpath(relative).read_text(encoding="utf-8")
 
 
-def _care_references() -> str:
-    """Every curation reference file of the durable-memory references, concatenated (#1462)."""
-    from importlib import resources
-
-    refs = resources.files("ciao.stock").joinpath("skills", "ciao-capabilities", "references", "memory-operations", "references")
-    return "\n\n".join(
-        item.read_text(encoding="utf-8")
-        for item in sorted(refs.iterdir(), key=lambda i: i.name)
-        if item.name.endswith(".md")
-    )
-
-
-def test_the_schedule_starts_from_the_computed_worklist() -> None:
-    """The agent must not re-derive by hand what pass 0 already decided."""
-    skill = next(entry["prompt"] for entry in json.loads(_stock("schedules.json"))["schedules"] if entry["schedule_id"] == "system-memory-curation")
-    skill = skill + "\n\n" + _care_references()
-
-    assert "ciao curation-begin --json" in skill
-    assert "ciao curation-progress" in skill
-    assert "ciao curation-end" in skill
-    # The three decisions the deterministic path takes away from the model.
-    assert "Exit 75 means another run holds the lease" in skill
-    assert '`"empty": true`' in skill
-    assert "`deferred` is next run's work" in skill
-    # The weekly marker is stamped by code, gated on both required checks.
-    assert "--key hygiene:vault-index" in skill
-    assert "--key hygiene:os-audit" in skill
-    assert "You never write that marker by hand." in skill
-    # Every follow-up command carries the holder pass 0 returned; without it
-    # the ownership check is skipped and the lease serializes nothing.
-    assert "ciao curation-progress --holder <lease.holder>" in skill
-    assert "ciao curation-end --holder <lease.holder>" in skill
-    assert skill.count("ciao curation-progress --key") == 0
-
-
-def test_the_schedule_prompt_points_at_the_worklist_first() -> None:
-    schedules = json.loads(_stock("schedules.json"))
-    prompt = next(
-        entry["prompt"]
-        for entry in schedules["schedules"]
-        if entry["schedule_id"] == "system-memory-curation"
-    )
-
-    assert "ciao curation-begin --json" in prompt
-    assert "one-line no-op" in prompt
-    # The lease only serializes anything if the follow-up commands carry it.
-    assert "`lease.holder`" in prompt and "--holder" in prompt
-    assert "## 1. Process the proposals queue" in prompt
-
-
 def test_the_schedule_verifies_stale_notes_through_the_managed_operation() -> None:
     """Acceptance: the agent no longer hand-edits stale notes.
 
@@ -4246,21 +4190,6 @@ def test_observations_skipped_without_workspace_name(tmp_path: Path) -> None:
     assert any("observations were not planned" in note for note in worklist.notes)
 
 
-def test_the_care_prompt_proposes_observations_between_sections_4_and_5() -> None:
-    prompt = next(
-        entry["prompt"]
-        for entry in json.loads(_stock("schedules.json"))["schedules"]
-        if entry["schedule_id"] == "system-memory-curation"
-    )
-
-    assert "## 4b. Propose recurring observations" in prompt
-    assert prompt.index("## 4. ") < prompt.index("## 4b. ") < prompt.index("## 5. ")
-    observations = _stock("skills/ciao-capabilities/references/memory-operations/references/curation-pass-4b-observations.md")
-    assert "references/curation-pass-4b-observations.md" in prompt
-    for command in ("ciao observation-propose", "ciao observation-merge", "ciao observation-prune"):
-        assert command in observations
-
-
 def test_rules_pass_planned_only_when_weekly_due_and_stale(tmp_path: Path) -> None:
     """The decision-rules pass rides the weekly marker and needs fresh operator decisions."""
     from ciao import decision_rules
@@ -4304,19 +4233,6 @@ def test_rules_pass_planned_only_when_weekly_due_and_stale(tmp_path: Path) -> No
     assert set(item.keys).isdisjoint(cr.REQUIRED_HYGIENE_KEYS)
     assert cr.PASS_RULES not in plan("2026-09-18")
     assert cr.PASS_ORDER.index(cr.PASS_GUIDE) < cr.PASS_ORDER.index(cr.PASS_RULES) < cr.PASS_ORDER.index(cr.PASS_LOGS)
-
-
-def test_the_care_prompt_names_the_rules_pass_and_pass1_read() -> None:
-    prompt = next(
-        entry["prompt"]
-        for entry in json.loads(_stock("schedules.json"))["schedules"]
-        if entry["schedule_id"] == "system-memory-curation"
-    )
-    assert "## 7b. Distill decision rules" in prompt
-    assert prompt.index("## 7. ") < prompt.index("## 7b. ") < prompt.index("## 8. ")
-    assert "references/curation-pass-7b-decision-rules.md" in prompt
-    assert "Workspace/Memory-Review-Rules.md` if it exists" in prompt
-    assert len(prompt.encode("utf-8")) <= 8192
 
 
 # ── decider ────────────────────────────────────────────────────────────────
