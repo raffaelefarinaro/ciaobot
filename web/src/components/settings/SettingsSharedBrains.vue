@@ -120,6 +120,17 @@
         <SettingsShareSources v-if="sourcesOpen" id="share-sources-panel" />
       </div>
 
+      <div class="shared-brain-sources">
+        <button
+          type="button"
+          class="btn-secondary btn-small"
+          :aria-expanded="auditOpen ? 'true' : 'false'"
+          aria-controls="share-audit-panel"
+          @click="auditOpen = !auditOpen"
+        >{{ auditOpen ? 'Hide consent and history' : 'Consent and history' }}</button>
+        <SettingsShareAudit v-if="auditOpen" id="share-audit-panel" :brains="brains" />
+      </div>
+
 
       <form v-if="brains.length < MAX_SHARED_BRAINS" class="shared-brain-form" @submit.prevent="linkFolder">
         <label class="shared-brain-field">
@@ -181,6 +192,7 @@
 
 <script setup lang="ts">
 import { computed, onMounted, ref, watch } from 'vue'
+import SettingsShareAudit from './SettingsShareAudit.vue'
 import SettingsShareSources from './SettingsShareSources.vue'
 import { api } from '../../lib/api'
 import { askConfirm } from '../../lib/confirm'
@@ -216,6 +228,7 @@ const saveError = ref('')
 const pathDraft = ref('')
 const nameDraft = ref('')
 const sourcesOpen = ref(false)
+const auditOpen = ref(false)
 
 const kindDraft = ref<'git' | 'folder'>('folder')
 interface GuidePreview {
