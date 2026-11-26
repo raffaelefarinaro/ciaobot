@@ -114,5 +114,5 @@ const {
 .overview-title .section-title { margin: 0; }
 .overview-body .set-subrow,
 .overview-body .set-subrow-hint { padding-left: 0; }
-.action-result--error { color: var(--error); }
+.action-result--error { color: var(--error-text); }
 </style>

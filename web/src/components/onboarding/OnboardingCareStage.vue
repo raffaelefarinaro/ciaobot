@@ -124,5 +124,5 @@ defineExpose({ refresh: load, save })
 .hint { color: var(--fg2); line-height: 1.5; }
 .fields { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 200px), 1fr)); gap: var(--space-4, 16px); }
 .availability { text-transform: capitalize; }
-.error { margin: 0; color: var(--error); }
+.error { margin: 0; color: var(--error-text); }
 </style>

@@ -71,7 +71,7 @@
   white-space: nowrap;
 }
 .cd-detail--wrap { white-space: normal; overflow-wrap: anywhere; }
-.cd-detail--error { color: var(--error); white-space: normal; overflow-wrap: anywhere; }
+.cd-detail--error { color: var(--error-text); white-space: normal; overflow-wrap: anywhere; }
 .cd-mono { font-family: var(--font-mono); }
 .cd-trail { display: flex; align-items: center; gap: var(--space-1); color: var(--fg3); font-size: var(--text-sm); }
 .cd-row--link:hover .cd-trail { color: var(--fg); }

@@ -538,7 +538,7 @@ function onRowDragEnd(): void {
   cursor: not-allowed;
   transform: none;
 }
-.action-result--error { color: var(--error); }
+.action-result--error { color: var(--error-text); }
 @media (max-width: 520px) {
   .workspace-row { flex-wrap: wrap; }
   .workspace-row-main { flex-basis: calc(100% - var(--handle) - 22px - 2 * var(--space-3) + var(--space-2)); }

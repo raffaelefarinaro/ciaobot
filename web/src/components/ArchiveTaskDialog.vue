@@ -281,6 +281,6 @@ onBeforeUnmount(() => {
 }
 .archive-task-error {
   margin: 0 0 var(--space-3);
-  color: var(--error);
+  color: var(--error-text);
 }
 </style>

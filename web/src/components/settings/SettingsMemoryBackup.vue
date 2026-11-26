@@ -479,7 +479,7 @@ onUnmounted(() => {
 /* The error variant of the shared .action-result lives in SettingsView's own
    scoped block, which cannot reach a child's markup, so it is restated here. */
 .action-result--error {
-  color: var(--error);
+  color: var(--error-text);
 }
 .backup-lede {
   margin: 0;

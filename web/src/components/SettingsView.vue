@@ -3356,7 +3356,7 @@ a.btn-secondary {
   text-decoration: none;
 }
 .action-result--error {
-  color: var(--error);
+  color: var(--error-text);
 }
 .action-result--prewrap {
   white-space: pre-wrap;
@@ -3448,7 +3448,7 @@ a.btn-secondary {
 }
 
 .deploy-step.ok { color: var(--success); }
-.deploy-step.fail { color: var(--error); }
+.deploy-step.fail { color: var(--error-text); }
 
 .step-icon { font-size: var(--text-base); }
 
@@ -3499,7 +3499,7 @@ a.btn-secondary {
   margin-top: var(--space-3);
 }
 .workspace-move-outcome--error {
-  color: var(--error);
+  color: var(--error-text);
 }
 .workspace-root-path {
   display: block;

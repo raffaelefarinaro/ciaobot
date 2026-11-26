@@ -26,7 +26,7 @@ label { font-weight: 600; }
 .ob-field-help :deep(p) { margin: 0; }
 .ob-field-help :deep(a) { color: var(--accent); }
 .ob-field-below { display: flex; flex-wrap: wrap; gap: var(--space-2, 8px); }
-.ob-field-error { margin: 0; color: var(--error); }
+.ob-field-error { margin: 0; color: var(--error-text); }
 .ob-field :slotted(input) { width: 100%; min-height: var(--touch, 44px); padding: var(--space-2, 8px) var(--space-3, 12px); border: 1px solid var(--border-strong); border-radius: var(--radius-sm, 6px); background: var(--bg); color: var(--fg); font: inherit; }
 .ob-field :slotted(input:focus-visible) { outline: 2px solid var(--accent); outline-offset: 2px; }
 </style>

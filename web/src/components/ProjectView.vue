@@ -1104,7 +1104,7 @@ watch(() => [props.projectId, project.value?.vault_folder], async () => {
 }
 .closure-error {
   margin: 0;
-  color: var(--error);
+  color: var(--error-text);
   font-size: var(--text-sm);
 }
 
@@ -1174,7 +1174,7 @@ watch(() => [props.projectId, project.value?.vault_folder], async () => {
 }
 
 .project-actions-menu .danger {
-  color: var(--error);
+  color: var(--error-text);
 }
 
 /* Sections, not cards: a 16px heading with its one action on the right, then
@@ -1268,7 +1268,7 @@ watch(() => [props.projectId, project.value?.vault_folder], async () => {
 
 .status { font-size: var(--text-xs); color: var(--fg2); }
 .status.saved { color: var(--success); }
-.status.error { color: var(--error); }
+.status.error { color: var(--error-text); }
 
 .context-display {
   margin: 0;
@@ -1312,7 +1312,7 @@ watch(() => [props.projectId, project.value?.vault_folder], async () => {
 .repo-dirty-dot { width: 7px; height: 7px; border-radius: 50%; background: var(--warning); }
 .repo-clean { color: var(--fg3); }
 .repo-missing { margin: var(--space-1) 0 0; color: var(--warning); font-size: var(--text-sm); }
-.repo-error { margin: var(--space-2) 0 0; color: var(--error); font-size: var(--text-sm); }
+.repo-error { margin: var(--space-2) 0 0; color: var(--error-text); font-size: var(--text-sm); }
 
 .chat-list,
 .automation-list {
@@ -1545,7 +1545,7 @@ watch(() => [props.projectId, project.value?.vault_folder], async () => {
 }
 
 .rail-browse-error {
-  color: var(--error);
+  color: var(--error-text);
 }
 
 .project-rail .link-btn {

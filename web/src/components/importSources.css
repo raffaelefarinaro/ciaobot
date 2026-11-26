@@ -43,7 +43,7 @@
   flex-wrap: wrap;
 }
 
-.import-error { color: var(--error); }
+.import-error { color: var(--error-text); }
 .import-warn { color: var(--warning); }
 
 .import-list {

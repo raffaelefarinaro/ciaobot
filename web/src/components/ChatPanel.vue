@@ -6553,7 +6553,7 @@ details[open] > .activity-summary::before {
 }
 
 .chat-panel :deep(.code-copy-btn[data-copy-state="failed"]) {
-  color: var(--error);
+  color: var(--error-text);
   border-color: color-mix(in srgb, var(--error) 45%, var(--border));
 }
 
@@ -6665,7 +6665,7 @@ details[open] > .activity-summary::before {
   cursor: pointer;
 }
 /* A tool call whose result came back is_error (#1416). */
-.activity-line.failed { color: var(--error); }
+.activity-line.failed { color: var(--error-text); }
 .message-content :deep(a.file-link:hover),
 .activity-line :deep(a.file-link:hover),
 :deep(a.file-link:hover) {
@@ -7634,13 +7634,13 @@ details[open] > .activity-summary::before {
 .question-other:focus { outline: 1px solid var(--accent); border-color: var(--accent); }
 .question-card-actions { display: flex; justify-content: flex-end; gap: 8px; }
 .question-card-error {
-  color: var(--error);
+  color: var(--error-text);
   font-size: 12px;
   line-height: 1.4;
 }
 .question-validation {
   margin: 0;
-  color: var(--error);
+  color: var(--error-text);
   font-size: 12px;
   line-height: 1.35;
 }

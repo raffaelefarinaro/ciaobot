@@ -257,3 +257,41 @@ test.describe('shared brain sources and consent', () => {
     await expect(reloaded.locator('.sources-grant-row')).toContainText('Generation 1 ended. A fresh preview and grant are required.')
   })
 })
+
+// A real 200% browser zoom of a 1280x844 window: 640x422 CSS px at 2x DPR. The
+// selects must each own a row of their own, never run under a neighbour (#3668).
+test.describe('shared brain sources at 200% zoom', () => {
+  test.use({ viewport: { width: 640, height: 422 }, deviceScaleFactor: 2, isMobile: false, hasTouch: false })
+
+  test.beforeEach(async ({ page }, testInfo) => {
+    await isolate(page, `share-evidence-zoom-${testInfo.testId}`)
+  })
+
+  test('the Shared brain, Project and Actual source selects never overlap', async ({ page }) => {
+    await stubSources(page)
+    await boot(page, OVERVIEW, '.settings-main .section-title')
+    const panel = card(page)
+    await panel.getByRole('button', { name: 'Sources and consent' }).click()
+    const sources = panel.locator('.sources-panel')
+    await expect(sources.getByLabel('Shared brain', { exact: true })).toBeVisible()
+    await quiesce(page)
+
+    const names = ['Shared brain', 'Project', 'Actual source']
+    const boxes = []
+    for (const name of names) {
+      const box = await sources.getByLabel(name, { exact: true }).boundingBox()
+      expect(box, name).not.toBeNull()
+      boxes.push({ name, ...box! })
+    }
+    for (let i = 0; i < boxes.length; i += 1) {
+      for (let j = i + 1; j < boxes.length; j += 1) {
+        const a = boxes[i]
+        const b = boxes[j]
+        const overlaps = a.x < b.x + b.width && b.x < a.x + a.width && a.y < b.y + b.height && b.y < a.y + a.height
+        expect(overlaps, `${a.name} overlaps ${b.name}: ${JSON.stringify([a, b])}`).toBe(false)
+      }
+    }
+    const { overflow, culprits } = await horizontalOverflow(page)
+    expect(overflow, JSON.stringify(culprits)).toBeLessThanOrEqual(0)
+  })
+})

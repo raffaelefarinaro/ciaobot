@@ -341,10 +341,10 @@ const md = (text: string) => renderUserMarkdown(text, props.knownPaths ?? [])
   text-align: left;
 }
 .injected-card-muted { color: var(--fg3); }
-.injected-card-error { margin: 4px 0 0; color: var(--error); }
+.injected-card-error { margin: 4px 0 0; color: var(--error-text); }
 .injected-card-hint {
   margin: 0 0 8px;
-  color: var(--error);
+  color: var(--error-text);
   font-family: var(--font-mono);
   font-size: var(--text-xs);
   overflow-wrap: anywhere;

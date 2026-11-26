@@ -1076,7 +1076,7 @@ const secretCopyLabel = computed(() => copyLabel('secret', 'Copy secret'))
   cursor: pointer;
 }
 .wh-menu-item:hover { background: var(--bg3); }
-.wh-menu-item.danger { color: var(--error); }
+.wh-menu-item.danger { color: var(--error-text); }
 
 /* The create form is two columns only where two fit; below that it is one, so
    no field is squeezed into a narrow strip. Keyed on the pane, not the window:

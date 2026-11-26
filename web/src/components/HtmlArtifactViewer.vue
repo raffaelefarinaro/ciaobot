@@ -312,6 +312,6 @@ defineExpose({ sendHighlights, enableComments, clearSelection, setBusy, frameEl 
   padding: 8px 4px;
 }
 .hav-note-error {
-  color: var(--error, #f44336);
+  color: var(--error-text);
 }
 </style>

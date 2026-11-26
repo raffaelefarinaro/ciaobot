@@ -166,7 +166,7 @@ const moreCount = computed(() => Math.max(0, props.card.step_count - shownSteps.
 }
 
 .subagent-card--failed .subagent-card-state {
-  color: var(--error);
+  color: var(--error-text);
 }
 
 .subagent-card-count {

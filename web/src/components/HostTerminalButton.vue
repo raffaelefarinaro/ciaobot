@@ -96,7 +96,7 @@ async function launch() {
 .host-terminal-status,
 .host-terminal-error { display: block; font-size: var(--text-sm); line-height: 1.4; }
 .host-terminal-status { color: var(--fg3); }
-.host-terminal-error { color: var(--error); }
+.host-terminal-error { color: var(--error-text); }
 @media (pointer: coarse) {
   .host-terminal button { min-height: var(--touch); min-width: var(--touch); }
 }

@@ -156,7 +156,7 @@ function onCloseAutoFocus(event: Event) {
 .item-header-menu > button:hover,
 .item-header-menu > button[data-highlighted] { background: var(--bg3); outline: none; }
 .item-header-menu :slotted(button:disabled) { color: var(--fg3); cursor: default; }
-.item-header-menu :slotted(button.danger) { color: var(--error); }
+.item-header-menu :slotted(button.danger) { color: var(--error-text); }
 /* A note above the items (the task's save line): quiet, not an action. */
 .item-header-menu :slotted(.item-header-menu-note) {
   margin: 0;

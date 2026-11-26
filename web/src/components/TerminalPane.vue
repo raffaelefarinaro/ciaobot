@@ -626,7 +626,7 @@ onBeforeUnmount(() => {
 }
 .tp-warning { color: var(--fg2); }
 .tp-truncated { color: var(--warning); }
-.tp-error { color: var(--error); }
+.tp-error { color: var(--error-text); }
 .tp-hint { border-top: 1px solid var(--border); }
 .tp-hint kbd {
   font-family: var(--font-mono);

@@ -253,7 +253,7 @@ defineExpose({
 }
 
 .csv-error {
-  color: var(--error, #f44336);
+  color: var(--error-text);
   font-size: var(--text-sm, 12px);
   padding: 8px 0;
 }
@@ -313,7 +313,7 @@ defineExpose({
 .csv-tool-danger {
   min-width: var(--touch, 44px);
   padding: 0;
-  color: var(--error, #f44336);
+  color: var(--error-text);
 }
 
 .csv-scroll {

@@ -71,7 +71,7 @@
 }
 
 .settings-card-header > .badge--warn { color: var(--warning); }
-.settings-card-header > .badge--error { color: var(--error); }
+.settings-card-header > .badge--error { color: var(--error-text); }
 
 /* No divider when the header is the only element in the card (nothing below
    it to separate). v-if="false" siblings render as comment nodes, which
@@ -136,7 +136,7 @@
 }
 
 .action-result.--error {
-  color: var(--error);
+  color: var(--error-text);
 }
 
 .routine-info {
@@ -792,7 +792,7 @@
 
 .settings-menu-item[data-disabled] { opacity: 0.5; cursor: not-allowed; }
 .settings-menu-item--caution { color: var(--warning); }
-.settings-menu-item--danger { color: var(--error); }
+.settings-menu-item--danger { color: var(--error-text); }
 
 @media (pointer: coarse) {
   .settings-menu-item { min-height: var(--touch); }

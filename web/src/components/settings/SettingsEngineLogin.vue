@@ -336,7 +336,7 @@ onUnmounted(() => {
 /* The error variant of the shared .action-result lives in SettingsView's own
    scoped block, which cannot reach a child's markup, so it is restated here. */
 .action-result--error {
-  color: var(--error);
+  color: var(--error-text);
 }
 /* The key/value status row, the same shape the notifications and install cards
    use for their one fact about this window. */

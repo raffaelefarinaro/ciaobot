@@ -29,6 +29,9 @@
   --success: #4caf50;
   --warning: #facc15;   /* yellow, kept clear of the orange accent */
   --error: #f44336;
+  /* Error as TEXT. #f44336 is 4.19:1 on --bg2 and 3.53:1 on --bg3, under the 4.5:1
+     small text needs; this lifts to 5.5:1 / 4.65:1. Fills and borders keep --error. */
+  --error-text: #ff6b61;
   /* Geometry */
   --radius-xs: 4px;     /* small squared tags: state chips, key badges */
   --radius: 10px;
@@ -105,6 +108,7 @@
   --success: #2e7d32;
   --warning: #a16207;
   --error: #c62828;
+  --error-text: var(--error);   /* 5.1:1 on --bg2, 4.6:1 on --bg3 */
 }
 
 /* Text contrast: Soft. Only --fg moves; --fg2/--fg3 keep their values, so the
@@ -659,7 +663,7 @@ input:focus, textarea:focus, select:focus {
 }
 .badge--success { background: rgba(76, 175, 80, 0.15); color: var(--success); }
 .badge--warn { background: rgba(255, 152, 0, 0.15); color: var(--warning); }
-.badge--error { background: rgba(244, 67, 54, 0.15); color: var(--error); }
+.badge--error { background: rgba(244, 67, 54, 0.15); color: var(--error-text); }
 
 /* Compact dot-style pill for day-of-week markers */
 .badge--dot {
@@ -723,7 +727,7 @@ input:focus, textarea:focus, select:focus {
 /* ── Danger button variant ───────────────────────────────────── */
 .btn-danger {
   border-color: var(--error) !important;
-  color: var(--error) !important;
+  color: var(--error-text) !important;
 }
 
 @media (pointer: coarse) {

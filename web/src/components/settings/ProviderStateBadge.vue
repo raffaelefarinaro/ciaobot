@@ -31,7 +31,7 @@ const view = computed(() => providerStateView(props.connKey, props.state))
   background: currentColor;
 }
 .provider-state--ok::before { background: var(--success); }
-.provider-state--error { color: var(--error); }
+.provider-state--error { color: var(--error-text); }
 /* Not installed is a choice, not a fault: a hollow mark and muted text, never the error colour. */
 .provider-state--neutral::before {
   background: transparent;

@@ -178,7 +178,7 @@ async function ran(): Promise<void> {
 }
 .needs-you-command-hint,
 .needs-you-command-message { color: var(--fg2); }
-.needs-you-command-error { color: var(--error); }
+.needs-you-command-error { color: var(--error-text); }
 .needs-you-command-actions {
   display: flex;
   flex-wrap: wrap;

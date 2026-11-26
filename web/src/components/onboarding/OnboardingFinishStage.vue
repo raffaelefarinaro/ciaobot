@@ -246,7 +246,7 @@ defineExpose({ refresh: loadSummary })
 
 <style scoped>
 .hint { color: var(--fg2); line-height: 1.5; }
-.error { color: var(--error); }
+.error { color: var(--error-text); }
 form { display: grid; gap: var(--space-2, 8px); }
 label { font-weight: 600; }
 textarea { font: inherit; padding: var(--space-3, 12px); color: var(--fg); background: var(--bg); border: 1px solid var(--border-strong); border-radius: var(--radius); }

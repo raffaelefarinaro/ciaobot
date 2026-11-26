@@ -1584,7 +1584,7 @@ defineExpose({ isBusyAuthoring })
 .pfp-error {
   padding: 24px;
   text-align: center;
-  color: var(--error, #f87171);
+  color: var(--error-text);
 }
 
 /* ── Skeleton loading (mirrors file + metadata card shape) ─────────────── */
@@ -2005,7 +2005,7 @@ defineExpose({ isBusyAuthoring })
   line-height: 1;
   padding: 0 4px;
 }
-.pfp-sidebar-card-remove:hover { color: var(--error, #f87171); }
+.pfp-sidebar-card-remove:hover { color: var(--error-text); }
 .pfp-sidebar-card-actions {
   display: flex;
   align-items: center;

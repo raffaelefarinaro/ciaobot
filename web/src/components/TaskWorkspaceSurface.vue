@@ -4455,7 +4455,7 @@ defineExpose({ requestClose, selectAdjacent, closeDetailPage, openCreate })
 .task-stale,
 .task-action-error {
   margin: 0;
-  color: var(--error);
+  color: var(--error-text);
   font-size: var(--text-sm);
   line-height: 1.5;
 }
@@ -5384,7 +5384,7 @@ button.task-check:disabled { cursor: progress; opacity: 0.5; }
 .task-detail-sheet .task-delete:hover:not(:disabled),
 .task-detail-sheet .task-delete:focus-visible {
   border-color: color-mix(in srgb, var(--error) 45%, transparent);
-  color: var(--error);
+  color: var(--error-text);
 }
 .task-detail-form {
   flex: 1;
@@ -5517,7 +5517,7 @@ button.task-check:disabled { cursor: progress; opacity: 0.5; }
 .task-detail-page .task-delete:hover:not(:disabled),
 .task-detail-page .task-delete:focus-visible {
   border-color: color-mix(in srgb, var(--error) 45%, transparent);
-  color: var(--error);
+  color: var(--error-text);
 }
 .task-detail-pane {
   display: flex;

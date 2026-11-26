@@ -406,7 +406,7 @@ watch(workspace, () => {
 <style scoped src="./settingsPanels.css"></style>
 
 <style scoped>
-.action-result--error { color: var(--error); }
+.action-result--error { color: var(--error-text); }
 .handover-note {
   margin: 0 0 var(--space-3);
   color: var(--fg);

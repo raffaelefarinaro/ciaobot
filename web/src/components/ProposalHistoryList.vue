@@ -847,7 +847,7 @@ const filtersHideEverything = computed(
   color: var(--fg2);
 }
 .ph-apply--ok { color: var(--success); }
-.ph-apply--bad { color: var(--error); }
+.ph-apply--bad { color: var(--error-text); }
 
 .ph-source-line {
   margin: 0;
@@ -1134,7 +1134,7 @@ const filtersHideEverything = computed(
 
 .ph-change-error {
   margin: 0;
-  color: var(--error);
+  color: var(--error-text);
   font-size: 0.78rem;
 }
 
@@ -1170,7 +1170,7 @@ const filtersHideEverything = computed(
 
 .ph-error {
   margin: 0;
-  color: var(--error);
+  color: var(--error-text);
   font-size: 0.85rem;
 }
 

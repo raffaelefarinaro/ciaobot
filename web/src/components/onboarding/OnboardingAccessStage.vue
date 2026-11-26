@@ -117,5 +117,5 @@ function chooseApproval(value: string): void {
 @media (pointer: coarse) {
   .hint a { display: inline-flex; align-items: center; min-height: var(--touch, 44px); }
 }
-.error { margin: 0; color: var(--error); }
+.error { margin: 0; color: var(--error-text); }
 </style>

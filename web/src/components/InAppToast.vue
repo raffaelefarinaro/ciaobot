@@ -219,7 +219,7 @@ async function onFix(toast: InAppToast) {
   margin-top: 8px;
   padding: 4px 12px;
   background: transparent;
-  color: var(--error);
+  color: var(--error-text);
   border: 1px solid var(--error);
   border-radius: var(--radius-sm);
   font-family: var(--font);
