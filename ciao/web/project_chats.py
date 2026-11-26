@@ -1045,9 +1045,6 @@ class ChatInfo:
     # ordinary user messages; history reads this back so the PWA draws a notice
     # card. Absent key = an ordinary typed turn (or a mixed-origin steer).
     user_turn_origin: dict = field(default_factory=dict)
-    # Map of user-turn index (as str) → vault answer check result
-    # (retired vault answer check; stored verdicts are read as they were written).
-    turn_verification: dict = field(default_factory=dict)
     # Map of user-turn index (as str) → the client send id the PWA minted for
     # that turn. The engine answers a repeated send id with a duplicate echo
     # instead of starting a second turn, so a recovery resend cannot double a
@@ -1714,7 +1711,6 @@ class ProjectChatManager:
                 user_turn_unattended=dict(cd.get("user_turn_unattended", {})),
                 user_turn_steered=dict(cd.get("user_turn_steered", {})),
                 user_turn_origin=dict(cd.get("user_turn_origin", {})),
-                turn_verification=dict(cd.get("turn_verification", {})),
                 user_turn_send_ids=dict(cd.get("user_turn_send_ids", {})),
                 archive_path=cd.get("archive_path", ""),
                 retry_status=cd.get("retry_status", "") if cd.get("retry_status", "") in _RETRY_STATUSES else "",
@@ -1859,7 +1855,6 @@ class ProjectChatManager:
                     "user_turn_unattended": c.user_turn_unattended,
                     "user_turn_steered": c.user_turn_steered,
                     "user_turn_origin": c.user_turn_origin,
-                    "turn_verification": c.turn_verification,
                     "user_turn_send_ids": c.user_turn_send_ids,
                     "archive_path": c.archive_path,
                     "retry_status": c.retry_status,
@@ -5940,7 +5935,6 @@ class ProjectChatManager:
                 self._config,
                 provider=provider_name,
                 agent_root=agent_root,
-                workspace=self._workspace_for_chat(chat_id),
             )
             # A provider's own continuation that starts on this chat answers the held shell notices.
             self._providers[chat_id].set_continuation_hook(partial(self._continuation_started, chat_id))
@@ -7640,7 +7634,6 @@ class ProjectChatManager:
                     chat.user_turn_images.pop(key, None)
                     chat.user_turn_unattended.pop(key, None)
                     chat.user_turn_steered.pop(key, None)
-                    chat.turn_verification.pop(key, None)
                     cancelled_send_ids = chat.user_turn_send_ids.pop(key, [])
                     if isinstance(cancelled_send_ids, str):
                         cancelled_send_ids = [cancelled_send_ids]

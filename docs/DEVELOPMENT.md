@@ -540,7 +540,7 @@ the operator-action tiles and the update-task group as two sibling sections, and
 blocking tile must stay above both, unmissable, with no "hide it" button of its
 own. The group and Settings → Overview → Update task history read the same
 `GET /api/update-tasks?workspace=` rows, so a change to one state has to be checked
-in both: `offered` starts, `in_progress` resumes, `waiting_review` offers Resume,
+in both: `offered` starts, `in_progress` resumes,
 `failed` retries into the same chat, and `unknown` applicability on an *offer*
 gets a Check again and never a start button. The applicability gate applies to
 offers only: a live attempt keeps Resume or Try again whatever the detector says,
@@ -1070,17 +1070,15 @@ on one rule: a remembered fact is either **state**, a current value that gets
 replaced when it changes, or an **event**, a thing that happened which gets
 appended to a log and never edited. The regions are a state surface.
 
-The write policy for every path that can touch durable memory — attended
-remember, the memory pass, unattended curation, direct edit, and proposal
-acceptance — is stated once in `ciao/memory_policy.py` and described in
-`docs/ARCHITECTURE.md` under "Memory write policy matrix". Two rules matter for
+The memory write policy is described in `docs/ARCHITECTURE.md` under "Memory
+write policy"; `ciao/memory_policy.py` holds the capsule's unattended guidance. Two rules matter for
 any change here: the region cap is **advisory** on every path (a write goes
 through and reports `over_cap`; consolidation, not refusal, bounds a region),
 and an **unattended run defers** approval-requiring work and reports it instead
 of asking or routing around the missing reviewer. For a scheduled run the ACP broker
 is the backstop: an approval it cannot wait for is denied at once and the run is
 recorded as `error` naming the denied tool (`tests/test_schedule_dispatch_boundary.py`). `tests/test_memory_policy.py`
-pins the matrix to the stock assets and the docs, so a copy that contradicts it
+pins the stock assets and the docs to the capsule, so a copy that contradicts it
 fails the suite.
 
 Three detectors, all model-free, because a model asked to tally a few hundred
@@ -1363,7 +1361,7 @@ settled lifecycle rather than the state it replaced.
 
 Adding a lifecycle or moving one into or out of `SETTLING_LIFECYCLES` means
 answering one question: *is this an undecided attempt whose evidence could
-already exist?* `in_progress`, `waiting_review` and `failed` are; `offered` is
+already exist?* `in_progress` and `failed` are; `offered` is
 not (no chat was ever opened, so any receipt in the vault belongs to somebody
 else's run), and neither are `completed` or `dismissed` (re-asking a check about
 its own verdict, or an operator's decision, on a timer would reopen decisions
@@ -1458,8 +1456,8 @@ new attempt. That ordering is the fix for the duplicate-prompt path an archived
 chat used to open: chats are archived and deleted routinely, so a stale tab or a
 retry against a finished task used to fall through the create-fresh recovery and
 replace `completed` with `in_progress`, re-running work that was already judged
-done. The create-fresh recovery itself is unchanged for `offered`, `in_progress`,
-`failed` and `waiting_review`, whose record is stale rather than final.
+done. The create-fresh recovery itself is unchanged for `offered`, `in_progress`
+and `failed`, whose record is stale rather than final.
 
 `dismiss_task` refuses the same record the same way, and it has to: a dismissal
 writes `dismissed` over whatever it replaces, so accepting a `completed` record

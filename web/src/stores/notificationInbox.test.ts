@@ -767,13 +767,13 @@ describe('notification inbox store', () => {
       const { projects, signals, inbox } = setup()
       markHealthy(projects, signals)
       setChats(projects, [makeChat('chat-x', { last_read_at: '' })])
-      setRows([utRow({ status: 'waiting_review', chat_live: false, chat_id: 'chat-x' })])
+      setRows([utRow({ status: 'failed', chat_live: false, chat_id: 'chat-x' })])
       expect(inbox.updateTaskCandidates[0].chatId).toBe('')
       expect(inbox.updateTaskCandidates[0].chatLive).toBe(false)
       expect(keysOf(inbox)).toEqual(['chat:chat-x', 'update-task:personal:review-legacy-rows@1'])
       // An archived chat is not live either.
       setChats(projects, [makeChat('chat-x', { archived: true })])
-      setRows([utRow({ status: 'waiting_review', chat_live: true, chat_id: 'chat-x' })])
+      setRows([utRow({ status: 'failed', chat_live: true, chat_id: 'chat-x' })])
       expect(inbox.updateTaskCandidates[0].chatId).toBe('')
     })
 

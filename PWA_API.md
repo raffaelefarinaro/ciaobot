@@ -147,7 +147,7 @@ The route source of truth is `ciao/web/app.py`. This file is kept in sync by `te
 | GET | `/api/housekeeping` | List the home-screen operator actions (detector pass; each carries `run_label`, `chat_label`, `chat_prompt`, and `terminal_action` / `command` — a host-terminal action id and the same command as copyable text — on a `provider-update:<provider>` tile, otherwise empty); the `mac-app-switch` tile (an installer-managed engine on an Apple-silicon Mac) leads with a *Download for Mac* external link instead |
 | POST | `/api/housekeeping/{action_id}/run` | Perform one action's mechanical work, re-run detection, and return the fresh action list; unknown id is 404 |
 | POST | `/api/housekeeping/{action_id}/dismiss` | Record a "not now" for an ask-style or advisory action (the GitHub star nudge, `provider-update:<provider>`, which hides the tile for the current release-tested version only, or `mac-app-switch`, which hides the *Switch to the new Ciaobot app* tile on every device for 30 days), re-run detection, and return the fresh action list; unknown id is 404 |
-| GET | `/api/update-tasks` | The "After this update" tasks this engine version supports for `?workspace=`, one row per task: `id`, `revision`, `scope`, `title`, `why`, `since_version`, `status` (the recorded lifecycle — `offered` when there is no record yet — through `dismissed`), `applicability` (`applicable`/`not_applicable`/`unknown`), `offered`, `suppressed`, and the `chat_id`/`prompt_digest`/`attempted_fingerprint`/`updated_at` of its last attempt. `applicability_checked_at` is when that row's *answer* was computed (ISO-8601 UTC), and is a different clock from `updated_at`, which is when the *record* was written — a dismissal is a decision, not a re-check. Inside the freshness window a row keeps the stamp of the call that computed the answer, so a repeated read does not re-date it. `coverage_gap` is present only when nothing is being offered, and says which of `no_eligible_task`/`not_substantiated`/`nothing_offered` applies. `?workspace=` is required (400 otherwise): applicability and state are per workspace. No `change_token`, so applicability falls back to the freshness window; the state file is still read on every call, so a dismissal or a launch shows up at once. The one write it performs is a **settlement**: a task whose record is `in_progress`/`waiting_review`/`failed` is checked against its registered completion check when this call computes its detector answer, and becomes `completed` if the check's postcondition holds — so a task the operator finished leaves Home without a separate endpoint, and its `status`/`suppressed`/`offered` in the very response that settled it. Nothing else is written and nothing is launched: no chat, no prompt, no model turn. `applicability` stays the detector's own answer even when `status` is `completed`, because the rows it counts may still be there (a review that retained them is a finished task). The settlement rides the same freshness window as the detector, so it lands within `APPLICABILITY_TTL_S` (300s) of the evidence appearing; nothing is written when the check is unregistered, raises, or says the postcondition does not hold yet. The lifecycle is revalidated under the write lock, so a `dismissed` (or reopened) decision that lands while the check is running wins over the settlement and is what this response reports; and a settlement whose write cannot land is skipped rather than raised, leaving the task in its previous lifecycle for a later listing |
+| GET | `/api/update-tasks` | The "After this update" tasks this engine version supports for `?workspace=`, one row per task: `id`, `revision`, `scope`, `title`, `why`, `since_version`, `status` (the recorded lifecycle — `offered` when there is no record yet — through `dismissed`), `applicability` (`applicable`/`not_applicable`/`unknown`), `offered`, `suppressed`, and the `chat_id`/`prompt_digest`/`attempted_fingerprint`/`updated_at` of its last attempt. `applicability_checked_at` is when that row's *answer* was computed (ISO-8601 UTC), and is a different clock from `updated_at`, which is when the *record* was written — a dismissal is a decision, not a re-check. Inside the freshness window a row keeps the stamp of the call that computed the answer, so a repeated read does not re-date it. `coverage_gap` is present only when nothing is being offered, and says which of `no_eligible_task`/`not_substantiated`/`nothing_offered` applies. `?workspace=` is required (400 otherwise): applicability and state are per workspace. No `change_token`, so applicability falls back to the freshness window; the state file is still read on every call, so a dismissal or a launch shows up at once. The one write it performs is a **settlement**: a task whose record is `in_progress`/`failed` is checked against its registered completion check when this call computes its detector answer, and becomes `completed` if the check's postcondition holds — so a task the operator finished leaves Home without a separate endpoint, and its `status`/`suppressed`/`offered` in the very response that settled it. Nothing else is written and nothing is launched: no chat, no prompt, no model turn. `applicability` stays the detector's own answer even when `status` is `completed`, because the rows it counts may still be there (a review that retained them is a finished task). The settlement rides the same freshness window as the detector, so it lands within `APPLICABILITY_TTL_S` (300s) of the evidence appearing; nothing is written when the check is unregistered, raises, or says the postcondition does not hold yet. The lifecycle is revalidated under the write lock, so a `dismissed` (or reopened) decision that lands while the check is running wins over the settlement and is what this response reports; and a settlement whose write cannot land is skipped rather than raised, leaving the task in its previous lifecycle for a later listing |
 | GET | `/api/update-tasks/{task_id}/preview` | Signed session required. With required `?workspace=<registered-name>` and optional `fresh=0` or `fresh=1`, returns `{task_id, revision, workspace, state, summary, plan, checked_at}`. `state` is `review`, `blocked`, or `unknown`; `plan` is an object or null, including null on preparation failure. `checked_at` is ISO-8601 UTC at the start of the observation, not an atomic snapshot or apply authorization. Scans run off-loop on the bounded read executor; identical default in-flight requests coalesce, while `fresh=1` starts an independent scan. Missing workspace: 400 `{"error":"workspace is required"}`; invalid fresh: 400 `{"error":"fresh must be 0 or 1"}`; unsupported task or unregistered workspace: 409 `{"error":"This update task cannot be previewed for this workspace."}`. No task settlement, state, receipt or content writes, chat, prompt or model launch. Later approval must re-read the planner and apply guards. |
 | POST | `/api/update-tasks/{task_id}/start` | Start this task's chat with the **packaged** prompt for its revision, or hand back the chat the last start created. `{ok, task_id, chat_id, resumed, result, tasks}`; `resumed: false` means this call created the chat and dispatched the prompt, `true` means nothing was created (double click, second tab, retry, restart — all the same call twice). A live chat is not the same as a dispatched prompt, so the record decides what a resume does: a `failed` attempt re-sends the prompt into that same chat and still reports `resumed: true` (one chat throughout, the prompt dispatched exactly once across the failure and the retry), and a `dismissed` or reopened-`offered` record is a reopen — same chat, record written `in_progress`, nothing re-sent. 409 for a refused task (unknown id, one this engine version cannot support, no `?workspace=`, no chat manager, a state record that cannot be written before the turn starts, or a record that already says `completed` at this revision — a finished task is never re-run, and that holds whether or not its chat is still there), 500 with the `chat_id` when the chat exists but the turn could not be dispatched — which is recoverable: the next start sends the prompt into that same chat. Nothing after the turn started is a refusal: a record that will not take the `in_progress` write is logged and still answered with the chat (the record keeps saying `failed`, which the next start retries from), and a detector pass that cannot list the tasks leaves the reply without its `tasks` key |
 | POST | `/api/update-tasks/{task_id}/dismiss` | Record "not this one" for this task at this revision (optional `{"reason": "..."}` body, kept as the record's evidence), suppressing the offer at this revision only and keeping the chat it was in — except a `failed` record's chat, which is live and empty because the prompt never reached it, so that one is dropped and the next start creates a fresh chat and dispatches into it. `{ok, task_id, result, tasks}`; 409 for a refused task — an unknown or unsupported id, and a record that already says `completed` at this revision, which is the same refusal a start answers and for the same reason: overwriting a verdict would put a later start back in reach of a finished task. |
@@ -887,25 +887,7 @@ curl -sS -b /tmp/ciao.jar -X DELETE "http://localhost:${PWA_PORT:-8443}/api/chat
 
 ```bash
 # List — returns {workspaces, active, primary, provider_options,
-# claude_trim_options}. Each workspace also
-# reports memory_handover ("off" | "dismiss" | "all", default "off"): whether
-# the nightly Workspace care run may act on its own [memory]/[profile]
-# verdicts. Set it with PATCH /api/workspaces/{name} and a body such as
-# {"memory_handover": "dismiss"}; any other value is a 400. A save that omits
-# the key keeps it, and it is the only way to change it (no agent verb, CLI
-# or env var sets it). At "all" the nightly run can accept queued, possibly
-# untrusted [memory]/[profile] text into the always-loaded AGENTS.md regions,
-# within the event-shape and duplicate guards and a cap of five accepts per
-# curation run, and each accept can be undone from History.
-# Each workspace also reports memory_approval (sparse; keys "memory" and
-# "profile", values "auto" or "approve"; default {}): a per-kind acceptance
-# choice. "auto" lets the run accept that kind even when memory_handover is
-# off or dismiss; "approve" refuses that kind even at "all"; a kind with no key
-# inherits memory_handover. Dismissal always follows memory_handover. Save it
-# with the same PATCH /api/workspaces/{name}: a partial map sets the named kinds
-# and keeps the rest, {"profile": null} resets one kind to inherited, and a
-# whole-field null, an unknown kind or mode, or a non-object is a 400 that saves
-# nothing. Each workspace also reports shared_brains ([{name, path, identity, kind, enabled}],
+# claude_trim_options}. Each workspace also reports shared_brains ([{name, path, identity, kind, enabled}],
 # always present, [] when none): the Git checkouts or ordinary folders it links as
 # shared brains. A save that omits kind keeps the linked row's kind; a raw new row
 # that omits kind defaults to Git for backward compatibility, while the Settings form
@@ -1332,37 +1314,11 @@ agent's setup is detected, with no restart. A guided setup that verifies turns
 the backup on, unless the owner has paused it: the pause is a hold they lift
 themselves, and a pause taken *during* a setup is the one that counts.
 
-**Memory receipts**
+**Memory**
 
-Region writes, note writes and prunes leave a receipt: `GET /api/memory/receipts`, `GET /api/memory/receipts/{id}` and `POST /api/memory/receipts/{id}/undo` list, show and undo them (see the curl comments below). There is no proposal queue: the agent writes memory directly, and what it is unsure of goes on `Workspace/Unsure.md`.
+The agent writes memory directly and Git is the record and the undo. What it is unsure of goes on `Workspace/Unsure.md`; there is no proposal queue and no receipt API.
 
 ```bash
-# Managed memory mutations (receipts), newest first: every region write, queue
-# resolution and prune with actor/source, destination, before/after revisions
-# and status (prepared | applied | rolled_back | failed | conflict | undone).
-# `undoable` is true only for an applied operation this protocol can reverse;
-# unsupported legacy rows render without an Undo affordance. A multi-row batch
-# (batch accept/dismiss, expiry sweep) is one atomic rewrite, so exactly one
-# row carries the whole-file image and is undoable as a unit; the rest are
-# history-only (`undoable: false`) facts that must not each restore the file.
-# Optional query params: workspace, limit (default 200).
-curl -sS -b /tmp/ciao.jar "http://localhost:${PWA_PORT:-8443}/api/memory/receipts"
-
-# One receipt with its before/after images and a line diff, which the list
-# above deliberately strips. Returns {id, workspace, kind, status, ts, actor,
-# source, destination, fact_text, undoable, has_snapshot, changed, error} and,
-# when `has_snapshot`, {before, after, diff[{op, text}], truncated,
-# diff_truncated}. `has_snapshot: false` carries a `reason` and is what the
-# History row renders as "No change snapshot available"; a row that is not
-# undoable carries a `reason` saying which case applies (part of a batch
-# transaction, not applied, itself an undo, or unsupported).
-curl -sS -b /tmp/ciao.jar "http://localhost:${PWA_PORT:-8443}/api/memory/receipts/$RECEIPT_ID"
-
-# Undo one receipt. Refuses with 409 when the destination changed since the
-# operation (undo would otherwise delete an unrelated later fact), 400 when the
-# receipt is unsupported/view-only, 404 when the id is unknown.
-curl -sS -b /tmp/ciao.jar -X POST "http://localhost:${PWA_PORT:-8443}/api/memory/receipts/$RECEIPT_ID/undo"
-
 # The vault's category list. `?workspace=` is required, and it resolves the AGENT
 # vault root - the one that owns entity-types.yaml, INDEX.md and VOCABULARY.md -
 # not the workspace's notes root, so a pre-re-rooting install (one shared vault)
@@ -1474,7 +1430,6 @@ Global `/ws/events` payloads the PWA reacts to:
 - `chat_read`: another client/device marked the chat read.
 - `chat_unread`: another client/device marked the chat unread on purpose ("come back to this"). Fields: `{chat_id, last_read_at}` (empty string). The PWA clears the local read stamp so the dot and OS badge rise again.
 - `chat_title`: auto-title finished.
-- `turn_verification`: the vault answer check for one turn finished. Fields: `{chat_id, turn_index, verification}`, where `verification` is `{supported, unsupported, general, claims: [{text, status: "supported"|"unsupported"|"general", source}], sources}` (`source` is a vault-relative note path, `""` for general). Persisted in `ChatInfo.turn_verification` and overlaid as `verification` on the turn's last assistant row of the chat messages response.
 - `chat_created`: a new chat was created (fresh or fork). Fields: `{chat: ChatInfo}`. The acting tab already pushes optimistically; this event is what makes other tabs/devices, or the acting tab after a racing `syncLatest` clobber, render the chat without waiting for the 15s poll. Without it a fork (which starts no streaming turn, so no `chat_result_ready` refetch) stayed invisible until a manual reload.
 - `chat_moved` / `chat_archived` / `chat_deleted`: project changes.
 - `chat_postprocess`: the memory pass queued by archiving a chat reporting on that chat. Fields: `{chat_id, project_id, postprocess}`, where `postprocess` is `{steps: {memory_pass: {status: "queued"|"running"|"ok"|"attention", extra: {chat_id}}}, updated_at}` and `extra.chat_id` is the pass's own chat. The same object is persisted on the archived chat and returned as `ChatInfo.postprocess`, so it can still link to its memory pass after a reload.

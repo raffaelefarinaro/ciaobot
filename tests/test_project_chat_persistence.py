@@ -59,6 +59,27 @@ def _persisted_chats(tmp_path: Path) -> dict[str, dict]:
     return payload["chats"]
 
 
+def test_a_stored_chat_carrying_the_retired_turn_verification_key_still_loads(
+    tmp_path: Path,
+) -> None:
+    manager = _make_manager(tmp_path)
+    project = manager.create_project("Notes", workspace="work")
+    chat = manager.create_chat(project.project_id, title="Old chat")
+    registry = tmp_path / ".runtime" / "web_projects.json"
+    payload = json.loads(registry.read_text(encoding="utf-8"))
+    payload["chats"][chat.chat_id]["turn_verification"] = {
+        "0": {"supported": 1, "unsupported": 0, "general": 0, "claims": [], "sources": []}
+    }
+    registry.write_text(json.dumps(payload), encoding="utf-8")
+
+    restored = _make_manager(tmp_path).get_chat(chat.chat_id)
+
+    assert restored is not None
+    assert restored.title == "Old chat"
+    assert not hasattr(restored, "turn_verification")
+    assert "turn_verification" not in restored.to_dict()
+
+
 def _seeded_welcome(manager: ProjectChatManager, title: str) -> tuple[str, str]:
     """The seeded welcome's own prompt and its visible first message, by title."""
     chat = next(chat for chat in manager._chats.values() if chat.title == title)
@@ -474,28 +495,6 @@ def test_registry_audit_records_chat_create_and_delete(tmp_path: Path) -> None:
         and chat.chat_id in event["chats"]["deleted"]
         for event in events
     )
-
-
-def test_proposal_helper_metadata_persists_and_new_session_clears_it(
-    tmp_path: Path,
-) -> None:
-    manager = _make_manager(tmp_path)
-    project = manager.create_project("Reviews", workspace="work")
-    helper = {
-        "kind": "proposal",
-        "intent": "resolve",
-        "proposal_ids": ["proposal-1"],
-        "archive_policy": "when_resolved",
-    }
-    chat = manager.create_chat(project.project_id, title="Merge fact", helper=helper)
-
-    restored = _make_manager(tmp_path).get_chat(chat.chat_id)
-    assert restored is not None
-    assert restored.helper == helper
-    assert restored.to_dict()["helper"] == helper
-
-    manager.new_session(chat.chat_id)
-    assert manager.get_chat(chat.chat_id).helper == {}
 
 
 def test_build_agent_request_fails_without_an_agent_surface(tmp_path: Path) -> None:

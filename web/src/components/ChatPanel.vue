@@ -1444,7 +1444,7 @@ import { recordSentPrompt } from '../lib/chatDrafts'
 import { splitAttachmentBlock, type AttachedFile } from '../lib/chatAttachments'
 import { useModalFocus } from '../composables/useModalFocus'
 import { useArchiveChat } from '../composables/useArchiveChat'
-import type { AgentAssetsResponse, RuntimeProvider, ModelsResponse, ChatInfo, ChatMessage, ProviderConfigSettings, ProviderConnection, TurnVerification } from '../lib/types'
+import type { AgentAssetsResponse, RuntimeProvider, ModelsResponse, ChatInfo, ChatMessage, ProviderConfigSettings, ProviderConnection } from '../lib/types'
 import { useTaskStore } from '../stores/tasks'
 import PaneHeader from './PaneHeader.vue'
 import ChatRepoSection from './ChatRepoSection.vue'
@@ -1542,7 +1542,6 @@ type TurnMeta = {
   duration_ms?: number
   effective_model?: string
   usage?: Record<string, string>
-  verification?: TurnVerification
 }
 
 type RenderItemInput =
@@ -4307,7 +4306,6 @@ function turnMetaFrom(buffer: ChatMessage[], base: TurnMeta | null = null): Turn
     if (m.duration_ms) meta.duration_ms = m.duration_ms
     if (m.effective_model) meta.effective_model = m.effective_model
     if (m.usage) meta.usage = m.usage
-    if (m.verification) meta.verification = m.verification
   }
   return Object.keys(meta).length ? meta : null
 }

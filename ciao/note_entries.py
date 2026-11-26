@@ -550,7 +550,7 @@ def invalidate_stale_stamps(before: str, after: str) -> tuple[str, int]:
     dropped or reverted nine stamps would leave a reader wondering why their
     careful dates vanished, so the caller is expected to say so.
 
-    Deliberately **not** used by :mod:`ciao.note_receipts.apply_entry_edit` or by
+    Deliberately **not** used by
     the managed verification. A `still_valid` re-stamp and an accepted
     `replace_entry` write a *new* fingerprint carrying a stamp on purpose, and
     running them through this would delete the exact claim the operation exists

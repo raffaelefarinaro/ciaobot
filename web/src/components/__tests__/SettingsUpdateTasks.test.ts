@@ -228,13 +228,12 @@ describe('grouping by scope', () => {
 
 describe('which tasks belong in a history', () => {
   it('leaves out the ones Home is showing right now', async () => {
-    // A task still on offer, started, or waiting for review is not history.
+    // A task still on offer or started is not history.
     // Listing it here too would put the same live card in two places with two
     // different sets of buttons.
     apiGet.mockResolvedValue(listing([
       task({ id: 'a', status: 'offered', applicability: 'applicable', offered: true, suppressed: false }),
       task({ id: 'b', status: 'in_progress', applicability: 'applicable', offered: true, suppressed: false }),
-      task({ id: 'c', status: 'waiting_review', applicability: 'applicable', offered: true, suppressed: false }),
     ]))
     const wrapper = mount(SettingsUpdateTasks)
     await flushPromises()
