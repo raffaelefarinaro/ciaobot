@@ -265,16 +265,6 @@ def remove_legacy_background_state(runtime_root: Path) -> bool:
     return True
 
 
-def refuse_legacy_node_state(runtime_root: Path) -> None:
-    """Refuse to start on a runtime root that still holds a node-mode `node_state.json`."""
-    state = Path(runtime_root) / "node_state.json"
-    if state.exists():
-        raise SystemExit(
-            f"Legacy node-mode state found at {state}: node mode is removed. "
-            "Delete that file to start this install as the only writer."
-        )
-
-
 # Web Push (RFC 8292) requires a VAPID "sub" contact URI. No push service
 # contacts it, but Apple's (web.push.apple.com, Safari and iOS PWAs) rejects a
 # `localhost` domain with 403 BadJwtToken, so the placeholder uses a real one.
@@ -780,8 +770,6 @@ async def _run_server_locked(
     app_engine_ready_fd: int | None = None,
 ) -> int:
     """Server implementation; caller owns the workspace instance lock."""
-
-    refuse_legacy_node_state(config.state_path.parent)
 
     # Runtime-mutable settings overlay (PWA Settings). Applied on top of the
     # env-backed config so PATCHes take effect without a restart and survive
