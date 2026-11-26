@@ -28,7 +28,22 @@ storage only: no route, no Settings surface and no background job use it yet.
   running `pruned` count) in the state file, so retention is visible in
   `DurableAuditLog.view` and the retained chain still verifies.
 
-Entries are intents and resolutions. The authority engine writes an `intent`
+Activation requirements this module does not meet by itself:
+
+* Pruning can drop an unresolved intent (and a resolution can outlive its
+  intent). Before any caller enables retention-driven pruning, it must settle
+  every pending intent first, or archive sealed segments instead of deleting.
+* Rollback is undetected: restoring the state file and the log together to an
+  older valid copy verifies. The chain is unkeyed and local.
+* An append can raise after its record is durable (the state write or a prune
+  failed). The entry exists and the next open adopts it; callers treat such an
+  error as "maybe written".
+* The recorded storage is whatever the caller supplies; the authority engine
+  supplies a digest, never a URL that could carry credentials.
+
+Entries are intents and resolutions. Every entry names its lease owner (pid and
+boot id); another process settles an intent only when its owner is gone, or the
+intent is older than ``INTENT_MAX_AGE_S``. At most one resolution per intent. The authority engine writes an `intent`
 before a mutation and a `committed` or `aborted` entry after, so an interrupted
 commit is reconcilable from the authority record without replaying any
 admission. No nonce, capability seal or evidence is ever written.
@@ -36,10 +51,13 @@ admission. No nonce, capability seal or evidence is ever written.
 
 from __future__ import annotations
 
+import functools
 import hashlib
 import json
+import math
 import os
 import re
+import subprocess
 import threading
 from contextlib import contextmanager
 from dataclasses import dataclass
@@ -64,6 +82,16 @@ MAX_SEGMENTS = 16
 
 #: Chain origin: the hash before the first record ever written.
 GENESIS_HASH = "0" * 64
+
+#: Longest text field, in UTF-8 bytes, and longest record line. A field over the
+#: cap is refused on write and treated as corruption on read, so a hostile or
+#: damaged file cannot make a read allocate or parse without bound.
+MAX_FIELD_BYTES = 512
+MAX_LINE_BYTES = 8192
+
+#: An intent older than this is settled even when its owner still looks alive
+#: (a reused pid): well beyond any admission lifetime.
+INTENT_MAX_AGE_S = 3600.0
 
 #: State schema. Any other value is corrupt.
 SCHEMA_VERSION = 1
@@ -113,6 +141,7 @@ class AuditEntry:
     generation: int
     at: float
     recovered: bool
+    owner: str
     hash: str
 
 
@@ -149,8 +178,61 @@ _BODY_KEYS = frozenset(
         "generation",
         "at",
         "recovered",
+        "owner",
     }
 )
+
+
+@functools.lru_cache(maxsize=1)
+def _boot_id() -> str:
+    """An identifier that changes on reboot, so a recycled pid is not mistaken for its owner."""
+    try:
+        with open("/proc/sys/kernel/random/boot_id", encoding="ascii") as handle:
+            return handle.read().strip() or "unknown"
+    except OSError:
+        pass
+    try:
+        done = subprocess.run(
+            ["/usr/sbin/sysctl", "-n", "kern.boottime"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+            check=False,
+        )
+        text = done.stdout.strip()
+        return text.replace(" ", "") if done.returncode == 0 and text else "unknown"
+    except (OSError, subprocess.SubprocessError):
+        return "unknown"
+
+
+def current_owner() -> str:
+    """The lease owner of an intent written by this process: pid and boot id."""
+    return f"{os.getpid()}:{_boot_id()}"
+
+
+def owner_state(owner: str) -> str:
+    """"self", "alive" or "dead" for an intent owner string.
+
+    "self" is this very process: the caller's own live-intent registry decides.
+    A different boot, an unparseable owner or a pid that no longer exists is
+    "dead"; a pid that exists but belongs to someone else is conservatively
+    "alive" (the age cap bounds how long that can hold an intent open).
+    """
+    pid_text, _, boot = owner.partition(":")
+    if not pid_text.isdigit() or boot != _boot_id():
+        return "dead"
+    pid = int(pid_text)
+    if pid == os.getpid():
+        return "self"
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return "dead"
+    except PermissionError:
+        return "alive"
+    except OSError:
+        return "dead"
+    return "alive"
 
 
 def _chain(previous: str, body: dict[str, Any]) -> str:
@@ -178,7 +260,7 @@ def _entry_from_body(body: Any, digest: Any, error: str = "corrupt") -> AuditEnt
         or body["seq"] < 1
         or not all(
             _is_text(body[k])
-            for k in ("intent", "operation", "brain", "storage", "actor", "steward")
+            for k in ("intent", "operation", "brain", "storage", "actor", "steward", "owner")
         )
         or not (previous is None or _is_text(previous))
         or type(body["previous_generation"]) is not int
@@ -186,14 +268,16 @@ def _entry_from_body(body: Any, digest: Any, error: str = "corrupt") -> AuditEnt
         or body["previous_generation"] < 0
         or body["generation"] < 1
         or type(body["at"]) not in (int, float)
+        or not math.isfinite(body["at"])
         or type(body["recovered"]) is not bool
     ):
         raise AuditError(error)
     try:
-        for key in ("intent", "operation", "brain", "storage", "actor", "steward"):
-            body[key].encode("utf-8")
-        if previous is not None:
-            previous.encode("utf-8")
+        for key in ("intent", "operation", "brain", "storage", "actor", "steward", "owner"):
+            if len(body[key].encode("utf-8")) > MAX_FIELD_BYTES:
+                raise AuditError(error)
+        if previous is not None and len(previous.encode("utf-8")) > MAX_FIELD_BYTES:
+            raise AuditError(error)
     except UnicodeEncodeError:
         raise AuditError(error) from None
     return AuditEntry(
@@ -210,6 +294,7 @@ def _entry_from_body(body: Any, digest: Any, error: str = "corrupt") -> AuditEnt
         generation=body["generation"],
         at=float(body["at"]),
         recovered=body["recovered"],
+        owner=body["owner"],
         hash=digest,
     )
 
@@ -258,10 +343,22 @@ class DurableAuditLog:
         generation: int,
         at: float,
         recovered: bool = False,
+        owner: str | None = None,
     ) -> AuditEntry:
-        """Verify, rotate if full, append one record durably, advance the state."""
+        """Verify, rotate if full, append one record durably, advance the state.
+
+        An intent id is used once; a resolution needs a retained unresolved
+        intent with the same operation, brain, storage, steward and generation,
+        and a second resolution for one intent is refused
+        (``duplicate_resolution``), which is what keeps two engines from both
+        settling one intent. ``at`` must be finite and every text field at most
+        ``MAX_FIELD_BYTES``. A failure after the record is durable (the state
+        write or a prune) can still raise: the entry then exists and the next
+        open adopts it, so a caller must treat such an error as "maybe written".
+        """
         with self._locked():
             state, entries = self._load_locked()
+            self._check_resolution(kind, intent, entries, operation, brain, storage, steward, generation)
             body: dict[str, Any] = {
                 "seq": state.last_seq + 1,
                 "kind": AuditKind(kind).value,
@@ -276,6 +373,7 @@ class DurableAuditLog:
                 "generation": generation,
                 "at": at,
                 "recovered": recovered,
+                "owner": owner if owner is not None else current_owner(),
             }
             digest = _chain(state.last_hash, body)
             entry = _entry_from_body(body, digest, "invalid_entry")
@@ -304,9 +402,41 @@ class DurableAuditLog:
             e for e in entries if e.kind is AuditKind.INTENT and e.intent not in resolved
         )
 
+    @staticmethod
+    def _check_resolution(
+        kind: AuditKind,
+        intent: str,
+        entries: list[AuditEntry],
+        operation: str,
+        brain: str,
+        storage: str,
+        steward: str,
+        generation: int,
+    ) -> None:
+        same = [e for e in entries if e.intent == intent]
+        if kind is AuditKind.INTENT:
+            if same:
+                raise AuditError("invalid_entry")
+            return
+        opened = [e for e in same if e.kind is AuditKind.INTENT]
+        if not opened:
+            raise AuditError("invalid_entry")
+        if any(e.kind is not AuditKind.INTENT for e in same):
+            raise AuditError("duplicate_resolution")
+        first = opened[0]
+        if (first.operation, first.brain, first.storage, first.steward, first.generation) != (
+            operation,
+            brain,
+            storage,
+            steward,
+            generation,
+        ):
+            raise AuditError("invalid_entry")
+
     # ── Loading and verification ─────────────────────────────────────────
 
     def _load_locked(self) -> tuple[_State, list[AuditEntry]]:
+        self._remove_stale_temporaries()
         state = self._read_state()
         sealed = self._sealed_segments()
         # A prune that crashed after the anchor advanced: drop what it gave up.
@@ -317,6 +447,7 @@ class DurableAuditLog:
         files: list[tuple[int | None, Path]] = list(sealed)
         files.append((None, self._root / _ACTIVE))
         entries: list[AuditEntry] = []
+        seen: dict[str, AuditEntry | None] = {}
         previous = state.base_prev_hash
         expected_seq = state.base_seq
         for position, (first, path) in enumerate(files):
@@ -324,15 +455,20 @@ class DurableAuditLog:
             raw = self._read_file(path, missing_ok=is_active)
             if raw is None:
                 continue
+            if len(raw) > MAX_LINE_BYTES * (self._segment_records + 1):
+                raise AuditError("corrupt")
             lines, torn = self._split(raw, allow_torn=is_active)
             if first is not None and not lines:
                 raise AuditError("corrupt")
             for index, line in enumerate(lines):
+                if len(line) > MAX_LINE_BYTES:
+                    raise AuditError("corrupt")
                 entry, body = self._parse_line(line)
                 if entry.seq != expected_seq or (index == 0 and first not in (None, entry.seq)):
                     raise AuditError("corrupt")
                 if entry.hash != _chain(previous, body):
                     raise AuditError("corrupt")
+                self._check_chain_rules(entry, seen, state)
                 previous = entry.hash
                 expected_seq += 1
                 entries.append(entry)
@@ -348,6 +484,39 @@ class DurableAuditLog:
             self._write_state(state)
             return state, entries
         raise AuditError("corrupt")
+
+    @staticmethod
+    def _check_chain_rules(
+        entry: AuditEntry, seen: dict[str, AuditEntry | None], state: _State
+    ) -> None:
+        """One intent opens once and resolves at most once, in that order."""
+        if entry.kind is AuditKind.INTENT:
+            if entry.intent in seen:
+                raise AuditError("corrupt")
+            seen[entry.intent] = None
+            return
+        if entry.intent not in seen:
+            # Its intent may only be missing because retention dropped it.
+            if state.pruned == 0:
+                raise AuditError("corrupt")
+        elif seen[entry.intent] is not None:
+            raise AuditError("corrupt")
+        seen[entry.intent] = entry
+
+    def _remove_stale_temporaries(self) -> None:
+        """Delete state-write temporaries a crash left behind (under the lock)."""
+        try:
+            names = os.listdir(self._root)
+        except OSError:
+            raise AuditError("unsafe_root") from None
+        for name in names:
+            if name.startswith(".audit.") and name.endswith(".tmp"):
+                try:
+                    (self._root / name).unlink()
+                except FileNotFoundError:
+                    pass
+                except OSError:
+                    raise AuditError("durability_unavailable") from None
 
     @staticmethod
     def _split(raw: bytes, *, allow_torn: bool) -> tuple[list[bytes], bool]:
@@ -432,7 +601,7 @@ class DurableAuditLog:
         sealed = self._sealed_segments()
         while len(sealed) > self._max_segments:
             _, path = sealed[0]
-            following = sealed[1][0] if len(sealed) > 1 else self._active_first_seq(state)
+            following = sealed[1][0]  # more than max_segments >= 1 sealed, so a successor exists
             raw = self._read_file(path, missing_ok=False)
             lines = (raw or b"").split(b"\n")[:-1]
             if not lines:
@@ -444,12 +613,6 @@ class DurableAuditLog:
             self._write_state(state)  # the anchor moves first; the unlink follows
             self._unlink(path)
             sealed = sealed[1:]
-
-    def _active_first_seq(self, state: _State) -> int:
-        raw = self._read_file(self._root / _ACTIVE, missing_ok=True)
-        if not raw:
-            return state.last_seq + 1
-        return self._parse_line(raw.split(b"\n")[0])[0].seq
 
     def _unlink(self, path: Path) -> None:
         try:

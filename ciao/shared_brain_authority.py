@@ -91,7 +91,14 @@ from typing import Any, Callable, Iterator, Protocol
 
 from ciao.os_support.files import open_fd, replace_file
 from ciao.os_support.locks import lock_exclusive, unlock
-from ciao.shared_brain_audit import AuditEntry, AuditError, AuditKind, DurableAuditLog
+from ciao.shared_brain_audit import (
+    INTENT_MAX_AGE_S,
+    AuditEntry,
+    AuditError,
+    AuditKind,
+    DurableAuditLog,
+    owner_state,
+)
 from ciao.os_support.private import (
     is_private_descriptor_strict,
     make_private_dir,
@@ -124,6 +131,11 @@ _DEFINITE_REFUSALS = frozenset(
         "already_initialized",
     }
 )
+
+#: Intents with a live call in this process, shared by every engine instance in
+#: it; another process's live intents are told apart by their lease owner.
+_LIVE_INTENTS: set[str] = set()
+_LIVE_LOCK = threading.Lock()
 
 #: Nonce strength: 32 random bytes, URL-safe.
 _NONCE_BYTES = 32
@@ -740,7 +752,6 @@ class StewardAuthority:
         self._audit: list[AuthorityTransition] = []
         self._durable = audit
         self._wall_clock = wall_clock
-        self._inflight: set[str] = set()
         if audit is not None:
             # Restart replay: settle any commit a crash left unresolved before
             # this engine admits another transition.
@@ -1138,15 +1149,16 @@ class StewardAuthority:
         fields = {
             "operation": operation.value,
             "brain": connector.brain,
-            "storage": connector.storage,
+            # A digest, never the locator: a storage URL can carry credentials.
+            "storage": _digest(connector.storage),
             "actor": actor.principal,
             "previous_steward": previous_steward,
             "steward": successor.principal,
             "previous_generation": generation,
             "generation": new_generation,
         }
-        with self._lock:
-            self._inflight.add(intent)
+        with _LIVE_LOCK:
+            _LIVE_INTENTS.add(intent)
         try:
             self._audit_append(AuditKind.INTENT, intent, fields)
             try:
@@ -1172,8 +1184,8 @@ class StewardAuthority:
             except AuthorityError:
                 raise AuthorityError("audit_unconfirmed") from None
         finally:
-            with self._lock:
-                self._inflight.discard(intent)
+            with _LIVE_LOCK:
+                _LIVE_INTENTS.discard(intent)
 
     def _audit_append(
         self,
@@ -1193,6 +1205,8 @@ class StewardAuthority:
                 **fields,
             )
         except AuditError as exc:
+            if exc.reason == "duplicate_resolution":
+                raise AuthorityError("audit_resolved") from exc
             raise AuthorityError("audit_unavailable") from exc
 
     def reconcile_audit(self) -> int:
@@ -1201,9 +1215,14 @@ class StewardAuthority:
         An intent with no resolution is committed when the record already shows
         the exact new generation and steward, aborted when it still shows the
         previous generation, and anything else is ``audit_inconsistent``: the
-        engine stays closed rather than guess. No admission is replayed; an
-        intent still owned by an in-flight call of this engine is left alone.
-        Returns how many intents were settled.
+        engine stays closed rather than guess. No admission is replayed.
+
+        An intent is settled only when it is orphaned: not owned by a live call
+        in this process, and its lease owner (pid and boot id) is gone or it is
+        older than ``INTENT_MAX_AGE_S``. Another live process's intent is left
+        alone. The log refuses a second resolution for one intent, so two
+        reconcilers racing on an orphan settle it exactly once. Returns how many
+        intents this call settled.
         """
         if self._durable is None:
             return 0
@@ -1213,17 +1232,13 @@ class StewardAuthority:
             raise AuthorityError("audit_unavailable") from exc
         settled = 0
         for entry in pending:
-            with self._lock:
-                if entry.intent in self._inflight:
-                    continue
+            if not self._orphaned(entry):
+                continue
             try:
                 record = self._store.load(entry.brain)
             except StoreError as exc:
                 raise AuthorityError("store_unavailable") from exc
-            if (
-                record is not None
-                and (record.storage != entry.storage)
-            ):
+            if record is not None and _digest(record.storage) != entry.storage:
                 raise AuthorityError("audit_inconsistent")
             if (
                 record is not None
@@ -1247,9 +1262,23 @@ class StewardAuthority:
                 "previous_generation": entry.previous_generation,
                 "generation": entry.generation,
             }
-            self._audit_append(kind, entry.intent, fields, recovered=True)
+            try:
+                self._audit_append(kind, entry.intent, fields, recovered=True)
+            except AuthorityError as exc:
+                if exc.reason == "audit_resolved":
+                    continue  # another reconciler settled it first
+                raise
             settled += 1
         return settled
+
+    def _orphaned(self, entry: AuditEntry) -> bool:
+        with _LIVE_LOCK:
+            if entry.intent in _LIVE_INTENTS:
+                return False
+        if self._wall_clock() - entry.at >= INTENT_MAX_AGE_S:
+            return True
+        # "self" without a live registration is an abandoned call of this process.
+        return owner_state(entry.owner) != "alive"
 
     def durable_audit(self) -> tuple[AuditEntry, ...]:
         """The verified durable audit, oldest first; empty without a durable log."""

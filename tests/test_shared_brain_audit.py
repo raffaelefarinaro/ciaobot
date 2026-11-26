@@ -7,19 +7,27 @@ fenced backend from the authority tests. No routes, no Settings, no live data.
 from __future__ import annotations
 
 import json
+import math
 import os
 import stat
+import subprocess
+import sys
 import threading
+import time
 from pathlib import Path
 
 import pytest
 
 from ciao.shared_brain_audit import (
+    INTENT_MAX_AGE_S,
+    MAX_FIELD_BYTES,
+    MAX_LINE_BYTES,
     AuditError,
     AuditKind,
     DurableAuditLog,
 )
 from ciao.shared_brain_authority import (
+    _digest,
     AuthorityError,
     BrainRef,
     ProtectedAuthorityStore,
@@ -657,3 +665,234 @@ def test_without_a_durable_audit_the_engine_is_unchanged(tmp_path: Path) -> None
     )
     assert engine.reconcile_audit() == 0
     assert engine.durable_audit() == ()
+
+
+# ── Review round: leases, single resolution, caps, digest, temporaries ───
+
+REPO = str(Path(__file__).resolve().parents[1])
+_CHILD = """
+import sys
+from ciao.shared_brain_audit import AuditKind, DurableAuditLog
+from ciao.shared_brain_authority import _digest
+root, brain, storage = sys.argv[1:4]
+DurableAuditLog(root).append(
+    AuditKind.INTENT, intent="live-intent", operation="bootstrap", brain=brain,
+    storage=_digest(storage), actor="alice", previous_steward=None, steward="bob",
+    previous_generation=0, generation=1, at=__import__("time").time(),
+)
+print("ready", flush=True)
+sys.stdin.read()
+"""
+
+
+def _spawn_owner(rig: Rig) -> subprocess.Popen[str]:
+    child = subprocess.Popen(
+        [sys.executable, "-c", _CHILD, str(rig.audit_root), CONNECTOR.brain, CONNECTOR.storage],
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        text=True,
+        env={**os.environ, "PYTHONPATH": REPO},
+    )
+    assert child.stdout is not None and child.stdout.readline().strip() == "ready"
+    return child
+
+
+def _resolutions(rig: Rig, intent: str):
+    return [e for e in rig.entries() if e.intent == intent and e.kind is not AuditKind.INTENT]
+
+
+def test_another_process_live_intent_is_never_settled_and_an_orphan_is_settled_once(
+    tmp_path: Path,
+) -> None:
+    rig = Rig(tmp_path)
+    child = _spawn_owner(rig)
+    try:
+        other = rig.new_engine()  # engine B starts while A's intent is live
+        assert other.reconcile_audit() == 0
+        assert rig.new_engine().reconcile_audit() == 0
+        assert _resolutions(rig, "live-intent") == []
+        assert [e.intent for e in DurableAuditLog(rig.audit_root).pending()] == ["live-intent"]
+    finally:
+        assert child.stdin is not None
+        child.kill()
+        child.wait()
+    # The owner is gone: it is a genuine orphan, settled exactly once.
+    settler = rig.new_engine()  # construction replays and settles the orphan
+    resolved = _resolutions(rig, "live-intent")
+    assert len(resolved) == 1 and resolved[0].kind is AuditKind.ABORTED and resolved[0].recovered
+    assert settler.reconcile_audit() == 0
+    assert rig.new_engine().reconcile_audit() == 0
+    assert len(_resolutions(rig, "live-intent")) == 1
+
+
+def test_an_old_intent_is_settled_even_when_its_owner_looks_alive(tmp_path: Path) -> None:
+    rig = Rig(tmp_path)
+    child = _spawn_owner(rig)
+    try:
+        late = StewardAuthority(
+            ProtectedAuthorityStore(rig.tmp / "authority"),
+            backend=rig.backend,
+            clock=rig.clock,
+            audit=DurableAuditLog(rig.audit_root),
+            wall_clock=lambda: time.time() + INTENT_MAX_AGE_S + 5,
+        )
+        assert len(_resolutions(rig, "live-intent")) == 1
+        assert late.reconcile_audit() == 0
+    finally:
+        child.kill()
+        child.wait()
+
+
+def test_racing_reconcilers_settle_an_orphan_exactly_once(tmp_path: Path) -> None:
+    rig = Rig(tmp_path)
+    log = DurableAuditLog(rig.audit_root)
+    log.append(
+        AuditKind.INTENT,
+        intent="orphan",
+        operation="bootstrap",
+        brain=CONNECTOR.brain,
+        storage=_digest(CONNECTOR.storage),
+        actor="alice",
+        previous_steward=None,
+        steward="bob",
+        previous_generation=0,
+        generation=1,
+        at=1.0,
+        owner="999999:" + "x",  # a different boot: dead
+    )
+    engines = [
+        StewardAuthority(
+            ProtectedAuthorityStore(rig.tmp / "authority"),
+            backend=rig.backend,
+            clock=rig.clock,
+        )
+        for _ in range(4)
+    ]
+    for engine in engines:
+        engine._durable = DurableAuditLog(rig.audit_root)
+    counts: list[int] = []
+    barrier = threading.Barrier(len(engines))
+
+    def go(engine: StewardAuthority) -> None:
+        barrier.wait()
+        counts.append(engine.reconcile_audit())
+
+    threads = [threading.Thread(target=go, args=(e,)) for e in engines]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    assert sum(counts) == 1
+    assert len(_resolutions(rig, "orphan")) == 1
+
+
+def test_second_resolution_for_one_intent_is_refused_on_write(tmp_path: Path) -> None:
+    log = DurableAuditLog(tmp_path / "audit")
+    _append(log, 1)
+    _append(log, 1, AuditKind.COMMITTED)
+    with pytest.raises(AuditError) as exc:
+        _append(log, 1, AuditKind.ABORTED)
+    assert exc.value.reason == "duplicate_resolution"
+    with pytest.raises(AuditError) as exc2:
+        _append(log, 1)  # an intent id is used once
+    assert exc2.value.reason == "invalid_entry"
+    with pytest.raises(AuditError) as exc3:
+        _append(log, 7, AuditKind.COMMITTED)  # no such intent
+    assert exc3.value.reason == "invalid_entry"
+    with pytest.raises(AuditError) as exc4:
+        _append(log, 2)
+        log.append(AuditKind.COMMITTED, **_fields(2, steward="mallory"))  # type: ignore[arg-type]
+    assert exc4.value.reason == "invalid_entry"
+
+
+def test_a_forged_second_resolution_on_disk_is_corrupt(tmp_path: Path) -> None:
+    from ciao.shared_brain_audit import _chain
+
+    root = tmp_path / "audit"
+    log = DurableAuditLog(root)
+    _append(log, 1)
+    _append(log, 1, AuditKind.COMMITTED)
+    last = log.view().entries[-1]
+    body = {
+        "seq": 3,
+        "kind": "aborted",
+        "intent": "intent-1",
+        "operation": "transfer",
+        "brain": "b",
+        "storage": "s",
+        "actor": "bob",
+        "previous_steward": "bob",
+        "steward": "carol",
+        "previous_generation": 1,
+        "generation": 2,
+        "at": 1.5,
+        "recovered": False,
+        "owner": last.owner,
+    }
+    forged = {"body": body, "hash": _chain(last.hash, body)}
+    with open(root / "audit.log", "a") as handle:
+        handle.write(json.dumps(forged, sort_keys=True) + "\n")
+    state = json.loads((root / "audit.state.json").read_text())
+    state["last_seq"], state["last_hash"] = 3, forged["hash"]
+    (root / "audit.state.json").write_text(json.dumps(state))
+    os.chmod(root / "audit.state.json", 0o600)
+    with pytest.raises(AuditError) as exc:
+        DurableAuditLog(root).view()
+    assert exc.value.reason == "corrupt"
+
+
+def test_field_length_and_line_size_are_bounded(tmp_path: Path) -> None:
+    root = tmp_path / "audit"
+    log = DurableAuditLog(root)
+    with pytest.raises(AuditError) as exc:
+        log.append(AuditKind.INTENT, **_fields(actor="a" * (MAX_FIELD_BYTES + 1)))  # type: ignore[arg-type]
+    assert exc.value.reason == "invalid_entry"
+    with pytest.raises(AuditError):
+        log.append(AuditKind.INTENT, **_fields(actor="é" * MAX_FIELD_BYTES))  # type: ignore[arg-type]
+    log.append(AuditKind.INTENT, **_fields(actor="a" * MAX_FIELD_BYTES))  # type: ignore[arg-type]
+    with open(root / "audit.log", "a") as handle:
+        handle.write("x" * (MAX_LINE_BYTES + 1) + "\n")
+    with pytest.raises(AuditError) as exc2:
+        log.view()
+    assert exc2.value.reason == "corrupt"
+
+
+@pytest.mark.parametrize("bad", [math.nan, math.inf, -math.inf])
+def test_non_finite_time_is_refused(tmp_path: Path, bad: float) -> None:
+    log = DurableAuditLog(tmp_path / "audit")
+    with pytest.raises(AuditError) as exc:
+        log.append(AuditKind.INTENT, **_fields(at=bad))  # type: ignore[arg-type]
+    assert exc.value.reason == "invalid_entry"
+    assert log.view().entries == ()
+
+
+def test_storage_is_audited_as_a_digest_without_userinfo(tmp_path: Path) -> None:
+    secret = "https://deploy:hunter2@example.invalid/team/brain.git"
+    connector = BrainRef("secret-brain", secret)
+    rig = Rig(tmp_path)
+    successor = rig.sign("bob-token")  # capability binding is per connector below
+    backend = rig.backend
+    challenge = rig.engine.begin_bootstrap(
+        connector=connector,
+        admin=backend.sign_in(connector, "alice-token"),
+        successor="bob",
+    )
+    rig.engine.accept_bootstrap(
+        challenge.nonce, connector=connector, successor=backend.sign_in(connector, "bob-token")
+    )
+    del successor
+    raw = "".join(p.read_text() for p in rig.audit_root.glob("audit*"))
+    assert "hunter2" not in raw and "deploy" not in raw
+    assert _digest(secret) in raw
+    assert rig.entries()[0].storage == _digest(secret)
+
+
+def test_stale_state_temporaries_are_removed_on_load(tmp_path: Path) -> None:
+    root = tmp_path / "audit"
+    log = DurableAuditLog(root)
+    _append(log, 1)
+    stale = root / ".audit.crashed.tmp"
+    stale.write_text("{}")
+    os.chmod(stale, 0o600)
+    assert [e.seq for e in DurableAuditLog(root).view().entries] == [1]
+    assert not stale.exists()
