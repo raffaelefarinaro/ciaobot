@@ -265,7 +265,7 @@ def _ok(data: Any = None, **extra: Any) -> dict[str, Any]:
     return payload
 
 
-#: Ceiling for any paged listing (`chats_list`, `memory-proposals`). The CLI
+#: Ceiling for any paged listing (`chats_list`). The CLI
 #: default is a separate, smaller constant in `ciao/agent_cli.py`.
 PAGE_MAX_LIMIT = 200
 CONTEXT_LOGS_DEFAULT_LINES = 200
@@ -1393,7 +1393,7 @@ class CiaoControlPlane:
             )
         return False
 
-    # ---- note verification ---------------------------------------------
+    # ---- related notes -------------------------------------------------
 
     async def note_related(
         self, principal: AgentPrincipal, *, path: str = "", limit: int = RELATED_NOTES_LIMIT
@@ -1514,13 +1514,6 @@ class CiaoControlPlane:
             raise ControlPlaneError(
                 "note_file_invalid", f"{flag} is not readable UTF-8: {exc}"
             ) from exc
-
-    # ---- memory proposals ----------------------------------------------
-
-    # Memory-proposal list/dismiss moved out of the MCP surface to the CLI
-    # (`ciao memory-proposals`, `ciao memory-proposal-dismiss`) so the nightly
-    # curation agent can review and resolve the queue through one tool instead
-    # of a synchronous MCP round-trip.
 
     # ---- workspaces ----------------------------------------------------
 

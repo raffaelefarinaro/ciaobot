@@ -3004,11 +3004,6 @@ def _learnings_migration_status(summary: dict[str, Any]) -> int:
     return 0
 
 
-# ── learnings-cleanup ───────────────────────────────────────────────────────
-
-#: The width of the two text columns that are allowed to be truncated. The key
-#: and the reason are what a reviewer reads across a row; the statement is what
-#: they read *below* it, in full, so it is never cut.
 def _vault_unmigrate_links_command(args: argparse.Namespace) -> int:
     """Restore the wikilinks recorded in the migration receipt.
 
@@ -4214,7 +4209,6 @@ def _resolve_workspace_and_vaults(
     return workspace, resolved, resolved, name
 
 
-#: Proposals `ciao memory-proposals` prints per page unless `--limit` says otherwise.
 def _decisions_digest_command(args: argparse.Namespace) -> int:
     """Print the operator's recent decisions grouped for the weekly rules pass.
 
@@ -5886,6 +5880,23 @@ def build_parser() -> argparse.ArgumentParser:
         help="Ciaobot server URL. Defaults to the bind address in Settings and PWA_PORT.",
     )
     chat_parser.set_defaults(func=_create_chat_command)
+
+    cleanup_parser = subparsers.add_parser(
+        "cleanup-sdk-blobs",
+        help="Dry-run or delete archived Claude SDK JSONL blobs.",
+    )
+    cleanup_parser.add_argument(
+        "--workspace",
+        type=Path,
+        default=Path("."),
+        help="Workspace root. Defaults to current directory.",
+    )
+    cleanup_parser.add_argument(
+        "--apply",
+        action="store_true",
+        help="Actually delete matching blobs. Default is dry-run.",
+    )
+    cleanup_parser.set_defaults(func=_cleanup_sdk_blobs_command)
 
     skills_parser = subparsers.add_parser(
         "skills",

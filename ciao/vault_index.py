@@ -158,7 +158,7 @@ def is_generated_vault_file(name: str) -> bool:
     return (name or "").casefold() in GENERATED_VAULT_FILES
 
 
-# `.vault-trash` is the reversible trash `ciao.vault_review` moves notes into.
+# `.vault-trash` is the reversible trash older versions of Vault Review moved notes into.
 # A trashed note keeps its bytes on disk under an opaque candidate-id filename,
 # so leaving it scannable meant "trash" removed a note from the vault the user
 # sees while it stayed in the Memory Map, the lint counts, and search — under a
@@ -175,15 +175,15 @@ EXCLUDED_PATH_PARTS: set[str] = {".vault-trash", ARCHIVED_WORKSPACES_DIR}
 
 # Vault bookkeeping the app itself writes (casefolded names). Mostly the memory
 # pipeline's own files; `Update-Tasks.json` is the update-task state store.
-# Indexing them made the proposals queue and the curation logs rank above real
+# Indexing them made the old proposals queue and the curation logs rank above real
 # notes for ordinary recall queries — the system's paperwork must never compete
 # with the memories it manages. Matched only directly under a
 # `Workspace/` directory — where the app writes them — so a user's own
 # note that happens to share a name (`projects/team/Weekly-Review-Log.md`)
 # stays searchable. Shared with `fts_search` so the two cannot drift.
 #
-# `note-checks.json` is `ciao.note_verification`'s durable per-note verification
-# state: a verdict with its citations, not a memory, and indexed JSON would put
+# `note-checks.json` is the per-note verification state older versions kept: a
+# verdict with its citations, not a memory, and indexed JSON would put
 # "checked on <date>" in the middle of an ordinary recall result.
 # Proposal files (``Workspace/Proposals/<slug>.md``, ``ciao/proposal_files.py``) are
 # the agent's paperwork for a person, not notes: their front matter has no
@@ -211,9 +211,8 @@ RESERVED_UNINDEXED_FILES = frozenset(
         # becoming an index row and a recall hit.
         "update-tasks.json",
         "note-checks.json",
-        # The Learnings cleanup suppression store (`ciao/learnings_cleanup.py`):
-        # which `(learning_id, entry_revision)` pairs have already been retired,
-        # so an undo is not reversed by the next nightly pass. A guard with a
+        # The Learnings cleanup suppression store older versions wrote: which
+        # `(learning_id, entry_revision)` pairs had been retired. A guard with a
         # machine identity in it, and indexed JSON would put a raw uuid in the
         # middle of an ordinary recall result.
         "learnings-cleanup.json",
@@ -444,7 +443,7 @@ def canonical_type(raw: str, *, registry: EntityTypeRegistry | None = None) -> s
 
 # Promotion threshold: a non-canonical type or an emerging tag that reaches
 # this many uses becomes a candidate for the canonical/established set. Shared
-# by the promotion/merge proposal audit (ciao.vocabulary_proposals) and the
+# by the vocabulary audit and the
 # established-tag tier in VOCABULARY.md, so one value classifies both.
 DEFAULT_PROMOTION_THRESHOLD = 5
 
@@ -506,9 +505,8 @@ def is_excluded(rel_path: Path) -> bool:
     # memory-vault/work/Logs (if any), etc.
     if any(p in EXCLUDED_TOP_DIRS for p in parts[1:]):
         return True
-    # The review queue is a projection of the review ledger, not a note. Left
-    # scannable it became a permanent orphan node in the Memory Map and was
-    # itself counted by the lint that seeds review candidates.
+    # The app's own bookkeeping files are not notes. Left scannable they became
+    # permanent orphan nodes in the Memory Map and were counted by the lint.
     if is_reserved_bookkeeping(rel_path):
         return True
     return False
@@ -717,8 +715,7 @@ def vault_relative(rendered: str, prefix: Path) -> str:
 
     :func:`ciao.memory_audit.find_stale_notes` reports the path
     :func:`scan_vault` rendered, which carries the render
-    prefix; the worklist key, :mod:`ciao.note_verification`'s check state and the
-    note-edit sidecar all key on the vault-relative POSIX path instead. A
+    prefix; the worklist key uses the vault-relative POSIX path instead. A
     rendered path that is not under the prefix (a hand-built entry in a test) is
     taken as already relative — the same total answer
     :func:`ciao.vault_index._strip_prefix` gives, rather than refusing a
@@ -1085,7 +1082,7 @@ def _commit_staged_edits(edits: list[tuple[Path, str, str]]) -> list[str]:
                 encoding="utf-8",
                 delete=False,
                 dir=abs_path.parent,
-                # Truncated for the same reason as `vault_review`: a note
+                # Truncated so a note
                 # name near NAME_MAX plus ".", 8 random chars and ".tmp"
                 # raises ENAMETOOLONG, which no caller here catches.
                 prefix=temp_prefix(abs_path.name),
@@ -1823,8 +1820,8 @@ def write_vocabulary_file(
     section naming a category the Types list did not offer, or counting against
     a different closed set than the drift beside it, would hand the agent two
     vocabularies. It is a keyword argument defaulting to ``None`` so every
-    existing caller — the CLI's ``--write``, and the writers the memory pass and
-    the proposal queue make — renders byte-for-byte what it rendered before,
+    existing caller — the CLI's ``--write``, and the writers the memory pass
+    makes — renders byte-for-byte what it rendered before,
     which is what keeps the registry's adoption a separate, reviewable change.
     """
     header = (

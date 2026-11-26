@@ -543,11 +543,8 @@ def invalidate_stale_stamps(before: str, after: str) -> tuple[str, int]:
       bullet" failure, and a fingerprint cannot see it at all, because the words
       are byte-identical.
 
-    A pure re-stamp is therefore *not* an ordinary save's business: it is the
-    `still_valid` verdict's, and a save that happens to move a date on unchanged
-    text has this put it back. That is the same rule
-    :func:`ciao.entry_verification.stamp_entry` writes under, read from the other
-    side.
+    A pure re-stamp is therefore *not* an ordinary save's business: it is not an edit, and a save that happens to move a date on unchanged text has this put
+    it back.
 
     Returning the count matters as much as the text: a writer that silently
     dropped or reverted nine stamps would leave a reader wondering why their

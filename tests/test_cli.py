@@ -404,6 +404,16 @@ def test_cli_create_chat_dispatches_command(monkeypatch: pytest.MonkeyPatch) -> 
     assert called[0].workspace == "personal"
 
 
+def test_cli_cleanup_sdk_blobs_dispatches_command(monkeypatch: pytest.MonkeyPatch) -> None:
+    called = []
+
+    monkeypatch.setattr(cli, "_cleanup_sdk_blobs_command", lambda args: called.append(args) or 0)
+
+    assert cli.main(["cleanup-sdk-blobs", "--workspace", str(Path("/tmp/workspace")), "--apply"]) == 0
+    assert str(called[0].workspace) == str(Path("/tmp/workspace"))
+    assert called[0].apply is True
+
+
 def test_cli_skills_sync_removed() -> None:
     # skills-sync command has been removed per simplification plan.
     try:
@@ -1621,187 +1631,6 @@ def test_setup_does_not_download_or_install_the_desktop_app(
     assert not (apps / "Ciaobot Server.app").exists()
 
 
-# -- skill-proposal-remove --------------------------------------------------
-
-
-def _skill_proposal_workspace(root: Path, name: str = "2026-08-09-defuddle") -> Path:
-    """A workspace whose vault holds one skill proposal in the personal queue."""
-    vault = root / "memory-vault"
-    personal = vault / "personal"
-    # A workspace evidence dir so the bootstrap registry sees a `personal` vault.
-    (personal / "Workspace").mkdir(parents=True, exist_ok=True)
-    source = personal / "Workspace" / "Skill-Proposals" / f"{name}.md"
-    source.parent.mkdir(parents=True, exist_ok=True)
-    source.write_text(f"# {name}\n\nA proposed skill.\n", encoding="utf-8")
-    return source
-
-
-def _accepted_skill_proposal(
-    root: Path, name: str = "2026-08-09-defuddle"
-) -> Path:
-    """A proposal a chat has been given, which is what an outcome records."""
-    from ciao import skill_proposals
-    from ciao.config import CiaoConfig
-
-    source = _skill_proposal_workspace(root, name)
-    config = CiaoConfig.from_env({
-        "CIAO_WORKSPACE": str(root),
-        "CIAO_VAULT_ROOT": "memory-vault",
-        "PWA_AUTH_TOKEN": "test",
-    })
-    record = skill_proposals.parse_proposal(source, "personal")
-    assert record is not None
-    skill_proposals.mark_implementing(config, record.id, "chat-1")
-    return source
-
-
-def test_cli_skill_proposal_remove_rejects_both_verification_flags() -> None:
-    """One proof, one door.
-
-    `--verification` and `--verification-file` are the same evidence by two
-    routes, so passing both is a contradiction the parser has to refuse: a
-    silently-preferred winner would settle the finding with proof nobody chose.
-    """
-    with pytest.raises(SystemExit) as excinfo:
-        cli.main(
-            [
-                "skill-proposal-remove",
-                "web-research",
-                "--applied",
-                "--verification",
-                "x",
-                "--verification-file",
-                "f",
-            ]
-        )
-    assert excinfo.value.code == 2
-
-
-# The readback a Windows chat actually writes. Windows PowerShell 5.1's `>` and
-# `Out-File` write UTF-16LE with a BOM; `Out-File -Encoding utf8` and Notepad's
-# "UTF-8 with BOM" write UTF-8 with a BOM. Both are what `--verification-file`
-# has to read, on the platform the readback-in-a-file change was made for.
-_BOM_READBACK = "- Use `gh api`, don't scrape — $HOME"
-
-
-# -- skill-proposal-add ------------------------------------------------------
-
-
-def _owned_skill_install(root: Path, name: str) -> Path:
-    """A workspace whose vault registers `personal` and owns one skill source.
-
-    The canonical owned source is ``<install>/skills/<name>/SKILL.md``: an
-    install that has not re-rooted answers every workspace with the install
-    root, and one owner is what makes the catalog this workspace's own.
-    """
-    (root / "memory-vault" / "personal" / "Workspace").mkdir(parents=True, exist_ok=True)
-    skill_md = root / "skills" / name / "SKILL.md"
-    skill_md.parent.mkdir(parents=True, exist_ok=True)
-    skill_md.write_text(f"---\nname: {name}\n---\n\n# {name}\n", encoding="utf-8")
-    return skill_md
-
-
-def _finding(
-    tmp_path: Path,
-    *,
-    name: str = "finding",
-    sources: list[dict] | None = None,
-    origins: list[dict] | None = None,
-) -> str:
-    """Write one structured finding, as a pass or a person would, and return it."""
-    path = tmp_path / f"{name}.json"
-    payload: dict = {
-        "title": "notes: read the categories block first",
-        "problem": "The user corrected the note type twice.",
-        "change": "Add a step: read the Categories block before a type.",
-        "rationale": "The correction repeated, so it is reusable.",
-        "sources": sources
-        if sources is not None
-        else [
-            {
-                "chat_id": "chat-7",
-                "archive": "memory-vault/personal/logs/x.md",
-                "turn": "3",
-                "excerpt": "no, that's a person, not a project",
-            }
-        ],
-    }
-    if origins is not None:
-        payload["origins"] = origins
-    path.write_text(json.dumps(payload), encoding="utf-8")
-    return str(path)
-
-
-def test_cli_skill_proposal_add_requires_the_input_file(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """There is no other door: a finding cannot be typed as an argument."""
-    workspace = tmp_path / "workspace"
-    _owned_skill_install(workspace, "notes")
-    monkeypatch.chdir(tmp_path)
-    monkeypatch.setenv("CIAO_WORKSPACE", str(workspace))
-    monkeypatch.setenv("CIAO_VAULT_ROOT", "memory-vault")
-
-    with pytest.raises(SystemExit) as excinfo:
-        cli.main(["skill-proposal-add", "notes"])
-    assert excinfo.value.code == 2
-
-
-# -- skill-proposal origins -------------------------------------------------
-
-
-def _origin_input(**overrides: object) -> dict:
-    """One learning link in a filed finding, as a routed pass would write it."""
-    entry: dict = {
-        "learning_id": "5d6b0a1e-6f4a-5b1c-9d2e-3a4b5c6d7e8f",
-        "finding": "read the Categories block before a type",
-        "source_revision": "c" * 64,
-        "summary": "Add the Categories step.",
-    }
-    entry.update(overrides)
-    return entry
-
-
-# -- skill-proposal-remove: settling a linked finding -----------------------
-
-
-LEARNING_ID = "5d6b0a1e-6f4a-5b1c-9d2e-3a4b5c6d7e8f"
-
-
-def _linked_workspace(monkeypatch: pytest.MonkeyPatch, root: Path) -> Path:
-    """An install owning one skill, filed against two findings of one learning."""
-    workspace = root / "workspace"
-    _owned_skill_install(workspace, "notes")
-    monkeypatch.chdir(root)
-    monkeypatch.setenv("CIAO_WORKSPACE", str(workspace))
-    monkeypatch.setenv("CIAO_VAULT_ROOT", "memory-vault")
-    finding = _finding(
-        root,
-        origins=[
-            _origin_input(learning_id=LEARNING_ID, finding="read the Categories block"),
-            _origin_input(learning_id=LEARNING_ID, finding="read it back afterwards"),
-        ],
-    )
-    assert cli.main(["skill-proposal-add", "notes", "--input-file", finding]) == 0
-    return workspace
-
-
-def _stored_record(workspace: Path):
-    from ciao import skill_proposals
-
-    record = skill_proposals.parse_proposal(
-        workspace
-        / "memory-vault"
-        / "personal"
-        / "Workspace"
-        / "Skill-Proposals"
-        / "notes.md",
-        "personal",
-    )
-    assert record is not None
-    return record
-
-
 def _search_note(vault: Path, name: str) -> None:
     (vault / "People").mkdir(parents=True, exist_ok=True)
     (vault / "People" / f"{name}.md").write_text(
@@ -2125,50 +1954,6 @@ def test_config_discovery_survives_an_exported_empty_workspace(
     # The discovered install wins, so the .env and the root agree.
     assert config.workspace_root == workspace.resolve()
     assert config.pwa_auth_token == "ws-secret-token"
-
-
-# -- skill-draft-* (#728-D) --------------------------------------------------
-
-
-def _draft_workspace(tmp_path: Path) -> Path:
-    """An install whose vault registers `personal`."""
-    root = tmp_path / "workspace"
-    (root / "memory-vault" / "personal" / "Workspace").mkdir(parents=True, exist_ok=True)
-    return root
-
-
-def _draft_payload(tmp_path: Path, **overrides) -> str:
-    path = tmp_path / "draft.json"
-    payload = {
-        "target": "upstream_issue",
-        "skill": "web-research",
-        "title": "Document the offline fallback for a timed-out fetch",
-        "change": "State that a timed-out fetch is retried once before reporting.",
-        "body": "A fetch that times out is a transport failure, not an empty answer.",
-        "repository": "example/tools",
-        "version": "1.4.0",
-        "private_evidence": "chat-42 turn 7",
-    }
-    payload.update(overrides)
-    path.write_text(json.dumps(payload), encoding="utf-8")
-    return str(path)
-
-
-def _run_draft_add(capsys: pytest.CaptureFixture[str], payload: str) -> str:
-    """File a draft through the CLI and return its ``--json`` stdout."""
-    assert cli.main(["skill-draft-add", "--input-file", payload, "--json"]) == 0
-    return capsys.readouterr().out
-
-
-def _workspace_config(root: Path):
-    """The config the CLI itself would build for ``root``, for a direct assertion."""
-    from ciao.config import CiaoConfig
-
-    return CiaoConfig.from_env({
-        "PWA_AUTH_TOKEN": "test-token",
-        "CIAO_WORKSPACE": str(root),
-        "CIAO_VAULT_ROOT": str(root / "memory-vault"),
-    })
 
 
 # ---- The workspace name the entry pass is planned under -------------------
@@ -2538,15 +2323,6 @@ def test_setup_command_prints_the_macos_access_note(
     err = capsys.readouterr().err
     assert "Ciaobot Server" in err and "Error:" in err
     assert not (home / "Documents" / "ws2").exists()
-
-
-def _handover_registry(root: Path, vault: Path, handover: str | None) -> None:
-    entry: dict[str, str] = {"name": "work", "vault_root": str(vault)}
-    if handover is not None:
-        entry["memory_handover"] = handover
-    (root / ".runtime" / "workspaces.json").write_text(
-        json.dumps({"work": entry}), encoding="utf-8"
-    )
 
 
 def test_cli_root_version_prints_version_without_side_effects(

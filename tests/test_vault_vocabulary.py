@@ -457,28 +457,3 @@ def test_workspace_reroot_plan_is_not_refused(tmp_path: Path, monkeypatch) -> No
 
     with pytest.raises(_Reached):
         cli_main(["workspace-reroot"])
-
-
-# The review-queue writers resolve their vault through _proposal_config. The
-# refusal sits before any input is read, so the stub is the first thing that can
-# observe a call.
-def _skill_writer_argv(tmp_path: Path, command: str) -> list[str]:
-    payload = tmp_path / "input.json"
-    payload.write_text("{}", encoding="utf-8")
-    return {
-        "skill-proposal-add": ["skill-proposal-add", "some-skill", "--input-file", str(payload)],
-        "skill-proposal-remove": ["skill-proposal-remove", "some-skill"],
-        "skill-draft-add": ["skill-draft-add", "--input-file", str(payload)],
-        "skill-draft-approve": ["skill-draft-approve", "draft-1"],
-        "skill-draft-reject": ["skill-draft-reject", "draft-1"],
-    }[command]
-
-
-_SKILL_WRITERS = [
-    "skill-proposal-add",
-    "skill-proposal-remove",
-    "skill-draft-add",
-    "skill-draft-approve",
-    "skill-draft-reject",
-]
-
