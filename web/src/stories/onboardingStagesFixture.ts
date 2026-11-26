@@ -1,6 +1,7 @@
 import { defineComponent, h, onBeforeUnmount, onMounted, ref, shallowRef, type Component, type VNode } from 'vue'
 import { expect, waitFor } from 'storybook/test'
 import type { OnboardingStageProps, StageState } from '../lib/onboarding'
+import type { Pinia } from 'pinia'
 import type { Schedule } from '../lib/types'
 import type { FixtureRoute } from './fixtureBoundary'
 import { mountConnected, type ConnectedFixture } from './mountConnected'
@@ -116,6 +117,7 @@ export type StagePanelConfig = {
   component: Component
   props: OnboardingStageProps
   narrow?: boolean
+  seed?: (pinia: Pinia) => void
   /**
    * Exposed stage methods the host may drive for the play, e.g. `save`: it is
    * the shell's Continue seam, invoked here outside the stage rather than by a
@@ -149,7 +151,7 @@ export function stagePanel(config: StagePanelConfig): VNode {
       })
       onMounted(() => {
         try {
-          fixture.value = mountConnected(host.value!, { component: routed })
+          fixture.value = mountConnected(host.value!, { component: routed, seed: config.seed })
         } catch (cause) { error.value = String(cause) }
       })
       onBeforeUnmount(() => fixture.value?.dispose())
