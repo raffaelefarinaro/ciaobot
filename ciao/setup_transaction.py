@@ -180,6 +180,8 @@ class SetupTransaction:
         """
         item = self.data[name]
         if item.get("published"):
+            if "values" not in item:
+                raise ValueError("pending setup predates this version; finish or remove it with that version")
             pinned: dict[str, Any] = item["values"]
             return pinned
         if item.get("values") != values:
@@ -215,7 +217,17 @@ class SetupTransaction:
             path.unlink()
             _sync_dir(parent)
 
-    def publish(self, name: str, text: str) -> None:
+    def publish(self, name: str, text: str, *, owner: Any = None) -> None:
+        """Publish a binding file.
+
+        The registry is created with `os.link`, which fails when the file
+        exists: a compare-and-swap on "absent" that also keeps the staged
+        inode as the journaled identity (`owner.replace` renames a temp file it
+        creates itself, so the identity could not be journaled first). Given
+        the registry `owner`, whose lock this must run under, the swap's
+        expectation is checked first and the owner's view is advanced after, so
+        a later `owner.replace(expected=...)` is not a stale-view conflict.
+        """
         path = self.root / (".env" if name == "env" else ".runtime/workspaces.json")
         self.verify_binding(name)
         item = self.data[name]
@@ -225,7 +237,13 @@ class SetupTransaction:
                 raise ValueError("setup binding differs from pending setup")
             if path.exists() and _identity(path) == item["identity"]:
                 self._remove_stage(name)
+                if owner is not None:
+                    owner.current = raw
                 return
+        if owner is not None and (name != "registry" or owner.current is not None):
+            from ciao.workspaces import WorkspaceRegistryConflict
+
+            raise WorkspaceRegistryConflict("workspace registry changed since it was loaded")
         self._remove_stage(name)
         path.parent.mkdir(parents=True, exist_ok=True)
         fd, stage_name = mkstemp_private(dir=path.parent, prefix=".setup-binding-", suffix=".tmp")
@@ -243,6 +261,8 @@ class SetupTransaction:
             else:
                 os.replace(stage, path)
             _sync_dir(path.parent)
+            if owner is not None:
+                owner.current = raw
         finally:
             stage.unlink(missing_ok=True)
 
