@@ -316,6 +316,26 @@ def _region_body(guide_text: str, region: MemoryRegion) -> tuple[str, list[Regio
     return body, []
 
 
+def marker_cap(guide: Path, region: str) -> int | None:
+    """Return the ``cap=N`` written in *region*'s start marker, or None.
+
+    None when the guide is unreadable, the marker is missing, or it carries no
+    cap, so callers fall back to the default only in those cases.
+    """
+    try:
+        canonical = resolve_region(region)
+        text = guide.read_text(encoding="utf-8")
+    except (ValueError, OSError):
+        return None
+    found = re.search(
+        rf"<!--\s*ciao:{canonical}:start\s+cap=(\d+)\s*-->", text
+    )
+    if found is None:
+        return None
+    cap = int(found.group(1))
+    return cap or None
+
+
 def read_region(
     guide: Path, region: str
 ) -> tuple[list[str], list[RegionDiagnostic]]:
@@ -515,7 +535,7 @@ def memory_status(
         entries, diags = read_region(guide, region)
         diagnostics.extend({"region": d.region, "code": d.code, "message": d.message} for d in diags)
         regions[region] = {
-            **region_usage(entries, limit),
+            **region_usage(entries, marker_cap(guide, region) or limit),
             "expired_count": sum(1 for entry in entries if is_entry_expired(entry)),
             "malformed_expiration_count": sum(
                 1 for entry in entries if expiration_tag_error(entry) is not None

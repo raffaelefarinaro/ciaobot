@@ -43,6 +43,7 @@ from ciao.fts_search import (
     search_vault,
     vault_key_prefix,
 )
+from ciao.memory_tool import marker_cap
 from ciao.memory_tool import memory_status as memory_status_payload
 from ciao.memory_tool import (
     DEFAULT_MEMORY_CHAR_LIMIT,
@@ -1198,12 +1199,12 @@ class CiaoControlPlane:
         if action not in {"add", "replace", "remove"}:
             raise ControlPlaneError("invalid_action", "action must be add, replace, or remove.")
         canonical = resolve_region(region)
-        limit = (
+        guide = guide_path(self.config.agent_root(workspace))
+        limit = marker_cap(guide, canonical) or (
             DEFAULT_MEMORY_CHAR_LIMIT
             if canonical == "memory"
             else DEFAULT_USER_CHAR_LIMIT
         )
-        guide = guide_path(self.config.agent_root(workspace))
         try:
             result = update_region(
                 guide,
