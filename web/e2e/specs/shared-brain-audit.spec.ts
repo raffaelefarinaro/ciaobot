@@ -39,7 +39,7 @@ function card(page: Page): Locator {
   return page.locator('.card', { has: page.getByText('Shared brains', { exact: true }) })
 }
 
-async function stub(page: Page) {
+async function stub(page: Page, grants: Array<Record<string, unknown>> = [GRANT]) {
   const writes: string[] = []
   await page.route(/\/api\/workspaces\/alpha\/shared-brains$/, (route) => route.fulfill({
     json: { shared_brains: [{
@@ -55,7 +55,7 @@ async function stub(page: Page) {
     return route.fulfill({ json: {
       disclosure_tokens: {}, workspace: 'alpha', chat_evidence: { available: false, status: 'remote_client' },
       mode: 'review', fields: ['decision', 'reason', 'effective_date'], producers: ['memory_extraction', 'nightly_curation'],
-      brains: [], projects: [], grants: [GRANT],
+      brains: [], projects: [], grants,
     } })
   })
   return writes
@@ -110,6 +110,38 @@ test.describe('shared brain consent and history', () => {
   // A real 200% zoom: half the CSS viewport at twice the device scale. Not CSS zoom.
   test.describe('200% zoom', () => {
     test.use({ viewport: { width: 640, height: 400 }, deviceScaleFactor: 2 })
+
+    test('six grants with very long values and a hostile reason stay inside the viewport and render as text', async ({ page }, testInfo) => {
+      const long = 'unbroken'.repeat(120)
+      const grants = Array.from({ length: 6 }, (_, i) => ({
+        ...GRANT,
+        grant_id: `grn_multi_${i}`,
+        project_id: `proj-${i}-${long}`,
+        source_label: `Source ${i} ${long}`,
+        field_mask: [`field_${long}`, 'decision'],
+        status: i % 2 ? 'revoked' : 'active',
+        active: i % 2 === 0,
+        revoked_at: i % 2 ? '2026-11-25T12:00:00Z' : null,
+        history: [
+          { event: 'issued', at: `2026-11-25T1${i}:00:00Z`, generation: 1 },
+          ...(i === 5 ? [{ event: 'withdrawn', at: '2026-11-25T20:00:00Z', generation: 1, reason: '<img src=x onerror="window.__pwned=1">' }] : []),
+        ],
+      }))
+      await stub(page, grants)
+      const { panel } = await open(page)
+      await expect(panel.locator('.audit-grant')).toHaveCount(6)
+      await expect(panel.locator('.audit-event')).toHaveCount(7)
+      // The hostile tag is text, never an element, and nothing ran.
+      await expect(panel.locator('img')).toHaveCount(0)
+      await expect(panel).toContainText('<img src=x onerror="window.__pwned=1">')
+      expect(await page.evaluate(() => (window as unknown as { __pwned?: number }).__pwned)).toBeUndefined()
+      // Long values are clipped, not allowed to push the page wide.
+      await expect(panel.locator('.audit-scope dd').first()).not.toContainText(long.repeat(2))
+      await quiesce(page)
+      const { overflow, culprits } = await horizontalOverflow(page)
+      expect(overflow, JSON.stringify(culprits)).toBeLessThanOrEqual(0)
+      await panel.screenshot({ path: testInfo.outputPath('audit-multi-200pct.png') })
+    })
 
     test('keeps every line reachable with no horizontal overflow', async ({ page }, testInfo) => {
       await stub(page)

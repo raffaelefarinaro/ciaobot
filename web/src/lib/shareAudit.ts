@@ -3,7 +3,8 @@ import type { ShareEvidenceGrant } from './types'
 
 /** Plain words for a grant's status; the state never rests on colour alone. */
 export function grantStatusLabel(grant: Pick<ShareEvidenceGrant, 'status'>): string {
-  if (grant.status === 'active') return 'Active'
+  // Never plain "Active": no producer publishes automatically yet, so a recorded permission is not a sharing in progress.
+  if (grant.status === 'active') return 'Recorded, not yet in use'
   if (grant.status === 'unlinked') return 'Brain unlinked'
   if (grant.status === 'withdrawn') return 'Withdrawn'
   if (grant.status === 'revoked') return 'Revoked'
@@ -13,6 +14,12 @@ export function grantStatusLabel(grant: Pick<ShareEvidenceGrant, 'status'>): str
 const PRODUCER_LABEL: Record<string, string> = {
   memory_extraction: 'Memory extraction',
   nightly_curation: 'Nightly curation',
+}
+
+/** Engine text is shown at a bounded length so one long value cannot take over the view. */
+export const MAX_AUDIT_TEXT = 200
+export function clipText(value: string, max = MAX_AUDIT_TEXT): string {
+  return value.length > max ? `${value.slice(0, max)}…` : value
 }
 
 export function producerLabel(producer: string): string {
@@ -52,8 +59,8 @@ export interface AuditEvent {
 
 function eventText(row: Record<string, unknown>): string {
   const generation = typeof row.generation === 'number' ? ` (generation ${row.generation})` : ''
-  const reason = typeof row.reason === 'string' && row.reason.trim() ? `: ${row.reason.trim().slice(0, 200)}` : ''
-  if (row.event === 'issued') return `Granted${generation}`
+  const reason = typeof row.reason === 'string' && row.reason.trim() ? `: ${clipText(row.reason.trim())}` : ''
+  if (row.event === 'issued') return `Permission recorded${generation}`
   if (row.event === 'revoked') return `Revoked${generation}`
   if (row.event === 'withdrawn') return `Withdrawn${generation}${reason}`
   return 'Change recorded'
@@ -62,7 +69,7 @@ function eventText(row: Record<string, unknown>): string {
 /** One line for the grant a history row belongs to. */
 export function grantLabel(grant: ShareEvidenceGrant): string {
   const what = grant.type === 'standing' ? 'Future decisions' : 'One decision'
-  return `${what} to ${grant.brain.name || 'unknown brain'}`
+  return `${what} to ${clipText(grant.brain.name || 'unknown brain', 80)}`
 }
 
 /** Every grant event in one list, newest first; rows with no usable time sort last. */

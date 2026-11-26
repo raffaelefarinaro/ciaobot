@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { audienceLines, auditEvents, grantStatusLabel, retentionText } from './shareAudit'
+import { audienceLines, auditEvents, clipText, grantStatusLabel, retentionText } from './shareAudit'
 import type { ShareEvidenceGrant } from './types'
 
 function grant(over: Partial<ShareEvidenceGrant> = {}): ShareEvidenceGrant {
@@ -46,7 +46,7 @@ describe('shareAudit', () => {
   it('names every grant status in words', () => {
     expect(['active', 'revoked', 'withdrawn', 'unlinked', 'inactive'].map((status) =>
       grantStatusLabel({ status } as Pick<ShareEvidenceGrant, 'status'>))).toEqual([
-      'Active', 'Revoked', 'Withdrawn', 'Brain unlinked', 'Inactive',
+      'Recorded, not yet in use', 'Revoked', 'Withdrawn', 'Brain unlinked', 'Inactive',
     ])
   })
 
@@ -71,13 +71,19 @@ describe('shareAudit', () => {
     expect(events.map((e) => e.text)).toEqual([
       'Withdrawn (generation 1): superseded',
       'Revoked (generation 1)',
-      'Granted (generation 1)',
-      'Granted (generation 1)',
+      'Permission recorded (generation 1)',
+      'Permission recorded (generation 1)',
       'Change recorded',
     ])
     expect(events.map((e) => e.grantId)).toEqual(['grn_b', 'grn_a', 'grn_b', 'grn_a', 'grn_b'])
     expect(events[4].when).toBe('Time unknown')
     expect(JSON.stringify(events)).not.toContain('do not show')
+  })
+
+  it('clips long text with an ellipsis and leaves short text alone', () => {
+    expect(clipText('abc')).toBe('abc')
+    expect(clipText('x'.repeat(500))).toHaveLength(201)
+    expect(clipText('x'.repeat(500), 80).endsWith('…')).toBe(true)
   })
 
   it('bounds an engine-recorded reason', () => {

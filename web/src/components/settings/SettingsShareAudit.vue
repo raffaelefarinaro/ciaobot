@@ -38,12 +38,12 @@
                 <span class="audit-state" :class="{ 'audit-state--ended': grant.status !== 'active' }">{{ grantStatusLabel(grant) }}</span>
               </div>
               <dl class="audit-scope">
-                <dt>Project</dt><dd>{{ grant.project_id }}</dd>
-                <dt>Source</dt><dd>{{ grant.source_label || 'Unknown' }}</dd>
-                <dt>Fields</dt><dd>{{ grant.field_mask.join(', ') || 'None' }}</dd>
-                <dt>Producers</dt><dd>{{ grant.producers.map(producerLabel).join(', ') || 'None' }}</dd>
+                <dt>Project</dt><dd>{{ clipText(grant.project_id, 80) }}</dd>
+                <dt>Source</dt><dd>{{ clipText(grant.source_label) || 'Unknown' }}</dd>
+                <dt>Fields</dt><dd>{{ clipText(grant.field_mask.join(', ')) || 'None' }}</dd>
+                <dt>Producers</dt><dd>{{ clipText(grant.producers.map(producerLabel).join(', ')) || 'None' }}</dd>
                 <dt>Audience</dt><dd>Unknown</dd>
-                <dt>Granted</dt><dd>{{ localTime(grant.issued_at) }}, generation {{ grant.consent_generation }}</dd>
+                <dt>Recorded</dt><dd>{{ localTime(grant.issued_at) }}, generation {{ grant.consent_generation }}</dd>
                 <template v-if="grant.revoked_at"><dt>Revoked</dt><dd>{{ localTime(grant.revoked_at) }}</dd></template>
                 <template v-if="grant.withdrawn_at"><dt>Withdrawn</dt><dd>{{ localTime(grant.withdrawn_at) }}</dd></template>
               </dl>
@@ -81,6 +81,7 @@ import { sharedBrainPolicyText } from '../../lib/sharedBrain'
 import {
   audienceLines,
   auditEvents,
+  clipText,
   grantLabel,
   grantStatusLabel,
   localTime,

@@ -80,7 +80,8 @@ describe('SettingsShareAudit', () => {
     expect(text).toContain('Audience unknown')
     expect(text).toContain('Target: github.com/acme/team-notes')
     expect(text).toContain('Future decisions to team-notes')
-    expect(text).toContain('Active')
+    expect(text).toContain('Recorded, not yet in use')
+    expect(text).not.toMatch(/\bActive\b/)
     expect(text).toContain('decision, effective_date')
     expect(text).toContain('Memory extraction, Nightly curation')
     expect(text).toContain('cannot recall a note once it is published')
@@ -124,10 +125,23 @@ describe('SettingsShareAudit', () => {
     const items = view.findAll('.audit-event').map((row) => row.text())
     expect(items).toHaveLength(3)
     expect(items[0]).toContain('Revoked (generation 1)')
-    expect(items[1]).toContain('Granted (generation 1)')
+    expect(items[1]).toContain('Permission recorded (generation 1)')
     expect(items[1]).toContain('One decision to old-notes')
     expect(items[2]).toContain('Future decisions to team-notes')
     expect(view.text()).toContain('does not remove a note that was already published')
+  })
+
+  it('bounds long engine text and renders markup as text', async () => {
+    const long = 'x'.repeat(5000)
+    apiGet.mockResolvedValue(evidence([grant({
+      project_id: long, source_label: long, field_mask: [long],
+      history: [{ event: 'withdrawn', at: '2026-11-25T10:00:00Z', reason: '<img src=x onerror=alert(1)>' }],
+    })]))
+    const view = await mountView([brain()])
+    expect(view.text().length).toBeLessThan(2500)
+    expect(view.text()).not.toContain('x'.repeat(300))
+    expect(view.find('img').exists()).toBe(false)
+    expect(view.text()).toContain('<img src=x onerror=alert(1)>')
   })
 
   it('says so when nothing has been recorded', async () => {

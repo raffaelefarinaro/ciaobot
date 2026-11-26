@@ -39,7 +39,7 @@ export const inventory: InventoryEntry[] = [
       { name: 'loading', coverage: 'covered', storyIds: ['settings-share-audit--loading'], note: 'The first evidence read is held; the reading line shows and no brain list renders.' },
       { name: 'failed', coverage: 'covered', storyIds: ['settings-share-audit--failed'], note: 'A first-load failure shows the role=alert read error with Try again; no brain list renders.' },
       { name: 'empty', coverage: 'covered', storyIds: ['settings-share-audit--empty'], note: 'A linked brain with no grant shows review, unknown audience, no permission and no history.' },
-      { name: 'active-grant', coverage: 'covered', storyIds: ['settings-share-audit--active-grant'], note: 'An active standing grant shows scope, unknown audience and the not-active-yet automatic policy, with no buttons.' },
+      { name: 'active-grant', coverage: 'covered', storyIds: ['settings-share-audit--active-grant'], note: 'A recorded standing grant (status "Recorded, not yet in use") shows scope, unknown audience and the not-active-yet automatic policy, with no buttons.' },
       { name: 'revoked-history', coverage: 'covered', storyIds: ['settings-share-audit--revoked-history'], note: 'An active and a revoked grant show their status words and a newest-first merged history.' },
       { name: 'folder', coverage: 'covered', storyIds: ['settings-share-audit--folder-brain'], note: 'A folder brain shows local-file semantics and never claims cloud sync or recall.' },
     ],

@@ -108,7 +108,7 @@ export const ActiveGrant: Story = {
   render: () => panel([brain({ sharing_policy: 'automatic', sharing_generation: 1 })]),
   play: async ({ canvasElement }) => {
     await settled(canvasElement)
-    await waitFor(() => expect(canvasElement.querySelector('.audit-state')?.textContent).toBe('Active'))
+    await waitFor(() => expect(canvasElement.querySelector('.audit-state')?.textContent).toBe('Recorded, not yet in use'))
     expect(canvasElement.textContent).toContain('it is not active yet')
     expect(canvasElement.textContent).toContain('Audience unknown')
     expect(canvasElement.textContent).toContain('cannot recall a note once it is published')
@@ -123,7 +123,7 @@ export const RevokedHistory: Story = {
     await settled(canvasElement)
     await waitFor(() => expect(canvasElement.querySelectorAll('.audit-event')).toHaveLength(3))
     expect(canvasElement.querySelector('.audit-event')?.textContent).toContain('Revoked (generation 1)')
-    expect([...canvasElement.querySelectorAll('.audit-state')].map((el) => el.textContent)).toEqual(['Active', 'Revoked'])
+    expect([...canvasElement.querySelectorAll('.audit-state')].map((el) => el.textContent)).toEqual(['Recorded, not yet in use', 'Revoked'])
   },
 }
 
