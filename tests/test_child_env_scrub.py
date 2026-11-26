@@ -18,7 +18,7 @@ from typing import Any
 
 import pytest
 
-from ciao import adapter_install, dag, host_terminal, package_version, schedule_command
+from ciao import adapter_install, host_terminal, package_version, schedule_command
 from ciao.os_support.child_env import BUNDLED_ENGINE_SCRUBBED_KEYS, child_env
 from ciao.providers.acp import connection as connection_module
 
@@ -223,40 +223,6 @@ def test_claude_auth_status_child_gets_the_child_env(
     setup_status.claude_auth_status("/bin/claude")
 
     _check_env(capture_runs[0], bundled)
-
-
-@pytest.mark.parametrize(("mode", "bundled"), [("bundled_app", True), ("editable", False)])
-def test_dag_bash_node_receives_the_child_env(
-    monkeypatch: pytest.MonkeyPatch, launcher_env: None, capture_runs: list[dict[str, Any]],
-    mode: str, bundled: bool,
-) -> None:
-    from types import SimpleNamespace
-
-    _mode(monkeypatch, mode)
-    node = SimpleNamespace(id="n", payload={"cmd": "true"}, timeout_s=5)
-
-    dag._exec_bash(node, {})  # type: ignore[arg-type]
-
-    _check_env(capture_runs[0], bundled)
-
-
-@pytest.mark.parametrize(("mode", "bundled"), [("bundled_app", True), ("editable", False)])
-def test_dag_prompt_and_subagent_nodes_receive_the_child_env(
-    monkeypatch: pytest.MonkeyPatch, launcher_env: None, capture_runs: list[dict[str, Any]],
-    mode: str, bundled: bool,
-) -> None:
-    from types import SimpleNamespace
-
-    _mode(monkeypatch, mode)
-    prompt = SimpleNamespace(id="p", model="sonnet", payload={"prompt": "hi"}, timeout_s=5)
-    subagent = SimpleNamespace(id="s", model="sonnet", payload={"prompt": "hi"}, timeout_s=5)
-
-    dag._exec_prompt(prompt, {})  # type: ignore[arg-type]
-    dag._exec_subagent(subagent, {})  # type: ignore[arg-type]
-
-    assert len(capture_runs) == 2
-    for call in capture_runs:
-        _check_env(call, bundled)
 
 
 @pytest.mark.parametrize(("mode", "bundled"), [("bundled_app", True), ("editable", False)])

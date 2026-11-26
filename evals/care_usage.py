@@ -23,7 +23,7 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Literal, cast
 
-from ciao.task_eval_contract import (
+from evals.task_eval_contract import (
     MAX_JSON_NUMBER,
     Metric,
     MetricReason,

@@ -1,12 +1,12 @@
 """Assemble one care measurement record from a finished schedule run.
 
 Pure: no I/O, no engine, no git. The caller passes the run's closed outcome
-(from :mod:`ciao.care_eval_run`), the seed manifest (:mod:`ciao.care_eval_seed`),
+(from :mod:`evals.care_eval_run`), the seed manifest (:mod:`evals.care_eval_seed`),
 and the observations read from disk by the seed observers, already translated
 to the oracle's symbolic bytes. Nothing here reads a reply, a transcript or a
 self-report: the grade is independent only when ``observed`` is supplied.
 
-The result goes through :func:`ciao.task_eval_contract.public_record`, the
+The result goes through :func:`evals.task_eval_contract.public_record`, the
 publication boundary, so no dict is published past it.
 
 Choices made here, recorded so a later reader can see why:
@@ -32,8 +32,8 @@ import json
 from collections.abc import Iterable, Mapping
 from typing import Any, cast
 
-from ciao.care_eval_fixtures import CARE_FIXTURES, CareFixture, grade_fixture
-from ciao.care_eval_run import (
+from evals.care_eval_fixtures import CARE_FIXTURES, CareFixture, grade_fixture
+from evals.care_eval_run import (
     Ambiguous,
     MissingChat,
     Refused,
@@ -42,10 +42,10 @@ from ciao.care_eval_run import (
     Superseded,
     TimedOut,
 )
-from ciao.care_eval_seed import SeedManifest
-from ciao.care_usage import CareUsageReport, contract_metrics
+from evals.care_eval_seed import SeedManifest
+from evals.care_usage import CareUsageReport, contract_metrics
 from ciao.curation_run import RunBudget
-from ciao.task_eval_contract import (
+from evals.task_eval_contract import (
     METRIC_NAMES,
     SCHEMA,
     MeasurementRecord,

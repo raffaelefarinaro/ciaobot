@@ -210,31 +210,6 @@ A later worker that reads this evidence, and the marginal-cost check tracked in
   telemetry speculation may enter the evidence the worker sees or cites.
 - Its cost is bounded and checked against #3054 before it is scheduled.
 
-### Bounded catalog candidates (#3248)
-
-`ciao/skill_catalog.py` is the first consumer of this evidence. A skill is a
-candidate only when a trigger matches: an archive-recorded use, or an open,
-settled or interrupted proposal or upstream draft. Installed presence, age and
-absent usage are never triggers, and triggers are checked before any source is
-read. Usage basis is `archive_marker` or `unknown`; installed presence is not
-recorded as usage.
-
-Selection drops protected and deferred candidates first, then interleaves the
-workspace-owned and packaged groups round-robin (each sorted by inventory id) and
-takes `MAX_CANDIDATES_PER_RUN`. There is no persisted cursor, so without one the
-same skills are selected on every night they remain eligible; a cursor belongs to
-the integration slice.
-
-Sources are read through a bounded no-follow read of at most
-`MAX_SOURCE_READ_BYTES`. A link, an oversize file or an undecodable file defers the
-candidate with a fixed reason and is not read in full.
-
-Draft references carry `revision` `unknown`: an upstream draft records no skill
-revision, so it is not drift-checked. An interrupted proposal is a distinct
-`interrupted` reference with no live row, so it can never be an `attach` target.
-Schedule dependency is `unknown` unless a caller supplies `schedule_refs`. The
-module writes nothing, and no schedule calls it yet.
-
 ## Evaluation
 
 Don't trust LoCoMo-style vendor numbers (misconfiguration-sensitive; string
@@ -247,7 +222,6 @@ Every recall failure observed in the wild becomes a fixture case first.
 Retrieval is only half the question: the deterministic eval cannot tell
 whether the assistant *uses* results well, and a prompt or provider change can
 alter auto-saving, tool selection, unattended behavior, or source handling
-while it stays green. `docs/BEHAVIORAL_EVAL.md` and `ciao/behavioral_eval.py`
-add versioned behavioral evaluations for that half — synthetic scenarios with
-baseline/candidate reports tied to exact prompt and provider versions, plus a
-model-free contract check that carries the CI gate.
+while it stays green. `docs/TASK_EVAL.md` and `evals/`
+add agentic task evaluations for that half — synthetic scenarios with
+baseline/candidate reports tied to exact prompt and provider versions.

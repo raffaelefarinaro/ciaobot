@@ -1,12 +1,11 @@
 """Agentic task eval: run real chat turns on an isolated engine and grade the workspace.
 
-Where ``behavioral_eval`` asks a model to *describe* the tool calls it would
-make, this module lets Ciaobot act: each task boots its own engine on a
+Each task boots its own engine on a
 synthetic fixture vault, runs one chat turn (or delegates one task), grades the
 resulting workspace state with deterministic checks, and records token, tool,
 wall-time and cost figures. Nothing reads a live vault.
 
-Catalog: ``ciao/stock/evals/tasks/<task_id>/task.json`` (plus an optional
+Catalog: ``evals/tasks/<task_id>/task.json`` (plus an optional
 ``overlay/`` tree). Docs: ``docs/TASK_EVAL.md``.
 """
 
@@ -41,11 +40,20 @@ from typing import Any, Protocol
 
 import yaml
 
-from ciao import agent_paths, behavioral_eval
+from ciao import agent_paths
 from ciao.config import PERMISSION_MODES
 from ciao.os_support.processes import isolated_probe_flags, python_isolation_flags
 
-TASKS_ROOT: Path = Path(__file__).resolve().parent / "stock" / "evals" / "tasks"
+# Synthetic fixtures must never carry a real person, path, or credential.
+PRIVATE_MARKERS: tuple[str, ...] = (
+    "PrivatePerson",
+    "private-person",
+    "private.example.com",
+    "PrivateCo",
+    "/Users/private",
+)
+
+TASKS_ROOT: Path = Path(__file__).resolve().parent / "tasks"
 FIXTURE_DIRNAME = "_fixture"
 WORKSPACE = "personal"
 # Prefix of every engine workdir; also the marker that lets cleanup touch a Claude project folder.
@@ -338,7 +346,7 @@ def _load_one(folder: Path) -> EvalTask:
 def _reject_private_markers(root: Path) -> None:
     for path in sorted(p for p in root.rglob("*") if p.is_file()):
         raw = path.read_bytes()
-        for marker in behavioral_eval.PRIVATE_MARKERS:
+        for marker in PRIVATE_MARKERS:
             if marker.encode("utf-8") in raw:
                 rel = path.relative_to(root).as_posix()
                 raise TaskCatalogError(f"{rel}: contains private marker {marker!r}")

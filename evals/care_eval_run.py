@@ -23,19 +23,13 @@ is the caller's job; the driver never re-enables it.
 
 from __future__ import annotations
 
-import json
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Literal
 
-from ciao.job_runs import JOB_RUNS_NAME
-from ciao.task_eval import EVAL_WORKDIR_PREFIX, EngineAPIError, IsolatedEngine
-
-# Ceiling on one read of the runtime job-run log. Above it the file is refused
-# rather than truncated: a truncated read could hide the settled row and turn
-# a finished run into a timeout.
-MAX_JOB_RUNS_BYTES: int = 16 * 1024 * 1024
+from ciao.job_runs import JOB_RUNS_NAME, JobRunsUnreadable, read_runtime_job_runs
+from evals.task_eval import EVAL_WORKDIR_PREFIX, EngineAPIError, IsolatedEngine
 
 REASON_NOT_FOUND = "schedule not found"
 REASON_NOT_SYSTEM = "schedule is not a system schedule"
@@ -58,10 +52,6 @@ AMBIGUOUS_OTHER_CHAT = "a settled row names another chat for this dispatch"
 AMBIGUOUS_RUN_CHAT = "schedule last run chat differs from the trigger's chat"
 AMBIGUOUS_UNKNOWN_STATUS = "settled row has an unknown status"
 AMBIGUOUS_UNREADABLE = "job run log unreadable"
-
-
-class JobRunsUnreadable(RuntimeError):
-    """The runtime job-run log is a symlink, oversize, or not readable UTF-8."""
 
 
 class IsolatedGuardError(ValueError):
@@ -360,35 +350,3 @@ def _judge(
             duration_ms=int(row.get("duration_ms") or 0),
         ),
     )
-
-
-def read_runtime_job_runs(runtime_dir: Path) -> list[dict[str, Any]]:
-    """Parsed rows of ``<runtime_dir>/job_runs.jsonl``; a missing file is no rows.
-
-    Lines that are not JSON objects are skipped (the log writes whole lines).
-    A symlink, an oversize file, or a file that is not UTF-8 raises
-    ``JobRunsUnreadable`` instead of returning a partial log.
-    """
-    path = runtime_dir / JOB_RUNS_NAME
-    try:
-        if path.is_symlink():
-            raise JobRunsUnreadable(JOB_RUNS_NAME)
-        if not path.exists():
-            return []
-        if path.stat().st_size > MAX_JOB_RUNS_BYTES:
-            raise JobRunsUnreadable(JOB_RUNS_NAME)
-        text = path.read_text(encoding="utf-8")
-    except (OSError, UnicodeDecodeError) as exc:
-        raise JobRunsUnreadable(JOB_RUNS_NAME) from exc
-
-    rows: list[dict[str, Any]] = []
-    for line in text.splitlines():
-        if not line.strip():
-            continue
-        try:
-            value = json.loads(line)
-        except ValueError:
-            continue
-        if isinstance(value, dict):
-            rows.append(value)
-    return rows

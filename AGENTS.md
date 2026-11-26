@@ -141,7 +141,7 @@ Before changing code:
   `docs/ARCHITECTURE.md`.
 - An engine started in a worktree can add backup or session commits to its
   branch. Compare the remote head with the intended head before pushing.
-  Run live `ciao eval tasks` only in a detached worktree with its own venv.
+  Run live `python -m evals` only in a detached worktree with its own venv.
 
 ## Reporting issues
 When you find a bug, test failure or worthwhile enhancement, explain it to the

@@ -10,8 +10,8 @@ from pathlib import Path
 
 import pytest
 
-from ciao import care_usage
-from ciao.care_usage import (
+from evals import care_usage
+from evals.care_usage import (
     PARTITIONS,
     Coverage,
     ExpectedCall,
@@ -21,7 +21,7 @@ from ciao.care_usage import (
     collect,
     contract_metrics,
 )
-from ciao.task_eval_contract import MAX_JSON_NUMBER, SCHEMA, validate_record
+from evals.task_eval_contract import MAX_JSON_NUMBER, SCHEMA, validate_record
 
 RUN = str(uuid.UUID("11111111-1111-4111-8111-111111111111"))
 MODEL = "claude-haiku-5-5"
@@ -322,7 +322,7 @@ def test_projection_module_imports_no_provider_or_task_eval_code() -> None:
             imported.add(node.module)
     forbidden = {
         m for m in imported
-        if m == "ciao.task_eval" or m.startswith(("ciao.task_eval.", "ciao.providers", "ciao.web"))
+        if m == "evals.task_eval" or m.startswith(("evals.task_eval.", "ciao.providers", "ciao.web"))
         or m in ("subprocess", "socket", "requests", "httpx")
     }
     assert forbidden == set()
