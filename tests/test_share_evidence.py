@@ -512,7 +512,7 @@ def test_routes_require_a_session_and_scope_every_action(client: TestClient) -> 
     get = client.get("/api/workspaces/home/share-evidence", headers=headers())
     assert get.status_code == 200
     body = get.json()
-    assert body["chat_evidence"] == {"available": False, "reason": "protected_authority_unavailable"}
+    assert body["chat_evidence"] == {"available": False, "status": "remote_client" if sys.platform == "darwin" else "unsupported_platform"}
     assert body["mode"] == "review"
     assert body["fields"] == ["decision", "reason", "effective_date"]
     assert body["producers"] == ["memory_extraction", "nightly_curation"]
@@ -2186,3 +2186,30 @@ def test_curation_cli_publishes_only_a_private_capability(
     assert child.returncode == 0, child.stderr
     assert child.stdout.strip() == "OK"
     assert capability.proof not in child.stdout + child.stderr
+
+
+def test_chat_evidence_status_never_available_and_ignores_requests(client: TestClient) -> None:
+    from ciao import share_evidence
+
+    seen = set()
+    for platform in ("darwin", "linux", "win32", "freebsd", ""):
+        for native in (False, True):
+            result = share_evidence.chat_evidence_status(platform=platform, native_app=native)
+            assert result["available"] is False
+            assert result["status"] in share_evidence.CHAT_EVIDENCE_STATUSES
+            assert result["status"] != "available"
+            seen.add(result["status"])
+    assert seen == {"unsupported_platform", "remote_client", "unprovisioned"}
+    assert share_evidence.chat_evidence_status(platform="linux", native_app=True)["status"] == "unsupported_platform"
+    assert share_evidence.chat_evidence_status(platform="darwin")["status"] == "remote_client"
+
+    # A request cannot claim a native channel through a header, query or cookie.
+    forged = {**headers(), "X-Ciao-Native-App": "1", "X-Forwarded-For": "127.0.0.1"}
+    for platform in ("darwin", "linux"):
+        with patch("ciao.share_evidence.sys.platform", platform):
+            body = client.get(
+                "/api/workspaces/home/share-evidence?native_app=1&status=available",
+                headers=forged,
+            ).json()
+        expected = "remote_client" if platform == "darwin" else "unsupported_platform"
+        assert body["chat_evidence"] == {"available": False, "status": expected}

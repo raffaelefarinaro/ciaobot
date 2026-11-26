@@ -519,7 +519,7 @@ function evidence(over: Partial<ShareEvidenceState> = {}): ShareEvidenceState {
   return {
     disclosure_tokens: { 'proj-alpha': 'scope' },
     workspace: 'personal',
-    chat_evidence: { available: false, reason: 'protected_authority_unavailable' },
+    chat_evidence: { available: false, status: 'remote_client' },
     mode: 'review',
     fields: ['decision', 'reason', 'effective_date'],
     producers: ['memory_extraction', 'nightly_curation'],
@@ -583,6 +583,22 @@ describe('SettingsSharedBrains sources and consent', () => {
     apiGet.mockImplementation(routeGet({ personal: () => evidence() }))
     const view = await openSources()
     expect(view.text()).toContain('Ordinary chat messages remain private')
+  })
+  it.each([
+    ['remote_client', 'Only the Ciaobot Mac app on this Mac'],
+    ['unsupported_platform', 'not supported on this operating system'],
+    ['unprovisioned', 'has not been set up on this Mac'],
+    ['degraded', 'is not working right now'],
+    ['available', 'cannot be confirmed'],
+  ] as const)('explains chat evidence status %s without implying sharing', async (status, copy) => {
+    apiGet.mockImplementation(routeGet({
+      personal: () => evidence({ chat_evidence: { available: false, status } }),
+    }))
+    const view = await openSources()
+    const text = view.find('[data-testid="chat-evidence-status"]').text()
+    expect(text).toContain('Ordinary chat messages remain private')
+    expect(text).toContain(copy)
+    expect(text).not.toMatch(/is being shared|are being shared|sharing is on/i)
   })
   it('server-filters the brain, project and actual source and states the review default', async () => {
     apiGet.mockImplementation(routeGet({ personal: () => evidence() }))

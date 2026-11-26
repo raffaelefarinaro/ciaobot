@@ -97,7 +97,7 @@ async function stubEngine(page: Page, seedBeta = true): Promise<Engine> {
       return route.fulfill({ json: { grant, mode: 'review' } })
     }
     return route.fulfill({ json: {
-      workspace: ws, mode: 'review', fields: ['decision', 'reason', 'effective_date'],
+      workspace: ws, chat_evidence: { available: false, status: 'remote_client' }, mode: 'review', fields: ['decision', 'reason', 'effective_date'],
       producers: ['memory_extraction', 'nightly_curation'], disclosure_tokens: { [p.id]: 'scope' },
       brains: [{ name: p.brain, identity: `github.com/acme/${p.brain}` }],
       projects: [{ project_id: p.id, name: p.name, sources: [{

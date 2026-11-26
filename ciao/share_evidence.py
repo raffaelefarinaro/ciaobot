@@ -34,6 +34,7 @@ import os
 import re
 import secrets
 import stat
+import sys
 import threading
 from contextlib import contextmanager, nullcontext
 from dataclasses import dataclass, field
@@ -1242,6 +1243,34 @@ def grant_detail(config: Any, *, workspace: str, grant_id: str) -> dict[str, Any
     ):
         _refuse("grant_unavailable", "The grant is not available.")
     return _public_grant(grant, linked=_grant_linked(config, workspace, grant))
+
+
+CHAT_EVIDENCE_STATUSES = (
+    "available",
+    "unprovisioned",
+    "unsupported_platform",
+    "remote_client",
+    "degraded",
+)
+
+
+def chat_evidence_status(*, platform: str | None = None, native_app: bool = False) -> dict[str, Any]:
+    """Say, truthfully, whether ordinary-chat evidence could be shared.
+
+    The answer is derived only from the engine's own platform and from whether
+    the engine itself identified the caller as the local native Mac app channel;
+    nothing a request sends can raise it. `available` is reserved for a protected
+    authority that does not exist yet, so no branch returns it. Ordinary chat
+    stays private in every status.
+    """
+    system = sys.platform if platform is None else platform
+    if system != "darwin":
+        status = "unsupported_platform"
+    elif not native_app:
+        status = "remote_client"
+    else:
+        status = "unprovisioned"
+    return {"available": False, "status": status}
 
 
 def workspace_mode(config: Any, *, workspace: str) -> str:

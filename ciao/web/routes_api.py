@@ -499,7 +499,8 @@ async def share_evidence_state(request: Request) -> JSONResponse:
         return JSONResponse({
             "workspace": workspace,
             "mode": share_evidence.workspace_mode(config, workspace=workspace),
-            "chat_evidence": {"available": False, "reason": "protected_authority_unavailable"},
+            # No native-app operator channel exists yet, so no request is one.
+            "chat_evidence": share_evidence.chat_evidence_status(native_app=False),
             "fields": list(share_evidence.FIELDS),
             "producers": list(share_evidence.PRODUCERS),
             "brains": [
