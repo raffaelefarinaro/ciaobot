@@ -540,8 +540,7 @@ the operator-action tiles and the update-task group as two sibling sections, and
 blocking tile must stay above both, unmissable, with no "hide it" button of its
 own. The group and Settings → Overview → Update task history read the same
 `GET /api/update-tasks?workspace=` rows, so a change to one state has to be checked
-in both: `offered` starts, `in_progress` resumes, `waiting_review` offers Review
-proposals (the real queue at `/memory/review?show=suggested`) *and* Resume,
+in both: `offered` starts, `in_progress` resumes, `waiting_review` offers Resume,
 `failed` retries into the same chat, and `unknown` applicability on an *offer*
 gets a Check again and never a start button. The applicability gate applies to
 offers only: a live attempt keeps Resume or Try again whatever the detector says,

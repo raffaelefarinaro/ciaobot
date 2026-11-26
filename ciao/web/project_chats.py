@@ -2463,10 +2463,10 @@ class ProjectChatManager:
             "**future** notes are organized, not a request to remember "
             "everything: [See or customize memory categories](/memory/categories).\n\n"
             "When you archive a chat, a memory pass reads it. What the pass is "
-            "confident about is filed into your notes; what it is not arrives as "
-            "a proposal you can accept or dismiss in **Memory · To decide**. What "
-            "it files shows up in **Memory · History**, where you can see the "
-            "change and undo it while the note is still as the pass left it."
+            "confident about is written into your notes; what it is not goes on "
+            "the Unsure list (**Memory · Unsure**, the file Workspace/Unsure.md), "
+            "where you tick a line to say yes or delete it to say no. Every "
+            "change is in the workspace's Git history, so it can be reverted."
         )
         # One block, both shapes, for the same reason as `memory_intro` (#987):
         # the known state, the interview and the starting-knowledge pass are the
@@ -2534,8 +2534,8 @@ class ProjectChatManager:
             "in this workspace, that is a separate, explicit choice in "
             "[Import conversations](/memory/import): you pick the conversations, "
             "see exactly what would be read and which model would receive it "
-            "before anything runs, and every fact it finds waits for you in "
-            "**To decide**. Nothing is read until you choose, and nothing is sent "
+            "before anything runs, and every fact it finds is added to the "
+            "Unsure list (**Memory · Unsure**). Nothing is read until you choose, and nothing is sent "
             "until you confirm. The same page is in Memory at any time."
         )
         # The matching agent instruction. It points at the page and stops: an

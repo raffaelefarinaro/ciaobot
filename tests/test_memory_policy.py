@@ -240,7 +240,7 @@ def test_unattended_policy_summary_names_the_handover_exception() -> None:
 def test_capabilities_skill_does_not_claim_nothing_is_durable_without_approval() -> None:
     skill = _capabilities()
     assert "nothing becomes durable without approval" not in skill
-    assert "no unattended run promotes a new always-loaded fact" in skill
+    assert "Git is the record and the undo" in skill
 
 
 def test_mcp_memory_docstring_no_longer_claims_enforcement() -> None:

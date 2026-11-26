@@ -43,6 +43,21 @@ test.describe('Memory › Unsure', () => {
     await page.screenshot({ path: 'test-results/memory-unsure-desktop.png' })
   })
 
+  test('Go through it with Ciaobot opens a chat in the workspace General project', async ({ page }) => {
+    await page.setViewportSize({ width: 1280, height: 900 })
+    await answerList(page, LIST)
+    // The engine's General project is an auto project; the shared fixture's is not.
+    const projects = await (await page.request.get('/api/projects')).json()
+    const marked = projects.map((p: { name: string }) => (p.name === 'General' ? { ...p, is_auto: true } : p))
+    expect((await page.request.post('/__fixture__/projects', { data: { projects: marked } })).ok()).toBe(true)
+    await boot(page, '/memory/unsure', '.mu-item')
+
+    const created = page.waitForRequest(request => request.method() === 'POST' && request.url().endsWith('/api/projects/alpha-general/chats'))
+    await page.getByRole('button', { name: 'Go through it with Ciaobot' }).click()
+    const request = await created
+    expect(request.postDataJSON()).toMatchObject({ title: 'Go through the Unsure list' })
+  })
+
   test('says so when there is no list yet', async ({ page }) => {
     await page.setViewportSize({ width: 1280, height: 900 })
     await answerList(page, null)

@@ -19,6 +19,14 @@ describe('parseUnsureLines', () => {
     ])
   })
 
+  it('skips fenced code and reads star bullets', () => {
+    const text = ['* [ ] memory: star bullet', '```', '- [ ] inside a fence', '```', '- [x] after the fence'].join('\n')
+    expect(parseUnsureLines(text)).toEqual([
+      { text: 'memory: star bullet', ticked: false },
+      { text: 'after the fence', ticked: true },
+    ])
+  })
+
   it('returns nothing for an empty list', () => {
     expect(parseUnsureLines('')).toEqual([])
   })

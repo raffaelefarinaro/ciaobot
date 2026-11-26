@@ -183,12 +183,11 @@ def test_both_welcome_shapes_explain_memory_and_link_existing_categories(
         # remember everything.
         assert "**future**" in welcome
         # What the memory pass really does, and where a person reviews it.
-        assert "proposal" in welcome
-        assert "**Memory · To decide**" in welcome
-        assert "**Memory · History**" in welcome
-        # Undo is offered where the receipt is, and only as long as the note is
-        # still as the pass left it — a note edited since is refused.
-        assert "undo it while the note is still as the pass left it" in welcome
+        assert "**Memory · Unsure**" in welcome
+        assert "Workspace/Unsure.md" in welcome
+        assert "To decide" not in welcome
+        # Undo is the workspace's Git history.
+        assert "Git history" in welcome
         # No promise that past conversations are read, imported or filed. Since
         # #1041 the welcome names the opt-in affordance, so this is no longer
         # "the word import may not appear": C1's property was that nothing is

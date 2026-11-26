@@ -3162,8 +3162,8 @@ class CiaoControlPlane:
         The user approving a delegated result says this conversation is how that
         kind of work is done correctly (#1069). Archiving it runs the ordinary
         memory pass with an ``approved_task`` focus: the pass extracts the
-        procedure and files skill proposals or new-skill drafts, and facts as
-        usual — all waiting in To decide for the user. Archiving is the natural
+        procedure and files skill-edit suggestions as proposal files, and facts as
+        usual — written directly, with anything doubtful on the Unsure list. Archiving is the natural
         end of an approved task's chat, and the attempt is already released, so
         the archive hook leaves the task alone.
 
