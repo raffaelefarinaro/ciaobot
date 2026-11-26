@@ -4207,63 +4207,21 @@ export const inventory: InventoryEntry[] = [
     "variantNotes": "Interval/once/weekly/monthly/time/model/archive options.",
     "states": [
       {
-        "name": "default",
-        "coverage": "uncovered",
-        "storyIds": [],
-        "note": "<template> in NewScheduleForm.vue implements this render; no rendered-state story exists."
+        "name": "cadence and validation",
+        "coverage": "covered",
+        "storyIds": ["automations--new-schedule"],
+        "note": "The weekly form disables an empty submit; the story selects interval, once and monthly cadences, and toggles a weekday."
       },
       {
-        "name": "interval",
-        "coverage": "uncovered",
-        "storyIds": [],
-        "note": "NewScheduleForm.vue has a interval branch; no rendered-state story exists."
-      },
-      {
-        "name": "once",
-        "coverage": "uncovered",
-        "storyIds": [],
-        "note": "NewScheduleForm.vue has a once branch; no rendered-state story exists."
-      },
-      {
-        "name": "weekly",
-        "coverage": "uncovered",
-        "storyIds": [],
-        "note": "NewScheduleForm.vue has a weekly branch; no rendered-state story exists."
-      },
-      {
-        "name": "monthly",
-        "coverage": "uncovered",
-        "storyIds": [],
-        "note": "NewScheduleForm.vue has a monthly branch; no rendered-state story exists."
-      },
-      {
-        "name": "time",
-        "coverage": "uncovered",
-        "storyIds": [],
-        "note": "NewScheduleForm.vue has a time branch; no rendered-state story exists."
-      },
-      {
-        "name": "model",
-        "coverage": "uncovered",
-        "storyIds": [],
-        "note": "NewScheduleForm.vue has a model branch; no rendered-state story exists."
-      },
-      {
-        "name": "archive",
-        "coverage": "uncovered",
-        "storyIds": [],
-        "note": "NewScheduleForm.vue has a archive branch; no rendered-state story exists."
-      },
-      {
-        "name": "other states",
-        "coverage": "unknown",
-        "storyIds": [],
-        "note": "Further state branches and their coverage have not yet been audited."
+        "name": "model and archive",
+        "coverage": "covered",
+        "storyIds": ["automations--new-schedule-model-and-archive"],
+        "note": "A registered workspace loads a synthetic model, selects it and chooses automatic archive for a project target."
       }
     ],
     "loading": {
-      "status": "unknown",
-      "detail": "Initial and refresh loading fidelity in NewScheduleForm.vue has not yet been audited."
+      "status": "known",
+      "detail": "Model availability is workspace-dependent; WorkspaceModelPickerTransitions.test.ts covers pending, error, stale and retry transitions."
     },
     "migration": {
       "status": "unassessed",
@@ -5268,21 +5226,45 @@ export const inventory: InventoryEntry[] = [
     "variantNotes": "Schedule/list/new/detail/system/user/edit/initial-failure/stale branches. Detailed variants are unassessed.",
     "states": [
       {
-        "name": "default",
-        "coverage": "uncovered",
-        "storyIds": [],
-        "note": "<template> in SchedulePanel.vue implements this render; no rendered-state story exists."
+        "name": "loading",
+        "coverage": "covered",
+        "storyIds": [
+          "automations--schedule-loading"
+        ],
+        "note": "A held first read renders the loading skeleton."
       },
       {
-        "name": "other states",
-        "coverage": "unknown",
-        "storyIds": [],
-        "note": "Further state branches and their coverage have not yet been audited."
+        "name": "initial-error",
+        "coverage": "covered",
+        "storyIds": [
+          "automations--schedule-error"
+        ],
+        "note": "A refused first read shows its message and Retry."
+      },
+      {
+        "name": "empty",
+        "coverage": "covered",
+        "storyIds": [
+          "automations--schedule-empty"
+        ],
+        "note": "An empty successful read retains the webhook section."
+      },
+      {
+        "name": "overview and detail",
+        "coverage": "covered",
+        "storyIds": ["automations--schedule-overview-and-detail"],
+        "note": "Active and paused routines appear in the overview; opening one shows detail and its schedule editor."
+      },
+      {
+        "name": "stale",
+        "coverage": "covered",
+        "storyIds": ["automations--schedule-stale", "automations--schedule-stale-rows"],
+        "note": "A failed refresh retains the last successful empty or populated list and displays the stale notice."
       }
     ],
     "loading": {
-      "status": "unknown",
-      "detail": "Initial and refresh loading fidelity in SchedulePanel.vue has not yet been audited."
+      "status": "known",
+      "detail": "A held first read, initial refusal and failed refresh retaining an empty result are stories."
     },
     "migration": {
       "status": "unassessed",
@@ -6812,51 +6794,51 @@ export const inventory: InventoryEntry[] = [
     "variantNotes": "Initial loading/failure/stale/empty/form/write error/history/revealed-secret states; do not include real secrets. Detailed variants are unassessed.",
     "states": [
       {
-        "name": "default",
-        "coverage": "uncovered",
-        "storyIds": [],
-        "note": "<template> in WebhookTriggers.vue implements this render; no rendered-state story exists."
-      },
-      {
         "name": "loading",
-        "coverage": "uncovered",
-        "storyIds": [],
-        "note": "WebhookTriggers.vue implements the loading branch; no rendered-state story exists."
+        "coverage": "covered",
+        "storyIds": [
+          "automations--webhook-loading"
+        ],
+        "note": "A held first read renders the loading skeleton."
       },
       {
         "name": "initial-error",
-        "coverage": "uncovered",
-        "storyIds": [],
-        "note": "WebhookTriggers.vue implements the initial-error branch; no rendered-state story exists."
+        "coverage": "covered",
+        "storyIds": [
+          "automations--webhook-error"
+        ],
+        "note": "A refused first read shows its message and Retry."
       },
       {
-        "name": "stale",
-        "coverage": "uncovered",
-        "storyIds": [],
-        "note": "WebhookTriggers.vue implements the stale branch; no rendered-state story exists."
+        "name": "empty and form",
+        "coverage": "covered",
+        "storyIds": [
+          "automations--webhook-empty-and-form"
+        ],
+        "note": "An empty list opens and cancels the form, with submit gated by name."
       },
       {
-        "name": "empty",
-        "coverage": "uncovered",
-        "storyIds": [],
-        "note": "WebhookTriggers.vue implements the empty branch; no rendered-state story exists."
+        "name": "loaded and history",
+        "coverage": "covered",
+        "storyIds": ["automations--webhook-rows-and-history"],
+        "note": "An enabled trigger opens a launched event with its chat action; disabled rows, recipe and rotation are exercised in WebhookTriggers.test.ts."
       },
       {
-        "name": "action-error",
-        "coverage": "uncovered",
-        "storyIds": [],
-        "note": "WebhookTriggers.vue implements the action-error branch; no rendered-state story exists."
+        "name": "stale and action error",
+        "coverage": "covered",
+        "storyIds": ["automations--webhook-stale-rows", "automations--webhook-write-error"],
+        "note": "A failed refresh retains the trigger; a revision conflict on Disable keeps the enabled row and displays the error."
       },
       {
-        "name": "other states",
-        "coverage": "unknown",
+        "name": "secret",
+        "coverage": "uncovered",
         "storyIds": [],
-        "note": "Further state branches and their coverage have not yet been audited."
+        "note": "WebhookTriggers.test.ts verifies the one-time synthetic secret is removed on close; a story would need a portalled dialog and controlled write response."
       }
     ],
     "loading": {
       "status": "known",
-      "detail": "WebhookTriggers.vue distinguishes first loading, initial failure and stale refresh retaining rows."
+      "detail": "Held first load and initial failure are stories; refresh and history loading are covered by WebhookTriggers.test.ts."
     },
     "migration": {
       "status": "unassessed",
