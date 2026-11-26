@@ -20,7 +20,7 @@ import json
 import os
 import threading
 from contextlib import contextmanager, nullcontext
-from datetime import UTC, date, datetime, timedelta
+from datetime import date
 from pathlib import Path
 
 import pytest
@@ -2733,70 +2733,6 @@ def test_an_unlinked_queue_removal_still_records_its_decision(tmp_path, monkeypa
 
     assert result.reconciled[0]["outcome_recorded"] is True
     assert len(mp.read_decisions(queue)) == 1
-
-
-def test_the_lease_stays_held_through_the_guide_write(tmp_path, monkeypatch):
-    from ciao import curation_run as cr
-
-    guide = _guide(tmp_path, memory=["Existing fact."])
-    lease = cr.begin_run(tmp_path, holder="runner", ttl_s=3600)
-    rival_done = threading.Event()
-    rival_threads: list[threading.Thread] = []
-    observed: dict[str, bool] = {}
-
-    def rival() -> None:
-        cr.begin_run(
-            tmp_path, holder="rival", now=datetime.now(UTC) + timedelta(hours=2)
-        )
-        rival_done.set()
-
-    real_write = mt.write_guide_atomically
-
-    def write_while_rival_waits(path, text):
-        thread = threading.Thread(target=rival)
-        rival_threads.append(thread)
-        thread.start()
-        observed["blocked_during_write"] = not rival_done.wait(0.3)
-        real_write(path, text)
-
-    monkeypatch.setattr(mt, "write_guide_atomically", write_while_rival_waits)
-    outcome, _ = mp.accept_region_fact(
-        guide_path=guide,
-        target="memory",
-        text="New fact.",
-        vault_root=tmp_path,
-        authorize=lambda: cr.authorize_holder(tmp_path, holder=lease.holder),
-    )
-    monkeypatch.undo()
-    for thread in rival_threads:
-        thread.join(timeout=5)
-
-    assert outcome == "written"
-    assert observed == {"blocked_during_write": True}
-    assert rival_done.is_set()
-
-
-def test_an_expired_lease_refuses_the_write_and_journals_nothing(tmp_path):
-    from ciao import curation_run as cr
-
-    guide = _guide(tmp_path, memory=["Existing fact."])
-    now = datetime.now(UTC)
-    lease = cr.begin_run(tmp_path, holder="runner", ttl_s=1, now=now)
-    later = now + timedelta(seconds=60)
-    before = guide.read_bytes()
-
-    outcome, _ = mp.accept_region_fact(
-        guide_path=guide,
-        target="memory",
-        text="New fact.",
-        vault_root=tmp_path,
-        authorize=lambda: cr.authorize_holder(
-            tmp_path, holder=lease.holder, clock=lambda: later
-        ),
-    )
-    assert outcome == "refused"
-    assert guide.read_bytes() == before
-    assert mr.read_receipts(mr.journal_path(tmp_path, None)) == []
 
 
 def test_a_byte_for_byte_accept_without_the_new_arguments_is_unchanged(tmp_path):

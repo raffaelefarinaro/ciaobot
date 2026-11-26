@@ -42,7 +42,6 @@ def test_decisions_digest_json_shape(tmp_path: Path, capsys: pytest.CaptureFixtu
     assert digest["memory"]["rows"] == 0
     keys = {group["key"] for group in digest["task"]["groups"]}
     assert {"chip:not mine", "kind:delete:agent"} <= keys
-    assert digest["task"]["progress_key"].startswith("rules:")
 
 
 def test_decision_rules_write_exit_codes(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:

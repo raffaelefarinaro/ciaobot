@@ -2400,14 +2400,13 @@ def _record_decision(
         # joined heuristically instead.
         entry["receipt_id"] = receipt_id
     if operation_id:
-        # The managed operation (see :mod:`ciao.curation_apply`) that wrote this
+        # The managed operation that wrote this
         # decision. It owns both receipts it links to, and finds them by this id.
         entry["operation_id"] = operation_id
     if reverses_operation_id:
         entry["reverses_operation_id"] = reverses_operation_id
     if run_id:
-        # The curation lease holder that made this decision. Read back for the
-        # care report's counts; never sent to the History payload.
+        # The run that made this decision; never sent to the History payload.
         entry["run_id"] = run_id
     if item_key:
         # The worklist key this decision settled (see ``run_id``).
