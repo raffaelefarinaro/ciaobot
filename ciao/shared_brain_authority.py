@@ -435,15 +435,18 @@ def _digest(value: str) -> str:
     return hashlib.sha256(value.encode("utf-8")).hexdigest()
 
 
-_SCP_LOCATOR = re.compile(r"^(?:[^@/:]+@)?([^@/:]+):(?!//)(.*)$")
+_SCP_LOCATOR = re.compile(r"^(?:[^@/:]+@)?([^@/:]{2,}):(?!//)(.*)$")
 
 
 def _canonical_locator(storage: str) -> str:
     """The storage locator without anything secret-bearing.
 
-    Userinfo, query and fragment are dropped from URLs (``https://u:s@host/p?token=x``)
-    and from scp-style remotes (``u@host:path``); scheme and host are lower-cased.
-    Anything else (a folder path) is returned unchanged.
+    Userinfo, query and fragment are dropped from URLs (``https://u:s@host/p?token=x``);
+    scheme and host are lower-cased. For an scp-style remote (``u@host:path``) only
+    the user is dropped and the host lower-cased: ``?`` and ``#`` are ordinary path
+    characters there and are kept. A single letter before the colon is a Windows
+    drive, not a host, so a drive path is returned unchanged (case included), as
+    is any other folder path.
     """
     if "://" in storage:
         parts = urlsplit(storage)
@@ -451,8 +454,7 @@ def _canonical_locator(storage: str) -> str:
         return f"{parts.scheme.lower()}://{host}{parts.path}"
     scp = _SCP_LOCATOR.match(storage)
     if scp is not None and not storage.startswith(("/", ".", "~")):
-        path = scp.group(2).split("?", 1)[0].split("#", 1)[0]
-        return f"{scp.group(1).lower()}:{path}"
+        return f"{scp.group(1).lower()}:{scp.group(2)}"
     return storage
 
 
@@ -1245,9 +1247,13 @@ class StewardAuthority:
         """Settle every crash-orphaned intent from the authority record.
 
         An intent with no resolution is committed when the record already shows
-        the exact new generation and steward, aborted when it still shows the
-        previous generation, and anything else is ``audit_inconsistent``: the
-        engine stays closed rather than guess. No admission is replayed.
+        the exact new generation and steward (and no other intent's committed
+        entry explains that record), aborted when it still shows the previous
+        generation, and superseded when the record is further on and a committed
+        entry of a different intent proves another transition took its place.
+        Anything else is ``audit_inconsistent``: the engine stays closed rather
+        than guess (operator recovery is in ``ciao.shared_brain_audit``).
+        No admission is replayed.
 
         An intent is settled only when it is orphaned: not owned by a live call
         in this process, and its lease owner (pid and boot id) is gone or it is
@@ -1264,7 +1270,8 @@ class StewardAuthority:
             raise AuthorityError("audit_unavailable") from exc
         resolved = {e.intent for e in entries if e.kind is not AuditKind.INTENT}
         pending = [e for e in entries if e.kind is AuditKind.INTENT and e.intent not in resolved]
-        self._check_recovered_aborts(entries)
+        committed = [e for e in entries if e.kind is AuditKind.COMMITTED]
+        self._check_recovered_aborts(entries, committed)
         settled = 0
         for entry in pending:
             if not self._orphaned(entry):
@@ -1280,11 +1287,30 @@ class StewardAuthority:
                 and record.generation == entry.generation
                 and record.steward == entry.steward
             ):
-                kind = AuditKind.COMMITTED
+                # Another intent's committed entry for this exact result means
+                # this attempt did not produce it (a retry did).
+                kind = (
+                    AuditKind.ABORTED
+                    if self._explained_by_other(entry, committed)
+                    else AuditKind.COMMITTED
+                )
             elif (record is None and entry.previous_generation == 0) or (
                 record is not None and record.generation == entry.previous_generation
             ):
                 kind = AuditKind.ABORTED
+            elif (
+                record is not None
+                and record.generation > entry.previous_generation
+                and any(
+                    c.intent != entry.intent
+                    and c.brain == entry.brain
+                    and c.storage == entry.storage
+                    and c.previous_generation >= entry.previous_generation
+                    for c in committed
+                )
+            ):
+                # A different, committed transition took its place.
+                kind = AuditKind.SUPERSEDED
             else:
                 raise AuthorityError("audit_inconsistent")
             fields: dict[str, Any] = {
@@ -1306,12 +1332,28 @@ class StewardAuthority:
             settled += 1
         return settled
 
-    def _check_recovered_aborts(self, entries: tuple[AuditEntry, ...]) -> None:
+    @staticmethod
+    def _explained_by_other(entry: AuditEntry, committed: list[AuditEntry]) -> bool:
+        return any(
+            c.intent != entry.intent
+            and c.brain == entry.brain
+            and c.storage == entry.storage
+            and c.generation == entry.generation
+            and c.steward == entry.steward
+            for c in committed
+        )
+
+    def _check_recovered_aborts(
+        self, entries: tuple[AuditEntry, ...], committed: list[AuditEntry]
+    ) -> None:
         """A recovered "aborted" must not contradict the authority record.
 
-        If the record shows the very generation and steward an aborted intent
-        was trying to install, the transition did commit and the audit is false
-        (a late committer was settled as aborted). The engine stays closed.
+        If the record shows the very generation, steward and storage an aborted
+        intent was trying to install, and no committed entry of a different
+        intent explains that record, the transition did commit and the audit is
+        false (a late committer was settled as aborted). A legitimate retry that
+        committed the same result is explained by its own committed entry and
+        does not close the engine. A false audit leaves the engine closed.
         """
         assert self._durable is not None
         for entry in entries:
@@ -1326,6 +1368,7 @@ class StewardAuthority:
                 and record.generation == entry.generation
                 and record.steward == entry.steward
                 and _storage_digest(record.storage) == entry.storage
+                and not self._explained_by_other(entry, committed)
             ):
                 raise AuthorityError("audit_inconsistent")
 

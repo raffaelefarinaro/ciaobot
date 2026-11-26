@@ -27,6 +27,7 @@ from ciao.shared_brain_audit import (
     DurableAuditLog,
 )
 from ciao.shared_brain_authority import (
+    AuthorityRecord,
     _storage_digest,
     AuthorityError,
     BrainRef,
@@ -845,9 +846,29 @@ def test_a_post_commit_duplicate_resolution_is_an_inconsistency(
 
 def test_a_recovered_abort_that_contradicts_the_record_is_flagged(tmp_path: Path) -> None:
     rig = Rig(tmp_path)
-    rig.bootstrap()  # record: generation 1, steward bob
+    # A record no committed audit entry explains (an unaudited commit).
+    rig.engine._store.create_if_absent(
+        AuthorityRecord(
+            brain=CONNECTOR.brain,
+            storage=CONNECTOR.storage,
+            connector="git",
+            generation=1,
+            steward="bob",
+            created_at=1.0,
+            updated_at=1.0,
+        )
+    )
     log = DurableAuditLog(rig.audit_root)
-    fields = dict(
+    fields = _bootstrap_fields()
+    log.append(AuditKind.INTENT, intent="late", owner="999999:x", **fields)  # type: ignore[arg-type]
+    log.append(AuditKind.ABORTED, intent="late", recovered=True, **fields)  # type: ignore[arg-type]
+    with pytest.raises(AuthorityError) as exc:
+        rig.new_engine()
+    assert exc.value.reason == "audit_inconsistent"
+
+
+def _bootstrap_fields() -> dict[str, object]:
+    return dict(
         operation="bootstrap",
         brain=CONNECTOR.brain,
         storage=_storage_digest(CONNECTOR.storage),
@@ -858,11 +879,131 @@ def test_a_recovered_abort_that_contradicts_the_record_is_flagged(tmp_path: Path
         generation=1,
         at=1.0,
     )
-    log.append(AuditKind.INTENT, intent="late", owner="999999:x", **fields)  # type: ignore[arg-type]
-    log.append(AuditKind.ABORTED, intent="late", recovered=True, **fields)  # type: ignore[arg-type]
+
+
+def test_crash_settle_retry_commit_keeps_the_engine_open(tmp_path: Path) -> None:
+    rig = Rig(tmp_path)
+    rig.bootstrap()
+    challenge = rig.begin_transfer()
+    original = rig.backend.commit
+    rig.backend.commit = lambda a, m: (_ for _ in ()).throw(RuntimeError("died"))  # type: ignore[method-assign,assignment]
+    with pytest.raises(AuthorityError):
+        rig.engine.accept_transfer(
+            challenge.nonce, connector=CONNECTOR, successor=rig.sign("carol-token")
+        )
+    rig.backend.commit = original  # type: ignore[method-assign]
+    settled = rig.new_engine()
+    assert rig.entries()[-1].kind is AuditKind.ABORTED and rig.entries()[-1].recovered
+    rig.transfer(settled)  # the operator retries the same transition and it commits
+    for _ in range(2):  # the record matches the aborted attempt forever; the engine stays open
+        again = rig.new_engine()
+    assert again.authorize_steward(
+        connector=CONNECTOR, principal=rig.sign("carol-token"), generation=2
+    )
+
+
+def test_a_matching_orphan_is_aborted_when_another_intent_committed_that_record(
+    tmp_path: Path,
+) -> None:
+    rig = Rig(tmp_path)
+    rig.bootstrap()
+    DurableAuditLog(rig.audit_root).append(
+        AuditKind.INTENT, intent="twin", owner="999999:x", **_bootstrap_fields()  # type: ignore[arg-type]
+    )
+    rig.new_engine()
+    twin = [e for e in rig.entries() if e.intent == "twin"][-1]
+    assert twin.kind is AuditKind.ABORTED and twin.recovered
+
+
+def test_an_orphan_superseded_by_a_committed_transition_is_recorded_not_fatal(
+    tmp_path: Path,
+) -> None:
+    rig = Rig(tmp_path)
+    rig.bootstrap()
+    rig.transfer()  # bob -> carol, generation 2 (a committed entry proves it)
+    DurableAuditLog(rig.audit_root).append(
+        AuditKind.INTENT,
+        intent="hung",
+        operation="transfer",
+        brain=CONNECTOR.brain,
+        storage=_storage_digest(CONNECTOR.storage),
+        actor="bob",
+        previous_steward="bob",
+        steward="dave",
+        previous_generation=1,
+        generation=2,
+        at=1.0,
+        owner="999999:x",  # the hung owner finally died
+    )
+    engine = rig.new_engine()
+    last = rig.entries()[-1]
+    assert last.intent == "hung" and last.kind is AuditKind.SUPERSEDED and last.recovered
+    assert engine.authorize_steward(
+        connector=CONNECTOR, principal=rig.sign("carol-token"), generation=2
+    )
+
+
+def test_an_unexplained_generation_jump_is_still_inconsistent(tmp_path: Path) -> None:
+    rig = Rig(tmp_path)
+    rig.bootstrap()
+    DurableAuditLog(rig.audit_root).append(
+        AuditKind.INTENT,
+        intent="odd",
+        operation="transfer",
+        brain=CONNECTOR.brain,
+        storage=_storage_digest(CONNECTOR.storage),
+        actor="bob",
+        previous_steward="bob",
+        steward="dave",
+        previous_generation=1,  # the record moved on without any committed entry replacing 1
+        generation=2,
+        at=1.0,
+        owner="999999:x",
+    )
+    rig.engine._store.replace_if_generation(
+        AuthorityRecord(
+            brain=CONNECTOR.brain,
+            storage=CONNECTOR.storage,
+            connector="git",
+            generation=2,
+            steward="mallory",
+            created_at=1.0,
+            updated_at=2.0,
+        ),
+        1,
+    )
     with pytest.raises(AuthorityError) as exc:
         rig.new_engine()
     assert exc.value.reason == "audit_inconsistent"
+
+
+def test_operator_recovery_archives_the_log_and_reopens_the_engine(tmp_path: Path) -> None:
+    rig = Rig(tmp_path)
+    rig.bootstrap()
+    active = rig.audit_root / "audit.log"
+    lines = active.read_text().splitlines(keepends=True)
+    del lines[0]
+    active.write_text("".join(lines))
+    os.chmod(active, 0o600)
+    with pytest.raises(AuthorityError):
+        rig.new_engine()
+    log = DurableAuditLog(rig.audit_root)  # opening needs no verified history
+    archive = log.archive_for_recovery("case-3677")
+    assert stat.S_IMODE(archive.stat().st_mode) == 0o700
+    kept = sorted(p.name for p in archive.iterdir())
+    assert "audit.log" in kept and "audit.state.json" in kept
+    assert all(stat.S_IMODE((archive / n).stat().st_mode) == 0o600 for n in kept)
+    engine = rig.new_engine()  # a fresh, empty, verifiable log; the record is untouched
+    assert engine.durable_audit() == ()
+    assert engine.authorize_steward(
+        connector=CONNECTOR, principal=rig.sign("bob-token"), generation=1
+    )
+    with pytest.raises(AuditError) as exc:
+        log.archive_for_recovery("case-3677")
+    assert exc.value.reason == "invalid_entry"
+    for bad in ("", "../x", "a/b", "x" * 65):
+        with pytest.raises(AuditError):
+            log.archive_for_recovery(bad)
 
 
 def test_boot_id_failures_are_not_cached(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -919,8 +1060,17 @@ def test_storage_digest_ignores_userinfo_and_query(variant: str) -> None:
 
 def test_scp_and_folder_locators_and_ports() -> None:
     assert _storage_digest("git@host.invalid:team/brain.git") == _storage_digest(
-        "other@host.invalid:team/brain.git?token=x"
+        "other@HOST.invalid:team/brain.git"
     )
+    # ? and # are path characters in an scp-style remote: they are not stripped.
+    assert _storage_digest("git@host.invalid:team/brain.git?x") != _storage_digest(
+        "git@host.invalid:team/brain.git"
+    )
+    assert _storage_digest("git@host.invalid:team/a#b") != _storage_digest(
+        "git@host.invalid:team/a"
+    )
+    # A Windows drive path is a folder, not a host: its drive letter keeps its case.
+    assert _storage_digest("C:\\Users\\a") != _storage_digest("c:\\Users\\a")
     assert _storage_digest("https://h.invalid:8443/p") != _storage_digest("https://h.invalid/p")
     assert _storage_digest("https://h.invalid:bad/p")  # a malformed port still digests
     assert _storage_digest("/Users/a@b/x") != _storage_digest("/Users/c/x")

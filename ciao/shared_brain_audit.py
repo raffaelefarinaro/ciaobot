@@ -28,6 +28,24 @@ storage only: no route, no Settings surface and no background job use it yet.
   running `pruned` count) in the state file, so retention is visible in
   `DurableAuditLog.view` and the retained chain still verifies.
 
+Operator recovery from ``audit_inconsistent`` or an unreadable log. The engine
+fails closed on purpose and nothing repairs the log automatically:
+
+1. Stop the engine (and any other process using the directory).
+2. Inspect: the files are JSON lines (``audit.log``, sealed
+   ``audit.<seq>.log``, ``audit.state.json``). Compare the last entries of the
+   transition in question with the authority record (generation and steward).
+3. Archive and re-anchor, keeping everything: from Python, as the owner,
+   ``DurableAuditLog(root).archive_for_recovery("case-1")`` moves all audit
+   files into ``root/archive-case-1/`` (0700, files 0600) and leaves an empty
+   root; the next engine start begins a new chain at sequence 1.
+4. Restart the engine and check the record with the authority view.
+
+What is lost: continuity of the active chain. Pending intents, and the proof
+that earlier transitions committed, are no longer in the active log (they stay
+in the archive); the authority record is untouched and is the source of truth
+afterwards. The archive is not deleted or rewritten by this module.
+
 Activation requirements this module does not meet by itself:
 
 * Pruning can drop an unresolved intent (and a resolution can outlive its
@@ -103,6 +121,7 @@ _STATE = "audit.state.json"
 _LOCK = "audit.lock"
 _SEALED = re.compile(r"^audit\.(\d{12})\.log$")
 _HASH = re.compile(r"^[0-9a-f]{64}$")
+_LABEL = re.compile(r"^[A-Za-z0-9._-]{1,64}$")
 
 
 class AuditKind(str, Enum):
@@ -111,6 +130,7 @@ class AuditKind(str, Enum):
     INTENT = "intent"
     COMMITTED = "committed"
     ABORTED = "aborted"
+    SUPERSEDED = "superseded"
 
 
 class AuditError(Exception):
@@ -455,6 +475,35 @@ class DurableAuditLog:
             generation,
         ):
             raise AuditError("invalid_entry")
+
+    def archive_for_recovery(self, label: str) -> Path:
+        """Move every audit file into a private ``archive-<label>`` directory.
+
+        The operator procedure for ``audit_inconsistent`` or an unreadable log
+        (engine stopped first; see the module docstring). It does not need the
+        log to verify, deletes nothing, and leaves the root with no audit files,
+        so the next open starts a fresh chain. The authority record is not
+        touched. A label is 1-64 of letters, digits, dot, dash or underscore and
+        the archive must not already exist.
+        """
+        if not _LABEL.match(label) or label.startswith("."):
+            raise AuditError("invalid_entry")
+        with self._locked():
+            target = self._root / f"archive-{label}"
+            if target.exists() or target.is_symlink():
+                raise AuditError("invalid_entry")
+            try:
+                target.mkdir(mode=0o700)
+                make_private_dir(target)
+                for name in os.listdir(self._root):
+                    if name in {_ACTIVE, _STATE} or _SEALED.match(name) or (
+                        name.startswith(".audit.") and name.endswith(".tmp")
+                    ):
+                        replace_file(self._root / name, target / name)
+            except OSError:
+                raise AuditError("durability_unavailable") from None
+            self._fsync_root()
+            return target
 
     # ── Loading and verification ─────────────────────────────────────────
 
