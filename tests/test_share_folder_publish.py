@@ -78,6 +78,39 @@ def _make_config(root: Path, folder: Path) -> tuple[Config, SharedBrainLink]:
     return config, link
 
 
+@pytest.fixture(autouse=True)
+def _ancestors_stop_at_the_test_root(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Bound the ancestor-stability snapshot to directories this test owns.
+
+    ``ancestor_stamps`` walks to the filesystem root. Above ``tmp_path`` that
+    chain is ``pytest-N``, ``pytest-of-<user>`` and the system temp directory,
+    which every other concurrent pytest run (parallel agents, xdist workers,
+    stress loops) creates and deletes entries in, so their ctime/mtime/nlink
+    move between the before and after snapshots and a good publish reads as
+    "path changed during the write" (outcome ``indeterminate``). Swap detection
+    inside the test tree is unchanged; swaps above it are not exercised here.
+    """
+    real = folder_io.ancestor_stamps
+    root = tmp_path.stat()
+
+    def bounded(parent_fd: int, max_levels: int = 512):
+        stamps = real(parent_fd, max_levels)
+        current = os.dup(parent_fd)
+        try:
+            for depth in range(1, len(stamps) + 1):
+                upper = os.open("..", os.O_RDONLY | os.O_DIRECTORY, dir_fd=current)
+                os.close(current)
+                current = upper
+                info = os.fstat(current)
+                if (info.st_dev, info.st_ino) == (root.st_dev, root.st_ino):
+                    return stamps[:depth]
+        finally:
+            os.close(current)
+        return stamps
+
+    monkeypatch.setattr(folder_io, "ancestor_stamps", bounded)
+
+
 @pytest.fixture
 def folder(tmp_path: Path) -> tuple[Config, Path, SharedBrainLink]:
     root = tmp_path / "case"
