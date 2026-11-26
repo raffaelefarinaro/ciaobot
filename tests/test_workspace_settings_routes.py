@@ -3625,38 +3625,89 @@ def test_grant_issuance_only_through_the_operator_route(tmp_path, monkeypatch):
     link = config.workspace("personal").shared_brains[0]
     assert (link.sharing_policy, link.sharing_generation, link.sharing_consent) == ("review", 0, None)
     assert issued == []
-    # Registry metadata written by hand is not authority either: identity and lifetime must match.
-    row_file = Path(config.state_path).parent / "workspaces.json"
-    rows = json.loads(row_file.read_text())
-    for row in rows:
-        for item in row.get("shared_brains", []):
-            item.update(forged)
-    assert all(
-        l.sharing_consent is None
-        for w in config_module.CiaoConfig.from_env({
-            "PWA_AUTH_TOKEN": "t", "CIAO_WORKSPACE": str(tmp_path), "CIAO_RUNTIME_ROOT": str(tmp_path / ".runtime"),
-        }).workspaces.values() for l in w.shared_brains
-    )
-    # The explicit operator route is the one place a consent is issued.
+    # Registry metadata written by hand is not authority either. Use the real
+    # registry file (the one the engine reads), forge every link row in it, and
+    # reload: a consent whose lifetime is not this link's must come back as Review.
+    registry = tmp_path / ".runtime" / "workspaces.json"
+    rows = json.loads(registry.read_text())
+    items = [item for row in rows for item in row.get("shared_brains", [])]
+    assert items, "the registry must hold the linked brain"
+    for item in items:
+        item.update(forged)
+        item["sharing_consent"] = {**forged["sharing_consent"], "identity": item["identity"], "lifetime_id": "forged-lifetime"}
+    registry.write_text(json.dumps(rows))
+    reloaded = [l for w in _reload_config(tmp_path).workspaces.values() for l in w.shared_brains]
+    assert reloaded and all(l.sharing_consent is None and l.sharing_policy == "review" for l in reloaded)
+    # The explicit operator route is the one place a consent is issued (fresh
+    # engine: the registry file was rewritten under the old one).
+    client, _config, _ = _client(tmp_path)
     assert client.post(_SHARING_PATH, json={**_sharing_body(_state(client)), "scope": _SCOPE}).status_code == 200
     assert issued == ["automatic", "consent"]
 
 
 def test_only_the_operator_route_and_shared_brain_issue_consents():
-    """The control plane, agent surface and every other module have no path to a grant."""
+    """AST guard: no ciao module but config.py/shared_brain.py can build or swap a consent.
+
+    Catches direct calls, import aliases, attribute aliases, and
+    `dataclasses.replace(link, sharing_consent=...)` (or sharing_policy/generation).
+    """
+    import ast
+
     root = Path(__file__).resolve().parents[1] / "ciao"
-    callers = {
-        p.relative_to(root).as_posix()
-        for p in root.rglob("*.py")
-        if "set_sharing_policy(" in p.read_text(encoding="utf-8") and "stock" not in p.parts
-    }
-    assert callers == {"shared_brain.py", "web/routes_api.py"}
-    makers = {
-        p.relative_to(root).as_posix()
-        for p in root.rglob("*.py")
-        if "SharingConsent(" in p.read_text(encoding="utf-8") and "stock" not in p.parts
-    }
-    assert makers == {"config.py", "shared_brain.py"}
+    guarded_kwargs = {"sharing_consent", "sharing_policy", "sharing_generation"}
+    constructors: set[str] = set()
+    kwarg_sites: set[str] = set()
+    policy_callers: set[str] = set()
+    for path in root.rglob("*.py"):
+        if "stock" in path.parts:
+            continue
+        rel = path.relative_to(root).as_posix()
+        for node in ast.walk(ast.parse(path.read_text(encoding="utf-8"))):
+            if isinstance(node, ast.Name) and node.id == "SharingConsent":
+                constructors.add(rel)
+            elif isinstance(node, ast.Attribute) and node.attr == "SharingConsent":
+                constructors.add(rel)
+            elif isinstance(node, ast.alias) and node.name == "SharingConsent":
+                constructors.add(rel)
+            elif isinstance(node, ast.Call):
+                if any(k.arg in guarded_kwargs for k in node.keywords):
+                    kwarg_sites.add(rel)
+                if any(k.arg is None for k in node.keywords) and any(
+                    isinstance(v, ast.Constant) and v.value in guarded_kwargs
+                    for v in ast.walk(node)
+                ):
+                    kwarg_sites.add(rel)
+                fn = node.func
+                name = fn.id if isinstance(fn, ast.Name) else fn.attr if isinstance(fn, ast.Attribute) else ""
+                if name == "set_sharing_policy":
+                    policy_callers.add(rel)
+            elif isinstance(node, ast.Name) and node.id == "set_sharing_policy":
+                policy_callers.add(rel)
+    assert constructors == {"config.py", "shared_brain.py"}, constructors
+    assert policy_callers == {"shared_brain.py", "web/routes_api.py"}, policy_callers
+    assert kwarg_sites <= {"config.py", "shared_brain.py"}, kwarg_sites
     for name in ("control_plane.py", "agent_surface.py", "web/routes_agent.py"):
         text = (root / name).read_text(encoding="utf-8")
         assert not any(word in text for word in ("sharing_policy", "sharing_consent", "build_sharing_scope")), name
+
+
+def test_scope_preview_refuses_like_the_real_call(tmp_path, monkeypatch):
+    client, config = _linked(tmp_path, monkeypatch)
+    state = _state(client)
+    body = {**_sharing_body(state), "scope": _SCOPE, "preview": True}
+    config._sharing_recovery_pending = True
+    pending = client.post(_SHARING_PATH, json=body)
+    assert pending.status_code == 409 and pending.json()["code"] == "consent_journal_unavailable"
+    assert client.post(_SHARING_PATH, json={**body, "preview": False}).status_code == 409
+    config._sharing_recovery_pending = False
+    # A broken folder is refused for a preview exactly as for a grant.
+    import shutil
+
+    shutil.rmtree(Path(config.workspace("personal").shared_brains[0].path) / ".git")
+    gone = client.post(_SHARING_PATH, json=body)
+    assert gone.status_code == 409 and gone.json()["code"] == "brain_unavailable"
+    assert config.workspace("personal").shared_brains[0].sharing_policy == "review"
+    bad = client.post(_SHARING_PATH, json={**body, "preview": 1})
+    assert bad.status_code == 400 and bad.json()["code"] == "invalid_request"
+    shape = client.post(_SHARING_PATH, json={**body, "scope": ["p1"]})
+    assert shape.status_code == 400 and shape.json()["code"] == "invalid_scope"

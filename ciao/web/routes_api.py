@@ -854,14 +854,19 @@ async def set_workspace_shared_brain_sharing(request: Request) -> JSONResponse:
     scope_body = body.get("scope")
     preview = body.get("preview", False)
     if preview is not True and preview is not False:
-        return JSONResponse({"error": "preview must be a boolean"}, status_code=400)
+        return JSONResponse(
+            {"error": "preview must be a boolean", "code": "invalid_request"}, status_code=400
+        )
     if scope_body is not None and (
         policy != "automatic"
         or not isinstance(scope_body, dict)
         or set(scope_body) != {"projects", "producers", "operations"}
     ):
         return JSONResponse(
-            {"error": "scope is only for automatic and needs projects, producers and operations"},
+            {
+                "error": "scope is only for automatic and needs projects, producers and operations",
+                "code": "invalid_scope",
+            },
             status_code=400,
         )
     pcm = getattr(request.app.state, "project_chat_manager", None)
@@ -994,19 +999,6 @@ async def _apply_sharing_policy(
         scope_for(link)
     except ValueError as exc:
         return invalid_scope(exc)
-    if preview:
-        # The exact permission this choice would store, written nowhere.
-        would = shared_brain.set_sharing_policy(link, policy, scope_for(link))
-        return JSONResponse({"preview": {
-            "policy": policy,
-            "scope": (
-                sharing_scope_row(would.sharing_consent.scope)
-                if would.sharing_consent is not None and would.sharing_consent.scope is not None
-                else None
-            ),
-            "changes": would != link,
-            "generation_after": would.sharing_generation,
-        }})
     if policy == "automatic":
         if getattr(config, "_sharing_recovery_pending", False):
             return JSONResponse(
@@ -1062,23 +1054,39 @@ async def _apply_sharing_policy(
                     },
                     status_code=409,
                 )
-            try:
-                await run_while_claimed(
-                    shared_brain.merge_sharing_revocations,
-                    config,
-                    set(),
-                    registry_bytes=owner.current,
-                    force_fail_closed=False,
-                )
-            except OSError:
-                return JSONResponse(
-                    {
-                        "error": "The sharing journal could not be initialized. "
-                        "Nothing was changed.",
-                        "code": "consent_journal_unavailable",
-                    },
-                    status_code=503,
-                )
+            # A preview refuses like the real call but never initializes the journal.
+            if not preview:
+                try:
+                    await run_while_claimed(
+                        shared_brain.merge_sharing_revocations,
+                        config,
+                        set(),
+                        registry_bytes=owner.current,
+                        force_fail_closed=False,
+                    )
+                except OSError:
+                    return JSONResponse(
+                        {
+                            "error": "The sharing journal could not be initialized. "
+                            "Nothing was changed.",
+                            "code": "consent_journal_unavailable",
+                        },
+                        status_code=503,
+                    )
+    if preview:
+        # After the same refusal checks as the real call, so a preview never
+        # promises a grant the route would refuse. The exact permission, written nowhere.
+        would = shared_brain.set_sharing_policy(link, policy, scope_for(link))
+        return JSONResponse({"preview": {
+            "policy": policy,
+            "scope": (
+                sharing_scope_row(would.sharing_consent.scope)
+                if would.sharing_consent is not None and would.sharing_consent.scope is not None
+                else None
+            ),
+            "changes": would != link,
+            "generation_after": would.sharing_generation,
+        }})
     with workspace_registry_lock(config):
         workspace = config.workspace(workspace_name)
         if workspace is None:
