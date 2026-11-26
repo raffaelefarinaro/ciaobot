@@ -6164,6 +6164,112 @@ def test_history_shows_no_apply_state_for_a_decision_with_no_receipt(
     assert row["apply_status"] == "none"
 
 
+def test_history_flags_a_named_receipt_the_journal_does_not_hold(tmp_path: Path) -> None:
+    """Missing evidence is not applied and not a legacy row: it says the receipt is gone."""
+    config = _config(tmp_path)
+    _seed_history(config, "personal", [_accepted(receipt_id="rcpt_gone")])
+    _seed_receipts(config, "personal", [_region_receipt("rcpt_other", "applied")])
+
+    row = _only_history_row(config)
+
+    assert row["apply_status"] == "none"
+    assert row["applied"] is None
+    assert row["receipt_issue"] == "missing"
+
+
+def test_history_flags_a_receipt_with_an_unknown_status(tmp_path: Path) -> None:
+    config = _config(tmp_path)
+    _seed_history(config, "personal", [_accepted(receipt_id="rcpt_a")])
+    _seed_receipts(config, "personal", [_region_receipt("rcpt_a", "teleported")])
+
+    row = _only_history_row(config)
+
+    assert row["apply_status"] == "none"
+    assert row["receipt_issue"] == "unknown_status"
+
+
+def test_history_receipt_issue_is_per_row_and_absent_when_evidence_is_sound(
+    tmp_path: Path,
+) -> None:
+    config = _config(tmp_path)
+    _seed_history(
+        config,
+        "personal",
+        [
+            _accepted(text="Gone.", receipt_id="rcpt_gone", promoted_at="2026-09-01T10:00:02+00:00"),
+            _accepted(text="Fine.", receipt_id="rcpt_ok", promoted_at="2026-09-01T10:00:01+00:00"),
+            _accepted(text="Legacy.", promoted_at="2026-09-01T10:00:00+00:00"),
+        ],
+    )
+    _seed_receipts(config, "personal", [_region_receipt("rcpt_ok", "applied")])
+
+    rows = {r["text"]: r for r in _client(config).get("/api/proposals/history").json()["rows"]}
+
+    assert rows["Gone."]["receipt_issue"] == "missing"
+    assert "receipt_issue" not in rows["Fine."]
+    assert "receipt_issue" not in rows["Legacy."]
+
+
+def test_history_receipt_issue_is_absent_for_a_dismissal_and_a_share_row(
+    tmp_path: Path,
+) -> None:
+    """Only an accepted, non-share decision claims a write; the other two name receipts the memory journal never holds."""
+    config = _config(tmp_path)
+    _seed_history(
+        config,
+        "personal",
+        [
+            {
+                "dismissed_at": "2026-09-01T10:00:02+00:00", "kind": "memory",
+                "text": "Dismissed.", "via": "pwa", "receipt_id": "rcpt_gone",
+            },
+            _accepted(
+                text="Shared.", kind="share", receipt_id="rcpt_share_gone",
+                promoted_at="2026-09-01T10:00:01+00:00",
+            ),
+            _accepted(text="Accepted.", receipt_id="rcpt_gone"),
+        ],
+    )
+
+    rows = {r["text"]: r for r in _client(config).get("/api/proposals/history").json()["rows"]}
+
+    assert rows["Accepted."]["receipt_issue"] == "missing"
+    assert "receipt_issue" not in rows["Dismissed."]
+    assert "receipt_issue" not in rows["Shared."]
+
+
+def test_history_flags_an_unknown_status_found_through_the_operation_id(
+    tmp_path: Path,
+) -> None:
+    config = _config(tmp_path)
+    _seed_history(config, "personal", [_accepted(operation_id="cop_7")])
+    _seed_receipts(
+        config,
+        "personal",
+        [_region_receipt("rcpt_a", "teleported", operation_id="cop_7")],
+    )
+
+    row = _only_history_row(config)
+
+    assert row["apply_status"] == "none"
+    assert row["receipt_issue"] == "unknown_status"
+
+
+def test_history_receipt_issue_does_not_cross_workspaces(tmp_path: Path) -> None:
+    """A receipt that exists only in workspace A's journal cannot vouch for B's decision."""
+    config = _config(tmp_path)
+    _seed_history(config, "personal", [_accepted(text="Mine.", receipt_id="rcpt_a")])
+    _seed_history(config, "work", [_accepted(text="Theirs.", receipt_id="rcpt_a")])
+    _seed_receipts(config, "personal", [_region_receipt("rcpt_a", "applied")])
+
+    rows = {r["workspace"]: r for r in _client(config).get("/api/proposals/history").json()["rows"]}
+
+    assert rows["personal"]["apply_status"] == "applied"
+    assert "receipt_issue" not in rows["personal"]
+    assert rows["work"]["apply_status"] == "none"
+    assert rows["work"]["receipt_issue"] == "missing"
+
+
 def test_history_joins_a_receipt_by_operation_id_when_the_decision_names_none(
     tmp_path: Path,
 ) -> None:
