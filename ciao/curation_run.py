@@ -108,7 +108,6 @@ PASS_GUIDE = "guide"
 PASS_RULES = "rules"
 PASS_LOGS = "logs"
 PASS_SKILL_PROPOSALS = "skill_proposals"
-PASS_SKILL_CATALOG = "skill_catalog"
 
 PASS_ORDER: tuple[str, ...] = (
     PASS_PROPOSALS,
@@ -147,11 +146,6 @@ PASS_ORDER: tuple[str, ...] = (
     PASS_RULES,
     PASS_LOGS,
     PASS_SKILL_PROPOSALS,
-    # Last, and deliberately: the skill catalog judges skills the earlier passes
-    # have already reported on, and it is the first item a full run defers. It
-    # sits after the required hygiene keys, so a bounded run never spends the
-    # budget they need.
-    PASS_SKILL_CATALOG,
 )
 
 # The two weekly checks that must both succeed before `last_full_pass` may
@@ -1653,7 +1647,6 @@ def build_worklist_views(
     user_char_limit: int | None = None,
     workspace: str | None,
     policy: HandoverPolicy | None = None,
-    skill_catalog_items: tuple[WorklistItem, ...] = (),
 ) -> WorklistViews:
     """Compute tonight's work from files alone.
 
@@ -1797,7 +1790,6 @@ def build_worklist_views(
     collected.extend(_rules_items(vault_root, weekly_due=weekly_due, today=today))
     collected.extend(_log_items(vault_root))
     collected.extend(_skill_proposal_items(vault_root))
-    collected.extend(skill_catalog_items)
 
     order = {pass_id: index for index, pass_id in enumerate(PASS_ORDER)}
     discovered_items = tuple(
