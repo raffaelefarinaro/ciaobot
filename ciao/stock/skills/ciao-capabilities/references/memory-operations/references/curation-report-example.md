@@ -5,9 +5,10 @@
 ```
 # Care report 2026-11-26
 Weekly done: 2026-11-19
-- [x] unsure: apply ticked Unsure lines (2 ticked) — applied 2, left 0 ticked
-- [x] regions: consolidate regions at or above 85% (memory 91%) — memory 91% -> 72%, 3 entries logged in Memory-Consolidations.md
-- [x] stale: re-check stale notes (4 listed, weekly due) — checked 4 notes (People/Rae.md, ...), fixed 1, Unsure 1
+Interrupted last run: guide-review
+- [x] unsure: apply ticked Unsure lines (2 ticked) — applied 2, left 0 ticked; verify: 0 `- [x]` lines left
+- [x] regions: consolidate regions at or above 85% (memory 91%) — memory 91% -> 72%, 3 entries logged in Memory-Consolidations.md; verify: memory.pct 72, profile.pct 40
+- [x] stale: re-check stale notes (4 listed, weekly due) — checked 4 notes (People/Rae.md, ...), fixed 1, Unsure 1; verify: 3 of 4 still listed, none of the fixed paths
 - [!] guide-review: review the AGENTS.md body (weekly due) — blocked: AGENTS.md unreadable
 ```
 

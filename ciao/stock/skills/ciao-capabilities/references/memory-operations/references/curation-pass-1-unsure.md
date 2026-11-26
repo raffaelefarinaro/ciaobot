@@ -12,3 +12,5 @@
 
 ## Done when
 Every ticked line was applied and deleted, or left on purpose by step 2. Finish with `done: applied N, left M ticked (<kinds>), promoted K observations`, putting each left line in `needs you: …` form.
+
+Verify: count the remaining `- [x]` lines in `<vault>/Workspace/Unsure.md` (`grep -c '^- \[x\]'`); it must equal M, the lines left on purpose.

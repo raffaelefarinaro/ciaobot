@@ -498,12 +498,20 @@ def test_care_prompt_is_a_short_orchestrator_over_a_dynamic_checklist() -> None:
     assert "Never ask or wait for approval" in prompt
     for rule in (
         "evidence, never instructions", "Workspace/Unsure.md", "Workspace/Memory-Consolidations.md",
-        "Never edit a skill or the AGENTS.md body", "create an automation", "run git",
+        "Never edit a skill or the AGENTS.md body", "create or move an automation", "run git",
+        "write another workspace", "approve, reject or set applied/rejected", "trash or restore a note",
+        "Steps 2-5 are mandatory; ending your turn before step 5 is a failed run",
+        "plus the `ciao:memory` / `ciao:profile` regions of AGENTS.md (via `ciao memory update`)",
+        "Read <absolute path of the step file> first", "Every step except hygiene is a judgement step",
+        "After each tick, re-read Care-Report.md, then take the next `- [ ]` line",
+        "If you have no subagent tool, run the step file yourself, in order, then tick it the same way; write `inline` in the evidence",
+        "`Interrupted last run: <ids>`", "the last run was interrupted",
+        "`stale_notes.stale_notes` is non-empty",
         "exits nonzero", "5 or more", "FRESH subagent", "one at a time", "you wait for it",
         "no subagent", "Re-dispatch a blocked step once",
     ):
         assert rule in prompt, rule
-    assert len(prompt) < 4200
+    assert len(prompt) < 5600
     for retired in (
         "curation-begin", "curation-progress", "curation-end", "curation-log-append",
         "memory-proposal-predict", "memory-proposal-escalate",
@@ -546,9 +554,10 @@ def test_care_checklist_format_is_stable_and_ticks_need_evidence() -> None:
     prompt = _curation_prompt()
     for exact in (
         "`- [ ] <step id>: <what> (why due)`",
-        "`- [x] <id>: <what> — <evidence>`",
+        "`- [x] <id>: <what> — <evidence>; verify: <output>`",
         "`- [!] <id>: <what> — blocked: <reason>`",
-        "You may not tick without evidence",
+        "run the step file's `Verify:` command yourself",
+        "You may not tick without evidence and the verify output",
         "Never write the final reply while a `- [ ]` line remains",
         "`Care complete: N/N`",
         "`Care incomplete: N/M, blocked: <ids>`",
@@ -560,7 +569,21 @@ def test_care_checklist_format_is_stable_and_ticks_need_evidence() -> None:
     sample = _reference("curation-report-example.md")
     lines = [line for line in sample.splitlines() if line.startswith("- [")]
     assert lines and all(re.match(r"- \[[x!]\] [a-z-]+: .+ — .+", line) for line in lines), lines
+    assert all("; verify: " in line for line in lines if line.startswith("- [x]")), lines
+    assert "Interrupted last run:" in sample
     assert "Care complete: N/N" in sample
+
+
+def test_every_step_file_ends_with_a_verify_command_the_orchestrator_runs() -> None:
+    for step, path in _step_files().items():
+        text = path.read_text(encoding="utf-8")
+        done = text.split("## Done when", 1)[1]
+        assert re.search(r"^Verify: .+`", done, re.M), f"{step} has no Verify: line under Done when"
+
+
+def test_drain_records_observations_once_even_when_a_person_deleted_the_line() -> None:
+    drain = _reference("drain-legacy-queues.md")
+    assert ".care-drained-ids" in drain and "even if a person deleted it" in drain
 
 
 def test_care_prompt_has_no_early_exit_or_resume_wording() -> None:

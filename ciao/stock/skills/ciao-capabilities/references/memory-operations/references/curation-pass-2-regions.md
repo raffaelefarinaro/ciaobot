@@ -20,3 +20,5 @@ The cap is advisory: nothing refuses a write, and a durable fact is never worth 
 
 ## Done when
 `ciao memory status` is below 85% for every region, or each region still at or above it has a reason (all high-signal, or Unsure lines added). Finish with `done: memory A% -> B%, profile C% -> D%, N entries logged in Memory-Consolidations.md`.
+
+Verify: run `ciao memory status` and report `data.regions.memory.pct` and `data.regions.profile.pct`; each must match the step's numbers, and each at or above 85 needs the reason.

@@ -14,3 +14,5 @@ Take at most 5 notes, oldest first. This step may use about 40 tool calls. For e
 
 ## Done when
 Each of the chosen notes was read, had `ciao note related` run, and was fixed, verified, or put on the Unsure list. Finish with `done: checked N notes (<paths>), fixed X, Unsure Y, retire proposals Z, W stale notes remain`.
+
+Verify: re-run `ciao memory-audit --with-vault --json` (exit 1 only means findings exist) and compare `stale_notes.stale_notes` with the list from before: no path the step says it fixed or verified may still be listed, and the count must be W or fewer.

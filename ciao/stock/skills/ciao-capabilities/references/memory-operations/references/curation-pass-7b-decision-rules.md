@@ -22,3 +22,5 @@ The result is two operator-editable notes, `Workspace/Memory-Review-Rules.md` an
 
 ## Done when
 Each file with 5 or more `rows` was written with `ciao decision-rules-write` or reported as unwritable. Finish with `done: memory rules W, task rules V` (`skipped` for a file below 5 rows).
+
+Verify: run `ciao decisions-digest --json` and read `existing_rules` for each file written: it must list the rule keys the step says it wrote.

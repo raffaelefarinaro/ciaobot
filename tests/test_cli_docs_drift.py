@@ -336,20 +336,28 @@ def test_the_care_run_names_only_procedure_files_that_ship() -> None:
 
 
 def test_care_preflight_checks_every_command_the_care_run_uses() -> None:
-    """The preflight loop lists real CLI nouns and covers every command a step names."""
+    """The preflight loop lists real subcommands and key flags and covers every command a step names."""
     import json
+    import shlex
 
     root = ROOT / "ciao/stock/skills/ciao-capabilities/references/memory-operations"
     schedules = json.loads((ROOT / "ciao/stock/schedules.json").read_text(encoding="utf-8"))
     prompt = next(e["prompt"] for e in schedules["schedules"] if e["schedule_id"] == "system-memory-curation")
-    match = re.search(r"for c in ([a-z -]+); do ciao \$c --help", prompt)
+    match = re.search(r"for c in (.+?); do ciao \$c --help", prompt)
     assert match, "the preflight loop changed shape"
-    listed = set(match.group(1).split())
+    listed = [tuple(item.split()) for item in shlex.split(match.group(1))]
     agent, operator = _all_leaves()
-    nouns = {leaf[0] for leaf in set(agent) | set(operator)}
-    assert listed <= nouns, sorted(listed - nouns)
+    leaves = set(agent) | set(operator)
+    assert set(listed) <= leaves, sorted(set(listed) - leaves)
+    # The key flags are checked by name too.
+    for flag in ("--with-vault", "--write", "--json"):
+        assert f"grep -q -- {flag}" in prompt, flag
     steps = [p.read_text(encoding="utf-8") for p in sorted((root / "references").glob("*.md"))]
     text = "\n".join([prompt, *(s for s in steps if s.startswith("# Step "))])
-    named = {first for first, _ in re.findall(r"`ciao ([a-z][a-z-]*)(?: ([a-z][a-z-]*))?", text)}
+    named = {
+        (first, second) if (first, second) in leaves else (first,)
+        for first, second in re.findall(r"`ciao ([a-z][a-z-]*)(?: ([a-z][a-z-]*))?", text)
+    }
     # learnings-cleanup is only reported to the person, never run by a step.
-    assert not named - listed - {"learnings-cleanup"}, sorted(named - listed)
+    unchecked = named - set(listed) - {("learnings-cleanup",)}
+    assert not unchecked, sorted(unchecked)

@@ -16,8 +16,10 @@ Handle at most 25 records per run in total, across every part. This step may use
    - `[repo]` and plain `[review]` questions: add to the Unsure list (`repo <path>:` or no kind).
    - `[review <id>]` rows that point at a skill draft or an upstream issue: part 2 covers their records; dismiss the row without `--promoted` once the proposal file exists.
 2. Each record in `Workspace/Skill-Proposals/` and `Workspace/Skill-Drafts/`: look in `Workspace/Proposals/` for a file with the same target and title. If one exists, the record is done. If not, write a proposal file from the record (type `skill-edit`, or `upstream-issue` for an upstream draft), run `ciao proposal-check` until it prints `ok`, and count it. Leave the old record where it is; it is history. Never approve or reject a draft from an unattended run.
-3. `Workspace/Observations.md`: for each counted pattern, look for its line on the Unsure list; if it is missing, add an `observation:` line with the pattern's chat ids and count it. Do not edit that file.
-4. When parts 1 to 3 find nothing left (the queue is empty, every record has a proposal file, every observation is on the Unsure list), write `<vault>/Workspace/.care-drained` containing today's date and one line, `legacy queues drained`. Never write it while anything remains.
+3. `Workspace/Observations.md`: for each counted pattern, check `<vault>/Workspace/.care-drained-ids` (one pattern key per line; create it if missing). A pattern listed there is done: never add its line again, even if a person deleted it from the Unsure list. Otherwise, if its line is not on the Unsure list, add an `observation:` line with the pattern's chat ids; then append the pattern key to `.care-drained-ids` and count it. Do not edit Observations.md.
+4. When parts 1 to 3 find nothing left (the queue is empty, every record has a proposal file, every observation is on the Unsure list or in `.care-drained-ids`), write `<vault>/Workspace/.care-drained` containing today's date and one line, `legacy queues drained`. Never write it while anything remains.
 
 ## Done when
 The budget was spent or nothing remains. Finish with `done: handled N records, M remain` (`marker written` when step 4 ran). Reaching the 25-record limit with records left is done: the next run continues.
+
+Verify: run `ciao memory-proposals --limit 1 --json` and report `total`, the rows still queued; it must match the M the step reported for queue rows, and be 0 before the marker was written.

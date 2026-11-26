@@ -14,3 +14,5 @@ Install-wide runtime failures are visible through startup triage and pending upg
 
 ## Done when
 Both commands ran and the section is written. Evidence: `index rebuilt; audit exit N, F findings (<categories>)`.
+
+Verify: re-read Care-Report.md and confirm the `## Hygiene` section holds the finding count and one line per finding.
