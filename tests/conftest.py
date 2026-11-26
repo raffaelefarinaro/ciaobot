@@ -33,6 +33,9 @@ _INHERITED_ENV_PREFIXES = ("CIAO_", "PWA_", "GWS_")
 for _key in [key for key in os.environ if key.startswith(_INHERITED_ENV_PREFIXES)]:
     del os.environ[_key]
 
+# The release tooling lives in scripts/ (not in the wheel); its tests import it by module name.
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
+
 # Captured before any fixture runs, so the guard test can prove no test sees it.
 REAL_HOME = Path.home()
 

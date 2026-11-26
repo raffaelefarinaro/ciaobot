@@ -169,7 +169,7 @@ jobs:
     - name: Install Python package
       run: python -m pip install -e .
     - name: Smoke-test installed package
-      run: ciao package-smoke --skip-frontend
+      run: python scripts/package_smoke.py --skip-frontend
 
   # The wheel is the release, so every PR proves the Linux one-line installer
   # still installs it (#3131): the PWA and the wheel of this checkout are
@@ -583,4 +583,4 @@ jobs:
 
     - name: Smoke-test package
       run: |
-        ciao package-smoke --skip-frontend
+        python scripts/package_smoke.py --skip-frontend

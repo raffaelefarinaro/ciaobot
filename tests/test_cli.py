@@ -159,33 +159,6 @@ def test_supervise_is_not_an_agent_command() -> None:
     assert is_agent_invocation(["supervise"]) is False
 
 
-def test_cli_public_preflight_dispatches_module(monkeypatch: pytest.MonkeyPatch) -> None:
-    called = []
-
-    monkeypatch.setattr(cli.public_release, "main", lambda argv: called.append(argv) or 7)
-
-    assert cli.main(["public-preflight", "scan", "/tmp/export"]) == 7
-    assert called == [["scan", "/tmp/export"]]
-
-
-def test_cli_package_smoke_dispatches_module(monkeypatch: pytest.MonkeyPatch) -> None:
-    called = []
-
-    monkeypatch.setattr(cli.package_smoke, "main", lambda argv: called.append(argv) or 0)
-
-    assert cli.main(["package-smoke", "--skip-frontend"]) == 0
-    assert called == [["--skip-frontend"]]
-
-
-def test_cli_prepare_release_dispatches_module(monkeypatch: pytest.MonkeyPatch) -> None:
-    called = []
-
-    monkeypatch.setattr(cli.release, "main", lambda argv: called.append(argv) or 0)
-
-    assert cli.main(["prepare-release", "--version", "0.3.0"]) == 0
-    assert called == [["--version", "0.3.0"]]
-
-
 def test_cli_dev_dispatches_module(monkeypatch: pytest.MonkeyPatch) -> None:
     called = []
 
@@ -4995,14 +4968,6 @@ def test_cli_root_version_module_entry(tmp_path: Path) -> None:
     assert result.returncode == 0, result.stderr
     assert result.stdout == f"ciao {ciao.__version__}\n"
     assert list(tmp_path.iterdir()) == []
-
-
-def test_cli_version_flag_after_subcommand_keeps_routing(monkeypatch: pytest.MonkeyPatch) -> None:
-    rel: list[list[str]] = []
-    monkeypatch.setattr(cli.release, "main", lambda argv: rel.append(argv) or 0)
-
-    assert cli.main(["prepare-release", "--version", "1.2.3"]) == 0
-    assert rel == [["--version", "1.2.3"]]
 
 
 def test_gws_is_not_a_cli_command() -> None:

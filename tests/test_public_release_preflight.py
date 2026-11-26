@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from ciao.public_release import (
+from public_release import (
     PUBLIC_EXPORT_ALLOWLIST,
     PublicReleaseFinding,
     export_public_tree,
@@ -84,7 +84,7 @@ def test_private_patterns_can_load_from_file(tmp_path: Path) -> None:
 
 
 def test_public_release_module_does_not_embed_private_raffa_markers() -> None:
-    source = Path(__file__).parents[1] / "ciao" / "public_release.py"
+    source = Path(__file__).parents[1] / "scripts" / "public_release.py"
     text = source.read_text(encoding="utf-8")
 
     forbidden_literals = (

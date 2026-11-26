@@ -20,7 +20,7 @@ that also patches what it is releasing has no fixed point, and every fix
 introduced mid-release is unreviewed code riding into a tag.
 
 Canonical companions: `docs/DEVELOPMENT.md` (§ "Branching and releases") and
-`ciao/release.py`. When this skill and the code disagree, the code wins — say
+`scripts/release.py`. When this skill and the code disagree, the code wins — say
 so and update this skill.
 
 Sibling skills this one calls into, rather than restating:
@@ -88,12 +88,12 @@ report them, do not fix them here.
 
 ## Step 2 — Run the gates
 
-`_run_checks` in `ciao/release.py` runs these for you during `--apply`, and
+`_run_checks` in `scripts/release.py` runs these for you during `--apply`, and
 `_run_checks` failing is a stop, not something to work around:
 
 ```
 mypy ciao · pytest tests/ · cd web && npm run test · cd web && npm run build
-ciao package-smoke --skip-frontend
+python scripts/package_smoke.py --skip-frontend
 ```
 
 There is no Rust, no `cargo`, no app bundle: the release *is* the engine
@@ -198,7 +198,7 @@ that risk on the condition that it is checked before the cut.
 Plan-only first. It writes nothing, so it is safe against a dirty tree:
 
 ```bash
-env -u PYTHONPATH .venv/bin/python -m ciao.release "$(pwd)" --bump <patch|minor|major>
+env -u PYTHONPATH .venv/bin/python scripts/release.py "$(pwd)" --bump <patch|minor|major>
 ```
 
 Read the plan. It is the last chance to catch a wrong bump.
@@ -215,7 +215,7 @@ read the notes. Run **`/ciao-release-notes`** for the range
 The notes become the `CHANGELOG.md` section and the GitHub release body. Then:
 
 ```bash
-env -u PYTHONPATH .venv/bin/python -m ciao.release "$(pwd)" \
+env -u PYTHONPATH .venv/bin/python scripts/release.py "$(pwd)" \
   --bump <patch|minor|major> --notes-file "$TMPDIR/release-notes-vX.Y.Z.md" --apply \
   --commit --push --create-pr --ready > /tmp/release.log 2>&1
 echo "EXIT=$?"
@@ -271,7 +271,7 @@ differ, re-record, commit, push to the release branch, and repeat the real chat
 turn with that provider:
 
 ```bash
-env -u PYTHONPATH .venv/bin/python -m ciao.release "$(pwd)" --refresh-provider-versions
+env -u PYTHONPATH .venv/bin/python scripts/release.py "$(pwd)" --refresh-provider-versions
 ```
 
 ### Driving the app, and the walkthrough report

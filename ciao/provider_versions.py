@@ -1,6 +1,6 @@
 """The record of provider CLI versions a release was tested with.
 
-``ciao/stock/provider-versions.json`` ships in the wheel. ``ciao.release``
+``ciao/stock/provider-versions.json`` ships in the wheel. ``scripts/release.py``
 writes it on ``--apply``; this module owns the schema, the strict parser and
 the loader, plus the offline runtime comparison of the installed CLIs against
 the record (``release_check``, ``current_checks``). Nothing here touches the

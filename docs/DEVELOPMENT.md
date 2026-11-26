@@ -81,7 +81,7 @@ wait expired before some engines had bound at all; a launchd-spawned install
 adds interpreter start-up and first import on top. A verified start carries
 `"verified": true` with the `startup_id` and `pid` it confirmed.
 
-The weekly dependency-changelog review is an operator-owned routine, not part of the public app install. In a maintainer workspace it lives at `scripts/dependency_review.py` and invokes this checkout for the DAG/runtime; public release preparation uses only the generic helpers in `ciao/dependency_updates.py`.
+The weekly dependency-changelog review is an operator-owned routine, not part of the public app install. In a maintainer workspace it lives at `scripts/dependency_review.py` and invokes this checkout for the DAG/runtime; public release preparation uses only the generic helpers in `scripts/dependency_updates.py`.
 
 A fresh first logical workspace and workspaces added later in Settings live at
 `<CIAO_VAULT_ROOT>/<workspace-name>/`. Their registry path is read-only in the
@@ -103,11 +103,11 @@ ciao vault-lint --vault-root memory-vault
 ciao os-audit --json
 ciao create-chat --prompt "Start here" --workspace default
 ciao cleanup-sdk-blobs --workspace .       # dry-run by default
-ciao label-hygiene --json                  # audit issue labels, dry-run by default
+python scripts/label_hygiene.py --json      # audit issue labels, dry-run by default
 ciao dev                                   # backend :8543 + Vite :5173
-ciao public-preflight export . /tmp/ciao-public-export
-ciao public-preflight scan /tmp/ciao-public-export --private-patterns /tmp/private-patterns.txt
-ciao package-smoke --skip-frontend
+python scripts/public_release.py export . /tmp/ciao-public-export
+python scripts/public_release.py scan /tmp/ciao-public-export --private-patterns /tmp/private-patterns.txt
+python scripts/package_smoke.py --skip-frontend
 ciao auth claude --print-only              # show terminal OAuth command
 ciao auth opencode --print-only            # show opencode login command
 ciao auth opencode                         # run provider login helper
@@ -450,9 +450,9 @@ source .venv/bin/activate
 pytest tests/                  # Python backend tests
 pytest tests/test_schedule_workspace_routing.py  # Workspace/provider/model inheritance for schedules
 pytest tests/test_dag.py       # DAG runner only (Node/Edge/run, per-node timing)
-ciao public-preflight scan <export-root> --private-patterns <file> # Public export private-data preflight
-ciao public-preflight export . /tmp/ciao-public-export # Copy allowlisted public tree
-ciao package-smoke --skip-frontend # Wheel install smoke test
+python scripts/public_release.py scan <export-root> --private-patterns <file> # Public export private-data preflight
+python scripts/public_release.py export . /tmp/ciao-public-export # Copy allowlisted public tree
+python scripts/package_smoke.py --skip-frontend # Wheel install smoke test
 ciao vault-index --workspace default --format json  # Query the vault index
 ciao vault-search "keyword" --limit 5 # FTS search over the configured vault
 ciao vault-lint --vault-root memory-vault # Vault hygiene lint

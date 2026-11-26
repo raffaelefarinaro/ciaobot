@@ -9,7 +9,6 @@ dispatcher needs: the operation table, the bearer-token registry, the
 
 from __future__ import annotations
 
-import asyncio
 import contextvars
 import functools
 import inspect
@@ -32,7 +31,6 @@ from ciao.control_plane import (
     AgentPrincipal,
     CiaoControlPlane,
     ControlPlaneError,
-    ManagedRecallAuthorization,
     CONTEXT_LOGS_DEFAULT_LINES,
 )
 from ciao.schedules import DEFAULT_TIMEZONE
@@ -175,29 +173,6 @@ class _Session:
 AGENT_SESSION_AUTH_POLL_S = 0.25
 
 
-class _ManagedRecallAuthorization:
-    __slots__ = ("__registry", "__session")
-
-    def __init__(self, registry: AgentSessionRegistry, session: _Session) -> None:
-        self.__registry = registry
-        self.__session = session
-
-    def __repr__(self) -> str:
-        return "<managed recall authorization>"
-
-    def is_active(self) -> bool:
-        with self.__registry._lock:
-            session = self.__session
-            return (
-                self.__registry._by_token.get(session.token) is session
-                and session.expires_at > int(time.time())
-            )
-
-    async def wait_invalid(self) -> None:
-        while self.is_active():
-            await asyncio.sleep(AGENT_SESSION_AUTH_POLL_S)
-
-
 class AgentSessionRegistry:
     """In-memory verifier for short-lived managed-process bearer tokens."""
 
@@ -312,21 +287,6 @@ class AgentSessionRegistry:
                 subject=item.principal.chat_id,
                 claims=item.principal.to_claims(),
             )
-
-    def live_authorization(
-        self, access: AccessToken | None, principal: AgentPrincipal
-    ) -> ManagedRecallAuthorization | None:
-        if access is None or "ciaobot" not in (access.scopes or []):
-            return None
-        with self._lock:
-            session = self._by_token.get(access.token)
-            if (
-                session is None
-                or session.principal != principal
-                or session.expires_at <= int(time.time())
-            ):
-                return None
-            return _ManagedRecallAuthorization(self, session)
 
     def status(self) -> dict[str, Any]:
         now = int(time.time())
@@ -486,21 +446,6 @@ async def _op_memory_update(service: CiaoMcpService, region: str, action: str, e
 async def _op_vault_search(service: CiaoMcpService, query: str, limit: int = 10) -> dict[str, Any]:
     """Full-text search the active workspace vault."""
     return await service._invoke("vault_search", lambda cp, p: cp.vault_search(p, query, limit))
-
-
-async def _op_vault_recall_check(service: CiaoMcpService, claims_json: str = "") -> dict[str, Any]:
-    """Check selected factual claims against bounded vault evidence."""
-    return await service._invoke(
-        "vault_recall_check",
-        lambda cp, p: cp.vault_recall_check(
-            p,
-            claims_json=claims_json,
-            authorization_factory=lambda: service.registry.live_authorization(
-                get_access_token(), p
-            ),
-        ),
-        mutating=False,
-    )
 
 
 async def _op_vault_review(service: CiaoMcpService, action: str = "list", path: str = "", candidate_id: str = "",
@@ -1678,7 +1623,6 @@ OPERATIONS: tuple[Operation, ...] = (
     Operation("memory_update", _WRITE, _op_memory_update.__doc__ or "", _op_memory_update),
     Operation("memory_learn", _WRITE, _op_memory_learn.__doc__ or "", _op_memory_learn),
     Operation("vault_search", _READ, _op_vault_search.__doc__ or "", _op_vault_search),
-    Operation("vault_recall_check", _READ, _op_vault_recall_check.__doc__ or "", _op_vault_recall_check),
     Operation("vault_review", _DESTRUCTIVE, _op_vault_review.__doc__ or "", _op_vault_review),
     Operation("verify_note", _WRITE, _op_verify_note.__doc__ or "", _op_verify_note),
     Operation("care_begin", _WRITE, _op_care_begin.__doc__ or "", _op_care_begin),

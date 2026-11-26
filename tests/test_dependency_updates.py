@@ -8,13 +8,13 @@ from pathlib import Path
 
 import pytest
 
-from ciao.dependency_updates import (
+from dependency_updates import (
     _pinned_version,
     apply_auto_updates,
     check_available_updates,
     install_updated_packages,
 )
-import ciao.dependency_updates as depupdates
+import dependency_updates as depupdates
 
 
 def _write_update_tree(root: Path) -> None:

@@ -25,7 +25,7 @@ def test_public_ci_matches_release_contract() -> None:
     assert "npm run build" in workflow
     assert "pytest" in workflow
     assert "tests/" in workflow
-    assert "ciao package-smoke --skip-frontend" in workflow
+    assert "python scripts/package_smoke.py --skip-frontend" in workflow
     assert "workflow_dispatch:" in workflow
     assert "branches: [ develop, main ]" in workflow
 
@@ -1281,7 +1281,7 @@ def test_develop_prs_run_linux_split_gates() -> None:
     assert "npm run build" in by_name["linux-web"]
     # The smoke serves the packaged PWA, so it must follow the build.
     web = by_name["linux-web"]
-    assert web.index("npm run build") < web.index("ciao package-smoke --skip-frontend")
+    assert web.index("npm run build") < web.index("python scripts/package_smoke.py --skip-frontend")
     assert not [name for name in by_name if name.startswith("windows")]
 
 
