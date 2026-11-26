@@ -60,9 +60,17 @@ jobs:
           Path("release-notes.md").write_text(notes + "\n", encoding="utf-8")
           PY
 
+          # A pre-release, never latest: the signed Mac DMG is attached by hand
+          # after publish.yml, and releases/latest feeds the download page, the
+          # install.sh one-liner and the 1.x updater. A pre-release still fires
+          # `release: published` (a draft would not), so publish.yml runs. The
+          # operator promotes it with mac/scripts/promote-release.sh once the
+          # DMG is attached.
           gh release create "$TAG" \
             --title "$TAG" \
             --notes-file release-notes.md \
+            --prerelease \
+            --latest=false \
             --target "${{ github.sha }}"
           echo "created=true" >> "$GITHUB_OUTPUT"
 

@@ -189,17 +189,22 @@ TeamIdentifier, without Developer ID Application authority, unnotarized,
 wrong-version, misnamed (`Ciaobot-<version>.dmg` only), or non-arm64. It only
 reads; it never publishes.
 
-## 6. Publish, one asset, feed last
+## 6. Publish, one asset, latest, feed last
 
 Order matters: an appcast must never point at an archive that is not yet
-downloadable, and no client may be offered a 2.x build before its DMG exists.
+downloadable, no client may be offered a 2.x build before its DMG exists, and the
+release must not be "latest" until the DMG is on it. `releases/latest` feeds the
+download page, the `install.sh` one-liner and the 1.x updater's manifest, so the
+release `release-on-main` creates is a **pre-release that is not latest**.
 
 1. **Merge the release PR into `main`** (admin only). `release-on-main` tags
-   `v<version>` at that commit and creates its GitHub release with the CHANGELOG
-   section as the notes. That release is the latest release from this moment,
-   so the download page points at it until step 3 is done.
+   `v<version>` at that commit and creates its GitHub release, as a pre-release
+   with `--latest=false`, with the CHANGELOG section as the notes. The download
+   page keeps pointing at the previous release. A pre-release still fires
+   `release: published`, so `publish.yml` runs.
 2. **Wait for `publish.yml` to go green** on that release. It builds the engine
-   and the wheel, and it skips the `updates` feed release.
+   and the wheel, and it skips the `updates` feed release. Do not attach the DMG
+   earlier: its asset check fails on any file beyond the expected set.
 3. **Attach the DMG** to `v<version>`:
    `scripts/publish-release.sh --tag v<version> --asset Ciaobot-<version>.dmg
    --notes notes.md`. The DMG is what people download, install from, and what
@@ -207,24 +212,33 @@ downloadable, and no client may be offered a 2.x build before its DMG exists.
    file and refuses a second asset, a ZIP or a `.sha256`. When `v<version>`
    already exists, as it does after step 1, the script uploads the DMG onto it
    and creates nothing; its `--notes`, `--title`, `--draft` and `--prerelease`
-   are not applied to an existing release. Put the printed digest in the
-   release notes by hand with `gh release edit v<version> --notes-file
-   notes.md`. The script creates the release, pre-release if asked, only when
-   `v<version>` is absent.
-4. **Publish `appcast.xml`** as an asset on the dedicated `updates` release in
+   are not applied to an existing release. Put the printed digest, and for a
+   release that follows 1.x the upgrade note from `/ciao-release-notes` ("The
+   1.x upgrade note"), in the release notes by hand with
+   `gh release edit v<version> --notes-file notes.md`. The script creates the
+   release, pre-release if asked, only when `v<version>` is absent.
+4. **Publish it as latest**, from `mac/`:
+   `scripts/promote-release.sh --tag v<version>`. It refuses unless the release
+   is a published pre-release that holds `install.sh`, the wheel and
+   `Ciaobot-<version>.dmg`, and for 2.0.0 also `ciaobot-engine-manifest.json`
+   and its `.sig` (the 1.x updater reads both from `releases/latest`; the rule
+   mirrors `publish.yml`'s `LEGACY_MANIFEST_VERSION`), then runs
+   `gh release edit v<version> --prerelease=false --latest`. From here the
+   download page, the one-liner and the 1.x updater see this version.
+5. **Publish `appcast.xml`** as an asset on the dedicated `updates` release in
    this repository, generated in section 5. The asset name must be exactly
    `appcast.xml` because the feed URL embeds it; `gh release upload` uses the
    local filename, so copy the generated file to that name first. Keep the
    `updates` release a pre-release so it never becomes "latest" and never
    replaces the download page. `gh release edit --prerelease=true` is the flag
    that actually sets it. The 2.x app reads this feed (`UPDATE_FEED_URL`).
-5. **Append the same signed item** to the legacy `ciaobot-mac` feed, so 0.5.x
+6. **Append the same signed item** to the legacy `ciaobot-mac` feed, so 0.5.x
    clients are offered the 2.x app: download `updates/appcast.xml` from
-   `raffaelefarinaro/ciaobot-mac`, add the one `<item>` that step 4's appcast
+   `raffaelefarinaro/ciaobot-mac`, add the one `<item>` that step 5's appcast
    holds for this version, and upload the combined file as `appcast.xml` on that
    repository's `updates` release. Keep every existing item. See
    [Bridging 0.5.x](#bridging-05x).
-6. Confirm each feed downloads the appcast you just published, and diff it
+7. Confirm each feed downloads the appcast you just published, and diff it
    against the local file: `UPDATE_FEED_URL` from `release/update-config.env`,
    then `https://github.com/raffaelefarinaro/ciaobot-mac/releases/download/updates/appcast.xml`.
 
@@ -267,6 +281,28 @@ confirm the client refuses it and keeps running.
 ### Bridging 0.5.x
 
 Installed 0.5.x clients still poll `https://github.com/raffaelefarinaro/ciaobot-mac/releases/download/updates/appcast.xml`. Append the 2.0.0 item to that file once, as section 6 step 5 describes, and never again. The other items in the file stay. Its `CFBundleVersion` is 20000, above the 14 that 0.5.0 shipped, or Sparkle will not offer it. Append it only after the 2.0.0 DMG it points at is downloadable.
+
+## Rollback
+
+Undo in the reverse order of section 6, and never delete a release or an asset:
+installed clients may be fetching them.
+
+1. **Appcast first.** Remove the bad version's `<item>` from both feeds and
+   re-upload each as `appcast.xml` (`gh release upload updates appcast.xml
+   --clobber`). Sparkle never downgrades, so a client that already installed it
+   needs a fixed **higher** build.
+2. **Stop new downloads.** Put the previous release back as latest, then demote
+   the bad one, in this order so `releases/latest` never has no answer:
+   `gh release edit v<previous> --latest`, then
+   `gh release edit v<version> --prerelease=true`.
+3. Ship the fix as the next version through section 1 onward. A release stays
+   a pre-release (never latest) until its own DMG is attached and promoted.
+
+If the failure happens before step 4 of section 6 there is nothing to roll back:
+the release is still a pre-release and the download page never moved. Fix
+`develop`, cut the next version, and leave the unpromoted release as it is.
+Rolling back also moves what the 1.x updater and the `install.sh` one-liner
+resolve, because both follow `releases/latest`.
 
 ## Recovery
 
