@@ -1855,6 +1855,33 @@ def test_archive_restore_rotates_lifetime_and_resets_shared_brain_sharing(tmp_pa
     assert restore_claimed == [True]
 
 
+def test_archive_restore_drops_a_scoped_grant_and_its_scope(tmp_path, monkeypatch):
+    from ciao import shared_brain
+    from ciao.config import SharedBrainLink
+
+    client, config, _pcm, _store = _app(tmp_path, rerooted=True)
+    away = tmp_path.parent / f"brain-scope-away-{tmp_path.name}"
+    base = SharedBrainLink(name="notes", path=str(away), identity="github.com/acme/notes")
+    scope = shared_brain.build_sharing_scope(
+        base, projects=["p1"], producers=["memory_extraction"], operations=["append"],
+        known_projects={"p1"}, known_producers=("memory_extraction",),
+    )
+    link = shared_brain.set_sharing_policy(base, "automatic", scope)
+    assert shared_brain.sharing_consent_active(link)
+    config.workspaces["work"].shared_brains = [link]
+    archived = client.post("/api/workspaces/work/archive").json()["archived"]
+    restored = client.post("/api/workspaces/archived/restore", json={"id": archived["id"]})
+    assert restored.status_code == 200, restored.json()
+    [back] = config.workspaces["work"].shared_brains
+    assert back.sharing_policy == "review"
+    assert back.sharing_consent is None
+    assert back.sharing_generation == link.sharing_generation + 1
+    assert back.lifetime_id != link.lifetime_id
+    assert not shared_brain.sharing_consent_active(back)
+    assert not shared_brain.sharing_scope_permits(
+        back, project="p1", producer="memory_extraction", operation="append", note_type="x")
+
+
 def test_archive_claims_shared_brain_before_moving_workspace(tmp_path, monkeypatch):
     from ciao import shared_brain
     from ciao.config import SharedBrainLink

@@ -207,6 +207,11 @@ class _PCM:
         self.archived.append(workspace)
         return {"projects": 2, "chats": 1}
 
+    def list_projects(self, workspace: str) -> list:
+        from types import SimpleNamespace
+
+        return [SimpleNamespace(project_id=p, workspace=workspace) for p in ("p1", "p2")]
+
 
 def _client(
     tmp_path: Path,
@@ -3440,3 +3445,286 @@ def test_recovery_pending_fails_closed_when_registry_is_unreadable(
     assert closed["sharing_policy"] == "review"
     assert closed["sharing_grant_pending"] is True
     assert closed["sharing_invalidation_failed"] is True
+
+
+# --- #3615 grant scope and generation binding -------------------------------
+
+_SCOPE = {"projects": ["p1"], "producers": ["memory_extraction"], "operations": ["append"]}
+_SHARING_PATH = "/api/workspaces/personal/shared-brains/notes/sharing"
+
+
+def _linked(tmp_path, monkeypatch, *, mapped: bool = False):
+    from ciao import shared_brain
+
+    monkeypatch.setattr(shared_brain, "schedule_update", lambda *args: None)
+    client, config, _pcm = _client(tmp_path)
+    acme = _checkout(_away(tmp_path) / "scope", "https://github.com/acme/notes")
+    if mapped:
+        document = {"version": 1, "scope": "Decisions", "exclusions": [], "types": {
+            "decision": {"kind": "section", "path": "notes/decisions.md", "section": "Decisions", "operation": "append"}}}
+        (acme / "CIAO-CONTENT-GUIDE.md").write_text("```ciao-guide\n" + json.dumps(document) + "\n```\n")
+    assert client.patch("/api/workspaces/personal", json={"shared_brains": [{"path": str(acme)}]}).status_code == 200
+    return client, config
+
+
+def _state(client) -> dict:
+    return client.get("/api/workspaces/personal/shared-brains").json()["shared_brains"][0]
+
+
+def _map(client) -> None:
+    path = "/api/workspaces/personal/shared-brains/notes/guide-mapping"
+    view = client.get(path).json()
+    choice = {k: view[k] for k in ("identity", "lifetime", "generation", "pin")}
+    choice["types"] = ["decision"]
+    assert client.post(path, json=choice).status_code == 200
+
+
+def test_scoped_grant_round_trips_previews_and_bumps_generation_only_on_change(tmp_path, monkeypatch):
+    from ciao import shared_brain
+
+    client, config = _linked(tmp_path, monkeypatch, mapped=True)
+    _map(client)
+    state = _state(client)
+    body = {**_sharing_body(state), "scope": _SCOPE}
+
+    preview = client.post(_SHARING_PATH, json={**body, "preview": True})
+    assert preview.status_code == 200, preview.text
+    shown = preview.json()["preview"]
+    assert shown["changes"] is True and shown["generation_after"] == state["sharing_generation"] + 1
+    assert shown["scope"]["projects"] == ["p1"] and shown["scope"]["operations"] == ["append"]
+    assert [n["note_type"] for n in shown["scope"]["note_mapping"]] == ["decision"]
+    assert config.workspace("personal").shared_brains[0].sharing_policy == "review"  # a preview writes nothing
+
+    granted = client.post(_SHARING_PATH, json=body)
+    assert granted.status_code == 200, granted.text
+    first = _state(client)
+    assert first["sharing_policy"] == "automatic" and first["sharing_scope"] == shown["scope"]
+    stored = _reload_config(tmp_path).workspace("personal").shared_brains[0]
+    assert stored.sharing_consent is not None and stored.sharing_consent.scope is not None
+    assert shared_brain.sharing_consent_active(stored)
+    assert shared_brain.sharing_scope_permits(
+        stored, project="p1", producer="memory_extraction", operation="append", note_type="decision")
+    for wrong in (
+        {"project": "p2"}, {"producer": "nightly_curation"}, {"operation": "create"}, {"note_type": "other"},
+    ):
+        kw = {"project": "p1", "producer": "memory_extraction", "operation": "append", "note_type": "decision", **wrong}
+        assert not shared_brain.sharing_scope_permits(stored, **kw)
+
+    # The same scope again is not a policy change.
+    again = client.post(_SHARING_PATH, json={**_sharing_body(first), "scope": _SCOPE})
+    assert again.status_code == 200
+    assert _state(client)["sharing_generation"] == first["sharing_generation"]
+    # A different scope, wider or narrower, is a new grant.
+    wider = client.post(_SHARING_PATH, json={**_sharing_body(first), "scope": {**_SCOPE, "projects": ["p1", "p2"]}})
+    assert wider.status_code == 200
+    second = _state(client)
+    assert second["sharing_generation"] == first["sharing_generation"] + 1
+    # Disable then re-enable to identical settings is a fresh generation.
+    assert client.post(_SHARING_PATH, json=_sharing_body(second, "review")).status_code == 200
+    off = _state(client)
+    assert off["sharing_scope"] is None
+    assert client.post(_SHARING_PATH, json={**_sharing_body(off), "scope": {**_SCOPE, "projects": ["p1", "p2"]}}).status_code == 200
+    assert _state(client)["sharing_generation"] == off["sharing_generation"] + 1
+
+
+def test_scope_choice_is_validated_and_mapping_comes_from_the_reviewed_mapping(tmp_path, monkeypatch):
+    client, config = _linked(tmp_path, monkeypatch, mapped=True)
+    _map(client)
+    state = _state(client)
+    base = _sharing_body(state)
+    bad = [
+        {**_SCOPE, "projects": ["nope"]},
+        {**_SCOPE, "projects": []},
+        {**_SCOPE, "projects": ["p1", "p1"]},
+        {**_SCOPE, "producers": ["anything"]},
+        {**_SCOPE, "operations": ["delete"]},
+        {**_SCOPE, "operations": ["create"]},  # outside the reviewed mapping's operations
+        {**_SCOPE, "note_mapping": []},  # a client cannot name its own destinations
+        {"projects": ["p1"]},
+    ]
+    for scope in bad:
+        resp = client.post(_SHARING_PATH, json={**base, "scope": scope})
+        assert resp.status_code == 400, scope
+    assert client.post(_SHARING_PATH, json={**_sharing_body(state, "review"), "scope": _SCOPE}).status_code == 400
+    assert client.post(_SHARING_PATH, json={**base, "scope": _SCOPE, "preview": "yes"}).status_code == 400
+    assert config.workspace("personal").shared_brains[0].sharing_policy == "review"
+    assert config.workspace("personal").shared_brains[0].sharing_generation == 0
+
+
+def test_a_mapping_change_pauses_a_scoped_grant(tmp_path, monkeypatch):
+    from ciao import shared_brain
+
+    client, config = _linked(tmp_path, monkeypatch, mapped=True)
+    assert client.post(_SHARING_PATH, json={**_sharing_body(_state(client)), "scope": _SCOPE}).status_code == 200
+    assert shared_brain.sharing_consent_active(config.workspace("personal").shared_brains[0])
+    _map(client)
+    link = config.workspace("personal").shared_brains[0]
+    assert not shared_brain.sharing_consent_active(link)
+    assert not shared_brain.sharing_scope_permits(
+        link, project="p1", producer="memory_extraction", operation="append", note_type="decision")
+
+
+def test_two_configs_race_on_the_expected_generation(tmp_path, monkeypatch):
+    client_a, _config_a = _linked(tmp_path, monkeypatch)
+    client_b, config_b, _ = _client(tmp_path)
+    stale = _state(client_b)
+    wide = {**_SCOPE, "projects": ["p1", "p2"]}
+    winner = client_a.post(_SHARING_PATH, json={**_sharing_body(_state(client_a)), "scope": _SCOPE})
+    assert winner.status_code == 200, winner.text
+    loser = client_b.post(_SHARING_PATH, json={**_sharing_body(stale), "scope": wide})
+    assert loser.status_code == 409
+    assert loser.json()["code"] in {"brain_changed", "policy_locked"}
+    stored = _reload_config(tmp_path).workspace("personal").shared_brains[0]
+    assert stored.sharing_generation == 1
+    assert stored.sharing_consent is not None and stored.sharing_consent.scope.projects == ("p1",)  # type: ignore[union-attr]
+    # An unchanged winner-side repeat leaves the generation alone; a fresh read from B can then expand.
+    client_c, _config_c, _ = _client(tmp_path)
+    assert client_c.post(_SHARING_PATH, json={**_sharing_body(_state(client_c)), "scope": wide}).status_code == 200
+    assert _reload_config(tmp_path).workspace("personal").shared_brains[0].sharing_generation == 2
+
+
+def test_legacy_rows_load_unchanged_and_a_malformed_scope_is_review(tmp_path, monkeypatch):
+    from ciao import shared_brain
+    from ciao.config import SharedBrainLink, shared_brain_row
+
+    link = shared_brain.set_sharing_policy(
+        SharedBrainLink(name="notes", path="/x", identity="github.com/acme/notes"), "automatic")
+    legacy = shared_brain_row(link)
+    assert "scope" not in legacy["sharing_consent"]  # a legacy-shaped consent writes the legacy row
+    from ciao.config import shared_brains_from_rows
+
+    [loaded] = shared_brains_from_rows([legacy])
+    assert shared_brain.sharing_consent_active(loaded) and loaded.sharing_consent.scope is None  # type: ignore[union-attr]
+    assert shared_brain_row(loaded) == legacy
+    assert not shared_brain.sharing_scope_permits(
+        loaded, project="p1", producer="memory_extraction", operation="append", note_type="decision")
+    scoped = shared_brain_row(shared_brain.set_sharing_policy(
+        SharedBrainLink(name="notes", path="/x", identity="github.com/acme/notes"), "automatic",
+        shared_brain.build_sharing_scope(
+            SharedBrainLink(name="notes", path="/x", identity="github.com/acme/notes"),
+            projects=["p1"], producers=["memory_extraction"], operations=["append"],
+            known_projects={"p1"}, known_producers=("memory_extraction",))))
+    for label, scope in {
+        "string": "all",
+        "unsorted": {**scoped["sharing_consent"]["scope"], "projects": ["b", "a"]},
+        "duplicate": {**scoped["sharing_consent"]["scope"], "projects": ["a", "a"]},
+        "missing": {k: v for k, v in scoped["sharing_consent"]["scope"].items() if k != "producers"},
+        "negative": {**scoped["sharing_consent"]["scope"], "mapping_generation": -1},
+    }.items():
+        row = {**scoped, "sharing_consent": {**scoped["sharing_consent"], "scope": scope}}
+        [bad] = shared_brains_from_rows([row])
+        assert bad.sharing_policy == "review" and bad.sharing_consent is None, label
+
+
+def test_grant_issuance_only_through_the_operator_route(tmp_path, monkeypatch):
+    """Generic PATCH, workspace create, registry metadata and the control plane never mint a consent."""
+    from ciao import config as config_module, shared_brain
+
+    issued: list[str] = []
+    real_set = shared_brain.set_sharing_policy
+    real_consent = config_module.SharingConsent
+
+    def spy_set(link, policy, scope=None):
+        issued.append(policy)
+        return real_set(link, policy, scope)
+
+    monkeypatch.setattr(shared_brain, "set_sharing_policy", spy_set)
+    monkeypatch.setattr(shared_brain, "SharingConsent", lambda *a, **k: issued.append("consent") or real_consent(*a, **k))
+    client, config = _linked(tmp_path, monkeypatch)
+    forged = {
+        "sharing_policy": "automatic", "sharing_generation": 5, "scope": _SCOPE,
+        "sharing_consent": {"generation": 5, "scope": _SCOPE, "granted_at": "2026-01-01T00:00:00Z"},
+    }
+    acme = config.workspace("personal").shared_brains[0].path
+    assert client.patch("/api/workspaces/personal", json={"shared_brains": [{"path": acme, **forged}]}).status_code == 200
+    assert client.patch("/api/workspaces/personal", json={"color": "sky", **forged}).status_code in (200, 400)
+    client.post("/api/workspaces", json={"name": "other", "vault_root": "other", "shared_brains": [{"path": acme, **forged}]})
+    link = config.workspace("personal").shared_brains[0]
+    assert (link.sharing_policy, link.sharing_generation, link.sharing_consent) == ("review", 0, None)
+    assert issued == []
+    # Registry metadata written by hand is not authority either. Use the real
+    # registry file (the one the engine reads), forge every link row in it, and
+    # reload: a consent whose lifetime is not this link's must come back as Review.
+    registry = tmp_path / ".runtime" / "workspaces.json"
+    rows = json.loads(registry.read_text())
+    items = [item for row in rows for item in row.get("shared_brains", [])]
+    assert items, "the registry must hold the linked brain"
+    for item in items:
+        item.update(forged)
+        item["sharing_consent"] = {**forged["sharing_consent"], "identity": item["identity"], "lifetime_id": "forged-lifetime"}
+    registry.write_text(json.dumps(rows))
+    reloaded = [l for w in _reload_config(tmp_path).workspaces.values() for l in w.shared_brains]
+    assert reloaded and all(l.sharing_consent is None and l.sharing_policy == "review" for l in reloaded)
+    # The explicit operator route is the one place a consent is issued (fresh
+    # engine: the registry file was rewritten under the old one).
+    client, _config, _ = _client(tmp_path)
+    assert client.post(_SHARING_PATH, json={**_sharing_body(_state(client)), "scope": _SCOPE}).status_code == 200
+    assert issued == ["automatic", "consent"]
+
+
+def test_only_the_operator_route_and_shared_brain_issue_consents():
+    """AST guard: no ciao module but config.py/shared_brain.py can build or swap a consent.
+
+    Catches direct calls, import aliases, attribute aliases, and
+    `dataclasses.replace(link, sharing_consent=...)` (or sharing_policy/generation).
+    """
+    import ast
+
+    root = Path(__file__).resolve().parents[1] / "ciao"
+    guarded_kwargs = {"sharing_consent", "sharing_policy", "sharing_generation"}
+    constructors: set[str] = set()
+    kwarg_sites: set[str] = set()
+    policy_callers: set[str] = set()
+    for path in root.rglob("*.py"):
+        if "stock" in path.parts:
+            continue
+        rel = path.relative_to(root).as_posix()
+        for node in ast.walk(ast.parse(path.read_text(encoding="utf-8"))):
+            if isinstance(node, ast.Name) and node.id == "SharingConsent":
+                constructors.add(rel)
+            elif isinstance(node, ast.Attribute) and node.attr == "SharingConsent":
+                constructors.add(rel)
+            elif isinstance(node, ast.alias) and node.name == "SharingConsent":
+                constructors.add(rel)
+            elif isinstance(node, ast.Call):
+                if any(k.arg in guarded_kwargs for k in node.keywords):
+                    kwarg_sites.add(rel)
+                if any(k.arg is None for k in node.keywords) and any(
+                    isinstance(v, ast.Constant) and v.value in guarded_kwargs
+                    for v in ast.walk(node)
+                ):
+                    kwarg_sites.add(rel)
+                fn = node.func
+                name = fn.id if isinstance(fn, ast.Name) else fn.attr if isinstance(fn, ast.Attribute) else ""
+                if name == "set_sharing_policy":
+                    policy_callers.add(rel)
+            elif isinstance(node, ast.Name) and node.id == "set_sharing_policy":
+                policy_callers.add(rel)
+    assert constructors == {"config.py", "shared_brain.py"}, constructors
+    assert policy_callers == {"shared_brain.py", "web/routes_api.py"}, policy_callers
+    assert kwarg_sites <= {"config.py", "shared_brain.py"}, kwarg_sites
+    for name in ("control_plane.py", "agent_surface.py", "web/routes_agent.py"):
+        text = (root / name).read_text(encoding="utf-8")
+        assert not any(word in text for word in ("sharing_policy", "sharing_consent", "build_sharing_scope")), name
+
+
+def test_scope_preview_refuses_like_the_real_call(tmp_path, monkeypatch):
+    client, config = _linked(tmp_path, monkeypatch)
+    state = _state(client)
+    body = {**_sharing_body(state), "scope": _SCOPE, "preview": True}
+    config._sharing_recovery_pending = True
+    pending = client.post(_SHARING_PATH, json=body)
+    assert pending.status_code == 409 and pending.json()["code"] == "consent_journal_unavailable"
+    assert client.post(_SHARING_PATH, json={**body, "preview": False}).status_code == 409
+    config._sharing_recovery_pending = False
+    # A broken folder is refused for a preview exactly as for a grant.
+    import shutil
+
+    shutil.rmtree(Path(config.workspace("personal").shared_brains[0].path) / ".git")
+    gone = client.post(_SHARING_PATH, json=body)
+    assert gone.status_code == 409 and gone.json()["code"] == "brain_unavailable"
+    assert config.workspace("personal").shared_brains[0].sharing_policy == "review"
+    bad = client.post(_SHARING_PATH, json={**body, "preview": 1})
+    assert bad.status_code == 400 and bad.json()["code"] == "invalid_request"
+    shape = client.post(_SHARING_PATH, json={**body, "scope": ["p1"]})
+    assert shape.status_code == 400 and shape.json()["code"] == "invalid_scope"
