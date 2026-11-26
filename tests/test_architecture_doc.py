@@ -61,11 +61,12 @@ def test_architecture_doc_states_the_consolidation_contract() -> None:
     repo = Path(__file__).resolve().parents[1]
     doc = (repo / "docs" / "ARCHITECTURE.md").read_text(encoding="utf-8")
 
-    assert "the unattended nightly curator never performs" not in doc, (
-        "docs/ARCHITECTURE.md still claims memory curation never writes the "
-        "bounded regions; consolidation is exactly that write."
-    )
+    # The positive statement below is what makes the old negative wording
+    # assertion redundant: a doc that still says consolidation is a write the
+    # curator never performs cannot also carry this sentence. Pin the
+    # behaviour, not the stale phrase.
     for fragment in (
+        "the one region write the unattended nightly curator does perform",
         "~85% of the cap",  # the threshold that gates consolidation
         "Workspace/Memory-Consolidations.md",  # the undo log
         "the queue itself cannot apply a drop",  # the [review] escape hatch

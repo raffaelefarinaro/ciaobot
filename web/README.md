@@ -929,7 +929,9 @@ package (~18 MB of `node_modules`), not the browser.
 CI runs it on Linux for develop PRs whose three-dot diff changes `web/`; the
 job checks out the PR merge ref and runs `npm run test:e2e`, whose npm prehook
 builds both the PWA and terminal harness from that checkout. The macOS `test`
-job runs on release PRs into `main`.
+job runs on release PRs into `main`; because it has already built the PWA for
+its own build check, it runs `npm run build:harness` and `npx playwright test`
+directly instead of paying for that prehook's second PWA build.
 
 ### Still manual
 

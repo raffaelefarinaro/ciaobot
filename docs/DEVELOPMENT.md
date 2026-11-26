@@ -213,8 +213,12 @@ while the server is running, because the live schedule store may be writing it.
   declares it a required check on `main`. The
   full macOS `test` job (coverage, browser tests, and the engine wheel this
   branch would publish, installed into a throwaway venv and cold-started — the
-  launchd, installer, engine-update and migration coverage — about 18 minutes)
-  runs on release PRs and manual full runs, not ordinary develop PRs. The Swift
+  launchd, installer, engine-update and migration coverage — about 23-32
+  minutes) runs on release PRs and manual full runs, not ordinary develop PRs.
+  Its browser steps reuse the PWA build the job already made
+  (`npm run build:harness` then `npx playwright test`) instead of running the
+  `test:e2e` prehook a second time. Every CI job and every pytest step has a
+  timeout, listed under "CI time bounds" below. The Swift
   Mac app in `mac/` is built by its own `mac-app` job (`swift test`,
   `swift build`, `scripts/build-app.sh`, which builds the bundled engine, the
   asset test and a plist lint on `macos-15`), which runs on develop PRs whose
@@ -295,6 +299,38 @@ post-release sync PR can merge. The checked-in script continues to declare
 This source change does not update live branch protection: activating the new
 required context needs separate maintainer approval and an admin action after
 the workflow is present and `linux-e2e` has reported on a PR.
+
+### CI time bounds
+
+Run 45669361072 (PR #3635) hung at 99% in `linux-server` after every test had
+passed, leaving orphan pytest processes. `faulthandler_timeout` is per test
+and cannot fire once the suite has finished, so each job and each pytest step
+now has a `timeout-minutes` bound, sized at roughly 2-3x the slowest
+successful run measured on 2026-11-26 (14 recent PR runs and 10 manual full
+runs of `ci.yml`; wall-clock minutes of the slowest success):
+
+| Job | Slowest success | Job bound | Step bound |
+| --- | --- | --- | --- |
+| `linux-server` | 6.9 (tests 6.1) | 20 | 15 |
+| `linux-server-latest-python` | 5.5 (tests 4.8) | 15 | 12 |
+| `linux-web` | 5.8 | 15 | |
+| `linux-install-smoke` | 2.1 | 10 | |
+| `linux-e2e` | 9.9 | 30 | |
+| `mac-app` | 8.5 | 25 | |
+| `test` (macOS) | 32.5 (pytest 13.3, browser 9.6) | 75 | 30 (pytest) |
+| `web-scope`, `mac-scope` | 0.3 | 5 | |
+
+After each pytest step an `if: always()` step lists leftover pytest processes,
+sends them SIGABRT (pytest enables `faulthandler`, so every thread's stack is
+printed) and then SIGKILL. The Linux pytest steps pass `--durations=15` so the
+log records the real slowest tests. `tests/test_ci_parallelism.py` asserts the
+bounds are present, at least twice the measured maximum, and below 90 minutes.
+
+`faulthandler_timeout = 600` in `pyproject.toml` is deliberately far above any
+real test. A local full run on macOS (17,937 tests, 243 s with `-n auto`) had
+the slowest test at 35 s (`test_host_stop_escalates_stalled_child`), then 25 s
+and 15 s; earlier CI logs print no durations, so the Linux per-test figures
+arrive with the first run of this change.
 
 ### GitHub code scanning
 

@@ -1274,7 +1274,8 @@ def test_develop_prs_run_linux_split_gates() -> None:
     jobs = re.split(r"(?m)^  (?=[a-z-]+:\n)", workflow.split("\njobs:\n", 1)[1])
     by_name = {job.split(":", 1)[0]: job for job in jobs if job.strip()}
 
-    assert "pytest -n auto tests/" in by_name["linux-server"]
+    assert "pytest -n auto" in by_name["linux-server"]
+    assert "tests/" in by_name["linux-server"]
     assert "npm test" not in by_name["linux-server"]
     assert "npm test" in by_name["linux-web"]
     assert "npm run build" in by_name["linux-web"]

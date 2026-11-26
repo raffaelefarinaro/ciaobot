@@ -2,6 +2,7 @@
 
 from pathlib import Path
 import re
+import tomllib
 
 import yaml
 
@@ -22,7 +23,7 @@ def test_browser_waits_only_for_fast_scope_detection() -> None:
     assert 'test "$SCOPE_RESULT" = success' in jobs["linux-e2e"]
     # Bounded like mac-app below: a hung e2e run must not hold a PR open
     # indefinitely.
-    assert "\n    timeout-minutes: 30\n" in jobs["linux-e2e"]
+    assert "\n    timeout-minutes: " in jobs["linux-e2e"]
 
 
 def test_linux_e2e_storybook_steps_are_gated_and_ordered() -> None:
@@ -124,7 +125,7 @@ def test_mac_app_waits_only_for_fast_mac_scope_detection() -> None:
     assert app_steps[0]["name"] == "Require successful mac scope detection"
     assert "if" not in app_steps[0]
     assert [step.get("if") for step in app_steps[1:]] == [gate] * 11
-    assert "timeout-minutes: 60" in app
+    assert "timeout-minutes: " in app
     assert "python-version: '3.12'" in app
     assert "path: mac/.build/engine-cache" in app
     assert (
@@ -156,3 +157,86 @@ def test_mac_full_runs_always_build_the_app() -> None:
         in full
     )
     assert "printf 'mac_changed=true\\n' >> \"$GITHUB_OUTPUT\"" in full
+
+
+def test_macos_browser_tests_reuse_the_pwa_build() -> None:
+    # The macOS job builds the PWA for the fixture, so it must build only the
+    # terminal harness and run Playwright directly. Going through
+    # `npm run test:e2e` would run the prehook's second PWA build. Linux-e2e
+    # checks out a clean tree and keeps that prehook.
+    jobs = yaml.safe_load(
+        (Path(__file__).parents[1] / ".github/workflows/ci.yml").read_text()
+    )["jobs"]
+    steps = jobs["test"]["steps"]
+    names = [step.get("name", "") for step in steps]
+    assert names.index("Build PWA") < names.index("Build the terminal harness")
+    assert names.index("Build the terminal harness") < names.index(
+        "Run PWA browser tests"
+    )
+    by_name = {step["name"]: step for step in steps if "name" in step}
+    assert by_name["Build the terminal harness"]["run"] == "npm run build:harness"
+    assert by_name["Build the terminal harness"]["working-directory"] == "web"
+    assert by_name["Run PWA browser tests"]["run"] == "npx playwright test"
+    assert by_name["Run PWA browser tests"]["working-directory"] == "web"
+    assert not any("test:e2e" in (step.get("run") or "") for step in steps)
+    assert any(
+        step.get("run") == "npm run test:e2e" for step in jobs["linux-e2e"]["steps"]
+    )
+
+
+# Slowest successful run of each job, in minutes, over 14 recent PR runs and 10
+# manual full runs (docs/DEVELOPMENT.md, "CI time bounds"). A bound must leave at
+# least twice that, so a slow runner does not fail a healthy run, and stay under
+# a ceiling, so a hung run cannot hold a runner for hours.
+SLOWEST_SUCCESS_MINUTES = {
+    "web-scope": 0.3,
+    "mac-scope": 0.3,
+    "linux-server": 6.9,
+    "linux-server-latest-python": 5.5,
+    "linux-web": 5.8,
+    "linux-install-smoke": 2.1,
+    "linux-e2e": 9.9,
+    "mac-app": 8.5,
+    "test": 32.5,
+}
+CEILING_MINUTES = 90
+
+
+def _workflow_jobs() -> dict:
+    return yaml.safe_load(
+        (Path(__file__).parents[1] / ".github/workflows/ci.yml").read_text()
+    )["jobs"]
+
+
+def test_every_job_has_a_sane_time_bound() -> None:
+    jobs = _workflow_jobs()
+    assert set(SLOWEST_SUCCESS_MINUTES) <= set(jobs)
+    for name, slowest in SLOWEST_SUCCESS_MINUTES.items():
+        bound = jobs[name]["timeout-minutes"]
+        assert slowest * 2 <= bound <= CEILING_MINUTES, name
+
+
+def test_pytest_steps_are_bounded_and_clean_up_orphans() -> None:
+    # Run 45669361072 hung at 99% after every test passed, with orphan
+    # pytest processes left over. The step bound ends the wait; the cleanup
+    # step runs even after a timeout or cancel and dumps stacks before killing.
+    jobs = _workflow_jobs()
+    for name in ("linux-server", "linux-server-latest-python", "test"):
+        steps = jobs[name]["steps"]
+        index = next(i for i, s in enumerate(steps) if "pytest -n auto" in (s.get("run") or ""))
+        bound = steps[index].get("timeout-minutes")
+        assert bound is not None and bound < jobs[name]["timeout-minutes"], name
+        cleanup = steps[index + 1]
+        assert cleanup["if"] == "always()", name
+        assert "pkill -ABRT" in cleanup["run"] and "pkill -KILL" in cleanup["run"], name
+
+
+def test_pytest_faulthandler_bounds_a_single_hung_test() -> None:
+    # faulthandler_timeout is per test: it names a hung test but cannot fire
+    # after the suite finished, which the step timeouts above cover.
+    pyproject = tomllib.loads(
+        (Path(__file__).parents[1] / "pyproject.toml").read_text(encoding="utf-8")
+    )
+    ini = pyproject["tool"]["pytest"]["ini_options"]
+    assert 60 <= ini["faulthandler_timeout"] <= 900
+    assert ini["faulthandler_exit_on_timeout"] is True

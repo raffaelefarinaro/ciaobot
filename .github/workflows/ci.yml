@@ -41,8 +41,12 @@ concurrency:
 # the real platform. It runs on release PRs and manual runs. Web changes in develop PRs are covered by
 # `linux-e2e`.
 jobs:
+  # Job and step timeouts below are sized from measured successful runs of this
+  # workflow (14 recent PR runs, 10 manual full runs); see docs/DEVELOPMENT.md
+  # "CI time bounds". Each is about 2-3x the slowest observed success.
   linux-server:
     runs-on: ubuntu-24.04
+    timeout-minutes: 20
     steps:
     - uses: actions/checkout@v7
     - uses: actions/setup-python@v7
@@ -54,7 +58,19 @@ jobs:
     - name: Python static type check
       run: mypy ciao
     - name: Linux backend tests
-      run: pytest -n auto tests/
+      timeout-minutes: 15
+      run: pytest -n auto --durations=15 tests/
+    # A hung run can leave orphan pytest/xdist workers behind (PR #3635 run
+    # 45669361072 stuck at 99% after every test had passed). Dump their Python
+    # stacks (pytest enables faulthandler, so SIGABRT prints every thread) and
+    # then kill them, so the log names the hang and nothing holds the runner.
+    - name: Dump stacks and kill leftover test processes
+      if: always()
+      run: |
+        ps -eo pid,etime,args | grep '[p]ytest' || true
+        pkill -ABRT -f '[p]ytest' || true
+        sleep 5
+        pkill -KILL -f '[p]ytest' || true
 
   # `requires-python` admits every release from 3.12 up, and installers pick
   # the newest interpreter, so the backend gates also run on the newest Python
@@ -63,6 +79,7 @@ jobs:
   linux-server-latest-python:
     if: github.event_name == 'workflow_dispatch' || github.base_ref == 'main'
     runs-on: ubuntu-24.04
+    timeout-minutes: 15
     steps:
     - uses: actions/checkout@v7
     - uses: actions/setup-python@v7
@@ -74,13 +91,26 @@ jobs:
     - name: Python static type check
       run: mypy --python-version 3.14 ciao
     - name: Linux backend tests
-      run: pytest -n auto tests/
+      timeout-minutes: 12
+      run: pytest -n auto --durations=15 tests/
+    # A hung run can leave orphan pytest/xdist workers behind (PR #3635 run
+    # 45669361072 stuck at 99% after every test had passed). Dump their Python
+    # stacks (pytest enables faulthandler, so SIGABRT prints every thread) and
+    # then kill them, so the log names the hang and nothing holds the runner.
+    - name: Dump stacks and kill leftover test processes
+      if: always()
+      run: |
+        ps -eo pid,etime,args | grep '[p]ytest' || true
+        pkill -ABRT -f '[p]ytest' || true
+        sleep 5
+        pkill -KILL -f '[p]ytest' || true
 
   # Detection is independent of unit/build work so Chromium starts immediately.
   web-scope:
     outputs:
       web_changed: ${{ steps.web-changes.outputs.web_changed }}
     runs-on: ubuntu-24.04
+    timeout-minutes: 5
     steps:
     - uses: actions/checkout@v7
       with:
@@ -115,6 +145,7 @@ jobs:
   # Package smoke needs the PWA built here; e2e builds its own tested bundle.
   linux-web:
     runs-on: ubuntu-24.04
+    timeout-minutes: 15
     steps:
     - uses: actions/checkout@v7
     - uses: actions/setup-python@v7
@@ -150,6 +181,7 @@ jobs:
   # and the runner's systemd is the system that must accept it.
   linux-install-smoke:
     runs-on: ubuntu-24.04
+    timeout-minutes: 10
     steps:
     - uses: actions/checkout@v7
     - uses: actions/setup-node@v7
@@ -275,6 +307,7 @@ jobs:
     outputs:
       mac_changed: ${{ steps.mac-changes.outputs.mac_changed || steps.mac-full.outputs.mac_changed }}
     runs-on: ubuntu-24.04
+    timeout-minutes: 5
     steps:
     - uses: actions/checkout@v7
       with:
@@ -316,7 +349,7 @@ jobs:
     needs: mac-scope
     if: ${{ !cancelled() }}
     runs-on: ${{ needs.mac-scope.outputs.mac_changed == 'true' && 'macos-15' || 'ubuntu-24.04' }}
-    timeout-minutes: 60
+    timeout-minutes: 25
     steps:
     - name: Require successful mac scope detection
       env:
@@ -376,6 +409,7 @@ jobs:
     # pre-merge in linux-e2e.
     if: github.event_name == 'workflow_dispatch' || github.base_ref == 'main'
     runs-on: macos-latest
+    timeout-minutes: 75
     steps:
     - uses: actions/checkout@v7
 
@@ -405,9 +439,25 @@ jobs:
       run: |
         pip-audit --desc || true
 
+    # Successful full macOS runs spent 8-13 minutes in this step; 30 minutes is
+    # more than twice the slowest. `faulthandler_timeout` in pyproject dumps the
+    # stacks of a single hung test first; the cleanup step below handles
+    # orphans pytest itself cannot see.
     - name: Run pytest with coverage
+      timeout-minutes: 30
       run: |
         pytest -n auto --cov=ciao --cov-report=term-missing tests/
+    # A hung run can leave orphan pytest/xdist workers behind (PR #3635 run
+    # 45669361072 stuck at 99% after every test had passed). Dump their Python
+    # stacks (pytest enables faulthandler, so SIGABRT prints every thread) and
+    # then kill them, so the log names the hang and nothing holds the runner.
+    - name: Dump stacks and kill leftover test processes
+      if: always()
+      run: |
+        ps -eo pid,etime,args | grep '[p]ytest' || true
+        pkill -ABRT -f '[p]ytest' || true
+        sleep 5
+        pkill -KILL -f '[p]ytest' || true
 
     - name: Install frontend dependencies
       run: |
@@ -450,6 +500,15 @@ jobs:
       working-directory: web
       run: npx playwright install chromium
 
+    # The PWA build above is the bundle the fixture serves. Build only the
+    # terminal harness here and run Playwright directly, instead of going
+    # through `npm run test:e2e`, whose npm prehook would rebuild that PWA.
+    # A clean checkout still gets both builds from the prehook; only this job,
+    # which has just built the PWA, skips the duplicate.
+    - name: Build the terminal harness
+      working-directory: web
+      run: npm run build:harness
+
     # Blocking, with no retries configured. A browser test that only passes on
     # the second attempt is a broken test, and hiding that behind a retry is
     # how a suite ends up being ignored. The suite is hermetic (a synthetic
@@ -457,7 +516,7 @@ jobs:
     # flake the answer is to delete the offending spec, not to soften the gate.
     - name: Run PWA browser tests
       working-directory: web
-      run: npm run test:e2e
+      run: npx playwright test
 
     - name: Upload browser test traces
       if: failure()
