@@ -1015,14 +1015,6 @@ def _rendered_chat_lesson_routing() -> str:
     )
 
 
-def upstream_drafts_prompt_citation(tmp_path: Path, statement: str) -> str:
-    """The learnings line a statement was written as, for the citation assertion."""
-    from ciao.memory_proposals import read_learnings
-
-    text = read_learnings(tmp_path / "memory-vault" / "work")
-    return next(
-        line for line in text.splitlines() if statement[:30] in line
-    )
 
 
 def test_pass_asks_for_no_skill_review_when_the_conversation_used_no_skill(

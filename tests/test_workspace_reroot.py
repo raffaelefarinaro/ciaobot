@@ -2866,7 +2866,7 @@ def test_repair_refuses_on_an_install_that_has_not_re_rooted(tmp_path: Path) -> 
     result = _repair(install, runtime)
 
     assert result["status"] == "not_rerooted"
-    assert "--apply" in result["reason"]
+    assert "has not re-rooted" in result["reason"]
     assert _install_hashes(install) == before
 
 

@@ -1,4 +1,4 @@
-# The task board and after-this-update tasks
+# The task board
 
 ## The task board (Tasks page)
 

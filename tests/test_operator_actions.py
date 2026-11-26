@@ -529,28 +529,6 @@ async def test_run_action_unknown_id_raises_value_error(tmp_path: Path) -> None:
 # -- the queue tile the operator saw on screen -------------------------------
 
 
-# -- the mandatory re-rooting gate -------------------------------------------
-
-
-def _reroot_receipt(tmp_path: Path, payload: dict) -> None:
-    import json
-
-    path = _runtime(tmp_path) / "migration" / "workspace-rooting.json"
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(payload), encoding="utf-8")
-    from ciao.config import reset_reroot_cache
-
-    reset_reroot_cache()
-
-
-def _reroot_actions(tmp_path: Path, *, workspaces=("personal", "work")) -> list:
-    from ciao.operator_actions import _detect_workspace_unmigrated
-
-    (tmp_path / "memory-vault").mkdir(parents=True, exist_ok=True)
-    config = _FakeConfig(tmp_path, workspaces=workspaces)
-    return _detect_workspace_unmigrated(_context(tmp_path, config=config))
-
-
 # -- post-migration drift detectors (§11.2) -----------------------------------
 
 

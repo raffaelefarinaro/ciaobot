@@ -1152,8 +1152,7 @@ def _search_index_audit(
     nothing then reports that search is silently answering from the old paths.
 
     Two findings, both cheap and read-only: the index is absent when notes exist,
-    and rows pointing at paths that no longer resolve. `ciao workspace-reroot
-    --repair` rebuilds it.
+    and rows pointing at paths that no longer resolve. `--repair` rebuilds it.
     """
     out: dict[str, Any] = {
         "missing": False,

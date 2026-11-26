@@ -26,7 +26,7 @@ Access & devices, Providers, Advanced) and the active workspace (Overview, Skill
 `/settings` (General) carries Updates, What can Ciaobot do?, app install,
 notifications, keyboard shortcuts, start at sign-in, insights and open
 source. `/settings/workspace` (Overview) is the active workspace's page: the
-Workspace card, memory handover, update task history and,
+Workspace card, memory handover and,
 for an archivable workspace, Archive this workspace. `/settings/advanced` carries This
 host, memory backup, the Ciaobot folder, workspace health and Developer (and
 Debug only in dev mode). `/settings/access` carries the PWA password card,

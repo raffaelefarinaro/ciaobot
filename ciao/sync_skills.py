@@ -978,7 +978,7 @@ def sync_workspace_skills(
                 if summary.get("failed"):
                     logger.warning(
                         "retired stock categories not kept for %s: %s; "
-                        "fix entity-types.yaml and run `ciao vault-migrate --apply`",
+                        "fix the collision in entity-types.yaml",
                         vault_root,
                         summary["failed"],
                     )
