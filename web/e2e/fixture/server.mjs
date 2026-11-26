@@ -424,7 +424,7 @@ function saveSharedBrains(state, name, rows) {
       }
       names.add(kept.name)
       identities.set(kept.identity, kept.name)
-      out.push(kept)
+      out.push(typeof row?.enabled === 'boolean' ? { ...kept, enabled: row.enabled } : kept)
       continue
     }
     let identity
@@ -443,7 +443,7 @@ function saveSharedBrains(state, name, rows) {
     const brainName = requested || derivedSharedBrainName(identity, names)
     names.add(brainName)
     identities.set(identity, brainName)
-    out.push({ name: brainName, path, identity, kind })
+    out.push({ name: brainName, path, identity, kind, enabled: row?.enabled !== false })
   }
   state.sharedBrains = { ...(state.sharedBrains || {}), [name]: out }
   return null
@@ -451,17 +451,17 @@ function saveSharedBrains(state, name, rows) {
 
 /** Live state of each linked brain: two are up to date, one has local changes. */
 function sharedBrainStates(state, name) {
-  return (state.sharedBrains?.[name] ?? []).map(({ name: brain, path, identity, kind }) => {
+  return (state.sharedBrains?.[name] ?? []).map(({ name: brain, path, identity, kind, enabled }) => {
     if (kind === 'folder') {
       return {
-        name: brain, kind, identity, path,
+        name: brain, kind, enabled: enabled !== false, identity, path,
         origin_changed: false, missing: false,
         problem: path === '/synthetic/unavailable-folder' ? 'inaccessible' : '',
         branch: '', head: '', head_date: '', dirty: false, upstream: false,
         fetched_at: null, last_update: null,
       }
     }
-    const base = { name: brain, kind: 'git', identity, path, origin_changed: false, missing: false, problem: '', branch: 'main', head: 'abc1234', head_date: '2026-11-20', dirty: false, upstream: true, fetched_at: '2026-11-22T10:00:00Z' }
+    const base = { name: brain, kind: 'git', enabled: enabled !== false, identity, path, origin_changed: false, missing: false, problem: '', branch: 'main', head: 'abc1234', head_date: '2026-11-20', dirty: false, upstream: true, fetched_at: '2026-11-22T10:00:00Z' }
     const at = '2026-11-22T10:00:00Z'
     if (path === '/synthetic/team-notes-dirty') return { ...base, dirty: true, last_update: { outcome: 'skipped', reason: 'local_changes', detail: '', at } }
     return { ...base, last_update: { outcome: 'up_to_date', reason: '', detail: '', at } }

@@ -611,19 +611,22 @@ def workspace_to_dict(workspace: WorkspaceConfig, config: Any) -> dict:
         "memory_approval": memory_approval,
         "provider_overrides": provider_overrides,
         "shared_brains": [
-            {"name": link.name, "path": link.path, "identity": link.identity, "kind": link.kind}
+            {
+                "name": link.name, "path": link.path, "identity": link.identity,
+                "kind": link.kind, "enabled": link.enabled,
+            }
             for link in getattr(workspace, "shared_brains", [])
         ],
     }
 
 
-_SHARED_BRAINS_SHAPE = "shared_brains must be a list of {path, name}"
+_SHARED_BRAINS_SHAPE = "shared_brains must be a list of {path, name, kind, enabled}"
 
 
-def _shared_brain_rows(raw: object) -> list[dict[str, str]]:
+def _shared_brain_rows(raw: object) -> list[dict[str, Any]]:
     if not isinstance(raw, list):
         raise ValueError(_SHARED_BRAINS_SHAPE)
-    rows: list[dict[str, str]] = []
+    rows: list[dict[str, Any]] = []
     for item in raw:
         if not isinstance(item, dict) or not isinstance(item.get("path"), str):
             raise ValueError(_SHARED_BRAINS_SHAPE)
@@ -633,16 +636,21 @@ def _shared_brain_rows(raw: object) -> list[dict[str, str]]:
         kind = item.get("kind")
         if "kind" in item and not isinstance(kind, str):
             raise ValueError(_SHARED_BRAINS_SHAPE)
-        row = {"path": item["path"]}
+        enabled = item.get("enabled")
+        if "enabled" in item and not isinstance(enabled, bool):
+            raise ValueError(_SHARED_BRAINS_SHAPE)
+        row: dict[str, Any] = {"path": item["path"]}
         if name is not None:
             row["name"] = name
         if "kind" in item:
             row["kind"] = kind
+        if "enabled" in item:
+            row["enabled"] = enabled
         rows.append(row)
     return rows
 
 
-def requested_brain_rows(raw: object) -> list[dict[str, str]]:
+def requested_brain_rows(raw: object) -> list[dict[str, Any]]:
     rows = _shared_brain_rows(raw)
     if len(rows) > shared_brain.MAX_BRAINS_PER_WORKSPACE:
         raise ValueError(f"A workspace can link at most {shared_brain.MAX_BRAINS_PER_WORKSPACE} shared brains")
@@ -667,7 +675,7 @@ def requested_brain_rows(raw: object) -> list[dict[str, str]]:
 
 
 def check_requested_brain_kinds(
-    owner: WorkspaceRegistryOwnership, requested: list[dict[str, str]], existing: list[SharedBrainLink],
+    owner: WorkspaceRegistryOwnership, requested: list[dict[str, Any]], existing: list[SharedBrainLink],
 ) -> None:
     if any(os.path.realpath(row["path"]) != row["path"] for row in requested):
         raise WorkspaceRegistryConflict("shared brain path changed while acquiring checkout claims")

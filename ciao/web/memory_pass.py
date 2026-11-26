@@ -1330,6 +1330,8 @@ class MemoryPassCoordinator:
         record = self._host._config.workspace(self._workspace_of(chat))
         lines: list[str] = []
         for link in getattr(record, "shared_brains", None) or []:
+            if not link.enabled:
+                continue
             unavailable = bool(shared_brain_link_problem(self._host._config, link))
             line = shared_brain_pass_line(link.name, link.path, unavailable=unavailable)
             if line is None:

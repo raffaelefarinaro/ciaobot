@@ -187,7 +187,7 @@ The route source of truth is `ciao/web/app.py`. This file is kept in sync by `te
 | GET | `/api/agent/status` | Agent CLI surface status: `{ready, operations, telemetry_path, version}` for the Settings → Agent CLI panel |
 | GET | `/api/workspaces` | List configured logical workspaces |
 | POST | `/api/workspaces/{name}` | Add or update a logical workspace config. A genuinely new workspace registers workspace-scoped onboarding at `runtime` before registry persistence and adds `onboarding_target: {kind: "workspace", name}` to the response; updating an existing workspace does not register progress. Restore does not create progress; reusing an archived name is a new creation. |
-| GET | `/api/workspaces/{name}/shared-brains` | Live state of each shared brain the workspace links: `{shared_brains: [{name, identity, path, origin_changed, missing, problem, branch, head, head_date, dirty, upstream, fetched_at, last_update}]}`; `problem` is "" or why the folder cannot be used now (`missing`, `moved` for a symlink, `not_a_checkout` for a missing or linked-worktree `.git`, `outside_install` for a link kept from before it moved into the install or a vault, `unsafe_config` for a folder whose own git settings are outside the allowlist or whose branch fetches from a remote other than origin, `origin_changed` when its origin no longer gives the linked identity), and git is not read then, `[]` when none. Read-only; 404 `{"error": "unknown workspace"}` for an unknown name. |
+| GET | `/api/workspaces/{name}/shared-brains` | Live state of each shared brain the workspace links: `{shared_brains: [{name, kind, enabled, identity, path, origin_changed, missing, problem, branch, head, head_date, dirty, upstream, fetched_at, last_update}]}`; `problem` is "" or why the folder cannot be used now (`missing`, `moved` for a symlink, `not_a_checkout` for a missing or linked-worktree `.git`, `outside_install` for a link kept from before it moved into the install or a vault, `unsafe_config` for a folder whose own git settings are outside the allowlist or whose branch fetches from a remote other than origin, `origin_changed` when its origin no longer gives the linked identity), and git is not read then, `[]` when none. Read-only; 404 `{"error": "unknown workspace"}` for an unknown name. |
 | POST | `/api/workspaces/reorder` | Persist a new workspace order: body `{order: [name, ...]}` must list every registered (non-archived) workspace exactly once, else 400. The order is the registry's list order: it drives the switcher, the 1-9 shortcuts and every workspace list. Returns the `GET /api/workspaces` payload. When no workspace is named `personal` the first one is the main workspace and stays first: an order that would change it is refused with 409. A restored workspace is appended last |
 | POST | `/api/workspaces/{name}/archive` | Archive a workspace: unregister it, archive its chats, take its user schedules (chat-owned loops are not taken: they are deleted with their chat in the same pass), and move its folder intact into `<install>/.archived-workspaces/<name>-<YYYYMMDD-HHMMSS>/`. Refuses the primary or last workspace, a workspace with a running chat or one still stopping (before anything moves), and layouts it cannot move safely (409). If search cleanup fails after archival, the response includes the archive ID, an error, and a null search-row count (503 for a busy connected index, otherwise 500). After resolving the error, restore that archive and archive the workspace again to retry cleanup. |
 | DELETE | `/api/workspaces/{name}` | Alias of `POST /api/workspaces/{name}/archive`, kept for existing scripts; it no longer deletes anything |
@@ -1008,13 +1008,13 @@ curl -sS -b /tmp/ciao.jar -X DELETE "http://localhost:${PWA_PORT:-8443}/api/chat
 # with the same PATCH /api/workspaces/{name}: a partial map sets the named kinds
 # and keeps the rest, {"profile": null} resets one kind to inherited, and a
 # whole-field null, an unknown kind or mode, or a non-object is a 400 that saves
-# nothing. Each workspace also reports shared_brains ([{name, path, identity, kind}],
+# nothing. Each workspace also reports shared_brains ([{name, path, identity, kind, enabled}],
 # always present, [] when none): the Git checkouts or ordinary folders it links as
 # shared brains. A save that omits kind keeps the linked row's kind; a raw new row
 # that omits kind defaults to Git for backward compatibility, while the Settings form
-# always sends its chosen kind (Folder by default). A folder link may receive a
-# reviewed new note (create only); Ciaobot never replaces or deletes an
-# existing folder file and never claims that cloud sync finished. Existing-note edits stay disabled because the APFS probe found no atomic expected-version replacement (`experiments/ciao-3626-folder-probe/CAPABILITY_MATRIX.md`, #3626).
+# always sends its chosen kind (Folder by default). `enabled` (boolean, default true;
+# a save that omits it on a retained row keeps its value) turns the brain off for
+# chats and the memory pass without removing it. Ciaobot never claims that cloud sync finished.
 # Operator-only: set it with the same PATCH and a whole-list body such as
 # {"shared_brains": [{"path": "<absolute path>", "name": "<optional name>", "kind": "folder"}]}.
 # [] removes all. At most 5; Git paths must be checkouts with an origin remote;
