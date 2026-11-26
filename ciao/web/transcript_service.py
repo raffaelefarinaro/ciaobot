@@ -746,20 +746,6 @@ def _last_assistant_index_per_turn(entries: list[dict]) -> dict[int, int]:
     return last_assistant_idx_in_turn
 
 
-def _overlay_turn_verification(entries: list[dict], verification: dict) -> None:
-    """Attach the vault answer check to the LAST assistant row per turn.
-
-    ``verification`` is ``ChatInfo.turn_verification`` keyed by turn_index (as
-    str). A turn with no recorded check leaves its rows untouched.
-    """
-    if not verification:
-        return
-    for turn, idx in _last_assistant_index_per_turn(entries).items():
-        rec = verification.get(str(turn)) or verification.get(turn)
-        if isinstance(rec, dict):
-            entries[idx]["verification"] = rec
-
-
 def _mark_preceding_answer(rows: list[dict]) -> None:
     """Mark the existing answer before a hidden continuation; append nothing.
 
@@ -1675,9 +1661,6 @@ def _messages_from_archived_transcript(
             parsed_entry["sent_at"] = parsed_entry["timestamp"]
     _stamp_archive_turn_indices(parsed, chat)
     _overlay_assistant_timings(parsed, chat.user_turn_timings)
-    _overlay_turn_verification(
-        parsed, getattr(chat, "turn_verification", None) or {}
-    )
     return parsed
 
 
@@ -1784,9 +1767,6 @@ async def _assemble_chat_messages(
             _append_unrendered_error(acp_rows, current)
             _overlay_transcript_metadata(acp_rows, current)
             _overlay_assistant_timings(acp_rows, chat.user_turn_timings)
-            _overlay_turn_verification(
-                acp_rows, getattr(chat, "turn_verification", None) or {}
-            )
             return [*handover_messages, *acp_rows]
     if not provider_registry.flag(provider, "session_jsonl_history"):
         current = pcm._transcripts.current_messages(
@@ -1794,9 +1774,6 @@ async def _assemble_chat_messages(
         )
         if current:
             _overlay_assistant_timings(current, chat.user_turn_timings)
-            _overlay_turn_verification(
-                current, getattr(chat, "turn_verification", None) or {}
-            )
             return [*handover_messages, *current]
         archived = _messages_from_archived_transcript(pcm, config, chat)
         if archived is not None:
@@ -2067,7 +2044,4 @@ async def _assemble_chat_messages(
         else:
             _overlay_transcript_metadata(result, current)
     _overlay_assistant_timings(result, chat.user_turn_timings)
-    _overlay_turn_verification(
-        result, getattr(chat, "turn_verification", None) or {}
-    )
     return [*handover_messages, *result]
