@@ -822,51 +822,6 @@ def test_seeding_failure_does_not_undo_the_created_workspace(tmp_path, monkeypat
     assert config.workspace("client-c") is not None
 
 
-def test_proposal_action_rejects_an_unknown_action_before_touching_the_queue(tmp_path):
-    """An unrecognised action must never discard a queued fact.
-
-    `POST /api/proposals/{id}/{action}` did not validate `action`: anything that
-    was not `accept` skipped the promotion block but still fell through to the
-    bullet removal and returned the dismiss-shaped success payload, so a typo or
-    a stale client silently threw away a fact nobody had asked to dismiss. The
-    batch endpoint already validates; this follows its shape.
-    """
-    from ciao.web.routes_api import list_proposals, proposal_action
-
-    env = {
-        "PWA_AUTH_TOKEN": "t",
-        "CIAO_WORKSPACE": str(tmp_path),
-        "CIAO_RUNTIME_ROOT": str(tmp_path / ".runtime"),
-    }
-    config = CiaoConfig.from_env(env)
-    queue = config.workspace_vault_root("personal") / "Workspace" / "Memory-Proposals.md"
-    queue.parent.mkdir(parents=True, exist_ok=True)
-    bullet = "- [memory] Remember the lesson about check-first.  _(from: Decisions)_"
-    queue.write_text(
-        f"# Memory Proposals\n\n## 2026-08-19 curation pass\n\n{bullet}\n",
-        encoding="utf-8",
-    )
-    app = Starlette(
-        routes=[
-            Route("/api/proposals", list_proposals, methods=["GET"]),
-            Route("/api/proposals/{id}/{action}", proposal_action, methods=["POST"]),
-        ]
-    )
-    app.state.config = config
-    client = TestClient(app)
-
-    listed = client.get("/api/proposals")
-    assert listed.status_code == 200, listed.text
-    pid = listed.json()["rows"][0]["id"]
-
-    resp = client.post(f"/api/proposals/{pid}/accpet")
-
-    assert resp.status_code == 400, resp.json()
-    assert "accept|dismiss" in resp.json()["error"]
-    # The fact is still queued.
-    assert bullet in queue.read_text(encoding="utf-8")
-
-
 # ---- vault ownership overlap ------------------------------------------------
 
 

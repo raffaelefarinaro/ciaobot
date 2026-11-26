@@ -7,14 +7,12 @@ how to get the rest.
 
 from __future__ import annotations
 
-import json
 from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 
 import ciao.control_plane as control_plane_module
-from ciao import cli
 from ciao.control_plane import CiaoControlPlane
 from tests.test_agent_surface import _client, _post, _token
 from tests.test_mcp_server import _service
@@ -235,38 +233,3 @@ def _proposal_args(tmp_path: Path, count: int) -> list[str]:
     _proposal_queue(vault, count)
     return ["--workspace", str(workspace), "--vault-root", str(vault)]
 
-
-def test_memory_proposals_pages_with_next_offset(
-    tmp_path: Path, capsys: pytest.CaptureFixture[str]
-) -> None:
-    base = _proposal_args(tmp_path, 45)
-    assert cli.main(["memory-proposals", *base, "--json"]) == 0
-    first = json.loads(capsys.readouterr().out)
-    assert len(first["proposals"]) == 20
-    assert first["total"] == 45
-    assert first["truncated"] is True
-    assert first["next_offset"] == 20
-
-    assert cli.main(["memory-proposals", *base, "--json", "--offset", "40"]) == 0
-    last = json.loads(capsys.readouterr().out)
-    assert [row["text"].split()[2] for row in last["proposals"]] == ["040", "041", "042", "043", "044"]
-    assert "next_offset" not in last
-    assert "truncated" not in last
-
-
-def test_memory_proposals_text_output_names_the_next_page(
-    tmp_path: Path, capsys: pytest.CaptureFixture[str]
-) -> None:
-    base = _proposal_args(tmp_path, 25)
-    assert cli.main(["memory-proposals", *base, "--limit", "10"]) == 0
-    out = capsys.readouterr().out
-    assert out.count("- [memory]") == 10
-    assert "--offset 10" in out
-
-
-def test_memory_proposals_rejects_a_limit_above_the_ceiling(
-    tmp_path: Path, capsys: pytest.CaptureFixture[str]
-) -> None:
-    base = _proposal_args(tmp_path, 3)
-    assert cli.main(["memory-proposals", *base, "--limit", "500"]) == 2
-    assert "between 1 and 200" in capsys.readouterr().err

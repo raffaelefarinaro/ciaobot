@@ -273,15 +273,15 @@ def _memory_proposal_paths(config: Any, vault: Path, root: Path) -> list[tuple[P
             ws_dir = vault / name
             if name == "personal" or ws_dir.is_dir():
                 paths.append((
-                    ws_dir / "Workspace" / "Memory-Proposals.md",
-                    f"Memory proposals ({name})" if (vault / "work").is_dir() else "Memory proposals",
+                    ws_dir / "Workspace" / "Unsure.md",
+                    f"Unsure list ({name})" if (vault / "work").is_dir() else "Unsure list",
                 ))
         return paths
 
     for name in ws_names:
         ws_vault_root = config.workspace_vault_root(name)
-        title = f"Memory proposals ({name})" if len(ws_names) > 1 else "Memory proposals"
-        paths.append((ws_vault_root / "Workspace" / "Memory-Proposals.md", title))
+        title = f"Unsure list ({name})" if len(ws_names) > 1 else "Unsure list"
+        paths.append((ws_vault_root / "Workspace" / "Unsure.md", title))
     return paths
 
 

@@ -20,7 +20,7 @@ from contextlib import contextmanager
 from datetime import date
 from pathlib import Path
 
-from ciao import memory_proposals as mp
+from ciao import learnings_writer as mp
 from ciao.learning_records import (
     SECTION_ACTIVE,
     SECTION_HEADINGS,

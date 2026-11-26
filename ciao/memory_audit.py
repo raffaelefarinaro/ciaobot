@@ -580,6 +580,22 @@ class NoteVerification:
         }
 
 
+def never_aged(path: str) -> bool:
+    """Whether this note is bookkeeping that is never flagged as stale.
+
+    ``Workspace/`` files, templates and completed projects keep their age but are
+    never reported as unchecked, so the audit, the Memory Map and ``note related``
+    agree about which notes count.
+    """
+    from pathlib import Path
+
+    from ciao.vault_lint import is_template_stem
+
+    parts = [part.casefold() for part in Path(path).parts]
+    completed = any(a == "projects" and b == "completed" for a, b in zip(parts, parts[1:]))
+    return "workspace" in parts or is_template_stem(Path(path).stem) or completed
+
+
 def note_verification(
     note_type: str,
     updated: str,
@@ -997,7 +1013,7 @@ class EntryVerdict:
     worklist and the proposal queue all use, and the one value a caller cannot
     rederive without reimplementing a hash. ``start``/``end`` are the entry's own
     character span, ``fingerprint`` is the text the verdict is about, and
-    ``revision`` is the note's :func:`ciao.memory_receipts.content_revision`, so
+    ``revision`` is the note's :func:`ciao.file_kernel.content_revision`, so
     a caller can hand the whole thing to the managed operation without re-reading
     anything.
 

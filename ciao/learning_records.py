@@ -2,7 +2,7 @@
 
 Why this exists
 ---------------
-``ciao/memory_proposals.py`` used to own the one regex that reads a learnings
+the queue module used to own the one regex that reads a learnings
 entry, mint a four-word key from the statement, truncate the cited sources to
 eight, and count recurrence by comparing normalized prose, and
 the curation pass imported that same regex to decide what to promote.
@@ -20,7 +20,7 @@ without losing a byte of anything it does not understand.
 
 Nothing here touches disk, the network, or a model. :func:`migrate_learnings`
 returns text; a caller decides whether to write it. The production writer
-(``memory_proposals.append_learning``) and the migration command
+(``learnings_writer.append_learning``) and the migration command
 (``ciao learnings-migrate``) are callers of this module, not copies of it.
 
 The four rules everything else follows from
@@ -185,7 +185,7 @@ LEARNINGS_STUB = (
 
 Owned here rather than by the writer because the writer, the migration command
 and the reader all need it to be the same text: two stubs would mean the first
-:func:`ciao.memory_proposals.append_learning` into one vault and the first read
+:func:`ciao.learnings_writer.append_learning` into one vault and the first read
 of another disagree about what an empty learnings file says.
 """
 
@@ -1337,7 +1337,7 @@ def entry_revision(record: LearningRecord) -> str:
     one, and the reason a learning with a ninth sighting is not a learning whose
     line was rewritten behind a decision.
 
-    :func:`ciao.memory_receipts.content_revision` is used rather than a second
+    :func:`ciao.file_kernel.content_revision` is used rather than a second
     hash so one revision is one digest everywhere in the app: a caller that
     already holds ``content_revision`` of some text gets the same answer here
     that it would have computed itself, and no two surfaces can disagree about

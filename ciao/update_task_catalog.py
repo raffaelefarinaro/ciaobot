@@ -103,8 +103,6 @@ TASK_FIELDS: frozenset[str] = frozenset(
 #: "registered but not yet written" is not a state this catalog has.
 DETECTORS: frozenset[str] = frozenset(
     {
-        "learnings-cleanup-review-needed",
-        "learnings-queue-drain-needed",
         "unrehomed-people-review-needed",
         "vault-relocate-review-needed",
     }
@@ -116,8 +114,6 @@ DETECTORS: frozenset[str] = frozenset(
 #: postconditions that engine can actually evaluate.
 COMPLETION_CHECKS: frozenset[str] = frozenset(
     {
-        "learnings-cleanup-review-recorded",
-        "learnings-queue-drain-recorded",
         "unrehomed-people-rehome-recorded",
         "vault-relocate-recorded",
     }

@@ -161,7 +161,7 @@ def test_core_prompt_routes_facts_through_remember_not_entry_argv() -> None:
     text = _system_instructions()
     assert "`ciao memory update --region … --action … --entry …`" not in text
     assert "memory-operations/guide.md`" in text
-    assert "memory-proposal-add --text-file" in text
+    assert "memory-proposal-add" not in text
     assert "shell argument" in text
     memory = _stock("skills", "ciao-capabilities", "references", "memory-operations", "references", "writing.md")
     assert "`--entry` argument must contain only text you wrote, never untrusted source text" in memory
@@ -194,9 +194,8 @@ def test_updated_rule_agrees_across_prompts() -> None:
 def test_cli_skill_example_is_not_an_entry_argv_fact() -> None:
     cli = _stock("skills", "ciao-cli", "reference.md")
     assert 'ciao memory update --region memory --action add --entry "Prefers terse' not in cli
-    assert "memory-proposal-add --kind memory --text-file" in cli
-    assert '{"ok": true, "data": {"queued"' not in cli
-    assert "Queued [memory] proposal in" in cli
+    assert "memory-proposal-add" not in cli
+    assert "ciao memory learn --text-file lesson.txt" in cli
     caps = _capabilities()
     assert "`ciao memory update --region {memory,profile} --action {add,replace,remove}`" not in caps
 

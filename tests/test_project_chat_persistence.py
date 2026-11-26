@@ -91,7 +91,7 @@ def test_existing_vault_onboarding_uses_current_layout_and_workspace_name(
 
     assert "logical workspace **personal**" in prompt
     assert "projects/active/" in prompt
-    assert "Workspace/Memory-Proposals.md" in prompt
+    assert "Workspace/Unsure.md" in prompt
     assert "`Templates/` and `personal/`/`work/` are not required" in prompt
     assert "Create Directory Structure" not in prompt
 
@@ -223,7 +223,7 @@ def test_both_welcome_shapes_explain_memory_and_link_existing_categories(
     existing_prompt, _ = _seeded_welcome(existing, "Connect Existing Vault 👋")
     assert "Preserve before reorganizing" in existing_prompt
     assert "Never delete or overwrite them" in existing_prompt
-    assert "Workspace/Memory-Proposals.md" in existing_prompt
+    assert "Workspace/Unsure.md" in existing_prompt
     scratch_prompt, _ = _seeded_welcome(scratch, "Welcome to Ciaobot! 👋")
     assert "Onboarding interview and curation" in scratch_prompt
     assert "Do not create `personal/`, `work/`, or `Templates/`" in scratch_prompt
@@ -308,7 +308,7 @@ def test_onboarding_starting_knowledge_is_confirmed_facts_only(
 
     A guess written as a note is indistinguishable from a fact once it is on disk,
     so the pass files only what the user confirmed and parks everything else in
-    `Workspace/Memory-Proposals.md`. Nothing about it creates scaffolding ahead of
+    `Workspace/Unsure.md`. Nothing about it creates scaffolding ahead of
     the facts, and nothing about it reaches outside Ciaobot's own vault state:
     reading past conversations is the consent-gated memory job, which the user
     starts from Memory whenever they choose, not a side effect of onboarding.
@@ -334,7 +334,7 @@ def test_onboarding_starting_knowledge_is_confirmed_facts_only(
         # Anything uncertain waits for the user instead of being filed.
         assert (
             "put anything you are not sure about in "
-            "`Workspace/Memory-Proposals.md` instead of filing it" in prompt
+            "`Workspace/Unsure.md` instead of filing it" in prompt
         )
         # No empty folders: a category/entity folder appears only where a
         # confirmed fact needs it.
@@ -498,94 +498,6 @@ def test_proposal_helper_metadata_persists_and_new_session_clears_it(
 
     manager.new_session(chat.chat_id)
     assert manager.get_chat(chat.chat_id).helper == {}
-
-
-def test_resolution_helper_archives_only_after_target_leaves_queue(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    manager = _make_manager(tmp_path)
-    project = manager.create_project("Reviews", workspace="work")
-    chat = manager.create_chat(
-        project.project_id,
-        helper={
-            "kind": "proposal",
-            "intent": "resolve",
-            "proposal_ids": ["proposal-1"],
-            "archive_policy": "when_resolved",
-        },
-    )
-    chat.last_response = "Merged the fact."
-    chat.last_response_status = "success"
-    monkeypatch.setattr(
-        "ciao.proposal_tracking.pending_proposal_ids", lambda _config: {"proposal-1"}
-    )
-    assert asyncio.run(manager._maybe_archive_proposal_helper(chat.chat_id)) is False
-
-    monkeypatch.setattr(
-        "ciao.proposal_tracking.pending_proposal_ids", lambda _config: set()
-    )
-
-    async def archive(chat_id: str):
-        manager.get_chat(chat_id).archived = True
-        return None
-
-    archive_mock = AsyncMock(side_effect=archive)
-    monkeypatch.setattr(manager, "archive_chat", archive_mock)
-    assert asyncio.run(manager._maybe_archive_proposal_helper(chat.chat_id)) is True
-    archive_mock.assert_awaited_once_with(chat.chat_id)
-
-
-def test_resolution_helper_is_not_archived_while_background_work_runs(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    manager = _make_manager(tmp_path)
-    project = manager.create_project("Reviews", workspace="work")
-    chat = manager.create_chat(
-        project.project_id,
-        helper={
-            "kind": "proposal",
-            "intent": "resolve",
-            "proposal_ids": ["proposal-1"],
-            "archive_policy": "when_resolved",
-        },
-    )
-    chat.last_response = "Merged the fact."
-    chat.last_response_status = "success"
-    monkeypatch.setattr(
-        "ciao.proposal_tracking.pending_proposal_ids", lambda _config: set()
-    )
-    archive_mock = AsyncMock()
-    monkeypatch.setattr(manager, "archive_chat", archive_mock)
-    # The provider still reports background work the helper dispatched.
-    manager._providers[chat.chat_id] = SimpleNamespace(  # type: ignore[assignment]
-        background_work_outstanding=True, background_activity_age=0.0
-    )
-
-    assert asyncio.run(manager._maybe_archive_proposal_helper(chat.chat_id)) is False
-    archive_mock.assert_not_awaited()
-
-
-def test_review_helper_never_auto_archives(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    manager = _make_manager(tmp_path)
-    project = manager.create_project("Reviews", workspace="work")
-    chat = manager.create_chat(
-        project.project_id,
-        helper={
-            "kind": "proposal",
-            "intent": "review",
-            "proposal_ids": ["proposal-1"],
-            "archive_policy": "manual",
-        },
-    )
-    chat.last_response = "Here is my recommendation."
-    chat.last_response_status = "success"
-    archive_mock = AsyncMock()
-    monkeypatch.setattr(manager, "archive_chat", archive_mock)
-
-    assert asyncio.run(manager._maybe_archive_proposal_helper(chat.chat_id)) is False
-    archive_mock.assert_not_awaited()
 
 
 def test_build_agent_request_fails_without_an_agent_surface(tmp_path: Path) -> None:

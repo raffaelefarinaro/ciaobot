@@ -61,7 +61,7 @@ EVAL_WORKDIR_PREFIX = "ciao-task-eval-"
 TIERS: frozenset[str] = frozenset({"easy", "medium", "hard"})
 ENTRY_KINDS: frozenset[str] = frozenset({"prompt", "delegate", "transcript"})
 # The memory pass a transcript entry triggers writes its queue under the agent root.
-PROPOSALS_PATH = "memory-vault/Workspace/Memory-Proposals.md"
+PROPOSALS_PATH = "memory-vault/Workspace/Unsure.md"
 MEMORY_PASS_TERMINAL: frozenset[str] = frozenset({"ok", "attention"})
 MEMORY_PASS_POLL_S = 2.0
 MEMORY_PASS_ARCHIVE_WAIT_S = 30.0
@@ -773,14 +773,12 @@ def _check_new_projects(ctx: GradeContext, spec: dict[str, Any]) -> CheckResult:
 
 
 def _queue_items(text: str) -> list[tuple[str, str]]:
-    """``(kind, text)`` of every queue bullet, read with the grammar ``list_proposals`` uses."""
-    from ciao.proposal_kinds import parse_bullet
-
+    """``("", text)`` of every Unsure-list line (``- [ ] text``, ticked or not)."""
     items: list[tuple[str, str]] = []
     for line in text.splitlines():
-        bullet = parse_bullet(line)
-        if bullet is not None:
-            items.append((bullet.kind, bullet.text))
+        match = re.match(r"^\s*-\s*\[[ xX]\]\s+(.+?)\s*$", line)
+        if match is not None:
+            items.append(("", match.group(1)))
     return items
 
 
@@ -810,7 +808,7 @@ def _check_proposals(ctx: GradeContext, spec: dict[str, Any]) -> CheckResult:
     queue = _resolve_in_root(ctx.agent_root, rel)
     queue_text = queue.read_text(encoding="utf-8", errors="replace") if queue.is_file() else ""
     new = [(kind, text) for kind, text in _queue_items(queue_text) if text not in before]
-    items = [f"[{kind}] {text}" for kind, text in new]
+    items = [text for _, text in new]
     for extra in spec.get("include_files", []):
         rel_extra = str(extra)
         if rel_extra.endswith("/"):

@@ -39,9 +39,6 @@ from ciao.memory_tool import (
     region_usage,
     strip_region_blocks,
 )
-# Proposal kinds and bullet shape are owned by ciao.proposal_kinds; re-export
-# here so this counter stays in sync with the control plane and the web layer.
-from ciao.proposal_kinds import BULLET_RE
 # The 15 KiB SKILL.md budget is owned by ciao.skills_inventory, the module that
 # owns skills; the audit reports the owner's threshold rather than a second copy.
 from ciao.skills_inventory import MAX_SKILL_BYTES
@@ -54,6 +51,8 @@ from ciao.workspace_guide import guide_path as workspace_guide_path
 
 logger = logging.getLogger(__name__)
 
+# An unticked Unsure-list item: the person has not decided it yet.
+_UNSURE_OPEN_RE = re.compile(r"^\s*-\s*\[ \]\s")
 _RULE_BULLET_RE = re.compile(r"^\s*[-*]\s+(.+?)\s*$")
 _RULE_NEGATION_RE = re.compile(
     r"\b(?:never|(?:do|does|must|should|can|cannot)\s+not|don't|doesn't|mustn't|shouldn't|can't)\b",
@@ -598,9 +597,9 @@ def _proposal_paths(
 ) -> tuple[list[Path], list[dict[str, str]]]:
     return _per_workspace_vault_paths(
         vault_root,
-        "Workspace/Memory-Proposals.md",
-        error_type="unreadable_proposal_root",
-        what="workspace proposal queues",
+        "Workspace/Unsure.md",
+        error_type="unreadable_unsure_root",
+        what="workspace Unsure lists",
         workspace=workspace,
     )
 
@@ -656,7 +655,7 @@ def audit_memory(
         region_limits=region_limits,
     )
 
-    proposals_count, proposal_files, proposal_errors = _scan_proposals(
+    proposals_count, unsure_files, unsure_errors = _scan_proposals(
         vault_root, proposal_paths, workspace_name
     )
 
@@ -672,10 +671,10 @@ def audit_memory(
         "duplicate_entries": scan["duplicate_entries"],
         "invisible_unicode": scan["invisible_unicode"],
         "marker_errors": scan["marker_errors"],
-        "pending_memory_proposals": proposals_count,
-        "proposal_files": proposal_files,
+        "pending_unsure_items": proposals_count,
+        "unsure_files": unsure_files,
         **scan["rot"],
-        "errors": proposal_errors,
+        "errors": unsure_errors,
     }
 
 
@@ -684,50 +683,50 @@ def _scan_proposals(
     proposal_paths: list[Path] | None,
     workspace_name: str,
 ) -> tuple[int, list[dict[str, Any]], list[dict[str, str]]]:
-    """Count pending proposal bullets and surface queue discovery errors.
+    """Count unticked Unsure-list items and surface discovery errors.
 
-    Proposal queues are workspace-scoped, not per guide, so the scan is shared
+    The Unsure list is workspace-scoped, not per guide, so the scan is shared
     by the single-guide ``audit_memory`` and the per-guide aggregate. Returns
-    ``(pending_count, proposal_files, errors)``.
+    ``(pending_count, unsure_files, errors)``.
     """
     proposals_count = 0
-    proposal_files: list[dict[str, Any]] = []
-    proposal_errors: list[dict[str, str]] = []
+    unsure_files: list[dict[str, Any]] = []
+    unsure_errors: list[dict[str, str]] = []
     if vault_root is not None:
         if proposal_paths is None:
             paths, discovery_errors = _proposal_paths(vault_root, workspace_name)
-            proposal_errors.extend(discovery_errors)
+            unsure_errors.extend(discovery_errors)
         else:
             paths = proposal_paths
         for path in dict.fromkeys(paths):
             if not path.exists():
                 continue
             if not path.is_file():
-                proposal_errors.append(
+                unsure_errors.append(
                     _diagnostic(
-                        "invalid_proposal_file",
+                        "invalid_unsure_file",
                         path,
-                        "memory proposal path is not a file",
+                        "Unsure list path is not a file",
                     )
                 )
                 continue
             try:
                 content = path.read_text(encoding="utf-8")
             except (OSError, UnicodeDecodeError) as exc:
-                proposal_errors.append(
+                unsure_errors.append(
                     _diagnostic(
-                        "unreadable_proposal_file",
+                        "unreadable_unsure_file",
                         path,
-                        f"failed to read memory proposals: {exc}",
+                        f"failed to read the Unsure list: {exc}",
                     )
                 )
                 continue
             pending = sum(
-                1 for line in content.splitlines() if BULLET_RE.match(line)
+                1 for line in content.splitlines() if _UNSURE_OPEN_RE.match(line)
             )
             proposals_count += pending
-            proposal_files.append({"path": str(path), "pending": pending})
-    return proposals_count, proposal_files, proposal_errors
+            unsure_files.append({"path": str(path), "pending": pending})
+    return proposals_count, unsure_files, unsure_errors
 
 
 def _scan_memory_guide(
@@ -892,8 +891,8 @@ def _scan_note_staleness(
 def _aggregate_memory_guides(
     guides: list[dict[str, Any]],
     *,
-    pending_memory_proposals: int,
-    proposal_files: list[dict[str, Any]],
+    pending_unsure_items: int,
+    unsure_files: list[dict[str, Any]],
     errors: list[dict[str, str]],
 ) -> dict[str, Any]:
     """Fold per-guide scans and the workspace proposal queue into one report.
@@ -948,8 +947,8 @@ def _aggregate_memory_guides(
         "aging_state_entries": aging_state,
         "paths_checked": sum(g["rot"]["paths_checked"] for g in guides),
         "paths_unverifiable": sum(g["rot"]["paths_unverifiable"] for g in guides),
-        "pending_memory_proposals": pending_memory_proposals,
-        "proposal_files": proposal_files,
+        "pending_unsure_items": pending_unsure_items,
+        "unsure_files": unsure_files,
         "errors": errors,
     }
 
@@ -1353,8 +1352,7 @@ def memory_actionable_count(memory_result: dict[str, Any]) -> int:
 
     One definition, shared by `run_os_audit`'s exit status and the standalone
     `ciao memory-audit` command. They previously each summed their own subset,
-    and `memory-audit` omitted `oversize_entries`, `invisible_unicode` and
-    `pending_memory_proposals` — so it reported "clean" (exit 0) for a region
+    and `memory-audit` omitted `oversize_entries` and `invisible_unicode` — so it reported "clean" (exit 0) for a region
     that `ciao os-audit` failed on, and the daily curation routine that reads
     the weaker verdict saw nothing to fix.
 
@@ -1375,7 +1373,6 @@ def memory_actionable_count(memory_result: dict[str, Any]) -> int:
         + len(memory_result["duplicate_entries"])
         + len(memory_result["invisible_unicode"])
         + len(memory_result["marker_errors"])
-        + memory_result["pending_memory_proposals"]
         # Both concretely fixable: move the entry to Learnings.md, or correct
         # the path.
         + len(memory_result["event_shaped_entries"])
@@ -1395,7 +1392,6 @@ WORKSPACE_SECTIONS: tuple[str, ...] = (
     "skill_audit",
     "rule_audit",
     "memory_hygiene",
-    "vocabulary_proposals",
 )
 AUDIT_SCOPES: tuple[str, ...] = ("all", "workspace", "global")
 
@@ -1511,7 +1507,7 @@ def run_os_audit(
         else {**empty_errors, "rule_clashes_found": 0}
     )
     if want_workspace:
-        pending_memory_proposals, proposal_files, proposal_errors = _scan_proposals(
+        pending_unsure_items, unsure_files, unsure_errors = _scan_proposals(
             notes, proposal_paths, workspace_name
         )
         current = today or datetime.date.today()
@@ -1539,9 +1535,9 @@ def run_os_audit(
         ]
         memory_result = _aggregate_memory_guides(
             guides,
-            pending_memory_proposals=pending_memory_proposals,
-            proposal_files=proposal_files,
-            errors=proposal_errors,
+            pending_unsure_items=pending_unsure_items,
+            unsure_files=unsure_files,
+            errors=unsure_errors,
         )
         # Vault-note aging joins the same section: it is memory rot, just on
         # the on-demand surface instead of the always-loaded one. Informational
@@ -1554,7 +1550,7 @@ def run_os_audit(
         memory_result["errors"].extend(stale["errors"])
     else:
         memory_result = _aggregate_memory_guides(
-            [], pending_memory_proposals=0, proposal_files=[], errors=[]
+            [], pending_unsure_items=0, unsure_files=[], errors=[]
         )
     job_result = (
         audit_job_runs(workspace, runtime_dir=runtime)
@@ -1566,41 +1562,6 @@ def run_os_audit(
         if want_global
         else {**empty_errors, "notices_found": 0, "notices": []}
     )
-    # Vocabulary proposals: informational pending actions, not defects. A
-    # non-canonical type or a singleton tag's near-duplicate needs a human
-    # decision (promote to canonical vs alias), so the hygiene routine
-    # surfaces it without rewriting frontmatter or raising the audit status —
-    # mirroring the Memory-Proposals.md promote/dismiss pattern.
-    if want_workspace:
-        try:
-            from ciao.vocabulary_proposals import audit_vocabulary_proposals
-
-            vocabulary_result = audit_vocabulary_proposals(
-                notes, workspace_name, config=config
-            )
-        except Exception as exc:  # noqa: BLE001 — advisory section
-            vocabulary_result = {
-                "threshold": 5,
-                "type_promotions": [],
-                "tag_promotions": [],
-                "tag_merges": [],
-                "errors": [
-                    _diagnostic(
-                        "vocabulary_proposal_scan_failed",
-                        notes,
-                        f"vocabulary proposal scan failed: {exc}",
-                    )
-                ],
-            }
-    else:
-        vocabulary_result = {
-            "threshold": 5,
-            "type_promotions": [],
-            "tag_promotions": [],
-            "tag_merges": [],
-            "errors": [],
-        }
-
     collected_errors = [
         *setup_result["errors"],
         *vault_result["errors"],
@@ -1609,7 +1570,6 @@ def run_os_audit(
         *memory_result["errors"],
         *job_result["errors"],
         *upgrade_result["errors"],
-        *vocabulary_result["errors"],
     ]
     scan_errors: list[dict[str, str]] = []
     seen_errors: set[tuple[str, ...]] = set()
@@ -1681,7 +1641,6 @@ def run_os_audit(
         "skill_audit": skill_result,
         "rule_audit": rule_result,
         "memory_hygiene": memory_result,
-        "vocabulary_proposals": vocabulary_result,
         "job_runs_audit": job_result,
         "upgrade_notices": upgrade_result,
         "scan_errors": scan_errors,
@@ -1807,7 +1766,7 @@ def format_audit_markdown(report: dict[str, Any]) -> str:
                 f"- Duplicate entries: {len(memory['duplicate_entries'])}",
                 f"- Invisible Unicode entries: {len(memory['invisible_unicode'])}",
                 f"- Region marker errors: {len(memory['marker_errors'])}",
-                f"- Pending memory proposals: {memory['pending_memory_proposals']}",
+                f"- Unsure items awaiting you: {memory['pending_unsure_items']}",
                 (
                     "- Event-shaped entries (belong in a log): "
                     f"{len(memory.get('event_shaped_entries', []))}"
@@ -1934,48 +1893,6 @@ def format_audit_markdown(report: dict[str, Any]) -> str:
                     lines.append(f"  - … {len(stale) - 10} more")
             if unindexed:
                 lines.append(f"- ⚠️ {unindexed} transcript archive(s) unindexed")
-
-    vocab = report.get("vocabulary_proposals") or {}
-    if vocab and (vocab.get("type_promotions") or vocab.get("tag_promotions") or vocab.get("tag_merges")):
-        # Informational pending actions: promotion/merge needs a human decision
-        # (add to CANONICAL_TYPES vs alias), so it never raises the status.
-        lines.extend(["", "## 8. Vocabulary Proposals (informational)"])
-        thr = vocab.get("threshold", 5)
-        for promo in vocab.get("type_promotions", [])[:10]:
-            ws = f" — {', '.join(promo['workspaces'])}" if promo.get("workspaces") else ""
-            lines.append(
-                f"- ℹ️ Promote type `{promo['type']}` ({promo['count']} uses{ws}) "
-                f"to CANONICAL_TYPES? No alias target — human decision. "
-                f"Threshold {thr}."
-            )
-            for p in promo.get("paths", [])[:3]:
-                lines.append(f"  - {p}")
-        for promo in vocab.get("tag_promotions", [])[:10]:
-            ws = f" — {', '.join(promo['workspaces'])}" if promo.get("workspaces") else ""
-            lines.append(
-                f"- ℹ️ Tag `{promo['tag']}` ({promo['count']} uses{ws}) "
-                f"crossed threshold {thr} — candidate for established use."
-            )
-        for merge in vocab.get("tag_merges", [])[:10]:
-            ws = f" — {', '.join(merge['workspaces'])}" if merge.get("workspaces") else ""
-            near = ", ".join(f"`{t}`" for t in merge.get("near_duplicates", []))
-            count = merge.get("count", 1)
-            kind = merge.get("kind", "singleton")
-            if kind == "case_variant":
-                # A repeated case-only variant (e.g. ai 3x + AI 2x) is not a
-                # singleton; say so with its actual count.
-                lines.append(
-                    f"- ℹ️ Tag `{merge['tag']}` ({count} uses{ws}) is a case "
-                    f"variant of {near} — candidate for merging into that "
-                    "spelling."
-                )
-            else:
-                lines.append(
-                    f"- ℹ️ Singleton tag `{merge['tag']}`{ws} near-duplicate of {near} "
-                    f"— candidate for aliasing."
-                )
-        if len(vocab.get("type_promotions", [])) > 10 or len(vocab.get("tag_promotions", [])) > 10 or len(vocab.get("tag_merges", [])) > 10:
-            lines.append("  - … more proposals omitted")
 
     notices = report.get("upgrade_notices", {}).get("notices", [])
     if notices:

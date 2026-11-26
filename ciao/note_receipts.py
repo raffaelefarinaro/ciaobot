@@ -35,7 +35,7 @@ The protocol is the receipt protocol, narrowed to a file:
 * **Bytes, not text.** The note is read with ``read_bytes`` and decoded with
   strict UTF-8, and the replacement is written as bytes, so a BOM, a CRLF pair
   and a final line without a newline all survive verbatim. A revision is
-  :func:`ciao.memory_receipts.content_revision` over that exact decoded text,
+  :func:`ciao.file_kernel.content_revision` over that exact decoded text,
   so the revision a caller must present is the one it read.
 * **The expected revision is mandatory.** This primitive never overwrites a
   note it has not read: an empty ``expected_revision`` is refused rather than
@@ -46,7 +46,7 @@ The protocol is the receipt protocol, narrowed to a file:
   ``applied`` row that History can read but not undo, which is the one outcome
   this protocol exists to prevent.
 * **Prepare, write, confirm, under one lock.** The per-file
-  :func:`ciao.memory_receipts.queue_lock` covers the read, the revision check,
+  :func:`ciao.file_kernel.queue_lock` covers the read, the revision check,
   the ``prepared`` row, the sibling-temp write and the ``os.replace``, and the
   revision is rechecked immediately before the rename. A journal that cannot
   record the ``prepared`` row aborts the write: no evidence, no mutation.
@@ -395,7 +395,7 @@ def commit_note_change(
 
     ``relative_path`` names an existing regular ``.md`` file inside
     ``vault_root``; ``expected_revision`` is the
-    :func:`ciao.memory_receipts.content_revision` of the exact text the caller
+    :func:`ciao.file_kernel.content_revision` of the exact text the caller
     read. A stale expectation raises :class:`ciao.memory_receipts.RevisionConflict`
     with the note untouched, which is how a concurrent managed write or a
     direct edit is reported rather than overwritten.

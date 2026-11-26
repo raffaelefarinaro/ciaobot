@@ -312,47 +312,7 @@ def test_deleting_a_chat_removes_its_folder_in_every_root(tmp_path: Path) -> Non
     assert sibling.is_dir()
 
 
-def test_source_index_spans_every_chats_root(tmp_path: Path) -> None:
-    from ciao.web import routes_api
-
-    config = _config(tmp_path, rerooted=True)
-    for root, chat_id, stem in (
-        (tmp_path / "work" / "Logs" / "Chats", "c1", "a"),
-        (tmp_path / "Logs" / "Chats", "c2", "b"),
-    ):
-        transcript = root / chat_id / "claude" / f"{stem}.md"
-        transcript.parent.mkdir(parents=True)
-        transcript.write_text("x", encoding="utf-8")
-    routes_api._SOURCE_INDEX.clear()
-
-    index = routes_api._source_index(config)
-
-    assert index["a"] == str(tmp_path / "work" / "Logs" / "Chats" / "c1" / "claude" / "a.md")
-    assert index["b"] == str(tmp_path / "Logs" / "Chats" / "c2" / "claude" / "b.md")
-    routes_api._SOURCE_INDEX.clear()
-
-
 # --- first root wins (finding 2) ---------------------------------------------
-
-
-def test_source_index_first_root_wins(tmp_path: Path) -> None:
-    from ciao.web import routes_api
-
-    config = _config(tmp_path, rerooted=True)
-    work_root = tmp_path / "work" / "Logs" / "Chats"
-    shared_root = tmp_path / "Logs" / "Chats"
-    for stem in ("dup-a", "dup-b"):
-        for root in (work_root, shared_root):
-            transcript = root / f"c-{stem}" / "claude" / f"{stem}.md"
-            transcript.parent.mkdir(parents=True, exist_ok=True)
-            transcript.write_text("x", encoding="utf-8")
-    routes_api._SOURCE_INDEX.clear()
-
-    index = routes_api._source_index(config)
-
-    assert index["dup-a"] == str(work_root / "c-dup-a" / "claude" / "dup-a.md")
-    assert index["dup-b"] == str(work_root / "c-dup-b" / "claude" / "dup-b.md")
-    routes_api._SOURCE_INDEX.clear()
 
 
 def test_discovery_first_root_wins_for_a_duplicate_chat(tmp_path: Path) -> None:

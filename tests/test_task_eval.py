@@ -1136,7 +1136,6 @@ def test_h3_correct_revision_passes_file_checks(tmp_path: Path) -> None:
 # --- Medium tier catalog ------------------------------------------------------------
 
 MEDIUM_TASK_IDS = (
-    "M1-proposal-merge",
     "M2-project-exists",
     "M2-project-missing",
     "M3-delegated-task",
@@ -1149,17 +1148,6 @@ def test_medium_tasks_load() -> None:
     assert set(MEDIUM_TASK_IDS) <= set(by_id)
     for task_id in MEDIUM_TASK_IDS:
         assert by_id[task_id].tier == "medium", task_id
-
-
-def test_m1_overlay_has_one_queued_proposal() -> None:
-    from ciao import memory_proposals
-
-    proposals_path = te.TASKS_ROOT / "M1-proposal-merge" / "overlay" / "memory-vault" / "Workspace" / "Memory-Proposals.md"
-
-    rows = memory_proposals.list_proposals(proposals_path)
-
-    assert len(rows) == 1
-    assert "Turin" in rows[0]["text"]
 
 
 def test_medium_fixture_facts_consistent() -> None:
@@ -1749,10 +1737,10 @@ def test_catalog_rejects_bad_regex_and_proposals_specs(
 
 
 def test_proposals_check_counts_only_new_bullets(tmp_path: Path) -> None:
-    old = "- [memory] Old fact about Sunday  _(from: x)_\n"
+    old = "- [ ] Old fact about Sunday — 2026-11-01\n"
     queue = tmp_path / te.PROPOSALS_PATH
     queue.parent.mkdir(parents=True)
-    queue.write_text(old + "- [memory] Uses kilometres for distances  _(from: y)_\n", encoding="utf-8", newline="")
+    queue.write_text(old + "- [ ] Uses kilometres for distances — 2026-11-02\n", encoding="utf-8", newline="")
     ctx = _ctx(tmp_path, snapshot=_snapshot(saved={te.PROPOSALS_PATH: old.encode("utf-8")}))
 
     assert te._check_proposals(ctx, {"kind": "proposals", "must": ["kilomet"]}).ok
@@ -2031,7 +2019,7 @@ class FakeTranscriptSession(FakeSession):
         if self.pass_bullet is not None:
             queue = self.agent_root / te.PROPOSALS_PATH
             queue.parent.mkdir(parents=True, exist_ok=True)
-            queue.write_text(f"- [memory] {self.pass_bullet}  _(from: {chat_id})_\n", encoding="utf-8", newline="")
+            queue.write_text(f"- [ ] {self.pass_bullet} — source: {chat_id}\n", encoding="utf-8", newline="")
         return self.outcome
 
     def usage(self) -> dict[str, Any]:
@@ -2186,35 +2174,22 @@ def test_prompt_record_has_null_memory_pass_fields(tmp_path: Path, stable_proven
     assert record["memory_pass_tokens"] is None
 
 
-# --- Memory pass: the M5 and M6 catalog tasks --------------------------------------
+# --- Memory pass: the M5 catalog task --------------------------------------
 
 M5_ID = "M5-memory-pass-keep-drop"
-M6_ID = "M6-memory-pass-decided-paraphrase"
 
 
-def test_memory_pass_tasks_plant_facts() -> None:
-    from ciao import memory_proposals
-
+def test_memory_pass_task_plants_facts() -> None:
     by_id = {task.id: task for task in te.load_tasks()}
     m5 = by_id[M5_ID]
-    m6 = by_id[M6_ID]
-    for task in (m5, m6):
-        assert task.entry["kind"] == "transcript", task.id
-        assert task.category == "memory_pass", task.id
+    assert m5.entry["kind"] == "transcript", m5.id
+    assert m5.category == "memory_pass", m5.id
 
     m5_users = " ".join(turn["user"] for turn in m5.entry["turns"])
     for needle in ("kilometres", "permit application", "max_span_cm"):
         assert needle in m5_users
     settings = te.TASKS_ROOT / M5_ID / "overlay" / "code" / "shed-planner" / "settings.toml"
     assert "max_span_cm = 240" in settings.read_text(encoding="utf-8")
-
-    vault = te.TASKS_ROOT / M6_ID / "overlay" / "memory-vault"
-    dismissed = "Send the weekly round-up on Sunday evenings."
-    assert memory_proposals.was_dismissed(vault, dismissed)
-    assert memory_proposals.list_proposals(vault / "Workspace" / "Memory-Proposals.md") == []
-    sunday_turn = next(turn["user"] for turn in m6.entry["turns"] if "Sunday" in turn["user"])
-    # Code-level dedupe compares dedupe_key only, so a paraphrase must not share it.
-    assert memory_proposals.dedupe_key(sunday_turn) != memory_proposals.dedupe_key(dismissed)
 
 
 # --- per-run tool trace and model calls -------------------------------------------
@@ -2626,21 +2601,11 @@ def test_take_snapshot_saves_every_file_under_a_directory(tmp_path: Path) -> Non
 MEMORY_PASS_INCLUDES = ["AGENTS.md", "memory-vault/People/", "memory-vault/Documents/"]
 
 
-def test_memory_pass_checks_cover_people_documents_and_the_decision_sidecar() -> None:
+def test_memory_pass_checks_cover_people_documents_and_the_unsure_list() -> None:
     by_id = {task.id: task for task in te.load_tasks()}
-    for task_id in (M5_ID, M6_ID):
-        for spec in by_id[task_id].checks:
-            if spec["kind"] == "proposals":
-                assert spec["include_files"] == MEMORY_PASS_INCLUDES, task_id
-
-    m6_checks = by_id[M6_ID].checks
-    sidecar = "memory-vault/Workspace/Memory-Proposals.dismissed.jsonl"
-    assert {"kind": "unchanged", "path": sidecar} not in m6_checks
-    assert {
-        "kind": "file_contains",
-        "path": sidecar,
-        "all": ["Send the weekly round-up on Sunday evenings."],
-    } in m6_checks
+    for spec in by_id[M5_ID].checks:
+        if spec["kind"] == "proposals":
+            assert spec["include_files"] == MEMORY_PASS_INCLUDES, M5_ID
 
 
 # --- Hard tier A: any_of, task/schedule check fields, H7 task breakdown, H8 cadence, H10 namesake -----

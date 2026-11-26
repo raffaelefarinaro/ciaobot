@@ -91,10 +91,9 @@ turn in that chat, or a detach, moves it back to `in_progress`.
 Approving a delegated result (**Approve Done**, or dropping the card on *Done*)
 archives its chat and queues the ordinary memory pass with an `approved_task`
 focus: the pass is told the conversation is a worked example the user accepted,
-handed the agent's summary, and asked to extract the procedure — a proposal for
-a skill the workspace owns (`ciao skill-proposal-add`), a `[review]` draft for a
-new skill (`ciao skill-draft-add`), and durable facts as usual. Everything it
-files waits in *To decide*. The focused pass is deduplicated per chat and focus,
+handed the agent's summary, and asked to extract the procedure — a `skill-edit`
+proposal file for a skill the workspace owns or a new one (`ciao proposal-check`),
+and durable facts as usual. Everything it writes down is yours to approve. The focused pass is deduplicated per chat and focus,
 so an earlier ordinary pass of the same chat does not block it.
 
 ## The agent's report and the delegation log (#1064)

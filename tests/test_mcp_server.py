@@ -196,7 +196,7 @@ def test_hot_loop_operations_dispatch_on_cli_only(tmp_path: Path) -> None:
     """S5 removed the hot-loop group from the MCP catalog but the dispatcher
     must still run them as `ciao memory …` / `ciao vault …` / `ciao file …`."""
 
-    hot_loop = {"memory_status", "memory_update", "vault_search", "vault_review", "file_surface"}
+    hot_loop = {"memory_status", "memory_update", "vault_search", "file_surface"}
     service, _ = _service(tmp_path)
     # Each is a dispatcher operation the CLI routes to.
     assert hot_loop <= set(service.operation_table)

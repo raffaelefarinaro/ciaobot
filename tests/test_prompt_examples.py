@@ -21,15 +21,6 @@ from ciao.import_sources.contract import (
     NormalizedSession,
     SourceRef,
 )
-from ciao.memory_proposals import (
-    _RECONCILE_SYSTEM_PROMPT,
-    DESTINATIONS,
-    _parse_reconcile_reply,
-)
-from ciao.project_doc_update import (
-    _DOC_UPDATE_SYSTEM_PROMPT,
-    _PERSON_FOLD_SYSTEM_PROMPT,
-)
 from ciao.web.chat_service import _clean_llm_title
 from ciao.web.project_chats import _TITLE_SYSTEM_PROMPT, _title_prompt
 
@@ -66,7 +57,7 @@ def _session_from(input_text: str) -> NormalizedSession:
 
 
 def test_extraction_prompt_defines_every_destination() -> None:
-    for destination in DESTINATIONS:
+    for destination in import_extract.DESTINATIONS:
         assert re.search(rf"^- {destination}: \S", EXTRACTION_SYSTEM_PROMPT, re.M), (
             destination
         )
@@ -131,23 +122,6 @@ def test_an_imported_learning_is_admitted_to_review_after_legacy_kind_removal(
     assert _hint(proposal)[0] == "review"
 
 
-def test_reconcile_examples_parse_with_the_production_parser() -> None:
-    examples = _examples(_RECONCILE_SYSTEM_PROMPT)
-    assert len(examples) >= 3
-    actions = set()
-    for input_text, output in examples:
-        entries = re.findall(r"^(\d+)\. ", input_text, re.M)
-        candidates = re.findall(r"^([A-Z])\. ", input_text, re.M)
-        rows = _parse_reconcile_reply(output, len(candidates))
-        assert rows is not None, output
-        for row in rows:
-            assert row["action"] in {"add", "covered", "update"}, row
-            actions.add(row["action"])
-            if row["action"] == "update":
-                assert 1 <= row["index"] <= len(entries)
-    assert actions == {"add", "covered", "update"}
-
-
 def test_title_examples_survive_the_production_cleaner() -> None:
     examples = _examples(_TITLE_SYSTEM_PROMPT)
     assert len(examples) >= 3
@@ -165,20 +139,3 @@ def test_title_prompt_escapes_user_and_assistant_text() -> None:
     assert prompt.count("<user>") == 1
     assert prompt.count("</session>") == 1
 
-
-@pytest.mark.parametrize(
-    ("prompt", "contract"),
-    [
-        (_DOC_UPDATE_SYSTEM_PROMPT, "one most important edit"),
-        (_PERSON_FOLD_SYSTEM_PROMPT, "one edit that"),
-    ],
-)
-def test_fold_prompts_state_the_single_action_contract(prompt: str, contract: str) -> None:
-    assert "each fact" not in prompt
-    assert contract in prompt
-
-
-def test_person_fold_offers_only_the_notes_section() -> None:
-    assert "Open loops" not in _PERSON_FOLD_SYSTEM_PROMPT
-    assert "Decisions" not in _PERSON_FOLD_SYSTEM_PROMPT
-    assert '"section":"Notes"' in _PERSON_FOLD_SYSTEM_PROMPT

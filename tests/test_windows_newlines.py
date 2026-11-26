@@ -17,8 +17,6 @@ them away again — so a POSIX run exercises the Windows path.
 
 from __future__ import annotations
 
-import asyncio
-import json
 import pathlib
 from pathlib import Path
 
@@ -28,7 +26,6 @@ from ciao import memory_receipts as mr
 from ciao import file_kernel as fk
 from ciao import note_entries as ne
 from ciao import note_receipts as nr
-from ciao import project_doc_update as pdu
 
 
 @pytest.fixture
@@ -110,68 +107,6 @@ def _applied_ids(vault: Path) -> list[str]:
         for row in rows
         if row.get("kind") == "note_apply" and row.get("status") == mr.APPLIED
     ]
-
-
-def test_project_fold_survives_windows_translation(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, windows_text: None
-) -> None:
-    """A translated fixture is still the same note to a byte-exact fold."""
-    vault = _vault(tmp_path)
-    doc = vault / "project.md"
-    doc.write_text("## Open loops\n- Pick a queue backend.\n", encoding="utf-8")
-    assert doc.read_bytes().endswith(b"backend.\r\n")
-    _patch_oneshot(
-        monkeypatch,
-        json.dumps({
-            "action": "update",
-            "index": 1,
-            "text": "- Pick a queue backend. Resolved: Redis Streams.",
-        }),
-    )
-
-    wrote = asyncio.run(pdu.update_project_doc(
-        doc_path=doc,
-        insights_md="## Decisions\n- Chose Redis.\n",
-        model="m",
-    ))
-
-    assert wrote is True
-    assert doc.read_bytes() == (
-        b"## Open loops\r\n"
-        b"- Pick a queue backend. Resolved: Redis Streams.\r\n"
-    )
-    undone = mr.undo_receipt(_applied_ids(vault)[-1], vault_root=vault)
-    assert undone["status"] == mr.UNDONE
-    assert doc.read_bytes() == b"## Open loops\r\n- Pick a queue backend.\r\n"
-
-
-def test_person_fold_survives_windows_translation(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, windows_text: None
-) -> None:
-    """The add half reads the same exact bytes under translation too."""
-    vault = _vault(tmp_path)
-    note = vault / "Mo.md"
-    note.write_text("## Notes\n- Lives in Porto.\n", encoding="utf-8")
-    _patch_oneshot(
-        monkeypatch,
-        json.dumps({
-            "action": "add",
-            "section": "Notes",
-            "text": "- Based in Lisbon.",
-        }),
-    )
-
-    wrote = asyncio.run(pdu.fold_fact_into_person_note(
-        note_path=note, fact="Based in Lisbon.", model="m",
-    ))
-
-    assert wrote is True
-    assert note.read_bytes() == (
-        b"## Notes\r\n- Lives in Porto.\r\n- Based in Lisbon.\r\n"
-    )
-    undone = mr.undo_receipt(_applied_ids(vault)[-1], vault_root=vault)
-    assert undone["status"] == mr.UNDONE
-    assert note.read_bytes() == b"## Notes\r\n- Lives in Porto.\r\n"
 
 
 def test_byte_exact_revision_survives_windows_translation(

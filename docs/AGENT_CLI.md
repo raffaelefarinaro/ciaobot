@@ -125,11 +125,10 @@ The operation table in `ciao/mcp_server.py` is the single source the dispatcher
 runs; `ciao/stock/skills/ciao-cli/SKILL.md` is the reference entry and index, and
 `GET /api/agent/status` reports the live operation list. The catalog covers
 application actions that are safe and meaningful for a scoped agent:
-bounded memory (`ciao memory status|update`), vault (`ciao vault search`,
-`ciao vault review …`), projects (`ciao project …`), workspaces
+bounded memory (`ciao memory status|update`), vault (`ciao vault search`), projects (`ciao project …`), workspaces
 (`ciao workspace list`), chats (`ciao chat …`), schedules (`ciao schedule …`), chat loops (`ciao loop …`), the task board
 (`ciao task …`, including `task delegate` and `task report`), notes
-(`ciao note create|related|verify`), webhook triggers (`ciao webhook …`),
+(`ciao note create|related`), webhook triggers (`ciao webhook …`),
 context and Ciaobot's own logs (`ciao context get|logs`), usage statistics (`ciao stats`), file
 surfacing (`ciao file surface`), and the suggested terminal command
 (`ciao chat needs-action`). Browser-session administration,
@@ -142,34 +141,7 @@ that mapping against the parser, so a verb added to the CLI without a row here
 fails rather than quietly becoming a command the telemetry and the behavioral
 evals cannot name.
 
-The proposals queue is reviewed and dismissed through the PWA, with one
-deliberate CLI exception the care agent drives because one shell command beats
-a synchronous request per row: `ciao memory-proposal-add`,
-`ciao memory-proposals` and
-`ciao memory-proposal-dismiss --text-file <file> [--reason-file <file>]`.
-
-The skill-proposal queue has the same pair, for the same reason, and files
-rather than dismisses are the interesting half: `ciao skill-proposal-add NAME
---input-file FILE` is how the end-of-conversation memory pass files a supported
-skill-improvement proposal, and a person can hand-author one through the same
-door. The target is resolved, not trusted — `skills_inventory.resolve_owned_skill`
-decides, so a stock copy, a provider mirror, a shared source and an unknown name
-are refused by name, and the record carries the resolved path and revision
-rather than whatever the caller said. `--input-file` holds a JSON object with
-`title`, `problem`, `change`, `rationale` and either a non-empty `sources` list
-whose entries carry `chat_id`, `archive`, `turn` and a verbatim `excerpt`, or a
-non-empty `origins` list (`learning_id` and `finding`, optionally
-`source_revision` and `summary`) for a routed learning: the finding is
-conversation prose, so none of it may travel as a shell argument. It proposes
-only — `ciao skill-proposal-remove NAME` settles, and a settled record stays
-settled while it keeps collecting evidence. It records which outcome it was:
-`--applied` when the change landed and was checked (a promotion, so History
-reads it as an accept; a proposal that links learning findings also needs
-`--verification-file FILE` (a file holding the lines you changed, as you read
-them back) with `--applied`), `--interrupted` when the work stopped part-way,
-which is neither and leaves the proposal queued with its chat bound to it, and
-the plain form for a decision against it. Never record `--applied` for a chat
-that simply finished: a turn ending is not a verified edit.
+Memory is written directly, and what the agent is unsure of goes on `Workspace/Unsure.md`. A skill edit, a guide edit, an upstream issue or a note retirement is a proposal file under `Workspace/Proposals/` that the agent writes and checks with `ciao proposal-check FILE [--json]` (required front matter, per-type target, evidence, body, credential-shaped text; it prints every problem and never edits the file); a person files the issue or applies the edit from the file.
 
 ## Loops
 

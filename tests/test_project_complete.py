@@ -1255,7 +1255,7 @@ def test_complete_move_failure_leaves_backlinks_and_project(tmp_path: Path) -> N
 
     with (
         patch.object(pcm, "enqueue_project_closure", return_value=None),
-        patch("ciao.vault_review.shutil.move", side_effect=OSError("disk full")),
+        patch("ciao.project_folder_move.shutil.move", side_effect=OSError("disk full")),
         pytest.raises(ValueError),
     ):
         pcm.complete_project(proj.project_id)

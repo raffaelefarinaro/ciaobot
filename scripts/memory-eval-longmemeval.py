@@ -556,17 +556,8 @@ def score_retrieval(
 # The archive (`ProjectChatManager.archive_chat`), the memory-pass gating and
 # queueing (`run_archive_postprocess`), the pass prompt, the context capsule,
 # the agent control plane the pass's `ciao` commands call, the workspace seed
-# (`sync_workspace_skills`), and the proposal accept/dismiss route
-# (`proposals_batch`) all run unmodified.
-
-PROPOSAL_MODES = ("accept", "drop", "leave")
-
-#: Queue kinds `--proposals accept` promotes. Their accept is a deterministic
-#: file write. The others either call a model through the engine's own provider
-#: (`project` folds into a doc with a one-shot call) or need a person to choose
-#: something (`review`, `category`, `rehome`, `note_edit`, `repo`, `skill`), so
-#: they stay queued and are counted as `unaccepted`.
-ACCEPTABLE_PROPOSAL_KINDS = frozenset({"memory", "profile", "user", "people", "learnings"})
+# (`sync_workspace_skills`) all run unmodified. The pass writes memory directly,
+# so there is no review queue to resolve.
 
 #: Frontmatter keys whose value changes on every rewrite of a note. A line that
 #: only re-stamps one of them is not evidence of anything a session said.
@@ -1011,7 +1002,6 @@ class HeadlessEngine:
     async def start(self) -> None:
         import socket
 
-        import httpx
         import uvicorn
         from starlette.applications import Starlette
         from starlette.routing import Route
@@ -1024,7 +1014,6 @@ class HeadlessEngine:
         from ciao.transcripts import TranscriptStore
         from ciao.web.project_chats import ProjectChatManager
         from ciao.web.routes_agent import agent_dispatch_endpoint
-        from ciao.web.routes_api import list_proposals, proposals_batch
         from ciao.workspace_guide import guide_path
 
         engine = self
@@ -1102,21 +1091,8 @@ class HeadlessEngine:
                 raise RuntimeError("the agent control plane did not start")
             await asyncio.sleep(0.01)
 
-        api_app = Starlette(
-            routes=[
-                Route("/api/proposals", list_proposals, methods=["GET"]),
-                Route("/api/proposals/batch", proposals_batch, methods=["POST"]),
-            ]
-        )
-        api_app.state.config = config
-        api_app.state.project_chat_manager = pcm
-        self._api = httpx.AsyncClient(
-            transport=httpx.ASGITransport(app=api_app), base_url="http://engine"
-        )
-
     async def close(self) -> None:
         await self._settle()
-        await self._api.aclose()
         self._server.should_exit = True
         await self._serve
 
@@ -1128,36 +1104,6 @@ class HeadlessEngine:
                 return
             await asyncio.gather(*pending, return_exceptions=True)
             await asyncio.sleep(0)
-
-    async def pending_proposals(self) -> list[dict[str, Any]]:
-        response = await self._api.get("/api/proposals")
-        response.raise_for_status()
-        return list(response.json().get("rows") or [])
-
-    async def resolve_proposals(self, mode: str) -> dict[str, Any]:
-        """Apply `--proposals` to what is queued now, through the review route."""
-        rows = await self.pending_proposals()
-        result: dict[str, Any] = {"accepted": 0, "dropped": 0, "unaccepted": {}, "failed": 0}
-        if mode == "leave" or not rows:
-            return result
-        if mode == "accept":
-            ids = [row["id"] for row in rows if row.get("kind") in ACCEPTABLE_PROPOSAL_KINDS]
-            for row in rows:
-                if row.get("kind") not in ACCEPTABLE_PROPOSAL_KINDS:
-                    kind = str(row.get("kind") or "?")
-                    result["unaccepted"][kind] = result["unaccepted"].get(kind, 0) + 1
-            action = "accept"
-        else:
-            ids = [row["id"] for row in rows]
-            action = "dismiss"
-        if not ids:
-            return result
-        await self._api.post("/api/proposals/batch", json={"action": action, "ids": ids})
-        remaining = {row["id"] for row in await self.pending_proposals()}
-        done = sum(1 for pid in ids if pid not in remaining)
-        result["accepted" if action == "accept" else "dropped"] = done
-        result["failed"] = len(ids) - done
-        return result
 
     async def ingest_session(
         self, title: str, turns: list[dict[str, Any]], when: Any
@@ -1235,7 +1181,6 @@ async def _curate(
     entry: dict[str, Any],
     *,
     extract_cmd: str,
-    proposals: str,
     workdir: Path,
     timeout: float,
 ) -> dict[str, Any]:
@@ -1277,8 +1222,6 @@ async def _curate(
     blocked: list[str] = []
     passes: list[dict[str, Any]] = []
     attribution: dict[tuple[str, str], str] = {}
-    filed = 0
-    resolved: dict[str, Any] = {"accepted": 0, "dropped": 0, "failed": 0, "unaccepted": {}}
     with refuse_engine_model_calls(blocked):
         await engine.start()
         try:
@@ -1286,18 +1229,9 @@ async def _curate(
             baseline = store_size(engine.vault, base, engine.guide)
             snapshot = store_snapshot(engine.vault, base, engine.guide)
             for _, (session_id, neutral, date, turns) in ordered:
-                known = {row["id"] for row in await engine.pending_proposals()}
                 record = await engine.ingest_session(
                     f"Chat session {neutral}", turns, parse_session_date(date)
                 )
-                queued = await engine.pending_proposals()
-                new = [row for row in queued if row["id"] not in known]
-                filed += len(new)
-                outcome = await engine.resolve_proposals(proposals)
-                for key in ("accepted", "dropped", "failed"):
-                    resolved[key] += outcome[key]
-                for kind, count in outcome["unaccepted"].items():
-                    resolved["unaccepted"][kind] = resolved["unaccepted"].get(kind, 0) + count
                 after = store_snapshot(engine.vault, base, engine.guide)
                 added = 0
                 for key, lines in after.items():
@@ -1310,7 +1244,6 @@ async def _curate(
                         "session": neutral,
                         "date": date,
                         **record,
-                        "proposals_filed": len(new),
                         "lines_added": added,
                     }
                 )
@@ -1321,7 +1254,6 @@ async def _curate(
                     break
             final = store_size(engine.vault, base, engine.guide)
             preamble = regions_block(engine.guide)
-            pending_at_end = len(await engine.pending_proposals())
         finally:
             await engine.close()
 
@@ -1358,12 +1290,6 @@ async def _curate(
         "passes_skipped": sum(1 for item in passes if item["status"] in {"skipped", "empty"}),
         "sessions_with_writes": sum(1 for item in passes if item["lines_added"]),
         "extract_latency_ms": round(sum(float(item.get("latency_ms") or 0) for item in passes), 1),
-        "proposals": {
-            "mode": proposals,
-            "filed": filed,
-            **resolved,
-            "pending_at_end": pending_at_end,
-        },
         "store": final,
         "baseline_store": baseline,
         "raw_chars": raw_chars,
@@ -1389,7 +1315,6 @@ def curated_index(
     entry: dict[str, Any],
     *,
     extract_cmd: str,
-    proposals: str,
     timeout: float,
 ) -> Iterator[tuple[sqlite3.Connection, dict[str, Any], str, dict[str, Any]]]:
     """Curate one question's haystack, then index only what the store kept.
@@ -1401,8 +1326,6 @@ def curated_index(
     `haystack` has the raw-ingest shape, keyed by note path, so the answer
     modes run unchanged.
     """
-    if proposals not in PROPOSAL_MODES:
-        raise ValueError(f"--proposals must be one of {', '.join(PROPOSAL_MODES)}")
     if not extract_cmd.strip():
         raise ValueError("curated ingest needs --extract-cmd")
     refuse_guide_above(workdir)
@@ -1417,7 +1340,6 @@ def curated_index(
                 install_root,
                 entry,
                 extract_cmd=extract_cmd,
-                proposals=proposals,
                 workdir=workdir / "extract",
                 timeout=timeout,
             )
@@ -1775,7 +1697,6 @@ def open_index(
     *,
     ingest: str = "raw",
     extract_cmd: str = "",
-    proposals: str = "",
     timeout: float = 300.0,
 ) -> Iterator[tuple[sqlite3.Connection, dict[str, Any], str, dict[str, Any] | None]]:
     """The per-question index for either ingest, as `(conn, haystack, preamble, curation)`.
@@ -1794,7 +1715,6 @@ def open_index(
         workdir,
         entry,
         extract_cmd=extract_cmd,
-        proposals=proposals,
         timeout=timeout,
     ) as (conn, haystack, preamble, curation):
         yield conn, haystack, preamble, curation
@@ -1839,12 +1759,11 @@ def _record_retrieval(
 
 
 def _curated_row_fields(
-    row: dict[str, Any], curation: dict[str, Any] | None, proposals: str
+    row: dict[str, Any], curation: dict[str, Any] | None
 ) -> None:
     if curation is None:
         return
     row["ingest"] = "curated"
-    row["proposals"] = proposals
     row["curation"] = curation
     row["latency_ms"]["curate"] = curation.get("latency_ms")
     if curation.get("error"):
@@ -1860,7 +1779,6 @@ def retrieve_for_question(
     temp_root: Path | None = None,
     ingest: str = "raw",
     extract_cmd: str = "",
-    proposals: str = "",
     timeout: float = 300.0,
 ) -> dict[str, Any]:
     """Index one question's haystack and record the top-5 retrieval.
@@ -1879,13 +1797,12 @@ def retrieve_for_question(
                 entry,
                 ingest=ingest,
                 extract_cmd=extract_cmd,
-                proposals=proposals,
                 timeout=timeout,
             ) as (conn, haystack, _preamble, curation):
                 row["latency_ms"]["index"] = round(
                     (time.perf_counter() - started) * 1000, 1
                 )
-                _curated_row_fields(row, curation, proposals)
+                _curated_row_fields(row, curation)
                 if not row["error"]:
                     search_started = time.perf_counter()
                     hits = search_hits(
@@ -1914,7 +1831,6 @@ def run_question(
     temp_root: Path | None = None,
     ingest: str = "raw",
     extract_cmd: str = "",
-    proposals: str = "",
 ) -> dict[str, Any]:
     """Retrieve, answer with `mode`, and judge one question."""
     row = _base_row(entry, dataset_sha256)
@@ -1928,13 +1844,12 @@ def run_question(
                 entry,
                 ingest=ingest,
                 extract_cmd=extract_cmd,
-                proposals=proposals,
                 timeout=timeout,
             ) as (conn, haystack, preamble, curation):
                 row["latency_ms"]["index"] = round(
                     (time.perf_counter() - started) * 1000, 1
                 )
-                _curated_row_fields(row, curation, proposals)
+                _curated_row_fields(row, curation)
                 if row["error"]:
                     # The store is not what Ciaobot would hold, so the question
                     # is incomplete rather than answered over a partial vault.
@@ -2186,24 +2101,15 @@ def summarize_curation(
         for item in complete
         if item.get("evidence_in_context") is not None
     ]
-    unaccepted: dict[str, int] = {}
-    for item in complete:
-        for kind, count in ((item.get("proposals") or {}).get("unaccepted") or {}).items():
-            unaccepted[kind] = unaccepted.get(kind, 0) + int(count)
-
     def split(name: str) -> dict[str, Any] | None:
         bucket = summary["by_type"].get(name)
         if summary["accuracy"] is None or not bucket:
             return None
         return {key: bucket[key] for key in ("n", "correct", "judged", "fraction")}
 
-    def total(key: str) -> int:
-        return sum(int((item.get("proposals") or {}).get(key) or 0) for item in complete)
-
     return {
         "n": len(curated),
         "complete": len(complete),
-        "proposals_mode": sorted({str(row.get("proposals") or "") for row in rows if row.get("curation")}),
         "sessions": sum(int(item.get("sessions") or 0) for item in curated),
         "passes_ok": sum(int(item.get("passes_ok") or 0) for item in curated),
         "passes_failed": sum(int(item.get("passes_failed") or 0) for item in curated),
@@ -2218,12 +2124,6 @@ def summarize_curation(
         "added_chars": _mean(added),
         "raw_chars": mean_of(("raw_chars",)),
         "stored_to_raw": _mean(ratios),
-        "proposals_filed": total("filed"),
-        "proposals_accepted": total("accepted"),
-        "proposals_dropped": total("dropped"),
-        "proposals_failed": total("failed"),
-        "proposals_unaccepted": unaccepted,
-        "proposals_pending_at_end": mean_of(("proposals", "pending_at_end")),
         "evidence_retained": sum(1 for value in retained if value),
         "evidence_answerable": len(retained),
         "evidence_in_context": sum(1 for value in in_context if value),
@@ -2245,7 +2145,7 @@ def _format_curation(curation: dict[str, Any]) -> list[str]:
         return f"{_pct(count / n)} ({count}/{n})" if n else "n/a (no answerable questions)"
 
     lines = [
-        "Curated ingest (proposals: " + ", ".join(curation["proposals_mode"]) + ")",
+        "Curated ingest",
         (
             f"  questions curated completely: {curation['complete']} of {curation['n']} "
             "(store, proposal and evidence figures cover these only)"
@@ -2268,19 +2168,7 @@ def _format_curation(curation: dict[str, Any]) -> list[str]:
             f"{num(curation['raw_chars'])} raw (added/raw "
             f"{num(curation['stored_to_raw'], '.3f')})"
         ),
-        (
-            f"  proposals: {curation['proposals_filed']} filed, "
-            f"{curation['proposals_accepted']} accepted, "
-            f"{curation['proposals_dropped']} dropped, "
-            f"{curation['proposals_failed']} failed to resolve, "
-            f"{num(curation['proposals_pending_at_end'], '.1f')} pending at end (mean)"
-        ),
     ]
-    if curation["proposals_unaccepted"]:
-        kinds = ", ".join(
-            f"{kind} {count}" for kind, count in sorted(curation["proposals_unaccepted"].items())
-        )
-        lines.append(f"  left queued, not auto-acceptable: {kinds}")
     lines.append(
         "  retained evidence (an answer session's pass wrote a line still stored): "
         + ratio(curation["evidence_retained"], curation["evidence_answerable"])
@@ -2476,16 +2364,6 @@ def build_parser() -> argparse.ArgumentParser:
             "pass's environment."
         ),
     )
-    parser.add_argument(
-        "--proposals",
-        choices=PROPOSAL_MODES,
-        default=None,
-        help=(
-            "Curated ingest only, required: what happens to proposals a pass queues "
-            "for review. accept: promote every deterministic kind after each pass; "
-            "drop: dismiss every proposal; leave: keep them queued."
-        ),
-    )
     return parser
 
 
@@ -2498,17 +2376,12 @@ def main(argv: list[str] | None = None) -> int:
     if args.ingest == "curated":
         if not args.extract_cmd.strip():
             raise SystemExit("--ingest curated needs --extract-cmd")
-        if args.proposals is None:
-            raise SystemExit(
-                "--ingest curated needs --proposals accept|drop|leave: a proposal "
-                "waits for a person, and the run must say what that person does"
-            )
         try:
             refuse_guide_above(Path(args.temp_dir or tempfile.gettempdir()))
         except ValueError as exc:
             raise SystemExit(str(exc)) from exc
-    elif args.extract_cmd or args.proposals is not None:
-        raise SystemExit("--extract-cmd and --proposals apply to --ingest curated only")
+    elif args.extract_cmd:
+        raise SystemExit("--extract-cmd applies to --ingest curated only")
 
     dataset_sha256 = verify_dataset(
         args.dataset, allow_other=args.allow_other_dataset
@@ -2543,11 +2416,10 @@ def main(argv: list[str] | None = None) -> int:
         print(f"Mode: {args.mode}")
     curated: dict[str, Any] = {}
     if args.ingest == "curated":
-        print(f"Ingest: curated (proposals: {args.proposals})")
+        print("Ingest: curated")
         curated = {
             "ingest": "curated",
             "extract_cmd": args.extract_cmd,
-            "proposals": args.proposals,
         }
 
     rows: list[dict[str, Any]] = []

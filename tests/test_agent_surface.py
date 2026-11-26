@@ -182,27 +182,6 @@ def test_chat_operations_dispatch_on_cli_only(tmp_path: Path) -> None:
     assert chat_group <= set(service.operation_table)
 
 
-def test_note_verification_dispatches_on_cli_only_and_is_write_gated(
-    tmp_path: Path,
-) -> None:
-    """The managed operation that replaced hand-editing stale notes.
-
-    Two properties beyond registration. It is `mutating` — the annotations are
-    what `service._invoke`'s plan-mode gate reads, so a `_READ` entry here would
-    let a plan-mode chat write a note. And its whole schema is one path: there is
-    no argument through which a note's text could arrive, which is the property
-    the CLI cannot express and the server has to hold.
-    """
-    from ciao import mcp_server
-
-    service, _ = _service(tmp_path)
-    assert "verify_note" in service.operation_table
-    operation = mcp_server.OPERATIONS_BY_NAME["verify_note"]
-    assert operation.annotations.readOnlyHint is False
-    assert operation.annotations.destructiveHint is False
-    assert set(inspect.signature(operation.fn).parameters) == {"service", "payload_file"}
-
-
 def test_note_related_is_a_read(tmp_path: Path) -> None:
     from ciao import mcp_server
 
@@ -224,16 +203,6 @@ def test_a_plan_mode_chat_cannot_create_a_note(tmp_path: Path) -> None:
     token = _token(service)
     with _client(service) as client:
         response = _post(client, token, "note_create", {"note_type": "person", "title": "Sofia"})
-    assert response.status_code == 422
-    assert response.json()["error"]["code"] == "plan_mode_read_only"
-
-
-def test_a_plan_mode_chat_cannot_verify_a_note(tmp_path: Path) -> None:
-    """The gate, end to end, through the CLI surface."""
-    service, _ = _service(tmp_path, mode="plan")
-    token = _token(service)
-    with _client(service) as client:
-        response = _post(client, token, "verify_note", {"payload_file": "verify.json"})
     assert response.status_code == 422
     assert response.json()["error"]["code"] == "plan_mode_read_only"
 
@@ -691,15 +660,8 @@ def test_plan_mode_cannot_delete_task(tmp_path: Path) -> None:
             ("memory_update", {"region": "profile", "action": "replace", "entry": "new", "match": "old"}),
         ),
         (["vault", "search", "who is Sofia", "--limit", "3"], ("vault_search", {"query": "who is Sofia", "limit": 3})),
-        (["vault", "review", "list"], ("vault_review", {"action": "list"})),
-        (["vault", "review", "keep", "--candidate", "c1"], ("vault_review", {"action": "decide", "candidate_id": "c1", "disposition": "keep"})),
-        (["vault", "review", "complete", "--candidate", "c1"], ("vault_review", {"action": "complete", "candidate_id": "c1"})),
-        # The verb is hyphenated on the command line and snake_cased on the wire.
-        (["vault", "review", "restore-completed", "--candidate", "c1"], ("vault_review", {"action": "restore_completed", "candidate_id": "c1"})),
         (["file", "surface", "out/report.md"], ("file_surface", {"path": "out/report.md"})),
-        # The payload crosses as a path; the verdict's prose never does.
         (["note", "related", "People/Mo.md"], ("note_related", {"path": "People/Mo.md", "limit": 15})),
-        (["note", "verify", "--payload-file", "out/verify.json"], ("verify_note", {"payload_file": "out/verify.json"})),
         (
             ["note", "create", "--type", "person", "--title", "Sofia Rossi"],
             ("note_create", {
@@ -866,12 +828,9 @@ def test_every_documented_command_parses(tmp_path: Path) -> None:
     required = {
         "memory update": ["--region", "memory", "--action", "add"],
         "memory learn": ["--text-file", str(lesson), "--source", "chat-a"],
-        "vault search": ["q"], "vault review show": ["p"],
-        "vault review keep": ["--candidate", "c"], "vault review trash": ["--candidate", "c"],
-        "vault review restore": ["--candidate", "c"], "vault review delete": ["--candidate", "c", "--confirm", "c"],
-        "vault review complete": ["--candidate", "c"], "vault review restore-completed": ["--candidate", "c"],
+        "vault search": ["q"],
         "note create": ["--type", "note", "--title", "t"],
-        "note related": ["People/Mo.md"], "note verify": ["--payload-file", "p.json"],
+        "note related": ["People/Mo.md"],
         "file surface": ["p"], "chat send": ["--chat", "c", "--prompt", "p"], "chat stop": ["--chat", "c"],
         "chat needs-action": ["command", "--command-file", str(command)],
         "chat continue": ["--chat", "c"], "project create": ["--name", "n"], "project restore": ["s"],
@@ -947,9 +906,9 @@ def test_only_agent_nouns_route_to_the_agent_surface() -> None:
 def test_cli_usage_errors_exit_2_before_any_request(capsys: pytest.CaptureFixture[str]) -> None:
     # A noun without its verb is argparse's own usage error, not a misleading hint.
     with pytest.raises(SystemExit) as excinfo:
-        agent_cli.main(["vault", "review"])
+        agent_cli.main(["vault"])
     assert excinfo.value.code == 2
-    assert "<action>" in capsys.readouterr().err
+    assert "<verb>" in capsys.readouterr().err
     assert agent_cli.main(["chat", "handover", "--messages", "{not json"]) == 2
     assert "--messages" in capsys.readouterr().err
 
@@ -1067,7 +1026,7 @@ def test_cli_help_prints_the_skill_document(capsys: pytest.CaptureFixture[str]) 
     assert "vault search" in out
     assert out.count("# ciao CLI reference") == 1
     for heading in (
-        "## Memory", "## Vault", "## Review queues", "## Notes", "## Files",
+        "## Memory", "## Vault", "## Proposal files and rules", "## Notes", "## Files",
         "## Chats", "## Reloading tools", "## Projects", "## Tasks",
         "## Schedules", "## Webhook triggers", "## Workspace and status",
         "## Worked examples", "## Common mistakes", "## Long-running commands",
@@ -1265,7 +1224,7 @@ def test_cli_help_topics_retain_operational_guards(capsys: pytest.CaptureFixture
     webhook = topic_help("webhook")
     assert "never save a copy in notes, memory or source files" in webhook
 
-    assert "--verification-file" in topic_help("queues")
+    assert "proposal-check" in topic_help("queues")
 
     examples = topic_help("examples")
     assert "shared entry" in examples
@@ -1307,7 +1266,7 @@ def test_cli_surface_prompt_carries_a_compact_synopsis() -> None:
     assert missing == []
     assert "ciao help <topic>" in cli and "ciao <noun> --help" in cli
     assert "vault search       QUERY" in cli and "task report" in cli
-    assert "vault review restore-completed" not in cli
+    assert "vault review" not in cli
     assert len(cli) < 12000
 
 

@@ -42,10 +42,10 @@ NOW = datetime(2026, 11, 9, 12, 0, tzinfo=UTC)
 WINDOW = (datetime(2026, 11, 1, tzinfo=UTC), datetime(2026, 11, 10, tzinfo=UTC))
 CONTRACT_KEYS = {
     "workspace", "range_days", "generated_at", "today", "totals", "previous", "daily_messages",
-    "projects", "memory_pipeline", "hours", "models",
+    "projects", "hours", "models",
 }
 TOTAL_KEYS = {
-    "chats_opened", "messages_sent", "chats_archived", "memories_saved",
+    "chats_opened", "messages_sent", "chats_archived",
     "tasks_completed", "projects_worked_on", "automation_runs", "tokens",
 }
 
@@ -133,23 +133,18 @@ def test_bucket_events_counts_messages_by_local_day_and_hour() -> None:
     assert bucket.project_messages == {"p1": 1}
 
 
-def test_bucket_events_tokens_models_and_funnel() -> None:
+def test_bucket_events_tokens_and_models() -> None:
     at = datetime(2026, 11, 9, 10, tzinfo=UTC)
     buckets = bucket_events(
         [
             Event("turn", at, model="opus", tokens=120),
             Event("turn", at, model="", tokens=5),
-            Event("proposal_decided", at, accepted=True),
-            Event("proposal_decided", at, accepted=False),
-            Event("proposal_pending", at),
-            Event("note_updated", at),
         ],
         UTC,
     )
     bucket = buckets[date(2026, 11, 9)]
     assert bucket.tokens == 125
     assert bucket.models == {"opus": 1}
-    assert (bucket.proposed, bucket.accepted, bucket.notes_updated) == (3, 1, 1)
 
 
 # ── build_response ───────────────────────────────────────────────────────
@@ -190,12 +185,11 @@ def test_build_response_today_averages_use_the_30_days_before_today() -> None:
 
 def test_build_response_today_averages_every_row() -> None:
     buckets = {TODAY - timedelta(days=offset): _bucket(
-        chats_archived=1, accepted=2, tasks_completed=3, project_messages={"a": 1, "b": 1},
+        chats_archived=1, tasks_completed=3, project_messages={"a": 1, "b": 1},
     ) for offset in range(1, 31)}
     buckets[TODAY - timedelta(days=1)] = _bucket()
     today = _build(buckets)["today"]
     assert today["avg_chats_archived_30d"] == 1.0
-    assert today["avg_memories_saved_30d"] == 1.9
     assert today["avg_tasks_completed_30d"] == 2.9
     # Distinct projects per day, averaged (58/30); the month's distinct count would be 2.
     assert today["avg_projects_worked_on_30d"] == 1.9
@@ -264,30 +258,6 @@ def test_collect_turn_and_archive_events_from_transcripts(
     assert [e.at for e in archived] == [datetime(2026, 11, 5, 10, tzinfo=UTC)]
 
 
-def test_collect_proposal_events_skips_skill_rows_and_counts_pending(tmp_path: Path) -> None:
-    sources = _sources(tmp_path)
-    workspace = sources.vault_root / "Workspace"
-    workspace.mkdir(parents=True)
-    rows = [
-        {"promoted_at": "2026-11-05T09:00:00+00:00", "kind": "memory", "text": "a"},
-        {"dismissed_at": "2026-11-05T09:00:00+00:00", "kind": "profile", "text": "b"},
-        {"promoted_at": "2026-11-05T09:00:00+00:00", "kind": "skill", "text": "c"},
-        {"promoted_at": "2026-10-01T09:00:00+00:00", "kind": "memory", "text": "d"},
-    ]
-    (workspace / "Memory-Proposals.dismissed.jsonl").write_text(
-        "".join(json.dumps(row) + "\n" for row in rows), encoding="utf-8"
-    )
-    (workspace / "Memory-Proposals.md").write_text(
-        "# Memory Proposals\n\n## 2026-11-06T08:00:00+00:00\n\n- [memory] fact one\n- [profile] likes tea\n"
-        "\n## 2026-10-01T08:00:00+00:00\n\n- [memory] old fact\n",
-        encoding="utf-8",
-    )
-    events = collect_events(sources, *WINDOW)
-    decided = sorted(e.accepted for e in events if e.kind == "proposal_decided")
-    assert decided == [False, True]
-    assert len([e for e in events if e.kind == "proposal_pending"]) == 2
-
-
 def test_collect_task_completion_events(tmp_path: Path) -> None:
     sources = _sources(tmp_path)
     clock = SimpleNamespace(now=datetime(2026, 11, 5, 12, tzinfo=UTC))
@@ -313,21 +283,6 @@ def test_collect_automation_events_filters_job_and_workspace(tmp_path: Path) -> 
                                      encoding="utf-8")
     events = collect_events(sources, *WINDOW)
     assert len([e for e in events if e.kind == "automation_run"]) == 1
-
-
-def test_collect_note_events_counts_applied_changed_note_writes(tmp_path: Path) -> None:
-    sources = _sources(tmp_path)
-    journal = sources.vault_root / "Workspace" / "Memory-Receipts.jsonl"
-    journal.parent.mkdir(parents=True)
-    rows = [
-        {"id": "r1", "ts": "2026-11-05T09:00:00+00:00", "kind": "note_apply", "status": "applied", "changed": True},
-        {"id": "r2", "ts": "2026-11-05T09:00:00+00:00", "kind": "note_apply", "status": "applied", "changed": False},
-        {"id": "r3", "ts": "2026-11-05T09:00:00+00:00", "kind": "note_apply", "status": "prepared"},
-        {"id": "r4", "ts": "2026-11-05T09:00:00+00:00", "kind": "region_apply", "status": "applied"},
-    ]
-    journal.write_text("".join(json.dumps(r) + "\n" for r in rows), encoding="utf-8")
-    events = collect_events(sources, *WINDOW)
-    assert len([e for e in events if e.kind == "note_updated"]) == 1
 
 
 # ── compute_usage_stats: cache ───────────────────────────────────────────
@@ -482,7 +437,7 @@ def test_cli_resolves_stats_command() -> None:
 
 def test_compute_does_not_cache_days_collected_with_a_read_failure(tmp_path: Path) -> None:
     sources = _sources(tmp_path, (_chat(tmp_path, sent=("2026-11-08T10:00:00Z",)),))
-    queue = sources.vault_root / "Workspace" / "Memory-Proposals.md"
+    queue = sources.job_runs_path
     queue.mkdir(parents=True)  # a directory: read_text raises IsADirectoryError
     compute_usage_stats(sources, 7, now=NOW, tz=UTC)
     assert not [key for key in usage_stats._DAY_CACHE if key[0] == "work"]
@@ -497,8 +452,8 @@ def test_compute_does_not_cache_days_collected_with_a_read_failure(tmp_path: Pat
 def test_corrupt_store_content_is_cached_as_read(tmp_path: Path) -> None:
     # Undecodable bytes are permanent: retrying every request would rescan forever.
     sources = _sources(tmp_path)
-    queue = sources.vault_root / "Workspace" / "Memory-Proposals.md"
-    queue.parent.mkdir(parents=True)
+    queue = sources.job_runs_path
+    queue.parent.mkdir(parents=True, exist_ok=True)
     queue.write_bytes(b"\xff\xfe\xfa not utf-8")
     compute_usage_stats(sources, 7, now=NOW, tz=UTC)
     assert ("work", TODAY - timedelta(days=1)) in usage_stats._DAY_CACHE

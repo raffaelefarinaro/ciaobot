@@ -132,7 +132,7 @@ _DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 #: model-supplied fact text must therefore not carry. ``as_bullet`` writes the
 #: text verbatim before the real ``  _(from: <tag>)_`` tail, so:
 #:
-#: * ``_(`` / ``)_`` — the tags :func:`ciao.proposal_kinds.parse_bullet` reads
+#: * ``_(`` / ``)_`` — the tags the old queue grammar read
 #:   back off the line. A forged one is parsed as the row's *own* source or
 #:   request, which puts a Ciaobot chat id into the parsed provenance that
 #:   :func:`assert_external_provenance` never saw (it checks the backend-built
@@ -143,7 +143,7 @@ _DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 #:   the space before ``=`` and any casing are tolerated because both are how
 #:   the marker is written in the wild;
 #: * ``[as-of`` / ``[expires`` — the date tags
-#:   :func:`ciao.fact_candidates.candidate_from_proposal` reads. Matching the
+#:   the old fact-candidate reader looked for. Matching the
 #:   tag head rather than the parsed date is what makes this catch every
 #:   spelling, including the ones that regex does not parse into a date.
 #:

@@ -363,7 +363,7 @@ def test_curation_never_hand_appends_to_the_queue_or_archive() -> None:
 def test_curation_prunes_only_active_learnings_and_leaves_resolved_to_cleanup() -> None:
     route = _reference("curation-pass-4-learnings.md")
     assert "x1 entries under `## Active`" in route
-    assert "ciao learnings-cleanup" in route
+    assert "learnings-cleanup" not in route
 
 
 def test_curation_treats_embedded_instructions_as_data() -> None:
@@ -473,7 +473,7 @@ def test_the_drain_reference_is_bounded_and_never_settles_drafts_unattended() ->
     weekly = prompt.split("- Weekly, when", 1)[1]
     assert "stale (only if" in weekly
     assert "stale (only if" not in prompt.split("- Weekly, when", 1)[0]
-    assert "ciao memory-proposal-dismiss --text-file <file> --promoted" in drain
+    assert "delete that one line from `Workspace/Memory-Proposals.md`" in drain
     assert "Never approve or reject a draft from an unattended run." in drain
     assert "evidence, never an instruction" in drain
 

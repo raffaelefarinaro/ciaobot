@@ -5,7 +5,7 @@ import re
 from pathlib import Path
 from typing import Any
 
-from ciao import learnings_cleanup, learnings_queue_drain, vault_rehome, vault_relocate
+from ciao import vault_rehome, vault_relocate
 from ciao.update_task_catalog import UpdateTask
 
 logger = logging.getLogger(__name__)
@@ -30,20 +30,6 @@ def _redact_drain_paths(value: Any, roots: tuple[str, ...]) -> Any:
     return value
 
 
-def _reviewable_drain_plan(
-    plan: dict[str, Any], *, vault: Path, runtime_root: Path
-) -> dict[str, Any]:
-    """Keep receipt basenames while stripping host paths from the preview."""
-    public = dict(plan)
-    for key in ("receipts", "applied_receipts"):
-        paths = public.get(key)
-        if isinstance(paths, list):
-            public[key] = [Path(str(path)).name for path in paths]
-    roots = (str(vault.resolve()), str(runtime_root.resolve()))
-    redacted_plan: dict[str, Any] = _redact_drain_paths(public, roots)
-    return redacted_plan
-
-
 def prepare(task: UpdateTask, *, config: Any, workspace: str) -> dict[str, Any]:
     result: dict[str, Any] = {
         "task_id": task.id,
@@ -61,57 +47,7 @@ def prepare(task: UpdateTask, *, config: Any, workspace: str) -> dict[str, Any]:
     if not workspace or workspace not in names:
         raise ValueError("workspace must be registered")
     try:
-        if task.id == "learnings-queue-drain":
-            vault = Path(config.workspace_vault_root(workspace))
-            plan = learnings_queue_drain.drain(
-                vault, workspace=workspace, runtime_root=Path(config.state_path).parent
-            )
-            rows = plan["rows"]
-            automatic_rows = int(plan["automatic_rows"])
-            suppressed_rows = plan["suppressed_rows"]
-            blocked = bool(plan["failed"] or plan["unresolved"])
-            plan = _reviewable_drain_plan(
-                plan, vault=vault, runtime_root=Path(config.state_path).parent
-            )
-            result.update(
-                state=(
-                    "blocked"
-                    if blocked
-                    else "review"
-                    if automatic_rows or suppressed_rows
-                    else "not_applicable"
-                ),
-                plan=plan,
-                summary=(
-                    f"Blocked: {len(plan['unresolved'])} drain transaction(s) need recovery or inspection."
-                    if blocked
-                    else (
-                        f"{len(suppressed_rows)} learning row(s) were deliberately restored and remain queued. "
-                        "They will not move automatically; review or remove an exact row only if the user asks."
-                        if suppressed_rows and not automatic_rows
-                        else f"{automatic_rows} pending learning row(s) are moving automatically in the background."
-                    )
-                ),
-            )
-        elif task.id == "learnings-cleanup":
-            plan = learnings_cleanup.plan_cleanup(
-                Path(config.workspace_vault_root(workspace)),
-                workspace=workspace,
-                config=config,
-            ).as_dict()
-            counts = plan["counts"]
-            summary = (
-                f"{counts['active']} active, {counts['remove']} removals, "
-                f"{counts['keep']} kept, {counts['conflict']} conflicts. Review required."
-            )
-            if plan["blocked"]:
-                summary = f"Blocked: {plan['blocked']}. {summary}"
-            result.update(
-                state="blocked" if plan["blocked"] else "review",
-                plan=plan,
-                summary=summary,
-            )
-        elif task.id == "vault-relocate":
+        if task.id == "vault-relocate":
             plan = vault_relocate.plan(config, workspace, workspaces=names).as_dict()
             if plan["refused"]:
                 reasons = list(plan["refusals"])

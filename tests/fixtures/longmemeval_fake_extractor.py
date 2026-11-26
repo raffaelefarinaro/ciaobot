@@ -4,12 +4,12 @@ Used by tests/test_longmemeval_harness.py as `--extract-cmd`. It does what the
 pass prompt asks with fixed rules instead of judgement, through the same doors a
 real pass uses: it reads the archived transcript the prompt names, writes
 through the `ciao` agent CLI (which reaches the harness's temporary control
-plane), files proposals with `ciao memory-proposal-add`, and writes vault notes
+plane), writes region entries with `ciao memory update`, and writes vault notes
 as files. No network, no model.
 
 Rules, by the user's own words in each turn:
 - "my cat" / "my dog": a `ciao:profile` entry via `ciao memory update`;
-- "I live in" / "I moved": a `[memory]` proposal for review;
+- "I live in" / "I moved": a `memory` region entry;
 - "I work": a note under `<workspace vault>/people/`;
 - anything else: dropped, which is the point of curation.
 """
@@ -48,22 +48,8 @@ def main() -> int:
             ciao("memory", "update", "--region", "profile", "--action", "add", "--entry", text)
             changed.append("profile entry")
         elif "i live in" in lowered or "i moved" in lowered:
-            fact = scratch / f"fact-{number}.txt"
-            reason = scratch / f"reason-{number}.txt"
-            fact.write_text(text, encoding="utf-8")
-            reason.write_text("A duplicate check would settle it.", encoding="utf-8")
-            ciao(
-                "memory-proposal-add",
-                "--kind",
-                "memory",
-                "--text-file",
-                str(fact),
-                "--decide",
-                "nightly",
-                "--decide-reason-file",
-                str(reason),
-            )
-            changed.append("memory proposal")
+            ciao("memory", "update", "--region", "memory", "--action", "add", "--entry", text)
+            changed.append("memory entry")
         elif "i work" in lowered:
             note = vault / "people" / "me.md"
             note.parent.mkdir(parents=True, exist_ok=True)

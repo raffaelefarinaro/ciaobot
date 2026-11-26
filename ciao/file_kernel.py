@@ -67,11 +67,6 @@ def lock_path_for(resolved_key: str) -> Path:
     return root / f"{digest}.lock"
 
 
-# Kept so the existing queue-lock call sites and their tests keep reading as
-# "the queue's lock", now that the helper serves more than the queue.
-_queue_lock_path = lock_path_for
-
-
 def write_queue_atomically(
     path: Path,
     text: str,
@@ -164,7 +159,7 @@ def queue_lock(
             depths[key] -= 1
         return
 
-    lock_path = _queue_lock_path(key)
+    lock_path = lock_path_for(key)
     try:
         lock_path.parent.mkdir(parents=True, exist_ok=True)
         handle = lock_path.open("a+", encoding="utf-8", newline="")

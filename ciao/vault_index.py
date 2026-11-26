@@ -185,9 +185,15 @@ EXCLUDED_PATH_PARTS: set[str] = {".vault-trash", ARCHIVED_WORKSPACES_DIR}
 # `note-checks.json` is `ciao.note_verification`'s durable per-note verification
 # state: a verdict with its citations, not a memory, and indexed JSON would put
 # "checked on <date>" in the middle of an ordinary recall result.
+# Proposal files (``Workspace/Proposals/<slug>.md``, ``ciao/proposal_files.py``) are
+# the agent's paperwork for a person, not notes: their front matter has no
+# category type, and a proposal quoting a note must not outrank the note.
+PROPOSAL_FILES_PARENT_PARTS = ("workspace", "proposals")
+
 RESERVED_UNINDEXED_FILES = frozenset(
     {
         "memory-proposals.md",
+        "unsure.md",
         "memory-consolidations.md",
         "memory-receipts.jsonl",
         "curation-log.md",
@@ -246,7 +252,7 @@ def is_reserved_bookkeeping(rel_to_root: Path) -> bool:
     parts = rel_to_root.parts
     if len(parts) in {3, 4}:
         parent_pair = tuple(part.casefold() for part in parts[-3:-1])
-        if parent_pair == TASK_RECORDS_PARENT_PARTS:
+        if parent_pair in (TASK_RECORDS_PARENT_PARTS, PROPOSAL_FILES_PARENT_PARTS):
             return True
     return (
         len(parts) in {2, 3}

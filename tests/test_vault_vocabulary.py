@@ -482,37 +482,3 @@ _SKILL_WRITERS = [
     "skill-draft-reject",
 ]
 
-
-@pytest.mark.parametrize("command", _SKILL_WRITERS)
-def test_skill_queue_write_is_refused_on_conflict(
-    command, tmp_path: Path, monkeypatch, capsys
-) -> None:
-    from ciao import cli
-
-    _conflicting_install(tmp_path, monkeypatch)
-    calls = _stub_write(monkeypatch, "ciao.cli", "_proposal_config")
-
-    assert cli.main(_skill_writer_argv(tmp_path, command)) == 2
-    assert calls == []
-    assert "name different vaults" in capsys.readouterr().err
-
-
-@pytest.mark.parametrize("command", _SKILL_WRITERS)
-def test_skill_queue_write_with_explicit_vault_root_proceeds(
-    command, tmp_path: Path, monkeypatch
-) -> None:
-    from ciao import cli
-
-    _conflicting_install(tmp_path, monkeypatch)
-    named = tmp_path / "named-vault"
-    named.mkdir()
-    # The add commands read their input before resolving the vault. An empty
-    # payload is not a finding, so the readers are stubbed to reach the stop
-    # point; the test is about the vault choice, not the payload's shape.
-    monkeypatch.setattr(cli, "_read_skill_proposal_input", lambda path: ({}, ""))
-    monkeypatch.setattr(cli, "_read_skill_draft_input", lambda path: ({}, ""))
-    _stub_write(monkeypatch, "ciao.cli", "_proposal_config")
-
-    argv = _skill_writer_argv(tmp_path, command) + ["--vault-root", str(named)]
-    with pytest.raises(_Reached):
-        cli.main(argv)

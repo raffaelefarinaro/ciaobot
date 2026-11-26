@@ -14,7 +14,7 @@ from types import SimpleNamespace
 import pytest
 
 from ciao import learning_records as lr
-from ciao import memory_proposals as mp
+from ciao import learnings_writer as mp
 from ciao.control_plane import CiaoControlPlane, ControlPlaneError, McpPrincipal
 
 
@@ -231,7 +231,7 @@ def test_workspace_swap_aborts_learning_and_releases_descriptor_and_lock(
 ) -> None:
     from contextlib import contextmanager
 
-    from ciao import memory_proposals
+    from ciao import learnings_writer as memory_proposals
 
     workspace = tmp_path / "Workspace"
     workspace.mkdir()
@@ -295,7 +295,7 @@ def test_learning_temp_is_complete_before_atomic_rename_and_failure_preserves_fi
     spy_append: list[str],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from ciao import memory_proposals
+    from ciao import learnings_writer as memory_proposals
 
     workspace = tmp_path / "Workspace"
     workspace.mkdir()
@@ -343,7 +343,7 @@ def test_learning_temp_is_complete_before_atomic_rename_and_failure_preserves_fi
 
 
 def test_secure_learning_reader_rejects_fifo_without_blocking(tmp_path: Path) -> None:
-    from ciao import memory_proposals
+    from ciao import learnings_writer as memory_proposals
 
     workspace = tmp_path / "Workspace"
     workspace.mkdir()
@@ -396,24 +396,6 @@ def test_a_held_queue_lock_is_a_retryable_error_with_no_write(
     assert excinfo.value.retryable is True
     assert spy_append == []
     assert not _learnings(tmp_path).exists()
-
-
-def test_a_text_the_user_dismissed_is_not_written_unless_allowed(
-    tmp_path: Path, spy_append: list[str], monkeypatch: pytest.MonkeyPatch
-) -> None:
-    monkeypatch.setattr(mp, "was_dismissed", lambda _root, _text: True)
-    plane = _plane(tmp_path, _attended_chat())
-    with pytest.raises(ControlPlaneError) as excinfo:
-        plane.memory_learn(_principal(), text="A dismissed lesson.", source="chat-a")
-    assert excinfo.value.code == "learning_dismissed"
-    assert spy_append == []
-    assert not _learnings(tmp_path).exists()
-
-    result = plane.memory_learn(
-        _principal(), text="A dismissed lesson.", source="chat-a", allow_dismissed=True
-    )["data"]
-    assert result["outcome"] == "recorded"
-    assert len(spy_append) == 1
 
 
 def test_an_unattended_turn_is_refused(tmp_path: Path, spy_append: list[str]) -> None:
@@ -618,7 +600,7 @@ def test_the_cli_verb_resolves_to_the_control_plane_operation(tmp_path: Path) ->
     op, payload = agent_cli.resolve(
         parser.parse_args(
             ["memory", "learn", "--text-file", str(text_file), "--source", "chat-a",
-             "--request", "req-1", "--allow-dismissed"]
+             "--request", "req-1"]
         )
     )
     assert op == "memory_learn"
@@ -626,7 +608,6 @@ def test_the_cli_verb_resolves_to_the_control_plane_operation(tmp_path: Path) ->
         "text": "A lesson.",
         "source": "chat-a",
         "request": "req-1",
-        "allow_dismissed": True,
     }
 
 
