@@ -27,30 +27,6 @@ events=3 keyfp=d7212bcf pid=1018 uid=0
 ##### B: peer identity over Unix socket with the daemon as _ciao: every lookup fails, see matrix (guest status=100013 = errno 13)
 uid=501 pid=993 id=? cdhash=? flags=0x0 runtime=false idReq=false pinReq=false dbg=guest status=100013
 
-##### B2/C: DYLD injection, debugger, task_for_pid inside the VM (SIP off)
-== B2: injection into the real pinned app
--- hardened app (pinned): dylib output: ACCEPTED a2e889f053bda49b
--- plain app (pinned): dylib output: ACCEPTED a2e889f053bda49b
-== debugger attach, non-root
-lldb vs hardened:
-(lldb) process attach --pid 1148
-error: attach failed: this is a non-interactive debug session, cannot get permission to debug processes.
-lldb vs plain:
-(lldb) process attach --pid 1150
-error: attach failed: this is a non-interactive debug session, cannot get permission to debug processes.
-Developer mode is currently disabled.
-staff everyone localaccounts _appserverusr admin _appserveradm _webdeveloper com.apple.sharepoint.group.1 _appstore _...
-[full output: "$HOME/Library/Application Support/rtk/tee/1795651208_ssh_-o_S_243713.log"]
-== B2: injection into the real pinned app (dylib connects with the app's identity)
--- hardened app: dylib output: DENIED (pinned requirement not satisfied)  | app output: uid=501 pid=1049 id=com.ciao....
--- plain app: dylib output: DENIED (pinned requirement not satisfied)  | app output: uid=501 pid=1059 id=com.ciao.spi...
-== task_for_pid as non-root same-UID agent
-hardened target pid 1066: task_for_pid(1066) kr=5 ((os/kern) failure)
-plain target pid 1068: task_for_pid(1068) kr=5 ((os/kern) failure)
-_ciao daemon pid 1003: task_for_pid(1003) kr=5 ((os/kern) failure)
-launchd pid 1: task_for_pid(1) kr=5 ((os/kern) failure)
-
-
 ##### HOST (macOS 27.0.1, SIP enabled): DYLD injection and task_for_pid, same-UID, non-root
 HOST SIP: System Integrity Protection status: enabled.
 27.0.1
@@ -102,45 +78,6 @@ bind: [Errno 48] Address already in use
 bound /tmp/fake.sock by uid 501
 -- daemon liveness after probes:
 events=0 keyfp=f0ec1f88 pid=1003 uid=299
-
-##### C: synthetic input into the pinned composer (grants inherited from image)
-cdhash H"79f3dbd058be6b737b9d6104160adbe4d456ddb2"
-== poster (AX state inherited from the ssh session), sudo-free admin process in GUI session
-AXIsProcessTrusted=true PostEventAccess=true ListenEventAccess=true
-posted
-typed=forged-no-grant -> DENIED (pinned requirement not satisfied)
-typed=forged-via-synthetic-keys -> ACCEPTED d97bbc10da06b546
-== TCC rows that explain AXIsProcessTrusted=true
-kTCCServicePostEvent|com.apple.screensharing.agent|2
-kTCCServiceAccessibility|/usr/libexec/sshd-keygen-wrapper|2
-kTCCServiceAccessibility|/usr/bin/osascript|2
-kTCCServicePostEvent|/usr/bin/osascript|2
-kTCCServiceAccessibility|org.python.python|2
-kTCCServicePostEvent|org.python.python|2
-kTCCServiceAccessibility|/opt/homebrew/Cellar/tart-guest-agent/0.15.0/bin/tart-guest-agent|2
-kTCCServicePostEvent|/opt/homebrew/Cellar/tart-guest-agent/0.15.0/bin/tart-guest-agent|2
-kTCCServicePostEvent|/usr/libexec/sshd-keygen-wrapper|2
-kTCCServiceLiverpool|com.apple.transparencyd|2
-kTCCServiceLiverpool|com.apple.syncdefaultsd|2
-kTCCServiceLiverpool|com.apple.securityd|2
-kTCCServiceLiverpool|com.apple.ScreenTimeAgent|2
-kTCCServiceLiverpool|com.apple.passd|2
-kTCCServiceLiverpool|com.apple.imagent|2
-kTCCServiceLiverpool|com.apple.routined|2
-kTCCServiceLiverpool|com.apple.assistant.assistantd|2
-kTCCServiceUbiquity|com.apple.weather.widget|2
-kTCCServiceLiverpool|com.apple.triald|2
-
-##### C: after deleting all Accessibility/PostEvent/ListenEvent grants
-== poster with NO Accessibility/PostEvent grants anywhere
-AXIsProcessTrusted=false PostEventAccess=false ListenEventAccess=false
-posted
-typed=forged-no-grant -> DENIED (pinned requirement not satisfied)
-typed=forged-via-synthetic-keys -> ACCEPTED d97bbc10da06b546
-== osascript System Events keystroke (agent route 2)
-36:64: execution error: System Events got an error: osascript is not allowed to send keystrokes. (1002)
-typed=forged-no-grant -> DENIED (pinned requirement not satisfied)
-typed=forged-via-synthetic-keys -> ACCEPTED d97bbc10da06b546
 
 ##### B/XPC: daemon as _ciao, libxpc peer requirement (no reply = connection dropped)
 -- hardened pinned app via XPC (daemon as _ciao):
@@ -203,3 +140,67 @@ copied binary run by agent uid (authority is non-root): peer uid=2002 gid=2002 p
 root authority: normal agent connection: ROOT authority sees uid=2002 exe=/usr/local/bin/python3.12 sha=36727872f3be
 root authority: copied binary: ROOT authority sees uid=2002 exe=/tmp/copy sha=36727872f3be
 kernel.yama.ptrace_scope = n/a
+
+##### B7 re-run, VM (SIP off), root daemon, fresh state, control before inject (supersedes the earlier B2/C block, whose DENIED lines came from a stale dylib hardcoded to the _ciao socket)
+CodeDirectory v=20500 size=851 flags=0x10002(adhoc,runtime) hashes=20+3 location=embedded
+CodeDirectory v=20400 size=843 flags=0x2(adhoc) hashes=20+3 location=embedded
+hardened/control: app exit=0 app says: uid=501 pid=1082 id=com.ciao.s | dylib ran: no
+hardened/inject: app exit=0 app says: uid=501 pid=1086 id=com.ciao.s | dylib ran: yes: ACCEPTED 17ac00dd888651e8
+plain/control: app exit=0 app says: uid=501 pid=1097 id=com.ciao.s | dylib ran: no
+plain/inject: app exit=0 app says: uid=501 pid=1101 id=com.ciao.s | dylib ran: yes: ACCEPTED 17ac00dd888651e8
+
+##### B7 re-run, HOST macOS 27.0.1 (SIP on), no daemon (dylib only proves it ran: output file exists)
+HOST 27.0.1 System Integrity Protection status: enabled.
+CodeDirectory v=20500 size=371 flags=0x10002(adhoc,runtime) hashes=5+3 location=embedded
+CodeDirectory v=20400 size=363 flags=0x2(adhoc) hashes=5+3 location=embedded
+plain/control: app exit=0 app says: CONNECT_FAILED errno=2 No such file or directory | dylib ran: no
+plain/inject: app exit=0 app says: CONNECT_FAILED errno=2 No such file or directory | dylib ran: yes
+hardened/control: app exit=0 app says: CONNECT_FAILED errno=2 No such file or directory | dylib ran: no
+hardened/inject: app exit=0 app says: CONNECT_FAILED errno=2 No such file or directory | dylib ran: no
+
+##### B8 task_for_pid and debugger in the VM (unchanged from first run)
+hardened target: kr=5, plain target: kr=5, _ciao daemon: kr=5, launchd: kr=5
+lldb: "cannot get permission to debug processes" (developer mode disabled)
+
+##### C1/C2 clean re-run (fresh daemon state and truncated composer log per case, grants set via sqlite on the system TCC.db, tccd restarted)
+######## CASE none (grant owner: none)
+TCC rows now:
+fresh daemon events.log lines:        0
+composer up (log truncated,        0 bytes)
+AXIsProcessTrusted=false PostEventAccess=false ListenEventAccess=false
+posted
+composer.log after poster:
+daemon events.log lines:        0
+daemon audit SUBMIT lines: 0
+######## CASE poster-owned (grant owner: /Users/admin/spike/build/poster)
+TCC rows now:
+kTCCServiceAccessibility|/Users/admin/spike/build/poster|2
+kTCCServicePostEvent|/Users/admin/spike/build/poster|2
+fresh daemon events.log lines:        0
+composer up (log truncated,        0 bytes)
+AXIsProcessTrusted=false PostEventAccess=false ListenEventAccess=false
+posted
+composer.log after poster:
+daemon events.log lines:        0
+daemon audit SUBMIT lines: 0
+######## CASE ancestor-sshd-keygen-wrapper (grant owner: /usr/libexec/sshd-keygen-wrapper)
+TCC rows now:
+kTCCServiceAccessibility|/usr/libexec/sshd-keygen-wrapper|2
+kTCCServicePostEvent|/usr/libexec/sshd-keygen-wrapper|2
+fresh daemon events.log lines:        0
+composer up (log truncated,        0 bytes)
+AXIsProcessTrusted=true PostEventAccess=true ListenEventAccess=true
+posted
+composer.log after poster:
+typed=forged-text-ancestor-sshd-keygen-wrapper -> ACCEPTED 5a5821bdc5f30a5e
+daemon events.log lines:        1
+daemon audit SUBMIT lines: 1
+######## CASE none-again (grant owner: none)
+TCC rows now:
+fresh daemon events.log lines:        0
+composer up (log truncated,        0 bytes)
+AXIsProcessTrusted=false PostEventAccess=false ListenEventAccess=false
+posted
+composer.log after poster:
+daemon events.log lines:        0
+daemon audit SUBMIT lines: 0
