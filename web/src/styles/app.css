@@ -30,8 +30,9 @@
   --warning: #facc15;   /* yellow, kept clear of the orange accent */
   --error: #f44336;
   /* Error as TEXT. #f44336 is 4.19:1 on --bg2 and 3.53:1 on --bg3, under the 4.5:1
-     small text needs; this lifts to 5.5:1 / 4.65:1. Fills and borders keep --error. */
-  --error-text: #ff6b61;
+     small text needs. #ff7f75 is 6.3:1 on --bg2 and 5.3:1 on --bg3, and still
+     4.7:1 on --bg3 under a 15% --error tint (badge). Fills and borders keep --error. */
+  --error-text: #ff7f75;
   /* Geometry */
   --radius-xs: 4px;     /* small squared tags: state chips, key badges */
   --radius: 10px;
@@ -108,7 +109,7 @@
   --success: #2e7d32;
   --warning: #a16207;
   --error: #c62828;
-  --error-text: var(--error);   /* 5.1:1 on --bg2, 4.6:1 on --bg3 */
+  --error-text: #b3201f;        /* 6.7:1 on --bg2, 5.5:1 on --bg3, 4.6:1 on --bg3 under a 15% --error tint */
 }
 
 /* Text contrast: Soft. Only --fg moves; --fg2/--fg3 keep their values, so the
