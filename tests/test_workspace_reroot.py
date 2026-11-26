@@ -4191,7 +4191,7 @@ def test_startup_runs_the_trigger_before_the_index(tmp_path: Path) -> None:
         line.split("#", 1)[0] for line in inspect.getsource(main).splitlines()
     )
     reroot = source.index("migrate_if_needed, config")
-    index = source.index("_refresh_vault_index,")
+    index = source.index("_refresh_configured_vault_index,")
     assert reroot < index, (reroot, index)
 
 
