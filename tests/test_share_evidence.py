@@ -484,10 +484,19 @@ def client(config: Config) -> TestClient:
     return TestClient(app, base_url="http://localhost:8443", client=("127.0.0.1", 50000))
 
 
+_COOKIES: dict[str, str] = {}
+
+
 def headers(payload: dict | None = None) -> dict[str, str]:
-    signer = URLSafeTimedSerializer("test-secret")
+    # Mint each distinct session once: the signed cookie embeds a per-second timestamp, and the
+    # session hash bound into previews and disclosure tokens would change if a second boundary
+    # fell between two requests of one test. A browser session keeps one stable cookie.
+    session = payload or {"user": "owner"}
+    key = json.dumps(session, sort_keys=True)
+    if key not in _COOKIES:
+        _COOKIES[key] = URLSafeTimedSerializer("test-secret").dumps(session)
     return {
-        "Cookie": f"{SESSION_COOKIE}={signer.dumps(payload or {'user': 'owner'})}",
+        "Cookie": f"{SESSION_COOKIE}={_COOKIES[key]}",
         "Origin": "http://localhost:8443",
     }
 
