@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import json
 import sys
+from urllib.parse import urlsplit
 from dataclasses import dataclass
 from fnmatch import fnmatch
 from pathlib import Path
@@ -65,10 +66,17 @@ def _status(value: object) -> str:
 @dataclass(frozen=True)
 class Finding:
     receipt: str
-    problem: str  # "missing" | "unreadable" | "status:<value>"
+    problem: str  # "missing" | "unreadable" | "status:<value>" | "former_client"
+    runtime_root: str = ""
 
     @property
     def message(self) -> str:
+        if self.problem == "former_client":
+            return (
+                "This install was a client of another engine; remove "
+                f"{self.runtime_root}/node_state.json (and decide which engine owns the vault) "
+                "before upgrading."
+            )
         remedy = next(text for pattern, text in _REMEDY.items() if fnmatch(self.receipt, pattern))
         what = {
             "missing": "has not run (no receipt)",
@@ -95,10 +103,43 @@ def _load(path: Path) -> tuple[str, dict[str, Any]]:
     return ("ok", data) if isinstance(data, dict) else ("unreadable", {})
 
 
+def _former_client(runtime_root: Path) -> bool:
+    """True only for a client/standby node_state.json with a usable http(s) host_url.
+
+    2.0 ignores node_state.json (host, invalid and unreadable files too: v0.6-0.18
+    wrote role=host everywhere), but a former client would become a second writer.
+    """
+    state, data = _load(Path(runtime_root) / "node_state.json")
+    if state != "ok":
+        return False
+    role = data.get("role")
+    if not isinstance(role, str) or role.strip().lower() not in ("client", "standby"):
+        return False
+    url = data.get("host_url")
+    if not isinstance(url, str):
+        return False
+    try:
+        parts = urlsplit(url.strip())
+        host = parts.hostname or ""
+        parts.port  # noqa: B018 — raises ValueError on a bad port
+    except ValueError:
+        return False
+    return (
+        parts.scheme in ("http", "https")
+        and bool(host)
+        and not parts.username
+        and not parts.password
+        and not any(c.isspace() for c in host)
+        and not any(c in host for c in "/?#@\\")
+    )
+
+
 def check(install_root: Path, runtime_root: Path) -> Finding | None:
     """The first unfinished 1.10 migration of this install, or None."""
     base = Path(runtime_root) / "migration"
     try:
+        if _former_client(Path(runtime_root)):
+            return Finding("node_state.json", "former_client", str(runtime_root))
         reroot_state, reroot = _load(base / _REROOT)
         old_layout = (Path(install_root) / "memory-vault").is_dir()
         # A receipt is the layout marker: a fresh install has no old vault dir

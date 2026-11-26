@@ -173,3 +173,47 @@ def test_check_never_raises_on_hostile_receipts(tmp_path: Path) -> None:
     big = install(tmp_path / "big", {"workspace-rooting.json": '{"status": "migrated", "pad": "' + "x" * (2 * 1024 * 1024) + '"}'})
     assert check(big) == pf.Finding("workspace-rooting.json", "unreadable")
     assert pf.check(tmp_path / "missing-install", tmp_path / "missing-runtime") is None
+
+
+def _node_state(root: Path, body: object) -> Path:
+    path = root / ".runtime" / "node_state.json"
+    path.write_text(body if isinstance(body, str) else json.dumps(body), encoding="utf-8")
+    return root
+
+
+@pytest.mark.parametrize("role", ["client", "standby", " Client "])
+def test_former_client_is_refused(tmp_path: Path, role: str) -> None:
+    root = _node_state(install(tmp_path), {"role": role, "host_url": "https://host.example:8443"})
+    finding = check(root)
+    assert finding is not None
+    assert finding.problem == "former_client"
+    assert "client of another engine" in finding.message
+    assert f"{root}/.runtime/node_state.json" in finding.message
+    assert "host.example" not in finding.message
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        {"role": "host"},
+        {"role": "active", "host_url": "https://host.example"},
+        {"role": "host", "host_url": "https://host.example"},
+        {"role": "client"},
+        {"role": "client", "host_url": "ftp://host.example"},
+        {"role": "client", "host_url": "https://"},
+        {"role": "client", "host_url": "https://user:pw@host.example"},
+        {"role": "client", "host_url": 5},
+        {"role": "weird", "host_url": "https://host.example"},
+        "{not json",
+        "[1]",
+        "[" * 100000,
+    ],
+)
+def test_other_node_states_are_allowed(tmp_path: Path, body: object) -> None:
+    assert check(_node_state(install(tmp_path), body)) is None
+
+
+def test_no_node_state_is_allowed_and_big_one_is_ignored(tmp_path: Path) -> None:
+    assert check(install(tmp_path)) is None
+    big = {"role": "client", "host_url": "https://h.example", "pad": "x" * (2 * 1024 * 1024)}
+    assert check(_node_state(install(tmp_path / "big"), big)) is None
