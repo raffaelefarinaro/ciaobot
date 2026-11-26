@@ -62,9 +62,8 @@ nothing.
   relationship to this user, and it is **never moved**. So is one whose tags name
   more than one other workspace, and one whose tags name both its own workspace
   and another — two workspaces is precisely the case the tags refuse to decide.
-  Both are queued into that workspace's `Workspace/Memory-Proposals.md`, which has
-  its own review surface. Read the queue entries and report them; resolving them
-  is the user's.
+  Both are put on that workspace's `Workspace/Unsure.md`. Read those lines and
+  report them; resolving them is the user's.
 * A note already cross-linked to a same-person note in the other workspace is not
   a candidate: the split was made on purpose.
 * A tag naming a workspace that is not registered is not a signal, so the note is

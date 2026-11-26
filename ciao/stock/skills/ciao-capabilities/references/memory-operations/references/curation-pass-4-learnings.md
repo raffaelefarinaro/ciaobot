@@ -14,7 +14,7 @@ Skip an entry that already has a proposal file under `Workspace/Proposals/` nami
 **Merge and prune.**
 - Merge entries that are semantically the same learning: keep one, sum the counts, union the sources.
 - Prune x1 entries under `## Active` older than 30 days with no reuse value.
-- Entries under `## Promoted / Resolved` stay where they are. Retiring one is the attended `ciao learnings-cleanup` flow, so report it as a `needs you` item.
+- Entries under `## Promoted / Resolved` stay where they are. Retiring one is a person's call, so report it as a `needs you` item.
 
 ## Done when
 Every x3-or-more entry has a destination (a proposal file that passed `ciao proposal-check`, a project doc line, or an Unsure line) or an existing proposal. Finish with `done: routed N entries (<proposal paths>), merged M, pruned K`.

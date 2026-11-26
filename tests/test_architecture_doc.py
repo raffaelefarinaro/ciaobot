@@ -69,8 +69,8 @@ def test_architecture_doc_states_the_consolidation_contract() -> None:
         "the one region write the unattended nightly curator does perform",
         "~85% of the cap",  # the threshold that gates consolidation
         "Workspace/Memory-Consolidations.md",  # the undo log
-        "the queue itself cannot apply a drop",  # the [review] escape hatch
-        "the unattended nightly curator never promotes a new region fact",
+        "becomes a `drop <region>:` line on the Unsure list instead",  # the escape hatch
+        "Promoting a NEW fact into a region is a direct write",
     ):
         assert fragment in doc, (
             "docs/ARCHITECTURE.md no longer documents the memory-consolidation "

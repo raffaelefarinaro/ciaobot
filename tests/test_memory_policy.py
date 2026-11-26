@@ -174,41 +174,6 @@ def test_both_providers_declare_schedule_unattended(provider: str) -> None:
     assert capabilities_for(provider).schedule_unattended is True
 
 
-def test_vault_note_mutation_is_refused_on_an_unattended_turn(tmp_path: Path) -> None:
-    """The one deferred action Ciaobot enforces in code, pinned by its code."""
-    from types import SimpleNamespace
-
-    from ciao import vault_review as review
-    from ciao.control_plane import CiaoControlPlane, ControlPlaneError, McpPrincipal
-
-    note = tmp_path / "People" / "A.md"
-    note.parent.mkdir(parents=True)
-    note.write_text("---\ntype: note\n---\nAn unlinked note.\n", encoding="utf-8")
-    candidate = review.generate_candidates(tmp_path, workspace="personal")[0]
-
-    chat = SimpleNamespace(user_turn_count=1, user_turn_unattended={"0": True})
-    plane = CiaoControlPlane(
-        SimpleNamespace(
-            workspace=lambda name: object(),
-            workspace_vault_root=lambda name: tmp_path,
-        ),
-        project_chat_manager=SimpleNamespace(get_chat=lambda chat_id: chat),
-        schedule_manager=SimpleNamespace(),
-    )
-    principal = McpPrincipal(
-        token_id="token-1",
-        chat_id="chat-1",
-        project_id="project-1",
-        workspace="personal",
-        provider="opencode",
-    )
-
-    with pytest.raises(ControlPlaneError) as excinfo:
-        plane.vault_review(principal, "trash", candidate_id=candidate.candidate_id)
-    assert excinfo.value.code == "unattended_forbidden"
-    assert note.exists(), "a deferred delete must not touch the note"
-
-
 # ── The stock assets and docs must not contradict the matrix ──────────────
 
 
@@ -304,14 +269,12 @@ def test_memory_design_drops_the_hard_cap_claim_and_states_advisory() -> None:
     assert "advisory" in doc
 
 
-def test_proposal_cli_exception_is_named_in_docs() -> None:
+def test_proposal_check_exception_is_named_in_docs() -> None:
     """The MCP-only rule must name the supported proposal CLI exception."""
     architecture = (REPO / "docs" / "ARCHITECTURE.md").read_text(encoding="utf-8")
     agent_cli = (REPO / "docs" / "AGENT_CLI.md").read_text(encoding="utf-8")
     for doc, name in ((architecture, "ARCHITECTURE.md"), (agent_cli, "AGENT_CLI.md")):
-        assert "ciao memory-proposal-add" in doc, name
-        assert "ciao memory-proposals" in doc, name
-        assert "ciao memory-proposal-dismiss" in doc, name
+        assert "ciao proposal-check" in doc, name
 
 
 # ── Nothing is promoted unattended (#728-D) ────────────────────────────────
@@ -365,11 +328,10 @@ def test_the_capabilities_catalog_describes_the_routing_without_overclaiming() -
     surfaces tell a person opposite things about the same nightly run.
     """
     skill = _stock("skills/ciao-capabilities/references/models-and-extensions.md")
-    assert "A reusable lesson in `Workspace/Learnings.md` routes the same way" in skill
-    assert "an inventory match is a candidate, not proof" in skill
-    assert "the issue body is sanitized" in skill
-    assert "it never edits a skill or the workspace guide, never settles a proposal, and never opens a public issue" in skill
-    assert "`ciao skill-draft-approve`" in skill
+    assert "`skill-edit`" in skill and "`upstream-issue`" in skill
+    assert "no transcript excerpt, path, name or credential leaves your machine" in skill
+    assert "it never edits a skill or the workspace guide and never opens a public issue" in skill
+    assert "`ciao proposal-check`" in skill
 
 
 def test_the_routing_contract_is_documented() -> None:
@@ -389,30 +351,17 @@ def test_the_routing_contract_is_documented() -> None:
     ):
         assert row in doc, row
     assert "An inventory match is a candidate, not proof" in doc
-    assert "`sources` entry or a `turn`, because those would claim" in doc
     assert "Nothing is promoted unattended" in doc
     assert "`x3+` recurrence is a" in doc
     assert "`/remember` keeps a real origin" in doc
     assert "`req:<id>`" in doc
-    assert "A filed upstream issue is not a deployed lesson" in doc
 
 
-def test_the_development_doc_covers_the_draft_commands() -> None:
+def test_the_development_doc_covers_the_proposal_check_command() -> None:
     """A new CLI surface the contributor doc does not mention is one nobody finds."""
     doc = (REPO / "docs" / "DEVELOPMENT.md").read_text(encoding="utf-8")
-    assert "### Lesson routing and skill drafts" in doc
-    for command in (
-        "ciao skill-draft-add",
-        "ciao skill-drafts",
-        "ciao skill-draft-approve",
-        "ciao skill-draft-reject",
-    ):
-        assert command in doc, command
-    assert "Sanitizing is a gate, not a filter" in doc
-    assert "The attended step is the only step" in doc
-    # And the lesson-routing carve-out in the proposal filer is documented, so a
-    # reader does not read "one or the other" as a loosened check.
-    assert "accepts a lesson with no `sources`" in doc
+    assert "### Proposal files and the Unsure list" in doc
+    assert "ciao proposal-check" in doc
 
 
 # ── The care prompt may only name what the control plane allows (#882) ────
@@ -442,24 +391,6 @@ _VAULT_REVIEW_WIRE = {
     "restore-completed": "restore_completed",
     "delete": "delete",
 }
-
-
-def test_every_vault_review_verb_maps_to_the_wire_action_agent_cli_sends() -> None:
-    """Keeps _VAULT_REVIEW_WIRE honest: it is derived from agent_cli, not a guess."""
-    from ciao import agent_cli
-
-    parser = agent_cli.build_parser()
-    for verb, wire in _VAULT_REVIEW_WIRE.items():
-        argv = ["vault", "review", verb]
-        if verb == "show":
-            argv.append("Some/Note.md")
-        elif verb not in {"list"}:
-            argv += ["--candidate", "c1"]
-            if verb == "delete":
-                argv += ["--confirm", "c1"]
-        operation, arguments = agent_cli.resolve(parser.parse_args(argv))
-        assert operation == "vault_review"
-        assert arguments["action"] == wire, verb
 
 
 def test_every_noun_verb_in_the_unattended_care_prompt_is_a_real_agent_cli_verb() -> None:

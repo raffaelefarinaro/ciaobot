@@ -264,7 +264,7 @@ def test_memory_actionable_count_covers_the_mechanical_findings(tmp_path: Path) 
     """`ciao memory-audit` and `ciao os-audit` must agree on "clean".
 
     The CLI used to sum its own subset of the report and omitted
-    `oversize_entries`, `invisible_unicode` and `pending_memory_proposals`, so
+    `oversize_entries`, `invisible_unicode` and the pending Unsure items, so
     it exited 0 on a region that os-audit failed. Both now call this function,
     and this test fails if a new key is counted in one place only.
     """
@@ -395,21 +395,22 @@ def test_audit_memory_rejects_noncanonical_and_multiple_expiration_tags(
     assert res["invalid_expiration_entries"] == 2
 
 
-def test_audit_memory_counts_only_canonical_proposals_in_each_workspace(
+def test_audit_memory_counts_only_unticked_unsure_items_in_each_workspace(
     tmp_path: Path,
 ) -> None:
     vault = tmp_path / "memory-vault"
     paths = [
-        vault / "Workspace" / "Memory-Proposals.md",
-        vault / "personal" / "Workspace" / "Memory-Proposals.md",
-        vault / "work" / "Workspace" / "Memory-Proposals.md",
+        vault / "Workspace" / "Unsure.md",
+        vault / "personal" / "Workspace" / "Unsure.md",
+        vault / "work" / "Workspace" / "Unsure.md",
     ]
     for index, path in enumerate(paths):
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(
-            "# Memory Proposals\n\n"
-            f"- [memory] pending {index}  _(from: Decisions)_\n"
-            "- Processed batch history that is not pending.\n",
+            "# Unsure\n\n"
+            f"- [ ] pending {index} — 2026-07-26\n"
+            "- [x] a ticked item the agent has not written yet — 2026-07-26\n"
+            "- A plain line that is not an item.\n",
             encoding="utf-8",
         )
 
@@ -417,17 +418,17 @@ def test_audit_memory_counts_only_canonical_proposals_in_each_workspace(
         vault_root=vault,
         today=datetime.date(2026, 7, 26),
     )
-    assert res["pending_memory_proposals"] == 3
-    assert len(res["proposal_files"]) == 3
-    assert {item["pending"] for item in res["proposal_files"]} == {1}
+    assert res["pending_unsure_items"] == 3
+    assert len(res["unsure_files"]) == 3
+    assert {item["pending"] for item in res["unsure_files"]} == {1}
 
 
-def test_audit_memory_uses_explicit_external_proposal_paths(tmp_path: Path) -> None:
+def test_audit_memory_uses_explicit_external_unsure_paths(tmp_path: Path) -> None:
     vault = tmp_path / "memory-vault"
     vault.mkdir()
-    external = tmp_path / "external-workspace" / "Workspace" / "Memory-Proposals.md"
+    external = tmp_path / "external-workspace" / "Workspace" / "Unsure.md"
     external.parent.mkdir(parents=True)
-    external.write_text("- [user] pending preference\n", encoding="utf-8")
+    external.write_text("- [ ] pending preference\n", encoding="utf-8")
 
     res = audit_memory(
         vault_root=vault,
@@ -435,11 +436,11 @@ def test_audit_memory_uses_explicit_external_proposal_paths(tmp_path: Path) -> N
         today=datetime.date(2026, 7, 26),
     )
 
-    assert res["pending_memory_proposals"] == 1
-    assert res["proposal_files"] == [{"path": str(external), "pending": 1}]
+    assert res["pending_unsure_items"] == 1
+    assert res["unsure_files"] == [{"path": str(external), "pending": 1}]
 
 
-def test_audit_memory_surfaces_proposal_discovery_errors(
+def test_audit_memory_surfaces_unsure_discovery_errors(
     tmp_path: Path,
     monkeypatch,
 ) -> None:
@@ -455,8 +456,8 @@ def test_audit_memory_surfaces_proposal_discovery_errors(
     monkeypatch.setattr(Path, "iterdir", failing_iterdir)
     res = audit_memory(vault_root=vault)
 
-    assert res["pending_memory_proposals"] == 0
-    assert res["errors"][0]["type"] == "unreadable_proposal_root"
+    assert res["pending_unsure_items"] == 0
+    assert res["errors"][0]["type"] == "unreadable_unsure_root"
 
 
 def test_audit_job_runs_uses_latest_status_and_real_timestamps(tmp_path: Path) -> None:
@@ -706,13 +707,9 @@ def test_run_os_audit_counts_every_actionable_finding(tmp_path: Path) -> None:
         "---\ntype: idea\n---\n# Two\n",
         encoding="utf-8",
     )
-    proposals = vault / "personal" / "Workspace" / "Memory-Proposals.md"
+    proposals = vault / "personal" / "Workspace" / "Unsure.md"
     proposals.parent.mkdir(parents=True)
-    proposals.write_text(
-        "---\ntype: note\n---\n"
-        "- [memory] pending fact  _(from: Decisions)_\n",
-        encoding="utf-8",
-    )
+    proposals.write_text("# Unsure\n\n- [ ] pending fact — 2026-07-26\n", encoding="utf-8")
     _seed_guide(
         workspace / "AGENTS.md",
         memory=[
@@ -743,9 +740,9 @@ def test_run_os_audit_counts_every_actionable_finding(tmp_path: Path) -> None:
     assert report["status"] == "needs_attention"
     # Vault: 1 broken markdown link + 2 orphans + 1 duplicate.
     # Skills: 1 missing SKILL.md + 1 over budget.
-    # Rules: 1 conflict. Memory: 1 expired + 1 invalid tag + 1 proposal.
+    # Rules: 1 conflict. Memory: 1 expired + 1 invalid tag (an Unsure item is the person's own list and is not counted).
     # Jobs: 1 unresolved latest failure.
-    assert report["total_issues"] == 11
+    assert report["total_issues"] == 10
     assert report["total_errors"] == 0
     md_summary = format_audit_markdown(report)
     assert "# AI OS Audit Report" in md_summary

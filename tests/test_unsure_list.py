@@ -54,3 +54,12 @@ def test_existing_content_is_kept(tmp_path: Path) -> None:
     text = path.read_text(encoding="utf-8")
     assert "older item" in text and text.index("older") < text.index("newer")
     assert ul.read_keys(tmp_path) == {"older item", "newer item"}
+
+
+def test_unsure_list_and_proposal_files_are_vault_paperwork_not_notes(tmp_path: Path) -> None:
+    from ciao import vault_index
+
+    for relative in ("Workspace/Unsure.md", "Workspace/Proposals/tighten-memory-skill.md"):
+        assert vault_index.is_reserved_bookkeeping(Path(relative)), relative
+    assert not vault_index.is_reserved_bookkeeping(Path("Notes/Unsure.md"))
+    assert not vault_index.is_reserved_bookkeeping(Path("Projects/Proposals/idea.md"))

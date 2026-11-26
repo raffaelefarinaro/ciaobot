@@ -536,7 +536,6 @@ def test_curated_ingest_answers_from_what_the_memory_pass_kept(
         temp_root=tmp_path / "runs",
         ingest="curated",
         extract_cmd=_extract_cmd(prompts),
-        proposals="accept",
     )
 
     # Isolation: the operator's environment is restored and the live install
@@ -547,17 +546,13 @@ def test_curated_ingest_answers_from_what_the_memory_pass_kept(
 
     assert row["error"] is None, row
     assert row["ingest"] == "curated"
-    assert row["proposals"] == "accept"
     curation = row["curation"]
     assert curation["haystack_sessions"] == curation["sessions"] == 3
     assert curation["passes_ok"] == 3
     assert curation["passes_failed"] == 0
     assert curation["engine_model_calls_blocked"] == 0
-    # The Lisbon fact was queued by the pass and accepted into ciao:memory; the
-    # cat went straight to ciao:profile; the job became a people note.
-    assert curation["proposals"]["filed"] == 1
-    assert curation["proposals"]["accepted"] == 1
-    assert curation["proposals"]["pending_at_end"] == 0
+    # The Lisbon fact went into ciao:memory; the cat went into ciao:profile; the
+    # job became a people note.
     store = curation["store"]
     assert store["region_entries"] == {"memory": 1, "profile": 1}
     assert store["notes"] == curation["baseline_store"]["notes"] + 1
@@ -586,47 +581,6 @@ def test_curated_ingest_answers_from_what_the_memory_pass_kept(
     assert "Logs/Chats/" in log
 
 
-@pytest.mark.parametrize(
-    ("proposals", "accepted", "dropped", "pending", "memory_entries", "retained"),
-    [
-        # real-1's only output is a proposal: dropped, nothing of it survives,
-        # even though the engine's queue file (title, template, timestamped
-        # heading) stays behind; left, its queued row is still stored.
-        ("drop", 0, 1, 0, 0, ["real-2"]),
-        ("leave", 0, 0, 1, 0, ["real-1", "real-2"]),
-    ],
-)
-def test_curated_proposal_modes_are_explicit(
-    tmp_path: Path,
-    proposals: str,
-    accepted: int,
-    dropped: int,
-    pending: int,
-    memory_entries: int,
-    retained: list[str],
-) -> None:
-    row = HARNESS.retrieve_for_question(
-        DATASET[1],
-        temp_root=tmp_path,
-        ingest="curated",
-        extract_cmd=_extract_cmd(),
-        proposals=proposals,
-        timeout=60,
-    )
-    assert row["error"] is None, row
-    counts = row["curation"]["proposals"]
-    assert counts["mode"] == proposals
-    assert counts["filed"] == 1
-    assert (counts["accepted"], counts["dropped"], counts["pending_at_end"]) == (
-        accepted,
-        dropped,
-        pending,
-    )
-    assert row["curation"]["store"]["region_entries"]["memory"] == memory_entries
-    assert row["curation"]["evidence_sessions_retained"] == retained
-    assert "retrieved_note_paths" in row
-
-
 def test_abstention_has_no_evidence_to_retain(tmp_path: Path) -> None:
     """An `_abs` question is never scored for retained evidence, gold ids or not."""
     entry = {**DATASET[2], "answer_session_ids": ["real-0"]}
@@ -635,7 +589,6 @@ def test_abstention_has_no_evidence_to_retain(tmp_path: Path) -> None:
         temp_root=tmp_path,
         ingest="curated",
         extract_cmd=_extract_cmd(),
-        proposals="accept",
         timeout=60,
     )
     assert row["error"] is None, row
@@ -652,7 +605,6 @@ def test_timed_out_extractor_is_killed_with_its_children(tmp_path: Path) -> None
         temp_root=tmp_path,
         ingest="curated",
         extract_cmd=f"sleep 60 & echo $! > {shlex.quote(str(pidfile))}; wait",
-        proposals="leave",
         timeout=1,
     )
     assert time.perf_counter() - started < 30
@@ -681,7 +633,7 @@ def test_curated_refuses_a_temp_dir_under_a_guide(tmp_path: Path) -> None:
         HARNESS.main(
             [
                 "--dataset", str(dataset), "--allow-other-dataset",
-                "--ingest", "curated", "--extract-cmd", "true", "--proposals", "drop",
+                "--ingest", "curated", "--extract-cmd", "true",
                 "--out", str(tmp_path / "o.jsonl"), "--temp-dir", str(nested),
             ]
         )
@@ -697,7 +649,6 @@ def test_failed_memory_pass_makes_the_question_incomplete(tmp_path: Path) -> Non
         temp_root=tmp_path,
         ingest="curated",
         extract_cmd="echo boom >&2; exit 3",
-        proposals="leave",
     )
     assert row["error"].startswith("curate: 1 of 1 memory passes failed: command exited 3")
     assert row["answer"] == ""
@@ -714,18 +665,6 @@ def test_failed_memory_pass_makes_the_question_incomplete(tmp_path: Path) -> Non
     assert summary["curation"]["passes_failed"] == 1
 
 
-def test_cli_curated_needs_explicit_flags(tmp_path: Path) -> None:
-    dataset = tmp_path / "dataset.json"
-    dataset.write_text(json.dumps(DATASET), encoding="utf-8")
-    base = ["--dataset", str(dataset), "--allow-other-dataset", "--out", str(tmp_path / "o.jsonl")]
-    with pytest.raises(SystemExit, match="--proposals"):
-        HARNESS.main([*base, "--ingest", "curated", "--extract-cmd", "true"])
-    with pytest.raises(SystemExit, match="--extract-cmd"):
-        HARNESS.main([*base, "--ingest", "curated", "--proposals", "drop"])
-    with pytest.raises(SystemExit, match="curated only"):
-        HARNESS.main([*base, "--proposals", "drop"])
-
-
 def test_cli_curated_retrieval_only_end_to_end(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
@@ -738,7 +677,7 @@ def test_cli_curated_retrieval_only_end_to_end(
         [
             "--dataset", str(dataset), "--allow-other-dataset",
             "--questions", str(questions), "--retrieval-only",
-            "--ingest", "curated", "--extract-cmd", _extract_cmd(), "--proposals", "accept",
+            "--ingest", "curated", "--extract-cmd", _extract_cmd(),
             "--out", str(out), "--temp-dir", str(tmp_path),
         ]
     )
@@ -749,56 +688,10 @@ def test_cli_curated_retrieval_only_end_to_end(
     assert row["curation"]["evidence_retained"] is None
     assert row["curation"]["evidence_in_context"] is None
     captured = capsys.readouterr().out
-    assert "Ingest: curated (proposals: accept)" in captured
-    assert "Curated ingest (proposals: accept)" in captured
+    assert "Ingest: curated" in captured
+    assert "Curated ingest" in captured
     assert "memory passes: 3 ok, 0 failed, 0 skipped, of 3 sessions" in captured
     assert "contradictory or superseded facts left behind: not measured" in captured
-
-
-def test_curated_summary_splits_knowledge_update_and_abstention() -> None:
-    def row(qid: str, stratum: str, verdict: bool, retained: bool | None) -> dict:
-        base = _judged_row(qid, stratum, verdict=verdict)
-        base["proposals"] = "accept"
-        base["curation"] = {
-            "sessions": 2, "passes_ok": 2, "passes_failed": 0, "passes_skipped": 0,
-            "extract_latency_ms": 100.0,
-            "proposals": {"filed": 2, "accepted": 1, "dropped": 0, "failed": 0,
-                          "unaccepted": {"review": 1}, "pending_at_end": 1},
-            "store": {"notes": 3, "note_chars": 300, "workspace_chars": 50,
-                      "region_chars": {"memory": 40, "profile": 10}},
-            "raw_chars": 4000,
-            "evidence_retained": retained,
-            "evidence_in_context": retained,
-            "engine_model_calls_blocked": 0,
-        }
-        return base
-
-    failed = row("q-failed", "multi-session", False, True)
-    failed["error"] = "curate: 1 of 1 memory passes failed: command exited 3"
-    failed["curation"]["error"] = "1 of 1 memory passes failed: command exited 3"
-    failed["curation"]["passes_failed"] = 1
-    failed["curation"]["store"]["note_chars"] = 99_999
-    rows = [
-        row("q-ku", "knowledge-update", True, True),
-        row("q-ku2", "knowledge-update", False, False),
-        row("q-x_abs", "abstention", True, None),
-        failed,
-    ]
-    summary = HARNESS.summarize(rows, qa=True)
-    curation = summary["curation"]
-    # The failed question counts as a failed pass but not in what was stored.
-    assert (curation["n"], curation["complete"], curation["passes_failed"]) == (4, 3, 1)
-    assert curation["note_chars"] == 300
-    assert curation["knowledge_update"] == {"n": 2, "correct": 1, "judged": 2, "fraction": 0.5}
-    assert curation["abstention"]["correct"] == 1
-    assert (curation["evidence_retained"], curation["evidence_answerable"]) == (1, 2)
-    assert curation["stored_to_raw"] == pytest.approx(400 / 4000)
-    assert curation["proposals_unaccepted"] == {"review": 3}
-    text = HARNESS.format_summary(summary, mode="notes")
-    assert "knowledge-update accuracy: 50.0% (1/2, 2 judged)" in text
-    assert "abstention accuracy: 100.0% (1/1, 1 judged)" in text
-    assert "left queued, not auto-acceptable: review 3" in text
-    assert "retained evidence (an answer session's pass wrote a line still stored): 50.0% (1/2)" in text
 
 
 def test_curated_helpers() -> None:

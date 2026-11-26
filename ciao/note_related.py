@@ -1,12 +1,10 @@
 """The vault notes connected to one note: a model-free, read-only lookup.
 
-The nightly care run checks a stale note against outside sources, so two notes
-that disagree about the same subject are never noticed. ``ciao note related``
-hands the agent the notes around the one it is judging: those the target links
-to, those linking to it, and those whose body names its title or an alias. Each
-row carries the ``revision`` and ``due`` flag a ``note verify`` payload for that
-note needs, so a neighbour the agent actually checked can be credited without
-being planned again as its own stale item.
+When the care run re-checks a stale note against outside sources, two notes
+that disagree about the same subject would otherwise never be noticed.
+``ciao note related`` hands the agent the notes around the one it is judging:
+those the target links to, those linking to it, and those whose body names its
+title or an alias. Each row carries the note's content ``revision``.
 
 Nothing here writes. The scan is :func:`ciao.vault_index.scan_vault`, not the
 FTS index, so no retrieval telemetry is recorded and the decay-by-disuse signal
@@ -18,19 +16,15 @@ from __future__ import annotations
 import logging
 import re
 from dataclasses import dataclass
-from datetime import date
 from pathlib import Path
 from typing import Any
 
-from ciao import memory_audit
-from ciao import memory_receipts as mr
 from ciao import file_kernel as fk
+from ciao import memory_receipts as mr
 from ciao import note_receipts as nr
-from ciao import note_verification as nv
 from ciao import vault_index
-from ciao.entity_types import load_entity_types
+from ciao.memory_audit import never_aged
 from ciao.vault_links import FRONTMATTER_RE
-from ciao.vault_review import never_queued
 
 logger = logging.getLogger(__name__)
 
@@ -51,11 +45,7 @@ class RelatedNote:
     title: str
     type: str
     relations: tuple[str, ...]  # subset of (LINKS_TO, LINKED_FROM, MENTIONS), in that order
-    revision: str  # memory_receipts.content_revision(full text)
-    due: bool  # the nightly worklist would plan it: stale for its type and no check settles it
-    # An attended caller may re-verify it now despite the cooldown: its unverified
-    # check for this revision has no pending proposal (note_verification.reopens_unverified).
-    reopenable: bool
+    revision: str  # file_kernel.content_revision(full text)
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -64,8 +54,6 @@ class RelatedNote:
             "type": self.type,
             "relations": list(self.relations),
             "revision": self.revision,
-            "due": self.due,
-            "reopenable": self.reopenable,
         }
 
 
@@ -108,44 +96,11 @@ def _body(text: str) -> str:
     return text[match.end() :] if match else text
 
 
-def _due(
-    root: Path, relative: str, entry: Any, revision: str, *, today: date, registry: Any
-) -> bool:
-    """Whether the nightly worklist would plan this note for verification.
-
-    Both halves of the worklist's rule: the note's facts are stale for its type
-    (a journal or log never is), and no recorded check settles this revision.
-    A ``due`` that only asked the check state would invite a verdict on every
-    journal day that names the subject.
-    """
-    try:
-        mtime = (root / relative).stat().st_mtime
-    except OSError:
-        mtime = 0.0
-    verification = memory_audit.note_verification(
-        entry.type or "", entry.updated, mtime, today=today, registry=registry
-    )
-    if verification is None or not verification.stale:
-        return False
-    return nv.should_check(root, relative, revision, today=today)
-
-
-def _reopenable(check: nv.NoteCheck | None, revision: str, *, attended: bool) -> bool:
-    """Whether an attended verify would be accepted for this revision despite its cooldown."""
-    return (
-        check is not None
-        and check.content_revision == revision
-        and nv.reopens_unverified(check, attended=attended)
-    )
-
-
 def find_related_notes(
     vault_root: Path | str,
     relative_path: str,
     *,
     workspace: str,
-    today: date,
-    attended: bool = False,
     limit: int = RELATED_NOTES_LIMIT,
 ) -> RelatedNotes:
     """The notes connected to ``relative_path``, link relations first.
@@ -161,8 +116,6 @@ def find_related_notes(
         raise mr.MemoryReceiptError(f"the note is not readable UTF-8 text: {target_key}")
     bounded = max(1, min(_MAX_LIMIT, int(limit)))
 
-    registry = load_entity_types(root)
-    checks = nv.read_note_checks(root)
     prefix = vault_index.VAULT_RENDER_PREFIX
     entries = vault_index.scan_vault(root, workspace=workspace, path_prefix=prefix)
     by_relative = {vault_index.vault_relative(entry.path_key, prefix): entry for entry in entries}
@@ -175,7 +128,7 @@ def find_related_notes(
     links_to = set(entry.related) if entry is not None else set()
     matches: list[tuple[int, str, RelatedNote]] = []
     for relative, other in by_relative.items():
-        if relative == target_key or never_queued(relative):
+        if relative == target_key or never_aged(relative):
             continue
         if vault_index.is_reserved_bookkeeping(Path(relative)):
             continue
@@ -198,8 +151,6 @@ def find_related_notes(
             type=other.type or "",
             relations=tuple(relations),
             revision=revision,
-            due=_due(root, relative, other, revision, today=today, registry=registry),
-            reopenable=_reopenable(checks.get(relative), revision, attended=attended),
         )
         linked = LINKS_TO in relations or LINKED_FROM in relations
         matches.append((0 if linked else 1, relative, note))

@@ -8,9 +8,6 @@ record another module already writes:
 * chats archived: the ``ended:`` frontmatter of the chat's archived transcript;
 * tokens and models: the per-turn ``usage`` and ``effective_model`` in the live
   transcript JSON and the archived transcript Markdown;
-* memories saved and the proposal funnel: the decision sidecar
-  (``memory_proposals.read_decisions``) plus the pending queue's batch headers;
-* notes updated: applied ``note_apply`` receipts in ``Workspace/Memory-Receipts.jsonl``;
 * tasks completed: the completion records in each task file;
 * automation runs: ``schedule_dispatch`` rows in ``job_runs.jsonl`` stamped
   with this workspace.
@@ -32,10 +29,7 @@ from pathlib import Path
 from typing import Any, Literal
 
 from ciao import job_runs
-from ciao.memory_proposals import read_decisions
-from ciao.memory_receipts import journal_path, read_receipts
 from ciao.models import ChatContext
-from ciao.proposal_kinds import parse_bullet
 from ciao.task_board import TaskBoardError, TaskBoardStore
 from ciao.task_resolution import parse_completions
 from ciao.transcripts import parse_archive_turns
@@ -52,7 +46,6 @@ _TODAY_KEYS = (
     "chats_opened",
     "messages_sent",
     "chats_archived",
-    "memories_saved",
     "projects_worked_on",
     "tasks_completed",
 )
@@ -60,8 +53,6 @@ _TODAY_KEYS = (
 # Mirrors ``CiaoControlPlane._ENGINE_HELPER_KINDS``: helper chats the engine
 # starts from its own prompt, so they are not chats a person opened.
 _ENGINE_HELPER_KINDS = frozenset({"memory_pass", "update_task", "proposal"})
-_PROPOSALS_RELATIVE = ("Workspace", "Memory-Proposals.md")
-_BATCH_HEADER_RE = re.compile(r"^## (\d{4}-\d{2}-\d{2}T\S+)")
 _ENDED_RE = re.compile(r"""^ended:\s*['"]?([^'"\s]+)['"]?\s*$""")
 _USAGE_LINE_RE = re.compile(
     r"^- (input_tokens|output_tokens|inputTokens|outputTokens): (\d+)\s*$", re.MULTILINE
@@ -72,12 +63,9 @@ EventKind = Literal[
     "chat_opened",
     "message",
     "chat_archived",
-    "proposal_decided",
-    "proposal_pending",
     "task_completed",
     "automation_run",
     "turn",
-    "note_updated",
 ]
 
 
@@ -116,7 +104,6 @@ class Event:
     project_id: str = ""
     model: str = ""
     tokens: int = 0
-    accepted: bool = False
 
 
 @dataclass(slots=True)
@@ -124,9 +111,6 @@ class DayBucket:
     chats_opened: int = 0
     messages_sent: int = 0
     chats_archived: int = 0
-    accepted: int = 0
-    proposed: int = 0
-    notes_updated: int = 0
     tasks_completed: int = 0
     automation_runs: int = 0
     tokens: int = 0
@@ -364,40 +348,6 @@ def _turn_events(
     return events
 
 
-def _proposal_events(
-    sources: StatsSources, start: datetime, end: datetime, *, failures: list[str] | None = None
-) -> list[Event]:
-    queue = sources.vault_root.joinpath(*_PROPOSALS_RELATIVE)
-    events: list[Event] = []
-    for row in read_decisions(queue):
-        # Upstream skill drafts share this sidecar with kind "skill"; they are
-        # not memories.
-        if row["kind"] == "skill":
-            continue
-        at = _parse_ts(row["ts"])
-        if at is not None and start <= at < end:
-            events.append(Event("proposal_decided", at, accepted=row["action"] == "accepted"))
-    try:
-        lines = queue.read_text(encoding="utf-8").splitlines()
-    except FileNotFoundError:
-        lines = []
-    except OSError:
-        _failed(failures, "proposals")
-        lines = []
-    except UnicodeDecodeError:
-        # Corrupt content is permanent, not transient: cache the day as read.
-        lines = []
-    batch: datetime | None = None
-    for line in lines:
-        header = _BATCH_HEADER_RE.match(line)
-        if header is not None:
-            batch = _parse_ts(header.group(1))
-            continue
-        if batch is not None and start <= batch < end and parse_bullet(line) is not None:
-            events.append(Event("proposal_pending", batch))
-    return events
-
-
 def _task_events(
     sources: StatsSources, start: datetime, end: datetime, *, failures: list[str] | None = None
 ) -> list[Event]:
@@ -455,21 +405,6 @@ def _automation_events(
     return events
 
 
-def _note_events(
-    sources: StatsSources, start: datetime, end: datetime, *, failures: list[str] | None = None
-) -> list[Event]:
-    events: list[Event] = []
-    for row in read_receipts(journal_path(sources.vault_root)):
-        if row.get("kind") != "note_apply" or row.get("status") != "applied":
-            continue
-        if row.get("changed") is False:
-            continue
-        at = _parse_ts(row.get("ts"))
-        if at is not None and start <= at < end:
-            events.append(Event("note_updated", at))
-    return events
-
-
 def collect_events(
     sources: StatsSources, start: datetime, end: datetime, *, failures: list[str] | None = None
 ) -> list[Event]:
@@ -480,10 +415,8 @@ def collect_events(
     return [
         *_chat_events(sources, start, end, failures=failures),
         *_turn_events(sources, start, end, failures=failures),
-        *_proposal_events(sources, start, end, failures=failures),
         *_task_events(sources, start, end, failures=failures),
         *_automation_events(sources, start, end, failures=failures),
-        *_note_events(sources, start, end, failures=failures),
     ]
 
 
@@ -506,12 +439,6 @@ def bucket_events(events: Iterable[Event], tz: tzinfo | None) -> dict[date, DayB
             )
         elif event.kind == "chat_archived":
             bucket.chats_archived += 1
-        elif event.kind == "proposal_decided":
-            bucket.proposed += 1
-            if event.accepted:
-                bucket.accepted += 1
-        elif event.kind == "proposal_pending":
-            bucket.proposed += 1
         elif event.kind == "task_completed":
             bucket.tasks_completed += 1
         elif event.kind == "automation_run":
@@ -520,8 +447,6 @@ def bucket_events(events: Iterable[Event], tz: tzinfo | None) -> dict[date, DayB
             bucket.tokens += event.tokens
             if event.model:
                 bucket.models[event.model] = bucket.models.get(event.model, 0) + 1
-        elif event.kind == "note_updated":
-            bucket.notes_updated += 1
     return buckets
 
 
@@ -537,7 +462,6 @@ def _totals(buckets: list[DayBucket]) -> dict[str, int]:
         "chats_opened": sum(b.chats_opened for b in buckets),
         "messages_sent": sum(b.messages_sent for b in buckets),
         "chats_archived": sum(b.chats_archived for b in buckets),
-        "memories_saved": sum(b.accepted for b in buckets),
         "tasks_completed": sum(b.tasks_completed for b in buckets),
         "projects_worked_on": len(projects),
         "automation_runs": sum(b.automation_runs for b in buckets),
@@ -605,11 +529,6 @@ def build_response(
             {"project_id": project_id, "name": name, "messages": count}
             for project_id, name, count in ranked_projects
         ],
-        "memory_pipeline": {
-            "proposed": sum(b.proposed for b in current),
-            "accepted": sum(b.accepted for b in current),
-            "notes_updated": sum(b.notes_updated for b in current),
-        },
         "hours": hours,
         "models": [
             {"model": model, "turns": turns}

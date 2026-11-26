@@ -5,7 +5,7 @@ an arbitrary Markdown file has no managed write of its own, so an edit to it
 could be neither recovered nor undone. This module adds exactly one such write —
 a single existing ``.md`` file inside the canonical configured vault — and
 nothing else. It is a foundation for the note business rules, not those rules:
-there is no evidence policy, no proposal or check-state settlement, no
+there is no evidence policy, no settlement, no
 retirement or deletion, and no caller-facing surface here.
 
 **The transaction is whole-note; a range is a composition.** There is no range
@@ -35,7 +35,7 @@ The protocol is the receipt protocol, narrowed to a file:
 * **Bytes, not text.** The note is read with ``read_bytes`` and decoded with
   strict UTF-8, and the replacement is written as bytes, so a BOM, a CRLF pair
   and a final line without a newline all survive verbatim. A revision is
-  :func:`ciao.memory_receipts.content_revision` over that exact decoded text,
+  :func:`ciao.file_kernel.content_revision` over that exact decoded text,
   so the revision a caller must present is the one it read.
 * **The expected revision is mandatory.** This primitive never overwrites a
   note it has not read: an empty ``expected_revision`` is refused rather than
@@ -46,7 +46,7 @@ The protocol is the receipt protocol, narrowed to a file:
   ``applied`` row that History can read but not undo, which is the one outcome
   this protocol exists to prevent.
 * **Prepare, write, confirm, under one lock.** The per-file
-  :func:`ciao.memory_receipts.queue_lock` covers the read, the revision check,
+  :func:`ciao.file_kernel.queue_lock` covers the read, the revision check,
   the ``prepared`` row, the sibling-temp write and the ``os.replace``, and the
   revision is rechecked immediately before the rename. A journal that cannot
   record the ``prepared`` row aborts the write: no evidence, no mutation.
@@ -168,8 +168,7 @@ def _on_disk_name(parent: Path, part: str) -> Path:
     A case-insensitive filesystem resolves ``Notes/A.md`` and ``notes/a.md`` to
     one file while the two strings stay different, and everything keyed off the
     string then splits in two: the per-file lock (keyed by the resolved path),
-    the ``relative_path`` a receipt records, the key a verification check is
-    filed under. A second writer reaching the same note through the other
+    the ``relative_path`` a receipt records. A second writer reaching the same note through the other
     spelling takes a different lock and both revisions compare equal, so one
     write silently lands on top of the other. The directory listing is the only
     place the real spelling exists, so the walk reads it and takes that.
@@ -224,7 +223,7 @@ def resolve_note_path(vault_root: Path | str, relative_path: str) -> Path:
     ``relative_path`` (see :func:`_on_disk_name`).
 
     The app's own bookkeeping under ``Workspace/`` is refused as a target: the
-    proposal queue, the curation logs and their neighbours are managed by the
+    Unsure list, the curation logs and their neighbours are managed by the
     pipelines that own them, each with its own atomic write, and a note write
     bypassing those would be an ordinary-looking undo of a file the user never
     edited.
@@ -395,7 +394,7 @@ def commit_note_change(
 
     ``relative_path`` names an existing regular ``.md`` file inside
     ``vault_root``; ``expected_revision`` is the
-    :func:`ciao.memory_receipts.content_revision` of the exact text the caller
+    :func:`ciao.file_kernel.content_revision` of the exact text the caller
     read. A stale expectation raises :class:`ciao.memory_receipts.RevisionConflict`
     with the note untouched, which is how a concurrent managed write or a
     direct edit is reported rather than overwritten.
@@ -570,7 +569,7 @@ def _commit_note_change(
 # ── Managed entry-range edits ──────────────────────────────────────────────
 #
 # One list item is the smallest thing a person maintains in a note, and it is
-# the smallest thing a verification can act on: a whole-note write to change one
+# the smallest thing a person edits on its own: a whole-note write to change one
 # fact rewrites every other fact in the file, and a whole-file retirement to
 # drop one fact takes the rest with it. So there is a managed edit for one entry's
 # exact span — and it is a *composition*, not a second transaction.
@@ -651,7 +650,7 @@ def compose_entry_edit(
 
     A re-stamp is not a separate case here: it is a replacement whose
     :func:`ciao.note_entries.refresh_fingerprint` is unchanged, which is exactly
-    what :func:`ciao.entry_verification.stamp_entry` produces. Splicing the
+    what a re-stamp produces. Splicing the
     opening line alone would be byte-identical for that call, and strictly more
     dangerous for every other one: a caller who passed just the new opening line
     for a multi-line entry would silently lose the entry's continuation lines,
@@ -723,9 +722,7 @@ def after_entry_line(text: str, end: int) -> str:
     may have no terminator at all, and then there is nothing to consume and the
     tail is returned unchanged.
 
-    Public because :func:`ciao.note_edit_proposals.entry_replacement` inverts the
-    same splice: it has to know which bytes the delete consumed to recognise the
-    after image this function produced, or the two disagree about a first-line
+    Public so a caller can know which bytes the delete consumed, for a first-line
     bullet in a note with no frontmatter.
     """
     if text[end : end + 2] == "\r\n":
@@ -777,9 +774,8 @@ def apply_entry_edit(
 
     Returns that same receipt. ``delete=True`` removes the entry and its line, and
     is reversible exactly like any other edit: the whole file comes back through
-    undo, and the row says which entry it was. A *whole-note* retirement is
-    still :func:`ciao.vault_review.trash_note`'s, and this module has no trash,
-    no delete and no archive of its own.
+    undo, and the row says which entry it was. This module has no trash,
+    no whole-note delete and no archive of its own.
     """
     root = canonical_vault(vault_root)
     target = resolve_note_path(root, relative_path)

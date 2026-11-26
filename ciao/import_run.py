@@ -10,8 +10,7 @@ This is that flow, and it is the only new module in C7.
 
 **The only durable write in this child is C4's ``append_proposals``.** No region,
 doc, entity or learning write, no control plane, no chat, no model call of its
-own. A person still presses accept, through the existing
-:func:`ciao.memory_proposals.accept_region_fact` path, with the fact's own
+own. A person ticks the line and the agent writes the fact with its own
 ``[as-of:]`` date — the *source* message's, which C4 appends from the session
 and never the import date.
 

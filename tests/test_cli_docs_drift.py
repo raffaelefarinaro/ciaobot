@@ -205,13 +205,6 @@ def test_core_prompt_synopsis_matches_the_parsers() -> None:
         assert command in text, command
 
 
-def test_prompt_reference_names_promoted_dismissal() -> None:
-    section = re.search(r"<ciaobot_cli_reference>(.*?)</ciaobot_cli_reference>", PROMPT, re.S)
-    assert section, "the core prompt lost its <ciaobot_cli_reference> section"
-    assert "--promoted" in section.group(1)
-    assert "--days-of-week" in section.group(1)
-
-
 def test_prompt_synopsis_rejects_an_unknown_flag_or_verb() -> None:
     agent, operator = _all_leaves()
     surface = {**agent, **operator}
@@ -226,9 +219,8 @@ def test_prompt_synopsis_holds_every_named_verb_to_every_flag() -> None:
     surface = {**agent, **operator}
     wrong_task = "task update|move|complete|delegate|add-update|link-chat ID --revision REV [--to STATUS] [--text-file F]"
     assert any("--to" in p for p in prompt_problems([wrong_task], surface))
-    assert prompt_problems(["vault review list|show|keep [--candidate ID]"], surface)
-    assert prompt_problems(["vault review list --candidate ID"], surface)
-    assert prompt_problems(["vault review show PATH"], surface) == []
+    assert prompt_problems(["note create|related --type T"], surface)
+    assert prompt_problems(["note related PATH [--limit N]"], surface) == []
     assert prompt_problems(["task move ID --revision REV --to backlog"], surface) == []
 
 
@@ -242,19 +234,12 @@ def test_skill_tables_match_the_parsers() -> None:
 
 @pytest.mark.parametrize(
     "command",
-    ["memory-proposal-add", "observation-add", "skill-draft-add", "skill-draft-approve"],
+    ["proposal-check"],
 )
 def test_queue_filing_commands_are_documented(command: str) -> None:
     _, operator = _all_leaves()
     assert (command,) in operator
     assert (command,) in documented_in_skill(set(operator) | set(agent_surface()))
-
-
-def test_skill_documents_the_origins_input() -> None:
-    row = next(line for line in SKILL.splitlines() if line.startswith("| `skill-proposal-add"))
-    for word in ("origins", "learning_id", "finding", "source_revision", "summary"):
-        assert word in row
-    assert "non-empty `sources` list whose" not in row
 
 
 def test_a_removed_flag_fails_the_comparison() -> None:

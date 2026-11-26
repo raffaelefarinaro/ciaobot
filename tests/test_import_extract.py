@@ -284,7 +284,7 @@ async def test_injection_transcript_files_proposals_and_no_durable_write(
     ``append_learning`` raise: a promotion is then a failure, not an absence.
     """
     import ciao.control_plane as control_plane
-    import ciao.memory_proposals as mp
+    import ciao.learnings_writer as mp
     from ciao import memory_tool as mt
 
     def _forbidden(*args: object, **kwargs: object):

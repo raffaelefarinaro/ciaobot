@@ -272,7 +272,7 @@ from markdown_it import MarkdownIt
 from markdown_it.token import Token
 
 from ciao.os_support.media_types import guess_type as guess_media_type
-from ciao import cli_envelopes, repo_link, repo_location, vault_review
+from ciao import cli_envelopes, project_folder_move, repo_link, repo_location
 from ciao.agent_surface import AGENT_TOKEN_ENV, AGENT_URL_ENV
 from ciao.config import (
     CLAUDE_MODELS,
@@ -2516,7 +2516,7 @@ class ProjectChatManager:
             "at most a few top resources to `Resources/`. Create an entity "
             "folder only when a confirmed fact needs it, never an empty one, "
             "and put anything you are not sure about in "
-            "`Workspace/Memory-Proposals.md` instead of filing it."
+            "`Workspace/Unsure.md` instead of filing it."
         )
 
         # One block, both shapes, for the same reason as `memory_intro` and
@@ -2559,10 +2559,10 @@ class ProjectChatManager:
                 f"This is logical workspace **{workspace_name}**. Do not create a second personal/work split inside it.\n\n"
                 f"Your task is to onboard the user and adapt this existing folder into the current Ciaobot vault layout:\n"
                 f"1. **Inventory first**: Scan the vault and report its top-level files and folders, separating user notes from Ciaobot-managed files (`.env`, `.runtime/`, `.claude/`, `AGENTS.md`). Do not assume an unfamiliar folder is disposable. {known_state}\n"
-                f"2. **Current structure**: The required vault roots are `MEMORY.md`, generated `INDEX.md`, `projects/active/`, `projects/completed/`. `Workspace/` is for cross-project learnings and memory proposals. Entity folders such as `People/`, `Ideas/`, `Resources/`, `Places/`, and `Documents/` are created only when useful. `Templates/` and `personal/`/`work/` are not required by the current layout. Chat transcripts are archived by Ciaobot under the workspace's own `Logs/Chats/`, outside the vault; never create or edit it.\n"
+                f"2. **Current structure**: The required vault roots are `MEMORY.md`, generated `INDEX.md`, `projects/active/`, `projects/completed/`. `Workspace/` is for cross-project learnings, the Unsure list and proposal files. Entity folders such as `People/`, `Ideas/`, `Resources/`, `Places/`, and `Documents/` are created only when useful. `Templates/` and `personal/`/`work/` are not required by the current layout. Chat transcripts are archived by Ciaobot under the workspace's own `Logs/Chats/`, outside the vault; never create or edit it.\n"
                 f"3. **Preserve before reorganizing**: Existing files and content are the source of truth. Never delete or overwrite them. Reorganize only when the classification is clear: active projects go under `projects/active/<slug>/`, completed projects under `projects/completed/<slug>/`, people under `People/`, and reusable cross-project lessons under `Workspace/Learnings.md`. Leave ambiguous or unsupported material in place and report it. Use the existing Git history as the rollback point and keep a concise curation summary.\n"
                 f"4. **Core-file hygiene**: Preserve an existing `MEMORY.md`; create it only if missing. Preserve the existing `AGENTS.md` and add any missing bounded regions without replacing user instructions: `<!-- ciao:memory:start cap=3000 -->` / `<!-- ciao:memory:end -->` and `<!-- ciao:profile:start cap=1375 -->` / `<!-- ciao:profile:end -->`.\n"
-                f"5. **Initial memory curation**: {interview} Then run an initial curation in this chat: search for duplicates, put reusable lessons in `Workspace/Learnings.md`, and put uncertain cross-project facts in `Workspace/Memory-Proposals.md`. Identity and communication style belong in the `ciao:profile` region; cross-project preferences and environment facts belong in `ciao:memory`; project-specific facts do not belong in bounded memory.\n"
+                f"5. **Initial memory curation**: {interview} Then run an initial curation in this chat: search for duplicates, put reusable lessons in `Workspace/Learnings.md`, and put uncertain cross-project facts in `Workspace/Unsure.md`. Identity and communication style belong in the `ciao:profile` region; cross-project preferences and environment facts belong in `ciao:memory`; project-specific facts do not belong in bounded memory.\n"
                 f"6. **Explain memory early**: Before or right after the interview, tell the user there are two layers: the bounded profile and preferences Ciaobot keeps in `AGENTS.md` and loads into every conversation, and durable notes filed by category (currently {category_names or 'the categories this workspace uses'}). Point them at Memory → Categories as the one place categories are added, renamed or turned off, and say that archiving a chat is what turns it into filed memories and proposals. Do not run a second interview round about categories, do not scan past chats, and do not import anything.\n"
                 f"7. **Starting knowledge**: {starting_knowledge}\n"
                 f"8. **Verify**: After the curation, run `ciao vault-index --write`, `ciao vault-lint`, and `ciao os-audit --json` when available. Report what was created, moved, left untouched, and any unresolved findings.\n"
@@ -2589,7 +2589,7 @@ class ProjectChatManager:
                 f"1. **Current structure**: Use `MEMORY.md`, generated `INDEX.md`, `projects/active/`, `projects/completed/`. Create `Workspace/`, `People/`, `Ideas/`, `Resources/`, `Places/`, or `Documents/` only when the user's confirmed knowledge needs them. Do not create `personal/`, `work/`, or `Templates/` as required directories. Chat transcripts are archived by Ciaobot under the workspace's own `Logs/Chats/`, outside the vault; never create or edit it.\n"
                 f"2. **Core files**: Setup has already seeded the workspace-level `AGENTS.md` and the vault-level `MEMORY.md`, `INDEX.md`, and General project. Preserve them and add only missing content. `AGENTS.md` must contain both bounded regions with their exact fenced markers: `<!-- ciao:memory:start cap=3000 -->` / `<!-- ciao:memory:end -->` and `<!-- ciao:profile:start cap=1375 -->` / `<!-- ciao:profile:end -->`.\n"
                 f"3. **Known state first**: {known_state}\n"
-                f"4. **Onboarding interview and curation**: {interview} Then route confirmed facts correctly: identity/style to the `ciao:profile` region, cross-project preferences/environment to `ciao:memory`, and reusable lessons to `Workspace/Learnings.md`. Put uncertain durable facts in `Workspace/Memory-Proposals.md` for review.\n"
+                f"4. **Onboarding interview and curation**: {interview} Then route confirmed facts correctly: identity/style to the `ciao:profile` region, cross-project preferences/environment to `ciao:memory`, and reusable lessons to `Workspace/Learnings.md`. Put uncertain durable facts on `Workspace/Unsure.md`.\n"
                 f"5. **Explain memory early**: Before or right after the interview, tell the user there are two layers: the bounded profile and preferences Ciaobot keeps in `AGENTS.md` and loads into every conversation, and durable notes filed by category (currently {category_names or 'the categories this workspace uses'}). Point them at Memory → Categories as the one place categories are added, renamed or turned off, and say that archiving a chat is what turns it into filed memories and proposals. Do not run a second interview round about categories, do not scan past chats, and do not import anything.\n"
                 f"6. **Starting knowledge**: {starting_knowledge}\n"
                 f"7. **Verify**: Run `ciao vault-index --write`, `ciao vault-lint`, and `ciao os-audit --json` when available, then report the resulting structure.\n"
@@ -4063,7 +4063,7 @@ class ProjectChatManager:
                     note=note,
                     recorded_at=recorded_at,
                 )
-                vault_review.move_project_folder(
+                project_folder_move.move_project_folder(
                     self._workspace_vault_root(project.workspace).resolve(),
                     src,
                     dst,
@@ -4180,7 +4180,7 @@ class ProjectChatManager:
                 f"An active project folder named {stem!r} already exists."
             )
 
-        vault_review.move_project_folder(
+        project_folder_move.move_project_folder(
             self._workspace_vault_root(workspace).resolve(),
             src,
             dst,
@@ -5599,43 +5599,6 @@ class ProjectChatManager:
             except Exception:  # noqa: BLE001 — the row is advisory; never break a delete
                 logger.exception("Could not settle the retrying schedule run for %s", chat_id)
         return True
-
-    async def _maybe_archive_proposal_helper(self, chat_id: str) -> bool:
-        """Archive a clean resolution helper once all owned proposals are gone."""
-        chat = self._chats.get(chat_id)
-        if chat is None or chat.archived:
-            return False
-        helper = chat_service._normalize_chat_helper(chat.helper)
-        if helper.get("archive_policy") != "when_resolved":
-            return False
-        if (
-            self._broker.get(chat_id) is not None
-            or chat.last_response_status != "success"
-            or not chat.last_response.strip()
-            or chat.pending_question
-            or chat.pending_permission
-            or chat.retry_status
-            or self._provider_background_busy(chat_id, self._providers.get(chat_id))
-        ):
-            return False
-        try:
-            from ciao.proposal_tracking import pending_proposal_ids
-
-            pending = pending_proposal_ids(self._config)
-        except Exception:  # noqa: BLE001 — uncertainty must keep the chat visible
-            logger.exception("Could not verify proposal helper %s", chat_id)
-            return False
-        pending_bases = {pid.split(":", 1)[0] for pid in pending}
-        if any(
-            pid in pending or pid.split(":", 1)[0] in pending_bases
-            for pid in helper["proposal_ids"]
-        ):
-            return False
-        project = self._projects.get(chat.project_id)
-        outcome = await self.archive_chat(chat_id)
-        if outcome is not None:
-            await self.run_archive_postprocess(chat_id, outcome, chat, project)
-        return bool(chat.archived)
 
     # ── Memory pass ──────────────────────────────────────────────────────
     #
@@ -9734,10 +9697,6 @@ class ProjectChatManager:
             return False
         project_id, title, snippet = parked
         self._announce_result_ready(chat_id, project_id, title, snippet)
-        self._spawn_detached(
-            self._maybe_archive_proposal_helper(chat_id),
-            f"archive-proposal-helper-{chat_id}",
-        )
         self._spawn_detached(
             self._memory_pass_turn_finished(chat_id),
             f"memory-pass-{chat_id}",

@@ -1373,33 +1373,6 @@ def test_an_entry_edit_replaces_exactly_its_span_and_preserves_the_rest(
     assert mr.is_undoable(receipt) is True
 
 
-def test_a_stamp_only_edit_leaves_the_fingerprint_alone(tmp_path: Path) -> None:
-    """A re-stamp changes the date on the line and nothing the fact says.
-
-    That is what `should_check_entry` relies on to tell a re-stamp from a
-    re-wording: the fingerprint ignores the stamp token, so a verified fact is
-    not asked about again tonight, while edited prose is.
-    """
-    from ciao import entry_verification as ev
-
-    vault = _vault(tmp_path)
-    text = _entry_text("2026-01-01")
-    path = _write(vault, ENTRY_NOTE, text)
-    entry = _entries(vault, text)[0]
-
-    stamped = ev.stamp_entry(entry.text, "2026-09-19")
-    _apply_entry(vault, path, entry, replacement=stamped)
-
-    after = path.read_bytes().decode("utf-8")
-    reparsed = ne.parse_note_entries(
-        after, note_path=ENTRY_NOTE, workspace=WORKSPACE
-    ).entries[0]
-    assert "[verified: 2026-09-19]" in after
-    assert reparsed.fingerprint == entry.fingerprint
-    assert reparsed.verified is not None
-    assert reparsed.verified.isoformat() == "2026-09-19"
-
-
 def test_deleting_an_entry_takes_its_line_and_leaves_no_gap(tmp_path: Path) -> None:
     """A list item's line is what delimits it; a blank left behind reads as a gap.
 

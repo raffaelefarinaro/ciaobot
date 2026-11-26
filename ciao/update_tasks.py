@@ -153,8 +153,6 @@ from pathlib import Path
 from typing import Any
 
 from ciao.async_reads import keyed_lock, run_read
-from ciao.learning_records import LEARNINGS_RELATIVE
-from ciao.file_kernel import content_revision
 from ciao.update_task_catalog import TaskCatalog, UpdateTask, load_catalog
 
 logger = logging.getLogger(__name__)
@@ -289,204 +287,6 @@ Probe = Callable[..., Detection]
 
 #: The registries live at the foot of the probe section below, next to the
 #: functions they name.
-
-
-# ── The Learnings cleanup probes (#728-E) ───────────────────────────────────
-
-
-def _learnings_queue_drain_needed(
-    *, config: Any, workspace: str = "", today: date | None = None
-) -> Detection:
-    """Whether the legacy pending queue contains rows the drain understands."""
-    vault = _workspace_vault(config, workspace)
-    if vault is None:
-        raise ValueError("no workspace vault is registered for this task")
-    from ciao.learnings_queue_drain import inspect
-
-    result = inspect(vault, workspace=workspace, runtime_root=_runtime_root(config))
-    if result["failed"]:
-        raise ValueError("could not inspect pending learning drain state")
-    rows = int(result["automatic_rows"])
-    suppressed = len(result["suppressed_rows"])
-    unresolved = len(result["unresolved"])
-    return Detection(
-        rows > 0 or suppressed > 0 or unresolved > 0,
-        {"rows": rows, "suppressed": suppressed, "unresolved": result["unresolved"]},
-    )
-
-
-def _learnings_queue_drain_recorded(
-    *, config: Any, workspace: str = "", today: date | None = None
-) -> Detection:
-    """Whether a drain receipt exists for this registered vault."""
-    vault = _workspace_vault(config, workspace)
-    if vault is None:
-        raise ValueError("no workspace vault is registered for this task")
-    from ciao.learnings_queue_drain import inspect
-
-    result = inspect(vault, workspace=workspace, runtime_root=_runtime_root(config))
-    pending = int(result["automatic_rows"])
-    suppressed = len(result["suppressed_rows"])
-    recorded = bool(result["applied_receipts"] or result["reverted_receipts"])
-    complete = (
-        recorded
-        and pending == 0
-        and suppressed == 0
-        and not result["unresolved"]
-        and not result["failed"]
-    )
-    return Detection(
-        complete,
-        {
-            "receipt_recorded": recorded,
-            "pending": pending,
-            "suppressed": suppressed,
-            "unresolved": result["unresolved"],
-        },
-    )
-
-
-def _learnings_cleanup_review_needed(
-    *, config: Any, workspace: str = "", today: date | None = None
-) -> Detection:
-    """Whether this workspace has learnings entries only a person can judge.
-
-    Applicable exactly when the reconciliation has rows it will *not* retire —
-    an entry nothing has ever proposed, one whose finding is still open, one
-    routed only to an upstream issue, or a line the parser cannot read. Those are
-    the rows the attended ``ciao learnings-cleanup`` workflow exists for, and an
-    empty set of them means the unattended pass is already doing everything this
-    engine can do on its own, so there is nothing to offer.
-
-    The evidence is the counts, not a boolean, so the fingerprint changes when a
-    new entry appears and the task comes back — which is the behaviour a person
-    wants: a document that gained a lesson is a document that has not been
-    reviewed.
-
-    Never a false negative that hides a row: an exception becomes
-    ``Detection(applicable=False, …)`` only where the underlying planner has
-    already refused to act (:attr:`~ciao.learnings_cleanup.CleanupPlan.blocked`),
-    and a genuine failure raises so :func:`apply_detector` records ``unknown``.
-    """
-    from ciao import learnings_cleanup
-
-    vault_root = _workspace_vault(config, workspace)
-    if vault_root is None:
-        raise ValueError("no workspace vault is registered for this task")
-    plan = learnings_cleanup.plan_cleanup(
-        vault_root, workspace=workspace, config=config, today=today
-    )
-    if plan.blocked:
-        return Detection(False, {"blocked": plan.blocked})
-    counts = plan.counts
-    outstanding = counts["keep"] + counts["conflict"]
-    return Detection(
-        outstanding > 0,
-        {
-            "active": counts["active"],
-            "removable": counts["remove"],
-            "kept": counts["keep"],
-            "unreadable": counts["conflict"],
-            "unmatched": counts["unmatched"],
-            "reasons": sorted({row.reason for row in plan.kept}),
-            "revision": plan.revision,
-        },
-    )
-
-
-def _review_is_attended(receipt: dict[str, Any]) -> bool:
-    """Whether a person stands behind this receipt, rather than a flag.
-
-    Three shapes of receipt land in the same directory and only one of them is a
-    review of anything:
-
-    * the attended workflow, ``ciao learnings-cleanup --apply --approval-file``,
-      which records ``reviewed`` — or names the rows it approved, each with the
-      reason and the evidence a person wrote for it;
-    * the nightly pass, ``--apply-settled``, which retires the rows the fold
-      already proposed and certifies nothing. It writes a receipt too, because a
-      removal without one could not be reversed, so "a receipt exists" is not the
-      test — ``removed_by`` is in every receipt for exactly this question;
-    * a run that persisted its receipt and then failed at, or died before, the
-      document write. Nothing was reviewed and nothing was removed.
-
-    The last two are the reason this is a positive test on ``reviewed``/``approvals``
-    rather than a check that the receipt is merely well-formed. A completion check
-    that a flag can satisfy is not a review, and the task it closes is the one
-    asking a person to look.
-    """
-    if str(receipt.get("removed_by") or "") == "system":
-        return False
-    return bool(receipt.get("reviewed") or receipt.get("approvals"))
-
-
-def _learnings_cleanup_review_recorded(
-    *, config: Any, workspace: str = "", today: date | None = None
-) -> Detection:
-    """Whether a durable cleanup receipt exists for the document as it stands.
-
-    A receipt, not a chat. The postcondition is "a person looked at this file as
-    it is now and said what should go", and the only durable record of that is the
-    receipt ``ciao learnings-cleanup --apply --approval-file`` writes — including
-    when it removed nothing, which is why a fully reviewed no-op completes and
-    generating the table does not.
-
-    "As it stands" is checked, not assumed, and it is checked on the right side of
-    the receipt's own write. A receipt names two revisions: a run that removed
-    something is only a review of the document that is there now when the write
-    *landed*, so it must be ``revision_after``. Its ``revision_before`` is the
-    revision the file still has precisely when the write did not happen — a
-    receipt persisted by a run that then failed is a review of nothing, and
-    accepting that side is how a run that removed no bytes at all comes to
-    certify a cleanup. A no-op removed nothing, so there was no second write and
-    both sides name the reviewed revision; it matches on ``revision_before``.
-
-    A receipt for a document that has since been edited is not a review of this
-    document, and treating it as one is how a stale cleanup comes to certify
-    itself.
-    """
-    from ciao.learnings_cleanup import read_receipt
-
-    del today  # the check is about the file, not about a date
-    vault_root = _workspace_vault(config, workspace)
-    if vault_root is None:
-        raise ValueError("no workspace vault is registered for this task")
-    current = _learnings_revision(vault_root)
-    if current is None:
-        return Detection(False, {"reason": "no_learnings_document"})
-
-    directory = _runtime_root(config) / "migration"
-    if not directory.is_dir():
-        return Detection(False, {"reason": "no_review_receipt", "revision": current})
-    newest: dict[str, Any] | None = None
-    for path in sorted(directory.glob("learnings-cleanup-*.json")):
-        receipt = read_receipt(path)
-        if receipt is None or str(receipt.get("workspace") or "") != workspace:
-            continue
-        if not _review_is_attended(receipt):
-            continue
-        side = (
-            "revision_before"
-            if int(receipt.get("entries_removed") or 0) == 0
-            else "revision_after"
-        )
-        if str(receipt.get(side) or "") != current:
-            continue
-        if newest is None or str(receipt.get("removed_at") or "") > str(
-            newest.get("removed_at") or ""
-        ):
-            newest = receipt
-    if newest is None:
-        return Detection(False, {"reason": "no_review_receipt", "revision": current})
-    return Detection(
-        True,
-        {
-            "receipt": newest.get("removed_at", ""),
-            "removed": int(newest.get("entries_removed") or 0),
-            "approvals": len(newest.get("approvals") or {}),
-            "revision": current,
-        },
-    )
 
 
 # ── The person re-home probes (#833) ─────────────────────────────────────────
@@ -792,23 +592,6 @@ def _runtime_root(config: Any) -> Path:
     return Path(config.state_path).parent
 
 
-def _learnings_revision(vault_root: Path) -> str | None:
-    """The document's whole-file revision, or ``None`` when there is no file.
-
-    Decoded from bytes for the same reason every other read of this file is: a
-    CRLF document hashed through ``read_text`` would not match the revision the
-    cleanup receipt recorded, and the check would then never be satisfied for a
-    Windows-authored vault.
-    """
-    path = vault_root / LEARNINGS_RELATIVE
-    if not path.is_file():
-        return None
-    try:
-        return content_revision(path.read_bytes().decode("utf-8"))
-    except (OSError, UnicodeDecodeError):
-        return None
-
-
 #: Every detector this engine ships. All are read-only, and all are registered in
 #: :data:`ciao.update_task_catalog.DETECTORS`, so a catalog row cannot name
 #: anything this engine has no code for. The functions live here rather than in
@@ -816,8 +599,6 @@ def _learnings_revision(vault_root: Path) -> str | None:
 #: bodies import lazily, because a Home render that does not touch Learnings or
 #: a vault should not pay for either module.
 DETECTOR_FUNCTIONS: dict[str, Probe] = {
-    "learnings-queue-drain-needed": _learnings_queue_drain_needed,
-    "learnings-cleanup-review-needed": _learnings_cleanup_review_needed,
     "unrehomed-people-review-needed": _unrehomed_people_rehome_needed,
     "vault-relocate-review-needed": _vault_relocate_needed,
 }
@@ -826,8 +607,6 @@ DETECTOR_FUNCTIONS: dict[str, Probe] = {
 #: means :func:`record_completion` records nothing, which is the point: a task is
 #: never marked done because nobody wrote the check that would prove it.
 COMPLETION_FUNCTIONS: dict[str, Probe] = {
-    "learnings-queue-drain-recorded": _learnings_queue_drain_recorded,
-    "learnings-cleanup-review-recorded": _learnings_cleanup_review_recorded,
     "unrehomed-people-rehome-recorded": _unrehomed_people_rehome_recorded,
     "vault-relocate-recorded": _vault_relocate_recorded,
 }
@@ -1809,10 +1588,7 @@ def _evaluate_off_loop(
                 },
             )
             continue
-        # A reverted drain restores its source rows after the task was marked
-        # complete. Re-scan this small queue on each listing so that reversal
-        # makes the workspace task actionable again without waiting out the TTL.
-        hit = None if task.id == "learnings-queue-drain" else cached.get(key)
+        hit = cached.get(key)
         if hit is not None:
             results[identity] = hit
             continue
@@ -1824,30 +1600,10 @@ def _evaluate_off_loop(
         # is on disk can be settled even on the turn where its detector is
         # unwell.
         fresh.add(identity)
-        if _is_cacheable(answer) and task.id != "learnings-queue-drain":
+        if _is_cacheable(answer):
             computed[key] = answer
     if computed:
         _store_results(computed, token, instant)
-    for task in tasks:
-        identity = (task.id, task.revision)
-        state = states.get(identity)
-        if (
-            task.id == "learnings-queue-drain"
-            and state is not None
-            and state.lifecycle == "completed"
-            and results[identity].status == APPLICABLE
-        ):
-            try:
-                _reopen_completed_drain_task(task, config=config, workspace=workspace)
-            except (UpdateTaskStateError, OSError) as exc:
-                logger.warning(
-                    "update task %s@%s: work became applicable again but the completed record "
-                    "could not be reopened (%s)",
-                    task.id,
-                    task.revision,
-                    exc,
-                )
-            states[identity] = read_task_state(task, config=config, workspace=workspace)
     _settle(tasks, states, config, workspace, fresh)
     return [
         TaskStatus(
@@ -1857,28 +1613,6 @@ def _evaluate_off_loop(
         )
         for task in tasks
     ]
-
-
-def _reopen_completed_drain_task(
-    task: UpdateTask, *, config: Any, workspace: str
-) -> TaskState | None:
-    """Re-offer only a completed drain whose fresh detector found work again."""
-    with _record_lock(task, config, workspace) as (path, previous):
-        if previous is None or previous.lifecycle != "completed":
-            return previous
-        state = TaskState(
-            task_id=task.id,
-            revision=task.revision,
-            scope=task.scope,
-            lifecycle="offered",
-            updated_at=_stamp(datetime.now(UTC)),
-            attempted_fingerprint="",
-            evidence={"completion_reversed": True},
-            chat_id=previous.chat_id,
-            prompt_digest=previous.prompt_digest,
-        )
-        _write_record(path, state)
-    return state
 
 
 def _settle(

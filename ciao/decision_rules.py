@@ -1,8 +1,8 @@
 """Standing review rules distilled from the operator's recorded decisions (#1745).
 
-Two decision logs exist: memory proposal decisions (``Memory-Proposals``
-sidecars, with an optional reason) and task decisions (``Task-Decisions.jsonl``).
-The weekly care pass reduces each to one operator-editable vault note,
+Memory decisions are no longer recorded (the agent writes memory directly), so
+the only decision log is the task decisions (``Task-Decisions.jsonl``). The
+weekly care pass reduces it to one operator-editable vault note,
 ``Workspace/Memory-Review-Rules.md`` and ``Workspace/Task-Rules.md``, and the
 memory pass and task delegation read the note back as quoted evidence.
 
@@ -28,7 +28,7 @@ from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
-from ciao import memory_proposals, task_decisions
+from ciao import task_decisions
 from ciao.memory_tool import contains_invisible_unicode, write_guide_atomically
 from ciao.prompt_fence import fence
 
@@ -238,26 +238,6 @@ def _flip_fingerprint_rows(flips: list[dict[str, Any]], kind: str) -> list[tuple
     return rows
 
 
-def _entries_memory(
-    proposals: list[dict[str, Any]], cutoff: date
-) -> tuple[list[dict[str, Any]], dict[str, int]]:
-    operator: list[dict[str, Any]] = []
-    agent: dict[str, int] = {}
-    for row in proposals:
-        if row.get("outcome") == "swept":
-            continue
-        day = _day(row.get("ts"))
-        if day is None or day < cutoff:
-            continue
-        via = row.get("via")
-        if via == "pwa":
-            operator.append({**row, "_day": day.isoformat()})
-        elif via in ("agent", "auto"):
-            label = f"{row.get('kind', '')}:{row.get('action', '')}"
-            agent[label] = agent.get(label, 0) + 1
-    return operator, agent
-
-
 def _entries_task(
     rows: list[dict[str, Any]], cutoff: date
 ) -> tuple[list[dict[str, Any]], dict[str, int]]:
@@ -371,11 +351,13 @@ def build_digest(vault_root: Path, *, today: date, window_days: int = WINDOW_DAY
     its own past behaviour feeds itself.
     """
     cutoff = today - timedelta(days=window_days)
-    proposals_path = vault_root / RULES_DIR / "Memory-Proposals.md"
-    mem_rows, mem_agent = _entries_memory(memory_proposals.read_decisions(proposals_path), cutoff)
+    # Memory decisions are no longer recorded: the agent writes memory directly and
+    # Git is the record, so the memory section has no operator rows to distil.
+    mem_rows: list[dict[str, Any]] = []
+    mem_agent: dict[str, int] = {}
     task_rows, task_agent = _entries_task(task_decisions.read_decisions(vault_root), cutoff)
-    # Both flips are accepted through the memory review queue, so both
-    # approvals are read from the memory decisions.
+    # A rule flip is approved by a recorded memory decision; none are recorded now,
+    # so a flip stays unapproved.
     flips = [row for row in mem_rows if _FLIP_RE.match(str(row.get("text", "")))]
     plain = [row for row in mem_rows if row not in flips]
     approved = _flip_decisions(flips)

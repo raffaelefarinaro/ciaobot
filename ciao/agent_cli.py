@@ -123,14 +123,6 @@ CHAT_GET_RECENT_MESSAGES = 10
 #: Characters of one message's content `chat get` returns by default.
 CHAT_MESSAGE_MAX_CHARS = 2000
 
-_VAULT_REVIEW_HELP: dict[str, str] = {
-    "keep": "Keep a note and stamp its updated date.",
-    "trash": "Move a note to trash (reversible).",
-    "restore": "Restore a trashed note.",
-    "complete": "Close a project out into projects/completed/.",
-    "restore-completed": "Undo a project completion.",
-    "delete": "Permanently delete a trashed note.",
-}
 _CHAT_TARGET_HELP: dict[str, str] = {
     "get": "Get one chat's metadata and recent messages.",
     "archive": "Archive a chat to the vault.",
@@ -253,25 +245,13 @@ def build_parser() -> argparse.ArgumentParser:
     learn.add_argument("--text-file", required=True, help="File holding the lesson, one line.")
     learn.add_argument("--source", default="", help="Chat or archive id the lesson came from.")
     learn.add_argument("--request", default="", help="User-request id, for a /remember with no archived turn.")
-    learn.add_argument("--allow-dismissed", action="store_true", help="Record a lesson the user dismissed before.")
 
-    vault = _verbs(nouns.add_parser("vault", help="Vault search and review."))
+    vault = _verbs(nouns.add_parser("vault", help="Vault search."))
     search = vault.add_parser("search", help="Full-text search of the active vault.")
     search.add_argument("query")
     search.add_argument("--limit", type=int, default=10)
-    review = _verbs(vault.add_parser("review", help="Vault-note review queue."), dest="action")
-    review.add_parser("list", help="List review candidates (stale, orphaned, duplicate, weakly linked).")
-    show = review.add_parser("show", help="Show one candidate's evidence.")
-    show.add_argument("path")
-    # `restore-completed` is hyphenated like the rest of the verb surface; the
-    # action it maps to is the review module's own `restore_completed`.
-    for verb, verb_help in _VAULT_REVIEW_HELP.items():
-        sub = review.add_parser(verb, help=verb_help)
-        sub.add_argument("--candidate", required=True)
-        if verb == "delete":
-            sub.add_argument("--confirm", required=True, help="Repeat the candidate id.")
 
-    note = _verbs(nouns.add_parser("note", help="Vault notes: create one, relate, verify, share."))
+    note = _verbs(nouns.add_parser("note", help="Vault notes: create one, list the ones related to it."))
     create = note.add_parser("create", help="Create a vault note with canonical frontmatter.")
     create.add_argument("--type", required=True, dest="note_type", help="Category id or alias from VOCABULARY.md.")
     create.add_argument("--title", required=True, help="The note's title; it also names the file.")
@@ -293,20 +273,6 @@ def build_parser() -> argparse.ArgumentParser:
     related = note.add_parser("related", help="List the vault notes connected to one note.")
     related.add_argument("path", help="The note, vault-relative (People/Sofia.md).")
     related.add_argument("--limit", type=int, default=15, help="At most this many related notes (1-50).")
-    verify = note.add_parser("verify", help="Record one stale note's verification verdict.")
-    # A path, not the payload itself. The verdict's before/after text and its
-    # citations are user prose: as a shell argument it would be mangled by
-    # `$()`, backticks and quotes, and it would sit in the process table. The
-    # same rule as `skill-proposal-add --input-file` and `chat handover
-    # --messages`, and the server reads and bounds the document rather than the
-    # caller reading it and posting the parsed dict.
-    verify.add_argument(
-        "--payload-file",
-        required=True,
-        metavar="FILE",
-        help="JSON document holding the verdict: relative_path, expected_revision, "
-        "outcome, coverage, evidence, before/after, reason. Never pass the prose itself.",
-    )
 
     file_ = _verbs(nouns.add_parser("file", help="Surface a workspace file in the pinned panel."))
     surface = file_.add_parser("surface", help="Open a workspace file in the pinned panel.")
@@ -410,7 +376,7 @@ def build_parser() -> argparse.ArgumentParser:
     tcreate = task.add_parser("create", help="File a task.")
     tcreate.add_argument("--title", required=True)
     # The body is Markdown prose (description, links, acceptance criteria):
-    # a path, for the same reason `note verify --payload-file` is one.
+    # a path, because the body is Markdown prose the shell must not touch.
     tcreate.add_argument("--body-file", default=None, metavar="FILE", help="Markdown file holding the task body: @file.md or a plain path.")
     tcreate.add_argument("--project", default=None)
     tcreate.add_argument("--due", default=None, metavar="YYYY-MM-DD")
@@ -763,28 +729,12 @@ def resolve(args: argparse.Namespace) -> tuple[str, dict[str, Any]] | None:
                 "text": _learning_text_file(args.text_file),
                 "source": args.source,
                 "request": args.request,
-                "allow_dismissed": args.allow_dismissed,
             }
         return "memory_update", {"region": args.region, "action": args.action, "entry": args.entry, "match": args.match}
     if noun == "vault":
         if verb == "search":
             return "vault_search", {"query": args.query, "limit": args.limit}
-        action = args.action
-        if action == "list":
-            return "vault_review", {"action": "list"}
-        if action == "show":
-            return "vault_review", {"action": "inspect", "path": args.path}
-        if action == "keep":
-            return "vault_review", {"action": "decide", "candidate_id": args.candidate, "disposition": "keep"}
-        if action == "delete":
-            return "vault_review", {"action": "delete", "candidate_id": args.candidate, "confirm": args.confirm}
-        # Every remaining verb is its own action, and one is not spelled the same
-        # way: the CLI surface is hyphenated (`restore-completed`) while the
-        # review module's action is `restore_completed`. The verb stays as typed
-        # in `args.action`, so the translation belongs here rather than in the
-        # parser.
-        wire = "restore_completed" if action == "restore-completed" else action
-        return "vault_review", {"action": wire, "candidate_id": args.candidate}
+        raise AssertionError(f"unhandled vault verb {verb}")
     if noun == "note":
         if verb == "related":
             return "note_related", {"path": args.path, "limit": args.limit}
@@ -797,12 +747,7 @@ def resolve(args: argparse.Namespace) -> tuple[str, dict[str, Any]] | None:
                 "body_file": args.body_file or "",
                 "path": args.path,
             }
-        # The path crosses to the server as written. Reading the document here
-        # and posting the parsed object would move the size cap, the workspace
-        # confinement and the "is this actually a file" check into the one place
-        # that can be bypassed, for no gain: the payload is user prose the shell
-        # must not touch, and a path is not prose.
-        return "verify_note", {"payload_file": args.payload_file}
+        raise AssertionError(f"unhandled note verb {verb}")
     if noun == "file":
         return "file_surface", {"path": args.path}
     if noun == "chat":

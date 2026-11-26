@@ -16,8 +16,8 @@ file over ``GET``/``PATCH /api/memory/entity-types`` (:func:`effective_payload`
 and :func:`write_vault_file`), and the generated ``VOCABULARY.md`` names the
 categories it holds. The consumers read the registry: ``vault_index``'s
 ``canonical_type`` / ``scan_vault``, ``vault_lint``'s ``run_validation``,
-``memory_audit``'s staleness predicates, the entity-note writer
-(``ciao.memory_proposals.write_entity_note``, #637) and, for the bootstrap and
+``memory_audit``'s staleness predicates, the note writer
+(``ciao.note_create``, #637) and, for the bootstrap and
 re-home folds, ``config`` and ``vault_rehome``. Most take an optional
 ``registry=`` keyword and load one from the vault root they already hold when
 the caller passes none; the two that cannot — ``config``, which asks for the

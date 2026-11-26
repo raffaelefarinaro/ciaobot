@@ -1379,24 +1379,6 @@ def test_task_chat_autoarchive_preserves_any_user_followup() -> None:
     )
 
 
-def test_stale_completed_state_cannot_archive_chat_after_migration_undo() -> None:
-    from ciao import main
-
-    stale_state = SimpleNamespace(lifecycle="completed", chat_id="migration-helper")
-    clean = {
-        "failed": [],
-        "unresolved": [],
-        "automatic_rows": 0,
-        "suppressed_rows": [],
-    }
-    reverted = {**clean, "suppressed_rows": [{"text": "the user's restored row"}]}
-
-    assert main._may_archive_completed_learning_drain(clean, stale_state)
-    # evaluate() can fail to persist the reopened state. The independent queue
-    # inspection still has veto power over the stale completed state.
-    assert not main._may_archive_completed_learning_drain(reverted, stale_state)
-
-
 def test_real_app_registers_the_update_task_routes(tmp_path: Path) -> None:
     """The constructed application exposes every update-task endpoint."""
     app = web_app.create_app(_config(tmp_path))

@@ -25,9 +25,6 @@ BROWSER_OR_INTERNAL_ROUTES: dict[str, str] = {
     "/api/welcome/dismiss": (
         "Home welcome card's close control; deletes .runtime/welcome-pending for every device"
     ),
-    "/api/proposals/legacy-learning-dismiss": (
-        "Memory Review's exact queued legacy-row removal; signed-session browser action with the queue revision"
-    ),
     "/api/host/terminal": (
         "browser Open/Run in Terminal button; host-only (session + loopback peer + "
         "loopback Host), takes an action id or a chat/project id, never a command or a path"

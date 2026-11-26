@@ -8,7 +8,7 @@ and that the lookup leaves no trace (no search hits, no FTS database).
 from __future__ import annotations
 
 import asyncio
-from datetime import date, timedelta
+from datetime import date
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -18,8 +18,6 @@ import pytest
 from ciao import async_reads
 from ciao import control_plane as cp
 from ciao import memory_receipts as mr
-from ciao import file_kernel as fk
-from ciao import note_verification as nv
 from ciao.note_related import (
     LINKED_FROM,
     LINKS_TO,
@@ -57,7 +55,7 @@ def _note(
 
 
 def _related(vault: Path, relative: str = TARGET, **kwargs: Any) -> Any:
-    return find_related_notes(vault, relative, workspace="personal", today=TODAY, **kwargs)
+    return find_related_notes(vault, relative, workspace="personal", **kwargs)
 
 
 def _by_path(result: Any) -> dict[str, Any]:
@@ -118,92 +116,6 @@ def test_bookkeeping_is_never_related(tmp_path: Path) -> None:
     (vault / "Workspace" / "Memory-Proposals.md").write_text("- Maurizio is VP\n", encoding="utf-8")
 
     assert _related(vault).related == ()
-
-
-def test_each_related_note_carries_its_revision_and_due_flag(tmp_path: Path) -> None:
-    vault = _vault(tmp_path)
-    _note(vault, TARGET)
-    checked = _note(vault, "People/Sofia.md", "Maurizio is VP Marketing.")
-    _note(vault, "People/Luca.md", "Maurizio is Head of Sales.")
-    text = checked.read_text(encoding="utf-8")
-    nv.record_note_check(
-        vault,
-        nv.NoteCheck(
-            relative_path="People/Sofia.md",
-            content_revision=fk.content_revision(text),
-            outcome="unverified",
-            checked_at=TODAY,
-            retry_after=TODAY + timedelta(days=30),
-        ),
-    )
-
-    found = _by_path(_related(vault))
-
-    assert found["People/Sofia.md"].revision == fk.content_revision(text)
-    assert found["People/Sofia.md"].due is False
-    assert found["People/Luca.md"].due is True
-
-
-def _unverified_sofia(vault: Path, *, proposal_id: str = "") -> None:
-    checked = _note(vault, "People/Sofia.md", "Maurizio is VP Marketing.")
-    nv.record_note_check(
-        vault,
-        nv.NoteCheck(
-            relative_path="People/Sofia.md",
-            content_revision=fk.content_revision(checked.read_text(encoding="utf-8")),
-            outcome="unverified",
-            checked_at=TODAY,
-            retry_after=TODAY + timedelta(days=30),
-            proposal_id=proposal_id,
-        ),
-    )
-
-
-def test_an_unverified_check_is_reopenable_only_for_an_attended_caller(tmp_path: Path) -> None:
-    vault = _vault(tmp_path)
-    _note(vault, TARGET)
-    _unverified_sofia(vault)
-
-    attended = _by_path(_related(vault, attended=True))["People/Sofia.md"]
-    unattended = _by_path(_related(vault))["People/Sofia.md"]
-
-    # The cooldown is unchanged: due is the worklist's answer for both callers.
-    assert attended.due is False
-    assert unattended.due is False
-    assert attended.reopenable is True
-    assert unattended.reopenable is False
-
-
-def test_a_pending_proposal_is_never_reopenable(tmp_path: Path) -> None:
-    vault = _vault(tmp_path)
-    _note(vault, TARGET)
-    _unverified_sofia(vault, proposal_id="proposal-1")
-
-    assert _by_path(_related(vault, attended=True))["People/Sofia.md"].reopenable is False
-
-
-def test_a_note_that_never_goes_stale_is_not_due(tmp_path: Path) -> None:
-    vault = _vault(tmp_path)
-    _note(vault, TARGET)
-    _note(vault, "journal/daily/2024-01-05.md", "Lunch with Maurizio.", type_="journal")
-
-    found = _by_path(_related(vault))
-
-    assert MENTIONS in found["journal/daily/2024-01-05.md"].relations
-    assert found["journal/daily/2024-01-05.md"].due is False
-
-
-def test_a_recently_updated_note_is_not_due(tmp_path: Path) -> None:
-    vault = _vault(tmp_path)
-    _note(vault, TARGET)
-    fresh = vault / "People/Sofia.md"
-    fresh.parent.mkdir(parents=True, exist_ok=True)
-    fresh.write_text(
-        f"---\ntype: person\nupdated: {TODAY.isoformat()}\n---\n\n# Sofia\n\nMaurizio is VP Marketing.\n",
-        encoding="utf-8",
-    )
-
-    assert _by_path(_related(vault))["People/Sofia.md"].due is False
 
 
 def test_link_relations_rank_before_mentions_and_the_rest_are_counted(tmp_path: Path) -> None:

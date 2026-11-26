@@ -30,7 +30,7 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 # Directory-based type inference (similar to vault_index.py). `.vault-trash`
-# holds notes `ciao.vault_review` has trashed: still on disk so a restore is
+# holds notes older versions of Vault Review trashed: still on disk so a restore is
 # possible, but no longer part of the vault, so never searchable.
 # `.archived-workspaces` is the same kind of exclusion for whole workspaces
 # (see `ciao.workspace_archive`).

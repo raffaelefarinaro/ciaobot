@@ -207,58 +207,6 @@ def test_vault_graph_never_flags_what_the_review_queue_never_lists(client, tmp_p
         assert node["age_days"] >= 400, rel
 
 
-def test_vault_graph_stale_set_matches_unverified_candidates(client, tmp_path):
-    from ciao.vault_review import generate_candidates
-
-    vault = tmp_path / "memory-vault" / "personal"
-    (vault / "People").mkdir()
-    (vault / "People" / "Mo.md").write_text(
-        "---\ntype: person\ntags: [p]\n---\n# Mo\n\nSee [A](../A.md).\n", encoding="utf-8", newline=""
-    )
-    _age(vault / "People" / "Mo.md", 120)
-    (vault / "Workspace").mkdir()
-    (vault / "Workspace" / "Queue.md").write_text("---\ntype: note\n---\n# Queue\n", encoding="utf-8", newline="")
-    _age(vault / "Workspace" / "Queue.md", 400)
-    _age(vault / "B.md", 400)
-
-    graph_stale = {
-        n["id"].rsplit("personal/", 1)[-1]
-        for n in client.get("/api/vault/graph?workspace=personal").json()["nodes"]
-        if n["stale"]
-    }
-    queued = {
-        c.path.rsplit("personal/", 1)[-1] if "personal/" in c.path else c.path.split("memory-vault/", 1)[-1]
-        for c in generate_candidates(vault, workspace="personal", max_candidates=200, write_queue=False)
-        if "unverified" in c.signals
-    }
-    assert graph_stale == queued == {"People/Mo.md", "B.md"}
-
-
-def test_keep_clears_the_graph_stale_flag(client, tmp_path):
-    from ciao.vault_review import generate_candidates, record_decision
-
-    vault = tmp_path / "memory-vault" / "personal"
-    (vault / "People").mkdir()
-    note = vault / "People" / "Mo.md"
-    note.write_text("---\ntype: person\ntags: [p]\nupdated: 2025-01-01\n---\n# Mo\n", encoding="utf-8", newline="")
-
-    def mo():
-        data = client.get("/api/vault/graph").json()
-        return next(n for n in data["nodes"] if n["title"] == "Mo")
-
-    assert mo()["stale"] is True
-    candidate = next(
-        c for c in generate_candidates(vault, workspace="personal", write_queue=False)
-        if c.path.endswith("People/Mo.md")
-    )
-    assert "unverified" in candidate.signals
-    # The horizon rides on the node, so the map names the rule from the same
-    # constant the flag came from.
-    assert mo()["threshold_days"] == 30
-    record_decision(vault, candidate, disposition="keep")
-    assert mo()["stale"] is False
-
-
 # ---- The managed check state, as the map reports it -------------------------
 #
 # A note somebody checked is not "unchecked" however old its own `updated:` says,
@@ -326,63 +274,6 @@ def _graph_node(client, title):
     return next(
         n for n in client.get("/api/vault/graph").json()["nodes"] if n["title"] == title
     )
-
-
-def test_a_note_checked_inside_its_cooldown_is_not_stale(client, tmp_path):
-    _checked, cfg, _vault = _checked_client(tmp_path)
-    _record(cfg, "Checked")
-
-    node = _graph_node(_checked, "Checked")
-
-    assert node["stale"] is False, "the note's own updated: is still a year old"
-    check = node["check"]
-    assert check["outcome"] == "unverified"
-    assert check["settled"] is True
-    assert check["pending"] is False
-    assert check["citations"] == 0
-    # The age and the horizon still ride along, so the map can explain itself.
-    assert node["threshold_days"] == 30
-    assert node["age_days"] > 300
-
-
-def test_a_note_with_a_pending_proposal_is_not_stale_and_says_why(
-    client, tmp_path
-):
-    """Being asked about is not being ignored."""
-    _checked, cfg, _vault = _checked_client(tmp_path)
-    _record(cfg, "Pending", proposal_id="p-1")
-
-    node = _graph_node(_checked, "Pending")
-
-    assert node["stale"] is False
-    assert node["check"]["pending"] is True
-    assert node["check"]["proposal_id"] == "p-1"
-    assert node["check"]["conflicted"] is False
-
-
-def test_a_proposal_whose_note_moved_is_stale_again_and_says_it_is_dead(
-    client, tmp_path
-):
-    """A check pinned to text the note has left describes nothing.
-
-    It cannot clear the flag — the note really is unchecked — and the tile has
-    to say the proposal is dead rather than offering a link to a card whose
-    accept would refuse.
-    """
-    _checked, cfg, _vault = _checked_client(tmp_path)
-    _record(cfg, "Checked", proposal_id="p-2")
-    vault = cfg.workspace_vault_root("personal")
-    (vault / "Checked.md").write_text(
-        "---\ntype: note\nupdated: 2025-01-01\n---\n# Checked\n\nEdited by hand.\n",
-        encoding="utf-8", newline=""
-    )
-
-    node = _graph_node(_checked, "Checked")
-
-    assert node["stale"] is True
-    assert node["check"]["settled"] is False
-    assert node["check"]["pending"] is False
-    assert node["check"]["conflicted"] is True
 
 
 def test_an_unchecked_note_still_reports_no_check_at_all(client, tmp_path):

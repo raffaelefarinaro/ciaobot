@@ -328,16 +328,6 @@ def test_the_receipt_records_that_it_was_born_this_way(tmp_path: Path) -> None:
     assert receipt["moves"] == []
 
 
-def test_a_fresh_setup_has_nothing_to_review(tmp_path: Path) -> None:
-    from ciao.vault_review import generate_candidates
-
-    _fresh(tmp_path)
-
-    assert generate_candidates(
-        tmp_path / "personal" / "memory-vault", workspace="personal", write_queue=False
-    ) == []
-
-
 def test_an_existing_notes_folder_kept_in_place_needs_no_migration(tmp_path: Path) -> None:
     """Choosing an existing notes folder keeps the notes where they are, so the
     vault is the install folder itself. That is a supported layout: the next
