@@ -1,0 +1,140 @@
+"""The 1.10 migration-receipt preflight, its takeover refusal and its installer wiring."""
+
+from __future__ import annotations
+
+import json
+import subprocess
+import sys
+from pathlib import Path
+
+import pytest
+
+from ciao import upgrade_preflight as pf
+
+REPO_ROOT = Path(__file__).resolve().parents[1]
+
+
+def install(tmp_path: Path, receipts: dict[str, object] | None = None, *, old_vault: bool = False) -> Path:
+    """An install dir; a str receipt value is written raw (to model a corrupt file)."""
+    (tmp_path / ".runtime" / "migration").mkdir(parents=True)
+    for name, body in (receipts or {}).items():
+        text = body if isinstance(body, str) else json.dumps(body)
+        (tmp_path / ".runtime" / "migration" / name).write_text(text, encoding="utf-8")
+    if old_vault:
+        (tmp_path / "memory-vault").mkdir()
+    return tmp_path
+
+
+def check(root: Path) -> pf.Finding | None:
+    return pf.check(root, root / ".runtime")
+
+
+MIGRATED: dict[str, object] = {
+    "workspace-rooting.json": {"status": "migrated"},
+    "logs-split.json": {"status": "migrated"},
+}
+
+
+def test_fresh_install_is_allowed(tmp_path: Path) -> None:
+    assert check(install(tmp_path)) is None
+
+
+def test_born_per_root_install_without_logs_receipt_is_allowed(tmp_path: Path) -> None:
+    root = install(tmp_path, {"workspace-rooting.json": {"status": "migrated", "born_per_root": True}})
+    assert check(root) is None
+
+
+def test_fully_migrated_install_is_allowed(tmp_path: Path) -> None:
+    root = install(
+        tmp_path,
+        {
+            **MIGRATED,
+            "vault-rehome.json": {"status": "migrated"},
+            "vault-links.json": {"status": "migrated"},
+            "vault-vocabulary.abc.json": {"renamed": []},
+            "learnings-20260101-000000.json": {"schema_version": 1},
+        },
+    )
+    assert check(root) is None
+
+
+def test_receipt_without_status_counts_as_complete(tmp_path: Path) -> None:
+    root = install(tmp_path, {**MIGRATED, "vault-rehome.json": {"moves": []}})
+    assert check(root) is None
+
+
+def test_old_layout_without_receipt_is_unfinished(tmp_path: Path) -> None:
+    finding = check(install(tmp_path, old_vault=True))
+    assert finding == pf.Finding("workspace-rooting.json", "missing")
+    assert "workspace-unmigrated" in finding.message
+    assert "Open 1.10" in finding.message
+
+
+@pytest.mark.parametrize("status", ["refused", "partial", "undo-in-progress", "surveyed", "failed"])
+def test_unfinished_reroot_status(tmp_path: Path, status: str) -> None:
+    finding = check(install(tmp_path, {"workspace-rooting.json": {"status": status}}))
+    assert finding == pf.Finding("workspace-rooting.json", f"status:{status}")
+    assert status in finding.message
+
+
+def test_rerooted_install_without_logs_split_is_unfinished(tmp_path: Path) -> None:
+    root = install(tmp_path, {"workspace-rooting.json": {"status": "migrated"}})
+    assert check(root) == pf.Finding("logs-split.json", "missing")
+
+
+@pytest.mark.parametrize(
+    ("name", "status", "task"),
+    [
+        ("logs-split.json", "partial", "restart"),
+        ("vault-rehome.json", "partial", "unrehomed-people"),
+        ("vault-links.json", "partial", "vault-migrate-links"),
+        ("vault-links.json", "prepared", "vault-migrate-links"),
+    ],
+)
+def test_partial_receipts_name_their_step(tmp_path: Path, name: str, status: str, task: str) -> None:
+    root = install(tmp_path, {**MIGRATED, name: {"status": status}})
+    finding = check(root)
+    assert finding == pf.Finding(name, f"status:{status}")
+    assert task in finding.message
+
+
+@pytest.mark.parametrize(
+    "name",
+    [
+        "workspace-rooting.json",
+        "logs-split.json",
+        "vault-rehome.json",
+        "vault-links.json",
+        "vault-vocabulary.abc.json",
+        "learnings-20260101-000000.json",
+    ],
+)
+@pytest.mark.parametrize("body", ["{not json", "[1, 2]"])
+def test_unreadable_receipt_is_unfinished(tmp_path: Path, name: str, body: str) -> None:
+    root = install(tmp_path, {**MIGRATED, name: body})
+    finding = check(root)
+    assert finding is not None
+    assert finding.receipt == name
+    assert finding.problem == "unreadable"
+
+
+def test_learnings_message_names_the_task(tmp_path: Path) -> None:
+    finding = check(install(tmp_path, {**MIGRATED, "learnings-1.json": "x"}))
+    assert finding is not None
+    assert "learnings-cleanup" in finding.message
+
+
+def test_main_exit_codes(tmp_path: Path) -> None:
+    fresh = tmp_path / "fresh"
+    fresh.mkdir()
+    half = tmp_path / "half"
+    half.mkdir()
+    install(half, {"workspace-rooting.json": {"status": "partial"}})
+    run = lambda ws: subprocess.run(  # noqa: E731
+        [sys.executable, "-m", "ciao.upgrade_preflight", str(ws)],
+        capture_output=True, text=True, cwd=REPO_ROOT, env={"PYTHONPATH": str(REPO_ROOT)},
+    )
+    assert run(fresh).returncode == 0
+    refused = run(half)
+    assert refused.returncode == 4
+    assert "Finish the 1.10 update first" in refused.stderr

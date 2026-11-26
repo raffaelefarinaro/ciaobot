@@ -825,6 +825,7 @@ def test_module_keeps_its_direct_import_boundary() -> None:
         "ciao.os_support.locks",
         "ciao.os_support.private",
         "ciao.package_version",
+        "ciao.upgrade_preflight",  # stdlib-only receipt check
     }
     assert imported <= allowed, imported - allowed
 
@@ -1498,3 +1499,29 @@ def test_an_unreadable_resume_carries_only_its_id(machine: Machine) -> None:
     (directory / "journal.json").chmod(0o600)
     result = run_plan(machine)
     assert (result.action, result.resume_id, result.plist) == ("resume", "20261118T100000Z", "")
+
+
+def test_unfinished_migration_refuses_takeover(machine: Machine) -> None:
+    machine.write_plist()
+    migration = machine.workspace / ".runtime" / "migration"
+    migration.mkdir()
+    (migration / "workspace-rooting.json").write_text(json.dumps({"status": "refused"}))
+    result = run_plan(machine)
+    assert (result.action, result.reason) == ("refuse", "unfinished_migration")
+    assert "workspace-unmigrated" in result.advice
+    assert result.workspace == str(machine.workspace)
+
+
+def test_old_vault_layout_without_receipt_refuses_takeover(machine: Machine) -> None:
+    machine.write_plist()
+    (machine.workspace / "memory-vault").mkdir()
+    assert run_plan(machine).reason == "unfinished_migration"
+
+
+def test_migrated_install_is_not_refused_by_the_preflight(machine: Machine) -> None:
+    machine.write_plist()
+    migration = machine.workspace / ".runtime" / "migration"
+    migration.mkdir()
+    (migration / "workspace-rooting.json").write_text(json.dumps({"status": "migrated"}))
+    (migration / "logs-split.json").write_text(json.dumps({"status": "migrated"}))
+    assert run_plan(machine).reason != "unfinished_migration"

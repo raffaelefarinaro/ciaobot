@@ -365,6 +365,25 @@ else
   fi
 fi
 
+# 2.0 upgrades from a finished 1.10 only. Read the 1.10 migration receipts of
+# the workspace this run will use (the unit's, else --workspace, else the
+# default) with the wheel's own stdlib-only checker, before uv replaces the
+# installed engine; an unfinished migration, or a check that cannot run, stops
+# the install and leaves the 1.10 engine in place.
+if [ "$have_workspace" -eq 1 ]; then
+  pf_ws=$workspace_value
+elif [ -e "$UNIT_PATH" ]; then
+  pf_ws=$(sed -n 's/^WorkingDirectory=//p' "$UNIT_PATH" | head -n 1)
+else
+  pf_ws=$HOME/Ciaobot
+fi
+if [ -n "$pf_ws" ] && [ -d "$pf_ws/.runtime" ]; then
+  PYTHONPATH=$wheel "$uv" run --no-project --python "$PYTHON_VERSION" python -m ciao.upgrade_preflight "$pf_ws" </dev/null || {
+    echo "install.sh: not upgrading $pf_ws; nothing was installed or changed." >&2
+    exit 4
+  }
+fi
+
 echo "install.sh: installing Ciaobot with uv..."
 "$uv" tool install --force --python "$PYTHON_VERSION" "$wheel" </dev/null || {
   echo "install.sh: uv tool install failed" >&2

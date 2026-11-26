@@ -107,7 +107,7 @@ from typing import Any, Callable
 from xml.parsers.expat import ExpatError
 
 import ciao
-from ciao import app_engine, macos_service
+from ciao import app_engine, macos_service, upgrade_preflight
 from ciao.macos_service import (
     LAUNCHCTL,
     SERVER_LABEL,
@@ -251,6 +251,8 @@ class TakeoverPlan:
     left_in_place: tuple[str, ...] = ()
     dropped_env: tuple[str, ...] = ()
     resume_id: str = ""
+    #: Which 1.10 step to finish, set with the `unfinished_migration` refusal.
+    advice: str = ""
     #: The plan-time protected paths, persisted in the journal so finish()
     #: filters the Trash candidates against the same inputs plan() used. Not
     #: part of the plan JSON the app reads.
@@ -970,6 +972,11 @@ def plan(
         )
     except (DefinitionReadError, ValueError):
         return _refuse("no_registry", label, **known)
+
+    # 4b. 2.0 upgrades from a finished 1.10 only: a half-migrated install stays put.
+    unfinished = upgrade_preflight.check(workspace, runtime_root)
+    if unfinished is not None:
+        return _refuse(upgrade_preflight.REFUSAL_CODE, label, advice=unfinished.message, **known)
 
     # 5. program kind.
     argv_value = document.get("ProgramArguments")

@@ -19,6 +19,7 @@ import re
 import shutil
 import stat
 import subprocess
+import sys
 
 import pytest
 
@@ -153,6 +154,11 @@ if [ "$1" = "tool" ] && [ "$2" = "install" ]; then
   chmod 755 "{fakebin}/ciao"
   exit 0
 fi
+if [ "$1" = "run" ]; then
+  # The preflight: run the repository's own checker, as the wheel would be.
+  for last in "$@"; do :; done
+  PYTHONPATH="{repo}" exec "{python}" -m ciao.upgrade_preflight "$last"
+fi
 if [ "$1" = "tool" ] && [ "$2" = "dir" ]; then
   echo "{fakebin}"
   exit 0
@@ -262,7 +268,10 @@ class Harness:
         ciao_src.chmod(0o755)
         uv_src = staged / "uv"
         uv_src.write_text(
-            FAKE_UV.format(log=self.log, fakebin=staged / "uvbin", ciao_src=ciao_src, uv_version="uv 999.0.0 (fresh)"),
+            FAKE_UV.format(
+                log=self.log, fakebin=staged / "uvbin", ciao_src=ciao_src, uv_version="uv 999.0.0 (fresh)",
+                repo=REPO_ROOT, python=sys.executable,
+            ),
             encoding="utf-8",
         )
         uv_src.chmod(0o755)
@@ -280,7 +289,7 @@ class Harness:
         # bootstrap), and reproducible wherever the tests run.
         self._fake(
             self.bin_dir / "uv", FAKE_UV, log=self.log,
-            fakebin=staged / "uvbin", ciao_src=ciao_src,
+            fakebin=staged / "uvbin", ciao_src=ciao_src, repo=REPO_ROOT, python=sys.executable,
             uv_version="uv 0.0.0 (too old for tool install --python)",
         )
         script_lines = {
@@ -727,7 +736,7 @@ def test_uv_on_path_is_used_when_new_enough(tmp_path):
     fresh_bin = harness.root / "freshbin"
     harness.install_fake(
         "uv", FAKE_UV, log=harness.log,
-        fakebin=fresh_bin, ciao_src=harness.ciao_src,
+        fakebin=fresh_bin, ciao_src=harness.ciao_src, repo=REPO_ROOT, python=sys.executable,
         uv_version="uv 12.3.4 (new enough)",
     )
     wheel = harness.local_wheel()
@@ -829,3 +838,41 @@ def test_script_parses_with_sh_n():
     dash = shutil.which("dash")
     if dash:
         subprocess.run([dash, "-n", str(INSTALL_SH)], check=True, capture_output=True, text=True)
+
+
+def _workspace_with_receipt(tmp_path, status):
+    workspace = tmp_path / "ws"
+    migration = workspace / ".runtime" / "migration"
+    migration.mkdir(parents=True)
+    (migration / "workspace-rooting.json").write_text(f'{{"status": "{status}"}}', encoding="utf-8")
+    if status == "migrated":
+        (migration / "logs-split.json").write_text('{"status": "migrated"}', encoding="utf-8")
+    return workspace
+
+
+def test_unfinished_1_10_migration_stops_the_install_before_uv_replaces_the_engine(tmp_path):
+    harness = Harness(tmp_path)
+    workspace = _workspace_with_receipt(tmp_path, "partial")
+    result = harness.run("--wheel", str(harness.local_wheel()), "--workspace", str(workspace))
+    assert result.returncode == 4
+    assert "Finish the 1.10 update first" in result.stderr
+    assert "workspace-unmigrated" in result.stderr
+    assert harness.lines_starting("uv tool") == []
+    assert harness.lines_starting("ciao setup") == []
+
+
+def test_unit_workspace_is_the_one_checked_when_no_flag_is_given(tmp_path):
+    harness = Harness(tmp_path, with_unit=True)
+    workspace = _workspace_with_receipt(tmp_path, "refused")
+    harness.unit.write_text(f"WorkingDirectory={workspace}\nExecStart=/x\n", encoding="utf-8")
+    result = harness.run("--wheel", str(harness.local_wheel()))
+    assert result.returncode == 4
+    assert harness.lines_starting("uv tool") == []
+
+
+def test_finished_1_10_migration_lets_the_install_proceed(tmp_path):
+    harness = Harness(tmp_path)
+    workspace = _workspace_with_receipt(tmp_path, "migrated")
+    result = harness.run("--wheel", str(harness.local_wheel()), "--workspace", str(workspace), "--no-service")
+    assert result.returncode == 0, result.stderr
+    assert harness.lines_starting("uv tool install") != []
