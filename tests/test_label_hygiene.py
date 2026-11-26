@@ -1,4 +1,4 @@
-"""Tests for ``ciao.label_hygiene``."""
+"""Tests for ``scripts/label_hygiene.py``."""
 
 from __future__ import annotations
 
@@ -7,8 +7,8 @@ import subprocess
 
 import pytest
 
-from ciao import label_hygiene as lh
-from ciao.label_hygiene import (
+import label_hygiene as lh
+from label_hygiene import (
     Issue,
     apply_additions,
     fetch_open_issues,

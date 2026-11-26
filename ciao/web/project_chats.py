@@ -1046,7 +1046,7 @@ class ChatInfo:
     # card. Absent key = an ordinary typed turn (or a mixed-origin steer).
     user_turn_origin: dict = field(default_factory=dict)
     # Map of user-turn index (as str) → vault answer check result
-    # (ciao.vault_verification.parse_verification shape). Absent = not checked.
+    # (retired vault answer check; stored verdicts are read as they were written).
     turn_verification: dict = field(default_factory=dict)
     # Map of user-turn index (as str) → the client send id the PWA minted for
     # that turn. The engine answers a repeated send id with a duplicate echo

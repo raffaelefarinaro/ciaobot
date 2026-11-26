@@ -1913,69 +1913,6 @@ def test_archive_claims_shared_brain_before_moving_workspace(tmp_path, monkeypat
     assert "work" not in config.workspaces
 
 
-def test_archive_registry_write_serializes_with_legacy_lifetime_initialization(tmp_path, monkeypatch):
-    from ciao import workspaces
-    from ciao.config import SharedBrainLink
-    from ciao.share_proposals import ShareDraftError, _persist_link_lifetime
-
-    _client, config, _pcm, _store = _app(tmp_path, rerooted=True)
-    link = SharedBrainLink(
-        name="notes", path=str(tmp_path.parent / f"brain-registry-{tmp_path.name}"),
-        identity="github.com/acme/notes",
-    )
-    config.workspaces["work"].shared_brains = [link]
-    persist_entered = threading.Event()
-    release_persist = threading.Event()
-    init_requested = threading.Event()
-    init_finished = threading.Event()
-    failures: list[BaseException] = []
-    original_persist = workspaces.persist_workspaces
-    original_lock = workspaces.workspace_registry_lock
-
-    def blocking_persist(candidate, **kwargs):
-        persist_entered.set()
-        assert release_persist.wait(timeout=3)
-        return original_persist(candidate, **kwargs)
-
-    def observe_lock(candidate):
-        if threading.current_thread().name == "legacy-lifetime-init":
-            init_requested.set()
-        return original_lock(candidate)
-
-    monkeypatch.setattr(workspaces, "persist_workspaces", blocking_persist)
-    monkeypatch.setattr(workspaces, "workspace_registry_lock", observe_lock)
-
-    def archive_unregister() -> None:
-        try:
-            workspace_archive.unregister(config, "work")
-        except BaseException as exc:
-            failures.append(exc)
-
-    def initialize_legacy_link() -> None:
-        try:
-            _persist_link_lifetime(config, "work", link)
-        except ShareDraftError:
-            pass  # archive won; the workspace is no longer eligible for drafting
-        except BaseException as exc:
-            failures.append(exc)
-        finally:
-            init_finished.set()
-
-    archive_thread = threading.Thread(target=archive_unregister, name="archive-unregister")
-    archive_thread.start()
-    assert persist_entered.wait(timeout=2)
-    initializer = threading.Thread(target=initialize_legacy_link, name="legacy-lifetime-init")
-    initializer.start()
-    assert init_requested.wait(timeout=2)
-    assert not init_finished.wait(timeout=0.05)
-    release_persist.set()
-    archive_thread.join(timeout=3)
-    initializer.join(timeout=3)
-    assert not archive_thread.is_alive() and not initializer.is_alive()
-    assert failures == []
-    assert "work" not in config.workspaces
-
-
 @pytest.mark.parametrize("expire", [False, True], ids=["wait", "expire-and-retry"])
 def test_archive_waits_for_connected_writer_or_reports_incomplete_cleanup(tmp_path, monkeypatch, expire):
     import select

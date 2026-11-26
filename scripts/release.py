@@ -675,12 +675,11 @@ def _run_checks(root: Path, *, skip_frontend: bool) -> list[str]:
         (
             [
                 sys.executable,
-                "-m",
-                "ciao.package_smoke",
+                str(root / "scripts" / "package_smoke.py"),
                 "--skip-frontend",
             ],
             root,
-            "ciao package-smoke --skip-frontend",
+            "python scripts/package_smoke.py --skip-frontend",
         )
     )
 
@@ -759,7 +758,7 @@ def _pr_body(
 def _check_dependency_updates(root: Path) -> list:
     """Return available dependency updates, or [] if the check cannot run."""
     try:
-        from ciao.dependency_updates import check_available_updates
+        from dependency_updates import check_available_updates
 
         return check_available_updates(root)
     except Exception as exc:  # noqa: BLE001 - never block a release on this
@@ -812,7 +811,7 @@ def _apply_auto_dependency_updates(
     if not any(getattr(u, "auto", False) for u in updates):
         return []
     try:
-        from ciao.dependency_updates import apply_auto_updates, auto_update_paths
+        from dependency_updates import apply_auto_updates, auto_update_paths
 
         applied = apply_auto_updates(root, updates, reinstall=reinstall)
     except Exception as exc:  # noqa: BLE001 - never block a release on this
@@ -853,7 +852,7 @@ def _probe_opencode() -> ProviderProbe:
     latest: str | None = None
     published: bool | None = None
     try:
-        from ciao.dependency_updates import get_latest_npm_version
+        from dependency_updates import get_latest_npm_version
         from ciao.opencode_cli import resolve_opencode_binary
 
         binary = resolve_opencode_binary()
@@ -899,7 +898,7 @@ def _probe_claude() -> ProviderProbe:
     note blocks recording, as a missing SDK did.
     """
     from ciao import adapter_install, setup_status
-    from ciao.dependency_updates import get_latest_npm_version
+    from dependency_updates import get_latest_npm_version
 
     notes: list[str] = []
     binary = setup_status.claude_cli_path()
