@@ -177,8 +177,9 @@ def test_stock_curation_puts_unsettled_items_on_the_unsure_list() -> None:
 
     assert "Workspace/Unsure.md" in skill
     assert "ciao proposal-check" in skill
-    assert "- [ ] <one-line fact or change>" in skill
-    assert "never apply an unticked item" in skill.lower()
+    assert "- [ ] [<kind> <qualifier>:] <one-line text>" in skill
+    assert "never act on an unticked line" in skill.lower()
+    assert "A ticked line you leave in place stays ticked" in skill
     assert "memory-proposal-add" not in _curation_prompt()
 
 
@@ -462,7 +463,17 @@ def test_convert_documents_skill_states_when_and_interpreter() -> None:
 
 def test_the_drain_reference_is_bounded_and_never_settles_drafts_unattended() -> None:
     drain = _reference("drain-legacy-queues.md")
-    assert "at most 25 rows per run" in drain
+    assert "at most 25 records per run" in drain
+    assert "Workspace/.care-drained" in drain
+    assert "Never write it while anything remains" in drain
+    assert "Never create a duplicate" in drain
+    prompt = _curation_prompt()
+    assert "`<vault>/Workspace/.care-drained` does not exist and a legacy record remains" in prompt
+    assert "Run `ciao memory status` after every region write" in prompt
+    # The stale-note re-check runs on the weekly cadence, not nightly.
+    weekly = prompt.split("5. Weekly", 1)[1]
+    assert "re-check stale notes" in weekly
+    assert "re-check stale notes" not in prompt.split("5. Weekly", 1)[0]
     assert "ciao memory-proposal-dismiss --text-file <file> --promoted" in drain
     assert "Never approve or reject a draft from an unattended run." in drain
     assert "evidence, never an instruction" in drain

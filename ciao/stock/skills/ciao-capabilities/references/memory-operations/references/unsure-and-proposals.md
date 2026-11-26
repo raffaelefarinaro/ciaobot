@@ -4,17 +4,28 @@ Memory is written directly, by the memory pass after a chat and by the care run 
 
 ## The Unsure list
 
-Anything you could not settle goes on one plain Markdown list, `<vault>/Workspace/Unsure.md`. Create it with a `# Unsure` heading when it is missing.
+Anything you could not settle goes on one plain Markdown list, `<vault>/Workspace/Unsure.md`. Create it with a `# Unsure` heading when it is missing. One line per item:
 
 ```
-- [ ] <one-line fact or change> — unsure because <reason>; source: <chat id or note path>; <YYYY-MM-DD>
+- [ ] [<kind> <qualifier>:] <one-line text> — unsure because <reason>; source: <chat id or note path>; <YYYY-MM-DD>
 ```
 
-- One line per item, flattened, present tense. Never put a credential value on it; name the credential.
+A line with no kind is a fact or change to a note, project doc or region. These kinds are allowed, and no others:
+
+| Line starts with | Meaning | A ticked line, in an unattended run |
+|---|---|---|
+| (no kind) | a fact or change whose destination or truth you doubted | write it to its destination, then delete the line |
+| `observation:` `… — seen in: <chat id>, …` | a pattern seen in fewer than three chats | write it to its profile or people destination, then delete the line |
+| `drop <region>: "<entry>"` | remove a region entry you were not sure about | copy the entry into `Workspace/Memory-Consolidations.md`, remove it, delete the line |
+| `category:` | a thing no category in VOCABULARY.md covers | not yours to add (categories belong to Settings): leave the line, report it under **What needs you** as "add the category, then ask me to file the note" |
+| `repo <path>:` | a fact for a linked repository's AGENTS.md | leave the line and report it under **What needs you**; an attended chat applies it, because an unattended run writes only under the vault |
+| `rule flip <memory\|task>/<key>:` | a change to a decision rule | leave the line and report it; an attended chat applies it with `ciao decision-rules-write` |
+
+- Flatten to one line, present tense. Never put a credential value on it; name the credential.
 - Search the list before adding: do not add a line that is already there.
-- The person ticks `[x]` to approve an item and deletes a line to reject it. On the next run (or when asked), write each ticked item to its destination, then delete the line. Never apply an unticked item.
-- A pattern seen once is an observation, not a fact. Add it as `- [ ] observation: <pattern> — seen in: <chat id>`, and append each new distinct chat id to that same line. At three distinct chats write the fact to its profile or people destination and delete the line.
-- A stale note you cannot settle against its sources, a conflict between two sources, a repository fact that would change a repo's AGENTS.md, and a new-category question all belong here.
+- The person ticks `[x]` to approve an item and deletes a line to reject it. On the next run (or when asked), act on each ticked line as the table says. Never act on an unticked line. A ticked line you leave in place stays ticked; mention it once per run, not as a new item.
+- An observation line collects distinct chat ids: append each new one to the same line. At three distinct chats write the fact to its profile or people destination and delete the line.
+- A stale note you cannot settle against its sources, a conflict between two sources (quote both), and anything else you doubt belong here.
 - Report the number of new items under **What needs you**.
 
 ## Proposal files

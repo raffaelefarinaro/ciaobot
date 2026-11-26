@@ -296,3 +296,25 @@ def test_help_prints_the_skill_and_its_reference(capsys: pytest.CaptureFixture[s
     out = capsys.readouterr().out
     assert "## Calling convention" in out and "## Worked examples" in out
     assert "Operation names for telemetry" not in SKILL
+
+
+def test_the_care_prompt_and_its_references_name_only_real_files_and_commands() -> None:
+    """Every `references/…` file and `ciao …` command the unattended care run is told to use exists."""
+    import json
+
+    root = ROOT / "ciao/stock/skills/ciao-capabilities/references/memory-operations"
+    schedules = json.loads((ROOT / "ciao/stock/schedules.json").read_text(encoding="utf-8"))
+    prompt = next(e["prompt"] for e in schedules["schedules"] if e["schedule_id"] == "system-memory-curation")
+    texts = [prompt, *(p.read_text(encoding="utf-8") for p in sorted((root / "references").glob("*.md")))]
+    agent, operator = _all_leaves()
+    leaves = set(agent) | set(operator)
+    problems: list[str] = []
+    for text in texts:
+        for path in re.findall(r"`(references/[a-z0-9-]+\.md)`", text):
+            if not (root / path).is_file():
+                problems.append(f"missing file {path}")
+        for first, second in re.findall(r"`ciao ([a-z][a-z-]*)(?: ([a-z][a-z-]*))?", text):
+            if (first,) in leaves or (second and (first, second) in leaves):
+                continue
+            problems.append(f"unknown command ciao {first} {second}".strip())
+    assert not problems, sorted(set(problems))
