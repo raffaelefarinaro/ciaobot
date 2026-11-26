@@ -422,6 +422,13 @@ vectors in one PR.
    protocol port, the two stores, XPC listener with the peer requirement, the
    rollback and missing-blob rules, a CLI test harness; tests with a fake
    anchor and in-process XPC.
+   **Partly done (this slice, #3623):** the protocol port, both stores, the
+   digest anchor, the rollback and missing-blob rules, a framed Unix-socket
+   read transport, an offline `apply` harness and the vector replay are in
+   `mac/Sources/CiaobotAuthority` and `mac/Sources/CiaobotAuthorityDaemon`
+   (product `ciao-authority`; see "Swift daemon status" below). The XPC
+   listener with the peer requirement, the launchd plists, the split into a
+   separate root-owned anchor process and the installer are still TODO.
 3. **Bridge and `SubprocessTransport`:** wire the Python client to the real
    service; timeout and fail-closed behaviour tested against the daemon.
 4. **Package, provisioning and uninstall:** `pkgbuild` with the postinstall,
@@ -438,3 +445,84 @@ vectors in one PR.
    separate principals.
 7. **Independent security review and the SIP-on re-measurement of B7**, before
    any status can read `available` for users.
+
+## Swift daemon status
+
+Slice 2 builds the protocol core and the daemon the later slices host. Nothing
+is installed, registered with launchd or wired into the engine.
+
+What exists (`mac/Sources/CiaobotAuthority`, `CiaobotAuthorityDaemon`, tests in
+`mac/Tests/CiaobotAuthorityTests` and `tests/test_chat_authority_daemon.py`):
+
+* A port of `ChatAuthority`: the canonical command, event and state bytes,
+  ECDSA P-256 raw r||s verification and the HMAC state MAC through CryptoKit,
+  every command (grant, submit, revoke, withdraw grant and turn), counters,
+  dedup, epochs and the lookup. It reproduces `tests/vectors/chat_authority_v1.json`
+  byte for byte: signing bytes, event signatures, every command outcome and
+  refusal code, the anchor value after each step, the final state digest and
+  MAC, and the load rules.
+* **Ed25519 signing is our own code** (`Ed25519Deterministic.swift`, RFC 8032).
+  CryptoKit's Ed25519 is randomized, and the vectors pin the event signature
+  bytes (and the state digest and MAC that contain them), so CryptoKit cannot
+  match. Verification and the public key stay with CryptoKit. The code is not
+  constant time; it signs only after a verified operator command, with a key in
+  a root-private process. Replacing it with a constant-time or audited
+  implementation is a candidate follow-up if the vectors can move to a
+  verify-only check of event signatures.
+* **Strictness.** The Swift JSON reader accepts a subset of what Python does:
+  integers only, no duplicate keys, no lone surrogates, no raw control
+  characters and only NFC strings (Swift compares strings by canonical
+  equivalence, Python by code point). Anything outside that is refused as a bad
+  command, never coerced.
+* **Counter anchor with digests.** The anchor record is
+  `{counter, current_sha256, previous_sha256}`. Persisting is write-ahead: the
+  anchor advances to n+1 with the digest of the exact blob about to be written,
+  then the blob is written (temp file, `F_FULLFSYNC`, rename, directory sync).
+  At load: equal counter needs an equal digest (else `state_invalid`); one
+  behind needs the previous digest (else `state_rollback`); two or more behind is
+  `state_rollback`; ahead is `state_invalid`; a missing blob above zero is
+  `state_missing`; a missing or unreadable anchor is `anchor_missing` or
+  `anchor_invalid`. A one-behind blob is rewritten under counter n+1 during
+  opening, before any instance exists to answer a read; if the rewrite fails
+  opening fails and the daemon stays closed. Health then reports
+  `recovered_crash_window: true`.
+* **Layout and storage.** A configurable root (production `/var/ciao-authority`):
+  `state/` (blob, `event.seed`, `state.key`, `enrollment.json`, `.lock`) and
+  `anchor/counter`. Opening requires every directory owned by the daemon's uid
+  with mode exactly 0700, not a symlink, every file 0600, regular and read with
+  `O_NOFOLLOW` relative to the directory descriptor, and an exclusive `flock`
+  held for the process lifetime. Nothing is created or repaired at open: the
+  keys and the anchor are made once by `provision`, the operator public key and
+  the reader uid are stored once by `enroll` (no replace; it refuses an existing
+  enrollment).
+* **Local transport.** A Unix domain socket (mode 0600), one request and one
+  reply per connection, each a 4-byte big-endian length then JSON, with the
+  `health` and `eligible_events` ops of `ciao/chat_authority_client.py`, the nonce
+  echoed, requests capped at 64 KiB, a total 2 second deadline per connection,
+  and a peer whose uid is not the enrolled reader answered with silence. There
+  are no command ops on the socket. This is a dev and test transport; it
+  stands in for the XPC service.
+* **Harness.** `ciao-authority provision | enroll | apply | serve`. `apply` takes
+  one signed command as JSON on stdin and runs it offline (it needs the state
+  lock, so not while `serve` runs); the Python test seeds the daemon with it.
+
+TODO, later slices: the XPC listener and peer requirement, the `enroll_operator_key`
+op with its admin authorization, launchd plists (none are written or loaded
+here), the separate root-owned anchor process (here the anchor is a file the
+same process holds, so there is no privilege separation between daemon and
+anchor yet), the installer package and uninstaller, the `SubprocessTransport`
+and bridge.
+
+Known residuals the security review should look at:
+
+* A one-behind blob is indistinguishable from a crash window. The digest rule
+  limits it to the exact previous blob and the counter then moves past it (a
+  second restore of the same blob is two behind and refused), but one
+  restore of the previous genuine blob still undoes the latest write once. It is
+  flagged in `health` so the app can warn; it is not prevented.
+* A crash between the anchor advance and the blob write of the recovery rewrite
+  itself leaves the blob two behind: closed until the admin reset.
+* The Ed25519 signer above, and the `apply` harness (a root-only tool that
+  needs a valid operator signature, like the XPC command path).
+* The socket exposes plaintext chat text to the enrolled uid only; the real
+  peer pin (code signature) arrives with XPC.

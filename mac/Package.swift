@@ -5,7 +5,10 @@ let package = Package(
     name: "CiaobotMac",
     platforms: [.macOS(.v14)],
     products: [
-        .executable(name: "CiaobotMac", targets: ["CiaobotMac"])
+        .executable(name: "CiaobotMac", targets: ["CiaobotMac"]),
+        // The chat authority daemon (#3623). Not part of the app bundle or the
+        // wheel; the installer slice ships it as a root-owned helper.
+        .executable(name: "ciao-authority", targets: ["CiaobotAuthorityDaemon"]),
     ],
     dependencies: [
         // Exactly pinned: Sparkle's prebuilt framework and its nested helpers
@@ -34,6 +37,14 @@ let package = Package(
                 // executable directly. This path is inert inside the .app.
                 .unsafeFlags(["-Xlinker", "-rpath", "-Xlinker", "@executable_path"]),
             ]
+        ),
+        // The chat authority protocol core, anchor, storage and local wire
+        // (#3623). Foundation and CryptoKit only: no Sparkle, no AppKit.
+        .target(name: "CiaobotAuthority"),
+        .executableTarget(name: "CiaobotAuthorityDaemon", dependencies: ["CiaobotAuthority"]),
+        .testTarget(
+            name: "CiaobotAuthorityTests",
+            dependencies: ["CiaobotAuthority"]
         ),
         .testTarget(
             name: "CiaobotMacTests",

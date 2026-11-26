@@ -511,7 +511,7 @@ scripts/
 native/                        Non-Python, installer-facing sources (see docs/SERVER_HOST.md).
   server-host/ServerHost.swift The persistent macOS host: fixed `serve` (spawns `[python, -I, -m, ciao.cli, supervise]` with public `posix_spawn`, keeping the child in launchd's job group, and mirrors its exit), `request-accessibility`, and `run-move` (spawns `[python, -I, -m, ciao.workspace_move, run, --operation, <id>, --state-dir, <dir>]` the same way, so a macOS folder grant covers the move, #1658) operations. Host protocol revision 2 (host revision 4, #1659, #1642), 35 s stop grace, accessory app, no shell/IPC/network/arbitrary-command surface. The installer does not activate it yet (#1008 child A).
 
-mac/                           The Swift Mac app (SwiftPM package `CiaobotMac`, Sparkle updates), imported from `ciaobot-mac` with its history. Built and tested only by the `mac-app` CI job; never in the Python wheel. Rules: `mac/AGENTS.md`; reference: `mac/docs/reference.md`; release skill: `skills/release-mac/`.
+mac/                           The Swift Mac app (SwiftPM package `CiaobotMac`, Sparkle updates), imported from `ciaobot-mac` with its history. Built and tested only by the `mac-app` CI job; never in the Python wheel. The package also holds `CiaobotAuthority` and the `ciao-authority` daemon (#3623, the Swift side of `docs/CHAT_AUTHORITY_HELPER.md`; not in the app bundle). Rules: `mac/AGENTS.md`; reference: `mac/docs/reference.md`; release skill: `skills/release-mac/`.
 
 tests/                         pytest suite for the Python backend.
 pyproject.toml                 Python package metadata, package-data declarations, and dev/test deps.

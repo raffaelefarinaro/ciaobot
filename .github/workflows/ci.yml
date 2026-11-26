@@ -26,8 +26,10 @@ concurrency:
 # unit/build job, after the fast `web-scope` detector. The detector
 # uses the PR's base/head commits and full history from the merge checkout.
 # `mac-app` builds and tests the Swift Mac app in `mac/` on macOS 15; on
-# develop PRs only when the diff changes `mac/`, `pyproject.toml`, `uv.lock` or
-# the engine colour table it pins (the `mac-scope` detector), and always on
+# develop PRs only when the diff changes `mac/`, `pyproject.toml`, `uv.lock`, the
+# engine colour table it pins or the chat authority protocol the Swift daemon
+# must match (`ciao/chat_authority.py` and its shared vectors; the
+# `mac-scope` detector), and always on
 # release PRs and manual runs. The app bundle includes the full engine, so
 # `mac-app` builds it whenever it runs on macOS. Changes under `ciao/` or
 # `web/` alone do not trigger `mac-app` on a develop PR (#3128 M4); the engine
@@ -332,7 +334,7 @@ jobs:
             exit 1
           fi
         done
-        mac_paths="$(git diff --no-renames --name-only "${PR_BASE_SHA}...${PR_HEAD_SHA}" -- mac/ web/src/lib/workspaceColors.ts pyproject.toml uv.lock)"
+        mac_paths="$(git diff --no-renames --name-only "${PR_BASE_SHA}...${PR_HEAD_SHA}" -- mac/ web/src/lib/workspaceColors.ts pyproject.toml uv.lock ciao/chat_authority.py tests/vectors/chat_authority_v1.json)"
         if [[ -n "$mac_paths" ]]; then
           printf 'mac_changed=true\n' >> "$GITHUB_OUTPUT"
         else

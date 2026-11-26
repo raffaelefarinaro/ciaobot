@@ -107,7 +107,10 @@ def test_mac_app_waits_only_for_fast_mac_scope_detection() -> None:
         "|| steps.mac-full.outputs.mac_changed }}"
     ) in scope
     assert "swift" not in scope
-    assert '-- mac/ web/src/lib/workspaceColors.ts pyproject.toml uv.lock)"' in scope
+    assert (
+        '-- mac/ web/src/lib/workspaceColors.ts pyproject.toml uv.lock '
+        'ciao/chat_authority.py tests/vectors/chat_authority_v1.json)"'
+    ) in scope
     app = jobs["mac-app"]
     assert "needs: mac-scope" in app
     assert "if: ${{ !cancelled() }}" in app

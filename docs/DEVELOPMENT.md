@@ -222,8 +222,10 @@ while the server is running, because the live schedule store may be writing it.
   Mac app in `mac/` is built by its own `mac-app` job (`swift test`,
   `swift build`, `scripts/build-app.sh`, which builds the bundled engine, the
   asset test and a plist lint on `macos-15`), which runs on develop PRs whose
-  three-dot diff changes `mac/`, `pyproject.toml`, `uv.lock` or
-  `web/src/lib/workspaceColors.ts`, the engine colour table it pins (decided by
+  three-dot diff changes `mac/`, `pyproject.toml`, `uv.lock`,
+  `web/src/lib/workspaceColors.ts` (the engine colour table it pins) or
+  `ciao/chat_authority.py` and `tests/vectors/chat_authority_v1.json` (the
+  protocol the Swift chat authority daemon must reproduce; decided by
   the fast `mac-scope` detector), and on every release PR and manual
   run; other develop PRs run only its scope check, on Linux. Changes under `ciao/` or
   `web/` alone therefore do not trigger `mac-app` on a develop PR (#3128 M4); the
