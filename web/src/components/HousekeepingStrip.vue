@@ -362,13 +362,6 @@ function taskStateLine(task: UpdateTaskRow): string {
   if (task.applicability === 'unknown') {
     return 'Checking whether this applies here…'
   }
-  if (task.status === 'waiting_review') {
-    // An archived chat cannot be "open and waiting": say what is true instead,
-    // because the operator is being asked to decide about a chat that is gone.
-    return task.chat_live
-      ? 'Its chat is open and waiting for you to decide what to do with it.'
-      : 'The chat this opened has been archived or deleted. Starting opens a new one.'
-  }
   if (task.status === 'failed') {
     return task.chat_live
       ? 'The last attempt did not get going. Starting again reuses the same chat.'
@@ -532,7 +525,7 @@ async function dismissTask(task: UpdateTaskRow): Promise<void> {
   // the copy falls back to the plain dismissal wording.
   const hasChat =
     task.chat_live
-    && (task.status === 'in_progress' || task.status === 'waiting_review' || !!task.chat_id)
+    && (task.status === 'in_progress' || !!task.chat_id)
   const message = hasChat
     ? 'Hide this task in this workspace? Its chat stays open and is not marked ' +
       'done — you can carry on in it, and reopen the task from Settings → ' +
@@ -571,7 +564,7 @@ function taskLead(task: UpdateTaskRow): TaskLead {
 
 function startText(task: UpdateTaskRow): string {
   if (taskBusy(task)) return 'Working…'
-  if (task.status === 'in_progress' || task.status === 'waiting_review') return startLabel(task)
+  if (task.status === 'in_progress') return startLabel(task)
   if (task.status === 'failed') return 'Try again'
   return 'Start in chat'
 }

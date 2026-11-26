@@ -202,7 +202,7 @@ def test_write_is_atomic_and_idempotent(
         task_id=task.id,
         revision=task.revision,
         scope="workspace",
-        lifecycle="waiting_review",
+        lifecycle="in_progress",
         updated_at="2026-01-01T00:00:00+00:00",
         chat_id="chat-1",
     )
@@ -514,7 +514,7 @@ def test_a_lifecycle_written_over_an_existing_record_keeps_its_identity(
             task_id=task.id,
             revision=task.revision,
             scope="workspace",
-            lifecycle="waiting_review",
+            lifecycle="in_progress",
             updated_at="2026-01-01T00:00:00+00:00",
             attempted_fingerprint="fp-1",
             chat_id="chat-7",
@@ -1176,7 +1176,7 @@ async def test_the_status_reports_the_settled_record_not_the_one_it_replaced(
 
 
 @pytest.mark.parametrize(
-    "lifecycle", ["offered", "dismissed", "completed", "waiting_review", "failed"]
+    "lifecycle", ["offered", "dismissed", "completed", "failed"]
 )
 async def test_only_an_undecided_lifecycle_is_asked(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, lifecycle: str
@@ -1185,9 +1185,8 @@ async def test_only_an_undecided_lifecycle_is_asked(
 
     ``offered`` is nobody's attempt. ``dismissed`` is the operator's decision and
     ``completed`` is a check's own verdict, so re-asking on a timer would reopen
-    decisions nobody asked to reopen. ``waiting_review`` and ``failed`` *are* open
-    attempts — a chat parked on a decision that has since been made, and a turn
-    that may have landed after all — so they are asked, and the check decides
+    decisions nobody asked to reopen. ``failed`` *is* an open
+    attempt — a turn that may have landed after all — so it is asked, and the check decides
     whether anything moves.
     """
     config = _config(tmp_path)

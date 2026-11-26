@@ -316,6 +316,26 @@ def _region_body(guide_text: str, region: MemoryRegion) -> tuple[str, list[Regio
     return body, []
 
 
+def marker_cap(guide: Path, region: str) -> int | None:
+    """Return the ``cap=N`` written in *region*'s start marker, or None.
+
+    None when the guide is unreadable, the marker is missing, or it carries no
+    cap, so callers fall back to the default only in those cases.
+    """
+    try:
+        canonical = resolve_region(region)
+        text = guide.read_text(encoding="utf-8")
+    except (ValueError, OSError):
+        return None
+    found = re.search(
+        rf"<!--\s*ciao:{canonical}:start\s+cap=(\d+)\s*-->", text
+    )
+    if found is None:
+        return None
+    cap = int(found.group(1))
+    return cap or None
+
+
 def read_region(
     guide: Path, region: str
 ) -> tuple[list[str], list[RegionDiagnostic]]:
@@ -515,7 +535,7 @@ def memory_status(
         entries, diags = read_region(guide, region)
         diagnostics.extend({"region": d.region, "code": d.code, "message": d.message} for d in diags)
         regions[region] = {
-            **region_usage(entries, limit),
+            **region_usage(entries, marker_cap(guide, region) or limit),
             "expired_count": sum(1 for entry in entries if is_entry_expired(entry)),
             "malformed_expiration_count": sum(
                 1 for entry in entries if expiration_tag_error(entry) is not None
@@ -533,10 +553,6 @@ def prune_expired_entries(
     guide: Path,
     *,
     today: datetime.date | None = None,
-    actor: str = "system",
-    source: str = "startup",
-    vault_root: Path | None = None,
-    workspace: str = "",
 ) -> dict[str, Any]:
     """Remove only valid, expired entries from the guide's bounded regions.
 
@@ -546,10 +562,7 @@ def prune_expired_entries(
     changes, so provider startup can safely call this on every turn.
 
     The lock is required: a lock that cannot be taken raises
-    :class:`MemoryLockError` rather than degrading to an unlocked write. Each
-    changed region is committed through :func:`ciao.memory_receipts.commit_region_change`
-    so an unattended prune is reversible from the same History surface as a
-    user-visible edit.
+    :class:`MemoryLockError` rather than degrading to an unlocked write.
     """
     if not guide.exists():
         return {"ok": True, "removed": {"memory": 0, "profile": 0}, "guide": str(guide)}
@@ -571,26 +584,11 @@ def prune_expired_entries(
         if diagnostics:
             return {"ok": False, "removed": removed, "diagnostics": diagnostics, "guide": str(guide)}
 
-        from ciao.memory_receipts import commit_region_change
-
         changed = False
         for region in REGIONS:
             if not removed_entries[region]:
                 continue
-            commit_region_change(
-                guide,
-                region,
-                entries=filtered[region],
-                actor=actor,
-                source=source,
-                workspace=workspace,
-                vault_root=vault_root,
-                lock=lock,
-                fact_text="",
-                destination=f"ciao:{region}",
-                removed_texts=removed_entries[region],
-                kind="prune_expired",
-            )
+            replace_region_entries(guide, region, filtered[region])
             changed = True
         return {"ok": True, "removed": removed, "guide": str(guide), "changed": changed}
     finally:
@@ -605,10 +603,6 @@ def update_region(
     entry: str = "",
     match: str = "",
     char_limit: int | None = None,
-    actor: str = "agent",
-    source: str = "mcp",
-    workspace: str = "",
-    vault_root: Path | None = None,
 ) -> dict[str, Any]:
     """Apply one bounded-memory edit while keeping storage in the guide.
 
@@ -630,13 +624,9 @@ def update_region(
     during memory curation — not of the write that noticed.
 
     Fail-safe locking: the guide lock is required, and a lock that cannot be
-    taken raises :class:`MemoryLockError` with zero writes. The write itself is
-    committed through :func:`ciao.memory_receipts.commit_region_change`, so a
-    managed edit leaves a reversible receipt and a concurrent external edit is
-    reported as a revision conflict rather than overwritten.
+    taken raises :class:`MemoryLockError` with zero writes. Git is the record of
+    what changed and the way back.
     """
-    from ciao.memory_receipts import commit_region_change
-
     canonical = resolve_region(region)
     normalized_entry = _normalize(entry)
     needle = _normalize(match)
@@ -676,25 +666,7 @@ def update_region(
                 candidate[index] = normalized_entry
         used = total_chars(candidate)
         over_cap = char_limit is not None and used > char_limit
-        kind = {
-            "add": "region_apply",
-            "replace": "region_update",
-            "remove": "region_remove",
-        }[action]
-        commit_region_change(
-            guide,
-            canonical,
-            entries=candidate,
-            actor=actor,
-            source=source,
-            workspace=workspace,
-            vault_root=vault_root,
-            lock=lock,
-            fact_text=normalized_entry or needle,
-            destination=f"ciao:{canonical}",
-            removed_texts=removed_texts,
-            kind=kind,
-        )
+        replace_region_entries(guide, canonical, candidate)
         result: dict[str, Any] = {
             "ok": True,
             "changed": True,
@@ -709,6 +681,23 @@ def update_region(
         return result
     finally:
         release_guide_lock(lock)
+
+
+def replace_region_entries(guide: Path, region: str, entries: list[str]) -> None:
+    """Replace one region's body in the guide, atomically.
+
+    The caller holds the guide lock. A missing guide or a malformed region is a
+    :class:`ValueError` and nothing is written.
+    """
+    canonical = resolve_region(region)
+    try:
+        text = guide.read_text(encoding="utf-8")
+    except FileNotFoundError as exc:
+        raise ValueError(f"guide not found: {guide}") from exc
+    diagnostics = diagnose_region(text, canonical)
+    if diagnostics:
+        raise ValueError("; ".join(d.message for d in diagnostics))
+    write_guide_atomically(guide, replace_region_body(text, canonical, entries))
 
 
 def _empty_region_block(region: MemoryRegion) -> str:

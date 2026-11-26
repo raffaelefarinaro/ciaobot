@@ -2,9 +2,9 @@ import { describe, expect, it } from 'vitest'
 import source from './updateTasks.ts?raw'
 import { hasLiveAttempt, isVisibleUpdateTask, visibleUpdateTasks } from './updateTasks'
 
-const STATUSES = ['offered', 'in_progress', 'waiting_review', 'failed', 'completed', 'dismissed', 'future-state']
+const STATUSES = ['offered', 'in_progress', 'failed', 'completed', 'dismissed', 'future-state']
 const APPLICABILITY = ['applicable', 'not_applicable', 'unknown']
-const LIVE = ['in_progress', 'waiting_review', 'failed']
+const LIVE = ['in_progress', 'failed']
 
 function expected(status: string, applicability: string): boolean {
   if (status === 'completed' || status === 'dismissed') return false

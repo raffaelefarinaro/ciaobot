@@ -46,16 +46,16 @@
 
     <section id="loop" aria-labelledby="loop-h">
       <h2 id="loop-h">The loop, on one page</h2>
-      <p>Ciaobot doesn't take notes while you talk. When you archive a chat, a memory pass reads it in the background, files what it is sure about, and leaves anything uncertain for you. Solid lines are writes to your notes; the dashed line waits for your answer.</p>
+      <p>Ciaobot doesn't take notes while you talk. When you archive a chat, a memory pass reads it in the background, files what it is sure about, and lists anything uncertain in <code>Workspace/Unsure.md</code>. Solid lines are writes to your notes; the dashed line is the unsure list.</p>
       <div class="home-map">
         <svg class="diagram" viewBox="0 0 1100 330" overflow="visible" role="img" aria-labelledby="loop-title-m loop-desc-m">
           <title id="loop-title-m">The memory loop</title>
-          <desc id="loop-desc-m">You chat, then archive the chat. A memory pass files clear facts into your notes and holds uncertain ones in To decide. A daily pass tidies the notes, and your next chat loads them.</desc>
+          <desc id="loop-desc-m">You chat, then archive the chat. A memory pass files clear facts into your notes and lists uncertain ones in the Unsure list. A daily pass tidies the notes, and your next chat loads them.</desc>
           <rect class="box" x="0" y="60" width="180" height="84" rx="16"/><text x="90" y="109" text-anchor="middle" font-size="20" font-weight="700">Chat</text>
           <rect class="box" x="250" y="60" width="180" height="84" rx="16"/><text x="340" y="109" text-anchor="middle" font-size="20" font-weight="700">Archive</text>
           <rect class="box-solid" x="500" y="60" width="220" height="84" rx="16"/><text class="on-solid" x="610" y="109" text-anchor="middle" font-size="20" font-weight="700">Memory pass</text>
           <rect class="box" x="830" y="0" width="230" height="84" rx="16"/><text x="945" y="49" text-anchor="middle" font-size="20" font-weight="700">Notes</text>
-          <rect class="box-pending" x="830" y="128" width="230" height="84" rx="16"/><text x="945" y="177" text-anchor="middle" font-size="20" font-weight="700">To decide</text>
+          <rect class="box-pending" x="830" y="128" width="230" height="84" rx="16"/><text x="945" y="177" text-anchor="middle" font-size="20" font-weight="700">Unsure list</text>
           <rect class="box" x="380" y="244" width="240" height="70" rx="16"/><text x="500" y="285" text-anchor="middle" font-size="20" font-weight="700">Daily tidy</text>
           <path class="line" d="M180 102H250M430 102H500M720 92 830 42M1060 42H1090V279H620M380 279H90V144"/>
           <path class="line pending" d="M720 112 830 170"/>
@@ -65,7 +65,7 @@
         </svg>
         <div class="home-legend">
           <span><svg width="40" height="6" aria-hidden="true"><line x1="0" y1="3" x2="40" y2="3" stroke="currentColor" stroke-width="3"/></svg>written to your notes</span>
-          <span><svg width="40" height="6" aria-hidden="true"><line x1="0" y1="3" x2="40" y2="3" stroke="currentColor" stroke-width="3" stroke-dasharray="8 6"/></svg>waits for your yes</span>
+          <span><svg width="40" height="6" aria-hidden="true"><line x1="0" y1="3" x2="40" y2="3" stroke="currentColor" stroke-width="3" stroke-dasharray="8 6"/></svg>goes on the unsure list</span>
         </div>
       </div>
     </section>
@@ -74,7 +74,7 @@
       <h2 id="layers-h">Three layers</h2>
       <svg class="diagram" viewBox="0 0 720 250" role="img" aria-labelledby="sum-title sum-desc">
         <title id="sum-title">Three layers of memory</title>
-        <desc id="sum-desc">Always known: core memory, two regions with character budgets, and the project description, loaded in every chat. Looked up when needed: the notes folder, searched by the assistant. Written after you archive: facts from the chat are checked and filed, or queued for you.</desc>
+        <desc id="sum-desc">Always known: core memory, two regions with character budgets, and the project description, loaded in every chat. Looked up when needed: the notes folder, searched by the assistant. Written after you archive: facts from the chat are filed in your notes, or listed as unsure.</desc>
         <rect class="box-accent" x="10" y="20" width="220" height="210" rx="14"/>
         <text x="120" y="54" text-anchor="middle" font-weight="700" font-size="17">Always known</text>
         <text class="muted" x="120" y="86" text-anchor="middle" font-size="14">Two regions with budgets:</text>
@@ -91,21 +91,21 @@
         <text x="600" y="54" text-anchor="middle" font-weight="700" font-size="17">Written</text>
         <text class="muted" x="600" y="86" text-anchor="middle" font-size="14">After you archive a chat,</text>
         <text class="muted" x="600" y="108" text-anchor="middle" font-size="14">facts are checked and filed,</text>
-        <text class="muted" x="600" y="140" text-anchor="middle" font-size="14">or queued for you</text>
+        <text class="muted" x="600" y="140" text-anchor="middle" font-size="14">or listed as unsure</text>
         <text class="muted" x="600" y="190" text-anchor="middle" font-size="13">tidied once a day</text>
       </svg>
       <ul>
         <li><strong>Always known.</strong> A short core memory about you and how you work, plus the project's description, is loaded into every chat. It lives in <code>AGENTS.md</code> in your workspace.</li>
         <li><strong>Looked up.</strong> Everything else is one note per project, person, place or lesson. When a question needs background, the assistant searches your notes, reads the right one, and says so when the notes don't know. Search stays inside the current workspace, so work notes never show up in a personal chat.</li>
-        <li><strong>Written.</strong> After you archive a chat, facts are checked and filed, or queued for you.</li>
+        <li><strong>Written.</strong> After you archive a chat, facts are filed in your notes, or listed as unsure.</li>
       </ul>
     </section>
 
     <section id="control" aria-labelledby="control-h">
-      <h2 id="control-h">You decide what stays</h2>
+      <h2 id="control-h">You can always check</h2>
       <ul>
-        <li><strong>To decide.</strong> Each suggestion shows where it would go. Edit the wording, accept, dismiss, or talk it through with the assistant. Nothing about you lands in core memory without evidence or your OK.</li>
-        <li><strong>History and undo.</strong> Every memory decision is recorded with its reason, and changes with a receipt can be undone.</li>
+        <li><strong>The unsure list.</strong> What the agent could not settle goes on <code>Workspace/Unsure.md</code>, one line each. Tick a line to approve it, or delete it to drop it.</li>
+        <li><strong>Git is the undo.</strong> The agent writes to your notes directly, and the folder is a Git repository, so every change is in its history and can be reverted.</li>
         <li><strong>Memory Map.</strong> See the whole vault as a graph of notes and links, or as a list, and open any note from it.</li>
         <li><strong>Old notes are flagged, never deleted.</strong> You decide whether to retire them, and retired notes stay readable.</li>
       </ul>
@@ -115,11 +115,11 @@
       <h2 id="nightly-h">The daily tidy-up</h2>
       <p>Once a day, at a time you choose, the Workspace care routine looks after each workspace:</p>
       <ul>
-        <li>It settles the simple suggestions and brings judgement calls back to you as a yes/no question.</li>
-        <li>When core memory gets full, it merges duplicates and drops expired facts, keeping a copy of every removed line as an undo log.</li>
-        <li>It re-checks notes that went too long without a look and flags the stale ones. When the same correction keeps coming up, it proposes a better skill.</li>
+        <li>It works through a checklist: it files the lines you ticked on the unsure list and leaves a report, <code>Workspace/Care-Report.md</code>, saying what it did and what needs you.</li>
+        <li>When core memory gets full, it merges duplicates and drops expired facts, and Git keeps every removed line in its history.</li>
+        <li>It re-checks notes that went too long without a look and flags the stale ones. When the same correction keeps coming up, it proposes a better skill as a file you can open.</li>
       </ul>
-      <p>It never adds a new fact about you to core memory, or deletes a note, unless you allow it.</p>
+      <p>It never deletes or retires a note itself: it writes a proposal file for you instead.</p>
     </section>
 
     <section id="backup" aria-labelledby="backup-h">

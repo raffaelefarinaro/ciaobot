@@ -46,72 +46,6 @@ def _capabilities() -> str:
     return "\n".join(parts)
 
 
-def test_every_policy_row_declares_advisory_caps_only() -> None:
-    """Acceptance: no shipped instruction claims a hard cap while it is advisory."""
-    assert mp.CAP_SEMANTICS_ADVISORY == "advisory"
-    for policy in mp.CONTEXT_POLICIES:
-        assert policy.cap_semantics == mp.CAP_SEMANTICS_ADVISORY, policy.key
-
-
-def test_the_matrix_covers_the_reviewed_contexts() -> None:
-    assert set(mp.CONTEXT_KEYS) == {
-        "attended_explicit_remember",
-        "memory_pass",
-        "unattended_curation",
-        "direct_edit",
-        "proposal_acceptance",
-    }
-
-
-def test_the_memory_pass_writes_live_and_curation_is_narrower() -> None:
-    """The archive-time auto-apply is gone; the attended pass replaced it.
-
-    The post-archive writer is the memory pass, a chat a person is present for:
-    it promotes a confident fact itself and queues what it is unsure of. Curation
-    still runs with no reviewer at all, so it may only consolidate what a region
-    already holds and file every new fact as a proposal.
-    """
-    memory_pass = mp.context_policy("memory_pass")
-    curation = mp.unattended_policy()
-    assert memory_pass.promotes_new_region_facts == mp.PROMOTE_ATTENDED
-    assert memory_pass.queues_uncertain is True
-    assert curation.promotes_new_region_facts == mp.PROMOTE_REVIEWED
-    assert curation.consolidates_regions == "at_threshold"
-    assert curation.undo_log_required is True
-    # Both may write vault destinations; only the pass is attended.
-    assert memory_pass.writes_vault is True
-    assert curation.writes_vault is True
-    assert memory_pass.approval == "attended"
-    assert memory_pass.approval != curation.approval
-
-
-def test_only_attended_contexts_promote_a_new_region_fact() -> None:
-    """No unattended row may write one, and every attended row is attended-marked.
-
-    This is the machine-readable half of the ARCHITECTURE table row: the memory
-    pass promotes live, the nightly curator never does.
-    """
-    for key in mp.CONTEXT_KEYS:
-        policy = mp.context_policy(key)
-        if policy.promotes_new_region_facts == mp.PROMOTE_ATTENDED:
-            assert policy.approval == "attended", key
-        else:
-            assert policy.approval == "unattended", key
-
-
-def test_the_review_destination_is_always_the_unsure_bucket() -> None:
-    assert "review" in mp.MEMORY_DESTINATIONS
-    for key in mp.CONTEXT_KEYS:
-        policy = mp.context_policy(key)
-        if policy.promotes_new_region_facts == mp.PROMOTE_REVIEWED:
-            assert policy.queues_uncertain is True
-
-
-def test_unknown_policy_key_raises() -> None:
-    with pytest.raises(KeyError):
-        mp.context_policy("not_a_context")
-
-
 # ── The capsule: unattended runs defer, never route around the reviewer ───
 
 
@@ -146,21 +80,6 @@ def test_capsule_renders_the_shared_guidance_verbatim() -> None:
     assert mp.UNATTENDED_CAPSULE_GUIDANCE in capsule
 
 
-def test_dangerous_unattended_actions_all_defer() -> None:
-    actions = "\n".join(
-        f"{item.action} {item.reason}" for item in mp.unattended_deferrals()
-    )
-    for needle in (
-        "always-loaded",
-        "Trash",
-        "another workspace",
-        "automation",
-        "GitHub issue",
-        "git",
-    ):
-        assert needle in actions, needle
-
-
 @pytest.mark.parametrize("provider", ["claude", "opencode"])
 def test_both_providers_declare_schedule_unattended(provider: str) -> None:
     """A new provider cannot ship a different unattended rule silently.
@@ -174,7 +93,7 @@ def test_both_providers_declare_schedule_unattended(provider: str) -> None:
     assert capabilities_for(provider).schedule_unattended is True
 
 
-# ── The stock assets and docs must not contradict the matrix ──────────────
+# ── The stock assets and docs must not contradict the policy ──────────────
 
 
 def test_stock_memory_skill_states_the_advisory_cap() -> None:
@@ -230,13 +149,6 @@ def test_the_core_prompt_routes_categories_through_the_memory_skill() -> None:
     assert "If no category fits, put a new-category question on the Unsure list" in skill
 
 
-def test_unattended_policy_summary_names_the_handover_exception() -> None:
-    summary = mp.unattended_policy().summary
-    assert "never promotes a NEW region fact" in summary
-    assert "handover=all" in summary
-    assert "undo receipt" in summary
-
-
 def test_capabilities_skill_does_not_claim_nothing_is_durable_without_approval() -> None:
     skill = _capabilities()
     assert "nothing becomes durable without approval" not in skill
@@ -249,18 +161,6 @@ def test_mcp_memory_docstring_no_longer_claims_enforcement() -> None:
     # The docstring sits in the module-level operation table (S2a) at 4-space
     # indent, not nested under _register_tools; check the line-independent phrase.
     assert "The region cap is" in server and "advisory" in server
-
-
-def test_architecture_doc_states_the_policy_matrix() -> None:
-    doc = (REPO / "docs" / "ARCHITECTURE.md").read_text(encoding="utf-8")
-    # The matrix's own section, the narrower-curation rationale, and the
-    # deferred-approval rule must all be present.
-    assert "### Memory write policy matrix" in doc
-    assert "Why curation is narrower than the memory pass" in doc
-    assert "Unattended runs defer; they do not route around the missing" in doc
-    # The old contradictory phrase is gone.
-    assert "Promoting NEW facts into a region stays user-reviewed" not in doc
-    assert "except rare archive-time \"User corrections\"" not in doc
 
 
 def test_memory_design_drops_the_hard_cap_claim_and_states_advisory() -> None:

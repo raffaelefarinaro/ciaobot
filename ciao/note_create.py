@@ -18,7 +18,7 @@ from dataclasses import dataclass
 from datetime import date
 from pathlib import Path
 
-from ciao import note_receipts
+from ciao import note_paths
 from ciao.entity_types import EntityType, EntityTypeRegistry, load_entity_types
 from ciao.frontmatter import yaml_scalar
 from ciao.file_kernel import portable_name_problem, safe_note_stem
@@ -196,12 +196,12 @@ def plan_destination(notes_root: Path, folder: str, title: str) -> tuple[Path, s
     parts = _folder_parts(folder)
     stem = _check_title(title)
     try:
-        root = note_receipts.canonical_vault(notes_root)
+        root = note_paths.canonical_vault(notes_root)
         current = root
         for part in parts:
-            # Private on purpose: the vault's real spelling of a name decides the
-            # path, the same walk resolve_note_path does for an existing note.
-            current = note_receipts._on_disk_name(current, part)
+            # The vault's real spelling of a name decides the path, the same
+            # walk resolve_note_path does for an existing note.
+            current = note_paths.on_disk_name(current, part)
             if current.is_symlink():
                 raise NoteCreateError("note_path_invalid", f"{part!r} is a symlink.")
             if current.exists() and not current.is_dir():

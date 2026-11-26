@@ -17,7 +17,7 @@ import pytest
 
 from ciao import async_reads
 from ciao import control_plane as cp
-from ciao import memory_receipts as mr
+from ciao.note_paths import NoteTargetRefused
 from ciao.note_related import (
     LINKED_FROM,
     LINKS_TO,
@@ -135,7 +135,7 @@ def test_a_path_outside_the_vault_is_refused(tmp_path: Path) -> None:
     vault = _vault(tmp_path)
     (tmp_path / "x.md").write_text("# x\n", encoding="utf-8")
 
-    with pytest.raises(mr.MemoryReceiptError):
+    with pytest.raises(NoteTargetRefused):
         _related(vault, "../x.md")
 
 
