@@ -31,6 +31,22 @@ export const inventory: InventoryEntry[] = [
     migration: { status: 'unassessed', note: 'Inventory admission does not approve a design migration.' },
   },
   {
+    id: 'components-settings-share-audit', name: 'SettingsShareAudit', family: 'Settings', kind: 'component',
+    owner: { path: 'web/src/components/settings/SettingsShareAudit.vue', anchor: 'class="audit-panel"' },
+    sources: [], consumers: ['web/src/components/settings/SettingsSharedBrains.vue'], variants: [],
+    variantNotes: 'Read-only consent and history view with no activation or write control; variants are unassessed.',
+    states: [
+      { name: 'loading', coverage: 'covered', storyIds: ['settings-share-audit--loading'], note: 'The first evidence read is held; the reading line shows and no brain list renders.' },
+      { name: 'failed', coverage: 'covered', storyIds: ['settings-share-audit--failed'], note: 'A first-load failure shows the role=alert read error with Try again; no brain list renders.' },
+      { name: 'empty', coverage: 'covered', storyIds: ['settings-share-audit--empty'], note: 'A linked brain with no grant shows review, unknown audience, no permission and no history.' },
+      { name: 'active-grant', coverage: 'covered', storyIds: ['settings-share-audit--active-grant'], note: 'An active standing grant shows scope, unknown audience and the not-active-yet automatic policy, with no buttons.' },
+      { name: 'revoked-history', coverage: 'covered', storyIds: ['settings-share-audit--revoked-history'], note: 'An active and a revoked grant show their status words and a newest-first merged history.' },
+      { name: 'folder', coverage: 'covered', storyIds: ['settings-share-audit--folder-brain'], note: 'A folder brain shows local-file semantics and never claims cloud sync or recall.' },
+    ],
+    loading: { status: 'known', detail: 'Reads the evidence record on mount and reports loading, failure or a stale refresh.' },
+    migration: { status: 'unassessed', note: 'Inventory admission does not approve a design migration.' },
+  },
+  {
     id: 'components-settings-settings-switch',
     name: 'SettingsSwitch',
     family: 'Settings',

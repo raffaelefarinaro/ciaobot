@@ -201,7 +201,7 @@
                   class="sources-grant-state"
                   :class="{ 'sources-grant-state--revoked': grant.status !== 'active' }"
                 >
-                  {{ grantStatusText(grant) }}
+                  {{ grantStatusLabel(grant) }}
                 </span>
               </div>
               <p class="hint hint--compact">
@@ -250,6 +250,7 @@ import { computed, onMounted, ref, watch } from 'vue'
 import { api } from '../../lib/api'
 import { askConfirm } from '../../lib/confirm'
 import { apiErrorMessage } from '../../lib/errorMessage'
+import { grantStatusLabel } from '../../lib/shareAudit'
 import { useProjectStore } from '../../stores/projects'
 import type {
   ChatEvidenceStatus,
@@ -309,13 +310,6 @@ const activeDisclosures = computed(() => (data.value?.grants ?? []).filter((gran
   && grant.type === 'standing'
   && grant.project_id === projectId.value,
 ))
-function grantStatusText(grant: ShareEvidenceGrant): string {
-  if (grant.status === 'active') return 'Active'
-  if (grant.status === 'unlinked') return 'Brain unlinked'
-  if (grant.status === 'withdrawn') return 'Withdrawn'
-  if (grant.status === 'revoked') return 'Revoked'
-  return 'Inactive'
-}
 const canPreview = computed(() =>
   Boolean(brainName.value && projectId.value && sourceId.value && fieldMask.value.length && producers.value.length),
 )
