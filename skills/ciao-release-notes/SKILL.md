@@ -97,8 +97,26 @@ the bullets after it. Any later release follows the rules above.
 - **MCP is managed in each agent's CLI.** Settings → MCP servers and Chat details → MCP open `claude mcp` or `opencode mcp`. There are no Ciaobot sign-in cards, on/off toggles or automatic reloads; servers you turned off stay off. A running chat picks up changes after `ciao chat reload` or in a new chat.
 - **Google Workspace is no longer built in.** The Google account card, `ciao gws` and the Google skills are gone. Connect Google through your agent instead: Claude's and Codex's own Google connectors, or the Google Workspace MCP server (see https://www.raffaelefarinaro.com/ciaobot/companions.html#google). Existing `secrets/gws*` folders are left in place.
 - **Question cards are not shown.** When the agent asks a multiple-choice question, it asks in plain text; 2.0 has no question card yet.
+- **Mac: install the 2.0 app once by hand.** Download `Ciaobot-<version>.dmg` from this release, open it and drag Ciaobot to Applications. A 1.x install does not update itself to the 2.0 app; after this one manual install, the app updates itself.
 - **Moving from 1.x:** https://www.raffaelefarinaro.com/ciaobot/migrate.html
 ```
+
+## The 1.x upgrade note
+
+The Mac app is attached to a release by hand, after the engine assets, and a 1.x
+install has no path to the 2.0 app. Any release notes that tell 1.x users to move
+to the app carry this bullet in Heads up, with `<version>` filled in. The 2.0.0
+block above holds it already; reuse it as written for a later release that is
+the first to carry a Mac app to some 1.x group:
+
+```markdown
+- **Mac: install the 2.0 app once by hand.** Download `Ciaobot-<version>.dmg` from this release, open it and drag Ciaobot to Applications. A 1.x install does not update itself to the 2.0 app; after this one manual install, the app updates itself.
+```
+
+The DMG is attached by the operator before the release is promoted to latest
+(`skills/release-mac/SKILL.md` section 6), so the link in the note works the
+moment the page is public. Never describe the app as available in notes for a
+release whose DMG is not attached.
 
 ## How to gather the material
 

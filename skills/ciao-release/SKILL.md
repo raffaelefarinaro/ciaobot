@@ -325,7 +325,11 @@ findings land as inline comments.
 1. CI must be green (`mergeStateStatus` CLEAN), including `linux-server-latest-python`, `test` and `mac-app`.
 2. Merge into `main`. This runs `.github/workflows/release-on-main.yml`, which
    creates the `vX.Y.Z` tag and GitHub release using `RELEASE_PAT` (a plain
-   `GITHUB_TOKEN` release would **not** fire `release: published`).
+   `GITHUB_TOKEN` release would **not** fire `release: published`). The release
+   is created with `--prerelease --latest=false`: it is **not latest** until the
+   operator promotes it in step 4, so the download page, the `install.sh`
+   one-liner and the 1.x updater keep serving the previous release. A
+   pre-release still fires `release: published`; a draft would not.
 3. That fires `publish.yml`:
    - `build-engine` (macos) — builds the PWA and the engine wheel, verifies the
      wheel in a clean environment, stamps the Linux `install.sh` with the wheel's
@@ -347,10 +351,15 @@ findings land as inline comments.
        `LEGACY_MANIFEST_VERSION` is set: it runs `scripts/legacy-update-gate.py`
        from the tagged checkout against the published assets with the pinned 1.x
        wheel. It stages the release and never applies it.
-4. **The Mac DMG, by hand.** Once `publish.yml` is green, the operator attaches
-   `Ciaobot-<version>.dmg` to the release and publishes the update feeds, in the
-   order `skills/release-mac/SKILL.md` section 6 gives. CI does not sign or
-   notarize the app, so 2.0.0 does not wait on CI signing.
+4. **The Mac DMG, by hand, then latest.** Once `publish.yml` is green, the
+   operator attaches `Ciaobot-<version>.dmg` to the release, runs
+   `mac/scripts/promote-release.sh --tag v<version>` to publish it as latest
+   (it refuses until `install.sh`, the wheel and the DMG are all attached), and
+   then publishes the update feeds, in the order `skills/release-mac/SKILL.md`
+   section 6 gives; its Rollback section undoes it. CI does not sign or
+   notarize the app, so 2.0.0 does not wait on CI signing. Release notes for a
+   release 1.x users must move to by hand carry the 1.x upgrade note from
+   `/ciao-release-notes`.
 5. A follow-up job merges `main` back into `develop`.
 
 No manual tag, no `gh release create`, no tap push, no separate desktop release —
@@ -380,8 +389,9 @@ only spawns after `Release on main` finishes creating the tag, so you would
 watch the *previous* release's run. Wait for a `Release on main` run on the
 merge commit, then take the `publish` run newer than it.
 
-After it ships, confirm the tag, the GitHub release, the wheel and `install.sh`
-(plus the signed manifest and its signature on 2.0.0), then attach the DMG. `pgrep` proves a process
+After it ships, confirm the tag, the GitHub release (a pre-release until promoted),
+the wheel and `install.sh` (plus the signed manifest and its signature on 2.0.0),
+then attach the DMG and promote it. `pgrep` proves a process
 exists, not that the engine runs — the smoke test checks the startup API and the
 installed `ciao`.
 
