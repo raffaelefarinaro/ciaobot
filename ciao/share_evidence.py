@@ -644,6 +644,30 @@ def _workspace_guard(config: Any, workspace: str) -> Iterator[Path]:
         yield claim.directory
 
 
+@contextmanager
+def _source_writer_guard(config: Any, workspace: str) -> Iterator[Path]:
+    """Join the admission fence (#3619): registry owner, then the evidence claim.
+
+    Grant writes, withdrawals and source supersessions change what an automatic
+    effect may disclose, so they take the same final common lock as an admission
+    (the runtime registry owner) before the workspace evidence claim. They need no
+    checkout or proposal lock. The owner is taken blocking: an admission holds it
+    only for one bounded effect, so a revocation that returns has waited out any
+    admitted write and every later admission sees the revoked state. Callers run
+    this off the event loop. The lifetime is persisted first because persisting
+    it takes the registry owner itself.
+    """
+    from ciao.workspaces import acquire_workspace_registry  # noqa: PLC0415
+
+    _workspace_lifetime(config, workspace)
+    owner = acquire_workspace_registry(config, blocking=True)
+    try:
+        with _workspace_guard(config, workspace) as directory:
+            yield directory
+    finally:
+        owner.close()
+
+
 def _claim_scope(config: Any, workspace: str, claim: EvidenceClaim | None) -> Any:
     if claim is None:
         return evidence_claim(config, workspace=workspace)
@@ -875,7 +899,7 @@ def supersede_entry(
     if not isinstance(entry_id, str) or not _ENTRY_ID_RE.fullmatch(entry_id):
         _refuse("invalid_entry", "The decision entry is not available.")
     moment = _now(now)
-    with _workspace_guard(config, workspace):
+    with _source_writer_guard(config, workspace):
         data = _load_state(config, workspace)
         stream = _stream_for(data, project)
         entries = stream.get("entries") if stream else None
@@ -1531,7 +1555,7 @@ def confirm(
     _require_workspace(config, workspace)
     moment = _now(now)
     lifetime = _workspace_lifetime(config, workspace)
-    with _workspace_guard(config, workspace):
+    with _source_writer_guard(config, workspace):
         state = _load_state(config, workspace)
         token_hash, record = _preview_for(state, workspace, token)
         grants = state.get("grants")
@@ -1683,7 +1707,7 @@ def revoke(
     """Withdraw this workspace's grant; the old generation cannot resolve."""
     _require_workspace(config, workspace)
     moment = _now(now)
-    with _workspace_guard(config, workspace):
+    with _source_writer_guard(config, workspace):
         data = _load_state(config, workspace)
         grants = data.get("grants")
         grant = grants.get(grant_id) if isinstance(grants, dict) else None
@@ -1720,7 +1744,7 @@ def withdraw(
     """Engine-recorded withdrawal of an authorized snapshot or grant."""
     note = _clean_text(reason, "Reason", MAX_REASON_CHARS, required=False)
     moment = _now(now)
-    with _workspace_guard(config, workspace):
+    with _source_writer_guard(config, workspace):
         data = _load_state(config, workspace)
         grants = data.get("grants")
         grant = grants.get(grant_id) if isinstance(grants, dict) else None

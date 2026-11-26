@@ -1416,13 +1416,15 @@ def test_intake_uses_settled_care_witness_and_current_consent(linked, tmp_path, 
             revoked.set()
         drafting.start()
         assert entered.wait(5)
-        original_lock = se._lock
-        @contextmanager
-        def tracked_lock(directory):
+        # A revoke joins the admission fence at the registry owner, before the evidence claim.
+        from ciao import workspaces
+        original_acquire = workspaces.acquire_workspace_registry
+
+        def tracked_acquire(*args, **kwargs):
             revoke_entered.set()
-            with original_lock(directory):
-                yield
-        monkeypatch.setattr(se, "_lock", tracked_lock)
+            return original_acquire(*args, **kwargs)
+
+        monkeypatch.setattr(workspaces, "acquire_workspace_registry", tracked_acquire)
         revoking = threading.Thread(target=revoke)
         revoking.start()
         assert revoke_entered.wait(5)

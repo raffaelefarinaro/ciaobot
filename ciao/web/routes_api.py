@@ -595,8 +595,10 @@ async def share_evidence_confirm(request: Request) -> JSONResponse:
         )
         # Re-resolve the previewed project through the live manager before persisting.
         _share_project(request, workspace, target["project_id"])
-        result = share_evidence.confirm(
-            config, workspace=workspace, token=token, session=_share_session(request)
+        # Grant writers wait on the admission fence; never on the event loop.
+        result = await asyncio.to_thread(
+            share_evidence.confirm,
+            config, workspace=workspace, token=token, session=_share_session(request),
         )
         return JSONResponse(result)
     except share_evidence.EvidenceError as exc:
@@ -629,8 +631,8 @@ async def share_evidence_revoke(request: Request) -> JSONResponse:
     config = request.app.state.config
     try:
         workspace = _share_workspace(request)
-        return JSONResponse(share_evidence.revoke(
-            config, workspace=workspace,
+        return JSONResponse(await asyncio.to_thread(
+            share_evidence.revoke, config, workspace=workspace,
             grant_id=str(request.path_params.get("grant_id", "")),
         ))
     except share_evidence.EvidenceError as exc:
@@ -650,8 +652,8 @@ async def share_evidence_withdraw(request: Request) -> JSONResponse:
         return JSONResponse({"error": "expected an object"}, status_code=400)
     try:
         workspace = _share_workspace(request)
-        return JSONResponse(share_evidence.withdraw(
-            config, workspace=workspace,
+        return JSONResponse(await asyncio.to_thread(
+            share_evidence.withdraw, config, workspace=workspace,
             grant_id=str(request.path_params.get("grant_id", "")),
             reason=body.get("reason", ""),
         ))
