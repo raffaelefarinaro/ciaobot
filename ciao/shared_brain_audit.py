@@ -196,6 +196,7 @@ def _boot_id() -> str:
             ["/usr/sbin/sysctl", "-n", "kern.boottime"],
             capture_output=True,
             text=True,
+            encoding="utf-8",
             timeout=5,
             check=False,
         )
