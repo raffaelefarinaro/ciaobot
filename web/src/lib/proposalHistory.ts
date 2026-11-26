@@ -1,9 +1,8 @@
 // Pure helpers for the decision History list (#3056 S4b). No Vue imports, so
 // they are tested directly. The engine's history rows carry what each decision
-// did (`apply_status`), who made it (`actor`) and the care run behind an
-// automated one (`run_id`); rows from an older engine carry none of those.
+// did (`apply_status`) and who made it (`actor`); rows from an older engine
+// carry none of those.
 
-import { fetchCareRun, isCareSchedule, type CareRunOutcome } from './careRun'
 import type { ProposalHistoryActor, ProposalHistoryRow } from './types'
 
 /** Fill the fields an older engine did not send, so the list never renders a blank or NaN. */
@@ -68,27 +67,4 @@ export function reasonPreview(reason: string, max = 160): ReasonPreview {
   const space = cut.lastIndexOf(' ')
   const head = (space > 0 ? cut.slice(0, space) : cut).trimEnd()
   return { text: `${head}…`, long: true }
-}
-
-/**
- * Map each care run id to the care schedule whose LAST run it is. Only an
- * exact run-id match counts; a lookup that fails resolves to nothing for that
- * schedule, so the row gets no link rather than a guessed one.
- */
-export async function careRunScheduleIndex(
-  schedules: { schedule_id: string; last_run_chat_id?: string }[],
-  fetchOutcome: (scheduleId: string) => Promise<CareRunOutcome | null> = fetchCareRun,
-): Promise<Map<string, string>> {
-  const index = new Map<string, string>()
-  const candidates = schedules.filter(s => isCareSchedule(s.schedule_id) && s.last_run_chat_id)
-  const outcomes = await Promise.all(candidates.map(s =>
-    fetchOutcome(s.schedule_id).then(
-      outcome => ({ id: s.schedule_id, outcome }),
-      () => ({ id: s.schedule_id, outcome: null }),
-    ),
-  ))
-  for (const { id, outcome } of outcomes) {
-    if (outcome?.run_id) index.set(outcome.run_id, id)
-  }
-  return index
 }

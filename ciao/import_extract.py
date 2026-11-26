@@ -160,8 +160,7 @@ _TEXT_MARKERS_RE = re.compile(
 
 #: Where ``memory_proposals.append_proposals`` writes, relative to the
 #: workspace's vault root. Mirrored here rather than imported from the private
-#: ``_PROPOSALS_RELATIVE``, which is the same thing ``curation_run``,
-#: ``proposal_tracking`` and ``note_edit_proposals`` each keep for themselves.
+#: ``_PROPOSALS_RELATIVE``, which is the same thing ``proposal_tracking`` and ``note_edit_proposals`` each keep for themselves.
 #: Read before the write, so a row the queue's exact-text dedupe already held
 #: counts as not filed by this run rather than as filed.
 PROPOSALS_RELATIVE = "Workspace/Memory-Proposals.md"

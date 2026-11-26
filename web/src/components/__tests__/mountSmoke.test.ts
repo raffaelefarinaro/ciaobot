@@ -458,11 +458,6 @@ describe('component mount smoke', () => {
     wrapper.unmount()
   })
 
-  it('CareRunOutcome mounts without throwing', async () => {
-    const errors = await mountAndSettle(() => import('../CareRunOutcome.vue'))
-    expect(errors).toEqual([])
-  })
-
   it('WebhookTriggers mounts without throwing', async () => {
     const errors = await mountAndSettle(() => import('../WebhookTriggers.vue'))
     expect(errors).toEqual([])
@@ -503,11 +498,6 @@ describe('component mount smoke', () => {
 
   it('SettingsSharedBrains mounts without throwing', async () => {
     const errors = await mountAndSettle(() => import('../settings/SettingsSharedBrains.vue'))
-    expect(errors).toEqual([])
-  })
-
-  it('SettingsCareCycle mounts without throwing', async () => {
-    const errors = await mountAndSettle(() => import('../settings/SettingsCareCycle.vue'))
     expect(errors).toEqual([])
   })
 

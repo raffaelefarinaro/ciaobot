@@ -45,7 +45,6 @@
 
     <SettingsMemoryHandover />
     <SettingsSharedBrains />
-    <SettingsCareCycle />
     <SettingsUpdateTasks />
 
     <div v-if="workspaceArchivable(form.name)" class="card">
@@ -77,7 +76,6 @@ import SettingsClaudeTrim from './SettingsClaudeTrim.vue'
 import SettingsWorkspaceModels from './SettingsWorkspaceModels.vue'
 import SettingsMemoryHandover from './SettingsMemoryHandover.vue'
 import SettingsSharedBrains from './SettingsSharedBrains.vue'
-import SettingsCareCycle from './SettingsCareCycle.vue'
 import SettingsUpdateTasks from './SettingsUpdateTasks.vue'
 import WorkspaceColorPicker from './WorkspaceColorPicker.vue'
 import { WORKSPACE_ADMIN_KEY } from '../../composables/useWorkspaceAdmin'

@@ -4,17 +4,14 @@ import { computed, onMounted, ref, watch } from 'vue'
 import { useProposalsStore } from '../stores/proposals'
 import { useProjectStore } from '../stores/projects'
 import { useFileViewerStore } from '../stores/fileViewer'
-import { useTaskStore } from '../stores/tasks'
 import type { ProposalHistoryRow } from '../lib/types'
 import { kindLabel } from '../lib/proposalKinds'
 import { formatTime } from '../lib/time'
-import { fetchCareRun } from '../lib/careRun'
-import { applyLine, careRunScheduleIndex, historyActorLabel, reasonPreview } from '../lib/proposalHistory'
+import { applyLine, historyActorLabel, reasonPreview } from '../lib/proposalHistory'
 
 const store = useProposalsStore()
 const projectStore = useProjectStore()
 const fileViewer = useFileViewerStore()
-const tasks = useTaskStore()
 
 // -- Apply state, reasons and the run behind an automated decision ----------
 //
@@ -165,34 +162,6 @@ const ACTOR_FILTERS: { key: 'all' | 'pwa' | 'agent' | 'auto'; label: string }[] 
 ]
 
 const filteredRows = computed(() => store.visibleHistory(projectStore.activeWorkspace))
-
-/** The care run ids on the page, mapped to the care schedule whose last run each is. */
-const runSchedules = ref<Map<string, string>>(new Map())
-const automatedRunIds = computed(() => [
-  ...new Set(filteredRows.value
-    .filter(r => r.actor === 'automated' && r.run_id)
-    .map(r => r.run_id as string)),
-])
-let runTicket = 0
-
-async function resolveRunSchedules(): Promise<void> {
-  const mine = ++runTicket
-  if (!automatedRunIds.value.length) {
-    runSchedules.value = new Map()
-    return
-  }
-  if (!tasks.schedulesLoaded) await tasks.fetchSchedules().catch(() => {})
-  if (mine !== runTicket) return
-  runSchedules.value = await careRunScheduleIndex(tasks.schedules, id => fetchCareRun(id))
-}
-
-watch(() => automatedRunIds.value.join('|'), () => { void resolveRunSchedules() }, { immediate: true })
-
-/** The Automations row to link to for an automated decision, or null when it cannot be matched exactly. */
-function runScheduleFor(row: ProposalHistoryRow): string | null {
-  if (row.actor !== 'automated' || !row.run_id) return null
-  return runSchedules.value.get(row.run_id) ?? null
-}
 
 /** Who decided, in the same words the row's actor badge uses. */
 function actorLabel(via: string): string {
@@ -407,9 +376,6 @@ const filtersHideEverything = computed(
                 @click="toggleReason(row)"
               >{{ isReasonOpen(row) ? 'Show less' : 'Show full reason' }}</button>
             </div>
-            <p v-if="runScheduleFor(row)" class="ph-run-line">
-              <router-link class="ph-run-link" :to="`/schedules/${runScheduleFor(row)}`">Workspace care run</router-link>
-            </p>
             <!-- A retirement went to the review trash, not through a memory
                  receipt, so the Changes box below says there is no snapshot.
                  Saying so alone would read as "nothing happened" beside a note
@@ -771,8 +737,7 @@ const filtersHideEverything = computed(
   gap: 2px;
 }
 
-.ph-reason-toggle,
-.ph-run-link {
+.ph-reason-toggle {
   min-height: 30px;
   padding: 0;
   border: none;
@@ -783,20 +748,13 @@ const filtersHideEverything = computed(
   text-decoration: underline;
   cursor: pointer;
 }
-.ph-reason-toggle:focus-visible,
-.ph-run-link:focus-visible {
+.ph-reason-toggle:focus-visible {
   outline: 2px solid var(--accent2);
   outline-offset: 2px;
   border-radius: 2px;
 }
 @media (pointer: coarse) {
-  .ph-reason-toggle,
-  .ph-run-link { min-height: var(--touch); }
-}
-
-.ph-run-line {
-  margin: 0;
-  font-size: 0.8rem;
+  .ph-reason-toggle { min-height: var(--touch); }
 }
 
 /* The apply line states the outcome in words; the colour only reinforces it. */

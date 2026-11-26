@@ -12,19 +12,13 @@ from pathlib import Path
 
 import pytest
 
-from ciao import curation_run
 from ciao.config import (
     CiaoConfig,
     WorkspaceConfig,
     coerce_memory_approval,
     merge_memory_approval,
 )
-from ciao.proposal_predictions import (
-    HandoverPolicy,
-    accept_allowed,
-    accept_kinds,
-    record_prediction,
-)
+from ciao.proposal_predictions import HandoverPolicy, accept_allowed, accept_kinds
 
 KINDS = ("memory", "profile")
 
@@ -224,27 +218,6 @@ def _queue_vault(tmp_path: Path, *lines: str) -> Path:
     return vault
 
 
-def test_an_approve_kind_plans_no_accept_work_and_an_auto_kind_does(tmp_path: Path) -> None:
-    vault = _queue_vault(tmp_path, "- [memory] Prefers uv over pip.", "- [profile] Writes in short sentences.")
-    queue = vault / QUEUE
-    record_prediction(queue, kind="memory", text="Prefers uv over pip.", verdict="accept", reason="r")
-    record_prediction(queue, kind="profile", text="Writes in short sentences.", verdict="accept", reason="r")
-
-    # Legacy all, memory explicitly approved: only the profile row is planned.
-    approve_memory = HandoverPolicy(memory_handover="all", memory_approval={"memory": "approve"})
-    items = curation_run._proposal_items(vault, approve_memory)
-    assert len(items) == 1 and len(items[0].keys) == 1
-
-    both_approved = HandoverPolicy(
-        memory_handover="all", memory_approval={"memory": "approve", "profile": "approve"}
-    )
-    assert curation_run._proposal_items(vault, both_approved) == []
-
-    auto_under_off = HandoverPolicy(memory_handover="off", memory_approval={"profile": "auto"})
-    items = curation_run._proposal_items(vault, auto_under_off)
-    assert len(items) == 1 and len(items[0].keys) == 1
-
-
 # ── fail closed for a kind the policy does not know ─────────────────────────
 
 
@@ -261,17 +234,3 @@ def test_shared_brain_publication_is_never_an_unattended_accept() -> None:
     policy = HandoverPolicy(memory_handover="all", memory_approval={"memory": "auto", "profile": "auto", "share": "auto"})
     assert accept_allowed(policy, "share") is False
 
-
-def test_workspace_care_never_plans_shared_note_rows(tmp_path: Path) -> None:
-    vault = _queue_vault(
-        tmp_path,
-        "- [memory] A region fact.",
-        "- [share opaque] Shared note change proposal opaque",
-    )
-    queue = vault / QUEUE
-    record_prediction(queue, kind="memory", text="A region fact.", verdict="accept", reason="r")
-    policy = HandoverPolicy(memory_handover="all", memory_approval={"memory": "auto", "share": "auto"})
-
-    items = curation_run._proposal_items(vault, policy)
-
-    assert len(items) == 1 and len(items[0].keys) == 1

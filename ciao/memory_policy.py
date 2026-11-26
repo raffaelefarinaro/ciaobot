@@ -230,9 +230,8 @@ UNATTENDED_DEFERRED_ACTIONS: tuple[DeferredAction, ...] = (
         "Settle a skill proposal or a skill draft",
         "Settlement follows verified application or an explicit rejection, and an "
         "unattended run can verify neither; a run that decided something would "
-        "archive an unanswered question as an answer. ciao.upstream_drafts reads "
-        "the run's own curation lease and refuses approve, create and reject "
-        "alike.",
+        "archive an unanswered question as an answer. The care prompt forbids "
+        "approve, create and reject alike.",
     ),
     DeferredAction(
         "Trash, restore, or permanently delete a vault note",
@@ -290,10 +289,8 @@ UNATTENDED_DEFERRED_ACTIONS: tuple[DeferredAction, ...] = (
         "Open or comment on a public GitHub issue, or run a destructive git operation",
         "Public and destructive actions need the operator's approval. An upstream "
         "skill lesson is prepared as a [review] draft and waits for that approval; "
-        "ciao.upstream_drafts refuses approve_draft (and create_new_skill and "
-        "reject_draft) whenever the run holds the vault's curation lease, and "
-        "`ciao skill-draft-approve` / `skill-draft-reject` exit 4 for the same "
-        "reason.",
+        "the care prompt forbids `ciao skill-draft-approve` and "
+        "`skill-draft-reject` from an unattended run.",
     ),
 )
 """Dangerous unattended examples, pinned across providers.
