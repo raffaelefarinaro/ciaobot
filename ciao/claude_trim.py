@@ -152,6 +152,36 @@ TRIM_OPTIONS: tuple[TrimOption, ...] = (
         "features",
     ),
     _tool(
+        "PublishPlugin",
+        "Publish plugin",
+        "Publishes a Claude Code plugin to a marketplace; Ciaobot chats do not author plugins.",
+        "features",
+    ),
+    _tool(
+        "ShareOnboardingGuide",
+        "Share onboarding guide",
+        "Shares a Claude Code team onboarding guide; not a Ciaobot workflow.",
+        "features",
+    ),
+    _tool(
+        "ListMcpResourcesTool",
+        "List MCP resources",
+        "Lists resources MCP servers expose; untrim it if your MCP servers serve resources.",
+        "features",
+    ),
+    _tool(
+        "ReadMcpResourceTool",
+        "Read MCP resource",
+        "Reads one MCP resource; untrim it if your MCP servers serve resources.",
+        "features",
+    ),
+    _tool(
+        "ReadMcpResourceDirTool",
+        "Read MCP resource directory",
+        "Reads an MCP resource directory; untrim it if your MCP servers serve resources.",
+        "features",
+    ),
+    _tool(
         "ReportFindings",
         "Code review findings",
         "Structured output for /code-review; hide it if you never run reviews.",
@@ -192,6 +222,18 @@ TRIM_OPTIONS: tuple[TrimOption, ...] = (
         "dataviz",
         "/dataviz skill",
         "Bundled Artifacts guidance; Ciaobot has its own dataviz skill.",
+        "skills",
+    ),
+    _skill(
+        "slides",
+        "/slides skill",
+        "Bundled slide-deck guidance; Ciaobot has its own presentation skills.",
+        "skills",
+    ),
+    _skill(
+        "whiteboard",
+        "/whiteboard skill",
+        "Bundled whiteboard guidance; Ciaobot renders diagrams as HTML artifacts.",
         "skills",
     ),
     _skill(
@@ -281,6 +323,18 @@ TRIM_OPTIONS: tuple[TrimOption, ...] = (
 CONNECTORS_TRIM_KEY = "setting:claude_ai_connectors"
 
 _BY_KEY: dict[str, TrimOption] = {option.key: option for option in TRIM_OPTIONS}
+
+# CLI `disable*` settings reviewed for #3530 (CLI 2.1.332) and deliberately left unset, so
+# the CLI default (feature on) applies. None has a user benefit that justifies a Settings toggle:
+#   disableAgentView                 terminal agent-list view; never shows in a headless chat.
+#   disableAutoBackground            Ciaobot relies on background tasks and the Monitor tool.
+#   disableAutoMode                  Ciaobot's permission modes include the CLI's auto mode.
+#   disableDirectMcpSkills           would hide skills that MCP servers publish; users want them.
+#   disableRemoteControl             remote-control pairing is a terminal feature, absent headless.
+#   disableSkillShellExecution       would break bundled and user skills that run inline commands.
+#   disableMobileSimulatorTools      adds no tool to the 2.1.332 init payload; nothing to save.
+#   disableConnectorSignInInApp      claude.ai connector sign-in is a CLI UI flow; no headless effect.
+# `McpTaskCheck` (new in 2.1.332, polls MCP async tasks) is kept: it only matters with MCP.
 
 # Built-in CLI tools Ciaobot keeps and does not offer as toggles. The first group
 # is core file, shell and agent tools the PWA relies on; AskUserQuestion renders
