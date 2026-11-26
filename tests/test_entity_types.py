@@ -18,7 +18,7 @@ from pathlib import Path
 
 import pytest
 
-from ciao import config, entity_types, memory_audit, vault_index, vault_lint, vault_rehome
+from ciao import config, entity_types, memory_audit, vault_index, vault_lint
 
 
 @pytest.fixture(autouse=True)
@@ -213,16 +213,13 @@ def test_disabling_a_category_removes_it_from_the_effective_views(tmp_path: Path
     ], "disabling never removes a builtin; a user can switch it back on"
 
 
-def test_no_vault_file_is_identical_for_the_bootstrap_and_rehome(tmp_path: Path) -> None:
-    """No `<vault>/entity-types.yaml`: bootstrap and re-home both read the
+def test_no_vault_file_is_identical_for_the_bootstrap(tmp_path: Path) -> None:
+    """No `<vault>/entity-types.yaml`: the bootstrap reads the
     shipped list.
 
     These are the consumers #635 put the registry in front of (the entity
     tagger was the third, removed in #723), and each is checked against the
-    constant it replaced. Re-home CAN be handed a registry and is also checked
-    against the same answer that way, because a caller that passes one has to
-    get what the consumer would have loaded for itself or the two forms of the
-    same call drift; that plumbing is pinned in `tests/test_vault_rehome.py`.
+    constant it replaced.
 
     The bootstrap is the exception, and cannot be handed a registry at all: it runs
     inside `CiaoConfig.__post_init__`, before any workspace is known, so its
@@ -259,19 +256,6 @@ def test_no_vault_file_is_identical_for_the_bootstrap_and_rehome(tmp_path: Path)
         "one workspace per vault directory holding an evidence folder"
     )
 
-
-    # Re-home: the person folder, and the folder map whose keys are not workspace
-    # names. Both are the shipped ones, and the misfiled note is still found.
-    assert vault_rehome.people_dirs(registry) == vault_rehome.people_dirs() == frozenset(
-        {"People"}
-    )
-    assert vault_rehome.dir_type_map(registry) == vault_rehome.dir_type_map()
-    assert vault_rehome.dir_type_map() == vault_index.DIR_TYPE_MAP
-    candidates = {c.path: c for c in vault_rehome.detect_misfiled_people(vault)}
-    assert [
-        (path, candidate.bucket, candidate.destination)
-        for path, candidate in candidates.items()
-    ] == [("personal/People/Alba.md", "mechanical", "work/People/Alba.md")]
 
 
 def test_no_vault_file_is_identical_for_the_index_lint_and_staleness(tmp_path: Path) -> None:
@@ -399,7 +383,7 @@ def test_effective_payload_carries_core_and_hidden(tmp_path: Path) -> None:
 
 
 def test_retired_entries_parse_and_do_not_collide_with_stock() -> None:
-    retired = entity_types.retired_stock_entries()
+    retired = list(entity_types._retired_stock_entries())
     stock = entity_types.stock_entity_type_registry()
 
     assert [entry.id for entry in retired] == [

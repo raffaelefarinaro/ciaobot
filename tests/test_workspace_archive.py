@@ -1992,7 +1992,7 @@ def _hold_registry(runtime, acquired, release):
 
 def test_other_process_blocks_archive_setup_and_maintenance_before_changes(tmp_path):
     import multiprocessing
-    from ciao import cli, vault_relocate, workspace_reroot
+    from ciao import cli, workspace_reroot
     from ciao.workspaces import WorkspaceRegistryBusy
 
     client, config, _, _ = _app(tmp_path, rerooted=True)
@@ -2013,7 +2013,6 @@ def test_other_process_blocks_archive_setup_and_maintenance_before_changes(tmp_p
         with pytest.raises(WorkspaceRegistryBusy):
             cli.setup_workspace(tmp_path)
         assert workspace_reroot.undo(tmp_path, runtime)["reason"] == "workspace registry is busy"
-        assert vault_relocate.undo(config, "work", runtime)["reason"] == "workspace registry is busy"
         assert _tree(tmp_path / "work") == work
         assert registry.read_bytes() == before
         assert not (runtime / "onboarding.json").exists()

@@ -329,12 +329,6 @@ def test_rewrite_workspace_state(tmp_path: Path) -> None:
         json.dumps({"chats": {"c": {"helper": {"archive_path": f"{old}/Logs/c.md"}, "title": str(old)}}}),
         encoding="utf-8",
     )
-    vault = old / "personal" / "memory-vault"
-    from ciao import vault_migration
-
-    old_receipt = vault_migration.receipt_path(runtime, vault)
-    old_receipt.write_text(json.dumps({"vault_root": str(vault)}), encoding="utf-8")
-
     workspace_move.rewrite_workspace_state(new, str(old), str(new))
 
     env = (new / ".env").read_text(encoding="utf-8")
@@ -344,11 +338,6 @@ def test_rewrite_workspace_state(tmp_path: Path) -> None:
     projects = json.loads((runtime / "web_projects.json").read_text(encoding="utf-8"))
     assert projects["chats"]["c"]["helper"]["archive_path"] == f"{new}/Logs/c.md"
     assert projects["chats"]["c"]["title"] == str(new)
-    new_vault = new / "personal" / "memory-vault"
-    new_vault.mkdir(parents=True)
-    rekeyed = vault_migration.receipt_path(runtime, new_vault)
-    assert rekeyed.is_file() and not old_receipt.exists()
-    assert json.loads(rekeyed.read_text(encoding="utf-8"))["vault_root"] == str(new_vault)
 
 
 def test_links_are_repointed_after_the_folder_moves(tmp_path: Path) -> None:

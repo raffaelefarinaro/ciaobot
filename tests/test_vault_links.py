@@ -1,7 +1,7 @@
 """Characterisation tests for the shared vault link primitives.
 
 These pin the behaviour the primitives had while they were private helpers
-scattered across `vault_index`, `vault_lint`, and `vault_migrate_links`, so a
+scattered across `vault_index` and `vault_lint`, so a
 later change to one of them cannot quietly alter what the other consumers see.
 The interesting cases are the ones the original docstrings called out as bugs
 that had already been paid for once.
@@ -34,7 +34,7 @@ from ciao.vault_links import (
 def test_vault_links_imports_nothing_from_ciao() -> None:
     """The seam only works because this module cannot cycle.
 
-    `vault_index`, `vault_lint`, `vault_migrate_links`, and `vault_rehome` all
+    `vault_index`, `vault_lint`, and `vault_reference_rewrite` all
     import it, and they already import each other in one direction. A single
     `from ciao...` here would reintroduce the tangle the module exists to undo,
     so the property is asserted rather than left to review.

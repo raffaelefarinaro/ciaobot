@@ -451,8 +451,6 @@ def test_apply_then_undo_restores_a_byte_identical_tree(tmp_path: Path) -> None:
 
 
 def test_link_marker_at_the_shared_root_is_stashed_not_refused(tmp_path: Path) -> None:
-    from ciao import vault_migrate_links, vault_relocate
-
     install, vault, runtime = _git_install(tmp_path)
     marker = vault / ".ciao-vault-links.json"
     marker.write_text('{"format":1,"operation_id":"' + "a" * 32 + '","state":"migrated"}\n', encoding="utf-8")
@@ -473,8 +471,7 @@ def test_link_marker_at_the_shared_root_is_stashed_not_refused(tmp_path: Path) -
     assert undo(install, runtime)["status"] == "undone"
     assert marker.read_bytes() == original
 
-    name = vault_migrate_links.MARKER_NAME
-    assert name in workspace_reroot._REGENERATED_ROOT_NOTES and name in vault_relocate._SHARED_NAMES
+    assert ".ciao-vault-links.json" in workspace_reroot._REGENERATED_ROOT_NOTES
 
 
 def _schedule_store(runtime: Path, schedules: list[dict]) -> Path:

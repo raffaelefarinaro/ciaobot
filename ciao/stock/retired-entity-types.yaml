@@ -1,9 +1,8 @@
 # Stock categories that used to ship and no longer do. They are not part of the
-# effective list: a vault that still has notes carrying one of these types (or
-# an alias of it) gets the entry copied into its own entity-types.yaml by
-# `ciao.vault_migration.retain_retired_stock_types`, so those notes keep
-# resolving. A vault with no such notes never sees them. Same shape as
-# stock entity-types.yaml; `log` is not here because it became an alias of
+# effective list. A vault whose entity-types.yaml still carries a row for one
+# (for example `enabled: false` on Document) keeps it as a complete custom
+# entry, which is what `entity_types` merges these definitions for. Same shape
+# as stock entity-types.yaml; `log` is not here because it became an alias of
 # `journal` instead.
 - id: product
   label: Product

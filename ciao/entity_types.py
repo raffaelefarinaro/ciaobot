@@ -18,7 +18,7 @@ categories it holds. The consumers read the registry: ``vault_index``'s
 ``canonical_type`` / ``scan_vault``, ``vault_lint``'s ``run_validation``,
 ``memory_audit``'s staleness predicates, the note writer
 (``ciao.note_create``, #637) and, for the bootstrap and
-re-home folds, ``config`` and ``vault_rehome``. Most take an optional
+re-home folds and ``config``. Most take an optional
 ``registry=`` keyword and load one from the vault root they already hold when
 the caller passes none; the two that cannot — ``config``, which asks for the
 **stock** list (below), and the writer, which resolves two roots — ask the
@@ -114,8 +114,8 @@ logger = logging.getLogger(__name__)
 #: for the same pattern).
 STOCK_FILENAME = "entity-types.yaml"
 
-#: Categories stock used to ship. Not part of the effective list; see
-#: :func:`retired_stock_entries`.
+#: Categories stock used to ship. Not part of the effective list; a vault row
+#: that edits one lands on its retired definition (see ``_merge``).
 RETIRED_FILENAME = "retired-entity-types.yaml"
 
 #: Ids stock used to ship as categories and now resolves as an alias of another
@@ -308,19 +308,6 @@ def _read_stock() -> list[EntityType]:
 def _retired_stock_entries() -> tuple[EntityType, ...]:
     text = resources.files("ciao.stock").joinpath(RETIRED_FILENAME).read_text(encoding="utf-8")
     return tuple(stated.entry for stated in _parse(yaml.safe_load(text), builtin=False, partial=False))
-
-
-def retired_stock_entries() -> list[EntityType]:
-    """The categories stock no longer ships, as custom entries.
-
-    For the upgrade step that copies one into a vault that still has notes of
-    that type (``vault_migration.retain_retired_stock_types``). They are not
-    builtin: once written into a vault file they are the user's own categories,
-    which is what they become. A file that does not parse is our bug, so it is
-    raised rather than swallowed, unlike the stock list that must not take the
-    process down on import.
-    """
-    return list(_retired_stock_entries())
 
 
 def _parse(payload: object, *, builtin: bool, partial: bool) -> list[_Stated]:

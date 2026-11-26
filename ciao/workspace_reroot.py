@@ -85,7 +85,7 @@ _GLOBAL_PROMOTIONS: dict[str, str] = {
 # moved and not preserved: an index that still describes the old prefixed layout
 # is worse than an absent one, because it reads as current. The link-migration
 # marker describes the shared root's link state; split roots start without one
-# (see `vault_migrate_links.MARKER_NAME`, spelled here to keep this module light).
+# (the marker file name is spelled here to keep this module light).
 _REGENERATED_ROOT_NOTES: frozenset[str] = frozenset(
     {"INDEX.md", "MEMORY.md", "VOCABULARY.md", ".ciao-vault-links.json"}
 )
@@ -322,7 +322,7 @@ def peek_receipt(runtime_root: Path) -> dict[str, Any] | None:
     ``read_receipt`` gates on ``status == "migrated"`` and must, because a
     refused or surveyed receipt is work still to do. But a detector whose whole
     job is to surface that work needs to READ the refusal, so it reads this
-    instead — the same split ``vault_rehome`` already makes for the same reason.
+    instead.
     """
     data = _load_receipt_json(receipt_path(runtime_root))
     if data is None:
@@ -343,8 +343,7 @@ def write_receipt(runtime_root: Path, payload: dict[str, Any]) -> Path:
     ``rehearse`` on a migrated install did exactly that.
     ``rehearse`` is documented as writing nothing that can make the real
     migration look done; the inverse holds too. So a non-migrated payload is
-    dropped when the migration is already recorded — the same guard
-    ``vault_rehome.write_receipt`` makes, for the same reason.
+    dropped when the migration is already recorded.
     """
     path = receipt_path(runtime_root)
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -383,11 +382,9 @@ def rehearse(
 def run_git(root: Path, *args: str) -> tuple[int, str]:
     """Run one git command in ``root``, returning (exit code, combined output).
 
-    Not the same helper as :func:`ciao.vault_migrate_links.run_git`, which
-    returns stdout alone and swallows OSError. This one folds stderr in (the
+    Unlike a helper that returns stdout alone and swallows OSError, this one folds stderr in (the
     reroot rails report git's own error text back to the operator) and lets a
-    missing git raise. Keep them separate: unifying them would change what one
-    set of callers sees.
+    missing git raise.
     """
     import subprocess
 
@@ -2693,8 +2690,7 @@ _SNAPSHOT_IGNORES: tuple[str, ...] = (
     "**/.obsidian/workspace*",
 )
 
-# The statuses that mean there is no usable rollback point, shared by both
-# callers (this module's `apply` and `vault_relocate`'s) so the two cannot drift.
+# The statuses that mean there is no usable rollback point, used by `apply`.
 # `unstage_failed` joins them because a snapshot we could not prove is free of
 # credentials is not a safety net: proceeding would commit the very secrets the
 # excludes exist to keep out, so the migration refuses and says so.

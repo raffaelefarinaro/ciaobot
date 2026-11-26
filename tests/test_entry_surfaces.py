@@ -12,9 +12,6 @@ from __future__ import annotations
 import datetime
 import textwrap
 from pathlib import Path
-from types import SimpleNamespace
-
-import pytest
 
 TODAY = datetime.date(2026, 9, 30)
 
@@ -104,34 +101,6 @@ def _review_vault(
     )
     (tmp_path / "Workspace").mkdir(exist_ok=True)
     return tmp_path
-
-
-# --- history ---------------------------------------------------------------
-
-
-def _history_detail(proposal: object) -> dict:
-    rows: list[dict] = [
-        {
-            "kind": "note_edit",
-            "action": "accepted",
-            "proposal_id": proposal.proposal_id,
-            "destination": proposal.relative_path,
-        }
-    ]
-    with pytest.MonkeyPatch.context() as patch:
-        import ciao.web.routes_api as routes
-
-        patch.setattr(
-            routes,
-            "list_sidecars",
-            lambda config, workspace: [proposal],
-            raising=False,
-        )
-        import ciao.note_edit_proposals as nep
-
-        patch.setattr(nep, "list_sidecars", lambda config, workspace: [proposal])
-        routes._attach_note_edit_detail(SimpleNamespace(), "personal", rows)
-    return rows[0]["note_edit"]
 
 
 # --- the memory map --------------------------------------------------------

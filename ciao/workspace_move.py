@@ -95,9 +95,6 @@ _RUNTIME_JSON = (
     "workspaces.json",
     "background/state.json",
 )
-# Receipt files keyed by a hash of their vault's absolute path; after a move
-# their names no longer match and the migration they record would re-run.
-_VAULT_KEYED_RECEIPTS = ("vault-vocabulary.", "retired-stock-types.")
 # Never walked for symlinks: large, and nothing Ciaobot links from lives there.
 _SYMLINK_WALK_PRUNE = frozenset({".git", "node_modules", ".venv", ".runtime", "__pycache__"})
 
@@ -718,35 +715,6 @@ def rewrite_env_file(path: Path, old: str, new: str) -> bool:
     return True
 
 
-def rekey_vault_receipts(migration_dir: Path) -> list[str]:
-    """Rename vault-keyed receipts to the key of the vault path they now record."""
-    from ciao import vault_migration
-
-    renamed: list[str] = []
-    if not migration_dir.is_dir():
-        return renamed
-    for path in sorted(migration_dir.glob("*.json")):
-        prefix = next((p for p in _VAULT_KEYED_RECEIPTS if path.name.startswith(p)), None)
-        if prefix is None or path.name == vault_migration.RECEIPT_NAME:
-            continue
-        try:
-            data = json.loads(path.read_text(encoding="utf-8"))
-        except (OSError, ValueError):
-            continue
-        vault = data.get("vault_root") if isinstance(data, dict) else None
-        if not vault:
-            continue
-        runtime = migration_dir.parent
-        if prefix == "vault-vocabulary.":
-            expected = vault_migration.receipt_path(runtime, Path(vault))
-        else:
-            expected = vault_migration.retired_receipt_path(runtime, Path(vault))
-        if expected.name != path.name and not expected.exists():
-            path.rename(expected)
-            renamed.append(expected.name)
-    return renamed
-
-
 def relink_symlinks(root: Path, old: str, new: str) -> int:
     """Repoint symlinks under ``root`` that name ``old``."""
     from ciao.os_support import links
@@ -792,7 +760,6 @@ def rewrite_workspace_state(root: Path, old: str, new: str) -> None:
     if migration.is_dir():
         for path in sorted(migration.glob("*.json")):
             rewrite_json_file(path, old, new)
-        rekey_vault_receipts(migration)
     relink_symlinks(root, old, new)
 
 
