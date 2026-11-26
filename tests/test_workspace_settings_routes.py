@@ -2593,6 +2593,7 @@ def test_git_discovery_runs_under_checkout_and_registry_ownership(tmp_path, monk
     from ciao import repo_link, shared_brain
     from ciao.workspaces import WorkspaceRegistryBusy, acquire_workspace_registry
 
+    monkeypatch.setattr(shared_brain, "schedule_update", lambda *_: None)
     client, config, _ = _client(tmp_path)
     checkout = _checkout(_away(tmp_path) / "git", "https://github.com/team/notes")
     original = repo_link._git
@@ -2612,6 +2613,22 @@ def test_git_discovery_runs_under_checkout_and_registry_ownership(tmp_path, monk
     response = client.patch("/api/workspaces/personal", json={"shared_brains": [{"path": str(checkout)}]})
     assert response.status_code == 200, response.text
     assert observed == [checkout.resolve()]
+
+
+def test_unstubbed_brain_update_is_refused_on_a_request_portal(tmp_path):
+    """Linking a checkout must not start a real git update on the request's loop.
+
+    The portal is torn down right after the response, mid-spawn; see
+    `no_brain_update_on_a_request_portal` in conftest for the CPython hang.
+    """
+    from ciao import shared_brain
+    from tests.conftest import BackgroundUpdateOnRequestLoop
+
+    client, _, _ = _client(tmp_path)
+    checkout = _checkout(_away(tmp_path) / "git", "https://github.com/team/notes")
+    with pytest.raises(BackgroundUpdateOnRequestLoop):
+        client.patch("/api/workspaces/personal", json={"shared_brains": [{"path": str(checkout)}]})
+    assert shared_brain._pending == {}
 
 
 @pytest.mark.parametrize("surface", ["settings", "preview"])

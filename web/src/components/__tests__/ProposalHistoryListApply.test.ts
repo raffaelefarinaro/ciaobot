@@ -104,6 +104,21 @@ describe('History apply state', () => {
     expect(lines[1].startsWith('Pending')).toBe(true)
   })
 
+  it('reads an accepted row whose receipt is missing as Unverified, never Accepted', async () => {
+    const view = await mountRows([
+      row({ id: 'gone', apply_status: 'none', applied: null, receipt_issue: 'missing' }),
+      row({ id: 'legacy', apply_status: 'none', applied: null }),
+    ])
+    const badges = view.findAll('.badge').map(b => b.text())
+    expect(badges[0]).toBe('Unverified')
+    expect(badges[1]).toBe('Accepted')
+    const lines = view.findAll('.ph-apply')
+    expect(lines).toHaveLength(1)
+    expect(lines[0].text()).toContain('no longer in the journal')
+    expect(lines[0].classes()).toContain('ph-apply--muted')
+    expect(lines[0].classes()).not.toContain('ph-apply--bad')
+  })
+
   it('shows no apply line for a dismissal with no receipt', async () => {
     const view = await mountRows([row({ action: 'dismissed', apply_status: 'none', applied: null })])
     expect(view.find('.ph-apply').exists()).toBe(false)

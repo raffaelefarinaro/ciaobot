@@ -1982,3 +1982,224 @@ def test_evidence_candidate_cannot_publish_without_effect_fence(linked, monkeypa
         expected_revision=artifact["review_token"],
     ))
     assert result.outcome == "draft_unavailable"
+
+
+# --- #3620a: expected-old-tip conditional push ---------------------------------
+
+def _origin_rev(origin: Path, ref: str = "refs/heads/main") -> str:
+    return subprocess.run(["git", "--git-dir", str(origin), "rev-parse", ref], check=True, capture_output=True, text=True).stdout.strip()
+
+
+def _lease_draft(config: Config, key: str, proposed: bytes = b"lease reviewed\n"):
+    draft = share_proposals.draft_share(
+        config, workspace="home", relative_path="n.md", operation="replace",
+        proposed=proposed, request_key=key,
+    )
+    assert isinstance(draft, share_proposals.ShareDraft)
+    return draft, draft.artifact["review_token"]
+
+
+def _publish(config: Config, draft, token):
+    return asyncio.run(share_publish.publish_share(
+        config, workspace="home", proposal_id=draft.proposal_id, expected_revision=token,
+    ))
+
+
+def _barrier(monkeypatch: pytest.MonkeyPatch, before_push, pushes: list[tuple[tuple[str, ...], int, bytes]]) -> None:
+    """Run `before_push` once, after the commit is prepared and before it reaches the remote."""
+    transport = share_publish._network_git
+    fired = False
+
+    def wrapped(folder: Path, *args: str, limit: int = 4096, timeout_s: float = 60.0):
+        nonlocal fired
+        if args and args[0] == "push":
+            if not fired:
+                fired = True
+                before_push(args)
+            code, out, err = transport(folder, *args, limit=limit, timeout_s=timeout_s)
+            pushes.append((args, code, out))
+            return code, out, err
+        return transport(folder, *args, limit=limit, timeout_s=timeout_s)
+
+    monkeypatch.setattr(share_publish, "_network_git", wrapped)
+
+
+def _racer(origin: Path) -> Path:
+    racer = origin.parent / "racer"
+    subprocess.run(["git", "clone", "--quiet", str(origin), str(racer)], check=True)
+    return racer
+
+
+def test_push_carries_the_expected_old_tip_lease_and_never_forces(linked, monkeypatch) -> None:
+    config, _clone, origin = linked
+    draft, token = _lease_draft(config, "lease-args")
+    tip = _origin_rev(origin)
+    pushes: list = []
+    _barrier(monkeypatch, lambda args: None, pushes)
+    result = _publish(config, draft, token)
+    assert result.outcome == "published"
+    (args, code, _out), = pushes
+    assert code == 0
+    assert f"--force-with-lease=refs/heads/main:{tip}" in args
+    assert not any(a in {"--force", "-f", "--force-if-includes"} or a.startswith("+") for a in args)
+    assert git(origin.parent / "brain", "rev-parse", result.commit_oid + "^") == tip
+
+
+def test_branch_rewind_between_review_and_push_is_refused(linked, monkeypatch) -> None:
+    config, _clone, origin = linked
+    first = _origin_rev(origin)
+    racer = _racer(origin)
+    (racer / "other.md").write_text("advance\n", encoding="utf-8")
+    git(racer, "add", ".")
+    git(racer, "commit", "--quiet", "-m", "advance")
+    git(racer, "push", "--quiet", "origin", "main")
+    draft, token = _lease_draft(config, "lease-rewind")
+    pushes: list = []
+    # The commit built on the advanced tip contains `first`, so a plain
+    # push would silently resurrect everything the rewind removed.
+    _barrier(
+        monkeypatch,
+        lambda args: subprocess.run(["git", "--git-dir", str(origin), "update-ref", "refs/heads/main", first], check=True),
+        pushes,
+    )
+    result = _publish(config, draft, token)
+    assert result.outcome != "published"
+    assert pushes and pushes[0][1] != 0 and b"stale info" in pushes[0][2]
+    assert _origin_rev(origin) == first
+    artifact = share_publish._artifact_for(config, "home", draft.proposal_id)
+    assert not artifact["publication"].get("receipts")
+
+
+def test_concurrent_unrelated_advance_is_refused_by_the_lease_and_preserved(linked, monkeypatch) -> None:
+    config, _clone, origin = linked
+    racer = _racer(origin)
+    draft, token = _lease_draft(config, "lease-advance")
+    raced: list[str] = []
+
+    def advance(_args) -> None:
+        (racer / "other.md").write_text("racer\n", encoding="utf-8")
+        git(racer, "add", ".")
+        git(racer, "commit", "--quiet", "-m", "racer")
+        git(racer, "push", "--quiet", "origin", "main")
+        raced.append(_origin_rev(origin))
+
+    pushes: list = []
+    _barrier(monkeypatch, advance, pushes)
+    _publish(config, draft, token)
+    first_args, first_code, first_out = pushes[0]
+    assert first_code != 0 and b"stale info" in first_out
+    # The racer's commit is never lost: it stays an ancestor of the remote tip.
+    assert subprocess.run(
+        ["git", "--git-dir", str(origin), "merge-base", "--is-ancestor", raced[0], "refs/heads/main"],
+    ).returncode == 0
+
+
+@pytest.mark.parametrize("drift", ["content", "mode"])
+def test_same_path_or_mode_drift_is_refused_and_remote_preserved(linked, monkeypatch, drift) -> None:
+    config, _clone, origin = linked
+    racer = _racer(origin)
+    draft, token = _lease_draft(config, f"lease-drift-{drift}")
+
+    def change(_args) -> None:
+        if drift == "content":
+            (racer / "n.md").write_bytes(b"someone else\n")
+        else:
+            os.chmod(racer / "n.md", 0o644)
+        git(racer, "add", ".")
+        git(racer, "commit", "--quiet", "-m", "drift")
+        git(racer, "push", "--quiet", "origin", "main")
+
+    pushes: list = []
+    _barrier(monkeypatch, change, pushes)
+    result = _publish(config, draft, token)
+    assert result.outcome == "changed_upstream"
+    assert len(pushes) == 1 and pushes[0][1] != 0
+    shown = subprocess.run(["git", "--git-dir", str(origin), "show", "refs/heads/main:n.md"], check=True, capture_output=True).stdout
+    assert shown != b"lease reviewed\n"
+    assert not share_publish._artifact_for(config, "home", draft.proposal_id)["publication"].get("receipts")
+
+
+def test_drift_before_prepare_is_refused_without_pushing(linked, monkeypatch) -> None:
+    config, _clone, origin = linked
+    draft, token = _lease_draft(config, "lease-drift-early")
+    racer = _racer(origin)
+    (racer / "n.md").write_bytes(b"early drift\n")
+    git(racer, "add", ".")
+    git(racer, "commit", "--quiet", "-m", "early")
+    git(racer, "push", "--quiet", "origin", "main")
+    pushes: list = []
+    _barrier(monkeypatch, lambda args: None, pushes)
+    assert _publish(config, draft, token).outcome == "changed_upstream"
+    assert pushes == []
+
+
+def test_protected_branch_refusal_is_reported_through_the_lease_push(linked, monkeypatch) -> None:
+    config, _clone, origin = linked
+    hook = origin / "hooks" / "pre-receive"
+    hook.write_text("#!/bin/sh\necho 'protected branch' >&2\nexit 1\n")
+    hook.chmod(0o755)
+    before = _origin_rev(origin)
+    draft, token = _lease_draft(config, "lease-protected")
+    pushes: list = []
+    _barrier(monkeypatch, lambda args: None, pushes)
+    result = _publish(config, draft, token)
+    assert result.outcome == "push_refused"
+    assert len(pushes) == 1 and any(a.startswith("--force-with-lease=") for a in pushes[0][0])
+    assert b"remote rejected" in pushes[0][2]
+    assert _origin_rev(origin) == before
+
+
+def test_disconnect_after_remote_acceptance_converges_by_receipt_without_a_second_commit(linked, monkeypatch) -> None:
+    config, _clone, origin = linked
+    draft, token = _lease_draft(config, "lease-disconnect")
+    transport = share_publish._network_git
+    pushes = 0
+    accepted = False
+    drop_fetch = False
+
+    def flaky(folder: Path, *args: str, limit: int = 4096, timeout_s: float = 60.0):
+        nonlocal pushes, accepted, drop_fetch
+        if args and args[0] == "push":
+            pushes += 1
+            result = transport(folder, *args, limit=limit, timeout_s=timeout_s)
+            accepted = result[0] == 0
+            drop_fetch = True
+            return 1, b"", b"connection reset after the remote accepted the update"
+        if drop_fetch and args and args[0] == "fetch":
+            drop_fetch = False
+            return 1, b"", b"network unreachable"
+        return transport(folder, *args, limit=limit, timeout_s=timeout_s)
+
+    monkeypatch.setattr(share_publish, "_network_git", flaky)
+    first = _publish(config, draft, token)
+    assert accepted and first.outcome == "indeterminate"
+    accepted_tip = _origin_rev(origin)
+    second = _publish(config, draft, token)
+    assert second.outcome == "published"
+    assert second.commit_oid == accepted_tip
+    assert pushes == 1
+    assert _origin_rev(origin) == accepted_tip
+    count = subprocess.run(
+        ["git", "--git-dir", str(origin), "rev-list", "--count", "--grep=Ciaobot-Share-Proposal", "refs/heads/main"],
+        check=True, capture_output=True, text=True,
+    ).stdout.strip()
+    assert count == "1"
+    assert len(share_publish.list_share_receipts(config, workspace="home")) == 1
+
+
+def test_direct_child_proof_rejects_merges_grandchildren_and_other_parents(linked) -> None:
+    _config, clone, _origin = linked
+    root = git(clone, "rev-parse", "HEAD")
+    git(clone, "commit", "--quiet", "--allow-empty", "-m", "child")
+    child = git(clone, "rev-parse", "HEAD")
+    git(clone, "commit", "--quiet", "--allow-empty", "-m", "grandchild")
+    grand = git(clone, "rev-parse", "HEAD")
+    assert share_publish._is_direct_child(clone, child, root)
+    assert not share_publish._is_direct_child(clone, grand, root)
+    assert not share_publish._is_direct_child(clone, child, grand)
+    git(clone, "checkout", "--quiet", "-b", "side", root)
+    git(clone, "commit", "--quiet", "--allow-empty", "-m", "side")
+    git(clone, "merge", "--quiet", "--no-ff", "-m", "merge", child)
+    merge = git(clone, "rev-parse", "HEAD")
+    assert not share_publish._is_direct_child(clone, merge, root)
+    assert not share_publish._is_direct_child(clone, "not-an-oid", root)
