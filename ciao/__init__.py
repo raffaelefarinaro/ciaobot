@@ -5,7 +5,7 @@ from importlib.metadata import PackageNotFoundError, version
 __all__ = ["__version__"]
 
 # Kept in sync by the release tool, which bumps this top-level literal
-# (ciao/release.py matches ``^__version__ = "..."``). When the package is
+# (scripts/release.py matches ``^__version__ = "..."``). When the package is
 # installed the real distribution version overrides it below; the literal is
 # the fallback for running straight from a source checkout.
 __version__ = "1.10.0"

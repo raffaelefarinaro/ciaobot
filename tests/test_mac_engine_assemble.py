@@ -220,7 +220,7 @@ def env(tmp_path, monkeypatch):
     state.status = {}
     state.smoke_output = b"OpenSSL 3.0.99 1 Jan 2099\n[\"-I\", \"-B\"]\n"
     state.ciaobot_requires = ["foo", 'pytest; extra == "test"']
-    state.scripts = ["ciao", "ciaobot", "ciao-public-preflight", "ciao-package-smoke", "ciao-prepare-release"]
+    state.scripts = ["ciao", "ciaobot"]
     state.extra_script = False
     state.extra_dist = False
     state.ciaobot_licence = b"ciaobot licence text\n"

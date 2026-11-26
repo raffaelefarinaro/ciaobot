@@ -63,8 +63,7 @@ def test_non_isolated_reexec_argv_is_unchanged(monkeypatch: pytest.MonkeyPatch) 
 
 
 def test_no_reexec_argv_bypasses_the_helper() -> None:
-    # ciao.package_smoke is the release tool's own command (source checkout, not an engine re-exec).
-    pattern = re.compile(r'sys\.executable,\s*"-m",\s*"ciao(?!\.package_smoke)')
+    pattern = re.compile(r'sys\.executable,\s*"-m",\s*"ciao')
     hits = [
         path.relative_to(REPO).as_posix()
         for path in (REPO / "ciao").rglob("*.py")

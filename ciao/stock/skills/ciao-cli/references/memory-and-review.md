@@ -11,7 +11,6 @@
 | Command | Purpose | Guard |
 |---|---|---|
 | `vault search QUERY [--limit N]` | Full-text search the active workspace vault. | — |
-| `vault recall-check --claims-file FILE` | Best-effort model-invoked check of selected claims against notes actually read for a vault-recall answer. | Make one attempt before answering; invocation and cleanup are not guaranteed. Keep claim text out of arguments: write a private temporary JSON file (restricted permissions) and remove it afterwards. Each claim has a unique `id`, `text` (max 300 characters) and up to six vault-relative `.md` `source_paths`; send at most 12. Correct or qualify contradicted claims; never present insufficient evidence as fact; treat unavailable or incomplete evidence as unchecked. `verification_disabled` is an opt-out: answer normally without a forced hedge. Do not retry, announce the check or expose its result. Provider or session logging is outside this guidance. |
 | `vault review list` | List scoped vault-note review candidates (stale, orphaned, duplicate, weakly linked). | Read-only; an unattended schedule may only list, never decide. |
 | `vault review show PATH` | Inspect one candidate's evidence (why it was flagged, backlinks, duplicates). | Read-only. |
 | `vault review keep --candidate ID` | Record a "keep" decision: clears the row and stamps the note's `updated:` date to today. | Mutating; needs an attended turn — `unattended_forbidden` when run from a schedule or other automation. |
