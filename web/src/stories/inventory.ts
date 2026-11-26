@@ -5092,22 +5092,64 @@ export const inventory: InventoryEntry[] = [
     "variantNotes": "Loading/load-error/connection/terminal action. Detailed variants are unassessed.",
     "states": [
       {
-        "name": "default",
-        "coverage": "uncovered",
-        "storyIds": [],
-        "note": "<template> in ProviderSignInHint.vue implements this render; no rendered-state story exists."
+            "name": "closed",
+            "coverage": "covered",
+            "storyIds": [
+                  "provider-sign-in-hint--closed"
+            ],
+            "note": "Rendered using synthetic fixture data."
       },
       {
-        "name": "other states",
-        "coverage": "unknown",
-        "storyIds": [],
-        "note": "Further state branches and their coverage have not yet been audited."
-      }
-    ],
+            "name": "loading",
+            "coverage": "covered",
+            "storyIds": [
+                  "provider-sign-in-hint--loading"
+            ],
+            "note": "Rendered using synthetic fixture data."
+      },
+      {
+            "name": "command",
+            "coverage": "covered",
+            "storyIds": [
+                  "provider-sign-in-hint--command"
+            ],
+            "note": "Rendered using synthetic fixture data."
+      },
+      {
+            "name": "missing",
+            "coverage": "covered",
+            "storyIds": [
+                  "provider-sign-in-hint--missing"
+            ],
+            "note": "Rendered using synthetic fixture data."
+      },
+      {
+            "name": "failure",
+            "coverage": "covered",
+            "storyIds": [
+                  "provider-sign-in-hint--failure"
+            ],
+            "note": "Rendered using synthetic fixture data."
+      },
+      {
+            "name": "remaining branches",
+            "coverage": "uncovered",
+            "storyIds": [],
+            "note": "Clipboard success and denial depend on browser permissions and would mutate the viewer clipboard; the chat terminal run requires a live shell and is covered by ProviderSignInHint component tests with mocked terminal outcomes. The chat and host terminal controls render with synthetic capabilities without issuing commands."
+      },
+      {
+      "name": "chat-and-host-terminal",
+      "coverage": "covered",
+      "storyIds": [
+            "provider-sign-in-hint--chat-and-host-terminal"
+      ],
+      "note": "A chat ID and permitted host action show both terminal controls; disabled retry stays disabled."
+}
+],
     "loading": {
-      "status": "unknown",
-      "detail": "Initial and refresh loading fidelity in ProviderSignInHint.vue has not yet been audited."
-    },
+      "status": "known",
+      "detail": "Opening the disclosure starts a command lookup and displays a status while pending."
+},
     "migration": {
       "status": "unassessed",
       "note": "Inventory admission does not approve a design migration."
@@ -7410,34 +7452,80 @@ export const inventory: InventoryEntry[] = [
     "variantNotes": "Observed branches in OnboardingAccessStage.vue; remaining variants have not been audited.",
     "states": [
       {
-        "name": "default",
-        "coverage": "uncovered",
-        "storyIds": [],
-        "note": "<template> in OnboardingAccessStage.vue implements this render; no rendered-state story exists."
+            "name": "loading",
+            "coverage": "covered",
+            "storyIds": [
+                  "onboarding-access-stage--loading"
+            ],
+            "note": "Rendered using synthetic fixture data."
       },
       {
-        "name": "provider",
-        "coverage": "uncovered",
-        "storyIds": [],
-        "note": "OnboardingAccessStage.vue has a provider branch; no rendered-state story exists."
+            "name": "claude",
+            "coverage": "covered",
+            "storyIds": [
+                  "onboarding-access-stage--claude"
+            ],
+            "note": "Rendered using synthetic fixture data."
       },
       {
-        "name": "bypass-note",
-        "coverage": "uncovered",
-        "storyIds": [],
-        "note": "approval group renders BYPASS_NOTE and the provider docs link"
+            "name": "open-code",
+            "coverage": "covered",
+            "storyIds": [
+                  "onboarding-access-stage--open-code"
+            ],
+            "note": "Rendered using synthetic fixture data."
       },
       {
-        "name": "other states",
-        "coverage": "unknown",
-        "storyIds": [],
-        "note": "Further state branches and their coverage have not yet been audited."
-      }
-    ],
+            "name": "unknown",
+            "coverage": "covered",
+            "storyIds": [
+                  "onboarding-access-stage--unknown"
+            ],
+            "note": "Rendered using synthetic fixture data."
+      },
+      {
+            "name": "load-error",
+            "coverage": "covered",
+            "storyIds": [
+                  "onboarding-access-stage--load-error"
+            ],
+            "note": "Rendered using synthetic fixture data."
+      },
+      {
+            "name": "save-error",
+            "coverage": "covered",
+            "storyIds": [
+                  "onboarding-access-stage--save-error"
+            ],
+            "note": "Rendered using synthetic fixture data."
+      },
+      {
+            "name": "remaining branches",
+            "coverage": "uncovered",
+            "storyIds": [],
+            "note": "The stage has no separate success message; the saved and pending stories observe the selected value and shell state."
+      },
+      {
+      "name": "saved",
+      "coverage": "covered",
+      "storyIds": [
+            "onboarding-access-stage--saved"
+      ],
+      "note": "Rendered with synthetic fixture data."
+},
+      {
+      "name": "saving",
+      "coverage": "covered",
+      "storyIds": [
+            "onboarding-access-stage--saving"
+      ],
+      "note": "Rendered with synthetic fixture data."
+}
+],
     "loading": {
-      "status": "unknown",
-      "detail": "Initial and refresh loading fidelity in OnboardingAccessStage.vue has not yet been audited."
-    },
+      "status": "known",
+      "detail": "The initial read has no dedicated skeleton: unknown runtime disables choices until the workspace answers."
+},
     "migration": {
       "status": "unassessed",
       "note": "Inventory admission does not approve a design migration."
@@ -7889,46 +7977,80 @@ export const inventory: InventoryEntry[] = [
     "variantNotes": "Observed branches in OnboardingFinishStage.vue; remaining variants have not been audited.",
     "states": [
       {
-        "name": "default",
-        "coverage": "uncovered",
-        "storyIds": [],
-        "note": "<template> in OnboardingFinishStage.vue implements this render; no rendered-state story exists."
+            "name": "loading",
+            "coverage": "covered",
+            "storyIds": [
+                  "onboarding-finish-stage--loading"
+            ],
+            "note": "Rendered using synthetic fixture data."
       },
       {
-        "name": "loading",
-        "coverage": "uncovered",
-        "storyIds": [],
-        "note": "OnboardingFinishStage.vue has a loading branch; no rendered-state story exists."
+            "name": "empty",
+            "coverage": "covered",
+            "storyIds": [
+                  "onboarding-finish-stage--empty"
+            ],
+            "note": "Rendered using synthetic fixture data."
       },
       {
-        "name": "attention",
-        "coverage": "uncovered",
-        "storyIds": [],
-        "note": "OnboardingFinishStage.vue has a attention branch; no rendered-state story exists."
+            "name": "read-failure",
+            "coverage": "covered",
+            "storyIds": [
+                  "onboarding-finish-stage--read-failure"
+            ],
+            "note": "Rendered using synthetic fixture data."
       },
       {
-        "name": "send error",
-        "coverage": "uncovered",
-        "storyIds": [],
-        "note": "OnboardingFinishStage.vue has a send error branch; no rendered-state story exists."
+            "name": "no-project",
+            "coverage": "covered",
+            "storyIds": [
+                  "onboarding-finish-stage--no-project"
+            ],
+            "note": "Rendered using synthetic fixture data."
       },
       {
-        "name": "sent",
-        "coverage": "uncovered",
-        "storyIds": [],
-        "note": "OnboardingFinishStage.vue has a sent branch; no rendered-state story exists."
+            "name": "remaining branches",
+            "coverage": "uncovered",
+            "storyIds": [],
+            "note": "The accepted-send story exercises the real store and a synthetic chat; the store accepts a queued message before delivery, so the status is not proof of a provider reply. The held chat creation and the open-question send refusal preserve the draft and block a false success."
       },
       {
-        "name": "other states",
-        "coverage": "unknown",
-        "storyIds": [],
-        "note": "Further state branches and their coverage have not yet been audited."
-      }
-    ],
+      "name": "attention",
+      "coverage": "covered",
+      "storyIds": [
+            "onboarding-finish-stage--attention"
+      ],
+      "note": "Rendered with synthetic fixture data."
+},
+      {
+      "name": "task-accepted",
+      "coverage": "covered",
+      "storyIds": [
+            "onboarding-finish-stage--task-accepted"
+      ],
+      "note": "Rendered with synthetic fixture data."
+},
+      {
+      "name": "sending",
+      "coverage": "covered",
+      "storyIds": [
+            "onboarding-finish-stage--sending"
+      ],
+      "note": "Held chat creation keeps the draft visible and disables the submit controls."
+},
+      {
+      "name": "send-refused",
+      "coverage": "covered",
+      "storyIds": [
+            "onboarding-finish-stage--send-refused"
+      ],
+      "note": "An open native question makes the real store refuse the send; the draft and error remain visible."
+}
+],
     "loading": {
-      "status": "unknown",
-      "detail": "Initial and refresh loading fidelity in OnboardingFinishStage.vue has not yet been audited."
-    },
+      "status": "known",
+      "detail": "All six summary reads must settle before the summary appears."
+},
     "migration": {
       "status": "unassessed",
       "note": "Inventory admission does not approve a design migration."
@@ -8157,46 +8279,104 @@ export const inventory: InventoryEntry[] = [
     "variantNotes": "Observed branches in OnboardingRuntimeStage.vue; remaining variants have not been audited.",
     "states": [
       {
-        "name": "default",
-        "coverage": "uncovered",
-        "storyIds": [],
-        "note": "<template> in OnboardingRuntimeStage.vue implements this render; no rendered-state story exists."
+            "name": "loading",
+            "coverage": "covered",
+            "storyIds": [
+                  "onboarding-runtime-stage--loading"
+            ],
+            "note": "Rendered using synthetic fixture data."
       },
       {
-        "name": "provider",
-        "coverage": "uncovered",
-        "storyIds": [],
-        "note": "OnboardingRuntimeStage.vue has a provider branch; no rendered-state story exists."
+            "name": "status-error",
+            "coverage": "covered",
+            "storyIds": [
+                  "onboarding-runtime-stage--status-error"
+            ],
+            "note": "Rendered using synthetic fixture data."
       },
       {
-        "name": "model",
-        "coverage": "uncovered",
-        "storyIds": [],
-        "note": "OnboardingRuntimeStage.vue has a model branch; no rendered-state story exists."
+            "name": "empty-providers",
+            "coverage": "covered",
+            "storyIds": [
+                  "onboarding-runtime-stage--empty-providers"
+            ],
+            "note": "Rendered using synthetic fixture data."
       },
       {
-        "name": "sign-in",
-        "coverage": "uncovered",
-        "storyIds": [],
-        "note": "OnboardingRuntimeStage.vue has a sign-in branch; no rendered-state story exists."
+            "name": "sign-in",
+            "coverage": "covered",
+            "storyIds": [
+                  "onboarding-runtime-stage--sign-in"
+            ],
+            "note": "Rendered using synthetic fixture data."
       },
       {
-        "name": "loading",
-        "coverage": "uncovered",
-        "storyIds": [],
-        "note": "OnboardingRuntimeStage.vue has a loading branch; no rendered-state story exists."
+            "name": "loading-models",
+            "coverage": "covered",
+            "storyIds": [
+                  "onboarding-runtime-stage--loading-models"
+            ],
+            "note": "Rendered using synthetic fixture data."
       },
       {
-        "name": "other states",
-        "coverage": "unknown",
-        "storyIds": [],
-        "note": "Further state branches and their coverage have not yet been audited."
-      }
-    ],
+            "name": "empty-models",
+            "coverage": "covered",
+            "storyIds": [
+                  "onboarding-runtime-stage--empty-models"
+            ],
+            "note": "Rendered using synthetic fixture data."
+      },
+      {
+            "name": "configured-models",
+            "coverage": "covered",
+            "storyIds": [
+                  "onboarding-runtime-stage--configured-models"
+            ],
+            "note": "Rendered using synthetic fixture data."
+      },
+      {
+            "name": "model-error",
+            "coverage": "covered",
+            "storyIds": [
+                  "onboarding-runtime-stage--model-error"
+            ],
+            "note": "Rendered using synthetic fixture data."
+      },
+      {
+            "name": "remaining branches",
+            "coverage": "uncovered",
+            "storyIds": [],
+            "note": "A saved pre-existing model and retry after a refusal remain covered by component tests; these stories show reported selection, pending and failed writes."
+      },
+      {
+      "name": "reported-saved",
+      "coverage": "covered",
+      "storyIds": [
+            "onboarding-runtime-stage--reported-saved"
+      ],
+      "note": "Rendered with synthetic fixture data."
+},
+      {
+      "name": "reported-saving",
+      "coverage": "covered",
+      "storyIds": [
+            "onboarding-runtime-stage--reported-saving"
+      ],
+      "note": "Rendered with synthetic fixture data."
+},
+      {
+      "name": "save-error",
+      "coverage": "covered",
+      "storyIds": [
+            "onboarding-runtime-stage--save-error"
+      ],
+      "note": "Rendered with synthetic fixture data."
+}
+],
     "loading": {
-      "status": "unknown",
-      "detail": "Initial and refresh loading fidelity in OnboardingRuntimeStage.vue has not yet been audited."
-    },
+      "status": "known",
+      "detail": "Status and model reads show distinct status text; refresh reuses the status read."
+},
     "migration": {
       "status": "unassessed",
       "note": "Inventory admission does not approve a design migration."
@@ -8854,22 +9034,56 @@ export const inventory: InventoryEntry[] = [
     "variantNotes": "The sign-in command is the connection payload's command for each provider; the OpenCode variant also carries its own note.",
     "states": [
       {
-        "name": "default",
-        "coverage": "uncovered",
-        "storyIds": [],
-        "note": "Sign-in guidance has no rendered-state story."
+            "name": "default",
+            "coverage": "covered",
+            "storyIds": [
+                  "provider-sign-in-guidance--default"
+            ],
+            "note": "Rendered using synthetic fixture data."
       },
       {
-        "name": "other states",
-        "coverage": "unknown",
-        "storyIds": [],
-        "note": "Further action and status branches have not yet been audited."
-      }
-    ],
+            "name": "custom-note",
+            "coverage": "covered",
+            "storyIds": [
+                  "provider-sign-in-guidance--custom-note"
+            ],
+            "note": "Rendered using synthetic fixture data."
+      },
+      {
+            "name": "no-workspace",
+            "coverage": "covered",
+            "storyIds": [
+                  "provider-sign-in-guidance--no-workspace"
+            ],
+            "note": "Rendered using synthetic fixture data."
+      },
+      {
+            "name": "remaining branches",
+            "coverage": "uncovered",
+            "storyIds": [],
+            "note": "Clipboard success and denial depend on browser permissions and would mutate the viewer clipboard; component tests cover both with an isolated stub. A successful terminal opening requires host policy and a live terminal session; component tests cover the opening-request and failure wording without opening a real shell."
+      },
+      {
+      "name": "busy-terminal",
+      "coverage": "covered",
+      "storyIds": [
+            "provider-sign-in-guidance--busy-terminal"
+      ],
+      "note": "Rendered with synthetic fixture data."
+},
+      {
+      "name": "invalid-workspace",
+      "coverage": "covered",
+      "storyIds": [
+            "provider-sign-in-guidance--invalid-workspace"
+      ],
+      "note": "Rendered with synthetic fixture data."
+}
+],
     "loading": {
       "status": "none",
-      "detail": "The guidance has no initial or refresh loading state."
-    },
+      "detail": "No initial loading state; terminal and clipboard outcomes depend on browser and terminal availability."
+},
     "migration": {
       "status": "unassessed",
       "note": "Inventory admission does not approve a design migration."
