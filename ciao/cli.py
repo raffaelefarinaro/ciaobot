@@ -4920,6 +4920,39 @@ def _decision_rules_write_command(args: argparse.Namespace) -> int:
     return 0
 
 
+def _proposal_check_command(args: argparse.Namespace) -> int:
+    """Validate one proposal file and print every problem, so the agent can fix it."""
+    from ciao import proposal_files
+    from ciao.execution_modes import is_credential_adjacent
+
+    target = Path(args.file).expanduser()
+    try:
+        resolved = target.resolve()
+    except OSError as exc:
+        print(f"ciao proposal-check: cannot read {args.file}: {exc}", file=sys.stderr)
+        return 2
+    if is_credential_adjacent(resolved):
+        print(f"ciao proposal-check: refuses credential-adjacent paths ({args.file})", file=sys.stderr)
+        return 2
+    try:
+        with resolved.open(encoding="utf-8") as handle:
+            text = handle.read(proposal_files.MAX_FILE_BYTES + 1)
+    except (OSError, UnicodeError) as exc:
+        print(f"ciao proposal-check: cannot read {args.file}: {exc}", file=sys.stderr)
+        return 2
+    problems = proposal_files.check(text, filename=resolved.name, parent=resolved.parent.name)
+    if args.json:
+        json.dump({"file": str(resolved), "ok": not problems, "problems": problems}, sys.stdout, ensure_ascii=False)
+        sys.stdout.write("\n")
+    elif problems:
+        print(f"{resolved.name}: {len(problems)} problem(s) to fix")
+        for problem in problems:
+            print(f"- {problem}")
+    else:
+        print(f"{resolved.name}: ok")
+    return 1 if problems else 0
+
+
 def _memory_proposals_command(args: argparse.Namespace) -> int:
     """List pending memory proposals in a workspace's review queue.
 
@@ -9550,6 +9583,22 @@ def build_parser() -> argparse.ArgumentParser:
         "--json", action="store_true", help="Emit the structured result as JSON."
     )
     decision_rules_write_parser.set_defaults(func=_decision_rules_write_command)
+
+    proposal_check_parser = subparsers.add_parser(
+        "proposal-check",
+        help="Check a Workspace/Proposals/<slug>.md file for the required format.",
+        description=(
+            "Validates a proposal file (type skill-edit, upstream-issue, guide-edit or "
+            "note-retire): front matter fields, values, evidence, body and credential-shaped "
+            "text. Prints every problem so the file can be fixed; exit 0 valid, 1 problems, "
+            "2 unreadable. Never edits the file."
+        ),
+    )
+    proposal_check_parser.add_argument("file", help="The proposal file to check.")
+    proposal_check_parser.add_argument(
+        "--json", action="store_true", help="Emit the result as JSON."
+    )
+    proposal_check_parser.set_defaults(func=_proposal_check_command)
 
     memory_proposal_add_parser = subparsers.add_parser(
         "memory-proposal-add",
