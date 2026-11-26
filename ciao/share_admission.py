@@ -302,6 +302,8 @@ def _admit_checked(
         share_evidence.check_source_eligibility(
             config, workspace=workspace, authorization=fields["evidence_authorization"], claim=claim)
     except share_evidence.EvidenceError as exc:
+        # Note: the journaled attempt still counts toward MAX_ADMISSION_ATTEMPTS, so a refusal
+        # in this gap spends one attempt even though no effect ran.
         code = exc.code if exc.code in share_evidence.SOURCE_REFUSALS else "evidence_stale"
         try:
             share_publish._write_state(

@@ -2589,7 +2589,14 @@ def check_source_eligibility(config: Any, *, workspace: str, authorization: obje
             stream = _stream_for(state, str(grant.get("project_id") or ""))
             entries = stream.get("entries") if stream else None
             entry = next((item for item in entries if isinstance(item, dict) and item.get("entry_id") == row.get("entry_id")), None) if isinstance(entries, list) else None
-            if entry is None or entry.get("superseded") or entry.get("revision") != row.get("entry_revision"):
+            # Recompute the bytes from the live entry, as the guard does, so the re-read
+            # right before the effect proves the same bytes and not just the same revision.
+            if (entry is None or entry.get("superseded") or entry.get("revision") != row.get("entry_revision")
+                    or type(grant.get("start_revision")) is not int or type(entry.get("revision")) is not int
+                    or entry["revision"] <= grant["start_revision"]
+                    or not _operator_event_valid(config, entry, workspace=workspace, lifetime_id=str(lifetime),
+                                                 project_id=str(grant.get("project_id", "")))
+                    or _canonical({name: str(entry.get(name, "")) for name in _clean_field_mask(grant.get("field_mask"))}).decode("utf-8") != canonical):
                 _refuse("source_changed", "The source decision changed.")
         else:
             _refuse("source_changed", "The source permission is unavailable.")

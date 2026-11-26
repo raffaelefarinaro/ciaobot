@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import json
 import threading
+from dataclasses import asdict, replace
 from pathlib import Path
 from typing import Any, Callable
 
@@ -17,10 +18,10 @@ import pytest
 
 from ciao import share_admission as sa
 from ciao import share_evidence as se
-from ciao import share_publish
-from ciao.workspaces import WorkspaceRegistryBusy, acquire_workspace_registry
+from ciao import share_proposals, share_publish, shared_brain, shared_brain_mapping
+from ciao.workspaces import WorkspaceRegistryBusy, acquire_workspace_registry, workspace_registry_claim
 from tests.test_share_admission import (  # noqa: F401 - fixtures and helpers
-    GRANT, WORKSPACE, Env, _child, _log, _revoke, _wait_for, _withdraw, env, install_grant, linked,
+    AUDIENCE, GRANT, LIFETIME, WORKSPACE, Env, _child, _log, _revoke, _wait_for, _withdraw, env, install_grant, linked,
 )
 
 
@@ -159,7 +160,9 @@ def test_a_withdrawal_waits_for_an_admitted_write_and_nothing_starts_after_it(en
 
 # --- the re-read right before the effect --------------------------------------------------
 
-def _tamper_after_journal(env: Env, monkeypatch: pytest.MonkeyPatch) -> list[int]:
+def _tamper_after_journal(
+    env: Env, monkeypatch: pytest.MonkeyPatch, tamper: Callable[[Env], None] = _tamper_bytes,
+) -> list[int]:
     real = share_publish._write_state
     calls: list[int] = []
 
@@ -167,7 +170,7 @@ def _tamper_after_journal(env: Env, monkeypatch: pytest.MonkeyPatch) -> list[int
         result = real(*args, **kwargs)
         calls.append(1)
         if len(calls) == 1:
-            _tamper_bytes(env)  # the gap between the durable journal and the effect
+            tamper(env)  # the gap between the durable journal and the effect
         return result
 
     monkeypatch.setattr(share_publish, "_write_state", journal_then_tamper)
@@ -268,3 +271,170 @@ def test_two_processes_a_source_made_ineligible_here_writes_nothing_there(
     child = _child(env, "hold", signals)
     assert child.communicate(timeout=30)[0].split() == [code]
     assert _log(signals) == [] and env.attempts() == []
+
+
+# --- a standing (stream entry) source -------------------------------------------------------
+
+STANDING = "grant-standing"
+
+
+def install_standing(config: Any, grant_id: str = STANDING) -> dict[str, Any]:
+    """A live standing grant over a real operator-signed decision, and its signed authorization."""
+    link = config.links[0]
+    with se.evidence_claim(config, workspace=WORKSPACE):
+        state = se._load_state(config, WORKSPACE)
+        state["grants"][grant_id] = {
+            "grant_id": grant_id, "active": True, "type": "standing", "source_kind": "stream", "workspace": WORKSPACE,
+            "workspace_lifetime_id": LIFETIME, "project_id": "proj", "source_id": "doc", "start_revision": 0,
+            "consent_generation": 1, "audience": AUDIENCE, "producers": ["memory_extraction"],
+            "field_mask": ["decision"], "evidence_key": None, "history": [],
+            "brain": {"name": link.name, "identity": link.identity, "lifetime_id": link.lifetime_id},
+        }
+        se._save_state(config, WORKSPACE, state)
+    se.record_operator_decision(
+        config, workspace=WORKSPACE, project_id="proj", decision="Launch", reason="", effective_date="2026-11-26",
+        session="operator-session")
+    entry = se._load_state(config, WORKSPACE)["streams"]["proj"]["entries"][-1]
+    canonical = se._canonical({"decision": "Launch"}).decode("utf-8")
+    row = {
+        "grant_id": grant_id, "grant_type": "standing", "entry_id": entry["entry_id"], "entry_revision": entry["revision"],
+        "snapshot_id": None, "consent_generation": 1, "audience": AUDIENCE, "project_id": "proj", "source_id": "doc",
+        "producer": "memory_extraction", "relation_kind": "memory_checkpoint", "relation_id": "run-1",
+        "relation_evidence": "proof-1", "relation_expires_at": "2099-01-01T00:00:00Z", "field_mask": ["decision"],
+        "canonical_bytes": canonical, "digest": se._digest(canonical.encode("utf-8")), "recorded_at": "2026-11-26T00:00:00Z",
+    }
+    payload = {"workspace": WORKSPACE, "workspace_lifetime_id": LIFETIME, "brain_name": link.name,
+               "brain_identity": link.identity, "brain_lifetime_id": link.lifetime_id, "row": row}
+    return {"schema": se.SCHEMA, "payload": payload, "signature": se._authorization_signature(config, payload)}
+
+
+def redraft(env: Env, authorization: dict[str, Any], path: str, key: str) -> Env:
+    """A fresh private artifact for another destination path, bound to `authorization`."""
+    link = env.config.links[0]
+    with shared_brain.checkout_claims_nowait([link.path], env.config), workspace_registry_claim(env.config) as owner:
+        snapshot = shared_brain_mapping.resolve_workspace_destination(
+            env.config, WORKSPACE, link.name, note_type="decision", relative_path=path, operation="create", owner=owner)
+        assert snapshot is not None
+        captured = share_proposals._qualify_owned(env.config, WORKSPACE, link, path, "create", owner)
+        draft = share_proposals._draft_share(
+            env.config, workspace=WORKSPACE, brain=link.name, relative_path=path, operation="create",
+            proposed=b"Launch\n", request_key=key, request_fingerprint=key, checkout_claimed=True,
+            registry_owner=owner, expected_qualification=captured,
+            candidate_binding={"authorization": authorization, **asdict(snapshot)})
+    assert isinstance(draft, share_proposals.ShareDraft)
+    return replace(env, authorization=authorization, proposal_id=draft.proposal_id, token=draft.artifact["review_token"])
+
+
+@pytest.fixture
+def standing(env: Env) -> Env:
+    return redraft(env, install_standing(env.config), "decisions/standing.md", "std")
+
+
+def _entry_edit(env: Env, change: Callable[[dict[str, Any], list[dict[str, Any]]], None]) -> None:
+    """An out-of-band edit of the private state: no claim, so it also works inside the fence.
+
+    The real writers (supersede, revoke) wait for the fence and cannot run in the
+    journal-to-effect gap; this is what a writer that bypasses it would do.
+    """
+    state = se._load_state(env.config, WORKSPACE)
+    entries = state["streams"]["proj"]["entries"]
+    change(entries[-1], entries)
+    se._save_state(env.config, WORKSPACE, state)
+
+
+def _supersede(env: Env) -> None:
+    _entry_edit(env, lambda entry, entries: entry.update(superseded=True))
+
+
+def _drop_entry(env: Env) -> None:
+    _entry_edit(env, lambda entry, entries: entries.clear())
+
+
+def _revision_mismatch(env: Env) -> None:
+    _entry_edit(env, lambda entry, entries: entry.update(revision=entry["revision"] + 5))
+
+
+def _text_without_revision_bump(env: Env) -> None:
+    _entry_edit(env, lambda entry, entries: entry.update(decision="Leak"))
+
+
+def _boundary_moved(env: Env) -> None:
+    _grant_edit_for(env, STANDING, start_revision=5)
+
+
+def _grant_edit_for(env: Env, grant_id: str, **changes: Any) -> None:
+    state = se._load_state(env.config, WORKSPACE)
+    state["grants"][grant_id].update(changes)
+    se._save_state(env.config, WORKSPACE, state)
+
+
+def _mask_changed(env: Env) -> None:
+    _grant_edit_for(env, STANDING, field_mask=["decision", "reason"])
+
+
+STANDING_CASES: list[tuple[str, Callable[[Env], None]]] = [
+    ("superseded", _supersede),
+    ("missing", _drop_entry),
+    ("revision-mismatch", _revision_mismatch),
+    ("text-without-revision-bump", _text_without_revision_bump),
+    ("before-grant-boundary", _boundary_moved),
+    ("mask-changed", _mask_changed),
+]
+
+
+def test_a_live_standing_entry_reaches_the_callback_once(standing: Env) -> None:
+    assert standing.admit().code == "applied" and len(standing.effects) == 1
+
+
+@pytest.mark.parametrize(("name", "mutate"), STANDING_CASES, ids=[item[0] for item in STANDING_CASES])
+def test_a_changed_standing_entry_refuses_with_zero_effects(standing: Env, name: str, mutate: Callable[[Env], None]) -> None:
+    mutate(standing)
+    assert standing.admit().code == "source_changed"
+    assert standing.admit(None).code == "source_changed"
+    assert standing.effects == [] and standing.attempts() == []
+
+
+@pytest.mark.parametrize(("name", "mutate"), STANDING_CASES, ids=[item[0] for item in STANDING_CASES])
+def test_a_standing_entry_changed_after_the_journal_stops_the_effect(
+    standing: Env, monkeypatch: pytest.MonkeyPatch, name: str, mutate: Callable[[Env], None],
+) -> None:
+    _tamper_after_journal(standing, monkeypatch, mutate)
+    assert standing.admit().code == "source_changed" and standing.effects == []
+    assert [item["status"] for item in standing.attempts()] == ["rejected"]
+
+
+@pytest.mark.parametrize(("name", "mutate"), STANDING_CASES, ids=[item[0] for item in STANDING_CASES])
+def test_mutation_dropping_the_standing_recheck_lets_the_change_through(
+    standing: Env, monkeypatch: pytest.MonkeyPatch, name: str, mutate: Callable[[Env], None],
+) -> None:
+    real = se.check_source_eligibility
+    calls: list[int] = []
+
+    def first_only(*args: Any, **kwargs: Any) -> Any:
+        calls.append(1)
+        return real(*args, **kwargs) if len(calls) == 1 else {}
+
+    monkeypatch.setattr(se, "check_source_eligibility", first_only)
+    _tamper_after_journal(standing, monkeypatch, mutate)
+    assert standing.admit().code == "applied"  # the mutant writes; the real code does not
+
+
+@pytest.mark.parametrize(("name", "mutate"), STANDING_CASES[:1] + STANDING_CASES[3:4], ids=["superseded", "text-without-revision-bump"])
+def test_mutation_dropping_the_standing_branch_is_noticed(
+    standing: Env, monkeypatch: pytest.MonkeyPatch, name: str, mutate: Callable[[Env], None],
+) -> None:
+    """With the whole step gone only the older guard stops it, and under another code."""
+    monkeypatch.setattr(se, "check_source_eligibility", lambda *a, **k: {})
+    mutate(standing)
+    assert standing.admit().code != "source_changed"
+
+
+# --- fresh consent and fresh drafting ---------------------------------------------------------
+
+def test_after_revoke_fresh_consent_and_a_fresh_draft_are_eligible_again(env: Env) -> None:
+    _revoke(env)
+    assert env.admit().code == "source_revoked"
+    fresh = redraft(env, install_grant(env.config, "grant-two"), "decisions/d2.md", "fresh")
+    assert fresh.admit(None).code == "eligible"
+    assert fresh.admit().code == "applied" and len(env.effects) == 1
+    assert env.admit().code == "source_revoked" and len(env.effects) == 1  # the old artifact stays dead
