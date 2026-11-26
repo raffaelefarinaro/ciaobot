@@ -80,7 +80,6 @@ BROWSER_OR_INTERNAL_ROUTES: dict[str, str] = {
     "/api/settings/providers/{provider}/{action}": "browser-only handoff to provider CLI login, verification, or logout",
     "/api/admin/skills/add": "deprecated GitHub skill add; returns 410, replaced by /api/skills/import",
     "/api/skills/import": "browser skills import; uploads validated zip",
-    "/api/import/preview": "browser Memory import selection; reads the chosen conversations on the engine host to state what would be processed",
 }
 
 

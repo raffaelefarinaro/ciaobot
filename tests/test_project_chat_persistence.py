@@ -209,17 +209,16 @@ def test_both_welcome_shapes_explain_memory_and_link_existing_categories(
         assert "To decide" not in welcome
         # Undo is the workspace's Git history.
         assert "Git history" in welcome
-        # No promise that past conversations are read, imported or filed. Since
-        # #1041 the welcome names the opt-in affordance, so this is no longer
-        # "the word import may not appear": C1's property was that nothing is
-        # filed on its own, and the welcome now carries that as a disclaimer —
-        # past conversations are not imported automatically, and nothing is read
-        # until the reader chooses. The pointer itself is pinned here too, so a
-        # welcome that dropped it (or one that promised an import had run) fails.
+        # No promise that past conversations are read, imported or filed: the
+        # welcome says they are not imported automatically and names the skill
+        # the user can ask for, so a welcome that dropped that (or one that
+        # promised an import had run) fails.
         lowered = welcome.lower()
-        assert "[Import conversations](/memory/import)" in welcome
+        assert "import my past conversations" in lowered
+        assert "`import-conversations` skill" in welcome
         assert "are not imported automatically" in lowered
-        assert "nothing is read until you choose" in lowered
+        assert "nothing is read until you ask" in lowered
+        assert "/memory/import" not in welcome
         # The interview still opens the chat, and memory comes before it.
         assert "What is your name" in welcome
         assert welcome.index("memory is organized") < welcome.index("What is your name")
@@ -330,8 +329,8 @@ def test_onboarding_starting_knowledge_is_confirmed_facts_only(
     so the pass files only what the user confirmed and parks everything else in
     `Workspace/Unsure.md`. Nothing about it creates scaffolding ahead of
     the facts, and nothing about it reaches outside Ciaobot's own vault state:
-    reading past conversations is the consent-gated memory job, which the user
-    starts from Memory whenever they choose, not a side effect of onboarding.
+    reading past conversations is the `import-conversations` skill, which the user
+    asks for whenever they choose, not a side effect of onboarding.
     """
     existing = _make_manager(tmp_path / "existing", vault_mode="existing")
     scratch = _make_manager(tmp_path / "scratch", vault_mode="scratch")

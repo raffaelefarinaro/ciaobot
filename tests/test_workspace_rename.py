@@ -10,7 +10,6 @@ from pathlib import Path
 import pytest
 
 from ciao.config import CiaoConfig, WorkspaceConfig, reset_reroot_cache
-from ciao.import_store import ImportStore, engine_store_path
 from ciao.schedules import ScheduleStore
 from ciao.sessions import StateStore
 from ciao.transcripts import TranscriptStore
@@ -79,8 +78,7 @@ def _stores(config: CiaoConfig, tmp_path: Path):
         runtime, include_system=True, workspace_names=config.workspace_names
     )
     webhooks = WebhookStore(runtime / "webhooks.json")
-    imports = ImportStore(engine_store_path(config))
-    return schedules, webhooks, imports
+    return schedules, webhooks
 
 
 def _seed_all(config: CiaoConfig, tmp_path: Path, projects: _Projects):
@@ -88,7 +86,7 @@ def _seed_all(config: CiaoConfig, tmp_path: Path, projects: _Projects):
     projects._projects["proj-1"] = ProjectInfo(
         project_id="proj-1", name="Work", workspace="personal"
     )
-    schedules, webhooks, imports = _stores(config, tmp_path)
+    schedules, webhooks = _stores(config, tmp_path)
     user = schedules.create(
         daily_time_utc="10:00",
         prompt="morning brief",
@@ -121,20 +119,15 @@ def _seed_all(config: CiaoConfig, tmp_path: Path, projects: _Projects):
     trigger = webhooks.update(
         trigger.trigger_id, expected_revision=trigger.revision, enabled=True
     )
-    batch = imports.create(
-        workspace="personal",
-        sources=[{"provider": "claude_code", "source_id": "sess-1"}],
-    )
     return {
         "schedule_id": user.schedule_id,
         "trigger_id": trigger.trigger_id,
         "revision": trigger.revision,
         "secret": secret,
-        "batch_id": batch.batch_id,
     }
 
 
-def test_rename_rewrites_registry_projects_schedules_webhooks_and_imports(
+def test_rename_rewrites_registry_projects_schedules_and_webhooks(
     tmp_path: Path,
 ) -> None:
     config = _shared_config(tmp_path, ["personal", "work"])
@@ -142,7 +135,7 @@ def test_rename_rewrites_registry_projects_schedules_webhooks_and_imports(
     projects = _Projects()
     ids = _seed_all(config, tmp_path, projects)
     runtime = tmp_path / ".runtime"
-    schedules, webhooks, imports = _stores(config, tmp_path)
+    schedules, webhooks = _stores(config, tmp_path)
 
     result = rename_workspace(
         config,
@@ -151,7 +144,6 @@ def test_rename_rewrites_registry_projects_schedules_webhooks_and_imports(
         projects=projects,
         schedules=schedules,
         webhooks=webhooks,
-        imports=imports,
     )
 
     assert result == {"from": "personal", "to": "santo"}
@@ -163,7 +155,7 @@ def test_rename_rewrites_registry_projects_schedules_webhooks_and_imports(
     assert projects._projects["proj-1"].project_id == "proj-1"
     assert projects.saved_reasons == ["workspace_rename"]
 
-    schedules, webhooks, imports = _stores(config, tmp_path)
+    schedules, webhooks = _stores(config, tmp_path)
     user_rows = [
         entry
         for entry in schedules.list_entries()
@@ -186,10 +178,6 @@ def test_rename_rewrites_registry_projects_schedules_webhooks_and_imports(
     assert trigger.revision == ids["revision"] + 1
     assert webhooks.authenticate(ids["trigger_id"], ids["secret"]) is not None
 
-    batch = imports.get(ids["batch_id"])
-    assert batch.workspace == "santo"
-    assert batch.destination == "personal"
-
     assert not (tmp_path / "santo").exists()
 
 
@@ -206,7 +194,7 @@ def test_rerooted_rename_moves_the_agent_root_and_the_vault_prefix(
     (tmp_path / "personal" / "sub").mkdir(parents=True)
     config.persist_workspace_registry()
     projects = _Projects()
-    schedules, webhooks, imports = _stores(config, tmp_path)
+    schedules, webhooks = _stores(config, tmp_path)
 
     result = rename_workspace(
         config,
@@ -215,7 +203,6 @@ def test_rerooted_rename_moves_the_agent_root_and_the_vault_prefix(
         projects=projects,
         schedules=schedules,
         webhooks=webhooks,
-        imports=imports,
     )
 
     assert result == {"from": "personal", "to": "santo"}
@@ -234,7 +221,7 @@ def test_absolute_vault_root_is_not_rewritten(tmp_path: Path) -> None:
     (tmp_path / "personal").mkdir()
     config.persist_workspace_registry()
     projects = _Projects()
-    schedules, webhooks, imports = _stores(config, tmp_path)
+    schedules, webhooks = _stores(config, tmp_path)
 
     rename_workspace(
         config,
@@ -243,7 +230,6 @@ def test_absolute_vault_root_is_not_rewritten(tmp_path: Path) -> None:
         projects=projects,
         schedules=schedules,
         webhooks=webhooks,
-        imports=imports,
     )
 
     assert config.workspaces["santo"].vault_root == str(external)
@@ -263,7 +249,7 @@ def test_invalid_name_collision_archived_name_and_busy_chat_write_nothing(
     config.persist_workspace_registry()
     runtime = tmp_path / ".runtime"
     projects = _Projects()
-    schedules, webhooks, imports = _stores(config, tmp_path)
+    schedules, webhooks = _stores(config, tmp_path)
 
     def attempt(new: str) -> None:
         before = (runtime / "workspaces.json").read_bytes()
@@ -275,7 +261,6 @@ def test_invalid_name_collision_archived_name_and_busy_chat_write_nothing(
                 projects=projects,
                 schedules=schedules,
                 webhooks=webhooks,
-                imports=imports,
             )
         assert (runtime / "workspaces.json").read_bytes() == before
         assert sorted(config.workspace_names()) == ["personal", "work"]
@@ -298,7 +283,7 @@ def test_failed_persist_after_the_directory_rename_moves_it_back(
     (tmp_path / "personal").mkdir()
     config.persist_workspace_registry()
     projects = _Projects()
-    schedules, webhooks, imports = _stores(config, tmp_path)
+    schedules, webhooks = _stores(config, tmp_path)
 
     def _boom(self: CiaoConfig, **kwargs) -> None:
         raise OSError("disk full")
@@ -312,7 +297,6 @@ def test_failed_persist_after_the_directory_rename_moves_it_back(
             projects=projects,
             schedules=schedules,
             webhooks=webhooks,
-            imports=imports,
         )
 
     assert (tmp_path / "personal").is_dir()
@@ -325,7 +309,7 @@ def test_renaming_personal_keeps_it_the_primary_workspace(tmp_path: Path) -> Non
     assert config.primary_workspace() == "personal"
     config.persist_workspace_registry()
     projects = _Projects()
-    schedules, webhooks, imports = _stores(config, tmp_path)
+    schedules, webhooks = _stores(config, tmp_path)
 
     rename_workspace(
         config,
@@ -334,7 +318,6 @@ def test_renaming_personal_keeps_it_the_primary_workspace(tmp_path: Path) -> Non
         projects=projects,
         schedules=schedules,
         webhooks=webhooks,
-        imports=imports,
     )
 
     # The renamed workspace keeps its first position, so it stays primary.
@@ -348,7 +331,6 @@ def _rollback_files(tmp_path: Path, config: CiaoConfig) -> dict[str, Path]:
         "schedules": runtime / "schedules.json",
         "system": runtime / "system_schedules_state.json",
         "webhooks": runtime / "webhooks.json",
-        "imports": engine_store_path(config),
     }
 
 
@@ -360,7 +342,6 @@ def _assert_rolled_back(
     before: dict[str, bytes],
 ) -> None:
     """Every persisted and in-memory reference is back on the old workspace."""
-    from ciao.import_store import ImportStore, engine_store_path
     from ciao.schedules import ScheduleStore
     from ciao.webhooks import WebhookStore
 
@@ -395,10 +376,6 @@ def _assert_rolled_back(
     assert trigger.revision == ids["revision"]
     assert webhooks.authenticate(trigger_id, str(ids["secret"])) is not None
 
-    imports = ImportStore(engine_store_path(config))
-    batch = imports.get(str(ids["batch_id"]))
-    assert batch.workspace == "personal"
-
     assert not (tmp_path / "santo").exists()
 
 
@@ -425,7 +402,6 @@ def test_failed_project_save_restores_registry(tmp_path: Path) -> None:
             projects=projects,
             schedules=_stores(config, tmp_path)[0],
             webhooks=_stores(config, tmp_path)[1],
-            imports=_stores(config, tmp_path)[2],
         )
 
     _assert_rolled_back(config, tmp_path, projects, ids, before)
@@ -443,7 +419,7 @@ def test_failed_schedule_write_restores_projects_and_registry(
         key: path.read_bytes()
         for key, path in _rollback_files(tmp_path, config).items()
     }
-    schedules, webhooks, imports = _stores(config, tmp_path)
+    schedules, webhooks = _stores(config, tmp_path)
 
     def _boom(self: ScheduleStore, old: str, new: str) -> int:
         raise OSError("disk full")
@@ -457,7 +433,6 @@ def test_failed_schedule_write_restores_projects_and_registry(
             projects=projects,
             schedules=schedules,
             webhooks=webhooks,
-            imports=imports,
         )
 
     _assert_rolled_back(config, tmp_path, projects, ids, before)
@@ -475,7 +450,7 @@ def test_failed_webhook_write_restores_schedules_and_projects(
         key: path.read_bytes()
         for key, path in _rollback_files(tmp_path, config).items()
     }
-    schedules, webhooks, imports = _stores(config, tmp_path)
+    schedules, webhooks = _stores(config, tmp_path)
 
     original = WebhookStore.rename_workspace
 
@@ -492,7 +467,6 @@ def test_failed_webhook_write_restores_schedules_and_projects(
             projects=projects,
             schedules=schedules,
             webhooks=webhooks,
-            imports=imports,
         )
 
     # The revision bump from the half-applied webhook write is undone as well:
@@ -500,45 +474,10 @@ def test_failed_webhook_write_restores_schedules_and_projects(
     _assert_rolled_back(config, tmp_path, projects, ids, before)
 
 
-def test_failed_import_write_restores_webhooks(
+def test_failed_webhook_write_restores_everything_on_a_rerooted_install(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """An import failure after webhooks were rewritten restores them exactly."""
-    config = _shared_config(tmp_path, ["personal", "work"])
-    config.persist_workspace_registry()
-    projects = _Projects()
-    ids = _seed_all(config, tmp_path, projects)
-    before = {
-        key: path.read_bytes()
-        for key, path in _rollback_files(tmp_path, config).items()
-    }
-    schedules, webhooks, imports = _stores(config, tmp_path)
-
-    original = ImportStore.rename_workspace
-
-    def _write_then_fail(self: ImportStore, old: str, new: str, **kwargs) -> int:
-        original(self, old, new, **kwargs)
-        raise OSError("disk full")
-
-    monkeypatch.setattr(ImportStore, "rename_workspace", _write_then_fail)
-    with pytest.raises(OSError, match="disk full"):
-        rename_workspace(
-            config,
-            old="personal",
-            new="santo",
-            projects=projects,
-            schedules=schedules,
-            webhooks=webhooks,
-            imports=imports,
-        )
-
-    _assert_rolled_back(config, tmp_path, projects, ids, before)
-
-
-def test_failed_import_write_restores_everything_on_a_rerooted_install(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """An import failure after the other stores restores all of them on re-root."""
+    """A webhook failure after the other stores restores all of them on re-root."""
     config = _rerooted_config(
         tmp_path, {"personal": "personal", "work": "work"}
     )
@@ -546,18 +485,18 @@ def test_failed_import_write_restores_everything_on_a_rerooted_install(
     (tmp_path / "personal" / "sub").mkdir(parents=True)
     config.persist_workspace_registry()
     projects = _Projects()
-    schedules, webhooks, imports = _stores(config, tmp_path)
+    schedules, webhooks = _stores(config, tmp_path)
     before: dict[str, bytes | None] = {}
     for key, path in _rollback_files(tmp_path, config).items():
         before[key] = path.read_bytes() if path.is_file() else None
 
-    original = ImportStore.rename_workspace
+    original = WebhookStore.rename_workspace
 
-    def _write_then_fail(self: ImportStore, old: str, new: str, **kwargs) -> int:
+    def _write_then_fail(self: WebhookStore, old: str, new: str, **kwargs) -> int:
         original(self, old, new, **kwargs)
         raise OSError("disk full")
 
-    monkeypatch.setattr(ImportStore, "rename_workspace", _write_then_fail)
+    monkeypatch.setattr(WebhookStore, "rename_workspace", _write_then_fail)
     with pytest.raises(OSError, match="disk full"):
         rename_workspace(
             config,
@@ -566,7 +505,6 @@ def test_failed_import_write_restores_everything_on_a_rerooted_install(
             projects=projects,
             schedules=schedules,
             webhooks=webhooks,
-            imports=imports,
         )
 
     for key, path in _rollback_files(tmp_path, config).items():
@@ -615,7 +553,7 @@ def test_rename_keeps_the_workspace_position_in_memory_and_on_disk(
     config = _shared_config(tmp_path, ["alpha", "personal", "work"])
     config.persist_workspace_registry()
     projects = _Projects()
-    schedules, webhooks, imports = _stores(config, tmp_path)
+    schedules, webhooks = _stores(config, tmp_path)
 
     rename_workspace(
         config,
@@ -624,7 +562,6 @@ def test_rename_keeps_the_workspace_position_in_memory_and_on_disk(
         projects=projects,
         schedules=schedules,
         webhooks=webhooks,
-        imports=imports,
     )
 
     assert config.workspace_names() == ["alpha", "santo", "work"]
@@ -643,7 +580,7 @@ def test_old_name_recreated_after_rename_does_not_take_over_projects(
     renamed_general = _general_id(manager, "work")
     chat_id = manager.create_chat(renamed_general, title="Chat").chat_id
     renamed_memory = manager._memory_pass.ensure_project("work").project_id
-    schedules, webhooks, imports = _stores(config, tmp_path)
+    schedules, webhooks = _stores(config, tmp_path)
 
     rename_workspace(
         config,
@@ -652,7 +589,6 @@ def test_old_name_recreated_after_rename_does_not_take_over_projects(
         projects=manager,
         schedules=schedules,
         webhooks=webhooks,
-        imports=imports,
     )
     config.workspaces["work"] = WorkspaceConfig(name="work", vault_root="memory-vault/work")
     manager.refresh_workspaces()
@@ -684,7 +620,7 @@ def test_rename_evicts_providers_before_the_agent_root_moves(
         return []
 
     monkeypatch.setattr(projects, "evict_workspace_providers", evict)
-    schedules, webhooks, imports = _stores(config, tmp_path)
+    schedules, webhooks = _stores(config, tmp_path)
 
     rename_workspace(
         config,
@@ -693,7 +629,6 @@ def test_rename_evicts_providers_before_the_agent_root_moves(
         projects=projects,
         schedules=schedules,
         webhooks=webhooks,
-        imports=imports,
     )
 
     assert root_present_at_eviction == [True]
@@ -713,7 +648,7 @@ async def test_rename_evicts_cached_providers_of_the_renamed_workspace(
     other_provider = _StubProvider()
     manager._providers[renamed_chat] = renamed_provider  # type: ignore[assignment]
     manager._providers[other_chat] = other_provider  # type: ignore[assignment]
-    schedules, webhooks, imports = _stores(config, tmp_path)
+    schedules, webhooks = _stores(config, tmp_path)
 
     rename_workspace(
         config,
@@ -722,7 +657,6 @@ async def test_rename_evicts_cached_providers_of_the_renamed_workspace(
         projects=manager,
         schedules=schedules,
         webhooks=webhooks,
-        imports=imports,
     )
     await asyncio.sleep(0)
 
@@ -742,7 +676,7 @@ def test_rollback_keeps_a_schedule_edit_made_after_the_rename_wrote(
     config.persist_workspace_registry()
     projects = _Projects()
     _seed_all(config, tmp_path, projects)
-    schedules, webhooks, imports = _stores(config, tmp_path)
+    schedules, webhooks = _stores(config, tmp_path)
     target = schedules.create(
         daily_time_utc="09:00", prompt="p", model="m", chat_id=1,
         workspace="personal", title="t",
@@ -767,7 +701,6 @@ def test_rollback_keeps_a_schedule_edit_made_after_the_rename_wrote(
             projects=projects,
             schedules=schedules,
             webhooks=webhooks,
-            imports=imports,
         )
 
     row = schedules.get(target.schedule_id)
@@ -784,7 +717,7 @@ def test_failure_inside_the_schedule_rename_step_is_rolled_back(
     config.persist_workspace_registry()
     projects = _Projects()
     _seed_all(config, tmp_path, projects)
-    schedules, webhooks, imports = _stores(config, tmp_path)
+    schedules, webhooks = _stores(config, tmp_path)
     target = schedules.create(
         daily_time_utc="09:00", prompt="p", model="m", chat_id=1,
         workspace="personal", title="t",
@@ -797,7 +730,7 @@ def test_failure_inside_the_schedule_rename_step_is_rolled_back(
     with pytest.raises(OSError, match="overlay disk full"):
         rename_workspace(
             config, old="personal", new="santo", projects=projects,
-            schedules=schedules, webhooks=webhooks, imports=imports,
+            schedules=schedules, webhooks=webhooks,
         )
     monkeypatch.undo()
     row = schedules.get(target.schedule_id)
@@ -809,16 +742,19 @@ def test_rollback_preserves_a_verifier_revoked_after_rename(tmp_path, monkeypatc
     config.persist_workspace_registry()
     projects = _Projects()
     ids = _seed_all(config, tmp_path, projects)
-    schedules, webhooks, imports = _stores(config, tmp_path)
+    schedules, webhooks = _stores(config, tmp_path)
+
+    original = webhooks.rename_workspace
 
     def revoke_then_fail(*args, **kwargs):
+        original(*args, **kwargs)
         assert webhooks.revoke_workspace("renamed") == 1
-        raise OSError("import save failed")
+        raise OSError("webhook save failed")
 
-    monkeypatch.setattr(imports, "rename_workspace", revoke_then_fail)
+    monkeypatch.setattr(webhooks, "rename_workspace", revoke_then_fail)
     with pytest.raises(RuntimeError, match="Newer edits were preserved"):
         rename_workspace(config, old="personal", new="renamed", projects=projects,
-                         schedules=schedules, webhooks=webhooks, imports=imports)
+                         schedules=schedules, webhooks=webhooks)
     assert webhooks.authenticate(ids["trigger_id"], ids["secret"]) is None
     assert "personal" in config.workspaces
     assert "renamed" not in config.workspaces

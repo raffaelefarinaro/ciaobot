@@ -2,7 +2,7 @@
 
 The name is the identity key: the registry entry, the agent root directory on
 a re-rooted install, and the ``workspace`` field in projects, schedules,
-webhooks and import batches. There is no display label, so
+and webhooks. There is no display label, so
 renaming rewrites the key itself rather than adding a second string.
 
 Order matters. Everything refused is refused before anything is written. The
@@ -72,15 +72,13 @@ def rename_workspace(
     projects: Any,
     schedules: Any,
     webhooks: Any,
-    imports: Any,
     owner: Any = None,
     updated: Any = None,
 ) -> dict[str, str]:
     """Rename workspace ``old`` to ``new`` and return ``{"from": old, "to": new}``.
 
     ``projects`` is the project/chat manager, ``schedules`` its schedule
-    store, ``webhooks`` the webhook trigger store, ``imports`` the import
-    batch store. ``projects`` may be
+    store, ``webhooks`` the webhook trigger store. ``projects`` may be
     ``None`` when the caller has no chat registry; every other store is
     required. The caller holds the workspace archive lock: the registry is
     mutated here, on the event loop.
@@ -91,12 +89,12 @@ def rename_workspace(
         links = [*getattr(config.workspace(old), "shared_brains", []), *getattr(updated, "shared_brains", [])]
         with checkout_claims_nowait((link.path for link in links), config), workspace_registry_claim(config) as claim:
             return rename_workspace(config, old=old, new=new, projects=projects, schedules=schedules,
-                                    webhooks=webhooks, imports=imports, owner=claim, updated=updated)
+                                    webhooks=webhooks, owner=claim, updated=updated)
     ensure_registry_current(config)
-    return _rename_owned(config, old, new, projects, schedules, webhooks, imports, owner, updated)
+    return _rename_owned(config, old, new, projects, schedules, webhooks, owner, updated)
 
 
-def _rename_owned(config: Any, old: str, new: str, projects: Any, schedules: Any, webhooks: Any, imports: Any, owner: Any, updated: Any) -> dict[str, str]:
+def _rename_owned(config: Any, old: str, new: str, projects: Any, schedules: Any, webhooks: Any, owner: Any, updated: Any) -> dict[str, str]:
     if not WORKSPACE_NAME_RE.match(new):
         raise ValueError(
             "workspace name must use letters, numbers, dashes, or underscores"
@@ -246,10 +244,9 @@ def _rename_owned(config: Any, old: str, new: str, projects: Any, schedules: Any
             schedules.rename_workspace(old, new)
             snapshot["schedule_written"] = _read_bytes_if_present(snapshot.get("schedule_path"))
             snapshot["system_state_written"] = _read_bytes_if_present(snapshot.get("system_state_path"))
-        for store in (webhooks, imports):
-            undo: list[tuple[bytes, bytes]] = []
-            snapshot["store_undo"].append((store, undo))
-            store.rename_workspace(old, new, undo=undo)
+        undo: list[tuple[bytes, bytes]] = []
+        snapshot["store_undo"].append((webhooks, undo))
+        webhooks.rename_workspace(old, new, undo=undo)
     except Exception:
         _roll_back(config, projects, snapshot, move, owner)
         raise
@@ -359,7 +356,7 @@ def _restore_file(path: Path | None, snapshot: bytes | None) -> None:
     try:
         mode = stat.S_IMODE(os.stat(path).st_mode)
     except OSError:
-        # Secret-bearing stores (webhooks, imports) are owner-only; a
+        # The secret-bearing webhook store is owner-only; a
         # rollback must not widen them to the default umask mode.
         mode = 0o600
     fd, tmp = tempfile.mkstemp(dir=path.parent, prefix=".rename-")

@@ -2470,8 +2470,8 @@ class ProjectChatManager:
         # Read-only and skippable throughout — a summary of what Ciaobot already
         # knows, then questions the user may decline, then a seed from confirmed
         # facts only. It reads no provider history, moves nothing, and writes no
-        # category; curating past conversations stays the separate, consent-gated
-        # memory job (#975's later children), reachable from Memory at any time.
+        # category; importing past conversations is a separate job the user asks for
+        # (the `import-conversations` skill).
         known_state = (
             "Before asking anything, report a short, read-only summary of what "
             "this workspace already holds, taken from Ciaobot's own state only: "
@@ -2514,34 +2514,29 @@ class ProjectChatManager:
             "`Workspace/Unsure.md` instead of filing it."
         )
 
-        # One block, both shapes, for the same reason as `memory_intro` and
-        # `known_state` (#1041, C8): the import affordance is the same sentence
-        # whichever vault the user pointed us at, and the seeded welcome is the
-        # one place a first-run user meets a capability that is not automatic. It
-        # names the page and what happens there — choose, confirm, then every fact
-        # waits for a person — and it claims nothing that has not happened: this
-        # chat reads no provider history, and a welcome that said past
-        # conversations were imported would be promising a run nobody performed
-        # (DESIGN.md's onboarding rule).
+        # One block, both shapes, like `memory_intro` and `known_state`: the
+        # import affordance is the same sentence whichever vault the user pointed
+        # us at. It claims nothing that has not happened: this chat reads no
+        # provider history, so a welcome that said past conversations were
+        # imported would be promising a run nobody performed (DESIGN.md's
+        # onboarding rule).
         import_intro = (
             "**Your past conversations are not imported automatically.** If you "
-            "want what your Claude Code and OpenCode chats already know about you "
-            "in this workspace, that is a separate, explicit choice in "
-            "[Import conversations](/memory/import): you pick the conversations, "
-            "see exactly what would be read and which model would receive it "
-            "before anything runs, and every fact it finds is added to the "
-            "Unsure list (**Memory · Unsure**). Nothing is read until you choose, and nothing is sent "
-            "until you confirm. The same page is in Memory at any time."
+            "want what your Claude Code, OpenCode or Codex chats already know "
+            "about you in this workspace, ask me to **import my past "
+            "conversations**: I use the `import-conversations` skill, read a bounded "
+            "batch you have named, skip Ciaobot's own chats, file what is durable "
+            "into memory, put anything I doubt on the Unsure list "
+            "(**Memory · Unsure**), and keep a checklist in "
+            "`Workspace/Import-Report.md`. Nothing is read until you ask."
         )
-        # The matching agent instruction. It points at the page and stops: an
+        # The matching agent instruction. It names the skill and stops: an
         # onboarding turn that ran an import itself would read a user's history
-        # with no consent screen, which is the one thing this journey exists to
-        # make impossible.
+        # unasked, which is the one thing this welcome must not do.
         import_tour = (
-            "Past conversations are not imported on their own. Name "
-            "**Memory → Import** as the place where they choose which "
-            "conversations Ciaobot may read, say that every fact waits for them "
-            "to accept, and stop there: do not run an import for them, do not "
+            "Past conversations are not imported on their own. Say that the user "
+            "can ask you to import them (the `import-conversations` skill) when "
+            "they want, and stop there: do not run an import for them, do not "
             "scan past chats, and do not read any provider history yourself."
         )
 

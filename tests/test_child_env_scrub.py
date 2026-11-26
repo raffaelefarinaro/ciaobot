@@ -298,21 +298,3 @@ def test_setup_cli_version_probe_child_gets_the_child_env(
     setup_status._cli_version("/bin/tool")
 
     _check_env(capture_runs[0], bundled)
-
-
-@pytest.mark.parametrize(("mode", "bundled"), [("bundled_app", True), ("editable", False)])
-def test_opencode_import_probes_get_the_child_env(
-    monkeypatch: pytest.MonkeyPatch, launcher_env: None, capture_runs: list[dict[str, Any]],
-    mode: str, bundled: bool,
-) -> None:
-    from ciao.import_sources import opencode as oc_import
-
-    _mode(monkeypatch, mode)
-    with contextlib.suppress(Exception):  # an empty stdout is not a version; only the spawn matters
-        oc_import._require_supported_v2("/bin/opencode", timeout=3)
-    with contextlib.suppress(Exception):
-        oc_import._run_opencode_json("/bin/opencode", ["session", "list"], 5)
-
-    assert len(capture_runs) == 2
-    for call in capture_runs:
-        _check_env(call, bundled)

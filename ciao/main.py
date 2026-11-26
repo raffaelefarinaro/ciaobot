@@ -1288,16 +1288,6 @@ async def _run_server_locked(
         # because replaying intervals missed during downtime is worthless.
         schedule_manager.start()
 
-        # Import batch retention (C6, #1032): drop terminal batches past the
-        # 30-day snapshot window, keeping accepted fact evidence. Once per
-        # boot is plenty for a 30-day window, and the sweep is fail-soft
-        # (a prune error is logged inside, never blocks startup).
-        from ciao.import_store import sweep_import_batches
-
-        pruned_imports = sweep_import_batches(config)
-        if pruned_imports:
-            logger.info("Pruned %d expired import batch(es)", pruned_imports)
-
         # Resume chats whose turn the previous process never finished (#2128).
         try:
             resumed = pcm.resume_interrupted_turns(

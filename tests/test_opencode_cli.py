@@ -1,7 +1,7 @@
 """The OpenCode CLI helpers that outlive the HTTP driver: the version floor and the binary.
 
 The chat runtime is `opencode acp` (see test_acp_agents.py). These guards cover what
-Settings, the releaser, the conversation importer and the ACP start gate all share.
+Settings, the releaser and the ACP start gate all share.
 """
 
 from __future__ import annotations

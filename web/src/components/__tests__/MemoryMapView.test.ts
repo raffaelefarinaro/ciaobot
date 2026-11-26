@@ -639,40 +639,6 @@ describe('MemoryMapView sections', () => {
     wrapper.unmount()
   })
 
-  it('shows the import panel on /memory/import, as a page and not a card on the map', async () => {
-    const { wrapper, mm } = await mountSection('import')
-    expect(mm.section).toBe('import')
-    expect(wrapper.get('.pane-header').text()).toContain('Memory · Import')
-    // Its own scrolling page: no canvas, no map toolbar, no review rail, so a
-    // listing of any length scrolls the pane instead of squeezing the map to
-    // zero height and pushing the controls below the list out of reach (#1029).
-    expect(wrapper.find('.import-sources').exists()).toBe(true)
-    expect(wrapper.find('.mm-review-wrap').exists()).toBe(true)
-    expect(wrapper.find('.mm-body').exists()).toBe(false)
-    expect(wrapper.find('.mm-toolbar').exists()).toBe(false)
-    expect(wrapper.find('.mm-review-rail').exists()).toBe(false)
-    // Discovery is opt-in: mounting the section scans nothing and previews
-    // nothing. An **allowlist**, not a deny-list of two route names — a deny-list
-    // lets any later `/api/import/…` GET through unexamined, and a history-reading
-    // GET is exactly the thing that must not be added by accident. The one import
-    // GET this page does make is Ciaobot's *own* batch store (the run list, so a
-    // returning user sees an import they left running instead of an empty list):
-    // metadata only, opening no conversation, and pinned in ImportSources.test.ts.
-    const importGets = apiGet.mock.calls
-      .map(([url]) => String(url))
-      .filter((url) => url.startsWith('/api/import/'))
-    expect(importGets).toEqual(['/api/import/batches?workspace=personal'])
-    // Preview is a POST, so a GET predicate could never have caught it: the scan
-    // and the preview are checked on the mock that can actually issue them.
-    const importPosts = apiPost.mock.calls.map(([url]) => String(url))
-    expect(importPosts.filter((url) => url.startsWith('/api/import/'))).toEqual([])
-    wrapper.unmount()
-
-    const map = await mountSection('map')
-    expect(map.wrapper.find('.import-sources').exists()).toBe(false)
-    map.wrapper.unmount()
-  })
-
   it('follows the route when the sidebar moves to another section', async () => {
     const { wrapper, mm } = await mountSection('unsure')
     await wrapper.router.push('/memory/map')

@@ -34,7 +34,6 @@ const MAIN_SURFACES: Array<[string, string]> = [
   ['/automations', '.schedule-panel .page-tag'],
   ['/memory/map', '.mm-toolbar-stale'],
   ['/memory/categories', '.cat-h'],
-  ['/memory/import', '.import-title'],
   ['/memory/unsure', '.mu-link'],
   ['/project/alpha-general', '.text-action'],
   ['/schedules/alpha-daily-brief', '.text-link'],
