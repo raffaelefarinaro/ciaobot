@@ -56,3 +56,28 @@ def test_agent_root_rejects_invalid_names(tmp_path: Path, name: str) -> None:
     config = _config(tmp_path)
     with pytest.raises(ValueError):
         config.agent_root(name)
+
+
+def test_a_vault_symlinked_to_a_cloud_folder_resolves_to_that_folder(tmp_path: Path) -> None:
+    """A relative registry path whose vault folder is a symlink is the normal
+    cloud-synced case: it resolves to the real folder, it does not refuse."""
+    import json
+
+    install = tmp_path / "install"
+    cloud = tmp_path / "cloud"
+    (cloud / "People").mkdir(parents=True)
+    (install / "personal").mkdir(parents=True)
+    (install / "personal" / "memory-vault").symlink_to(cloud)
+    (install / ".runtime").mkdir()
+    (install / ".runtime" / "workspaces.json").write_text(
+        json.dumps([{"name": "personal", "vault_root": "personal/memory-vault"}]), encoding="utf-8"
+    )
+
+    config = CiaoConfig.from_env(
+        {"PWA_AUTH_TOKEN": "t", "CIAO_WORKSPACE": str(install)}, export=False
+    )
+
+    assert config.workspace_vault_root("personal") == cloud.resolve()
+    assert config.agent_vault_root("personal") == cloud.resolve()
+    assert config.adopted_workspace_vault("personal") is True
+    assert config.canonical_workspace_vault_root("personal") == install.resolve() / "personal" / "memory-vault"

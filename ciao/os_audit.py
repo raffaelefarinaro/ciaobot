@@ -584,8 +584,8 @@ def _proposal_paths(
 def _memory_guide_specs(config: Any, workspace_dir: Path | None) -> list[tuple[str, Path]]:
     """(workspace name, guide path) pairs the audit must cover.
 
-    One entry per registered workspace, resolved through ``agent_root`` so a
-    future re-rooting install reports each guide separately. Over-cap and rot
+    One entry per registered workspace, resolved through ``agent_root`` so each
+    guide is reported separately. Over-cap and rot
     findings are then attributable to the workspace that owns them. Without a
     registry (``config`` is None) the caller's own workspace root is the one
     guide; its name is empty, meaning "the operating workspace".
@@ -1317,10 +1317,8 @@ def memory_actionable_count(memory_result: dict[str, Any]) -> int:
 
 # D2/P10.8. Which sections describe ONE workspace and which describe the whole
 # install. Measured on the reference install rather than assumed: with two
-# workspaces registered, six of the seven sections come back byte-identical,
-# because today one vault, one skill catalog and one CLAUDE.md are shared. The
-# re-rooting makes the first four genuinely per-root; these two never become
-# per-root, because their subject is the global runtime directory.
+# workspaces registered, the workspace sections are per-root; this one never becomes
+# per-root, because its subject is the global runtime directory.
 GLOBAL_SECTIONS: tuple[str, ...] = ("job_runs_audit",)
 WORKSPACE_SECTIONS: tuple[str, ...] = (
     "vault_hygiene",
@@ -1345,10 +1343,7 @@ def _audit_roots(
     run that names a workspace narrows.
 
     ``workspace_vault_root`` is deliberate over ``agent_vault_root``: this is the
-    workspace's NOTES, which are a subtree of the shared vault before the
-    re-rooting and a whole vault after it. Before this change a named run still
-    audited the entire shared vault, so a personal hygiene chat reported every
-    defect in the work notes as its own.
+    workspace's NOTES: a whole vault.
     """
     if config is None or not workspace_name:
         return workspace, vault

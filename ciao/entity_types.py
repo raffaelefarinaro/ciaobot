@@ -29,8 +29,8 @@ constant it replaced.
 
 **Which vault.** ``<vault>`` is the *agent* vault root
 (``CiaoConfig.agent_vault_root(name)``) — the root that owns the generated
-``INDEX.md`` and ``VOCABULARY.md``, not a workspace's notes root. The two differ
-on a pre-re-rooting install (one shared vault, several workspaces), so
+``INDEX.md`` and ``VOCABULARY.md``, not a workspace's notes root. The two can differ
+for an adopted vault, so
 ``load_entity_types`` takes the directory explicitly and leaves that choice to
 the caller. The entity-note writer is the one consumer that has to name two: the
 note lands in a workspace's **notes** root while the category it files that note

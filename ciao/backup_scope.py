@@ -62,7 +62,7 @@ because the rule reads as an over-broad name match without it (#734):
   falls inside the vault — including the install whose vault *is* the archive,
   where the provenance rule would otherwise admit every file in it. One place
   a resolved location cannot follow is an archived agent root: it is a copy of
-  a workspace as it was, so one archived before the re-rooting carries its
+  a workspace as it was, so one archived from an older install carries its
   vault's ``Logs`` too, and the transcript subtree is refused there by its
   shape rather than by its name.
 
@@ -214,7 +214,7 @@ _CARVED_OUT_DIRS: frozenset[str] = frozenset(
 #: archive root, and the transcripts inside it. Spelled here rather than
 #: derived from ``config.logs_root``, because :func:`_holds_archived_transcripts`
 #: has to recognise the archive's *shape* in a copy of a workspace the
-#: re-rooting has since moved — the one place the resolved location cannot
+#: archive has since moved — the one place the resolved location cannot
 #: follow. The layout is the app's own (``main`` writes ``<logs_root>/Chats``),
 #: so it is a fact about the archive rather than about the operator.
 _LOGS_DIR = "Logs"
@@ -409,8 +409,7 @@ def _archive_rel(config, root: Path) -> str | None:
     is outside the agent-root allowlist instead, so it needs no entry here.
 
     The same ``config.logs_root`` the writers use, so the refusal follows the
-    archive through the re-rooting (``<vault>/Logs`` before it, ``<install>/Logs``
-    after) instead of one spelling of it. Three answers, because all three are
+    archive (``<install>/Logs``) instead of one spelling of it. Three answers, because all three are
     installs:
 
     - a path under the data root: the archive to refuse, and nothing else is;
@@ -634,8 +633,8 @@ def _holds_archived_transcripts(parts: tuple[str, ...], *, offset: int) -> bool:
     The one place the archive anchor does not reach. :func:`_in_archive` refuses
     the archive at the single location ``config.logs_root`` resolves to, but an
     archived agent root is a *copy* of a workspace as it was, so one archived
-    before the re-rooting carries its vault's own ``Logs``: a duplicate of the
-    promoted archive rather than a folder the operator named. It is derived
+    from an older install carries its vault's own ``Logs``: a duplicate of the
+    archive rather than a folder the operator named. It is derived
     output either way, and ``<logs_root>/Chats`` is where transcripts actually
     live — so the transcript subtree is refused under an archived root while a
     note file beside it stays in scope (#734).

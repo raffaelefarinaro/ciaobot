@@ -28,6 +28,8 @@ from ciao.operator_actions import (
 class _FakeConfig:
     """Minimal stand-in for the workspace registry surface detectors read."""
 
+    make_roots = True
+
     def __init__(
         self,
         tmp_path: Path,
@@ -40,6 +42,9 @@ class _FakeConfig:
         self._roots = {
             name: self.vault_root / name for name in self._names
         }
+        if self.make_roots:
+            for name in self._names:
+                (tmp_path / name).mkdir(exist_ok=True)
 
     def workspace_names(self) -> list[str]:
         return list(self._names)
@@ -539,6 +544,7 @@ async def test_run_action_unknown_id_raises_value_error(tmp_path: Path) -> None:
 
 
 class _RerootedConfig(_FakeConfig):
+    make_roots = False
     """A config whose workspaces have their own agent roots, as after re-rooting."""
 
     def __init__(self, tmp_path: Path, *, workspaces: tuple[str, ...] = ("personal", "work")) -> None:
@@ -554,6 +560,64 @@ class _RerootedConfig(_FakeConfig):
 
 def _kinds(context) -> set[str]:
     return {a.kind for a in detect_actions(context)}
+
+
+def test_a_registered_workspace_with_no_folder_is_reported(tmp_path: Path) -> None:
+    config = _RerootedConfig(tmp_path)
+    (tmp_path / "personal").mkdir()
+    (tmp_path / "personal" / "CLAUDE.md").write_text("# G\n", encoding="utf-8")
+    # 'work' has no directory at all.
+
+    actions = [a for a in detect_actions(_context(tmp_path, config=config))
+               if a.kind == "workspace-root-missing"]
+
+    assert [a.workspace for a in actions] == ["work"]
+    assert not actions[0].run_label and actions[0].chat_prompt   # chat-only
+
+
+def test_a_shared_mcp_config_no_root_inherited_is_reported(tmp_path: Path) -> None:
+    """A chat runs from its agent root, so an install-root `.mcp.json` is nobody's
+    cwd: every server in it went unreachable with the file still sitting there."""
+    config = _RerootedConfig(tmp_path)
+    for name in ("personal", "work"):
+        (tmp_path / name).mkdir()
+        (tmp_path / name / "CLAUDE.md").write_text("# G\n", encoding="utf-8")
+    (tmp_path / ".mcp.json").write_text(
+        json.dumps({"mcpServers": {"notion": {"command": "x"}, "n8n": {"url": "y"}}}),
+        encoding="utf-8",
+    )
+
+    actions = [a for a in detect_actions(_context(tmp_path, config=config))
+               if a.kind == "workspace-mcp-uncomposed"]
+
+    assert len(actions) == 1
+    assert "n8n" in actions[0].detail and "notion" in actions[0].detail
+    # Never a copy button: .mcp.json grants credentialed access, so which root
+    # may reach which server is a decision, not a mechanical fix.
+    assert not actions[0].run_label
+    assert actions[0].chat_prompt
+
+
+def test_roots_that_already_have_their_own_mcp_config_are_silent(tmp_path: Path) -> None:
+    config = _RerootedConfig(tmp_path)
+    for name in ("personal", "work"):
+        (tmp_path / name).mkdir()
+        (tmp_path / name / "CLAUDE.md").write_text("# G\n", encoding="utf-8")
+        (tmp_path / name / ".mcp.json").write_text('{"mcpServers": {}}', encoding="utf-8")
+    (tmp_path / ".mcp.json").write_text('{"mcpServers": {"notion": {}}}', encoding="utf-8")
+
+    assert "workspace-mcp-uncomposed" not in _kinds(_context(tmp_path, config=config))
+
+
+def test_no_shared_mcp_config_means_no_tile(tmp_path: Path) -> None:
+    config = _RerootedConfig(tmp_path)
+    for name in ("personal", "work"):
+        (tmp_path / name).mkdir()
+        (tmp_path / name / "CLAUDE.md").write_text("# G\n", encoding="utf-8")
+
+    assert "workspace-mcp-uncomposed" not in _kinds(_context(tmp_path, config=config))
+
+
 
 
 def test_env_vars_the_engine_no_longer_reads_are_surfaced(tmp_path: Path) -> None:

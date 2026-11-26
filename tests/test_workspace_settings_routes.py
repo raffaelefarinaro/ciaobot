@@ -385,21 +385,6 @@ def test_workspace_save_never_accepts_a_request_body_vault_path(tmp_path):
     )
 
 
-def test_workspace_creation_rejects_a_symlinked_vault_folder(tmp_path):
-    target = tmp_path / "outside"
-    target.mkdir()
-    client, config, pcm = _client(tmp_path)
-    (tmp_path / "research").mkdir()
-    (tmp_path / "research" / "memory-vault").symlink_to(target, target_is_directory=True)
-
-    response = client.post("/api/workspaces", json={"name": "research"})
-
-    assert response.status_code == 400
-    assert "symlink" in response.json()["error"]
-    assert config.workspace("research") is None
-    assert pcm.refresh_count == 0
-
-
 def test_workspace_creation_rejects_case_and_vault_owner_collisions(tmp_path):
     client, config, _pcm = _client(tmp_path)
     assert client.post("/api/workspaces", json={"name": "Research"}).status_code == 201

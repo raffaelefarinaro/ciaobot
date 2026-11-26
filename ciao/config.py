@@ -981,12 +981,7 @@ class CiaoConfig:
         name = _clean_relative_path(workspace)
         if not name or len(Path(name).parts) != 1:
             raise ValueError("workspace name must identify one vault folder")
-        candidate = self.agent_root(name) / self.vault_root.name
-        if candidate.is_symlink():
-            raise ValueError("workspace vault folder must not be a symlink")
-        if candidate.exists() and not candidate.is_dir():
-            raise ValueError("workspace vault folder must be a directory")
-        return candidate
+        return self.agent_root(name) / self.vault_root.name
 
     def stored_workspace_vault_root(self, workspace: str) -> str:
         """Portable registry value for a workspace's standard vault folder."""

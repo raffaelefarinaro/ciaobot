@@ -688,9 +688,57 @@ def _detect_missed_schedules(context: DetectionContext) -> list[OperatorAction]:
     ]
 
 
-# -- orphaned GitHub skills ----------------------------------------------------
+# -- workspace folders and GitHub skills ------------------------------------
 
 _DRIFT_SEVERITY = 15
+
+
+def _agent_root_targets(context: DetectionContext) -> list[tuple[str, Path]]:
+    """(workspace, agent root) per registered workspace."""
+    getter = getattr(context.config, "agent_root_targets", None)
+    if not callable(getter):
+        return []
+    try:
+        return [(str(name), Path(root)) for root, name in getter() if name]
+    except Exception:  # noqa: BLE001 — advisory
+        return []
+
+
+def _detect_workspace_root_missing(context: DetectionContext) -> list[OperatorAction]:
+    """A registered workspace with no directory on disk.
+
+    Chat-only: restoring a folder can mean an unmounted drive or a moved
+    install, which is the operator's call, not a button's. Reported per
+    workspace, because the fix is per root.
+    """
+    actions: list[OperatorAction] = []
+    for name, root in _agent_root_targets(context):
+        if root.is_dir():
+            continue
+        prompt = (
+            f"The workspace '{name}' is registered but its folder {root} does not exist, "
+            "so its guide, skills and notes have nowhere to live. Find out whether the "
+            "folder was moved, renamed or sits on a drive that is not mounted, and tell me "
+            "before you create or move anything. If it is simply gone, offer to create "
+            f"{root} and run `ciao sync-skills` for it."
+        )
+        actions.append(
+            OperatorAction(
+                id=f"workspace-root-missing:{name}",
+                kind="workspace-root-missing",
+                severity=_DRIFT_SEVERITY,
+                title=f"The {name} workspace has no folder",
+                detail=(
+                    f"'{name}' is registered but {root} does not exist, so its "
+                    "guide, skills and notes have nowhere to live."
+                ),
+                glyph="⌂",
+                workspace=name,
+                chat_label="Sort it out with me",
+                chat_prompt=prompt,
+            )
+        )
+    return actions
 
 
 def _detect_locked_skills_orphaned(context: DetectionContext) -> list[OperatorAction]:
@@ -752,6 +800,70 @@ def _detect_locked_skills_orphaned(context: DetectionContext) -> list[OperatorAc
                 "stays installed, then run `ciao sync-skills` for that root. If no "
                 "cached copy exists, the skill is gone and I can help you re-add it "
                 "from its source or a zip."
+            ),
+        )
+    ]
+
+
+def _detect_mcp_uncomposed(context: DetectionContext) -> list[OperatorAction]:
+    """A shared ``.mcp.json`` that no root inherited, so no chat can reach it.
+
+    A chat runs with its agent root as cwd, and a project-scoped ``.mcp.json`` is
+    read from that cwd. After the re-rooting the only copy sits at the install
+    root, which is nobody's cwd — so every server configured there became
+    unreachable, silently, with the file still sitting right there.
+
+    Chat-only, and deliberately not a copy button. ``.mcp.json`` grants
+    credentialed access: duplicating it into every root would hand a work chat a
+    personal server and the reverse. Which root may reach which server is the
+    operator's decision, which is why the migration reported this rather than
+    composing it.
+    """
+    config = context.config
+    install = getattr(config, "workspace_root", None)
+    if install is None:
+        return []
+    shared = Path(install) / ".mcp.json"
+    if not shared.is_file():
+        return []
+    targets = _agent_root_targets(context)
+    if not targets:
+        return []
+    without = [name for name, root in targets if not (root / ".mcp.json").is_file()]
+    if not without:
+        return []
+    try:
+        import json
+
+        data = json.loads(shared.read_text(encoding="utf-8"))
+        servers = sorted(data.get("mcpServers") or data.get("servers") or {})
+    except (OSError, ValueError):
+        servers = []
+    named = ", ".join(servers) if servers else "the configured servers"
+    return [
+        OperatorAction(
+            id="workspace-mcp-uncomposed",
+            kind="workspace-mcp-uncomposed",
+            severity=_DRIFT_SEVERITY,
+            title=f"{len(servers) or ''} MCP server(s) are unreachable from chats".strip(),
+            detail=(
+                f"{named} are configured in {shared}, but a chat runs from its own "
+                f"workspace folder and {', '.join(without)} has no .mcp.json — so "
+                "nothing can reach them."
+            ),
+            glyph="⊘",
+            workspace="",
+            chat_label="Split them with me",
+            chat_prompt=(
+                f"My MCP servers ({named}) are configured in `{shared}`, which no "
+                "chat reads any more: each workspace now runs from its own folder. "
+                "For each server, tell me what it connects to and ask me which "
+                "workspaces should be allowed to reach it — do not assume all of "
+                "them, because these grant credentialed access and a work chat "
+                "reaching a personal server (or the reverse) is the thing to avoid. "
+                "Then write a `.mcp.json` into each approved workspace folder "
+                "containing only that workspace's servers, and tell me when to "
+                "delete the shared one. Never copy the whole file into every root."
             ),
         )
     ]
@@ -882,8 +994,10 @@ _DETECTORS: list[Callable[[DetectionContext], list[OperatorAction]]] = [
     _detect_mac_app_switch,
     _detect_provider_updates,
     _detect_missed_schedules,
+    _detect_workspace_root_missing,
     _detect_locked_skills_orphaned,
     _detect_legacy_env_ignored,
+    _detect_mcp_uncomposed,
     _detect_github_star,
 ]
 

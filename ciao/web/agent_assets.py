@@ -113,8 +113,7 @@ def _mirror_vault_root(config: Any, workspace: str = "") -> Path:
     Scoped to the workspace whose agent root the asset is written into, so the
     mirror note lands in the same vault the agent reads. An empty or
     unregistered `workspace` falls back to the PRIMARY root, the same choice
-    P10.4 and P10.5 made for the shared guide and the skill catalog. Before the
-    re-rooting `agent_vault_root` returns the shared vault, so nothing changes.
+    P10.4 and P10.5 made for the shared guide and the skill catalog.
     """
     resolver = getattr(config, "agent_vault_root", None)
     if callable(resolver):
@@ -338,10 +337,8 @@ def workspace_health(config: Any) -> dict:
 
     add("workspace-root", "Workspace root", "ok" if root.is_dir() else "error", "Workspace root exists." if root.is_dir() else "Workspace root is missing.", root)
     add("workspace-writable", "Workspace writable", "ok" if os.access(root, os.W_OK) else "error", "Workspace is writable." if os.access(root, os.W_OK) else "Workspace is not writable.", root)
-    # One vault before the re-rooting, one per agent root after it. Checking
-    # `config.vault_root` alone reported "Vault root is missing" and "Vault is
-    # not writable" on a CORRECTLY migrated install, because that path is exactly
-    # what the migration empties.
+    # One vault per agent root. Checking `config.vault_root` alone would report
+    # "Vault root is missing" on a healthy install.
     vault_targets: list[tuple[Path, str]] = []
     getter = getattr(config, "vault_scan_targets", None)
     if callable(getter):
@@ -370,11 +367,7 @@ def workspace_health(config: Any) -> dict:
             target,
         )
 
-    # Every agent root, which is the install root before the re-rooting and
-    # one per workspace after it. Checking only `workspace_root` found the
-    # install root's stale `.claude/`, whose links point at a catalog that
-    # moved, so a correctly migrated install reported every custom skill as a
-    # broken generated link.
+    # Every agent root: one per workspace. The install root is not one.
     root_targets: list[tuple[Path, str]] = []
     targets_getter = getattr(config, "agent_root_targets", None)
     if callable(targets_getter):

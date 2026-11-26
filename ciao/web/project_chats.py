@@ -2624,10 +2624,9 @@ class ProjectChatManager:
 
         The root is ``agent_vault_root`` — the one that owns ``entity-types.yaml``
         and ``VOCABULARY.md``, and the one ``GET``/``PATCH
-        /api/memory/entity-types`` reads. That is a DIFFERENT directory from the
-        workspace's notes root named in the welcome above on an install that has
-        not re-rooted (``memory-vault/personal`` vs ``memory-vault``), and there
-        is deliberately no notes-root fallback: reading there would report the
+        /api/memory/entity-types`` reads. That can be a DIFFERENT directory from the
+        workspace's notes root named in the welcome above (an adopted vault), and
+        there is deliberately no notes-root fallback: reading there would report the
         stock categories while the owner's own Categories page shows their edits
         — the invisible-edit bug ``proposal_service._entity_roots`` exists to
         prevent. With no vault file the loader serves the shipped list, which is
@@ -3395,8 +3394,7 @@ class ProjectChatManager:
             if provider_registry.flag(provider, "session_blob_on_disk"):
                 # No chat in hand here, only a transcript row, so there is no
                 # workspace to resolve an agent root from. Defaults to
-                # workspace_root, which is what every root resolves to until the
-                # re-rooting release.
+                # workspace_root.
                 if (
                     not self._claude_session_exists(session_id)
                     and audit_status != "present"
@@ -7005,12 +7003,9 @@ class ProjectChatManager:
         env["PATH"] = prepend_engine_path()
         # The vault this chat's CLI commands should read and write. Exported
         # explicitly rather than inherited, because there is one process-level
-        # CIAO_VAULT_ROOT and after the re-rooting there are N vaults, so a
-        # single inherited value cannot name the right one. `agent_vault_root`
-        # returns today's shared vault until this install has re-rooted, so this
-        # changes nothing yet; afterwards a per-workspace routine running
-        # `ciao vault-index --write` rebuilds its own root's index instead of a
-        # shared path that no longer exists.
+        # CIAO_VAULT_ROOT and there are N vaults, so a single inherited value
+        # cannot name the right one. A per-workspace routine running
+        # `ciao vault-index --write` rebuilds its own root's index.
         #
         # CIAO_WORKSPACE deliberately stays the install root: `.env`, `.runtime`
         # and the registry are the global layer and live there, not in a root.
@@ -10955,8 +10950,7 @@ class ProjectChatManager:
         # - and the provider that created the session was handed the agent
         # root by `_agent_root_for_chat`. Reading from `workspace_root`
         # therefore looked up a directory the session was never written under,
-        # so after the re-rooting every chat outside the primary workspace
-        # found no native title and sat on the deterministic fallback (or "New
+        # so every chat outside the primary workspace found no native title and sat on the deterministic fallback (or "New
         # Chat" when the prompt yielded none) forever.
         workspace = self._agent_root_for_chat(chat.chat_id)
         try:

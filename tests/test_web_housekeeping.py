@@ -65,6 +65,7 @@ class _Store:
 
 
 def _config(tmp_path: Path) -> _Config:
+    (tmp_path / "personal").mkdir(exist_ok=True)  # the bootstrap workspace's folder
     return _Config(tmp_path)
 
 
