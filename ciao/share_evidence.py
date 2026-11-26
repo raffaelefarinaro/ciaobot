@@ -2520,14 +2520,7 @@ def mint_evidence_authorizations(config: Any, *, workspace: str, brain_name: str
         return result
 
 
-@contextmanager
-def evidence_authorization_guard(config: Any, *, workspace: str, authorization: object, claim: EvidenceClaim | None = None) -> Iterator[dict[str, Any]]:
-    """Hold evidence consent stable while the caller performs an authorized effect.
-
-    The caller must first hold the checkout and authoritative workspace-registry
-    ownership; this guard alone cannot fence unlink, restore or external edits.
-    """
-    _require_workspace(config, workspace)
+def _verified_authorization(config: Any, authorization: object) -> tuple[dict[str, Any], dict[str, Any]]:
     if not isinstance(authorization, dict) or authorization.get("schema") != SCHEMA:
         _refuse("authorization_invalid", "The evidence authorization is unavailable.")
     payload = authorization.get("payload")
@@ -2539,6 +2532,86 @@ def evidence_authorization_guard(config: Any, *, workspace: str, authorization: 
     row = payload.get("row")
     if not isinstance(row, dict):
         _refuse("authorization_invalid", "The evidence authorization is unavailable.")
+    return payload, row
+
+
+SOURCE_REFUSALS = (
+    "source_foreign", "source_withdrawn", "source_revoked", "source_generation_stale", "source_changed",
+)
+
+
+def check_source_eligibility(config: Any, *, workspace: str, authorization: object, claim: EvidenceClaim) -> dict[str, Any]:
+    """Is the confirmed source still eligible right now? Refuses with a `source_*` code.
+
+    Read-only and fail closed. It runs under the caller's evidence claim, which a
+    caller inside the admission fence (#3619) holds together with the registry
+    owner, so no grant write, withdrawal or supersession can interleave. It
+    answers, in order: is the source of this workspace instance (not foreign),
+    withdrawn, revoked, still at the consented generation, and are its bytes the
+    confirmed snapshot (content-addressed evidence, or the unsuperseded stream
+    entry). It does not look at the destination or the draft.
+    """
+    _require_workspace(config, workspace)
+    payload, row = _verified_authorization(config, authorization)
+    with _claim_scope(config, workspace, claim):
+        state = _load_state(config, workspace)
+        lifetime = state.get("workspace_lifetime_id")
+        grants = state.get("grants")
+        grant = grants.get(row.get("grant_id")) if isinstance(grants, dict) else None
+        if payload.get("workspace") != workspace or payload.get("workspace_lifetime_id") != lifetime:
+            _refuse("source_foreign", "The source belongs to another workspace.")
+        if not isinstance(grant, dict):
+            _refuse("source_withdrawn", "The source permission no longer exists.")
+        if grant.get("workspace") != workspace or grant.get("workspace_lifetime_id") != lifetime:
+            _refuse("source_foreign", "The source belongs to another workspace.")
+        if grant.get("withdrawn_at"):
+            _refuse("source_withdrawn", "The source was withdrawn.")
+        if not grant.get("active") or grant.get("revoked_at"):
+            _refuse("source_revoked", "The source permission was revoked.")
+        if grant.get("consent_generation") != row.get("consent_generation"):
+            _refuse("source_generation_stale", "The source consent generation changed.")
+        canonical = row.get("canonical_bytes")
+        if not isinstance(canonical, str) or _digest(canonical.encode("utf-8")) != row.get("digest"):
+            _refuse("source_changed", "The source bytes are not the confirmed snapshot.")
+        if grant.get("type") == "snapshot":
+            key = grant.get("evidence_key")
+            if (not isinstance(key, str) or not re.fullmatch(r"[0-9a-f]{64}", key) or key != row.get("snapshot_id")
+                    or key != _evidence_key(str(lifetime), str(grant.get("project_id")), str(grant.get("source_id")), canonical.encode("utf-8"))):
+                _refuse("source_changed", "The source bytes are not the confirmed snapshot.")
+            try:
+                evidence = _read_json(_evidence_dir(config, workspace) / (key + ".json"), limit=MAX_EVIDENCE_BYTES, code="evidence_corrupt")
+            except EvidenceError:
+                _refuse("source_changed", "The confirmed snapshot is unreadable.")
+            if (evidence.get("evidence_key") != key or evidence.get("canonical_bytes") != canonical
+                    or evidence.get("digest") != row.get("digest")):
+                _refuse("source_changed", "The source bytes are not the confirmed snapshot.")
+        elif grant.get("type") == "standing":
+            stream = _stream_for(state, str(grant.get("project_id") or ""))
+            entries = stream.get("entries") if stream else None
+            entry = next((item for item in entries if isinstance(item, dict) and item.get("entry_id") == row.get("entry_id")), None) if isinstance(entries, list) else None
+            # Recompute the bytes from the live entry, as the guard does, so the re-read
+            # right before the effect proves the same bytes and not just the same revision.
+            if (entry is None or entry.get("superseded") or entry.get("revision") != row.get("entry_revision")
+                    or type(grant.get("start_revision")) is not int or type(entry.get("revision")) is not int
+                    or entry["revision"] <= grant["start_revision"]
+                    or not _operator_event_valid(config, entry, workspace=workspace, lifetime_id=str(lifetime),
+                                                 project_id=str(grant.get("project_id", "")))
+                    or _canonical({name: str(entry.get(name, "")) for name in _clean_field_mask(grant.get("field_mask"))}).decode("utf-8") != canonical):
+                _refuse("source_changed", "The source decision changed.")
+        else:
+            _refuse("source_changed", "The source permission is unavailable.")
+        return dict(row)
+
+
+@contextmanager
+def evidence_authorization_guard(config: Any, *, workspace: str, authorization: object, claim: EvidenceClaim | None = None) -> Iterator[dict[str, Any]]:
+    """Hold evidence consent stable while the caller performs an authorized effect.
+
+    The caller must first hold the checkout and authoritative workspace-registry
+    ownership; this guard alone cannot fence unlink, restore or external edits.
+    """
+    _require_workspace(config, workspace)
+    payload, row = _verified_authorization(config, authorization)
     with _claim_scope(config, workspace, claim) as owned:
         state = _load_state(config, workspace)
         if (payload.get("workspace") != workspace
