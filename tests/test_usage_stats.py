@@ -490,7 +490,7 @@ def test_snapshot_sources_excludes_automation_helper_system_and_origin_turns(tmp
     scheduled = pcm.create_chat(project.project_id, title="scheduled")
     scheduled.schedule_id = "s1"
     others.append(scheduled)
-    for kind in ("memory_pass", "proposal"):
+    for kind in ("memory_pass",):
         helper_chat = pcm.create_chat(project.project_id, title=kind)
         helper_chat.helper = {"kind": kind}
         others.append(helper_chat)

@@ -1131,15 +1131,9 @@ def test_helper_normalize_memory_pass() -> None:
         == "queued"
     )
 
-    # The proposal branch is untouched by the new kind.
-    proposal = {
-        "kind": "proposal",
-        "intent": "resolve",
-        "proposal_ids": ["proposal-1"],
-        "archive_policy": "when_resolved",
-    }
-    assert chat_service._normalize_chat_helper(proposal) == proposal
-    assert chat_service._normalize_chat_helper({**proposal, "kind": "nope"}) == {}
+    # A kind the engine no longer knows (the retired proposal helper) is dropped.
+    assert chat_service._normalize_chat_helper({"kind": "proposal", "proposal_ids": ["p"]}) == {}
+    assert chat_service._normalize_chat_helper({**valid, "kind": "nope"}) == {}
 
 
 def test_a_stored_update_task_helper_is_ignored() -> None:

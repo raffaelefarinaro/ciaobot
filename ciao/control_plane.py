@@ -43,6 +43,7 @@ from ciao.fts_search import (
     search_vault,
     vault_key_prefix,
 )
+from ciao.memory_tool import marker_cap
 from ciao.memory_tool import memory_status as memory_status_payload
 from ciao.memory_tool import (
     DEFAULT_MEMORY_CHAR_LIMIT,
@@ -1024,7 +1025,7 @@ class CiaoControlPlane:
     #: engine's.
     _PERSON_TURN_ORIGINS = frozenset({"", "retry"})
     #: Helper chats the engine starts from its own prompt, not a typed one.
-    _ENGINE_HELPER_KINDS = frozenset({"memory_pass", "proposal"})
+    _ENGINE_HELPER_KINDS = frozenset({"memory_pass"})
 
     def _person_typed_turn(self, principal: AgentPrincipal) -> bool:
         """Whether the turn asking right now is one a person typed into this chat.
@@ -1198,16 +1199,12 @@ class CiaoControlPlane:
         if action not in {"add", "replace", "remove"}:
             raise ControlPlaneError("invalid_action", "action must be add, replace, or remove.")
         canonical = resolve_region(region)
-        limit = (
+        guide = guide_path(self.config.agent_root(workspace))
+        limit = marker_cap(guide, canonical) or (
             DEFAULT_MEMORY_CHAR_LIMIT
             if canonical == "memory"
             else DEFAULT_USER_CHAR_LIMIT
         )
-        guide = guide_path(self.config.agent_root(workspace))
-        try:
-            vault_root = Path(self.config.workspace_vault_root(workspace))
-        except (AttributeError, ValueError):
-            vault_root = None
         try:
             result = update_region(
                 guide,
@@ -1216,10 +1213,6 @@ class CiaoControlPlane:
                 entry=entry,
                 match=match,
                 char_limit=limit,
-                actor="agent",
-                source="mcp",
-                workspace=workspace,
-                vault_root=vault_root,
             )
         except MemoryLockError as exc:
             # Retryable, and explicitly not a success: the region is unchanged.
@@ -1404,7 +1397,7 @@ class CiaoControlPlane:
         index, so it records no retrieval hits. Each related note carries the
         content ``revision``.
         """
-        from ciao import memory_receipts as mr
+        from ciao.note_paths import NoteTargetRefused
         from ciao.note_related import find_related_notes
 
         if not str(path or "").strip():
@@ -1414,7 +1407,7 @@ class CiaoControlPlane:
         def _run() -> dict[str, Any]:
             try:
                 found = find_related_notes(root, path, workspace=workspace, limit=limit)
-            except mr.MemoryReceiptError as exc:
+            except NoteTargetRefused as exc:
                 raise ControlPlaneError("note_related_invalid", str(exc)) from exc
             return found.as_dict()
 
@@ -1440,8 +1433,8 @@ class CiaoControlPlane:
         folder unless ``path`` (a vault-relative folder) overrides it. An
         existing note is never overwritten.
         """
-        from ciao import memory_receipts as mr
         from ciao import note_create as nc
+        from ciao.note_paths import NoteTargetRefused
         from ciao.frontmatter import split_frontmatter
 
         if not str(title or "").strip():
@@ -1485,7 +1478,7 @@ class CiaoControlPlane:
                 )
             except nc.NoteCreateError as exc:
                 raise ControlPlaneError(exc.code, str(exc)) from exc
-            except mr.MemoryReceiptError as exc:
+            except NoteTargetRefused as exc:
                 raise ControlPlaneError("note_path_invalid", str(exc)) from exc
             return created.as_dict()
 

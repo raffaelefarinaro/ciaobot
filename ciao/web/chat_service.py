@@ -668,7 +668,7 @@ def _set_frontmatter_description(text: str, description: str) -> str | None:
 
 
 def _normalize_memory_pass_helper(value: dict[str, Any]) -> dict[str, Any]:
-    """Fail closed on a memory-pass helper, same contract as the proposal one.
+    """Fail closed on a memory-pass helper, same contract as the others.
 
     A rejected helper is not merely metadata loss: it is what makes the chat
     unrecognisable as a pass, so a caller must never let a half-valid dict
@@ -829,33 +829,7 @@ def _normalize_chat_helper(value: Any) -> dict[str, Any]:
         return _normalize_memory_pass_helper(value)
     if kind == "task_delegation":
         return _normalize_task_delegation_helper(value)
-    if kind != "proposal":
-        return {}
-    intent = str(value.get("intent") or "")
-    policy = str(value.get("archive_policy") or "")
-    if (intent, policy) not in {
-        ("resolve", "when_resolved"),
-        ("review", "manual"),
-    }:
-        return {}
-    raw_ids = value.get("proposal_ids")
-    if not isinstance(raw_ids, list):
-        return {}
-    proposal_ids = list(
-        dict.fromkeys(
-            item
-            for item in raw_ids[:100]
-            if isinstance(item, str) and 0 < len(item) <= 128
-        )
-    )
-    if not proposal_ids:
-        return {}
-    return {
-        "kind": "proposal",
-        "intent": intent,
-        "proposal_ids": proposal_ids,
-        "archive_policy": policy,
-    }
+    return {}
 
 
 @dataclass(slots=True)

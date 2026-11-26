@@ -613,17 +613,15 @@ on one rule: a remembered fact is either **state**, a current value that gets
 replaced when it changes, or an **event**, a thing that happened which gets
 appended to a log and never edited. The regions are a state surface.
 
-The write policy for every path that can touch durable memory — attended
-remember, the memory pass, unattended curation, direct edit, and proposal
-acceptance — is stated once in `ciao/memory_policy.py` and described in
-`docs/ARCHITECTURE.md` under "Memory write policy matrix". Two rules matter for
+The memory write policy is described in `docs/ARCHITECTURE.md` under "Memory
+write policy"; `ciao/memory_policy.py` holds the capsule's unattended guidance. Two rules matter for
 any change here: the region cap is **advisory** on every path (a write goes
 through and reports `over_cap`; consolidation, not refusal, bounds a region),
 and an **unattended run defers** approval-requiring work and reports it instead
 of asking or routing around the missing reviewer. For a scheduled run the ACP broker
 is the backstop: an approval it cannot wait for is denied at once and the run is
 recorded as `error` naming the denied tool (`tests/test_schedule_dispatch_boundary.py`). `tests/test_memory_policy.py`
-pins the matrix to the stock assets and the docs, so a copy that contradicts it
+pins the stock assets and the docs to the capsule, so a copy that contradicts it
 fails the suite.
 
 Three detectors, all model-free, because a model asked to tally a few hundred

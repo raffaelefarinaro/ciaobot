@@ -204,12 +204,7 @@ def test_helper_chat_sessions_are_excluded_like_any_other_row(
                 "session_id": "ses_helper01",
                 "previous_session_ids": [],
                 "archived": False,
-                "helper": {
-                    "kind": "proposal",
-                    "intent": "review",
-                    "proposal_ids": ["abc123"],
-                    "archive_policy": "manual",
-                },
+                "helper": {"kind": "update_task"},
             },
         }
     )

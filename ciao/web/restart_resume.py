@@ -30,7 +30,7 @@ RESTART_RESUME_PROMPT = (
 #: Wait after boot before resuming, like the startup wakes do.
 RESUME_DELAY_SECONDS = 5.0
 # Helper chats the engine runs itself; a delegated task is resumed from the board.
-NO_RESUME_HELPER_KINDS = frozenset({"memory_pass", "proposal", "task_delegation"})
+NO_RESUME_HELPER_KINDS = frozenset({"memory_pass", "task_delegation"})
 # A resume that was itself cut off is not resumed again (no crash loop); a
 # delegated task's turn belongs to its attempt, which reads ``interrupted``.
 _NO_RESUME_ORIGINS = frozenset({RESTART_RESUME_ORIGIN, "task_delegation", "task_resume"})
