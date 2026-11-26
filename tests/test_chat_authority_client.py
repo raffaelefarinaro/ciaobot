@@ -10,7 +10,9 @@ import pytest
 from ciao.chat_authority import (
     ChatAuthority,
     Command,
-    HmacSigner,
+    EcdsaP256Signer,
+    Ed25519Signer,
+    StateMac,
     sign_command,
 )
 from ciao.chat_authority_client import (
@@ -32,6 +34,18 @@ def status(client: ChatAuthorityClient, ok: bool = True) -> str:
 SCOPE = {"workspace": "w1", "project": "p1", "chat": "c1"}
 
 
+class MemAnchor:
+    def __init__(self) -> None:
+        self.value = 0
+
+    def current(self) -> int:
+        return self.value
+
+    def advance(self, to: int) -> None:
+        assert to > self.value
+        self.value = to
+
+
 class MemStorage:
     blob: bytes | None = None
 
@@ -46,13 +60,15 @@ class FakeHelper:
     """Serves the wire protocol from a real ChatAuthority, like the daemon will."""
 
     def __init__(self) -> None:
-        self.operator = HmacSigner(b"o" * 32)
+        self.operator = EcdsaP256Signer.generate()
         ids = itertools.count(1)
         nonces = itertools.count(1)
         self.auth = ChatAuthority(
-            signer=HmacSigner(b"a" * 32),
-            operator=self.operator,
+            event_signer=Ed25519Signer.from_seed(b"a" * 32),
+            state_mac=StateMac(b"s" * 32),
+            operator=self.operator.verifier(),
             storage=MemStorage(),
+            anchor=MemAnchor(),
             new_id=lambda: f"id{next(ids)}",
         )
         self._counter = itertools.count(1)
@@ -97,6 +113,8 @@ class FakeHelper:
                     grant_id=req["grant_id"],
                     producer=req["producer"],
                     limit=req["limit"],
+                    destination=req["destination"],
+                    audience=req["audience"],
                     chat=req.get("chat"),
                     expected_epoch=req.get("expected_epoch"),
                 )
@@ -110,6 +128,9 @@ class FakeHelper:
             else:
                 reply["result"] = {
                     "epoch": lookup.epoch,
+                    "grant_id": lookup.grant_id,
+                    "destination": lookup.destination,
+                    "audience": lookup.audience,
                     "events": [
                         {
                             "event_id": e.event_id,
@@ -270,10 +291,10 @@ def test_each_request_uses_a_fresh_nonce_and_a_timeout() -> None:
 def test_lookup_round_trips_real_events() -> None:
     helper, _, grant_id = seeded()
     client = make(helper)
-    lookup = client.eligible_events(grant_id=grant_id, producer="memory", limit=2)
+    lookup = client.eligible_events(grant_id=grant_id, producer="memory", destination="d", audience="a", limit=2)
     assert [e.text for e in lookup.events] == [b"text 2", b"text 1"]
     assert lookup.epoch == helper.auth.epoch
-    direct = helper.auth.eligible_events(grant_id=grant_id, producer="memory", limit=2)
+    direct = helper.auth.eligible_events(grant_id=grant_id, producer="memory", destination="d", audience="a", limit=2)
     assert lookup.events == direct.events
     assert all(helper.auth.verify_event(e) for e in lookup.events)
 
@@ -282,10 +303,11 @@ def test_lookup_passes_filters_to_the_helper_not_the_client() -> None:
     helper, _, grant_id = seeded()
     client = make(helper)
     client.eligible_events(
-        grant_id=grant_id, producer="memory", limit=1, chat="c1", expected_epoch=helper.auth.epoch
+        grant_id=grant_id, producer="memory", destination="d", audience="a", limit=1, chat="c1", expected_epoch=helper.auth.epoch
     )
     sent = helper.requests[-1]
     assert (sent["grant_id"], sent["producer"], sent["limit"], sent["chat"]) == (grant_id, "memory", 1, "c1")
+    assert (sent["destination"], sent["audience"]) == ("d", "a")
     assert sent["expected_epoch"] == helper.auth.epoch
 
 
@@ -293,14 +315,14 @@ def test_stale_epoch_surfaces_as_a_refusal_with_the_helper_code() -> None:
     helper, _, grant_id = seeded()
     client = make(helper)
     with pytest.raises(ChatAuthorityUnavailable) as err:
-        client.eligible_events(grant_id=grant_id, producer="memory", limit=1, expected_epoch=999)
+        client.eligible_events(grant_id=grant_id, producer="memory", destination="d", audience="a", limit=1, expected_epoch=999)
     assert err.value.code == "epoch_changed"
 
 
 def test_revoked_grant_yields_nothing() -> None:
     helper, _, grant_id = seeded()
     helper.op("revoke_grant", {"grant_id": grant_id})
-    lookup = make(helper).eligible_events(grant_id=grant_id, producer="memory", limit=5)
+    lookup = make(helper).eligible_events(grant_id=grant_id, producer="memory", destination="d", audience="a", limit=5)
     assert lookup.events == ()
     assert lookup.epoch == helper.auth.epoch
 
@@ -310,7 +332,7 @@ def test_lookup_fails_closed_on_every_transport_problem() -> None:
         helper, _, grant_id = seeded()
         helper.raises = exc
         with pytest.raises(ChatAuthorityUnavailable):
-            make(helper).eligible_events(grant_id=grant_id, producer="memory", limit=1)
+            make(helper).eligible_events(grant_id=grant_id, producer="memory", destination="d", audience="a", limit=1)
 
 
 def _tamper(fn: Any) -> Any:
@@ -334,13 +356,17 @@ def _tamper(fn: Any) -> Any:
         lambda res: res["events"][0].pop("signature_b64"),
         lambda res: res["events"][0].update(revision="1"),
         lambda res: res.update(events="x"),
+        lambda res: res.update(destination="other"),  # echo of another destination
+        lambda res: res.update(audience="other"),
+        lambda res: res.update(grant_id="other"),
+        lambda res: res.pop("destination"),
     ],
 )
 def test_client_refuses_inconsistent_events(fn: Any) -> None:
     helper, _, grant_id = seeded()
     helper.mutate_reply = _tamper(fn)
     with pytest.raises(ChatAuthorityUnavailable):
-        make(helper).eligible_events(grant_id=grant_id, producer="memory", limit=2, chat="c1")
+        make(helper).eligible_events(grant_id=grant_id, producer="memory", destination="d", audience="a", limit=2, chat="c1")
 
 
 def test_lookup_epoch_must_match_expected_epoch() -> None:
@@ -348,7 +374,7 @@ def test_lookup_epoch_must_match_expected_epoch() -> None:
     helper.mutate_reply = _tamper(lambda res: res.update(epoch=res["epoch"] + 1))
     with pytest.raises(ChatAuthorityUnavailable):
         make(helper).eligible_events(
-            grant_id=grant_id, producer="memory", limit=1, expected_epoch=helper.auth.epoch
+            grant_id=grant_id, producer="memory", destination="d", audience="a", limit=1, expected_epoch=helper.auth.epoch
         )
 
 
@@ -357,7 +383,7 @@ def test_limit_validated_before_any_call() -> None:
     client = make(helper)
     for bad in (0, -1, 201):
         with pytest.raises(ValueError):
-            client.eligible_events(grant_id="g", producer="memory", limit=bad)
+            client.eligible_events(grant_id="g", producer="memory", destination="d", audience="a", limit=bad)
     assert helper.requests == []
 
 
@@ -465,3 +491,11 @@ def test_static_check_refuses_symlinks(tmp_path: Any) -> None:
     (root / files[2]).unlink()
     (root / files[2]).symlink_to(real)
     assert not static_provisioning_ok(root, owner_uid=os.getuid(), account_ok=lambda: True)
+
+
+def test_destination_mismatch_yields_nothing_from_the_helper() -> None:
+    helper, _, grant_id = seeded()
+    lookup = make(helper).eligible_events(
+        grant_id=grant_id, producer="memory", destination="elsewhere", audience="a", limit=5
+    )
+    assert lookup.events == () and lookup.destination == "elsewhere"
