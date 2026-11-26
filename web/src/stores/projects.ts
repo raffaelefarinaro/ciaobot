@@ -5126,20 +5126,6 @@ export const useProjectStore = defineStore('projects', () => {
         if (c) c.repo_location = msg.repo_location
         break
       }
-      case 'turn_verification': {
-        // Uncached chat: nothing to update; the next history load carries the overlay.
-        const rows = messages.value[msg.chat_id]
-        if (rows) {
-          const start = rows.findIndex(row => row.role === 'user' && row.turn_index === msg.turn_index)
-          let target = -1
-          for (let i = start + 1; start >= 0 && i < rows.length && rows[i].role !== 'user'; i++) {
-            if (rows[i].role === 'assistant') target = i
-          }
-          // Keep the verdict on history metadata; this UI slice only retires its presentation.
-          if (target >= 0) rows[target].verification = msg.verification
-        }
-        break
-      }
       case 'chat_pin_changed': {
         // A pin/replace/unpin happened on another device. Apply server truth and
         // nothing else: this must not select or navigate the chat, mark it read,
