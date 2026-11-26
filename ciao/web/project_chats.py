@@ -963,17 +963,6 @@ CIAOBOT_AUTO_TITLE_ORIGINS = ("default", "fallback")
 ADAPTER_REPLACEABLE_TITLE_ORIGINS = ("default", "fallback", "adapter")
 
 
-def _restore_memory_completion_attestation(value: object) -> dict:
-    if not isinstance(value, dict):
-        return {}
-    try:
-        if len(json.dumps(value, ensure_ascii=True).encode("utf-8")) <= 16_384:
-            return value
-    except (TypeError, ValueError, RecursionError):
-        pass
-    return {}
-
-
 @dataclass(slots=True)
 class ChatInfo:
     chat_id: str
@@ -1057,7 +1046,7 @@ class ChatInfo:
     # card. Absent key = an ordinary typed turn (or a mixed-origin steer).
     user_turn_origin: dict = field(default_factory=dict)
     # Map of user-turn index (as str) → vault answer check result
-    # (ciao.vault_verification.parse_verification shape). Absent = not checked.
+    # (retired vault answer check; stored verdicts are read as they were written).
     turn_verification: dict = field(default_factory=dict)
     # Map of user-turn index (as str) → the client send id the PWA minted for
     # that turn. The engine answers a repeated send id with a duplicate echo
@@ -1183,8 +1172,6 @@ class ChatInfo:
     # UI. Resolution helpers may auto-archive only after their target proposal
     # IDs have durably left the queue; discussion helpers always remain manual.
     helper: dict = field(default_factory=dict)
-    # Signed completion proof stays in the private registry, never the chat API.
-    memory_completion_attestation: dict = field(default_factory=dict)
     # What the memory pass queued by archiving this chat is doing, or did.
     # Lives on the chat so it survives a restart: an archived chat opened next
     # month should still be able to say what Ciaobot took from it.
@@ -1760,9 +1747,6 @@ class ProjectChatManager:
                 schedule_id=cd.get("schedule_id", ""),
                 schedule_title=cd.get("schedule_title", ""),
                 helper=chat_service._normalize_chat_helper(cd.get("helper")),
-                memory_completion_attestation=_restore_memory_completion_attestation(
-                    cd.get("memory_completion_attestation")
-                ),
                 # A record written before pins existed (#1118) has none of
                 # these keys and restores unpinned at revision 0. Nothing is
                 # imported from any browser: the engine's registry is the only
@@ -1906,7 +1890,6 @@ class ProjectChatManager:
                     "schedule_id": c.schedule_id,
                     "schedule_title": c.schedule_title,
                     "helper": c.helper,
-                    "memory_completion_attestation": c.memory_completion_attestation,
                     "postprocess": c.postprocess,
                     "pinned_file_path": c.pinned_file_path,
                     "dismissed_pin_paths": list(c.dismissed_pin_paths),

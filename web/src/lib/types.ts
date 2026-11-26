@@ -112,13 +112,6 @@ export interface SharedBrainLink {
   kind?: 'git' | 'folder'
 }
 
-/**
- * One link's sharing policy. `review` files every note as a proposal a human
- * must accept; `automatic` is an explicit, durable standing consent for that
- * one link. Every new and legacy link starts at `review`.
- */
-export type SharedBrainSharingPolicy = 'review' | 'automatic'
-
 /** The last update attempt for a brain, as `ciao/shared_brain.py` records it. */
 export interface SharedBrainUpdate {
   outcome: 'updated' | 'up_to_date' | 'skipped' | 'failed'
@@ -133,21 +126,6 @@ export interface SharedBrainState {
   kind: SharedBrainKind
   identity: string
   path: string
-  // Opaque link lifetime; a relink changes it and invalidates older tabs.
-  lifetime: string
-  // Effective policy: `automatic` only through a consent matching the link's
-  // lifetime and repository identity; otherwise `review`.
-  sharing_policy: SharedBrainSharingPolicy
-  // Monotonic for the link: every grant and revocation bumps it.
-  sharing_generation: number
-  // The grant time in ISO UTC, or '' at `review`.
-  sharing_granted_at: string
-  // A stored automatic grant that is not effective and still needs a revoke
-  // action (origin drift or a failed invalidation).
-  sharing_grant_pending: boolean
-  // True when a drift invalidation could not be persisted; the old grant stays
-  // paused in this process and must be revoked explicitly.
-  sharing_invalidation_failed: boolean
   origin_changed: boolean
   missing: boolean
   // '' or why the folder cannot be used now: missing, moved, not_a_checkout,
@@ -167,98 +145,6 @@ export interface SharedBrainsResponse {
   shared_brains: SharedBrainState[]
 }
 
-/** One project decision source the Sources panel may offer (server-filtered). */
-export interface ShareEvidenceSource {
-  source_id: string
-  kind: 'stream' | 'document'
-  label: string
-  project_id: string
-  project_name: string
-  entry_count: number
-  stream_id?: string
-}
-
-export interface ShareEvidenceProject {
-  project_id: string
-  name: string
-  sources: ShareEvidenceSource[]
-}
-
-export interface ShareEvidenceBrain {
-  name: string
-  identity: string
-}
-
-export interface ShareEvidenceField {
-  field: 'decision' | 'reason' | 'effective_date'
-  value: string
-}
-
-export interface ShareEvidenceGrant {
-  grant_id: string
-  type: 'standing' | 'snapshot'
-  project_id: string
-  source_id: string
-  source_kind: 'stream' | 'document'
-  source_label: string
-  brain: { name: string; identity: string; link_fingerprint: string }
-  audience: string
-  field_mask: string[]
-  producers: string[]
-  issued_at: string
-  start_revision: number | null
-  consent_generation: number
-  active: boolean
-  linked: boolean
-  status: 'active' | 'revoked' | 'withdrawn' | 'unlinked' | 'inactive'
-  revoked_at: string | null
-  revoked_generation: number | null
-  withdrawn_at: string | null
-  withdrawal_reason: string
-  history: Array<Record<string, unknown>>
-}
-
-/** `available` is reserved: the engine never returns it yet. */
-export type ChatEvidenceStatus =
-  | 'available'
-  | 'unprovisioned'
-  | 'unsupported_platform'
-  | 'remote_client'
-  | 'degraded'
-
-export interface ShareEvidenceState {
-  chat_evidence: { available: false; status: ChatEvidenceStatus }
-  disclosure_tokens: Record<string, string>
-  workspace: string
-  mode: 'review' | 'automatic'
-  fields: Array<ShareEvidenceField['field']>
-  producers: string[]
-  brains: ShareEvidenceBrain[]
-  projects: ShareEvidenceProject[]
-  grants: ShareEvidenceGrant[]
-}
-
-export interface ShareEvidencePreview {
-  preview_token: string
-  preview: {
-    grant_type: 'standing' | 'snapshot'
-    scope: 'future_decisions' | 'one_decision'
-    summary: string
-    future_items_without_review: boolean
-    project_id: string
-    source_id: string
-    source_label: string
-    entry_label: string
-    fields: ShareEvidenceField[][]
-    field_mask: string[]
-    excluded_fields: string[]
-    producers: string[]
-    recipient: { brain: string; identity: string; audience: string }
-    expected_generation: string
-    expires_at: string
-    notice: string
-  }
-}
 
 export interface WorkspacesResponse {
   workspaces: WorkspaceInfo[]
@@ -2135,30 +2021,6 @@ export interface ProposalPreview {
     notes: string[]
     missing?: string[]
   }
-  /** Revision-bound shared-note publication projection (#3576). */
-  brain?: string
-  identity?: string
-  /** `git` or `folder`. */
-  link_kind?: 'git' | 'folder'
-  branch?: string
-  path?: string
-  blocked_reason?: string | null
-  /** An existing-note change in an ordinary folder: where and against which version to apply it by hand. */
-  folder_manual?: {
-    root: string
-    path: string
-    absolute_path: string
-    operation: 'replace' | 'delete'
-    reviewed_version: string
-    current_version: string | null
-    state: 'ready' | 'applied' | 'changed' | 'unavailable'
-    reason: string
-  }
-  /** True only when this exact canonical review has a recorded attempt that can be reconciled. */
-  redraft_available?: boolean
-  reconcile_available?: boolean
-  /** True only when every exact recorded attempt was definitively rejected as retryable. */
-  publish_retry_available?: boolean
 }
 
 export interface ProposalPreviewResponse {
@@ -2347,8 +2209,6 @@ export interface ProposalHistoryRow {
   run_id?: string
   /** The decision's own timestamp, the same value as `ts`. ABSENT from an older engine. */
   decided_at?: string
-  /** Share publication is successful only when the server attached its receipt. */
-  share_status?: string
   commit_oid?: string
   branch?: string
   path?: string
@@ -2471,7 +2331,6 @@ export interface MemoryReceiptDetail {
   diff?: MemoryReceiptDiffLine[]
   truncated?: boolean
   diff_truncated?: boolean
-  share_status?: string
   operation?: string
   branch?: string
   path?: string

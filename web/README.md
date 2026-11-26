@@ -1,9 +1,5 @@
 # PWA frontend
 
-Shared-brain Settings can preview a content guide and save selected typed destinations for review. The audience is explicitly unknown; this mapping never enables automatic publication.
-
-Sources and consent states that ordinary chat stays private while a protected operator authority is unavailable. The server reports this capability as unavailable on every platform; structured-decision grants do not authorize chat.
-
 The sidebar's **Search chats** dialog searches saved titles and visible transcript text in the selected workspace. It sends the query only in a bounded JSON body, shows literal plain-text excerpts, and opens archived results through the existing read-only chat flow. Search results are fetched a page at a time.
 
 Vue 3 + Vite + Pinia + TypeScript. Built output goes to `ciao/web/static/`, served by the same Starlette server as the API. See `../README.md` for the repo-wide layout and `../PWA_API.md` for backend routes.
@@ -109,30 +105,15 @@ The component workshop runs without an engine: `npm run storybook` serves it at
 `http://127.0.0.1:6006`, and `npm run build-storybook` writes the ignored
 `web/dist/storybook` output. It imports production components and CSS directly
 and does not load the app bootstrap or public assets. `npm test` remains the
-separate application suite. Open **Inventory / UI inventory** (`inventory--all`)
-to search the production owner catalogue: one row per SFC, plus inline and
-shared CSS families. Search intersects with family, coverage and migration
-filters.
+separate application suite.
 
-**Coverage rules.** Per-owner state lists belong in the inventory rows, not here.
+**Coverage rules.**
 
-- An inventory row is not a story or a migration approval. Adding an SFC needs its
-  own row (and a rationale for a composition), not a complete story suite.
 - **Covered** means a rendered-state story exists, not that interaction is verified.
-  **Uncovered** means an implemented state has no story; **unknown** means the state
-  or loading fidelity is unaudited; **not applicable** means it is known not to apply.
-  Summary categories overlap. Migration starts unassessed unless a decision says otherwise.
-- A story does not imply connected-caller, loading-fidelity, keyboard,
-  reduced-motion, responsive or migration coverage. Those stay unassessed until the row says otherwise.
+  A story does not imply connected-caller, loading-fidelity, keyboard, reduced-motion,
+  responsive or migration coverage.
 - Stories preserve current production behaviour, even where it differs from the
-  desired contract. Record the difference in the row; do not fix it in the story.
-- Direct consumers are production import/include sites. Support sources may use
-  classes or host a composition without importing the owner. Composition rows
-  render the real composition; CSS rows claim no stories.
-- Node inventory tests derive coverage from each story file's CSF index, not a
-  hand-written list: every covered state's story IDs must exist there, every story
-  except the inventory page is claimed by exactly one row state, and each claimed
-  story file must render that owner.
+  desired contract. Record the difference in the story; do not fix it there.
 
 **Connected fixtures.** A story that renders an owner which transports data declares
 what it may reach; nothing else is reachable.
@@ -188,11 +169,7 @@ what it may reach; nothing else is reachable.
 
 **Checks.**
 
-- `npm run build-storybook` runs `scripts/check-storybook-index.ts` after building.
-  Every registry-linked ID must exist as a story (not Docs or the inventory page);
-  missing or malformed output fails the command. Run the check alone with
-  `node --experimental-strip-types web/scripts/check-storybook-index.ts` from the
-  repository root.
+- `npm run build-storybook` writes the static workshop; a story that fails to build fails the command.
 - `npm run test-storybook` runs the browser interaction runner (@storybook/addon-vitest,
   vitest browser mode with the Playwright provider): every story renders in headless
   Chromium and its `play` functions execute there. Chromium must be installed locally
@@ -359,7 +336,6 @@ Ciaobot, the Home setup card keeps its three phone instructions and that link
 inside a closed native disclosure. Setup task labels stay quiet, help links use
 neutral bordered actions aligned with the row buttons, and narrow panes make
 those actions full-width. Phone setup never keeps a completed reminder open.
-
 
 The PWA runs primarily as a standalone iOS Safari app. Several iOS-specific quirks are addressed in code; do not undo them without reading why.
 
@@ -856,9 +832,6 @@ establish:
 | `chat-motion.spec.ts` | That a chat opened from Home rises into place, archiving opens the next chat in the rail order rather than Home, and the phone drawer slides out on close with its rows still in it.; Chat details stays closed in the next chat once closed; and a pinned file slides in after the chat |
 | `shared-brain-settings.spec.ts` | The Shared brains card on Settings › Workspace › Overview at 390px: the Link type selector is usable, the path field is 16px and controls are 44px under touch, mixed Folder and Git rows keep their kinds after reload and saves, local folder availability stays distinct from cloud sync status, a refused path shows the engine's words inline, and Remove asks first and runs from the keyboard. |
 
-| `shared-brain-sources.spec.ts` | The Sources and consent panel at 390px with a stubbed evidence API: server-filtered brain/project/source pickers, exact snapshot fields and the future-without-review sentence, cancel writing nothing, confirm listing the grant, and keyboard revoke surviving a reload. |
-| `shared-brain-audit.spec.ts` | The read-only Consent and history view at 390px, at a real 200% zoom (halved viewport with deviceScaleFactor 2) and with a stubbed evidence API: unknown audience, no recall or sync claim, 44px toggle, keyboard open, grants and newest-first history, no write route called, survives reload. |
-| `shared-brain-isolation.spec.ts` | Client-side isolation of the Sources panel across two workspaces, against a stateful engine stub: the foreign workspace's names and grant ids never reach the DOM or the requests, a DOM-edited preview sends only the token and confirmation, a forged token is refused in the panel, switching workspace before submit drops the preview and writes nothing, and a confirm still in flight across a switch never lands in the other workspace. Engine-side isolation is covered by `tests/test_share_evidence_isolation.py` (#3646). |
 | `project-decisions.spec.ts` | Project-side decision entry at 390px, with isolated permissions and save responses: shows the standing disclosure and records the decision for the owning project. |
 | `sidebar-overflow.spec.ts` | That the sidebar's chat list never scrolls sideways, with project rows idle or hovered. |
 | `narrow-viewport.spec.ts` | Layout at 390px. jsdom has no layout engine: every rect is 0x0 and `scrollWidth` is always 0, so neither the unbreakable-flex-child trap nor a tap target under `--touch: 44px` is visible from a mount. The memory-insight journey also measures the row that carries a second control (the retry beside the open control), which is the one place a row can grow past the pane. Selecting a reply measures the opposite case: the action footer is not in the layout until the message is selected, and selection must leave the transcript's `scrollTop` alone; the fixture's opt-in `comment` shape then measures that the selected card's accent outline does not bleed across the turn gap onto the comment-reference card below it. Structured question cases measure the always-visible, hit-testable answer footer and usable scroll region at portrait, landscape and enlarged text, and check composer/keyboard focus. |

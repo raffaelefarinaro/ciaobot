@@ -24,7 +24,7 @@ from typing import TYPE_CHECKING, Any, cast
 import urllib.error
 import urllib.request
 
-from ciao import dev, package_smoke, package_version, proposal_kinds, public_release, release, service_backend
+from ciao import dev, package_version, proposal_kinds, service_backend
 from ciao.workspace_discovery import trusted_registry
 from ciao.server_host import (
     BUNDLE_ID,
@@ -5562,12 +5562,6 @@ def _memory_proposal_dismiss_command(args: argparse.Namespace) -> int:
                 file=sys.stderr,
             )
             return 1
-        if parsed.kind == "share":
-            print(
-                "shared-note proposals can only be dismissed by the PWA after it verifies publication state",
-                file=sys.stderr,
-            )
-            return 2
         from ciao.upstream_drafts import DRAFT_KIND, decision_text
 
         if parsed.kind == DRAFT_KIND and parsed.target and parsed.source == decision_text(parsed.target):
@@ -5821,9 +5815,6 @@ def _memory_proposal_accept_command(args: argparse.Namespace) -> int:
         # before the decision or the progress key. Finish that operation.
         return _resume_memory_accept(args, workspace, vault, name, needle, no_match)
     bullet, _removal_needle = matched
-    if bullet.kind == "share":
-        print("handover refused: publishing to a shared brain requires an attended decision", file=sys.stderr)
-        return 1
     holder = _curation_holder(args)
     if not holder:
         return 1
@@ -5953,17 +5944,6 @@ def _cleanup_sdk_blobs_command(args: argparse.Namespace) -> int:
     if args.apply:
         module_args.append("--apply")
     return cleanup_sdk_blobs.main(module_args)
-
-
-def _label_hygiene_command(args: argparse.Namespace) -> int:
-    from ciao import label_hygiene
-
-    module_args = ["--repo", args.repo, "--limit", str(args.limit)]
-    if args.apply:
-        module_args.append("--apply")
-    if args.json:
-        module_args.append("--json")
-    return label_hygiene.main(module_args)
 
 
 def _eval_tasks_command(args: argparse.Namespace) -> int:
@@ -6654,18 +6634,7 @@ def _curation_begin_command(args: argparse.Namespace) -> int:
             print(f"curation could not begin: {error.get('message', 'engine unavailable')}", file=sys.stderr)
             return CURATION_BUSY_EXIT if error.get("code") == "curation_busy" else 1
         else:
-            lease = None
-            if _name:
-                from ciao import curation_share, share_evidence
-
-                config = _installed_config(_workspace)
-                if share_evidence._store_root(config).exists():
-                    name = _name
-                    with share_evidence.evidence_claim(config, workspace=name) as claim:
-                        lease = begin_run(vault, holder=args.holder, ttl_s=budget.max_seconds, chat_id=chat_id,
-                                          before_acquire=lambda state: curation_share.recover(config, name, state, claim))
-            if lease is None:
-                lease = begin_run(vault, holder=args.holder, ttl_s=budget.max_seconds, chat_id=chat_id)
+            lease = begin_run(vault, holder=args.holder, ttl_s=budget.max_seconds, chat_id=chat_id)
     except CurationBusy as exc:
         print(f"curation is already running: {exc}", file=sys.stderr)
         return CURATION_BUSY_EXIT
@@ -6777,15 +6746,6 @@ def _curation_progress_command(args: argparse.Namespace) -> int:
     except CurationStateError as exc:
         print(f"curation state error: {exc}", file=sys.stderr)
         return 1
-    token = os.environ.get("CIAO_AGENT_TOKEN", "")
-    url = os.environ.get("CIAO_AGENT_URL", "")
-    if token and url:
-        from ciao.agent_cli import post
-
-        for key in keys:
-            result = post("care_checkpoint", {"holder": holder, "key": key}, url=url, token=token, timeout_s=2.0)
-            if not result.get("ok") and result.get("error", {}).get("code") != "not_care_dispatch":
-                print("curation sharing checkpoint unavailable; work remains private", file=sys.stderr)
     payload = {"recorded": len(keys), "newly_done": added}
     if args.json:
         json.dump(payload, sys.stdout, ensure_ascii=False, indent=2)
@@ -9003,27 +8963,6 @@ def build_parser() -> argparse.ArgumentParser:
         )
     )
 
-    public_parser = subparsers.add_parser(
-        "public-preflight",
-        help="Export or scan a public Ciaobot tree.",
-    )
-    public_parser.add_argument("args", nargs=argparse.REMAINDER)
-    public_parser.set_defaults(func=lambda args: public_release.main(args.args))
-
-    smoke_parser = subparsers.add_parser(
-        "package-smoke",
-        help="Build, install, and smoke-test the Ciaobot package.",
-    )
-    smoke_parser.add_argument("args", nargs=argparse.REMAINDER)
-    smoke_parser.set_defaults(func=lambda args: package_smoke.main(args.args))
-
-    release_parser = subparsers.add_parser(
-        "prepare-release",
-        help="Prepare a release branch, changelog, and draft PR.",
-    )
-    release_parser.add_argument("args", nargs=argparse.REMAINDER)
-    release_parser.set_defaults(func=lambda args: release.main(args.args))
-
     search_parser = subparsers.add_parser(
         "vault-search",
         help="Full-text search over the vault or transcript logs.",
@@ -10738,33 +10677,6 @@ def build_parser() -> argparse.ArgumentParser:
     )
     cleanup_parser.set_defaults(func=_cleanup_sdk_blobs_command)
 
-    label_hygiene_parser = subparsers.add_parser(
-        "label-hygiene",
-        help="Audit open-issue labels against the title-prefix convention. Dry-run by default.",
-    )
-    label_hygiene_parser.add_argument(
-        "--repo",
-        default="raffaelefarinaro/ciaobot",
-        help="Target GitHub repo (owner/name).",
-    )
-    label_hygiene_parser.add_argument(
-        "--limit",
-        type=int,
-        default=100,
-        help="Maximum open issues to scan.",
-    )
-    label_hygiene_parser.add_argument(
-        "--apply",
-        action="store_true",
-        help="Actually add missing labels via gh issue edit. Default is dry-run.",
-    )
-    label_hygiene_parser.add_argument(
-        "--json",
-        action="store_true",
-        help="Emit the structured report as JSON instead of text.",
-    )
-    label_hygiene_parser.set_defaults(func=_label_hygiene_command)
-
     eval_parser = subparsers.add_parser(
         "eval",
         help=(
@@ -11056,12 +10968,6 @@ def _dispatch(argv_list: list[str]) -> int:
 
     if is_agent_invocation(argv_list):
         return agent_main(argv_list)
-    if argv_list[:1] == ["public-preflight"]:
-        return public_release.main(argv_list[1:])
-    if argv_list[:1] == ["package-smoke"]:
-        return package_smoke.main(argv_list[1:])
-    if argv_list[:1] == ["prepare-release"]:
-        return release.main(argv_list[1:])
     if argv_list[:1] == ["update"]:
         from ciao.engine_update import main as update_main
 

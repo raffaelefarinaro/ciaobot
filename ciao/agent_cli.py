@@ -24,7 +24,7 @@ from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
 
-from ciao.agent_surface import AGENT_TOKEN_ENV, AGENT_URL_ENV, RECALL_CHECK_MAX_REQUEST_BYTES
+from ciao.agent_surface import AGENT_TOKEN_ENV, AGENT_URL_ENV
 from ciao.chat_actions import (
     AGENT_ACTION_KINDS,
     COMMAND_MAX_BYTES,
@@ -259,8 +259,6 @@ def build_parser() -> argparse.ArgumentParser:
     search = vault.add_parser("search", help="Full-text search of the active vault.")
     search.add_argument("query")
     search.add_argument("--limit", type=int, default=10)
-    recall = vault.add_parser("recall-check", help="Check selected recall claims against vault evidence.")
-    recall.add_argument("--claims-file", required=True)
     review = _verbs(vault.add_parser("review", help="Vault-note review queue."), dest="action")
     review.add_parser("list", help="List review candidates (stale, orphaned, duplicate, weakly linked).")
     show = review.add_parser("show", help="Show one candidate's evidence.")
@@ -309,10 +307,6 @@ def build_parser() -> argparse.ArgumentParser:
         help="JSON document holding the verdict: relative_path, expected_revision, "
         "outcome, coverage, evidence, before/after, reason. Never pass the prose itself.",
     )
-    share = note.add_parser("share", help="Queue a note draft for human review in a shared brain.")
-    share.add_argument("--path", required=True, help="Repository-relative Markdown destination path.")
-    share.add_argument("--body-file", required=True, metavar="FILE", help="File inside this workspace vault holding the exact note body.")
-    share.add_argument("--brain", default="", help="Name of a linked shared brain when several are available.")
 
     file_ = _verbs(nouns.add_parser("file", help="Surface a workspace file in the pinned panel."))
     surface = file_.add_parser("surface", help="Open a workspace file in the pinned panel.")
@@ -746,24 +740,6 @@ def _learning_text_file(raw: str) -> str:
         raise UsageError("--text-file must be UTF-8 text.") from exc
 
 
-def _recall_claims_file(raw: str) -> str:
-    try:
-        path = Path(raw).expanduser().resolve()
-        if is_credential_adjacent(path) or not stat.S_ISREG(path.stat().st_mode):
-            raise UsageError("--claims-file must name an ordinary non-credential file.")
-        with path.open("rb") as handle:
-            if not stat.S_ISREG(os.fstat(handle.fileno()).st_mode):
-                raise UsageError("--claims-file must name an ordinary file.")
-            payload = handle.read(RECALL_CHECK_MAX_REQUEST_BYTES + 1)
-        if len(payload) > RECALL_CHECK_MAX_REQUEST_BYTES:
-            raise UsageError("--claims-file exceeds the request size limit.")
-        return payload.decode("utf-8", errors="strict")
-    except UsageError:
-        raise
-    except (OSError, RuntimeError, ValueError, UnicodeError):
-        raise UsageError("--claims-file cannot be read as UTF-8.") from None
-
-
 def resolve(args: argparse.Namespace) -> tuple[str, dict[str, Any]] | None:
     """Map parsed arguments to ``(operation, arguments)``; ``None`` for help.
 
@@ -793,8 +769,6 @@ def resolve(args: argparse.Namespace) -> tuple[str, dict[str, Any]] | None:
     if noun == "vault":
         if verb == "search":
             return "vault_search", {"query": args.query, "limit": args.limit}
-        if verb == "recall-check":
-            return "vault_recall_check", {"claims_json": _recall_claims_file(args.claims_file)}
         action = args.action
         if action == "list":
             return "vault_review", {"action": "list"}
@@ -823,8 +797,6 @@ def resolve(args: argparse.Namespace) -> tuple[str, dict[str, Any]] | None:
                 "body_file": args.body_file or "",
                 "path": args.path,
             }
-        if verb == "share":
-            return "note_share", {"path": args.path, "body_file": args.body_file, "brain": args.brain}
         # The path crosses to the server as written. Reading the document here
         # and posting the parsed object would move the size cap, the workspace
         # confinement and the "is this actually a file" check into the one place

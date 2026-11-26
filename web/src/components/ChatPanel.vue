@@ -1024,7 +1024,6 @@
              footer keeps its place and the way forward reads as the next step. -->
         <div class="archived-notice">
           <p class="archived-notice-text">This chat is archived.</p>
-          <p v-if="archiveCandidateMessage" class="archived-notice-text" role="status">{{ archiveCandidateMessage }}</p>
           <div class="archived-notice-actions">
             <!-- The memory pass this chat spawned, if one did. The pass lives in
                  a project the sidebar hides, so this is the durable way back to
@@ -1811,12 +1810,6 @@ const archivePostprocess = computed(() => store.chatPostprocess(chat.value.chat_
 // moment the pass is enqueued, so the link works while it is still running and
 // after the pass is archived.
 const archiveMemoryPassChatId = computed(() => memoryPassChatId(archivePostprocess.value))
-const archiveCandidateMessage = computed(() => {
-  const outcome = archivePostprocess.value?.steps?.memory_pass?.extra?.candidate_outcome
-  if (outcome === 'unavailable') return 'Shared note suggestions could not be prepared. Ciao will retry when it next starts.'
-  if (outcome === 'checkpoint_unavailable') return 'Shared note suggestions could not be prepared for this chat.'
-  return ''
-})
 function openMemoryPass(): void {
   if (archiveMemoryPassChatId.value) void store.switchChat(archiveMemoryPassChatId.value)
 }

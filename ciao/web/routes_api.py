@@ -78,16 +78,12 @@ from ciao.config import (
     MEMORY_APPROVAL_KINDS,
     CiaoConfig,
     RESTART_EXIT_CODE,
-    SHARING_POLICIES,
-    SharedBrainLink,
     WorkspaceConfig,
-    sharing_scope_row,
 )
 from ciao.model_tiers import MAX_MODEL_ID_CHARS
 from ciao.models import THINKING_LEVELS, ChatContext
 from ciao.workspaces import (
     WORKSPACE_NAME_RE,
-    WorkspaceRegistryBusy,
     WorkspaceRegistryConflict,
     agent_root_for,
     persist_workspaces,
@@ -330,818 +326,17 @@ async def _workspace_from_request_async(
     return _workspace_from_request(data, config=config, existing=existing)
 
 
-async def _invalidate_sharing_claim(config: Any, link: SharedBrainLink) -> bool:
-    """Persist a drift invalidation under checkout + authoritative registry claims.
-
-    When the registry claim is already held, record only the durable journal;
-    the next writer persists the review state. The worker is shielded so a
-    cancelled request cannot release the checkout claim before it finishes.
-    """
-    async with shared_brain._checkout_lock(link.path):
-        async with shared_brain._checkout_claim(link.path, config):
-            try:
-                async with _workspace_registry_claim(config) as owner:
-                    return await run_while_claimed(
-                        shared_brain.invalidate_sharing_on_drift,
-                        config,
-                        link,
-                        owner,
-                    )
-            except WorkspaceRegistryBusy:
-                return await run_while_claimed(
-                    shared_brain.record_sharing_revocation_without_registry,
-                    config,
-                    link,
-                )
-
-
 async def workspace_shared_brains(request: Request) -> JSONResponse:
-    """Live state of each linked brain; a drift observation retires its grant."""
+    """Live state of each brain the workspace registers."""
     config = request.app.state.config
-    workspace_name = str(request.path_params.get("name", ""))
-    workspace = config.workspace(workspace_name)
+    workspace = config.workspace(str(request.path_params.get("name", "")))
     if workspace is None:
         return JSONResponse({"error": "unknown workspace"}, status_code=404)
-    states = []
-    for link in list(workspace.shared_brains):
-        state = await asyncio.to_thread(shared_brain.brain_state, link, config, workspace.name)
-        if state.get("problem") == "origin_changed":
-            # Seeing a retargeted folder is the moment to retire its standing
-            # grant durably; a repaired origin must ask again.
-            try:
-                changed = await _invalidate_sharing_claim(config, link)
-            except (OSError, WorkspaceRegistryConflict):
-                # Even when a claim cannot be taken, the observed grant can be
-                # journaled under the journal's own interprocess lock. This is
-                # durable across restart and never leaves the grant active.
-                try:
-                    await run_while_claimed(
-                        shared_brain.record_sharing_revocation_without_registry,
-                        config,
-                        link,
-                    )
-                except OSError:
-                    # Nothing durable could be written; fail closed in this
-                    # process and report the result as unavailable/unconfirmed.
-                    from ciao.workspaces import workspace_registry_lock
-
-                    with workspace_registry_lock(config):
-                        demotions = shared_brain._demote_fenced_grants(
-                            config,
-                            shared_brain._fenced_grants_for_path(config, link),
-                        )
-                        config.workspaces.update(demotions)
-                    config._sharing_recovery_pending = True
-                    try:
-                        from ciao.workspaces import read_workspace_registry_bytes
-
-                        await run_while_claimed(
-                            shared_brain.merge_sharing_revocations,
-                            config,
-                            set(),
-                            registry_bytes=read_workspace_registry_bytes(config),
-                            force_fail_closed=True,
-                        )
-                    except OSError:
-                        pass
-                current = _sharing_link(config, workspace_name, link.name)
-                if current is not None:
-                    state = await asyncio.to_thread(
-                        shared_brain.brain_state, current, config, workspace_name
-                    )
-                state["sharing_invalidation_failed"] = True
-                state["sharing_grant_pending"] = True
-            else:
-                if changed:
-                    current = _sharing_link(config, workspace_name, link.name)
-                    if current is not None:
-                        state = await asyncio.to_thread(
-                            shared_brain.brain_state, current, config, workspace_name
-                        )
-        states.append(state)
+    states = [
+        await asyncio.to_thread(shared_brain.brain_state, link, config, workspace.name)
+        for link in list(workspace.shared_brains)
+    ]
     return JSONResponse({"shared_brains": states})
-
-
-# --- Share evidence: private typed decisions and permission to disclose one ---
-
-def _share_evidence_error(exc: Any, *, status: int = 400) -> JSONResponse:
-    return JSONResponse(
-        {"error": str(getattr(exc, "message", exc)), "code": getattr(exc, "code", "")},
-        status_code=status,
-    )
-
-
-def _share_project(request: Request, workspace: str, project_id: str) -> tuple[Any, Path]:
-    """Resolve one project that actually belongs to this workspace and its folder."""
-    from ciao import share_evidence  # noqa: PLC0415
-
-    pcm = getattr(request.app.state, "project_chat_manager", None)
-    if pcm is None:
-        raise share_evidence.EvidenceError("project_unavailable", "Projects are not available.")
-    project = pcm.get_project(project_id) if project_id else None
-    if project is None or getattr(project, "workspace", "") != workspace:
-        raise share_evidence.EvidenceError("invalid_project", "Choose a project in this workspace.")
-    folder = pcm.active_project_vault_dir(project.project_id)
-    if folder is None:
-        raise share_evidence.EvidenceError(
-            "invalid_project", "The project has no active folder in this workspace."
-        )
-    return project, Path(folder)
-
-
-def _share_session(request: Request) -> str:
-    from ciao.web.auth import SESSION_COOKIE  # noqa: PLC0415
-
-    return str(request.cookies.get(SESSION_COOKIE) or "")
-
-
-def _share_workspace(request: Request) -> str:
-    config = request.app.state.config
-    name = str(request.path_params.get("name", ""))
-    if config.workspace(name) is None:
-        from ciao import share_evidence  # noqa: PLC0415
-
-        raise share_evidence.EvidenceError("unknown_workspace", "The workspace is not available.")
-    return name
-
-
-async def share_evidence_state(request: Request) -> JSONResponse:
-    """Read the private Sources panel for one workspace; review is the default."""
-    from ciao import share_evidence  # noqa: PLC0415
-
-    config = request.app.state.config
-    try:
-        workspace = _share_workspace(request)
-        pcm = getattr(request.app.state, "project_chat_manager", None)
-        projects = []
-        for project in (pcm.list_projects(workspace) if pcm is not None else []):
-            if getattr(project, "workspace", workspace) != workspace:
-                continue
-            folder = pcm.active_project_vault_dir(project.project_id) if pcm is not None else None
-            sources = []
-            if folder is not None:
-                try:
-                    sources = share_evidence.list_sources(
-                        config, workspace=workspace, project_id=project.project_id,
-                        project_name=project.name, project_dir=Path(folder),
-                    )
-                except share_evidence.EvidenceError:
-                    sources = []
-            projects.append({
-                "project_id": project.project_id,
-                "name": project.name,
-                "sources": sources,
-            })
-        record = config.workspace(workspace)
-        grants, disclosure_tokens = share_evidence.disclosure_state(
-            config, workspace=workspace, projects=[p["project_id"] for p in projects],
-            session=_share_session(request),
-        )
-        return JSONResponse({
-            "workspace": workspace,
-            "mode": share_evidence.workspace_mode(config, workspace=workspace),
-            # No native-app operator channel exists yet, so no request is one.
-            "chat_evidence": share_evidence.chat_evidence_status(native_app=False),
-            "fields": list(share_evidence.FIELDS),
-            "producers": list(share_evidence.PRODUCERS),
-            "brains": [
-                {"name": link.name, "identity": link.identity}
-                for link in list(getattr(record, "shared_brains", []) or [])
-            ],
-            "projects": projects,
-            "grants": grants,
-            "disclosure_tokens": disclosure_tokens,
-        })
-    except share_evidence.EvidenceError as exc:
-        return _share_evidence_error(exc, status=404 if exc.code == "unknown_workspace" else 400)
-
-
-async def share_evidence_record_decision(request: Request) -> JSONResponse:
-    """Authenticated operator save: append one trusted structured decision."""
-    from ciao import share_evidence  # noqa: PLC0415
-
-    config = request.app.state.config
-    try:
-        body = await request.json()
-    except ValueError:
-        return JSONResponse({"error": "invalid JSON"}, status_code=400)
-    if not isinstance(body, dict):
-        return JSONResponse({"error": "expected an object"}, status_code=400)
-    try:
-        workspace = _share_workspace(request)
-        project, _folder = _share_project(request, workspace, str(body.get("project_id", "")).strip())
-        token = body.get("disclosure_token")
-        if not isinstance(token, str) or len(token) != 64 or any(c not in '0123456789abcdef' for c in token):
-            raise share_evidence.EvidenceError("disclosure_changed", "Sharing permissions changed. Review them before saving.")
-        result = share_evidence.record_operator_decision(
-            config, workspace=workspace, project_id=project.project_id,
-            decision=body.get("decision"), reason=body.get("reason", ""),
-            effective_date=body.get("effective_date"),
-            session=_share_session(request),
-            disclosure_token=token,
-        )
-        return JSONResponse({**result, "mode": share_evidence.workspace_mode(config, workspace=workspace)})
-    except share_evidence.EvidenceError as exc:
-        return _share_evidence_error(exc, status=404 if exc.code == "unknown_workspace" else 409 if exc.code == "disclosure_changed" else 400)
-
-
-async def share_evidence_preview(request: Request) -> JSONResponse:
-    """Render the exact scope and mint a session-bound preview token."""
-    from ciao import share_evidence  # noqa: PLC0415
-
-    config = request.app.state.config
-    try:
-        body = await request.json()
-    except ValueError:
-        return JSONResponse({"error": "invalid JSON"}, status_code=400)
-    if not isinstance(body, dict):
-        return JSONResponse({"error": "expected an object"}, status_code=400)
-    try:
-        workspace = _share_workspace(request)
-        project, folder = _share_project(request, workspace, str(body.get("project_id", "")).strip())
-        result = share_evidence.preview(
-            config, workspace=workspace,
-            brain_name=str(body.get("brain", "")),
-            project_id=project.project_id, project_name=project.name, project_dir=folder,
-            source_id=str(body.get("source_id", "")),
-            grant_type=str(body.get("grant_type", "")),
-            field_mask=body.get("field_mask"),
-            producers=body.get("producers"),
-            entry_index=body.get("entry_index"),
-            session=_share_session(request),
-        )
-        return JSONResponse(result)
-    except share_evidence.EvidenceError as exc:
-        return _share_evidence_error(exc, status=404 if exc.code == "unknown_workspace" else 400)
-
-
-async def share_evidence_confirm(request: Request) -> JSONResponse:
-    """Persist exactly the previewed scope after re-resolving authorization."""
-    from ciao import share_evidence  # noqa: PLC0415
-
-    config = request.app.state.config
-    try:
-        body = await request.json()
-    except ValueError:
-        return JSONResponse({"error": "invalid JSON"}, status_code=400)
-    if not isinstance(body, dict):
-        return JSONResponse({"error": "expected an object"}, status_code=400)
-    if body.get("confirm") is not True:
-        return JSONResponse({"error": "Explicit confirmation is required."}, status_code=400)
-    try:
-        workspace = _share_workspace(request)
-        token = str(body.get("preview_token", ""))
-        target = share_evidence.preview_target(
-            config, workspace=workspace, token=token, session=_share_session(request)
-        )
-        # Re-resolve the previewed project through the live manager before persisting.
-        _share_project(request, workspace, target["project_id"])
-        # Grant writers wait on the admission fence; never on the event loop.
-        result = await asyncio.to_thread(
-            share_evidence.confirm,
-            config, workspace=workspace, token=token, session=_share_session(request),
-        )
-        return JSONResponse(result)
-    except share_evidence.EvidenceError as exc:
-        status = 404 if exc.code == "unknown_workspace" else 409 if exc.code in {
-            "stale_preview", "preview_used", "preview_expired", "brain_changed",
-            "preview_session_mismatch",
-        } else 400
-        return _share_evidence_error(exc, status=status)
-
-
-async def share_evidence_grant(request: Request) -> JSONResponse:
-    """Read one grant's exact scope and history inside its workspace."""
-    from ciao import share_evidence  # noqa: PLC0415
-
-    config = request.app.state.config
-    try:
-        workspace = _share_workspace(request)
-        return JSONResponse({"grant": share_evidence.grant_detail(
-            config, workspace=workspace,
-            grant_id=str(request.path_params.get("grant_id", "")),
-        )})
-    except share_evidence.EvidenceError as exc:
-        return _share_evidence_error(exc, status=404)
-
-
-async def share_evidence_revoke(request: Request) -> JSONResponse:
-    """Revoke one grant; a fresh preview and grant are required afterwards."""
-    from ciao import share_evidence  # noqa: PLC0415
-
-    config = request.app.state.config
-    try:
-        workspace = _share_workspace(request)
-        return JSONResponse(await asyncio.to_thread(
-            share_evidence.revoke, config, workspace=workspace,
-            grant_id=str(request.path_params.get("grant_id", "")),
-        ))
-    except share_evidence.EvidenceError as exc:
-        return _share_evidence_error(exc, status=404 if exc.code == "unknown_workspace" else 400)
-
-
-async def share_evidence_withdraw(request: Request) -> JSONResponse:
-    """Engine-recorded withdrawal; the old generation can no longer resolve."""
-    from ciao import share_evidence  # noqa: PLC0415
-
-    config = request.app.state.config
-    try:
-        body = await request.json()
-    except ValueError:
-        body = {}
-    if not isinstance(body, dict):
-        return JSONResponse({"error": "expected an object"}, status_code=400)
-    try:
-        workspace = _share_workspace(request)
-        return JSONResponse(await asyncio.to_thread(
-            share_evidence.withdraw, config, workspace=workspace,
-            grant_id=str(request.path_params.get("grant_id", "")),
-            reason=body.get("reason", ""),
-        ))
-    except share_evidence.EvidenceError as exc:
-        return _share_evidence_error(exc, status=404 if exc.code == "unknown_workspace" else 400)
-
-def _sharing_link(
-    config: Any, workspace_name: str, brain_name: str
-) -> SharedBrainLink | None:
-    workspace = config.workspace(workspace_name)
-    if workspace is None:
-        return None
-    return next(
-        (link for link in workspace.shared_brains if link.name == brain_name), None
-    )
-
-
-def _disk_shared_brain_row(
-    config: Any, workspace_name: str, brain_name: str
-) -> dict[str, Any] | None:
-    """The target link exactly as ``workspaces.json`` holds it now.
-
-    The in-memory registry is authoritative for one engine process, but the
-    file is the cross-process source of truth. Reading it under the checkout
-    claim gives the policy route a compare-and-swap instead of blindly writing a
-    stale snapshot.
-    """
-    path = Path(config.state_path).parent / "workspaces.json"
-    try:
-        rows = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, UnicodeError, ValueError):
-        return None
-    if not isinstance(rows, list):
-        return None
-    for row in rows:
-        if not isinstance(row, dict) or row.get("name") != workspace_name:
-            continue
-        links = row.get("shared_brains")
-        if not isinstance(links, list):
-            return None
-        for link in links:
-            if isinstance(link, dict) and link.get("name") == brain_name:
-                return link
-        return None
-    return None
-
-
-def _disk_link_matches(link: SharedBrainLink, row: dict[str, Any] | None) -> bool:
-    if not isinstance(row, dict):
-        return False
-    # Generation/policy changes are covered by the authoritative registry claim:
-    # `_workspace_registry_claim` refuses a stale in-memory snapshot, and the
-    # owner CAS refuses a file changed between that check and the write.
-    return (
-        row.get("identity") == link.identity
-        and row.get("lifetime_id") == link.lifetime_id
-        and row.get("kind", "git") == link.kind
-    )
-
-
-def _disk_link_state_matches(link: SharedBrainLink, row: dict[str, Any] | None) -> bool:
-    """Whether the persisted row already carries this exact policy state."""
-    if not isinstance(row, dict):
-        return False
-    consent = row.get("sharing_consent")
-    consent_generation = consent.get("generation") if isinstance(consent, dict) else None
-    current_generation = (
-        link.sharing_consent.generation if link.sharing_consent is not None else None
-    )
-    return (
-        row.get("sharing_policy", "review") == link.sharing_policy
-        and row.get("sharing_generation", 0) == link.sharing_generation
-        and consent_generation == current_generation
-    )
-
-
-async def workspace_shared_brain_guide_mapping(request: Request) -> JSONResponse:
-    """Preview or save a review-only mapping from an authenticated Settings action."""
-    from ciao import shared_brain_guide as guide, shared_brain_mapping as mapping
-    from ciao.workspaces import workspace_registry_lock
-
-    config = request.app.state.config
-    workspace_name = str(request.path_params.get("name") or "")
-    brain_name = str(request.path_params.get("brain") or "")
-    body: Any = None
-    if request.method == "POST":
-        try:
-            body = await request.json()
-        except ValueError:
-            return JSONResponse({"error": "invalid JSON"}, status_code=400)
-        if not isinstance(body, dict) or set(body) != {"identity", "lifetime", "generation", "pin", "types"}:
-            return JSONResponse({"error": "invalid mapping choice"}, status_code=400)
-        if not isinstance(body["identity"], str) or not isinstance(body["lifetime"], str) or type(body["generation"]) is not int or body["generation"] < 0 or not isinstance(body["types"], list) or len(body["types"]) > guide.MAX_TYPES or any(not isinstance(x, str) for x in body["types"]):
-            return JSONResponse({"error": "invalid mapping choice"}, status_code=400)
-
-    async with _workspace_archive_lock(request):
-        with workspace_registry_lock(config):
-            link = _sharing_link(config, workspace_name, brain_name)
-        if link is None:
-            return JSONResponse({"error": "unknown workspace or shared brain"}, status_code=404)
-        try:
-            async with shared_brain._checkout_lock(link.path):
-                async with shared_brain._checkout_claim(link.path, config):
-                    async with _workspace_registry_claim(config) as owner:
-                        with workspace_registry_lock(config):
-                            current = _sharing_link(config, workspace_name, brain_name)
-                            if current is None or not _disk_link_matches(current, _disk_shared_brain_row(config, workspace_name, brain_name)) or current.lifetime_id != link.lifetime_id:
-                                return JSONResponse({"error": "shared brain changed", "code": "brain_changed"}, status_code=409)
-                        if body is not None and (body["identity"] != current.identity or body["lifetime"] != current.lifetime_id or body["generation"] != current.guide_mapping_generation):
-                            return JSONResponse({"error": "mapping changed; reload", "code": "mapping_changed"}, status_code=409)
-                        # Revocation must remain possible when the destination is unavailable.
-                        if body is not None and not body["types"]:
-                            updated = current if current.guide_mapping is None else dataclasses.replace(current, guide_mapping=None, guide_mapping_generation=current.guide_mapping_generation + 1)
-                        else:
-                            if current.kind == "git":
-                                state = await run_while_claimed(shared_brain.probe_under_fence, config, current, owner)
-                                problem = state.get("problem")
-                            else:
-                                problem = shared_brain.link_problem(config, current)
-                            if problem:
-                                if body is None:
-                                    return JSONResponse({"identity": current.identity, "lifetime": current.lifetime_id, "generation": current.guide_mapping_generation, "pin": None, "scope": "", "exclusions": [], "types": [], "selected": [], "guide_status": "unavailable", "audience": {"status": "unknown", "verified": False}, "mapping_mode": "review"})
-                                return JSONResponse({"error": "shared brain unavailable", "problem": problem}, status_code=409)
-                            load = await run_while_claimed(guide.read_guide, current.path, brain_identity=current.identity)
-                            if not load.ok or load.guide is None:
-                                if body is None:
-                                    return JSONResponse({"identity": current.identity, "lifetime": current.lifetime_id, "generation": current.guide_mapping_generation, "pin": None, "scope": "", "exclusions": [], "types": [], "selected": [], "guide_status": load.status, "audience": {"status": "unknown", "verified": False}, "mapping_mode": "review"})
-                                return JSONResponse({"error": "guide unavailable", "status": load.status}, status_code=409)
-                            pin = {"identity": load.guide.pin.brain_identity, "version": load.guide.pin.version, "digest": load.guide.pin.digest}
-                            if body is None:
-                                return JSONResponse({"identity": current.identity, "lifetime": current.lifetime_id, "generation": current.guide_mapping_generation, "pin": pin, "scope": load.guide.scope, "exclusions": load.guide.exclusions, "types": [{"name": n.name, "kind": n.destination.kind, "path": n.destination.path, "section": n.destination.section, "operation": n.destination.operation, "example": n.example} for n in load.guide.types.values()], "selected": [g.note_type for g in current.guide_mapping.grants] if current.guide_mapping and current.guide_mapping.pin == load.guide.pin else [], "audience": {"status": "unknown", "verified": False}, "mapping_mode": "review"})
-                            if body["pin"] != pin:
-                                return JSONResponse({"error": "guide changed; review again", "code": "guide_changed"}, status_code=409)
-                            try:
-                                approved = mapping.approve(current, load, body["types"], expected_pin=load.guide.pin)
-                            except ValueError:
-                                return JSONResponse({"error": "invalid type selection"}, status_code=400)
-                            updated = dataclasses.replace(
-                                current, guide_mapping=approved, guide_mapping_generation=approved.generation,
-                                guide_generation_from_restore_only=False,
-                            )
-                        if updated != current:
-                            with workspace_registry_lock(config):
-                                workspace = config.workspace(workspace_name)
-                                links = [updated if item is current else item for item in workspace.shared_brains]
-                                candidate = dataclasses.replace(workspace, shared_brains=links)
-                                workspaces = dict(config.workspaces)
-                                workspaces[workspace_name] = candidate
-                                _persist_workspaces(config, workspaces, owner=owner)
-                                config.workspaces[workspace_name] = candidate
-                        return JSONResponse({"generation": updated.guide_mapping_generation, "mapping_mode": "review", "audience": {"status": "unknown", "verified": False}})
-        except (OSError, WorkspaceRegistryConflict):
-            return JSONResponse({"error": "mapping unavailable; reload and retry", "code": "mapping_locked"}, status_code=409)
-
-
-async def set_workspace_shared_brain_sharing(request: Request) -> JSONResponse:
-    """Choose one link's sharing policy, explicitly, from authenticated Settings.
-
-    ``review`` is the default and the only state a legacy or new link starts in.
-    ``automatic`` records a durable, generation-stamped consent for that exact
-    link lifetime and repository identity. Revocation bumps the generation and
-    drops the consent. No publishing exists in this slice: the policy is stored
-    for the engine's later producer and publisher to consult, never applied here.
-
-    The caller must name the identity, opaque lifetime and generation it saw, so
-    a stale Settings tab cannot grant a relinked folder or overwrite a newer
-    choice. The checks and the write happen under the same registry lock.
-    """
-    config = request.app.state.config
-    workspace_name = str(request.path_params.get("name") or "")
-    brain_name = str(request.path_params.get("brain") or "")
-    try:
-        body = await request.json()
-    except ValueError:
-        return JSONResponse({"error": "invalid JSON"}, status_code=400)
-    if not isinstance(body, dict):
-        return JSONResponse({"error": "expected an object"}, status_code=400)
-    policy = body.get("policy")
-    if not isinstance(policy, str) or policy not in SHARING_POLICIES:
-        return JSONResponse(
-            {"error": "policy must be one of: review, automatic"}, status_code=400
-        )
-    expected_identity = body.get("identity")
-    if not isinstance(expected_identity, str) or not expected_identity:
-        return JSONResponse(
-            {"error": "identity is required to confirm the shared brain"}, status_code=400
-        )
-    expected_lifetime = body.get("lifetime")
-    if not isinstance(expected_lifetime, str) or not expected_lifetime:
-        return JSONResponse(
-            {"error": "lifetime is required to confirm the shared brain"}, status_code=400
-        )
-    expected_generation = body.get("generation")
-    if type(expected_generation) is not int or expected_generation < 0:
-        return JSONResponse(
-            {"error": "generation is required to confirm the shared brain"},
-            status_code=400,
-        )
-    scope_body = body.get("scope")
-    preview = body.get("preview", False)
-    if preview is not True and preview is not False:
-        return JSONResponse(
-            {"error": "preview must be a boolean", "code": "invalid_request"}, status_code=400
-        )
-    if scope_body is not None and (
-        policy != "automatic"
-        or not isinstance(scope_body, dict)
-        or set(scope_body) != {"projects", "producers", "operations"}
-    ):
-        return JSONResponse(
-            {
-                "error": "scope is only for automatic and needs projects, producers and operations",
-                "code": "invalid_scope",
-            },
-            status_code=400,
-        )
-    pcm = getattr(request.app.state, "project_chat_manager", None)
-    known_projects = {
-        str(project.project_id)
-        for project in (pcm.list_projects(workspace_name) if pcm is not None and hasattr(pcm, "list_projects") else [])
-        if getattr(project, "workspace", workspace_name) == workspace_name
-    }
-
-    # Serialized with create, update, rename, archive and restore, which also
-    # replace the registry and the link list. Automatic grants additionally
-    # take the cross-process checkout claim: the registry file CAS inside
-    # `_apply_sharing_policy` then rejects a stale snapshot from another writer.
-    async with _workspace_archive_lock(request):
-        from ciao.workspaces import workspace_registry_lock  # noqa: PLC0415
-
-        with workspace_registry_lock(config):
-            link = _sharing_link(config, workspace_name, brain_name)
-        if link is None:
-            if config.workspace(workspace_name) is None:
-                return JSONResponse({"error": "unknown workspace"}, status_code=404)
-            return JSONResponse({"error": "unknown shared brain"}, status_code=404)
-
-        async def apply(owner: Any) -> JSONResponse:
-            return await _apply_sharing_policy(
-                config,
-                workspace_name=workspace_name,
-                brain_name=brain_name,
-                policy=policy,
-                expected_identity=expected_identity,
-                expected_lifetime=expected_lifetime,
-                expected_generation=expected_generation,
-                owner=owner,
-                scope_body=scope_body,
-                preview=preview,
-                known_projects=known_projects,
-            )
-
-        claimed = False
-        try:
-            async with shared_brain._checkout_lock(link.path):
-                async with shared_brain._checkout_claim(link.path, config):
-                    async with _workspace_registry_claim(config) as owner:
-                        claimed = True
-                        return await apply(owner)
-        except (OSError, WorkspaceRegistryConflict):
-            if claimed:
-                return JSONResponse(
-                    {
-                        "error": "The sharing choice could not be saved. "
-                        "Nothing was changed.",
-                        "code": "policy_write_failed",
-                    },
-                    status_code=503,
-                )
-            return JSONResponse(
-                {
-                    "error": "The sharing choice is unavailable while another "
-                    "registry or shared-brain operation is running. Try again.",
-                    "code": "policy_locked",
-                },
-                status_code=409,
-            )
-
-
-async def _apply_sharing_policy(
-    config: Any,
-    *,
-    workspace_name: str,
-    brain_name: str,
-    policy: str,
-    expected_identity: str,
-    expected_lifetime: str,
-    expected_generation: int,
-    owner: Any,
-    scope_body: dict[str, Any] | None = None,
-    preview: bool = False,
-    known_projects: set[str] | None = None,
-) -> JSONResponse:
-    """Revalidate one policy change against memory and disk, then write it."""
-    from ciao import share_evidence  # noqa: PLC0415
-    from ciao.workspaces import workspace_registry_lock  # noqa: PLC0415
-
-    def scope_for(target: SharedBrainLink) -> Any:
-        if scope_body is None:
-            return None
-        return shared_brain.build_sharing_scope(
-            target,
-            projects=scope_body["projects"],
-            producers=scope_body["producers"],
-            operations=scope_body["operations"],
-            known_projects=known_projects or set(),
-            known_producers=share_evidence.PRODUCERS,
-        )
-
-    def invalid_scope(exc: ValueError) -> JSONResponse:
-        return JSONResponse({"error": str(exc), "code": "invalid_scope"}, status_code=400)
-
-    def changed() -> JSONResponse:
-        return JSONResponse(
-            {
-                "error": "This shared brain changed since the page was loaded. "
-                "Reload it and choose again.",
-                "code": "brain_changed",
-            },
-            status_code=409,
-        )
-
-    def matches(link: SharedBrainLink) -> bool:
-        return (
-            link.identity == expected_identity
-            and link.lifetime_id == expected_lifetime
-            and link.sharing_generation == expected_generation
-        )
-
-    with workspace_registry_lock(config):
-        link = _sharing_link(config, workspace_name, brain_name)
-    if link is None:
-        if config.workspace(workspace_name) is None:
-            return JSONResponse({"error": "unknown workspace"}, status_code=404)
-        return JSONResponse({"error": "unknown shared brain"}, status_code=404)
-    if link.kind != "git":
-        return JSONResponse(
-            {"error": "Ordinary folder links do not have a sharing policy.", "code": "unsupported_brain_kind"},
-            status_code=409,
-        )
-    if not matches(link):
-        return changed()
-    try:
-        scope_for(link)
-    except ValueError as exc:
-        return invalid_scope(exc)
-    if policy == "automatic":
-        if getattr(config, "_sharing_recovery_pending", False):
-            return JSONResponse(
-                {
-                    "error": "Automatic sharing is unavailable until shared-brain "
-                    "consent recovery completes.",
-                    "code": "consent_journal_unavailable",
-                },
-                status_code=409,
-            )
-        # A grant names a person's audience, so the folder has to be usable
-        # and still its own checkout right now. Revocation never needs this:
-        # it must work even when the folder is gone or broken.
-        probe = await run_while_claimed(
-            shared_brain.probe_under_fence, config, link, owner
-        )
-        if probe.get("problem"):
-            if probe["problem"] == "origin_changed":
-                # A retargeted folder permanently loses the old standing
-                # grant; restoring the old origin later needs a fresh choice.
-                try:
-                    await run_while_claimed(
-                        shared_brain.invalidate_sharing_on_drift, config, link, owner
-                    )
-                except OSError:
-                    return JSONResponse(
-                        {
-                            "error": "Automatic sharing is unavailable. The old "
-                            "grant could not be cleared and remains paused; "
-                            "reload the shared brains and turn it off.",
-                            "code": "consent_invalidation_failed",
-                            "problem": probe["problem"],
-                        },
-                        status_code=409,
-                    )
-            return JSONResponse(
-                {
-                    "error": "Automatic sharing needs a usable linked folder. "
-                    "Fix the folder or remove it, then try again.",
-                    "code": "brain_unavailable",
-                    "problem": probe["problem"],
-                },
-                status_code=409,
-            )
-        journal_state = shared_brain.load_sharing_revocations(config)
-        if not journal_state.healthy or journal_state.fail_closed:
-            if shared_brain.has_automatic_grants(config):
-                return JSONResponse(
-                    {
-                        "error": "Automatic sharing is unavailable until the "
-                        "revocation journal is recovered.",
-                        "code": "consent_journal_unavailable",
-                    },
-                    status_code=409,
-                )
-            # A preview refuses like the real call but never initializes the journal.
-            if not preview:
-                try:
-                    await run_while_claimed(
-                        shared_brain.merge_sharing_revocations,
-                        config,
-                        set(),
-                        registry_bytes=owner.current,
-                        force_fail_closed=False,
-                    )
-                except OSError:
-                    return JSONResponse(
-                        {
-                            "error": "The sharing journal could not be initialized. "
-                            "Nothing was changed.",
-                            "code": "consent_journal_unavailable",
-                        },
-                        status_code=503,
-                    )
-    if preview:
-        # After the same refusal checks as the real call, so a preview never
-        # promises a grant the route would refuse. The exact permission, written nowhere.
-        would = shared_brain.set_sharing_policy(link, policy, scope_for(link))
-        return JSONResponse({"preview": {
-            "policy": policy,
-            "scope": (
-                sharing_scope_row(would.sharing_consent.scope)
-                if would.sharing_consent is not None and would.sharing_consent.scope is not None
-                else None
-            ),
-            "changes": would != link,
-            "generation_after": would.sharing_generation,
-        }})
-    with workspace_registry_lock(config):
-        workspace = config.workspace(workspace_name)
-        if workspace is None:
-            return JSONResponse({"error": "unknown workspace"}, status_code=404)
-        links = list(workspace.shared_brains)
-        index = next(
-            (i for i, item in enumerate(links) if item.name == brain_name), None
-        )
-        if index is None:
-            return JSONResponse({"error": "unknown shared brain"}, status_code=404)
-        current = links[index]
-        if not matches(current):
-            return changed()
-        disk_row = _disk_shared_brain_row(config, workspace_name, brain_name)
-        if not _disk_link_matches(current, disk_row):
-            return changed()
-        try:
-            updated = shared_brain.set_sharing_policy(current, policy, scope_for(current))
-        except ValueError as exc:
-            return invalid_scope(exc)
-        if updated != current or not _disk_link_state_matches(current, disk_row):
-            links[index] = updated
-            candidate = dataclasses.replace(workspace, shared_brains=links)
-            candidate_workspaces = dict(config.workspaces)
-            candidate_workspaces[workspace_name] = candidate
-            _persist_workspaces(config, candidate_workspaces, owner=owner)
-            config.workspaces[workspace_name] = candidate
-    state = await run_while_claimed(
-        shared_brain.probe_under_fence, config, updated, owner
-    )
-    if state.get("problem") == "origin_changed":
-        # A race after the commit must not return an automatic response. The
-        # probe already left a fence; commit the demotion before replying.
-        try:
-            await run_while_claimed(
-                shared_brain.invalidate_sharing_on_drift, config, updated, owner
-            )
-        except OSError:
-            return JSONResponse(
-                {
-                    "error": "The sharing change was committed but could not be "
-                    "confirmed; it remains paused and revocable.",
-                    "code": "consent_invalidation_failed",
-                },
-                status_code=409,
-            )
-        current = _sharing_link(config, workspace_name, brain_name)
-        if current is not None:
-            updated = current
-        state = await run_while_claimed(
-            shared_brain.probe_under_fence, config, updated, owner
-        )
-    return JSONResponse({"shared_brain": state})
 
 
 def _registry_conflicts(handler):
@@ -9325,7 +8520,7 @@ def _receipt_issue(
     row: dict[str, Any], receipt_id: str, found: list[dict[str, Any]]
 ) -> str:
     """Why an accepted decision's named receipt cannot vouch for it, or ""."""
-    if row.get("action") != "accepted" or str(row.get("kind", "")) == "share":
+    if row.get("action") != "accepted":
         return ""
     if receipt_id and not found:
         return "missing"
@@ -9463,117 +8658,6 @@ def _attach_change_receipts(vault: Path, rows: list[dict[str, Any]]) -> None:
             continue
         claimed.add(str(found.get("id", "")))
         row["change"] = _change_payload(found)
-
-
-def _attach_share_history(
-    rows: list[dict[str, Any]], details_by_receipt: dict[str, dict[str, Any]],
-) -> tuple[set[str], set[tuple[str, str]]]:
-    """Join share decisions using one validated, workspace-aware receipt index."""
-    by_summary: dict[str, list[tuple[str, dict[str, Any]]]] = {}
-    for receipt_id, detail in details_by_receipt.items():
-        fields = detail.get("immutable")
-        if not isinstance(fields, dict):
-            continue
-        summary = f"Shared note change proposal {fields.get('sidecar_id', '')}"
-        by_summary.setdefault(summary, []).append((receipt_id, detail))
-    matched_ids: set[str] = set()
-    matched_identities: set[tuple[str, str]] = set()
-    claimed: set[str] = set()
-    for row in rows:
-        receipt_id = str(row.pop("_share_receipt_id", "") or "")
-        if row.get("kind") != "share" or row.get("action") != "accepted":
-            continue
-        selected_detail: dict[str, Any] | None = (
-            details_by_receipt.get(receipt_id) if receipt_id else None
-        )
-        if selected_detail is not None and not _share_history_row_matches(row, selected_detail):
-            selected_detail = None
-        if selected_detail is None:
-            proposal_id = str(row.get("proposal_id") or "")
-            candidates = [
-                (rid, item)
-                for rid, item in by_summary.get(str(row.get("text") or ""), [])
-                if (not proposal_id or proposal_id == str(item["immutable"].get("proposal_id") or ""))
-                and rid not in claimed
-                and _share_history_row_matches(row, item)
-            ]
-            if len(candidates) == 1:
-                selected_detail = candidates[0][1]
-        if selected_detail is None:
-            continue
-        receipt = selected_detail["receipt"]
-        fields = selected_detail["immutable"]
-        canonical_id = str(receipt["id"])
-        if canonical_id in claimed:
-            continue
-        claimed.add(canonical_id)
-        matched_ids.add(canonical_id)
-        matched_identities.add((str(fields["proposal_id"]), str(row.get("text") or "")))
-        row["workspace"] = str(fields["workspace"])
-        _apply_share_history_detail(row, selected_detail)
-    return matched_ids, matched_identities
-
-
-def _is_archived_share_decision(
-    row: dict[str, Any], archived_details: dict[str, dict[str, Any]],
-    archived_by_summary: dict[str, list[dict[str, Any]]],
-) -> bool:
-    """Hide a shared-vault decision when its canonical receipt owner retired."""
-    if row.get("kind") != "share" or row.get("action") != "accepted":
-        return False
-    receipt_id = str(row.get("_share_receipt_id") or "")
-    detail = archived_details.get(receipt_id) if receipt_id else None
-    if detail is not None and _share_history_row_matches(row, detail):
-        return True
-    return any(
-        _share_history_row_matches(row, detail)
-        for detail in archived_by_summary.get(str(row.get("text") or ""), [])
-    )
-
-
-def _share_history_row_matches(row: dict[str, Any], detail: dict[str, Any]) -> bool:
-    fields = detail.get("immutable")
-    receipt = detail.get("receipt")
-    if not isinstance(fields, dict) or not isinstance(receipt, dict):
-        return False
-    summary = f"Shared note change proposal {fields.get('sidecar_id', '')}"
-    proposal_id = str(row.get("proposal_id") or "")
-    return bool(
-        summary != "Shared note change proposal "
-        and row.get("text") == summary
-        and receipt.get("proposal_id") == fields.get("proposal_id")
-        and (not proposal_id or proposal_id == fields.get("proposal_id"))
-        and receipt.get("workspace") == fields.get("workspace")
-    )
-
-
-def _apply_share_history_detail(row: dict[str, Any], detail: dict[str, Any]) -> None:
-    receipt = detail["receipt"]
-    fields = detail["immutable"]
-    receipt_id = str(receipt["id"])
-    destination = f"{fields.get('brain', '')}:{fields.get('path', '')}"
-    undoable = (
-        receipt.get("undoable", True) is not False
-        and fields.get("link_kind", "git") != "folder"
-        and bool(receipt.get("commit_oid"))
-    )
-    row.update({
-        "share_status": "published", "applied": True,
-        "apply_status": "applied", "commit_oid": receipt.get("commit_oid", ""),
-        "branch": receipt.get("branch", ""), "path": fields.get("path", ""),
-        "operation": fields.get("operation", ""),
-        "change": {
-            "receipt_id": receipt_id, "kind": "share_publish",
-            "status": "applied", "destination": destination,
-            "undoable": undoable,
-            "changed": True, "ts": receipt.get("ts", ""),
-            "source_turns": [], "branch": receipt.get("branch", ""),
-            "commit_oid": receipt.get("commit_oid", ""),
-            "scope": receipt.get("scope"),
-            "local_only": receipt.get("local_only"),
-            "sync_claimed": receipt.get("sync_claimed"),
-        },
-    })
 
 
 def _attach_note_edit_detail(
@@ -9799,43 +8883,7 @@ async def proposals_history(request: Request) -> JSONResponse:
     limit = min(requested, _HISTORY_MAX_LIMIT)
 
     registered_workspaces = set(config.workspace_names())
-    share_details_by_receipt: dict[str, dict[str, Any]] = {}
-    archived_share_details_by_receipt: dict[str, dict[str, Any]] = {}
-    archived_share_details_by_summary: dict[str, list[dict[str, Any]]] = {}
-    if action_filter != "dismissed":
-        from ciao import share_publish
-
-        try:
-            details = await asyncio.to_thread(
-                share_publish.list_share_receipt_details, config
-            )
-        except (OSError, ValueError):
-            details = []
-        valid_details = {
-            str(detail["receipt"]["id"]): detail
-            for detail in details
-            if isinstance(detail, dict)
-            and isinstance(detail.get("receipt"), dict)
-            and isinstance(detail["receipt"].get("id"), str)
-        }
-        share_details_by_receipt = {
-            receipt_id: detail
-            for receipt_id, detail in valid_details.items()
-            if detail["immutable"].get("workspace") in registered_workspaces
-        }
-        archived_share_details_by_receipt = {
-            receipt_id: detail
-            for receipt_id, detail in valid_details.items()
-            if detail["immutable"].get("workspace") not in registered_workspaces
-        }
-        for detail in archived_share_details_by_receipt.values():
-            fields = detail["immutable"]
-            summary = f"Shared note change proposal {fields.get('sidecar_id', '')}"
-            archived_share_details_by_summary.setdefault(summary, []).append(detail)
-
     rows: list[dict[str, Any]] = []
-    matched_share_receipt_ids: set[str] = set()
-    matched_share_identities: set[tuple[str, str]] = set()
     # Two registered names can resolve to one vault root (a ``vault_root: "."``
     # entry, or the legacy entity layout), and then they share a sidecar. Read
     # each sidecar once, under the first name that claims it, or every decision
@@ -9890,24 +8938,9 @@ async def proposals_history(request: Request) -> JSONResponse:
         await asyncio.to_thread(
             _attach_apply_state, vault_for_receipts, workspace_rows
         )
-        for row in workspace_rows:
-            if str(row.get("kind", "")) == "share":
-                row["_share_receipt_id"] = row.get("receipt_id", "")
         await asyncio.to_thread(
             _attach_change_receipts, vault_for_receipts, workspace_rows
         )
-        workspace_rows = [
-            row for row in workspace_rows
-            if not _is_archived_share_decision(
-                row, archived_share_details_by_receipt,
-                archived_share_details_by_summary,
-            )
-        ]
-        matched_ids, matched_identities = _attach_share_history(
-            workspace_rows, share_details_by_receipt
-        )
-        matched_share_receipt_ids.update(matched_ids)
-        matched_share_identities.update(matched_identities)
         if workspace_filter:
             # A shared queue may contain a decision for a different registered
             # alias. Receipt attribution is authoritative, so apply the filter
@@ -9918,62 +8951,6 @@ async def proposals_history(request: Request) -> JSONResponse:
             ]
         _attach_note_edit_detail(config, workspace, workspace_rows)
         rows.extend(workspace_rows)
-
-    # A process can stop after the remote publication is confirmed but before
-    # the local decision log is written. Canonical publication receipts are
-    # already durable and validated independently of the queue, so project any
-    # missing published share into History without writing during this GET.
-    if action_filter in {"", "accepted"}:
-        known_receipt_ids = set(matched_share_receipt_ids)
-        accepted_share_identities = set(matched_share_identities)
-        for detail in share_details_by_receipt.values():
-            receipt = detail["receipt"]
-            fields = detail["immutable"]
-            workspace = str(fields.get("workspace") or "")
-            if workspace not in registered_workspaces:
-                continue
-            if workspace_filter and workspace != workspace_filter:
-                continue
-            receipt_id = str(receipt.get("id") or "")
-            proposal_id = str(fields.get("proposal_id") or "")
-            sidecar_id = str(fields.get("sidecar_id") or "")
-            summary = f"Shared note change proposal {sidecar_id}"
-            if (
-                not receipt_id or receipt_id in known_receipt_ids
-                or (proposal_id, summary) in accepted_share_identities
-                or ("", summary) in accepted_share_identities
-            ):
-                continue
-            ts = str(receipt.get("ts") or "")
-            destination = f"{fields.get('brain', '')}:{fields.get('path', '')}"
-            row = {
-                "id": "sharepub_" + hashlib.sha256(
-                    (workspace + "\0" + receipt_id).encode("utf-8")
-                ).hexdigest()[:16],
-                "ts": ts, "decided_at": ts, "action": "accepted",
-                "kind": "share", "text": summary, "source": "", "via": "pwa",
-                "actor": "human", "workspace": workspace,
-                "outcome": "published", "proposal_id": proposal_id,
-                "receipt_id": receipt_id, "destination": destination,
-                "reason": "", "share_status": "published", "applied": True,
-                "apply_status": "applied", "commit_oid": receipt.get("commit_oid", ""),
-                "branch": receipt.get("branch", ""), "path": fields.get("path", ""),
-                "operation": fields.get("operation", ""),
-                "change": {
-                    "receipt_id": receipt_id, "kind": "share_publish",
-                    "status": "applied", "destination": destination,
-                    "undoable": share_publish.is_share_receipt_undoable(receipt),
-                    "changed": True, "ts": ts,
-                    "source_turns": [], "branch": receipt.get("branch", ""),
-                    "commit_oid": receipt.get("commit_oid", ""),
-                    "scope": receipt.get("scope"),
-                    "local_only": receipt.get("local_only"),
-                    "sync_claimed": receipt.get("sync_claimed"),
-                },
-            }
-            rows.append(row)
-            known_receipt_ids.add(receipt_id)
-            accepted_share_identities.add((proposal_id, summary))
 
     # Newest first; undated legacy rows (empty ts) sort last within that order.
     rows.sort(key=lambda r: r["ts"], reverse=True)
@@ -10205,8 +9182,6 @@ async def proposal_preview(request: Request) -> JSONResponse:
     if ctx is None:
         return JSONResponse({"error": f"unknown proposal id: {pid}"}, status_code=404)
     text = request.query_params.get("text", "")
-    if str(ctx["row"].get("kind") or "") == "share" and text:
-        return JSONResponse({"error": "shared-note reviews cannot be edited"}, status_code=400)
     # Off the event loop: the preview reads a guide (taking no lock) and a
     # learnings file, and a slow filesystem must not stall every other request.
     linked = _linked_repos_for(request, ctx["row"])
@@ -10216,364 +9191,6 @@ async def proposal_preview(request: Request) -> JSONResponse:
         )
     )
     return JSONResponse({"ok": True, "preview": preview})
-
-
-def _share_context_is_current(config: Any, ctx: dict[str, Any]) -> bool:
-    """Whether the reviewed share still names a registered workspace queue row."""
-    workspace = str(ctx.get("workspace") or "")
-    try:
-        if workspace not in config.workspace_names():
-            return False
-        current_queue = proposal_service._proposals_file(config, workspace).resolve()
-        captured_queue = Path(str(ctx.get("path") or "")).resolve()
-    except (AttributeError, OSError, ValueError):
-        return False
-    if current_queue != captured_queue:
-        return False
-    return bool(proposal_service.bullets_present(
-        captured_queue,
-        [(int(ctx.get("line", -1)), str(ctx.get("row", {}).get("raw") or ""))],
-    ))
-
-
-async def _settle_share_accept(config: Any, ctx: dict[str, Any], receipt: dict[str, Any]) -> bool:
-    """Remove a confirmed share row and record its decision as one worker transaction."""
-    queue = Path(ctx["path"])
-    try:
-        vault = Path(config.workspace_vault_root(ctx["workspace"]))
-    except (AttributeError, ValueError):
-        vault = queue.parent.parent
-    return await run_while_claimed(
-        functools.partial(_settle_share_accept_sync, ctx, receipt, queue, vault)
-    )
-
-
-def _settle_share_accept_sync(
-    ctx: dict[str, Any], receipt: dict[str, Any],
-    queue: Path, vault: Path,
-) -> bool:
-    """Finish both local settlement writes before releasing lifecycle claims."""
-    from ciao.memory_receipts import queue_lock
-
-    row = ctx["row"]
-    receipt_id = str(receipt.get("id") or "")
-    with queue_lock(queue):
-        # The remote write is already confirmed, so its accepted History row
-        # is true even if local queue cleanup is interrupted. Write it first;
-        # the publication receipt ID makes repeats idempotent at the decision
-        # layer and distinguishes this externally reversible operation.
-        proposal_actions.record_decision(
-            queue, action="accept", text=str(row.get("text") or ""),
-            kind="share", via="pwa", source=str(row.get("source") or ""),
-            destination=f"{receipt.get('brain', '')}:{receipt.get('path', '')}",
-            outcome="published", proposal_id=str(row.get("id") or ""),
-            receipt_id=receipt_id, once=True,
-        )
-        return proposal_service._rewrite_queue_single(
-            queue, ctx["line"], str(row.get("raw") or ""),
-            str(row.get("text") or ""), "share", True,
-            ctx["workspace"], vault, undoable=False, operation_id=receipt_id,
-        )
-
-
-async def _proposal_share_accept(
-    request: Request, ctx: dict[str, Any], body: dict[str, Any],
-) -> JSONResponse:
-    """Human consent boundary for publishing one immutable share artifact."""
-    from ciao import share_publish
-
-    pid = str(ctx["row"].get("id") or "")
-    workspace = str(ctx.get("workspace") or "")
-    raw_workspace = body.get("workspace")
-    raw_revision = body.get("expected_revision")
-    if raw_workspace != workspace:
-        return JSONResponse({"error": "workspace does not own this share proposal", "id": pid}, status_code=409)
-    if not isinstance(raw_revision, str) or not raw_revision:
-        return JSONResponse({"error": "expected_revision is required", "id": pid}, status_code=409)
-    if body.get("text") not in (None, "") or request.query_params.get("text") or body.get("reconcile") or request.query_params.get("reconcile"):
-        return JSONResponse({"error": "shared-note accepts do not support edits or reconcile options", "id": pid}, status_code=400)
-    preview = await asyncio.to_thread(
-        proposal_service.preview_row, request.app.state.config, ctx
-    )
-    if preview.get("revision") != raw_revision:
-        return JSONResponse(
-            {"error": "the shared-note review changed; confirm the refreshed preview", "id": pid,
-             "share_status": "stale_review", "preview": preview},
-            status_code=409,
-        )
-    if preview.get("blocked_reason") and not share_publish.has_publication_attempt(
-        request.app.state.config, workspace=workspace, proposal_id=pid,
-        expected_revision=raw_revision,
-    ):
-        async with _workspace_archive_lock(request):
-            if not await asyncio.to_thread(
-                _share_context_is_current, request.app.state.config, ctx
-            ):
-                return JSONResponse({
-                    "error": "the share workspace or queue changed; reload the review",
-                    "id": pid, "share_status": "stale_review",
-                }, status_code=409)
-            return await _refresh_legacy_share_review(
-                request, pid=pid, workspace=workspace,
-                expected_revision=raw_revision, preview=preview,
-            )
-    # Workspace archive and rename take this same lock before moving its vault.
-    # Keep the workspace identity and queue path stable through publication and
-    # local settlement; publication itself then takes checkout and proposal
-    # claims in its established order.
-    async with _workspace_archive_lock(request):
-        if not await asyncio.to_thread(
-            _share_context_is_current, request.app.state.config, ctx
-        ):
-            return JSONResponse({
-                "error": "the share workspace or queue changed; reload the review",
-                "id": pid, "share_status": "stale_review",
-            }, status_code=409)
-        return await _publish_and_settle_share_accept(
-            request, ctx, pid=pid, workspace=workspace,
-            expected_revision=raw_revision, preview=preview,
-        )
-
-
-async def _proposal_share_reconcile(
-    request: Request, ctx: dict[str, Any], body: dict[str, Any],
-) -> JSONResponse:
-    """Reconcile one recorded attempt without entering the publisher path."""
-    from ciao import share_publish
-
-    config = request.app.state.config
-    pid = str(ctx["row"].get("id") or "")
-    workspace = str(ctx.get("workspace") or "")
-    expected_workspace = body.get("workspace")
-    expected_revision = body.get("expected_revision")
-    if expected_workspace != workspace:
-        return JSONResponse(
-            {"error": "workspace does not own this share proposal", "id": pid},
-            status_code=409,
-        )
-    if not isinstance(expected_revision, str) or not expected_revision:
-        return JSONResponse(
-            {"error": "expected_revision is required", "id": pid}, status_code=409
-        )
-    if body.get("text") not in (None, ""):
-        return JSONResponse(
-            {"error": "shared-note reconciliation does not accept text", "id": pid},
-            status_code=400,
-        )
-
-    async with _workspace_archive_lock(request):
-        if not await asyncio.to_thread(_share_context_is_current, config, ctx):
-            return JSONResponse({
-                "error": "the share workspace or queue changed; reload the review",
-                "id": pid, "share_status": "stale_review",
-            }, status_code=409)
-        preview = await asyncio.to_thread(proposal_service.preview_row, config, ctx)
-        if preview.get("revision") != expected_revision:
-            return JSONResponse({
-                "error": "the shared-note review changed; refresh before reconciling",
-                "id": pid, "share_status": "stale_review", "preview": preview,
-            }, status_code=409)
-        if not preview.get("reconcile_available"):
-            return JSONResponse({
-                "error": "there is no recorded publication attempt to reconcile",
-                "id": pid, "share_status": "no_recorded_attempt",
-            }, status_code=409)
-
-        # This dedicated call is the consent boundary: reconcile_share only
-        # verifies persisted commit attempts and has no fresh-push path.
-        outcome = await share_publish.reconcile_share(
-            config, workspace=workspace, proposal_id=pid,
-            expected_revision=expected_revision,
-        )
-        if outcome.outcome not in {"published", "already_published"}:
-            return JSONResponse({
-                "error": outcome.message or "the recorded publication is unresolved",
-                "id": pid, "share_status": outcome.outcome,
-            }, status_code=503 if outcome.outcome == "indeterminate" else 409)
-        receipt = await asyncio.to_thread(
-            share_publish.get_share_receipt,
-            config, workspace=workspace, proposal_id=pid,
-            expected_revision=expected_revision,
-        )
-        if receipt is None:
-            return JSONResponse({
-                "error": "the publication receipt needs recovery",
-                "id": pid, "share_status": "indeterminate",
-            }, status_code=503)
-        try:
-            removed = await _settle_share_accept(config, ctx, receipt)
-        except QueueReceiptUnavailable:
-            return JSONResponse({
-                "error": "the publication is confirmed; queue settlement needs retry",
-                "id": pid, "share_status": "published", "receipt": receipt,
-            }, status_code=503)
-        return JSONResponse({
-            "ok": True,
-            "result": {
-                "id": pid, "action": "reconcile", "dismissed": False,
-                "promoted": True,
-                "destination": f"{preview.get('brain', '')}:{preview.get('path', '')}",
-            },
-            "share_status": "published", "receipt": receipt,
-            "settled": removed,
-        })
-
-
-async def proposal_redraft_action(request: Request) -> JSONResponse:
-    """Replace one reviewed candidate, including an interrupted queue swap."""
-    from ciao import share_proposals
-
-    try:
-        body = await request.json()
-    except ValueError:
-        body = None
-    if not isinstance(body, dict) or set(body) != {"workspace", "expected_revision"}:
-        return JSONResponse({"error": "Provide workspace and expected_revision."}, status_code=400)
-    workspace, revision = body["workspace"], body["expected_revision"]
-    if not isinstance(workspace, str) or not isinstance(revision, str) or not revision:
-        return JSONResponse({"error": "Invalid workspace or review revision."}, status_code=400)
-    if request.query_params.get("workspace", workspace) != workspace:
-        return JSONResponse({"error": "Workspace selection changed."}, status_code=409)
-    config = request.app.state.config
-    async with _workspace_archive_lock(request):
-        if workspace not in config.workspace_names():
-            return JSONResponse({"error": "Unknown workspace."}, status_code=404)
-        result = await run_while_claimed(functools.partial(
-            share_proposals.redraft_evidence_candidate, config, workspace=workspace,
-            proposal_id=request.path_params["id"], expected_revision=revision,
-        ))
-    if isinstance(result, share_proposals.ShareRefusal):
-        return JSONResponse({"error": result.message, "share_status": result.code}, status_code=409)
-    return JSONResponse({"replacement": {"id": result.proposal_id, "revision": result.artifact["review_token"]}})
-
-
-async def proposal_reconcile_action(request: Request) -> JSONResponse:
-    """Explicit `/reconcile` route, resolved independently of the `{action}` route."""
-    config = request.app.state.config
-    pid = request.path_params["id"]
-    try:
-        raw_body = await request.json()
-    except Exception:  # noqa: BLE001 — an absent body becomes a typed refusal below
-        raw_body = {}
-    body = raw_body if isinstance(raw_body, dict) else {}
-    _rows, by_id = proposal_service._scan_proposal_rows(config)
-    ctx = by_id.get(pid)
-    if ctx is None:
-        return JSONResponse({"error": f"unknown proposal id: {pid}"}, status_code=404)
-    if ctx["row"].get("kind") != "share":
-        return JSONResponse({
-            "error": "reconcile is only available for shared-note proposals",
-            "id": pid,
-        }, status_code=400)
-    return await _proposal_share_reconcile(request, ctx, body)
-
-
-async def _refresh_legacy_share_review(
-    request: Request, *, pid: str, workspace: str,
-    expected_revision: str, preview: dict[str, Any],
-) -> JSONResponse:
-    """Refresh a legacy review while holding the workspace lifecycle claim."""
-    from ciao import share_proposals, share_publish
-
-    config = request.app.state.config
-    replacement = await run_while_claimed(functools.partial(
-        share_publish.refresh_legacy_draft,
-        config, workspace=workspace, proposal_id=pid,
-        expected_revision=expected_revision,
-    ))
-    if isinstance(replacement, share_proposals.ShareDraft):
-        _replacement_rows, replacement_by_id = proposal_service._scan_proposal_rows(config)
-        replacement_ctx = replacement_by_id.get(replacement.proposal_id)
-        replacement_preview = (
-            await asyncio.to_thread(
-                proposal_service.preview_row, config, replacement_ctx
-            ) if replacement_ctx is not None else None
-        )
-        return JSONResponse(
-            {"error": "the legacy review was replaced; review and accept the new proposal",
-             "id": pid, "share_status": "stale_review",
-             "replacement": {"id": replacement.proposal_id,
-                             "revision": replacement.artifact["review_token"],
-                             "preview": replacement_preview}},
-            status_code=409,
-        )
-    if isinstance(replacement, share_proposals.ShareRefusal):
-        if replacement.code == "legacy_replaced":
-            return JSONResponse(
-                {"error": replacement.message, "id": pid,
-                 "share_status": "stale_review"},
-                status_code=409,
-            )
-        if replacement.code == "draft_unavailable":
-            return JSONResponse(
-                {"error": "the replacement review could not be completed; retry to recover it",
-                 "id": pid, "share_status": replacement.code},
-                status_code=503,
-            )
-        if replacement.code == "capacity":
-            return JSONResponse(
-                {"error": replacement.message, "id": pid,
-                 "share_status": replacement.code},
-                status_code=409,
-            )
-        if replacement.code == "publication_pending":
-            return JSONResponse(
-                {"error": replacement.message, "id": pid,
-                 "share_status": replacement.code},
-                status_code=409,
-            )
-    return JSONResponse(
-        {"error": "the shared-note destination is unavailable", "id": pid,
-         "share_status": preview["blocked_reason"], "preview": preview},
-        status_code=409,
-    )
-
-
-async def _publish_and_settle_share_accept(
-    request: Request,
-    ctx: dict[str, Any],
-    *,
-    pid: str,
-    workspace: str,
-    expected_revision: str,
-    preview: dict[str, Any],
-) -> JSONResponse:
-    """Publish and settle while the caller owns the workspace lifecycle lock."""
-    from ciao import share_publish
-
-    outcome = await share_publish.publish_share(
-        request.app.state.config, workspace=workspace,
-        proposal_id=pid, expected_revision=expected_revision,
-    )
-    if outcome.outcome not in {"published", "already_published"}:
-        payload: dict[str, Any] = {
-            "error": "the shared note was not confirmed as published",
-            "id": pid, "share_status": outcome.outcome,
-        }
-        if outcome.outcome == "stale_review":
-            payload["preview"] = await asyncio.to_thread(
-                proposal_service.preview_row, request.app.state.config, ctx
-            )
-        return JSONResponse(payload, status_code=503 if outcome.outcome == "indeterminate" else 409)
-    receipt = await asyncio.to_thread(
-        share_publish.get_share_receipt,
-        request.app.state.config, workspace=workspace, proposal_id=pid,
-        expected_revision=expected_revision,
-    )
-    if receipt is None:
-        return JSONResponse({"error": "the publication receipt needs recovery", "id": pid,
-                             "share_status": "indeterminate"}, status_code=503)
-    try:
-        removed = await _settle_share_accept(request.app.state.config, ctx, receipt)
-    except QueueReceiptUnavailable:
-        return JSONResponse({"error": "the publication is confirmed; queue settlement needs retry",
-                             "id": pid, "share_status": "published", "receipt": receipt}, status_code=503)
-    return JSONResponse({
-        "ok": True, "result": {"id": pid, "action": "accept", "dismissed": False,
-                               "promoted": True, "destination": f"{preview['brain']}:{preview['path']}"},
-        "share_status": "published", "receipt": receipt,
-        "settled": removed,
-    })
 
 
 async def memory_receipts(request: Request) -> JSONResponse:
@@ -10612,28 +9229,6 @@ async def memory_receipts(request: Request) -> JSONResponse:
         for row in list_receipts(vault, limit=max(1, requested)):
             row["workspace"] = workspace
             rows.append(row)
-        from ciao import share_publish
-
-        for receipt in await asyncio.to_thread(
-            share_publish.list_share_receipts, config, workspace=workspace
-        ):
-            rows.append({
-                "id": receipt["id"], "workspace": workspace,
-                "kind": "share_publish", "status": "applied",
-                "ts": str(receipt.get("ts", "")), "actor": "operator",
-                "source": "pwa", "destination": f"{receipt.get('brain', '')}:{receipt.get('path', '')}",
-                "fact_text": "Shared note publication", "changed": True,
-                "undoable": share_publish.is_share_receipt_undoable(receipt),
-                "share_status": "published",
-                "operation": receipt.get("operation", ""),
-                "branch": receipt.get("branch", ""), "path": receipt.get("path", ""),
-                "commit_oid": receipt.get("commit_oid", ""),
-                "published_blob_oid": receipt.get("published_blob_oid"),
-                "scope": receipt.get("scope"),
-                "local_only": receipt.get("local_only"),
-                "sync_claimed": receipt.get("sync_claimed"),
-                "proposal_id": receipt.get("proposal_id", ""),
-            })
     rows.sort(key=lambda row: str(row.get("ts", "")), reverse=True)
     return JSONResponse({"rows": rows[: max(1, requested)], "total": len(rows)})
 
@@ -10718,21 +9313,6 @@ def _find_receipt_in_workspaces(
     return None, ""
 
 
-def _find_share_receipt_in_workspaces(
-    config: Any, receipt_id: str, workspace: str = "",
-) -> tuple[dict[str, Any], dict[str, Any], str] | None:
-    from ciao import share_publish
-
-    names = [workspace] if workspace else list(config.workspace_names())
-    for name in names:
-        detail = share_publish.get_share_receipt_detail(
-            config, workspace=name, receipt_id=receipt_id
-        )
-        if detail is not None:
-            return detail["receipt"], detail["immutable"], name
-    return None
-
-
 async def memory_receipt_detail(request: Request) -> JSONResponse:
     """One receipt with its before/after images and a line diff.
 
@@ -10742,7 +9322,6 @@ async def memory_receipt_detail(request: Request) -> JSONResponse:
     — comes back with ``has_snapshot: false``, which the UI renders as "No
     change snapshot available" rather than as an empty diff.
     """
-    from ciao import share_publish
     from ciao.memory_receipts import is_undoable
 
     config = request.app.state.config
@@ -10751,38 +9330,6 @@ async def memory_receipt_detail(request: Request) -> JSONResponse:
     receipt, found_in = await asyncio.to_thread(
         _find_receipt_in_workspaces, config, rid, workspace
     )
-    if receipt is None:
-        share_detail = await asyncio.to_thread(
-            _find_share_receipt_in_workspaces, config, rid, workspace
-        )
-        if share_detail is not None:
-            share_receipt, fields, found_in = share_detail
-            before, after = fields.get("original"), fields.get("proposed")
-            share_payload: dict[str, Any] = {
-                "id": rid, "workspace": found_in, "kind": "share_publish",
-                "status": "applied", "share_status": "published",
-                "ts": str(share_receipt.get("ts", "")), "actor": "operator",
-                "source": "pwa", "destination": f"{fields.get('brain', '')}:{fields.get('path', '')}",
-                "operation": fields.get("operation", ""), "branch": share_receipt.get("branch", ""),
-                "path": fields.get("path", ""), "identity": fields.get("origin_identity", ""),
-                "commit_oid": share_receipt.get("commit_oid", ""),
-                "published_blob_oid": share_receipt.get("published_blob_oid"),
-                "undoable": share_publish.is_share_receipt_undoable(share_receipt),
-                "has_snapshot": True, "changed": True,
-                "scope": share_receipt.get("scope"),
-                "local_only": share_receipt.get("local_only"),
-                "sync_claimed": share_receipt.get("sync_claimed"),
-                "before": before, "after": after, "truncated": False,
-            }
-            if not share_payload["undoable"]:
-                share_payload["reason"] = (
-                    "A note published into an ordinary folder is edited there; "
-                    "Ciaobot does not delete or replace it from History."
-                )
-            diff, diff_truncated = _receipt_diff(before or "", after or "", "\n")
-            share_payload["diff"] = diff
-            share_payload["diff_truncated"] = diff_truncated
-            return JSONResponse(share_payload)
     if receipt is None:
         return JSONResponse({"error": f"unknown receipt: {rid}"}, status_code=404)
     before = receipt.get("before_text")
@@ -10855,25 +9402,6 @@ async def memory_receipt_undo(request: Request) -> JSONResponse:
     config = request.app.state.config
     rid = request.path_params["id"]
     workspace = request.query_params.get("workspace", "").strip()
-    share_detail = await asyncio.to_thread(
-        _find_share_receipt_in_workspaces, config, rid, workspace
-    )
-    if share_detail is not None:
-        from ciao import share_publish
-
-        _receipt, _fields, found_in = share_detail
-        reversal = await share_publish.draft_share_reversal(
-            config, workspace=found_in, receipt_id=rid
-        )
-        if isinstance(reversal, share_publish.drafts.ShareRefusal):
-            if reversal.code in {"draft_unavailable", "upstream_unavailable"}:
-                status = 503
-            elif reversal.code == "undo_unsupported":
-                status = 400
-            else:
-                status = 409
-            return JSONResponse({"error": reversal.message, "id": rid, "conflict": reversal.code == "changed_upstream"}, status_code=status)
-        return JSONResponse({"ok": True, **reversal})
     try:
         vault = Path(config.workspace_vault_root(workspace)) if workspace else None
     except (AttributeError, ValueError):
@@ -11004,11 +9532,6 @@ async def proposals_batch(request: Request) -> JSONResponse:
     resolved, error = proposal_service._resolve_batch(config, ids)
     if error or resolved is None:
         return JSONResponse({"error": error}, status_code=404)
-    if action == "accept" and any(ctx["row"].get("kind") == "share" for ctx in resolved):
-        return JSONResponse(
-            {"error": "publishing a shared note requires its attended consent flow"},
-            status_code=409,
-        )
 
     # An accept mutates every destination first - region writes, project-doc
     # folds, people notes, learnings counts - and only then rewrites the queue,
@@ -11314,7 +9837,7 @@ async def proposals_batch(request: Request) -> JSONResponse:
                 for row in entry["rows"]
             ]
             try:
-                removed_here, blocked_here = await asyncio.to_thread(
+                removed_here = await asyncio.to_thread(
                     proposal_service._rewrite_queue_batch,
                     queue,
                     entry["rows"],
@@ -11322,7 +9845,6 @@ async def proposals_batch(request: Request) -> JSONResponse:
                     removals,
                     entry["workspace"],
                     vault_for_receipt,
-                    config=config,
                 )
             except QueueReceiptUnavailable as exc:
                 return JSONResponse(
@@ -11333,11 +9855,6 @@ async def proposals_batch(request: Request) -> JSONResponse:
                     },
                     status_code=503,
                 )
-            for blocked_id, blocked_reason in blocked_here.items():
-                results.append(proposal_actions.ProposalActionResult(
-                    id=blocked_id, action="dismiss", dismissed=False,
-                    conflict=True, error=blocked_reason,
-                ).as_dict())
             self_request_removed.update(removed_here)
             # Record THIS queue's outcomes immediately after its rewrite lands: a
             # later file failing to persist must not take already-persisted
@@ -11418,15 +9935,10 @@ async def proposals_batch(request: Request) -> JSONResponse:
                         include_usage=False,
                     ).as_dict())
                 else:
-                    if row["id"] in blocked_here:
-                        continue
                     results.append(proposal_actions.ProposalActionResult(
                         id=row["id"], action="dismiss",
-                        # Dismiss remains idempotent for ordinary rows: a
-                        # concurrent resolver may already have removed one.
-                        # Guarded shares are the exception and enter
-                        # ``blocked_here`` when their canonical publication
-                        # state refuses removal.
+                        # Dismiss is idempotent: a concurrent resolver may
+                        # already have removed the row.
                         dismissed=True,
                     ).as_dict())
         return JSONResponse(
@@ -11574,29 +10086,10 @@ async def proposal_action(request: Request) -> JSONResponse:
     _rows, by_id = proposal_service._scan_proposal_rows(config)
     ctx = by_id.get(pid)
     if ctx is None:
-        if request.path_params.get("action", "").strip() == "accept":
-            from ciao import share_publish
-
-            workspace = body.get("workspace")
-            revision = body.get("expected_revision")
-            if (isinstance(workspace, str) and workspace in config.workspace_names()
-                    and isinstance(revision, str) and revision):
-                receipt = await asyncio.to_thread(
-                    share_publish.get_share_receipt,
-                    config, workspace=workspace, proposal_id=pid,
-                    expected_revision=revision,
-                )
-                if receipt is not None:
-                    return JSONResponse({
-                        "ok": True,
-                        "result": {"id": pid, "action": "accept", "dismissed": False,
-                                   "promoted": True, "destination": f"{receipt.get('brain', '')}:{receipt.get('path', '')}"},
-                        "share_status": "already_published", "receipt": receipt,
-                    })
         return JSONResponse({"error": f"unknown proposal id: {pid}"}, status_code=404)
     action = request.path_params.get("action", "").strip()
     # A body is optional here and always has been; a client that sends none
-    # gets the pre-preview behaviour unless this is a share accept.
+    # gets the pre-preview behaviour.
     expected_revision = str(body.get("expected_revision", "") or "").strip()
     edited_text = str(body.get("text", "") or "").strip()
     # Validate BEFORE any file mutation, the same shape the batch endpoint uses.
@@ -11604,9 +10097,9 @@ async def proposal_action(request: Request) -> JSONResponse:
     # below but still fell through to the bullet removal and returned the
     # dismiss-shaped success payload: a typo in the path, or a stale client,
     # silently discarded a queued fact nobody had asked to dismiss.
-    if action not in {"accept", "dismiss", "reconcile"}:
+    if action not in {"accept", "dismiss"}:
         return JSONResponse(
-            {"error": "action must be accept|dismiss|reconcile", "id": pid}, status_code=400
+            {"error": "action must be accept|dismiss", "id": pid}, status_code=400
         )
     # Raw value, no str() coercion: a list or number must be refused, and the
     # refusal has to precede every write below.
@@ -11615,16 +10108,6 @@ async def proposal_action(request: Request) -> JSONResponse:
     except ValueError as exc:
         return JSONResponse({"error": str(exc), "id": pid}, status_code=400)
     row = ctx["row"]
-    if action == "reconcile":
-        if row.get("kind") != "share":
-            return JSONResponse(
-                {"error": "reconcile is only available for shared-note proposals", "id": pid},
-                status_code=400,
-            )
-        return await _proposal_share_reconcile(request, ctx, body)
-    if action == "accept" and row.get("kind") == "share":
-        return await _proposal_share_accept(request, ctx, body)
-
     if action == "dismiss" and row.get("kind") == "category":
         # Recorded BEFORE the bullet is removed, because the row IS the proposal:
         # once it is gone the vault still has the cluster, and the sidecar flag is
@@ -11955,11 +10438,7 @@ async def proposal_action(request: Request) -> JSONResponse:
                 action == "accept",
                 ctx["workspace"],
                 vault_for_receipt,
-                config=config,
-                proposal_id=pid,
             )
-        except proposal_service.ShareDismissalRefused as exc:
-            return JSONResponse({"error": str(exc), "id": pid, "conflict": True}, status_code=409)
         except QueueReceiptUnavailable as exc:
             return JSONResponse(
                 {
@@ -12022,8 +10501,6 @@ async def proposal_action(request: Request) -> JSONResponse:
             proposal_id=pid,
             reason=reason,
         )
-    elif row.get("kind") == "share":
-        return JSONResponse({"error": "this proposal was already resolved; reload the queue", "id": pid, "conflict": True}, status_code=409)
     return JSONResponse(
         {
             "ok": True,

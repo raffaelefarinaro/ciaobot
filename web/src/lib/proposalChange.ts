@@ -117,15 +117,6 @@ export function changeFor(
   opts: { canAccept: boolean; fallbackQualifier?: string } = { canAccept: true },
 ): ProposalChange {
   const fallback = opts.fallbackQualifier ?? ''
-  if (row.kind === 'share') {
-    return {
-      type: preview?.blocked_reason ? 'blocked' : 'update',
-      label: preview?.blocked_reason ? 'Cannot publish yet' : 'Shared note',
-      verb: '',
-      destination: preview ? `${preview.brain || 'Shared brain'}/${preview.path || ''}` : '',
-      qualifier: preview?.branch ? `Review before publishing · ${preview.branch}` : 'Review before publishing',
-    }
-  }
   if (row.kind === 'skill') {
     // "Improve", never "New": the skill the finding is about already exists, so
     // "New skill" described a task the proposal does not ask for.

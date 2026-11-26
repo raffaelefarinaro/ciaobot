@@ -47,10 +47,6 @@ _SECTION_DATE_RE = re.compile(r"^##\s+(\d{4}-\d{2}-\d{2})")
 _PROPOSALS_REL = ("Workspace", "Memory-Proposals.md")
 
 
-class ShareDismissalRefused(ValueError):
-    """A share proposal is protected by canonical publication state."""
-
-
 @dataclass(frozen=True)
 class AcceptOutcome:
     """What one promotion attempt did with one accepted row.
@@ -176,15 +172,6 @@ def _sweep_queue_file(
                 continue
             bullet = proposal_kinds.parse_bullet(raw_line)
             if bullet is not None and section_date is not None and section_date < cutoff:
-                if bullet.kind == "share":
-                    from ciao import share_proposals
-
-                    reason = share_proposals.share_dismissal_block(
-                        config, workspace=workspace, bullet=bullet
-                    )
-                    if reason:
-                        keep.append(raw_line)
-                        continue
                 changed = True
                 swept_kinds.append(bullet.kind)
                 swept_texts.append(bullet.text)
@@ -231,8 +218,6 @@ def _rewrite_queue_single(
     vault_root: Path,
     *,
     undoable: bool = True,
-    config: Any = None,
-    proposal_id: str = "",
     operation_id: str = "",
 ) -> bool:
     """Remove one bullet under the queue lock and record its receipt.
@@ -249,17 +234,6 @@ def _rewrite_queue_single(
 
     with queue_lock(queue):
         lines = queue.read_text(encoding="utf-8").splitlines()
-        bullet = proposal_kinds.parse_bullet(raw)
-        if bullet is not None and bullet.kind == "share" and not promoted:
-            if config is None:
-                raise ShareDismissalRefused("The shared-note publication state is unavailable.")
-            from ciao import share_proposals
-
-            reason = share_proposals.share_dismissal_block(
-                config, workspace=workspace, bullet=bullet, proposal_id=proposal_id
-            )
-            if reason:
-                raise ShareDismissalRefused(reason)
         removed_ours = _remove_bullet_line(lines, line_index, raw)
         if not removed_ours:
             return False
@@ -287,9 +261,7 @@ def _rewrite_queue_batch(
     removals: list[dict[str, Any]],
     workspace: str,
     vault_root: Path,
-    *,
-    config: Any = None,
-) -> tuple[set[str], dict[str, str]]:
+) -> set[str]:
     """Remove batch rows under the queue lock and record the transaction.
 
     Runs in a worker thread: `queue_lock` waits with a synchronous sleep, so
@@ -308,23 +280,9 @@ def _rewrite_queue_batch(
         # verifies the content at that index - a promotion above may have
         # awaited a model call while another request rewrote this same file.
         removed_here: set[str] = set()
-        blocked: dict[str, str] = {}
         for row in sorted(rows, key=lambda r: int(r.get("line", -1)), reverse=True):
             if int(row.get("line", -1)) in keep_lines:
                 continue
-            bullet = proposal_kinds.parse_bullet(str(row.get("raw") or ""))
-            if bullet is not None and bullet.kind == "share":
-                if config is None:
-                    blocked[row["id"]] = "The shared-note publication state is unavailable."
-                    continue
-                from ciao import share_proposals
-
-                reason = share_proposals.share_dismissal_block(
-                    config, workspace=workspace, bullet=bullet, proposal_id=row["id"]
-                )
-                if reason:
-                    blocked[row["id"]] = reason
-                    continue
             if _remove_bullet_line(
                 lines, int(row.get("line", -1)), str(row.get("raw") or "")
             ):
@@ -345,7 +303,7 @@ def _rewrite_queue_batch(
                 vault_root=vault_root,
             ):
                 write_queue_atomically(queue, queue_after)
-    return removed_here, blocked
+    return removed_here
 
 
 def _find_bullet_line(lines: list[str], line_index: int, raw: str) -> int | None:
@@ -3192,92 +3150,6 @@ def preview_row(
     """
     row = ctx["row"]
     fact = (text or str(row.get("text") or "")).strip()
-    if str(row.get("kind") or "") == "share":
-        from ciao import share_proposals, share_publish, shared_brain
-
-        workspace = str(ctx.get("workspace") or row.get("workspace") or "")
-        proposal_id = str(row.get("id") or "")
-        draft = share_proposals.load_share(
-            config, workspace=workspace, proposal_id=proposal_id
-        )
-        if isinstance(draft, share_proposals.ShareRefusal):
-            return {
-                "id": proposal_id, "kind": "share", "workspace": workspace,
-                "operation": "none", "before": None, "after": None,
-                "brain": "", "identity": "", "branch": "", "path": "",
-                "revision": "", "blocked_reason": draft.code,
-            }
-        fields = draft["immutable"]
-        record = config.workspace(workspace) if hasattr(config, "workspace") else None
-        link = next(
-            (item for item in getattr(record, "shared_brains", []) or []
-             if item.name == fields.get("brain")),
-            None,
-        )
-        blocked = None
-        folder_manual: dict[str, Any] | None = None
-        expected_kind = str(fields.get("link_kind") or "git")
-        if "evidence_authorization" in fields:
-            blocked = "draft_unavailable"
-        elif link is None or link.kind != expected_kind or getattr(link, "lifetime_id", None) != fields.get("link_lifetime_id"):
-            blocked = "brain_unavailable"
-        elif expected_kind == "folder" and str(fields.get("operation") or "") != "create":
-            blocked = "folder_update_unsupported"
-            folder_manual = share_publish.folder_manual_surface(fields)
-        else:
-            state = shared_brain.brain_state(link, config, workspace)
-            if state.get("problem"):
-                blocked = "brain_changed" if state.get("problem") == "origin_changed" else "brain_unavailable"
-            elif expected_kind == "folder" and str(fields.get("operation") or "") == "create":
-                from ciao.os_support import folder_io
-
-                try:
-                    with share_publish._folder_target(fields) as (parent_fd, _chain):
-                        name = str(fields.get("path") or "").rsplit("/", 1)[-1]
-                        staging_root = share_publish._folder_staging_root(
-                            config, workspace, fields, parent_fd
-                        )
-                        if (
-                            not share_publish._folder_same_mount(staging_root, parent_fd)
-                            or not folder_io.verified_hardlink_support(staging_root)
-                            or not folder_io.verified_rename_observability(staging_root)
-                        ):
-                            blocked = "manual_export_required"
-                        elif folder_io.stat_entry(parent_fd, name) is not None:
-                            blocked = "folder_update_unsupported"
-                except folder_io.FolderChanged:
-                    blocked = "unsafe_target"
-                except (FileNotFoundError, OSError):
-                    blocked = "brain_unavailable"
-        if text:
-            blocked = "share_text_edits_not_supported"
-        operation = str(fields.get("operation") or "")
-        revision = str(draft.get("review_token") or "")
-        retry_available = bool(
-            not blocked and share_publish.can_retry_publication(
-                config, workspace=workspace, proposal_id=proposal_id,
-                expected_revision=revision,
-            )
-        )
-        attempt_available = share_publish.has_publication_attempt(
-            config, workspace=workspace, proposal_id=proposal_id,
-            expected_revision=revision,
-        )
-        return {
-            "id": proposal_id, "kind": "share", "workspace": workspace,
-            "operation": operation, "before": fields.get("original"),
-            "after": fields.get("proposed"), "brain": str(fields.get("brain") or ""),
-            "identity": str(fields.get("origin_identity") or ""),
-            "link_kind": expected_kind,
-            "branch": str(fields.get("upstream_ref") or "").removeprefix("refs/heads/"),
-            "path": str(fields.get("path") or ""),
-            "revision": revision,
-            "blocked_reason": blocked,
-            "redraft_available": "evidence_authorization" in fields and not attempt_available,
-            "reconcile_available": attempt_available and not retry_available,
-            "publish_retry_available": retry_available,
-            **({"folder_manual": folder_manual} if folder_manual is not None else {}),
-        }
     if ctx.get("file"):
         out = _base_preview(row)
         out["text"] = fact

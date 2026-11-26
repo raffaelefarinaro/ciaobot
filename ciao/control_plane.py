@@ -16,25 +16,19 @@ import json
 import logging
 import math
 import os
-import stat
 import sqlite3
 import sys
 import threading
-import time
 import uuid
-import weakref
-from collections import deque
 from collections.abc import Callable, Coroutine, Iterator, Mapping
 from dataclasses import asdict, dataclass, replace
 from datetime import UTC, date, datetime
 from pathlib import Path
-from typing import Any, Literal, NoReturn, Protocol, cast
+from typing import Any, Literal, cast
 
 from ciao import decision_rules, vault_index
-from ciao.agent_surface import RECALL_CHECK_MAX_REQUEST_BYTES
 from ciao.async_reads import keyed_lock, run_read
 from ciao.execution_modes import MODE_RANK
-from ciao.jsonio import MAX_JSON_DEPTH, json_nesting_exceeds
 from ciao.fts_search import (
     connected_db_path,
     connected_index_connection,
@@ -264,164 +258,6 @@ def _lifecycle_conflicts() -> Iterator[None]:
     except RecoveryLifecycleConflict as exc:
         raise ControlPlaneError("chat_busy", str(exc), retryable=True) from exc
 
-
-MANAGED_RECALL_CHECK_ENABLED = True
-MANAGED_RECALL_OPERATION_TIMEOUT_S = 45.0
-MANAGED_RECALL_MAX_IN_FLIGHT = 2
-MANAGED_RECALL_MAX_ADMISSIONS = 12
-MANAGED_RECALL_WINDOW_S = 60.0
-
-
-def _managed_recall_now() -> float:
-    return time.monotonic()
-
-
-class _ManagedRecallRefusal(ControlPlaneError):
-    """A fixed, operation-owned policy refusal safe to return to the caller."""
-
-
-class ManagedRecallAuthorization(Protocol):
-    def is_active(self) -> bool: ...
-    async def wait_invalid(self) -> None: ...
-
-
-async def _settle_managed_recall_tasks(
-    *tasks: asyncio.Task[Any] | None,
-    classified: set[asyncio.Task[Any]] | None = None,
-) -> None:
-    owned = [task for task in tasks if task is not None]
-    requested: set[asyncio.Task[Any]] = set()
-    for task in owned:
-        if not task.done():
-            requested.add(task)
-            task.cancel()
-    if not owned:
-        return
-    joined = asyncio.gather(*owned, return_exceptions=True)
-    pending_cancel = False
-    while True:
-        try:
-            outcomes = await asyncio.shield(joined)
-            break
-        except asyncio.CancelledError:
-            current = asyncio.current_task()
-            if current is not None and current.cancelling():
-                pending_cancel = True
-                continue
-            # A child cancellation is reported by gather as a value.
-            outcomes = await asyncio.shield(joined)
-            break
-    failures = [
-        outcome for task, outcome in zip(owned, outcomes)
-        if isinstance(outcome, BaseException)
-        and task not in (classified or set())
-        and (
-            not isinstance(outcome, asyncio.CancelledError)
-            or task not in requested
-        )
-    ]
-    if pending_cancel:
-        raise asyncio.CancelledError
-    if failures:
-        raise _ManagedRecallRefusal(
-            "unavailable", "The recall check is unavailable."
-        ) from None
-
-
-@dataclass(frozen=True, slots=True)
-class _ManagedRecallSnapshot:
-    token_id: str
-    chat_id: str
-    project_id: str
-    workspace: str
-    provider: str
-    source_model: str
-    turn_index: int
-    project_workspace: str
-    project_kind: str
-    helper_kind: str
-    chat: Any
-    project: Any
-    stream: Any
-    turn_task: asyncio.Task[Any]
-    driver_task: asyncio.Task[Any]
-    helper_model: str
-    vault_root: Path
-    cwd: Path
-
-
-def _json_native_copy(value: Any) -> Any:
-    """Copy only JSON-native result values, rejecting custom and nonfinite data."""
-    if value is None or type(value) in {str, bool, int}:
-        if isinstance(value, str):
-            value.encode("utf-8", errors="strict")
-        return value
-    if type(value) is float:
-        if not math.isfinite(value):
-            raise ValueError("invalid result")
-        return value
-    if type(value) is list:
-        return [_json_native_copy(item) for item in value]
-    if type(value) is dict:
-        copied: dict[str, Any] = {}
-        for key, item in value.items():
-            if type(key) is not str:
-                raise ValueError("invalid result")
-            key.encode("utf-8", errors="strict")
-            copied[key] = _json_native_copy(item)
-        return copied
-    raise ValueError("invalid result")
-
-
-def _parse_managed_recall_claims(raw: str) -> list[Any]:
-    from ciao.vault_verification import RecallClaim, _validate_recall_request
-
-    if not isinstance(raw, str):
-        raise ValueError("invalid request")
-    encoded = raw.encode("utf-8", errors="strict")
-    if len(encoded) > RECALL_CHECK_MAX_REQUEST_BYTES or encoded.startswith(b"\xef\xbb\xbf"):
-        raise ValueError("invalid request")
-    if json_nesting_exceeds(raw, MAX_JSON_DEPTH):
-        raise ValueError("invalid request")
-
-    def pairs(items: list[tuple[str, Any]]) -> dict[str, Any]:
-        result: dict[str, Any] = {}
-        for key, value in items:
-            key.encode("utf-8", errors="strict")
-            if key in result:
-                raise ValueError("invalid request")
-            result[key] = value
-        return result
-
-    def constant(_: str) -> None:
-        raise ValueError("invalid request")
-
-    parsed = json.loads(raw, object_pairs_hook=pairs, parse_constant=constant)
-
-    def check_strings(value: Any) -> None:
-        if isinstance(value, str):
-            value.encode("utf-8", errors="strict")
-        elif isinstance(value, list):
-            for item in value:
-                check_strings(item)
-        elif isinstance(value, dict):
-            for key, item in value.items():
-                key.encode("utf-8", errors="strict")
-                check_strings(item)
-
-    check_strings(parsed)
-    if not isinstance(parsed, list):
-        raise ValueError("invalid request")
-    claims = []
-    for item in parsed:
-        if type(item) is not dict or set(item) != {"id", "text", "source_paths"}:
-            raise ValueError("invalid request")
-        if type(item["id"]) is not str or type(item["text"]) is not str or type(item["source_paths"]) is not list:
-            raise ValueError("invalid request")
-        if any(type(path) is not str for path in item["source_paths"]):
-            raise ValueError("invalid request")
-        claims.append(RecallClaim(item["id"], item["text"], tuple(item["source_paths"])))
-    return _validate_recall_request(claims)
 
 def _ok(data: Any = None, **extra: Any) -> dict[str, Any]:
     payload: dict[str, Any] = {"ok": True}
@@ -1423,9 +1259,6 @@ class CiaoControlPlane:
         self.app_settings = app_settings
         self.startup_tracker = startup_tracker
         self._deferred_actions: dict[str, dict[str, Any]] = {}
-        self._managed_recall_attempts: weakref.WeakSet[asyncio.Task[Any]] = weakref.WeakSet()
-        self._managed_recall_tasks: set[asyncio.Task[Any]] = set()
-        self._managed_recall_admissions: deque[float] = deque()
         # Optional: the app-wide ConnectionTracker, used by file_surface to
         # report real connected clients instead of a per-turn stream proxy.
         self.connection_tracker = connection_tracker
@@ -1729,7 +1562,7 @@ class CiaoControlPlane:
     async def managed_care_begin(self, principal: AgentPrincipal, ttl_s: float, vault: str) -> dict[str, Any]:
         """Take a care lease only for the engine's currently running care dispatch."""
         import math  # noqa: PLC0415
-        from ciao import curation_run, curation_share  # noqa: PLC0415
+        from ciao import curation_run  # noqa: PLC0415
 
         workspace = self._workspace(principal)
         dispatcher = self.pcm._schedule_dispatcher_for()
@@ -1741,39 +1574,20 @@ class CiaoControlPlane:
         if not math.isfinite(ttl_s) or ttl_s < 1 or ttl_s > 86400:
             raise ControlPlaneError("invalid_request", "Care lease duration must be between 1 and 86400 seconds.")
         try:
-            lease = curation_share.begin(
-                self.config, workspace=workspace, chat_id=principal.chat_id,
-                token_id=principal.token_id, dispatch_id=dispatch_id, ttl_s=ttl_s,
+            lease = await asyncio.to_thread(
+                curation_run.begin_run,
+                Path(self.config.workspace_vault_root(workspace)),
+                ttl_s=ttl_s, chat_id=principal.chat_id,
             )
         except curation_run.CurationBusy as exc:
             raise ControlPlaneError("curation_busy", str(exc)) from None
-        try:
-            await asyncio.to_thread(curation_share.dispatch_ready, self.config, workspace=workspace)
-        except Exception:  # noqa: BLE001 - private intake remains retryable
-            logger.warning("Unable to file settled Workspace care candidates; they remain private")
         return _ok({**lease.as_dict(), "vault": str(lease.vault_root.resolve())})
-
-    def managed_care_checkpoint(self, principal: AgentPrincipal, holder: str, key: str) -> dict[str, Any]:
-        """Stage only witnesses for a completed item of this live care dispatch."""
-        from ciao import curation_share  # noqa: PLC0415
-
-        workspace = self._workspace(principal)
-        dispatch_id = self.pcm._schedule_dispatcher_for().active_care_dispatch(principal.chat_id, workspace)
-        if not dispatch_id or not principal.token_id or not self._unattended_turn(principal):
-            raise ControlPlaneError("not_care_dispatch", "A live managed Workspace care dispatch is required.")
-        if not holder or len(holder) > 512 or not key or len(key) > 512:
-            raise ControlPlaneError("invalid_request", "A valid care lease and work item are required.")
-        staged = curation_share.checkpoint(
-            self.config, self.pcm, workspace=workspace, chat_id=principal.chat_id,
-            token_id=principal.token_id, dispatch_id=dispatch_id, holder=holder, key=key,
-        )
-        return _ok({"staged": staged})
 
     async def managed_care_end(
         self, principal: AgentPrincipal, holder: str, status: str, reasons: list[str]
     ) -> dict[str, Any]:
         """Derive the run outcome and settle it under the active care dispatch."""
-        from ciao import curation_run, curation_share  # noqa: PLC0415
+        from ciao import curation_run  # noqa: PLC0415
         from ciao.cli import _derive_run_counts  # noqa: PLC0415
         from ciao.entity_types import load_entity_types  # noqa: PLC0415
         from ciao.proposal_predictions import HandoverPolicy  # noqa: PLC0415
@@ -1802,18 +1616,14 @@ class CiaoControlPlane:
                 config=self.config, path_prefix=VAULT_RENDER_PREFIX, workspace=workspace,
             )
             live_keys = frozenset(key for item in views.remaining.items for key in item.keys)
-            summary = curation_share.end(
-                self.config, workspace=workspace, chat_id=principal.chat_id, token_id=principal.token_id,
-                dispatch_id=dispatch_id, holder=holder, status=status, planned=counts.planned,
+            if dispatcher.active_care_dispatch(principal.chat_id, workspace) != dispatch_id:
+                raise curation_run.CurationBusy("the managed care dispatch is no longer active")
+            return curation_run.end_run(
+                vault, holder=holder, status=status, planned=counts.planned,
                 completed=counts.completed, deferred=counts.deferred, reasons=[*reasons, *counts.reasons],
-                live_keys=live_keys, failed=counts.failed, counts_complete=counts.complete, report=counts.report,
-                dispatch_active=lambda: dispatcher.active_care_dispatch(principal.chat_id, workspace) == dispatch_id,
+                live_keys=live_keys, advance_marker=status == "ok", failed=counts.failed,
+                counts_complete=counts.complete, report=counts.report, dispatch_id=dispatch_id,
             )
-            try:
-                curation_share.dispatch_ready(self.config, workspace=workspace)
-            except Exception:  # noqa: BLE001 - the durable receipt is retried on the next run
-                logger.warning("Unable to file settled Workspace care candidates; they remain private")
-            return summary
 
         try:
             summary = await asyncio.to_thread(settle)
@@ -2331,160 +2141,6 @@ class CiaoControlPlane:
         )
         return _ok(reported)
 
-    def _share_body_bytes(self, workspace: str, relative: str) -> bytes:
-        """Read one regular file beneath this workspace's vault through its descriptor."""
-        from ciao.share_proposals import MAX_BYTES
-
-        if not relative or Path(relative).is_absolute() or "\\" in relative or "\x00" in relative:
-            raise ControlPlaneError("note_file_invalid", "--body-file must be a relative path inside this workspace vault.")
-        parts = relative.split("/")
-        if any(part in {"", ".", ".."} for part in parts):
-            raise ControlPlaneError("note_file_invalid", "--body-file must be a relative path inside this workspace vault.")
-        root = Path(self.config.workspace_vault_root(workspace)).resolve()
-        directory_flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
-        file_flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
-        descriptor = -1
-        try:
-            descriptor = os.open(root, directory_flags)
-            for component in parts[:-1]:
-                next_descriptor = os.open(component, directory_flags, dir_fd=descriptor)
-                os.close(descriptor)
-                descriptor = next_descriptor
-            file_descriptor = os.open(parts[-1], file_flags, dir_fd=descriptor)
-            with os.fdopen(file_descriptor, "rb") as handle:
-                if not stat.S_ISREG(os.fstat(handle.fileno()).st_mode):
-                    raise ControlPlaneError("note_file_invalid", "--body-file must name an ordinary file.")
-                data = handle.read(MAX_BYTES + 1)
-                if len(data) > MAX_BYTES:
-                    raise ControlPlaneError("note_file_invalid", f"--body-file exceeds the {MAX_BYTES}-byte limit.")
-                return data
-        except ControlPlaneError:
-            raise
-        except (OSError, ValueError) as exc:
-            raise ControlPlaneError("note_file_invalid", f"--body-file cannot be read inside this workspace vault: {exc}") from exc
-        finally:
-            if descriptor >= 0:
-                os.close(descriptor)
-
-    async def note_share(
-        self, principal: AgentPrincipal, *, path: str, body_file: str, brain: str = ""
-    ) -> dict[str, Any]:
-        """Queue an exact note body for a human to review before it reaches a shared brain."""
-        import hashlib
-        from ciao import share_proposals as sp
-
-        workspace = self._workspace(principal)
-        chat, project = self._chat_scope(principal)
-        if (
-            project.workspace != workspace
-            or str(chat.chat_id) != principal.chat_id
-            or str(chat.project_id) != principal.project_id
-            or str(chat.provider) != principal.provider
-        ):
-            raise ControlPlaneError("chat_required", "Sharing a note requires an attributable chat in this workspace.")
-        stream = self.pcm.get_active_stream(principal.chat_id)
-        if stream is None:
-            raise ControlPlaneError("note_share_inactive", "Sharing a note requires the active foreground user turn.")
-        with stream.publish_lock:
-            turn_count = int(getattr(chat, "user_turn_count", 0) or 0)
-            if turn_count < 1:
-                raise ControlPlaneError("chat_required", "Sharing a note requires an attributable user turn in this chat.")
-            turn_index = turn_count - 1
-            turn_key = str(turn_index)
-            publish_generation = stream.publish_generation
-            origins = getattr(chat, "user_turn_origin", None)
-            timings = getattr(chat, "user_turn_timings", None)
-            turn_ids = getattr(chat, "user_turn_ids", None)
-            # Ordinary typed turns intentionally have no origin-map entry:
-            # streaming persists only truthy engine origins. The per-turn send
-            # time proves this is a recorded user turn; absent means typed.
-            if (
-                not isinstance(timings, dict)
-                or not isinstance(timings.get(turn_key), dict)
-                or not isinstance(turn_ids, dict)
-                or not isinstance(turn_ids.get(turn_key), str)
-                or not turn_ids.get(turn_key)
-            ):
-                raise ControlPlaneError(
-                    "note_share_inactive", "Sharing a note requires the active foreground user turn."
-                )
-            if not isinstance(origins, dict) or (
-                turn_key in origins and not isinstance(origins[turn_key], str)
-            ):
-                raise ControlPlaneError("unattended_forbidden", "Sharing a note requires a verifiable user turn.")
-            turn_id = str(turn_ids[turn_key])
-
-        def _require_active_turn_locked() -> None:
-            current_count = int(getattr(chat, "user_turn_count", 0) or 0)
-            origins = getattr(chat, "user_turn_origin", None)
-            timings = getattr(chat, "user_turn_timings", None)
-            turn_ids = getattr(chat, "user_turn_ids", None)
-            current_turn_id = turn_ids.get(turn_key) if isinstance(turn_ids, dict) else None
-            if (
-                self.pcm.get_chat(principal.chat_id) is not chat
-                or self.pcm.get_project(principal.project_id) is not project
-                or current_count != turn_index + 1
-                or stream.publish_generation != publish_generation
-                or not stream.publish_active
-                or stream.publish_turn_index != turn_index
-                or not isinstance(origins, dict)
-                or not isinstance(timings, dict)
-                or not isinstance(timings.get(turn_key), dict)
-                or not isinstance(turn_ids, dict)
-                or current_turn_id != turn_id
-                or (turn_key in origins and not isinstance(origins[turn_key], str))
-                or self.pcm.get_active_stream(principal.chat_id) is not stream
-                or getattr(stream, "background", False)
-                or getattr(stream, "done", False)
-                or getattr(stream, "user_stopped", False)
-                or getattr(stream, "running_turn_index", None) != turn_index
-            ):
-                raise ControlPlaneError(
-                    "note_share_inactive", "Sharing a note requires the active foreground user turn."
-                )
-            self._require_person_typed_turn(principal, "Sharing a note")
-
-        @contextlib.contextmanager
-        def _queue_publish_guard() -> Iterator[None]:
-            # Turn start/end, count changes, Stop, and stream finish publish
-            # their lifecycle generation under this lock. The queue writer
-            # stages first and holds it only around atomic replace.
-            with stream.publish_lock:
-                try:
-                    _require_active_turn_locked()
-                except ControlPlaneError as exc:
-                    raise sp.ShareDraftError(sp.ShareRefusal(exc.code, str(exc))) from exc
-                yield
-
-        with stream.publish_lock:
-            _require_active_turn_locked()
-
-        def _run() -> dict[str, Any]:
-            with stream.publish_lock:
-                _require_active_turn_locked()
-            proposed = self._share_body_bytes(workspace, body_file)
-            with stream.publish_lock:
-                _require_active_turn_locked()
-            identity = json.dumps(
-                [principal.chat_id, turn_id, turn_index, brain, path, hashlib.sha256(proposed).hexdigest()],
-                ensure_ascii=False, separators=(",", ":"),
-            )
-            draft = sp.draft_share(
-                self.config, workspace=workspace, brain=brain, relative_path=path,
-                operation=None, proposed=proposed,
-                request_key="chat-share:" + hashlib.sha256(identity.encode("utf-8")).hexdigest(),
-                publish_guard=_queue_publish_guard,
-            )
-            if isinstance(draft, sp.ShareRefusal):
-                error = ControlPlaneError(draft.code, draft.message)
-                if draft.eligible_brains:
-                    error.suggestions = ["Choose one linked shared brain: " + ", ".join(draft.eligible_brains)]
-                raise error
-            return {"status": "queued", "proposal_id": draft.proposal_id, "review_path": draft.review_path}
-
-        key = f"note-share:{self._search_runtime_dir()}:{workspace}:{principal.chat_id}:{turn_id}:{brain}:{path}"
-        return _ok(await run_read(key, _run, coalesce=False))
-
     def _workspace_text_file(self, workspace: str, relative: str, *, flag: str) -> str:
         """One UTF-8 prose file confined to the caller's workspace root, or a refusal."""
         from ciao.note_create import MAX_NOTE_FILE_BYTES
@@ -2922,343 +2578,6 @@ class CiaoControlPlane:
             return Path(state_path).parent
         base = self._search_key_base()
         return base / ".runtime"
-
-    async def vault_recall_check(
-        self,
-        principal: AgentPrincipal,
-        *,
-        claims_json: str = "",
-        authorization_factory: Callable[[], ManagedRecallAuthorization | None] | None = None,
-    ) -> dict[str, Any]:
-        """Run one bounded recall check for the current foreground provider pass."""
-        checker: asyncio.Task[Any] | None = None
-        watcher: asyncio.Task[Any] | None = None
-        issued_refusals: dict[int, tuple[_ManagedRecallRefusal, str, str]] = {}
-
-        def refuse(code: str, message: str) -> NoReturn:
-            error = _ManagedRecallRefusal(code, message)
-            issued_refusals[id(error)] = (error, code, message)
-            raise error from None
-        try:
-            async with asyncio.timeout(MANAGED_RECALL_OPERATION_TIMEOUT_S):
-                if not MANAGED_RECALL_CHECK_ENABLED:
-                    refuse("feature_inactive", "Managed recall checking is inactive.")
-                if authorization_factory is None:
-                    refuse(
-                        "unauthorized", "The managed agent session is no longer authorized."
-                    )
-                try:
-                    authorization = authorization_factory()
-                    authorized = authorization is not None and authorization.is_active()
-                except Exception:
-                    refuse(
-                        "unavailable", "The recall check is unavailable."
-                    )
-                if authorization is None or not authorized:
-                    refuse(
-                        "unauthorized", "The managed agent session is no longer authorized."
-                    )
-                try:
-                    claims = _parse_managed_recall_claims(claims_json)
-                except (ValueError, TypeError, UnicodeError):
-                    refuse(
-                        "invalid_request", "The recall-check request is invalid."
-                    )
-                if not principal.chat_id:
-                    refuse("recall_check_not_running", "Recall checking requires a running foreground pass.")
-                chat = self.pcm.get_chat(principal.chat_id)
-                project = self.pcm.get_project(principal.project_id)
-                stream = self.pcm.get_active_stream(principal.chat_id)
-                settings = getattr(getattr(self.app_settings, "settings", None), "verify_vault_answers", None)
-                if settings is not True:
-                    refuse("verification_disabled", "Vault verification is disabled.")
-                if (
-                    chat is None or project is None or chat.chat_id != principal.chat_id
-                    or chat.project_id != principal.project_id or project.project_id != principal.project_id
-                    or project.workspace != principal.workspace
-                    or chat.provider != principal.provider or chat.provider not in {"claude", "opencode"}
-                    or getattr(project, "kind", "") == "memory"
-                    or not stream or getattr(stream, "background", False) or stream.done
-                    or stream.user_stopped or not stream.turn_task or stream.turn_task.done()
-                ):
-                    refuse("recall_check_scope_mismatch", "Recall checking is not available for this pass.")
-                helper = chat.helper if isinstance(chat.helper, dict) else {}
-                if helper.get("kind") in self._ENGINE_HELPER_KINDS:
-                    refuse("recall_check_helper_forbidden", "Recall checking is unavailable in helper chats.")
-                running = getattr(stream, "running_turn_index", None)
-                driver = self.pcm._streaming.drive_task(principal.chat_id, stream)
-                if running is None or driver is None or driver.done():
-                    refuse("recall_check_not_running", "Recall checking requires a running foreground pass.")
-                if claims and stream.turn_task in self._managed_recall_attempts:
-                    refuse("recall_check_budget_exhausted", "This provider pass already used its recall-check attempt.")
-                from ciao.insights import resolve_helper_model
-                from ciao.vault_verification import verify_recall_claims
-                provider = chat.provider
-                model = chat.model
-                workspace = project.workspace
-                helper_model = resolve_helper_model(self.config, workspace, provider, source_model=model)
-                root = self._vault_root(principal)
-                cwd = self.pcm._agent_root_for_chat(principal.chat_id)
-                snapshot = _ManagedRecallSnapshot(
-                    str(principal.token_id), str(principal.chat_id), str(principal.project_id),
-                    str(principal.workspace), str(principal.provider), str(model), int(cast(int, running)),
-                    str(project.workspace), str(getattr(project, "kind", "")),
-                    str(helper.get("kind") or ""), chat, project, stream,
-                    stream.turn_task, driver, str(helper_model), Path(root), Path(cwd),
-                )
-                # Final admission check has no await between it and task creation.
-                if (
-                    not MANAGED_RECALL_CHECK_ENABLED
-                    or self.pcm.get_chat(snapshot.chat_id) is not snapshot.chat
-                    or self.pcm.get_project(snapshot.project_id) is not snapshot.project
-                    or self.pcm.get_active_stream(snapshot.chat_id) is not snapshot.stream
-                    or snapshot.chat.chat_id != snapshot.chat_id
-                    or snapshot.chat.project_id != snapshot.project_id
-                    or snapshot.chat.provider != snapshot.provider
-                    or snapshot.chat.model != snapshot.source_model
-                    or str(snapshot.project.workspace) != snapshot.project_workspace
-                    or str(getattr(snapshot.project, "kind", "")) != snapshot.project_kind
-                    or not isinstance(snapshot.chat.helper, dict)
-                    or str(snapshot.chat.helper.get("kind") or "") != snapshot.helper_kind
-                    or snapshot.stream.turn_task is not snapshot.turn_task
-                    or snapshot.turn_task.done() or snapshot.driver_task.done()
-                    or snapshot.stream.running_turn_index != snapshot.turn_index
-                    or getattr(getattr(self.app_settings, "settings", None), "verify_vault_answers", None) is not True
-                ):
-                    refuse("recall_check_stale", "The current pass changed before checking began.")
-                if claims:
-                    # Reserve synchronously before any checker work can be scheduled.
-                    self._managed_recall_attempts.add(stream.turn_task)
-                if claims:
-                    assert authorization is not None
-                    if not authorization.is_active():
-                        refuse(
-                            "unauthorized", "The managed agent session is no longer authorized."
-                        )
-                    now = _managed_recall_now()
-                    while self._managed_recall_admissions and now - self._managed_recall_admissions[0] >= MANAGED_RECALL_WINDOW_S:
-                        self._managed_recall_admissions.popleft()
-                    self._managed_recall_tasks.difference_update(
-                        {task for task in self._managed_recall_tasks if task.done()}
-                    )
-                    unfinished = len(self._managed_recall_tasks)
-                    if unfinished >= MANAGED_RECALL_MAX_IN_FLIGHT:
-                        self._managed_recall_attempts.discard(snapshot.turn_task)
-                        refuse("recall_check_busy", "Managed recall checking is busy.")
-                    if len(self._managed_recall_admissions) >= MANAGED_RECALL_MAX_ADMISSIONS:
-                        self._managed_recall_attempts.discard(snapshot.turn_task)
-                        refuse(
-                            "recall_check_rate_limited",
-                            "Managed recall checking attempt limit reached.",
-                        )
-
-                    def before_helper() -> None:
-                        if not authorization.is_active():
-                            refuse(
-                                "unauthorized", "The managed agent session is no longer authorized."
-                            )
-
-                    admitted_at = _managed_recall_now()
-                    checker_coro = verify_recall_claims(
-                        claims, vault_root=snapshot.vault_root, model=snapshot.helper_model,
-                        provider=snapshot.provider, cwd=snapshot.cwd,
-                        before_helper=before_helper,
-                    )
-                    self._managed_recall_admissions.append(admitted_at)
-                    try:
-                        checker = asyncio.create_task(checker_coro)
-                    except BaseException:
-                        checker_coro.close()
-                        raise
-                    self._managed_recall_tasks.add(checker)
-                    checker.add_done_callback(self._managed_recall_tasks.discard)
-                    watcher_coro = authorization.wait_invalid()
-                    try:
-                        watcher = asyncio.create_task(watcher_coro)
-                    except BaseException:
-                        watcher_coro.close()
-                        raise
-                    assert watcher is not None and checker is not None
-                    done, _ = await asyncio.wait(
-                        {checker, watcher, snapshot.turn_task, snapshot.driver_task},
-                        return_when=asyncio.FIRST_COMPLETED,
-                    )
-                    if not authorization.is_active():
-                        classified: set[asyncio.Task[Any]] = set()
-                        if watcher in done:
-                            try:
-                                watcher.result()
-                            except BaseException:
-                                pass
-                            else:
-                                classified.add(watcher)
-                        if checker in done:
-                            try:
-                                checker.result()
-                            except _ManagedRecallRefusal as child_refusal:
-                                issued = issued_refusals.get(id(child_refusal))
-                                if issued is not None and issued[0] is child_refusal:
-                                    classified.add(checker)
-                            except BaseException:
-                                pass
-                            else:
-                                classified.add(checker)
-                        await _settle_managed_recall_tasks(
-                            checker, watcher, classified=classified,
-                        )
-                        checker = watcher = None
-                        refuse(
-                            "unauthorized", "The managed agent session is no longer authorized."
-                        )
-                    if watcher in done:
-                        try:
-                            watcher.result()
-                        except asyncio.CancelledError:
-                            refuse("unavailable", "The recall check is unavailable.")
-                        refuse("unavailable", "The recall check is unavailable.")
-                    if checker not in done or snapshot.turn_task in done or snapshot.driver_task in done:
-                        await _settle_managed_recall_tasks(checker, watcher)
-                        checker = watcher = None
-                        refuse("recall_check_stale", "The current pass ended before checking completed.")
-                    try:
-                        checker_result = checker.result()
-                    except asyncio.CancelledError:
-                        refuse("unavailable", "The recall check is unavailable.")
-                    candidate = checker_result
-                else:
-                    candidate = {"status": "not_applicable", "claims": [], "coverage": {"truncated": False, "omitted_sources": []}}
-            if checker is not None or watcher is not None:
-                await _settle_managed_recall_tasks(checker, watcher)
-            checker = watcher = None
-            if (
-                not MANAGED_RECALL_CHECK_ENABLED
-                or str(principal.token_id) != snapshot.token_id
-                or str(principal.chat_id) != snapshot.chat_id
-                or str(principal.project_id) != snapshot.project_id
-                or str(principal.workspace) != snapshot.workspace
-                or str(principal.provider) != snapshot.provider
-                or self.pcm.get_chat(snapshot.chat_id) is not snapshot.chat
-                or self.pcm.get_project(snapshot.project_id) is not snapshot.project
-                or self.pcm.get_active_stream(snapshot.chat_id) is not snapshot.stream
-                or self.pcm._streaming.drive_task(snapshot.chat_id, snapshot.stream) is not snapshot.driver_task
-                or snapshot.chat.chat_id != snapshot.chat_id
-                or snapshot.chat.project_id != snapshot.project_id
-                or snapshot.chat.provider != snapshot.provider
-                or snapshot.chat.model != snapshot.source_model
-                or snapshot.project.project_id != snapshot.project_id
-                or str(snapshot.project.workspace) != snapshot.project_workspace
-                or str(getattr(snapshot.project, "kind", "")) != snapshot.project_kind
-                or not isinstance(snapshot.chat.helper, dict)
-                or str(snapshot.chat.helper.get("kind") or "") != snapshot.helper_kind
-                or snapshot.stream.turn_task is not snapshot.turn_task or snapshot.turn_task.done()
-                or snapshot.driver_task.done() or snapshot.stream.running_turn_index != snapshot.turn_index
-                or snapshot.stream.done or getattr(snapshot.stream, "background", False)
-                or snapshot.stream.user_stopped
-                or getattr(getattr(self.app_settings, "settings", None), "verify_vault_answers", None) is not True
-                or resolve_helper_model(
-                    self.config, snapshot.project_workspace, snapshot.provider,
-                    source_model=snapshot.chat.model,
-                ) != snapshot.helper_model
-                or self._vault_root(principal) != snapshot.vault_root
-                or Path(self.pcm._agent_root_for_chat(snapshot.chat_id)) != snapshot.cwd
-            ):
-                refuse("recall_check_stale", "The current pass changed before results were returned.")
-            result = _json_native_copy(candidate)
-            if type(result) is not dict or set(result) != {"status", "claims", "coverage"}:
-                raise ValueError("invalid result")
-            if result["status"] not in {"checked", "not_applicable", "unavailable"}:
-                raise ValueError("invalid result")
-            if type(result["claims"]) is not list or type(result["coverage"]) is not dict:
-                raise ValueError("invalid result")
-            if set(result["coverage"]) != {"truncated", "omitted_sources"}:
-                raise ValueError("invalid result")
-            if type(result["coverage"]["truncated"]) is not bool or type(result["coverage"]["omitted_sources"]) is not list:
-                raise ValueError("invalid result")
-            if result["status"] == "checked":
-                if any(
-                    type(row) is not dict or set(row) != {"id", "status", "sources", "reason"}
-                    or type(row["id"]) is not str or len(row["id"]) > 64
-                    or type(row["status"]) is not str
-                    or row["status"] not in {"supported", "contradicted", "insufficient_evidence"}
-                    or type(row["sources"]) is not list or len(row["sources"]) > 6
-                    or any(type(path) is not str or len(path) > 512 for path in row["sources"])
-                    or type(row["reason"]) is not str or len(row["reason"]) > 300
-                    for row in result["claims"]
-                ):
-                    raise ValueError("invalid result")
-                if len(result["claims"]) > 12 or len({row["id"] for row in result["claims"]}) != len(result["claims"]):
-                    raise ValueError("invalid result")
-                from ciao.vault_verification import _validate_recall_source
-                claims_by_id = {claim.id: set(claim.source_paths) for claim in claims}
-                if {row["id"] for row in result["claims"]} != set(claims_by_id):
-                    raise ValueError("invalid result")
-                for row in result["claims"]:
-                    if not row["reason"].strip() or any(
-                        _validate_recall_source(path) not in claims_by_id[row["id"]]
-                        for path in row["sources"]
-                    ):
-                        raise ValueError("invalid result")
-            elif result["claims"]:
-                raise ValueError("invalid result")
-            if len(result["coverage"]["omitted_sources"]) > 12 * 6 or any(
-                type(path) is not str or len(path) > 512
-                for path in result["coverage"]["omitted_sources"]
-            ):
-                raise ValueError("invalid result")
-            from ciao.vault_verification import _validate_recall_source
-            declared_sources = {path for claim in claims for path in claim.source_paths}
-            if any(
-                _validate_recall_source(path) not in declared_sources
-                for path in result["coverage"]["omitted_sources"]
-            ):
-                raise ValueError("invalid result")
-            encoded = json.dumps(result, ensure_ascii=False, allow_nan=False).encode("utf-8", errors="strict")
-            if len(encoded) > RECALL_CHECK_MAX_REQUEST_BYTES:
-                raise ValueError("invalid result")
-            if not authorization.is_active():
-                refuse(
-                    "unauthorized", "The managed agent session is no longer authorized."
-                )
-            return _ok(result)
-        except _ManagedRecallRefusal as exc:
-            if checker is not None or watcher is not None:
-                try:
-                    await _settle_managed_recall_tasks(checker, watcher)
-                except asyncio.CancelledError:
-                    raise
-                except Exception:
-                    refuse("unavailable", "The recall check is unavailable.")
-            trusted = issued_refusals.get(id(exc))
-            if trusted is not None and trusted[0] is exc:
-                refuse(trusted[1], trusted[2])
-            refuse("unavailable", "The recall check is unavailable.")
-        except asyncio.CancelledError:
-            if checker is not None or watcher is not None:
-                try:
-                    await _settle_managed_recall_tasks(checker, watcher)
-                except asyncio.CancelledError:
-                    pass
-                except Exception:
-                    pass
-            raise
-        except TimeoutError:
-            if checker is not None or watcher is not None:
-                try:
-                    await _settle_managed_recall_tasks(checker, watcher)
-                except asyncio.CancelledError:
-                    raise
-                except Exception:
-                    refuse("unavailable", "The recall check is unavailable.")
-            refuse("recall_check_timeout", "The recall check timed out.")
-        except Exception:
-            if checker is not None or watcher is not None:
-                try:
-                    await _settle_managed_recall_tasks(checker, watcher)
-                except asyncio.CancelledError:
-                    raise
-                except Exception:
-                    refuse("unavailable", "The recall check is unavailable.")
-            refuse("unavailable", "The recall check is unavailable.")
 
     async def vault_search(self, principal: AgentPrincipal, query: str, limit: int = 10) -> dict[str, Any]:
         """Search this workspace's notes, and only this workspace's notes.

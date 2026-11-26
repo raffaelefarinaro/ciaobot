@@ -9,7 +9,6 @@ dispatcher needs: the operation table, the bearer-token registry, the
 
 from __future__ import annotations
 
-import asyncio
 import contextvars
 import functools
 import inspect
@@ -32,7 +31,6 @@ from ciao.control_plane import (
     AgentPrincipal,
     CiaoControlPlane,
     ControlPlaneError,
-    ManagedRecallAuthorization,
     CONTEXT_LOGS_DEFAULT_LINES,
 )
 from ciao.schedules import DEFAULT_TIMEZONE
@@ -175,29 +173,6 @@ class _Session:
 AGENT_SESSION_AUTH_POLL_S = 0.25
 
 
-class _ManagedRecallAuthorization:
-    __slots__ = ("__registry", "__session")
-
-    def __init__(self, registry: AgentSessionRegistry, session: _Session) -> None:
-        self.__registry = registry
-        self.__session = session
-
-    def __repr__(self) -> str:
-        return "<managed recall authorization>"
-
-    def is_active(self) -> bool:
-        with self.__registry._lock:
-            session = self.__session
-            return (
-                self.__registry._by_token.get(session.token) is session
-                and session.expires_at > int(time.time())
-            )
-
-    async def wait_invalid(self) -> None:
-        while self.is_active():
-            await asyncio.sleep(AGENT_SESSION_AUTH_POLL_S)
-
-
 class AgentSessionRegistry:
     """In-memory verifier for short-lived managed-process bearer tokens."""
 
@@ -312,21 +287,6 @@ class AgentSessionRegistry:
                 subject=item.principal.chat_id,
                 claims=item.principal.to_claims(),
             )
-
-    def live_authorization(
-        self, access: AccessToken | None, principal: AgentPrincipal
-    ) -> ManagedRecallAuthorization | None:
-        if access is None or "ciaobot" not in (access.scopes or []):
-            return None
-        with self._lock:
-            session = self._by_token.get(access.token)
-            if (
-                session is None
-                or session.principal != principal
-                or session.expires_at <= int(time.time())
-            ):
-                return None
-            return _ManagedRecallAuthorization(self, session)
 
     def status(self) -> dict[str, Any]:
         now = int(time.time())
@@ -488,21 +448,6 @@ async def _op_vault_search(service: CiaoMcpService, query: str, limit: int = 10)
     return await service._invoke("vault_search", lambda cp, p: cp.vault_search(p, query, limit))
 
 
-async def _op_vault_recall_check(service: CiaoMcpService, claims_json: str = "") -> dict[str, Any]:
-    """Check selected factual claims against bounded vault evidence."""
-    return await service._invoke(
-        "vault_recall_check",
-        lambda cp, p: cp.vault_recall_check(
-            p,
-            claims_json=claims_json,
-            authorization_factory=lambda: service.registry.live_authorization(
-                get_access_token(), p
-            ),
-        ),
-        mutating=False,
-    )
-
-
 async def _op_vault_review(service: CiaoMcpService, action: str = "list", path: str = "", candidate_id: str = "",
                             disposition: str = "", confirm: str = "") -> dict[str, Any]:
     """List and decide scoped vault-note review candidates.
@@ -525,14 +470,6 @@ async def _op_care_begin(service: CiaoMcpService, ttl_s: float, vault: str) -> d
     """Begin a lease for the active engine-owned Workspace care dispatch."""
     return await service._invoke(
         "care_begin", lambda cp, principal: cp.managed_care_begin(principal, ttl_s, vault), mutating=True
-    )
-
-
-async def _op_care_checkpoint(service: CiaoMcpService, holder: str, key: str) -> dict[str, Any]:
-    """Checkpoint a completed item of the active Workspace care dispatch."""
-    return await service._invoke(
-        "care_checkpoint", lambda cp, principal: cp.managed_care_checkpoint(principal, holder, key),
-        mutating=True,
     )
 
 
@@ -673,22 +610,6 @@ async def _op_note_create(
             body_file=body_file,
             path=path,
         ),
-        mutating=True,
-    )
-
-
-async def _op_note_share(
-    service: CiaoMcpService, path: str, body_file: str, brain: str = ""
-) -> dict[str, Any]:
-    """Queue a note draft for a human to review in a linked shared brain.
-
-    The exact body travels as a file inside this workspace's vault, never as a
-    shell argument. Filing requires a user-typed chat turn and returns a
-    canonical review link; it does not publish or change a checkout.
-    """
-    return await service._invoke(
-        "note_share",
-        lambda cp, p: cp.note_share(p, path=path, body_file=body_file, brain=brain),
         mutating=True,
     )
 
@@ -1702,15 +1623,12 @@ OPERATIONS: tuple[Operation, ...] = (
     Operation("memory_update", _WRITE, _op_memory_update.__doc__ or "", _op_memory_update),
     Operation("memory_learn", _WRITE, _op_memory_learn.__doc__ or "", _op_memory_learn),
     Operation("vault_search", _READ, _op_vault_search.__doc__ or "", _op_vault_search),
-    Operation("vault_recall_check", _READ, _op_vault_recall_check.__doc__ or "", _op_vault_recall_check),
     Operation("vault_review", _DESTRUCTIVE, _op_vault_review.__doc__ or "", _op_vault_review),
     Operation("verify_note", _WRITE, _op_verify_note.__doc__ or "", _op_verify_note),
     Operation("care_begin", _WRITE, _op_care_begin.__doc__ or "", _op_care_begin),
-    Operation("care_checkpoint", _WRITE, _op_care_checkpoint.__doc__ or "", _op_care_checkpoint),
     Operation("care_end", _WRITE, _op_care_end.__doc__ or "", _op_care_end),
     Operation("note_related", _READ, _op_note_related.__doc__ or "", _op_note_related),
     Operation("note_create", _WRITE, _op_note_create.__doc__ or "", _op_note_create),
-    Operation("note_share", _WRITE, _op_note_share.__doc__ or "", _op_note_share),
     Operation("projects_list", _READ, _op_projects_list.__doc__ or "", _op_projects_list),
     Operation("project_get", _READ, _op_project_get.__doc__ or "", _op_project_get),
     Operation("project", _WRITE, _op_project.__doc__ or "", _op_project),

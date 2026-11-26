@@ -284,24 +284,6 @@ describe('ChatPanel Outputs section', () => {
     expect(switchChat).toHaveBeenCalledWith('pass-1')
   })
 
-  it('shows a recoverable sharing intake failure on the archived source', async () => {
-    const { wrapper, store } = await mountPanel()
-    const chat = store.chats[0]
-    chat.archived = true
-    chat.postprocess = {
-      steps: { memory_pass: { status: 'ok', extra: { chat_id: 'pass-1', candidate_outcome: 'unavailable' } } },
-    }
-    await flushPromises()
-    expect(wrapper.find('.archived-notice').text()).toContain('Shared note suggestions could not be prepared. Ciao will retry when it next starts.')
-    chat.postprocess.steps!.memory_pass.extra!.candidate_outcome = 'checkpoint_unavailable'
-    await flushPromises()
-    expect(wrapper.find('.archived-notice').text()).toContain('Shared note suggestions could not be prepared for this chat.')
-    expect(wrapper.find('.archived-notice').text()).not.toContain('retry')
-    chat.postprocess.steps!.memory_pass.extra!.candidate_outcome = 'complete'
-    await flushPromises()
-    expect(wrapper.find('.archived-notice').text()).not.toContain('Shared note suggestions could not be prepared')
-  })
-
   it('offers no memory pass link on an archived chat that spawned none', async () => {
     const { wrapper, store } = await mountPanel()
     const chat = store.chats[0]

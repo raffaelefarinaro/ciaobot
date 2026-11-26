@@ -63,7 +63,7 @@ _MARKER_FIELDS = frozenset({"kind", "sha256"})
 _LEASE_FIELDS = frozenset({"holder", "started_at", "expires_at"})
 # The begin-time plan a run stores on its lease (curation_run.record_plan). It is
 # optional: a lease with no plan is a run that has not planned yet.
-_LEASE_OPTIONAL_FIELDS = frozenset({"plan", "chat_id", "proof_hash"})
+_LEASE_OPTIONAL_FIELDS = frozenset({"plan", "chat_id"})
 _LAST_RUN_FIELDS = frozenset({"status", "finished_at", "planned", "completed", "deferred", "reasons"})
 # Written by curation-end once the run's derived outcome is known. Optional, so
 # a state file from before they existed still decodes (no schema bump).
@@ -456,12 +456,6 @@ def _check_lease(lease: dict[str, Any]) -> None:
         raise CycleError("lease plan must be an object")
     if "chat_id" in lease and not isinstance(lease["chat_id"], str):
         raise CycleError("lease chat_id must be a string")
-    if "proof_hash" in lease and (
-        not isinstance(lease["proof_hash"], str)
-        or len(lease["proof_hash"]) != 64
-        or any(ch not in "0123456789abcdef" for ch in lease["proof_hash"])
-    ):
-        raise CycleError("lease proof_hash must be a sha256 hex string")
     holder = lease.get("holder")
     if not isinstance(holder, str) or not holder.strip():
         raise CycleError("lease holder is invalid")

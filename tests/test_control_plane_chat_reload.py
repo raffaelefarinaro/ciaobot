@@ -123,14 +123,6 @@ async def test_managed_care_acquisition_requires_the_active_scheduler_dispatch(t
         "detail": "the pass reports done, with no effect receipt", "receipt_ids": [],
     }]
     assert managed["report"]["weekly"] == {"marker": "not_advanced"}
-    sidecars = list((plane.config.state_path.parent / "secrets" / "share-evidence").rglob("care-leases/*.json"))
-    assert not sidecars
-    receipts = list((plane.config.state_path.parent / "secrets" / "share-evidence").rglob("care-settlements/*.json"))
-    assert len(receipts) == 1 and receipts[0].stat().st_mode & 0o077 == 0
-    stored = json.loads(receipts[0].read_text())
-    assert stored["payload"]["dispatch_id"] == "synthetic-dispatch"
-    assert stored["payload"]["chat_id"] == chat.chat_id
-    assert stored["payload"]["holder"] == holder
 
 
 async def test_own_chat_with_a_foreground_stream_arms_the_reload(tmp_path: Path) -> None:

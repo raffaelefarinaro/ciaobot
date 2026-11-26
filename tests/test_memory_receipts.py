@@ -1465,20 +1465,6 @@ def test_recovery_completes_the_sidecar_before_the_terminal_row(
     assert sidecar_text.count("A resolved fact.") == 1
 
 
-def test_share_publication_queue_receipt_does_not_synthesize_generic_history(monkeypatch):
-    from ciao import memory_proposals
-
-    def unexpected(*_args, **_kwargs):
-        pytest.fail("share publication history must come from its canonical receipt")
-
-    monkeypatch.setattr(memory_proposals, "record_promotion", unexpected)
-    assert mr._complete_outcome({
-        "kind": "queue_resolve", "proposal_kind": "share",
-        "operation_id": "shrpub_canonical", "fact_text": "Shared note proposal",
-        "promoted": True, "queue": "/does/not/matter",
-    }) is True
-
-
 def test_recovery_stays_recoverable_when_the_sidecar_write_fails(
     tmp_path, monkeypatch,
 ):
