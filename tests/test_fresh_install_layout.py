@@ -1037,3 +1037,37 @@ def test_a_failed_vocabulary_write_does_not_fail_setup(
     err = capsys.readouterr().err
     assert "vocabulary not written for" in err
     assert str(vault.resolve()) in err
+
+
+def test_api_created_workspace_gets_a_vault_index_on_the_next_refresh(
+    tmp_path: Path,
+) -> None:
+    """#3661: setup records only the first workspace's root in the ownership map.
+
+    A workspace added through POST /api/workspaces is a registered local root,
+    which the classifier treats as Ciao-owned by name; the publication recheck
+    used to ask without the name, saw an unrecorded root as ambiguous and
+    refused ("index ownership changed before publication").
+    """
+    from ciao.main import _refresh_configured_vault_index
+    from ciao.setup_marker import read_vault_index_ownership
+    from tests.test_workspace_settings_routes import _client
+
+    setup_workspace(tmp_path, auth_token="t")
+    reset_reroot_cache()
+    client, config, _ = _client(tmp_path, {
+        "CIAO_VAULT_ROOT": str(tmp_path / "memory-vault"),
+    })
+    created = client.post("/api/workspaces", json={"name": "beta"})
+    assert created.status_code == 201
+    reset_reroot_cache()
+    beta = config.agent_vault_root("beta")
+    beta.mkdir(parents=True, exist_ok=True)
+    (beta / "People").mkdir(exist_ok=True)
+    (beta / "People" / "Bea.md").write_text(
+        "---\ntype: person\ntitle: Bea\n---\n# Bea\n", encoding="utf-8",
+    )
+    assert str(beta.resolve()) not in read_vault_index_ownership(tmp_path / ".runtime")
+
+    assert _refresh_configured_vault_index(config)
+    assert "Bea" in (beta / "INDEX.md").read_text(encoding="utf-8")

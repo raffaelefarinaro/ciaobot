@@ -181,7 +181,7 @@ mismatch is `degraded` and a re-install prompt, not a negotiated older mode.
 | Op | Callers | Effect |
 |----|---------|--------|
 | `health` | app, bridge | `ready`, `helper_version`, `state_counter`, `epoch`, `authority_key_id`, event public key |
-| `eligible_events` | app, bridge | `ChatAuthority.eligible_events`; every filter before the limit |
+| `eligible_events` | app, bridge | `ChatAuthority.eligible_events`; every filter before the limit; the request carries the intended `destination` and `audience` and the reply echoes them with the grant id |
 | `create_grant`, `revoke_grant`, `withdraw_grant`, `withdraw_turn`, `submit_turn` | app only | a signed operator command (below) |
 | `enroll_operator_key` | app only, needs an admin authorization | store the operator public key **once**; refused while a key is enrolled. There is no replace: changing the key is the admin-authorized reset (state, keys and counter destroyed, which revokes everything) followed by a fresh enrollment |
 
@@ -240,6 +240,21 @@ Library gaps 1, 2 and 7, and how the daemon closes them:
   `ready:false`, lookups and commands are refused, nothing is repaired
   automatically. A missing blob with the anchor at 0 is the only fresh
   initialization, and it happens only right after provisioning.
+* **One-version rollback inherent to write-ahead (decision).** Because a blob
+  one behind the anchor is accepted (crash window), an attacker who can write
+  the storage can restore the previous blob once, undoing the latest write (a
+  revoke, say). The anchor therefore stores, with the counter, the SHA-256 of
+  the blob it expects next and of the previous one; a one-behind blob is
+  accepted only if its digest equals the previous digest, and reads are served
+  only after the daemon has rewritten the state under the new counter. Advancing
+  the anchor after the durable write is rejected (a crash would leave a blob
+  ahead of the anchor, indistinguishable from forgery). The Python library's
+  `CounterAnchor` carries the counter only; closing the window is the daemon
+  slice's job.
+* **Command key id.** Each signed command carries the SHA-256 of the operator
+  public key, covered by the signature; the daemon refuses a different key id.
+* **Pruned grant ids** are not persisted; the id factory must never repeat ids
+  (random 128-bit or a persisted monotonic value).
 * **Recovery** is the admin-authorized reset, which destroys state and keys.
   A reset is equivalent to revoking every grant; enrolled events are lost.
 * **Client side:** one long-lived client per engine process is required. The
@@ -398,7 +413,8 @@ vectors in one PR.
 
 ## Slices after this one
 
-1. **Library hardening (Python), with a no-replace enrollment rule:** asymmetric operator verifier and separate
+1. **Library hardening (Python), with a no-replace enrollment rule (done in
+   `ciao/chat_authority.py`, vectors in `tests/vectors/chat_authority_v1.json`):** asymmetric operator verifier and separate
    state and event keys in `chat_authority.py`; destination and audience
    arguments on lookup; `state_counter` and write-ahead hook in the storage
    protocol; shared vector file.
