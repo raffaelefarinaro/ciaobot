@@ -100,7 +100,7 @@ def edit_registry(config: AdmissionConfig, mutate: Callable[[AdmissionConfig], N
 def install_grant(config: AdmissionConfig, grant_id: str = GRANT, *, audience: str = AUDIENCE) -> dict[str, Any]:
     """A live snapshot grant plus the signed authorization a producer would mint."""
     link = config.links[0]
-    key = hashlib.sha256(grant_id.encode()).hexdigest()
+    key = se._evidence_key(LIFETIME, "proj", "doc", CANONICAL.encode())
     digest = hashlib.sha256(CANONICAL.encode()).hexdigest()
     mask = ["decision"]
     with se.evidence_claim(config, workspace=WORKSPACE) as claim:
@@ -290,12 +290,12 @@ def _upstream_moves(env: Env) -> None:
 
 
 INVALIDATIONS = [
-    ("revoke", _revoke, "evidence_stale"),
-    ("withdraw", _withdraw, "evidence_stale"),
+    ("revoke", _revoke, "source_revoked"),
+    ("withdraw", _withdraw, "source_withdrawn"),
     ("downgrade", _downgrade, "consent_changed"),
     ("unlink", _unlink, "brain_unavailable"),
     ("archive", _archive, "brain_unavailable"),
-    ("revoke-and-regrant", _regrant, "evidence_stale"),
+    ("revoke-and-regrant", _regrant, "source_revoked"),
     ("upstream-moved", _upstream_moves, "destination_changed"),
 ]
 
@@ -345,11 +345,11 @@ def test_audience_changed_or_unreadable_refuses_without_an_effect(env: Env) -> N
 
 def test_reconsent_needs_a_fresh_grant_and_fresh_draft(env: Env) -> None:
     _revoke(env)
-    assert env.admit().code == "evidence_stale"
+    assert env.admit().code == "source_revoked"
     _downgrade(env)
     edit_registry(env.config, lambda c: c.links.__setitem__(0, shared_brain.set_sharing_policy(c.links[0], "automatic")))
     # Consent is automatic again, but the old artifact is bound to the old grant and generation.
-    assert env.admit().code in {"evidence_stale", "destination_changed"} and env.effects == []
+    assert env.admit().code in {"source_revoked", "destination_changed"} and env.effects == []
 
 
 # --- barriers after admission ------------------------------------------------------------
@@ -389,7 +389,7 @@ def test_barrier_between_retries_revalidates_every_attempt(env: Env) -> None:
 
     assert env.admit(flaky).code == "rejected" and len(env.effects) == 1
     _revoke(env)  # between the attempts
-    assert env.admit(flaky).code == "evidence_stale" and len(env.effects) == 1
+    assert env.admit(flaky).code == "source_revoked" and len(env.effects) == 1
 
 
 def test_a_retry_after_a_retryable_rejection_is_a_new_journaled_attempt(env: Env) -> None:
@@ -573,7 +573,7 @@ def test_two_processes_a_revoke_waits_for_the_other_process_admitted_write_then_
     assert revoked.is_set() and child.communicate(timeout=20)[0].split() == ["applied"]
     assert len(_log(signals)) == 1
     again = _child(env, "hold", env.tmp / "sig-after")
-    assert again.communicate(timeout=30)[0].split() in (["already_applied"], ["evidence_stale"])
+    assert again.communicate(timeout=30)[0].split() in (["already_applied"], ["source_revoked"])
     assert _log(env.tmp / "sig-after") == [] and len(_log(signals)) == 1
 
 
