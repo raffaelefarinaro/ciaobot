@@ -8719,11 +8719,8 @@ def build_parser() -> argparse.ArgumentParser:
             "`skills/` directory — refusing a name that already exists — then read "
             "back, checked and synced, and the row is settled only once the file is "
             "there and the sync finished.\n\n"
-            "Attended only, and read from the run rather than from a flag. There is "
-            "no unattended mode to turn off: while a run holds this vault's "
-            "curation lease the command exits 4 without filing, creating or "
-            "settling anything, so the nightly Workspace care run can only report "
-            "the draft. Opening a public issue is a deferred action, and creating a "
+            "Attended only: the Workspace care prompt forbids this command from an "
+            "unattended run, which can only report the draft. Opening a public issue is a deferred action, and creating a "
             "skill writes a file every session of this workspace loads.\n\n"
             "A failed or ambiguous GitHub request, an issue whose draft names no "
             "owning repository, and a sync that did not finish all leave the draft "
@@ -8759,9 +8756,9 @@ def build_parser() -> argparse.ArgumentParser:
             "of the review queue and keeps the record on disk. A rejected change "
             "is not re-filed: the next pass that reaches the same conclusion adds "
             "its evidence to the settled record instead of opening a second row.\n\n"
-            "A rejection settles exactly as an approval does, so it is refused the "
-            "same way: while a run holds this vault's curation lease the command "
-            "exits 4 and the draft stays queued for a person."
+            "A rejection settles exactly as an approval does, so the Workspace care "
+            "prompt forbids it from an unattended run too; the draft stays queued "
+            "for a person."
         ),
     )
     skill_draft_reject_parser.add_argument(

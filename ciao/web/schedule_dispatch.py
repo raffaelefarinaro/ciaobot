@@ -92,11 +92,6 @@ _ATTENTION_SYSTEM_PROMPT = (
     )
 )
 
-# The one system routine whose job is verifiable from outside the chat: it is
-# told to take the curation lease first, so a clean turn that never took it did
-# nothing. Stored ids are workspace-qualified, so compare with `system_base_id`.
-
-
 class ScheduleDispatchHost(Protocol):
     """The complete, typed manager surface used by ``ScheduleDispatcher``."""
 

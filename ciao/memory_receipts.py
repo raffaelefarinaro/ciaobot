@@ -768,10 +768,9 @@ def commit_region_change(
     lock, because that lock is not re-entrant.
 
     ``operation_id``, when given, is stored on the receipt so the operation
-    that owns the queue effect can be matched to this write. ``run_id`` (the
-    curation lease holder) and ``item_key`` (the worklist key the write settles)
-    are stored beside it, on every row of the write, so a care report can count
-    the run's own receipts. Neither is written when empty.
+    that owns the queue effect can be matched to this write. ``run_id`` and
+    ``item_key`` are stored beside it, on every row of the write. Neither is
+    written when empty.
 
     ``provenance``, when given, is the fact's evidence chain as
     :mod:`ciao.fact_candidates` records it — the transcript message ids it was
