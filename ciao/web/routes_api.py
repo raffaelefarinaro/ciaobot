@@ -81,6 +81,7 @@ from ciao.config import (
     SHARING_POLICIES,
     SharedBrainLink,
     WorkspaceConfig,
+    sharing_scope_row,
 )
 from ciao.model_tiers import MAX_MODEL_ID_CHARS
 from ciao.models import THINKING_LEVELS, ChatContext
@@ -595,8 +596,10 @@ async def share_evidence_confirm(request: Request) -> JSONResponse:
         )
         # Re-resolve the previewed project through the live manager before persisting.
         _share_project(request, workspace, target["project_id"])
-        result = share_evidence.confirm(
-            config, workspace=workspace, token=token, session=_share_session(request)
+        # Grant writers wait on the admission fence; never on the event loop.
+        result = await asyncio.to_thread(
+            share_evidence.confirm,
+            config, workspace=workspace, token=token, session=_share_session(request),
         )
         return JSONResponse(result)
     except share_evidence.EvidenceError as exc:
@@ -629,8 +632,8 @@ async def share_evidence_revoke(request: Request) -> JSONResponse:
     config = request.app.state.config
     try:
         workspace = _share_workspace(request)
-        return JSONResponse(share_evidence.revoke(
-            config, workspace=workspace,
+        return JSONResponse(await asyncio.to_thread(
+            share_evidence.revoke, config, workspace=workspace,
             grant_id=str(request.path_params.get("grant_id", "")),
         ))
     except share_evidence.EvidenceError as exc:
@@ -650,8 +653,8 @@ async def share_evidence_withdraw(request: Request) -> JSONResponse:
         return JSONResponse({"error": "expected an object"}, status_code=400)
     try:
         workspace = _share_workspace(request)
-        return JSONResponse(share_evidence.withdraw(
-            config, workspace=workspace,
+        return JSONResponse(await asyncio.to_thread(
+            share_evidence.withdraw, config, workspace=workspace,
             grant_id=str(request.path_params.get("grant_id", "")),
             reason=body.get("reason", ""),
         ))
@@ -850,6 +853,30 @@ async def set_workspace_shared_brain_sharing(request: Request) -> JSONResponse:
             {"error": "generation is required to confirm the shared brain"},
             status_code=400,
         )
+    scope_body = body.get("scope")
+    preview = body.get("preview", False)
+    if preview is not True and preview is not False:
+        return JSONResponse(
+            {"error": "preview must be a boolean", "code": "invalid_request"}, status_code=400
+        )
+    if scope_body is not None and (
+        policy != "automatic"
+        or not isinstance(scope_body, dict)
+        or set(scope_body) != {"projects", "producers", "operations"}
+    ):
+        return JSONResponse(
+            {
+                "error": "scope is only for automatic and needs projects, producers and operations",
+                "code": "invalid_scope",
+            },
+            status_code=400,
+        )
+    pcm = getattr(request.app.state, "project_chat_manager", None)
+    known_projects = {
+        str(project.project_id)
+        for project in (pcm.list_projects(workspace_name) if pcm is not None and hasattr(pcm, "list_projects") else [])
+        if getattr(project, "workspace", workspace_name) == workspace_name
+    }
 
     # Serialized with create, update, rename, archive and restore, which also
     # replace the registry and the link list. Automatic grants additionally
@@ -875,6 +902,9 @@ async def set_workspace_shared_brain_sharing(request: Request) -> JSONResponse:
                 expected_lifetime=expected_lifetime,
                 expected_generation=expected_generation,
                 owner=owner,
+                scope_body=scope_body,
+                preview=preview,
+                known_projects=known_projects,
             )
 
         claimed = False
@@ -914,9 +944,28 @@ async def _apply_sharing_policy(
     expected_lifetime: str,
     expected_generation: int,
     owner: Any,
+    scope_body: dict[str, Any] | None = None,
+    preview: bool = False,
+    known_projects: set[str] | None = None,
 ) -> JSONResponse:
     """Revalidate one policy change against memory and disk, then write it."""
+    from ciao import share_evidence  # noqa: PLC0415
     from ciao.workspaces import workspace_registry_lock  # noqa: PLC0415
+
+    def scope_for(target: SharedBrainLink) -> Any:
+        if scope_body is None:
+            return None
+        return shared_brain.build_sharing_scope(
+            target,
+            projects=scope_body["projects"],
+            producers=scope_body["producers"],
+            operations=scope_body["operations"],
+            known_projects=known_projects or set(),
+            known_producers=share_evidence.PRODUCERS,
+        )
+
+    def invalid_scope(exc: ValueError) -> JSONResponse:
+        return JSONResponse({"error": str(exc), "code": "invalid_scope"}, status_code=400)
 
     def changed() -> JSONResponse:
         return JSONResponse(
@@ -948,6 +997,10 @@ async def _apply_sharing_policy(
         )
     if not matches(link):
         return changed()
+    try:
+        scope_for(link)
+    except ValueError as exc:
+        return invalid_scope(exc)
     if policy == "automatic":
         if getattr(config, "_sharing_recovery_pending", False):
             return JSONResponse(
@@ -1003,23 +1056,39 @@ async def _apply_sharing_policy(
                     },
                     status_code=409,
                 )
-            try:
-                await run_while_claimed(
-                    shared_brain.merge_sharing_revocations,
-                    config,
-                    set(),
-                    registry_bytes=owner.current,
-                    force_fail_closed=False,
-                )
-            except OSError:
-                return JSONResponse(
-                    {
-                        "error": "The sharing journal could not be initialized. "
-                        "Nothing was changed.",
-                        "code": "consent_journal_unavailable",
-                    },
-                    status_code=503,
-                )
+            # A preview refuses like the real call but never initializes the journal.
+            if not preview:
+                try:
+                    await run_while_claimed(
+                        shared_brain.merge_sharing_revocations,
+                        config,
+                        set(),
+                        registry_bytes=owner.current,
+                        force_fail_closed=False,
+                    )
+                except OSError:
+                    return JSONResponse(
+                        {
+                            "error": "The sharing journal could not be initialized. "
+                            "Nothing was changed.",
+                            "code": "consent_journal_unavailable",
+                        },
+                        status_code=503,
+                    )
+    if preview:
+        # After the same refusal checks as the real call, so a preview never
+        # promises a grant the route would refuse. The exact permission, written nowhere.
+        would = shared_brain.set_sharing_policy(link, policy, scope_for(link))
+        return JSONResponse({"preview": {
+            "policy": policy,
+            "scope": (
+                sharing_scope_row(would.sharing_consent.scope)
+                if would.sharing_consent is not None and would.sharing_consent.scope is not None
+                else None
+            ),
+            "changes": would != link,
+            "generation_after": would.sharing_generation,
+        }})
     with workspace_registry_lock(config):
         workspace = config.workspace(workspace_name)
         if workspace is None:
@@ -1036,7 +1105,10 @@ async def _apply_sharing_policy(
         disk_row = _disk_shared_brain_row(config, workspace_name, brain_name)
         if not _disk_link_matches(current, disk_row):
             return changed()
-        updated = shared_brain.set_sharing_policy(current, policy)
+        try:
+            updated = shared_brain.set_sharing_policy(current, policy, scope_for(current))
+        except ValueError as exc:
+            return invalid_scope(exc)
         if updated != current or not _disk_link_state_matches(current, disk_row):
             links[index] = updated
             candidate = dataclasses.replace(workspace, shared_brains=links)
@@ -9249,6 +9321,20 @@ def _history_reason(text: Any) -> str:
     return " ".join(str(text or "").split())[:MAX_REASON]
 
 
+def _receipt_issue(
+    row: dict[str, Any], receipt_id: str, found: list[dict[str, Any]]
+) -> str:
+    """Why an accepted decision's named receipt cannot vouch for it, or ""."""
+    if row.get("action") != "accepted" or str(row.get("kind", "")) == "share":
+        return ""
+    if receipt_id and not found:
+        return "missing"
+    known = {raw for raw, _ in _APPLY_PRECEDENCE}
+    if any(str(r.get("status", "")) not in known for r in found):
+        return "unknown_status"
+    return ""
+
+
 def _attach_apply_state(vault: Path, rows: list[dict[str, Any]]) -> None:
     """Say whether each decision's write landed, from the receipts that performed it.
 
@@ -9261,6 +9347,13 @@ def _attach_apply_state(vault: Path, rows: list[dict[str, Any]]) -> None:
 
     ``applied`` is ``true`` or ``false`` when a receipt says so, and ``null``
     while the write is pending or when no receipt exists to say.
+
+    ``receipt_issue`` is set (and otherwise absent) on an accepted, non-share
+    decision whose evidence cannot be trusted: ``missing`` when it names a
+    receipt the journal does not hold, ``unknown_status`` when the receipt's
+    status is outside the protocol. Both leave ``apply_status`` at ``none``,
+    so the row is never read as applied, and is told apart from a legacy decision
+    that never had a receipt.
     """
     from ciao.memory_receipts import journal_path, read_receipts
 
@@ -9283,6 +9376,9 @@ def _attach_apply_state(vault: Path, rows: list[dict[str, Any]]) -> None:
             (state for raw, state in _APPLY_PRECEDENCE if raw in statuses), "none"
         )
         row["apply_status"] = status
+        issue = _receipt_issue(row, receipt_id, found)
+        if issue:
+            row["receipt_issue"] = issue
         if status == "applied":
             row["applied"] = True
         elif status in _NOT_APPLIED:

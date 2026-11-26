@@ -395,6 +395,42 @@ class RealRunnerReached(BaseException):
     """
 
 
+class BackgroundUpdateOnRequestLoop(AssertionError):
+    """A route test let a real shared-brain git update start on a request portal."""
+
+
+@pytest.fixture(autouse=True)
+def no_brain_update_on_a_request_portal(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A route test must stub `schedule_update`, not start a real git update.
+
+    `TestClient` without a context manager runs each request on its own portal
+    loop and tears that loop down the moment the response is read, cancelling
+    every task still alive, including asyncio's own pipe-connect task of a git
+    subprocess that is mid-spawn. On CPython 3.12 that leaves the cancelled
+    spawn waiting forever for pipes that never disconnect, so the portal never
+    closes and the xdist worker dies after the faulthandler timeout (CI run
+    45780398529). The engine has one long-lived loop and cancels only its own
+    update tasks (`shutdown_updates`), so only this harness is exposed.
+    Tests of `schedule_update` itself call it from the main thread.
+    """
+    import threading
+
+    from ciao import shared_brain
+
+    real = shared_brain.schedule_update
+
+    def schedule_update(*args: Any, **kwargs: Any) -> None:
+        link = args[0] if args else None
+        if getattr(link, "kind", None) == "git" and threading.current_thread() is not threading.main_thread():
+            raise BackgroundUpdateOnRequestLoop(
+                "stub shared_brain.schedule_update in a route test: a real update "
+                "would be cancelled mid-spawn when the request portal closes"
+            )
+        real(*args, **kwargs)
+
+    monkeypatch.setattr(shared_brain, "schedule_update", schedule_update)
+
+
 @pytest.fixture(autouse=True)
 def never_the_real_launchctl(monkeypatch: pytest.MonkeyPatch) -> None:
     """A takeover test that forgets to inject its runner must fail, not drive launchd.

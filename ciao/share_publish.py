@@ -708,6 +708,14 @@ def _verify_commit(folder: Path, commit: str, parent: str, fields: dict[str, Any
     return state == "blob" and content == fields["proposed"].encode("utf-8") and oid is not None
 
 
+def _is_direct_child(folder: Path, commit: str, tip: str) -> bool:
+    """Prove the commit has exactly one parent and it is the reviewed tip."""
+    if not _OID.fullmatch(commit) or not _OID.fullmatch(tip):
+        return False
+    code, out, _ = _safe_git(folder, "rev-list", "--parents", "-n", "1", commit, limit=256)
+    return code == 0 and _text(out).split(" ") == [commit, tip]
+
+
 def _reachable(folder: Path, commit: str, tracking: str, fields: dict[str, Any]) -> bool:
     code, _, _ = _safe_git(folder, "merge-base", "--is-ancestor", commit, tracking, limit=256)
     code2, parent_raw, _ = _safe_git(folder, "rev-parse", "--verify", commit + "^", limit=256)
@@ -1691,8 +1699,12 @@ def _publish_locked(config: Any, workspace: str, folder: Path, link: SharedBrain
                     return PublishOutcome("draft_unavailable", message="The publication attempt could not be recorded safely.")
         except memory_receipts.QueueLockError:
             return PublishOutcome("draft_unavailable", message="The share proposal queue could not be locked safely.")
+        if not _is_direct_child(folder, commit, tip):
+            return PublishOutcome("push_refused", message="The prepared commit is not a direct child of the reviewed tip.")
+        # Expected-old-tip update: the remote ref moves only if it still equals
+        # the tip this commit was built on. Never an unconditional force.
         code, push_stdout, stderr = _network_git(
-            folder, "push", "--porcelain", origin, f"{commit}:{ref}",
+            folder, "push", "--porcelain", f"--force-with-lease={ref}:{tip}", origin, f"{commit}:{ref}",
             limit=4096, timeout_s=PUSH_TIMEOUT_S,
         )
         fetched, _raw, _fetch_error = _fetch(folder, origin, ref)

@@ -32,6 +32,10 @@ from ciao.config import (
     SHARING_POLICIES,
     SharedBrainLink,
     SharingConsent,
+    SharingScope,
+    SharingScopeNote,
+    MAX_SCOPE_ITEMS,
+    sharing_scope_row,
     shared_brains_from_rows,
 )
 from ciao.git_proc import EXACT_BYTES, GIT_TIMEOUT_DETAIL, git_output_line, run_git
@@ -168,20 +172,89 @@ def sharing_consent_active(link: SharedBrainLink) -> bool:
         and consent.generation == link.sharing_generation
         and consent.identity == link.identity
         and consent.lifetime_id == link.lifetime_id
+        # A scoped grant is also bound to the reviewed note mapping it was made
+        # against: any later mapping change pauses it until the operator decides again.
+        and (consent.scope is None or consent.scope.mapping_generation == link.guide_mapping_generation)
     )
 
 
-def set_sharing_policy(link: SharedBrainLink, policy: str) -> SharedBrainLink:
+def sharing_scope_permits(
+    link: SharedBrainLink, *, project: str, producer: str, operation: str, note_type: str
+) -> bool:
+    """True only when an active consent names all four. A consent stored before
+    scopes existed names nothing, so it permits nothing."""
+    consent = link.sharing_consent
+    if not sharing_consent_active(link) or consent is None or consent.scope is None:
+        return False
+    scope = consent.scope
+    return (
+        project in scope.projects
+        and producer in scope.producers
+        and operation in scope.operations
+        and any(n.note_type == note_type and operation in n.operations for n in scope.note_mapping)
+    )
+
+
+def build_sharing_scope(
+    link: SharedBrainLink,
+    *,
+    projects: object,
+    producers: object,
+    operations: object,
+    known_projects: set[str],
+    known_producers: tuple[str, ...],
+) -> SharingScope:
+    """The scope an operator choice means for this link, or ValueError.
+
+    The note mapping is never client input: it is copied from the link's
+    reviewed guide mapping, so a browser cannot name a destination it has not
+    reviewed. Operations must stay inside what that mapping allows.
+    """
+    from ciao.shared_brain_guide import _OPERATIONS  # noqa: PLC0415
+
+    def chosen(raw: object, allowed: Any, label: str) -> tuple[str, ...]:
+        if (
+            not isinstance(raw, list) or not raw or len(raw) > MAX_SCOPE_ITEMS
+            or any(not isinstance(x, str) for x in raw)
+        ):
+            raise ValueError(f"choose at least one {label}")
+        if len(set(raw)) != len(raw) or any(x not in allowed for x in raw):
+            raise ValueError(f"choose only listed, distinct {label}s")
+        return tuple(sorted(raw))
+
+    mapping = link.guide_mapping
+    notes = tuple(
+        SharingScopeNote(g.note_type, g.kind, g.path, g.section, tuple(sorted(g.operations)))
+        for g in (mapping.grants if mapping is not None else ())
+    )
+    mapped_ops = {op for n in notes for op in n.operations}
+    scope_ops = chosen(operations, mapped_ops if notes else _OPERATIONS, "operation")
+    return SharingScope(
+        projects=chosen(projects, known_projects, "project"),
+        producers=chosen(producers, known_producers, "producer"),
+        operations=scope_ops,
+        note_mapping=tuple(sorted(notes, key=lambda n: n.note_type)),
+        mapping_generation=link.guide_mapping_generation,
+    )
+
+
+def set_sharing_policy(
+    link: SharedBrainLink, policy: str, scope: SharingScope | None = None
+) -> SharedBrainLink:
     """The link with ``policy`` applied, rotating consent durably.
 
     A grant stores a fresh consent at a new generation; a revocation clears the
     consent and bumps the generation again, so neither an old consent nor a
     publisher that captured one can survive a change of mind. Repeating the
     current choice returns the same link, so a double-submitted Settings save
-    does not invent a new generation.
+    does not invent a new generation. The generation moves only when the
+    effective policy changes: a different scope (wider or narrower) is a new
+    grant, an identical one is not.
     """
     if not isinstance(policy, str) or policy not in SHARING_POLICIES:
         raise ValueError("sharing policy must be review or automatic")
+    if policy == "review" and scope is not None:
+        raise ValueError("a review choice has no scope")
     if policy == "review":
         if link.sharing_policy == DEFAULT_SHARING_POLICY and link.sharing_consent is None:
             return link
@@ -191,7 +264,7 @@ def set_sharing_policy(link: SharedBrainLink, policy: str) -> SharedBrainLink:
             sharing_generation=link.sharing_generation + 1,
             sharing_consent=None,
         )
-    if sharing_consent_active(link):
+    if sharing_consent_active(link) and link.sharing_consent is not None and link.sharing_consent.scope == scope:
         return link
     generation = link.sharing_generation + 1
     return replace(
@@ -203,6 +276,7 @@ def set_sharing_policy(link: SharedBrainLink, policy: str) -> SharedBrainLink:
             identity=link.identity,
             lifetime_id=link.lifetime_id,
             granted_at=_now(),
+            scope=scope,
         ),
     )
 
@@ -1558,6 +1632,11 @@ def _initial_state(link: SharedBrainLink) -> dict[str, Any]:
         ),
         # A stored grant that is not effective (origin drift, a revoked-in-
         # memory generation, or an invalid row) still needs a revoke action.
+        "sharing_scope": (
+            sharing_scope_row(link.sharing_consent.scope)
+            if automatic and link.sharing_consent is not None and link.sharing_consent.scope is not None
+            else None
+        ),
         "sharing_grant_pending": stored and not automatic,
         "sharing_invalidation_failed": False,
         "origin_changed": False,
