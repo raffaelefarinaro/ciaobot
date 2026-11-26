@@ -32,9 +32,8 @@ same as (``same_as``) or lists every sibling it is distinct from
 
 **A draft is not a filing.** :func:`file_draft` writes a record and a queue
 bullet, both local. :func:`approve_draft` is the only thing that reaches GitHub,
-and every decision here — approve, create, reject — refuses in an unattended run,
-which :func:`unattended_run` reads off the run's own curation lease rather than
-off a flag the caller passes. That is the same rule the unattended capsule and
+and the care prompt and unattended capsule guidance tell an unattended run never
+to approve, create or reject a draft. That is the same rule the unattended capsule and
 :data:`ciao.memory_policy.UNATTENDED_DEFERRED_ACTIONS` already state for any
 public action. It **searches before it creates**: a lesson somebody else already
 reported upstream should be linked, not duplicated, and a retry after a network
@@ -1282,64 +1281,6 @@ def create_issue(*, title: str, body: str, repository: str) -> str:
 # ── Decisions ───────────────────────────────────────────────────────────────
 
 
-def unattended_run(config: CiaoConfig, workspace: str) -> str:
-    """The unattended run working on ``workspace``'s vault, or ``""``.
-
-    **Read from the run, never from a flag the caller passes.** A caller-supplied
-    ``unattended=`` only proves the caller read its own argument: the CLI passed
-    ``False`` on every path, so the parameter was a comment rather than a
-    control. The run's own curation lease is the one thing that cannot be
-    forgotten — ``ciao curation-begin`` takes it before the Workspace care run
-    reads a single file and ``ciao curation-end`` releases it, so a live lease
-    means an automation is mid-run on this very vault, and no attended person is
-    in the room to approve anything.
-
-    Empty for a workspace that cannot resolve its vault: an unanswerable question
-    is not an unattended run, and refusing on a guess would block a person from
-    deciding their own draft.
-    """
-    from ciao.curation_run import CurationStateError, active_lease
-
-    try:
-        vault = Path(config.workspace_vault_root(workspace))
-    except (AttributeError, ValueError):  # pragma: no cover - config guard
-        return ""
-    try:
-        lease = active_lease(vault)
-    except CurationStateError:
-        raise UnattendedRefused(
-            "curation state is uncertain; attended-only draft actions are refused"
-        ) from None
-    except OSError:  # pragma: no cover - an unreadable state file decides nothing
-        logger.debug("Could not read the curation state of %s", vault, exc_info=True)
-        raise UnattendedRefused(
-            "curation state could not be read; attended-only draft actions are refused"
-        ) from None
-    if not lease:
-        return ""
-    return str(lease.get("holder") or "an unattended run")
-
-
-def _refuse_if_unattended(config: CiaoConfig, workspace: str, action: str) -> None:
-    """Raise :class:`UnattendedRefused` when a run holds this vault's lease.
-
-    One place, called by every decision here, because the three of them reach
-    three different things — GitHub, a skill file, and the decision log — and a
-    rule kept three times is a rule that drifts. The refusal happens before
-    anything is read or written, so an unattended caller cannot half-file and
-    then discover it was unattended.
-    """
-    holder = unattended_run(config, workspace)
-    if not holder:
-        return
-    raise UnattendedRefused(
-        f"{action} is an attended action, and the unattended run {holder!r} holds "
-        "this vault's curation lease. An unattended run may prepare the draft and "
-        "report it under **What needs you**; a person approves the filing, and "
-        "the draft stays queued for them"
-    )
-
-
 def approve_draft(
     config: CiaoConfig,
     draft_id: str,
@@ -1351,11 +1292,9 @@ def approve_draft(
 ) -> UpstreamDraft | None:
     """Act on an approved draft: link a matching issue, or file a new one.
 
-    **Attended only**, twice over. ``unattended=True`` raises
+    **Attended only**: ``unattended=True`` raises
     :class:`UnattendedRefused` for a caller that already knows it is
-    unattended, and so does an unattended run discovered from the vault's
-    curation lease (:func:`_refuse_if_unattended`) — the check a CLI cannot opt
-    out of, because it never supplies the flag. Opening a public issue is already
+    unattended. Opening a public issue is already
     :data:`ciao.memory_policy.UNATTENDED_DEFERRED_ACTIONS`, and an unattended run
     that prepares the draft is the whole of what it may do — so the enforcement
     belongs here, where the request would be made, and not in a prompt nobody
@@ -1404,9 +1343,6 @@ def approve_draft(
                 "is not re-filed"
             )
         return None
-    _refuse_if_unattended(
-        config, draft.workspace, "opening or commenting on a public GitHub issue"
-    )
     if draft.target != UPSTREAM_ISSUE:
         raise DraftRefused(
             f"draft {draft_id} proposes a {draft.target}, not an upstream issue: "
@@ -1492,7 +1428,6 @@ def reject_draft(
     draft = find_draft(config, draft_id)
     if draft is None:
         return None
-    _refuse_if_unattended(config, draft.workspace, "settling a skill draft")
     return _settle(config, draft, DRAFT_REJECTED, reason=reason, via=via)
 
 
@@ -1658,8 +1593,8 @@ def create_new_skill(
     session will load, so the row is only settled once the creation is **read
     back, checked and synced**.
 
-    **Attended only**, on the same run-derived signal as an issue filing
-    (:func:`_refuse_if_unattended`): creating a skill writes a file every
+    **Attended only** by the care prompt and the unattended capsule guidance:
+    creating a skill writes a file every
     session of this workspace loads, which is the other half of the same
     "never unattended" rule.
 
@@ -1698,7 +1633,6 @@ def create_new_skill(
                 "is not re-created"
             )
         return None
-    _refuse_if_unattended(config, draft.workspace, "creating a skill")
     if draft.target != NEW_SKILL:
         raise DraftRefused(
             f"draft {draft_id} proposes an upstream issue, not a new skill: "

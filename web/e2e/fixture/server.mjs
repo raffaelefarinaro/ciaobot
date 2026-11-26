@@ -763,28 +763,6 @@ const GET_ROUTES = {
     const rows = state.verification ? [...PROPOSALS, ...VERIFICATION_PROPOSALS] : [...PROPOSALS]
     return { rows }
   },
-  // Settings > Workspace > Overview's Weekly care cycle card: the dry run. A
-  // switch made in this session flips the workspace to v2 (see careCycleApply).
-  '/api/care/cycle': (req, url) => {
-    const workspace = url.searchParams.get('workspace') || WORKSPACES[0].name
-    const switched = (sessionOf(req).careCycle || {})[workspace] === 'v2'
-    return {
-      workspace,
-      on_host: true,
-      lease_live: false,
-      status: switched ? 'v2' : 'v1',
-      live_lease: null,
-      marker: 'present',
-      last_full_pass: '2026-11-09',
-      daily: 2,
-      weekly_historical: 3,
-      ambiguous: [],
-      dropped: [],
-      backup_path: '/fixture/vault/Workspace/Curation-State.v1.bak',
-      digest: CARE_CYCLE_DIGEST,
-      blockers: [],
-    }
-  },
   // Settings > Workspace > Overview's Memory handover card.
   '/api/proposals/handover': (req, url) => {
     const state = sessionOf(req)
@@ -953,60 +931,8 @@ function projectChats(req, url) {
   }
 }
 
-/**
- * The care run report for one schedule dispatch (GET /api/schedules/{id}/care-run?dispatch_id=).
- * The dispatch id names the scenario, so a spec picks a state by patching the
- * schedule's last_dispatch_id. Counts and keys are synthetic.
- */
-const CARE_PROPOSAL_KEY = `prv_${'c'.repeat(64)}`
-const CARE_COUNTS = { planned: 6, completed: 2, deferred: 1, failed: 1 }
-const careItem = (status, detail, item_key) => ({ item_key, pass_id: 'pass-1', status, detail, receipt_ids: [] })
-const CARE_RUNS = {
-  'd-ok': {
-    state: 'ok',
-    care_run: { run_id: 'run-1', ...CARE_COUNTS, counts_complete: true, reasons: [] },
-    report_available: true,
-    job_status: 'ok',
-    run_id: 'run-1',
-    counts: CARE_COUNTS,
-    outcomes: [
-      careItem('applied', 'filed', 'Notes/applied-one'),
-      careItem('applied', 'filed', 'Notes/applied-two'),
-      careItem('failed', 'The write was refused', 'Notes/refused'),
-      careItem('blocked', 'The note is locked by another run', 'Notes/locked'),
-      careItem('deferred_budget', 'Left for the next run', 'Notes/later'),
-      careItem('queued', 'Waiting for your decision', CARE_PROPOSAL_KEY),
-    ],
-    weekly: { marker: 'not_advanced' },
-  },
-  'd-noop': {
-    state: 'ok',
-    care_run: { run_id: 'run-2', planned: 0, completed: 0, deferred: 0, failed: 0, counts_complete: true, reasons: [] },
-    report_available: true,
-    job_status: 'ok',
-    run_id: 'run-2',
-    counts: { planned: 0, completed: 0, deferred: 0, failed: 0 },
-    outcomes: [careItem('no_change', '', 'Notes/steady')],
-    weekly: { marker: 'advanced' },
-  },
-  'd-legacy': {
-    state: 'ok',
-    care_run: null,
-    report_available: false,
-    job_status: 'ok',
-    run_id: 'run-3',
-    counts: { planned: 3, completed: 3, deferred: 0, failed: 0 },
-  },
-  'd-pending': { state: 'pending', care_run: null, report_available: false },
-  'd-superseded': { state: 'superseded', care_run: null, report_available: false },
-  'd-ambiguous': { state: 'ambiguous', care_run: null, report_available: false },
-  'd-unavailable': { state: 'unavailable', care_run: null, report_available: false },
-}
-
 /** Path patterns, for the routes that carry an id. */
 const GET_PATTERNS = [
-  [/^\/api\/schedules\/[^/]+\/care-run$/, (_req, url) =>
-    CARE_RUNS[url.searchParams.get('dispatch_id') || ''] || { state: 'pending', care_run: null, report_available: false }],
   // An empty array is the "nothing to merge" short-circuit in the store; the
   // fallback `{}` would be read as a pagination envelope and crash on
   // `env.items`. The transcript is per-session, so a spec opts in through
@@ -1050,31 +976,6 @@ const WRITE_ROUTES = {
       })),
     }
   },
-}
-
-// The Weekly care cycle card's switch. It accepts only the exact body the card
-// sends, and the digest the dry run gave; a second switch is refused.
-const CARE_CYCLE_DIGEST = 'fixture-care-digest'
-
-function workspaceOf(body) {
-  return typeof body?.workspace === 'string' && body.workspace.trim() ? body.workspace.trim() : WORKSPACES[0].name
-}
-
-function careCycleApply(state, workspace, body, res) {
-  const exact = body && typeof body === 'object'
-    && Object.keys(body).sort().join(',') === 'confirm_quiesced,digest,workspace'
-    && body.confirm_quiesced === true
-    && typeof body.digest === 'string' && body.digest.length > 0
-  if (!exact) return sendJson(res, { error: 'send exactly workspace, digest and confirm_quiesced: true' }, 400)
-  state.careCycle = state.careCycle || {}
-  if (state.careCycle[workspace] === 'v2') {
-    return sendJson(res, { error: 'The switch was refused and nothing was written.', blockers: ['the curation state is already a v2 cycle document; there is nothing to migrate'] }, 409)
-  }
-  if (body.digest !== CARE_CYCLE_DIGEST) {
-    return sendJson(res, { error: 'The switch was refused and nothing was written.', blockers: ['the vault changed since the dry run (digest mismatch); run the dry run again'] }, 409)
-  }
-  state.careCycle[workspace] = 'v2'
-  return sendJson(res, { workspace, status: 'migrated', backup_path: '/fixture/vault/Workspace/Curation-State.v1.bak', digest: CARE_CYCLE_DIGEST })
 }
 
 function sendJson(res, body, status = 200) {
@@ -1362,9 +1263,6 @@ const server = http.createServer(async (req, res) => {
     if (scheduleDelete) {
       writer.removedSchedules.add(decodeURIComponent(scheduleDelete[1]))
       return sendJson(res, { ok: true })
-    }
-    if (pathname === '/api/care/cycle' && req.method === 'POST') {
-      return careCycleApply(writer, workspaceOf(body), body, res)
     }
     // Reading a chat: stamp it read and tell every device of the install.
     const readMatch = req.method === 'POST' ? /^\/api\/chats\/([^/]+)\/read$/.exec(pathname) : null

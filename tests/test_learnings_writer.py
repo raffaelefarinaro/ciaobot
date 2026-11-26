@@ -3,7 +3,7 @@
 ``ciao/learning_records.py`` is the model; these are the tests for the two
 production callers that have to agree with it. The writer
 (``memory_proposals.append_learning``) and the curation worklist
-(``curation_run._learning_items``) used to share a private regex in
+(the retired curation pass) used to share a private regex in
 ``memory_proposals`` and each keep their own reading of a learnings line. They
 are now two callers of one model, and these tests pin the contract that makes
 that worth anything: a replay of the same source is a no-op, and a resolved
@@ -20,7 +20,6 @@ from contextlib import contextmanager
 from datetime import date
 from pathlib import Path
 
-from ciao import curation_run as cr
 from ciao import memory_proposals as mp
 from ciao.learning_records import (
     SECTION_ACTIVE,
@@ -586,65 +585,6 @@ def test_a_preview_of_a_sighting_already_counted_is_a_no_op(tmp_path: Path) -> N
 
 
 # ---- the curation reader ---------------------------------------------------
-
-
-def test_curation_still_promotes_at_x3_through_the_shared_reader(
-    tmp_path: Path,
-) -> None:
-    vault = _vault(
-        tmp_path,
-        "# Learnings\n\n## Active\n"
-        "- [pin-node] [2026-01-01 → 2026-09-01] (x4) Pin the Node version.\n",
-    )
-    for _ in range(3):
-        mp.append_learning(vault, "Pin the Node version.", workspace="personal", source="chat-1")
-
-    items = cr._learning_items(vault, workspace="personal", today=date(2026, 9, 19))
-
-    assert [item.pass_id for item in items] == [cr.PASS_LEARNINGS]
-    # The key is a hash of the subject, so the subject is what has to be right.
-    assert items[0].keys == (
-        cr.item_key(cr.PASS_LEARNINGS, f"promote:{_only(vault).key}"),
-    )
-    assert "x3" in items[0].reason
-
-
-def test_curation_still_prunes_an_aging_x1(tmp_path: Path) -> None:
-    vault = _vault(tmp_path)
-    mp.append_learning(
-        vault, "Pin the Node version.", workspace="personal", source="chat-1"
-    )  # counts as today, so the entry is fresh
-    _age_the_only_entry(vault, "2026-01-01")
-
-    items = cr._learning_items(vault, workspace="personal", today=date(2026, 9, 19))
-
-    assert [item.pass_id for item in items] == [cr.PASS_LEARNINGS]
-    assert items[0].keys == (
-        cr.item_key(cr.PASS_LEARNINGS, f"prune:{_only(vault).key}"),
-    )
-    assert "x1" in items[0].reason
-
-
-def test_curation_does_not_replan_a_resolved_learning(tmp_path: Path) -> None:
-    vault = _vault(
-        tmp_path,
-        "# Learnings\n\n## Active\n\n## Promoted / Resolved\n"
-        "- [pin-node] [2026-01-01 → 2026-09-01] (x4) Pin the Node version.\n",
-    )
-
-    assert cr._learning_items(vault, workspace="personal", today=date(2026, 9, 19)) == []
-
-
-def test_curation_ignores_an_entry_with_no_recurrence(tmp_path: Path) -> None:
-    """A plain bullet renders `(?)`, which is not "seen once".
-
-    Promoting or pruning on a count nobody witnessed is the invented-x1 failure
-    arriving from the other direction: the worklist would schedule a decision
-    about a learning it has no evidence for.
-    """
-    vault = _vault(tmp_path, "# Learnings\n\n## Active\n- Ask before deleting.\n")
-
-    assert cr._learning_items(vault, workspace="personal", today=date(2026, 9, 19)) == []
 
 
 def _age_the_only_entry(vault: Path, last_seen: str) -> None:

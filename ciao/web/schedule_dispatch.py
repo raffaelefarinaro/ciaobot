@@ -31,7 +31,6 @@ from ciao import job_runs
 from ciao import loop_wake
 from ciao import schedules as schedule_support
 from ciao.config import CiaoConfig
-from ciao.curation_run import unstarted_run_reason
 from ciao.error_log import clear_error_log, tail_error_log
 from ciao.models import BridgeMode, ImageAttachment
 from ciao.provider_service import ProviderService, supported_providers
@@ -96,7 +95,6 @@ _ATTENTION_SYSTEM_PROMPT = (
 # The one system routine whose job is verifiable from outside the chat: it is
 # told to take the curation lease first, so a clean turn that never took it did
 # nothing. Stored ids are workspace-qualified, so compare with `system_base_id`.
-MEMORY_CURATION_SCHEDULE_BASE_ID = "system-memory-curation"
 
 
 class ScheduleDispatchHost(Protocol):
@@ -182,15 +180,6 @@ class ScheduleDispatcher:
 
     def __init__(self, host: ScheduleDispatchHost) -> None:
         self._host = host
-        self._active_care: dict[str, tuple[str, str, object]] = {}
-
-    def active_care_dispatch(self, chat_id: str, workspace: str) -> str | None:
-        """Identify a live care stream created by this dispatcher in this workspace."""
-        active = self._active_care.get(chat_id)
-        broker = getattr(self._host, "_broker", None)
-        if active is None or active[0] != workspace or broker is None or broker.get(chat_id) is not active[2]:
-            return None
-        return active[1]
 
     async def _schedule_run_needs_user(
         self, entry: ScheduleEntry, outcome: chat_service.ScheduleRunOutcome,
@@ -723,19 +712,10 @@ class ScheduleDispatcher:
         if loop_owned:
             prompt = loop_wake.loop_wake_prompt(entry, now=datetime.now(UTC))
             stream_origin = "loop"
-        broker = getattr(self._host, "_broker", None)
-        prior_stream = broker.get(target_id) if broker is not None else None
-        registered_care = False
         try:
             stream = self._host.start_stream(
                 target_id, prompt, unattended=True, origin=stream_origin
             )
-            if (broker is not None and prior_stream is None and broker.get(target_id) is stream
-                and _sched_dispatch_id and entry.scope == "system" and not loop_owned
-                and schedule_support.system_base_id(_sched_schedule_id) == MEMORY_CURATION_SCHEDULE_BASE_ID
-                and _sched_workspace and _sched_workspace == getattr(entry, "workspace", "")):
-                self._active_care[target_id] = (_sched_workspace, _sched_dispatch_id, stream)
-                registered_care = True
             async for raw_payload in stream.subscribe():
                 if not isinstance(raw_payload, dict):
                     continue
@@ -776,8 +756,6 @@ class ScheduleDispatcher:
             outcome.stream_error = True
             logger.exception("Schedule dispatch to %s failed", target_id)
         finally:
-            if registered_care and self._active_care.get(target_id, (None, None, None))[2] is stream:
-                del self._active_care[target_id]
             if (
                 orig_model is not None
                 and not interval
@@ -793,28 +771,6 @@ class ScheduleDispatcher:
         if chat_state and chat_state.retry_status == "pending":
             outcome.retry_pending = True
             network_retry = chat_state.retry_kind == "network"
-
-        if (
-            chat_service._schedule_run_clean(outcome)
-            and schedule_support.system_base_id(_sched_schedule_id)
-            == MEMORY_CURATION_SCHEDULE_BASE_ID
-        ):
-            vault = self._host._config.workspace_vault_root(
-                getattr(entry, "workspace", "") or None
-            )
-            reason = await asyncio.to_thread(
-                unstarted_run_reason, vault, _sched_started
-            )
-            if reason:
-                # A missing lease or uncertain state means the nightly care
-                # cannot be confirmed; report it as a failure and keep visible.
-                outcome.is_error = True
-                outcome.final_text = reason
-                logger.warning(
-                    "Schedule %s curation completion could not be confirmed: %s",
-                    _sched_schedule_id,
-                    reason,
-                )
 
         needs_user = False
         # A loop's own chat is never archived by its run: its archive policy is

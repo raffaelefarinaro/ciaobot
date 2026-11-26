@@ -8,7 +8,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { createPinia, setActivePinia } from 'pinia'
 import { flushPromises, mount } from '@vue/test-utils'
-import { RouterLinkStub } from '@vue/test-utils'
 import ProposalHistoryList from '../ProposalHistoryList.vue'
 import type { ProposalHistoryRow } from '../../lib/types'
 
@@ -38,15 +37,13 @@ function row(overrides: Partial<ProposalHistoryRow> = {}): ProposalHistoryRow {
   }
 }
 
-async function mountRows(rows: ProposalHistoryRow[], schedules: unknown[] = [], careRun: unknown = null) {
+async function mountRows(rows: ProposalHistoryRow[]) {
   apiGet.mockImplementation(async (path: string) => {
     if (path.startsWith('/api/proposals/history')) return { rows, total: rows.length, truncated: false }
-    if (path === '/api/schedules') return schedules
-    if (path.endsWith('/care-run')) return { care_run: careRun }
     return {}
   })
   const wrapper = mount(ProposalHistoryList, {
-    global: { plugins: [createPinia()], stubs: { RouterLink: RouterLinkStub } },
+    global: { plugins: [createPinia()] },
   })
   await flushPromises()
   return wrapper
@@ -158,35 +155,5 @@ describe('History from an older engine', () => {
     expect(view.find('.ph-apply').exists()).toBe(false)
     expect(view.find('.ph-actor').text()).toBe('You')
     expect(view.text()).not.toMatch(/NaN|undefined/)
-  })
-})
-
-describe('History run link for automated rows', () => {
-  const careSchedule = { schedule_id: 'system-memory-curation', last_run_chat_id: 'chat_a' }
-  const careRun = { run_id: 'run_1', planned: 1, completed: 1, deferred: 0, failed: 0, counts_complete: true, reasons: [] }
-
-  it('links to the schedule whose last run carries the row run id', async () => {
-    const view = await mountRows(
-      [row({ actor: 'automated', via: 'agent', kind: 'skill', run_id: 'run_1' })],
-      [careSchedule],
-      careRun,
-    )
-    const link = view.findComponent(RouterLinkStub)
-    expect(link.exists()).toBe(true)
-    expect(link.props('to')).toBe('/schedules/system-memory-curation')
-  })
-
-  it('shows no link when no care run matches the row run id', async () => {
-    const view = await mountRows(
-      [row({ actor: 'automated', via: 'agent', kind: 'skill', run_id: 'run_other' })],
-      [careSchedule],
-      careRun,
-    )
-    expect(view.findComponent(RouterLinkStub).exists()).toBe(false)
-  })
-
-  it('shows no link for a human row', async () => {
-    const view = await mountRows([row({ actor: 'human' })], [careSchedule], careRun)
-    expect(view.findComponent(RouterLinkStub).exists()).toBe(false)
   })
 })

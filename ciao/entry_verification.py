@@ -398,8 +398,7 @@ def check_settles_entry(
     One read of the sidecar and N lookups, rather than N reads of the same file:
     :func:`read_entry_checks` re-reads and re-parses the whole document on every
     call, so a worklist asking about every due entry in a vault pays that parse
-    once per entry — the entry pass being the one caller that does exactly that,
-    on every ``curation-begin``, over every note in the vault. The predicate is
+    once per entry for every entry in every note of the vault. The predicate is
     the *same* one :func:`verify_entry` short-circuits on, so a caller batching
     the reads cannot end up with a second, drifting definition of "settled".
 

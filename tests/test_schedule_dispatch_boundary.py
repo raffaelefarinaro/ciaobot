@@ -10,14 +10,13 @@ manager's named seams instead of bypassing a test/integration patch.
 from __future__ import annotations
 
 import dataclasses
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime
 from pathlib import Path
 from types import SimpleNamespace
 from typing import cast
 
 import pytest
 
-from ciao import curation_run
 from ciao.config import CiaoConfig, WorkspaceConfig
 from ciao.debug_report import (
     ERROR_LOG_OMISSION_NOTICE,
@@ -233,46 +232,6 @@ def _capture_run_records(monkeypatch: pytest.MonkeyPatch) -> list[JobRun]:
     rows: list[JobRun] = []
     monkeypatch.setattr("ciao.web.schedule_dispatch.job_runs.record_run", rows.append)
     return rows
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize(
-    ("schedule_id", "scope", "dispatch_id", "prior", "expected"),
-    [
-        ("system-memory-curation@personal", "system", "dispatch-1", False, "dispatch-1"),
-        ("system-memory-curation@personal", "system", "dispatch-1", True, None),
-        ("system-memory-curation@personal", "system", "", False, None),
-        ("system-memory-curation@personal", "user", "dispatch-1", False, None),
-        ("another-schedule", "system", "dispatch-1", False, None),
-    ],
-)
-async def test_care_dispatch_authority_exists_only_during_its_own_stream(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, schedule_id: str, scope: str,
-    dispatch_id: str, prior: bool, expected: str | None,
-) -> None:
-    host = _ScheduleHost(tmp_path, [])
-    dispatcher = ScheduleDispatcher(cast(ScheduleDispatchHost, host))
-    broker = SimpleNamespace(current=object() if prior else None)
-    broker.get = lambda _chat_id: broker.current
-    host._broker = broker
-    observed: list[object] = []
-
-    class ObservedStream(_Stream):
-        async def subscribe(self):
-            observed.append(dispatcher.active_care_dispatch("chat-1", "personal"))
-            yield {"type": "result", "text": "done", "is_error": False}
-
-    def start_stream(*args, **kwargs):
-        broker.current = ObservedStream([])
-        return broker.current
-
-    host.start_stream = start_stream
-    entry = dataclasses.replace(_entry(), schedule_id=schedule_id,
-                                scope=scope, last_dispatch_id=dispatch_id)
-    monkeypatch.setattr("ciao.web.schedule_dispatch.job_runs.record_run", lambda _row: None)
-    await dispatcher.dispatch_schedule(entry, "Run the routine.", "opus", "auto", "claude")
-    assert observed == [expected]
-    assert dispatcher.active_care_dispatch("chat-1", "personal") is None
 
 
 @pytest.mark.asyncio
@@ -558,151 +517,6 @@ def _record_failure(error: str, *, workspace: str, job: str = "background_run") 
     ))
 
 
-class _LeaseTakingStream(_Stream):
-    """A turn that takes and releases the curation lease while it streams.
-
-    ``_sched_started`` is sampled inside ``dispatch_schedule``, before the
-    stream is consumed, so the state file has to be written from inside
-    ``subscribe`` for the stamp to fall inside the run's own window. No sleep:
-    the lease stamps are compared against a second-resolution floor.
-    """
-
-    def __init__(self, events: list[dict[str, object]], vault: Path) -> None:
-        super().__init__(events)
-        self._vault = vault
-
-    async def subscribe(self):
-        lease = curation_run.begin_run(self._vault, holder="t")
-        curation_run.end_run(self._vault, holder=lease.holder)
-        for event in self._events:
-            yield event
-
-
-@pytest.mark.asyncio
-async def test_curation_run_without_lease_records_error(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """A clean turn that never took the lease did not do its job (#866).
-
-    ``ciao`` off the agent's PATH leaves the agent saying "nothing happened"
-    and ending the turn without a single error event, which the dispatcher can
-    only see as a healthy run.
-    """
-    host = _ScheduleHost(
-        tmp_path,
-        [{"type": "result", "text": "nothing happened", "is_error": False}],
-    )
-    dispatcher = ScheduleDispatcher(cast(ScheduleDispatchHost, host))
-    rows: list[object] = []
-    monkeypatch.setattr(
-        "ciao.web.schedule_dispatch.job_runs.record_run",
-        lambda row: rows.append(row),
-    )
-
-    result = await dispatcher.dispatch_schedule(
-        _curation_entry(archive_policy="auto"),
-        "Run the routine.",
-        "opus",
-        "auto",
-        "claude",
-    )
-
-    assert result["status"] == "error"
-    assert len(rows) == 1
-    row = rows[0]
-    assert row.status == "error"
-    assert "curation lease was never taken" in row.error
-    # An unclean run must stay visible, not be swept into the archive.
-    assert host.archives == []
-
-
-@pytest.mark.asyncio
-async def test_curation_with_uncertain_state_records_failure_and_does_not_autoarchive(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    host = _ScheduleHost(
-        tmp_path,
-        [{"type": "result", "text": "nothing happened", "is_error": False}],
-    )
-    state = curation_run.state_path(tmp_path / "vault")
-    state.parent.mkdir(parents=True)
-    state.write_text(
-        '{"version":1,"done_keys":{},"lease":{},"last_run":{},"x":'
-        + "[" * 2000
-        + "0"
-        + "]" * 2000
-        + "}",
-        encoding="utf-8",
-    )
-    dispatcher = ScheduleDispatcher(cast(ScheduleDispatchHost, host))
-    rows: list[object] = []
-    monkeypatch.setattr(
-        "ciao.web.schedule_dispatch.job_runs.record_run",
-        lambda row: rows.append(row),
-    )
-
-    result = await dispatcher.dispatch_schedule(
-        _curation_entry(archive_policy="auto"),
-        "Run the routine.",
-        "opus",
-        "auto",
-        "claude",
-    )
-
-    assert result["status"] == "error"
-    assert len(rows) == 1 and rows[0].status == "error"
-    assert "curation state is uncertain" in rows[0].error
-    assert host.archives == []
-
-
-@pytest.mark.asyncio
-async def test_curation_run_that_took_the_lease_stays_ok(
-    tmp_path: Path,
-) -> None:
-    host = _ScheduleHost(
-        tmp_path,
-        [{"type": "result", "text": "curated", "is_error": False}],
-    )
-    vault = tmp_path / "vault"
-    (vault / "Workspace").mkdir(parents=True)
-    host.start_stream = (  # type: ignore[method-assign]
-        lambda chat_id, prompt, images=None, *, is_retry=False, unattended=False, origin="": cast(
-            ChatStream, _LeaseTakingStream(host._stream_events, vault)
-        )
-    )
-    dispatcher = ScheduleDispatcher(cast(ScheduleDispatchHost, host))
-
-    result = await dispatcher.dispatch_schedule(
-        _curation_entry(), "Run the routine.", "opus", "auto", "claude"
-    )
-
-    assert result["status"] == "ok"
-    assert host.vault_root_calls == ["personal"]
-
-
-@pytest.mark.asyncio
-async def test_curation_run_with_other_holder_live_lease_stays_ok(
-    tmp_path: Path,
-) -> None:
-    """Standing down because another run holds the lease is not a failure."""
-    vault = tmp_path / "vault"
-    (vault / "Workspace").mkdir(parents=True)
-    started = datetime.now(UTC) - timedelta(seconds=5)
-    curation_run.begin_run(vault, holder="other", now=started)
-    host = _ScheduleHost(
-        tmp_path,
-        [{"type": "result", "text": "nothing happened", "is_error": False}],
-    )
-    dispatcher = ScheduleDispatcher(cast(ScheduleDispatchHost, host))
-
-    result = await dispatcher.dispatch_schedule(
-        _curation_entry(), "Run the routine.", "opus", "auto", "claude"
-    )
-
-    assert result["status"] == "ok"
-
-
 @pytest.mark.asyncio
 async def test_other_schedules_never_read_curation_state(
     tmp_path: Path,
@@ -940,31 +754,6 @@ def _both_targets(tmp_path: Path):
     entry.web_project_id = work_project.project_id
     entry.workspace = "personal"
     return manager, entry, personal_chat, work_project
-
-
-@pytest.mark.asyncio
-async def test_real_manager_binds_care_authority_to_running_stream(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    manager = _workspace_pair_manager(tmp_path)
-    project = manager.create_project("Care", workspace="personal")
-    chat = manager.create_chat(project.project_id, title="Care", provider="claude")
-    entry = dataclasses.replace(
-        _entry(), schedule_id="system-memory-curation@personal", scope="system",
-        last_dispatch_id="dispatch-real", web_chat_id=chat.chat_id,
-    )
-    dispatcher = manager._schedule_dispatcher_for()
-    observed: list[str | None] = []
-
-    async def fake_stream_chat(chat_id, prompt, images=None, **kwargs):
-        observed.append(dispatcher.active_care_dispatch(chat_id, "personal"))
-        yield {"type": "result", "text": "done", "is_error": False}
-
-    monkeypatch.setattr(manager, "stream_chat", fake_stream_chat)
-    monkeypatch.setattr("ciao.web.schedule_dispatch.job_runs.record_run", lambda _row: None)
-    await dispatcher.dispatch_schedule(entry, "Run the routine.", "opus", "auto", "claude")
-    assert observed == ["dispatch-real"]
-    assert dispatcher.active_care_dispatch(chat.chat_id, "personal") is None
 
 
 @pytest.mark.asyncio
@@ -1501,3 +1290,32 @@ async def test_system_schedule_failed_run_does_not_clear_engine_error_log(
     assert rows[0].status == "error"
     assert rows[0].extra["workspace"] == ""
     assert path.read_text(encoding="utf-8") == "SYNTH-KEEP-ME\n"
+
+
+@pytest.mark.asyncio
+async def test_a_clean_care_run_that_took_no_lease_stays_ok(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The care prompt works the vault itself; there is no lease to take."""
+    host = _ScheduleHost(
+        tmp_path,
+        [{"type": "result", "text": "cared for the vault", "is_error": False}],
+    )
+    dispatcher = ScheduleDispatcher(cast(ScheduleDispatchHost, host))
+    rows: list[object] = []
+    monkeypatch.setattr(
+        "ciao.web.schedule_dispatch.job_runs.record_run",
+        lambda row: rows.append(row),
+    )
+
+    result = await dispatcher.dispatch_schedule(
+        _curation_entry(archive_policy="auto"),
+        "Run the routine.",
+        "opus",
+        "auto",
+        "claude",
+    )
+
+    assert result["status"] == "ok"
+    assert [row.status for row in rows] == ["ok"]  # type: ignore[attr-defined]

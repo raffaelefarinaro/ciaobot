@@ -124,13 +124,6 @@ def rules_path(vault_root: Path, kind: str) -> Path:
     return vault_root / RULES_DIR / _NAMES[kind]
 
 
-def progress_key(kind: str) -> str:
-    """The curation-progress key for one rules file (``rules:<hash>``)."""
-    from ciao.curation_run import PASS_RULES, item_key
-
-    return item_key(PASS_RULES, kind)
-
-
 # ── Sanitising ────────────────────────────────────────────────────────────
 
 
@@ -358,7 +351,6 @@ def _section(
         "rows": sum(1 for e in entries if e["by"] == "user"),
         "agent_relayed_rows": sum(1 for e in entries if e["by"] == "agent"),
         "fingerprint": _fingerprint(fp_rows),
-        "progress_key": progress_key(kind),
         "file": _NAMES[kind],
         "file_present": state.present,
         "fence_malformed": state.malformed,

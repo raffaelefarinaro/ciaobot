@@ -821,7 +821,7 @@ def scan_category_candidates(
     ``registry`` is required, and it is NOT ``load_entity_types(vault_root)``:
     *vault_root* is where this workspace's NOTES live, while
     ``entity-types.yaml`` belongs to the AGENT vault root. The caller resolves the
-    root (``ciao/curation_run.py`` threads the one the CLI resolved) and this
+    root (the CLI threads the one it resolved) and this
     function never guesses it.
     """
     root = Path(vault_root)

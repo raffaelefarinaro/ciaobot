@@ -303,8 +303,7 @@ def lock_path_for(resolved_key: str) -> Path:
     same lock. The user component (the uid; the SID on Windows) keeps two local
     accounts from colliding on a shared ``/tmp``.
 
-    Public because the curation lease (``ciao/curation_run.py``) guards a
-    different vault file and must not reinvent — or diverge from — where this
+    Public so other lock users do not reinvent — or diverge from — where this
     install puts its lock files.
     """
     base = os.environ.get(_QUEUE_LOCK_DIR_ENV, "").strip()
@@ -761,9 +760,8 @@ def commit_region_change(
     ``authorize``, when given, is a factory for a context manager whose entry
     answers whether this write may proceed. It is entered once the revision
     check has passed, and it stays held through the ``prepared`` row, the
-    guide replacement and the ``applied`` row, so a lease cannot be replaced
-    between the decision and the write (the guide lock is taken before the
-    state lock; see :func:`ciao.curation_run.authorize_holder`). A False answer,
+    guide replacement and the ``applied`` row, so the authority cannot change
+    between the decision and the write. A False answer,
     or a check that raises, is :class:`AuthorityRefused` with nothing journalled.
 
     Precondition for ``authorize``: the caller must not already hold the state
