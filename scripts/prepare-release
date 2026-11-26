@@ -1,4 +1,4 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-"${CIAO_PYTHON:-python3}" -m ciao.release "$@"
+"${CIAO_PYTHON:-python3}" "$(dirname "$0")/release.py" "$@"

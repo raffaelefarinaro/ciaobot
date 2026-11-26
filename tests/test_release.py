@@ -7,8 +7,8 @@ from pathlib import Path
 
 import pytest
 
-import ciao.release as release_mod
-from ciao.release import (
+import release as release_mod
+from release import (
     CommitSummary,
     ReleaseError,
     _resolve_source_ref,
@@ -629,7 +629,7 @@ def test_dependency_step_reports_the_files_it_wrote(tmp_path: Path, monkeypatch)
     (tmp_path / "pyproject.toml").write_text("", encoding="utf-8")
     (tmp_path / "uv.lock").write_text("# lock\n", encoding="utf-8")
 
-    import ciao.dependency_updates as depmod
+    import dependency_updates as depmod
 
     monkeypatch.setattr(
         depmod, "apply_auto_updates", lambda *_a, **_k: ["pkg (Python: 1 -> 2)"]
@@ -647,7 +647,7 @@ def test_dependency_step_reports_nothing_when_no_bump_applied(
     tmp_path: Path, monkeypatch
 ) -> None:
     """No adopted bump means no extra paths to stage."""
-    import ciao.dependency_updates as depmod
+    import dependency_updates as depmod
 
     monkeypatch.setattr(depmod, "apply_auto_updates", lambda *_a, **_k: [])
     update = type("U", (), {"auto": True})()
@@ -888,7 +888,7 @@ def test_probe_claude_reads_the_cli_and_the_pinned_adapter(
 
     monkeypatch.setattr(release_mod.subprocess, "run", fake_run)
     monkeypatch.setattr(
-        "ciao.dependency_updates.get_latest_npm_version", lambda name: None
+        "dependency_updates.get_latest_npm_version", lambda name: None
     )
 
     probe = release_mod._probe_claude()
@@ -921,7 +921,7 @@ def test_probe_claude_notes_a_missing_or_unpinned_adapter(
 
     monkeypatch.setattr(release_mod.subprocess, "run", fake_run)
     monkeypatch.setattr(
-        "ciao.dependency_updates.get_latest_npm_version", lambda name: None
+        "dependency_updates.get_latest_npm_version", lambda name: None
     )
 
     probe = release_mod._probe_claude()
