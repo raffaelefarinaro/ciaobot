@@ -16,15 +16,20 @@
 - **Question cards are not shown.** When the agent asks a multiple-choice question, it asks in plain text; 2.0 has no question card yet.
 - **Claude trims more by default.** The MCP resource tools (list/read MCP resources), `PublishPlugin`, `ShareOnboardingGuide` and the slides and whiteboard skills are off by default. If your MCP servers serve resources, turn the MCP resource tools back on in Settings.
 - **Mac: install the 2.0 app once by hand.** Download `Ciaobot-<version>.dmg` from this release, open it and drag Ciaobot to Applications. A 1.x install does not update itself to the 2.0 app; after this one manual install, the app updates itself.
+- **The review screens are gone.** To decide, History and Vault Review no longer exist. The agent writes to your notes directly and Git is the undo: open the folder's Git history to see or revert a change. What the agent is unsure of goes on `Workspace/Unsure.md`, and proposed skill or note changes are files you can open.
+- **The Care cycle card is gone.** Workspace care no longer has a card in Automations. It is a scheduled checklist the agent runs, and its report is `Workspace/Care-Report.md`.
+- **Handover and approval settings are gone.** There are no memory handover or approval options in Settings; stored values are ignored.
 - **Moving from 1.x:** https://www.raffaelefarinaro.com/ciaobot/migrate.html
 
 ### New features
 - **Ciaobot for Mac:** one app download that includes the engine, with a menu-bar tray, quit confirmation, start at sign-in, and updates through Sparkle. Switch between saved servers and This Mac from the tray, and move your workspace from inside the app. (macOS)
 - **One-line Linux installer:** `install.sh` installs the engine as a service on a Linux server (`ciao service install`), and `ciao update` re-runs the latest installer. (Linux)
 - **Codex, Claude and OpenCode over ACP:** all three agent CLIs run through the Agent Client Protocol using the copies installed on your machine, so Codex is available as a provider and a missing adapter is installed for you. Settings → Providers shows a plain "Not installed" state and refreshes model lists after an account change.
-- **Shared brains:** Settings → Shared brains links a shared notes folder or git checkout to a workspace. Notes drafted from your chats are reviewed by you before anything is published, and only approved notes are saved to the shared folder.
+- **Shared brains:** Settings → Shared brains links a shared notes folder or a Git clone to a workspace and lets you switch each brain on or off. The agent reads it, and a stock instruction tells it how to write to it. There is no review queue: you manage the brain's own history.
 - **Separate notes folder:** setup can place your notes in a cloud-synced folder, and notes stay in place when that folder is briefly unavailable.
-- **Workspace care:** a weekly care cycle with a card in Automations that shows the full report of the last run. History shows what was applied or approved, who decided, why, and which run made the change; memory and profile suggestions need their own approval.
+- **Workspace care:** the agent runs a care checklist on a schedule and writes its report to `Workspace/Care-Report.md`. There is no care card.
+- **Memory review by the agent:** the agent writes memory directly, Git is the undo, uncertain items go to `Workspace/Unsure.md`, and proposals are files. There are no review screens.
+- **Conversation import is a skill:** importing past conversations is done by asking the agent, which uses the import skill, instead of a Settings flow.
 - **Loops:** ask a chat to start a loop (`ciao loop start`, `list`, `stop`). Loops live in Automations and show a Stop chip in the composer, stop after two failed runs with one notification, and end with their chat.
 - **Usage page:** a heatmap, projects, memory pipeline, hours and models, plus a Today section on Home (`ciao stats`).
 - **Folder browser:** open any folder pinned or linked in a chat, browse it from Chat details, and see it docked in the pinned tile.
@@ -75,12 +80,10 @@
 - Chat details lists OpenCode skills loaded by ID ([#2863](https://github.com/raffaelefarinaro/ciaobot/issues/2863)).
 - A note left unverified by an unattended run can be re-verified in an attended chat ([#2848](https://github.com/raffaelefarinaro/ciaobot/issues/2848)), ([#2928](https://github.com/raffaelefarinaro/ciaobot/issues/2928)).
 - Existing vaults adopted per root are not offered relocation ([#2845](https://github.com/raffaelefarinaro/ciaobot/issues/2845)), and onboarding into an existing vault repo registers the right vault ([#2619](https://github.com/raffaelefarinaro/ciaobot/issues/2619)).
-- The vault review list refreshes after a backlink is added ([#3020](https://github.com/raffaelefarinaro/ciaobot/issues/3020)).
 - Task delegation refuses an unknown model before creating a chat ([#2509](https://github.com/raffaelefarinaro/ciaobot/issues/2509)).
 - A stored font scale of 1.2 moves to the new default ([#2715](https://github.com/raffaelefarinaro/ciaobot/issues/2715)).
 - A workspace audit reads only that workspace's MEMORY.md ([#2501](https://github.com/raffaelefarinaro/ciaobot/issues/2501)).
 - Concurrent schedule writers no longer overwrite each other's changes ([#3068](https://github.com/raffaelefarinaro/ciaobot/issues/3068)).
-- Workspace care resumes cleanly after interruption and refuses corrupt state ([#3061](https://github.com/raffaelefarinaro/ciaobot/issues/3061)), ([#3064](https://github.com/raffaelefarinaro/ciaobot/issues/3064)).
 
 [Full list of changes](https://github.com/raffaelefarinaro/ciaobot/compare/v1.10.0...v2.0.0)
 
