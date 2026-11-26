@@ -82,3 +82,12 @@ def test_anchor_load_rules(rule: dict) -> None:  # type: ignore[type-arg]
 def test_command_context_is_part_of_the_signed_bytes() -> None:
     c = Command("revoke_grant", 1, "op", {"grant_id": "g"})
     assert c.signing_bytes().startswith(b"ciao-chat-authority/command/v1\0")
+
+
+def test_vectors_carry_the_test_keys_warning_and_the_key_id() -> None:
+    doc = _doc()
+    assert doc["warning"].startswith("TEST KEYS ONLY")
+    assert "TEST KEYS ONLY" in (v.__doc__ or "")
+    for raw in doc["signing"]["commands"]:
+        assert raw["key_id"] == doc["keys"]["operator_key_id"]
+        assert doc["keys"]["operator_key_id"] in bytes.fromhex(raw["signing_bytes_hex"]).decode()

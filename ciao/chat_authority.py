@@ -70,6 +70,27 @@ Hardening (#3623 slice 1, #3662), closed in this library:
   refuses to open (stays closed), never repairing. Two failed writes in a row
   leave the anchor two ahead of the blob and therefore also fail closed on the
   next load; recovery is the host's admin reset.
+* Every command signs the operator key id (SHA-256 of the public key), and
+  the authority refuses a command whose key id is not its verifier's, so a
+  signature is bound to one key and a later key rotation cannot replay old
+  commands.
+* The state key and the event seed must be different bytes; construction
+  refuses the same secret in both roles.
+* Write-ahead anchoring accepts a blob one behind the anchor (crash window).
+  An attacker who can write the storage can therefore restore the previous
+  blob once, undoing the latest write (for example a revoke). Decision for the
+  Swift anchor: it stores, with the counter, the SHA-256 of the blob it expects
+  next (`advance(to, blob_sha256)`) and the digest of the previous one; a
+  blob one behind the anchor is accepted only if its digest equals the
+  anchor's previous digest AND the daemon never serves reads before it has
+  rewritten the state under the new counter. Advancing the anchor after the
+  durable write is rejected: a crash between the two then leaves a blob ahead
+  of the anchor, which is indistinguishable from forgery. This library's
+  `CounterAnchor` carries the counter only and does not close the window; the
+  daemon slice must.
+* Pruned grant ids are not persisted. The id factory must never repeat an
+  id across restarts (random 128-bit or a persisted monotonic value); a
+  repeated pruned id is accepted as a new grant. Tests pin this contract.
 * An operator counter above `MAX_COUNTER` (2**53 - 1) is refused without being
   consumed, so a signed 2**62 cannot lock a principal out.
 * `MAX_GRANTS` counts live (active) grants only. Creating a grant first drops
@@ -155,12 +176,18 @@ class Verifier(Protocol):
     def verify(self, data: bytes, signature: bytes) -> bool: ...
 
 
+class OperatorVerifier(Verifier, Protocol):
+    def key_id(self) -> str: ...
+
+
 class Signer(Verifier, Protocol):
     def sign(self, data: bytes) -> bytes: ...
 
 
 class _CommandSigner(Protocol):
     def sign(self, data: bytes) -> bytes: ...
+
+    def key_id(self) -> str: ...
 
 
 class CounterAnchor(Protocol):
@@ -187,6 +214,9 @@ class StateMac:
         if len(key) < 32:
             raise ValueError("key must be at least 32 bytes")
         self._key = key
+
+    def key_bytes(self) -> bytes:
+        return self._key
 
     def tag(self, data: bytes) -> bytes:
         return hmac.new(self._key, data, hashlib.sha256).digest()
@@ -231,6 +261,14 @@ class Ed25519Signer(Ed25519Verifier):
     def sign(self, data: bytes) -> bytes:
         return self._private.sign(data)
 
+    def uses_secret(self, secret: bytes) -> bool:
+        raw = self._private.private_bytes_raw()
+        return hmac.compare_digest(raw, secret[:32]) or hmac.compare_digest(raw, secret)
+
+
+def _key_id(public_key_x963: bytes) -> str:
+    return hashlib.sha256(public_key_x963).hexdigest()
+
 
 class EcdsaP256Verifier:
     """Operator verifier: an ECDSA P-256 public key (x9.63 point), raw r||s signatures.
@@ -247,6 +285,10 @@ class EcdsaP256Verifier:
 
     def public_key_x963(self) -> bytes:
         return self._raw
+
+    def key_id(self) -> str:
+        """SHA-256 (hex) of the x9.63 public key; signed into every command."""
+        return _key_id(self._raw)
 
     def verify(self, data: bytes, signature: bytes) -> bool:
         if len(signature) != 64:
@@ -291,6 +333,9 @@ class EcdsaP256Signer:
     def verifier(self) -> EcdsaP256Verifier:
         return EcdsaP256Verifier(self.public_key_x963())
 
+    def key_id(self) -> str:
+        return _key_id(self.public_key_x963())
+
     def sign(self, data: bytes) -> bytes:
         der = self._private.sign(
             data, ec.ECDSA(hashes.SHA256(), deterministic_signing=True)
@@ -322,10 +367,12 @@ class Command:
     principal: str
     params: Mapping[str, Any]
     payload: bytes = b""
+    key_id: str = ""  # stamped by sign_command; the operator key the signature is for
 
     def signing_bytes(self) -> bytes:
         return _CMD_CONTEXT + _canonical(
             {
+                "key_id": self.key_id,
                 "kind": self.kind,
                 "counter": self.counter,
                 "principal": self.principal,
@@ -342,8 +389,9 @@ class SignedCommand:
 
 
 def sign_command(signer: _CommandSigner, command: Command) -> SignedCommand:
-    """Operator-side helper: sign a command with the operator key."""
-    return SignedCommand(command, signer.sign(command.signing_bytes()))
+    """Operator-side helper: stamp the signer's key id, then sign."""
+    stamped = replace(command, key_id=signer.key_id())
+    return SignedCommand(stamped, signer.sign(stamped.signing_bytes()))
 
 
 @dataclass(frozen=True)
@@ -570,13 +618,17 @@ class ChatAuthority:
         *,
         event_signer: Signer,
         state_mac: StateMac,
-        operator: Verifier,
+        operator: OperatorVerifier,
         storage: AuthorityStorage,
         anchor: CounterAnchor,
         new_id: Callable[[], str],
     ) -> None:
         if isinstance(event_signer, StateMac) or not hasattr(event_signer, "sign"):
             raise ValueError("event signer must be its own signing key, not the state key")
+        if isinstance(event_signer, Ed25519Signer) and event_signer.uses_secret(
+            state_mac.key_bytes()
+        ):
+            raise ValueError("state key and event seed must differ")
         if hasattr(operator, "sign"):
             raise ValueError("operator must be a verifier without signing ability")
         self._event_signer = event_signer
@@ -655,7 +707,9 @@ class ChatAuthority:
             raise AuthorityError("bad_command") from exc
         if cmd.kind != kind:
             raise AuthorityError("bad_command")
-        if not self._operator.verify(signing, signed.signature):
+        if cmd.key_id != self._operator.key_id() or not self._operator.verify(
+            signing, signed.signature
+        ):
             raise AuthorityError("bad_signature")
         if (
             not isinstance(cmd.counter, int)

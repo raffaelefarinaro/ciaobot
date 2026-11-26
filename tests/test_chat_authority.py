@@ -780,3 +780,75 @@ def test_two_failed_writes_in_a_row_fail_closed_on_reload() -> None:
     with pytest.raises(AuthorityError) as e:
         r.open()
     assert code(e) == "state_rollback"
+
+
+# ---- review follow-ups ------------------------------------------------
+
+
+def test_command_signature_is_bound_to_the_operator_key_id() -> None:
+    r = Rig()
+    signed = r.cmd("submit_turn", {"send_id": "s", **SCOPE}, b"x")
+    assert signed.command.key_id == r.operator.key_id() == r.operator.verifier().key_id()
+    # Same bytes re-signed by another key carry that key's id and are refused.
+    other = EcdsaP256Signer.generate()
+    assert other.key_id() != r.operator.key_id()
+    with pytest.raises(AuthorityError) as e:
+        r.auth.submit_turn(sign_command(other, signed.command))
+    assert code(e) == "bad_signature"
+    # A key id swapped in after signing, or stripped, breaks the signature.
+    from dataclasses import replace
+
+    for kid in (other.key_id(), ""):
+        forged = SignedCommand(replace(signed.command, key_id=kid), signed.signature)
+        with pytest.raises(AuthorityError) as e:
+            r.auth.submit_turn(forged)
+        assert code(e) == "bad_signature"
+    # A correct id over a signature made by the wrong key is refused too.
+    mixed = SignedCommand(signed.command, other.sign(signed.command.signing_bytes()))
+    with pytest.raises(AuthorityError) as e:
+        r.auth.submit_turn(mixed)
+    assert code(e) == "bad_signature"
+    assert r.auth.submit_turn(signed).send_id == "s"
+
+
+def test_same_secret_as_state_key_and_event_seed_is_refused() -> None:
+    secret = b"k" * 32
+    with pytest.raises(ValueError):
+        ChatAuthority(
+            event_signer=Ed25519Signer.from_seed(secret),
+            state_mac=StateMac(secret),
+            operator=EcdsaP256Signer.generate().verifier(),
+            storage=MemStorage(),
+            anchor=MemAnchor(),
+            new_id=lambda: "x",
+        )
+    ChatAuthority(
+        event_signer=Ed25519Signer.from_seed(secret),
+        state_mac=StateMac(b"j" * 32),
+        operator=EcdsaP256Signer.generate().verifier(),
+        storage=MemStorage(),
+        anchor=MemAnchor(),
+        new_id=lambda: "x",
+    )
+
+
+def test_pruned_grant_ids_are_not_persisted_so_the_factory_must_not_repeat(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr("ciao.chat_authority.MAX_GRANTS", 5)
+    r = Rig()
+    old = r.grant()
+    r.auth.revoke_grant(r.cmd("revoke_grant", {"grant_id": old}))
+    fresh = r.grant(chat="c2")  # prunes the ended, unreferenced grant
+    assert r.auth.grant(old) is None
+    r.open()
+    assert r.auth.grant(old) is None
+    # A monotonic or random factory never offers `old` again: nothing collides.
+    assert r.grant(chat="c3") not in (old, fresh)
+    # Contract pin: the library does not remember a pruned id across a restart,
+    # so a factory that repeated it would be accepted as a brand-new grant.
+    # The id factory must therefore never repeat ids (documented).
+    r.ids = itertools.count(int(old.removeprefix("id")))
+    again = r.grant(chat="c4")
+    assert again == old
+    assert r.auth.grant(old) is not None and r.auth.grant(old).chat == "c4"  # type: ignore[union-attr]
