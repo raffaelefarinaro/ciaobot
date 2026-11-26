@@ -254,8 +254,8 @@
         </div>
         <!-- A retry that failed again is said once, on the failure's own card. -->
         <template v-else-if="item.kind === 'user' && retryFailedAgain(i)"></template>
-        <!-- A turn the engine wrote (a wake, an automation run, a resume, a webhook,
-             an update task) or a request the user retried reads as a notice, not
+        <!-- A turn the engine wrote (a wake, an automation run, a resume, a webhook)
+             or a request the user retried reads as a notice, not
              as something the reader typed. -->
         <div
           v-else-if="item.kind === 'user' && injectedPrompts.get(item.msg)"

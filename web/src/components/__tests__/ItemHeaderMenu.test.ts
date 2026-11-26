@@ -51,8 +51,6 @@ function seedUnread(count: number) {
   taskSignals.health = readyHealth()
   const housekeeping = useHousekeepingStore()
   housekeeping.actionsHealth = readyHealth()
-  housekeeping.updateTasksWorkspace = 'personal'
-  housekeeping.updateTasksHealth = readyHealth()
   useTaskStore().schedulesLoaded = true
   vi.mocked(api.get).mockReset()
   vi.mocked(api.get).mockImplementation(async (url: string) => {

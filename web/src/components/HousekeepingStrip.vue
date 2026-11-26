@@ -3,15 +3,13 @@ import { computed, inject, nextTick, onBeforeUnmount, onMounted, ref, watch } fr
 import { routeLocationKey, routerKey } from 'vue-router'
 import { useHousekeepingStore } from '../stores/housekeeping'
 import { useProjectStore } from '../stores/projects'
-import { askConfirm } from '../lib/confirm'
-import type { OperatorAction, UpdateTaskRow } from '../lib/types'
+import type { OperatorAction } from '../lib/types'
 import NeedsYouRow, { type NeedsYouMenuItem } from './NeedsYouRow.vue'
 import HostTerminalButton from './HostTerminalButton.vue'
 import { useCommandCopy } from '../composables/useCommandCopy'
 import { useHostTerminal } from '../composables/useHostTerminal'
 import { focusAfterNoticeClose, useHomeNoticeWindows } from '../composables/useHomeNoticeWindows'
-import { hasLiveAttempt, visibleUpdateTasks as filterVisibleUpdateTasks } from '../lib/updateTasks'
-import { actionNoticeKey, parseHomeNoticeKey, updateNoticeKey } from '../lib/notificationInbox'
+import { actionNoticeKey, parseHomeNoticeKey } from '../lib/notificationInbox'
 
 const housekeeping = useHousekeepingStore()
 const projectStore = useProjectStore()
@@ -134,12 +132,10 @@ async function openChat(action: OperatorAction): Promise<void> {
 
 // ── One list ────────────────────────────────────────────────────────────────
 //
-// Workspace-health errors, operator actions and update tasks share one list
-// above the composer. A row is a title, one line and one lead control; anything
-// else the source can do sits in the row's ⋯ menu. The sources keep their own
-// policies (an operator action is a view of the machine and goes away when the
-// condition does; an update task is a decision that persists until somebody
-// reverses it), so each keeps its own row builder below.
+// Workspace-health errors and operator actions share one list above the
+// composer. A row is a title, one line and one lead control; anything
+// else the source can do sits in the row's ⋯ menu. An operator action is a view
+// of the machine and goes away when the condition does.
 
 const hostTerminal = useHostTerminal()
 onMounted(() => { void hostTerminal.ensureCapabilities() })
@@ -271,30 +267,8 @@ async function onHealthSelect(id: string): Promise<void> {
   await router.push(HEALTH_SETTINGS_ROUTE)
 }
 
-// ── "After this update" ────────────────────────────────────────────────────
-//
-// The work Ciaobot's own update leaves behind, as cards rather than as prose.
-// They live in their own section instead of joining `groups` because their
-// policy is different in a way the operator can feel: an operator action is a
-// view of the machine and disappears when re-detection says the condition is
-// gone, while an update task is a *decision* that persists until somebody
-// reverses it, can be reopened from Settings, and must never be drawn as done
-// before a completion check has actually said so.
-
-// Which update tasks Home shows, and what counts as a live attempt, live in
-// lib/updateTasks.ts so the inbox applies the identical rule.
-const visibleUpdateTasks = computed(() => filterVisibleUpdateTasks(housekeeping.updateTasks))
-const openUpdateTasks = computed(() => visibleUpdateTasks.value.filter(task => !noticeWindows.isClosed(updateKey(task))))
-
-function updateKey(task: UpdateTaskRow): string {
-  return updateNoticeKey(projectStore.activeWorkspace, task.id, task.revision)
-}
-
 watch(
-  () => [
-    ...scopedActions.value.map(actionKey),
-    ...visibleUpdateTasks.value.map(updateKey),
-  ],
+  () => scopedActions.value.map(actionKey),
   keys => noticeWindows.setAvailable('housekeeping', keys),
   { immediate: true },
 )
@@ -319,98 +293,17 @@ onBeforeUnmount(() => noticeWindows.clearAvailable('housekeeping'))
  * that is the strip's own best-effort contract (a Home that raised a red line
  * for a background poll would nag about a condition the operator cannot act on
  * from this page). Silence is not a false "done": the list has no all-clear
- * state at all, so its absence never reads as a verdict. The one place a failed
- * update-task check *is* reported is Settings → Overview → Update task history.
+ * state at all, so its absence never reads as a verdict.
  *
- * Nothing is drawn until the first load of all three sources has settled
+ * Nothing is drawn until the first load of both sources has settled
  * (`initialLoadPending`), so the list arrives once instead of growing source by
  * source under the composer. */
 const rowCount = computed(
-  () => housekeeping.healthErrors.length + orderedActions.value.length + openUpdateTasks.value.length,
+  () => housekeeping.healthErrors.length + orderedActions.value.length,
 )
 const showNeedsYou = computed(
   () => !housekeeping.initialLoadPending && (rowCount.value > 0 || groupStatus.value !== ''),
 )
-
-/** One task's key. A revision is a different record and a different card, so
- *  the two are never collapsed into one row. */
-function taskKey(task: UpdateTaskRow): string {
-  return `${task.id}@${task.revision}`
-}
-
-function taskBusy(task: UpdateTaskRow): boolean {
-  return housekeeping.pendingUpdateTaskIds.has(taskKey(task))
-}
-
-function taskError(task: UpdateTaskRow): string {
-  return housekeeping.taskErrors[taskKey(task)] || ''
-}
-
-/** The one line that says where this task stands, in words rather than a colour.
- *
- * `unknown` is worded as a question nobody could answer, never as an absence of
- * work: a detector that has not run, or could not, has not established that
- * there is nothing to do. It is checked first, so a row whose detector is still
- * silent says so even while an attempt is under way — the silence is the more
- * recent fact, and the one an operator is waiting on.
- *
- * There is no "does not apply" line, because a row that does not apply and has
- * no attempt is not drawn at all (see `visibleUpdateTasks`): a permanent card
- * reading "nothing to do" on the Home of an install that never needed the task
- * is the opposite of what a zero-task Home should look like. */
-function taskStateLine(task: UpdateTaskRow): string {
-  if (task.applicability === 'unknown') {
-    return 'Checking whether this applies here…'
-  }
-  if (task.status === 'waiting_review') {
-    // An archived chat cannot be "open and waiting": say what is true instead,
-    // because the operator is being asked to decide about a chat that is gone.
-    return task.chat_live
-      ? 'Its chat is open and waiting for you to decide what to do with it.'
-      : 'The chat this opened has been archived or deleted. Starting opens a new one.'
-  }
-  if (task.status === 'failed') {
-    return task.chat_live
-      ? 'The last attempt did not get going. Starting again reuses the same chat.'
-      : 'The last attempt did not get going, and its chat is gone. Starting opens a new one.'
-  }
-  if (task.status === 'in_progress') {
-    // Not "on the left": the chat is a route, and on a phone the list is above
-    // the conversation. Where it opens is the layout's business. And when the
-    // chat no longer exists, "its chat is open" would be a flat untruth — the
-    // start will mint a fresh one, which is what this line says.
-    return task.chat_live
-      ? 'Started. Its chat is open.'
-      : 'Started, but its chat has been archived or deleted. Starting opens a new one.'
-  }
-  return 'New since this update.'
-}
-
-/** What the lead button says for a task already under way.
- *
- * "Resume chat" is right only while there is a chat to resume. Against an
- * archived or deleted one a start mints a fresh chat and dispatches the prompt
- * into that, so calling it "Resume" would promise continuity the server does not
- * deliver. Same action, honest label. */
-function startLabel(task: UpdateTaskRow): string {
-  return task.chat_live ? 'Resume chat' : 'Start a new chat'
-}
-
-/** Whether this row's lead button starts — or resumes — its chat.
- *
- * The gate is the row's *state*, not the detector's answer, and the difference
- * is not cosmetic. An offer is the only row that needs `applicable` first:
- * nobody may be handed instructions for a condition this install has not
- * established exists. A live attempt is a different question — the chat is
- * already open and the work is already under way, and `not_applicable` is the
- * *normal* state once the chat has done the job but the completion check has not
- * said so yet. Gating Resume on it would strand a live chat behind a small "Open
- * its chat" link, which is precisely the wrong thing to do to somebody whose
- * work is running. */
-function canStart(task: UpdateTaskRow): boolean {
-  if (hasLiveAttempt(task.status)) return true
-  return task.applicability === 'applicable'
-}
 
 const groupEl = ref<HTMLElement | null>(null)
 /** The outcome of the last press. Declared here rather than beside the click
@@ -475,137 +368,7 @@ async function report(text: string, at: string, after?: () => Promise<void>): Pr
   await keepFocus()
 }
 
-async function openTaskChat(chatId: string): Promise<void> {
-  if (!chatId) return
-  const { router } = await import('../router')
-  await router.push(`/chat/${chatId}`)
-}
-
-/** Start (or resume) a task's chat.
- *
- * The button is the same on an offered task and on one already under way, and
- * that is the server's doing rather than a shortcut here: `start` is idempotent
- * per `(task, revision)`, so a double press, a second tab or a retry after a
- * dropped response all land in one chat with the prompt dispatched once. The
- * label says which of the two is meant so nobody is surprised. */
-async function startTask(task: UpdateTaskRow): Promise<void> {
-  // Captured before the first await: the outcome is about the workspace the
-  // button was pressed in, wherever the reader has wandered to since.
-  const at = projectStore.activeWorkspace || ''
-  const outcome = await housekeeping.startUpdateTask(task)
-  if (!outcome.ok) {
-    if (outcome.chatId) {
-      // The chat exists and the prompt never reached it. Opening it rather than
-      // throwing it away is the whole point of the server sending the id back.
-      await report('The chat was opened but the task could not be sent into it.', at, () =>
-        openTaskChat(outcome.chatId),
-      )
-      return
-    }
-    await report(outcome.error, at)
-    return
-  }
-  const title = task.title
-  await report(
-    outcome.resumed
-      ? `Reopened the existing chat for “${title}”.`
-      : `Started “${title}” in a new chat.`,
-    at,
-    () => openTaskChat(outcome.chatId),
-  )
-}
-
-/** Decline this task at this revision, after saying exactly what that means.
- *
- * The confirmation is not ceremony. Two things are true at once and an operator
- * pressing a small button is unlikely to have thought about either: the card
- * disappears for this workspace only, and — when a chat is open — nothing about
- * that chat changes. It is not cancelled and it is not marked done; dismissing
- * records "not this one" and leaves the work exactly where it was. */
-async function dismissTask(task: UpdateTaskRow): Promise<void> {
-  // Same reasoning as `startTask`: the confirmation can be open for as long as it
-  // takes to read, and the press after it belongs to the workspace it was
-  // confirmed in.
-  const at = projectStore.activeWorkspace || ''
-  // "Its chat stays open" is only true while the chat is live. Against an
-  // archived or deleted one the promise would be about a chat that is gone, so
-  // the copy falls back to the plain dismissal wording.
-  const hasChat =
-    task.chat_live
-    && (task.status === 'in_progress' || task.status === 'waiting_review' || !!task.chat_id)
-  const message = hasChat
-    ? 'Hide this task in this workspace? Its chat stays open and is not marked ' +
-      'done — you can carry on in it, and reopen the task from Settings → ' +
-      'Overview → Update task history.'
-    : 'Hide this task in this workspace? It stays hidden for this revision only, ' +
-      'and you can reopen it from Settings → Overview → Update task history.'
-  if (!await askConfirm(message, {
-    title: 'Hide this update task?',
-    confirmLabel: 'Hide it',
-    cancelLabel: 'Keep it',
-  })) return
-
-  const outcome = await housekeeping.dismissUpdateTask(task)
-  if (!outcome.ok) {
-    await report(outcome.error, at)
-    return
-  }
-  await report(
-    hasChat
-      ? `Hidden “${task.title}”. Its chat is untouched and still open.`
-      : `Hidden “${task.title}” in this workspace. Reopen it from Settings.`,
-    at,
-  )
-}
-
-async function recheckTasks(): Promise<void> {
-  await housekeeping.recheckUpdateTask()
-  await keepFocus()
-}
-
-type TaskLead = 'start' | 'check'
-
-function taskLead(task: UpdateTaskRow): TaskLead {
-  return canStart(task) ? 'start' : 'check'
-}
-
-function startText(task: UpdateTaskRow): string {
-  if (taskBusy(task)) return 'Working…'
-  if (task.status === 'in_progress' || task.status === 'waiting_review') return startLabel(task)
-  if (task.status === 'failed') return 'Try again'
-  return 'Start in chat'
-}
-
-/** One line: a refusal first (it is the thing the operator must read), then —
- *  for an offer the detector has confirmed — why it exists, and otherwise where
- *  the attempt stands. */
-function taskLine(task: UpdateTaskRow): string {
-  const error = taskError(task)
-  if (error) return error
-  if (task.status === 'offered' && task.applicability !== 'unknown') return task.why
-  return taskStateLine(task)
-}
-
-function taskItems(task: UpdateTaskRow): NeedsYouMenuItem[] {
-  const items: NeedsYouMenuItem[] = []
-  if (task.chat_live) items.push({ id: 'chat', label: 'Open its chat' })
-  items.push({ id: 'dismiss', label: 'Hide it', disabled: taskBusy(task) })
-  items.push({ id: 'hide', label: 'Hide for now' })
-  return items
-}
-
-async function onTaskSelect(task: UpdateTaskRow, id: string): Promise<void> {
-  switch (id) {
-    case 'start': return startTask(task)
-    case 'chat': return openTaskChat(task.chat_id)
-    case 'dismiss': return dismissTask(task)
-    case 'hide': return hideNotice(updateKey(task))
-  }
-}
-
-// Applicability and state are per workspace, so a workspace switch re-asks the
-// question rather than leaving the previous workspace's answers on screen — and
-// takes the last press's announcement with them, since that press was made in
+// A workspace switch drops the last press's announcement: that press was made in
 // the workspace being left, not in the one now on screen.
 watch(
   () => projectStore.activeWorkspace,
@@ -613,7 +376,6 @@ watch(
     if (next && next !== previous) {
       clearGroupStatus()
       clearNoticeUnavailable()
-      void housekeeping.refreshUpdateTasks(next)
     }
   },
 )
@@ -673,44 +435,19 @@ const revealDecision = computed<'none' | 'wait' | 'found' | 'missing'>(() => {
   if (!key) return 'none'
   const parsed = parseHomeNoticeKey(key)
   if (!parsed) return 'missing'
-  if (parsed.kind === 'action') {
-    if (housekeeping.actionsHealth.status === 'checking') return 'wait'
-    return scopedActions.value.some(a => actionKey(a) === key) ? 'found' : 'missing'
-  }
-  const active = projectStore.activeWorkspace
-  if (!active) return 'wait'
-  // A previous workspace's key can never target this workspace's row.
-  if (parsed.workspace !== active) return 'missing'
-  if (housekeeping.updateTasksWorkspace !== active || housekeeping.updateTasksHealth.status === 'checking') {
-    return 'wait'
-  }
-  return visibleUpdateTasks.value.some(t => updateKey(t) === key) ? 'found' : 'missing'
+  if (housekeeping.actionsHealth.status === 'checking') return 'wait'
+  return scopedActions.value.some(a => actionKey(a) === key) ? 'found' : 'missing'
 })
-
-let updateRefreshRequestedFor = ''
 
 watch(
   revealDecision,
   async (decision) => {
     const key = noticeWindows.pendingReveal.value
-    if (decision === 'wait') {
-      const active = projectStore.activeWorkspace
-      if (
-        active
-        && parseHomeNoticeKey(key)?.kind === 'update'
-        && housekeeping.updateTasksWorkspace !== active
-        && updateRefreshRequestedFor !== key
-      ) {
-        updateRefreshRequestedFor = key
-        void housekeeping.refreshUpdateTasks(active)
-      }
-      return
-    }
+    if (decision === 'wait') return
     if (decision === 'missing') {
       showNoticeUnavailable()
       noticeWindows.clearReveal()
       void housekeeping.refresh()
-      void housekeeping.refreshUpdateTasks()
       return
     }
     if (decision !== 'found') return
@@ -740,7 +477,7 @@ watch(
   <!--
     One list, above the composer. Health errors lead (the install cannot do its
     work), then blocking preconditions, then everything else an operator action
-    offers, then the work the last update left behind. Each row is a title, one
+    offers. Each row is a title, one
     line and one lead control; the rest is in the row's menu. With nothing to
     show the section is not rendered at all: there is no "all clear" row, so the
     page below does not move when a row appears or goes.
@@ -846,40 +583,6 @@ watch(
         </template>
       </NeedsYouRow>
 
-      <NeedsYouRow
-        v-for="task in openUpdateTasks"
-        :key="taskKey(task)"
-        :title="task.title"
-        :line="taskLine(task)"
-        :alert="!!taskError(task)"
-        :notice-key="updateKey(task)"
-        :items="taskItems(task)"
-        @select="onTaskSelect(task, $event)"
-      >
-        <template #primary>
-          <!-- One start button for every state that can start. Idempotent on the
-               server per (task, revision), so the label is the only thing that
-               differs between "begin" and "carry on". Gate is the lifecycle, not
-               the detector (see canStart). -->
-          <button
-            v-if="taskLead(task) === 'start'"
-            type="button"
-            class="btn-small"
-            :disabled="taskBusy(task)"
-            @click="startTask(task)"
-          >{{ startText(task) }}</button>
-          <!-- The one row that reaches here is an offer nobody can say applies,
-               so a quiet re-check is the only honest action — never drawn as
-               "done". -->
-          <button
-            v-else
-            type="button"
-            class="btn-small"
-            :disabled="taskBusy(task)"
-            @click="recheckTasks()"
-          >Check again</button>
-        </template>
-      </NeedsYouRow>
     </ul>
   </section>
 </template>

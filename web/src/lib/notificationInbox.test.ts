@@ -10,11 +10,9 @@ import {
   scheduleDisplayName,
   type ChatCandidate,
   type TaskReviewCandidate,
-  type UpdateTaskCandidate,
   type OperatorCandidate,
   type ScheduleCandidate,
   type SourceSnapshot,
-  updateNoticeKey,
 } from './notificationInbox'
 
 function chat(o: Partial<ChatCandidate> & { chatId: string }): ChatCandidate {
@@ -37,7 +35,6 @@ const READY: SourceSnapshot[] = [
   { source: 'chats', status: 'ready', lastSuccessAt: '2026-10-01T00:00:00+00:00' },
   { source: 'operator', status: 'ready', lastSuccessAt: '2026-10-01T00:00:00+00:00' },
   { source: 'automations', status: 'ready', lastSuccessAt: '2026-10-01T00:00:00+00:00' },
-  { source: 'updateTasks', status: 'ready', lastSuccessAt: '2026-10-01T00:00:00+00:00' },
 ]
 
 function project(chats: ChatCandidate[], sources: SourceSnapshot[] = READY) {
@@ -188,7 +185,6 @@ const READY3: SourceSnapshot[] = [
   { source: 'chats', status: 'ready', lastSuccessAt: 'x' },
   { source: 'operator', status: 'ready', lastSuccessAt: 'x' },
   { source: 'automations', status: 'ready', lastSuccessAt: 'x' },
-  { source: 'updateTasks', status: 'ready', lastSuccessAt: 'x' },
 ]
 
 function op(o: Partial<OperatorCandidate> & { id: string }): OperatorCandidate {
@@ -275,9 +271,8 @@ describe('notificationInbox operator and automation sources', () => {
   it('notice_key_builders_and_parser', () => {
     expect(actionNoticeKey('', 'x')).toBe('action:shared:x')
     expect(actionNoticeKey('personal', 'x')).toBe('action:personal:x')
-    expect(updateNoticeKey('', 't', 2)).toBe('update:shared:t@2')
-    expect(parseHomeNoticeKey(actionNoticeKey('personal', 'x'))).toEqual({ kind: 'action', workspace: 'personal', id: 'x' })
-    expect(parseHomeNoticeKey(updateNoticeKey('work', 't', 2))).toEqual({ kind: 'update', workspace: 'work', id: 't@2' })
+    expect(parseHomeNoticeKey(actionNoticeKey('personal', 'x'))).toEqual({ workspace: 'personal', id: 'x' })
+    expect(parseHomeNoticeKey('update:work:t@2')).toBeNull()
     for (const bad of ['', 'foo:a:b', 'action::x', 'action:ws']) expect(parseHomeNoticeKey(bad)).toBeNull()
   })
 
@@ -445,13 +440,12 @@ describe('notificationInbox operator and automation sources', () => {
     expect(notificationPath({ kind: 'home-notice', noticeKey: 'action:shared:x' })).toBe('/?notice=action%3Ashared%3Ax')
   })
 
-  it('sources_four_keys_in_order', () => {
+  it('sources_three_keys_in_order', () => {
     const missing = project3({ sources: [{ source: 'chats', status: 'ready', lastSuccessAt: 'x' }] })
     expect(missing.sources.map((s) => [s.source, s.status, s.label])).toEqual([
       ['chats', 'ready', 'Chats'],
       ['operator', 'checking', 'Settings'],
       ['automations', 'checking', 'Automations'],
-      ['updateTasks', 'checking', 'Update tasks'],
     ])
     expect(missing.allClear).toBe(false)
     expect(project3({}).allClear).toBe(true)
@@ -512,113 +506,5 @@ describe('notificationInbox review and queue rows', () => {
   it('keys_use_shared_for_empty_workspace', () => {
     const inbox = inboxWith({ workspace: '', reviewTasks: [{ taskId: 't', title: 'T' }] })
     expect(inbox.rows.map((r) => r.key).sort()).toEqual(['task:shared:t'])
-  })
-})
-
-function ut(o: Partial<UpdateTaskCandidate> = {}): UpdateTaskCandidate {
-  return {
-    id: 't1', revision: 1, workspace: 'personal', title: 'Task', status: 'offered',
-    applicability: 'applicable', chatId: '', chatLive: false, chatNeedsInput: false, chatFailed: false,
-    ...o,
-  }
-}
-
-function projectUt(updateTasks: UpdateTaskCandidate[], chats: ChatCandidate[] = []) {
-  return projectNotificationInbox({ workspace: 'personal', chats, updateTasks, sources: READY })
-}
-
-describe('update-task rows', () => {
-  const STATUSES = ['offered', 'in_progress', 'waiting_review', 'failed', 'completed', 'dismissed']
-  const APPLIC = ['applicable', 'not_applicable', 'unknown']
-  const expected = (status: string, applicability: string): string | null => {
-    if (status === 'offered') return applicability === 'not_applicable' ? null : 'toReview'
-    if (status === 'waiting_review') return 'toReview'
-    if (status === 'failed') return 'needsYou'
-    return null
-  }
-  const cases = STATUSES.flatMap((s) => APPLIC.map((a) => [s, a, expected(s, a)] as const))
-
-  it.each(cases)('update_task_matrix %s x %s', (status, applicability, section) => {
-    const inbox = projectUt([ut({ status, applicability })])
-    if (section === null) {
-      expect(inbox.rows).toHaveLength(0)
-      return
-    }
-    expect(inbox.rows).toHaveLength(1)
-    expect(inbox.rows[0].section).toBe(section)
-    if (status === 'offered' && applicability === 'applicable') expect(inbox.rows[0].reason).toBe('New since this update.')
-    if (status === 'offered' && applicability === 'unknown') expect(inbox.rows[0].title).toBe('Check applicability: Task')
-    else expect(inbox.rows[0].title).toBe('Task')
-  })
-
-  it('failed_live_task_survives_changed_applicability', () => {
-    expect(projectUt([ut({ status: 'failed', applicability: 'not_applicable' })]).rows).toHaveLength(1)
-    expect(projectUt([ut({ status: 'offered', applicability: 'not_applicable' })]).rows).toHaveLength(0)
-  })
-
-  it('in_progress_contributes_only_for_failed_chat', () => {
-    const failed = projectUt([ut({ status: 'in_progress', chatId: 'c', chatLive: true, chatFailed: true })])
-    expect(failed.rows).toHaveLength(1)
-    expect(failed.rows[0].section).toBe('needsYou')
-    expect(failed.rows[0].urgency).toBe('failure')
-    expect(projectUt([ut({ status: 'in_progress', chatId: 'c', chatLive: true, chatNeedsInput: true })]).rows).toHaveLength(0)
-    expect(projectUt([ut({ status: 'in_progress', chatId: 'c', chatLive: true })]).rows).toHaveLength(0)
-  })
-
-  it('key_carries_workspace_id_and_revision', () => {
-    const inbox = projectUt([ut({ revision: 1 }), ut({ revision: 2 })])
-    expect(inbox.rows.map((r) => r.key).sort()).toEqual(['update-task:personal:t1@1', 'update-task:personal:t1@2'])
-    const paths = inbox.rows.map((r) => notificationPath(r.destination)).sort()
-    expect(paths).toEqual(['/?notice=update%3Apersonal%3At1%401', '/?notice=update%3Apersonal%3At1%402'])
-    expect(projectUt([ut({ workspace: '' })]).rows[0].key).toBe('update-task:shared:t1@1')
-  })
-
-  it('destination_is_always_home_notice', () => {
-    const inbox = projectUt([ut({ status: 'waiting_review', chatId: '', chatLive: false })])
-    expect(notificationPath(inbox.rows[0].destination)).toBe('/?notice=update%3Apersonal%3At1%401')
-    const live = projectUt([ut({ status: 'waiting_review', chatId: 'c1', chatLive: true })])
-    expect(notificationPath(live.rows[0].destination)).toBe('/?notice=update%3Apersonal%3At1%401')
-  })
-
-  it('question_chat_preferred_over_task_row', () => {
-    const inbox = projectUt(
-      [ut({ status: 'in_progress', chatId: 'c', chatLive: true, chatNeedsInput: true })],
-      [chat({ chatId: 'c', needsInput: true, needsYou: true })],
-    )
-    expect(inbox.rows.map((r) => r.key)).toEqual(['chat:c'])
-  })
-
-  it('failed_chat_and_unread_twin_suppressed_by_task_row', () => {
-    const task = ut({ status: 'in_progress', chatId: 'c', chatLive: true, chatFailed: true })
-    const failedChat = projectUt([task], [chat({ chatId: 'c', failed: true, needsYou: true })])
-    expect(failedChat.rows.map((r) => r.key)).toEqual(['update-task:personal:t1@1'])
-    const twin = projectUt([ut({ status: 'waiting_review', chatId: 'c', chatLive: true })], [chat({ chatId: 'c', unread: true })])
-    expect(twin.rows.map((r) => r.key)).toEqual(['update-task:personal:t1@1'])
-  })
-
-  it('unlinked_chat_untouched', () => {
-    const inbox = projectUt([ut({ status: 'failed' })], [chat({ chatId: 'other', unread: true })])
-    expect(inbox.rows.map((r) => r.key).sort()).toEqual(['chat:other', 'update-task:personal:t1@1'])
-  })
-
-  it('in_progress_unread_chat_keeps_chat_row', () => {
-    const inbox = projectUt(
-      [ut({ status: 'in_progress', chatId: 'c', chatLive: true })],
-      [chat({ chatId: 'c', unread: true })],
-    )
-    expect(inbox.rows.map((r) => r.key)).toEqual(['chat:c'])
-  })
-
-  it('wording', () => {
-    const reason = (o: Partial<UpdateTaskCandidate>) => projectUt([ut(o)]).rows[0].reason
-    expect(reason({ status: 'failed' })).toBe('The last attempt did not get going.')
-    expect(reason({ status: 'in_progress', chatFailed: true, chatId: 'c', chatLive: true })).toBe('Its chat failed.')
-    expect(reason({ status: 'waiting_review', chatLive: true, chatId: 'c' }))
-      .toBe('Its chat is open and waiting for you to decide what to do with it.')
-    expect(reason({ status: 'waiting_review' }))
-      .toBe('Its chat was archived or deleted. Open the notice to start a new one.')
-    expect(reason({ applicability: 'unknown' })).toBe('Not yet known whether this applies here. Open it to check again.')
-    expect(reason({})).toBe('New since this update.')
-    expect(projectUt([ut({ status: 'waiting_review', applicability: 'unknown' })]).rows[0].title).toBe('Task')
   })
 })

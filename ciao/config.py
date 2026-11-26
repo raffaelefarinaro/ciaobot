@@ -1209,9 +1209,8 @@ class CiaoConfig:
         superseded pre-re-rooting shared subfolder (``<vault root>/<name>``)
         was chosen by setup or by the operator, such as ``work/brain``, a
         nested clone vault, ``.`` or an absolute external folder. Ownership
-        (:meth:`agent_vault_root`) and the relocation offer
-        (``migration_notices.relocation_state``) both read this, so the
-        folder a workspace owns is never the folder it is told to leave.
+        (:meth:`agent_vault_root`) reads this, so the folder a workspace owns
+        is never the folder it is told to leave.
         Always ``False`` before the re-rooting and for an unregistered name.
         """
         if not self._rerooted() or self.workspace(name) is None:

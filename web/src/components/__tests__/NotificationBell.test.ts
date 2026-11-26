@@ -50,8 +50,6 @@ async function mountBell(opts: { chats?: number; health?: SourceHealth; variant?
   taskSignals.health = readyHealth()
   const housekeeping = useHousekeepingStore()
   housekeeping.actionsHealth = readyHealth()
-  housekeeping.updateTasksWorkspace = 'personal'
-  housekeeping.updateTasksHealth = readyHealth()
   useTaskStore().schedulesLoaded = true
 
   vi.mocked(api.get).mockReset()

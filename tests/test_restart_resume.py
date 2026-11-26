@@ -207,7 +207,7 @@ def _skip_cases() -> list[Any]:
             id="origin-task-resume",
         ),
     ]
-    for kind in ("memory_pass", "update_task", "proposal", "task_delegation"):
+    for kind in ("memory_pass", "proposal", "task_delegation"):
         cases.append(
             pytest.param(setter("helper", {"kind": kind}), id=f"helper-{kind}")
         )

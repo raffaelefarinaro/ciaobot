@@ -12,7 +12,7 @@
  *   POST /__fixture__/drop-ws                        sever every events socket
  *   GET  /__fixture__/ws-count                       sockets opened so far
  *   POST /__fixture__/transcript                     give this session a chat history
- *   POST /__fixture__/update-tasks                   give this session update tasks
+ *   POST /__fixture__/needs-you                      give this session housekeeping rows
  *   POST /__fixture__/projects  { projects: [...] }  replace this session's project list
  *   POST /__fixture__/chat-frame                     speak on a chat's own socket
 *   POST /__fixture__/chat-action { chat_id, kind, params, state? }  put a needs-you action on a chat
@@ -34,7 +34,7 @@ import path from 'node:path'
 import { randomBytes } from 'node:crypto'
 import { fileURLToPath } from 'node:url'
 import { acceptUpgrade } from './ws.mjs'
-import { WORKSPACES, PROJECTS, CHATS, SCHEDULES, MEMORY_NODES, MEMORY_EDGES, MEMORY_CATEGORIES, UPDATE_TASKS, snapshotFrame, usageStats } from './data.mjs'
+import { WORKSPACES, PROJECTS, CHATS, SCHEDULES, MEMORY_NODES, MEMORY_EDGES, MEMORY_CATEGORIES, NEEDS_YOU_ACTIONS, snapshotFrame, usageStats } from './data.mjs'
 
 const here = path.dirname(fileURLToPath(import.meta.url))
 const STATIC_ROOT = path.resolve(here, '../../../ciao/web/static')
@@ -738,14 +738,6 @@ const GET_ROUTES = {
     const workspace = url.searchParams.get('workspace') || WORKSPACES[0].name
     return { workspace, tasks: (state.tasksByWorkspace[workspace] ?? []).map(row => sessionTask(state, row)) }
   },
-  // "After this update" is a second, per-workspace question, so it carries a
-  // query string and cannot live in the exact-path table. A spec that needs the
-  // section measured on screen opts in through POST /__fixture__/update-tasks;
-  // the default stays empty so the other specs keep the Home they already
-  // assert on.
-  '/api/update-tasks': (req) => (sessionOf(req).updateTasks
-    ? { tasks: UPDATE_TASKS }
-    : { tasks: [] }),
   '/api/vault/graph': (req) => ({ workspace: WORKSPACES[0].name, workspaces: orderedWorkspaces(sessionOf(req)).map(w => w.name), nodes: MEMORY_NODES, edges: MEMORY_EDGES }),
   '/api/memory/entity-types': () => ({ workspace: WORKSPACES[0].name, vault: '/fixture/vault', types: MEMORY_CATEGORIES }),
   '/api/models': () => ({
@@ -1104,13 +1096,14 @@ const server = http.createServer(async (req, res) => {
       state.projects = Array.isArray(body?.projects) ? body.projects : null
       return sendJson(res, { ok: true })
     }
-    if (pathname === '/__fixture__/update-tasks') {
-      // Opt this session into having "After this update" on Home. Per session
-      // for the same reason the transcript is: the section must appear for the
-      // spec that measures the gaps around it without appearing for the specs
-      // beside it, which assert the Home they already know.
-      state.updateTasks = true
-      return sendJson(res, { ok: true, tasks: UPDATE_TASKS.length })
+    if (pathname === '/__fixture__/needs-you') {
+      // Opt this session into housekeeping rows on Home, so the "Needs you"
+      // list is on screen for the spec that measures it. Per session for the
+      // same reason the transcript is: the list must appear for that spec
+      // without appearing for the specs beside it, which assert the Home they
+      // already know.
+      state.actions = NEEDS_YOU_ACTIONS
+      return sendJson(res, { ok: true, actions: NEEDS_YOU_ACTIONS.length })
     }
     if (pathname === '/__fixture__/chat-frame') {
       // Speak on a chat's own socket. The fixture is otherwise silent there.

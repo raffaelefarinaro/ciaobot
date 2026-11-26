@@ -52,7 +52,7 @@ _TODAY_KEYS = (
 
 # Mirrors ``CiaoControlPlane._ENGINE_HELPER_KINDS``: helper chats the engine
 # starts from its own prompt, so they are not chats a person opened.
-_ENGINE_HELPER_KINDS = frozenset({"memory_pass", "update_task", "proposal"})
+_ENGINE_HELPER_KINDS = frozenset({"memory_pass", "proposal"})
 _ENDED_RE = re.compile(r"""^ended:\s*['"]?([^'"\s]+)['"]?\s*$""")
 _USAGE_LINE_RE = re.compile(
     r"^- (input_tokens|output_tokens|inputTokens|outputTokens): (\d+)\s*$", re.MULTILINE

@@ -20,7 +20,6 @@ vi.mock('../../lib/api', () => {
   const get = vi.fn((path: string) => {
     if (path === '/api/workspaces') return Promise.resolve(state.workspaces)
     if (path === '/api/workspaces/archived') return Promise.resolve({ archived: [] })
-    if (path.startsWith('/api/update-tasks')) return Promise.resolve({ tasks: [] })
     // The Overview's Chats and models card reads the engine defaults.
     if (path === '/api/settings/routines') return Promise.resolve({ model_options: { anthropic: [] } })
     return Promise.resolve({})

@@ -1,5 +1,5 @@
 // Parses user turns the engine wrote into a chat (wakes, automation runs,
-// resumes, webhooks, update tasks) and the retries the user asked for into
+// resumes, webhooks) and the retries the user asked for into
 // typed records for InjectedPromptCard.
 // Pure: no state and no Vue imports. The formats mirror the Python builders
 // named next to each pattern; change them together.
@@ -26,7 +26,6 @@ export type InjectedPrompt =
   | { kind: 'loop'; run: number; of: number; ends: string; prompt: string }
   | { kind: 'task_resume'; title: string; previousState: string }
   | { kind: 'webhook'; instructions: string; event: string }
-  | { kind: 'update_task' }
   | { kind: 'retry' }
   | { kind: 'retry_scheduled' }
   | { kind: 'restart_resume' }
@@ -228,7 +227,6 @@ export function parseInjectedPrompt(
     case 'loop': return parseLoop(content)
     case 'task_resume': return parseTaskResume(content)
     case 'webhook': return parseWebhook(content)
-    case 'update_task': return { kind: 'update_task' }
     case 'retry': return { kind: 'retry' }
     case 'restart_resume': return { kind: 'restart_resume' }
     case 'chat_action': return { kind: 'chat_action' }
@@ -334,8 +332,6 @@ export function summarizeInjectedPrompt(prompt: InjectedPrompt, chatTitle?: stri
       return { label: 'Task resumed', facts: prompt.title, tone: null }
     case 'webhook':
       return { label: 'Webhook', facts: chatTitle ?? '', tone: null }
-    case 'update_task':
-      return { label: 'Update task', facts: chatTitle ?? '', tone: null }
     case 'retry':
       return { label: 'Retry started', facts: 'Same request · new attempt', tone: null }
     case 'retry_scheduled':

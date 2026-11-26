@@ -3673,8 +3673,7 @@ def migrate_if_needed(config: Any) -> dict[str, Any]:
 
     Never raises. A migration that cannot run is a condition to SURFACE, not a
     reason to fail an upgrade and leave the install half-started — the refusal is
-    already recorded in the receipt, and the `workspace-unmigrated` action reads
-    it back and offers the retry.
+    already recorded in the receipt.
 
     Ordering matters and is the caller's job: after the git sync, so the
     clean-tree gate judges the real tree, and before the index refresh, so the

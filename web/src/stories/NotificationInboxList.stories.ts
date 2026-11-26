@@ -36,7 +36,7 @@ function renderList(seed: InboxSeed, props: Record<string, unknown> = {}) {
 const headingText = (element: Element) => element.textContent!.replace(/\s+/g, ' ').trim()
 
 export const Checking: Story = {
-  render: () => renderList({ updateTasksScoped: false, health: { chats: { status: 'checking', lastSuccessAt: '', error: '' }, operator: { status: 'checking', lastSuccessAt: '', error: '' }, automations: { status: 'checking', lastSuccessAt: '', error: '' } } }),
+  render: () => renderList({ health: { chats: { status: 'checking', lastSuccessAt: '', error: '' }, operator: { status: 'checking', lastSuccessAt: '', error: '' }, automations: { status: 'checking', lastSuccessAt: '', error: '' } } }),
   play: async ({ canvas, canvasElement }) => {
     await assertQuietFence(canvas)
     // Nothing has answered yet: the summary says so and no empty state claims
@@ -44,9 +44,9 @@ export const Checking: Story = {
     expect(canvas.getByTestId('inbox-empty-checking').textContent).toContain('Checking your sources')
     expect(canvasElement.textContent).not.toContain('all caught up')
     const sources = canvas.getByRole('list', { name: 'Source status' })
-    expect(sources.querySelectorAll('[data-testid^="source-"]')).toHaveLength(4)
+    expect(sources.querySelectorAll('[data-testid^="source-"]')).toHaveLength(3)
     expect(sources.textContent).toContain('Chats: checking...')
-    expect(sources.textContent).toContain('Update tasks: checking...')
+    expect(sources.textContent).toContain('Automations: checking...')
     // A check in flight has nothing to retry.
     expect(sources.querySelectorAll('button')).toHaveLength(0)
   },

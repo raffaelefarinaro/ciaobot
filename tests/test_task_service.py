@@ -1076,7 +1076,7 @@ def test_agent_complete_on_a_done_task_says_it_is_already_done(tmp_path: Path) -
     assert read_decisions(plane.config.workspace_vault_root("personal")) == []
 
 
-@pytest.mark.parametrize("origin", ["webhook", "task_delegation", "cli_task_wake", "update_task", "restart_resume"])
+@pytest.mark.parametrize("origin", ["webhook", "task_delegation", "cli_task_wake", "restart_resume"])
 def test_agent_delete_and_complete_refuse_a_turn_the_person_did_not_type(
     tmp_path: Path, origin: str
 ) -> None:
@@ -1146,7 +1146,7 @@ def test_agent_delete_and_complete_allow_a_typed_or_retried_turn(
     assert removed["data"]["deleted"] is True
 
 
-@pytest.mark.parametrize("kind", ["memory_pass", "update_task", "proposal"])
+@pytest.mark.parametrize("kind", ["memory_pass", "proposal"])
 def test_agent_delete_and_complete_refuse_an_engine_helper_chat(
     tmp_path: Path, kind: str
 ) -> None:

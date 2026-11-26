@@ -156,11 +156,6 @@ The route source of truth is `ciao/web/app.py`. This file is kept in sync by `te
 | GET | `/api/housekeeping` | List the home-screen operator actions (detector pass; each carries `run_label`, `chat_label`, `chat_prompt`, and `terminal_action` / `command` — a host-terminal action id and the same command as copyable text — on a `provider-update:<provider>` tile, otherwise empty); the `mac-app-switch` tile (an installer-managed engine on an Apple-silicon Mac) leads with a *Download for Mac* external link instead |
 | POST | `/api/housekeeping/{action_id}/run` | Perform one action's mechanical work, re-run detection, and return the fresh action list; unknown id is 404 |
 | POST | `/api/housekeeping/{action_id}/dismiss` | Record a "not now" for an ask-style or advisory action (the GitHub star nudge, `provider-update:<provider>`, which hides the tile for the current release-tested version only, or `mac-app-switch`, which hides the *Switch to the new Ciaobot app* tile on every device for 30 days), re-run detection, and return the fresh action list; unknown id is 404 |
-| GET | `/api/update-tasks` | The "After this update" tasks this engine version supports for `?workspace=`, one row per task: `id`, `revision`, `scope`, `title`, `why`, `since_version`, `status` (the recorded lifecycle — `offered` when there is no record yet — through `dismissed`), `applicability` (`applicable`/`not_applicable`/`unknown`), `offered`, `suppressed`, and the `chat_id`/`prompt_digest`/`attempted_fingerprint`/`updated_at` of its last attempt. `applicability_checked_at` is when that row's *answer* was computed (ISO-8601 UTC), and is a different clock from `updated_at`, which is when the *record* was written — a dismissal is a decision, not a re-check. Inside the freshness window a row keeps the stamp of the call that computed the answer, so a repeated read does not re-date it. `coverage_gap` is present only when nothing is being offered, and says which of `no_eligible_task`/`not_substantiated`/`nothing_offered` applies. `?workspace=` is required (400 otherwise): applicability and state are per workspace. No `change_token`, so applicability falls back to the freshness window; the state file is still read on every call, so a dismissal or a launch shows up at once. The one write it performs is a **settlement**: a task whose record is `in_progress`/`waiting_review`/`failed` is checked against its registered completion check when this call computes its detector answer, and becomes `completed` if the check's postcondition holds — so a task the operator finished leaves Home without a separate endpoint, and its `status`/`suppressed`/`offered` in the very response that settled it. Nothing else is written and nothing is launched: no chat, no prompt, no model turn. `applicability` stays the detector's own answer even when `status` is `completed`, because the rows it counts may still be there (a review that retained them is a finished task). The settlement rides the same freshness window as the detector, so it lands within `APPLICABILITY_TTL_S` (300s) of the evidence appearing; nothing is written when the check is unregistered, raises, or says the postcondition does not hold yet. The lifecycle is revalidated under the write lock, so a `dismissed` (or reopened) decision that lands while the check is running wins over the settlement and is what this response reports; and a settlement whose write cannot land is skipped rather than raised, leaving the task in its previous lifecycle for a later listing |
-| GET | `/api/update-tasks/{task_id}/preview` | Signed session required. With required `?workspace=<registered-name>` and optional `fresh=0` or `fresh=1`, returns `{task_id, revision, workspace, state, summary, plan, checked_at}`. `state` is `review`, `blocked`, or `unknown`; `plan` is an object or null, including null on preparation failure. `checked_at` is ISO-8601 UTC at the start of the observation, not an atomic snapshot or apply authorization. Scans run off-loop on the bounded read executor; identical default in-flight requests coalesce, while `fresh=1` starts an independent scan. Missing workspace: 400 `{"error":"workspace is required"}`; invalid fresh: 400 `{"error":"fresh must be 0 or 1"}`; unsupported task or unregistered workspace: 409 `{"error":"This update task cannot be previewed for this workspace."}`. No task settlement, state, receipt or content writes, chat, prompt or model launch. Later approval must re-read the planner and apply guards. |
-| POST | `/api/update-tasks/{task_id}/start` | Start this task's chat with the **packaged** prompt for its revision, or hand back the chat the last start created. `{ok, task_id, chat_id, resumed, result, tasks}`; `resumed: false` means this call created the chat and dispatched the prompt, `true` means nothing was created (double click, second tab, retry, restart — all the same call twice). A live chat is not the same as a dispatched prompt, so the record decides what a resume does: a `failed` attempt re-sends the prompt into that same chat and still reports `resumed: true` (one chat throughout, the prompt dispatched exactly once across the failure and the retry), and a `dismissed` or reopened-`offered` record is a reopen — same chat, record written `in_progress`, nothing re-sent. 409 for a refused task (unknown id, one this engine version cannot support, no `?workspace=`, no chat manager, a state record that cannot be written before the turn starts, or a record that already says `completed` at this revision — a finished task is never re-run, and that holds whether or not its chat is still there), 500 with the `chat_id` when the chat exists but the turn could not be dispatched — which is recoverable: the next start sends the prompt into that same chat. Nothing after the turn started is a refusal: a record that will not take the `in_progress` write is logged and still answered with the chat (the record keeps saying `failed`, which the next start retries from), and a detector pass that cannot list the tasks leaves the reply without its `tasks` key |
-| POST | `/api/update-tasks/{task_id}/dismiss` | Record "not this one" for this task at this revision (optional `{"reason": "..."}` body, kept as the record's evidence), suppressing the offer at this revision only and keeping the chat it was in — except a `failed` record's chat, which is live and empty because the prompt never reached it, so that one is dropped and the next start creates a fresh chat and dispatches into it. `{ok, task_id, result, tasks}`; 409 for a refused task — an unknown or unsupported id, and a record that already says `completed` at this revision, which is the same refusal a start answers and for the same reason: overwriting a verdict would put a later start back in reach of a finished task. |
-| POST | `/api/update-tasks/{task_id}/reopen` | Undo that dismissal at this revision and re-offer the task. `{ok, task_id, result, tasks}`; only `dismissed` is reopened, so an offered or in-flight task succeeds and writes nothing. 409 for a refused task |
 | GET | `/api/models` | Lists configured aliases and runtime-provider descriptors plus `provider_catalog_evidence`. Optional `workspace=<registered-name>` scopes evidence/catalog; paths are not accepted. `?refresh=1` refreshes OpenCode and invalidates Claude evidence, without connecting Claude. ACP agents report their own per-provider catalog, read from the agent's model options (`provider_models[id]`, `provider_defaults[id]`, `provider_catalog_evidence[id]`); `model_reasoning_levels` is keyed by bare model id, and OpenCode's levels win on a shared id. A failed ACP probe leaves that provider with an empty catalog. Configured aliases are not availability evidence; runtime-reported evidence is not proof a generation will succeed. |
 | GET, PATCH | `/api/memory/entity-types` | The vault's category list (`?workspace=` required) as `{workspace, vault, types}`, where each row is `{id, label, kind, folder, description, aliases, enabled, builtin, note_count}`. A `stale_after_days` key from an older client or an older file is ignored, since the review horizon is one number for every note. `GET` returns every effective entry, disabled ones included; `note_count` is the notes carrying that `type:` (an alias counts for its category, drift under its own spelling). A `PATCH` sends the whole desired list as `{"types": [...]}` — a row whose `id` is a shipped one is a partial override of that category's default (an omitted field falls back to the shipped default; a custom row's omitted fields take the built-in defaults instead, so send the whole list), only rows that differ from the shipped default are written to `<agent vault root>/entity-types.yaml`, and the write regenerates `VOCABULARY.md` with a `## Categories` section. 400 for a malformed body, a duplicate id, two enabled categories sharing a folder, an alias that is another entry's id, a missing label, or a delete of a custom category whose notes still name it; 500 when the file cannot be written (the old file is left in place) |
 | GET, PATCH | `/api/status` | Read or update status |
@@ -474,63 +469,6 @@ curl -sS -b /tmp/ciao.jar -X POST "http://localhost:${PWA_PORT:-8443}/api/housek
 
 # Hide the "Update OpenCode" tile until a release is tested with a newer version.
 curl -sS -b /tmp/ciao.jar -X POST "http://localhost:${PWA_PORT:-8443}/api/housekeeping/provider-update:opencode/dismiss"
-```
-
-**Update tasks (the "After this update" catalog)**
-
-```bash
-# List the tasks this engine supports for a workspace, with their state. Each row
-# carries its lifecycle (`status`), the applicability answer behind it, and the
-# chat a previous start created — so a caller never has to remember a chat id.
-# `?workspace=` is required.
-#
-# Read `applicability_checked_at` as "when did anyone last look" and `updated_at`
-# as "when did the operator decide". They are separate clocks on purpose: a
-# dismissed task has a decision time and a stale check time, and a surface that
-# shows only the second cannot tell an unexamined condition from a settled one.
-# Answers are cached for `update_tasks.APPLICABILITY_TTL_S`, so a repeat read
-# inside that window reports the same check time rather than re-dating it; the
-# state file, by contrast, is read on every call.
-#
-# This is also how a task finishes. When it computes a task's answer, it asks
-# that task's registered completion check — so a task the operator has finished
-# turns to `status: "completed"` here, and drops off Home, with no separate call.
-# `applicability` is unaffected: a review that deliberately kept some rows leaves
-# those rows countable, and the task is done anyway.
-curl -sS -b /tmp/ciao.jar "http://localhost:${PWA_PORT:-8443}/api/update-tasks?workspace=personal"
-
-# Start a task. Idempotent per (task, revision): press it twice and you get the
-# SAME chat back with `"resumed": true`, and the packaged prompt runs once. There
-# is no prompt field — the instructions are read from the packaged catalog on the
-# server, and the response's `prompt_digest` is what they hash to. If the last
-# dispatch failed (the 500 below, or a crash mid-launch), the next start sends
-# the prompt into that same chat rather than reporting a resume that never ran.
-# Starting a task you had dismissed reopens it in place. 409 means the task was
-# refused (unknown id, or one this engine version cannot support).
-curl -sS -b /tmp/ciao.jar -X POST \
-  "http://localhost:${PWA_PORT:-8443}/api/update-tasks/review-legacy-rows/start?workspace=personal"
-
-# Decline this task at this revision. Suppresses the offer at this revision only;
-# a later revision is new work and is offered again. `reason` is optional.
-#
-# This hides the task in this workspace. It does NOT cancel a chat that is
-# already open and it does NOT mark the work done: the record goes to
-# `dismissed`, the chat carries forward, and a client that tells the operator
-# otherwise is lying about the state of the machine. Reopen below puts it back.
-# The chat is carried forward unless the last attempt never dispatched
-# (`status: "failed"`): that chat is live and empty, so the next start creates a
-# fresh one and dispatches into it rather than reporting the empty one as
-# running.
-curl -sS -b /tmp/ciao.jar -X POST \
-  "http://localhost:${PWA_PORT:-8443}/api/update-tasks/review-legacy-rows/dismiss?workspace=personal" \
-  -H 'content-type: application/json' \
-  -d '{"reason":"reviewed them by hand"}'
-
-# Undo that dismissal and put the task back on offer. Re-evaluates current
-# applicability rather than replaying old instructions: the answer comes from the
-# same detector pass as the list.
-curl -sS -b /tmp/ciao.jar -X POST \
-  "http://localhost:${PWA_PORT:-8443}/api/update-tasks/review-legacy-rows/reopen?workspace=personal"
 ```
 
 **Projects**

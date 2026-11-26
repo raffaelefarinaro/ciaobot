@@ -103,7 +103,7 @@ def take_pending_list(items: list[dict], entry_id: str) -> dict | None:
 #: is the note the engine leaves when it stops a loop after failed runs (#3509).
 TURN_ORIGINS = frozenset({
     "background_run", "chat_action", "cli_task_wake", "loop", "loop_stop", "retry",
-    "restart_resume", "schedule", "task_delegation", "task_resume", "webhook", "update_task",
+    "restart_resume", "schedule", "task_delegation", "task_resume", "webhook",
 })
 def _flushed_entry(entry: dict) -> dict:
     """A drained entry as it flushes or parks."""

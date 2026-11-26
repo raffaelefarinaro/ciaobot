@@ -1,19 +1,13 @@
 import { defineStore } from 'pinia'
 import { computed, ref } from 'vue'
 import { api } from '../lib/api'
-import { apiErrorMessage, errorPayload } from '../lib/errorMessage'
+import { apiErrorMessage } from '../lib/errorMessage'
 import { checkingHealth, failedHealth, readyHealth, type SourceHealth } from '../lib/sourceHealth'
-import { useProjectStore } from './projects'
 import type {
   HousekeepingDismissResponse,
   HousekeepingResponse,
   HousekeepingRunResponse,
   OperatorAction,
-  UpdateTaskActionResponse,
-  UpdateTaskCoverageGap,
-  UpdateTaskPreview,
-  UpdateTaskRow,
-  UpdateTasksResponse,
   WorkspaceHealthCheck,
   WorkspaceHealthResponse,
 } from '../lib/types'
@@ -24,110 +18,12 @@ const REFRESH_INTERVAL_MS = 60_000
  *  rows (and their Fix button); rows still arrive when the reads land. */
 export const INITIAL_LOAD_GATE_MS = 3000
 
-/** What a start/dismiss/reopen call reports back, whichever way it went.
- *
- * `chatId` is separate from `ok` on purpose. A start can fail *after* the chat
- * exists (the 500 that carries a `chat_id`), and that is the one case where the
- * chat must be opened rather than thrown away: the next start sends the prompt
- * into it instead of minting a second one, so hiding it would strand a chat the
- * engine already made and lose the task's only attempt. */
-export interface UpdateTaskOutcome {
-  ok: boolean
-  chatId: string
-  resumed: boolean
-  error: string
-}
-
-export interface UpdateTaskPreviewState {
-  loading: boolean
-  result: UpdateTaskPreview | null
-  error: string
-  applicabilityCheckedAt: string
-}
-
 /**
- * Plain-language recovery guidance for a refused transition.
- *
- * The server refuses for reasons that need *different* things from the operator
- * — a task already done at this revision is not a retry, a task that arrived in a
- * newer engine needs an update, a missing chat manager needs a moment — so a
- * single generic "something went wrong" would send everybody to the same wrong
- * next step. The probes are deliberately coarse and every one of them falls
- * through to a safe default, because these are the server's own sentences
- * matched on the client: a reworded refusal degrades to the default rather than
- * showing a stranger the wrong remedy.
- */
-function refusalCopy(action: string, error: unknown): string {
-  const status = statusOf(error)
-  const server = apiErrorMessage(error, '')
-  if (status === 400) {
-    return 'No workspace is selected, so this task has nowhere to run.'
-  }
-  if (status === 409) {
-    if (server.includes('already completed')) {
-      return 'This task is already marked done at this revision, so it cannot be ' +
-        'started again. A newer revision is new work and gets its own card.'
-    }
-    if (server.includes('needs engine')) {
-      return 'This task arrived in a later Ciaobot version. Update the engine to ' +
-        'run it.'
-    }
-    if (server.includes('unknown update task')) {
-      return 'This install no longer ships that task, so there is nothing to run.'
-    }
-    if (server.includes('chat manager is not running')) {
-      return 'The assistant is not running yet, so no chat could be opened. Try ' +
-        'again in a moment.'
-    }
-    if (server.includes('workspace')) {
-      return 'This task needs a workspace that is not set up on this install.'
-    }
-    return `The engine declined to ${action} this task, so nothing was changed.`
-  }
-  if (status === 500) {
-    return 'The assistant could not start the chat. Nothing was lost — try again.'
-  }
-  return 'Could not reach the engine, so nothing was changed. Try again.'
-}
-
-function statusOf(error: unknown): number | undefined {
-  if (error && typeof error === 'object' && 'status' in error) {
-    const status = (error as { status?: unknown }).status
-    if (typeof status === 'number') return status
-  }
-  return undefined
-}
-
-/** One row's key: the identity a decision is recorded against, per 729-C.
- *
- * A revision bump is new work with its own record, so `(id, revision)` and not
- * `id` alone — two rows for the same task at different revisions are two
- * different cards that may both be visible at once. */
-function taskKey(row: UpdateTaskRow): string {
-  return `${row.id}@${row.revision}`
-}
-
-function query(workspace: string): string {
-  return `?workspace=${encodeURIComponent(workspace)}`
-}
-
-/**
- * Home-screen operator-action strip, plus the "After this update" group beside
- * it. Mirrors `checkPackageStatus`'s best-effort contract: a failure leaves the
- * strip empty rather than showing an error. Refreshes on first access, on a
- * short interval, and on window focus, so a cleared action (run in chat)
- * disappears without a manual reload. `run(id)` performs one action's work and
- * re-renders from the response's fresh list.
- *
- * The update tasks are a second, separate request rather than an extra key on
- * `/api/housekeeping`, and that is the cheaper of the two shapes in the way that
- * matters: the housekeeping response is a *detector pass* whose whole contract
- * is that nothing in it is expensive (see `ciao/operator_actions.py`), while the
- * task list is a per-workspace question the strip does not even know how to ask.
- * Bolting it on would make one request's cost depend on the other's semantics,
- * and the plan's "do not make housekeeping's own detection walk a vault" is the
- * same rule read the other way round. Both are cheap; they are simply cheap for
- * different reasons.
+ * Home-screen operator-action strip. Mirrors `checkPackageStatus`'s best-effort
+ * contract: a failure leaves the strip empty rather than showing an error.
+ * Refreshes on first access, on a short interval, and on window focus, so a
+ * cleared action (run in chat) disappears without a manual reload. `run(id)`
+ * performs one action's work and re-renders from the response's fresh list.
  */
 export const useHousekeepingStore = defineStore('housekeeping', () => {
   const actions = ref<OperatorAction[]>([])
@@ -139,8 +35,8 @@ export const useHousekeepingStore = defineStore('housekeeping', () => {
    *  opened before the decision cannot restore the pre-decision list. */
   let actionsSeq = 0
   const loading = ref(false)
-  /** True from `init` until its first three reads (actions, update tasks,
-   *  workspace health) have each answered or failed. Home paints no "Needs you"
+  /** True from `init` until its first two reads (actions, workspace
+   *  health) have each answered or failed. Home paints no "Needs you"
    *  row before then, so rows do not arrive one source at a time and push the
    *  composer down in steps. Later refreshes never set it. */
   const initialLoadPending = ref(false)
@@ -161,105 +57,6 @@ export const useHousekeepingStore = defineStore('housekeeping', () => {
   const healthFixError = ref('')
   const runningIds = ref<Set<string>>(new Set())
   let initialized = false
-
-  // ── "After this update" ──────────────────────────────────────────────────
-  //
-  // Applicability and state are per workspace, so the rows are stamped with the
-  // workspace they were computed for. A switch clears them rather than leaving
-  // the previous workspace's answers on screen: a card claiming this workspace
-  // has work to do because another one does is worse than a card that is briefly
-  // absent.
-  const updateTasks = ref<UpdateTaskRow[]>([])
-  const updateTasksWorkspace = ref('')
-  const updateTasksCoverageGap = ref<UpdateTaskCoverageGap | null>(null)
-  /** Whether the update-task listing could be read, for `updateTasksWorkspace`.
-   *  A switch resets it to `checking`; a refresh never does. */
-  const updateTasksHealth = ref<SourceHealth>(checkingHealth())
-  /** The listing worked but could not answer: no eligible task, or none it
-   *  could substantiate. `nothing_offered` is a healthy empty result. */
-  const updateTasksCoverageBlocked = computed(() => {
-    const reason = updateTasksCoverageGap.value?.reason
-    return reason === 'no_eligible_task' || reason === 'not_substantiated'
-  })
-  const pendingUpdateTaskIds = ref<Set<string>>(new Set())
-  const taskErrors = ref<Record<string, string>>({})
-  const taskPreviews = ref<Record<string, UpdateTaskPreviewState>>({})
-  let previewGeneration = 0
-  const previewSeq = new Map<string, number>()
-  const invalidatedPreviews = new Set<string>()
-
-  function eligible(row: UpdateTaskRow): boolean {
-    return row.offered && !row.suppressed && row.status === 'offered' && row.applicability === 'applicable'
-  }
-
-  function invalidatePreview(key: string): void {
-    previewSeq.set(key, (previewSeq.get(key) ?? 0) + 1)
-    invalidatedPreviews.add(key)
-    delete taskPreviews.value[key]
-  }
-
-  async function fetchTaskPreview(row: UpdateTaskRow, fresh: boolean): Promise<void> {
-    const key = taskKey(row)
-    const workspace = updateTasksWorkspace.value
-    const current = updateTasks.value.find(item => taskKey(item) === key)
-    if (!workspace || !current || !eligible(current) || current.applicability_checked_at !== row.applicability_checked_at) return
-    const existing = taskPreviews.value[key]
-    if (existing?.loading && existing.applicabilityCheckedAt === row.applicability_checked_at) return
-    if (existing && existing.applicabilityCheckedAt !== row.applicability_checked_at) {
-      invalidatePreview(key)
-      fresh = true
-    }
-    const generation = previewGeneration
-    const seq = (previewSeq.get(key) ?? 0) + 1
-    previewSeq.set(key, seq)
-    taskPreviews.value[key] = { loading: true, result: null, error: '', applicabilityCheckedAt: row.applicability_checked_at }
-    const isCurrent = () => {
-      const latest = updateTasks.value.find(item => taskKey(item) === key)
-      return generation === previewGeneration && workspace === updateTasksWorkspace.value &&
-        previewSeq.get(key) === seq && !!latest && eligible(latest) &&
-        latest.applicability_checked_at === row.applicability_checked_at
-    }
-    try {
-      const result = await api.get<UpdateTaskPreview>(`/api/update-tasks/${encodeURIComponent(row.id)}/preview${query(workspace)}${fresh ? '&fresh=1' : ''}`)
-      if (!isCurrent()) return
-      if (!result || result.task_id !== row.id || result.revision !== row.revision || result.workspace !== workspace) {
-        throw new Error('Preview response does not match this task.')
-      }
-      taskPreviews.value[key] = { loading: false, result, error: '', applicabilityCheckedAt: row.applicability_checked_at }
-    } catch (e) {
-      if (!isCurrent()) return
-      taskPreviews.value[key] = { loading: false, result: null, error: apiErrorMessage(e, 'Could not load preview.'), applicabilityCheckedAt: row.applicability_checked_at }
-    }
-  }
-
-  function prepareTaskPreviews(): void {
-    const rows = new Map(updateTasks.value.filter(eligible).map(row => [taskKey(row), row]))
-    for (const key of Object.keys(taskPreviews.value)) {
-      const row = rows.get(key)
-      if (!row || (taskPreviews.value[key].applicabilityCheckedAt && taskPreviews.value[key].applicabilityCheckedAt !== row.applicability_checked_at)) invalidatePreview(key)
-    }
-    for (const [key, row] of rows) {
-      const existing = taskPreviews.value[key]
-      if (existing?.applicabilityCheckedAt === row.applicability_checked_at && (existing.loading || existing.result || existing.error)) continue
-      // A later generation must not join a server scan from an earlier workspace visit.
-      void fetchTaskPreview(row, previewGeneration > 1 || invalidatedPreviews.has(key))
-    }
-  }
-
-  function refreshTaskPreview(row: UpdateTaskRow): Promise<void> {
-    return fetchTaskPreview(row, true)
-  }
-
-  /** How many listings have been asked for, and therefore which answers are
-   *  still current.
-   *
-   *  The workspace name is not enough on its own: two requests about the *same*
-   *  workspace can land in either order, and a 60s poll that was already in
-   *  flight when a dismiss landed would answer with the pre-dismiss list and put
-   *  the card back — with a Start button that 409s, until the next poll.
-   *  `adoptRows` counts as an answer too, so a listing is stale the moment a
-   *  decision newer than it lands. */
-  let requestSeq = 0
 
   async function refresh() {
     const seq = ++actionsSeq
@@ -303,52 +100,6 @@ export const useHousekeepingStore = defineStore('housekeeping', () => {
     }
   }
 
-  async function refreshUpdateTasks(workspace = ''): Promise<void> {
-    const wanted = (workspace || useProjectStore().activeWorkspace || '').trim()
-    if (!wanted) {
-      // The route refuses a nameless question on purpose. Asking anyway and
-      // rendering the refusal as "no tasks" would be a claim nobody made.
-      return
-    }
-    if (updateTasksWorkspace.value !== wanted) {
-      previewGeneration += 1
-      taskPreviews.value = {}
-      invalidatedPreviews.clear()
-      updateTasks.value = []
-      updateTasksCoverageGap.value = null
-      updateTasksHealth.value = checkingHealth()
-      taskErrors.value = {}
-    }
-    updateTasksWorkspace.value = wanted
-    const seq = ++requestSeq
-    try {
-      const data = await api.get<UpdateTasksResponse>(`/api/update-tasks${query(wanted)}`)
-      // Two ways to be stale, and both are checked: a switch may have landed
-      // while this was in flight, so the older answer is about a workspace the
-      // reader is no longer in; and a decision may have landed since, in which
-      // case this answer predates it and writing it would undo it.
-      if (updateTasksWorkspace.value !== wanted || seq !== requestSeq) return
-      updateTasks.value = data.tasks ?? []
-      updateTasksCoverageGap.value = data.coverage_gap ?? null
-      updateTasksHealth.value = readyHealth()
-      prepareTaskPreviews()
-    } catch (e) {
-      // Best-effort, exactly like `refresh` above, and for the same reason: this
-      // is a background poll on the home screen, and a red line here would nag
-      // about a condition the operator cannot act on from this page. The
-      // previous rows are deliberately left in place — a failed refresh is not a
-      // cleared list, and a cleared list would claim this workspace has no
-      // tasks when the truth is that nobody could ask.
-      //
-      // Where a failed check *is* reported: Settings → Overview → Update task history, which
-      // fetches for itself and owns the error, its retry and its empty state.
-      // It is also recorded in `updateTasksHealth`, behind the same guard as the
-      // rows: a superseded answer touches neither.
-      if (updateTasksWorkspace.value !== wanted || seq !== requestSeq) return
-      updateTasksHealth.value = failedHealth(updateTasksHealth.value, e)
-    }
-  }
-
   async function run(id: string): Promise<{ ok: boolean; summary: string }> {
     runningIds.value = new Set(runningIds.value).add(id)
     try {
@@ -387,169 +138,21 @@ export const useHousekeepingStore = defineStore('housekeeping', () => {
     }
   }
 
-  // -- update-task transitions ---------------------------------------------
-
-  /** Adopt the rows a state-changing reply carried, if it carried any.
-   *
-   * Absent rather than empty on purpose: the route leaves the key off when its
-   * own decision landed but the follow-up listing could not be computed, and
-   * writing `[]` there would tell the card the workspace has no tasks. On absent
-   * the caller re-lists instead, so a lost listing is a retry and never a
-   * silently cleared card. */
-  function adoptRows(data: UpdateTaskActionResponse): boolean {
-    if (!data.tasks) return false
-    // These rows are the server's answer *after* the decision, so every listing
-    // still in flight was asked before it and would put the old card back.
-    requestSeq += 1
-    updateTasksHealth.value = readyHealth()
-    updateTasks.value = data.tasks
-    prepareTaskPreviews()
-    return true
-  }
-
-  function setTaskError(key: string, message: string): void {
-    taskErrors.value = { ...taskErrors.value, [key]: message }
-  }
-
-  function clearTaskError(key: string): void {
-    if (!(key in taskErrors.value)) return
-    const next = { ...taskErrors.value }
-    delete next[key]
-    taskErrors.value = next
-  }
-
-  function markPending(key: string, pending: boolean): void {
-    const next = new Set(pendingUpdateTaskIds.value)
-    if (pending) next.add(key)
-    else next.delete(key)
-    pendingUpdateTaskIds.value = next
-  }
-
-  /** POST one transition. Shared by the two Home presses, start and dismiss,
-   *  which differ only in the path and the body the route takes.
-   *
-   *  There is deliberately no third one for reopen: only Settings reopens, it
-   *  posts for itself, and the one thing it needs from here is this list brought
-   *  up to date afterwards — so a `reopen` here would be a second, subtly
-   *  different way to reach the same records. */
-  async function transition(
-    row: UpdateTaskRow,
-    action: 'start' | 'dismiss',
-  ): Promise<UpdateTaskOutcome> {
-    const key = taskKey(row)
-    const workspace = updateTasksWorkspace.value
-    if (!workspace) {
-      const error = 'No workspace is selected, so this task has nowhere to run.'
-      setTaskError(key, error)
-      return { ok: false, chatId: '', resumed: false, error }
-    }
-    markPending(key, true)
-    clearTaskError(key)
-    try {
-      const data = await api.post<UpdateTaskActionResponse>(
-        `/api/update-tasks/${encodeURIComponent(row.id)}/${action}${query(workspace)}`,
-        action === 'dismiss' ? { reason: '' } : undefined,
-      )
-      // A switch may have landed while this was in flight: this reply — and any
-      // row it carried — is about a workspace the reader is no longer in, and
-      // re-listing would put that workspace back in front of them. Guarded
-      // exactly as `refreshUpdateTasks` guards its own answer. The outcome is
-      // still reported either way, because it happened: the chat really was
-      // opened, or the refusal really did land.
-      if (updateTasksWorkspace.value === workspace && !adoptRows(data)) {
-        await refreshUpdateTasks(workspace)
-      }
-      if (!data.ok) {
-        // A refusal that arrived as a 200 has just been re-listed by the branch
-        // above, the same way a refused one thrown by the route is re-listed
-        // below: a card whose record disagrees with the screen is a card that
-        // will be refused again.
-        const error = data.error || `The engine declined to ${action} this task.`
-        setTaskError(key, error)
-        return { ok: false, chatId: '', resumed: false, error }
-      }
-      const chatId = data.chat_id || ''
-      if (action === 'start' && !chatId) {
-        // A start that reports success without a chat opened nothing. Say so
-        // rather than clearing the card as though the task were under way.
-        const error = 'The engine did not open a chat for this task.'
-        setTaskError(key, error)
-        return { ok: false, chatId: '', resumed: false, error }
-      }
-      return { ok: true, chatId, resumed: !!data.resumed, error: '' }
-    } catch (e) {
-      // A refusal or a lost response: the card stays exactly as it was, with the
-      // reason attached. Never a clear, because a clear would read as "handled".
-      // The `chat_id` on a failed start is the exception the server goes out of
-      // its way to send — the chat exists and the next start retries into it.
-      const payloadChatId = String(errorPayload(e)?.chat_id || '')
-      const error = payloadChatId
-        ? 'The chat was opened but the task could not be sent into it. Opening it ' +
-          'now, and trying again, reuses that same chat.'
-        : refusalCopy(action, e)
-      setTaskError(key, error)
-      // A refusal means the record and this card disagree — a second tab can
-      // complete a task the copy on screen still offers, and the 409 says so.
-      // Re-list so the card stops offering the action that just failed, rather
-      // than leaving a Start button that will be refused again until the next
-      // poll. This re-reads the server's truth; it never clears anything on its
-      // own account, and the reason stays attached to whatever comes back.
-      if (updateTasksWorkspace.value === workspace) {
-        await refreshUpdateTasks(workspace)
-      }
-      return {
-        ok: false,
-        chatId: payloadChatId,
-        resumed: false,
-        error,
-      }
-    } finally {
-      markPending(key, false)
-    }
-  }
-
-  function startUpdateTask(row: UpdateTaskRow): Promise<UpdateTaskOutcome> {
-    return transition(row, 'start')
-  }
-
-  function dismissUpdateTask(row: UpdateTaskRow): Promise<UpdateTaskOutcome> {
-    return transition(row, 'dismiss')
-  }
-
-  /** Re-read a task's applicability and the record that goes with it.
-   *
-   * The server decides how fresh an answer may be (a named window, per
-   * `update_tasks.APPLICABILITY_TTL_S`) and the state file is read on every call
-   * regardless, so this re-reads the decision immediately and the detector
-   * answer as soon as its window allows. The card shows the check time, so
-   * "nothing changed" is visible rather than guessed at. */
-  async function recheckUpdateTask(): Promise<void> {
-    previewGeneration += 1
-    for (const row of updateTasks.value.filter(eligible)) {
-      const key = taskKey(row)
-      invalidatePreview(key)
-      taskPreviews.value[key] = { loading: false, result: null, error: 'Preview needs refreshing.', applicabilityCheckedAt: '' }
-    }
-    await refreshUpdateTasks()
-  }
-
   function init() {
     if (initialized) return
     initialized = true
     initialLoadPending.value = true
     void Promise.race([
-      Promise.allSettled([refresh(), refreshUpdateTasks(), refreshHealth()]),
+      Promise.allSettled([refresh(), refreshHealth()]),
       new Promise<void>(resolve => setTimeout(resolve, INITIAL_LOAD_GATE_MS)),
     ]).then(() => { initialLoadPending.value = false })
     if (typeof window !== 'undefined') {
       window.addEventListener('focus', () => {
         void refresh()
-        void refreshUpdateTasks()
         void refreshHealth()
       })
       window.setInterval(() => {
         void refresh()
-        void refreshUpdateTasks()
         void refreshHealth()
       }, REFRESH_INTERVAL_MS)
     }
@@ -570,19 +173,6 @@ export const useHousekeepingStore = defineStore('housekeeping', () => {
     refresh,
     run,
     dismiss,
-    updateTasks,
-    updateTasksWorkspace,
-    updateTasksCoverageGap,
-    updateTasksHealth,
-    updateTasksCoverageBlocked,
-    pendingUpdateTaskIds,
-    taskErrors,
-    taskPreviews,
-    refreshTaskPreview,
-    refreshUpdateTasks,
-    startUpdateTask,
-    dismissUpdateTask,
-    recheckUpdateTask,
     init,
   }
 })
