@@ -87,8 +87,8 @@ export const Collapsed: Story = {
   },
 }
 
-// The open disclosure the browser remembers: the full body with its tag
-// table, and the toggle that closes and re-opens it, storing the choice.
+// The open disclosure the browser remembers: the full body, and the toggle
+// that closes and re-opens it, storing the choice.
 export const Expanded: Story = {
   parameters: { fixture: { routes: [] }, ...viewportWide },
   render: () => renderExplainer('1'),
@@ -97,10 +97,8 @@ export const Expanded: Story = {
     await waitFor(() => expect(toggle.getAttribute('aria-expanded')).toBe('true'))
     expect(body(canvasElement).style.display).not.toBe('none')
     expect(canvas.getByText('What gets saved')).toBeTruthy()
-    expect(canvas.getByText('Who decides each tag', { selector: 'caption' })).toBeTruthy()
-    const rows = canvasElement.querySelectorAll<HTMLElement>('table.mhw-table tbody tr')
-    expect(rows.length).toBe(5)
-    expect(rows[0]!.querySelector<HTMLElement>('.mhw-tag')!.textContent).toBeTruthy()
+    expect(canvas.getByText('Undo')).toBeTruthy()
+    expect(canvasElement.querySelector('table')).toBeNull()
     const siteLink = canvasElement.querySelector<HTMLAnchorElement>('a[target="_blank"]')!
     expect(siteLink.rel).toContain('noopener')
     expect(siteLink.rel).toContain('noreferrer')
@@ -116,8 +114,7 @@ export const Expanded: Story = {
   },
 }
 
-// The 390px viewport: the compact table paddings the owner's own media query
-// ships, with the disclosure open and its tags unsplit on one line.
+// The 390px viewport: the disclosure open and inside the pane.
 export const Narrow: Story = {
   parameters: { fixture: { routes: [] }, viewport: { defaultViewport: 'narrow' } },
   render: () => renderExplainer('1'),
@@ -128,11 +125,6 @@ export const Narrow: Story = {
     const section = canvasElement.querySelector<HTMLElement>('section.mhw')!
     expect(section.getBoundingClientRect().width).toBeGreaterThan(0)
     expect(section.getBoundingClientRect().width).toBeLessThanOrEqual(window.innerWidth)
-    // The compact paddings belong to the 640px media query, not to a wrapper.
-    const header = canvasElement.querySelector<HTMLElement>('table.mhw-table th')!
-    expect(getComputedStyle(header).paddingLeft).toBe('0px')
-    const tag = canvasElement.querySelector<HTMLElement>('.mhw-tag')!
-    expect(getComputedStyle(tag).whiteSpace).toBe('nowrap')
     // The keyboard still drives the disclosure at this size.
     for (let step = 0; step < 6 && document.activeElement !== toggle; step++) await userEvent.tab()
     expect(document.activeElement).toBe(toggle)

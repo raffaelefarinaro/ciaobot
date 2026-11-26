@@ -47,7 +47,6 @@ describe('normalizeUsageStats', () => {
       expect(Object.values(s.totals).every(v => v === null)).toBe(true)
       expect(Object.values(s.previous).every(v => v === null)).toBe(true)
       expect(Object.values(s.today).every(v => v === null)).toBe(true)
-      expect(Object.values(s.memory_pipeline).every(v => v === null)).toBe(true)
       expect(s.hours).toHaveLength(24)
       expect(s.hours.every(v => v === null)).toBe(true)
       expect(s.daily_messages).toEqual([])

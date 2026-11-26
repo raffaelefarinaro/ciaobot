@@ -27,14 +27,13 @@
 <script setup lang="ts" generic="K extends string">
 import { nextTick, onMounted, ref, watch } from 'vue'
 
-// One tab bar for the whole app. Three copies of this markup, styling and
-// roving-tabindex handler had grown up independently (project sections,
-// proposal review, memory-map review), and the newest of them shipped without
-// the keyboard behaviour at all — while rendering directly above one of the
-// others, where any styling drift is visible side by side.
+// One tab bar for the whole app. Several copies of this markup, styling and
+// roving-tabindex handler had grown up independently, and the newest of them
+// shipped without the keyboard behaviour at all — while rendering directly above
+// one of the others, where any styling drift is visible side by side.
 
 // Generic over the key union so a caller whose state is
-// `'proposals' | 'retirement'` keeps that type through v-model, instead of
+// `'chats' | 'files'` keeps that type through v-model, instead of
 // silently widening to string on every emit.
 export interface TabSpec<K extends string = string> {
   key: K

@@ -18,7 +18,6 @@ const SAMPLE = {
     { project_id: 'alpha-notes', name: 'alpha-notes-a-very-long-unbreakable-project-identifier', messages: 260 },
     { project_id: 'beta-general', name: 'General', messages: 198 },
   ],
-  memory_pipeline: { proposed: 179, accepted: 112, notes_updated: 62 },
   hours: [2, 1, 0, 0, 0, 0, 1, 4, 9, 14, 16, 12, 7, 11, 15, 13, 10, 8, 6, 9, 14, 17, 12, 6],
   models: [{ model: 'claude-opus-5-5', turns: 680 }, { model: 'claude-sonnet-5-5', turns: 220 }, { model: 'openai/gpt-5.6-luna', turns: 100 }],
 }
@@ -82,12 +81,6 @@ describe('UsageBreakdown', () => {
     expect(wrapper.text()).toContain('Messages sent, last 30 days.')
   })
 
-  it('walks the memory pipeline in order', () => {
-    const wrapper = mountBreakdown(normalizeUsageStats(SAMPLE, 30), 30)
-
-    expect(wrapper.findAll('.usage-pipeline-step').map(s => s.text())).toEqual(['Proposed179', 'Accepted112', 'Vault notes updated62'])
-  })
-
   it('plots 24 hours and names the busiest', () => {
     const wrapper = mountBreakdown(normalizeUsageStats(SAMPLE, 30), 30)
 
@@ -112,7 +105,6 @@ describe('UsageBreakdown', () => {
     expect(wrapper.text()).toContain('No activity recorded yet.')
     expect(wrapper.text()).toContain('No project activity in this period.')
     expect(wrapper.text()).toContain('No model turns in this period.')
-    expect(wrapper.findAll('.usage-pipeline-step strong').map(s => s.text())).toEqual(['—', '—', '—'])
     expect(wrapper.find('.usage-hours').attributes('aria-label')).toBe('Messages by hour of day, none in this period')
     expect(wrapper.text()).toContain('Messages sent, last 7 days.')
   })

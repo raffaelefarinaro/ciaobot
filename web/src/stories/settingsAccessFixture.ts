@@ -7,8 +7,8 @@ import { mountConnected, type ConnectedFixture } from './mountConnected'
 
 /**
  * Synthetic connected fixtures for the Settings access and memory story slice
- * (#3307, B22): `SettingsDevices`, `SettingsMemoryBackup`,
- * `SettingsMemoryHandover` and `SettingsUpdateTasks` each read their own data
+ * (#3307, B22): `SettingsDevices`, `SettingsMemoryBackup`
+ * and `SettingsUpdateTasks` each read their own data
  * on mount, so every story mounts the production owner through `mountConnected`
  * with exactly the routes its play performs. Synthetic names, ids and text only.
  */

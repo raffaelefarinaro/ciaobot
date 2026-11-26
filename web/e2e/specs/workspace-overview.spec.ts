@@ -1,5 +1,5 @@
 import { expect, test } from '@playwright/test'
-import { activeWorkspaceButton, boot, fixtureWrites, horizontalOverflow, isolate } from '../support/app'
+import { activeWorkspaceButton, boot, horizontalOverflow, isolate } from '../support/app'
 
 /**
  * Why this is a browser test: the Overview page lives under a container-query
@@ -23,7 +23,7 @@ test.describe('workspace overview', () => {
     const rail = page.locator('.settings-toc-item')
     await expect(rail.first()).toBeVisible()
     const labels = await rail.allTextContents()
-    for (const title of ['Workspace', 'Memory handover', 'Shared brains', 'Update task history', 'All workspaces']) {
+    for (const title of ['Workspace', 'Shared brains', 'Update task history', 'All workspaces']) {
       expect(labels).toContain(title)
     }
     expect(labels).not.toContain('Google account')
@@ -69,71 +69,6 @@ test.describe('workspace overview', () => {
     await page.getByRole('menuitem', { name: /^Rename workspace /i }).click()
     await expect(page).toHaveURL(/\/settings\/workspace#workspace-name$/)
     await expect(page.locator('#workspace-name-input')).toBeFocused()
-  })
-
-  test('the memory handover radiogroup takes arrow keys', async ({ page }) => {
-    await page.setViewportSize({ width: 1280, height: 900 })
-    // The fixture keeps the saved handover per session (the workspace PATCH and
-    // /api/proposals/handover both read it), so no page.route stands in for
-    // the engine here: a route handler still fetching when the test ends fails
-    // the test after it passed (#2851).
-    await boot(page, OVERVIEW, READY)
-
-    const group = page.getByRole('radiogroup', { name: 'Memory handover' })
-    const card = page.locator('.card').filter({ has: group })
-    const refresh = card.getByRole('button', { name: 'Refresh', exact: true })
-    await group.scrollIntoViewIfNeeded()
-    const off = group.getByRole('radio', { name: 'Off' })
-    const dismiss = group.getByRole('radio', { name: 'Dismiss', exact: true })
-    // A save is settled once the group takes arrows again and the card has
-    // re-read the saved value (Refresh is disabled while that read runs).
-    const settled = async () => {
-      await expect(group.locator('[aria-disabled="true"]')).toHaveCount(0)
-      await expect(refresh).toBeEnabled()
-    }
-
-    await off.focus()
-    await expect(off).toHaveAttribute('aria-checked', 'true')
-    await page.keyboard.press('ArrowRight')
-    // Focus moves at once; the save is still in flight, and the group ignores
-    // arrows until it settles (no second write mid-save).
-    await expect(dismiss).toBeFocused()
-    await expect(dismiss).toHaveAttribute('aria-checked', 'true')
-    await settled()
-    await page.keyboard.press('ArrowLeft')
-    await expect(off).toBeFocused()
-    await expect(off).toHaveAttribute('aria-checked', 'true')
-    // Both arrows saved, and nothing is still in flight when the test ends.
-    await settled()
-    const saves = (await fixtureWrites(page)).filter(w => w.method === 'PATCH' && w.path.startsWith('/api/workspaces/'))
-    expect(saves).toHaveLength(2)
-  })
-
-  test('the per-kind acceptance rows sit under the handover and take arrow keys', async ({ page }) => {
-    await page.setViewportSize({ width: 1280, height: 900 })
-    await boot(page, OVERVIEW, READY)
-
-    // Both kinds are labelled radiogroups under the handover card. They start
-    // inherited: "Ask me" is checked and no reset link is offered.
-    const profile = page.getByRole('radiogroup', { name: 'Profile', exact: true })
-    await expect(page.getByRole('radiogroup', { name: 'Memory', exact: true })).toBeVisible()
-    await profile.scrollIntoViewIfNeeded()
-    const askMe = profile.getByRole('radio', { name: 'Ask me', exact: true })
-    await expect(askMe).toHaveAttribute('aria-checked', 'true')
-    await expect(page.getByRole('button', { name: 'Reset to inherited' })).toHaveCount(0)
-
-    // Arrow keys reach "Let Workspace care add it" through the confirm dialog;
-    // once allowed, the row shows the choice as set for this kind.
-    await askMe.focus()
-    await page.keyboard.press('ArrowRight')
-    await page.getByRole('button', { name: 'Allow', exact: true }).click()
-    await expect(profile.getByRole('radio', { name: 'Let Workspace care add it', exact: true })).toHaveAttribute('aria-checked', 'true')
-    await expect(page.getByText('Set for this kind.')).toBeVisible()
-
-    // Reset returns the kind to the inherited choice.
-    await page.getByRole('button', { name: 'Reset to inherited' }).click()
-    await expect(askMe).toHaveAttribute('aria-checked', 'true')
-    await expect(page.getByRole('button', { name: 'Reset to inherited' })).toHaveCount(0)
   })
 
   test('the All workspaces card ends the page and Settings \u2191 returns to the top', async ({ page }) => {

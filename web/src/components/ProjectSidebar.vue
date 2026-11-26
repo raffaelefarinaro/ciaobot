@@ -104,15 +104,12 @@
           <router-link
             to="/memory"
             class="nav-item"
-            :class="{ 'nav-item--active': mode === 'memory' || mode === 'proposals' }"
-            :title="proposals.rows.length > 0 ? `memory — ${proposals.rows.length} suggested across all workspaces` : 'memory'"
-            :data-count="memoryCount || undefined"
-            :aria-label="memoryCount > 0 ? `memory — ${memoryCount} to review in this workspace` : 'memory'"
+            :class="{ 'nav-item--active': mode === 'memory' }"
+            title="memory"
+            aria-label="memory"
           >
             <!-- Book/tray: rectilinear like the rest of the rail, which the
-                 organic-curve brain never was. It also now covers review, since
-                 the proposal queue is a segment of this view rather than its own
-                 rail entry. -->
+                 organic-curve brain never was. -->
             <span class="nav-item-icon" aria-hidden="true">
               <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor"
                    stroke-width="2" stroke-linecap="square" stroke-linejoin="miter">
@@ -446,7 +443,7 @@
          of navigation, each a route. The map's own filters (search,
          categories) follow under the list only while the map is showing,
          because they act on nothing else. -->
-    <template v-if="!collapsed && (mode === 'memory' || mode === 'proposals')">
+    <template v-if="!collapsed && mode === 'memory'">
       <nav class="settings-nav-list memory-nav-list" aria-label="Memory sections">
         <template v-for="(group, gi) in MEMORY_NAV" :key="gi">
           <h2 v-if="group.label" class="sidebar-list-label">{{ group.label }}</h2>
@@ -463,7 +460,6 @@
             <span
               v-if="memoryNavCount(item.section) !== null"
               class="memory-nav-count"
-              :class="{ 'memory-nav-count--due': item.due && (memoryNavCount(item.section) ?? 0) > 0 }"
               aria-hidden="true"
             >{{ memoryNavCount(item.section)?.toLocaleString() }}</span>
           </SidebarRow>
@@ -1041,8 +1037,6 @@ import { formatCardDue, readableTasks, taskLanes, taskRailMark } from '../lib/ta
 import { useHousekeepingStore } from '../stores/housekeeping'
 import { useFileViewerStore } from '../stores/fileViewer'
 import { useMemoryMapStore, memorySectionPath, type MemorySection } from '../stores/memoryMap'
-import { useProposalsStore } from '../stores/proposals'
-import { useVaultReviewStore } from '../stores/vaultReview'
 import { useTaskSignalsStore } from '../stores/taskSignals'
 import ChatSignals from './ChatSignals.vue'
 import { useDragSort, type DragCommit } from '../composables/useDragSort'
@@ -1075,7 +1069,7 @@ import { homeNewChatProjectId, openNewChatPicker } from '../lib/newChat'
 
 const props = defineProps<{
   collapsed: boolean
-  mode?: 'chat' | 'project' | 'schedules' | 'tasks' | 'settings' | 'memory' | 'proposals' | 'stats'
+  mode?: 'chat' | 'project' | 'schedules' | 'tasks' | 'settings' | 'memory' | 'stats'
   /** The layout can show a second chat beside the open one (a desktop pane wide enough). */
   canOpenBeside?: boolean
   /** The second chat of a split, when its pane has the focus: a row click then replaces it,
@@ -1105,21 +1099,17 @@ const taskStore = useTaskStore()
 const housekeeping = useHousekeepingStore()
 const fileViewer = useFileViewerStore()
 const mm = useMemoryMapStore()
-const proposals = useProposalsStore()
-const vaultReview = useVaultReviewStore()
 const taskSignals = useTaskSignalsStore()
 
-// Memory's sections and their counts. Scoped counts come from the stores so
-// they use the same workspace rule as each page's list — a count that
-// disagreed with the rows under it would be worse than none. The retirement
-// store holds one workspace at a time, so a load for another workspace reads
-// as "not loaded" here rather than as the previous workspace's queue.
-type MemoryNavItem = { section: MemorySection; label: string; due?: boolean }
-// To decide heads the list on its own: both queues, one row, so it needs no
-// group heading above it.
+// Memory's sections. Scoped counts come from the stores so they use the same
+// workspace rule as each page's list — a count that disagreed with the rows
+// under it would be worse than none.
+type MemoryNavItem = { section: MemorySection; label: string }
 const MEMORY_NAV: { label?: string; items: MemoryNavItem[] }[] = [
   { items: [
-    { section: 'review', label: 'To decide', due: true },
+    // The list of what Ciaobot could not settle: a Markdown file, so no count —
+    // reading it for a number would put a file read on every page.
+    { section: 'unsure', label: 'Unsure' },
   ] },
   { label: 'Explore', items: [
     { section: 'map', label: 'Map' },
@@ -1129,22 +1119,11 @@ const MEMORY_NAV: { label?: string; items: MemoryNavItem[] }[] = [
     // for, so a number here would describe a scan nobody ran.
     { section: 'import', label: 'Import' },
   ] },
-  { label: 'Records', items: [
-    { section: 'retired', label: 'Retired' },
-    { section: 'history', label: 'History' },
-  ] },
 ]
-/** A section's count, scoped to the selected workspace; null hides it (not
- * loaded yet, or a zero on a queue where zero is the news). */
+/** A section's count, scoped to the selected workspace; null hides it. */
 function memoryNavCount(section: MemorySection): number | null {
   const workspace = store.activeWorkspace
-  const retirementLoaded = vaultReview.loadedWorkspace === workspace
-  // The ledger is fetched per workspace too; until the switch's refetch lands
-  // it still holds the previous workspace's total.
-  const historyLoaded = proposals.historyLoaded && (proposals.historyWorkspace ?? '') === workspace
   switch (section) {
-    case 'review': return memoryCount.value || null
-    case 'retired': return retirementLoaded ? vaultReview.trashed.length || null : null
     case 'map': return mm.loadedWorkspace === workspace ? mm.nodes.length || null : null
     // The category list is configuration, not a queue: a number beside it would
     // ask for attention no click can clear, and the map's own note count already
@@ -1153,14 +1132,13 @@ function memoryNavCount(section: MemorySection): number | null {
     // Nothing is listed until the reader presses Find, so there is nothing to
     // count before then and nothing stale to show after.
     case 'import': return null
-    case 'history': return historyLoaded ? proposals.historyTotal || null : null
+    case 'unsure': return null
   }
 }
 function memoryNavLabel(item: MemoryNavItem): string {
   const count = memoryNavCount(item.section)
   if (count === null) return item.label
   if (item.section === 'map') return `${item.label}, ${count} notes`
-  if (item.due) return `${item.label}, ${count} waiting`
   return `${item.label}, ${count}`
 }
 const hasBlockingHousekeeping = computed(() => housekeeping.actions.some(action => action.blocking))
@@ -1170,27 +1148,6 @@ onMounted(() => {
   housekeeping.init()
   document.addEventListener('click', closeWorkspaceMenuOnOutside)
 })
-
-// Badges still load on every page, after the primary content has painted.
-// Waiting for the named chat's history avoids competing with its first read.
-watch(
-  [() => store.bootstrapped, () => store.messageHistoryLoading, () => store.activeWorkspace],
-  ([ready, historyLoading, workspace], _, onCleanup) => {
-    if (!ready || historyLoading || !workspace) return
-    let secondFrame = 0
-    const firstFrame = requestAnimationFrame(() => {
-      secondFrame = requestAnimationFrame(() => {
-        void proposals.ensureLoaded()
-        void vaultReview.ensureLoaded(workspace)
-      })
-    })
-    onCleanup(() => {
-      cancelAnimationFrame(firstFrame)
-      cancelAnimationFrame(secondFrame)
-    })
-  },
-  { immediate: true, flush: 'post' },
-)
 
 onBeforeUnmount(() => {
   document.removeEventListener('click', closeWorkspaceMenuOnOutside)
@@ -1216,9 +1173,6 @@ const workspaceScopeMenu = ref<HTMLElement | null>(null)
 const workspaceMenuMaxHeight = ref(0)
 const workspaceSidebarMaxHeight = ref<number | null>(null)
 
-// Review + retirement work waiting in a workspace, used only as the scope
-// trigger's attention badge. The retirement queue is only loaded for the active workspace,
-// so their count is the proposals queue alone.
 // Section counts, all scoped to the selected workspace so they agree with
 // what each page shows. They replace the per-workspace badge in the scope
 // menu: the number sits next to the place that resolves it.
@@ -1235,11 +1189,6 @@ const todayCount = computed(() => store.chats.reduce((sum, chat) => {
 const automationsCount = computed(() => missedCountFor(store.activeWorkspace))
 // Delegated tasks the agent reported done, waiting for the user's Approve.
 const tasksCount = computed(() => taskSignals.inReviewCount(store.activeWorkspace))
-const memoryCount = computed(() => {
-  const workspace = store.activeWorkspace
-  const retirement = vaultReview.loadedWorkspace === workspace ? vaultReview.candidates.length : 0
-  return proposals.scopedRows(workspace).length + retirement
-})
 // Settings has no count. A blocking action is the alert glyph like any other
 // failure; an available update is news, not trouble, so it is a muted word.
 const settingsNote = computed(() => (store.packageStatus?.update_available ? 'update' : ''))
@@ -2432,24 +2381,6 @@ async function confirmDeleteChat(chatId: string) {
   background: color-mix(in srgb, var(--accent) 18%, var(--bg3));
 }
 
-/* Pending-proposal count inside the view switcher's Review segment. Same
-   treatment as the workspace shortcut chip: small, bordered, quiet. */
-.view-toggle .view-count {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  min-width: 16px;
-  height: 16px;
-  padding: 0 4px;
-  border: 1px solid var(--border);
-  border-radius: 999px;
-  background: var(--bg);
-  color: var(--fg2);
-  font-size: 10px;
-  line-height: 1;
-  font-weight: 700;
-}
-
 /* Keep workspace status markers visually separate from the workspace name,
    matching the spacing used by project-level state dots. */
 .workspace-toggle button .workspace-status-dot {
@@ -3346,7 +3277,6 @@ async function confirmDeleteChat(chatId: string) {
 .memory-nav-list .sidebar-list-label { margin-top: 8px; }
 .memory-nav-list .sidebar-list-label:first-child { margin-top: 0; }
 .memory-nav-count { flex: none; padding-right: 6px; color: var(--fg3); font-size: var(--text-xs); font-variant-numeric: tabular-nums; }
-.memory-nav-count--due { color: var(--accent); font-weight: 650; }
 
 /* Memory Map sidebar (search, categories) */
 .mm-sidebar-scroll {

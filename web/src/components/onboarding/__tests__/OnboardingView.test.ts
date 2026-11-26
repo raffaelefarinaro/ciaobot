@@ -1,7 +1,6 @@
 // @vitest-environment jsdom
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { mount } from '@vue/test-utils'
-import { defineComponent, h, onMounted } from 'vue'
 import OnboardingView from '../OnboardingView.vue'
 import { createPinia, setActivePinia } from 'pinia'
 import { api } from '../../../lib/api'
@@ -14,19 +13,6 @@ vi.mock('vue-router', async importOriginal => ({
 }))
 vi.mock('../../../lib/api', () => ({ api: { get: vi.fn(), patch: vi.fn(), post: vi.fn() } }))
 
-// A Memory stage that reports ready and exposes the commit the shell calls on Continue.
-function memoryStub(save: () => Promise<boolean>) {
-  return defineComponent({
-    name: 'OnboardingMemoryStage',
-    emits: ['state'],
-    setup(_, { emit, expose }) {
-      expose({ save })
-      onMounted(() => emit('state', { dirty: false, pending: false, canContinue: true, error: null }))
-      return () => h('div')
-    },
-  })
-}
-
 beforeEach(() => { setActivePinia(createPinia()); vi.resetAllMocks() })
 
 describe('onboarding route', () => {
@@ -37,23 +23,19 @@ describe('onboarding route', () => {
 })
 
 describe('OnboardingView resumes', () => {
-  it('can advance from a resumed access/memory step once both halves are ready', async () => {
+  it('resumes on the access step', async () => {
     vi.mocked(api.get).mockImplementation((url: string) => {
       if (url === '/api/onboarding') return Promise.resolve({ schema: 1, revision: 2, installation: { status: 'in_progress', step: 'access_memory' }, workspaces: {} }) as never
       if (url === '/api/workspaces') return Promise.resolve({ workspaces: [{ name: 'personal' }] }) as never
       if (url === '/api/setup-status') return Promise.resolve({ workspace_root: '/srv/ciaobot' }) as never
       if (url === '/api/host/terminal') return Promise.resolve({ platform: 'darwin' }) as never
       if (url === '/api/settings/routines') return Promise.resolve({ provider_default_modes: { claude: 'auto' } }) as never
-      if (url === '/api/proposals/handover') return Promise.resolve({ handover: 'off', acting_available: true }) as never
-      if (url.startsWith('/api/proposals/handover')) return Promise.resolve({ handover: 'off', acting_available: true }) as never
       return Promise.resolve({ provider_catalog_evidence: {}, provider_models: {} }) as never
     })
     const wrapper = mount(OnboardingView)
-    await vi.waitFor(() => expect(wrapper.text()).toContain('Memory & access'))
-    // One scrolling screen: both halves are present, and Memory's options are
-    // reachable above the single footer.
-    expect(wrapper.text()).toContain('Memory handover')
-    expect(wrapper.text()).toContain('Ask me first')
+    await vi.waitFor(() => expect(wrapper.text()).toContain('Access'))
+    // No memory choice is asked here: the agent writes memory itself.
+    expect(wrapper.text()).not.toContain('Memory handover')
     expect(wrapper.findAll('footer')).toHaveLength(1)
     expect(wrapper.findAll('button.continue')).toHaveLength(1)
     expect(wrapper.findAll('button.back')).toHaveLength(1)
@@ -128,9 +110,9 @@ describe('OnboardingView advancement', () => {
     await wrapper.get('footer button.continue').trigger('click')
     await vi.waitFor(() => expect(api.patch).toHaveBeenCalledWith('/api/onboarding', expect.objectContaining({ step: 'access_memory' })))
     expect(vi.mocked(api.patch).mock.calls.filter(([url]) => url === '/api/workspaces/personal')).toHaveLength(1)
-    await vi.waitFor(() => expect(wrapper.get('h1').text()).toBe('Memory & access'))
+    await vi.waitFor(() => expect(wrapper.get('h1').text()).toBe('Access'))
   })
-  it('advances from the shared screen only after memory saves and access is ready', async () => {
+  it('advances from the access screen once access is ready', async () => {
     vi.mocked(api.get).mockImplementation((url: string) => {
       if (url === '/api/onboarding') return Promise.resolve({ schema: 1, revision: 2, installation: { status: 'in_progress', step: 'access_memory' }, workspaces: {} }) as never
       if (url === '/api/workspaces') return Promise.resolve({ workspaces: [{ name: 'personal' }] }) as never
@@ -139,8 +121,6 @@ describe('OnboardingView advancement', () => {
     })
     vi.mocked(api.patch).mockResolvedValue({ schema: 1, revision: 3, installation: { status: 'in_progress', step: 'care' }, workspaces: {} } as never)
 
-    const memorySave = vi.fn().mockResolvedValue(true)
-    const MemoryStub = memoryStub(memorySave)
     const AccessStub = {
       name: 'OnboardingAccessStage',
       emits: ['state'],
@@ -150,11 +130,10 @@ describe('OnboardingView advancement', () => {
       },
     }
     const wrapper = mount(OnboardingView, {
-      global: { stubs: { OnboardingAccessStage: AccessStub, OnboardingMemoryStage: MemoryStub } },
+      global: { stubs: { OnboardingAccessStage: AccessStub } },
     })
     await vi.waitFor(() => expect((wrapper.get('footer button.continue').element as HTMLButtonElement).disabled).toBe(false))
     await wrapper.get('footer button.continue').trigger('click')
-    expect(memorySave).toHaveBeenCalledTimes(1)
     await vi.waitFor(() => expect(api.patch).toHaveBeenCalledWith('/api/onboarding', expect.objectContaining({ step: 'care' })))
     // The journey moved on, so the care screen is what the operator sees.
     await vi.waitFor(() => expect(wrapper.text()).toContain('When should workspace care run?'))
@@ -171,8 +150,6 @@ describe('OnboardingView failed save', () => {
     })
     vi.mocked(api.patch).mockRejectedValue(new Error('offline'))
 
-    const memorySave = vi.fn().mockResolvedValue(false)
-    const MemoryStub = memoryStub(memorySave)
     const AccessStub = {
       name: 'OnboardingAccessStage',
       emits: ['state'],
@@ -182,14 +159,13 @@ describe('OnboardingView failed save', () => {
       },
     }
     const wrapper = mount(OnboardingView, {
-      global: { stubs: { OnboardingAccessStage: AccessStub, OnboardingMemoryStage: MemoryStub } },
+      global: { stubs: { OnboardingAccessStage: AccessStub } },
     })
     await vi.waitFor(() => expect((wrapper.get('footer button.continue').element as HTMLButtonElement).disabled).toBe(false))
     await wrapper.get('footer button.continue').trigger('click')
-    await vi.waitFor(() => expect(memorySave).toHaveBeenCalledTimes(1))
-    // The commit failed: the journey did not move and nothing was written.
-    expect(vi.mocked(api.patch)).not.toHaveBeenCalled()
-    expect(wrapper.get('h1').text()).toBe('Memory & access')
+    await vi.waitFor(() => expect(api.patch).toHaveBeenCalledWith('/api/onboarding', expect.objectContaining({ step: 'care' })))
+    // The step write failed: the journey did not move, and the failure is shown.
+    await vi.waitFor(() => expect(wrapper.get('[role="alert"]').text()).toContain('offline'))
     expect(wrapper.text()).not.toContain('When should workspace care run?')
   })
 })

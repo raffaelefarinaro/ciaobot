@@ -43,7 +43,6 @@
 
     <div v-if="workspacesResult" class="action-result action-result--error" role="alert">{{ workspacesResult }}</div>
 
-    <SettingsMemoryHandover />
     <SettingsSharedBrains />
     <SettingsUpdateTasks />
 
@@ -74,7 +73,6 @@ import SkeletonLoader from '../SkeletonLoader.vue'
 import WorkspaceTile from '../WorkspaceTile.vue'
 import SettingsClaudeTrim from './SettingsClaudeTrim.vue'
 import SettingsWorkspaceModels from './SettingsWorkspaceModels.vue'
-import SettingsMemoryHandover from './SettingsMemoryHandover.vue'
 import SettingsSharedBrains from './SettingsSharedBrains.vue'
 import SettingsUpdateTasks from './SettingsUpdateTasks.vue'
 import WorkspaceColorPicker from './WorkspaceColorPicker.vue'

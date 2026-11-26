@@ -310,9 +310,9 @@ describe('real connected owner', () => {
     expect(second.host.querySelector('strong')?.textContent).toBe('12')
   })
 
-  it.each(['loading', 'failed'] as const)('%s keeps the real owner’s six dashes without invented status UI', async state => {
+  it.each(['loading', 'failed'] as const)('%s keeps the real owner’s five dashes without invented status UI', async state => {
     const fixture = await mount(state)
-    expect([...fixture.host.querySelectorAll('strong')].map(el => el.textContent)).toEqual(Array(6).fill('—'))
+    expect([...fixture.host.querySelectorAll('strong')].map(el => el.textContent)).toEqual(Array(5).fill('—'))
     expect(fixture.host.querySelectorAll('.home-today-avg')).toHaveLength(0)
     expect(fixture.boundary.requests).toEqual([path])
     expect(fixture.boundary.violations).toEqual([])
@@ -320,7 +320,7 @@ describe('real connected owner', () => {
 
   it('normalizes missing and invalid fields, keeping valid zeroes and averages', async () => {
     const fixture = await mount('partial')
-    expect([...fixture.host.querySelectorAll('strong')].map(el => el.textContent)).toEqual(['0', '—', '—', '3', '—', '—'])
+    expect([...fixture.host.querySelectorAll('strong')].map(el => el.textContent)).toEqual(['0', '—', '—', '3', '—'])
     expect(fixture.host.querySelector('.home-today-avg')?.textContent).toBe('avg 0.4')
   })
 

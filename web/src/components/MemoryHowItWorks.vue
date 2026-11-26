@@ -37,7 +37,7 @@
             <li>A small block about you and your rules, read in every chat.</li>
             <li>Notes, filed by category: people, projects, places, ideas.</li>
             <li>Lessons for next time, in Learnings.</li>
-            <li>Anything unsure waits in To decide.</li>
+            <li>Anything unsure waits on the Unsure list.</li>
           </ul>
 
           <h3 class="mhw-sub">How it flows</h3>
@@ -45,9 +45,9 @@
             <li>Archive a chat and a memory pass starts.</li>
             <li>The pass is a chat of its own. Open it from Home to read it or steer it.</li>
             <li>Facts it is sure of are written straight away.</li>
-            <li>Facts it is unsure of wait in To decide.</li>
-            <li>Each night, Workspace care settles what it can and re-checks notes that have gone too long without a check.</li>
-            <li>Each week, it also tidies the vault, reviews your guide and distills your decisions into rules. It only suggests; it never edits the guide.</li>
+            <li>Facts it is unsure of go on the Unsure list, one line each.</li>
+            <li>Tick a line to say yes, or delete it to say no. A later run writes what you ticked.</li>
+            <li>Each night, Workspace care re-checks notes that have gone too long without a check.</li>
           </ol>
 
           <h3 class="mhw-sub">What is not saved</h3>
@@ -58,32 +58,15 @@
             <li>Instructions found inside a chat. They are read as evidence, never obeyed.</li>
           </ul>
 
-          <h3 class="mhw-sub">Who decides each tag</h3>
-          <p class="mhw-intro">Every suggestion has a tag. Nightly leaves a suggestion for you when it is marked decide: you, or when it could not settle it.</p>
-          <div class="mhw-table-wrap">
-            <table class="mhw-table">
-              <caption class="sr-only">Who decides each tag</caption>
-              <thead>
-                <tr>
-                  <th scope="col">Tag</th>
-                  <th scope="col">What it is</th>
-                  <th scope="col">Who decides</th>
-                </tr>
-              </thead>
-              <tbody>
-                <tr v-for="row in TAG_ROWS" :key="row.kind">
-                  <td><span class="mhw-tag">{{ kindLabel(row.kind) }}</span></td>
-                  <td>{{ row.what }}</td>
-                  <td>{{ row.who }}</td>
-                </tr>
-              </tbody>
-            </table>
-          </div>
-          <p class="mhw-note">Settings → Overview → Memory handover can let Workspace care act on its guess for memory and profile: off, dismiss, or dismiss and accept. Accept is capped at 5 per run, and each one has Undo in History. Not available on every install.</p>
+          <h3 class="mhw-sub">Undo</h3>
+          <ul class="mhw-list">
+            <li>The workspace is a Git repository, so every change to a note is in its history and can be reverted.</li>
+            <li>A suggested edit to a skill or your guide is a file in Workspace/Proposals. Ciaobot never applies it for you.</li>
+          </ul>
 
           <h3 class="mhw-sub">Why you decided</h3>
           <ul class="mhw-list">
-            <li>Accepting or dismissing a suggestion asks why first. It is optional — you can continue without one. The one thing it does not ask is which workspace a re-home should move a note to: there the destination is the answer.</li>
+            <li>Rejecting, approving or deleting a task asks why first. It is optional — you can continue without one.</li>
             <li>Each week Ciaobot distills your reasons into two notes you can edit: Memory-Review-Rules and Task-Rules. It waits until there are enough new decisions, so it is a weekly tidy rather than a second daily job. Memory passes and task hand-offs read them as hints.</li>
           </ul>
 
@@ -110,7 +93,6 @@
 <script setup lang="ts">
 import { ref, watch } from 'vue'
 import { RouterLink } from 'vue-router'
-import { kindLabel } from '../lib/proposalKinds'
 import { memorySectionPath } from '../stores/memoryMap'
 
 /**
@@ -137,19 +119,6 @@ watch(open, (isOpen) => {
     // Storage blocked: the choice lasts for this page only.
   }
 })
-
-/** Who settles each tag. Static, cross-checked against the nightly and memory-pass prompts. */
-const TAG_ROWS: { kind: string; what: string; who: string }[] = [
-  { kind: 'project', what: 'A fact or decision about one project', who: 'Nightly files it.' },
-  { kind: 'people', what: 'Something about a person', who: 'Nightly files it.' },
-  {
-    kind: 'review',
-    what: 'A question with no home yet',
-    who: 'Nightly decides. A judgement call comes back to you as a yes or no.',
-  },
-  { kind: 'memory', what: 'A rule for every chat', who: 'You. Nightly only guesses what you would pick.' },
-  { kind: 'profile', what: 'About you: identity, style', who: 'You. Nightly only guesses what you would pick.' },
-]
 </script>
 
 <style scoped>
@@ -227,53 +196,6 @@ const TAG_ROWS: { kind: string; what: string; who: string }[] = [
   margin-top: var(--space-1);
 }
 
-.mhw-intro {
-  margin: 0 0 var(--space-2);
-}
-
-.mhw-table-wrap {
-  max-width: 100%;
-}
-
-.mhw-table {
-  width: 100%;
-  border-collapse: collapse;
-}
-
-.mhw-table th,
-.mhw-table td {
-  padding: var(--space-2) var(--space-3) var(--space-2) 0;
-  border-top: 1px solid var(--border);
-  text-align: left;
-  vertical-align: top;
-  overflow-wrap: anywhere;
-}
-
-.mhw-table th {
-  color: var(--fg3);
-  font-size: 11px;
-  font-weight: 600;
-  letter-spacing: 0.5px;
-  text-transform: uppercase;
-}
-
-.mhw-tag {
-  font-family: var(--font-mono);
-  font-size: 11px;
-  font-weight: 600;
-  letter-spacing: 0.5px;
-  color: var(--fg);
-  /* A tag is one word; `anywhere` on the cell would split "memory" at 390px. */
-  overflow-wrap: normal;
-  white-space: nowrap;
-}
-
-.mhw-note {
-  margin: var(--space-3) 0 0;
-  color: var(--fg3);
-  font-size: 12px;
-}
-
 .mhw-foot {
   margin: var(--space-4) 0 0;
 }
@@ -287,14 +209,6 @@ const TAG_ROWS: { kind: string; what: string; who: string }[] = [
 .mhw-link:focus-visible {
   outline: 2px solid var(--accent);
   outline-offset: 2px;
-}
-
-@media (max-width: 640px) {
-  .mhw-table th,
-  .mhw-table td {
-    padding: var(--space-2);
-    padding-left: 0;
-  }
 }
 
 @media (pointer: coarse) {

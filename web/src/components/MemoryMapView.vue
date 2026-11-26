@@ -30,124 +30,25 @@
       </div>
     </div>
 
-    <div v-else-if="mm.section !== 'map'" class="mm-review-wrap">
+    <!-- Unsure is the list of what Ciaobot could not settle: one Markdown file,
+         with the always-loaded budget beside it. -->
+    <div v-else-if="mm.section === 'unsure'" class="mm-review-wrap">
       <div class="page-grid mm-review-grid">
-      <div class="page-main">
-      <div
-        v-if="mm.section === 'review' && proposals.legacyLearningQueues?.[store.activeWorkspace]"
-        class="mm-link-notice mm-migration-notice"
-        role="status"
-      >
-        <span v-if="proposals.legacyLearningQueues[store.activeWorkspace]?.state === 'pending'" class="mm-migration-notice-copy">
-          Ciaobot is moving older suggestions into Learnings.
-        </span>
-        <span v-else-if="proposals.legacyLearningQueues[store.activeWorkspace]?.state === 'blocked'" class="mm-migration-notice-copy">
-          Ciaobot couldn't finish moving older suggestions. It won't retry automatically. Ask Ciaobot for help.
-        </span>
-        <span v-else-if="proposals.legacyLearningQueues[store.activeWorkspace]?.state === 'unknown'" class="mm-migration-notice-copy">
-          Ciaobot couldn't safely check older suggestions. Ask Ciaobot for help.
-        </span>
-        <span v-else-if="proposals.legacyLearningQueues[store.activeWorkspace]?.suppressed_rows?.length" class="mm-migration-notice-copy">
-          You restored these suggestions. They won't move again automatically.
-        </span>
-        <span v-else-if="proposals.legacyLearningQueues[store.activeWorkspace]?.state === 'completed'" class="mm-migration-notice-copy">
-          Older suggestions have moved to Learnings. Ask Ciaobot if you want one removed.
-        </span>
-        <span v-else class="mm-migration-notice-copy">
-          There are no older learning proposals to move in this workspace.
-        </span>
-        <ul v-if="proposals.legacyLearningQueues[store.activeWorkspace]?.pending_rows?.length" class="mm-legacy-learning-list">
-          <li v-for="row in proposals.legacyLearningQueues[store.activeWorkspace]?.pending_rows" :key="row.id">
-            <span>{{ row.text }}</span>
-            <button
-              type="button"
-              class="mr-btn mm-link-notice-action"
-              :disabled="proposals.isBusy(`legacy-learning:${row.id}`)"
-              @click="removeLegacyLearning(row.id, row.revision)"
-            >{{ row.removal_pending ? 'Finish removing' : 'Remove' }}</button>
-          </li>
-        </ul>
-        <ul v-if="proposals.legacyLearningQueues[store.activeWorkspace]?.suppressed_rows?.length" class="mm-legacy-learning-list">
-          <li v-for="row in proposals.legacyLearningQueues[store.activeWorkspace]?.suppressed_rows" :key="row.id">
-            <span>{{ row.text }}</span>
-            <button
-              type="button"
-              class="mr-btn mm-link-notice-action"
-              :disabled="proposals.isBusy(`legacy-learning:${row.id}`)"
-              @click="removeLegacyLearning(row.id, row.revision)"
-            >Remove</button>
-          </li>
-        </ul>
-        <div
-          v-if="['blocked', 'unknown'].includes(proposals.legacyLearningQueues[store.activeWorkspace]?.state ?? '')"
-          class="mm-migration-notice-actions"
-        >
-          <router-link class="mm-link-notice-action" to="/">Open Home</router-link>
-          <router-link v-if="proposals.legacyLearningQueues[store.activeWorkspace]?.state === 'unknown'" class="mm-link-notice-action" to="/settings/workspace">Workspace settings</router-link>
+        <div class="page-main">
+          <MemoryUnsurePanel />
         </div>
-      </div>
-      <!-- To decide holds both queues, narrowed by one filter; each queue keeps
-           its own heading and its own finer chips under it. -->
-      <div
-        v-if="mm.section === 'review'"
-        class="mr-chips mm-decide-chips"
-        role="group"
-        aria-label="Show"
-      >
-        <button
-          v-for="chip in decideChips"
-          :key="chip.filter"
-          type="button"
-          class="mr-chip"
-          :aria-pressed="mm.reviewFilter === chip.filter"
-          @click="setReviewFilter(chip.filter)"
-        >{{ chip.label }} <span v-if="chip.count !== null" class="mr-chip-count">{{ chip.count }}</span></button>
-      </div>
-      <!-- A proposal link being opened: one quiet line saying what it is doing
-           or why it cannot reveal a question. Never a claim about the outcome. -->
-      <div
-        v-if="mm.section === 'review' && proposalNotice"
-        ref="proposalNoticeEl"
-        class="mm-link-notice"
-        :role="proposalNotice.kind === 'error' ? 'alert' : 'status'"
-        tabindex="-1"
-      >
-        <span>{{ proposalNotice.message }}</span>
-        <router-link v-if="proposalNotice.kind === 'gone'" class="mr-link mm-link-notice-action" to="/memory/history">Open history</router-link>
-        <button v-if="proposalNotice.kind === 'error'" type="button" class="mr-btn mm-link-notice-action" @click="retryProposalLink">Retry</button>
-      </div>
-      <!-- Suggested and History are the proposal panel's two sections; it is
-           bound without `key`, so moving between them swaps its section
-           rather than remounting it (which would refetch the queue). The
-           filter hides a queue with v-show for the same reason. -->
-      <ProposalReviewPanel
-        v-if="mm.section === 'review' || mm.section === 'history'"
-        v-show="mm.section === 'history' || showSuggested"
-        :section="mm.section === 'history' ? 'history' : 'queue'"
-      />
-      <!-- One component, two sections: the queue and the trash share the
-           store, the busy set and the error toast, so splitting them into
-           two components would only duplicate all three. -->
-      <VaultReviewPanel
-        v-if="mm.section === 'review' || mm.section === 'retired'"
-        v-show="mm.section === 'retired' || showRevisit"
-        :section="mm.section === 'retired' ? 'trash' : 'candidates'"
-      />
-      </div>
-      <!-- What the review decisions feed: the always-loaded budget. The vault's
-           numbers live on the map's toolbar. -->
-      <aside class="page-rail mm-review-rail" aria-label="Always loaded">
-        <MemoryGuideBudget />
-      </aside>
+        <aside class="page-rail mm-review-rail" aria-label="Always loaded">
+          <MemoryGuideBudget />
+        </aside>
       </div>
     </div>
+
 
     <!-- The map takes the whole pane: toolbar across the top, the drawing
          under it, and a note's details in a docked tile at the right edge —
          the same tile a pinned file opens in. The vault's numbers are one line
-         in the toolbar; what the old rail listed is elsewhere (Needs review is
-         To decide, Unlinked is the Orphans filter, Most connected is List
-         sorted by links). -->
+         in the toolbar; what the old rail listed is elsewhere (Unlinked is the
+         Orphans filter, Most connected is List sorted by links). -->
     <div v-else class="mm-body" :class="{ 'mm-body--detail-open': !!mm.selectedNode, 'mm-body--dragging-detail': isDraggingDetail }">
       <div class="mm-surface">
         <div v-if="!mm.loading && !mm.loadError" class="mm-toolbar">
@@ -182,12 +83,11 @@
             <span><strong>{{ mm.visibleNodes.length.toLocaleString() }}</strong> notes</span>
             <span><strong>{{ mm.edges.length.toLocaleString() }}</strong> links</span>
             <span><strong>{{ mm.orphanNotes.length.toLocaleString() }}</strong> unlinked</span>
-            <router-link
+            <span
               v-if="mm.staleNotes.length"
               class="mm-toolbar-stale"
-              :to="reviewPath('revisit')"
-              title="Notes unchecked past their type's limit — review them in To decide"
-            ><strong>{{ mm.staleNotes.length.toLocaleString() }}</strong> unchecked</router-link>
+              title="Notes unchecked past their type's limit"
+            ><strong>{{ mm.staleNotes.length.toLocaleString() }}</strong> unchecked</span>
             <!-- A second, separate figure, and it is not a subset of the first.
                  "Unchecked" counts notes whose own date is old; this counts notes
                  holding at least one fact nobody has re-checked, which is how a
@@ -323,48 +223,14 @@
           @close="closeDetail"
         >
           <template #lead>
-            <!-- Two states, and the order matters. A note somebody is being
-                 asked about RIGHT NOW is not unchecked — the question is in
-                 flight — so the pending proposal is named first and the stale
-                 callout is suppressed. Otherwise a note whose verdict is
-                 sitting in a queue would show "Unchecked for 4 months, review
-                 this" beside a link to a proposal already filed about it. -->
-            <div v-if="mm.selectedNode.check?.pending" class="mm-tile-pending" role="note">
-              <p>
-                <strong>Being checked.</strong>
-                Ciaobot checked this version on {{ mm.selectedNode.check.checked_at }} and filed a
-                proposal about it. The note's own date still reads
-                {{ staleAgeWords(mm.selectedNode) }} old, which is why it is not being asked again
-                on top of that.
-              </p>
-              <router-link class="mm-tile-stale-link" :to="reviewPath('suggested')">Open the proposal</router-link>
-            </div>
-            <div v-else-if="mm.selectedNode.check?.settled" class="mm-tile-checked" role="note">
-              <p>
-                <strong>Checked {{ mm.selectedNode.check.checked_at }}.</strong>
-                The verdict was {{ verdictWords(mm.selectedNode.check.outcome) }}<template
-                  v-if="mm.selectedNode.check.coverage"
-                >, covering {{ coverageWords(mm.selectedNode.check.coverage) }}</template>.
-                It will be checked again after {{ mm.selectedNode.check.retry_after }}.
-              </p>
-            </div>
-            <div v-else-if="mm.selectedNode.check?.conflicted" class="mm-tile-stale" role="note">
-              <p>
-                <strong>A verification is out of date for this note.</strong>
-                It was checked against an earlier version, so that verdict can no longer be applied.
-                Ciaobot will check the current text and file a new proposal if it needs one.
-              </p>
-              <router-link class="mm-tile-stale-link" :to="reviewPath('revisit')">Review in To decide</router-link>
-            </div>
-            <div v-else-if="mm.selectedNode.stale" class="mm-tile-stale" role="note">
+            <div v-if="mm.selectedNode.stale" class="mm-tile-stale" role="note">
               <p>
                 <strong>Unchecked for {{ staleAgeWords(mm.selectedNode) }}.</strong>
                 {{ staleRuleWords(mm.selectedNode) }}
               </p>
-              <router-link class="mm-tile-stale-link" :to="reviewPath('revisit')">Review in To decide</router-link>
             </div>
 
-            <!-- The facts inside the note, one level below every callout above.
+            <!-- The facts inside the note, one level below the callout above.
                  None of them is about this FILE being old: a person note
                  re-stamped last week is not stale here, and is still holding a
                  fact from two years ago. Shown whenever the detector ran, not
@@ -429,18 +295,15 @@ import SkeletonLoader from './SkeletonLoader.vue'
 import MemoryGuideBudget from './MemoryGuideBudget.vue'
 import MemoryHowItWorks from './MemoryHowItWorks.vue'
 import MemoryCategoriesPanel from './MemoryCategoriesPanel.vue'
-import ProposalReviewPanel from './ProposalReviewPanel.vue'
-import VaultReviewPanel from './VaultReviewPanel.vue'
+import MemoryUnsurePanel from './MemoryUnsurePanel.vue'
 import ImportSources from './ImportSources.vue'
-import { useProposalsStore } from '../stores/proposals'
-import { useVaultReviewStore } from '../stores/vaultReview'
 import { useProjectStore } from '../stores/projects'
 import {
-  useMemoryMapStore, categoryLabelFor, categoryColorFor, catKeyFor, isMemorySection, isReviewFilter,
-  memorySectionPath, reviewPath, type MemoryGraphEntryCoverage, type MemoryGraphEntryFinding, type MemoryGraphNode, type MemorySection, type ReviewFilter,
+  useMemoryMapStore, categoryLabelFor, categoryColorFor, catKeyFor, isMemorySection,
+  memorySectionPath, type MemoryGraphEntryCoverage, type MemoryGraphEntryFinding, type MemoryGraphNode, type MemorySection,
 } from '../stores/memoryMap'
 import { askConfirm } from '../lib/confirm'
-import { ageInWords, coverageLabel, verdictLabel } from '../lib/vaultReviewLabels'
+import { ageInWords } from '../lib/ageWords'
 import { useModalFocus } from '../composables/useModalFocus'
 import { isLightTheme } from '../lib/theme'
 import PinnedFilePanel from './PinnedFilePanel.vue'
@@ -1364,17 +1227,9 @@ function onWheel(e: WheelEvent) {
 }
 
 // ---------- list view ----------
-// Review is a segment of this view rather than its own rail entry: the proposal
-// queue IS the memory system's inbox, so it belongs where you go to think about
-// what Ciaobot knows. `/proposals` still routes here (the housekeeping tiles link
-// to it), it just selects this segment instead of a separate page. The switcher
-// itself lives in the sidebar next to the workspace toggle; this component only
-// mirrors the shared `mm.view` state, seeding it from the URL on mount.
-const proposals = useProposalsStore()
-const vaultReview = useVaultReviewStore()
-function removeLegacyLearning(rowId: string, revision: string) {
-  void proposals.dismissLegacyLearning(store.activeWorkspace, rowId, revision)
-}
+// The sections are listed in the sidebar next to the workspace toggle; this
+// component only mirrors the shared `mm.view` state, seeding it from the URL
+// on mount.
 /** Switch the map's rendering. Graph and List are one section (/memory/map),
  * so there is no route to push — only `mapView` to remember. */
 function setMapView(next: 'graph' | 'list') {
@@ -1385,15 +1240,13 @@ function setMapView(next: 'graph' | 'list') {
 const route = useRoute()
 const viewRouter = useRouter()
 const SECTION_LABELS: Record<MemorySection, string> = {
-  review: 'To decide',
   map: 'Map',
   categories: 'Categories',
   import: 'Import',
-  retired: 'Retired',
-  history: 'History',
+  unsure: 'Unsure',
 }
 // The route owns the section. Bare /memory lands on the section last visited
-// (To decide on a first visit), replaced rather than pushed so Back does not
+// (the map on a first visit), replaced rather than pushed so Back does not
 // bounce through the bare address.
 watch(() => route.params.section, (param) => {
   if (!route.path.startsWith('/memory')) return
@@ -1403,217 +1256,11 @@ watch(() => route.params.section, (param) => {
   }
   void viewRouter.replace(memorySectionPath(mm.section))
 }, { immediate: true })
-// ...and To decide's filter, so Home's "notes to revisit" and the map's
-// "unchecked" links land on the queue they name.
-watch(() => [route.params.section, route.query.show] as const, ([section, show]) => {
-  if (section !== 'review') return
-  mm.reviewFilter = isReviewFilter(show) ? show : 'all'
-}, { immediate: true })
-
-// ---------- proposal review link ----------
-// A canonical proposal link (show=suggested, workspace=NAME, proposal=prv_ plus
-// 64 hex) names one review question. The resolver waits for the workspace list,
-// switches scope through the store's guards, loads the queue fresh, and hands
-// the matching row to the panel. Every await re-checks that this run is still
-// the live one: a route change, an unmount or a workspace change the resolver
-// did not make withdraws it, and a withdrawn run never reveals, focuses or
-// clears anything that belongs to a newer request.
-const PROPOSAL_KEY = /^prv_[a-f0-9]{64}$/
-type ProposalLinkNotice = {
-  kind: 'loading' | 'gone' | 'unavailable' | 'refused' | 'error'
-  message: string
-}
-const proposalNotice = ref<ProposalLinkNotice | null>(null)
-let resolveGeneration = 0
-let resolverUnmounted = false
-let resolveLive = false
-let selfSwitchTarget: string | null = null
-let handedOffId = ''
-let cancelBootstrapWait: (() => void) | null = null
-
-/** Take back a reveal this resolver handed to the panel, and only that one:
- * the Vault review panel reveals rows through the same store field. */
-function releaseHandoff() {
-  if (handedOffId && proposals.revealedRowId === handedOffId) proposals.revealedRowId = ''
-  handedOffId = ''
-}
-function invalidateProposalLink() {
-  resolveGeneration += 1
-  resolveLive = false
-  cancelBootstrapWait?.()
-  releaseHandoff()
-}
-function waitForBootstrap(): Promise<void> {
-  return new Promise<void>((resolve) => {
-    const stop = watch(() => store.bootstrapped, (ready) => { if (ready) done() })
-    const done = () => {
-      stop()
-      if (cancelBootstrapWait === done) cancelBootstrapWait = null
-      resolve()
-    }
-    cancelBootstrapWait = done
-  })
-}
-
-async function resolveProposalLink(force = false) {
-  invalidateProposalLink()
-  const gen = resolveGeneration
-  proposalNotice.value = null
-  if (route.params.section !== 'review') return
-  const rawKey = route.query.proposal
-  if (rawKey === undefined) return
-  const rawWorkspace = route.query.workspace
-  const key = typeof rawKey === 'string' ? rawKey : ''
-  const name = typeof rawWorkspace === 'string' ? rawWorkspace : ''
-  const capturedPath = route.fullPath
-  const current = () => gen === resolveGeneration && !resolverUnmounted && route.fullPath === capturedPath
-  if (!name || !PROPOSAL_KEY.test(key)) {
-    proposalNotice.value = { kind: 'refused', message: 'This proposal link is not valid, so nothing was opened.' }
-    return
-  }
-  resolveLive = true
-  proposalNotice.value = { kind: 'loading', message: 'Opening the proposal\u2026' }
-  try {
-    if (!store.bootstrapped) {
-      await waitForBootstrap()
-      if (!current()) return
-    }
-    if (!store.workspaces.some(w => w.name === name)) {
-      proposalNotice.value = { kind: 'unavailable', message: `The workspace "${name}" is not available here, so the proposal was not opened.` }
-      return
-    }
-    if (store.activeWorkspace !== name) {
-      selfSwitchTarget = name
-      let ok = false
-      try {
-        ok = await store.switchWorkspace(name, { transition: false, isCurrent: current })
-        // The store's own watchers see the new scope on the next flush; keep the
-        // target until they have, so the switch is not read as someone else's.
-        await nextTick()
-      } finally {
-        selfSwitchTarget = null
-      }
-      if (!current()) return
-      if (!ok) {
-        proposalNotice.value = { kind: 'refused', message: 'The workspace was not changed, so the proposal was not opened.' }
-        return
-      }
-    }
-    // `fetch`, not `ensureLoaded`: rows hydrated earlier are not a fresh queue.
-    await proposals.fetch(force ? { force: true } : undefined)
-    if (!current()) return
-    if (proposals.loading) {
-      await proposals.fetch()
-      if (!current()) return
-    }
-    if (proposals.loadError) {
-      proposalNotice.value = { kind: 'error', message: 'Could not load the proposal' }
-      return
-    }
-    const row = proposals.rows.find(r => r.review_key === key && r.workspace === name)
-    if (!row) {
-      proposalNotice.value = { kind: 'gone', message: 'This proposal is no longer pending.' }
-      return
-    }
-    if (proposals.revealedRowId === row.id) {
-      // The panel only reacts to a change, so a kept id has to be reset first.
-      proposals.revealedRowId = ''
-      await nextTick()
-      if (!current()) return
-    }
-    proposalNotice.value = null
-    // Owned only while the panel has not consumed it.
-    handedOffId = row.id
-    proposals.revealRow(row.id)
-  } finally {
-    if (gen === resolveGeneration) resolveLive = false
-  }
-}
-// Ownership ends when the panel consumes the reveal or anything else replaces it.
-watch(() => proposals.revealedRowId, (id) => {
-  if (handedOffId && id !== handedOffId) handedOffId = ''
-})
-const proposalNoticeEl = ref<HTMLElement | null>(null)
-function retryProposalLink() {
-  // The button is replaced by the loading line; keep focus on the notice itself.
-  proposalNoticeEl.value?.focus({ preventScroll: true })
-  void resolveProposalLink(true)
-}
-watch(() => [route.params.section, route.query.workspace, route.query.proposal] as const, () => {
-  void resolveProposalLink()
-}, { immediate: true })
-// A workspace change the resolver did not make is the reader moving on.
-watch(() => store.activeWorkspace, (workspace) => {
-  if (workspace === selfSwitchTarget) return
-  if (!resolveLive && !handedOffId) return
-  const waiting = resolveLive
-  invalidateProposalLink()
-  if (waiting) proposalNotice.value = null
-})
-
-function setReviewFilter(filter: ReviewFilter) {
-  if (filter === mm.reviewFilter) return
-  void viewRouter.replace(reviewPath(filter))
-}
-
-// Each queue's count, on the same workspace rule as its list. null until that
-// workspace's snapshot is in, so a count never describes another workspace.
-const suggestedCount = computed<number | null>(() =>
-  proposals.loaded ? proposals.scopedRows(store.activeWorkspace).length : null)
-const revisitCount = computed<number | null>(() =>
-  vaultReview.loadedWorkspace === store.activeWorkspace ? vaultReview.candidates.length : null)
-/** No zero chips, as the queues' own chip rows — except the one selected, so
- * emptying a queue does not take away the control that is on. */
-const decideChips = computed(() => {
-  const all = suggestedCount.value !== null && revisitCount.value !== null
-    ? suggestedCount.value + revisitCount.value
-    : null
-  const chips: { filter: ReviewFilter; label: string; count: number | null }[] = [
-    { filter: 'all', label: 'All', count: all },
-    { filter: 'suggested', label: 'Suggested', count: suggestedCount.value },
-    { filter: 'revisit', label: 'To revisit', count: revisitCount.value },
-  ]
-  return chips.filter(c => c.filter === 'all' || c.filter === mm.reviewFilter || c.count !== 0)
-})
-/** Under All, a queue known to be empty steps aside for one that is not; with
- * both empty, both say so in their own words. */
-const showSuggested = computed(() => mm.reviewFilter === 'suggested'
-  || (mm.reviewFilter === 'all' && !(suggestedCount.value === 0 && (revisitCount.value ?? 0) > 0)))
-const showRevisit = computed(() => mm.reviewFilter === 'revisit'
-  || (mm.reviewFilter === 'all' && !(revisitCount.value === 0 && (suggestedCount.value ?? 0) > 0)))
-// Every section's count sits in the sidebar, whichever section is showing, so
-// the queues and the ledger load with the page rather than with their panel.
-watch(() => store.activeWorkspace, (workspace) => {
-  void proposals.ensureLoaded()
-  if (workspace) {
-    void proposals.ensureHistoryLoaded(workspace)
-    void vaultReview.ensureLoaded(workspace)
-  }
-}, { immediate: true })
-watch(() => mm.section, (section) => {
-  proposals.view = section === 'history' ? 'history' : 'queue'
-}, { immediate: true })
-
-/** "3 months", from the note's age in days — the words To revisit uses. */
+/** "3 months", from the note's age in days. */
 function staleAgeWords(n: MemoryGraphNode): string {
   return ageInWords(n.ageDays ?? 0)
 }
 
-/** What a verification's verdict was, in words.
- *
- * Shared with the review panel rather than re-spelled here: two surfaces
- * describing the same verdict two ways is how "still_valid" ends up reading as
- * a problem somewhere and as good news somewhere else. */
-function verdictWords(outcome: string): string {
-  return verdictLabel(outcome)
-}
-
-/** How much of a note a check covered, in words. `partial` is the one that
- * matters: a re-stamp claims the whole note, so the pass only applies one from
- * complete coverage, and a half-checked note is asked again. */
-function coverageWords(coverage: string): string {
-  return coverageLabel(coverage)
-}
 /** The rule the note broke. The horizon comes from the server, which resolves
  * the type through the vault's alias table; the map keeps no copy of it. */
 function staleRuleWords(n: MemoryGraphNode): string {
@@ -1830,8 +1477,6 @@ watch(isLightTheme, () => {
   requestRedraw()
 })
 onBeforeUnmount(() => {
-  resolverUnmounted = true
-  invalidateProposalLink()
   if (rafId) cancelAnimationFrame(rafId)
   if (redrawRafId) cancelAnimationFrame(redrawRafId)
   if (animRafId) cancelAnimationFrame(animRafId)
@@ -1846,8 +1491,6 @@ onBeforeUnmount(() => {
 })
 </script>
 
-<style scoped src="./memoryReview.css"></style>
-
 <style scoped>
 .memory-map {
   display: flex;
@@ -1856,8 +1499,8 @@ onBeforeUnmount(() => {
   min-height: 0;
 }
 
-/* The Review surface holds all four sections — two queues waiting on a
-   decision and two records of decisions already made — under one tab bar. */
+/* The page sections (Unsure, Categories, Import) scroll as one page; the map
+   takes the whole pane instead. */
 .mm-review-wrap {
   flex: 1;
   min-height: 0;
@@ -1866,72 +1509,6 @@ onBeforeUnmount(() => {
 .mm-review-grid {
   padding-block: var(--space-5) var(--space-6);
 }
-/* Above both queues' own headings, so it reads as choosing the list rather
-   than as one queue's chips. */
-.mm-decide-chips {
-  padding-bottom: var(--space-2);
-}
-
-/* The proposal-link status line: quiet, with 44px targets for its one action. */
-.mm-link-notice {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: var(--space-2);
-  margin: 0 0 var(--space-2);
-  color: var(--fg2);
-  font-size: var(--text-sm);
-}
-.mm-link-notice-action {
-  min-height: 44px;
-  min-width: 44px;
-}
-.mm-migration-notice {
-  display: block;
-}
-.mm-migration-notice-copy {
-  display: block;
-}
-.mm-migration-notice-actions {
-  display: flex;
-  flex-direction: column;
-  align-items: flex-start;
-  gap: var(--space-1);
-  margin-top: var(--space-2);
-}
-.mm-migration-notice-actions .mm-link-notice-action {
-  display: flex;
-  align-items: center;
-  box-sizing: border-box;
-  width: fit-content;
-  max-width: 100%;
-  padding: var(--space-1) var(--space-2);
-  line-height: 1.35;
-  overflow-wrap: anywhere;
-}
-.mm-legacy-learning-list {
-  display: grid;
-  gap: var(--space-2);
-  margin: var(--space-2) 0;
-  padding: 0;
-  list-style: none;
-}
-.mm-legacy-learning-list li {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  justify-content: space-between;
-  gap: var(--space-2);
-  padding: var(--space-2);
-  border: 1px solid var(--border);
-  border-radius: var(--radius-sm);
-}
-.mm-legacy-learning-list li > span {
-  min-width: 0;
-  flex: 1 1 18rem;
-  overflow-wrap: anywhere;
-}
-
 .mm-body {
   flex: 1;
   min-height: 0;

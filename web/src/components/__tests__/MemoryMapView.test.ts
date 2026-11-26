@@ -17,7 +17,6 @@ import { nextTick } from 'vue'
 import MemoryMapView from '../MemoryMapView.vue'
 import { useMemoryMapStore } from '../../stores/memoryMap'
 import { useProjectStore } from '../../stores/projects'
-import { useProposalsStore } from '../../stores/proposals'
 
 const apiGet = vi.hoisted(() => vi.fn())
 const apiPost = vi.hoisted(() => vi.fn())
@@ -66,30 +65,16 @@ function graphPayload() {
   }
 }
 
-function checkedPayload() {
+function staleNotePayload() {
   const base = (over: Record<string, unknown> = {}) => ({
     tags: [], aliases: [], description: '', workspace: 'personal', degree: 1,
-    mtime: 1, updated: '2025-01-01', age_days: 640, threshold_days: 30, ...over,
+    mtime: 1, updated: '2025-01-01', age_days: 640, threshold_days: 30, check: null, ...over,
   })
   return {
     nodes: [
-      base({
-        id: 'checked', title: 'Checked', type: 'note', stale: false,
-        check: { outcome: 'still_valid', checked_at: '2026-09-28', retry_after: '2026-10-28', coverage: 'complete', reason: '', citations: 3, receipt_id: 'mrcpt_1', settled: true, pending: false, proposal_id: '', conflicted: false },
-      }),
-      base({
-        id: 'partial', title: 'Partial', type: 'note', stale: false,
-        check: { outcome: 'unverified', checked_at: '2026-09-28', retry_after: '2026-10-28', coverage: 'partial', reason: 'a connector was down', citations: 0, receipt_id: '', settled: true, pending: false, proposal_id: '', conflicted: false },
-      }),
-      base({
-        id: 'pending', title: 'Pending', type: 'note', stale: false,
-        check: { outcome: 'retire', checked_at: '2026-09-28', retry_after: '2026-10-28', coverage: 'complete', reason: 'the office moved', citations: 2, receipt_id: '', settled: true, pending: true, proposal_id: 'p-1', conflicted: false },
-      }),
-      base({
-        id: 'conflicted', title: 'Conflicted', type: 'note', stale: true,
-        check: { outcome: 'retire', checked_at: '2026-08-01', retry_after: '2026-08-31', coverage: 'complete', reason: 'the office moved', citations: 2, receipt_id: '', settled: false, pending: false, proposal_id: 'p-2', conflicted: true },
-      }),
-      base({ id: 'untouched', title: 'Untouched', type: 'note', stale: true, check: null }),
+      base({ id: 'fresh', title: 'Fresh', type: 'note', stale: false, age_days: 3 }),
+      base({ id: 'untouched', title: 'Untouched', type: 'note', stale: true }),
+      base({ id: 'old', title: 'Old', type: 'note', stale: true, age_days: 900 }),
     ],
     edges: [],
   }
@@ -575,45 +560,6 @@ describe('MemoryMapView sections', () => {
           }],
         })
       }
-      if (url.startsWith('/api/proposals/history')) {
-        return Promise.resolve({
-          rows: [{
-            id: 'h1', ts: '2026-09-01T10:00:00+00:00', action: 'accepted', via: 'pwa',
-            kind: 'memory', text: 'Remember the thing', source: '', workspace: 'personal',
-            destination: 'ciao:memory', outcome: 'written', proposal_id: 'p1',
-          }],
-          total: 500,
-          truncated: true,
-          limit: 200,
-        })
-      }
-      if (url.startsWith('/api/proposals')) {
-        return Promise.resolve({
-          rows: [{
-            id: 'p1', kind: 'memory', text: 'A queued fact', source: '', path: '',
-            workspace: 'personal', region: 'memory', target: '', ts: '2026-09-01',
-          }],
-        })
-      }
-      if (url.startsWith('/api/vault/review')) {
-        return Promise.resolve({
-          candidates: [{
-            candidate_id: 'c1', workspace: 'personal', path: 'memory-vault/People/Mo.md',
-            content_hash: 'deadbeef', signals: ['unlinked'], priority: 1,
-            evidence: {
-              backlinks: [], outbound_links: [], bridge: false, duplicate_group: [],
-              last_update: '', type: 'note', age_days: null,
-            },
-            status: 'candidate', disposition: '', deferred_until: '',
-          }],
-          trashed: [{
-            candidate_id: 't1', workspace: 'personal',
-            original_path: 'memory-vault/People/Old.md', content_hash: 'cafef00d',
-            trashed_at: '2026-09-01T00:00:00Z',
-          }],
-          cleared: [],
-        })
-      }
       return Promise.resolve({})
     })
     const store = useProjectStore()
@@ -640,140 +586,42 @@ describe('MemoryMapView sections', () => {
   }
 
   it('has no tab row and no mode switch; the header names the section', async () => {
-    const { wrapper } = await mountSection('review')
+    const { wrapper } = await mountSection('unsure')
     expect(wrapper.findAll('[role="tablist"]')).toHaveLength(0)
     const header = wrapper.get('.pane-header')
     expect(header.find('.memory-mode-actions').exists()).toBe(false)
-    expect(header.text()).toContain('Memory · To decide')
+    expect(header.text()).toContain('Memory · Unsure')
     wrapper.unmount()
   })
 
-  it('shows both queues on To decide, with a filter for each', async () => {
-    const { wrapper, mm } = await mountSection('review')
-    expect([mm.section, mm.reviewFilter]).toEqual(['review', 'all'])
-    const chips = wrapper.get('.mm-decide-chips').findAll('.mr-chip')
-    expect(chips.map(c => c.text())).toEqual(['All 2', 'Suggested 1', 'To revisit 1'])
-    const suggested = wrapper.get('.proposal-review')
-    const revisit = wrapper.get('.vault-review')
-    expect(suggested.isVisible()).toBe(true)
-    expect(revisit.isVisible()).toBe(true)
-    expect(suggested.text()).toContain('A queued fact')
-    expect(revisit.text()).toContain('Mo')
-
-    await chips[2]!.trigger('click')
-    await flushPromises()
-    expect(wrapper.router.currentRoute.value.fullPath).toBe('/memory/review?show=revisit')
-    expect(mm.reviewFilter).toBe('revisit')
-    // Hidden, not unmounted: flipping back must not refetch the queue.
-    expect(wrapper.get('.proposal-review').isVisible()).toBe(false)
-    expect(wrapper.get('.vault-review').isVisible()).toBe(true)
+  it('shows the Unsure list on /memory/unsure, read from the vault file', async () => {
+    const list = [
+      '# Unsure',
+      '',
+      '- [ ] memory: prefers tea — unsure because one mention; 2026-11-01',
+      '- [x] people: Ada is a client — source: chat-1; 2026-11-02',
+    ].join('\n')
+    const fetchMock = vi.fn(async () => ({ ok: true, status: 200, text: async () => list }) as unknown as Response)
+    vi.stubGlobal('fetch', fetchMock)
+    const { wrapper, mm } = await mountSection('unsure')
+    expect(mm.section).toBe('unsure')
+    const url = new URL(String((fetchMock.mock.calls[0] as unknown[])[0]), 'http://localhost')
+    expect(url.searchParams.get('path')).toBe('/tmp/vault/Workspace/Unsure.md')
+    expect(url.searchParams.get('exact')).toBe('1')
+    const panel = wrapper.get('.mu')
+    expect(panel.text()).toContain('1 item waiting.')
+    expect(panel.findAll('.mu-item').map(li => li.text())).toEqual([
+      'memory: prefers tea — unsure because one mention; 2026-11-01',
+    ])
+    expect(panel.text()).toContain('Open Unsure.md')
     wrapper.unmount()
   })
 
-  it.each([
-    ['pending', 'Ciaobot is moving older suggestions into Learnings.'],
-    ['blocked', "Ciaobot couldn't finish moving older suggestions."],
-    ['unknown', "Ciaobot couldn't safely check older suggestions."],
-    ['restored', 'You restored these suggestions.'],
-    ['completed', 'Older suggestions have moved to Learnings.'],
-  ] as const)('shows the %s migration status on To decide independently of update tasks', async (state, text) => {
-    const queues = {
-      personal: {
-        state: state === 'restored' ? 'completed' : state,
-        rows: state === 'pending' ? 2 : 0,
-        ...(state === 'pending' ? {
-          pending_rows: [
-            { id: 'legacy-row-1', revision: 'queue-revision', text: 'Old lesson', source: '', request: '' },
-            { id: 'legacy-row-2', revision: 'queue-revision', text: 'Finishing lesson', source: '', request: '', removal_pending: true },
-          ],
-        } : {}),
-        ...(state === 'restored' ? {
-          suppressed_rows: [{ id: 'legacy-row-3', revision: 'queue-revision', text: 'Restored lesson', source: '', request: '' }],
-        } : {}),
-      },
-    } as const
-    useProposalsStore().legacyLearningQueues = queues
-    apiGet.mockImplementation((url: string) => {
-      if (url.includes('/api/vault/graph')) return Promise.resolve(graphPayload())
-      if (url === '/api/proposals') {
-        return Promise.resolve({
-          rows: [],
-          legacy_learning_queues: queues,
-        })
-      }
-      return Promise.resolve({})
-    })
-
-    const { wrapper } = await mountSection('review')
-
-    expect(wrapper.get('[role="status"]').text()).toContain(text)
-    if (state === 'pending') {
-      expect(wrapper.get('[role="status"]').text()).toContain('Old lesson')
-      expect(wrapper.get('[role="status"]').findAll('button').map(button => button.text())).toEqual([
-        'Remove',
-        'Finish removing',
-      ])
-    }
-    if (state === 'restored') {
-      expect(wrapper.get('[role="status"]').text()).toContain('Restored lesson')
-      expect(wrapper.get('[role="status"]').find('button').text()).toBe('Remove')
-    }
-    const actionGroup = wrapper.find('.mm-migration-notice-actions')
-    const actions = actionGroup.exists() ? actionGroup.findAll('a') : []
-    expect(actions.map(action => action.attributes('href'))).toEqual(
-      state === 'blocked' ? ['/'] : state === 'unknown' ? ['/', '/settings/workspace'] : [],
-    )
-    expect(actions.every(action => action.classes().includes('mm-link-notice-action'))).toBe(true)
-    if (state === 'unknown') {
-      expect(wrapper.get('a[href="/settings/workspace"]').text()).toBe('Workspace settings')
-    }
-    if (state === 'blocked' || state === 'unknown') {
-      expect(wrapper.get('[role="status"]').get('a[href="/"]').text()).toBe('Open Home')
-    }
-    if (state === 'blocked') expect(wrapper.get('[role="status"]').text()).toContain("won't retry automatically")
-    if (state === 'completed') expect(wrapper.find('.mm-migration-notice-actions').exists()).toBe(false)
-    expect(apiGet).not.toHaveBeenCalledWith(expect.stringContaining('/api/update-tasks'))
-    wrapper.unmount()
-  })
-
-  it('does not show another workspace legacy queue notice', async () => {
-    const queues = {
-      personal: { state: 'pending' as const, rows: 1 },
-    }
-    useProposalsStore().legacyLearningQueues = queues
-    apiGet.mockImplementation((url: string) => {
-      if (url === '/api/proposals') return Promise.resolve({ rows: [], legacy_learning_queues: queues })
-      if (url.includes('/api/vault/graph')) return Promise.resolve(graphPayload())
-      return Promise.resolve({})
-    })
-
-    const { wrapper } = await mountSection('review')
-
-    expect(wrapper.get('[role="status"]').text()).toContain('Ciaobot is moving')
-    useProjectStore().activeWorkspace = 'work'
-    await nextTick()
-    expect(wrapper.findAll('[role="status"]').some(el => el.text().includes('older learning proposal'))).toBe(false)
-    wrapper.unmount()
-  })
-
-  it('lands a deep link on the queue it names', async () => {
-    const { wrapper, mm } = await mountSection('review?show=suggested')
-    expect(mm.reviewFilter).toBe('suggested')
-    expect(wrapper.get('.vault-review').isVisible()).toBe(false)
-    expect(wrapper.get('.proposal-review').isVisible()).toBe(true)
-    wrapper.unmount()
-  })
-
-  it('reaches the retired notes at their own address', async () => {
-    const { wrapper, mm } = await mountSection('retired')
-    expect(mm.section).toBe('retired')
-    expect(wrapper.text()).toContain('Old')
-    wrapper.unmount()
-  })
-
-  it('shows the decision ledger on /memory/history', async () => {
-    const { wrapper } = await mountSection('history')
-    expect(wrapper.text()).toContain('Remember the thing')
+  it('says so when the workspace has no Unsure list yet', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => ({ ok: false, status: 404, text: async () => '' }) as unknown as Response))
+    const { wrapper } = await mountSection('unsure')
+    expect(wrapper.get('.mu').text()).toContain('Nothing is on the list for this workspace.')
+    expect(wrapper.find('.mu-item').exists()).toBe(false)
     wrapper.unmount()
   })
 
@@ -826,7 +674,7 @@ describe('MemoryMapView sections', () => {
   })
 
   it('follows the route when the sidebar moves to another section', async () => {
-    const { wrapper, mm } = await mountSection('review')
+    const { wrapper, mm } = await mountSection('unsure')
     await wrapper.router.push('/memory/map')
     await flushPromises()
     expect(mm.section).toBe('map')
@@ -837,22 +685,21 @@ describe('MemoryMapView sections', () => {
 
   it('sends bare /memory to the section last visited', async () => {
     const mm = useMemoryMapStore()
-    mm.setSection('retired')
+    mm.setSection('categories')
     const wrapper = await mountView('/memory')
     await flushPromises()
-    expect(wrapper.router.currentRoute.value.path).toBe('/memory/retired')
+    expect(wrapper.router.currentRoute.value.path).toBe('/memory/categories')
     wrapper.unmount()
   })
 
-  it('names the workspace only in the sidebar scope, not in the review body', async () => {
-    const { wrapper } = await mountSection('review')
+  it('names the workspace only in the sidebar scope, not in the Unsure body', async () => {
+    const { wrapper } = await mountSection('unsure')
     const body = wrapper.get('.mm-review-wrap .page-main').text()
-    expect(body).not.toContain('to decide in')
     expect(body.toLowerCase()).not.toContain('personal')
     wrapper.unmount()
   })
 
-  it('keeps only the always-loaded budget on the review rail', async () => {
+  it('keeps only the always-loaded budget on the Unsure rail', async () => {
     const guide = '# Guide\n\n<!-- ciao:memory:start -->\nPrefers short briefs\n<!-- ciao:memory:end -->\n'
     vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL) => {
       const path = new URL(String(input), 'http://localhost').searchParams.get('path')
@@ -868,7 +715,7 @@ describe('MemoryMapView sections', () => {
         return toLocaleString.call(this, locales ?? 'en-US', options)
       },
     )
-    const { wrapper } = await mountSection('review')
+    const { wrapper } = await mountSection('unsure')
     await flushPromises()
 
     const rail = wrapper.get('.mm-review-rail')
@@ -884,19 +731,17 @@ describe('MemoryMapView sections', () => {
   })
 })
 
-// ── A note somebody has already checked ─────────────────────────────────────
+// ── A note whose age has passed its type's limit ────────────────────────────
 //
-// The map's `stale` flag is the age rule, and the managed pass only ever
-// CLEARS it. A note in its cooldown, or one a proposal is waiting on, is not
-// "unchecked" — the tile has to say which, or the flag's absence looks like the
-// note being quietly forgotten.
+// The map's `stale` flag is the age rule. There is no check state to clear it:
+// the tile names the age and the rule, and nothing links to a queue.
 
-describe('MemoryMapView verification state', () => {
+describe('MemoryMapView stale notes', () => {
   beforeEach(() => {
     setActivePinia(createPinia())
     apiGet.mockReset()
     apiGet.mockImplementation((url: string) => {
-      if (url.includes('/api/vault/graph')) return Promise.resolve(checkedPayload())
+      if (url.includes('/api/vault/graph')) return Promise.resolve(staleNotePayload())
       return Promise.resolve({})
     })
     const store = useProjectStore()
@@ -924,472 +769,33 @@ describe('MemoryMapView verification state', () => {
     return wrapper
   }
 
-  it('leads the tile with a pending proposal and a link to it, not "needs review"', async () => {
-    const wrapper = await selectNote('pending')
+  it('calls a note past its limit out, with the rule and no link', async () => {
+    const wrapper = await selectNote('untouched')
 
-    const lead = wrapper.get('.mm-tile .mm-tile-pending').text()
-    expect(lead).toContain('Being checked')
-    expect(lead).toContain('2026-09-28')
-    expect(wrapper.get('.mm-tile-pending a').text()).toBe('Open the proposal')
-    // Being asked about is not being ignored, and saying "unchecked" here would
-    // link the operator to a queue that has stopped asking on purpose.
+    const callout = wrapper.get('.mm-tile .mm-tile-stale')
+    expect(callout.text()).toContain('Unchecked for')
+    expect(callout.text()).toContain('due every 30 days')
+    expect(callout.find('a').exists()).toBe(false)
+    wrapper.unmount()
+  })
+
+  it('leaves a fresh note without a callout', async () => {
+    const wrapper = await selectNote('fresh')
+
     expect(wrapper.find('.mm-tile-stale').exists()).toBe(false)
     wrapper.unmount()
   })
 
-  it('shows a recorded verdict, its coverage and when the note is due again', async () => {
-    const wrapper = await selectNote('checked')
-
-    const lead = wrapper.get('.mm-tile .mm-tile-checked').text()
-    expect(lead).toContain('Checked 2026-09-28')
-    expect(lead).toContain('the note is still true')
-    expect(lead).toContain('covering the whole note')
-    expect(lead).toContain('2026-10-28')
-    wrapper.unmount()
-  })
-
-  it('says a partial check covered part of the note', async () => {
-    const wrapper = await selectNote('partial')
-
-    expect(wrapper.get('.mm-tile-checked').text()).toContain('covering part of the note')
-    wrapper.unmount()
-  })
-
-  it('says a dead proposal means the note is unchecked again', async () => {
-    const wrapper = await selectNote('conflicted')
-
-    expect(wrapper.get('.mm-tile-stale').text())
-      .toContain('A verification is out of date for this note')
-    // Its accept would refuse as a conflict, so the tile must not offer a link
-    // to a card nobody can use.
-    expect(wrapper.find('.mm-tile-pending').exists()).toBe(false)
-    wrapper.unmount()
-  })
-
-  it('still calls a never-checked note out', async () => {
-    const wrapper = await selectNote('untouched')
-
-    expect(wrapper.get('.mm-tile-stale').text()).toContain('Unchecked for')
-    expect(wrapper.find('.mm-tile-checked').exists()).toBe(false)
-    expect(wrapper.find('.mm-tile-pending').exists()).toBe(false)
-    wrapper.unmount()
-  })
-
-  it('counts only the note that is genuinely unchecked', async () => {
+  it('counts the stale notes in the toolbar as plain text', async () => {
     const wrapper = await mountView('/memory/map')
     await flushPromises()
     await nextTick()
 
     const mm = useMemoryMapStore()
-    // Three carry a check that settles their revision and the server cleared
-    // their flags, so the toolbar must not re-add them. The fourth is a dead
-    // proposal — the note really IS unchecked again — so it belongs here.
-    expect(mm.staleNotes.map(n => n.title)).toEqual(['Conflicted', 'Untouched'])
-    expect(wrapper.get('.mm-toolbar-stale').text()).toContain('2')
+    expect(mm.staleNotes.map(n => n.title)).toEqual(['Old', 'Untouched'])
+    const stat = wrapper.get('.mm-toolbar-stale')
+    expect(stat.text()).toContain('2')
+    expect(stat.element.tagName).toBe('SPAN')
     wrapper.unmount()
-  })
-})
-
-/**
- * A reloadable proposal link: `/memory/review?show=suggested&workspace=NAME&proposal=prv_<64 hex>`.
- *
- * The real panel is mounted; only layout (jsdom has none), the frame timer and
- * the network are replaced. Fetches are held on deferred promises and the
- * panel's 16 ms frames on fake timers, so each test decides when the queue
- * arrives and when the row becomes visible.
- */
-describe('MemoryMapView proposal links', () => {
-  type Deferred<T> = { promise: Promise<T>; resolve: (v: T) => void; reject: (e: unknown) => void }
-  function deferred<T>(): Deferred<T> {
-    let resolve!: (v: T) => void
-    let reject!: (e: unknown) => void
-    const promise = new Promise<T>((res, rej) => { resolve = res; reject = rej })
-    return { promise, resolve, reject }
-  }
-  const keyOf = (c: string) => `prv_${c.repeat(64)}`
-  const linkTo = (c: string, ws = 'personal') =>
-    `/memory/review?show=suggested&workspace=${ws}&proposal=${keyOf(c)}`
-  const row = (id: string, text: string, c: string, ws = 'personal') => ({
-    id, kind: 'memory', text, source: '', path: '', workspace: ws, region: 'memory',
-    target: '', ts: '2026-09-01', review_key: keyOf(c), review_path: linkTo(c, ws),
-  })
-  const QUEUE = () => ({
-    rows: [
-      row('p1', 'Alpha fact', 'a'),
-      row('p2', 'Beta fact', 'b'),
-      row('p3', 'Gamma fact', 'c', 'work'),
-    ],
-  })
-
-  let listing: () => Promise<unknown>
-  let visible: boolean
-  let focused: string[]
-  let current: ReturnType<typeof mount> | null
-
-  beforeEach(() => {
-    setActivePinia(createPinia())
-    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] })
-    apiGet.mockReset()
-    apiPost.mockReset()
-    visible = true
-    focused = []
-    current = null
-    listing = () => Promise.resolve(QUEUE())
-    apiGet.mockImplementation((url: string) => {
-      if (url === '/api/proposals') return listing()
-      if (url.startsWith('/api/proposals/history')) return Promise.resolve({ rows: [], total: 0, truncated: false, limit: 200 })
-      if (url.startsWith('/api/vault/review')) return Promise.resolve({ candidates: [], trashed: [], cleared: [] })
-      if (url.includes('/api/vault/graph')) return Promise.resolve(graphPayload())
-      return Promise.resolve({})
-    })
-    const store = useProjectStore()
-    store.workspaces = [
-      { name: 'personal', vault_root: '/tmp/vault', default_provider: 'claude' },
-      { name: 'work', vault_root: '/tmp/work', default_provider: 'claude' },
-    ]
-    store.activeWorkspace = 'personal'
-    store.bootstrapped = true
-    vi.stubGlobal('ResizeObserver', class { observe() {} unobserve() {} disconnect() {} })
-    HTMLCanvasElement.prototype.getContext = vi.fn(() => null) as never
-    vi.stubGlobal('requestAnimationFrame', vi.fn(() => 1))
-    vi.stubGlobal('cancelAnimationFrame', vi.fn())
-    // jsdom lays nothing out: `visible` is what the panel's frame loop waits for.
-    vi.spyOn(Element.prototype, 'getClientRects').mockImplementation(
-      () => (visible ? [{}] : []) as unknown as DOMRectList,
-    )
-    Element.prototype.scrollIntoView = vi.fn()
-    const realFocus = HTMLElement.prototype.focus
-    vi.spyOn(HTMLElement.prototype, 'focus').mockImplementation(function (this: HTMLElement, ...args) {
-      if (this.classList.contains('pr-row')) focused.push(/Alpha|Beta|Gamma/.exec(this.textContent ?? '')?.[0] ?? '?')
-      else realFocus.apply(this, args)
-    })
-  })
-
-  afterEach(() => {
-    current?.unmount()
-    document.body.innerHTML = ''
-    vi.useRealTimers()
-    vi.unstubAllGlobals()
-    vi.restoreAllMocks()
-    delete (Element.prototype as { scrollIntoView?: unknown }).scrollIntoView
-  })
-
-  /** Let promises and the panel's 16 ms frames run a few rounds. */
-  async function settle() {
-    for (let i = 0; i < 4; i += 1) {
-      await flushPromises()
-      await vi.advanceTimersByTimeAsync(16)
-    }
-    await flushPromises()
-  }
-  async function open(path: string) {
-    const wrapper = await mountView(path)
-    current = wrapper
-    await settle()
-    return wrapper
-  }
-  const noticeText = (wrapper: ReturnType<typeof mount>) => wrapper.find('.mm-link-notice').text()
-
-  it('a fresh mount waits for bootstrap and the deferred fetch, then reveals the exact row and clears saved filters', async () => {
-    const proposals = useProposalsStore()
-    proposals.kindFilter = 'skill'
-    proposals.decideFilter = 'needs-you'
-    proposals.search = 'zzz'
-    useProjectStore().bootstrapped = false
-    const gate = deferred<unknown>()
-    listing = () => gate.promise
-
-    const wrapper = await open(linkTo('b'))
-    expect(noticeText(wrapper)).toContain('Opening the proposal')
-    useProjectStore().bootstrapped = true
-    await settle()
-    expect(focused).toEqual([])
-
-    gate.resolve(QUEUE())
-    await settle()
-
-    expect(focused).toEqual(['Beta'])
-    expect([proposals.kindFilter, proposals.decideFilter, proposals.search]).toEqual(['all', 'all', ''])
-    expect(proposals.revealedRowId).toBe('')
-    expect(wrapper.find('.mm-link-notice').exists()).toBe(false)
-    expect(apiPost).not.toHaveBeenCalled()
-  })
-
-  it('a same-component route update reveals the exact row after a deferred fetch', async () => {
-    const proposals = useProposalsStore()
-    const wrapper = await open('/memory/review')
-    expect(focused).toEqual([])
-    proposals.kindFilter = 'skill'
-    proposals.search = 'zzz'
-    const gate = deferred<unknown>()
-    listing = () => gate.promise
-
-    await wrapper.router.push(linkTo('a'))
-    await settle()
-    expect(focused).toEqual([])
-
-    gate.resolve(QUEUE())
-    await settle()
-
-    expect(focused).toEqual(['Alpha'])
-    expect([proposals.kindFilter, proposals.search]).toEqual(['all', ''])
-  })
-
-  it('a registered other workspace is entered through the switch guards', async () => {
-    const store = useProjectStore()
-    const guard = vi.fn(async () => true)
-    store.registerWorkspaceSwitchGuard(guard)
-
-    await open(linkTo('c', 'work'))
-
-    expect(guard).toHaveBeenCalledWith('personal')
-    expect(store.activeWorkspace).toBe('work')
-    expect(focused).toEqual(['Gamma'])
-  })
-
-  it('a declined guard leaves the scope and the focus alone', async () => {
-    const store = useProjectStore()
-    store.registerWorkspaceSwitchGuard(async () => false)
-
-    const wrapper = await open(linkTo('c', 'work'))
-
-    expect(store.activeWorkspace).toBe('personal')
-    expect(focused).toEqual([])
-    expect(useProposalsStore().revealedRowId).toBe('')
-    expect(noticeText(wrapper)).toContain('The workspace was not changed')
-  })
-
-  it('an unknown workspace is said so and changes nothing', async () => {
-    const store = useProjectStore()
-    const wrapper = await open(linkTo('a', 'ghost'))
-
-    expect(store.activeWorkspace).toBe('personal')
-    expect(focused).toEqual([])
-    expect(noticeText(wrapper)).toContain('"ghost" is not available')
-  })
-
-  it('a malformed or repeated key is refused and never picks another row', async () => {
-    const short = await open('/memory/review?show=suggested&workspace=personal&proposal=prv_abc')
-    expect(noticeText(short)).toContain('not valid')
-    short.unmount()
-    current = null
-
-    const repeated = await open(`/memory/review?show=suggested&workspace=personal&proposal=${keyOf('a')}&proposal=${keyOf('b')}`)
-    expect(noticeText(repeated)).toContain('not valid')
-    expect(focused).toEqual([])
-    expect(useProjectStore().activeWorkspace).toBe('personal')
-  })
-
-  it('a key that belongs to another workspace is not found here', async () => {
-    const wrapper = await open(linkTo('c', 'personal'))
-
-    expect(noticeText(wrapper)).toContain('This proposal is no longer pending.')
-    expect(focused).toEqual([])
-  })
-
-  it('a missing or resolved key says it is no longer pending and links to history', async () => {
-    const wrapper = await open(linkTo('f'))
-
-    expect(noticeText(wrapper)).toContain('This proposal is no longer pending.')
-    expect(wrapper.get('.mm-link-notice a').attributes('href')).toBe('/memory/history')
-    expect(focused).toEqual([])
-  })
-
-  it('a transport failure is not a missing-state claim, and Retry succeeds', async () => {
-    listing = () => Promise.reject(new Error('offline'))
-    const wrapper = await open(linkTo('b'))
-
-    const alert = wrapper.get('.mm-link-notice[role="alert"]')
-    expect(alert.text()).toContain('Could not load the proposal')
-    expect(wrapper.text()).not.toContain('no longer pending')
-    expect(focused).toEqual([])
-
-    listing = () => Promise.resolve(QUEUE())
-    await alert.get('button').trigger('click')
-    await settle()
-
-    expect(focused).toEqual(['Beta'])
-    expect(wrapper.find('.mm-link-notice').exists()).toBe(false)
-  })
-
-  it('route A to B while A is still loading: A cannot overwrite B', async () => {
-    const proposals = useProposalsStore()
-    const reveal = vi.spyOn(proposals, 'revealRow')
-    const gate = deferred<unknown>()
-    listing = () => gate.promise
-    const wrapper = await open(linkTo('a'))
-
-    await wrapper.router.push(linkTo('b'))
-    await settle()
-    gate.resolve(QUEUE())
-    await settle()
-
-    expect(reveal.mock.calls.map(c => c[0])).toEqual(['p2'])
-    expect(focused).toEqual(['Beta'])
-  })
-
-  it('after handoff, navigating to B never lets A focus or clear B', async () => {
-    const proposals = useProposalsStore()
-    visible = false
-    const wrapper = await open(linkTo('a'))
-    expect(proposals.revealedRowId).toBe('p1')
-
-    await wrapper.router.push(linkTo('b'))
-    await settle()
-    expect(proposals.revealedRowId).toBe('p2')
-    expect(focused).toEqual([])
-
-    visible = true
-    await settle()
-    expect(focused).toEqual(['Beta'])
-    expect(proposals.revealedRowId).toBe('')
-  })
-
-  it('after handoff, a workspace switch the resolver did not make withdraws the reveal', async () => {
-    const proposals = useProposalsStore()
-    visible = false
-    await open(linkTo('a'))
-    expect(proposals.revealedRowId).toBe('p1')
-
-    useProjectStore().activeWorkspace = 'work'
-    await settle()
-    expect(proposals.revealedRowId).toBe('')
-
-    visible = true
-    await settle()
-    expect(focused).toEqual([])
-  })
-
-  it('after handoff, unmounting stops the old loop and withdraws the reveal', async () => {
-    const proposals = useProposalsStore()
-    visible = false
-    const wrapper = await open(linkTo('a'))
-    expect(proposals.revealedRowId).toBe('p1')
-
-    wrapper.unmount()
-    current = null
-    expect(proposals.revealedRowId).toBe('')
-
-    visible = true
-    await settle()
-    expect(focused).toEqual([])
-  })
-
-  it('exactly equivalent duplicates reveal the first, and no decision is ever sent', async () => {
-    listing = () => Promise.resolve({
-      rows: [row('p1', 'Alpha fact', 'a'), row('p9', 'Beta fact', 'a'), row('p2', 'Gamma fact', 'b')],
-    })
-
-    await open(linkTo('a'))
-
-    expect(focused).toEqual(['Alpha'])
-    expect(apiPost).not.toHaveBeenCalled()
-  })
-
-  it('without a proposal query, or outside To decide, nothing is resolved or changed', async () => {
-    const proposals = useProposalsStore()
-    const reveal = vi.spyOn(proposals, 'revealRow')
-    proposals.kindFilter = 'skill'
-
-    const plain = await open('/memory/review')
-    expect(plain.find('.mm-link-notice').exists()).toBe(false)
-    expect(proposals.kindFilter).toBe('skill')
-    plain.unmount()
-    current = null
-
-    const map = await open(`/memory/map?workspace=personal&proposal=${keyOf('a')}`)
-    expect(map.find('.mm-link-notice').exists()).toBe(false)
-    expect(reveal).not.toHaveBeenCalled()
-    expect(proposals.kindFilter).toBe('skill')
-  })
-
-  it('a Vault review reveal of the same row survives the route change that follows a finished link', async () => {
-    const proposals = useProposalsStore()
-    const wrapper = await open(linkTo('a'))
-    expect(focused).toEqual(['Alpha'])
-
-    // What VaultReviewPanel does: reveal the row, then go to the queue.
-    visible = false
-    proposals.revealRow('p1')
-    await wrapper.router.push('/memory/review?show=suggested')
-    await settle()
-
-    expect(proposals.revealedRowId).toBe('p1')
-  })
-
-  it('a manual workspace switch after a finished link is not resolver work', async () => {
-    const proposals = useProposalsStore()
-    await open(linkTo('a'))
-    expect(focused).toEqual(['Alpha'])
-
-    visible = false
-    proposals.revealRow('p1')
-    await settle()
-    useProjectStore().activeWorkspace = 'work'
-    await settle()
-
-    // Not the resolver's reveal, so the resolver must not take it back.
-    expect(proposals.revealedRowId).toBe('p1')
-  })
-
-  it('Retry leaves keyboard focus inside the notice', async () => {
-    listing = () => Promise.reject(new Error('offline'))
-    const wrapper = await open(linkTo('b'))
-    const gate = deferred<unknown>()
-    listing = () => gate.promise
-
-    const button = wrapper.get('.mm-link-notice button').element as HTMLButtonElement
-    button.focus()
-    expect(document.activeElement).toBe(button)
-    await wrapper.get('.mm-link-notice button').trigger('click')
-    await settle()
-
-    const notice = wrapper.get('.mm-link-notice').element
-    expect(notice.contains(document.activeElement)).toBe(true)
-    expect(document.activeElement).not.toBe(document.body)
-    gate.resolve(QUEUE())
-    await settle()
-  })
-
-  it('a forced fetch superseded by a newer request neither reveals nor claims the row is gone', async () => {
-    const proposals = useProposalsStore()
-    listing = () => Promise.reject(new Error('offline'))
-    const wrapper = await open(linkTo('b'))
-    const stale = deferred<unknown>()
-    const newer = deferred<unknown>()
-    const gates = [stale, newer]
-    listing = () => gates.shift()!.promise
-
-    await wrapper.get('.mm-link-notice button').trigger('click')
-    await settle()
-    void proposals.fetch({ force: true })
-    await settle()
-
-    // The superseded request answers first, with a queue that lacks the row.
-    stale.resolve({ rows: [] })
-    await settle()
-    expect(focused).toEqual([])
-    expect(wrapper.text()).not.toContain('no longer pending')
-
-    newer.resolve(QUEUE())
-    await settle()
-    expect(focused).toEqual(['Beta'])
-  })
-
-  it('a manual workspace switch while the resolver is switching stops it and keeps the reader\'s scope', async () => {
-    const store = useProjectStore()
-    store.workspaces = [...store.workspaces, { name: 'third', vault_root: '/tmp/third', default_provider: 'claude' }]
-    const release = deferred<boolean>()
-    store.registerWorkspaceSwitchGuard(() => release.promise)
-    await open(linkTo('c', 'work'))
-
-    store.activeWorkspace = 'third'
-    await settle()
-    release.resolve(true)
-    await settle()
-
-    expect(store.activeWorkspace).toBe('third')
-    expect(focused).toEqual([])
-    expect(useProposalsStore().revealedRowId).toBe('')
   })
 })

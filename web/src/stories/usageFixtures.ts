@@ -18,7 +18,7 @@ export function syntheticUsageRaw(workspace: string, range: StatsRange) {
       chats_opened: Math.round(248 * totalsScale),
       messages_sent: Math.round(4517 * totalsScale),
       chats_archived: Math.round(171 * totalsScale),
-      memories_saved: Math.round(112 * totalsScale),
+     
       tasks_completed: Math.round(37 * totalsScale),
       projects_worked_on: Math.round(16 * totalsScale),
       automation_runs: Math.round(180 * totalsScale),
@@ -28,7 +28,7 @@ export function syntheticUsageRaw(workspace: string, range: StatsRange) {
       chats_opened: Math.round(210 * totalsScale),
       messages_sent: Math.round(3702 * totalsScale),
       chats_archived: Math.round(157 * totalsScale),
-      memories_saved: Math.round(85 * totalsScale),
+     
       tasks_completed: Math.round(31 * totalsScale),
       projects_worked_on: Math.round(13 * totalsScale),
       automation_runs: Math.round(173 * totalsScale),
@@ -40,7 +40,6 @@ export function syntheticUsageRaw(workspace: string, range: StatsRange) {
       { project_id: 'sb-alpha-notes', name: 'storybook-alpha-notes', messages: 260 },
       { project_id: 'sb-beta-general', name: 'storybook-beta', messages: 198 },
     ],
-    memory_pipeline: { proposed: 179, accepted: 112, notes_updated: 62 },
     hours: [2, 1, 0, 0, 0, 0, 1, 4, 9, 14, 16, 12, 7, 11, 15, 13, 10, 8, 6, 9, 14, 17, 12, 6],
     models: [
       { model: 'storybook-model-a', turns: 680 },

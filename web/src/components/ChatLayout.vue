@@ -134,7 +134,7 @@
             @open-sidebar="sidebarCollapsed = false"
           />
           <MemoryMapView
-            v-else-if="viewMode === 'memory' || viewMode === 'proposals'"
+            v-else-if="viewMode === 'memory'"
             @open-sidebar="sidebarCollapsed = false"
           />
           <UsageView v-else-if="viewMode === 'stats'" @open-sidebar="sidebarCollapsed = false" />
@@ -662,14 +662,13 @@ const chatRoutePending = computed(() => {
   if (!id || store.activeChat) return false
   return chatLookupPendingId.value === id
 })
-const viewMode = computed<'chat' | 'project' | 'schedules' | 'tasks' | 'settings' | 'memory' | 'proposals' | 'stats'>(() => {
+const viewMode = computed<'chat' | 'project' | 'schedules' | 'tasks' | 'settings' | 'memory' | 'stats'>(() => {
   const path = route.path
   if (path.startsWith('/settings')) return 'settings'
   if (path.startsWith('/schedules')) return 'schedules'
   if (path.startsWith('/tasks')) return 'tasks'
   if (path.startsWith('/stats')) return 'stats'
   if (path.startsWith('/memory')) return 'memory'
-  if (path.startsWith('/proposals')) return 'proposals'
   if (projectIdParam.value) return 'project'
   return 'chat'
 })
@@ -696,7 +695,7 @@ const viewShortcutsActive = computed(() =>
 // themselves. `1`–`9` keep switching workspaces from all of them: they are gated
 // on `viewShortcutsActive`, which the board does not exclude.
 const shortcutsActive = computed(() =>
-  viewShortcutsActive.value && viewMode.value !== 'schedules' && viewMode.value !== 'tasks' && viewMode.value !== 'memory' && viewMode.value !== 'proposals' && viewMode.value !== 'stats',
+  viewShortcutsActive.value && viewMode.value !== 'schedules' && viewMode.value !== 'tasks' && viewMode.value !== 'memory' && viewMode.value !== 'stats',
 )
 const sidebarCollapsed = ref(false)
 // On a phone the drawer slides out on close the way it slides in on open: for the
@@ -760,7 +759,6 @@ const pageDocumentTitle = computed(() => {
     return 'automations'
   }
   if (viewMode.value === 'memory') return 'memory'
-  if (viewMode.value === 'proposals') return 'proposals'
   if (viewMode.value === 'tasks') return 'tasks'
   if (viewMode.value === 'stats') return 'usage'
   if (projectIdParam.value) {
@@ -1471,7 +1469,7 @@ function onUnreservedKeydown(e: KeyboardEvent) {
       memoryMapStore.selectNode(null)
       return
     }
-    if (viewMode.value === 'settings' || viewMode.value === 'schedules' || viewMode.value === 'tasks' || viewMode.value === 'memory' || viewMode.value === 'proposals' || viewMode.value === 'stats') {
+    if (viewMode.value === 'settings' || viewMode.value === 'schedules' || viewMode.value === 'tasks' || viewMode.value === 'memory' || viewMode.value === 'stats') {
       e.preventDefault()
       void router.push('/')
       return

@@ -37,20 +37,6 @@ async function mountSettings(routines?: unknown, tab = '') {
         provider_options: [{ value: 'claude', label: 'Claude' }],
       } as never
     }
-    if (url.startsWith('/api/proposals/handover')) {
-      return {
-        workspace: 'work',
-        handover: 'off',
-        memory_approval: {},
-        accept_resolved: { memory: { mode: 'approve', inherited: true }, profile: { mode: 'approve', inherited: true } },
-        acting_available: true,
-        agreement: {
-          decided: 0, matched: 0, rate: null, window: 50, min_decisions: 20, threshold: 0.9,
-          predicted_accept: 0, accept_matched: 0, predicted_dismiss: 0, dismiss_matched: 0,
-          suggest_handover: false,
-        },
-      } as never
-    }
     if (url.startsWith('/api/update-tasks')) return { tasks: [] } as never
     throw new Error('Unrelated settings data unavailable in this test')
   })
@@ -71,7 +57,7 @@ it('lists the rendered sections of the tab in the On this page rail', async () =
     // Built from the page itself, in page order, headings in sentence case.
     // Updates leads, then the capability help, then the everyday device
     // sections, then everything else in its existing order. The workspace's own
-    // Memory handover and Update task history live on Overview.
+    // Update task history lives on Overview.
     expect(labels.slice(0, 5)).toEqual([
       'Updates',
       'What can Ciaobot do?',
@@ -83,7 +69,6 @@ it('lists the rendered sections of the tab in the On this page rail', async () =
     expect(labels).not.toContain('Check vault answers')
     expect(wrapper.findAll('.settings-main .section-title').map(heading => heading.text()))
       .not.toContain('Check vault answers')
-    expect(labels).not.toContain('Memory handover')
     expect(labels).not.toContain('Update task history')
     expect(labels).not.toContain('Session insights')
     expect(labels).not.toContain('Appearance')
@@ -107,7 +92,6 @@ it('lists Overview cards on the rail', async () => {
     expect(labels).toEqual([
       'Workspace',
       'Chats and models',
-      'Memory handover',
       'Shared brains',
       'Update task history',
       'Archive this workspace',

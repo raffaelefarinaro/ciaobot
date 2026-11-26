@@ -77,7 +77,7 @@ export const Loaded: Story = {
     await assertFenceQuiet(canvas)
     expect(canvas.getByText('248')).toBeTruthy()
     expect(canvas.getByText('Activity')).toBeTruthy()
-    expect(canvas.getByText('Memory pipeline')).toBeTruthy()
+    expect(canvas.queryByText('Memory pipeline')).toBeNull()
   },
 }
 

@@ -63,7 +63,6 @@ const KPIS: Array<{ key: keyof UsageCounts; label: string; compact?: boolean }> 
   { key: 'chats_opened', label: 'Chats opened' },
   { key: 'messages_sent', label: 'Messages sent' },
   { key: 'chats_archived', label: 'Chats archived' },
-  { key: 'memories_saved', label: 'Memories saved' },
   { key: 'tasks_completed', label: 'Tasks completed' },
   { key: 'projects_worked_on', label: 'Projects worked on' },
   { key: 'automation_runs', label: 'Automation runs' },

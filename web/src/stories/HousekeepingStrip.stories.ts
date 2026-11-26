@@ -314,7 +314,8 @@ export const TaskNeedsReview: Story = {
   ...story(routes({ updates: updates([task({ status: 'waiting_review' })]) })),
   play: async ({ canvas }) => {
     await settled(canvas)
-    expect(canvas.getByRole('button', { name: 'Review proposals' })).toBeTruthy()
+    expect(canvas.getByRole('button', { name: 'Start a new chat' })).toBeTruthy()
+    expect(canvas.queryByRole('button', { name: 'Review proposals' })).toBeNull()
     expect(canvas.getByText('The chat this opened has been archived or deleted. Starting opens a new one.')).toBeTruthy()
     await assertFenceQuiet(canvas)
   },

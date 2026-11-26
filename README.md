@@ -83,7 +83,7 @@ They are excellent agents. Ciaobot gives them a persistent personal workspace: s
 
 ### See what it remembered. Decide what stays.
 
-Archiving a chat can file confident facts automatically; uncertain ones become proposals. Review proposals and recorded decisions in Memory, with Undo where a reversible receipt is available. Nightly curation consolidates existing core memory rather than adding new core facts unattended. Old or unused notes are flagged for your decision, not automatically deleted; retired notes remain restorable until you permanently delete them.
+Archiving a chat can file confident facts automatically; uncertain ones go on the Unsure list, one Markdown file you can read in Memory → Unsure. Every change to a note is in the workspace's Git history, so it can be reverted. Nightly curation consolidates existing core memory. Old or unused notes are never deleted automatically.
 
 The user-facing product is **Ciaobot**. The CLI is installed as both `ciaobot` and `ciao`; the Python package and many environment variables still use `ciao`/`CIAO_*` for compatibility.
 

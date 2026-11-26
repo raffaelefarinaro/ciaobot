@@ -431,8 +431,8 @@ export const useImportStore = defineStore('import', () => {
   }
 
   /**
-   * Drop a batch record. Nothing else moves: the filed proposals stay queued and
-   * an accepted fact stays in the vault, which is the existing review/undo path.
+   * Drop a batch record. Nothing else moves: the lines already on the Unsure list stay and
+   * a fact written to the vault stays there; Git is the undo.
    *
    * `false` also comes back from a workspace switch made while the DELETE was in
    * flight — see {@link drawingWorkspace}.

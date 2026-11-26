@@ -32,18 +32,15 @@
 import { computed } from 'vue'
 import { useRouter } from 'vue-router'
 import { useProjectStore } from '../stores/projects'
-import { useProposalsStore } from '../stores/proposals'
-import { useVaultReviewStore } from '../stores/vaultReview'
 import { useTaskStore } from '../stores/tasks'
 import { useTaskSignalsStore } from '../stores/taskSignals'
 import type { Schedule } from '../lib/types'
-import { reviewPath } from '../stores/memoryMap'
 import { scheduleInWorkspace, scheduleNeedsAttention } from '../lib/automationWorkspace'
 import HomeTodayStats from './HomeTodayStats.vue'
 
 type ReviewState = 'ready' | 'loading' | 'stale' | 'error'
 type ReviewItem = {
-  key: 'tasks' | 'memory' | 'retirement' | 'automations'
+  key: 'tasks' | 'automations'
   title: string
   detail: string
   count: number
@@ -53,8 +50,6 @@ type ReviewItem = {
 
 const router = useRouter()
 const projects = useProjectStore()
-const proposals = useProposalsStore()
-const retirement = useVaultReviewStore()
 const tasks = useTaskStore()
 const taskSignals = useTaskSignalsStore()
 
@@ -93,39 +88,7 @@ function automationProblem(s: Schedule): string {
 }
 
 const items = computed<ReviewItem[]>(() => {
-  const workspace = projects.activeWorkspace
   const inReview = tasksInReview.value
-  const proposalCount = proposals.scopedRows(workspace).length
-  let proposalState: ReviewState = 'ready'
-  let proposalDetail = proposalCount
-    ? `${proposalCount === 1 ? 'A durable fact is' : 'Durable facts are'} ready to accept, edit, or reject.`
-    : 'Up to date. No suggested memories are waiting in this workspace.'
-  if (!proposals.loaded && !proposals.loadError) {
-    proposalState = 'loading'
-    proposalDetail = 'Checking for suggested memories.'
-  } else if (proposals.loadError) {
-    proposalState = proposalCount ? 'stale' : 'error'
-    proposalDetail = proposalCount
-      ? `Showing the last successful load. ${proposals.loadError}`
-      : proposals.loadError
-  }
-
-  const hasCurrentRetirement = retirement.loadedWorkspace === workspace
-  const retirementCount = hasCurrentRetirement ? retirement.candidates.length : 0
-  let retirementState: ReviewState = 'ready'
-  let retirementDetail = retirementCount
-    ? `${retirementCount === 1 ? 'A note needs' : 'Notes need'} a freshness or duplication decision.`
-    : 'Up to date. No notes need a memory decision in this workspace.'
-  if (!hasCurrentRetirement && !retirement.loadError) {
-    retirementState = 'loading'
-    retirementDetail = 'Checking for notes that need review.'
-  } else if (retirement.loadError) {
-    retirementState = hasCurrentRetirement && retirementCount ? 'stale' : 'error'
-    retirementDetail = hasCurrentRetirement && retirementCount
-      ? `Showing the last successful load. ${retirement.loadError}`
-      : retirement.loadError
-  }
-
   const failing = failingAutomations.value
   const n = failing.length
   let automationState: ReviewState = 'ready'
@@ -157,26 +120,6 @@ const items = computed<ReviewItem[]>(() => {
       attention: false,
     },
     {
-      key: 'memory',
-      title: proposalCount && proposalState !== 'loading'
-        ? plural(proposalCount, 'memory proposal')
-        : 'Memory proposals',
-      detail: proposalDetail,
-      count: proposalCount,
-      state: proposalState,
-      attention: false,
-    },
-    {
-      key: 'retirement',
-      title: retirementCount && retirementState !== 'loading'
-        ? plural(retirementCount, 'note to revisit', 'notes to revisit')
-        : 'Notes to revisit',
-      detail: retirementDetail,
-      count: retirementCount,
-      state: retirementState,
-      attention: false,
-    },
-    {
       key: 'automations',
       title: n && automationState !== 'loading'
         ? plural(n, 'automation needs a look', 'automations need a look')
@@ -205,12 +148,8 @@ function openItem(key: ReviewItem['key']) {
     void router.push(only ? { name: 'task-detail', params: { taskId: only.id } } : '/tasks')
     return
   }
-  if (key === 'automations') {
-    const failing = failingAutomations.value
-    void router.push(failing.length === 1 ? `/schedules/${failing[0].schedule_id}` : '/schedules')
-    return
-  }
-  void router.push(reviewPath(key === 'retirement' ? 'revisit' : 'suggested'))
+  const failing = failingAutomations.value
+  void router.push(failing.length === 1 ? `/schedules/${failing[0].schedule_id}` : '/schedules')
 }
 </script>
 

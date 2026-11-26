@@ -47,7 +47,7 @@ function destination() {
 /** Inert router destinations: no bootstrap, no fetches, no app orchestration. */
 export function homeRoutes(): RouteRecordRaw[] {
   return ['/onboarding', '/settings', '/settings/advanced', '/settings/providers', '/settings/access',
-    '/memory/review', '/proposals', '/stats', '/chat/:chatId'].map(path => ({ path, component: destination() }))
+    '/memory/unsure', '/stats', '/chat/:chatId'].map(path => ({ path, component: destination() }))
 }
 
 export type HomeMount = ConnectedFixture

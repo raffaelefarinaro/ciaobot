@@ -347,6 +347,8 @@ test.describe('workbench layout', () => {
   })
 
   test('the review rail sits beside the command surface', async ({ page }) => {
+    // One automation that failed gives the rail the one row it can show here.
+    await seedInbox(page, { schedules: { 'alpha-daily-brief': { last_status: 'error' } } })
     await boot(page)
     const surface = await page.locator('.home-intake-form').boundingBox()
     const rail = await page.locator('.home-rail').boundingBox()
@@ -355,9 +357,9 @@ test.describe('workbench layout', () => {
     expect(rail!.x).toBeGreaterThan(surface!.x + surface!.width)
 
     // Rows, not a card grid: each row spans the rail's width. Up-to-date
-    // queues drop out. The fixture's one automation (`alpha-daily-brief`,
-    // `last_status: 'ok'`) is healthy, and an active automation is not news,
-    // so only proposals remain.
+    // queues drop out. The fixture's one automation (`alpha-daily-brief`) is
+    // healthy by default, and an active automation is not news, so the test
+    // fails it above and that failure is the one row.
     const rows = page.locator('.home-review-item')
     await expect(rows).toHaveCount(1)
     // The window insets its rows 16px and a 1px border per side.
@@ -368,9 +370,9 @@ test.describe('workbench layout', () => {
       expect(box!.width).toBeGreaterThan(list!.width - 2)
     }
 
-    // Today sits under the queues: six rows, averages on the first two.
+    // Today sits under the queues: five rows, averages on the first two.
     const today = page.locator('.home-rail .home-today .rail-kv')
-    await expect(today).toHaveCount(6)
+    await expect(today).toHaveCount(5)
     await expect(today.first()).toContainText('14')
     await expect(today.first()).toContainText('avg 10')
   })

@@ -1,7 +1,7 @@
 import { defineComponent, h } from 'vue'
 import type { Component } from 'vue'
 import type { RouteRecordRaw } from 'vue-router'
-import type { MemoryGraphCheck, MemoryGraphEntryCoverage } from '../stores/memoryMap'
+import type { MemoryGraphEntryCoverage } from '../stores/memoryMap'
 import { useMemoryMapStore } from '../stores/memoryMap'
 import { useProjectStore } from '../stores/projects'
 import type { FixtureRoute } from './fixtureBoundary'
@@ -39,7 +39,6 @@ type SyntheticNode = {
   stale: boolean
   age_days: number | null
   threshold_days: number | null
-  check?: MemoryGraphCheck | null
   entry_coverage?: MemoryGraphEntryCoverage | null
 }
 
@@ -66,21 +65,8 @@ function makeNode(
     stale: extra.stale ?? false,
     age_days: extra.age_days === undefined ? 18 : extra.age_days,
     threshold_days: extra.threshold_days ?? null,
-    check: extra.check ?? null,
     entry_coverage: extra.entry_coverage ?? null,
   }
-}
-
-const pendingCheck: MemoryGraphCheck = {
-  outcome: 'update', checked_at: '2026-11-01', retry_after: '2026-11-08',
-  coverage: 'partial', reason: 'Storybook verification note', citations: 2,
-  receipt_id: '', settled: true, pending: true, proposal_id: 'storybook-proposal-1', conflicted: false,
-}
-
-const conflictedCheck: MemoryGraphCheck = {
-  outcome: 'update', checked_at: '2026-09-01', retry_after: '2026-09-08',
-  coverage: 'complete', reason: '', citations: 1,
-  receipt_id: '', settled: false, pending: false, proposal_id: '', conflicted: true,
 }
 
 const factsCoverage: MemoryGraphEntryCoverage = {
@@ -99,8 +85,8 @@ export const mapNoteIds = {
   project: 'storybook-vault/Storybook project.md',
   reference: 'storybook-vault/Storybook reference.md',
   meeting: 'storybook-vault/Storybook meeting notes.md',
-  pending: 'storybook-vault/Storybook pending check.md',
-  conflicted: 'storybook-vault/Storybook conflicted check.md',
+  archive: 'storybook-vault/Storybook archive.md',
+  readingList: 'storybook-vault/Storybook reading list.md',
   facts: 'storybook-vault/Storybook facts audit.md',
 } as const
 
@@ -116,8 +102,8 @@ export function syntheticVault(): SyntheticGraph {
     { source: mapHubId, target: mapNoteIds.reference },
     { source: mapHubId, target: 'storybook-vault/Storybook idea.md' },
     { source: mapHubId, target: 'storybook-vault/Storybook colleague.md' },
-    { source: mapHubId, target: mapNoteIds.pending },
-    { source: mapHubId, target: mapNoteIds.conflicted },
+    { source: mapHubId, target: mapNoteIds.archive },
+    { source: mapHubId, target: mapNoteIds.readingList },
     { source: mapHubId, target: mapNoteIds.facts },
     { source: mapNoteIds.reference, target: mapNoteIds.meeting },
     { source: mapNoteIds.person, target: mapNoteIds.project },
@@ -137,8 +123,8 @@ export function syntheticVault(): SyntheticGraph {
       makeNode('storybook-vault/Storybook idea.md', 'Storybook idea', 'idea', 1),
       makeNode('storybook-vault/Storybook colleague.md', 'Storybook colleague', 'person', d('storybook-vault/Storybook colleague.md'), { tags: ['colleague'] }),
       makeNode('storybook-vault/Storybook orphan.md', 'Storybook orphan', 'note', 0, { updated: '2026-11-05', age_days: 14 }),
-      makeNode(mapNoteIds.pending, 'Storybook pending check', 'note', d(mapNoteIds.pending), { updated: '2026-10-28', age_days: 22, check: pendingCheck }),
-      makeNode(mapNoteIds.conflicted, 'Storybook conflicted check', 'note', d(mapNoteIds.conflicted), { check: conflictedCheck }),
+      makeNode(mapNoteIds.archive, 'Storybook archive', 'note', d(mapNoteIds.archive), { updated: '2026-10-28', age_days: 22 }),
+      makeNode(mapNoteIds.readingList, 'Storybook reading list', 'note', d(mapNoteIds.readingList)),
       makeNode(mapNoteIds.facts, 'Storybook facts audit', 'note', d(mapNoteIds.facts), { entry_coverage: factsCoverage }),
     ],
     edges,
@@ -237,20 +223,22 @@ const workspaceGuideRoute: FixtureRoute = {
   }),
 }
 
-/** The section loads the review queues whatever section is on screen. */
-export function reviewQueueRoutes(): FixtureRoute[] {
+/** The Unsure list the section reads from the vault, and the guide its rail reads. */
+export const unsureListBody = [
+  '# Unsure',
+  '',
+  '- [ ] memory: Storybook prefers short briefs — unsure because it was said once; 2026-11-01',
+  '- [x] people: Storybook colleague works on the project — source: storybook; 2026-11-02',
+  '',
+].join('\n')
+
+export function memoryPageRoutes(): FixtureRoute[] {
   return [
     workspaceGuideRoute,
-    { method: 'GET', path: '/api/proposals', respond: () => response({ rows: [] }) },
     {
       method: 'GET',
-      path: `/api/proposals/history?limit=200&workspace=${mapWorkspace}`,
-      respond: () => response({ rows: [], total: 0, at_max: true, limit: 200, truncated: false }),
-    },
-    {
-      method: 'GET',
-      path: `/api/vault/review?workspace=${mapWorkspace}&include=trashed,cleared`,
-      respond: () => response({ candidates: [], trashed: [], cleared: [] }),
+      path: `/api/workspace-file?exact=1&path=${encodeURIComponent(`memory-vault/${mapWorkspace}/Workspace/Unsure.md`)}`,
+      respond: () => new Response(unsureListBody, { status: 200, headers: { 'Content-Type': 'text/plain' } }),
     },
   ]
 }
@@ -278,7 +266,7 @@ const markdownPathsRoute: FixtureRoute = {
 export function mapRoutes(options: { graph: GraphMode; dense?: boolean; notes?: string[] }): FixtureRoute[] {
   const routes = [
     graphRoute(options.graph, (options.dense ? denseSyntheticVault : syntheticVault)()),
-    ...reviewQueueRoutes(),
+    ...memoryPageRoutes(),
   ]
   for (const id of options.notes ?? []) routes.push(noteFileRoute(id))
   routes.push(markdownPathsRoute)
@@ -337,6 +325,7 @@ export function memoryRouterRoutes(): RouteRecordRaw[] {
 // ── Connected mounts ─────────────────────────────────────────────────────────
 
 export type MapFixtureOptions = {
+  section?: 'unsure'
   view?: 'graph' | 'list'
   selectedId?: string
 }
@@ -349,6 +338,7 @@ export function mountMapFixture(host: HTMLElement, component: Component, options
     seed: (pinia) => {
       useProjectStore(pinia).activeWorkspace = mapWorkspace
       const mm = useMemoryMapStore(pinia)
+      if (options.section) mm.setSection(options.section)
       if (options.view) {
         mm.section = 'map'
         mm.view = options.view

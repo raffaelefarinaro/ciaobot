@@ -438,7 +438,7 @@ describe('ImportSources', () => {
         skipped: 0, current_source_id: '',
       },
       provenance: [
-        { provider: 'claude_code', source_id: 'sess-a', anchor: 'm-1', destination: 'personal', accepted: false, note: 'filed as a review proposal' },
+        { provider: 'claude_code', source_id: 'sess-a', anchor: 'm-1', destination: 'personal', accepted: false, note: 'filed on the Unsure list' },
       ],
       updated_at: '2026-10-04T09:05:00+00:00',
     })
@@ -478,7 +478,7 @@ describe('ImportSources', () => {
     expect(runs.text()).toContain('Reading session sess-b')
     expect(runs.get('progress').attributes('value')).toBe('1')
     expect(runs.text()).toContain('1 of 2 conversations read')
-    expect(runs.text()).toContain('3 proposals filed')
+    expect(runs.text()).toContain('3 lines added to the Unsure list')
 
     await runs.get('.import-run-actions button.import-quiet').trigger('click')
     await flushPromises()
@@ -488,13 +488,13 @@ describe('ImportSources', () => {
     const text = runs.text()
     expect(text).toContain('Cancelled after 1 of 2 conversations')
     // The two halves of what a cancel means, both said out loud.
-    expect(text).toContain('3 proposals stay queued for you to decide')
+    expect(text).toContain('3 lines stay on the Unsure list')
     expect(text).toContain('text already sent to the configured provider cannot be unsent')
     // The evidence the run recorded, and where a date is read.
     expect(text).toContain('What this filed (1)')
     expect(text).toContain('Claude Code · session sess-a')
-    expect(text).toContain('message m-1 — waiting for review')
-    expect(wrapper.getComponent(RouterLinkStub).props('to')).toBe('/memory/review')
+    expect(text).toContain('message m-1')
+    expect(wrapper.getComponent(RouterLinkStub).props('to')).toBe('/memory/unsure')
     wrapper.unmount()
   })
 
@@ -511,9 +511,9 @@ describe('ImportSources', () => {
     // promise an undecided import a longer life than the store gives it.
     expect(text).toContain('checked when Ciaobot starts')
     expect(text).not.toContain('if you never decided')
-    expect(text).toContain('Facts you accepted keep a short record')
+    expect(text).toContain('Facts you ticked keep a short record')
     expect(text).toContain('Removing an import only removes this record')
-    expect(text).toContain('a fact you accepted stays in your memory')
+    expect(text).toContain('a fact you ticked stays in your memory')
     expect(text).toContain('never modified or deleted')
     wrapper.unmount()
   })
@@ -742,7 +742,7 @@ describe('ImportSources — the run list states', () => {
     const text = wrapper.get('.import-runs').text()
     expect(text).toContain('No imports filed for personal yet')
     // The retention sentence is what says the memories survive it.
-    expect(text).toContain('a fact you accepted stays in your memory')
+    expect(text).toContain('a fact you ticked stays in your memory')
     wrapper.unmount()
   })
 })

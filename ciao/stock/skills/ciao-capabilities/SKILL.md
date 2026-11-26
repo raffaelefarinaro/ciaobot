@@ -50,7 +50,7 @@ Each area has a reference file next to this one. Open only the file the question
 | Area | What it covers | Read |
 |---|---|---|
 | Workspaces, projects, chats | hierarchy, permission mode and file access, archiving a workspace, usage statistics (`ciao stats`) and the Usage page, `ciao project`, linked repos, code mode, forks, subagents, long scripts (a subagent, or a background shell: the chat is told when it finishes), plan mode, turn resilience | `references/workspaces-and-chats.md` |
-| Memory and the vault | the memory pass, what is automatic vs yours, To decide, History and Undo, the optional reason on every decision, Memory Map, Vault Review, retirement candidates, conversation import, memory backup, shared brains | `references/memory.md` |
+| Memory and the vault | the memory pass, what is automatic vs yours, the Unsure list, Git as the undo, Memory Map, conversation import, memory backup, shared brains | `references/memory.md` |
 | Automations | schedules, interval runs, project vs chat targets, catch-up, webhook triggers | `references/automations.md` |
 | Files | viewer and pinned panel, folder browser and folder pins, annotations, drafts, previews, document conversion, HTML artifacts, CSV tables, backlinks, keyboard shortcuts | `references/files.md` |
 | Skills, models | skills, subagents, slash commands, skill proposals, providers, permission modes, message queue | `references/models-and-extensions.md` |
@@ -64,7 +64,7 @@ Ciaobot deliberately does not build in dictation, keeping the host awake, an age
 
 ## Privacy and trust posture
 
-Local-first: the server, vault, and runtime state live on the user's machine; traffic leaves only toward the configured model providers. Memory is reviewable: confident state-shaped facts are filed by the memory pass, the unsure ones wait as proposals, every individual accept or dismiss in the queue asks for an optional reason before it writes (picking a re-home destination is the exception; the destination is the answer), and no unattended run promotes a new always-loaded fact (unless the operator set Memory handover to Dismiss and accept). An existing notes folder is never discarded or rewritten during onboarding, and the vault stays portable plain markdown. Ciaobot does not limit the agent's file access; each CLI's permission mode does, and bypass gives full access to what the user account can reach (`references/workspaces-and-chats.md`).
+Local-first: the server, vault, and runtime state live on the user's machine; traffic leaves only toward the configured model providers. Memory is reviewable: confident facts are written by the memory pass, the unsure ones go on the Unsure list (one Markdown file), and Git is the record and the undo. An existing notes folder is never discarded or rewritten during onboarding, and the vault stays portable plain markdown. Ciaobot does not limit the agent's file access; each CLI's permission mode does, and bypass gives full access to what the user account can reach (`references/workspaces-and-chats.md`).
 
 ## Guided tour (new users)
 
@@ -73,7 +73,7 @@ When onboarding someone, walk through these hands-on:
 1. **Orient** — workspaces → projects → chats; create or rename a project for something they're working on.
 2. **Chat** — model picker and project context the agent always sees.
 3. **Annotate & files** — message comments, inline file cards, pin, line comments, and rich previews.
-4. **Memory** — archive → memory pass; confident facts are filed, unsure ones wait, and no unattended run promotes a new always-loaded fact (unless the operator let Workspace care accept that kind in Settings, or set Memory handover to Dismiss and accept).
+4. **Memory** — archive → memory pass; confident facts are written, unsure ones go on the Unsure list, and Git is the record and the undo.
 5. **Schedules** — set up one small routine they'd actually use.
 6. **Task board** — file one task with a due date, open it and press **Delegate to agent**, watch the badge go running, open the chat it works in, then **Approve Done** when the result lands. The step worth stopping on is that the agent's turn finishing never marks the task done: that gesture is theirs (an agent can close a manual task only when you tell it the task is done).
 7. **Webhooks** — point an external system at one trigger URL, if they have something that reports events.

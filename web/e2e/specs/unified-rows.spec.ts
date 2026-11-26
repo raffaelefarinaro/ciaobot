@@ -87,7 +87,7 @@ test.describe('unified rows, desktop', () => {
     await expect(page.locator('.usage-view .skeleton[role="status"]')).toHaveAttribute('aria-label', 'Loading usage')
     await expect(page.locator('.usage-kpi')).toHaveCount(0)
     release()
-    await expect(page.locator('.usage-kpi')).toHaveCount(8)
+    await expect(page.locator('.usage-kpi')).toHaveCount(7)
     await expect(page.locator('.usage-view .skeleton')).toHaveCount(0)
   })
 })

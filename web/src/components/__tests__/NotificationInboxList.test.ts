@@ -12,8 +12,6 @@ import { useProjectStore } from '../../stores/projects'
 import { useTaskSignalsStore } from '../../stores/taskSignals'
 import { useHousekeepingStore } from '../../stores/housekeeping'
 import { useTaskStore } from '../../stores/tasks'
-import { useProposalsStore } from '../../stores/proposals'
-import { useVaultReviewStore } from '../../stores/vaultReview'
 import { api } from '../../lib/api'
 import { readyHealth } from '../../lib/sourceHealth'
 import type { SourceHealth } from '../../lib/sourceHealth'
@@ -66,8 +64,6 @@ async function mountView(opts: Opts = {}) {
   housekeeping.updateTasksWorkspace = 'personal'
   housekeeping.updateTasksHealth = readyHealth()
   useTaskStore().schedulesLoaded = true
-  useProposalsStore().loaded = true
-  useVaultReviewStore().loadedWorkspace = 'personal'
 
   vi.mocked(api.get).mockReset()
   vi.mocked(api.get).mockImplementation(async (url: string) => {

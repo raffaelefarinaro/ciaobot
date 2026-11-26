@@ -34,7 +34,7 @@ import path from 'node:path'
 import { randomBytes } from 'node:crypto'
 import { fileURLToPath } from 'node:url'
 import { acceptUpgrade } from './ws.mjs'
-import { WORKSPACES, PROJECTS, CHATS, SCHEDULES, PROPOSALS, MEMORY_NODES, MEMORY_EDGES, MEMORY_CATEGORIES, UPDATE_TASKS, VERIFICATION_REVIEW, VERIFICATION_PROPOSALS, VERIFICATION_HISTORY, VERIFICATION_RECEIPT, VERIFICATION_ENTRY_RECEIPT, VERIFICATION_NODES, snapshotFrame, usageStats } from './data.mjs'
+import { WORKSPACES, PROJECTS, CHATS, SCHEDULES, MEMORY_NODES, MEMORY_EDGES, MEMORY_CATEGORIES, UPDATE_TASKS, snapshotFrame, usageStats } from './data.mjs'
 
 const here = path.dirname(fileURLToPath(import.meta.url))
 const STATIC_ROOT = path.resolve(here, '../../../ciao/web/static')
@@ -302,18 +302,11 @@ const FOLD_TRANSCRIPT = [
 
 const sessions = new Map()
 
-/** The workspace registry as this session sees it: a saved Memory handover and per-kind choices show on their workspace. */
+/** The workspace registry as this session sees it: its saved shared brains show on their workspace. */
 function workspacesPayload(state) {
   const ordered = orderedWorkspaces(state)
   return {
-    workspaces: ordered.map(w => {
-      let row = state.handover[w.name] ? { ...w, memory_handover: state.handover[w.name] } : w
-      row = { ...row, shared_brains: state.sharedBrains?.[w.name] ?? [] }
-      if (state.memoryApproval[w.name] && Object.keys(state.memoryApproval[w.name]).length) {
-        row = { ...row, memory_approval: { ...state.memoryApproval[w.name] } }
-      }
-      return row
-    }),
+    workspaces: ordered.map(w => ({ ...w, shared_brains: state.sharedBrains?.[w.name] ?? [] })),
     active: ordered[0].name,
     provider_options: [{ value: 'claude', label: 'Claude' }],
   }
@@ -473,7 +466,7 @@ function sessionOf(req) {
   const id = /(?:^|;\s*)e2e_session=([^;]+)/.exec(cookie)?.[1] || 'default'
   let state = sessions.get(id)
   if (!state) {
-    state = { activeStreams: [], sockets: new Set(), chatSockets: new Map(), pendingChatFrames: new Map(), connections: 0, transcript: null, terminals: new Map(), chatActions: new Map(), terminalUnlocked: false, appearance: { text_contrast: 'normal', body_font: 'system', theme: null, font_scale: null, custom_colors: {}, revision: 'a0' }, handover: {}, memoryApproval: {}, sharedBrains: {}, workspaceOrder: null, chatPatches: new Map(), removedChats: new Set(), tasksByWorkspace: null, taskPatches: new Map(), taskWrites: 0, schedulePatches: new Map(), removedSchedules: new Set(), actions: null, writes: [], projects: null }
+    state = { activeStreams: [], sockets: new Set(), chatSockets: new Map(), pendingChatFrames: new Map(), connections: 0, transcript: null, terminals: new Map(), chatActions: new Map(), terminalUnlocked: false, appearance: { text_contrast: 'normal', body_font: 'system', theme: null, font_scale: null, custom_colors: {}, revision: 'a0' }, sharedBrains: {}, workspaceOrder: null, chatPatches: new Map(), removedChats: new Set(), tasksByWorkspace: null, taskPatches: new Map(), taskWrites: 0, schedulePatches: new Map(), removedSchedules: new Set(), actions: null, writes: [], projects: null }
     sessions.set(id, state)
   }
   return state
@@ -753,38 +746,7 @@ const GET_ROUTES = {
   '/api/update-tasks': (req) => (sessionOf(req).updateTasks
     ? { tasks: UPDATE_TASKS }
     : { tasks: [] }),
-  // The three queues behind "To decide". A spec that wants the managed
-  // verification states (a pending proposal linked from a review row, a dead
-  // proposal, a settled verdict) opts in through POST /__fixture__/verification
-  // rather than replacing these defaults for everybody: the other review specs
-  // assert the empty and the plain states, which must stay the default.
-  '/api/proposals': (req) => {
-    const state = sessionOf(req)
-    const rows = state.verification ? [...PROPOSALS, ...VERIFICATION_PROPOSALS] : [...PROPOSALS]
-    return { rows }
-  },
-  // Settings > Workspace > Overview's Memory handover card.
-  '/api/proposals/handover': (req, url) => {
-    const state = sessionOf(req)
-    const name = url.searchParams.get('workspace') || WORKSPACES[0].name
-    const handover = state.handover[name] || 'off'
-    const approval = state.memoryApproval[name] || {}
-    // The engine's rule: an explicit kind choice wins; an unset kind follows the legacy handover (all = auto).
-    const resolve = kind => ({ mode: approval[kind] || (handover === 'all' ? 'auto' : 'approve'), inherited: !(kind in approval) })
-    return {
-    workspace: name,
-    handover,
-    memory_approval: { ...approval },
-    accept_resolved: { memory: resolve('memory'), profile: resolve('profile') },
-    acting_available: true,
-    agreement: { decided: 0, matched: 0, rate: null, window: 50, min_decisions: 20, threshold: 0.9, predicted_accept: 0, accept_matched: 0, predicted_dismiss: 0, dismiss_matched: 0, suggest_handover: false },
-    }
-  },
-  '/api/proposals/history': (req) => (sessionOf(req).verification ? VERIFICATION_HISTORY : { rows: [], total: 0, truncated: false, limit: 200, at_max: true }),
-  '/api/vault/graph': (req) => (sessionOf(req).verification
-    ? { workspace: WORKSPACES[0].name, workspaces: orderedWorkspaces(sessionOf(req)).map(w => w.name), nodes: VERIFICATION_NODES, edges: MEMORY_EDGES }
-    : { workspace: WORKSPACES[0].name, workspaces: orderedWorkspaces(sessionOf(req)).map(w => w.name), nodes: MEMORY_NODES, edges: MEMORY_EDGES }),
-  '/api/vault/review': (req) => (sessionOf(req).verification ? VERIFICATION_REVIEW : { candidates: [], trashed: [], cleared: [] }),
+  '/api/vault/graph': (req) => ({ workspace: WORKSPACES[0].name, workspaces: orderedWorkspaces(sessionOf(req)).map(w => w.name), nodes: MEMORY_NODES, edges: MEMORY_EDGES }),
   '/api/memory/entity-types': () => ({ workspace: WORKSPACES[0].name, vault: '/fixture/vault', types: MEMORY_CATEGORIES }),
   '/api/models': () => ({
     // A realistic picker needs enough options to exercise its own scroll
@@ -945,11 +907,6 @@ const GET_PATTERNS = [
     const row = findSessionTask(sessionOf(req), id)
     return { workspace: WORKSPACES[0].name, task: { ...row, body: row.body ?? 'Find his comment and draft a reply.' } }
   }],
-  // The receipt behind a settled verification's accept, so the History card's
-  // Undo is the real affordance a `note_apply` carries rather than an
-  // assertion about one.
-  [/^\/api\/memory\/receipts\/mrcpt_fixture_2$/, () => VERIFICATION_RECEIPT],
-  [/^\/api\/memory\/receipts\/mrcpt_fixture_entry$/, () => VERIFICATION_ENTRY_RECEIPT],
   [/^\/api\/projects\/[^/]+\/chats$/, projectChats],
   [/^\/api\/workspaces\/([^/]+)\/shared-brains$/, (req, url) => ({ shared_brains: sharedBrainStates(sessionOf(req), decodeURIComponent(url.pathname.split('/')[3] || '')) })],
 ]
@@ -1114,14 +1071,6 @@ const server = http.createServer(async (req, res) => {
     }
     if (pathname === '/__fixture__/ws-count') {
       return sendJson(res, { connections: state.connections, open: state.sockets.size })
-    }
-    if (pathname === '/__fixture__/verification') {
-      // Opt this session into the managed-verification payloads. Per session for
-      // the same reason the transcript is: one server serves every worker, and a
-      // spec that emptied the review queue would be visible to a spec running
-      // beside it.
-      state.verification = true
-      return sendJson(res, { ok: true, candidates: VERIFICATION_REVIEW.candidates.length, history: VERIFICATION_HISTORY.rows.length })
     }
     if (pathname === '/__fixture__/transcript') {
       // Opt this session's chat into having a transcript. The default is an
@@ -1308,28 +1257,16 @@ const server = http.createServer(async (req, res) => {
       }
       return sendJson(res, workspacesPayload(state))
     }
-    // A workspace PATCH keeps the Memory handover it saves, per session, and
-    // answers with the registry (the store replaces its list from the reply).
+    // A workspace PATCH answers with the registry (the store replaces its list
+    // from the reply).
     const workspacePatch = req.method === 'PATCH' ? /^\/api\/workspaces\/([^/]+)$/.exec(pathname) : null
     if (workspacePatch) {
       const state = sessionOf(req)
       const name = decodeURIComponent(workspacePatch[1])
-      if (body && WORKSPACES.some(w => w.name === name) && typeof body.memory_handover === 'string') {
-        state.handover[name] = body.memory_handover
-      }
       // The shared-brain list is saved whole; an invalid list changes nothing and answers 400.
       if (body && WORKSPACES.some(w => w.name === name) && Array.isArray(body.shared_brains)) {
         const refused = saveSharedBrains(state, name, body.shared_brains)
         if (refused) return sendJson(res, { error: refused }, 400)
-      }
-      // Per-kind acceptance merges one key at a time; null resets that kind to inherited.
-      if (body && WORKSPACES.some(w => w.name === name) && body.memory_approval && typeof body.memory_approval === 'object') {
-        const merged = { ...(state.memoryApproval[name] || {}) }
-        for (const [kind, mode] of Object.entries(body.memory_approval)) {
-          if (mode === null) delete merged[kind]
-          else merged[kind] = mode
-        }
-        state.memoryApproval[name] = merged
       }
       return sendJson(res, workspacesPayload(state))
     }

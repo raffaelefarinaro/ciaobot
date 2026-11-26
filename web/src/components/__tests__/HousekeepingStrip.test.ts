@@ -108,7 +108,7 @@ describe('HousekeepingStrip', () => {
     store.actions = [
       action({ id: 'a', run_label: 'Install', chat_prompt: 'x', dismiss_label: 'Later', link_label: 'Notes', link_url: 'https://example.test' }),
       action({ id: 'b', chat_label: 'Fix in chat', chat_prompt: 'do it' }),
-      action({ id: 'c', view_label: 'Open queue', view_route: '/proposals', run_label: 'Run', dismiss_label: 'Not now' }),
+      action({ id: 'c', view_label: 'Open queue', view_route: '/memory/unsure', run_label: 'Run', dismiss_label: 'Not now' }),
       action({ id: 'd', dismiss_label: 'Later' }),
     ]
     const wrapper = mount(HousekeepingStrip, { global: { plugins: [pinia] } })
@@ -693,9 +693,9 @@ describe('a row that names an existing surface', () => {
     const housekeeping = useHousekeepingStore()
     housekeeping.actions = [action({
       id: 'review-queue-depth',
-      title: '109 proposals are waiting for a review',
+      title: '109 items are waiting on the Unsure list',
       view_label: 'Open queue',
-      view_route: '/proposals',
+      view_route: '/memory/unsure',
       chat_label: 'Review in chat',
       chat_prompt: 'discuss it',
     })]
@@ -707,7 +707,7 @@ describe('a row that names an existing surface', () => {
     routerPush.mockClear()
     await leads(row)[0].trigger('click')
     await flushPromises()
-    expect(routerPush).toHaveBeenCalledWith('/proposals')
+    expect(routerPush).toHaveBeenCalledWith('/memory/unsure')
   })
 
   it('shows no view button when the action names no surface', async () => {

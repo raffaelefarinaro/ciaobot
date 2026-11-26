@@ -21,18 +21,6 @@ function stubGet(routines: unknown = {}) {
     if (url === '/api/local/status') return { git_repo: true, branch: 'main', dirty: false } as never
     if (url === '/api/workspace-move') return { workspace_root: '/srv/ciao', operation: null } as never
     if (url === '/api/agent-assets') return { subagents: [], commands: [], health: { status: 'ok', checks: [] } } as never
-    if (url.startsWith('/api/proposals/handover')) {
-      return {
-        workspace: 'personal', handover: 'off', memory_approval: {},
-        accept_resolved: { memory: { mode: 'approve', inherited: true }, profile: { mode: 'approve', inherited: true } },
-        acting_available: true,
-        agreement: {
-          decided: 0, matched: 0, rate: null, window: 50, min_decisions: 20, threshold: 0.9,
-          predicted_accept: 0, accept_matched: 0, predicted_dismiss: 0, dismiss_matched: 0,
-          suggest_handover: false,
-        },
-      } as never
-    }
     return {} as never
   })
 }
@@ -71,7 +59,7 @@ function calledUrls(get: ReturnType<typeof stubGet>): string[] {
 }
 
 describe('Settings pages', () => {
-  const MOVED = ['Appearance', 'This host', 'PWA password', 'Other devices', 'Network access', 'Developer', 'Workspace health', 'Memory backup', 'Update task history', 'Memory handover']
+  const MOVED = ['Appearance', 'This host', 'PWA password', 'Other devices', 'Network access', 'Developer', 'Workspace health', 'Memory backup', 'Update task history']
 
   it('hides Use Ciaobot as an app inside Ciaobot for Mac', async () => {
     ;(globalThis as Record<string, unknown>).__CIAOBOT_DESKTOP__ = true
