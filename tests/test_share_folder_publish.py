@@ -245,20 +245,321 @@ def test_folder_receipt_api_projection_is_a_historical_local_write(folder) -> No
     assert not row["commit_oid"]
 
 
-def test_folder_refuses_existing_note_changes_without_touching_it(folder) -> None:
+def _tree_snapshot(shared: Path) -> dict[str, tuple[int, int, bytes | None]]:
+    rows: dict[str, tuple[int, int, bytes | None]] = {}
+    for path in sorted(shared.rglob("*")):
+        info = path.lstat()
+        rows[str(path.relative_to(shared))] = (
+            info.st_ino, info.st_mtime_ns, path.read_bytes() if path.is_file() else None,
+        )
+    return rows
+
+
+def _forbid_mutation_and_network(monkeypatch: pytest.MonkeyPatch, shared: Path) -> None:
+    """Any Git, network, staging or link call, and any destructive call that
+    touches the shared folder (by path or by directory descriptor), fails."""
+    import shutil
+    import socket
+
+    _no_git(monkeypatch)
+
+    root = str(shared.resolve())
+
+    def always(name: str):
+        def raiser(*_args, **_kwargs):
+            raise AssertionError(f"unsupported folder update called {name}")
+        return raiser
+
+    def guarded(name: str, real):
+        def wrapper(*args, **kwargs):
+            touches = kwargs.get("dir_fd") is not None or kwargs.get("src_dir_fd") is not None or any(
+                isinstance(arg, (str, Path)) and os.path.realpath(arg).startswith(root) for arg in args
+            )
+            if touches:
+                raise AssertionError(f"unsupported folder update called os.{name} on the shared folder")
+            return real(*args, **kwargs)
+        return wrapper
+
+    for name in ("unlink", "remove", "rename", "replace", "rmdir", "truncate", "link", "symlink", "mkdir"):
+        monkeypatch.setattr(os, name, guarded(name, getattr(os, name)))
+    for name in ("rmtree", "move", "copy", "copyfile"):
+        monkeypatch.setattr(shutil, name, always("shutil." + name))
+    for name in ("connect", "connect_ex"):
+        monkeypatch.setattr(socket.socket, name, always("socket." + name))
+    for name in (
+        "link_no_clobber", "create_staging_dir", "create_staged_file",
+        "discard_staging", "open_or_create_private_dir",
+    ):
+        monkeypatch.setattr(share_publish.folder_io, name, always("folder_io." + name))
+
+
+def test_folder_existing_note_drafts_a_version_bound_diff_and_never_writes(folder) -> None:
     config, shared, _link = folder
     target = shared / "notes" / "existing.md"
-    target.write_bytes(b"keep these bytes\n")
-    for operation in (None, "create", "replace", "delete"):
+    target.write_bytes(b"keep these bytes\r\n")
+    before = _tree_snapshot(shared)
+    version = "sha256:" + hashlib.sha256(b"keep these bytes\r\n").hexdigest()
+    for operation in (None, "replace", "delete"):
         proposed = None if operation == "delete" else b"replacement\n"
-        refusal = share_proposals.draft_share(
+        draft = share_proposals.draft_share(
             config, workspace="home", relative_path="notes/existing.md",
             operation=operation, proposed=proposed, request_key=f"existing-{operation}",
         )
+        assert isinstance(draft, share_proposals.ShareDraft), draft
+        fields = draft.artifact["immutable"]
+        assert fields["operation"] == ("delete" if operation == "delete" else "replace")
+        assert fields["original"] == "keep these bytes\r\n"
+        assert fields["proposed"] == (None if operation == "delete" else "replacement\n")
+        assert fields["base_blob_oid"] == version
+        assert fields["base_commit"] is None
+        assert fields["folder_chain"]
+    refusal = share_proposals.draft_share(
+        config, workspace="home", relative_path="notes/existing.md",
+        operation="create", proposed=b"replacement\n", request_key="existing-create",
+    )
+    assert isinstance(refusal, share_proposals.ShareRefusal)
+    assert refusal.code == "folder_update_unsupported"
+    assert _tree_snapshot(shared) == before
+
+
+def test_folder_existing_note_that_cannot_be_read_safely_is_refused(
+    folder, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config, shared, _link = folder
+    (shared / "notes" / "big.md").write_bytes(b"x" * (share_proposals.MAX_BYTES + 1))
+    (shared / "notes" / "binary.md").write_bytes(b"\xff\xfe")
+    (shared / "notes" / "secret.md").write_bytes(b"ghp_" + b"a" * 36 + b"\n")
+    (shared / "notes" / "cloud.md").write_bytes(b"evicted\n")
+    for name, code in (
+        ("big.md", "too_large"), ("binary.md", "invalid_utf8"), ("secret.md", "secret_detected"),
+    ):
+        refusal = share_proposals.draft_share(
+            config, workspace="home", relative_path=f"notes/{name}", operation="replace",
+            proposed=b"new\n", request_key="unsafe-" + name,
+        )
         assert isinstance(refusal, share_proposals.ShareRefusal)
-        assert refusal.code == "folder_update_unsupported"
-    assert target.read_bytes() == b"keep these bytes\n"
-    assert list((shared / "notes").iterdir()) == [target]
+        assert refusal.code == code, (name, refusal)
+    monkeypatch.setattr(folder_io, "is_dataless", lambda _info: True)
+    refusal = share_proposals.draft_share(
+        config, workspace="home", relative_path="notes/cloud.md", operation="replace",
+        proposed=b"new\n", request_key="dataless",
+    )
+    assert isinstance(refusal, share_proposals.ShareRefusal)
+    assert refusal.code == "unsafe_target"
+    assert (shared / "notes" / "cloud.md").read_bytes() == b"evicted\n"
+
+
+@pytest.mark.parametrize("operation", ["replace", "delete"])
+def test_folder_existing_note_publish_is_unsupported_with_no_git_network_or_destructive_call(
+    folder, monkeypatch: pytest.MonkeyPatch, operation: str,
+) -> None:
+    config, shared, _link = folder
+    target = shared / "notes" / "existing.md"
+    target.write_bytes(b"original\n")
+    proposed = None if operation == "delete" else b"proposed\n"
+    draft = share_proposals.draft_share(
+        config, workspace="home", relative_path="notes/existing.md",
+        operation=operation, proposed=proposed, request_key="unsupported-" + operation,
+    )
+    assert isinstance(draft, share_proposals.ShareDraft)
+    before = _tree_snapshot(shared)
+    _forbid_mutation_and_network(monkeypatch, shared)
+    result = _publish(config, draft)
+    assert result.outcome == "folder_update_unsupported"
+    assert result.receipt_id is None and result.commit_oid is None
+    monkeypatch.undo()
+    assert _tree_snapshot(shared) == before
+    artifact = share_publish._artifact_for(config, "home", draft.proposal_id)
+    assert artifact is not None
+    assert "publication" not in artifact
+    assert share_publish.get_share_receipt(
+        config, workspace="home", proposal_id=draft.proposal_id,
+        expected_revision=draft.artifact["review_token"],
+    ) is None
+
+
+@pytest.mark.parametrize("operation", ["replace", "delete"])
+def test_folder_existing_note_preview_surfaces_diff_root_path_and_capability_reason(
+    folder, monkeypatch: pytest.MonkeyPatch, operation: str,
+) -> None:
+    config, shared, _link = folder
+    target = shared / "notes" / "existing.md"
+    target.write_bytes(b"original\n")
+    proposed = None if operation == "delete" else b"proposed\n"
+    draft = share_proposals.draft_share(
+        config, workspace="home", relative_path="notes/existing.md",
+        operation=operation, proposed=proposed, request_key="preview-" + operation,
+    )
+    assert isinstance(draft, share_proposals.ShareDraft)
+    _rows, by_id = proposal_service._scan_proposal_rows(config)
+    ctx = by_id[draft.proposal_id]
+    # Review and auto-accept both read this one projection; it must not probe
+    # staging or reach Git.
+    for name in ("_folder_staging_root", "_folder_same_mount"):
+        monkeypatch.setattr(share_publish, name, lambda *a, **k: pytest.fail("preview touched staging"))
+    monkeypatch.setattr(shared_brain, "_git", lambda *a, **k: pytest.fail("preview reached Git"))
+    preview = proposal_service.preview_row(config, ctx)
+    assert preview["blocked_reason"] == "folder_update_unsupported"
+    assert preview["operation"] == operation
+    assert preview["before"] == "original\n"
+    assert preview["after"] == (None if operation == "delete" else "proposed\n")
+    assert preview["publish_retry_available"] is False
+    manual = preview["folder_manual"]
+    assert manual == {
+        "root": str(shared.resolve()),
+        "path": "notes/existing.md",
+        "absolute_path": str(shared.resolve() / "notes" / "existing.md"),
+        "operation": operation,
+        "reviewed_version": "sha256:" + hashlib.sha256(b"original\n").hexdigest(),
+        "current_version": "sha256:" + hashlib.sha256(b"original\n").hexdigest(),
+        "state": "ready",
+        "reason": "folder_update_unsupported",
+    }
+    assert preview == proposal_service.preview_row(config, ctx)
+
+    # An external edit moves the folder off the reviewed version.
+    target.write_bytes(b"edited elsewhere\n")
+    changed = proposal_service.preview_row(config, ctx)["folder_manual"]
+    assert changed["state"] == "changed"
+    assert changed["current_version"] == "sha256:" + hashlib.sha256(b"edited elsewhere\n").hexdigest()
+    assert changed["reviewed_version"] == manual["reviewed_version"]
+
+    # A manual application is observed, never claimed as an engine publish.
+    target.write_bytes(proposed) if proposed is not None else target.unlink()
+    applied = proposal_service.preview_row(config, ctx)
+    assert applied["folder_manual"]["state"] == "applied"
+    assert applied["blocked_reason"] == "folder_update_unsupported"
+    assert _publish(config, draft).outcome == "folder_update_unsupported"
+    assert share_publish.get_share_receipt(
+        config, workspace="home", proposal_id=draft.proposal_id,
+        expected_revision=draft.artifact["review_token"],
+    ) is None
+
+    if operation == "replace":
+        target.unlink()
+        assert proposal_service.preview_row(config, ctx)["folder_manual"]["state"] == "changed"
+        assert proposal_service.preview_row(config, ctx)["folder_manual"]["current_version"] is None
+        target.symlink_to(config.workspace_root.parent)
+        unsafe = proposal_service.preview_row(config, ctx)["folder_manual"]
+        assert unsafe["state"] == "unavailable"
+        assert unsafe["current_version"] is None
+
+
+def test_folder_create_preview_has_no_manual_surface(folder) -> None:
+    config, _shared, _link = folder
+    draft = _draft(config, b"fresh\n", path="notes/fresh.md", key="fresh-preview")
+    _rows, by_id = proposal_service._scan_proposal_rows(config)
+    assert "folder_manual" not in proposal_service.preview_row(config, by_id[draft.proposal_id])
+
+
+def test_folder_cloud_placeholder_blocks_a_create_before_and_after_review(folder) -> None:
+    config, shared, _link = folder
+    (shared / "notes" / ".evicted.md.icloud").write_bytes(b"placeholder")
+    refusal = share_proposals.draft_share(
+        config, workspace="home", relative_path="notes/evicted.md", operation="create",
+        proposed=b"never\n", request_key="placeholder-draft",
+    )
+    assert isinstance(refusal, share_proposals.ShareRefusal)
+    assert refusal.code == "unsafe_target"
+
+    draft = _draft(config, b"reviewed\n", path="notes/late.md", key="placeholder-late")
+    (shared / "notes" / ".late.md.icloud").write_bytes(b"placeholder")
+    before = _tree_snapshot(shared)
+    result = _publish(config, draft)
+    assert result.outcome == "unsafe_target"
+    assert not (shared / "notes" / "late.md").exists()
+    assert _tree_snapshot(shared) == before
+    assert _attempts(config, draft) == []
+
+
+_EXTERNAL_WRITER = (
+    "import os, sys\n"
+    "fd = os.open(sys.argv[1], os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o644)\n"
+    "os.write(fd, sys.argv[2].encode()); os.fsync(fd); os.close(fd)\n"
+)
+
+
+@pytest.mark.parametrize("external", ["different\n", "reviewed\n"])
+def test_folder_external_writer_process_wins_the_create_race_and_equal_bytes_never_succeed(
+    folder, monkeypatch: pytest.MonkeyPatch, external: str,
+) -> None:
+    config, shared, _link = folder
+    draft = _draft(config, b"reviewed\n", path="notes/proc.md", key="proc-" + external.strip())
+    original = share_publish.folder_io.link_no_clobber
+    target = shared / "notes" / "proc.md"
+
+    def process_writes_first(*args, **kwargs):
+        subprocess.run(
+            [sys.executable, "-I", "-c", _EXTERNAL_WRITER, str(target), external],
+            check=True, timeout=30,
+        )
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(share_publish.folder_io, "link_no_clobber", process_writes_first)
+    first = _publish(config, draft)
+    assert first.outcome == "indeterminate"
+    assert first.receipt_id is None
+    assert target.read_bytes() == external.encode()
+    assert [item.name for item in (shared / "notes").iterdir()] == ["proc.md"]
+    monkeypatch.setattr(share_publish.folder_io, "link_no_clobber", original)
+    replay = _publish(config, draft)
+    assert replay.outcome != "published" and replay.receipt_id is None
+    assert target.read_bytes() == external.encode()
+    assert share_publish.get_share_receipt(
+        config, workspace="home", proposal_id=draft.proposal_id,
+        expected_revision=draft.artifact["review_token"],
+    ) is None
+    assert not any(path.name.startswith(".ciao-share-") for path in shared.rglob("*"))
+
+
+def test_folder_ancestor_swapped_for_a_symlink_before_the_link_writes_nothing_outside(
+    folder, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config, shared, _link = folder
+    draft = _draft(config, b"reviewed\n", path="notes/anc.md", key="ancestor-symlink")
+    outside = config.workspace_root.parent / "outside-dir"
+    outside.mkdir()
+    original = share_publish.folder_io.link_no_clobber
+    moved = shared / "notes-moved"
+
+    def swap_then_link(*args, **kwargs):
+        (shared / "notes").rename(moved)
+        (shared / "notes").symlink_to(outside, target_is_directory=True)
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(share_publish.folder_io, "link_no_clobber", swap_then_link)
+    result = _publish(config, draft)
+    assert result.outcome != "published" and result.receipt_id is None
+    assert list(outside.iterdir()) == []
+
+
+def test_folder_crash_between_staging_and_link_leaves_no_destination_and_no_success(
+    folder, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config, shared, _link = folder
+    draft = _draft(config, b"reviewed\n", path="notes/crash.md", key="staged-crash")
+
+    class Crash(BaseException):
+        pass
+
+    def crash(*_args, **_kwargs):
+        raise Crash
+
+    monkeypatch.setattr(share_publish.folder_io, "link_no_clobber", crash)
+    with pytest.raises(Crash):
+        _publish(config, draft)
+    monkeypatch.undo()
+    assert not (shared / "notes" / "crash.md").exists()
+    attempts = _attempts(config, draft)
+    assert attempts and attempts[-1]["status"] == "pending"
+    # An equal-bytes copy that appears afterwards is not evidence of the crashed attempt.
+    (shared / "notes" / "crash.md").write_bytes(b"reviewed\n")
+    replay = _publish(config, draft)
+    assert replay.outcome != "published" and replay.receipt_id is None
+    assert share_publish.get_share_receipt(
+        config, workspace="home", proposal_id=draft.proposal_id,
+        expected_revision=draft.artifact["review_token"],
+    ) is None
 
 
 def test_folder_concurrent_external_create_wins_and_nothing_is_overwritten(

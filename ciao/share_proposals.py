@@ -205,13 +205,13 @@ def _folder_chain_rows(chain: list[folder_io.DirectoryIdentity]) -> list[dict[st
 
 def _qualify_folder(
     config: Any, link: SharedBrainLink, relative_path: str, operation: str | None,
-) -> tuple[str, None, None, None, str, list[dict[str, int]], None]:
-    """Qualify a new note in an ordinary folder; existing notes are deferred to #3626."""
-    if operation not in (None, "create"):
-        _refuse(
-            "folder_update_unsupported",
-            "Updating or deleting an existing note in an ordinary folder is not supported yet.",
-        )
+) -> tuple[str, None, bytes | None, str | None, str, list[dict[str, int]], str | None]:
+    """Qualify a note in an ordinary folder.
+
+    A new note can be published. An existing one is only read (descriptor
+    relative, no-follow, bounded) so the draft carries a version-bound exact
+    diff for manual application; nothing here, or in publication, writes to it.
+    """
     parts = _safe_path(relative_path)
     state = shared_brain._brain_state_owned(link, config)
     if state.get("problem"):
@@ -224,20 +224,47 @@ def _qualify_folder(
         _refuse("unsafe_target", "The shared folder or one of its path components changed.")
     except OSError:
         _refuse("brain_unavailable", "The selected shared folder could not be read safely.")
+    original: bytes | None = None
+    original_mode: str | None = None
     try:
         entry = folder_io.stat_entry(parent_fd, parts[-1])
+        if entry is None:
+            if folder_io.has_cloud_placeholder(parent_fd, parts[-1]):
+                _refuse("unsafe_target", "A cloud placeholder stands in for this note; download it first.")
+        else:
+            if stat.S_ISLNK(entry.st_mode):
+                _refuse("unsafe_target", "The note path is a symbolic link.")
+            if not stat.S_ISREG(entry.st_mode):
+                _refuse("unsafe_target", "The note path is not a regular file.")
+            if operation == "create":
+                _refuse(
+                    "folder_update_unsupported",
+                    "Updating or deleting an existing note in an ordinary folder is not supported yet.",
+                )
+            if folder_io.is_dataless(entry):
+                _refuse("unsafe_target", "The note is stored only in the cloud; download it first.")
+            try:
+                original, opened = folder_io.read_regular(parent_fd, parts[-1], MAX_BYTES + 1)
+            except OSError:
+                _refuse("unsafe_target", "The existing note could not be read safely.")
+            if (opened.st_dev, opened.st_ino) != (entry.st_dev, entry.st_ino):
+                _refuse("unsafe_target", "The note changed while it was being read.")
+            if len(original) > MAX_BYTES:
+                _refuse("too_large", "The existing note exceeds the 65,536-byte limit.")
+            try:
+                original.decode("utf-8", "strict")
+            except UnicodeDecodeError:
+                _refuse("invalid_utf8", "The existing note is not valid UTF-8.")
+            original_mode = format(stat.S_IMODE(opened.st_mode), "o")
     finally:
         os.close(parent_fd)
-    if entry is not None:
-        if stat.S_ISLNK(entry.st_mode):
-            _refuse("unsafe_target", "The note path is a symbolic link.")
-        if not stat.S_ISREG(entry.st_mode):
-            _refuse("unsafe_target", "The note path is not a regular file.")
-        _refuse(
-            "folder_update_unsupported",
-            "Updating or deleting an existing note in an ordinary folder is not supported yet.",
-        )
-    return "", None, None, None, folder_destination_fingerprint(link), _folder_chain_rows(chain), None
+    version = folder_version(original) if original is not None else None
+    return "", None, original, version, folder_destination_fingerprint(link), _folder_chain_rows(chain), original_mode
+
+
+def folder_version(content: bytes) -> str:
+    """The version an existing folder note is reviewed and applied against."""
+    return "sha256:" + hashlib.sha256(content).hexdigest()
 
 
 def _qualify_git(

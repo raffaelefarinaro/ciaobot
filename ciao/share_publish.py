@@ -770,6 +770,53 @@ def _folder_target(fields: dict[str, Any]):
         os.close(parent_fd)
 
 
+def folder_manual_surface(fields: dict[str, Any]) -> dict[str, Any]:
+    """Where and against which version a person applies a folder update by hand.
+
+    Read-only: it opens the reviewed chain, stats and reads the note, and
+    never stages, links, renames or deletes. The engine does not apply an
+    update or delete to an existing note in an ordinary folder, because no
+    write there can atomically test the version it was reviewed against while
+    an external editor or cloud client is also writing. Seeing the file now at
+    the reviewed version, already changed or already applied does not make the
+    change an engine publication; there is never a receipt for it.
+    """
+    root = str(fields.get("checkout_path") or "")
+    relative = str(fields.get("path") or "")
+    operation = str(fields.get("operation") or "")
+    reviewed = fields.get("base_blob_oid")
+    proposed = fields.get("proposed")
+    state = "unavailable"
+    current: str | None = None
+    try:
+        with _folder_target(fields) as (parent_fd, _chain):
+            name = relative.rsplit("/", 1)[-1]
+            entry = folder_io.stat_entry(parent_fd, name)
+            if entry is None:
+                state = "applied" if operation == "delete" else "changed"
+            elif stat.S_ISREG(entry.st_mode) and not folder_io.is_dataless(entry):
+                data, _opened = folder_io.read_regular(parent_fd, name, drafts.MAX_BYTES + 1)
+                if len(data) <= drafts.MAX_BYTES:
+                    current = drafts.folder_version(data)
+                    if operation == "replace" and isinstance(proposed, str) and data == proposed.encode("utf-8"):
+                        state = "applied"
+                    else:
+                        state = "ready" if current == reviewed else "changed"
+    except (folder_io.FolderChanged, OSError):
+        state = "unavailable"
+        current = None
+    return {
+        "root": root,
+        "path": relative,
+        "absolute_path": str(Path(root) / relative),
+        "operation": operation,
+        "reviewed_version": reviewed,
+        "current_version": current,
+        "state": state,
+        "reason": "folder_update_unsupported",
+    }
+
+
 def _folder_parts(fields: dict[str, Any]) -> tuple[str, tuple[str, ...]]:
     path = fields.get("checkout_path")
     relative = fields.get("path")
@@ -1109,7 +1156,7 @@ def _publish_folder_locked(
     if fields.get("operation") != "create" or not isinstance(fields.get("proposed"), str):
         return PublishOutcome(
             "folder_update_unsupported",
-            message="Updating or deleting an existing note in an ordinary folder is not supported yet.",
+            message="Updating or deleting an existing note in an ordinary folder is not supported yet; apply the reviewed change by hand.",
         )
     proposed = str(fields["proposed"]).encode("utf-8")
     if hashlib.sha256(proposed).hexdigest() != fields.get("proposed_sha256"):
@@ -1196,6 +1243,8 @@ def _publish_folder_locked(
             )
         if folder_io.stat_entry(parent_fd, final_name) is not None:
             return PublishOutcome("changed_upstream", message="The reviewed note destination now exists; nothing was overwritten.")
+        if folder_io.has_cloud_placeholder(parent_fd, final_name):
+            return PublishOutcome("unsafe_target", message="A cloud placeholder now stands in for this note; nothing was written.")
         token = secrets.token_urlsafe(24)
         staging_name = f".ciao-share-{token}.d"
         new_attempt: dict[str, Any] = {

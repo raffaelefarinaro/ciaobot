@@ -1521,11 +1521,24 @@ reason.
 A `kind: "share"` preview is the exact private draft projection:
 `{before, after, operation, brain, identity, link_kind, branch, path, revision,
 blocked_reason, reconcile_available, publish_retry_available}`.
-`link_kind` is `git` or `folder`. A folder preview is always a create
-(`before: null`) and is blocked with `folder_update_unsupported` after an
-external note appears at the reviewed path; replacing or deleting an existing
-ordinary-folder note is deferred until a platform can enforce a real
-conditional mutation (#3626). `reconcile_available` is true only when the
+`link_kind` is `git` or `folder`. A folder create has `before: null` and is
+blocked with `folder_update_unsupported` after an external note appears at the
+reviewed path. A folder replace or delete is drafted from a bounded,
+no-follow read of the existing note (`before` is its exact text; it is
+version-bound by `sha256:<hex>` of its bytes) and is always blocked with
+`folder_update_unsupported`, in review and auto modes alike: no write to an
+ordinary mounted folder can atomically test that version against an external
+editor or cloud client, so the engine never replaces or deletes it (the
+conditional-write capability is #3626 and stays unimplemented). Such a preview
+also carries `folder_manual: {root, path, absolute_path, operation,
+reviewed_version, current_version, state, reason}` for applying the change by
+hand. `state` is `ready` (the note is still the reviewed version),
+`applied` (it already matches the proposal, or is gone for a delete),
+`changed` or `unavailable` (unsafe or unreadable); it is read on every
+preview and never becomes a receipt, so a manually handled change is not
+engine-published. A create is also refused when an evicted-file placeholder
+(`.name.icloud`) stands in for the note, or an existing note is stored only
+in the cloud. `reconcile_available` is true only when the
 exact canonical review token has a persisted attempt that must be inspected
 without writing. `publish_retry_available` is true only when every persisted
 attempt is a validated retryable rejection and the attempt limit allows

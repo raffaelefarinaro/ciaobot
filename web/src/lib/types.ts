@@ -2138,11 +2138,22 @@ export interface ProposalPreview {
   /** Revision-bound shared-note publication projection (#3576). */
   brain?: string
   identity?: string
-  /** `git` or `folder`; a folder preview is create-only. */
+  /** `git` or `folder`. */
   link_kind?: 'git' | 'folder'
   branch?: string
   path?: string
   blocked_reason?: string | null
+  /** An existing-note change in an ordinary folder: where and against which version to apply it by hand. */
+  folder_manual?: {
+    root: string
+    path: string
+    absolute_path: string
+    operation: 'replace' | 'delete'
+    reviewed_version: string
+    current_version: string | null
+    state: 'ready' | 'applied' | 'changed' | 'unavailable'
+    reason: string
+  }
   /** True only when this exact canonical review has a recorded attempt that can be reconciled. */
   redraft_available?: boolean
   reconcile_available?: boolean

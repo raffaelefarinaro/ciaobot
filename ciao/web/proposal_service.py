@@ -3215,6 +3215,7 @@ def preview_row(
             None,
         )
         blocked = None
+        folder_manual: dict[str, Any] | None = None
         expected_kind = str(fields.get("link_kind") or "git")
         if "evidence_authorization" in fields:
             blocked = "draft_unavailable"
@@ -3222,6 +3223,7 @@ def preview_row(
             blocked = "brain_unavailable"
         elif expected_kind == "folder" and str(fields.get("operation") or "") != "create":
             blocked = "folder_update_unsupported"
+            folder_manual = share_publish.folder_manual_surface(fields)
         else:
             state = shared_brain.brain_state(link, config, workspace)
             if state.get("problem"):
@@ -3274,6 +3276,7 @@ def preview_row(
             "redraft_available": "evidence_authorization" in fields and not attempt_available,
             "reconcile_available": attempt_available and not retry_available,
             "publish_retry_available": retry_available,
+            **({"folder_manual": folder_manual} if folder_manual is not None else {}),
         }
     if ctx.get("file"):
         out = _base_preview(row)
