@@ -12,10 +12,10 @@ from typing import Any
 
 import pytest
 
-from ciao import care_eval_record as rec
-from ciao import care_eval_seed as seed
-from ciao.care_eval_fixtures import CARE_FIXTURES, CareFixture
-from ciao.care_eval_run import (
+from evals import care_eval_record as rec
+from evals import care_eval_seed as seed
+from evals.care_eval_fixtures import CARE_FIXTURES, CareFixture
+from evals.care_eval_run import (
     Ambiguous,
     JobRunRef,
     MissingChat,
@@ -24,9 +24,9 @@ from ciao.care_eval_run import (
     Superseded,
     TimedOut,
 )
-from ciao.care_usage import Inventory, collect, contract_metrics
+from evals.care_usage import Inventory, collect, contract_metrics
 from ciao.curation_run import RunBudget
-from ciao.task_eval_contract import METRIC_NAMES, comparison_eligibility, public_record
+from evals.task_eval_contract import METRIC_NAMES, comparison_eligibility, public_record
 
 DISPATCH_DATE = date(2026, 11, 24)
 SCENARIOS = ("nightly", "weekly_due", "budget_continuation")

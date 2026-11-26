@@ -39,8 +39,8 @@ from ciao.curation_run import (
     CurationStateError,
 )
 from ciao.memory_receipts import content_revision
-from ciao.task_eval import WORKSPACE
-from ciao.task_eval_contract import Scenario
+from evals.task_eval import WORKSPACE
+from evals.task_eval_contract import Scenario
 from ciao.workspace_guide import GUIDE_NAME
 
 # Symbolic bytes the oracle expects (see care_eval_fixtures.CARE_FIXTURES). A real

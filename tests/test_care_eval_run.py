@@ -8,8 +8,8 @@ from typing import Any
 
 import pytest
 
-import ciao.care_eval_run as driver
-from ciao.care_eval_run import (
+import evals.care_eval_run as driver
+from evals.care_eval_run import (
     AMBIGUOUS_DUPLICATE_ROW,
     AMBIGUOUS_DUPLICATE_SCHEDULE,
     AMBIGUOUS_OTHER_CHAT,
@@ -31,7 +31,6 @@ from ciao.care_eval_run import (
     Ambiguous,
     BoundEngine,
     IsolatedGuardError,
-    JobRunsUnreadable,
     MissingChat,
     Refused,
     ScheduleRunRequest,
@@ -39,11 +38,10 @@ from ciao.care_eval_run import (
     Superseded,
     TimedOut,
     bind_isolated,
-    read_runtime_job_runs,
     run_schedule,
 )
-from ciao.job_runs import JOB_RUNS_NAME
-from ciao.task_eval import EVAL_WORKDIR_PREFIX, EngineAPIError, IsolatedEngine
+from ciao.job_runs import JOB_RUNS_NAME, JobRunsUnreadable, read_runtime_job_runs
+from evals.task_eval import EVAL_WORKDIR_PREFIX, EngineAPIError, IsolatedEngine
 
 SID = "system-memory-curation@personal"
 WS = "personal"
@@ -667,7 +665,7 @@ def test_read_runtime_job_runs_skips_bad_lines(tmp_path: Path) -> None:
 
 
 def test_read_runtime_job_runs_over_ceiling_refuses(tmp_path: Path, monkeypatch: Any) -> None:
-    monkeypatch.setattr(driver, "MAX_JOB_RUNS_BYTES", 10)
+    monkeypatch.setattr("ciao.job_runs.MAX_JOB_RUNS_BYTES", 10)
     (tmp_path / JOB_RUNS_NAME).write_text("x" * 11, encoding="utf-8")
 
     with pytest.raises(JobRunsUnreadable):

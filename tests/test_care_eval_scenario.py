@@ -14,12 +14,12 @@ from typing import Any
 
 import pytest
 
-from ciao import care_eval_seed as seed
+from evals import care_eval_seed as seed
 from ciao import curation_logs
 from ciao import curation_run
 from ciao import note_verification as nv
-from ciao.care_eval_run import bind_isolated
-from ciao.care_eval_scenario import (
+from evals.care_eval_run import bind_isolated
+from evals.care_eval_scenario import (
     REASON_ATTEMPT1_COMPLETED,
     REASON_ATTEMPT1_NOT_SETTLED,
     REASON_ATTEMPT2_NO_PROGRESS,
@@ -33,7 +33,7 @@ from ciao.care_eval_scenario import (
 from ciao.curation_run import CURATION_LOG_RELATIVE
 from ciao.job_runs import JOB_RUNS_NAME
 from ciao.memory_receipts import content_revision
-from ciao.task_eval import EVAL_WORKDIR_PREFIX, EngineAPIError
+from evals.task_eval import EVAL_WORKDIR_PREFIX, EngineAPIError
 
 DISPATCH_DATE = date(2026, 11, 24)
 SID = "system-memory-curation@personal"
@@ -438,7 +438,7 @@ def test_attempt_one_not_settled_is_unavailable(tmp_path: Path) -> None:
 
 
 def test_cursor_reads_that_disagree_are_unavailable(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    from ciao import care_eval_scenario as scenario_module
+    from evals import care_eval_scenario as scenario_module
 
     world = ContWorld(tmp_path)
     _two_settled_attempts(world)
@@ -491,7 +491,7 @@ def test_attempt_two_not_settled_is_unavailable(tmp_path: Path, ending: str) -> 
 def test_attempt_two_restarting_from_scratch_is_unavailable(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    from ciao import care_eval_scenario as scenario_module
+    from evals import care_eval_scenario as scenario_module
 
     world = ContWorld(tmp_path)
     _two_settled_attempts(world)

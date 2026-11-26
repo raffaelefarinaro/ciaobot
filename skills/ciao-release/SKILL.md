@@ -131,7 +131,7 @@ what you find; do not resolve it here.
 
 ### Record the task-eval results
 
-Run `ciao eval tasks` on the release candidate, following
+Run `python -m evals` on the release candidate, following
 [docs/evals/README.md](../../docs/evals/README.md): the whole suite, three
 repeats, on claude/haiku and on the opencode model the previous results file
 used. Add `docs/evals/vX.Y.Z.md` to the release PR, and compare it with the

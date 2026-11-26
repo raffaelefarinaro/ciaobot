@@ -91,7 +91,6 @@ def test_stock_package_contains_memory_procedures_commands_and_schedules() -> No
     assert stock.joinpath("public", "AGENTS.md").is_file()
     assert stock.joinpath("workspace", "AGENTS.md").is_file()
     assert stock.joinpath("workspace", "CIAO_CUSTOMIZATION.md").is_file()
-    assert stock.joinpath("evals", "scenarios.json").is_file()
     assert stock.joinpath("deploy", "com.ciao.server.plist.tmpl").is_file()
     plist = stock.joinpath("deploy", "com.ciao.server.plist.tmpl").read_text(encoding="utf-8")
     assert "<string>{{CIAO_EXECUTABLE}}</string>" in plist
@@ -336,14 +335,12 @@ def test_pyproject_packages_stock_data() -> None:
     assert "public/*.md" in package_data["ciao.stock"]
     assert "workspace/*.md" in package_data["ciao.stock"]
     assert "schedules.json" in package_data["ciao.stock"]
-    assert "evals/*.json" in package_data["ciao.stock"]
 
 
 # Files that legitimately name control-plane operations (telemetry names).
 _OPERATION_NAME_EXEMPT = {
     "skills/ciao-cli/SKILL.md",
     "skills/ciao-cli/commands.json",
-    "evals/scenarios.json",
 }
 _AGENT_CLI_NOUNS = "memory|vault|note|file|chat|project|schedule|workspace|context|run|task|webhook|repo"
 _CLI_MENTION = re.compile(rf"\bciao ({_AGENT_CLI_NOUNS}) ([a-z][a-z-]*)")

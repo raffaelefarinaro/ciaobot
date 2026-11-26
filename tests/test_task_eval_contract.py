@@ -6,7 +6,7 @@ from collections import UserDict
 
 import pytest
 
-from ciao.task_eval_contract import (
+from evals.task_eval_contract import (
     MAX_JSON_NUMBER,
     METRIC_NAMES,
     SCHEMA,
@@ -141,7 +141,7 @@ def test_huge_integer_rejected_without_finiteness_or_float_conversion(monkeypatc
         assert type(value) is not int
         raise AssertionError("integer passed to math.isfinite")
 
-    monkeypatch.setattr("ciao.task_eval_contract.math.isfinite", no_integer_finiteness)
+    monkeypatch.setattr("evals.task_eval_contract.math.isfinite", no_integer_finiteness)
     raw = valid_record()
     raw["metrics"]["input"]["value"] = -(1 << 100_000) if negative else 1 << 100_000  # type: ignore[index]
     with pytest.raises(ValueError, match="^invalid_number$") as exc:

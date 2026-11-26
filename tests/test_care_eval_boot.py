@@ -10,13 +10,13 @@ from typing import Any
 
 import pytest
 
-from ciao import care_eval_boot as boot
-from ciao import care_eval_seed as seed
+from evals import care_eval_boot as boot
+from evals import care_eval_seed as seed
 from ciao import curation_run as cr
-from ciao import task_eval as te
-from ciao.care_eval_scenario import CONTINUATION_BUDGET
+from evals import task_eval as te
+from evals.care_eval_scenario import CONTINUATION_BUDGET
 from ciao.schedules import ScheduleStore, system_schedule_id
-from ciao.task_eval import TASKS_ROOT, WORKSPACE, EvalTask, IsolatedEngine
+from evals.task_eval import TASKS_ROOT, WORKSPACE, EvalTask, IsolatedEngine
 from ciao.workspace_guide import GUIDE_NAME
 
 DISPATCH_DATE = date(2026, 11, 24)

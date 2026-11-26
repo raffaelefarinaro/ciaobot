@@ -222,7 +222,6 @@ Every recall failure observed in the wild becomes a fixture case first.
 Retrieval is only half the question: the deterministic eval cannot tell
 whether the assistant *uses* results well, and a prompt or provider change can
 alter auto-saving, tool selection, unattended behavior, or source handling
-while it stays green. `docs/BEHAVIORAL_EVAL.md` and `ciao/behavioral_eval.py`
-add versioned behavioral evaluations for that half — synthetic scenarios with
-baseline/candidate reports tied to exact prompt and provider versions, plus a
-model-free contract check that carries the CI gate.
+while it stays green. `docs/TASK_EVAL.md` and `evals/`
+add agentic task evaluations for that half — synthetic scenarios with
+baseline/candidate reports tied to exact prompt and provider versions.

@@ -5654,7 +5654,7 @@ async def _care_run_for_dispatch(request: Request, schedule_id: str, dispatch_id
     with no counts. The vault is the schedule's own workspace.
     """
     from ciao import care_run_report
-    from ciao.care_eval_run import JobRunsUnreadable, read_runtime_job_runs
+    from ciao.job_runs import JobRunsUnreadable, read_runtime_job_runs
     from ciao.care_run_outcome import bounded_outcome, is_care_schedule_id
     from ciao.config import DEFAULT_WORKSPACE_NAME
     from ciao.curation_run import CurationStateError, load_state

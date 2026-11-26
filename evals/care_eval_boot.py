@@ -3,7 +3,7 @@
 ``IsolatedEngine.boot`` always copies the generic ``_fixture`` vault into the
 workspace and then lays the task overlay over it. A care run needs its own
 starting vault instead, so this module writes the scenario's seed (see
-:mod:`ciao.care_eval_seed`) as the overlay and passes an empty directory as the
+:mod:`evals.care_eval_seed`) as the overlay and passes an empty directory as the
 vault fixture, which leaves nothing of ``_fixture`` behind.
 
 Boots an engine process when :func:`boot_care` is called; the tests replace
@@ -15,11 +15,11 @@ from __future__ import annotations
 from datetime import date
 from pathlib import Path
 
-from ciao import care_eval_seed as seed
-from ciao.care_eval_scenario import CONTINUATION_BUDGET
+from evals import care_eval_seed as seed
+from evals.care_eval_scenario import CONTINUATION_BUDGET
 from ciao.curation_run import DEFAULT_MAX_SECONDS
-from ciao.task_eval import EvalTask, IsolatedEngine
-from ciao.task_eval_contract import Scenario
+from evals.task_eval import EvalTask, IsolatedEngine
+from evals.task_eval_contract import Scenario
 
 OVERLAY_DIRNAME = "overlay"
 EMPTY_VAULT_DIRNAME = "empty-vault"

@@ -2417,15 +2417,12 @@ async def test_the_agent_envelopes_are_the_shape_the_cli_prints(tmp_path: Path) 
 def test_the_operation_annotations_keep_the_auto_approved_split() -> None:
     """``task_delegate`` is allow-class like every other task write; the attempt
     gestures are ask-class because ``stop`` is irreversible."""
-    from ciao import behavioral_eval, mcp_server
+    from ciao import mcp_server
 
     declared = {op.name: op.annotations for op in mcp_server.OPERATIONS}
     assert declared["task_delegate"] == mcp_server._WRITE
     assert declared["task_delegate"].readOnlyHint is False
     assert declared["task_attempt_action"] == mcp_server._DESTRUCTIVE
-    # And it is genuinely in the destructive set, so the ask-class split the
-    # approval check reads is not cosmetic.
-    assert "task_attempt_action" in behavioral_eval.destructive_mcp_tool_names()
 
 
 # ── The agent's report, the task's log, archive and hand-off (#1064) ────
