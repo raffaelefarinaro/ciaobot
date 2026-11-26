@@ -524,8 +524,8 @@ class Candidate:
         where = f"`{self.destination}`" if self.destination else "another workspace"
         text = (
             f"Re-home `{self.path}` to {where}? "
-            f"Uncertain: {self.reason}. Move it and its links with "
-            f"`ciao vault-rehome --apply` only after tagging it."
+            f"Uncertain: {self.reason}. Tag it with its "
+            f"workspace before moving it."
         )
         return UnsureItem(text=text, source=PROPOSAL_SOURCE)
 

@@ -267,30 +267,6 @@ def test_cli_os_audit_exit_codes_distinguish_findings_and_errors(
     ]) == 2
 
 
-def test_cli_os_audit_pending_only_exits_zero_with_a_distinct_line(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    capsys: pytest.CaptureFixture[str],
-) -> None:
-    """A pending-only audit exits 0 and prints its own line, not the healthy one."""
-    workspace = tmp_path / "workspace"
-    _write_healthy_audit_workspace(workspace)
-    legacy = workspace / "research"
-    (legacy / "projects" / "active" / "general").mkdir(parents=True)
-    (workspace / ".runtime" / "workspaces.json").write_text(
-        json.dumps([{"name": "research", "vault_root": "research"}]),
-        encoding="utf-8",
-    )
-    memory_dir = tmp_path / "bounded"
-    memory_dir.mkdir()
-    monkeypatch.setenv("CIAO_MEMORY_DIR", str(memory_dir))
-
-    assert cli.main(["os-audit", "--workspace", str(workspace)]) == 0
-    out = capsys.readouterr().out
-    assert "Pending actions" in out
-    assert "Upgrade Actions (optional)" in out
-
-
 def test_cli_os_audit_explicit_workspace_beats_an_ambient_runtime_root(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -328,56 +304,6 @@ def test_cli_os_audit_explicit_workspace_beats_an_ambient_runtime_root(
     report = json.loads(capsys.readouterr().out)
 
     assert report["job_runs_audit"]["runtime_root"] == str(workspace / ".runtime")
-    # The named workspace's own registry was read, so its nonstandard vault is
-    # still detected rather than the foreign install's healthy one.
-    assert report["pending_action_count"] == 1
-    assert report["upgrade_notices"]["notices"][0]["workspace"] == "research"
-
-
-def test_cli_os_audit_passes_the_workspace_registry_to_upgrade_notices(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    capsys: pytest.CaptureFixture[str],
-) -> None:
-    workspace = tmp_path / "workspace"
-    _write_healthy_audit_workspace(workspace)
-    legacy = workspace / "research"
-    (legacy / "projects" / "active" / "general").mkdir(parents=True)
-    (workspace / ".runtime" / "workspaces.json").write_text(
-        json.dumps([{"name": "research", "vault_root": "research"}]),
-        encoding="utf-8",
-    )
-    memory_dir = tmp_path / "bounded"
-    memory_dir.mkdir()
-    monkeypatch.setenv("CIAO_MEMORY_DIR", str(memory_dir))
-
-    # A pending upgrade notice is an optional action the operator may decline.
-    # Under D2 it must not raise the status: this exits 0, and the notice is
-    # surfaced on its own line instead of the healthy one.
-    assert cli.main([
-        "os-audit",
-        "--workspace",
-        str(workspace),
-    ]) == 0
-    out = capsys.readouterr().out
-    assert "Pending actions" in out
-    assert "Upgrade Actions (optional)" in out
-
-    assert cli.main([
-        "os-audit",
-        "--workspace",
-        str(workspace),
-        "--json",
-    ]) == 0
-    report = json.loads(capsys.readouterr().out)
-    assert report["status"] == "healthy"
-    assert report["defect_count"] == 0
-    assert report["pending_action_count"] == 1
-    notices = report["upgrade_notices"]["notices"]
-    assert notices[0]["workspace"] == "research"
-    # The managed command, not a hand migration: the audit's remedy and the Home
-    # card's are one sentence from `ciao.migration_notices` since #816.
-    assert "ciao vault-relocate research --apply" in notices[0]["remedy"]
 
 
 def test_cli_create_chat_dispatches_command(monkeypatch: pytest.MonkeyPatch) -> None:

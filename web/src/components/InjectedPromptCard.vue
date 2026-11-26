@@ -1,7 +1,7 @@
 <script setup lang="ts">
 /**
  * A user turn the engine wrote (a finished background run, lost background
- * tasks, an automation run, a resumed task, a webhook event, an update task,
+ * tasks, an automation run, a resumed task, a webhook event,
  * a retried request), drawn as a collapsed notice instead of a user bubble.
  *
  * ChatPanel draws this once {@link parseInjectedPrompt} has recognised the turn
@@ -42,7 +42,6 @@ const ICONS: Record<InjectedPrompt['kind'], AppIconName> = {
   loop: 'clock',
   task_resume: 'doc',
   webhook: 'comment',
-  update_task: 'spark',
   retry: 'activity',
   retry_scheduled: 'clock',
   restart_resume: 'activity',
@@ -176,11 +175,6 @@ const md = (text: string) => renderUserMarkdown(text, props.knownPaths ?? [])
 
       <template v-else-if="prompt.kind === 'task_resume'">
         <p v-if="prompt.previousState">The previous attempt ended as {{ prompt.previousState }}.</p>
-        <!-- eslint-disable-next-line vue/no-v-html -- renderUserMarkdown is the transcript's sanitising renderer -->
-        <div class="injected-card-prose" tabindex="0" role="region" aria-label="Injected request" v-html="md(raw)"></div>
-      </template>
-
-      <template v-else-if="prompt.kind === 'update_task'">
         <!-- eslint-disable-next-line vue/no-v-html -- renderUserMarkdown is the transcript's sanitising renderer -->
         <div class="injected-card-prose" tabindex="0" role="region" aria-label="Injected request" v-html="md(raw)"></div>
       </template>

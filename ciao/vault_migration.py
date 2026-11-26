@@ -384,7 +384,7 @@ def retain_retired_stock_types_if_needed(vault_root: Path, runtime_root: Path) -
         "vault_root": str(Path(vault_root)),
         "retained": summary["retained"],
         # A refused write is recorded too: the owner fixes the collision and
-        # runs `ciao vault-migrate`, rather than every boot rescanning the vault.
+        # fixes it, rather than every boot rescanning the vault.
         "failed": summary.get("failed", ""),
     }
     tmp = receipt.with_suffix(".json.tmp")

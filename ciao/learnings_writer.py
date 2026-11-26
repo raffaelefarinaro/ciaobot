@@ -530,7 +530,7 @@ def append_learning(
     The read, the render and the write all happen under
     :func:`ciao.file_kernel.queue_lock`, and the default write goes through
     :func:`ciao.file_kernel.write_queue_atomically`. Both are the same ones
-    ``ciao learnings-migrate`` takes on this file, and both are load-bearing: the
+    ``learnings_migrate`` takes on this file, and both are load-bearing: the
     memory pass, the care run and the migration are writers of one file, and a read-check-write that is not
     serialized is a read-check-write that races. The atomic rename is what makes
     a crash mid-write leave the old file rather than a truncated one. And the

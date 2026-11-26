@@ -340,8 +340,8 @@ test.describe('sidebar shell navigation', () => {
 
 test.describe('workbench layout', () => {
   test.beforeEach(async ({ page }, testInfo) => {
-    // A slice per test, not per worker: opting in to update tasks writes a
-    // session flag the fixture keeps, so a test that mutates must not share a
+    // A slice per test, not per worker: opting in to housekeeping rows writes a
+    // session value the fixture keeps, so a test that mutates must not share a
     // slice with one that asserts the mutation is absent.
     await isolate(page, `workbench-${testInfo.workerIndex}-${testInfo.title}`)
   })
@@ -465,7 +465,7 @@ test.describe('workbench layout', () => {
     // and the two summing wherever both applied. `.home-main` owns the gap now,
     // and this measures it in a real layout engine rather than trusting the
     // stylesheet — jsdom gives every rect 0x0.
-    await page.request.post('/__fixture__/update-tasks')
+    await page.request.post('/__fixture__/needs-you')
     await boot(page, '/', '.needs-you')
 
     const measure = (selector: string) => page.evaluate((sel) => {
@@ -510,7 +510,7 @@ test.describe('workbench layout', () => {
     // setup card — a root with no width of its own — collapsed to fit its text.
     // Neither is a gap, so the gap assertions above stayed green throughout; only
     // the edges say otherwise, and only a real layout engine has them.
-    await page.request.post('/__fixture__/update-tasks')
+    await page.request.post('/__fixture__/needs-you')
     await boot(page, '/', '.needs-you')
 
     // Hiding a row is how the recovery chip comes to be at all.
@@ -535,8 +535,8 @@ test.describe('workbench layout', () => {
     expect(report.setup, 'the setup card is as wide as the column').toEqual({ offset: 0, width: report.column })
   })
 
-  test('a Home with no update work has no phantom gap for it', async ({ page }) => {
-    // The group renders nothing at all when it has no open rows, so the gap the
+  test('a Home with no housekeeping rows has no phantom gap for them', async ({ page }) => {
+    // The list renders nothing at all when it has no rows, so the gap the
     // layout reserves must not survive it: a doubled gap above the recent list
     // is the exact artefact a margin-only reset leaves behind.
     await boot(page, '/', '.home-intake')
@@ -561,7 +561,7 @@ test.describe('workbench layout', () => {
   })
 
   test('"Needs you" sits above the composer, fits the column and keeps its spacing tokens', async ({ page }) => {
-    await page.request.post('/__fixture__/update-tasks')
+    await page.request.post('/__fixture__/needs-you')
     await boot(page, '/', '.needs-you')
     await expect(page.locator('.home-main .needs-you')).toBeVisible()
     await expect(page.locator('.home-rail .needs-you')).toHaveCount(0)
@@ -595,7 +595,7 @@ test.describe('workbench layout', () => {
   })
 
   test('"Needs you" stays above the composer when the pane narrows past 940px', async ({ page }) => {
-    await page.request.post('/__fixture__/update-tasks')
+    await page.request.post('/__fixture__/needs-you')
     await boot(page, '/', '.needs-you')
     await page.setViewportSize({ width: 900, height: 900 })
     await expect(page.locator('.home-main .needs-you')).toBeVisible()
@@ -605,7 +605,7 @@ test.describe('workbench layout', () => {
   })
 
   test('Home is top-aligned and the composer is stable once the first load has settled', async ({ page }) => {
-    await page.request.post('/__fixture__/update-tasks')
+    await page.request.post('/__fixture__/needs-you')
     await boot(page, '/', '.needs-you')
     const form = page.locator('.home-intake-form')
     const settled = (await form.boundingBox())!
@@ -664,7 +664,7 @@ test.describe('home section gaps on a phone', () => {
   })
 
   test('one gap between every section, at both widths', async ({ page }) => {
-    await page.request.post('/__fixture__/update-tasks')
+    await page.request.post('/__fixture__/needs-you')
     await boot(page, '/', '.needs-you')
 
     const report = await page.evaluate(() => {

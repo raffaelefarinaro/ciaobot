@@ -20,8 +20,8 @@ without losing a byte of anything it does not understand.
 
 Nothing here touches disk, the network, or a model. :func:`migrate_learnings`
 returns text; a caller decides whether to write it. The production writer
-(``learnings_writer.append_learning``) and the migration command
-(``ciao learnings-migrate``) are callers of this module, not copies of it.
+(``learnings_writer.append_learning``) and the migration module
+(``learnings_migrate``) are callers of this module, not copies of it.
 
 The four rules everything else follows from
 -------------------------------------------

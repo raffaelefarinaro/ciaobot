@@ -798,7 +798,7 @@ already keeps:
 
 | Source | Covers | Why it belongs in the set |
 |---|---|---|
-| `web_projects.json`, every chat row | live chats, archived chats, helper chats (the hidden Memory project's pass, proposal helpers, update-task chats) and each row's `previous_session_ids` rotation lineage | `_archive_chat_unlocked` keeps `session_id` on an archived row, so the row keeps naming the session it reclaimed **even when the reclaim failed**. A helper chat is an ordinary row with its own `session_id`, so there is no second helper list to keep in step with the first |
+| `web_projects.json`, every chat row | live chats, archived chats, helper chats (the hidden Memory project's pass, proposal helpers) and each row's `previous_session_ids` rotation lineage | `_archive_chat_unlocked` keeps `session_id` on an archived row, so the row keeps naming the session it reclaimed **even when the reclaim failed**. A helper chat is an ordinary row with its own `session_id`, so there is no second helper list to keep in step with the first |
 | `state.json`, every context | a chat whose registry row is gone but whose state context survives | `delete_chat` writes two files — the registry pop and `StateStore.delete_context` — and the second is the one that can be missed. The state store records no provider (one provider-agnostic slot per context), so an id it still holds is excluded against **every** supported provider rather than guessed at one |
 
 **The classification rule.** `classify_session(provider, session_id,

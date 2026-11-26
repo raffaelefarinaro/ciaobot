@@ -119,9 +119,7 @@ export type InboxSeed = {
   chats?: 'none' | 'rows'
   operator?: 'none' | 'one' | 'many'
   /** HTTP health of each projected source; the chat source combines projects and task signals. */
-  health?: Partial<Record<'chats' | 'operator' | 'automations' | 'updateTasks', SourceHealth>>
-  /** False leaves the update-task listing stamped for another workspace, so it reads back as checking. */
-  updateTasksScoped?: boolean
+  health?: Partial<Record<'chats' | 'operator' | 'automations', SourceHealth>>
 }
 
 /**
@@ -148,9 +146,6 @@ export function seedInbox(pinia: Pinia, seed: InboxSeed = {}): void {
   const housekeeping = useHousekeepingStore(pinia)
   housekeeping.actions = seededActions(seed.operator)
   housekeeping.actionsHealth = health.operator ?? ready
-  housekeeping.updateTasks = []
-  housekeeping.updateTasksWorkspace = seed.updateTasksScoped === false ? '' : INBOX_WORKSPACE
-  housekeeping.updateTasksHealth = health.updateTasks ?? ready
 
   const automations = health.automations ?? ready
   const tasks = useTaskStore(pinia)
