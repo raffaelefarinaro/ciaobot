@@ -409,9 +409,6 @@ stories. Only the vault-check and restart-resume cards use this shared switch
 so far; their persistence, parent loading fidelity and connected-screen story
 coverage are unchanged. Legacy switch styles remain for unmigrated consumers.
 
-The Node inventory tests reject wrong owners, states and exact ID sets.
-`npm run build-storybook` additionally checks all registry-linked IDs against
-the generated index and fails on missing stories, Docs or inventory IDs.
 This is not an automated browser interaction or visual-regression runner.
 
 - [ ] No hex/rgb/hsl literal; no hardcoded `font-size`, `border-radius`, or spacing

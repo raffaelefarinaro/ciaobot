@@ -105,30 +105,15 @@ The component workshop runs without an engine: `npm run storybook` serves it at
 `http://127.0.0.1:6006`, and `npm run build-storybook` writes the ignored
 `web/dist/storybook` output. It imports production components and CSS directly
 and does not load the app bootstrap or public assets. `npm test` remains the
-separate application suite. Open **Inventory / UI inventory** (`inventory--all`)
-to search the production owner catalogue: one row per SFC, plus inline and
-shared CSS families. Search intersects with family, coverage and migration
-filters.
+separate application suite.
 
-**Coverage rules.** Per-owner state lists belong in the inventory rows, not here.
+**Coverage rules.**
 
-- An inventory row is not a story or a migration approval. Adding an SFC needs its
-  own row (and a rationale for a composition), not a complete story suite.
 - **Covered** means a rendered-state story exists, not that interaction is verified.
-  **Uncovered** means an implemented state has no story; **unknown** means the state
-  or loading fidelity is unaudited; **not applicable** means it is known not to apply.
-  Summary categories overlap. Migration starts unassessed unless a decision says otherwise.
-- A story does not imply connected-caller, loading-fidelity, keyboard,
-  reduced-motion, responsive or migration coverage. Those stay unassessed until the row says otherwise.
+  A story does not imply connected-caller, loading-fidelity, keyboard, reduced-motion,
+  responsive or migration coverage.
 - Stories preserve current production behaviour, even where it differs from the
-  desired contract. Record the difference in the row; do not fix it in the story.
-- Direct consumers are production import/include sites. Support sources may use
-  classes or host a composition without importing the owner. Composition rows
-  render the real composition; CSS rows claim no stories.
-- Node inventory tests derive coverage from each story file's CSF index, not a
-  hand-written list: every covered state's story IDs must exist there, every story
-  except the inventory page is claimed by exactly one row state, and each claimed
-  story file must render that owner.
+  desired contract. Record the difference in the story; do not fix it there.
 
 **Connected fixtures.** A story that renders an owner which transports data declares
 what it may reach; nothing else is reachable.
@@ -184,11 +169,7 @@ what it may reach; nothing else is reachable.
 
 **Checks.**
 
-- `npm run build-storybook` runs `scripts/check-storybook-index.ts` after building.
-  Every registry-linked ID must exist as a story (not Docs or the inventory page);
-  missing or malformed output fails the command. Run the check alone with
-  `node --experimental-strip-types web/scripts/check-storybook-index.ts` from the
-  repository root.
+- `npm run build-storybook` writes the static workshop; a story that fails to build fails the command.
 - `npm run test-storybook` runs the browser interaction runner (@storybook/addon-vitest,
   vitest browser mode with the Playwright provider): every story renders in headless
   Chromium and its `play` functions execute there. Chromium must be installed locally
