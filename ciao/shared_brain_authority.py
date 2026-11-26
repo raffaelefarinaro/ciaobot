@@ -60,11 +60,15 @@ backend stays absent and every such transition fails closed with
    under the provider's own enforceable fence (for example an ``If-Match``
    revision or a provider transaction). A local file lock, a fresh role lookup
    or a prior successful write is not a fence for a provider-side revocation.
-4. **Durable audit and crash recovery.** The old/new principals, actor and
-   generation are recorded in restricted durable audit, and an interrupted
-   commit is reconciled after a crash as committed or not committed without
-   replaying a spent admission. A local in-memory audit trail is evidence for
-   tests, not the production record.
+4. **Durable audit and crash recovery.** Implemented here, still inactive:
+   pass a :class:`ciao.shared_brain_audit.DurableAuditLog` as ``audit``. The
+   engine writes an intent before the fenced commit and a committed or aborted
+   entry after it (old/new steward, actor, generations, wall time; never a
+   nonce or seal). :meth:`StewardAuthority.reconcile_audit` runs at
+   construction and settles a crash-orphaned intent from the authority record
+   without replaying a spent admission; an unprovable state is
+   ``audit_inconsistent``, an unreadable log is ``audit_unavailable``, and both
+   fail closed. The in-memory trail is a bounded cache, not the record.
 
 The clock, the store and the provider backend are injected, which is how the
 tests reach expiry, races and failure modes without sleeping or touching live
@@ -76,6 +80,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 import secrets
 import threading
 import time
@@ -84,9 +89,18 @@ from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
 from typing import Any, Callable, Iterator, Protocol
+from urllib.parse import urlsplit
 
 from ciao.os_support.files import open_fd, replace_file
 from ciao.os_support.locks import lock_exclusive, unlock
+from ciao.shared_brain_audit import (
+    INTENT_MAX_AGE_S,
+    AuditEntry,
+    AuditError,
+    AuditKind,
+    DurableAuditLog,
+    owner_state,
+)
 from ciao.os_support.private import (
     is_private_descriptor_strict,
     make_private_dir,
@@ -104,7 +118,26 @@ MAX_CHALLENGES = 128
 
 #: Transitions retained in the restricted in-process audit. The integration
 #: slice owns durable audit; this keeps the core reviewable and bounded.
-MAX_AUDIT_RECORDS = 256
+MAX_AUDIT_RECORDS = 256  # in-memory cache only; the durable log rotates, never truncates
+
+#: Refusals that prove the mutation did not happen, so the audit records the
+#: intent as aborted at once. Anything else is ambiguous and is settled from
+#: the authority record by `reconcile_audit`.
+_DEFINITE_REFUSALS = frozenset(
+    {
+        "admission_rejected",
+        "admission_mismatch",
+        "admission_expired",
+        "forged_admission",
+        "stale_generation",
+        "already_initialized",
+    }
+)
+
+#: Intents with a live call in this process, shared by every engine instance in
+#: it; another process's live intents are told apart by their lease owner.
+_LIVE_INTENTS: set[str] = set()
+_LIVE_LOCK = threading.Lock()
 
 #: Nonce strength: 32 random bytes, URL-safe.
 _NONCE_BYTES = 32
@@ -400,6 +433,34 @@ def _digest(value: str) -> str:
     ``challenge_unknown``.
     """
     return hashlib.sha256(value.encode("utf-8")).hexdigest()
+
+
+_SCP_LOCATOR = re.compile(r"^(?:[^@/:]+@)?([^@/:]{2,}):(?!//)(.*)$")
+
+
+def _canonical_locator(storage: str) -> str:
+    """The storage locator without anything secret-bearing.
+
+    Userinfo, query and fragment are dropped from URLs (``https://u:s@host/p?token=x``);
+    scheme and host are lower-cased. For an scp-style remote (``u@host:path``) only
+    the user is dropped and the host lower-cased: ``?`` and ``#`` are ordinary path
+    characters there and are kept. A single letter before the colon is a Windows
+    drive, not a host, so a drive path is returned unchanged (case included), as
+    is any other folder path.
+    """
+    if "://" in storage:
+        parts = urlsplit(storage)
+        host = parts.netloc.rpartition("@")[2].lower()  # drops userinfo, keeps the port
+        return f"{parts.scheme.lower()}://{host}{parts.path}"
+    scp = _SCP_LOCATOR.match(storage)
+    if scp is not None and not storage.startswith(("/", ".", "~")):
+        return f"{scp.group(1).lower()}:{scp.group(2)}"
+    return storage
+
+
+def _storage_digest(storage: str) -> str:
+    """SHA-256 of the canonical locator: what the audit records for a storage."""
+    return _digest(_canonical_locator(storage))
 
 
 def _required_principal(value: str, reason: str) -> str:
@@ -707,6 +768,8 @@ class StewardAuthority:
         backend: AuthorityBackend | None = None,
         clock: Callable[[], float] = time.monotonic,
         challenge_ttl_s: float = CHALLENGE_TTL_S,
+        audit: DurableAuditLog | None = None,
+        wall_clock: Callable[[], float] = time.time,
     ) -> None:
         if challenge_ttl_s <= 0:
             raise ValueError("a challenge needs a positive lifetime")
@@ -717,6 +780,12 @@ class StewardAuthority:
         self._lock = threading.Lock()
         self._challenges: dict[str, _StoredChallenge] = {}
         self._audit: list[AuthorityTransition] = []
+        self._durable = audit
+        self._wall_clock = wall_clock
+        if audit is not None:
+            # Restart replay: settle any commit a crash left unresolved before
+            # this engine admits another transition.
+            self.reconcile_audit()
 
     # ── Transitions ──────────────────────────────────────────────────────
 
@@ -835,7 +904,7 @@ class StewardAuthority:
             created_at=now,
             updated_at=now,
         )
-        self._fenced_commit(
+        self._audited_commit(
             connector=connector,
             operation=Operation.BOOTSTRAP,
             generation=0,
@@ -843,6 +912,8 @@ class StewardAuthority:
             successor=successor,
             condition_reason="already_initialized",
             mutation=lambda: self._create(record),
+            previous_steward=None,
+            new_generation=1,
         )
         self._invalidate_brain(connector.brain)
         return self._record_transition(
@@ -882,7 +953,7 @@ class StewardAuthority:
             created_at=record.created_at,
             updated_at=now,
         )
-        self._fenced_commit(
+        self._audited_commit(
             connector=connector,
             operation=Operation.TRANSFER,
             generation=record.generation,
@@ -890,6 +961,8 @@ class StewardAuthority:
             successor=successor,
             condition_reason="stale_generation",
             mutation=lambda: self._replace(updated, record.generation),
+            previous_steward=record.steward,
+            new_generation=updated.generation,
         )
         self._invalidate_brain(connector.brain)
         return self._record_transition(
@@ -927,7 +1000,7 @@ class StewardAuthority:
             created_at=record.created_at,
             updated_at=now,
         )
-        self._fenced_commit(
+        self._audited_commit(
             connector=connector,
             operation=Operation.RECOVERY,
             generation=record.generation,
@@ -935,6 +1008,8 @@ class StewardAuthority:
             successor=successor,
             condition_reason="stale_generation",
             mutation=lambda: self._replace(updated, record.generation),
+            previous_steward=record.steward,
+            new_generation=updated.generation,
         )
         self._invalidate_brain(connector.brain)
         return self._record_transition(
@@ -1063,6 +1138,260 @@ class StewardAuthority:
         if admin and not capability.admin:
             raise AuthorityError("not_admin")
         return capability
+
+    def _audited_commit(
+        self,
+        *,
+        connector: BrainConnector,
+        operation: Operation,
+        generation: int,
+        actor: AuthenticatedPrincipal,
+        successor: AuthenticatedPrincipal,
+        condition_reason: str,
+        mutation: Callable[[], bool],
+        previous_steward: str | None,
+        new_generation: int,
+    ) -> None:
+        """Write intent, commit through the fence, then record the resolution.
+
+        Without a durable audit this is exactly :meth:`_fenced_commit`. With
+        one, the intent is durable before the backend can mutate anything, so a
+        crash at any later point is reconcilable from the authority record. A
+        definite refusal records ``aborted``; an ambiguous failure leaves the
+        intent pending for :meth:`reconcile_audit`. A committed transition
+        whose confirmation cannot be written raises ``audit_unconfirmed``: the
+        authority record has already changed and the next reconcile completes
+        the audit; the invitation is spent either way.
+        """
+        if self._durable is None:
+            self._fenced_commit(
+                connector=connector,
+                operation=operation,
+                generation=generation,
+                actor=actor,
+                successor=successor,
+                condition_reason=condition_reason,
+                mutation=mutation,
+            )
+            return
+        self.reconcile_audit()
+        intent = secrets.token_hex(16)
+        fields = {
+            "operation": operation.value,
+            "brain": connector.brain,
+            # A digest of the canonical locator, never the locator itself.
+            "storage": _storage_digest(connector.storage),
+            "actor": actor.principal,
+            "previous_steward": previous_steward,
+            "steward": successor.principal,
+            "previous_generation": generation,
+            "generation": new_generation,
+        }
+        with _LIVE_LOCK:
+            _LIVE_INTENTS.add(intent)
+        try:
+            self._audit_append(AuditKind.INTENT, intent, fields)
+            try:
+                self._fenced_commit(
+                    connector=connector,
+                    operation=operation,
+                    generation=generation,
+                    actor=actor,
+                    successor=successor,
+                    condition_reason=condition_reason,
+                    mutation=mutation,
+                )
+            except AuthorityError as exc:
+                if exc.reason in _DEFINITE_REFUSALS:
+                    try:
+                        self._audit_append(AuditKind.ABORTED, intent, fields)
+                    except AuthorityError:
+                        pass  # the pending intent is settled by reconcile_audit
+                raise
+            self._invalidate_brain(connector.brain)
+            try:
+                self._audit_append(AuditKind.COMMITTED, intent, fields)
+            except AuthorityError as exc:
+                if exc.reason == "audit_resolved":
+                    # Someone else already resolved our live intent: the audit
+                    # now contradicts the record this call just changed.
+                    raise AuthorityError("audit_inconsistent") from None
+                raise AuthorityError("audit_unconfirmed") from None
+        finally:
+            with _LIVE_LOCK:
+                _LIVE_INTENTS.discard(intent)
+
+    def _audit_append(
+        self,
+        kind: AuditKind,
+        intent: str,
+        fields: dict[str, Any],
+        *,
+        recovered: bool = False,
+    ) -> AuditEntry:
+        assert self._durable is not None
+        try:
+            return self._durable.append(
+                kind,
+                intent=intent,
+                at=self._wall_clock(),
+                recovered=recovered,
+                **fields,
+            )
+        except AuditError as exc:
+            if exc.reason == "duplicate_resolution":
+                raise AuthorityError("audit_resolved") from exc
+            raise AuthorityError("audit_unavailable") from exc
+
+    def reconcile_audit(self) -> int:
+        """Settle every crash-orphaned intent from the authority record.
+
+        An intent with no resolution is committed when the record already shows
+        the exact new generation and steward (and no other intent's committed
+        entry explains that record), aborted when it still shows the previous
+        generation, and superseded when the record is further on and a committed
+        entry of a different intent proves another transition took its place.
+        Anything else is ``audit_inconsistent``: the engine stays closed rather
+        than guess (operator recovery is in ``ciao.shared_brain_audit``).
+        No admission is replayed.
+
+        An intent is settled only when it is orphaned: not owned by a live call
+        in this process, and its lease owner (pid and boot id) is gone or it is
+        older than ``INTENT_MAX_AGE_S``. Another live process's intent is left
+        alone. The log refuses a second resolution for one intent, so two
+        reconcilers racing on an orphan settle it exactly once. Returns how many
+        intents this call settled.
+        """
+        if self._durable is None:
+            return 0
+        try:
+            entries = self._durable.view().entries
+        except AuditError as exc:
+            raise AuthorityError("audit_unavailable") from exc
+        resolved = {e.intent for e in entries if e.kind is not AuditKind.INTENT}
+        pending = [e for e in entries if e.kind is AuditKind.INTENT and e.intent not in resolved]
+        committed = [e for e in entries if e.kind is AuditKind.COMMITTED]
+        self._check_recovered_aborts(entries, committed)
+        settled = 0
+        for entry in pending:
+            if not self._orphaned(entry):
+                continue
+            try:
+                record = self._store.load(entry.brain)
+            except StoreError as exc:
+                raise AuthorityError("store_unavailable") from exc
+            if record is not None and _storage_digest(record.storage) != entry.storage:
+                raise AuthorityError("audit_inconsistent")
+            if (
+                record is not None
+                and record.generation == entry.generation
+                and record.steward == entry.steward
+            ):
+                # Another intent's committed entry for this exact result means
+                # this attempt did not produce it (a retry did).
+                kind = (
+                    AuditKind.ABORTED
+                    if self._explained_by_other(entry, committed)
+                    else AuditKind.COMMITTED
+                )
+            elif (record is None and entry.previous_generation == 0) or (
+                record is not None and record.generation == entry.previous_generation
+            ):
+                kind = AuditKind.ABORTED
+            elif (
+                record is not None
+                and record.generation > entry.previous_generation
+                and any(
+                    c.intent != entry.intent
+                    and c.brain == entry.brain
+                    and c.storage == entry.storage
+                    and c.previous_generation >= entry.previous_generation
+                    for c in committed
+                )
+            ):
+                # A different, committed transition took its place.
+                kind = AuditKind.SUPERSEDED
+            else:
+                raise AuthorityError("audit_inconsistent")
+            fields: dict[str, Any] = {
+                "operation": entry.operation,
+                "brain": entry.brain,
+                "storage": entry.storage,
+                "actor": entry.actor,
+                "previous_steward": entry.previous_steward,
+                "steward": entry.steward,
+                "previous_generation": entry.previous_generation,
+                "generation": entry.generation,
+            }
+            try:
+                self._audit_append(kind, entry.intent, fields, recovered=True)
+            except AuthorityError as exc:
+                if exc.reason == "audit_resolved":
+                    continue  # another reconciler settled it first
+                raise
+            settled += 1
+        return settled
+
+    @staticmethod
+    def _explained_by_other(entry: AuditEntry, committed: list[AuditEntry]) -> bool:
+        return any(
+            c.intent != entry.intent
+            and c.brain == entry.brain
+            and c.storage == entry.storage
+            and c.generation == entry.generation
+            and c.steward == entry.steward
+            for c in committed
+        )
+
+    def _check_recovered_aborts(
+        self, entries: tuple[AuditEntry, ...], committed: list[AuditEntry]
+    ) -> None:
+        """A recovered "aborted" must not contradict the authority record.
+
+        If the record shows the very generation, steward and storage an aborted
+        intent was trying to install, and no committed entry of a different
+        intent explains that record, the transition did commit and the audit is
+        false (a late committer was settled as aborted). A legitimate retry that
+        committed the same result is explained by its own committed entry and
+        does not close the engine. A false audit leaves the engine closed.
+        """
+        assert self._durable is not None
+        for entry in entries:
+            if entry.kind is not AuditKind.ABORTED or not entry.recovered:
+                continue
+            try:
+                record = self._store.load(entry.brain)
+            except StoreError as exc:
+                raise AuthorityError("store_unavailable") from exc
+            if (
+                record is not None
+                and record.generation == entry.generation
+                and record.steward == entry.steward
+                and _storage_digest(record.storage) == entry.storage
+                and not self._explained_by_other(entry, committed)
+            ):
+                raise AuthorityError("audit_inconsistent")
+
+    def _orphaned(self, entry: AuditEntry) -> bool:
+        with _LIVE_LOCK:
+            if entry.intent in _LIVE_INTENTS:
+                return False
+        # "self" without a live registration is an abandoned call of this
+        # process. A live owner is never settled, however old; age decides only
+        # when liveness cannot be determined.
+        state = owner_state(entry.owner)
+        if state == "unknown":
+            return self._wall_clock() - entry.at >= INTENT_MAX_AGE_S
+        return state != "alive"
+
+    def durable_audit(self) -> tuple[AuditEntry, ...]:
+        """The verified durable audit, oldest first; empty without a durable log."""
+        if self._durable is None:
+            return ()
+        try:
+            return self._durable.view().entries
+        except AuditError as exc:
+            raise AuthorityError("audit_unavailable") from exc
 
     def _fenced_commit(
         self,

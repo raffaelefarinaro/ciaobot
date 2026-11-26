@@ -572,6 +572,35 @@ def open_regular(parent_fd: int, name: str) -> int:
         raise
 
 
+def read_regular(parent_fd: int, name: str, limit: int) -> tuple[bytes, os.stat_result]:
+    """Read one existing regular file read-only: no-follow, never blocking on a special file.
+
+    Returns at most ``limit`` bytes and the ``fstat`` of the descriptor that was
+    read, so a caller can tell a larger file from a bounded one.
+    """
+    fd = os.open(name, os.O_RDONLY | _NOFOLLOW | getattr(os, "O_NONBLOCK", 0), dir_fd=parent_fd)
+    try:
+        opened = os.fstat(fd)
+        if not stat.S_ISREG(opened.st_mode):
+            raise OSError(errno.EINVAL, "the note is not a regular file")
+        return read_all(fd, limit), opened
+    finally:
+        os.close(fd)
+
+
+_SF_DATALESS = 0x40000000
+
+
+def is_dataless(info: os.stat_result) -> bool:
+    """True for a macOS file whose content lives only in the cloud."""
+    return bool(getattr(info, "st_flags", 0) & _SF_DATALESS)
+
+
+def has_cloud_placeholder(parent_fd: int, name: str) -> bool:
+    """True when an evicted-file stub (``.name.icloud``) stands in for ``name``."""
+    return stat_entry(parent_fd, f".{name}.icloud") is not None
+
+
 def read_all(fd: int, limit: int) -> bytes:
     """Read at most ``limit`` bytes from an already-open file descriptor."""
     chunks: list[bytes] = []

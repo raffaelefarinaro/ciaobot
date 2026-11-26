@@ -325,13 +325,24 @@ function operationLabel(operation: string): string {
   return OPERATION_LABELS[operation] ?? 'Change'
 }
 
+const FOLDER_MANUAL_STATES: Record<string, string> = {
+  ready: 'The note is still the version you reviewed.',
+  applied: 'The note already matches this change. Ciaobot did not make it.',
+  changed: 'The note has changed since this review. Check it before you change anything.',
+  unavailable: 'Ciaobot cannot read the note right now.',
+}
+
+function folderManualState(state: string): string {
+  return FOLDER_MANUAL_STATES[state] ?? FOLDER_MANUAL_STATES.unavailable
+}
+
 const SHARE_BLOCKED_MESSAGES: Record<string, string> = {
   brain_unavailable: 'The original shared brain link is no longer active. Restore it if possible, or create a new proposal for the current destination.',
   brain_changed: 'The shared brain destination changed since this proposal was created. Restore the original destination if possible, or create a new proposal for the current one.',
   draft_unavailable: 'This shared-note review is unavailable. Refresh the proposal before continuing.',
   draft_corrupt: 'This shared-note review could not be verified. Refresh the proposal before continuing.',
   share_text_edits_not_supported: 'Shared-note proposals cannot be edited here.',
-  folder_update_unsupported: 'This folder already has a note at that path. Ciaobot cannot safely replace or delete an existing folder file; edit it in the folder instead.',
+  folder_update_unsupported: 'Ciaobot does not change or delete a note that already exists in a folder. It cannot check that nobody else changed the note while it writes. Make the change below by hand, then reject this review. Ciaobot will not record it as published.',
   unsafe_target: 'The folder path or one of its components changed since review. Nothing was written; review a fresh proposal.',
   manual_export_required: 'Ciaobot cannot stage and hard-link into this folder safely from its private storage. Export the approved note manually instead.',
   folder_unverifiable: 'This volume cannot prove the completed write, so Ciaobot does not claim it.',
@@ -2148,13 +2159,19 @@ watch(
                     <pre v-else>{{ store.previews[row.id].after }}</pre>
                   </section>
                 </div>
-                <p class="pr-share-warning hint hint--warn">
+                <p v-if="!store.previews[row.id].folder_manual" class="pr-share-warning hint hint--warn">
                   Sharing publishes this text to everyone with access to {{ store.previews[row.id].identity }}. It stays in the repository’s history even if it is later removed.
                 </p>
                 <p v-if="store.previews[row.id].redraft_available" class="hint">Redrafting replaces this private proposal with a new version for review.</p>
                 <p v-else-if="store.previews[row.id].blocked_reason" class="pr-card-error" role="alert">
                   {{ shareBlockedMessage(store.previews[row.id].blocked_reason!) }}
                 </p>
+                <div v-if="store.previews[row.id].folder_manual" class="pr-share-manual" data-testid="folder-manual">
+                  <h3>Apply by hand</h3>
+                  <p>Folder: <code>{{ store.previews[row.id].folder_manual!.root }}</code></p>
+                  <p>Note: <code>{{ store.previews[row.id].folder_manual!.absolute_path }}</code></p>
+                  <p>{{ folderManualState(store.previews[row.id].folder_manual!.state) }}</p>
+                </div>
                 <p v-if="store.previews[row.id].reconcile_available" class="hint">
                   This checks a previously recorded publication attempt. It cannot start a new publish.
                 </p>
@@ -2797,6 +2814,22 @@ watch(
   padding: 0.75rem;
   border: 1px solid var(--border);
   border-radius: var(--radius-sm, 6px);
+}
+
+.pr-share-manual {
+  margin: 8px 0;
+  min-width: 0;
+}
+
+.pr-share-manual h3 {
+  margin: 0 0 4px;
+  font-size: 13px;
+}
+
+.pr-share-manual p {
+  margin: 2px 0;
+  font-size: 13px;
+  overflow-wrap: anywhere;
 }
 
 .pr-share-warning {
