@@ -68,7 +68,7 @@ from ciao.web.chat_broker import (
     public_queue,
 )
 from ciao.web.file_snapshots import SnapshotStore
-from ciao import provider_registry, repo_location, vault_verification
+from ciao import provider_registry, repo_location
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
     from ciao.web.project_chats import ChatInfo
@@ -639,12 +639,6 @@ class ChatStreaming:
         last_error_text = ""
         had_provider_progress = False
         repo_hints: list[str] = []
-        # Vault notes this drive's turns read, checked after a successful turn.
-        # Resolved on the first Read tool event, so a drive that reads nothing
-        # never touches the vault layout.
-        vault_root: Path | None = None
-        agent_root: Path | None = None
-        vault_root_resolved = False
         withdrawn = await self._await_predecessor(chat_id, stream)
         # A compaction is a command, never a chip; only the first pass can be
         # withdrawn, so the flag is consumed there.
@@ -671,7 +665,6 @@ class ChatStreaming:
                 # force-closed partial): the selected answer then replaces the
                 # carry-over even when it is empty (#2139 review).
                 turn_answer_ready = False
-                turn_vault_reads: list[Path] = []
                 turn_succeeded = False
                 # The turn index the answer is filed under.
                 turn_verify_index: int | None = None
@@ -690,7 +683,6 @@ class ChatStreaming:
                 ) -> None:
                     nonlocal turn_assistant_text, turn_answer_text, turn_answer_ready
                     nonlocal turn_succeeded, turn_verify_index
-                    nonlocal vault_root, agent_root, vault_root_resolved
                     nonlocal question_paused, had_error, last_error_text
                     nonlocal had_provider_progress, turn_result_published
                     nonlocal last_assistant_text, last_answer_text
@@ -897,20 +889,6 @@ class ChatStreaming:
                             return
                         if isinstance(event, ToolUseEvent):
                             repo_hints.extend(repo_location.tool_event_hints(event))
-                            if event.type != "tool_result" and event.tool_name in ("Read", "read"):
-                                if not vault_root_resolved:
-                                    vault_root = self._host._vault_root_for_chat(chat_id)
-                                    agent_root = self._host._agent_root_for_chat(chat_id)
-                                    vault_root_resolved = True
-                                if vault_root is not None and agent_root is not None:
-                                    read = vault_verification.vault_read_path(
-                                        event.tool_name,
-                                        event.tool_input,
-                                        vault_root=vault_root,
-                                        agent_root=agent_root,
-                                    )
-                                    if read is not None:
-                                        turn_vault_reads.append(read)
                             touches: list[dict] = []
                             if payload:
                                 multi = payload.get("file_touches")
