@@ -40,7 +40,7 @@ For each item:
    - `conflict`: the note moved since you read it. Re-read it and judge the text that is actually there.
    - `already_checked`: a check for this exact revision is in its cooldown or waiting on a proposal. The reply names the reason; an attended chat can re-verify an `unverified` one, this pass cannot.
    - `failed`: the note could not be used at all.
-5. Record the key you settled with `ciao curation-progress --holder <lease.holder> --key <key>`, so the next run resumes instead of re-asking.
+5. Move on to the next note. If a `ciao` command exits non-zero, leave the item and report it.
 
 When the related notes disagree and the real sources do not settle which is current, pick no side:
 
@@ -64,7 +64,6 @@ When pass 0 hands you a `stale_entry` item, one call judges that one fact instea
 
 - The item's `reason` names which kind of staleness it is, and the difference is work. `unverified for 400d against a 30d horizon` is a fact somebody checked and time passed. `nobody has recorded a [verified:] check on this entry` is a fact nobody has ever looked at. The second wants the same evidence and no more, and a `still_valid` on it is refused until the entry carries a stamp to move, so read the note before deciding it needs a source.
 - Run `ciao note related` on the entry's note too, and treat a disagreeing note exactly as above.
-- Record the key you settled with `ciao curation-progress --holder <lease.holder> --key <key>`, like any other item.
 
 ## The `uncovered` count
 

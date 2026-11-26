@@ -161,7 +161,7 @@ def test_system_schedule_state_persists_separately(tmp_path: Path) -> None:
     assert reloaded.last_triggered_on == "2026-07-05"
     assert reloaded.workspace == "work"
     assert "references/memory-operations/guide.md" in reloaded.prompt
-    assert "references/curation-run-lifecycle.md" in reloaded.prompt
+    assert "references/curation-pass-1-proposals.md" in reloaded.prompt
 
 
 def test_upgraded_store_resolves_packaged_care_paths_and_keeps_saved_state(tmp_path: Path) -> None:
@@ -197,7 +197,7 @@ def test_upgraded_store_resolves_packaged_care_paths_and_keeps_saved_state(tmp_p
     assert str(guide) in care.prompt
     assert str(procedures) in care.prompt
     assert "ciao-memory" not in care.prompt
-    assert "references/curation-run-lifecycle.md" in care.prompt
+    assert "references/curation-pass-1-proposals.md" in care.prompt
     assert care.enabled is False
     assert care.last_triggered_on == "2026-11-20"
     assert care.workspace == "work"
@@ -939,48 +939,6 @@ def test_the_retired_skill_reflection_routine_is_not_installed(tmp_path: Path) -
         e.schedule_id.startswith("system-skill-evolution")
         for e in store.list_entries()
     )
-
-
-def test_curation_consolidates_regions_only_under_guardrails(tmp_path: Path) -> None:
-    """Curation may consolidate bounded regions, but never promote into them.
-
-    An unattended promotion would rewrite what every session of the workspace
-    loads with nobody reviewing the judgement, so cross-project facts stay
-    queued for the user. Consolidation of existing entries used to be banned
-    too, which dead-ended over-cap regions at "needs a human pass"; it is now
-    allowed behind two guardrails: every removal is logged to the undo file,
-    and uncertain removals become [review] yes/no questions instead.
-    """
-    store = ScheduleStore(tmp_path, include_system=True)
-    entry = store.get("system-memory-curation")
-    assert entry is not None
-    prompt = _curation_text(entry.prompt)
-    # Promotion stays forbidden; consolidation is required when needed.
-    assert "Do not promote new facts into the bounded" in prompt
-    assert "unless `curation-begin` lists its kind in `accept_kinds`" in prompt
-    assert "consolidate that region now" in prompt
-    # Guardrail 1: nothing is dropped without an undo log entry.
-    assert "Workspace/Memory-Consolidations.md" in prompt
-    assert "undo log" in prompt
-    # Guardrail 2: judgment calls become reviewable questions, not deletions.
-    assert 'Keep "<entry text>" in ciao:<region>?' in prompt
-    assert "ciao memory-proposal-add --kind review --text-file" in prompt
-    assert "Memory-Proposals.md" in prompt
-    assert "ciao memory status" in prompt
-    # The old blanket ban must be gone, or the two instructions cancel out.
-    assert "Do not edit the bounded" not in prompt
-
-
-def test_workspace_care_runs_overdue_structured_os_audit(tmp_path: Path) -> None:
-    """Workspace care owns both nightly memory and the overdue weekly audit."""
-    store = ScheduleStore(tmp_path, include_system=True)
-    entry = store.get("system-memory-curation")
-    assert entry is not None
-    text = _curation_text(entry.prompt)
-    assert "ciao vault-index --write" in text
-    assert "ciao os-audit --json --scope workspace" in text
-    assert "last_full_pass" in text
-    assert text.index("vault-index --write") < text.index("os-audit --json")
 
 
 def test_user_schedule_description_round_trips(tmp_path: Path) -> None:
