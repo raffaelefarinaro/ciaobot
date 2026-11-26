@@ -473,8 +473,9 @@ struct ConnectionView: View {
     private let takeover: EngineTakeover?
     /// Settled takeovers. A published value replays to a screen built later.
     private let settledEvents: AnyPublisher<EngineTakeover.Settled, Never>
-    /// The fixed notice for the last takeover outcome, shown on this screen.
-    @State private var takeoverNotice: String?
+    /// The running check or the last takeover result, shown as a card on this
+    /// screen until the next check replaces it.
+    @State private var connectionResult: ConnectionResult?
     /// The host a tray switch is probing right now, shown as "Checking…" so the
     /// user sees why nothing changed yet. Nil when no tray probe runs.
     @State private var switchingTo: String?
@@ -520,7 +521,8 @@ struct ConnectionView: View {
         modeSwitchDialog: (@MainActor (EngineLifecycle.ModeSwitchDialog) -> Bool)? = nil,
         onModeChange: (@MainActor (EngineMode) -> Void)? = nil,
         testHooks: ConnectionViewTestHooks? = nil,
-        hostIsArm64: Bool = EngineSupervisor.hostIsArm64
+        hostIsArm64: Bool = EngineSupervisor.hostIsArm64,
+        connectionResult: ConnectionResult? = nil
     ) {
         self.onModeChange = onModeChange
         self.hostIsArm64 = hostIsArm64
@@ -584,6 +586,7 @@ struct ConnectionView: View {
         _engineMode = State(initialValue: engineMode)
         _address = State(initialValue: initialAddress)
         _error = State(initialValue: testError)
+        _connectionResult = State(initialValue: connectionResult)
     }
 
     var body: some View {
@@ -592,8 +595,9 @@ struct ConnectionView: View {
         Group {
             if let local = localEngineScreen {
                 VStack(alignment: .leading, spacing: 0) {
-                    if let takeoverNotice {
-                        takeoverNoticeText(takeoverNotice)
+                    if let connectionResult {
+                        ConnectionResultCard(result: connectionResult)
+                            .id(connectionResult.id)
                             .padding(.horizontal, 32)
                             .padding(.top, 16)
                     }
@@ -614,8 +618,9 @@ struct ConnectionView: View {
                 // A fallback is reported where the session actually lives: the
                 // connection screen is already gone once the probe succeeds.
                 VStack(spacing: 0) {
-                    if let takeoverNotice {
-                        takeoverNoticeText(takeoverNotice)
+                    if let connectionResult {
+                        ConnectionResultCard(result: connectionResult)
+                            .id(connectionResult.id)
                             .padding(.horizontal, 12)
                             .padding(.vertical, 6)
                     }
@@ -693,62 +698,7 @@ struct ConnectionView: View {
                         : origin.canonicalKey)
                 }
             } else {
-                VStack(alignment: .leading, spacing: 16) {
-                    if let takeoverNotice {
-                        takeoverNoticeText(takeoverNotice)
-                    }
-                    // The supplied full wordmark, not the mark beside typed
-                    // text. Its two ink variants follow the window appearance.
-                    if let wordmark = colorScheme == .dark
-                        ? AppAssets.wordmarkLightImage
-                        : AppAssets.wordmarkImage {
-                        Image(nsImage: wordmark)
-                            .resizable()
-                            .interpolation(.high)
-                            .scaledToFit()
-                            .frame(height: 28)
-                            .accessibilityLabel("Ciaobot")
-                            .accessibilityAddTraits(.isHeader)
-                    } else {
-                        // A missing asset drops only the image; the heading
-                        // stays, and the screen keeps working.
-                        Text("Ciaobot").font(.title.bold())
-                    }
-                    Text("Enter your server’s address.")
-                        .foregroundStyle(.secondary)
-                    if offersThisMac {
-                        HStack(spacing: 8) {
-                            Spacer(minLength: 8)
-                            Button(Self.useThisMacTitle) { useThisMac() }
-                                .disabled(busy)
-                                .accessibilityHint("Runs the Ciaobot engine bundled with this app on this Mac.")
-                        }
-                    }
-                    TextField("Server address", text: $address).textFieldStyle(.roundedBorder)
-                        .onSubmit(connect).disabled(busy)
-                    Toggle("Keep me signed in on this Mac", isOn: Binding(
-                        get: { keepSignedIn },
-                        set: { keepSignedInChoice = $0 }
-                    ))
-                        .disabled(!persistentOptionAvailable || busy)
-                    Text(persistenceExplanation)
-                        .font(.caption).foregroundStyle(.secondary)
-                    if let error { Text(error).foregroundStyle(.red) }
-                    if let candidate = addressOrigin, signIn.hasSavedSignIn(for: candidate, registryKey: sessionRegistryKey) {
-                        Button(forgetting ? "Forgetting…" : "Forget saved sign-in") { forget() }
-                            .disabled(busy)
-                    }
-                    if let forgetMessage {
-                        Text(forgetMessage).font(.caption).foregroundStyle(.secondary)
-                    }
-                    HStack {
-                        Button(checking ? "Checking…" : "Connect", action: connect)
-                            .keyboardShortcut(.defaultAction).disabled(busy)
-                        if checking { ProgressView().controlSize(.small) }
-                    }
-                    Text("The connection check confirms the server’s response format, not its identity. Sign in only if you trust the address.")
-                        .font(.caption).foregroundStyle(.secondary)
-                }.padding(32).frame(maxWidth: 520)
+                connectionScreen
             }
         }
         // The running-origin watcher stays mounted for the whole local-mode
@@ -802,13 +752,125 @@ struct ConnectionView: View {
         .onReceive(settledEvents) { applySettled($0) }
     }
 
-    private func takeoverNoticeText(_ text: String) -> some View {
-        Text(text)
-            .font(.caption)
-            .foregroundStyle(.secondary)
-            .fixedSize(horizontal: false, vertical: true)
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .accessibilityLabel(text)
+    /// The disconnected screen: one centered column that scrolls when the window
+    /// is too small for it. The bundled engine, when offered, is the one primary
+    /// choice; another server's address comes second.
+    private var connectionScreen: some View {
+        GeometryReader { proxy in
+            ScrollView {
+                VStack(spacing: 24) {
+                    wordmarkView
+                    if let connectionResult {
+                        ConnectionResultCard(
+                            result: connectionResult,
+                            onTryAgain: offersThisMac ? { useThisMac() } : nil,
+                            tryAgainDisabled: busy
+                        )
+                        .id(connectionResult.id)
+                        .transition(.opacity)
+                    }
+                    if offersThisMac {
+                        Button { useThisMac() } label: {
+                            Text(Self.useThisMacTitle).frame(maxWidth: .infinity)
+                        }
+                        .buttonStyle(.borderedProminent)
+                        .controlSize(.large)
+                        .disabled(busy)
+                        .accessibilityHint("Runs the Ciaobot engine bundled with this app on this Mac.")
+                        HStack(spacing: 12) {
+                            Rectangle().fill(.separator).frame(height: 1)
+                            Text("or connect to another server").foregroundStyle(.secondary).fixedSize()
+                            Rectangle().fill(.separator).frame(height: 1)
+                        }
+                        .accessibilityHidden(true)
+                    } else {
+                        Text("Enter your server’s address.").foregroundStyle(.secondary)
+                    }
+                    serverForm
+                }
+                .frame(maxWidth: 440)
+                .padding(24)
+                .frame(maxWidth: .infinity, minHeight: proxy.size.height)
+            }
+            .scrollBounceBehavior(.basedOnSize)
+        }
+        .animation(.easeOut(duration: 0.2), value: connectionResult?.id)
+    }
+
+    /// The supplied full wordmark, not the mark beside typed text. Its two ink
+    /// variants follow the window appearance.
+    @ViewBuilder
+    private var wordmarkView: some View {
+        if let wordmark = colorScheme == .dark
+            ? AppAssets.wordmarkLightImage
+            : AppAssets.wordmarkImage {
+            Image(nsImage: wordmark)
+                .resizable()
+                .interpolation(.high)
+                .scaledToFit()
+                .frame(height: 28)
+                .accessibilityLabel("Ciaobot")
+                .accessibilityAddTraits(.isHeader)
+        } else {
+            // A missing asset drops only the image; the heading stays, and the
+            // screen keeps working.
+            Text("Ciaobot").font(.title.bold())
+        }
+    }
+
+    private var serverForm: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            HStack(spacing: 8) {
+                TextField("Server address", text: $address)
+                    .textFieldStyle(.roundedBorder)
+                    .onSubmit(connect).disabled(busy)
+                Button(checking ? "Checking…" : "Connect", action: connect)
+                    .keyboardShortcut(.defaultAction)
+                    .disabled(busy || address.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                if checking { ProgressView().controlSize(.small) }
+            }
+            if let error {
+                Label(error, systemImage: "exclamationmark.triangle.fill")
+                    .foregroundStyle(.red)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            signInPersistenceControl
+            if let candidate = addressOrigin, signIn.hasSavedSignIn(for: candidate, registryKey: sessionRegistryKey) {
+                Button(forgetting ? "Forgetting…" : "Forget saved sign-in") { forget() }
+                    .disabled(busy)
+            }
+            if let forgetMessage {
+                Text(forgetMessage).font(.caption).foregroundStyle(.secondary)
+            }
+            Text("The check confirms the server’s response format, not its identity. Sign in only if you trust the address.")
+                .font(.caption).foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+    }
+
+    /// The toggle appears only where persistence can apply; otherwise one line
+    /// says why, so there is no disabled checkbox.
+    @ViewBuilder
+    private var signInPersistenceControl: some View {
+        switch SignInPersistenceHint.make(
+            origin: addressOrigin,
+            canPersist: persistentOptionAvailable,
+            explanation: persistenceExplanation
+        ) {
+        case .hidden:
+            EmptyView()
+        case .toggle(let help):
+            Toggle("Keep me signed in on this Mac", isOn: Binding(
+                get: { keepSignedIn },
+                set: { keepSignedInChoice = $0 }
+            ))
+            .disabled(busy)
+            .help(help)
+            .accessibilityHint(help)
+        case .line(let text):
+            Text(text).font(.caption).foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+        }
     }
 
     /// What the connection view does when it appears.
@@ -1062,10 +1124,11 @@ struct ConnectionView: View {
         localPhase = .idle
         engineDown = false
         onModeChange?(.local)
-        takeoverNotice = nil
+        connectionResult = nil
         // The 1.x takeover check (S7) runs first and starts the engine itself
         // once it settles on "no takeover" or "moved". Without it, start now.
         if let takeover {
+            connectionResult = .checking()
             takeover.startLocal()
         } else {
             supervisor.start()
@@ -1088,8 +1151,11 @@ struct ConnectionView: View {
     /// Every other outcome keeps the saved local choice, so the next launch tries
     /// again, and the screen offers Use Ciaobot on This Mac.
     func applyTakeover(_ outcome: EngineTakeover.Outcome) {
-        guard engineMode == .local else { return }
-        takeoverNotice = TakeoverCopy.notice(for: outcome)
+        guard engineMode == .local else {
+            if connectionResult?.kind == .checking { connectionResult = nil }
+            return
+        }
+        connectionResult = ConnectionResult(outcome: outcome)
         // The second engine-level rollback in a row persists the external choice,
         // so the launch after it does not repeat the move. The retry copy is the
         // rolled-back notice, which already says to use Use Ciaobot on This Mac.
@@ -1115,7 +1181,12 @@ struct ConnectionView: View {
         localPhase = .idle
         engineDown = false
         dropSession()
-        if let origin { connect(to: origin) }
+        if let origin {
+            // The existing Ciaobot's address stays in the field as the
+            // suggestion, even when the connection check below fails.
+            address = origin.url.absoluteString
+            connect(to: origin)
+        }
     }
 
     /// The status line for a tray switch: the probe in progress, then the reason
@@ -1292,6 +1363,7 @@ struct ConnectionView: View {
         localModel.reset()
         localPhase = .idle
         engineDown = false
+        if connectionResult?.kind == .checking { connectionResult = nil }
         dropSession()
     }
 }
