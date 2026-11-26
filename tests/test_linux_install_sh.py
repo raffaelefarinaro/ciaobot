@@ -156,6 +156,17 @@ if [ "$1" = "tool" ] && [ "$2" = "install" ]; then
 fi
 if [ "$1" = "run" ]; then
   # The preflight: run the repository's own checker, as the wheel would be.
+  # Real uv searches upward from the cwd for a pyproject.toml unless told not to.
+  dir=$PWD
+  no_project=0
+  for arg in "$@"; do [ "$arg" = "--no-project" ] && no_project=1; done
+  while [ "$dir" != "/" ] && [ "$no_project" = "0" ]; do
+    if [ -f "$dir/pyproject.toml" ]; then
+      echo "uv fake: would use the project at $dir" >&2
+      exit 9
+    fi
+    dir=$(dirname "$dir")
+  done
   while [ "$1" != "python" ]; do shift; done
   shift
   PYTHONPATH="{repo}" exec "{python}" "$@"
@@ -884,6 +895,7 @@ def test_preflight_runs_isolated_from_the_current_directory(tmp_path):
     workspace = _workspace_with_receipt(tmp_path, "migrated")
     harness.run("--wheel", str(harness.local_wheel()), "--workspace", str(workspace), "--no-service")
     (line,) = harness.lines_starting("uv run ")
+    assert " run --no-project --python " in line
     assert " python -P -m ciao.upgrade_preflight " in line
     # -P keeps a ./ciao folder in the current directory from shadowing the module.
     decoy = tmp_path / "decoy"
@@ -914,3 +926,17 @@ def test_unit_and_flag_workspaces_are_both_checked(tmp_path):
     assert result.returncode == 4
     assert str(bad) in result.stderr
     assert harness2.lines_starting("uv tool") == []
+
+
+def test_preflight_ignores_a_project_above_the_scratch_directory(tmp_path):
+    harness = Harness(tmp_path)
+    # TMPDIR inside a project: mktemp's scratch dir has a pyproject.toml above it.
+    project = tmp_path / "project"
+    scratch_root = project / "tmp"
+    scratch_root.mkdir(parents=True)
+    (project / "pyproject.toml").write_text('[project]\nname = "trap"\n', encoding="utf-8")
+    harness.tmp_root = scratch_root
+    workspace = _workspace_with_receipt(tmp_path, "migrated")
+    result = harness.run("--wheel", str(harness.local_wheel()), "--workspace", str(workspace), "--no-service")
+    assert result.returncode == 0, result.stderr
+    assert "would use the project" not in result.stderr

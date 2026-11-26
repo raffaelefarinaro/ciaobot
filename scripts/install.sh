@@ -370,8 +370,10 @@ fi
 # when given) with the wheel's own stdlib-only checker, before uv replaces the
 # installed engine; an unfinished migration, or a check that cannot run, stops
 # the install and leaves the 1.10 engine in place. Run from the scratch
-# directory (no project, nothing to shadow ciao) with python -P, so neither the
-# current directory nor a ./ciao folder can stand in for the wheel's module.
+# directory with --no-project (uv would otherwise search upward from it for a
+# pyproject.toml, e.g. when TMPDIR sits inside a project) and python -P, so
+# neither the current directory nor a ./ciao folder can stand in for the
+# wheel's module. --no-project is in uv 0.3.0, UV_MIN_VERSION (verified).
 case $wheel in
   /*) ;;
   *) wheel=$PWD/$wheel ;;
@@ -392,7 +394,7 @@ IFS='
 for pf_ws in $pf_dirs; do
   IFS=$pf_old_ifs
   if [ -n "$pf_ws" ] && [ -d "$pf_ws/.runtime" ]; then
-    (cd "$tmpd" && PYTHONPATH=$wheel "$uv" run --python "$PYTHON_VERSION" python -P -m ciao.upgrade_preflight "$pf_ws" </dev/null) || {
+    (cd "$tmpd" && PYTHONPATH=$wheel "$uv" run --no-project --python "$PYTHON_VERSION" python -P -m ciao.upgrade_preflight "$pf_ws" </dev/null) || {
       echo "install.sh: not upgrading $pf_ws; nothing was installed or changed." >&2
       exit 4
     }
