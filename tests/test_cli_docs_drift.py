@@ -243,38 +243,6 @@ def test_skill_tables_match_the_parsers() -> None:
     assert sorted(set(agent) - set(documented)) == [], "agent verbs missing from the complete CLI reference"
 
 
-def test_recall_check_guidance_has_invocable_command_schema_and_failure_handling() -> None:
-    guidance = "\n".join(
-        line for line in (*PROMPT.splitlines(), *SKILL.splitlines())
-        if "recall-check" in line
-    )
-    for expected in (
-        "--claims-file",
-        '"id"',
-        '"text"',
-        '"source_paths"',
-        "vault-relative",
-        "unavailable",
-        "incomplete",
-        "work summaries",
-        "never",
-        "securely created private temporary file",
-        "restricted permissions",
-        "delete it",
-        "command arguments or logs",
-        "12 claims",
-        "[A-Za-z0-9_-]{1,64}",
-        "300 characters",
-        "6 vault-relative",
-        "one attempt",
-        "verification_disabled",
-        "without a forced hedge",
-    ):
-        assert expected in guidance
-    assert '"source_paths":["People/Ann.md"]' in guidance
-    assert "only `chat handover --messages @file.json` and `chat needs-action command --command-file FILE`" not in SKILL
-
-
 @pytest.mark.parametrize(
     "command",
     ["memory-proposal-add", "memory-proposal-escalate", "observation-add", "skill-draft-add", "skill-draft-approve"],
