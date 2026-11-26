@@ -9,7 +9,10 @@ public struct StoreError: Error, Equatable, CustomStringConvertible {
 }
 
 /// A directory the daemon owns: owned by the effective uid, mode exactly 0700,
-/// never reached through a symlink. All file access is relative to the open
+/// never reached through a symlink. File access inside a directory is relative to
+/// its open descriptor. `subdirectory(_:)` reopens by path (`O_NOFOLLOW` on the
+/// final component, then the same owner and mode checks), so it is only as safe
+/// as its already-verified, owner-only parent: swapping a child needs the owner.
 /// descriptor, so swapping the path afterwards changes nothing. Files are 0600,
 /// owned by the same uid, and read with `O_NOFOLLOW`.
 final class PrivateDirectory {

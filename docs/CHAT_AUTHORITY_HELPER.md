@@ -490,7 +490,9 @@ What exists (`mac/Sources/CiaobotAuthority`, `CiaobotAuthorityDaemon`, tests in
   `state/` (blob, `event.seed`, `state.key`, `enrollment.json`, `.lock`) and
   `anchor/counter`. Opening requires every directory owned by the daemon's uid
   with mode exactly 0700, not a symlink, every file 0600, regular and read with
-  `O_NOFOLLOW` relative to the directory descriptor, and an exclusive `flock`
+  `O_NOFOLLOW` relative to the directory descriptor (the `state/` and
+  `anchor/` directories themselves are reopened by path from the verified
+  root, with the same checks), and an exclusive `flock`
   held for the process lifetime. Nothing is created or repaired at open: the
   keys and the anchor are made once by `provision`, the operator public key and
   the reader uid are stored once by `enroll` (no replace; it refuses an existing
@@ -520,6 +522,12 @@ Known residuals the security review should look at:
   second restore of the same blob is two behind and refused), but one
   restore of the previous genuine blob still undoes the latest write once. It is
   flagged in `health` so the app can warn; it is not prevented.
+* A failed blob write (`storage_failed`) happens after the anchor advanced. The
+  running daemon carries on (nothing was swapped in, the counter is consumed),
+  but a restart right after one failed write finds the blob one behind and
+  recovers (the failed command is lost); a restart after two failed writes in a
+  row finds it two behind and fails closed with `state_rollback` until the
+  admin reset. A successful write in between resynchronizes blob and anchor.
 * A crash between the anchor advance and the blob write of the recovery rewrite
   itself leaves the blob two behind: closed until the admin reset.
 * The Ed25519 signer above, and the `apply` harness (a root-only tool that
