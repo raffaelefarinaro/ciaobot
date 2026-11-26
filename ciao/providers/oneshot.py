@@ -61,7 +61,7 @@ async def run_oneshot(
     :func:`asyncio.wait_for`.
 
     ``max_turns`` is still accepted for the callers that count their attempts
-    (the behavioral eval's budget). No runner reads it now: an ACP one-shot is one
+    (a caller's own budget). No runner reads it now: an ACP one-shot is one
     prompt on one session.
 
     On a transient failure the call is retried up to ``max_retries`` times with

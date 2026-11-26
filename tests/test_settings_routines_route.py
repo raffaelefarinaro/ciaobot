@@ -184,23 +184,6 @@ def test_resume_after_restart_is_read_and_patched(monkeypatch, tmp_path):
     assert resp.status_code == 400
 
 
-def test_verify_vault_answers_is_read_and_patched(monkeypatch, tmp_path):
-    monkeypatch.setattr("shutil.which", lambda cmd, path=None: None)
-    client, _config = _make_client(tmp_path)
-    assert client.get("/api/settings/routines").json()["verify_vault_answers"] is True
-
-    resp = client.patch(
-        "/api/settings/routines", json={"verify_vault_answers": False}
-    )
-    assert resp.status_code == 200
-    assert resp.json()["verify_vault_answers"] is False
-
-    resp = client.patch(
-        "/api/settings/routines", json={"verify_vault_answers": "off"}
-    )
-    assert resp.status_code == 400
-
-
 def test_patch_applies_provider_routine_models(tmp_path):
     """Per-provider insights models are stored and applied."""
     client, config = _make_client(tmp_path)
@@ -281,3 +264,10 @@ def test_server_settings_patch_rejects_a_bad_host(monkeypatch, tmp_path):
     client, _config = _make_client(tmp_path)
     res = client.patch("/api/settings/routines", json={"pwa_host": "two words"})
     assert res.status_code == 400
+
+
+def test_patch_verify_vault_answers_is_ignored(tmp_path):
+    client, _config = _make_client(tmp_path)
+    resp = client.patch("/api/settings/routines", json={"verify_vault_answers": False})
+    assert resp.status_code == 200
+    assert "verify_vault_answers" not in resp.json()
