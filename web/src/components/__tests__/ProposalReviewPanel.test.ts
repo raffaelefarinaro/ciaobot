@@ -991,6 +991,39 @@ describe('shared-note review', () => {
     toast.unmount()
   })
 
+  it('shows the folder root, path, state and reason for a change Ciaobot will not write', async () => {
+    const share = row({ id: 'share-manual', kind: 'share', workspace: 'research' })
+    const sharePreview = preview({
+      id: share.id, workspace: share.workspace, kind: 'share',
+      operation: 'replace', before: 'old\n', after: 'new\n',
+      brain: 'Team folder', identity: 'folder:/cloud/team',
+      branch: '', path: 'notes/a.md', revision: 'manual-token',
+      link_kind: 'folder', blocked_reason: 'folder_update_unsupported',
+      folder_manual: {
+        root: '/cloud/team', path: 'notes/a.md', absolute_path: '/cloud/team/notes/a.md',
+        operation: 'replace', reviewed_version: 'sha256:aa', current_version: 'sha256:bb',
+        state: 'changed', reason: 'folder_update_unsupported',
+      },
+    })
+    apiGet.mockImplementation((url: string) => {
+      if (url.startsWith('/api/proposals/history')) return Promise.resolve({ rows: [], total: 0, truncated: false })
+      if (url.includes('/preview')) return Promise.resolve({ ok: true, preview: sharePreview })
+      return Promise.resolve({ rows: [share] })
+    })
+    const wrapper = mount(ProposalReviewPanel, { global: { plugins: [pinia] } })
+    await flushPromises()
+    await wrapper.find('.pr-row-action').trigger('click')
+    await flushPromises()
+    const manual = wrapper.get('[data-testid="folder-manual"]')
+    expect(manual.text()).toContain('/cloud/team')
+    expect(manual.text()).toContain('/cloud/team/notes/a.md')
+    expect(manual.text()).toContain('The note has changed since this review.')
+    expect(wrapper.get('.pr-card-error').text()).toContain('Make the change below by hand')
+    expect(wrapper.find('.pr-card button.btn-primary').exists()).toBe(false)
+    expect(wrapper.text()).toContain('Reject')
+    wrapper.unmount()
+  })
+
   it('shows a canonical publication refusal when rejecting a share review', async () => {
     const share = row({ id: 'share-pending', kind: 'share', workspace: 'research' })
     const sharePreview = preview({
