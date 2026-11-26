@@ -289,7 +289,7 @@ def test_startup_splits_after_the_reroot_and_before_the_index(tmp_path: Path) ->
     )
     reroot = source.index("migrate_if_needed, config")
     split = source.index("split_chat_logs, config")
-    index = source.index("_refresh_vault_index,")
+    index = source.index("_refresh_configured_vault_index,")
     registry = source.index("ProjectChatManager(")
 
     assert reroot < split < index < registry, (reroot, split, index, registry)
