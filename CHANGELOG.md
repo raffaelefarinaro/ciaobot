@@ -14,6 +14,7 @@
 - **MCP is managed in each agent's CLI.** Settings → MCP servers and Chat details → MCP open `claude mcp` or `opencode mcp`. There are no Ciaobot sign-in cards, on/off toggles or automatic reloads; servers you turned off stay off. A running chat picks up changes after `ciao chat reload` or in a new chat.
 - **Google Workspace is no longer built in.** The Google account card, `ciao gws` and the Google skills are gone. Connect Google through your agent instead: Claude's and Codex's own Google connectors, or the Google Workspace MCP server (see https://www.raffaelefarinaro.com/ciaobot/companions.html#google). Existing `secrets/gws*` folders are left in place.
 - **Question cards are not shown.** When the agent asks a multiple-choice question, it asks in plain text; 2.0 has no question card yet.
+- **Claude trims more by default.** The MCP resource tools (list/read MCP resources), `PublishPlugin`, `ShareOnboardingGuide` and the slides and whiteboard skills are off by default. If your MCP servers serve resources, turn the MCP resource tools back on in Settings.
 - **Mac: install the 2.0 app once by hand.** Download `Ciaobot-<version>.dmg` from this release, open it and drag Ciaobot to Applications. A 1.x install does not update itself to the 2.0 app; after this one manual install, the app updates itself.
 - **Moving from 1.x:** https://www.raffaelefarinaro.com/ciaobot/migrate.html
 
