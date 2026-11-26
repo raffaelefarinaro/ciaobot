@@ -21,7 +21,7 @@ from pathlib import Path
 from ciao import note_receipts
 from ciao.entity_types import EntityType, EntityTypeRegistry, load_entity_types
 from ciao.frontmatter import yaml_scalar
-from ciao.memory_proposals import portable_name_problem, safe_note_stem
+from ciao.file_kernel import portable_name_problem, safe_note_stem
 from ciao.vault_index import is_reserved_bookkeeping
 
 MAX_NOTE_FILE_BYTES = 256 * 1024

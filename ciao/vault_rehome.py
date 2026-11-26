@@ -18,8 +18,8 @@ substitution with no decision in it — the same bar `vault_migration` uses for
 "apply aliased renames, report the rest". A note with **no** workspace-naming tag
 is a real judgement call about someone's relationship to the user, which a
 migration has no business guessing: those are written to the workspace's
-`Workspace/Memory-Proposals.md` queue (the promote/dismiss surface that already
-exists) and **never moved**.
+`Workspace/Unsure.md` list (tick a line to approve it, delete it to drop it) and
+**never moved**.
 
 The signal is a tag → *role* map, not a tag → directory map. Workspace names
 belong to the user: an install may have `home`/`office`, or one workspace, or
@@ -90,7 +90,7 @@ from typing import Any
 
 from ciao.entity_types import EntityTypeRegistry, load_entity_types
 from ciao.frontmatter import split_frontmatter
-from ciao.memory_proposals import MemoryProposal, append_proposals
+from ciao.unsure_list import UnsureItem, append_unsure, unsure_path
 from ciao.vault_index import (
     DIR_TYPE_MAP,
     EXCLUDED_TOP_DIRS,
@@ -192,7 +192,6 @@ ROLE_WORKSPACE_NAMES: dict[str, tuple[str, ...]] = {
     "personal": ("personal", "private", "home"),
 }
 
-PROPOSAL_TARGET = "rehome"
 PROPOSAL_SOURCE = "vault-rehome"
 
 
@@ -515,12 +514,12 @@ class Candidate:
             "tags": list(self.tags),
         }
 
-    def as_proposal(self) -> MemoryProposal:
-        """Render as a queue entry mirroring the memory-proposal bullet shape.
+    def as_unsure_item(self) -> UnsureItem:
+        """Render as an Unsure-list item.
 
         The path is backticked, which also keeps it out of the reference-rewriting
-        pass (inline code is excluded): a queue entry is a historical record of
-        what was proposed, not an edge that should follow the note around.
+        pass (inline code is excluded): a list line is a record of what was
+        asked, not an edge that should follow the note around.
         """
         where = f"`{self.destination}`" if self.destination else "another workspace"
         text = (
@@ -528,9 +527,7 @@ class Candidate:
             f"Uncertain: {self.reason}. Move it and its links with "
             f"`ciao vault-rehome --apply` only after tagging it."
         )
-        return MemoryProposal(
-            target=PROPOSAL_TARGET, text=text, source_section=PROPOSAL_SOURCE
-        )
+        return UnsureItem(text=text, source=PROPOSAL_SOURCE)
 
 
 def _counterpart(
@@ -1897,15 +1894,14 @@ def rehome_vault_people(
 def _queue_judgement_cases(
     vault_root: Path, cases: list[dict[str, Any]]
 ) -> list[str]:
-    """File the judgement cases in each workspace's proposal queue.
+    """Put the judgement cases on each workspace's Unsure list.
 
     Per workspace, not one global file: that is where the user already reviews
-    that workspace's proposals, and `ciao memory-proposal-dismiss` already knows
-    how to remove an entry there. Grouped by the workspace the note is in *today*,
-    since that is the vault whose curator has to make the call.
+    that workspace's open questions. Grouped by the workspace the note is in
+    *today*, since that is the vault whose curator has to make the call.
     """
     written: list[str] = []
-    grouped: dict[str, list[MemoryProposal]] = defaultdict(list)
+    grouped: dict[str, list[UnsureItem]] = defaultdict(list)
     for case in cases:
         candidate = Candidate(
             path=case["path"],
@@ -1915,15 +1911,15 @@ def _queue_judgement_cases(
             bucket="needs_judgement",
             reason=case.get("reason", ""),
         )
-        grouped[case["workspace"]].append(candidate.as_proposal())
+        grouped[case["workspace"]].append(candidate.as_unsure_item())
     for workspace, proposals in sorted(grouped.items()):
         try:
-            path = append_proposals(proposals, vault_root / workspace)
+            added = append_unsure(vault_root / workspace, proposals)
         except OSError:
-            logger.exception("vault-rehome: could not queue proposals for %s", workspace)
+            logger.exception("vault-rehome: could not list judgement cases for %s", workspace)
             continue
-        if path is not None:
-            written.append(str(path))
+        if added:
+            written.append(str(unsure_path(vault_root / workspace)))
     return written
 
 

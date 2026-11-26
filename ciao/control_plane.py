@@ -975,6 +975,7 @@ def _file_review_proposal(
     success). The verdict stands and its check is recorded either way, so a
     failure has to reach the caller: the note was judged, and nobody was asked.
     """
+    from ciao import file_kernel as fk
     operation = {
         nv.RETIRE: nep.RETIRE,
         nv.STILL_VALID: nep.RESTAMP,
@@ -1017,7 +1018,7 @@ def _file_review_proposal(
         # after the check and its cooldown were already recorded. The note was
         # judged and nobody was asked, and the agent was told the call failed
         # rather than told a verdict exists with a filing error against it.
-        mr.QueueLockError,
+        fk.QueueLockError,
         OSError,
     ) as exc:
         return None, (
@@ -1109,6 +1110,7 @@ def _file_entry_review_proposal(
     the verdict was about, so a stale payload cannot file a splice at offsets that
     now mean other words.
     """
+    from ciao import file_kernel as fk
     from ciao import note_receipts as nr
 
     operation = {
@@ -1174,7 +1176,7 @@ def _file_entry_review_proposal(
         nep.NoteEditError,
         ev.EntryCheckRefused,
         mr.MemoryReceiptError,
-        mr.QueueLockError,
+        fk.QueueLockError,
         OSError,
     ) as exc:
         return None, (
@@ -1817,7 +1819,7 @@ class CiaoControlPlane:
         """
         from ciao import learning_records as lr
         from ciao import memory_proposals
-        from ciao.memory_receipts import QueueLockError, queue_lock
+        from ciao.file_kernel import QueueLockError, queue_lock
         from ciao.redact import redact_text
 
         if not self._memory_learning_turn(principal):

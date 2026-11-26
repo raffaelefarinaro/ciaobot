@@ -24,6 +24,7 @@ from typing import Any
 
 from ciao import memory_audit
 from ciao import memory_receipts as mr
+from ciao import file_kernel as fk
 from ciao import note_receipts as nr
 from ciao import note_verification as nv
 from ciao import vault_index
@@ -190,7 +191,7 @@ def find_related_notes(
             relations.append(MENTIONS)
         if not relations:
             continue
-        revision = mr.content_revision(text)
+        revision = fk.content_revision(text)
         note = RelatedNote(
             relative_path=relative,
             title=other.title or relative,
@@ -208,7 +209,7 @@ def find_related_notes(
     return RelatedNotes(
         relative_path=target_key,
         title=title,
-        revision=mr.content_revision(target_text),
+        revision=fk.content_revision(target_text),
         related=kept,
         truncated=len(matches) - len(kept),
     )

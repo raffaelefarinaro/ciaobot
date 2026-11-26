@@ -849,7 +849,7 @@ def _generate_candidates(
     # and every row below is compared against the note's *current* revision — so
     # a check about text that has since been replaced is reported as a conflict
     # rather than as a pending question.
-    from ciao import memory_receipts as mr
+    from ciao import file_kernel as fk
     from ciao.entry_verification import read_entry_checks
     from ciao.note_verification import read_note_checks
 
@@ -943,7 +943,7 @@ def _generate_candidates(
         # that recorded it — which is why `unverified` did not fire for it
         # either.
         relative = Path(path).relative_to("memory-vault").as_posix()
-        revision = mr.content_revision(text)
+        revision = fk.content_revision(text)
         check = note_checks.get(relative)
         check_state = (
             verification_evidence(check, revision, relative)

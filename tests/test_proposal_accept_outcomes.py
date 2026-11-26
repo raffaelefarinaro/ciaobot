@@ -24,6 +24,7 @@ from typing import Any
 import pytest
 
 from ciao import memory_proposals, memory_receipts as mr, memory_tool, project_doc_update
+from ciao import file_kernel as fk
 from ciao.config import CiaoConfig, WorkspaceConfig
 from ciao.web import proposal_service
 from ciao.web.proposal_service import AcceptOutcome
@@ -415,7 +416,7 @@ def _note_edit_fixture(
     fields: dict[str, Any] = {
         "workspace": "personal",
         "relative_path": NOTE,
-        "expected_revision": mr.content_revision(before_text),
+        "expected_revision": fk.content_revision(before_text),
         "operation": nep.REPLACE,
         "before": PLAIN,
         "after": FOURTH,

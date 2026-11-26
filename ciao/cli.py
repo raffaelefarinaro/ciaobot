@@ -5543,7 +5543,8 @@ def _memory_proposal_dismiss_command(args: argparse.Namespace) -> int:
     # removal re-uses the needle form that matched (see `removal_needle`
     # below), so both name the same row without the remover having to match on
     # a text that is a prefix of another queued bullet's.
-    from ciao.memory_receipts import queue_lock, queue_resolution
+    from ciao.memory_receipts import queue_resolution
+    from ciao.file_kernel import queue_lock
     from ciao.proposal_kinds import parse_bullet
 
     with queue_lock(path):

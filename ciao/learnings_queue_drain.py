@@ -19,7 +19,7 @@ from ciao.memory_proposals import (
     record_promotion,
     render_learning_append,
 )
-from ciao.memory_receipts import content_revision, queue_lock
+from ciao.file_kernel import content_revision, queue_lock
 from ciao.os_support.private import is_private_descriptor_strict, mkstemp_private
 
 SCHEMA = 2

@@ -72,6 +72,15 @@ def test_extraction_prompt_defines_every_destination() -> None:
         )
 
 
+def _hint(item) -> tuple[str, str]:  # type: ignore[no-untyped-def]
+    """The destination and payload an admitted row carries in its suggested-destination hint."""
+    import re
+
+    match = re.search(r"\(suggested destination: (\S+)(?: (.*?))?\)$", item.text)
+    assert match is not None, item.text
+    return match.group(1), match.group(2) or ""
+
+
 def test_extraction_examples_parse_with_the_production_parser() -> None:
     examples = _examples(EXTRACTION_SYSTEM_PROMPT)
     assert len(examples) == 5
@@ -88,10 +97,10 @@ def test_extraction_examples_parse_with_the_production_parser() -> None:
             assert proposal is not None, reason
             admitted_all.append((row, proposal))
     assert any(_parse_rows(o) == [] for _, o in examples)
-    by_destination = {proposal.target: proposal for _, proposal in admitted_all}
+    by_destination = {_hint(proposal)[0]: proposal for _, proposal in admitted_all}
     assert set(by_destination) == {"project", "people", "profile", "review"}
-    assert by_destination["project"].payload == "Projects/Billing/Billing.md"
-    assert by_destination["people"].payload == "Dana Reyes"
+    assert _hint(by_destination["project"])[1] == "Projects/Billing/Billing.md"
+    assert _hint(by_destination["people"])[1] == "Dana Reyes"
     assert by_destination["review"].text.startswith("A CI job")
 
 
@@ -119,7 +128,7 @@ def test_an_imported_learning_is_admitted_to_review_after_legacy_kind_removal(
         known_chat_ids=(),
     )
     assert proposal is not None, reason
-    assert proposal.target == "review"
+    assert _hint(proposal)[0] == "review"
 
 
 def test_reconcile_examples_parse_with_the_production_parser() -> None:

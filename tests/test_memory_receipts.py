@@ -27,6 +27,7 @@ import pytest
 
 from ciao import memory_proposals as mp
 from ciao import memory_receipts as mr
+from ciao import file_kernel as fk
 from ciao import memory_tool as mt
 from ciao.os_support.private import is_private
 
@@ -185,7 +186,7 @@ def test_competing_managed_writes_report_conflict_not_lost_write(tmp_path, monke
 
     guide = _guide(tmp_path, memory=["Original."])
     entries, _ = mt.read_region(guide, "memory")
-    expected = mr.content_revision(mt.serialize_entries(entries))
+    expected = fk.content_revision(mt.serialize_entries(entries))
     # A concurrent managed write lands.
     mt.update_region(guide, "memory", action="add", entry="Concurrent fact.")
 
@@ -553,8 +554,8 @@ def test_recovery_applied_when_crash_landed_after_the_write(tmp_path):
         "kind": "region_apply",
         "guide": str(guide),
         "region": "memory",
-        "before_revision": mr.content_revision(before),
-        "after_revision": mr.content_revision(after),
+        "before_revision": fk.content_revision(before),
+        "after_revision": fk.content_revision(after),
         "before_text": before,
         "after_text": after,
         "fact_text": "fact two",
@@ -583,8 +584,8 @@ def test_recovery_rolled_back_when_write_never_landed(tmp_path):
         "kind": "region_apply",
         "guide": str(guide),
         "region": "memory",
-        "before_revision": mr.content_revision(before),
-        "after_revision": mr.content_revision(after),
+        "before_revision": fk.content_revision(before),
+        "after_revision": fk.content_revision(after),
         "before_text": before,
         "after_text": after,
         "status": mr.PREPARED,
@@ -607,8 +608,8 @@ def test_recovery_conflicts_when_neither_image_matches(tmp_path):
         "kind": "region_apply",
         "guide": str(guide),
         "region": "memory",
-        "before_revision": mr.content_revision(before),
-        "after_revision": mr.content_revision(after),
+        "before_revision": fk.content_revision(before),
+        "after_revision": fk.content_revision(after),
         "before_text": before,
         "after_text": after,
         "status": mr.PREPARED,
@@ -641,8 +642,8 @@ def test_crash_between_guide_write_and_outcome_recovers_once(tmp_path):
         "guide": str(guide),
         "region": "memory",
         "vault_root": str(vault),
-        "before_revision": mr.content_revision(before),
-        "after_revision": mr.content_revision(after),
+        "before_revision": fk.content_revision(before),
+        "after_revision": fk.content_revision(after),
         "before_text": before,
         "after_text": after,
         "fact_text": "Recovered fact.",
@@ -1014,8 +1015,8 @@ def test_queue_lock_is_reentrant_within_a_thread(tmp_path):
     queue.parent.mkdir(parents=True, exist_ok=True)
     queue.write_text("# Memory Proposals\n\n", encoding="utf-8")
 
-    with mr.queue_lock(queue):
-        with mr.queue_lock(queue):
+    with fk.queue_lock(queue):
+        with fk.queue_lock(queue):
             inner = True
     assert inner
 
@@ -1060,7 +1061,7 @@ def test_undo_holds_the_queue_lock_across_read_and_replace(tmp_path):
 
     def undo() -> None:
         try:
-            with mr.queue_lock(queue):
+            with fk.queue_lock(queue):
                 pass
             mr.undo_receipt(rid, vault_root=tmp_path)
         except Exception as exc:  # noqa: BLE001 — captured for the assertion
@@ -1068,7 +1069,7 @@ def test_undo_holds_the_queue_lock_across_read_and_replace(tmp_path):
         finally:
             done.set()
 
-    with mr.queue_lock(queue):
+    with fk.queue_lock(queue):
         t = threading.Thread(target=undo)
         t.start()
         # The undo is blocked on the lock; a newer writer lands its update.
@@ -1093,7 +1094,7 @@ def test_queue_lock_refuses_to_write_when_held(tmp_path):
     queue = tmp_path / "Workspace" / "Memory-Proposals.md"
     queue.parent.mkdir(parents=True, exist_ok=True)
     queue.write_text("# Memory Proposals\n\n", encoding="utf-8")
-    lock_path = mr._queue_lock_path(str(queue.resolve()))
+    lock_path = fk.lock_path_for(str(queue.resolve()))
     lock_path.parent.mkdir(parents=True, exist_ok=True)
     handle = lock_path.open("a+", encoding="utf-8")
     lock_exclusive(handle.fileno())
@@ -1101,9 +1102,9 @@ def test_queue_lock_refuses_to_write_when_held(tmp_path):
 
     def contender() -> None:
         try:
-            with mr.queue_lock(queue, timeout_s=0.2):
+            with fk.queue_lock(queue, timeout_s=0.2):
                 acquired.set()
-        except mr.QueueLockError:
+        except fk.QueueLockError:
             pass
 
     t = threading.Thread(target=contender)
@@ -1121,11 +1122,11 @@ def test_queue_lock_file_lives_outside_the_vault(tmp_path):
     queue.parent.mkdir(parents=True, exist_ok=True)
     queue.write_text("# Memory Proposals\n\n", encoding="utf-8")
 
-    with mr.queue_lock(queue):
+    with fk.queue_lock(queue):
         pass
 
     assert not (queue.parent / f"{queue.name}.lock").exists()
-    assert mr._queue_lock_path(str(queue.resolve())).exists()
+    assert fk.lock_path_for(str(queue.resolve())).exists()
 
 
 def test_write_queue_atomically_keeps_the_old_file_on_failure(tmp_path, monkeypatch):
@@ -1149,7 +1150,7 @@ def test_write_queue_atomically_keeps_the_old_file_on_failure(tmp_path, monkeypa
 
     monkeypatch.setattr(Path, "write_text", boom)
     with pytest.raises(OSError):
-        mr.write_queue_atomically(queue, "# Memory Proposals\n\n")
+        fk.write_queue_atomically(queue, "# Memory Proposals\n\n")
 
     assert queue.read_text(encoding="utf-8") == original
 
@@ -1356,7 +1357,7 @@ def test_recovered_queue_receipt_stays_undoable(tmp_path, monkeypatch):
             "kind": "queue_resolve",
             "queue": str(queue),
             "removed_text": "Keep every fact.",
-            "before_revision": mr.content_revision(before),
+            "before_revision": fk.content_revision(before),
             "before_text": before,
             "status": mr.PREPARED,
         },
@@ -1991,8 +1992,8 @@ def test_recover_memory_journals_covers_every_workspace_vault(tmp_path):
             "kind": "region_apply",
             "guide": str(guide),
             "region": "memory",
-            "before_revision": mr.content_revision(before),
-            "after_revision": mr.content_revision(after),
+            "before_revision": fk.content_revision(before),
+            "after_revision": fk.content_revision(after),
             "before_text": before,
             "after_text": after,
             "status": mr.PREPARED,
@@ -2025,8 +2026,8 @@ def test_recovery_scans_the_guide_local_fallback_journal(tmp_path):
             "kind": "region_apply",
             "guide": str(guide),
             "region": "memory",
-            "before_revision": mr.content_revision(before),
-            "after_revision": mr.content_revision(after),
+            "before_revision": fk.content_revision(before),
+            "after_revision": fk.content_revision(after),
             "before_text": before,
             "after_text": after,
             "status": mr.PREPARED,
@@ -2367,7 +2368,7 @@ def test_write_queue_atomically_stores_the_text_exactly(tmp_path):
     on every OS (a Windows text-mode write used to turn `\r\n` into `\r\r\n`)."""
     for name, text in [("crlf.md", "# L\r\n\r\n- [a] x\r\n"), ("lf.md", "# L\n\n- [a] x\n")]:
         path = tmp_path / name
-        mr.write_queue_atomically(path, text)
+        fk.write_queue_atomically(path, text)
         assert path.read_bytes() == text.encode("utf-8")
 
 
@@ -2390,7 +2391,7 @@ def test_a_stale_expected_revision_conflicts_and_leaves_the_guide_alone(tmp_path
         target="memory",
         text="New fact.",
         vault_root=tmp_path,
-        expected_revision=mr.content_revision("a body that is not the live one"),
+        expected_revision=fk.content_revision("a body that is not the live one"),
     )
     assert outcome == "conflict"
     assert guide.read_bytes() == before
@@ -2405,7 +2406,7 @@ def test_a_matching_expected_revision_writes(tmp_path):
         target="memory",
         text="New fact.",
         vault_root=tmp_path,
-        expected_revision=mr.content_revision(mt.serialize_entries(entries)),
+        expected_revision=fk.content_revision(mt.serialize_entries(entries)),
     )
     assert outcome == "written"
     assert "New fact." in _entries(guide)
@@ -2470,7 +2471,7 @@ def test_a_stale_digest_with_refused_authority_is_a_conflict(tmp_path):
         target="memory",
         text="New fact.",
         vault_root=tmp_path,
-        expected_revision=mr.content_revision("a body that is not the live one"),
+        expected_revision=fk.content_revision("a body that is not the live one"),
         authorize=_grant(False),
     )
     assert outcome == "conflict"
@@ -2486,7 +2487,7 @@ def test_a_stale_digest_cannot_settle_a_covered_fact(tmp_path):
         text="Near fact.",
         vault_root=tmp_path,
         decision={"action": "covered"},
-        expected_revision=mr.content_revision("a body that is not the live one"),
+        expected_revision=fk.content_revision("a body that is not the live one"),
     )
     assert outcome == "conflict"
     assert _consolidations(tmp_path) == ""
@@ -2533,7 +2534,7 @@ def test_a_stale_update_leaves_no_consolidation_line(tmp_path):
         text="Merged fact.",
         vault_root=tmp_path,
         decision=dict(_UPDATE),
-        expected_revision=mr.content_revision("a body that is not the live one"),
+        expected_revision=fk.content_revision("a body that is not the live one"),
     )
     assert outcome == "conflict"
     assert _entries(guide) == ["Existing fact."]
@@ -2582,7 +2583,7 @@ def test_authority_is_checked_once_on_a_plain_write_and_not_on_settled_or_confli
 
     outcome, _ = mp.accept_region_fact(
         guide_path=guide, target="memory", text="Another fact.", vault_root=tmp_path,
-        expected_revision=mr.content_revision("stale"), authorize=counted,
+        expected_revision=fk.content_revision("stale"), authorize=counted,
     )
     assert outcome == "conflict"
     assert calls == []
@@ -2613,7 +2614,7 @@ def test_an_authority_check_that_raises_fails_closed(tmp_path):
 def test_destination_revision_is_the_digest_the_commit_compares(tmp_path):
     guide = _guide(tmp_path, memory=["Existing fact."])
     entries, _ = mt.read_region(guide, "memory")
-    assert mr.destination_revision(entries) == mr.content_revision(
+    assert mr.destination_revision(entries) == fk.content_revision(
         mt.serialize_entries(entries)
     )
     outcome, _ = mp.accept_region_fact(
@@ -2781,8 +2782,8 @@ def _interrupted_region_receipt(tmp_path, guide, **extra):
         "guide": str(guide),
         "region": "memory",
         "vault_root": str(tmp_path),
-        "before_revision": mr.content_revision(before),
-        "after_revision": mr.content_revision(after),
+        "before_revision": fk.content_revision(before),
+        "after_revision": fk.content_revision(after),
         "before_text": before,
         "after_text": after,
         "fact_text": "Recovered fact.",

@@ -91,6 +91,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 from ciao import memory_receipts as mr
+from ciao import file_kernel as fk
 from ciao import note_receipts as nr
 
 # The stamp itself belongs to `vault_review`: it is the same parse that decides
@@ -944,7 +945,7 @@ def update_check_state(
     already left the file untouched for the same reason.
     """
     path = note_check_state_path(vault_root)
-    with mr.queue_lock(path):
+    with fk.queue_lock(path):
         document, skipped = _load_check_document(path)
         if skipped:
             raise NoteCheckRefused(
@@ -956,7 +957,7 @@ def update_check_state(
             for name, row in _readable_note_rows(path, document["notes"]).items()
         }
         mutate(document)
-        mr.write_queue_atomically(
+        fk.write_queue_atomically(
             path,
             json.dumps(document, indent=2, sort_keys=True, ensure_ascii=False) + "\n",
         )
@@ -1150,7 +1151,7 @@ def _store(vault_root: Path, check: NoteCheck) -> tuple[NoteCheck, str]:
     """
     try:
         record_note_check(vault_root, check)
-    except (mr.MemoryReceiptError, mr.QueueLockError, OSError) as exc:
+    except (mr.MemoryReceiptError, fk.QueueLockError, OSError) as exc:
         logger.error("note verification: could not record the check: %s", exc)
         return check, str(exc)
     return check, ""
@@ -1226,7 +1227,7 @@ def verify_note(
         return VerificationResult(
             status=FAILED, message=f"the note could not be read as UTF-8: {exc}"
         )
-    current = mr.content_revision(note_text)
+    current = fk.content_revision(note_text)
 
     # A caller bug is reported before anything else, including before the
     # cooldown: an outcome this version cannot interpret must say so, not hide
@@ -1313,7 +1314,7 @@ def verify_note(
         # nothing is recorded, so the caller can re-read it and judge the text
         # that is actually there.
         return VerificationResult(status=CONFLICT, message=str(exc))
-    except (mr.MemoryReceiptError, mr.QueueLockError, OSError) as exc:
+    except (mr.MemoryReceiptError, fk.QueueLockError, OSError) as exc:
         # A journal that would not record, a lock this thread could not take, a
         # filesystem that said no. All three are reported rather than raised:
         # this function's contract is one result per note, and a caller running
@@ -1330,7 +1331,7 @@ def verify_note(
             request,
             plan,
             key=key,
-            revision=mr.content_revision(plan.after_text),
+            revision=fk.content_revision(plan.after_text),
             receipt_id=receipt_id,
             today=day,
         ),

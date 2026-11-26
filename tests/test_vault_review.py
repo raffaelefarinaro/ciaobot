@@ -2472,12 +2472,12 @@ def _check(root: Path, relative: str, text: str, **fields):
     """Record one check against the note's CURRENT text, and return it."""
     from datetime import timedelta
 
-    from ciao import memory_receipts as mr
+    from ciao import file_kernel as fk
     from ciao import note_verification as nv
 
     check = nv.NoteCheck(
         relative_path=relative,
-        content_revision=mr.content_revision(text),
+        content_revision=fk.content_revision(text),
         outcome=fields.pop("outcome", "unverified"),
         checked_at=fields.pop("checked_at", _PINNED.date()),
         retry_after=fields.pop(
@@ -2564,6 +2564,7 @@ def test_a_proposal_is_the_sole_reason_suppresses_the_duplicate_candidate(
     Offering Still true and Retire here would ask the same question twice, in
     two places, with the two answers free to disagree.
     """
+    from ciao import file_kernel as fk
     path = tmp_path / "Notes/Lonely.md"
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(
@@ -2593,11 +2594,10 @@ def test_a_proposal_is_the_sole_reason_suppresses_the_duplicate_candidate(
     assert row is None
     # The note is still discoverable where it is being decided: the check names
     # the queue row, and nothing was written to the note.
-    from ciao import memory_receipts as mr
     from ciao.note_verification import should_check
 
     assert not should_check(
-        tmp_path, "Notes/Lonely.md", mr.content_revision(text), today=_PINNED.date()
+        tmp_path, "Notes/Lonely.md", fk.content_revision(text), today=_PINNED.date()
     )
     assert path.read_text(encoding="utf-8") == text
 
@@ -2609,6 +2609,7 @@ def test_a_conflicted_proposal_gives_the_queue_its_actions_back(tmp_path: Path) 
     the note with nobody asking about it at all: the proposal cannot be applied
     and the queue had withdrawn. The row comes back, labelled.
     """
+    from ciao import file_kernel as fk
     note = _stale_note(tmp_path)
     stale_text = note.read_text(encoding="utf-8")
     _check(
@@ -2632,13 +2633,12 @@ def test_a_conflicted_proposal_gives_the_queue_its_actions_back(tmp_path: Path) 
     assert payload["retirement_offered"] is True
     assert "unverified" in row.signals
     # And the note is due to be checked again.
-    from ciao import memory_receipts as mr
     from ciao.note_verification import should_check
 
     assert should_check(
         tmp_path,
         "People/Old.md",
-        mr.content_revision(note.read_text(encoding="utf-8")),
+        fk.content_revision(note.read_text(encoding="utf-8")),
         today=_PINNED.date(),
     )
 

@@ -90,7 +90,7 @@ from dataclasses import dataclass, replace
 from datetime import date
 from typing import Any
 
-from ciao.memory_receipts import content_revision
+from ciao.file_kernel import content_revision
 
 # ── Constants ──────────────────────────────────────────────────────────────
 

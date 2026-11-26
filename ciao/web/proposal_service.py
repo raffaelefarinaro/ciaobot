@@ -29,7 +29,7 @@ from ciao import proposal_kinds
 from ciao import proposal_tracking
 from ciao import skill_proposals
 from ciao import vault_rehome
-from ciao.fact_candidates import external_anchor
+from ciao.import_decouple import external_anchor
 from ciao.memory_tool import resolve_region
 from ciao.workspace_guide import guide_path
 
@@ -142,11 +142,8 @@ def _sweep_queue_file(
     other request while another writer holds the lock. Returns the count and,
     when a rewrite landed, the per-fact fields the caller records.
     """
-    from ciao.memory_receipts import (
-        queue_lock,
-        queue_resolution_multi,
-        write_queue_atomically,
-    )
+    from ciao.memory_receipts import queue_resolution_multi
+    from ciao.file_kernel import queue_lock, write_queue_atomically
 
     result: dict[str, Any] = {
         "removed": 0,
@@ -226,11 +223,8 @@ def _rewrite_queue_single(
     synchronous sleep, so this must not run on the event loop. Returns whether
     this call actually removed the bullet.
     """
-    from ciao.memory_receipts import (
-        queue_lock,
-        queue_resolution,
-        write_queue_atomically,
-    )
+    from ciao.memory_receipts import queue_resolution
+    from ciao.file_kernel import queue_lock, write_queue_atomically
 
     with queue_lock(queue):
         lines = queue.read_text(encoding="utf-8").splitlines()
@@ -268,11 +262,8 @@ def _rewrite_queue_batch(
     doing this on the event loop would freeze unrelated requests while another
     writer holds the lock. Returns the ids whose bullets this call removed.
     """
-    from ciao.memory_receipts import (
-        queue_lock,
-        queue_resolution_multi,
-        write_queue_atomically,
-    )
+    from ciao.memory_receipts import queue_resolution_multi
+    from ciao.file_kernel import queue_lock, write_queue_atomically
 
     with queue_lock(queue):
         lines = queue.read_text(encoding="utf-8").splitlines()
@@ -350,7 +341,7 @@ def bullets_present(queue: Path, rows: Sequence[tuple[int, str]]) -> set[int]:
     the event loop. Returns line indices, matching the `keep_lines` the batch
     rewrite already speaks in.
     """
-    from ciao.memory_receipts import queue_lock
+    from ciao.file_kernel import queue_lock
 
     with queue_lock(queue):
         try:
@@ -377,7 +368,7 @@ def _claim_key(queue: Path, proposal_id: str) -> str:
     `queue_lock` uses, so a claim and the file lock name the same queue instead
     of the codebase growing a second notion of queue identity.
     """
-    from ciao.memory_receipts import lock_path_for
+    from ciao.file_kernel import lock_path_for
 
     try:
         resolved = str(queue.resolve())
@@ -667,12 +658,12 @@ def _note_edit_moved(proposal: Any, current: str) -> bool:
     which reads the note's current text and would otherwise have nothing to
     check it against.
     """
-    from ciao import memory_receipts as mr
+    from ciao import file_kernel as fk
 
     if not current:
         return False
     expected: str = str(proposal.expected_revision)
-    return bool(mr.content_revision(current) != expected)
+    return bool(fk.content_revision(current) != expected)
 
 
 _CHANGED_SINCE = "this note changed since the proposal was filed"
@@ -1193,7 +1184,7 @@ def _dismiss_skill_proposal(ctx: dict[str, Any]) -> dict[str, Any]:
     take: a refusal to write unlocked is a refusal to decide, and the handler's
     contract is a structured ``ok: false`` rather than a 500.
     """
-    from ciao.memory_receipts import QueueLockError
+    from ciao.file_kernel import QueueLockError
 
     config = ctx.get("config")
     if config is None:
@@ -1837,6 +1828,7 @@ def _accept_repo_row(
     config, row: dict[str, Any], linked_repos: Sequence[str]
 ) -> AcceptOutcome:
     """Append an accepted `[repo <path>]` fact to the linked repository's AGENTS.md."""
+    from ciao import file_kernel as fk
     from ciao import memory_receipts as mr
     from ciao import note_receipts as nr
 
@@ -1852,7 +1844,7 @@ def _accept_repo_row(
         receipt = nr.append_repo_doc_item(
             vault_root=vault,
             repo_root=doc.parent,
-            expected_revision=mr.content_revision(text),
+            expected_revision=fk.content_revision(text),
             item=item,
             actor="proposal-accept",
             source="pwa",
@@ -1911,7 +1903,8 @@ def _accept_category_row(config, row: dict[str, Any]) -> AcceptOutcome:
     an outcome the caller maps to 409.
     """
     from ciao import entity_types
-    from ciao.memory_receipts import journal_path, queue_lock, record_category_apply
+    from ciao.memory_receipts import journal_path, record_category_apply
+    from ciao.file_kernel import queue_lock
     from ciao.memory_proposals import read_note_type, set_note_type
     from ciao.vocabulary_proposals import (
         CategorySidecarError,
@@ -2201,7 +2194,8 @@ def _settle_note_edit(
     the caller keeps the row and says why, exactly as
     :func:`decline_category_row` does for a category.
     """
-    from ciao.memory_receipts import MemoryReceiptError, QueueLockError
+    from ciao.memory_receipts import MemoryReceiptError
+    from ciao.file_kernel import QueueLockError
     from ciao.note_edit_proposals import (
         NoteEditError,
         settle_note_edit,
@@ -2255,7 +2249,8 @@ def _settle_skill_draft(config, row: dict[str, Any], *, reason: str = "") -> str
     the row stays queued, the same contract as :func:`_settle_note_edit`.
     """
     from ciao import upstream_drafts
-    from ciao.memory_receipts import MemoryReceiptError, QueueLockError
+    from ciao.memory_receipts import MemoryReceiptError
+    from ciao.file_kernel import QueueLockError
 
     try:
         upstream_drafts.reject_draft(
@@ -2297,6 +2292,7 @@ def _accept_note_edit_row(config, row: dict[str, Any]) -> AcceptOutcome:
     bespoke index call here would be a new failure mode on a path whose note is
     already committed and undoable.
     """
+    from ciao import file_kernel as fk
     from ciao import memory_receipts as mr
     from ciao import note_edit_proposals as nep
     from ciao import note_receipts as nr
@@ -2378,7 +2374,7 @@ def _accept_note_edit_row(config, row: dict[str, Any]) -> AcceptOutcome:
         # A note that moved under a read nobody rechecked. Nothing written, and
         # the row survives so a retry re-reads.
         return AcceptOutcome(ok=False, conflict=True, destination=destination, error=str(exc))
-    except (mr.MemoryReceiptError, mr.QueueLockError, OSError) as exc:
+    except (mr.MemoryReceiptError, fk.QueueLockError, OSError) as exc:
         return AcceptOutcome(ok=False, destination=destination, error=str(exc))
     receipt_id = str(receipt.get("id", ""))
     refusal = _settle_note_edit(
@@ -2442,6 +2438,7 @@ def _accept_note_edit_entry(
     itself is never trashed by an entry operation, and this module reaches no
     trash primitive on that path at all.
     """
+    from ciao import file_kernel as fk
     from ciao import entry_verification as ev
     from ciao import memory_receipts as mr
     from ciao import note_edit_proposals as nep
@@ -2484,7 +2481,7 @@ def _accept_note_edit_entry(
         return AcceptOutcome(
             ok=False, conflict=True, destination=destination, error=str(exc)
         )
-    except (mr.MemoryReceiptError, mr.QueueLockError, OSError) as exc:
+    except (mr.MemoryReceiptError, fk.QueueLockError, OSError) as exc:
         return AcceptOutcome(ok=False, destination=destination, error=str(exc))
     receipt_id = str(receipt.get("id", ""))
     # The same post-check the unattended path records, keyed by the identity of
@@ -2704,7 +2701,7 @@ def _region_preview(config, row: dict[str, Any], text: str) -> dict[str, Any]:
     """
     from ciao.memory_audit import strip_learned_stamp
     from ciao.memory_proposals import _promotable_text
-    from ciao.memory_receipts import content_revision
+    from ciao.file_kernel import content_revision
     from ciao.memory_tool import (
         read_region,
         resolve_region as _resolve,
@@ -2787,7 +2784,7 @@ def _repo_preview(
 ) -> dict[str, Any]:
     """What accepting one `[repo <path>]` bullet would leave in <repo>/AGENTS.md."""
     from ciao import note_receipts as nr
-    from ciao.memory_receipts import content_revision
+    from ciao.file_kernel import content_revision
 
     out = _base_preview(row)
     doc, reason = _resolve_repo_doc(row, linked_repos)
@@ -2840,7 +2837,7 @@ def _people_preview(config, row: dict[str, Any], text: str) -> dict[str, Any]:
         entity_note_path,
         render_entity_note,
     )
-    from ciao.memory_receipts import content_revision
+    from ciao.file_kernel import content_revision
 
     out = _base_preview(row)
     name = str(row.get("target") or "").strip()
@@ -2904,7 +2901,7 @@ def _fold_preview(config, row: dict[str, Any]) -> dict[str, Any]:
     would be invented. `exact: False` is what the card renders as "the exact
     wording is decided when you accept".
     """
-    from ciao.memory_receipts import content_revision
+    from ciao.file_kernel import content_revision
 
     out = _base_preview(row)
     doc_raw = str(row.get("target") or "").strip()
@@ -3021,7 +3018,7 @@ def _note_edit_preview(config, row: dict[str, Any], text: str) -> dict[str, Any]
     that cannot be undone by an edit.
     """
     from ciao import note_edit_proposals as nep
-    from ciao.memory_receipts import content_revision
+    from ciao.file_kernel import content_revision
     from ciao.note_edit_proposals import NoteEditError
 
     out = _base_preview(row)
@@ -3200,7 +3197,7 @@ def destination_revision(
         accept = proposal_kinds.accept_for(str(row.get("kind") or ""))
     except proposal_kinds.UnknownKindError:
         return ""
-    from ciao.memory_receipts import content_revision
+    from ciao.file_kernel import content_revision
 
     try:
         if accept.action == "edit_region":

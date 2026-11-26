@@ -27,7 +27,7 @@ from ciao.learning_records import (
     entry_revision,
     render_learning,
 )
-from ciao.memory_receipts import write_queue_atomically
+from ciao.file_kernel import write_queue_atomically
 
 WORKSPACE = "personal"
 RETIRED = "Blocked pages need a fallback."

@@ -25,6 +25,7 @@ from pathlib import Path
 import pytest
 
 from ciao import memory_receipts as mr
+from ciao import file_kernel as fk
 from ciao import note_entries as ne
 from ciao import note_receipts as nr
 from ciao import project_doc_update as pdu
@@ -193,7 +194,7 @@ def test_byte_exact_revision_survives_windows_translation(
     receipt = nr.apply_entry_edit(
         vault_root=vault,
         relative_path=relative,
-        expected_revision=mr.content_revision(text),
+        expected_revision=fk.content_revision(text),
         identity=entries[1].identity,
         fingerprint=entries[1].fingerprint,
         replacement="- Speaks Portuguese",
@@ -225,7 +226,7 @@ def test_translated_revision_is_refused_not_overwritten(
             vault_root=vault,
             relative_path=relative,
             # The translated read: LF text the CRLF file does not hold.
-            expected_revision=mr.content_revision(note.read_text(encoding="utf-8")),
+            expected_revision=fk.content_revision(note.read_text(encoding="utf-8")),
             identity=entries[0].identity,
             fingerprint=entries[0].fingerprint,
             replacement="- Lives in Lisbon.",

@@ -47,6 +47,7 @@ from typing import Any
 import pytest
 
 from ciao import memory_receipts as mr
+from ciao import file_kernel as fk
 from ciao import note_entries as ne
 from ciao import note_receipts as nr
 from ciao.os_support.private import is_private, make_private
@@ -74,7 +75,7 @@ def _write(vault: Path, relative: str, text: str) -> Path:
 
 def _revision(path: Path) -> str:
     """The revision of a note's exact bytes, as a caller would have read them."""
-    return mr.content_revision(path.read_bytes().decode("utf-8"))
+    return fk.content_revision(path.read_bytes().decode("utf-8"))
 
 
 def _apply(
@@ -165,8 +166,8 @@ def test_note_apply_and_undo_preserve_exact_bytes_and_mode(tmp_path):
     assert receipt["relative_path"] == NOTE
     assert receipt["before_text"] == BOM_CRLF
     assert receipt["after_text"] == BOM_CRLF_AFTER
-    assert receipt["before_revision"] == mr.content_revision(BOM_CRLF)
-    assert receipt["after_revision"] == mr.content_revision(BOM_CRLF_AFTER)
+    assert receipt["before_revision"] == fk.content_revision(BOM_CRLF)
+    assert receipt["after_revision"] == fk.content_revision(BOM_CRLF_AFTER)
     assert receipt["workspace"] == "personal"
     assert receipt["actor"] == "operator"
     assert receipt["source"] == "pwa"
@@ -381,7 +382,7 @@ def test_note_target_confinement(tmp_path, relative_path, why):
         nr.commit_note_change(
             vault_root=vault,
             relative_path=relative_path,
-            expected_revision=mr.content_revision(""),
+            expected_revision=fk.content_revision(""),
             after_text="overwritten\n",
             actor="agent",
             source="cli",
@@ -576,7 +577,7 @@ def test_note_target_refuses_vault_bookkeeping(tmp_path, relative_path):
         nr.commit_note_change(
             vault_root=vault,
             relative_path=relative_path,
-            expected_revision=mr.content_revision(body),
+            expected_revision=fk.content_revision(body),
             after_text="overwritten\n",
             actor="agent",
             source="cli",
@@ -612,8 +613,8 @@ def test_note_forged_receipt_target_is_refused(tmp_path):
         "note": str(secret),
         "relative_path": "../outside/secret.md",
         "vault_root": str(tmp_path),
-        "before_revision": mr.content_revision("a"),
-        "after_revision": mr.content_revision("b"),
+        "before_revision": fk.content_revision("a"),
+        "after_revision": fk.content_revision("b"),
         "before_text": "a",
         "after_text": "b",
         "status": mr.PREPARED,
@@ -658,8 +659,8 @@ def test_note_recovery_uses_the_journals_vault_not_the_receipts(tmp_path):
             "note": str(other_note),
             "relative_path": NOTE,
             "vault_root": str(elsewhere),
-            "before_revision": mr.content_revision("elsewhere copy\n"),
-            "after_revision": mr.content_revision("elsewhere edited\n"),
+            "before_revision": fk.content_revision("elsewhere copy\n"),
+            "after_revision": fk.content_revision("elsewhere edited\n"),
             "before_text": "elsewhere copy\n",
             "after_text": "elsewhere edited\n",
             "status": mr.PREPARED,
@@ -686,8 +687,8 @@ def test_note_recovery_uses_the_journals_vault_not_the_receipts(tmp_path):
             "workspace": "personal",
             "kind": "note_apply",
             "relative_path": NOTE,
-            "before_revision": mr.content_revision("elsewhere copy\n"),
-            "after_revision": mr.content_revision("elsewhere edited\n"),
+            "before_revision": fk.content_revision("elsewhere copy\n"),
+            "after_revision": fk.content_revision("elsewhere edited\n"),
             "before_text": "elsewhere copy\n",
             "after_text": "elsewhere edited\n",
             "status": mr.PREPARED,
@@ -706,7 +707,7 @@ def test_note_invalid_or_oversize_content_is_not_written(tmp_path):
     path = _write(vault, NOTE, "readable\n")
     # The revision a caller still holds, from before the file turned to bytes
     # no revision can be computed over.
-    held = mr.content_revision("readable\n")
+    held = fk.content_revision("readable\n")
     readable_before = path.read_bytes()
 
     # A note that is not UTF-8: refused, because a revision over bytes that
@@ -777,8 +778,8 @@ def test_note_recovery_before_after_and_conflict(tmp_path, monkeypatch):
             "note": str(path),
             "relative_path": NOTE,
             "vault_root": str(vault),
-            "before_revision": mr.content_revision(before),
-            "after_revision": mr.content_revision(after),
+            "before_revision": fk.content_revision(before),
+            "after_revision": fk.content_revision(after),
             "before_text": before,
             "after_text": after,
             "status": mr.PREPARED,
@@ -1171,7 +1172,7 @@ def test_note_with_unicode_line_separators_stays_in_the_journal(tmp_path):
     assert found is not None
     assert found["status"] == mr.APPLIED
     assert found["after_text"] == separators
-    assert found["after_revision"] == mr.content_revision(separators)
+    assert found["after_revision"] == fk.content_revision(separators)
     assert len(_rows(vault)) == 1, "the row must not be split into unreadable halves"
 
     # An interrupted row with the same characters is still recoverable.
@@ -1185,8 +1186,8 @@ def test_note_with_unicode_line_separators_stays_in_the_journal(tmp_path):
             "workspace": "personal",
             "kind": "note_apply",
             "relative_path": NOTE,
-            "before_revision": mr.content_revision("elsewhere\n"),
-            "after_revision": mr.content_revision(separators),
+            "before_revision": fk.content_revision("elsewhere\n"),
+            "after_revision": fk.content_revision(separators),
             "before_text": "elsewhere\n",
             "after_text": separators,
             "status": mr.PREPARED,
@@ -1950,8 +1951,8 @@ def test_repo_doc_prepared_receipt_recovers_as_applied(tmp_path):
             "note": str(agents),
             "relative_path": "AGENTS.md",
             "vault_root": str(repo),
-            "before_revision": mr.content_revision(before),
-            "after_revision": mr.content_revision(after),
+            "before_revision": fk.content_revision(before),
+            "after_revision": fk.content_revision(after),
             "before_text": before,
             "after_text": after,
             "provenance": {"repo_root": str(repo.resolve())},

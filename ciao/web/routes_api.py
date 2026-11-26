@@ -57,7 +57,8 @@ from ciao import repo_link
 from ciao.repo_location import resolve_chat_location
 from ciao.git_mutation import RepositoryBusyError, ensure_mutable, repository_mutation
 from ciao.jsonio import loads_untrusted, write_private_text
-from ciao.memory_receipts import QueueLockError, QueueReceiptUnavailable
+from ciao.memory_receipts import QueueReceiptUnavailable
+from ciao.file_kernel import QueueLockError
 from ciao.os_support.child_env import child_env
 from ciao.port_in_use import BIND_PHASE
 from ciao.web.auth import (
@@ -4079,7 +4080,7 @@ def _vault_graph_payload(config: Any, workspace: str | None) -> dict[str, Any]:
     # queue asking a question and a queue asking it twice. The check state lives
     # in the vault the notes came from, so it is read per target root rather
     # than once for the install.
-    from ciao import memory_receipts as mr
+    from ciao import file_kernel as fk
     from ciao.memory_audit import note_verification
     from ciao.note_verification import NoteCheck, _check_settles, read_note_checks
     from ciao.vault_review import never_queued, verification_evidence
@@ -4141,7 +4142,7 @@ def _vault_graph_payload(config: Any, workspace: str | None) -> dict[str, Any]:
             # `verification_evidence` read it as a conflict, which is the
             # honest middle.
             return check, relative, ""
-        return check, relative, mr.content_revision(text)
+        return check, relative, fk.content_revision(text)
 
     def _entry_coverage_for(e) -> dict[str, Any] | None:
         """One node's per-entry freshness, from the audit's own detector.
@@ -4654,7 +4655,7 @@ def _write_entity_types_under_lock(
     Raises :class:`QueueLockError` rather than writing unlocked, like every
     other managed writer of a file behind this lock.
     """
-    from ciao.memory_receipts import queue_lock
+    from ciao.file_kernel import queue_lock
 
     with queue_lock(vault / entity_types.VAULT_FILENAME):
         entity_types.write_vault_file(vault, entries)

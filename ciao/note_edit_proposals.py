@@ -74,6 +74,7 @@ from typing import Any
 
 from ciao import entry_verification as ev
 from ciao import memory_receipts as mr
+from ciao import file_kernel as fk
 from ciao import note_entries as ne
 from ciao import note_receipts as nr
 from ciao import note_verification as nv
@@ -736,7 +737,7 @@ def write_sidecar(config: Any, proposal: NoteEditProposal) -> Path:
     payload = {"schema": SIDECAR_SCHEMA, "proposal": proposal.as_dict()}
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
-        with mr.queue_lock(path):
+        with fk.queue_lock(path):
             tmp = path.with_name(f".{path.name}.write.tmp")
             try:
                 tmp.write_text(
@@ -988,7 +989,7 @@ def _entry_span(
         text = target.read_bytes().decode("utf-8")
     except (mr.MemoryReceiptError, OSError, UnicodeDecodeError) as exc:
         raise NoteEditRefused(f"the note could not be read to place its entry: {exc}")
-    if mr.content_revision(text) != revision:
+    if fk.content_revision(text) != revision:
         raise NoteEditRefused(
             f"{key} changed since this verdict was reached, so the entry's span "
             "cannot be recorded against text that is no longer there; nothing was "
@@ -1375,7 +1376,7 @@ def _clear_pending_check(root: Path, proposal: NoteEditProposal) -> None:
 
     try:
         nv.update_check_state(root, _mutate)
-    except (nv.NoteCheckRefused, mr.MemoryReceiptError, mr.QueueLockError) as exc:
+    except (nv.NoteCheckRefused, mr.MemoryReceiptError, fk.QueueLockError) as exc:
         # Reported, not raised: the sidecar is already settled and the queue row
         # is about to go, and a raised error here would tell the owner their
         # decision did not happen. The worst a caller loses by not clearing it

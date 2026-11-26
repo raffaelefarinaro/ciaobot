@@ -29,7 +29,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from ciao.frontmatter import split_frontmatter, unquote_scalar
-from ciao.memory_receipts import write_queue_atomically
+from ciao.file_kernel import write_queue_atomically
 
 if TYPE_CHECKING:
     from ciao.config import CiaoConfig

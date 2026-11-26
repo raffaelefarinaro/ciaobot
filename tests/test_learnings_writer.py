@@ -490,16 +490,16 @@ def test_the_write_goes_through_the_atomic_helper(
     sibling must also be gone afterwards, or the vault grows a file nobody owns.
     """
     vault = _crlf_vault(tmp_path)
-    from ciao import memory_receipts
+    from ciao import file_kernel as fk
 
     written: list[tuple[str, str]] = []
-    real = memory_receipts.write_queue_atomically
+    real = fk.write_queue_atomically
 
     def _recording(path: Path, text: str) -> None:
         written.append((Path(path).name, text))
         real(path, text)
 
-    monkeypatch.setattr(memory_receipts, "write_queue_atomically", _recording)
+    monkeypatch.setattr(fk, "write_queue_atomically", _recording)
 
     assert mp.append_learning(vault, "A brand new learning.", workspace="personal", source="chat-9")
 
@@ -521,13 +521,13 @@ def test_the_write_is_serialized_against_the_migration(
     `queue_lock`, so the two cannot interleave — which is only true if the accept
     takes it too.
     """
+    from ciao import file_kernel as fk
     from ciao.os_support.locks import lock_exclusive
 
     vault = _crlf_vault(tmp_path)
-    from ciao import memory_receipts
 
     taken: list[str] = []
-    real = memory_receipts.queue_lock
+    real = fk.queue_lock
 
     @contextmanager
     def _recording(target, **kwargs):
@@ -543,7 +543,7 @@ def test_the_write_is_serialized_against_the_migration(
                 os.close(fd)
             yield
 
-    monkeypatch.setattr(memory_receipts, "queue_lock", _recording)
+    monkeypatch.setattr(fk, "queue_lock", _recording)
     assert mp.append_learning(vault, "A brand new learning.", workspace="personal", source="chat-9")
 
     assert taken == ["Learnings.md"]

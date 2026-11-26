@@ -33,7 +33,7 @@ from ciao.learning_records import (
     render_learning,
 )
 from ciao.memory_proposals import MemoryProposal
-from ciao.memory_receipts import queue_lock, write_queue_atomically
+from ciao.file_kernel import queue_lock, write_queue_atomically
 
 OBSERVATIONS_RELATIVE = "Workspace/Observations.md"
 OBSERVATIONS_ARCHIVE_RELATIVE = "Workspace/Observations-Archive.md"

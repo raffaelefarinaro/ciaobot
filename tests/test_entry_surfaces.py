@@ -755,7 +755,7 @@ def test_the_fold_writer_strips_stamps_before_it_writes(tmp_path: Path) -> None:
     its bytes are unchanged. This pins that through the update half of the
     fold write.
     """
-    from ciao import memory_receipts as mr
+    from ciao import file_kernel as fk
     from ciao import note_entries as ne
     from ciao import note_receipts as nr
 
@@ -779,7 +779,7 @@ def test_the_fold_writer_strips_stamps_before_it_writes(tmp_path: Path) -> None:
     nr.apply_entry_edit(
         vault_root=vault,
         relative_path=relative,
-        expected_revision=mr.content_revision(text),
+        expected_revision=fk.content_revision(text),
         identity=entries[1].identity,
         fingerprint=entries[1].fingerprint,
         replacement="- Speaks Portuguese",
@@ -799,7 +799,7 @@ def test_the_fold_writer_puts_a_redated_bullet_back(tmp_path: Path) -> None:
     and the untouched bullet keeps the exact stamp it carried, including its
     date.
     """
-    from ciao import memory_receipts as mr
+    from ciao import file_kernel as fk
     from ciao import note_receipts as nr
 
     vault = tmp_path / "vault"
@@ -817,7 +817,7 @@ def test_the_fold_writer_puts_a_redated_bullet_back(tmp_path: Path) -> None:
     nr.append_list_item(
         vault_root=vault,
         relative_path=relative,
-        expected_revision=mr.content_revision(text),
+        expected_revision=fk.content_revision(text),
         section="Notes",
         item="- Based in Lisbon.",
         actor="proposal-accept",

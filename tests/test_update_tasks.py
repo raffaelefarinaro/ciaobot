@@ -1315,7 +1315,7 @@ def _settled_vault(tmp_path: Path) -> tuple[Any, Path]:
         render_learning,
     )
     from ciao import skill_proposals as sp
-    from ciao.memory_receipts import write_queue_atomically
+    from ciao.file_kernel import write_queue_atomically
 
     record = LearningRecord(
         learning_id=allocate_learning_id("personal", "- A settled lesson."),
@@ -1447,7 +1447,7 @@ def test_a_receipt_whose_write_never_landed_does_not_complete_the_task(
     readers have to be right about it, which is what this pins.
     """
     from ciao import learnings_cleanup
-    from ciao.memory_receipts import content_revision
+    from ciao.file_kernel import content_revision
 
     check = update_tasks.COMPLETION_FUNCTIONS[SHIPPED["completion_check"]]
     config, vault = _settled_vault(tmp_path)
