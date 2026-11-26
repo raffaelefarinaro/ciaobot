@@ -37,7 +37,6 @@ async function mountSettings(routines?: unknown, tab = '') {
         provider_options: [{ value: 'claude', label: 'Claude' }],
       } as never
     }
-    if (url.startsWith('/api/update-tasks')) return { tasks: [] } as never
     throw new Error('Unrelated settings data unavailable in this test')
   })
   const wrapper = mount(SettingsView, {
@@ -56,8 +55,7 @@ it('lists the rendered sections of the tab in the On this page rail', async () =
     const labels = wrapper.findAll('.settings-toc-item').map(item => item.text())
     // Built from the page itself, in page order, headings in sentence case.
     // Updates leads, then the capability help, then the everyday device
-    // sections, then everything else in its existing order. The workspace's own
-    // Update task history lives on Overview.
+    // sections, then everything else in its existing order.
     expect(labels.slice(0, 5)).toEqual([
       'Updates',
       'What can Ciaobot do?',
@@ -66,7 +64,9 @@ it('lists the rendered sections of the tab in the On this page rail', async () =
       'Keyboard shortcuts',
     ])
     expect(labels.slice(5)).toEqual(['Resume after restart', 'Start at sign-in', 'Open source'])
-    expect(labels).not.toContain('Update task history')
+    expect(labels).not.toContain('Check vault answers')
+    expect(wrapper.findAll('.settings-main .section-title').map(heading => heading.text()))
+      .not.toContain('Check vault answers')
     expect(labels).not.toContain('Session insights')
     expect(labels).not.toContain('Appearance')
     expect(labels).not.toContain('This host')
@@ -90,7 +90,6 @@ it('lists Overview cards on the rail', async () => {
       'Workspace',
       'Chats and models',
       'Shared brains',
-      'Update task history',
       'Archive this workspace',
       'All workspaces',
     ])

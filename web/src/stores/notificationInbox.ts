@@ -11,9 +11,8 @@
 // - No events-socket observer. `eventsSocket` is not exported, and the events
 //   `snapshot` message already reloads `taskSignals` (its health reflects it).
 //   The 15s `projects.syncLatest` poll covers the chat list.
-// - No timer, no `housekeeping.init`, and no initial fetch except the update-task
-//   listing: the other owners load at bootstrap, but nothing reads that one
-//   until Home mounts.
+// - No timer, no `housekeeping.init`, and no initial fetch: the owners load at
+//   bootstrap.
 // - No mutation: only `syncLatest`/`fetchAll`/`taskSignals.reload` and read
 //   getters are called; never `markRead` or any write request.
 //
@@ -43,7 +42,6 @@ import type {
   ScheduleCandidate,
   SourceSnapshot,
   TaskReviewCandidate,
-  UpdateTaskCandidate,
 } from '../lib/notificationInbox'
 import { checkingHealth } from '../lib/sourceHealth'
 import type { SourceHealth } from '../lib/sourceHealth'
@@ -174,31 +172,6 @@ export const useNotificationInboxStore = defineStore('notificationInbox', () => 
     taskSignals.inReview(projects.activeWorkspace).map((t) => ({ taskId: t.id, title: t.title })),
   )
 
-  // Another workspace's rows never leak: they count only for the workspace they were loaded for.
-  const updateTaskCandidates = computed<UpdateTaskCandidate[]>(() => {
-    const ws = projects.activeWorkspace
-    if (!ws || housekeeping.updateTasksWorkspace !== ws) return []
-    return housekeeping.updateTasks.map((t) => {
-      // A remembered chat id is never a link: only a live, local, unarchived chat is.
-      const chat = t.chat_live && t.chat_id
-        ? projects.chats.find((c) => c.chat_id === t.chat_id && !c.archived)
-        : undefined
-      const id = chat ? chat.chat_id : ''
-      return {
-        id: t.id,
-        revision: t.revision,
-        workspace: ws,
-        title: t.title,
-        status: t.status,
-        applicability: t.applicability,
-        chatId: id,
-        chatLive: !!chat,
-        chatNeedsInput: chat ? projects.chatNeedsInput(id) : false,
-        chatFailed: chat ? projects.chatFailed(id) : false,
-      }
-    })
-  })
-
   // One entry per source; a missing key is a compile error once INBOX_SOURCES grows.
   const SNAPSHOT_BUILDERS: Record<RefreshSourceKey, () => SourceSnapshot> = {
     chats: () => {
@@ -223,16 +196,6 @@ export const useNotificationInboxStore = defineStore('notificationInbox', () => 
       else status = 'ready'
       return { source: 'automations', status, lastSuccessAt: schedulesStampedAt.value }
     },
-    updateTasks: () => {
-      const ws = projects.activeWorkspace
-      if (!ws || housekeeping.updateTasksWorkspace !== ws) {
-        return { source: 'updateTasks', status: 'checking', lastSuccessAt: '' }
-      }
-      const h = housekeeping.updateTasksHealth
-      // A listing that worked but could not answer is not a healthy empty list.
-      const status = h.status === 'ready' && housekeeping.updateTasksCoverageBlocked ? 'unavailable' : h.status
-      return { source: 'updateTasks', status, lastSuccessAt: h.lastSuccessAt }
-    },
   }
 
   const REFRESHERS: Record<RefreshSourceKey, (workspace: string) => unknown> = {
@@ -247,13 +210,6 @@ export const useNotificationInboxStore = defineStore('notificationInbox', () => 
     // Both owners record their own failure; neither throws or needs an interval here.
     operator: () => housekeeping.refresh(),
     automations: () => tasks.fetchSchedules().catch(() => {}),
-    // Healthy means no request: housekeeping's own focus and 60s poll keep it fresh.
-    updateTasks: (ws) =>
-      ((housekeeping.updateTasksHealth.status === 'ready'
-        && !housekeeping.updateTasksCoverageBlocked
-        && housekeeping.updateTasksWorkspace === ws)
-        ? undefined
-        : housekeeping.refreshUpdateTasks(ws)),
   }
 
   const snapshots = computed<SourceSnapshot[]>(() =>
@@ -267,7 +223,6 @@ export const useNotificationInboxStore = defineStore('notificationInbox', () => 
       operators: operatorCandidates.value,
       schedules: scheduleCandidates.value,
       reviewTasks: reviewTaskCandidates.value,
-      updateTasks: updateTaskCandidates.value,
       sources: snapshots.value,
     }),
   )
@@ -343,17 +298,12 @@ export const useNotificationInboxStore = defineStore('notificationInbox', () => 
         () => projects.activeWorkspace,
         () => {
           resetInflight()
-          void refreshSource('updateTasks')
         },
         { flush: 'sync' },
       )
       // Shallow on purpose: an in-place push is not a load.
       watch(() => tasks.schedules, () => { schedulesStampedAt.value = new Date().toISOString() }, { flush: 'sync' })
     })
-    // housekeeping.init ran before a workspace existed and only the Home strip reacts to switches.
-    if (projects.activeWorkspace && housekeeping.updateTasksWorkspace !== projects.activeWorkspace) {
-      void refreshSource('updateTasks')
-    }
     window.addEventListener('focus', onFocusOrVisible)
     document.addEventListener('visibilitychange', onFocusOrVisible)
     removeListeners = () => {
@@ -382,7 +332,6 @@ export const useNotificationInboxStore = defineStore('notificationInbox', () => 
     operatorCandidates,
     scheduleCandidates,
     reviewTaskCandidates,
-    updateTaskCandidates,
     snapshots,
     inbox,
     rows,

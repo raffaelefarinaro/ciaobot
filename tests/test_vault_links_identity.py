@@ -23,7 +23,6 @@ import pytest
 
 import ciao
 import ciao.vault_migrate_links as m
-from ciao import migration_notices
 from ciao.vault_migrate_links import (
     ReceiptUnavailable,
     migrate_links,
@@ -262,7 +261,6 @@ def test_failed_adoption_keeps_legacy_semantics(tmp_path: Path, monkeypatch: pyt
     try:
         assert read_receipt(runtime, vault_root=vault) is not None
         assert receipt_path(runtime).read_bytes() == raw
-        assert migration_notices._links_scope(SimpleNamespace(vault_root=vault), runtime).vault is None
     finally:
         directory.chmod(0o700)
         if process is not None:
@@ -460,11 +458,9 @@ def test_stale_undo_evidence_is_refused(tmp_path: Path, monkeypatch: pytest.Monk
 
 def test_marker_from_another_copy_makes_receipt_stale(tmp_path: Path) -> None:
     vault, runtime = _migrated(tmp_path)
-    config = SimpleNamespace(vault_root=vault)
     _write_marker(vault, _FOREIGN, "unmigrated")  # a pull from another machine
     assert read_receipt(runtime, vault_root=vault) is None
     assert "stale" in unmigrate_links(vault, runtime, apply=True)["failed"][0]["error"]
-    assert migration_notices._links_scope(config, runtime).readable is True
 
     (vault / m.MARKER_NAME).unlink()  # a checkout from before the migration
     assert read_receipt(runtime, vault_root=vault) is None

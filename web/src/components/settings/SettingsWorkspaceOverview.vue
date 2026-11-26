@@ -44,7 +44,6 @@
     <div v-if="workspacesResult" class="action-result action-result--error" role="alert">{{ workspacesResult }}</div>
 
     <SettingsSharedBrains />
-    <SettingsUpdateTasks />
 
     <div v-if="workspaceArchivable(form.name)" class="card">
       <div class="settings-card-header">
@@ -74,7 +73,6 @@ import WorkspaceTile from '../WorkspaceTile.vue'
 import SettingsClaudeTrim from './SettingsClaudeTrim.vue'
 import SettingsWorkspaceModels from './SettingsWorkspaceModels.vue'
 import SettingsSharedBrains from './SettingsSharedBrains.vue'
-import SettingsUpdateTasks from './SettingsUpdateTasks.vue'
 import WorkspaceColorPicker from './WorkspaceColorPicker.vue'
 import { WORKSPACE_ADMIN_KEY } from '../../composables/useWorkspaceAdmin'
 

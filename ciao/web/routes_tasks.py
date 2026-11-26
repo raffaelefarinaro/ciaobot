@@ -399,8 +399,8 @@ async def task_delegate(request: Request) -> JSONResponse:
     that is already running, never a second chat.
 
     Deliberately not ``asyncio.to_thread``: ``start_stream`` creates an asyncio
-    task and is only legal on the event loop, exactly as ``start_update_task``
-    notes. The store writes it makes are short, locked file operations.
+    task and is only legal on the event loop, as every
+    stream start here. The store writes it makes are short, locked file operations.
 
     A task already in *Done* is ``invalid_task`` — a 400. Delegation hands a task
     over as ``in_progress``/``agent``, so delegating a finished one would reopen

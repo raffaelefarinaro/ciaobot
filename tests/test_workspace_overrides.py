@@ -305,7 +305,7 @@ def test_memory_pass_chat_uses_the_workspace_insights_model(
 
 
 def test_webhook_style_chat_uses_workspace_overrides(tmp_path: Path) -> None:
-    """create_chat with no model/mode is the single path for webhook, update-task,
+    """create_chat with no model/mode is the single path for webhook,
     proposal and delegated chats."""
     config = _config(
         tmp_path,

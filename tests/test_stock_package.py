@@ -394,6 +394,7 @@ def test_import_conversations_skill_states_its_bounds_and_the_own_session_rule()
     # Ciaobot's own sessions are excluded whole, by the envelope marker.
     assert "CIAO_CONTEXT_BEGIN" in skill and "CIAO_CONTEXT_END" in skill
     assert "Skip a session whole" in skill
+    assert "first user turn" in skill and "merely mentions the marker" in skill
     assert "chat-" in skill
     # Bounded run, checklist with verify lines, Unsure for doubts.
     assert "at most **20 sessions per run**" in skill

@@ -329,8 +329,8 @@ def test_onboarding_starting_knowledge_is_confirmed_facts_only(
     so the pass files only what the user confirmed and parks everything else in
     `Workspace/Unsure.md`. Nothing about it creates scaffolding ahead of
     the facts, and nothing about it reaches outside Ciaobot's own vault state:
-    reading past conversations is the consent-gated memory job, which the user
-    starts from Memory whenever they choose, not a side effect of onboarding.
+    reading past conversations is the `import-conversations` skill, which the user
+    asks for whenever they choose, not a side effect of onboarding.
     """
     existing = _make_manager(tmp_path / "existing", vault_mode="existing")
     scratch = _make_manager(tmp_path / "scratch", vault_mode="scratch")

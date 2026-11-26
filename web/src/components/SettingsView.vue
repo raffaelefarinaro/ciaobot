@@ -2562,8 +2562,8 @@ function loadSettingsTab(tab: string): Promise<void> {
       reads = [fetchRoutines(), fetchProviderKeys().then(scrollToChatProvidersIfLinked), fetchWorkspaceModels()]
       break
     case 'workspace':
-      // Not scoped: the list covers every workspace. Handover and Update tasks
-      // reload themselves when the active workspace changes.
+      // Not scoped: the list covers every workspace. Handover
+      // reloads itself when the active workspace changes.
       reads = [ensureWorkspaceList(), fetchArchivedWorkspaces()]
       break
     case 'skills':

@@ -352,15 +352,6 @@ describe('InjectedPromptCard', () => {
     expect(prose.attributes('aria-label')).toBe('Injected request')
   })
 
-  it('keeps an update task request reachable and named', async () => {
-    const wrapper = mountCard({ prompt: { kind: 'update_task' }, raw: longText })
-    await wrapper.get('.injected-card-toggle').trigger('click')
-    const prose = wrapper.get('.injected-card-prose')
-    expect(prose.attributes('tabindex')).toBe('0')
-    expect(prose.attributes('role')).toBe('region')
-    expect(prose.attributes('aria-label')).toBe('Injected request')
-  })
-
   it('renders the actions slot while collapsed, and the cause when expanded', async () => {
     const prompt = errorNoticePrompt('Error: connection refused')
     const wrapper = mount(InjectedPromptCard, {

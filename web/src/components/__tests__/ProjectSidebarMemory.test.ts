@@ -451,8 +451,6 @@ function seedInbox(unread: number) {
   signals.health = readyHealth()
   const housekeeping = useHousekeepingStore()
   housekeeping.actionsHealth = readyHealth()
-  housekeeping.updateTasksWorkspace = 'personal'
-  housekeeping.updateTasksHealth = readyHealth()
   useTaskStore().schedulesLoaded = true
 }
 

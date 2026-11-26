@@ -27,7 +27,7 @@ Use only what exists on this machine; a missing folder or command means that age
 
 Ciaobot's own chats, memory passes, subagents and forks live in the same folders as the user's history, and importing them would file Ciaobot's own work back as if the user had said it. Skip a session whole (never keep "just the user's turns") when any of these holds:
 
-- the file or export contains `CIAO_CONTEXT_BEGIN` or `CIAO_CONTEXT_END` anywhere. Ciaobot prefixes every prompt it starts a session with an envelope marked `[CIAO_CONTEXT_BEGIN]`, so one hit marks the session as Ciaobot's. Check with `grep -c 'CIAO_CONTEXT_' <file>`, or for OpenCode `opencode session export <id> | grep -c 'CIAO_CONTEXT_'`; any count above 0 skips it.
+- the **first user turn** contains `CIAO_CONTEXT_BEGIN` or `CIAO_CONTEXT_END` (for Codex, the first user or developer message). Ciaobot prefixes every prompt it starts a session with an envelope marked `[CIAO_CONTEXT_BEGIN]`, so a session that opens with it is Ciaobot's. Read only that first turn: for Claude Code `grep -m1 '"type":"user"' <file> | grep -c 'CIAO_CONTEXT_'`; for Codex `grep -m2 '"role":"\(user\|developer\)"' <file> | grep -c 'CIAO_CONTEXT_'`; for OpenCode look at the first message of `opencode session export <id>`. A count above 0 skips it. A session that merely mentions the marker later (for example because the user is developing Ciaobot and pasted it) is a normal session: do not skip it for that.
 - the session id looks like `chat-` followed by 8 hex digits: that is a Ciaobot chat id, not an agent's.
 - you cannot read it well enough to tell (empty, truncated, unparseable, no user turn): report it as skipped-unreadable instead of guessing.
 

@@ -18,14 +18,6 @@ from collections.abc import Sequence
 from typing import Any
 
 from ciao.job_runs import JOB_RUNS_LATEST_NAME, JOB_RUNS_NAME
-from ciao.migration_notices import (
-    UNMIGRATED_LINKS_NOTICE,
-    UNREHOMED_PEOPLE_NOTICE,
-    VAULT_LOCATION_NOTICE,
-    rehomed_people_finding,
-    resolve_links,
-    vault_location_findings,
-)
 from ciao.memory_audit import audit_entries, find_stale_entries, find_stale_notes
 from ciao.memory_tool import (
     DEFAULT_MEMORY_CHAR_LIMIT,
@@ -1160,8 +1152,7 @@ def _search_index_audit(
     nothing then reports that search is silently answering from the old paths.
 
     Two findings, both cheap and read-only: the index is absent when notes exist,
-    and rows pointing at paths that no longer resolve. `ciao workspace-reroot
-    --repair` rebuilds it.
+    and rows pointing at paths that no longer resolve. `--repair` rebuilds it.
     """
     out: dict[str, Any] = {
         "missing": False,
@@ -1238,115 +1229,6 @@ def _vault_audit(vault_root: Path, install_root: Path | None = None) -> dict[str
     return result
 
 
-def audit_upgrade_notices(
-    config: Any | None, runtime_dir: Path | None = None
-) -> dict[str, Any]:
-    """Actions an upgrade left for the operator, detected from the install.
-
-    A release note only works if someone reads it and then remembers to act.
-    These are the same conditions stated as facts about *this* machine, so the
-    PWA can show them and the operator can act without consulting a changelog.
-
-    Each notice carries an interactive Ciaobot-chat remedy. Detected, never
-    applied: moving an existing vault can involve conflicts or user-owned
-    layout decisions, so a normal chat inspects it and asks before acting.
-    """
-    notices: list[dict[str, str]] = []
-    errors: list[dict[str, str]] = []
-    if config is None:
-        return {"notices": notices, "notices_found": 0, "errors": errors}
-
-    # Advisory section: a config that does not expose a workspace registry has
-    # nothing to report, and must not turn the whole audit red.
-    vault_raw = getattr(config, "vault_root", None)
-    workspace_raw = getattr(config, "workspace_root", None)
-    lister = getattr(config, "workspace_names", None)
-    if vault_raw is None or workspace_raw is None or not callable(lister):
-        return {"notices": notices, "notices_found": 0, "errors": errors}
-    # The registry is read inside each probe rather than listed here: the re-home
-    # notice counts the workspaces to decide whether it applies (#833), and a
-    # count taken beside the caller is one that can drift from the rule using it.
-
-    resolver = getattr(config, "workspace_vault_root", None)
-    if not callable(resolver):
-        return {"notices": notices, "notices_found": 0, "errors": errors}
-    standardizer = getattr(config, "canonical_workspace_vault_root", None)
-    if not callable(standardizer):
-        return {"notices": notices, "notices_found": 0, "errors": errors}
-
-    # The registry-resolved path against the standard folder config supplies, from
-    # the same probe the Home tile reads. Setup-created whole-vault roots, adopted
-    # external folders and pre-nesting siblings all remain usable until the user
-    # approves the managed relocation, but all get one shared description of it
-    # and one shared remedy — the audit used to carry its own copy here, including
-    # a remedy that described moving the folder and hand-editing the registry,
-    # which is the path the engine refuses.
-    for finding in vault_location_findings(config):
-        notices.append({
-            "type": VAULT_LOCATION_NOTICE,
-            "workspace": finding.workspace,
-            "detail": finding.detail,
-            "remedy": finding.remedy,
-        })
-
-    # The vault still speaks the retired link dialect. Surfaced, never applied:
-    # rewriting a user's own notes is not a decision an upgrade makes on their
-    # behalf, and this is the notice that makes the choice visible instead of
-    # leaving it in a release note nobody re-reads. Notices are pending actions
-    # the weekly hygiene routine surfaces without turning the audit red.
-    #
-    # Resolved here, by walking, rather than read from the cache the Home strip
-    # uses: the audit is already a full-install pass over every note, and a
-    # report that reused a stored verdict could report a stale one. What it finds
-    # is published, so a run of the audit warms the strip for free. There is no
-    # vault-mode gate, deliberately — a scratch vault is created conformant and so
-    # is clean, but it is also the vault an operator can hand a wikilink, and
-    # reporting that is what this notice is for.
-    try:
-        links = resolve_links(config, runtime_dir)
-    except Exception:  # noqa: BLE001 — advisory section, never fail the audit
-        logger.exception("upgrade notices: link-dialect check failed")
-        links = None
-    if links is not None:
-        notices.append({
-            "type": UNMIGRATED_LINKS_NOTICE,
-            "workspace": "",
-            "detail": links.detail,
-            "remedy": links.remedy,
-        })
-
-    # Person notes filed into the wrong workspace by the per-workspace curation
-    # bug. Surfaced, never applied, and detected from the receipt's presence
-    # only: `plan_rehome` walks every person note, and this routine runs on every
-    # app open, so a vault walk here is exactly the cost the receipt check exists
-    # to avoid. It can never auto-apply either: the judgement bucket is non-empty
-    # by construction, and a note with no workspace-naming tag has no single
-    # correct destination. A pending action like the link notice, never a defect.
-    #
-    # The condition and the wording now live in `migration_notices`, shared with
-    # #833's `unrehomed-people` update task, so the report and the Home card
-    # cannot come to disagree about one install. What is *not* shared is the
-    # suppression: nothing in that module reads an update-task record, so
-    # dismissing the card silences the card and never this line. An exception
-    # there is still logged and dropped rather than failing the report — a
-    # diagnostic that cannot read one receipt is a report with one fewer notice,
-    # not an audit that stops.
-    try:
-        rehome = rehomed_people_finding(config, runtime_dir)
-    except Exception:  # noqa: BLE001 — advisory section, never fail the audit
-        logger.warning("upgrade notices: person re-home check failed")
-        rehome = None
-    if rehome is not None:
-        notices.append({
-            "type": UNREHOMED_PEOPLE_NOTICE,
-            "workspace": "",
-            "detail": rehome.detail,
-            "remedy": rehome.remedy,
-        })
-
-    return {"notices": notices, "notices_found": len(notices), "errors": errors}
-
-
 def memory_actionable_count(memory_result: dict[str, Any]) -> int:
     """Findings in a memory report that a user can actually act on.
 
@@ -1386,7 +1268,7 @@ def memory_actionable_count(memory_result: dict[str, Any]) -> int:
 # because today one vault, one skill catalog and one CLAUDE.md are shared. The
 # re-rooting makes the first four genuinely per-root; these two never become
 # per-root, because their subject is the global runtime directory.
-GLOBAL_SECTIONS: tuple[str, ...] = ("job_runs_audit", "upgrade_notices")
+GLOBAL_SECTIONS: tuple[str, ...] = ("job_runs_audit",)
 WORKSPACE_SECTIONS: tuple[str, ...] = (
     "vault_hygiene",
     "skill_audit",
@@ -1557,11 +1439,6 @@ def run_os_audit(
         if want_global
         else {**empty_errors, "failed_runs": 0}
     )
-    upgrade_result = (
-        audit_upgrade_notices(config, runtime_dir=runtime)
-        if want_global
-        else {**empty_errors, "notices_found": 0, "notices": []}
-    )
     collected_errors = [
         *setup_result["errors"],
         *vault_result["errors"],
@@ -1569,7 +1446,6 @@ def run_os_audit(
         *rule_result["errors"],
         *memory_result["errors"],
         *job_result["errors"],
-        *upgrade_result["errors"],
     ]
     scan_errors: list[dict[str, str]] = []
     seen_errors: set[tuple[str, ...]] = set()
@@ -1615,8 +1491,6 @@ def run_os_audit(
         + (1 if search_result.get("stale_rows") else 0)
         + (1 if search_result.get("transcripts_unindexed") else 0)
     )
-    pending_action_count = upgrade_result["notices_found"]
-    has_pending_actions = pending_action_count > 0
     total_errors = len(scan_errors)
     total_issues = defect_count + total_errors
     if total_errors:
@@ -1631,8 +1505,6 @@ def run_os_audit(
         "scope": scope,
         "total_issues": total_issues,
         "defect_count": defect_count,
-        "pending_action_count": pending_action_count,
-        "has_pending_actions": has_pending_actions,
         "total_errors": total_errors,
         "timestamp": datetime.datetime.now(datetime.timezone.utc).isoformat(),
         "setup_audit": setup_result,
@@ -1642,7 +1514,6 @@ def run_os_audit(
         "rule_audit": rule_result,
         "memory_hygiene": memory_result,
         "job_runs_audit": job_result,
-        "upgrade_notices": upgrade_result,
         "scan_errors": scan_errors,
     }
     # A section outside this scope is REMOVED, not zeroed. An empty section
@@ -1681,13 +1552,6 @@ def format_audit_markdown(report: dict[str, Any]) -> str:
             f"**Scope**: {report_scope} — only the sections describing "
             + ("this workspace" if report_scope == "workspace" else "the whole install")
             + " are included."
-        )
-    # A pending action is optional and does not raise the status, so it must be
-    # visible on its own rather than folded into "Total Issues".
-    if report.get("has_pending_actions"):
-        lines.append(
-            f"**Pending actions**: {report['pending_action_count']} upgrade "
-            "action(s) you may decline; see Upgrade Actions below."
         )
     lines.extend([
         "",
@@ -1893,22 +1757,6 @@ def format_audit_markdown(report: dict[str, Any]) -> str:
                     lines.append(f"  - … {len(stale) - 10} more")
             if unindexed:
                 lines.append(f"- ⚠️ {unindexed} transcript archive(s) unindexed")
-
-    notices = report.get("upgrade_notices", {}).get("notices", [])
-    if notices:
-        # Not a finding: these are optional actions a user may decline, so they
-        # render as pending work with an information icon, not as a ⚠️ defect.
-        lines.extend(["", "## Upgrade Actions (optional)"])
-        for notice in notices:
-            # A vault-wide notice has no workspace, and rendering the label
-            # unconditionally printed a bare `****:` in front of it.
-            scope = str(notice.get("workspace") or "").strip()
-            prefix = f"**{scope}**: " if scope else ""
-            lines.append(f"- ℹ️ {prefix}{notice['detail']}")
-            # The remedy is prose containing its own backticked commands, so
-            # wrapping the whole sentence in backticks nested them and broke the
-            # code spans it already had.
-            lines.append(f"  - Suggested: {notice['remedy']}")
 
     if report["scan_errors"]:
         lines.extend(["", "## Scan Errors"])
