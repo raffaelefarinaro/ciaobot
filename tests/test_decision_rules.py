@@ -203,7 +203,6 @@ def test_chip_constants_match_the_typescript_lists() -> None:
         assert block
         return tuple(re.findall(r"'([^']+)'", block.group(1)))
 
-    assert parse("memoryDecisionReasons.ts", "MEMORY_REASON_CHIPS") == dr.MEMORY_REASON_CHIPS
     assert parse("decisionReasons.ts", "REASON_CHIPS") == dr.TASK_REASON_CHIPS
 
 

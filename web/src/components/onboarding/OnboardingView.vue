@@ -3,11 +3,9 @@ import { computed, onMounted, ref } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { api } from '../../lib/api'
 import OnboardingShell from './OnboardingShell.vue'
-import OnboardingStack from './OnboardingStack.vue'
 import OnboardingLocationStage from './OnboardingLocationStage.vue'
 import OnboardingRuntimeStage from './OnboardingRuntimeStage.vue'
 import OnboardingAccessStage from './OnboardingAccessStage.vue'
-import OnboardingMemoryStage from './OnboardingMemoryStage.vue'
 import OnboardingCareStage from './OnboardingCareStage.vue'
 import OnboardingFinishStage from './OnboardingFinishStage.vue'
 import { useOnboardingStore } from '../../stores/onboarding'
@@ -37,11 +35,9 @@ const context = ref<OnboardingStageContext>({
 })
 const step = ref<OnboardingStep>('location')
 const runtimeStage = ref<InstanceType<typeof OnboardingRuntimeStage> | null>(null)
-const memoryStage = ref<InstanceType<typeof OnboardingMemoryStage> | null>(null)
 const careStage = ref<InstanceType<typeof OnboardingCareStage> | null>(null)
 const state = ref<StageState>({ dirty: false, pending: false, canContinue: false, error: null })
 const accessState = ref<StageState>({ dirty: false, pending: false, canContinue: false, error: null })
-const memoryState = ref<StageState>({ dirty: false, pending: false, canContinue: false, error: null })
 // Nothing may mount until the target, the workspace name and the provisioned
 // fact are resolved; otherwise Location initialises against an empty context and
 // stays read-only in provisioned installs.
@@ -50,17 +46,12 @@ const targetError = ref('')
 const committing = ref(false)
 const busy = computed(() => store.loading || store.saving || committing.value)
 const stageProps = computed(() => ({ context: context.value, busy: busy.value }))
-// On the shared screen readiness lives in the two stage states, so the shell's
-// Continue follows both; Continue then commits Memory's proposed choice.
-const shellContinue = computed(() =>
-  step.value === 'access_memory'
-    ? readyToAdvance(step.value, state.value, accessState.value, memoryState.value)
-    : state.value.canContinue,
-)
+// On the access screen readiness lives in the access stage's own state, so the
+// shell's Continue follows it.
+const shellContinue = computed(() => readyToAdvance(step.value, state.value, accessState.value))
 
 function update(value: StageState) { state.value = value }
 function updateAccess(value: StageState) { accessState.value = value }
-function updateMemory(value: StageState) { memoryState.value = value }
 
 async function load(): Promise<void> {
   await store.load()
@@ -92,20 +83,11 @@ async function load(): Promise<void> {
 onMounted(load)
 
 async function advance(): Promise<void> {
-  if (!readyToAdvance(step.value, state.value, accessState.value, memoryState.value) || busy.value || !contextReady.value) return
+  if (!readyToAdvance(step.value, state.value, accessState.value) || busy.value || !contextReady.value) return
   if (step.value === 'runtime') {
     committing.value = true
     try {
       if (!await runtimeStage.value?.save()) return
-    } finally {
-      committing.value = false
-    }
-  }
-  if (step.value === 'access_memory') {
-    // Memory proposes a default that is written only here, on Continue.
-    committing.value = true
-    try {
-      if (!await memoryStage.value?.save()) return
     } finally {
       committing.value = false
     }
@@ -167,7 +149,7 @@ async function reload(): Promise<void> {
     :context="context"
     :step="step"
     :busy="busy"
-    :error="state.error || accessState.error || memoryState.error"
+    :error="state.error || accessState.error"
     :conflict="store.conflict"
     :can-continue="shellContinue"
     @continue="advance"
@@ -178,10 +160,7 @@ async function reload(): Promise<void> {
     <template #stage>
       <OnboardingLocationStage v-if="step === 'location'" v-bind="stageProps" @state="update" />
       <OnboardingRuntimeStage v-else-if="step === 'runtime'" ref="runtimeStage" v-bind="stageProps" @state="update" />
-      <OnboardingStack v-else-if="step === 'access_memory'" gap="2xl">
-        <OnboardingAccessStage v-bind="stageProps" @state="updateAccess" />
-        <OnboardingMemoryStage ref="memoryStage" v-bind="stageProps" @state="updateMemory" />
-      </OnboardingStack>
+      <OnboardingAccessStage v-else-if="step === 'access_memory'" v-bind="stageProps" @state="updateAccess" />
       <OnboardingCareStage v-else-if="step === 'care'" ref="careStage" v-bind="stageProps" @state="update" />
       <OnboardingFinishStage v-else v-bind="stageProps" @state="update" />
     </template>

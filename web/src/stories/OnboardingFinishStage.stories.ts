@@ -8,8 +8,8 @@ const meta = { id: 'onboarding-finish-stage', title: 'Onboarding runtime/Finish'
 export default meta
 type Story = StoryObj<typeof meta>
 const render = () => stagePanel({ label: 'finish', component: OnboardingFinishStage, props })
-const paths = ['/api/workspaces', '/api/setup-status', '/api/local/backup/setup-prompt', '/api/settings/providers', '/api/proposals/handover?workspace=' + WORKSPACE, '/api/schedules']
-const answers = [{ workspaces: [{ name: WORKSPACE }] }, { workspace_root: '/storybook/alpha' }, { context: {} }, { connections: {} }, { handover: 'off' }, []]
+const paths = ['/api/workspaces', '/api/setup-status', '/api/local/backup/setup-prompt', '/api/settings/providers', '/api/schedules']
+const answers = [{ workspaces: [{ name: WORKSPACE }] }, { workspace_root: '/storybook/alpha' }, { context: {} }, { connections: {} }, []]
 // The production project store navigates through the app router after creating a chat.
 // Its asynchronous auth guard can still be in flight as another story mounts.
 const authRoute = () => route('GET', '/api/auth/check', () => json({ authenticated: true }))

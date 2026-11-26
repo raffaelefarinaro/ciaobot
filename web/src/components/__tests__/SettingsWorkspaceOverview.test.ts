@@ -19,21 +19,6 @@ vi.mock('../../lib/api', () => {
   const get = vi.fn((path: string) => {
     if (path === '/api/workspaces') return Promise.resolve(state.workspaces)
     if (path === '/api/workspaces/archived') return Promise.resolve({ archived: [] })
-    if (path.startsWith('/api/proposals/handover')) {
-      const workspace = decodeURIComponent(path.split('workspace=')[1] ?? '')
-      return Promise.resolve({
-        workspace,
-        handover: 'off',
-        memory_approval: {},
-        accept_resolved: { memory: { mode: 'approve', inherited: true }, profile: { mode: 'approve', inherited: true } },
-        acting_available: true,
-        agreement: {
-          decided: 0, matched: 0, rate: null, window: 50, min_decisions: 20, threshold: 0.9,
-          predicted_accept: 0, accept_matched: 0, predicted_dismiss: 0, dismiss_matched: 0,
-          suggest_handover: false,
-        },
-      })
-    }
     if (path.startsWith('/api/update-tasks')) return Promise.resolve({ tasks: [] })
     // The Overview's Chats and models card reads the engine defaults.
     if (path === '/api/settings/routines') return Promise.resolve({ model_options: { anthropic: [] } })
@@ -113,7 +98,6 @@ describe('Settings > Workspace Overview', () => {
       expect(titles).toEqual([
         'Workspace',
         'Chats and models',
-        'Memory handover',
         'Shared brains',
         'Update task history',
         'Archive this workspace',
@@ -138,7 +122,6 @@ describe('Settings > Workspace Overview', () => {
   })
 
   it('follows a workspace switch', async () => {
-    const { api } = await import('../../lib/api')
     const { wrapper, store } = await mountOverview('work')
     try {
       store.activeWorkspace = 'personal'
@@ -146,7 +129,6 @@ describe('Settings > Workspace Overview', () => {
       await nextTick()
 
       expect(nameValue(wrapper)).toBe('personal')
-      expect(vi.mocked(api.get)).toHaveBeenCalledWith('/api/proposals/handover?workspace=personal')
       // personal is the primary workspace: it cannot be archived.
       expect(wrapper.findAll('.section-title').map(el => el.text())).not.toContain('Archive this workspace')
     } finally {

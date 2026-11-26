@@ -24,7 +24,7 @@ export interface StageState {
 }
 
 export interface OnboardingSummaryItem {
-  id: 'location' | 'backup' | 'runtime' | 'model' | 'approvals' | 'memory' | 'care'
+  id: 'location' | 'backup' | 'runtime' | 'model' | 'approvals' | 'care'
   label: string
   value: string
   state: 'ready' | 'deferred' | 'attention' | 'unknown'
@@ -34,7 +34,8 @@ export interface OnboardingSummaryItem {
 export const ONBOARDING_STEPS: { id: OnboardingStep; label: string }[] = [
   { id: 'location', label: 'Your folder' },
   { id: 'runtime', label: 'Your assistant' },
-  { id: 'access_memory', label: 'Memory & access' },
+  // The id stays: a stored receipt names it, and there is no migration for a rename.
+  { id: 'access_memory', label: 'Access' },
   { id: 'care', label: 'Care' },
   { id: 'finish', label: 'Finish' },
 ]
@@ -47,18 +48,17 @@ export function onboardingProgress(receipt: OnboardingReceipt | null, target: On
 }
 
 /**
- * Whether the shell may advance from `step`. The shared access/memory screen
- * has two owners, so it advances only when both are ready and neither is busy
- * or reporting an error; every other step follows its own stage's readiness.
+ * Whether the shell may advance from `step`. The access screen reports its
+ * readiness through its own stage state, and advances only when that stage is
+ * ready and neither busy nor reporting an error; every other step follows its
+ * own stage's readiness.
  */
 export function readyToAdvance(
   step: OnboardingStep,
   shell: StageState,
   access?: StageState | null,
-  memory?: StageState | null,
 ): boolean {
   if (step !== 'access_memory') return shell.canContinue
-  if (!access || !memory) return false
-  const settled = (state: StageState) => state.canContinue && !state.pending && !state.error
-  return settled(access) && settled(memory)
+  if (!access) return false
+  return access.canContinue && !access.pending && !access.error
 }

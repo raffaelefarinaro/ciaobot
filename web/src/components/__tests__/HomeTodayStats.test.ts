@@ -18,13 +18,12 @@ const TODAY = {
   chats_opened: 14,
   messages_sent: 212,
   chats_archived: 5,
-  memories_saved: 7,
+ 
   projects_worked_on: 4,
   tasks_completed: 3,
   avg_chats_opened_30d: 10.4,
   avg_messages_sent_30d: 151,
   avg_chats_archived_30d: 4,
-  avg_memories_saved_30d: 1.13,
   avg_projects_worked_on_30d: 2.5,
   avg_tasks_completed_30d: 0.4,
 }
@@ -45,13 +44,13 @@ describe('HomeTodayStats', () => {
     await flushPromises()
 
     const rows = wrapper.findAll('.rail-kv')
-    expect(rows).toHaveLength(6)
+    expect(rows).toHaveLength(5)
     expect(rows.map(row => row.get('dt').text())).toEqual([
-      'Chats opened', 'Messages sent', 'Chats archived', 'Memories saved', 'Projects worked on', 'Tasks completed',
+      'Chats opened', 'Messages sent', 'Chats archived', 'Projects worked on', 'Tasks completed',
     ])
-    expect(rows.map(row => row.get('strong').text())).toEqual(['14', '212', '5', '7', '4', '3'])
+    expect(rows.map(row => row.get('strong').text())).toEqual(['14', '212', '5', '4', '3'])
     expect(rows.map(row => row.get('.home-today-avg').text())).toEqual([
-      'avg 10', 'avg 151', 'avg 4', 'avg 1.1', 'avg 2.5', 'avg 0.4',
+      'avg 10', 'avg 151', 'avg 4', 'avg 2.5', 'avg 0.4',
     ])
     wrapper.unmount()
   })
@@ -70,7 +69,7 @@ describe('HomeTodayStats', () => {
     get.mockReturnValue(new Promise(() => {}))
     const wrapper = mountToday()
 
-    expect(wrapper.findAll('strong').map(node => node.text())).toEqual(Array(6).fill('—'))
+    expect(wrapper.findAll('strong').map(node => node.text())).toEqual(Array(5).fill('—'))
     expect(wrapper.find('.home-today-avg').exists()).toBe(false)
     expect(wrapper.find('.spinner, [role="progressbar"], [aria-busy="true"]').exists()).toBe(false)
     wrapper.unmount()
@@ -80,16 +79,16 @@ describe('HomeTodayStats', () => {
     get.mockRejectedValue(new Error('engine offline'))
     const failed = mountToday()
     await flushPromises()
-    expect(failed.findAll('strong').map(node => node.text())).toEqual(Array(6).fill('—'))
+    expect(failed.findAll('strong').map(node => node.text())).toEqual(Array(5).fill('—'))
     expect(failed.find('.home-today-avg').exists()).toBe(false)
     expect(failed.text()).not.toContain('engine offline')
     failed.unmount()
 
-    get.mockResolvedValue({ today: { ...TODAY, memories_saved: null, avg_messages_sent_30d: null } })
+    get.mockResolvedValue({ today: { ...TODAY, projects_worked_on: null, avg_messages_sent_30d: null } })
     const partial = mountToday()
     await flushPromises()
     expect(partial.findAll('.rail-kv')[3].get('strong').text()).toBe('—')
-    expect(partial.findAll('.home-today-avg')).toHaveLength(5)
+    expect(partial.findAll('.home-today-avg')).toHaveLength(4)
     expect(partial.findAll('.rail-kv')[1].find('.home-today-avg').exists()).toBe(false)
     partial.unmount()
   })
@@ -124,7 +123,7 @@ describe('HomeTodayStats', () => {
     await flushPromises()
 
     expect(get).toHaveBeenLastCalledWith('/api/stats?workspace=work&range=30')
-    expect(wrapper.findAll('strong').map(node => node.text())).toEqual(Array(6).fill('—'))
+    expect(wrapper.findAll('strong').map(node => node.text())).toEqual(Array(5).fill('—'))
     wrapper.unmount()
   })
 })

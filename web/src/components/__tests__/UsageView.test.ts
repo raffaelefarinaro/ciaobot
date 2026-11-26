@@ -17,8 +17,8 @@ const get = vi.mocked(api.get)
 const SAMPLE = {
   range_days: 30,
   generated_at: '2026-11-09T10:00:00Z',
-  totals: { chats_opened: 248, messages_sent: 4517, chats_archived: 171, memories_saved: 112, tasks_completed: 37, projects_worked_on: 16, automation_runs: 180, tokens: 71500000 },
-  previous: { chats_opened: 210, messages_sent: 3702, chats_archived: 157, memories_saved: 85, tasks_completed: 31, projects_worked_on: 13, automation_runs: 173, tokens: null },
+  totals: { chats_opened: 248, messages_sent: 4517, chats_archived: 171, tasks_completed: 37, projects_worked_on: 16, automation_runs: 180, tokens: 71500000 },
+  previous: { chats_opened: 210, messages_sent: 3702, chats_archived: 157, tasks_completed: 31, projects_worked_on: 13, automation_runs: 173, tokens: null },
 }
 
 function deferred<T>() {
@@ -39,21 +39,21 @@ beforeEach(() => {
 })
 
 describe('UsageView', () => {
-  it('shows the eight totals with deltas against the previous period', async () => {
+  it('shows the seven totals with deltas against the previous period', async () => {
     get.mockResolvedValue(SAMPLE)
     const wrapper = mountView()
     await flushPromises()
 
     const tiles = wrapper.findAll('.usage-kpi')
-    expect(tiles).toHaveLength(8)
+    expect(tiles).toHaveLength(7)
     expect(wrapper.findAll('.usage-kpi-label').map(l => l.text())).toEqual([
-      'Chats opened', 'Messages sent', 'Chats archived', 'Memories saved',
+      'Chats opened', 'Messages sent', 'Chats archived',
       'Tasks completed', 'Projects worked on', 'Automation runs', 'Tokens processed',
     ])
     expect(tiles[0].find('.usage-kpi-value').text()).toBe('248')
     expect(tiles[0].find('.usage-kpi-delta').text()).toBe('+18% vs previous 30 days')
 
-    const tokens = tiles[7]
+    const tokens = tiles[6]
     expect(tokens.find('.usage-kpi-value').text()).toBe('71.5M')
     expect(tokens.find('.usage-kpi-delta').exists()).toBe(false)
   })

@@ -37,20 +37,6 @@ export interface MemoryGraphNode {
    * null when the note has no usable date or the server is older. */
   thresholdDays?: number | null
   /**
-   * What the managed verification pass concluded about this note's CURRENT
-   * revision, or null when nobody has checked it.
-   *
-   * A check inside its cooldown clears `stale` even though the note's own
-   * `updated:` is old: the question has been asked, and asking it again is what
-   * the cooldown exists to prevent. So the map has to be able to say *why* a
-   * note dropped off the "unchecked" count rather than leaving the operator to
-   * wonder whether the note was quietly forgotten.
-   *
-   * `pending` is the state that matters most to show: a proposal is filed and
-   * waiting for a person, which is not the same as a note nobody looked at.
-   */
-  check?: MemoryGraphCheck | null
-  /**
    * What the entry-level detector found inside this note's own list items, or
    * null for a node whose body could not be read (and for a note the review
    * queue would never show, which the map has always left unflagged).
@@ -133,31 +119,6 @@ export interface MemoryGraphEntryFinding {
   own_date: boolean
 }
 
-/** One note's last verification, as the memory map reports it. */
-export interface MemoryGraphCheck {
-  /** `still_valid` | `update` | `retire` | `unverified`. */
-  outcome: string
-  /** `YYYY-MM-DD`: when the check ran. */
-  checked_at: string
-  /** `YYYY-MM-DD`: the end of the cooldown. */
-  retry_after: string
-  /** `complete` | `partial`: how much of the note the check covered. */
-  coverage: string
-  reason: string
-  /** How many citations the verdict rested on. */
-  citations: number
-  /** The note receipt an applied verdict wrote, or '' for one that wrote none. */
-  receipt_id: string
-  /** The check answers this revision: in cooldown, or waiting on a proposal. */
-  settled: boolean
-  /** Settled AND waiting on a `note_edit` proposal — asked, not yet answered. */
-  pending: boolean
-  /** The queue row to link to, when `pending`. */
-  proposal_id: string
-  /** A proposal is pinned to a revision this note has left, so it is dead. */
-  conflicted: boolean
-}
-
 export interface MemoryGraphEdge { source: string; target: string }
 
 export const MEMORY_TYPE_META: Record<string, { label: string; color: string }> = {
@@ -224,7 +185,7 @@ function matchesSearch(n: MemoryGraphNode, term: string): boolean {
  * component triggered it.
  */
 /** The memory page's sections, in sidebar order. */
-export const MEMORY_SECTIONS = ['review', 'map', 'categories', 'import', 'retired', 'history'] as const
+export const MEMORY_SECTIONS = ['map', 'categories', 'import', 'unsure'] as const
 export type MemorySection = typeof MEMORY_SECTIONS[number]
 export function isMemorySection(value: unknown): value is MemorySection {
   return typeof value === 'string' && (MEMORY_SECTIONS as readonly string[]).includes(value)
@@ -233,22 +194,6 @@ export function isMemorySection(value: unknown): value is MemorySection {
 export function memorySectionPath(section: MemorySection): string {
   return `/memory/${section}`
 }
-/**
- * The two queues To decide shows, and the filter that narrows it to one. The
- * suggestions and the notes to revisit are the same job — a list of routine
- * choices — so they share one page with a filter instead of one page each.
- */
-export const REVIEW_FILTERS = ['all', 'suggested', 'revisit'] as const
-export type ReviewFilter = typeof REVIEW_FILTERS[number]
-export function isReviewFilter(value: unknown): value is ReviewFilter {
-  return typeof value === 'string' && (REVIEW_FILTERS as readonly string[]).includes(value)
-}
-/** To decide, narrowed to one queue. The filter rides in `?show=` so Home's
- * and the map's links land on the queue they name. */
-export function reviewPath(filter: ReviewFilter = 'all'): string {
-  return filter === 'all' ? memorySectionPath('review') : `${memorySectionPath('review')}?show=${filter}`
-}
-
 export const useMemoryMapStore = defineStore('memoryMap', () => {
   const nodes = ref<MemoryGraphNode[]>([])
   const edges = ref<MemoryGraphEdge[]>([])
@@ -275,7 +220,7 @@ export const useMemoryMapStore = defineStore('memoryMap', () => {
    * sidebar next to the workspace toggle, so this state is shared between
    * `ProjectSidebar` (the buttons) and `MemoryMapView` (the surfaces).
    */
-  const view = ref<'graph' | 'list' | 'review'>('review')
+  const view = ref<'graph' | 'list' | 'page'>('graph')
   /**
    * Which rendering the map surface uses. Graph and list are two drawings of
    * one thing — the same notes, the same workspace, the same filters — so the
@@ -285,17 +230,15 @@ export const useMemoryMapStore = defineStore('memoryMap', () => {
    */
   const mapView = ref<'graph' | 'list'>('graph')
   /**
-   * Which of the memory page's five sections is on screen. The sidebar lists
+   * Which of the memory page's sections is on screen. The sidebar lists
    * them the way it lists Settings' tabs, and each one is a route
    * (`/memory/<section>`), so back/forward and deep links land on the same
    * place. `view` stays as the map's own state; `setSection` keeps it in step.
    */
-  const section = ref<MemorySection>('review')
-  /** Which queue To decide shows; the route's `?show=` owns it. */
-  const reviewFilter = ref<ReviewFilter>('all')
+  const section = ref<MemorySection>('map')
   function setSection(next: MemorySection) {
     section.value = next
-    view.value = next === 'map' ? mapView.value : 'review'
+    view.value = next === 'map' ? mapView.value : 'page'
   }
   // Bumped whenever something outside the canvas (the sidebar's "most
   // connected" list, a neighbor link) asks the canvas to pan/zoom onto a
@@ -514,11 +457,7 @@ export const useMemoryMapStore = defineStore('memoryMap', () => {
         stale: n.stale === true,
         ageDays: typeof n.age_days === 'number' ? n.age_days : null,
         thresholdDays: typeof n.threshold_days === 'number' ? n.threshold_days : null,
-        // `null` rather than a default object, so "nobody checked this" and "the
-        // server is older than this client" both read as absence and neither
-        // puts a "checked" claim on a note nothing checked.
-        check: (n.check && typeof n.check === 'object') ? n.check : null,
-        // Same contract as `check`: absent means absent. A node whose body could
+        // Absent means absent. A node whose body could
         // not be read carries no coverage, and a default object of zeroes would
         // render as "read nothing, found nothing wrong" — a claim about the note
         // rather than about this client's ability to see it.
@@ -712,7 +651,7 @@ export const useMemoryMapStore = defineStore('memoryMap', () => {
   return {
     nodes, edges, loading, loadError, search, activeCats, selectedId, focusSignal, loadedWorkspace,
     pendingFocus,
-    hideOrphans, orphanFilter, view, mapView, section, reviewFilter, setSection,
+    hideOrphans, orphanFilter, view, mapView, section, setSection,
     nodesById, adjacency, categoryList, visibleNodes, visibleIds, visibleEdgeCount, orphanCount,
     mostConnected, selectedNode,
     orphanNotes, recentNotes, staleNotes, entryStaleNotes, ageLabelOf,

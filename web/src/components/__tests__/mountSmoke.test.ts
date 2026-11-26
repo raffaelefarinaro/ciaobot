@@ -167,18 +167,6 @@ vi.mock('../../lib/api', () => {
       pending_commits: 0,
       reason: 'up to date',
     },
-    '/api/proposals/handover': {
-      workspace: 'personal',
-      handover: 'off',
-      memory_approval: {},
-      accept_resolved: { memory: { mode: 'approve', inherited: true }, profile: { mode: 'approve', inherited: true } },
-      acting_available: true,
-      agreement: {
-        decided: 0, matched: 0, rate: null, window: 50, min_decisions: 20, threshold: 0.9,
-        predicted_accept: 0, accept_matched: 0, predicted_dismiss: 0, dismiss_matched: 0,
-        suggest_handover: false,
-      },
-    },
     '/api/local/backup/setup-prompt': {
       context: { folder: '/Users/person/Ciao', scope: 'memory-vault' },
       prompt: 'Set up a private repository for this folder.',
@@ -488,11 +476,6 @@ describe('component mount smoke', () => {
 
   it('SettingsMemoryBackup mounts without throwing', async () => {
     const errors = await mountAndSettle(() => import('../settings/SettingsMemoryBackup.vue'))
-    expect(errors).toEqual([])
-  })
-
-  it('SettingsMemoryHandover mounts without throwing', async () => {
-    const errors = await mountAndSettle(() => import('../settings/SettingsMemoryHandover.vue'))
     expect(errors).toEqual([])
   })
 

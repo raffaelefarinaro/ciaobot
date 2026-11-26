@@ -42,7 +42,6 @@ const ROWS = [
   ['chats_opened', 'Chats opened'],
   ['messages_sent', 'Messages sent'],
   ['chats_archived', 'Chats archived'],
-  ['memories_saved', 'Memories saved'],
   ['projects_worked_on', 'Projects worked on'],
   ['tasks_completed', 'Tasks completed'],
 ] as const

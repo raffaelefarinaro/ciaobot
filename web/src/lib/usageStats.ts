@@ -10,7 +10,6 @@ export interface UsageCounts {
   chats_opened: number | null
   messages_sent: number | null
   chats_archived: number | null
-  memories_saved: number | null
   tasks_completed: number | null
   projects_worked_on: number | null
   automation_runs: number | null
@@ -21,20 +20,17 @@ export interface UsageToday {
   chats_opened: number | null
   messages_sent: number | null
   chats_archived: number | null
-  memories_saved: number | null
   projects_worked_on: number | null
   tasks_completed: number | null
   avg_chats_opened_30d: number | null
   avg_messages_sent_30d: number | null
   avg_chats_archived_30d: number | null
-  avg_memories_saved_30d: number | null
   avg_projects_worked_on_30d: number | null
   avg_tasks_completed_30d: number | null
 }
 
 export interface UsageDay { date: string; count: number | null }
 export interface UsageProject { project_id: string; name: string; messages: number | null }
-export interface UsagePipeline { proposed: number | null; accepted: number | null; notes_updated: number | null }
 export interface UsageModel { model: string; turns: number | null }
 
 export interface UsageStats {
@@ -45,14 +41,12 @@ export interface UsageStats {
   previous: UsageCounts
   daily_messages: UsageDay[]
   projects: UsageProject[]
-  memory_pipeline: UsagePipeline
   hours: Array<number | null> // always length 24
   models: UsageModel[]
 }
 
-const COUNT_KEYS = ['chats_opened', 'messages_sent', 'chats_archived', 'memories_saved', 'tasks_completed', 'projects_worked_on', 'automation_runs', 'tokens'] as const
-const TODAY_KEYS = ['chats_opened', 'messages_sent', 'chats_archived', 'memories_saved', 'projects_worked_on', 'tasks_completed', 'avg_chats_opened_30d', 'avg_messages_sent_30d', 'avg_chats_archived_30d', 'avg_memories_saved_30d', 'avg_projects_worked_on_30d', 'avg_tasks_completed_30d'] as const
-const PIPELINE_KEYS = ['proposed', 'accepted', 'notes_updated'] as const
+const COUNT_KEYS = ['chats_opened', 'messages_sent', 'chats_archived', 'tasks_completed', 'projects_worked_on', 'automation_runs', 'tokens'] as const
+const TODAY_KEYS = ['chats_opened', 'messages_sent', 'chats_archived', 'projects_worked_on', 'tasks_completed', 'avg_chats_opened_30d', 'avg_messages_sent_30d', 'avg_chats_archived_30d', 'avg_projects_worked_on_30d', 'avg_tasks_completed_30d'] as const
 const DATE_RE = /^\d{4}-\d{2}-\d{2}$/
 
 export const DASH = '—'
@@ -82,7 +76,6 @@ export function normalizeUsageStats(raw: unknown, range: StatsRange): UsageStats
     projects: list(o.projects).map(obj)
       .filter(p => str(p.project_id) || str(p.name))
       .map(p => ({ project_id: str(p.project_id), name: str(p.name) || str(p.project_id), messages: num(p.messages) })),
-    memory_pipeline: pick(o.memory_pipeline, PIPELINE_KEYS),
     hours,
     models: list(o.models).map(obj).filter(m => str(m.model))
       .map(m => ({ model: str(m.model), turns: num(m.turns) })),

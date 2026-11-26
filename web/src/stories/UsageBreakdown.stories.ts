@@ -25,7 +25,7 @@ export const Loaded: Story = {
     expect(canvas.getByText('Activity')).toBeTruthy()
     expect(canvas.getByRole('list', { name: 'Messages per day, last 52 weeks' })).toBeTruthy()
     expect(canvas.getByText('Projects')).toBeTruthy()
-    expect(canvas.getByText('Memory pipeline')).toBeTruthy()
+    expect(canvas.queryByText('Memory pipeline')).toBeNull()
     expect(canvas.getByText('Models used')).toBeTruthy()
     expect(canvas.getByText('68%')).toBeTruthy()
   },

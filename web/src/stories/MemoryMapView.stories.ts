@@ -7,9 +7,8 @@ import { mapNoteIds, mapRoutes, mountMapFixture } from './memoryMapFixture'
 /**
  * The MemoryMapView composition over the fail-closed fixture boundary. Every
  * story mounts the production component (whose own imports own its children)
- * with the synthetic storybook vault; the review queues answer empty so the
- * To decide section renders its own chrome only. The queue bodies themselves
- * belong to their own component rows.
+ * with the synthetic storybook vault. The Unsure section reads its list from
+ * the declared vault file.
  */
 
 /** Which seeded note the tile shows; the tile reads the note's own file. */
@@ -17,8 +16,6 @@ function selectedIdFor(state: MapState): string | undefined {
   switch (state) {
     case 'detail-plain': return mapNoteIds.reference
     case 'detail-stale': return mapNoteIds.project
-    case 'detail-pending': return mapNoteIds.pending
-    case 'detail-conflicted': return mapNoteIds.conflicted
     case 'detail-facts': return mapNoteIds.facts
     default: return undefined
   }
@@ -29,32 +26,29 @@ function noteFilesFor(state: MapState): string[] {
   switch (state) {
     case 'detail-plain': return [mapNoteIds.reference, 'storybook-vault/Storybook hub.md']
     case 'detail-stale': return [mapNoteIds.project]
-    case 'detail-pending': return [mapNoteIds.pending]
-    case 'detail-conflicted': return [mapNoteIds.conflicted]
     case 'detail-facts': return [mapNoteIds.facts]
     default: return []
   }
 }
 
 type MapState =
-  | 'default' | 'loading' | 'error'
-  | 'detail-plain' | 'detail-stale' | 'detail-pending' | 'detail-conflicted' | 'detail-facts'
+  | 'default' | 'unsure' | 'loading' | 'error'
+  | 'detail-plain' | 'detail-stale' | 'detail-facts'
 
 const stateDescription: Record<MapState, string> = {
-  default: 'the store default section (To decide): filter chips over the two queues',
+  default: 'the store default section (the map): toolbar over the drawing',
+  unsure: 'the Unsure section: the list read from its Markdown file',
   loading: 'a held vault graph read behind the graph skeleton',
   error: 'a failed vault graph read',
   'detail-plain': 'a selected note with no callout, neighbours swappable in play',
-  'detail-stale': 'a selected stale note with the review callout',
-  'detail-pending': 'a selected note whose verification filed a proposal',
-  'detail-conflicted': 'a selected note whose verification no longer applies',
+  'detail-stale': 'a selected stale note with the age callout',
   'detail-facts': 'a selected note with facts nobody re-checked',
 }
 
 function mountState(host: HTMLElement, state: MapState) {
-  // Every state except the default To decide section lives in the map section.
   return mountMapFixture(host, MemoryMapView, {
-    view: state === 'default' ? undefined : 'graph',
+    section: state === 'unsure' ? 'unsure' : undefined,
+    view: state === 'default' || state === 'unsure' ? undefined : 'graph',
     selectedId: selectedIdFor(state),
   })
 }
@@ -104,18 +98,28 @@ async function assertSettled(canvas: Parameters<NonNullable<Story['play']>>[0]['
   expect(canvas.queryByText(/Story network violation/)).toBeNull()
 }
 
-// The store's default section is To decide, so the composition's default render
-// is the review chrome: the two-queue filter chips with counts and no zero chips.
+// The store's default section is the map: toolbar over the drawing.
 export const Default: Story = {
   parameters: { fixture: { routes: mapRoutes({ graph: 'loaded' }) } },
   render: () => renderState('default'),
   play: async ({ canvas }) => {
-    await waitFor(() => expect(canvas.getByRole('button', { name: 'All 0' })).toBeTruthy())
-    const all = canvas.getByRole('button', { name: 'All 0' })
-    expect(all.getAttribute('aria-pressed')).toBe('true')
-    expect(canvas.queryByRole('button', { name: /Suggested/ })).toBeNull()
-    expect(canvas.queryByRole('button', { name: /To revisit/ })).toBeNull()
-    expect(canvas.getByText('Memory · To decide')).toBeTruthy()
+    await waitFor(() => expect(canvas.getByRole('group', { name: 'View' })).toBeTruthy())
+    expect(canvas.getByText('Memory · Map')).toBeTruthy()
+    expect(canvas.queryByRole('complementary', { name: 'Always loaded' })).toBeNull()
+    await assertSettled(canvas)
+  },
+}
+
+// The Unsure section: the open lines of the list, the file one click away.
+export const Unsure: Story = {
+  parameters: { fixture: { routes: mapRoutes({ graph: 'loaded' }) } },
+  render: () => renderState('unsure'),
+  play: async ({ canvas }) => {
+    await waitFor(() => expect(canvas.getByText('1 item waiting.')).toBeTruthy())
+    expect(canvas.getByText('Memory · Unsure')).toBeTruthy()
+    expect(canvas.getByText(/memory: Storybook prefers short briefs/)).toBeTruthy()
+    expect(canvas.queryByText(/Storybook colleague works on the project/)).toBeNull()
+    expect(canvas.getByRole('button', { name: 'Open Unsure.md' })).toBeTruthy()
     expect(canvas.getByRole('complementary', { name: 'Always loaded' })).toBeTruthy()
     await assertSettled(canvas)
   },
@@ -162,41 +166,14 @@ export const SelectionDetail: Story = {
   },
 }
 
-// A stale note: the tile suppresses nothing else and offers the To decide link.
+// A stale note: the tile names the age and the rule, and links nowhere.
 export const DetailStale: Story = {
   parameters: { fixture: { routes: mapRoutes({ graph: 'loaded', notes: noteFilesFor('detail-stale') }) } },
   render: () => renderState('detail-stale'),
   play: async ({ canvas }) => {
     await waitFor(() => expect(canvas.getByText(/Unchecked for/)).toBeTruthy())
     expect(canvas.getByText(/Notes like this are due every 30 days\./)).toBeTruthy()
-    const link = canvas.getByRole('link', { name: 'Review in To decide' })
-    expect(link.getAttribute('href')).toBe('/memory/review?show=revisit')
-    await assertSettled(canvas)
-  },
-}
-
-// A note with a verification that filed a proposal: the tile answers why the
-// note is not being asked again on top of the pending question.
-export const DetailPending: Story = {
-  parameters: { fixture: { routes: mapRoutes({ graph: 'loaded', notes: noteFilesFor('detail-pending') }) } },
-  render: () => renderState('detail-pending'),
-  play: async ({ canvas }) => {
-    await waitFor(() => expect(canvas.getByText(/Being checked\./)).toBeTruthy())
-    const link = canvas.getByRole('link', { name: 'Open the proposal' })
-    expect(link.getAttribute('href')).toBe('/memory/review?show=suggested')
-    await assertSettled(canvas)
-  },
-}
-
-// A note whose verification answers an older revision: the verdict is dead and
-// the tile routes to the revisit queue.
-export const DetailConflicted: Story = {
-  parameters: { fixture: { routes: mapRoutes({ graph: 'loaded', notes: noteFilesFor('detail-conflicted') }) } },
-  render: () => renderState('detail-conflicted'),
-  play: async ({ canvas }) => {
-    await waitFor(() => expect(canvas.getByText(/A verification is out of date for this note\./)).toBeTruthy())
-    const link = canvas.getByRole('link', { name: 'Review in To decide' })
-    expect(link.getAttribute('href')).toBe('/memory/review?show=revisit')
+    expect(canvas.queryByRole('link', { name: 'Review in To decide' })).toBeNull()
     await assertSettled(canvas)
   },
 }

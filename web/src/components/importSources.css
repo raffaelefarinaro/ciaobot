@@ -2,8 +2,8 @@
    status lines, the disclosure blocks and the 44px floor they all stand on.
    Pulled in by `ImportSources.vue` (discovery, selection, confirmation) and
    `ImportRuns.vue` (the filed batches, their progress and their retention) as
-   `<style scoped src="./importSources.css">`, the shape `memoryReview.css` and
-   `overviewSections.css` already use in this directory.
+   `<style scoped src="./importSources.css">`, the shape `overviewSections.css`
+   already uses in this directory.
 
    It is a shared file because the two halves are one journey drawn in two
    components: a row, a disclosure and a quiet button have to look and measure

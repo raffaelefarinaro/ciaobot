@@ -18,8 +18,6 @@ import { useProjectStore } from './projects'
 import { useTaskSignalsStore } from './taskSignals'
 import { useHousekeepingStore } from './housekeeping'
 import { useTaskStore } from './tasks'
-import { useProposalsStore } from './proposals'
-import { useVaultReviewStore } from './vaultReview'
 import projectsSrc from './projects.ts?raw'
 import taskSignalsSrc from './taskSignals.ts?raw'
 import housekeepingSrc from './housekeeping.ts?raw'
@@ -69,8 +67,6 @@ function markHealthy(projects: ReturnType<typeof useProjectStore>, signals: Retu
   housekeeping.updateTasksWorkspace = 'personal'
   housekeeping.updateTasksHealth = ready()
   useTaskStore().schedulesLoaded = true
-  useProposalsStore().loaded = true
-  useVaultReviewStore().loadedWorkspace = 'personal'
   projects.chatsHealth = ready()
   signals.healthWorkspace = projects.activeWorkspace
   signals.health = ready()
@@ -160,10 +156,6 @@ describe('notification inbox store', () => {
     useHousekeepingStore().actionsHealth = ready()
     expect(inbox.allClear).toBe(false)
     useTaskStore().schedulesLoaded = true
-    expect(inbox.allClear).toBe(false)
-    useProposalsStore().loaded = true
-    expect(inbox.allClear).toBe(false)
-    useVaultReviewStore().loadedWorkspace = 'personal'
     expect(inbox.allClear).toBe(false)
     const housekeeping = useHousekeepingStore()
     housekeeping.updateTasksWorkspace = 'personal'
@@ -671,33 +663,6 @@ describe('notification inbox store', () => {
       expect(inbox.rows.find((r) => r.key === 'chat:c-del')!.section).toBe('needsYou')
     })
 
-    it('memory_suggestions_and_revisit_are_not_inbox_content', async () => {
-      const { projects, signals, inbox } = setup()
-      markHealthy(projects, signals)
-      const proposals = useProposalsStore()
-      const review = useVaultReviewStore()
-      proposals.rows = [{ id: 'a', workspace: 'personal' }, { id: 'b', workspace: 'personal' }] as never
-      review.loadedWorkspace = 'personal'
-      review.candidates = [{ path: 'a.md' }] as never
-      expect(keysOf(inbox)).toEqual([])
-      expect(inbox.count).toBe(0)
-      expect(inbox.sources.map((s) => s.source)).toEqual(['chats', 'operator', 'automations', 'updateTasks'])
-      // Their loads failing is not an inbox concern either.
-      proposals.loadError = 'x'
-      review.loadError = 'x'
-      expect(inbox.overall).toBe('ready')
-      expect(inbox.allClear).toBe(true)
-      vi.spyOn(projects, 'syncLatest').mockResolvedValue()
-      vi.spyOn(signals, 'reload').mockResolvedValue()
-      vi.spyOn(useHousekeepingStore(), 'refresh').mockResolvedValue()
-      vi.spyOn(useTaskStore(), 'fetchSchedules').mockResolvedValue()
-      const pf = vi.spyOn(proposals, 'fetch').mockResolvedValue()
-      const vf = vi.spyOn(review, 'fetch').mockResolvedValue()
-      await inbox.refresh()
-      expect(pf).not.toHaveBeenCalled()
-      expect(vf).not.toHaveBeenCalled()
-    })
-
     it('memory_passes_never_reach_the_inbox_even_blocked', () => {
       const { projects, signals, inbox } = setup()
       markHealthy(projects, signals)
@@ -743,24 +708,16 @@ describe('notification inbox store', () => {
       expect(insight).toMatchObject({ phase: 'needsYou', blocking: true, question: 'Which project?' })
     })
 
-    it('never_mutates_review', async () => {
+    it('never_mutates_anything', async () => {
       const { projects, signals, inbox } = setup()
       markHealthy(projects, signals)
-      const proposals = useProposalsStore()
-      const review = useVaultReviewStore()
-      const act = vi.spyOn(proposals, 'act')
-      const batch = vi.spyOn(proposals, 'batch')
       const markRead = vi.spyOn(projects, 'markRead')
       vi.spyOn(projects, 'syncLatest').mockResolvedValue()
       vi.spyOn(signals, 'reload').mockResolvedValue()
-      proposals.loadError = 'x'
-      review.loadError = 'x'
       inbox.init()
       await inbox.refresh()
       window.dispatchEvent(new Event('focus'))
       await nextTick()
-      expect(act).not.toHaveBeenCalled()
-      expect(batch).not.toHaveBeenCalled()
       expect(markRead).not.toHaveBeenCalled()
       expect(api.post).not.toHaveBeenCalled()
       expect(api.patch).not.toHaveBeenCalled()

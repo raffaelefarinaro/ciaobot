@@ -95,7 +95,7 @@ export function workspacesBody(): unknown {
   }
 }
 
-/** The onboarding receipt the memory stage reads to decide the offer of the draft. */
+/** The onboarding receipt: in progress or completed. */
 export function receipt(status: 'in_progress' | 'completed'): unknown {
   return {
     schema: 1,
@@ -103,11 +103,6 @@ export function receipt(status: 'in_progress' | 'completed'): unknown {
     installation: { status, step: status === 'in_progress' ? 'access_memory' : 'finish' },
     workspaces: {},
   }
-}
-
-/** The handover answer: `off` unless a story overrides it. */
-export function handover(handoverValue: 'off' | 'dismiss' | 'all' = 'off', actingAvailable = true): unknown {
-  return { workspace: WORKSPACE, handover: handoverValue, acting_available: actingAvailable }
 }
 
 type StageExposed = Partial<{ save: () => Promise<boolean>, refresh: () => Promise<void> }>

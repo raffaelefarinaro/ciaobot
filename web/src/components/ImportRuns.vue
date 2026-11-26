@@ -99,7 +99,7 @@
             />
             <p class="import-run-line">
               {{ batch.progress.completed_sources }} of {{ batch.progress.total_sources }} conversations
-              read · {{ batch.progress.proposals_filed }} proposal{{ batch.progress.proposals_filed === 1 ? '' : 's' }} filed
+              read · {{ batch.progress.proposals_filed }} line{{ batch.progress.proposals_filed === 1 ? '' : 's' }} added to the Unsure list
               <span v-if="batch.progress.skipped">, {{ batch.progress.skipped }} skipped</span>
             </p>
             <p v-if="batch.error" class="import-status import-error">{{ batch.error }}</p>
@@ -115,8 +115,8 @@
               <router-link
                 v-if="batch.progress.proposals_filed > 0"
                 class="import-run-review"
-                to="/memory/review"
-              >Review the {{ batch.progress.proposals_filed }} filed proposal{{ batch.progress.proposals_filed === 1 ? '' : 's' }} in To decide</router-link>
+                to="/memory/unsure"
+              >Open the Unsure list</router-link>
               <button
                 v-if="store.isOpen(batch)"
                 type="button"
@@ -134,7 +134,7 @@
             </div>
 
             <!-- What a cancel does and does not do, said where the button is:
-                 keeping the proposals is the point, and text already handed to
+                 keeping the lines already on the list is the point, and text already handed to
                  the provider is gone whatever this button says. Which of those
                  is true depends on whether the run has started, so the sentence
                  does too. -->
@@ -147,7 +147,7 @@
 
             <!-- The evidence this batch recorded, one row per filed bullet: which
                  conversation, which message inside it. The fact's own date rides
-                 on the proposal, so review is where a date is read. -->
+                 on its line in the Unsure list. -->
             <details v-if="batch.provenance.length" class="import-aside">
               <summary class="import-aside-title">
                 What this filed ({{ batch.provenance.length }})
@@ -159,7 +159,7 @@
                       {{ providerName(row.provider) }} · session {{ row.source_id }}
                     </span>
                     <span class="import-row-meta">
-                      message {{ row.anchor || 'unknown' }} — {{ row.accepted ? 'accepted' : 'waiting for review' }}
+                      message {{ row.anchor || 'unknown' }}
                     </span>
                   </span>
                 </li>
@@ -232,9 +232,9 @@ const hasOpen = computed(() => store.batches.some((row) => store.isOpen(row)))
  * The window as the sweep actually prunes on.
  *
  * `prune_expired` drops *any* terminal batch whose `updated_at` is older than the
- * window, whatever became of its proposals, and it runs once per boot — so the
+ * window, whatever became of its lines, and it runs once per boot — so the
  * honest sentence is "about N days, checked when Ciaobot starts" and says nothing
- * about what the reader decided. "If you never decided its proposals" would have
+ * about what the reader decided. "If you never ticked its lines" would have
  * promised a longer life for an undecided import than the store gives it.
  */
 const retentionNote = computed(() => {
@@ -242,10 +242,10 @@ const retentionNote = computed(() => {
   const window = days > 0 ? `${days} days` : 'a limited time'
   return (
     `Ciaobot keeps a private copy of what an import read, and drops it ${window} after the ` +
-    'import settles (checked when Ciaobot starts). Facts you accepted keep a short ' +
+    'import settles (checked when Ciaobot starts). Facts you ticked keep a short ' +
     'record of the conversation and message they came from, so an imported fact stays ' +
     'attributable after that copy is gone. Removing an import only removes this record: ' +
-    'proposals already filed stay queued, and a fact you accepted stays in your memory. ' +
+    'lines already on the Unsure list stay there, and a fact you ticked stays in your memory. ' +
     'The conversations on this computer are never modified or deleted.'
   )
 })
@@ -303,8 +303,8 @@ function openNote(batch: ImportBatch): string {
     )
   }
   return (
-    'Cancelling stops the conversations not yet started. Proposals already filed stay ' +
-    'queued for you to decide, and text already sent to the configured provider cannot ' +
+    'Cancelling stops the conversations not yet started. Lines already added to the ' +
+    'Unsure list stay there, and text already sent to the configured provider cannot ' +
     'be unsent.'
   )
 }
@@ -315,22 +315,22 @@ function settledNote(batch: ImportBatch): string {
   if (batch.status === 'cancelled') {
     return (
       `Cancelled after ${batch.progress.completed_sources} of ${batch.progress.total_sources} ` +
-      `conversations. ${filed} proposal${filed === 1 ? '' : 's'} stay queued for you to decide; ` +
+      `conversations. ${filed} line${filed === 1 ? '' : 's'} stay on the Unsure list; ` +
       'text already sent to the configured provider cannot be unsent.'
     )
   }
   if (batch.status === 'failed') {
     return (
       'The run stopped on an error. Nothing was written to your memory, and anything already ' +
-      'filed stays queued for you to decide.'
+      'on the Unsure list stays there.'
     )
   }
   if (!filed) {
     return 'This run filed nothing worth keeping. Your memory is unchanged.'
   }
   return (
-    `Filed ${filed} proposal${filed === 1 ? '' : 's'}, each carrying the date of the message it ` +
-    'came from. Nothing is saved until you accept one in To decide.'
+    `Added ${filed} line${filed === 1 ? '' : 's'} to the Unsure list, each carrying the date of the message it ` +
+    'came from. Nothing is saved until you tick one.'
   )
 }
 

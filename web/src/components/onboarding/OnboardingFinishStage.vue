@@ -56,12 +56,11 @@ async function loadSummary(): Promise<void> {
   readError.value = ''
   // Each read is independent: an unavailable one becomes `unknown`, not a
   // guessed value, and never a "ready".
-  const [workspaces, setup, backup, providers, handover, schedules] = await Promise.allSettled([
+  const [workspaces, setup, backup, providers, schedules] = await Promise.allSettled([
     api.get<{ workspaces?: Array<{ name: string; provider_overrides?: Record<string, Record<string, string>> }> }>('/api/workspaces'),
     api.get<{ workspace_root?: string; ready?: boolean }>('/api/setup-status'),
     api.get<{ context?: Record<string, unknown> }>('/api/local/backup/setup-prompt'),
     api.get<{ connections?: Record<string, { ok?: boolean; auth?: string }> }>('/api/settings/providers'),
-    api.get<{ handover?: string; acting_available?: boolean }>(`/api/proposals/handover?workspace=${encodeURIComponent(props.context.workspace)}`),
     api.get<Array<{ schedule_id?: string; scope?: string; enabled?: boolean; daily_time_utc?: string; timezone_name?: string }>>('/api/schedules'),
   ])
   const value = <T,>(result: PromiseSettledResult<T>): T | null =>
@@ -71,7 +70,6 @@ async function loadSummary(): Promise<void> {
   const setupRow = value(setup)
   const backupContext = (value(backup)?.context ?? {}) as Record<string, unknown>
   const connections = value(providers)?.connections ?? null
-  const handoverRow = value(handover)
   const scheduleRows = value(schedules) ?? null
 
   const rows: OnboardingSummaryItem[] = []
@@ -135,15 +133,6 @@ async function loadSummary(): Promise<void> {
         ? row('approvals', 'Approvals', `${explicitMode} (explicit)`, 'ready', SETTINGS_HREF)
         : row('approvals', 'Approvals', 'Engine default; no explicit mode', 'deferred', SETTINGS_HREF),
     )
-  }
-
-  if (!handoverRow) {
-    rows.push(row('memory', 'Memory handover', 'Could not read memory handover', 'unknown', SETTINGS_HREF))
-  } else if (handoverRow.handover && handoverRow.handover !== 'off') {
-    const acting = handoverRow.acting_available === false ? '; acceptance is not acting on this install' : ''
-    rows.push(row('memory', 'Memory handover', `${handoverRow.handover}${acting}`, handoverRow.acting_available === false ? 'attention' : 'ready', SETTINGS_HREF))
-  } else {
-    rows.push(row('memory', 'Memory handover', 'Off; suggestions are predicted only', 'deferred', SETTINGS_HREF))
   }
 
   const routine = scheduleRows?.find(

@@ -45,7 +45,7 @@ export const routes: RouteRecordRaw[] = [
   {
     // One route per memory section, listed in the sidebar like Settings'
     // tabs. Bare /memory lands on the last section visited (MemoryMapView).
-    path: '/memory/:section(review|map|categories|import|retired|history)?',
+    path: '/memory/:section(map|categories|import|unsure)?',
     name: 'memory',
     component: () => import('./components/ChatLayout.vue'),
     meta: { requiresAuth: true },
@@ -73,11 +73,6 @@ export const routes: RouteRecordRaw[] = [
     name: 'task-detail',
     component: () => import('./components/ChatLayout.vue'),
     meta: { requiresAuth: true },
-  },
-  {
-    // The proposal queue's old address; To decide is where it lives now.
-    path: '/proposals',
-    redirect: '/memory/review?show=suggested',
   },
   {
     path: '/schedules/:scheduleId',

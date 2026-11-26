@@ -12,7 +12,6 @@ import {
   handleAppLinkClick,
   isAppRouteHref,
   parseChatHref,
-  parseProposalReviewHref,
   parseTaskHref,
 } from './appLinks'
 
@@ -26,12 +25,10 @@ const PAGES = [
   '/schedules',
   '/automations',
   '/memory',
-  '/memory/review',
   '/memory/map',
   '/memory/categories',
   '/memory/import',
-  '/memory/retired',
-  '/memory/history',
+  '/memory/unsure',
   '/settings',
   '/settings/home',
   '/settings/workspace',
@@ -117,7 +114,7 @@ describe('isAppRouteHref', () => {
       '/settings/providers?effort=high',
       '/settings/workspace#install-app',
       '/settings/home#new-workspace',
-      '/memory/review#top',
+      '/memory/unsure#top',
       '/settings/../api/x',
       '/tasks/../settings',
     ]) {
@@ -132,25 +129,18 @@ describe('a retired workspace File access link', () => {
   })
 })
 
-describe('a proposal review link', () => {
-  const KEY = `prv_${'0123456789abcdef'.repeat(4)}`
-  const href = (ws = 'work', key = KEY) => `/memory/review?show=suggested&workspace=${ws}&proposal=${key}`
-
-  it('is an app route and parses to its workspace and proposal', () => {
-    expect(isAppRouteHref(href())).toBe(true)
-    expect(parseProposalReviewHref(href())).toEqual({ workspace: 'work', proposal: KEY })
+describe('the memory sections', () => {
+  it('lists the sections that exist', () => {
+    for (const section of ['map', 'categories', 'import', 'unsure']) {
+      expect(isAppRouteHref(`/memory/${section}`)).toBe(true)
+    }
   })
 
-  it.each([
-    ['uppercase hex', href('work', `prv_${'0123456789ABCDEF'.repeat(4)}`)],
-    ['a short key', href('work', KEY.slice(0, -1))],
-    ['an extra parameter', `${href()}&x=1`],
-    ['reordered parameters', `/memory/review?workspace=work&show=suggested&proposal=${KEY}`],
-    ['a fragment', `${href()}#top`],
-    ['a workspace containing a space', href('my work')],
-  ])('refuses %s', (_label, bad) => {
-    expect(isAppRouteHref(bad)).toBe(false)
-    expect(parseProposalReviewHref(bad)).toBeNull()
+  it('does not treat the removed review addresses as app links', () => {
+    for (const gone of ['/memory/review', '/memory/retired', '/memory/history', '/proposals']) {
+      expect(isAppRouteHref(gone)).toBe(false)
+    }
+    expect(isAppRouteHref('/memory/review?show=suggested&workspace=work&proposal=prv_x')).toBe(false)
   })
 })
 

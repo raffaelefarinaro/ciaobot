@@ -9,14 +9,14 @@ describe('readyToAdvance', () => {
     expect(readyToAdvance('runtime', ready({ canContinue: false }))).toBe(false)
   })
 
-  it('needs both halves of the access/memory screen', () => {
-    expect(readyToAdvance('access_memory', ready({ canContinue: false }), ready(), ready())).toBe(true)
-    expect(readyToAdvance('access_memory', ready({ canContinue: false }), ready(), ready({ canContinue: false }))).toBe(false)
-    expect(readyToAdvance('access_memory', ready({ canContinue: false }), ready(), null)).toBe(false)
+  it('follows the access stage on the access screen, not the shell', () => {
+    expect(readyToAdvance('access_memory', ready({ canContinue: false }), ready())).toBe(true)
+    expect(readyToAdvance('access_memory', ready(), ready({ canContinue: false }))).toBe(false)
+    expect(readyToAdvance('access_memory', ready(), null)).toBe(false)
   })
 
-  it('refuses while either half is busy or failed', () => {
-    expect(readyToAdvance('access_memory', ready({ canContinue: false }), ready({ pending: true }), ready())).toBe(false)
-    expect(readyToAdvance('access_memory', ready({ canContinue: false }), ready(), ready({ error: 'offline' }))).toBe(false)
+  it('refuses while the access stage is busy or failed', () => {
+    expect(readyToAdvance('access_memory', ready({ canContinue: false }), ready({ pending: true }))).toBe(false)
+    expect(readyToAdvance('access_memory', ready({ canContinue: false }), ready({ error: 'offline' }))).toBe(false)
   })
 })

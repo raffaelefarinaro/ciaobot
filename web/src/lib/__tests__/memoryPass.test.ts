@@ -29,7 +29,7 @@ describe('memoryPass', () => {
   it('recognises a pass by its helper kind, not by its project name', () => {
     expect(isMemoryPassChat(pass('queued'))).toBe(true)
     // A user project may legitimately be called "Memory"; only the kind counts.
-    expect(isMemoryPassChat({ helper: { kind: 'proposal', intent: 'review', proposal_ids: [], archive_policy: 'manual' } } as unknown as ChatInfo)).toBe(false)
+    expect(isMemoryPassChat({ helper: { kind: 'task_delegation' } } as unknown as ChatInfo)).toBe(false)
     expect(isMemoryPassChat({} as ChatInfo)).toBe(false)
     expect(isMemoryPassChat(undefined)).toBe(false)
   })

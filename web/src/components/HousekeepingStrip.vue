@@ -24,8 +24,7 @@ const commandCopy = useCommandCopy()
  *
  * A shared action (no workspace) always applies. A workspace-scoped action
  * names where acting on it writes, and another workspace's pile is not this
- * tab's business: the review queue behind /proposals scopes its rows the same
- * way, so a summed strip made the tile claim more than the opened page showed.
+ * tab's business, so a summed strip would claim more than the opened page shows.
  * With no active workspace yet, show everything rather than an empty strip.
  */
 const scopedActions = computed(() => {
@@ -559,20 +558,14 @@ async function dismissTask(task: UpdateTaskRow): Promise<void> {
   )
 }
 
-async function reviewTask(): Promise<void> {
-  const { router } = await import('../router')
-  await router.push('/memory/review?show=suggested')
-}
-
 async function recheckTasks(): Promise<void> {
   await housekeeping.recheckUpdateTask()
   await keepFocus()
 }
 
-type TaskLead = 'review' | 'start' | 'check'
+type TaskLead = 'start' | 'check'
 
 function taskLead(task: UpdateTaskRow): TaskLead {
-  if (task.status === 'waiting_review') return 'review'
   return canStart(task) ? 'start' : 'check'
 }
 
@@ -595,10 +588,6 @@ function taskLine(task: UpdateTaskRow): string {
 
 function taskItems(task: UpdateTaskRow): NeedsYouMenuItem[] {
   const items: NeedsYouMenuItem[] = []
-  // A review row leads with the queue; its chat is still one tap away.
-  if (taskLead(task) === 'review') {
-    items.push({ id: 'start', label: startText(task), disabled: taskBusy(task) })
-  }
   if (task.chat_live) items.push({ id: 'chat', label: 'Open its chat' })
   items.push({ id: 'dismiss', label: 'Hide it', disabled: taskBusy(task) })
   items.push({ id: 'hide', label: 'Hide for now' })
@@ -868,22 +857,12 @@ watch(
         @select="onTaskSelect(task, $event)"
       >
         <template #primary>
-          <!-- waiting_review: the decisions are on the review queue, which has
-               per-row accept/dismiss and a destination picker. Sending the
-               operator to the chat to re-decide them in prose would be worse
-               than naming the surface that already exists. -->
-          <button
-            v-if="taskLead(task) === 'review'"
-            type="button"
-            class="btn-small"
-            @click="reviewTask()"
-          >Review proposals</button>
           <!-- One start button for every state that can start. Idempotent on the
                server per (task, revision), so the label is the only thing that
                differs between "begin" and "carry on". Gate is the lifecycle, not
                the detector (see canStart). -->
           <button
-            v-else-if="taskLead(task) === 'start'"
+            v-if="taskLead(task) === 'start'"
             type="button"
             class="btn-small"
             :disabled="taskBusy(task)"

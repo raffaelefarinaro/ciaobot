@@ -5,13 +5,11 @@ import { createPinia, setActivePinia } from 'pinia'
 import { flushPromises, mount } from '@vue/test-utils'
 import { nextTick } from 'vue'
 import HomeReviewSummary from '../HomeReviewSummary.vue'
-import { useProposalsStore } from '../../stores/proposals'
 import { useTaskStore } from '../../stores/tasks'
 import { useProjectStore } from '../../stores/projects'
-import { useVaultReviewStore } from '../../stores/vaultReview'
 import { useTaskSignalsStore } from '../../stores/taskSignals'
 import { api } from '../../lib/api'
-import type { ProposalRow, Schedule, Task } from '../../lib/types'
+import type { Schedule, Task } from '../../lib/types'
 
 const router = {
   push: vi.fn(() => Promise.resolve()),
@@ -27,20 +25,6 @@ vi.mock('../../lib/usageStats', async (importOriginal) => ({
 }))
 
 const get = vi.mocked(api.get)
-
-function proposal(id: string, workspace: string): ProposalRow {
-  return {
-    id,
-    kind: 'memory',
-    text: `Fact for ${workspace}`,
-    source: `${workspace}-chat`,
-    workspace,
-    path: 'MEMORY.md',
-    line: 1,
-    region: 'memory',
-    leak_warning: false,
-  } as ProposalRow
-}
 
 function schedule(id: string, workspace: string, overrides: Partial<Schedule> = {}): Schedule {
   return {
@@ -60,13 +44,7 @@ describe('HomeReviewSummary', () => {
     setActivePinia(createPinia())
     router.push.mockClear()
     get.mockReset()
-    get.mockImplementation((url: string) => {
-      if (url === '/api/proposals') return Promise.resolve({ rows: [] })
-      if (url.includes('/api/vault/review')) {
-        return Promise.resolve({ candidates: [], trashed: [], cleared: [] })
-      }
-      return Promise.resolve({})
-    })
+    get.mockImplementation(() => Promise.resolve({}))
 
     const projects = useProjectStore()
     projects.activeWorkspace = 'personal'
@@ -76,32 +54,20 @@ describe('HomeReviewSummary', () => {
       { project_id: 'work-general', name: 'General', workspace: 'work' },
     ] as unknown as typeof projects.projects
 
-    const proposals = useProposalsStore()
-    proposals.loaded = true
-    proposals.rows = [proposal('personal-one', 'personal')]
-
     const tasks = useTaskStore()
     tasks.schedulesLoaded = true
     tasks.schedules = [schedule('personal-briefing', 'personal')]
-
-    const retirement = useVaultReviewStore()
-    retirement.loadedWorkspace = 'personal'
   })
 
   it('counts only the active workspace and refreshes on scope changes', async () => {
     const wrapper = mount(HomeReviewSummary)
     expect(wrapper.get('#home-review-title').text()).toBe('At a glance')
-    // Up-to-date queues drop out; only what needs a look is listed.
+    // A healthy workspace drops out; only what needs a look is listed.
     let titles = wrapper.findAll('.home-review-title').map(node => node.text())
-    expect(titles).toEqual(['1 memory proposal'])
+    expect(titles).toEqual([])
 
     const projects = useProjectStore()
-    const proposals = useProposalsStore()
     const tasks = useTaskStore()
-    proposals.rows.push(
-      proposal('work-one', 'work'),
-      proposal('work-two', 'work'),
-    )
     tasks.schedules.push(
       schedule('work-one', 'work', { last_status: 'error' }),
       schedule('work-two', 'work', { last_status: 'error' }),
@@ -111,7 +77,6 @@ describe('HomeReviewSummary', () => {
     await flushPromises()
 
     titles = wrapper.findAll('.home-review-title').map(node => node.text())
-    expect(titles).toContain('2 memory proposals')
     expect(titles).toContain('2 automations need a look')
 
     projects.activeWorkspace = 'personal'
@@ -122,7 +87,6 @@ describe('HomeReviewSummary', () => {
   })
 
   it('says so when nothing needs review', () => {
-    useProposalsStore().rows = []
     useTaskStore().schedules = []
     const wrapper = mount(HomeReviewSummary)
     expect(wrapper.findAll('.home-review-item')).toHaveLength(0)
@@ -131,7 +95,6 @@ describe('HomeReviewSummary', () => {
   })
 
   it('is one window: a title bar, then the queues, then Today even when nothing needs review', () => {
-    useProposalsStore().rows = []
     useTaskStore().schedules = []
     const wrapper = mount(HomeReviewSummary)
     const root = wrapper.get('.home-review-summary')
@@ -147,77 +110,36 @@ describe('HomeReviewSummary', () => {
     wrapper.unmount()
   })
 
-  it('leaves review queue loading to the shared sidebar', async () => {
-    const retirement = useVaultReviewStore()
-    retirement.loadedWorkspace = null
-    get.mockImplementation((url: string) => {
-      if (url === '/api/proposals') return Promise.resolve({ rows: [] })
-      if (url.includes('/api/vault/review')) {
-        return Promise.resolve({
-          candidates: [{ id: 'note-1', signals: ['unlinked'] }],
-          trashed: [],
-          cleared: [],
-        })
-      }
-      return Promise.resolve({})
-    })
-
-    const wrapper = mount(HomeReviewSummary)
-    await flushPromises()
-
-    expect(get).not.toHaveBeenCalled()
-    wrapper.unmount()
-  })
-
   it('marks retained rows as stale and shows loading before a snapshot exists', async () => {
-    const proposals = useProposalsStore()
     const tasks = useTaskStore()
-    const retirement = useVaultReviewStore()
-    proposals.loadError = 'proposal refresh failed'
     tasks.scheduleLoadError = 'schedule refresh failed'
-    retirement.loadError = 'retirement refresh failed'
 
     const stale = mount(HomeReviewSummary)
     expect(stale.text()).toContain('Showing the last successful load')
-    expect(stale.findAll('.home-review-item--stale')).toHaveLength(2)
-    expect(stale.findAll('.home-review-item--attention')).toHaveLength(1)
+    expect(stale.findAll('.home-review-item--stale')).toHaveLength(1)
     stale.unmount()
 
-    proposals.loaded = false
-    proposals.rows = []
-    proposals.loadError = ''
     tasks.schedulesLoaded = false
     tasks.schedules = []
     tasks.scheduleLoadError = ''
-    retirement.loadedWorkspace = null
-    retirement.loadError = ''
     get.mockReturnValue(new Promise(() => {}))
 
     const loading = mount(HomeReviewSummary)
     expect(loading.findAll('.home-review-item').map(card => card.text())).toEqual([
       expect.stringContaining('Checking'),
-      expect.stringContaining('Checking'),
-      expect.stringContaining('Checking'),
     ])
     loading.unmount()
   })
 
-  it('renders rows with real counts', () => {
-    const proposals = useProposalsStore()
-    proposals.rows.push(proposal('personal-two', 'personal'))
-
+  it('makes no requests of its own', async () => {
     const wrapper = mount(HomeReviewSummary)
-    const rows = wrapper.findAll('.home-review-item')
-    expect(rows).toHaveLength(1)
-    expect(rows[0].find('.home-review-title').text()).toBe('2 memory proposals')
-    expect(wrapper.text()).not.toContain('active automation')
-    expect(wrapper.find('.home-review-icon').exists()).toBe(false)
+    await flushPromises()
+    expect(get).not.toHaveBeenCalled()
     wrapper.unmount()
   })
 
   describe('automations', () => {
     function mountWith(schedules: Schedule[]) {
-      useProposalsStore().rows = []
       useTaskStore().schedules = schedules
       return mount(HomeReviewSummary)
     }

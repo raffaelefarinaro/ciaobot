@@ -260,19 +260,13 @@ describe('one card per lifecycle', () => {
     wrapper.unmount()
   })
 
-  it('sends waiting_review to the proposals surface, and offers Resume too', async () => {
-    // The queue has per-row accept/dismiss and a destination picker. Telling
-    // somebody to decide proposals in a chat, while the buttons for them sit one
-    // route away, is the failure this button exists to avoid.
-    const { wrapper, store } = await mountGroup([
+  it('offers Resume for a chat parked on a decision, and nothing that opens a queue', async () => {
+    const { wrapper } = await mountGroup([
       task({ status: 'waiting_review', chat_id: 'chat-9', chat_live: true }),
     ])
-    expect(await buttons(wrapper)).toContain('Review proposals')
     expect(await buttons(wrapper)).toContain('Resume chat')
+    expect(await buttons(wrapper)).not.toContain('Review proposals')
     expect(cards(wrapper)[0].text()).toContain('waiting for you to decide')
-
-    await press(wrapper, 'Review proposals')
-    expect(store.updateTasks).toHaveLength(1)
     wrapper.unmount()
   })
 
@@ -381,7 +375,7 @@ describe('which control leads each lifecycle', () => {
     ['an offer that applies', {}, 'Start in chat', ['Hide it', 'Hide for now']],
     ['an attempt under way', { status: 'in_progress', chat_id: 'c', chat_live: true }, 'Resume chat', ['Open its chat', 'Hide it', 'Hide for now']],
     ['a failed attempt', { status: 'failed', chat_id: 'c', chat_live: true }, 'Try again', ['Open its chat', 'Hide it', 'Hide for now']],
-    ['proposals waiting for review', { status: 'waiting_review', chat_id: 'c', chat_live: true }, 'Review proposals', ['Resume chat', 'Open its chat', 'Hide it', 'Hide for now']],
+    ['a chat parked on a decision', { status: 'waiting_review', chat_id: 'c', chat_live: true }, 'Resume chat', ['Open its chat', 'Hide it', 'Hide for now']],
     ['an offer nobody can say applies', { applicability: 'unknown', offered: false }, 'Check again', ['Hide it', 'Hide for now']],
   ] as const)('%s', async (_name, overrides, lead, menu) => {
     const { wrapper } = await mountGroup([task(overrides as Partial<UpdateTaskRow>)])

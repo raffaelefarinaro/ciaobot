@@ -15,9 +15,7 @@ import { SETTINGS_NAV } from './settingsNav'
  * 32-hex record id `ciao task list` returns; a short prefix is not an id. A
  * conversation is named by its own id, `chat-` plus eight lowercase hex
  * characters. A page is an exact path — no query strings, no arbitrary
- * fragments, and no `/api`, `/ws` or protocol-relative addresses. The one
- * exception is a proposal review link, whose three fixed-order parameters are
- * parsed by `parseProposalReviewHref`. Adding one is a
+ * fragments, and no `/api`, `/ws` or protocol-relative addresses. Adding one is a
  * deliberate decision: an unknown or malformed address stays an ordinary
  * browser link.
  */
@@ -27,12 +25,10 @@ const PAGE_HREFS = [
   '/schedules',
   '/automations',
   '/memory',
-  '/memory/review',
   '/memory/map',
   '/memory/categories',
   '/memory/import',
-  '/memory/retired',
-  '/memory/history',
+  '/memory/unsure',
 ]
 
 // Settings tabs come from the sidebar's own rail, so a renamed tab cannot
@@ -53,19 +49,6 @@ const TASK_HREF = /^\/tasks\/([0-9a-f]{32})$/
 // plus eight lowercase hex characters (ciao/web/chat_service.py `_uuid8`).
 // The address is exact: no extra path, no query, no fragment.
 const CHAT_HREF = /^\/chat\/(chat-[0-9a-f]{8})$/
-// One pending proposal's review question, as `proposal_review_path` in
-// ciao/proposal_tracking.py emits it (that parameter order, exactly). The link
-// only locates the question; MemoryMapView's resolver decides whether it is
-// still pending, and nothing here accepts, dismisses or authenticates.
-const PROPOSAL_REVIEW_HREF =
-  /^\/memory\/review\?show=suggested&workspace=([A-Za-z0-9][A-Za-z0-9_-]{0,63})&proposal=(prv_[a-f0-9]{64})$/
-
-/** The workspace and review key an exact proposal review link names, or null. */
-export function parseProposalReviewHref(href: string): { workspace: string; proposal: string } | null {
-  const match = PROPOSAL_REVIEW_HREF.exec((href || '').trim())
-  return match ? { workspace: match[1]!, proposal: match[2]! } : null
-}
-
 /** The task id an exact `/tasks/<id>` address names, or null for anything else. */
 export function parseTaskHref(href: string): string | null {
   const match = TASK_HREF.exec((href || '').trim())
@@ -83,7 +66,6 @@ export function isAppRouteHref(href: string): boolean {
   return APP_ROUTE_HREFS.has(raw)
     || parseTaskHref(raw) !== null
     || parseChatHref(raw) !== null
-    || parseProposalReviewHref(raw) !== null
 }
 
 /**

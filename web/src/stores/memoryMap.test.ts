@@ -7,7 +7,7 @@ import { api } from '../lib/api'
 vi.mock('../lib/api', () => ({
   api: { get: vi.fn(), post: vi.fn(), patch: vi.fn(), del: vi.fn() },
 }))
-import { useMemoryMapStore, isMemorySection, isReviewFilter, memorySectionPath, reviewPath, MEMORY_SECTIONS, type MemoryGraphNode } from './memoryMap'
+import { useMemoryMapStore, isMemorySection, memorySectionPath, MEMORY_SECTIONS, type MemoryGraphNode } from './memoryMap'
 
 beforeEach(() => {
   setActivePinia(createPinia())
@@ -55,9 +55,10 @@ function seedChain() {
 }
 
 describe('visibility', () => {
-  test('opens in review before graph exploration', () => {
+  test('opens on the map', () => {
     const mm = useMemoryMapStore()
-    expect(mm.view).toBe('review')
+    expect(mm.section).toBe('map')
+    expect(mm.view).toBe('graph')
   })
 
   test('the whole vault is visible by default — there is no local scope', () => {
@@ -129,12 +130,11 @@ describe('sections', () => {
     expect(isMemorySection('categories')).toBe(true)
   })
 
-  test('the two queues are one section, narrowed by a filter in the address', () => {
-    expect(MEMORY_SECTIONS).toEqual(['review', 'map', 'categories', 'import', 'retired', 'history'])
-    expect(reviewPath()).toBe('/memory/review')
-    expect(reviewPath('revisit')).toBe('/memory/review?show=revisit')
-    expect(isReviewFilter('suggested')).toBe(true)
-    expect(isReviewFilter('map')).toBe(false)
+  test('the sections are the map, categories, import and the Unsure list', () => {
+    expect(MEMORY_SECTIONS).toEqual(['map', 'categories', 'import', 'unsure'])
+    expect(memorySectionPath('unsure')).toBe('/memory/unsure')
+    // The queues and ledgers that used to sit beside them are gone.
+    for (const gone of ['review', 'retired', 'history']) expect(isMemorySection(gone)).toBe(false)
   })
 
   test('Import is a section, and its listing is not a card on the map', () => {
@@ -150,8 +150,8 @@ describe('sections', () => {
     mm.mapView = 'list'
     mm.setSection('map')
     expect(mm.view).toBe('list')
-    mm.setSection('history')
-    expect(mm.view).toBe('review')
+    mm.setSection('unsure')
+    expect(mm.view).toBe('page')
     mm.setSection('map')
     expect(mm.view).toBe('list')
   })

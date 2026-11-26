@@ -13,7 +13,7 @@
        what would be processed, which provider and model would receive it, an
        estimate, and the batch cap, all before anything runs. From there the
        panel files a batch (C6) and `<ImportRuns>` owns everything after it — the
-       run (C7), its progress, its cancel, the proposals it filed and the
+       run (C7), its progress, its cancel, the lines it added to the Unsure list and the
        retention the store enforces. One journey, two components: the consent
        screen and the runs list, sharing the listing's row rules and its touch
        floor. Both are reachable from here in the app and from the first-run
@@ -160,8 +160,8 @@
           <strong>{{ preview.estimated_messages.toLocaleString() }}</strong> turns, and at most
           <strong>{{ preview.batch_cap }}</strong> conversations per batch. Each conversation
           is read by the model Ciaobot uses for its own insights on that conversation's
-          provider, which can differ from the workspace default. Every fact it finds waits
-          for you in <strong>To decide</strong>; the import writes nothing into your memory
+          provider, which can differ from the workspace default. Every fact it finds is added as a line on the
+          <strong>Unsure list</strong>; the import writes nothing into your memory
           by itself.
         </p>
         <div class="import-confirm-actions">

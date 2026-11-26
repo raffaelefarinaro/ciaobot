@@ -32,18 +32,22 @@ describe('router', () => {
     expect(router.currentRoute.value.name).toBe('settings-tab')
     expect(router.currentRoute.value.params.tab).toBe('skills')
   })
-  it('routes each memory section and sends the old proposals address to To decide', async () => {
+  it('routes each memory section', async () => {
     const router = makeRouter()
-    await router.push('/memory/review?show=revisit')
+    await router.push('/memory/unsure')
     expect(router.currentRoute.value.name).toBe('memory')
-    expect(router.currentRoute.value.params.section).toBe('review')
-    expect(router.currentRoute.value.query.show).toBe('revisit')
+    expect(router.currentRoute.value.params.section).toBe('unsure')
     await router.push('/memory')
     expect(router.currentRoute.value.name).toBe('memory')
     expect(router.currentRoute.value.params.section ?? '').toBe('')
-    await router.push('/proposals')
-    expect(router.currentRoute.value.path).toBe('/memory/review')
-    expect(router.currentRoute.value.query.show).toBe('suggested')
+  })
+
+  it('has no address for the removed review sections', async () => {
+    const router = makeRouter()
+    for (const gone of ['/memory/review', '/memory/retired', '/memory/history', '/proposals']) {
+      await router.push(gone)
+      expect(router.currentRoute.value.name).not.toBe('memory')
+    }
   })
 
   it('addresses one task on the board', async () => {

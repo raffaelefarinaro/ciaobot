@@ -28,11 +28,6 @@ watch(cells, async () => {
 }, { immediate: true })
 const projects = computed(() => topProjects(props.stats?.projects ?? []))
 const projectMax = computed(() => Math.max(0, ...projects.value.map(p => p.messages ?? 0)))
-const pipeline = computed(() => [
-  { key: 'proposed', label: 'Proposed', value: props.stats?.memory_pipeline.proposed ?? null },
-  { key: 'accepted', label: 'Accepted', value: props.stats?.memory_pipeline.accepted ?? null },
-  { key: 'notes_updated', label: 'Vault notes updated', value: props.stats?.memory_pipeline.notes_updated ?? null },
-])
 const hours = computed<Array<number | null>>(() => props.stats?.hours ?? Array.from({ length: 24 }, () => null))
 const hourMax = computed(() => Math.max(0, ...hours.value.map(v => v ?? 0)))
 const hoursLabel = computed(() => {
@@ -73,29 +68,18 @@ function hourTitle(h: number, v: number | null): string {
       <p v-else class="usage-caption">No activity recorded yet.</p>
       <p class="usage-legend" aria-hidden="true"><span class="usage-legend-scale">Less <span v-for="l in 5" :key="l" class="usage-heat-cell usage-legend-swatch" :data-level="l - 1" /> More</span> <span>· messages per day, last 52 weeks</span></p>
     </section>
-    <div class="usage-pair">
-      <section class="usage-card" aria-labelledby="usage-projects-title">
-        <h3 id="usage-projects-title" class="usage-card-title">Projects</h3>
-        <ul v-if="projects.length" class="usage-bars" role="list">
-          <li v-for="p in projects" :key="p.project_id || p.name" class="usage-bar">
-            <span class="usage-bar-name" :title="p.name">{{ p.name }}</span>
-            <span class="usage-bar-track" aria-hidden="true"><span class="usage-bar-fill" :style="{ width: barPercent(p.messages, projectMax) }" /></span>
-            <span class="usage-bar-value">{{ formatCount(p.messages) }}</span>
-          </li>
-        </ul>
-        <p v-else class="usage-caption">No project activity in this period.</p>
-        <p class="usage-caption">Messages sent, last {{ period }}.</p>
-      </section>
-      <section class="usage-card" aria-labelledby="usage-memory-title">
-        <h3 id="usage-memory-title" class="usage-card-title">Memory pipeline</h3>
-        <ol class="usage-pipeline" role="list">
-          <li v-for="(step, i) in pipeline" :key="step.key" class="usage-pipeline-step" :style="{ marginRight: `${i * 14}%` }">
-            <span>{{ step.label }}</span><strong>{{ formatCount(step.value) }}</strong>
-          </li>
-        </ol>
-        <p class="usage-caption">Proposed by chats → accepted by you → written to the vault.</p>
-      </section>
-    </div>
+    <section class="usage-card" aria-labelledby="usage-projects-title">
+      <h3 id="usage-projects-title" class="usage-card-title">Projects</h3>
+      <ul v-if="projects.length" class="usage-bars" role="list">
+        <li v-for="p in projects" :key="p.project_id || p.name" class="usage-bar">
+          <span class="usage-bar-name" :title="p.name">{{ p.name }}</span>
+          <span class="usage-bar-track" aria-hidden="true"><span class="usage-bar-fill" :style="{ width: barPercent(p.messages, projectMax) }" /></span>
+          <span class="usage-bar-value">{{ formatCount(p.messages) }}</span>
+        </li>
+      </ul>
+      <p v-else class="usage-caption">No project activity in this period.</p>
+      <p class="usage-caption">Messages sent, last {{ period }}.</p>
+    </section>
     <div class="usage-pair">
       <section class="usage-card usage-card--fill" aria-labelledby="usage-hours-title">
         <h3 id="usage-hours-title" class="usage-card-title">When you work</h3>
@@ -158,9 +142,6 @@ function hourTitle(h: number, v: number | null): string {
 .usage-bar-track { height: 8px; border-radius: 4px; background: var(--usage-heat-0); overflow: hidden; }
 .usage-bar-fill { display: block; height: 100%; border-radius: 4px; background: var(--accent); }
 .usage-bar-value { text-align: right; color: var(--fg2); font-variant-numeric: tabular-nums; }
-.usage-pipeline { display: flex; flex-direction: column; gap: 6px; margin: 0; padding: 0; list-style: none; }
-.usage-pipeline-step { display: flex; justify-content: space-between; gap: var(--space-3); padding: 8px 10px; border-radius: var(--radius-sm); background: color-mix(in srgb, var(--accent) 12%, var(--bg2)); font-size: var(--text-base); }
-.usage-pipeline-step strong { font-weight: 650; font-variant-numeric: tabular-nums; }
 /* Beside a taller Models card the chart takes the spare height, not empty space under the caption. */
 .usage-card--fill { display: flex; flex-direction: column; }
 .usage-hours { display: flex; flex: 1 1 auto; align-items: flex-end; gap: 2px; min-height: 90px; }

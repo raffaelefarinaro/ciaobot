@@ -17,20 +17,6 @@ vi.mock('../../lib/api', () => {
   const get = vi.fn((path: string) => {
     if (path === '/api/workspaces') return Promise.resolve(state.workspaces)
     if (path === '/api/workspaces/archived') return Promise.resolve({ archived: [] })
-    if (path.startsWith('/api/proposals/handover')) {
-      return Promise.resolve({
-        workspace: 'work',
-        handover: 'off',
-        memory_approval: {},
-        accept_resolved: { memory: { mode: 'approve', inherited: true }, profile: { mode: 'approve', inherited: true } },
-        acting_available: true,
-        agreement: {
-          decided: 0, matched: 0, rate: null, window: 50, min_decisions: 20, threshold: 0.9,
-          predicted_accept: 0, accept_matched: 0, predicted_dismiss: 0, dismiss_matched: 0,
-          suggest_handover: false,
-        },
-      })
-    }
     if (path.startsWith('/api/update-tasks')) return Promise.resolve({ tasks: [] })
     // The Overview's Chats and models card reads the engine defaults.
     if (path === '/api/settings/routines') return Promise.resolve({ model_options: { anthropic: [] } })

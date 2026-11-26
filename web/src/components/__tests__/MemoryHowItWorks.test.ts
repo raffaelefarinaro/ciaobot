@@ -6,14 +6,13 @@
  * What a mount can decide: that it starts collapsed and says so to assistive
  * tech, that the toggle is a native button wired to its body, that the open
  * choice is remembered per browser and a blocked store never throws, that the
- * tag table reads the five remaining kinds through `kindLabel`, that the copy names only
+ * copy names only
  * the things it is allowed to name, and that it makes no request at all.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { flushPromises, mount } from '@vue/test-utils'
 import { createMemoryHistory, createRouter } from 'vue-router'
 import MemoryHowItWorks from '../MemoryHowItWorks.vue'
-import { kindLabel } from '../../lib/proposalKinds'
 
 const apiGet = vi.hoisted(() => vi.fn())
 const apiPost = vi.hoisted(() => vi.fn())
@@ -30,7 +29,7 @@ async function mountCard() {
     history: createMemoryHistory(),
     routes: [{ path: '/memory/:section?', component: { template: '<div />' } }],
   })
-  await router.push('/memory/review')
+  await router.push('/memory/unsure')
   await router.isReady()
   const wrapper = mount(MemoryHowItWorks, {
     attachTo: document.body,
@@ -115,36 +114,14 @@ describe('MemoryHowItWorks disclosure', () => {
     expect(button.attributes('aria-expanded')).toBe('true')
   })
 
-  it('has the five remaining tag rows in order, labelled through kindLabel', async () => {
+  it('says unsure items go on the Unsure list and that Git is the undo', async () => {
     const wrapper = await mountCard()
-    const rows = wrapper.findAll('table.mhw-table tbody tr')
+    const text = wrapper.text()
 
-    expect(rows).toHaveLength(5)
-    const kinds = ['project', 'people', 'review', 'memory', 'profile']
-    kinds.forEach((kind, i) => {
-      expect(rows[i].find('.mhw-tag').text()).toBe(kindLabel(kind))
-    })
-  })
-
-  it('states who decides each tag', async () => {
-    const wrapper = await mountCard()
-    const whoCells = wrapper.findAll('table.mhw-table tbody tr').map(r => r.findAll('td')[2].text())
-
-    expect(whoCells).toEqual([
-      'Nightly files it.',
-      'Nightly files it.',
-      'Nightly decides. A judgement call comes back to you as a yes or no.',
-      'You. Nightly only guesses what you would pick.',
-      'You. Nightly only guesses what you would pick.',
-    ])
-  })
-
-  it('labels the table columns with column headers and a caption', async () => {
-    const wrapper = await mountCard()
-    const headers = wrapper.findAll('table.mhw-table th[scope="col"]').map(th => th.text())
-
-    expect(headers).toEqual(['Tag', 'What it is', 'Who decides'])
-    expect(wrapper.find('table.mhw-table caption').text()).toBe('Who decides each tag')
+    expect(text).toContain('Unsure list')
+    expect(text).toContain('Git repository')
+    expect(text).toContain('Workspace/Proposals')
+    expect(wrapper.find('table').exists()).toBe(false)
   })
 
   it('states what is not saved', async () => {

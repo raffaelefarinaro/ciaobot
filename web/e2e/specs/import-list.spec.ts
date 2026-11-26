@@ -185,13 +185,13 @@ test.describe('memory import listing', () => {
     expect(Math.min(...heights)).toBeGreaterThanOrEqual(44)
 
     // Cancel is below a 60-row listing too, and it says both halves of what it
-    // does: the proposals stay, and provider input cannot be unsent. Scoped to
+    // does: the lines stay, and provider input cannot be unsent. Scoped to
     // the run's own note, because the retention paragraph below it says the
-    // proposals stay queued too.
+    // lines stay on the list too.
     const cancel = page.locator('.import-run-actions').getByRole('button', { name: 'Cancel' })
     await cancel.scrollIntoViewIfNeeded()
     await expect(cancel).toBeInViewport()
-    await expect(page.locator('.import-run-note')).toContainText('Proposals already filed stay queued')
+    await expect(page.locator('.import-run-note')).toContainText('Lines already added to the Unsure list stay there')
     await expect(page.locator('.import-run-note')).toContainText('cannot be unsent')
 
     const { overflow } = await horizontalOverflow(page)

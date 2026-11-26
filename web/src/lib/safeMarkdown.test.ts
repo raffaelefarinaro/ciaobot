@@ -31,15 +31,13 @@ describe('safe markdown rendering', () => {
     expect(html).toContain('href="/tasks/9920898d" target="_blank"')
   })
 
-  it('keeps the canonical proposal review query link in the app', () => {
-    const reviewKey = `prv_${'a'.repeat(64)}`
-    const href = `/memory/review?show=suggested&workspace=personal&proposal=${reviewKey}`
-    const html = renderMarkdown(`[Review this proposal](${href})`)
+  it('leaves a removed review address as an ordinary link', () => {
+    const href = '/memory/review?show=suggested&workspace=personal'
+    const html = renderMarkdown(`[Review](${href})`)
     const link = parse(html).querySelector('a')
 
     expect(link?.getAttribute('href')).toBe(href)
-    expect(link?.hasAttribute('target')).toBe(false)
-    expect(link?.getAttribute('rel')).toBeNull()
+    expect(link?.getAttribute('target')).toBe('_blank')
   })
 
   it('keeps supported page and anchor links in the app instead of opening a new tab', () => {

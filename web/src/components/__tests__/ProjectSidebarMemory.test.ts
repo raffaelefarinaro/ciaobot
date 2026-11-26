@@ -17,42 +17,21 @@ import { nextTick } from 'vue'
 import ProjectSidebar from '../ProjectSidebar.vue'
 import { useProjectStore } from '../../stores/projects'
 import { api } from '../../lib/api'
-import { useProposalsStore } from '../../stores/proposals'
-import { useVaultReviewStore } from '../../stores/vaultReview'
 import { useMemoryMapStore } from '../../stores/memoryMap'
 import { useNotificationInboxStore } from '../../stores/notificationInbox'
 import { useHousekeepingStore } from '../../stores/housekeeping'
 import { useTaskStore } from '../../stores/tasks'
 import { useTaskSignalsStore } from '../../stores/taskSignals'
 import type { SourceHealth } from '../../lib/sourceHealth'
-import type { ProposalRow, VaultReviewCandidate } from '../../lib/types'
 
 const apiGet = api.get as unknown as Mock
-
-const EVIDENCE: VaultReviewCandidate['evidence'] = {
-  backlinks: [], outbound_links: [], bridge: false, duplicate_group: [],
-  last_update: '', type: 'note', age_days: null,
-}
 
 vi.mock('../../lib/api', () => ({
   api: { get: vi.fn().mockResolvedValue({ rows: [] }), post: vi.fn(), patch: vi.fn(), del: vi.fn() },
 }))
 
-function row(overrides: Partial<ProposalRow> = {}): ProposalRow {
-  return {
-    id: 'r1',
-    kind: 'memory',
-    text: 'Remember the thing',
-    source: '',
-    workspace: 'personal',
-    path: 'personal/Workspace/Memory-Proposals.md',
-    line: 3,
-    ...overrides,
-  }
-}
-
 async function mountSidebar(
-  mode: 'chat' | 'memory' | 'proposals' = 'proposals',
+  mode: 'chat' | 'memory' = 'memory',
   extra: { collapsed?: boolean } = {},
 ) {
   const router = createRouter({
@@ -70,24 +49,7 @@ async function mountSidebar(
   })
 }
 
-describe('ProjectSidebar review section', () => {
-  it('waits for the primary view to paint before loading review badges', async () => {
-    const store = useProjectStore()
-    useProposalsStore().loaded = false
-    useProposalsStore().rows = []
-    useVaultReviewStore().loadedWorkspace = null
-    const wrapper = await mountSidebar()
-    expect(apiGet.mock.calls.map(([path]) => path)).not.toContain('/api/proposals')
-    expect(apiGet.mock.calls.some(([path]) => path.startsWith('/api/vault/review'))).toBe(false)
-
-    store.bootstrapped = true
-    await vi.waitFor(() => {
-      expect(apiGet).toHaveBeenCalledWith('/api/proposals')
-      expect(apiGet.mock.calls.some(([path]) => path.startsWith('/api/vault/review?workspace=personal'))).toBe(true)
-    }, { timeout: 2000 })
-    wrapper.unmount()
-  })
-
+describe('ProjectSidebar memory section', () => {
   beforeEach(() => {
     apiGet.mockClear()
     setActivePinia(createPinia())
@@ -97,13 +59,6 @@ describe('ProjectSidebar review section', () => {
       { name: 'work', vault_root: '/tmp/w', default_provider: 'claude' },
     ]
     store.activeWorkspace = 'personal'
-    const proposals = useProposalsStore()
-    proposals.rows = [
-      row({ id: 'p-mem' }),
-      row({ id: 'p-mem-2' }),
-      row({ id: 'p-skill', kind: 'skill' }),
-      row({ id: 'w-mem', workspace: 'work' }),
-    ]
   })
 
   afterEach(() => {
@@ -112,15 +67,16 @@ describe('ProjectSidebar review section', () => {
     vi.unstubAllGlobals()
   })
 
-  it('counts the queue for the active workspace and what sits elsewhere', async () => {
+  it('makes no review requests of its own and carries no count on the Memory link', async () => {
+    useMemoryMapStore().setSection('unsure')
     const wrapper = await mountSidebar()
 
-    // The count lives on the memory pulse, not on the nav: the link only
-    // states it in its accessible name.
-    // A subtle count on the section itself, scoped to this workspace.
+    // There is no queue to count: unsure items are lines in a Markdown file.
     const memoryLink = wrapper.get('a[href="/memory"]')
-    expect(memoryLink.attributes('data-count')).toBe('3')
-    expect(memoryLink.attributes('aria-label')).toBe('memory — 3 to review in this workspace')
+    expect(memoryLink.attributes('data-count')).toBeUndefined()
+    expect(memoryLink.attributes('aria-label')).toBe('memory')
+    expect(apiGet.mock.calls.map(([path]) => path)).not.toContain('/api/proposals')
+    expect(apiGet.mock.calls.some(([path]) => String(path).startsWith('/api/vault/review'))).toBe(false)
     // The workspace scope is one dropdown at the top of the rail now, not a
     // per-mode row of pills.
     const workspaceTrigger = wrapper.get('.workspace-scope-trigger')
@@ -357,38 +313,27 @@ describe('ProjectSidebar review section', () => {
     wrapper.unmount()
   })
 
-  it('lists Memory\'s sections like Settings\' tabs, each a route with its count', async () => {
-    const vaultReview = useVaultReviewStore()
-    vaultReview.loadedWorkspace = 'personal'
-    vaultReview.candidates = [
-      { candidate_id: 'c1', workspace: 'personal', path: 'a.md', content_hash: 'h1', signals: ['unverified'], priority: 0, evidence: EVIDENCE, status: 'candidate', disposition: '', deferred_until: '', completable: false, completion_moves_folder: false },
-    ]
+  it('lists Memory\'s sections like Settings\' tabs, each a route', async () => {
     const wrapper = await mountSidebar()
 
     const nav = wrapper.get('nav[aria-label="Memory sections"]')
-    expect(nav.findAll('.sidebar-list-label').map(h => h.text())).toEqual(['Explore', 'Records'])
+    expect(nav.findAll('.sidebar-list-label').map(h => h.text())).toEqual(['Explore'])
     const items = nav.findAll('.memory-nav-item')
     expect(items.map(i => i.attributes('href'))).toEqual([
-      '/memory/review', '/memory/map', '/memory/categories', '/memory/import',
-      '/memory/retired', '/memory/history',
+      '/memory/unsure', '/memory/map', '/memory/categories', '/memory/import',
     ])
+    expect(items[0].text()).toContain('Unsure')
     // Explore holds the map, then the list of what the map is drawing, then the
     // way conversations get in.
     expect(items[1].text()).toContain('Map')
     expect(items[2].text()).toContain('Categories')
     expect(items[3].text()).toContain('Import')
-    // The category list is configuration, not a queue: no count on it. Import has
-    // none either — nothing is listed until the reader asks for a scan.
+    // The Unsure list is a file, the category list is configuration and Import
+    // lists nothing until the reader asks for a scan: no count on any of them.
+    expect(items[0].find('.memory-nav-count').exists()).toBe(false)
     expect(items[2].find('.memory-nav-count').exists()).toBe(false)
     expect(items[3].find('.memory-nav-count').exists()).toBe(false)
-    // Three proposals in `personal` plus one note to revisit, on the one
-    // To decide row; its count is the accent one, and the accessible name
-    // carries the number.
-    expect(items[0].get('.memory-nav-count').text()).toBe('4')
-    expect(items[0].get('.memory-nav-count').classes()).toContain('memory-nav-count--due')
-    expect(items[0].attributes('aria-label')).toBe('To decide, 4 waiting')
-    // Nothing retired: no zero badge.
-    expect(items[4].find('.memory-nav-count').exists()).toBe(false)
+    expect(items[0].attributes('aria-label')).toBe('Unsure')
   })
 
   it('offers a Manage link from the map\'s category chips to the category list', async () => {
@@ -430,64 +375,33 @@ describe('ProjectSidebar review section', () => {
   })
 
   it('draws the sections as sidebar rows with no bold for the open one', async () => {
-    useMemoryMapStore().setSection('review')
+    useMemoryMapStore().setSection('unsure')
     const wrapper = await mountSidebar()
     const current = wrapper.get('.memory-nav-item[aria-current="page"]')
     expect(current.classes()).toEqual(expect.arrayContaining(['sidebar-row', 'active']))
-    expect(current.get('.sidebar-row-title').text()).toBe('To decide')
+    expect(current.get('.sidebar-row-title').text()).toBe('Unsure')
     const source = readFileSync(join(__dirname, '..', 'ProjectSidebar.vue'), 'utf8')
     expect(source).not.toMatch(/\.memory-nav-item\.active\s*\{[^}]*font-weight/)
     expect(source).not.toMatch(/\.settings-nav-item\s*\{/)
   })
 
   it('marks the section on screen as the current page', async () => {
-    useMemoryMapStore().setSection('review')
+    useMemoryMapStore().setSection('unsure')
     const wrapper = await mountSidebar()
     const current = wrapper.get('.memory-nav-item[aria-current="page"]')
-    expect(current.text()).toContain('To decide')
+    expect(current.text()).toContain('Unsure')
   })
 
-  it('leaves the Review/Map switch to the Memory page header', async () => {
+  it('leaves any view switch to the Memory page header', async () => {
     const wrapper = await mountSidebar()
     expect(wrapper.find('.view-toggle').exists()).toBe(false)
   })
 
-  it('counts both review queues on the Memory section, not just the proposals one', async () => {
-    // "Is there anything to decide here" has two queues behind it. Counting
-    // one of them said "3" beside two more notes waiting on the other tab.
-    const vaultReview = useVaultReviewStore()
-    vaultReview.loadedWorkspace = 'personal'
-    vaultReview.candidates = [
-      { candidate_id: 'c1', workspace: 'personal', path: 'a.md', content_hash: 'h1', signals: ['unlinked'], priority: 1, evidence: EVIDENCE, status: 'candidate', disposition: '', deferred_until: '', completable: false, completion_moves_folder: false },
-      { candidate_id: 'c2', workspace: 'personal', path: 'b.md', content_hash: 'h2', signals: ['unlinked'], priority: 1, evidence: EVIDENCE, status: 'candidate', disposition: '', deferred_until: '', completable: false, completion_moves_folder: false },
-    ]
-
-    const wrapper = await mountSidebar()
-    // Three proposals in `personal` plus two notes to revisit.
-    expect(wrapper.get('a[href="/memory"]').attributes('data-count')).toBe('5')
-    expect(wrapper.get('a[href="/memory"]').attributes('aria-label'))
-      .toBe('memory — 5 to review in this workspace')
-  })
-
-  it('leaves retired notes out of that count', async () => {
-    // Records, not work: a badge counting them asks for attention no click
-    // can clear.
-    const vaultReview = useVaultReviewStore()
-    vaultReview.loadedWorkspace = 'personal'
-    vaultReview.candidates = []
-    vaultReview.trashed = [
-      { candidate_id: 't1', workspace: 'personal', original_path: 'old.md', content_hash: 'h3', trashed_at: '2026-09-01T00:00:00Z' },
-    ]
-
-    const wrapper = await mountSidebar()
-    expect(wrapper.get('a[href="/memory"]').attributes('data-count')).toBe('3')
-  })
-
   it('shows the map\'s search and categories only under Map', async () => {
-    // They filter the map and nothing else; beside a review queue they would
+    // They filter the map and nothing else; beside another section they would
     // filter nothing on screen.
     const mm = useMemoryMapStore()
-    mm.setSection('review')
+    mm.setSection('unsure')
     const wrapper = await mountSidebar()
     expect(wrapper.find('.mm-search').exists()).toBe(false)
 
@@ -496,7 +410,7 @@ describe('ProjectSidebar review section', () => {
     expect(wrapper.find('.mm-search').exists()).toBe(true)
   })
 
-  it('does not render the review section for other modes', async () => {
+  it('does not render the memory section for other modes', async () => {
     const router = createRouter({
       history: createMemoryHistory(),
       routes: [{ path: '/', component: { template: '<div />' } }],
@@ -543,9 +457,6 @@ function seedInbox(unread: number) {
   housekeeping.updateTasksWorkspace = 'personal'
   housekeeping.updateTasksHealth = readyHealth()
   useTaskStore().schedulesLoaded = true
-  useProposalsStore().rows = []
-  useProposalsStore().loaded = true
-  useVaultReviewStore().loadedWorkspace = 'personal'
 }
 
 describe('notifications bell', () => {

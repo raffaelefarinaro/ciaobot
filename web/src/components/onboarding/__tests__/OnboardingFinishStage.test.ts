@@ -16,7 +16,6 @@ function payloads() {
     if (url === '/api/setup-status') return Promise.resolve({ workspace_root: '/srv/ciaobot', ready: true }) as never
     if (url === '/api/local/backup/setup-prompt') return Promise.resolve({ context: { has_repo: true, has_commits: true, has_remote: true } }) as never
     if (url === '/api/settings/providers') return Promise.resolve({ connections: { claude: { ok: true, auth: 'signed in' } } }) as never
-    if (url.startsWith('/api/proposals/handover')) return Promise.resolve({ handover: 'all', acting_available: true }) as never
     if (url === '/api/schedules') return Promise.resolve([{ schedule_id: 'system-memory-curation@personal', scope: 'system', enabled: true, daily_time_utc: '08:00', timezone_name: 'Europe/Zurich' }]) as never
     return Promise.reject(new Error('unexpected')) as never
   })
@@ -93,7 +92,6 @@ describe('OnboardingFinishStage focus on what needs attention', () => {
       if (url === '/api/setup-status') return Promise.resolve({ workspace_root: '/srv/ciaobot', ready: true }) as never
       if (url === '/api/local/backup/setup-prompt') return Promise.resolve({ context: {} }) as never
       if (url === '/api/settings/providers') return Promise.resolve({ connections: {} }) as never
-      if (url.startsWith('/api/proposals/handover')) return Promise.resolve({ handover: 'off', acting_available: true }) as never
       if (url === '/api/schedules') return Promise.resolve([]) as never
       return Promise.reject(new Error('unexpected')) as never
     })
@@ -142,7 +140,6 @@ describe('OnboardingFinishStage refusals and unknowns', () => {
       if (url === '/api/setup-status') return Promise.resolve({ workspace_root: '/srv/ciaobot', ready: true }) as never
       if (url === '/api/local/backup/setup-prompt') return Promise.resolve({ context: {} }) as never
       if (url === '/api/settings/providers') return Promise.resolve({ connections: {} }) as never
-      if (url.startsWith('/api/proposals/handover')) return Promise.resolve({ handover: 'off', acting_available: true }) as never
       return Promise.resolve([]) as never
     })
     const wrapper = mount(OnboardingFinishStage, { props: { context, busy: false } })
@@ -174,7 +171,6 @@ describe('OnboardingFinishStage location check', () => {
       if (url === '/api/setup-status') return Promise.reject(new Error('offline')) as never
       if (url === '/api/local/backup/setup-prompt') return Promise.resolve({ context: {} }) as never
       if (url === '/api/settings/providers') return Promise.resolve({ connections: {} }) as never
-      if (url.startsWith('/api/proposals/handover')) return Promise.resolve({ handover: 'off', acting_available: true }) as never
       return Promise.resolve([]) as never
     })
     const wrapper = mount(OnboardingFinishStage, { props: { context, busy: false } })
