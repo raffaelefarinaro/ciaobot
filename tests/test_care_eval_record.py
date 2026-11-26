@@ -47,7 +47,11 @@ def seeded(base: Path, scenario: str = "nightly") -> seed.SeedManifest:
 
 def full_observation(scenario: str) -> dict[str, bytes | None]:
     # The values the oracle expects, as observe() would translate the real effects.
-    return {item.observation_key: item.expected_bytes for item in fixture_for(scenario).obligations} | {
+    return {
+        item.observation_key: item.expected_bytes
+        for item in fixture_for(scenario).obligations
+        if item.item_slot is None
+    } | {
         item.observation_key: item.expected_bytes for item in fixture_for(scenario).protected
     }
 
@@ -66,12 +70,15 @@ def build(tmp_path: Path, scenario: str = "nightly", **overrides: Any) -> dict[s
         "manifest": manifest,
         "budget": RunBudget(),
         "observed": full_observation(scenario),
+        "effects": dict.fromkeys(manifest.item_keys, 1),
         "wall_s": 180.25,
         "usage": None,
         "code_revision": "a" * 40,
         "dirty": False,
     }
     fields.update(overrides)
+    if fields["observed"] is None:
+        fields["effects"] = None
     return fields
 
 
@@ -288,3 +295,80 @@ def test_record_round_trips_as_public_record_without_mutation(tmp_path: Path) ->
     frozen = copy.deepcopy(record)
     assert public_record(record) == frozen
     assert record == frozen
+
+
+# Effect observations bound to item keys
+# ------------------------------------------------------------
+
+
+def test_exact_per_item_effects_pass_the_effect_obligations(tmp_path: Path) -> None:
+    record = rec.build_record(**build(tmp_path, "budget_continuation"))
+    assert record["grade"]["outcomes"] == {"o001": "passed", "o002": "passed"}
+
+
+def _outcomes(tmp_path: Path, effects: dict[str, int | None]) -> dict[str, str]:
+    fields = build(tmp_path / uuid.uuid4().hex, "budget_continuation")
+    fields["effects"] = effects
+    return dict(rec.build_record(**fields)["grade"]["outcomes"])
+
+
+def test_duplicate_effect_fails_only_its_item(tmp_path: Path) -> None:
+    first, remaining = seeded(tmp_path / "k", "budget_continuation").item_keys
+    assert _outcomes(tmp_path, {first: 1, remaining: 2}) == {"o001": "passed", "o002": "failed"}
+
+
+def test_missing_effect_is_a_real_zero_and_fails(tmp_path: Path) -> None:
+    first, remaining = seeded(tmp_path / "k", "budget_continuation").item_keys
+    assert _outcomes(tmp_path, {first: 1, remaining: 0}) == {"o001": "passed", "o002": "failed"}
+
+
+def test_unknown_effect_stays_unknown_never_zero(tmp_path: Path) -> None:
+    first, remaining = seeded(tmp_path / "k", "budget_continuation").item_keys
+    assert _outcomes(tmp_path, {first: 1, remaining: None}) == {"o001": "passed", "o002": "unknown"}
+    # An item the caller never counted is unknown as well, not failed.
+    assert _outcomes(tmp_path, {first: 1}) == {"o001": "passed", "o002": "unknown"}
+    assert _outcomes(tmp_path, {}) == {"o001": "unknown", "o002": "unknown"}
+
+
+def test_a_count_for_the_wrong_item_key_credits_nothing(tmp_path: Path) -> None:
+    first, remaining = seeded(tmp_path / "k", "budget_continuation").item_keys
+    outcomes = _outcomes(tmp_path, {first: 1, "proposals:000000000000": 1})
+    assert outcomes == {"o001": "passed", "o002": "unknown"}
+    # Swapped keys: the slot binding is by position in the manifest, so the counts do not move.
+    assert _outcomes(tmp_path, {first: 0, remaining: 1}) == {"o001": "failed", "o002": "passed"}
+
+
+def test_effect_counts_cannot_arrive_through_observed(tmp_path: Path) -> None:
+    fields = build(tmp_path, "budget_continuation")
+    fields["observed"] = {**fields["observed"], "committed_first_item_effect_count": b"1"}
+    with pytest.raises(ValueError, match="item keys"):
+        rec.build_record(**fields)
+
+
+def test_effects_without_observed_are_refused(tmp_path: Path) -> None:
+    fields = build(tmp_path, "budget_continuation")
+    fields["observed"] = None
+    with pytest.raises(ValueError, match="observed"):
+        rec.build_record(**fields)
+
+
+@pytest.mark.parametrize("bad", [-1, True, 1.0, "1"])
+def test_malformed_counts_are_refused(tmp_path: Path, bad: Any) -> None:
+    first, remaining = seeded(tmp_path / "k", "budget_continuation").item_keys
+    with pytest.raises(ValueError, match="count"):
+        _outcomes(tmp_path, {first: 1, remaining: bad})
+
+
+def test_a_manifest_without_item_keys_cannot_bind_effects(tmp_path: Path) -> None:
+    fixture = fixture_for("budget_continuation")
+    manifest = seeded(tmp_path, "nightly")
+    with pytest.raises(ValueError, match="item key"):
+        rec.effect_observations(fixture, manifest, {})
+
+
+def test_effect_digest_binds_the_observed_counts(tmp_path: Path) -> None:
+    first, remaining = seeded(tmp_path / "k", "budget_continuation").item_keys
+    fields = build(tmp_path / "a", "budget_continuation")
+    one = rec.build_record(**fields)["grade"]["observation_sha256"]
+    fields["effects"] = {first: 1, remaining: 2}
+    assert rec.build_record(**fields)["grade"]["observation_sha256"] != one

@@ -94,7 +94,8 @@ def workload_digest(fixture: CareFixture, budget: RunBudget) -> str:
     return _sha({
         "scenario": fixture.scenario,
         "declared_budget": budget.as_dict(),
-        "obligations": [[item.id, item.observation_key, _bytes_digest(item.expected_bytes)]
+        "obligations": [[item.id, item.observation_key, _bytes_digest(item.expected_bytes),
+                         *([] if item.item_slot is None else [item.item_slot])]
                         for item in fixture.obligations],
         "protected": [[item.id, item.observation_key, _bytes_digest(item.expected_bytes)]
                       for item in fixture.protected],
@@ -115,6 +116,34 @@ def _observation_digest(keys: Iterable[str], observed: Mapping[str, bytes | None
         else:
             rows.append([key, "invalid"])
     return _sha(rows)
+
+
+def effect_observations(
+    fixture: CareFixture, manifest: SeedManifest, counts: Mapping[str, int | None]
+) -> dict[str, bytes]:
+    """Translate per-item effect counts into the oracle's symbolic bytes, bound by item key.
+
+    ``counts`` maps a seeded item key to the number of applied receipts the
+    execution left for it, or ``None`` when that could not be read. Each
+    effect obligation looks up only its own seeded key (``manifest.item_keys`` at the
+    obligation's slot): a count for any other key is ignored, so a receipt for a
+    wrong item can never credit the expected one. A key that is absent from
+    ``counts``, or counted ``None``, is left out, so the oracle grades it unknown
+    and an unreadable effect is never read as zero. A real zero is observed.
+    """
+    observed: dict[str, bytes] = {}
+    for item in fixture.obligations:
+        if item.item_slot is None:
+            continue
+        if item.item_slot >= len(manifest.item_keys):
+            raise ValueError("seed manifest has no item key for this obligation")
+        count = counts.get(manifest.item_keys[item.item_slot])
+        if count is None:
+            continue
+        if isinstance(count, bool) or not isinstance(count, int) or count < 0:
+            raise ValueError("an effect count must be a non-negative integer or None")
+        observed[item.observation_key] = str(count).encode("ascii")
+    return observed
 
 
 def _status(outcome: ScheduleRunOutcome) -> str:
@@ -160,6 +189,7 @@ def build_record(
     manifest: SeedManifest,
     budget: RunBudget,
     observed: Mapping[str, bytes | None] | None,
+    effects: Mapping[str, int | None] | None = None,
     wall_s: float | None,
     usage: CareUsageReport | None,
     code_revision: str | None,
@@ -169,7 +199,10 @@ def build_record(
 
     ``observed`` must be the seed observers' output for this run, or ``None``
     when nothing was observed (the grade is then ``none`` and every outcome is
-    unknown). ``budget`` is the budget the run actually used, bound into the workload
+    unknown). ``effects`` maps each seeded item key to the applied-receipt count the
+    execution left for it (see :func:`effect_observations`); ``observed`` itself may
+    not carry an effect-count key, so a count cannot skip the item-key binding.
+    ``budget`` is the budget the run actually used, bound into the workload
     digest. ``wall_s`` is the caller's monotonic seconds around the trigger.
     """
     if manifest.scenario != scenario:
@@ -178,6 +211,8 @@ def build_record(
     obligation_ids = sorted(item.id for item in fixture.obligations)
     workload = workload_digest(fixture, budget)
     grader = grader_digest()
+    if observed is None and effects:
+        raise ValueError("effects need observed")
     if observed is None:
         grade: dict[str, Any] = {
             "source": "none", "run_id": None, "fixture_sha256": None, "workload_sha256": None,
@@ -185,6 +220,10 @@ def build_record(
             "outcomes": dict.fromkeys(obligation_ids, "unknown"), "safety": "unknown",
         }
     else:
+        effect_keys = {item.observation_key for item in fixture.obligations if item.item_slot is not None}
+        if effect_keys & set(observed):
+            raise ValueError("effect counts come through effects, bound to item keys")
+        observed = {**observed, **effect_observations(fixture, manifest, effects or {})}
         outcomes, safety = grade_fixture(fixture, observed)
         keys = [item.observation_key for item in (*fixture.obligations, *fixture.protected)]
         grade = {

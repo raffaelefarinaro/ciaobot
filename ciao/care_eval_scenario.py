@@ -36,7 +36,6 @@ from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 
-from ciao.care_eval_record import build_record
 from ciao.care_eval_run import (
     BoundEngine,
     ScheduleRunOutcome,
@@ -55,6 +54,7 @@ from ciao.care_eval_seed import (
     observe_effects,
     observe_last_run,
 )
+from ciao.care_eval_record import build_record
 from ciao.curation_run import RunBudget
 from ciao.task_eval_contract import MeasurementRecord, Scenario
 
@@ -223,6 +223,8 @@ def run_continuation(
     if manifest.scenario != "budget_continuation":
         raise ValueError("seed manifest is for another scenario")
     _verify_seed(layout, manifest)
+    if len(manifest.item_keys) != 2:
+        raise ValueError("seed manifest does not carry the continuation item keys")
     vault = Path(layout.vault_root)
     request = ScheduleRunRequest(
         schedule_id=schedule_id, workspace=workspace, deadline_s=deadline_s, poll_s=poll_s
@@ -257,6 +259,14 @@ def run_continuation(
         return Unavailable(REASON_RESUME_UNVERIFIED)
     if any(count for count in effects.values()):
         return Unavailable(REASON_ATTEMPT2_RESTARTED)
+    # Each seeded item is counted under the run that was meant to do it: the first by
+    # attempt 1's holder, the remaining one by attempt 2's. A count stays None (unknown)
+    # when its journal cannot be read; it is never turned into zero.
+    first_key, remaining_key = manifest.item_keys
+    item_effects: dict[str, int | None] = {
+        **observe_effects(vault, first.last_run.run_id or "", [first_key]),
+        **observe_effects(vault, holder, [remaining_key]),
+    }
 
     dispatch = _dispatch_clock(second_outcome)
     if dispatch is None:
@@ -268,6 +278,7 @@ def run_continuation(
         manifest=manifest,
         budget=CONTINUATION_BUDGET,
         observed=observe("budget_continuation", layout, manifest, dispatch),
+        effects=item_effects,
         wall_s=wall_s,
         usage=None,
         code_revision=code_revision,

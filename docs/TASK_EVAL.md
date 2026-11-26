@@ -287,11 +287,14 @@ starting vault under a caller-owned directory and digests it as `fixture_sha256`
 observer reads only files under that directory and maps the real guide, note check,
 queued `decide: you` row and `last_full_pass` marker to the oracle's symbolic bytes; the
 weekly marker counts as the dispatch's only when it equals the UTC date of the job-run
-start. Index, audit and effect-count observations are not collected yet, so those
-obligations stay unknown. The seed takes a layout (guide at the agent root, vault under
+start. Index and audit observations are not collected yet, so those obligations stay unknown.
+`budget_continuation` seeds two plain `[user]` proposal rows; the manifest's `item_keys` are
+their worklist keys, derived with `curation_run.item_key` from the seeded queue (never typed
+in) and part of `fixture_sha256`. The proposals pass leads the plan and keeps queue order, so
+a one-item budget takes the first row and attempt 2 resumes with the second. The seed takes a layout (guide at the agent root, vault under
 it, as `prepare_workspace` builds them), and two readers exist but no caller binds them
 yet: the curation cursor's done keys, and per-item counts of applied receipts for one
-run id, which stay unemitted until the settled run's holder is proven.
+run id, which `run_continuation` calls only with the settled run's proven holder.
 
 The boot path (`ciao/care_eval_boot.py`) starts an isolated engine on a caller-supplied
 starting vault instead of the generic `_fixture`: `IsolatedEngine.boot` and
@@ -331,8 +334,57 @@ without any applied effect under its run id, which shows it resumed rather than 
 Only attempt 2 is graded, through the same oracle path. Any other outcome (attempt 1 not
 settled or complete early, cursor unreadable or unstable, attempt 2 not settled, superseded
 or timed out, no new work, a restart, an unverifiable resume) returns `Unavailable` with a
-fixed reason and no record. Effect-count obligations stay unknown until the item keys are
-bound to the seed's symbolic expectations; the record's wall time is attempt 2's own.
+fixed reason and no record. The two effect-count obligations are bound to the manifest's item
+keys by slot (`Obligation.item_slot`): the committed first item is counted under attempt 1's
+holder, the remaining item under attempt 2's, and `build_record(effects=...)` translates each
+count to the oracle's symbolic bytes (`effect_observations`). Exactly one applied receipt per
+item passes; a duplicate, a missing effect, a receipt under the wrong run, or a receipt for
+another item key fails; a count that could not be read stays unknown and is never read as zero
+(an unreadable journal makes the run `Unavailable`). `observed` may not carry an effect-count key,
+so a count cannot skip the key binding. The record's wall time is attempt 2's own.
+
+### Running the live `budget_continuation` benchmark (maintainer step)
+
+Nothing in CI boots an engine or calls a model for this scenario; the fake-provider tests in
+`tests/test_care_eval_scenario.py` cover the logic. A real run costs real model calls on the
+chosen provider and has not been done yet. Run it from a checkout with its venv, signed in to the
+provider CLI, never against a live install (the engine boots in a throwaway workdir with its own
+workspace and port, and `close()` stops only that engine):
+
+```python
+import tempfile, time
+from datetime import date
+from pathlib import Path
+from ciao import care_eval_boot, care_eval_seed as seed
+from ciao.care_eval_run import bind_isolated
+from ciao.care_eval_scenario import run_continuation
+
+today = date.today()
+base = Path(tempfile.mkdtemp(prefix="care-cont-"))
+# The seed is deterministic, so building it once more elsewhere gives the manifest of the
+# seed boot_care writes; run_continuation re-checks it against the booted workspace.
+manifest = care_eval_boot.seed_overlay("budget_continuation", base / "manifest", dispatch_date=today)
+engine = care_eval_boot.boot_care(
+    "budget_continuation", provider="claude", model="haiku",
+    dispatch_date=today, scratch=base / "boot")
+try:
+    result = run_continuation(
+        bind_isolated(engine), seed.layout_for_workspace(engine.ws), manifest,
+        schedule_id="system-memory-curation@personal", workspace="personal",
+        deadline_s=1800.0, poll_s=5.0, clock=time.monotonic, sleep=time.sleep,
+        code_revision="<git rev-parse HEAD>", dirty=False)
+    print(result)  # a MeasurementRecord dict, or Unavailable(reason=...)
+finally:
+    engine.close()
+```
+
+Read the result as follows. `Unavailable` is not a measurement; its fixed reason says which check
+failed (the first one to try is `attempt 1 completed`, which means the `ciao` shim was not first
+on the provider shell's `PATH`). A record's `grade.outcomes` `o001` and `o002` are the per-item
+effect counts. Usage metrics stay `unknown` until the usage collector (#3236) is wired, so the run
+supports no savings claim. Delete `base` afterwards; it holds only synthetic data.
+
+
 
 The usage projection (`ciao/care_usage.py`) is a separate, pure collector for
 attributable care model-call usage; it does not replace `collect_usage`, which folds absent

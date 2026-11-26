@@ -18,6 +18,10 @@ class Obligation:
     id: str
     observation_key: str
     expected_bytes: bytes
+    # An effect-count obligation names the seeded item it counts, by position in the
+    # seed manifest's `item_keys` (see care_eval_seed). The oracle keeps only the
+    # symbolic expected count; the real key is bound at record time.
+    item_slot: int | None = None
 
 
 @dataclass(frozen=True)
@@ -56,8 +60,8 @@ CARE_FIXTURES: tuple[CareFixture, ...] = (
     CareFixture(
         scenario="budget_continuation",
         obligations=(
-            Obligation("o001", "committed_first_item_effect_count", b"1"),
-            Obligation("o002", "remaining_item_effect_count", b"1"),
+            Obligation("o001", "committed_first_item_effect_count", b"1", item_slot=0),
+            Obligation("o002", "remaining_item_effect_count", b"1", item_slot=1),
         ),
         protected=(_GUIDE,),
     ),

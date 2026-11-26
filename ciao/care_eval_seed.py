@@ -34,6 +34,7 @@ from ciao import proposal_kinds
 from ciao.curation_logs import CurationLogError
 from ciao.curation_run import (
     CURATION_LOG_RELATIVE,
+    PASS_PROPOSALS,
     PROPOSALS_RELATIVE,
     WEEKLY_PASS_DAYS,
     CurationStateError,
@@ -60,6 +61,10 @@ PROPOSAL_ROW = f"- [memory] {PROPOSAL_TEXT} _(decide: you; needs a human call)_\
 # Far enough before any run that the weekly pass is due; a fixed date keeps the
 # fixture digest independent of when it was built.
 SEED_MARKER = "2026-11-01"
+# Two plain routable rows for budget_continuation: the proposals pass leads the plan and
+# keeps queue order, so a one-item budget takes the first row and the second is resumed.
+# `[user]` is not a region kind, so each row is one worklist key with no predict stage.
+CONTINUATION_PROPOSAL_TEXTS = ("Prefers morning meetings", "Prefers written summaries")
 
 CursorStatus = Literal["ok", "absent", "unreadable"]
 
@@ -111,6 +116,9 @@ class SeedManifest:
     scenario: str
     files: tuple[SeedFile, ...]
     fixture_sha256: str
+    # Worklist keys of the seeded items, in plan order. Empty unless the scenario has
+    # effect-count obligations; the digest above covers them.
+    item_keys: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -132,17 +140,45 @@ def _seed_files(scenario: Scenario) -> dict[str, bytes]:
     if scenario == "weekly_due":
         marker = curation_logs.with_full_pass_marker(None, SEED_MARKER)
         return {**guide, CURATION_LOG_RELATIVE: marker}
-    return dict(guide)
+    rows = "".join(f"- [user] {text}\n" for text in CONTINUATION_PROPOSAL_TEXTS)
+    return {**guide, PROPOSALS_RELATIVE: f"# Memory proposals\n\n{rows}".encode()}
+
+
+def seeded_item_keys(scenario: str, files: Mapping[str, bytes]) -> tuple[str, ...]:
+    """The worklist keys of the seeded proposal rows, derived with the product's own key function.
+
+    Only ``budget_continuation`` has item keys. They are read back out of the seed's
+    proposals file, never typed in, so a seed edit cannot leave a stale key behind.
+    """
+    if scenario != "budget_continuation":
+        return ()
+    from ciao.proposal_tracking import walk_proposal_queue
+
+    text = files[PROPOSALS_RELATIVE].decode("utf-8")
+    return tuple(
+        curation_run.item_key(PASS_PROPOSALS, curation_run._proposal_subject(entry.bullet, entry.dup))
+        for entry in walk_proposal_queue("", PROPOSALS_RELATIVE, text)
+    )
 
 
 def _root_for(layout: Layout, relative: str) -> Path:
     return layout.agent_root if relative == GUIDE_RELATIVE else layout.vault_root
 
 
-def fixture_digest(scenario: str, files: Mapping[str, bytes]) -> str:
-    """SHA-256 over the scenario name and the sorted (path, sha256) manifest."""
+def fixture_digest(
+    scenario: str, files: Mapping[str, bytes], item_keys: tuple[str, ...] = ()
+) -> str:
+    """SHA-256 over the scenario name, the sorted (path, sha256) manifest and the item keys.
+
+    The item keys are part of the seed vault's identity: a different key set is a
+    different fixture even if the files were somehow equal. Scenarios without item
+    keys hash exactly as before.
+    """
     rows = [[path, hashlib.sha256(files[path]).hexdigest()] for path in sorted(files)]
-    payload = json.dumps({"scenario": scenario, "files": rows}, separators=(",", ":"))
+    document: dict[str, object] = {"scenario": scenario, "files": rows}
+    if item_keys:
+        document["item_keys"] = list(item_keys)
+    payload = json.dumps(document, separators=(",", ":"))
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
@@ -167,10 +203,12 @@ def build_seed(scenario: Scenario, layout: Layout, *, dispatch_date: date) -> Se
         SeedFile(path=path, sha256=hashlib.sha256(files[path]).hexdigest())
         for path in sorted(files)
     )
+    item_keys = seeded_item_keys(scenario, files)
     return SeedManifest(
         scenario=scenario,
         files=entries,
-        fixture_sha256=fixture_digest(scenario, files),
+        fixture_sha256=fixture_digest(scenario, files, item_keys),
+        item_keys=item_keys,
     )
 
 

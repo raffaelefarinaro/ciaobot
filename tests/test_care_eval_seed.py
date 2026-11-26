@@ -465,3 +465,62 @@ def _write_receipts(vault: Path, rows: list[dict[str, Any]]) -> None:
     journal = memory_receipts.journal_path(vault)
     journal.parent.mkdir(parents=True, exist_ok=True)
     journal.write_text("".join(json.dumps(row) + "\n" for row in rows), encoding="utf-8")
+
+
+# Item keys and the vault digest
+# ------------------------------------------------------------
+
+
+def test_only_budget_continuation_has_item_keys(tmp_path: Path) -> None:
+    for scenario in SCENARIOS:
+        _, manifest = seeded(tmp_path / scenario, scenario)
+        assert (len(manifest.item_keys) == 2) == (scenario == "budget_continuation"), scenario
+
+
+def test_item_keys_are_the_products_first_two_planned_keys(tmp_path: Path) -> None:
+    # The seed's keys must be what the real worklist plans first, not a private copy of the hash.
+    from datetime import date
+
+    from ciao import curation_run
+    from ciao.entity_types import load_entity_types
+
+    layout, manifest = seeded(tmp_path, "budget_continuation")
+    worklist = curation_run.build_worklist(
+        vault_root=layout.vault_root,
+        guide_path=layout.agent_root / seed.GUIDE_RELATIVE,
+        category_registry=load_entity_types(layout.vault_root),
+        workspace_dir=layout.agent_root,
+        today=date(2026, 11, 24),
+        workspace="personal",
+    )
+    proposals = next(item for item in worklist.items if item.pass_id == curation_run.PASS_PROPOSALS)
+    assert proposals.keys == manifest.item_keys
+    plan = curation_run.plan_run(worklist, curation_run.RunBudget(max_items=1))
+    assert plan.planned[0].keys == (manifest.item_keys[0],), "one-item budget takes the first"
+    done = frozenset({manifest.item_keys[0]})
+    resumed = curation_run.build_worklist(
+        vault_root=layout.vault_root,
+        guide_path=layout.agent_root / seed.GUIDE_RELATIVE,
+        category_registry=load_entity_types(layout.vault_root),
+        workspace_dir=layout.agent_root,
+        today=date(2026, 11, 24),
+        done_keys=done,
+        workspace="personal",
+    )
+    again = curation_run.plan_run(resumed, curation_run.RunBudget(max_items=1))
+    assert again.planned[0].keys == (manifest.item_keys[1],), "attempt 2 resumes with the second"
+
+
+def test_item_keys_are_part_of_the_fixture_digest(tmp_path: Path) -> None:
+    _, manifest = seeded(tmp_path, "budget_continuation")
+    files = seed._seed_files("budget_continuation")
+    assert manifest.fixture_sha256 == seed.fixture_digest("budget_continuation", files, manifest.item_keys)
+    assert manifest.fixture_sha256 != seed.fixture_digest("budget_continuation", files)
+    assert manifest.fixture_sha256 != seed.fixture_digest(
+        "budget_continuation", files, tuple(reversed(manifest.item_keys))
+    )
+
+
+def test_scenarios_without_item_keys_keep_their_digest_shape(tmp_path: Path) -> None:
+    files = seed._seed_files("nightly")
+    assert seed.fixture_digest("nightly", files) == seed.fixture_digest("nightly", files, ())

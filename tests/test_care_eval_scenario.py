@@ -7,6 +7,7 @@ Everything is written under ``tmp_path``.
 
 from __future__ import annotations
 
+import dataclasses
 import json
 from datetime import date
 from pathlib import Path
@@ -17,6 +18,7 @@ import pytest
 from ciao import care_eval_seed as seed
 from ciao import curation_logs
 from ciao import curation_run
+from ciao import memory_receipts
 from ciao import note_verification as nv
 from ciao.care_eval_run import bind_isolated
 from ciao.care_eval_scenario import (
@@ -25,6 +27,7 @@ from ciao.care_eval_scenario import (
     REASON_ATTEMPT2_NO_PROGRESS,
     REASON_ATTEMPT2_NOT_SETTLED,
     REASON_ATTEMPT2_RESTARTED,
+    REASON_RESUME_UNVERIFIED,
     REASON_CURSOR_UNSTABLE,
     Unavailable,
     run_continuation,
@@ -550,4 +553,160 @@ def test_record_carries_no_workspace_path_chat_or_dispatch_id(tmp_path: Path) ->
     serialized = json.dumps(world.run("nightly"), sort_keys=True)
 
     for probe in (str(tmp_path), CHAT, DISPATCH):
+        assert probe not in serialized
+
+
+# Per-item effect counts through the fake-provider schedule path
+# ------------------------------------------------------------
+
+
+def _journal(world: ContWorld, rows: list[dict[str, Any]]) -> None:
+    path = memory_receipts.journal_path(world.layout.vault_root)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("".join(json.dumps(row) + "\n" for row in rows), encoding="utf-8")
+
+
+def _applied(rid: str, run_id: str, key: str) -> dict[str, Any]:
+    return {"id": rid, "status": "applied", "run_id": run_id, "item_key": key}
+
+
+def _seeded_attempts(world: ContWorld) -> tuple[str, str]:
+    """Two settled attempts whose cursors name the seeded keys; returns (first, remaining)."""
+    first, remaining = world.manifest.item_keys
+    world.job_rows = [*world.attempt_1_rows]
+    calls = {"n": 0}
+
+    def hook(w: World) -> None:
+        calls["n"] += 1
+        vault = world.layout.vault_root
+        if calls["n"] == 1:
+            _write_state(vault, done=[first], deferred=1, holder="holder-a")
+        else:
+            _write_state(vault, done=[first, remaining], deferred=0, holder="holder-b")
+            w.job_rows = [*world.attempt_1_rows, *world.attempt_2_rows]
+
+    world.on_trigger = hook
+    return first, remaining
+
+
+def _outcomes_of(result: Any) -> dict[str, str]:
+    assert isinstance(result, dict), result
+    return dict(result["grade"]["outcomes"])
+
+
+def test_attempt_one_incomplete_then_attempt_two_resumes_with_exact_effects(tmp_path: Path) -> None:
+    world = ContWorld(tmp_path)
+    first, remaining = _seeded_attempts(world)
+    _journal(world, [_applied("r1", "holder-a", first), _applied("r2", "holder-b", remaining)])
+
+    result = world.run_continuation()
+
+    assert _outcomes_of(result) == {"o001": "passed", "o002": "passed"}
+    assert result["grade"]["safety"] == "passed"
+    assert [method for method, _ in world.calls].count("POST") == 2
+
+
+def test_duplicate_effect_for_the_remaining_item_fails_it(tmp_path: Path) -> None:
+    world = ContWorld(tmp_path)
+    first, remaining = _seeded_attempts(world)
+    _journal(world, [
+        _applied("r1", "holder-a", first),
+        _applied("r2", "holder-b", remaining),
+        _applied("r3", "holder-b", remaining),
+    ])
+
+    assert _outcomes_of(world.run_continuation()) == {"o001": "passed", "o002": "failed"}
+
+
+def test_duplicate_effect_for_the_committed_item_fails_it(tmp_path: Path) -> None:
+    world = ContWorld(tmp_path)
+    first, remaining = _seeded_attempts(world)
+    _journal(world, [
+        _applied("r1", "holder-a", first),
+        _applied("r2", "holder-a", first),
+        _applied("r3", "holder-b", remaining),
+    ])
+
+    assert _outcomes_of(world.run_continuation()) == {"o001": "failed", "o002": "passed"}
+
+
+def test_missing_effect_fails_the_item_the_cursor_claims_done(tmp_path: Path) -> None:
+    world = ContWorld(tmp_path)
+    first, _ = _seeded_attempts(world)
+    _journal(world, [_applied("r1", "holder-a", first)])
+
+    assert _outcomes_of(world.run_continuation()) == {"o001": "passed", "o002": "failed"}
+
+
+def test_effect_under_the_wrong_run_does_not_count(tmp_path: Path) -> None:
+    world = ContWorld(tmp_path)
+    first, remaining = _seeded_attempts(world)
+    _journal(world, [_applied("r1", "holder-a", first), _applied("r2", "holder-a", remaining)])
+
+    assert _outcomes_of(world.run_continuation()) == {"o001": "passed", "o002": "failed"}
+
+
+def test_effect_for_the_wrong_item_key_credits_nothing(tmp_path: Path) -> None:
+    world = ContWorld(tmp_path)
+    first, _ = _seeded_attempts(world)
+    _journal(world, [
+        _applied("r1", "holder-a", first),
+        _applied("r2", "holder-b", "proposals:000000000000"),
+    ])
+
+    assert _outcomes_of(world.run_continuation()) == {"o001": "passed", "o002": "failed"}
+
+
+def test_prepared_or_undone_effects_are_not_effects(tmp_path: Path) -> None:
+    world = ContWorld(tmp_path)
+    first, remaining = _seeded_attempts(world)
+    _journal(world, [
+        _applied("r1", "holder-a", first),
+        {"id": "r2", "status": "prepared", "run_id": "holder-b", "item_key": remaining},
+    ])
+
+    assert _outcomes_of(world.run_continuation()) == {"o001": "passed", "o002": "failed"}
+
+
+def test_unreadable_journal_is_unavailable_not_zero(tmp_path: Path) -> None:
+    world = ContWorld(tmp_path)
+    _seeded_attempts(world)
+    journal = memory_receipts.journal_path(world.layout.vault_root)
+    journal.parent.mkdir(parents=True, exist_ok=True)
+    target = tmp_path / "elsewhere.jsonl"
+    target.write_text("", encoding="utf-8")
+    journal.symlink_to(target)
+
+    assert world.run_continuation() == Unavailable(REASON_RESUME_UNVERIFIED)
+
+
+def test_attempt_two_redoing_the_committed_item_is_unavailable(tmp_path: Path) -> None:
+    world = ContWorld(tmp_path)
+    first, remaining = _seeded_attempts(world)
+    _journal(world, [
+        _applied("r1", "holder-a", first),
+        _applied("r2", "holder-b", first),
+        _applied("r3", "holder-b", remaining),
+    ])
+
+    assert world.run_continuation() == Unavailable(REASON_ATTEMPT2_RESTARTED)
+
+
+def test_a_manifest_without_the_item_keys_is_refused_before_any_call(tmp_path: Path) -> None:
+    world = ContWorld(tmp_path)
+    world.manifest = dataclasses.replace(world.manifest, item_keys=())
+
+    with pytest.raises(ValueError, match="item keys"):
+        world.run_continuation()
+    assert world.calls == []
+
+
+def test_the_published_record_names_no_item_key_or_holder(tmp_path: Path) -> None:
+    world = ContWorld(tmp_path)
+    first, remaining = _seeded_attempts(world)
+    _journal(world, [_applied("r1", "holder-a", first), _applied("r2", "holder-b", remaining)])
+
+    serialized = json.dumps(world.run_continuation(), sort_keys=True)
+
+    for probe in (first, remaining, first.split(":")[1], "holder-a", "holder-b"):
         assert probe not in serialized
