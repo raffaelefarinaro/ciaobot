@@ -337,7 +337,7 @@ def rewrite_references(
     ``moved_by_ref`` maps a vault-relative ref (no extension) to its new one.
 
     Each change carries its offset in the **new** text plus the exact `from`/`to`
-    strings, which is what lets :func:`unrehome_vault_people` be an inverse. An
+    strings, so a caller can undo or audit each edit. An
     empty change list means nothing pointed at a moved note, so the driver can
     leave the file's mtime alone.
     """

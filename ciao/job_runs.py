@@ -72,6 +72,9 @@ def _latest_path() -> Path:
 # forever with a stale last run.
 RETIRED_JOBS: frozenset[str] = frozenset({
     "pwa_rebuild",       # startup PWA rebuild phase, removed
+    # Recorded by sync_skills for the vocabulary and retired-category migrations, removed.
+    "vault_vocabulary_migration",
+    "retired_stock_categories",
     "insights_backfill",  # renamed to backfill_insights
     "backfill_insights",  # bulk insights pass, removed in #627
     "startup_sync",      # opt-in startup git pull, removed
