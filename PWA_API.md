@@ -186,18 +186,7 @@ The route source of truth is `ciao/web/app.py`. This file is kept in sync by `te
 | GET | `/api/stats` | Usage statistics for one workspace: `?workspace=<name>` (required, a registered workspace, else 400) and `?range=7\|30\|90\|365` (default 30, anything else 400). Returns `{workspace, range_days, generated_at, today, totals, previous, daily_messages, projects, memory_pipeline, hours, models}` computed from existing stores (`ciao/usage_stats.py`); completed local days are cached in memory, today is live. Same payload as `ciao stats` |
 | GET | `/api/agent/status` | Agent CLI surface status: `{ready, operations, telemetry_path, version}` for the Settings → Agent CLI panel |
 | GET | `/api/workspaces` | List configured logical workspaces |
-| POST | `/api/workspaces/{name}` | Add or update a logical workspace config. A genuinely new workspace registers workspace-scoped onboarding at `runtime` before registry persistence and adds `onboarding_target: {kind: "workspace", name}` to the response; updating an existing workspace does not register progress. Restore does not create progress; reusing an archived name is a new creation. Restore advances the guide-mapping generation for every link, expiring earlier previews. A folder that has never had a mapping keeps its lifetime. Git links and folders with a current or revoked mapping receive a new lifetime and return to review with consent and mapping cleared. |
-| GET | `/api/workspaces/{name}/shared-brains` | Live state of each shared brain the workspace links: `{shared_brains: [{name, kind, identity, path, lifetime, sharing_policy, sharing_generation, sharing_granted_at, sharing_scope, sharing_grant_pending, sharing_invalidation_failed, origin_changed, missing, problem, branch, head, head_date, dirty, upstream, fetched_at, last_update}]}`; `kind` is `git` or `folder` (an omitted registry kind means Git); ordinary folder links always stay at `review` with no consent. `lifetime` is the client-visible opaque link lifetime, `sharing_policy` is `review` (the default for every legacy and new link) or `automatic` through a consent bound to the link's lifetime and repository identity, and `sharing_generation` is monotonic across grants, revocations, restore and origin-drift invalidation; `sharing_grant_pending` is true when a stored automatic grant is paused and still needs a revoke action, including while a failed journal or registry write leaves the persisted grant in place; while recovery is pending it is re-derived from the authoritative registry under its claim, and an unreadable registry fails closed to true rather than trusting the demoted in-memory row. `sharing_invalidation_failed` is true when that drift invalidation could not be persisted; the pause and later revocation are bound to the exact workspace and link lifetime, so a same-name/same-path link in another workspace with its own generation is never conflated; `problem` is "" or why the folder cannot be used now (`missing`, `moved` for a symlink, `not_a_checkout` for a missing or linked-worktree `.git`, `outside_install` for a link kept from before it moved into the install or a vault, `inaccessible` when a folder cannot be read, `registry_unavailable` when a Git link cannot be inspected, `unsafe_config` for a folder whose own git settings are outside the allowlist or whose branch fetches from a remote other than origin, `origin_changed` when its origin no longer gives the linked identity), and git is not read for a folder or when it could not be inspected, `[]` when none. Read-only apart from durably clearing an automatic consent when it observes `origin_changed`; 404 `{"error": "unknown workspace"}` for an unknown name. |
-| GET, POST | `/api/workspaces/{name}/shared-brains/{brain}/guide-mapping` | Authenticated Settings preview and explicit selection of typed destinations, bound to the exact guide pin and link lifetime. POST takes `{identity, lifetime, generation, pin, types}`; an empty type list revokes. Stale choices fail with 409. Audience is unknown and this mapping remains Review; it does not authorize publication. |
-| POST | `/api/workspaces/{name}/shared-brains/{brain}/sharing` | Explicit authenticated Settings choice of one link's policy: body `{policy: "review" \| "automatic", identity: "<the identity shown>", lifetime: "<the opaque lifetime shown>", generation: <the generation shown>}`. `review` is what every existing and newly linked brain starts in and what revocation returns to; `automatic` stores a consent stamped with a new monotonic generation for that exact link lifetime and repository identity. An optional `scope: {projects, producers, operations}` binds the grant to the chosen source project ids of this workspace, producers (`memory_extraction`, `nightly_curation`) and the edit boundary (`create`, `replace`, `append`, never wider than the link's reviewed guide mapping); each list is non-empty and distinct. Every scope problem is `400 {"code": "invalid_scope"}`: a `scope` that is not an object with exactly those three keys, a `scope` sent with `review`, an unknown or repeated project, producer or operation, an empty list, and an operation outside the reviewed mapping. A non-boolean `preview` is `400 {"code": "invalid_request"}`. The older body errors (invalid JSON, non-object body, bad `policy`, `identity`, `lifetime` or `generation`) are `400` with only an `error` string and no `code`. The note mapping is never client input: it is copied from the link's reviewed guide mapping together with its `guide_mapping_generation`, so a later mapping change pauses the grant until the operator chooses again. `"preview": true` returns `{preview: {policy, scope, changes, generation_after}}`, the exact permission the choice would store, and writes nothing; it first runs the same refusal checks as the real call (`brain_changed`, `unsupported_brain_kind`, `consent_journal_unavailable`, `brain_unavailable`), so a preview never shows a grant the route would refuse, but it does not initialize the journal. The generation moves only on a real policy change: an identical repeat keeps it, a wider or narrower scope, a revoke and a re-enable to identical settings each take a new one. A consent without a scope (every one stored before scopes existed) loads unchanged and permits no project, producer, operation or note type. Only this route issues a consent; generic `PATCH`, workspace create, registry metadata, archive restore and the control plane cannot. A healthy journal preserves it across restart; a missing, malformed or fail-closed journal is recovered by durably demoting every surviving automatic grant before a fresh journal is initialized. All three fields are compared under the authoritative interprocess registry claim (a compare-and-swap against the exact persisted registry bytes) and the cross-process checkout claim, so a stale tab cannot grant a relinked folder or overwrite a newer choice: any mismatch is `409 {"code": "brain_changed"}` or `409 {"code": "policy_locked"}` and changes nothing. Ordinary folder links return `409 {"code": "unsupported_brain_kind"}`. Every authorization-relevant origin read, including the manual share draft and publish destination checks, goes through the shared fenced observation path: an fsynced private pending fence names the checkout path and exact grant tuples under the checkout and registry claims; only then does it validate the fresh registry row, require the configured origin and effective fetch and push identities each to prove the linked identity, and retire matching grants; an unparseable or divergent alias durably demotes the affected consent. The revocation is merged into `sharing-revocations.json` and then the registry. If the registry write fails, the fence and journal remain for startup recovery and `409 {"code": "consent_invalidation_failed"}` leaves the old grant paused and revocable; if either journal merge fails, the failure is surfaced instead of reported as durable. The same validated observation backs the GET status probe and the manual draft/publish destination checks, so no read path settles a fence on the configured origin alone. If the registry claim is already held, the journal-and-fence path still records the revocation. Startup recovery demotes surviving fenced grants, and a missing/malformed/fail-closed journal is replaced only after every surviving automatic grant is durably review. A healthy journal preserves grants across a normal restart. The journal is compacted against persisted automatic grants and bounded; an unreadable, malformed or over-bound journal fails closed by demoting every stored automatic grant rather than reviving one. `sharing_generation` and the exact observed lifetime guard a delayed observation; every Git link at the same drifted path in any workspace is retired, not just the observing workspace. Automatic also refuses a folder that is missing, moved, unsafe or whose origin changed with `409 {"code": "brain_unavailable", "problem": "<code>"}`; observing `origin_changed` through this route or the GET durably clears the consent and bumps the generation, so repairing the origin still needs a fresh choice. Revocation is always available while the caller presents the current lifetime and generation. Returns `{shared_brain: {...}}` in the GET shape. No automatic publishing or producer exists in this slice: the policy is recorded for a later engine-owned flow and this route never shares a note. 404 for an unknown workspace or brain, 400 for a bad body. |
-
-| GET | `/api/workspaces/{name}/share-evidence` | Read one workspace's private evidence panel: `{workspace, mode, chat_evidence, fields, producers, brains, projects, grants, disclosure_tokens}`. `chat_evidence` is `{available: false, status}` where `status` is a closed enum derived only from the engine's own platform and caller channel, never from anything the request sends: `unsupported_platform` (anything but macOS: Linux and Windows fail closed), `remote_client` (macOS, caller is not the local native Mac app channel; every request today, including the PWA), `unprovisioned` (macOS, native app channel, no protected authority installed; not reachable until that channel exists). `degraded` (a provisioned authority that is failing) and `available` are reserved and never returned yet. Ordinary chat stays private in every status. This replaces the earlier `reason: "protected_authority_unavailable"`. `mode` is `review` for every existing install until a live standing grant on a still-linked brain exists, otherwise `automatic` (a recorded permission only; no automatic publication is active); `projects` are that workspace's own projects with only the actual sources the server offers (`stream:<project>` or `document:Decisions.md`); `grants` omit evidence bytes, preview tokens and entry ids; each row carries `active`, `linked`, `status` (`active`, `unlinked`, `revoked`, `withdrawn` or `inactive`) and a non-secret `brain.link_fingerprint`, so a still-named relink reads `unlinked` rather than live. Every grant is bound to the persisted workspace lifetime, so a delete/recreate or archive restore never inherits it. 404 for an unknown workspace. |
-| POST | `/api/workspaces/{name}/share-evidence/decisions` | Authenticated operator save of one structured decision: body `{project_id, decision, reason, effective_date, disclosure_token}` bounded to 2,000 characters each, a real `YYYY-MM-DD` date, valid UTF-8 with no control characters and no credential-shaped text. The token comes from the same session’s current project disclosure listing; changed standing permissions return 409 `disclosure_changed` without appending. The engine owns the project stream and records private provenance; a first save creates it. Returns `{entry, stream, mode}`; a model, file write or import has no equivalent path. This authenticated operator save is the sole ingress for standing-stream text; the engine signs an event over its exact fields, revision, project, workspace lifetime and session fingerprint, and producers select these existing masked entries rather than authoring new text. Editing the stored text without that signature makes the event inert |
-| POST | `/api/workspaces/{name}/share-evidence/preview` | Render the exact scope: body `{brain, project_id, source_id, grant_type, field_mask, producers, entry_index?}` with `grant_type` `standing` (a stream, future entries) or `snapshot` (one `Decisions.md` entry, `entry_index`). Returns a one-use, 15-minute preview token bound to the operator session, workspace, brain lifetime, project, source, field mask/bytes and expected generation, plus sample fields (stream) or all exact values (snapshot), recipient, producers and excluded fields. 409/400 refusals use `{error, code}` |
-| POST | `/api/workspaces/{name}/share-evidence/confirm` | Persist exactly the previewed scope: body `{preview_token, confirm: true}`. A stale stream revision, an expired or reused token, another operator session or a changed brain link is refused (409); grant persistence and token consumption are one atomic state replacement under a cross-process lock, so a crash cannot leave a replayable token or a duplicate grant. A snapshot persists the previewed bytes even after the document changed. Returns `{grant, mode}` |
-| GET | `/api/workspaces/{name}/share-evidence/grants/{grant_id}` | Exact scope and immutable history of one grant in this workspace (404 otherwise) |
-| POST | `/api/workspaces/{name}/share-evidence/grants/{grant_id}/revoke` | Revoke one grant. Returns `{grant, fresh_grant_required: true}`; the revoked generation and time are kept, and earlier authorized evidence no longer resolves |
-| POST | `/api/workspaces/{name}/share-evidence/grants/{grant_id}/withdraw` | Engine-recorded withdrawal with an optional bounded `{reason}`. Returns the grant; the old generation can no longer resolve as eligible |
+| POST | `/api/workspaces/{name}` | Add or update a logical workspace config. A genuinely new workspace registers workspace-scoped onboarding at `runtime` before registry persistence and adds `onboarding_target: {kind: "workspace", name}` to the response; updating an existing workspace does not register progress. Restore does not create progress; reusing an archived name is a new creation. |
 | GET | `/api/workspaces/{name}/shared-brains` | Live state of each shared brain the workspace links: `{shared_brains: [{name, identity, path, origin_changed, missing, problem, branch, head, head_date, dirty, upstream, fetched_at, last_update}]}`; `problem` is "" or why the folder cannot be used now (`missing`, `moved` for a symlink, `not_a_checkout` for a missing or linked-worktree `.git`, `outside_install` for a link kept from before it moved into the install or a vault, `unsafe_config` for a folder whose own git settings are outside the allowlist or whose branch fetches from a remote other than origin, `origin_changed` when its origin no longer gives the linked identity), and git is not read then, `[]` when none. Read-only; 404 `{"error": "unknown workspace"}` for an unknown name. |
 | POST | `/api/workspaces/reorder` | Persist a new workspace order: body `{order: [name, ...]}` must list every registered (non-archived) workspace exactly once, else 400. The order is the registry's list order: it drives the switcher, the 1-9 shortcuts and every workspace list. Returns the `GET /api/workspaces` payload. When no workspace is named `personal` the first one is the main workspace and stays first: an order that would change it is refused with 409. A restored workspace is appended last |
 | POST | `/api/workspaces/{name}/archive` | Archive a workspace: unregister it, archive its chats, take its user schedules (chat-owned loops are not taken: they are deleted with their chat in the same pass), and move its folder intact into `<install>/.archived-workspaces/<name>-<YYYYMMDD-HHMMSS>/`. Refuses the primary or last workspace, a workspace with a running chat or one still stopping (before anything moves), and layouts it cannot move safely (409). If search cleanup fails after archival, the response includes the archive ID, an error, and a null search-row count (503 for a busy connected index, otherwise 500). After resolving the error, restore that archive and archive the workspace again to retry cleanup. |
@@ -327,39 +316,6 @@ curl -sS -b /tmp/ciao.jar -X DELETE "http://localhost:${PWA_PORT:-8443}/api/impo
 ```
 
 ### Shared-brain evidence and consent
-
-The structured-decision path is operator-only by construction: these routes exist
-for Settings, and no agent tool appends a trusted decision or grants disclosure.
-A standing grant authorizes future matching entries with no per-fact approval;
-an individual snapshot freezes the exact previewed bytes. The preview token is
-one-use and session-bound, so preview and confirm must come from the same
-cookie jar.
-
-```bash
-# Read the workspace's actual sources and existing grants (review by default).
-curl -sS -b /tmp/ciao.jar "http://localhost:${PWA_PORT:-8443}/api/workspaces/default/share-evidence"
-
-# Record one operator-authored structured decision; the engine creates the stream.
-curl -sS -b /tmp/ciao.jar -X POST "http://localhost:${PWA_PORT:-8443}/api/workspaces/default/share-evidence/decisions" \
-  -H 'content-type: application/json' \
-  -d '{"project_id":"<project>","decision":"Use the new vendor","reason":"cheaper","effective_date":"2026-11-25","disclosure_token":"<token from disclosure_tokens for this project>"}'
-
-# Preview a standing grant over the exact fields, then confirm the same token.
-PREVIEW=$(curl -sS -b /tmp/ciao.jar -X POST "http://localhost:${PWA_PORT:-8443}/api/workspaces/default/share-evidence/preview" \
-  -H 'content-type: application/json' \
-  -d '{"brain":"team-notes","project_id":"<project>","source_id":"stream:<project>","grant_type":"standing","field_mask":["decision","effective_date"],"producers":["memory_extraction"]}')
-TOKEN=$(printf %s "$PREVIEW" | python3 -c 'import json,sys; print(json.load(sys.stdin)["preview_token"])')
-curl -sS -b /tmp/ciao.jar -X POST "http://localhost:${PWA_PORT:-8443}/api/workspaces/default/share-evidence/confirm" \
-  -H 'content-type: application/json' \
-  -d "{\"preview_token\":\"$TOKEN\",\"confirm\":true}"
-
-# Revoke the returned grant; a fresh preview and grant are required afterwards.
-curl -sS -b /tmp/ciao.jar -X POST "http://localhost:${PWA_PORT:-8443}/api/workspaces/default/share-evidence/grants/$GRANT/revoke"
-
-# Engine-recorded withdrawal (for a correction or supersession).
-curl -sS -b /tmp/ciao.jar -X POST "http://localhost:${PWA_PORT:-8443}/api/workspaces/default/share-evidence/grants/$GRANT/withdraw" \
-  -H 'content-type: application/json' -d '{"reason":"superseded by a corrected decision"}'
-```
 
 ### Restart an installed server
 
@@ -1488,8 +1444,6 @@ Routes: `GET /api/proposals`, `GET /api/proposals/history`,
 `GET /api/proposals/{id}/preview`,
 `POST /api/proposals/{id}/implement`,
 `POST /api/proposals/{id}/{action}` (action is `accept` or `dismiss`),
-`POST /api/proposals/{id}/redraft` (replace one pending evidence candidate),
-`POST /api/proposals/{id}/reconcile` (recorded share attempt only),
 `POST /api/proposals/batch`, `POST /api/proposals/dismiss-older-than`,
 `POST /api/proposals/legacy-learning-dismiss`.
 
@@ -1517,82 +1471,6 @@ changed or is no longer queued.
 trimmed, at most 1000 characters; 400 if longer or not a string) that is stored
 on the decision row. `/api/proposals/batch` and `dismiss-older-than` take no
 reason.
-
-A `kind: "share"` preview is the exact private draft projection:
-`{before, after, operation, brain, identity, link_kind, branch, path, revision,
-blocked_reason, reconcile_available, publish_retry_available}`.
-`link_kind` is `git` or `folder`. A folder create has `before: null` and is
-blocked with `folder_update_unsupported` after an external note appears at the
-reviewed path. A folder replace or delete is drafted from a bounded,
-no-follow read of the existing note (`before` is its exact text; it is
-version-bound by `sha256:<hex>` of its bytes) and is always blocked with
-`folder_update_unsupported`, in review and auto modes alike: no write to an
-ordinary mounted folder can atomically test that version against an external
-editor or cloud client, so the engine never replaces or deletes it (the
-conditional-write capability is #3626 and stays unimplemented). Such a preview
-also carries `folder_manual: {root, path, absolute_path, operation,
-reviewed_version, current_version, state, reason}` for applying the change by
-hand. `state` is `ready` (the note is still the reviewed version),
-`applied` (it already matches the proposal, or is gone for a delete),
-`changed` or `unavailable` (unsafe or unreadable); it is read on every
-preview and never becomes a receipt, so a manually handled change is not
-engine-published. A create is also refused when an evicted-file placeholder
-(`.name.icloud`) stands in for the note, or an existing note is stored only
-in the cloud. `reconcile_available` is true only when the
-exact canonical review token has a persisted attempt that must be inspected
-without writing. `publish_retry_available` is true only when every persisted
-attempt is a validated retryable rejection and the attempt limit allows
-another attempt. Clients should expose only the action indicated by these
-server fields for blocked or previously attempted reviews.
-`before` and `after` are exact text or `null` when the file
-is absent; `revision` is the full-artifact consent token. Share previews cannot
-be edited. Accept requires `{workspace, expected_revision}` for the owning
-workspace and that exact token. A stale token returns 409 with
-`share_status: "stale_review"` and a refreshed preview. The publisher records
-and reconciles attempts before confirming success; refusals leave the proposal
-pending. A folder create is staged in trusted same-volume storage outside every
-linked/synced tree - engine state when it is already on the destination volume,
-otherwise a private per-volume staging directory - tagged with a random
-operation identity, and published with one no-clobber link without replacing an
-existing file. It is confirmed only after a definitive link, a
-destination-directory flush, and a visible destination that is the live staged
-inode carrying that tag and the approved bytes; matching bytes, a copied tag or
-a reused device/inode alone never count. Ancestor metadata is snapshotted as a
-best-effort move check, the path is revalidated, and the ancestor stamps are
-compared again after the link. A destination without trusted same-volume
-staging, hard-link support or a passing rename-observability probe returns
-`manual_export_required` before effect; Ciaobot does not claim guaranteed
-stable ancestry across mounts or caches. A receipt takes its inode from the
-descriptor that was actually read, never from a later name lookup. The shared
-tree is never used for staging or cleanup.
-A crash before the durable flush marker, any post-syscall link error including
-`EEXIST`, a failed flush or an observed path change stays `indeterminate`, with
-the proposal and staging evidence retained and no automatic retry or sync claim.
-A pending or linked attempt whose destination was replaced also stays
-indeterminate; only a durably flushed attempt may treat a later replacement as a
-conflict/rejection. A confirmed accept
-settles the queue and records one decision. Retrying a confirmed accept with the
-same workspace and token replays its historical private receipt without another
-write; a later external replacement is not rewritten or deleted. Batch accept
-still refuses share rows.
-
-`POST /api/proposals/{id}/reconcile` also requires `{workspace,
-expected_revision}`. Use it only when the preview says `reconcile_available:
-true`. The server checks that same canonical attempt and calls the reconcile-only
-path; it never starts a new push. An unresolved or rejected attempt stays queued
-and returns its status so the operator can decide what to do next.
-
-Share publication receipts are projected into proposal history and
-`/api/memory/receipts` as `kind: "share_publish"`, with commit, branch, path,
-operation and undoability metadata. The exact before/after text remains in the
-private runtime artifact and is returned only by receipt detail. A Git receipt
-is undoable: undo checks the original link lifetime, destination ref and
-currently published blob (or absence), then queues an inverse share proposal and
-returns `{ok: true, workspace, review_path}`. It never publishes; the inverse
-needs a separate preview and approval. A folder receipt is `undoable: false`:
-Ciaobot created a new file and never deletes, replaces or reverts it, so the
-operator edits the folder directly and the undo route returns 400
-`undo_unsupported`.
 
 Each `GET /api/proposals` row may carry `decider` (`nightly` or `you`, absent
 when the bullet carries none) and `decide_reason` (one line).
@@ -1826,16 +1704,6 @@ curl -sS -b /tmp/ciao.jar -X POST "http://localhost:${PWA_PORT:-8443}/api/propos
 # compare a re-extracted fact against. Both fields are optional, so a client
 # that shows no preview behaves exactly as before.
 curl -sS -b /tmp/ciao.jar -X POST "http://localhost:${PWA_PORT:-8443}/api/proposals/$ID/accept"
-
-# Replace a reviewed private candidate and open its replacement for review.
-curl -sS -b /tmp/ciao.jar -X POST "http://localhost:${PWA_PORT:-8443}/api/proposals/$ID/redraft" \
-  -H 'Content-Type: application/json' -d '{"workspace":"home","expected_revision":"REVIEW_TOKEN"}'
-
-# Reconcile a shared-note attempt only when its exact preview returned
-# reconcile_available: true. This checks the recorded commit and cannot push.
-curl -sS -b /tmp/ciao.jar -X POST "http://localhost:${PWA_PORT:-8443}/api/proposals/$ID/reconcile" \
-  -H 'content-type: application/json' \
-  -d '{"workspace":"personal","expected_revision":"<preview revision>"}'
 
 # Accept a region row, reconciling it against that region's CURRENT entries
 # first, so a fact that supersedes one already there replaces it (undo-logged)

@@ -322,7 +322,7 @@ def _active_legacy_link(config: Any, workspace: str, fields: dict[str, Any]) -> 
 
 def _retire_legacy_queue_row(config: Any, workspace: str, proposal_id: str, fields: dict[str, Any]) -> bool:
     """Remove only the exact legacy queue row after its replacement is durable."""
-    from ciao.web.proposal_service import ShareDismissalRefused, _rewrite_queue_single
+    from ciao.web.proposal_service import _rewrite_queue_single
 
     queue = Path(config.workspace_vault_root(workspace)) / drafts._QUEUE
     text = queue.read_text(encoding="utf-8") if queue.exists() else ""
@@ -334,13 +334,7 @@ def _retire_legacy_queue_row(config: Any, workspace: str, proposal_id: str, fiel
     if row is None:
         return False
     vault = Path(config.workspace_vault_root(workspace))
-    try:
-        return _rewrite_queue_single(
-            queue, row.line, row.raw, row.bullet.text, "share", False, workspace, vault,
-            config=config, proposal_id=proposal_id,
-        )
-    except ShareDismissalRefused:
-        return False
+    return _rewrite_queue_single(queue, row.line, row.raw, row.bullet.text, "share", False, workspace, vault)
 
 
 def _active_link(config: Any, workspace: str, fields: dict[str, Any]) -> SharedBrainLink | None:

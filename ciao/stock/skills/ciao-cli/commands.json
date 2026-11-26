@@ -14,7 +14,6 @@
   "vault review delete": "vault_review",
   "note create": "note_create",
   "note verify": "verify_note",
-  "note share": "note_share",
   "note related": "note_related",
   "file surface": "file_surface",
   "chat list": "chats_list",

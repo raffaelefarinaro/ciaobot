@@ -144,8 +144,6 @@
           </p>
         </section>
 
-        <ProjectDecisionEntry :key="`${project.workspace}:${project.project_id}`" :workspace="project.workspace" :project-id="project.project_id" />
-
         <section v-if="showRepoSection" class="project-section project-repo" aria-labelledby="project-repo-title">
           <div class="section-head">
             <h3 id="project-repo-title">Repository</h3>
@@ -398,7 +396,6 @@
 </template>
 
 <script setup lang="ts">
-import ProjectDecisionEntry from './ProjectDecisionEntry.vue'
 import SkeletonLoader from './SkeletonLoader.vue'
 import { ref, computed, watch, onBeforeUnmount, onMounted, nextTick, useId } from 'vue'
 import { onBeforeRouteLeave, onBeforeRouteUpdate, useRouter, type RouteLocationNormalized } from 'vue-router'

@@ -528,14 +528,6 @@ async def _op_care_begin(service: CiaoMcpService, ttl_s: float, vault: str) -> d
     )
 
 
-async def _op_care_checkpoint(service: CiaoMcpService, holder: str, key: str) -> dict[str, Any]:
-    """Checkpoint a completed item of the active Workspace care dispatch."""
-    return await service._invoke(
-        "care_checkpoint", lambda cp, principal: cp.managed_care_checkpoint(principal, holder, key),
-        mutating=True,
-    )
-
-
 async def _op_care_end(service: CiaoMcpService, holder: str, status: str, reasons: list[str]) -> dict[str, Any]:
     """Settle the active managed Workspace care run."""
     return await service._invoke(
@@ -673,22 +665,6 @@ async def _op_note_create(
             body_file=body_file,
             path=path,
         ),
-        mutating=True,
-    )
-
-
-async def _op_note_share(
-    service: CiaoMcpService, path: str, body_file: str, brain: str = ""
-) -> dict[str, Any]:
-    """Queue a note draft for a human to review in a linked shared brain.
-
-    The exact body travels as a file inside this workspace's vault, never as a
-    shell argument. Filing requires a user-typed chat turn and returns a
-    canonical review link; it does not publish or change a checkout.
-    """
-    return await service._invoke(
-        "note_share",
-        lambda cp, p: cp.note_share(p, path=path, body_file=body_file, brain=brain),
         mutating=True,
     )
 
@@ -1706,11 +1682,9 @@ OPERATIONS: tuple[Operation, ...] = (
     Operation("vault_review", _DESTRUCTIVE, _op_vault_review.__doc__ or "", _op_vault_review),
     Operation("verify_note", _WRITE, _op_verify_note.__doc__ or "", _op_verify_note),
     Operation("care_begin", _WRITE, _op_care_begin.__doc__ or "", _op_care_begin),
-    Operation("care_checkpoint", _WRITE, _op_care_checkpoint.__doc__ or "", _op_care_checkpoint),
     Operation("care_end", _WRITE, _op_care_end.__doc__ or "", _op_care_end),
     Operation("note_related", _READ, _op_note_related.__doc__ or "", _op_note_related),
     Operation("note_create", _WRITE, _op_note_create.__doc__ or "", _op_note_create),
-    Operation("note_share", _WRITE, _op_note_share.__doc__ or "", _op_note_share),
     Operation("projects_list", _READ, _op_projects_list.__doc__ or "", _op_projects_list),
     Operation("project_get", _READ, _op_project_get.__doc__ or "", _op_project_get),
     Operation("project", _WRITE, _op_project.__doc__ or "", _op_project),
