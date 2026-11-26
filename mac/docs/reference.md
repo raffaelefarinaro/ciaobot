@@ -452,7 +452,7 @@ that same image, so there is no separate ZIP to publish and no `.sha256` asset:
 the digest printed by `scripts/package-notarized.sh` goes in the release notes,
 and GitHub publishes one per asset too. `scripts/publish-release.sh --tag
 v<version> --asset Ciaobot-<version>.dmg --notes notes.md --prerelease` attaches
-exactly that one file and refuses a second asset. When the release `v<version>` already exists, which is the case after a release PR merges because `release-on-main` creates it, the script uploads that one file onto it with `gh release upload` and creates nothing; `--notes`, `--title`, `--draft` and `--prerelease` then have no effect, so the digest is recorded in the existing release's notes by hand.
+exactly that one file and refuses a second asset. When the release `v<version>` already exists, which is the case after a release PR merges because `release-on-main` creates it, the script uploads that one file onto it with `gh release upload` and creates nothing; `--notes`, `--title`, `--draft` and `--prerelease` then have no effect, so the digest is recorded in the existing release's notes by hand. That release is a pre-release that is not latest. `scripts/promote-release.sh --tag v<version> [--repo OWNER/NAME]` makes it latest (`gh release edit --prerelease=false --latest`) and refuses unless the release is a published pre-release holding `install.sh`, the engine wheel and `Ciaobot-<version>.dmg`, and only a plain `vX.Y.Z` tag (never `updates`).
 
 `make-appcast.sh` refuses a non-https or credential-bearing prefix, an existing
 non-empty output, a wrong `CFBundleIdentifier`, a version in the archive name

@@ -2153,3 +2153,194 @@ def test_release_rehearsal_is_documented_for_dispatch() -> None:
     assert "rehearsal-<sha>-<run_attempt>" in development
     upkeep = (Path(__file__).parents[1] / "docs" / "UPKEEP.md").read_text(encoding="utf-8")
     assert "release-signing" in upkeep
+
+
+def _release_on_main_create_command() -> str:
+    workflow = (
+        Path(__file__).parents[1] / ".github" / "workflows" / "release-on-main.yml"
+    ).read_text(encoding="utf-8")
+    start = workflow.index("gh release create")
+    end = workflow.index('echo "created=true"', start)
+    return workflow[start:end].replace("\\\n", " ")
+
+
+def test_release_on_main_creates_a_prerelease_that_is_not_latest() -> None:
+    # The signed DMG is attached by hand after publish.yml, so the release a
+    # main merge creates must not be "latest" yet: releases/latest feeds the
+    # download page, the install.sh one-liner and the 1.x updater. A prerelease
+    # still fires `release: published`, so publish.yml runs; a draft would not.
+    command = _release_on_main_create_command()
+    assert "--prerelease" in command
+    assert "--latest=false" in command
+    assert "--draft" not in command
+
+
+def test_release_on_main_keeps_its_job_names_and_permissions() -> None:
+    import yaml
+
+    workflow = yaml.safe_load(
+        (Path(__file__).parents[1] / ".github" / "workflows" / "release-on-main.yml").read_text(
+            encoding="utf-8"
+        )
+    )
+    assert set(workflow["jobs"]) == {"release", "sync-develop"}
+    assert workflow["permissions"] == {"contents": "write"}
+    for job in workflow["jobs"].values():
+        for step in job["steps"]:
+            if "uses" in step:
+                assert re.fullmatch(r"actions/checkout@v\d+", step["uses"]), step["uses"]
+
+
+def test_release_on_main_never_promotes_or_edits_a_release() -> None:
+    # Promotion to latest is the operator's explicit step, never the workflow's.
+    workflow = (
+        Path(__file__).parents[1] / ".github" / "workflows" / "release-on-main.yml"
+    ).read_text(encoding="utf-8")
+    commands = "\n".join(
+        line for line in workflow.splitlines() if not line.lstrip().startswith("#")
+    )
+    assert "gh release edit" not in commands
+    assert "--latest\n" not in commands and "--latest " not in commands
+
+
+def _promote_script() -> Path:
+    return Path(__file__).parents[1] / "mac" / "scripts" / "promote-release.sh"
+
+
+def _run_promote(
+    tmp_path: Path, *args: str, state: str, assets: list[str]
+) -> tuple[subprocess.CompletedProcess[str], list[str]]:
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    log = tmp_path / "gh.log"
+    (tmp_path / "state").write_text(state, encoding="utf-8")
+    (tmp_path / "assets").write_text("\n".join(assets) + "\n", encoding="utf-8")
+    gh = bin_dir / "gh"
+    gh.write_text(
+        "#!/bin/sh\n"
+        'printf "%s\\n" "$*" >> "$FAKE_LOG"\n'
+        'case "$*" in\n'
+        '  *"--json isDraft,isPrerelease"*) cat "$FAKE_DIR/state" ;;\n'
+        '  *"--json assets"*) cat "$FAKE_DIR/assets" ;;\n'
+        "esac\n",
+        encoding="utf-8",
+    )
+    gh.chmod(0o755)
+    env = {
+        "PATH": f"{bin_dir}:/usr/bin:/bin",
+        "FAKE_LOG": str(log),
+        "FAKE_DIR": str(tmp_path),
+    }
+    result = subprocess.run(
+        ["/bin/sh", str(_promote_script()), *args],
+        env=env,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    calls = log.read_text(encoding="utf-8").splitlines() if log.exists() else []
+    return result, calls
+
+
+_FULL_ASSETS = ["install.sh", "ciaobot-2.0.0-py3-none-any.whl", "Ciaobot-2.0.0.dmg"]
+
+
+def test_promote_release_marks_a_complete_prerelease_latest(tmp_path: Path) -> None:
+    result, calls = _run_promote(
+        tmp_path, "--tag", "v2.0.0", state="false true", assets=_FULL_ASSETS
+    )
+    assert result.returncode == 0, result.stderr
+    edits = [call for call in calls if call.startswith("release edit")]
+    assert edits == ["release edit v2.0.0 --prerelease=false --latest"]
+
+
+def test_promote_release_targets_the_given_repo(tmp_path: Path) -> None:
+    result, calls = _run_promote(
+        tmp_path, "--tag", "v2.0.0", "--repo", "o/r", state="false true", assets=_FULL_ASSETS
+    )
+    assert result.returncode == 0, result.stderr
+    assert all("--repo o/r" in call for call in calls)
+
+
+def test_promote_release_refuses_a_release_without_the_dmg(tmp_path: Path) -> None:
+    result, calls = _run_promote(
+        tmp_path, "--tag", "v2.0.0", state="false true", assets=_FULL_ASSETS[:2]
+    )
+    assert result.returncode == 1
+    assert "Ciaobot-2.0.0.dmg" in result.stderr
+    assert not [call for call in calls if call.startswith("release edit")]
+
+
+@pytest.mark.parametrize("missing", ["install.sh", "ciaobot-2.0.0-py3-none-any.whl"])
+def test_promote_release_refuses_a_release_publish_has_not_finished(
+    tmp_path: Path, missing: str
+) -> None:
+    assets = [name for name in _FULL_ASSETS if name != missing]
+    result, calls = _run_promote(tmp_path, "--tag", "v2.0.0", state="false true", assets=assets)
+    assert result.returncode == 1
+    assert missing in result.stderr
+    assert not [call for call in calls if call.startswith("release edit")]
+
+
+def test_promote_release_refuses_drafts_and_already_published(tmp_path: Path) -> None:
+    result, calls = _run_promote(
+        tmp_path, "--tag", "v2.0.0", state="true true", assets=_FULL_ASSETS
+    )
+    assert result.returncode == 1 and "draft" in result.stderr
+    assert not [call for call in calls if call.startswith("release edit")]
+
+    other = tmp_path / "again"
+    other.mkdir()
+    result, calls = _run_promote(other, "--tag", "v2.0.0", state="false false", assets=_FULL_ASSETS)
+    assert result.returncode == 1 and "not a pre-release" in result.stderr
+    assert not [call for call in calls if call.startswith("release edit")]
+
+
+@pytest.mark.parametrize("tag", ["2.0.0", "v2.0", "v2.0.0-rc1", "updates", "v2.0.0;rm"])
+def test_promote_release_accepts_only_version_tags(tmp_path: Path, tag: str) -> None:
+    # The `updates` feed release must never be promoted: it stays a pre-release.
+    result, calls = _run_promote(tmp_path, "--tag", tag, state="false true", assets=_FULL_ASSETS)
+    assert result.returncode != 0
+    assert calls == []
+
+
+def test_promote_release_script_is_executable_and_posix() -> None:
+    script = _promote_script()
+    assert os.access(script, os.X_OK)
+    assert script.read_text(encoding="utf-8").startswith("#!/bin/sh\n")
+
+
+def test_release_runbook_orders_dmg_then_latest_then_feed() -> None:
+    root = Path(__file__).parents[1]
+    mac = (root / "skills" / "release-mac" / "SKILL.md").read_text(encoding="utf-8")
+    section = mac[mac.index("## 6. Publish") : mac.index("## 7. Prove the update chain")]
+    attach = section.index("scripts/publish-release.sh")
+    promote = section.index("scripts/promote-release.sh --tag v<version>")
+    appcast = section.index("**Publish `appcast.xml`**")
+    assert attach < promote < appcast
+    assert "pre-release" in section.split("scripts/promote-release.sh")[0]
+    assert "no longer \"latest\" from this moment" not in section
+    assert "That release is the latest release from this moment" not in mac
+    assert "## Rollback" in mac
+    rollback = mac[mac.index("## Rollback") :]
+    assert "gh release edit v<previous> --latest" in rollback
+    assert "gh release edit v<version> --prerelease=true" in rollback
+    assert "never delete" in rollback.lower()
+
+    release = (root / "skills" / "ciao-release" / "SKILL.md").read_text(encoding="utf-8")
+    assert "--prerelease" in release and "not latest" in release
+    assert "scripts/promote-release.sh" in release
+
+
+def test_release_notes_skill_has_the_1x_upgrade_note_template() -> None:
+    root = Path(__file__).parents[1]
+    notes = (root / "skills" / "ciao-release-notes" / "SKILL.md").read_text(encoding="utf-8")
+    template = (
+        "- **Mac: install the 2.0 app once by hand.** Download `Ciaobot-<version>.dmg` from "
+        "this release, open it and drag Ciaobot to Applications. A 1.x install does not "
+        "update itself to the 2.0 app; after this one manual install, the app updates "
+        "itself."
+    )
+    assert template in notes
+    assert notes.count(template) == 2  # the 2.0.0 block and the reusable template
+    assert "## The 1.x upgrade note" in notes
