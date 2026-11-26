@@ -8,7 +8,6 @@ from pathlib import Path
 # in PWA_API.md → Agent recipes. Each entry needs a one-line reason so future
 # contributors can decide whether their new route really belongs here.
 BROWSER_OR_INTERNAL_ROUTES: dict[str, str] = {
-    "/api/workspaces/{name}/shared-brains/{brain}/guide-mapping": "Operator-only Settings mapping; never an agent recipe.",
     "/api/chats/search": "browser-only bounded read of saved chat text; workspace scoped and never agent initiated",
     "/api/tasks/{task_id}/order": "drag/menu reorder; signed session only, no agent verb, acts as the user",
     "/api/onboarding": "browser-only resumable lifecycle progress; signed session, no settings/readiness writes",
@@ -85,10 +84,6 @@ BROWSER_OR_INTERNAL_ROUTES: dict[str, str] = {
     "/api/workspace-open": "browser file-viewer Open-in-default-app button; hidden and refused unless the PWA runs on the engine's own machine",
     "/api/workspaces": "browser workspaces list config",
     "/api/workspaces/{name}": "browser workspaces management endpoint",
-    "/api/workspaces/{name}/shared-brains/{brain}/sharing": (
-        "browser-only explicit Settings consent for one shared brain; signed session, "
-        "names the exact link identity and lifetime, no agent surface or publishing"
-    ),
     "/api/settings/providers/{provider}/{action}": "browser-only handoff to provider CLI login, verification, or logout",
     "/api/admin/skills/add": "deprecated GitHub skill add; returns 410, replaced by /api/skills/import",
     "/api/skills/import": "browser skills import; uploads validated zip",

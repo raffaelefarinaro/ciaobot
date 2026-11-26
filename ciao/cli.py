@@ -6654,18 +6654,7 @@ def _curation_begin_command(args: argparse.Namespace) -> int:
             print(f"curation could not begin: {error.get('message', 'engine unavailable')}", file=sys.stderr)
             return CURATION_BUSY_EXIT if error.get("code") == "curation_busy" else 1
         else:
-            lease = None
-            if _name:
-                from ciao import curation_share, share_evidence
-
-                config = _installed_config(_workspace)
-                if share_evidence._store_root(config).exists():
-                    name = _name
-                    with share_evidence.evidence_claim(config, workspace=name) as claim:
-                        lease = begin_run(vault, holder=args.holder, ttl_s=budget.max_seconds, chat_id=chat_id,
-                                          before_acquire=lambda state: curation_share.recover(config, name, state, claim))
-            if lease is None:
-                lease = begin_run(vault, holder=args.holder, ttl_s=budget.max_seconds, chat_id=chat_id)
+            lease = begin_run(vault, holder=args.holder, ttl_s=budget.max_seconds, chat_id=chat_id)
     except CurationBusy as exc:
         print(f"curation is already running: {exc}", file=sys.stderr)
         return CURATION_BUSY_EXIT
@@ -6777,15 +6766,6 @@ def _curation_progress_command(args: argparse.Namespace) -> int:
     except CurationStateError as exc:
         print(f"curation state error: {exc}", file=sys.stderr)
         return 1
-    token = os.environ.get("CIAO_AGENT_TOKEN", "")
-    url = os.environ.get("CIAO_AGENT_URL", "")
-    if token and url:
-        from ciao.agent_cli import post
-
-        for key in keys:
-            result = post("care_checkpoint", {"holder": holder, "key": key}, url=url, token=token, timeout_s=2.0)
-            if not result.get("ok") and result.get("error", {}).get("code") != "not_care_dispatch":
-                print("curation sharing checkpoint unavailable; work remains private", file=sys.stderr)
     payload = {"recorded": len(keys), "newly_done": added}
     if args.json:
         json.dump(payload, sys.stdout, ensure_ascii=False, indent=2)

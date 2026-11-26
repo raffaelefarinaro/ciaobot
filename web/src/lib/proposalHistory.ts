@@ -31,17 +31,6 @@ export interface ApplyLine {
  * Undone is checked first: an undo wins over the applied row it reverses.
  */
 export function applyLine(row: ProposalHistoryRow): ApplyLine | null {
-  if (row.kind === 'share') {
-    if (row.share_status === 'published' && row.change?.scope === 'historical_local_write') {
-      return { text: 'Saved locally', tone: 'ok' }
-    }
-    if (row.share_status === 'published' && row.commit_oid) {
-      return { text: 'Published', tone: 'ok' }
-    }
-    if (row.action === 'accepted') {
-      return { text: `Not published${row.share_status ? ` · ${row.share_status}` : ''}`, tone: 'bad' }
-    }
-  }
   if (row.receipt_issue === 'missing') {
     return { text: 'Unverified · the receipt for this decision is no longer in the journal', tone: 'muted' }
   }

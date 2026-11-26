@@ -13,40 +13,6 @@ export interface InventoryFilters { query: string; family: string; coverage: 'al
 // Ownership is deliberately explicit: adding a production SFC requires its own row.
 export const inventory: InventoryEntry[] = [
   {
-    id: 'components-project-decision-entry', name: 'ProjectDecisionEntry', family: 'Projects', kind: 'component',
-    owner: { path: 'web/src/components/ProjectDecisionEntry.vue', anchor: 'class="project-section decision-entry"' },
-    sources: [], consumers: ['web/src/components/ProjectView.vue'], variants: [],
-    variantNotes: 'Project-scoped decision entry and standing disclosure information; variants are unassessed.',
-    states: [{ name: 'default', coverage: 'uncovered', storyIds: [], note: 'The project view opens this form; no workshop story is recorded yet.' }],
-    loading: { status: 'known', detail: 'Opening the form loads disclosure permissions before entry.' },
-    migration: { status: 'unassessed', note: 'Inventory admission does not approve a design migration.' },
-  },
-  {
-    id: 'components-settings-share-sources', name: 'SettingsShareSources', family: 'Settings', kind: 'component',
-    owner: { path: 'web/src/components/settings/SettingsShareSources.vue', anchor: 'class="sources-panel"' },
-    sources: [], consumers: ['web/src/components/settings/SettingsSharedBrains.vue'], variants: [],
-    variantNotes: 'Workspace-scoped source permission and snapshot confirmation panel; variants are unassessed.',
-    states: [{ name: 'default', coverage: 'uncovered', storyIds: [], note: 'Settings opens this panel; no workshop story is recorded yet.' }],
-    loading: { status: 'known', detail: 'Loads available sources and reports loading or failure.' },
-    migration: { status: 'unassessed', note: 'Inventory admission does not approve a design migration.' },
-  },
-  {
-    id: 'components-settings-share-audit', name: 'SettingsShareAudit', family: 'Settings', kind: 'component',
-    owner: { path: 'web/src/components/settings/SettingsShareAudit.vue', anchor: 'class="audit-panel"' },
-    sources: [], consumers: ['web/src/components/settings/SettingsSharedBrains.vue'], variants: [],
-    variantNotes: 'Read-only consent and history view with no activation or write control; variants are unassessed.',
-    states: [
-      { name: 'loading', coverage: 'covered', storyIds: ['settings-share-audit--loading'], note: 'The first evidence read is held; the reading line shows and no brain list renders.' },
-      { name: 'failed', coverage: 'covered', storyIds: ['settings-share-audit--failed'], note: 'A first-load failure shows the role=alert read error with Try again; no brain list renders.' },
-      { name: 'empty', coverage: 'covered', storyIds: ['settings-share-audit--empty'], note: 'A linked brain with no grant shows review, unknown audience, no permission and no history.' },
-      { name: 'active-grant', coverage: 'covered', storyIds: ['settings-share-audit--active-grant'], note: 'A recorded standing grant (status "Recorded, not yet in use") shows scope, unknown audience and the not-active-yet automatic policy, with no buttons.' },
-      { name: 'revoked-history', coverage: 'covered', storyIds: ['settings-share-audit--revoked-history'], note: 'An active and a revoked grant show their status words and a newest-first merged history.' },
-      { name: 'folder', coverage: 'covered', storyIds: ['settings-share-audit--folder-brain'], note: 'A folder brain shows local-file semantics and never claims cloud sync or recall.' },
-    ],
-    loading: { status: 'known', detail: 'Reads the evidence record on mount and reports loading, failure or a stale refresh.' },
-    migration: { status: 'unassessed', note: 'Inventory admission does not approve a design migration.' },
-  },
-  {
     id: 'components-settings-settings-switch',
     name: 'SettingsSwitch',
     family: 'Settings',

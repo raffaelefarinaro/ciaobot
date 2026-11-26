@@ -1,9 +1,5 @@
 # PWA frontend
 
-Shared-brain Settings can preview a content guide and save selected typed destinations for review. The audience is explicitly unknown; this mapping never enables automatic publication.
-
-Sources and consent states that ordinary chat stays private while a protected operator authority is unavailable. The server reports this capability as unavailable on every platform; structured-decision grants do not authorize chat.
-
 The sidebar's **Search chats** dialog searches saved titles and visible transcript text in the selected workspace. It sends the query only in a bounded JSON body, shows literal plain-text excerpts, and opens archived results through the existing read-only chat flow. Search results are fetched a page at a time.
 
 Vue 3 + Vite + Pinia + TypeScript. Built output goes to `ciao/web/static/`, served by the same Starlette server as the API. See `../README.md` for the repo-wide layout and `../PWA_API.md` for backend routes.
@@ -359,7 +355,6 @@ Ciaobot, the Home setup card keeps its three phone instructions and that link
 inside a closed native disclosure. Setup task labels stay quiet, help links use
 neutral bordered actions aligned with the row buttons, and narrow panes make
 those actions full-width. Phone setup never keeps a completed reminder open.
-
 
 The PWA runs primarily as a standalone iOS Safari app. Several iOS-specific quirks are addressed in code; do not undo them without reading why.
 
@@ -856,8 +851,6 @@ establish:
 | `chat-motion.spec.ts` | That a chat opened from Home rises into place, archiving opens the next chat in the rail order rather than Home, and the phone drawer slides out on close with its rows still in it.; Chat details stays closed in the next chat once closed; and a pinned file slides in after the chat |
 | `shared-brain-settings.spec.ts` | The Shared brains card on Settings › Workspace › Overview at 390px: the Link type selector is usable, the path field is 16px and controls are 44px under touch, mixed Folder and Git rows keep their kinds after reload and saves, local folder availability stays distinct from cloud sync status, a refused path shows the engine's words inline, and Remove asks first and runs from the keyboard. |
 
-| `shared-brain-sources.spec.ts` | The Sources and consent panel at 390px with a stubbed evidence API: server-filtered brain/project/source pickers, exact snapshot fields and the future-without-review sentence, cancel writing nothing, confirm listing the grant, and keyboard revoke surviving a reload. |
-| `shared-brain-audit.spec.ts` | The read-only Consent and history view at 390px, at a real 200% zoom (halved viewport with deviceScaleFactor 2) and with a stubbed evidence API: unknown audience, no recall or sync claim, 44px toggle, keyboard open, grants and newest-first history, no write route called, survives reload. |
 | `shared-brain-isolation.spec.ts` | Client-side isolation of the Sources panel across two workspaces, against a stateful engine stub: the foreign workspace's names and grant ids never reach the DOM or the requests, a DOM-edited preview sends only the token and confirmation, a forged token is refused in the panel, switching workspace before submit drops the preview and writes nothing, and a confirm still in flight across a switch never lands in the other workspace. Engine-side isolation is covered by `tests/test_share_evidence_isolation.py` (#3646). |
 | `project-decisions.spec.ts` | Project-side decision entry at 390px, with isolated permissions and save responses: shows the standing disclosure and records the decision for the owning project. |
 | `sidebar-overflow.spec.ts` | That the sidebar's chat list never scrolls sideways, with project rows idle or hovered. |

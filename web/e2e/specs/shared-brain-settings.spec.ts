@@ -79,15 +79,12 @@ test.describe('shared brains card', () => {
     await expect(panel.locator('.shared-brain-kind', { hasText: 'Folder' })).toHaveCount(1)
     await expect(panel.getByText('Folder is locally available. Read in place, never updated.')).toBeVisible()
     await expect(panel.getByText('Checked-out commit')).toHaveCount(0)
-    await expect(panel.locator('.shared-brain-policy-toggle')).toHaveCount(0)
 
     await link(panel, TEAM, { kind: 'git' })
     await expect(panel.getByText('team-notes', { exact: true })).toBeVisible()
     await expect(panel.locator('.shared-brain-kind', { hasText: 'Git repository' })).toHaveCount(1)
     await expect(panel.getByText('Up to date')).toHaveCount(1)
     await expect(panel.locator('.shared-brain-kind', { hasText: 'Folder' })).toHaveCount(1)
-    await expect(panel.getByText('You review each note before it is shared.')).toBeVisible()
-    await expect(panel.locator('.shared-brain-policy-toggle')).toHaveCount(1)
 
     await page.reload()
     await quiesce(page)

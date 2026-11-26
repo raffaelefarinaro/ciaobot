@@ -9,14 +9,12 @@ import type { ProposalHistoryRow } from '../lib/types'
 import { kindLabel } from '../lib/proposalKinds'
 import { formatTime } from '../lib/time'
 import { fetchCareRun } from '../lib/careRun'
-import { useRouter } from 'vue-router'
 import { applyLine, careRunScheduleIndex, historyActorLabel, reasonPreview } from '../lib/proposalHistory'
 
 const store = useProposalsStore()
 const projectStore = useProjectStore()
 const fileViewer = useFileViewerStore()
 const tasks = useTaskStore()
-const router = useRouter()
 
 // -- Apply state, reasons and the run behind an automated decision ----------
 //
@@ -120,8 +118,7 @@ function receiptError(row: ProposalHistoryRow): string {
  * because restoring the before image would delete an unrelated later fact. */
 async function undoChange(row: ProposalHistoryRow) {
   if (!row.change?.undoable) return
-  const result = await store.undoReceipt(row.change.receipt_id, row.workspace)
-  if (row.kind === 'share' && result.ok && result.review_path) await router.push(result.review_path)
+  await store.undoReceipt(row.change.receipt_id, row.workspace)
 }
 
 /** Open the archive this fact came from. Only linked when the server could
@@ -239,14 +236,6 @@ function predictionBadge(row: ProposalHistoryRow): { cls: string; text: string }
  * recognized, and rows an expiry sweep dropped.
  */
 function statusBadge(row: ProposalHistoryRow): { cls: string; text: string } {
-  if (row.kind === 'share' && row.action === 'accepted') {
-    if (row.share_status === 'published' && row.change?.scope === 'historical_local_write') {
-      return { cls: 'badge--success', text: 'Saved locally' }
-    }
-    return row.share_status === 'published' && row.commit_oid
-      ? { cls: 'badge--success', text: 'Published' }
-      : { cls: 'badge--error', text: 'Publication not confirmed' }
-  }
   if (row.action === 'accepted') {
     if (row.outcome === 'duplicate' || row.outcome === 'suppressed') {
       return { cls: 'badge--muted', text: 'Skipped · already known' }
@@ -408,15 +397,6 @@ const filtersHideEverything = computed(
               >{{ store.isBusy(row.change.receipt_id) ? 'undoing…' : 'Undo' }}</button>
             </div>
             <p v-if="row.destination" class="ph-destination">{{ row.destination }}</p>
-            <p v-if="row.kind === 'share' && row.share_status === 'published' && row.commit_oid" class="ph-share-commit">
-              Published commit <code>{{ row.commit_oid }}</code>
-            </p>
-            <p
-              v-if="row.kind === 'share' && row.share_status === 'published' && row.change?.scope === 'historical_local_write'"
-              class="ph-share-commit"
-            >
-              Saved to the folder on {{ formatTime(row.change.ts) }}. This is a historical local record; the file's current availability and any cloud sync are not confirmed.
-            </p>
             <div v-if="row.reason" class="ph-reason-block">
               <p class="ph-reason"><span class="ph-reason-label">Why</span> {{ isReasonOpen(row) ? row.reason : reasonPreview(row.reason).text }}</p>
               <button
@@ -567,27 +547,7 @@ const filtersHideEverything = computed(
                   </p>
                   <template v-else>
                     <p class="ph-change-dest">{{ receiptFor(row)!.destination || row.destination }}</p>
-                    <p v-if="receiptFor(row)!.share_status === 'published' && receiptFor(row)!.commit_oid" class="ph-share-commit">
-                      Published commit <code>{{ receiptFor(row)!.commit_oid }}</code>
-                    </p>
-                    <p v-if="receiptFor(row)!.scope === 'historical_local_write'" class="ph-share-commit">
-                      This receipt records the local folder write at the time shown. Current file availability and cloud delivery are unknown.
-                    </p>
-                    <template v-if="row.kind === 'share' && receiptFor(row)!.has_snapshot">
-                      <section class="ph-share-image">
-                        <h3>Before</h3>
-                        <p v-if="receiptFor(row)!.before === null" class="ph-change-none">No note existed.</p>
-                        <p v-else-if="receiptFor(row)!.before === ''" class="ph-change-none">The note was empty.</p>
-                        <pre v-else>{{ receiptFor(row)!.before }}</pre>
-                      </section>
-                      <section class="ph-share-image">
-                        <h3>After</h3>
-                        <p v-if="receiptFor(row)!.after === null" class="ph-change-none">The note was removed.</p>
-                        <p v-else-if="receiptFor(row)!.after === ''" class="ph-change-none">The note is empty.</p>
-                        <pre v-else>{{ receiptFor(row)!.after }}</pre>
-                      </section>
-                    </template>
-                    <ul v-else-if="receiptFor(row)!.diff?.length" class="ph-change-lines">
+                    <ul v-if="receiptFor(row)!.diff?.length" class="ph-change-lines">
                       <li
                         v-for="(line, index) in receiptFor(row)!.diff"
                         :key="`${line.op}-${index}`"
@@ -609,7 +569,7 @@ const filtersHideEverything = computed(
                       class="btn-small btn-chip"
                       :disabled="store.isBusy(row.change.receipt_id)"
                       @click="undoChange(row)"
-                    >{{ store.isBusy(row.change.receipt_id) ? 'undoing…' : row.kind === 'share' ? 'Propose undo' : 'undo this change' }}</button>
+                    >{{ store.isBusy(row.change.receipt_id) ? 'undoing…' : 'undo this change' }}</button>
                     <span v-else-if="receiptFor(row)!.reason" class="ph-change-none">{{ receiptFor(row)!.reason }}.</span>
                   </div>
                 </template>
@@ -1053,34 +1013,6 @@ const filtersHideEverything = computed(
   font-family: var(--font-mono, ui-monospace, monospace);
   font-size: 0.75rem;
   color: var(--fg2);
-}
-
-.ph-share-commit {
-  margin: 0.35rem 0;
-  color: var(--fg2);
-  font-size: 0.78rem;
-  overflow-wrap: anywhere;
-}
-
-.ph-share-commit code,
-.ph-share-image pre {
-  font-family: var(--font-mono, ui-monospace, monospace);
-}
-
-.ph-share-image h3 {
-  margin: 0.5rem 0 0.25rem;
-  font-size: 0.82rem;
-}
-
-.ph-share-image pre {
-  max-height: 24rem;
-  margin: 0;
-  padding: var(--space-2);
-  overflow: auto;
-  white-space: pre-wrap;
-  overflow-wrap: anywhere;
-  border: 1px solid var(--border);
-  border-radius: var(--radius-sm, 6px);
 }
 
 .ph-change-lines {

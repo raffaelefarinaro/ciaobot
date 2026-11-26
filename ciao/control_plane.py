@@ -16,7 +16,6 @@ import json
 import logging
 import math
 import os
-import stat
 import sqlite3
 import sys
 import threading
@@ -1729,7 +1728,7 @@ class CiaoControlPlane:
     async def managed_care_begin(self, principal: AgentPrincipal, ttl_s: float, vault: str) -> dict[str, Any]:
         """Take a care lease only for the engine's currently running care dispatch."""
         import math  # noqa: PLC0415
-        from ciao import curation_run, curation_share  # noqa: PLC0415
+        from ciao import curation_run  # noqa: PLC0415
 
         workspace = self._workspace(principal)
         dispatcher = self.pcm._schedule_dispatcher_for()
@@ -1741,39 +1740,20 @@ class CiaoControlPlane:
         if not math.isfinite(ttl_s) or ttl_s < 1 or ttl_s > 86400:
             raise ControlPlaneError("invalid_request", "Care lease duration must be between 1 and 86400 seconds.")
         try:
-            lease = curation_share.begin(
-                self.config, workspace=workspace, chat_id=principal.chat_id,
-                token_id=principal.token_id, dispatch_id=dispatch_id, ttl_s=ttl_s,
+            lease = await asyncio.to_thread(
+                curation_run.begin_run,
+                Path(self.config.workspace_vault_root(workspace)),
+                ttl_s=ttl_s, chat_id=principal.chat_id,
             )
         except curation_run.CurationBusy as exc:
             raise ControlPlaneError("curation_busy", str(exc)) from None
-        try:
-            await asyncio.to_thread(curation_share.dispatch_ready, self.config, workspace=workspace)
-        except Exception:  # noqa: BLE001 - private intake remains retryable
-            logger.warning("Unable to file settled Workspace care candidates; they remain private")
         return _ok({**lease.as_dict(), "vault": str(lease.vault_root.resolve())})
-
-    def managed_care_checkpoint(self, principal: AgentPrincipal, holder: str, key: str) -> dict[str, Any]:
-        """Stage only witnesses for a completed item of this live care dispatch."""
-        from ciao import curation_share  # noqa: PLC0415
-
-        workspace = self._workspace(principal)
-        dispatch_id = self.pcm._schedule_dispatcher_for().active_care_dispatch(principal.chat_id, workspace)
-        if not dispatch_id or not principal.token_id or not self._unattended_turn(principal):
-            raise ControlPlaneError("not_care_dispatch", "A live managed Workspace care dispatch is required.")
-        if not holder or len(holder) > 512 or not key or len(key) > 512:
-            raise ControlPlaneError("invalid_request", "A valid care lease and work item are required.")
-        staged = curation_share.checkpoint(
-            self.config, self.pcm, workspace=workspace, chat_id=principal.chat_id,
-            token_id=principal.token_id, dispatch_id=dispatch_id, holder=holder, key=key,
-        )
-        return _ok({"staged": staged})
 
     async def managed_care_end(
         self, principal: AgentPrincipal, holder: str, status: str, reasons: list[str]
     ) -> dict[str, Any]:
         """Derive the run outcome and settle it under the active care dispatch."""
-        from ciao import curation_run, curation_share  # noqa: PLC0415
+        from ciao import curation_run  # noqa: PLC0415
         from ciao.cli import _derive_run_counts  # noqa: PLC0415
         from ciao.entity_types import load_entity_types  # noqa: PLC0415
         from ciao.proposal_predictions import HandoverPolicy  # noqa: PLC0415
@@ -1802,18 +1782,14 @@ class CiaoControlPlane:
                 config=self.config, path_prefix=VAULT_RENDER_PREFIX, workspace=workspace,
             )
             live_keys = frozenset(key for item in views.remaining.items for key in item.keys)
-            summary = curation_share.end(
-                self.config, workspace=workspace, chat_id=principal.chat_id, token_id=principal.token_id,
-                dispatch_id=dispatch_id, holder=holder, status=status, planned=counts.planned,
+            if dispatcher.active_care_dispatch(principal.chat_id, workspace) != dispatch_id:
+                raise curation_run.CurationBusy("the managed care dispatch is no longer active")
+            return curation_run.end_run(
+                vault, holder=holder, status=status, planned=counts.planned,
                 completed=counts.completed, deferred=counts.deferred, reasons=[*reasons, *counts.reasons],
-                live_keys=live_keys, failed=counts.failed, counts_complete=counts.complete, report=counts.report,
-                dispatch_active=lambda: dispatcher.active_care_dispatch(principal.chat_id, workspace) == dispatch_id,
+                live_keys=live_keys, advance_marker=status == "ok", failed=counts.failed,
+                counts_complete=counts.complete, report=counts.report, dispatch_id=dispatch_id,
             )
-            try:
-                curation_share.dispatch_ready(self.config, workspace=workspace)
-            except Exception:  # noqa: BLE001 - the durable receipt is retried on the next run
-                logger.warning("Unable to file settled Workspace care candidates; they remain private")
-            return summary
 
         try:
             summary = await asyncio.to_thread(settle)
@@ -2330,160 +2306,6 @@ class CiaoControlPlane:
             f"note-create:{notes_root}:{title}", _run, coalesce=False
         )
         return _ok(reported)
-
-    def _share_body_bytes(self, workspace: str, relative: str) -> bytes:
-        """Read one regular file beneath this workspace's vault through its descriptor."""
-        from ciao.share_proposals import MAX_BYTES
-
-        if not relative or Path(relative).is_absolute() or "\\" in relative or "\x00" in relative:
-            raise ControlPlaneError("note_file_invalid", "--body-file must be a relative path inside this workspace vault.")
-        parts = relative.split("/")
-        if any(part in {"", ".", ".."} for part in parts):
-            raise ControlPlaneError("note_file_invalid", "--body-file must be a relative path inside this workspace vault.")
-        root = Path(self.config.workspace_vault_root(workspace)).resolve()
-        directory_flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
-        file_flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
-        descriptor = -1
-        try:
-            descriptor = os.open(root, directory_flags)
-            for component in parts[:-1]:
-                next_descriptor = os.open(component, directory_flags, dir_fd=descriptor)
-                os.close(descriptor)
-                descriptor = next_descriptor
-            file_descriptor = os.open(parts[-1], file_flags, dir_fd=descriptor)
-            with os.fdopen(file_descriptor, "rb") as handle:
-                if not stat.S_ISREG(os.fstat(handle.fileno()).st_mode):
-                    raise ControlPlaneError("note_file_invalid", "--body-file must name an ordinary file.")
-                data = handle.read(MAX_BYTES + 1)
-                if len(data) > MAX_BYTES:
-                    raise ControlPlaneError("note_file_invalid", f"--body-file exceeds the {MAX_BYTES}-byte limit.")
-                return data
-        except ControlPlaneError:
-            raise
-        except (OSError, ValueError) as exc:
-            raise ControlPlaneError("note_file_invalid", f"--body-file cannot be read inside this workspace vault: {exc}") from exc
-        finally:
-            if descriptor >= 0:
-                os.close(descriptor)
-
-    async def note_share(
-        self, principal: AgentPrincipal, *, path: str, body_file: str, brain: str = ""
-    ) -> dict[str, Any]:
-        """Queue an exact note body for a human to review before it reaches a shared brain."""
-        import hashlib
-        from ciao import share_proposals as sp
-
-        workspace = self._workspace(principal)
-        chat, project = self._chat_scope(principal)
-        if (
-            project.workspace != workspace
-            or str(chat.chat_id) != principal.chat_id
-            or str(chat.project_id) != principal.project_id
-            or str(chat.provider) != principal.provider
-        ):
-            raise ControlPlaneError("chat_required", "Sharing a note requires an attributable chat in this workspace.")
-        stream = self.pcm.get_active_stream(principal.chat_id)
-        if stream is None:
-            raise ControlPlaneError("note_share_inactive", "Sharing a note requires the active foreground user turn.")
-        with stream.publish_lock:
-            turn_count = int(getattr(chat, "user_turn_count", 0) or 0)
-            if turn_count < 1:
-                raise ControlPlaneError("chat_required", "Sharing a note requires an attributable user turn in this chat.")
-            turn_index = turn_count - 1
-            turn_key = str(turn_index)
-            publish_generation = stream.publish_generation
-            origins = getattr(chat, "user_turn_origin", None)
-            timings = getattr(chat, "user_turn_timings", None)
-            turn_ids = getattr(chat, "user_turn_ids", None)
-            # Ordinary typed turns intentionally have no origin-map entry:
-            # streaming persists only truthy engine origins. The per-turn send
-            # time proves this is a recorded user turn; absent means typed.
-            if (
-                not isinstance(timings, dict)
-                or not isinstance(timings.get(turn_key), dict)
-                or not isinstance(turn_ids, dict)
-                or not isinstance(turn_ids.get(turn_key), str)
-                or not turn_ids.get(turn_key)
-            ):
-                raise ControlPlaneError(
-                    "note_share_inactive", "Sharing a note requires the active foreground user turn."
-                )
-            if not isinstance(origins, dict) or (
-                turn_key in origins and not isinstance(origins[turn_key], str)
-            ):
-                raise ControlPlaneError("unattended_forbidden", "Sharing a note requires a verifiable user turn.")
-            turn_id = str(turn_ids[turn_key])
-
-        def _require_active_turn_locked() -> None:
-            current_count = int(getattr(chat, "user_turn_count", 0) or 0)
-            origins = getattr(chat, "user_turn_origin", None)
-            timings = getattr(chat, "user_turn_timings", None)
-            turn_ids = getattr(chat, "user_turn_ids", None)
-            current_turn_id = turn_ids.get(turn_key) if isinstance(turn_ids, dict) else None
-            if (
-                self.pcm.get_chat(principal.chat_id) is not chat
-                or self.pcm.get_project(principal.project_id) is not project
-                or current_count != turn_index + 1
-                or stream.publish_generation != publish_generation
-                or not stream.publish_active
-                or stream.publish_turn_index != turn_index
-                or not isinstance(origins, dict)
-                or not isinstance(timings, dict)
-                or not isinstance(timings.get(turn_key), dict)
-                or not isinstance(turn_ids, dict)
-                or current_turn_id != turn_id
-                or (turn_key in origins and not isinstance(origins[turn_key], str))
-                or self.pcm.get_active_stream(principal.chat_id) is not stream
-                or getattr(stream, "background", False)
-                or getattr(stream, "done", False)
-                or getattr(stream, "user_stopped", False)
-                or getattr(stream, "running_turn_index", None) != turn_index
-            ):
-                raise ControlPlaneError(
-                    "note_share_inactive", "Sharing a note requires the active foreground user turn."
-                )
-            self._require_person_typed_turn(principal, "Sharing a note")
-
-        @contextlib.contextmanager
-        def _queue_publish_guard() -> Iterator[None]:
-            # Turn start/end, count changes, Stop, and stream finish publish
-            # their lifecycle generation under this lock. The queue writer
-            # stages first and holds it only around atomic replace.
-            with stream.publish_lock:
-                try:
-                    _require_active_turn_locked()
-                except ControlPlaneError as exc:
-                    raise sp.ShareDraftError(sp.ShareRefusal(exc.code, str(exc))) from exc
-                yield
-
-        with stream.publish_lock:
-            _require_active_turn_locked()
-
-        def _run() -> dict[str, Any]:
-            with stream.publish_lock:
-                _require_active_turn_locked()
-            proposed = self._share_body_bytes(workspace, body_file)
-            with stream.publish_lock:
-                _require_active_turn_locked()
-            identity = json.dumps(
-                [principal.chat_id, turn_id, turn_index, brain, path, hashlib.sha256(proposed).hexdigest()],
-                ensure_ascii=False, separators=(",", ":"),
-            )
-            draft = sp.draft_share(
-                self.config, workspace=workspace, brain=brain, relative_path=path,
-                operation=None, proposed=proposed,
-                request_key="chat-share:" + hashlib.sha256(identity.encode("utf-8")).hexdigest(),
-                publish_guard=_queue_publish_guard,
-            )
-            if isinstance(draft, sp.ShareRefusal):
-                error = ControlPlaneError(draft.code, draft.message)
-                if draft.eligible_brains:
-                    error.suggestions = ["Choose one linked shared brain: " + ", ".join(draft.eligible_brains)]
-                raise error
-            return {"status": "queued", "proposal_id": draft.proposal_id, "review_path": draft.review_path}
-
-        key = f"note-share:{self._search_runtime_dir()}:{workspace}:{principal.chat_id}:{turn_id}:{brain}:{path}"
-        return _ok(await run_read(key, _run, coalesce=False))
 
     def _workspace_text_file(self, workspace: str, relative: str, *, flag: str) -> str:
         """One UTF-8 prose file confined to the caller's workspace root, or a refusal."""
