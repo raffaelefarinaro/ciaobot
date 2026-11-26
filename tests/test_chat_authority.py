@@ -52,9 +52,15 @@ class Rig:
             new_id=lambda: f"id{next(self.ids)}",
         )
 
-    def cmd(self, kind: str, params: dict[str, Any], payload: bytes = b"", nonce: str | None = None) -> SignedCommand:
-        n = nonce or f"n{next(self.nonces)}"
-        return sign_command(self.operator, Command(kind, n, "op", params, payload))
+    def cmd(
+        self,
+        kind: str,
+        params: dict[str, Any],
+        payload: bytes = b"",
+        principal: str = "op",
+    ) -> SignedCommand:
+        n = next(self.nonces)
+        return sign_command(self.operator, Command(kind, n, principal, params, payload))
 
     def grant(self, chat: str | None = "c1", producers: list[str] | None = None) -> str:
         g = self.auth.create_grant(
@@ -128,7 +134,7 @@ def test_revocation_advances_epoch_and_stops_eligibility() -> None:
 
 def test_replay_after_restart_is_refused() -> None:
     r = Rig()
-    signed = r.cmd("submit_turn", {"send_id": "s1", **SCOPE}, b"hi", nonce="fixed")
+    signed = r.cmd("submit_turn", {"send_id": "s1", **SCOPE}, b"hi")
     r.auth.submit_turn(signed)
     with pytest.raises(AuthorityError) as e:
         r.auth.submit_turn(signed)
@@ -230,14 +236,14 @@ def test_correction_supersedes_earlier_revision() -> None:
 def test_commands_need_a_valid_operator_signature_and_matching_kind() -> None:
     r = Rig()
     forged = sign_command(
-        HmacSigner(b"x" * 32), Command("submit_turn", "n", "op", {"send_id": "s", **SCOPE}, b"hi")
+        HmacSigner(b"x" * 32), Command("submit_turn", 1, "op", {"send_id": "s", **SCOPE}, b"hi")
     )
     with pytest.raises(AuthorityError) as e:
         r.auth.submit_turn(forged)
     assert code(e) == "bad_signature"
     good = r.cmd("submit_turn", {"send_id": "s", **SCOPE}, b"hi")
     tampered = SignedCommand(
-        Command("submit_turn", good.command.nonce, "op", good.command.params, b"HI"),
+        Command("submit_turn", good.command.counter, "op", good.command.params, b"HI"),
         good.signature,
     )
     with pytest.raises(AuthorityError) as e:
@@ -289,7 +295,7 @@ def test_tampered_or_unsigned_state_refuses_to_load() -> None:
 
 def test_failed_write_changes_nothing_and_does_not_burn_the_nonce() -> None:
     r = Rig()
-    signed = r.cmd("submit_turn", {"send_id": "s1", **SCOPE}, b"hi", nonce="n-x")
+    signed = r.cmd("submit_turn", {"send_id": "s1", **SCOPE}, b"hi")
     r.storage.fail = True
     with pytest.raises(OSError):
         r.auth.submit_turn(signed)
@@ -312,3 +318,156 @@ def test_event_signature_covers_bytes_and_scope() -> None:
 def test_signer_rejects_short_keys() -> None:
     with pytest.raises(ValueError):
         HmacSigner(b"short")
+
+
+def test_revoke_and_withdraw_still_work_at_capacity_and_refusals_are_final(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr("ciao.chat_authority.MAX_EVENTS", 2)
+    r = Rig()
+    g = r.grant()
+    r.send("s1")
+    r.send("s2")
+    refused = r.cmd("submit_turn", {"send_id": "s3", **SCOPE}, b"x")
+    with pytest.raises(AuthorityError) as e:
+        r.auth.submit_turn(refused)
+    assert code(e) == "capacity"
+    # A refused command is consumed: it cannot be replayed once room appears.
+    with pytest.raises(AuthorityError) as e:
+        r.auth.submit_turn(refused)
+    assert code(e) == "replayed"
+    epoch = r.auth.revoke_grant(r.cmd("revoke_grant", {"grant_id": g}))
+    assert epoch == r.auth.epoch == 1
+    g2 = r.grant()
+    assert r.auth.withdraw_grant(r.cmd("withdraw_grant", {"grant_id": g2})) == 2
+
+
+def test_counter_is_monotonic_per_principal_and_state_stays_small() -> None:
+    r = Rig()
+    low = r.cmd("submit_turn", {"send_id": "a", **SCOPE}, b"x")
+    high = r.cmd("submit_turn", {"send_id": "b", **SCOPE}, b"x")
+    r.auth.submit_turn(high)
+    with pytest.raises(AuthorityError) as e:
+        r.auth.submit_turn(low)
+    assert code(e) == "replayed"
+    other = r.cmd("submit_turn", {"send_id": "c", **SCOPE}, b"x", principal="op2")
+    r.auth.submit_turn(other)
+    assert "nonces" not in json.loads(r.storage.blob or b"{}")["state"]
+
+
+def test_unknown_grant_refusal_consumes_the_counter() -> None:
+    r = Rig()
+    bad = r.cmd("revoke_grant", {"grant_id": "nope"})
+    with pytest.raises(AuthorityError) as e:
+        r.auth.revoke_grant(bad)
+    assert code(e) == "unknown_grant"
+    with pytest.raises(AuthorityError) as e:
+        r.auth.revoke_grant(bad)
+    assert code(e) == "replayed"
+
+
+def _cycling_rig(ids: list[str]) -> Rig:
+    r = Rig()
+    cycle = itertools.cycle(ids)
+    r.ids = cycle  # type: ignore[assignment]
+    r.new_id = lambda: next(cycle)
+    r.auth = ChatAuthority(
+        signer=HmacSigner(AUTH_KEY),
+        operator=r.operator,
+        storage=r.storage,
+        new_id=r.new_id,
+    )
+    return r
+
+
+def test_repeated_grant_id_cannot_reactivate_or_overwrite() -> None:
+    r = _cycling_rig(["g"])
+    g = r.grant()
+    r.auth.revoke_grant(r.cmd("revoke_grant", {"grant_id": g}))
+    with pytest.raises(AuthorityError) as e:
+        r.grant()
+    assert code(e) == "id_collision"
+    grant = r.auth.grant("g")
+    assert grant is not None and grant.status == "revoked"
+
+
+def test_repeated_turn_or_event_id_is_refused() -> None:
+    r = _cycling_rig(["t", "e"])
+    r.send("s1")
+    with pytest.raises(AuthorityError) as e:
+        r.send("s2")
+    assert code(e) == "id_collision"
+    constant = _cycling_rig(["same"])
+    with pytest.raises(AuthorityError) as e:
+        constant.send("s1")
+    assert code(e) == "id_collision"
+    # an id used by a grant cannot be reused by an event either
+    mixed = _cycling_rig(["g", "t", "g"])
+    mixed.grant()
+    with pytest.raises(AuthorityError) as e:
+        mixed.send("s1")
+    assert code(e) == "id_collision"
+
+
+def test_retry_must_name_the_same_correction_target() -> None:
+    r = Rig()
+    t1 = r.send("a")
+    t2 = r.send("b")
+    r.send("c", b"v2", corrects=t1.turn_id)
+    assert r.send("c", b"v2", corrects=t1.turn_id).revision == 2
+    for other in (t2.turn_id, None):
+        extra = {} if other is None else {"corrects": other}
+        with pytest.raises(AuthorityError) as e:
+            r.send("c", b"v2", **extra)
+        assert code(e) == "retry_conflict"
+
+
+def test_correction_carries_original_grants_and_never_enrolls_in_newer_ones() -> None:
+    r = Rig()
+    first = r.send("s1", b"v1")  # captured before any grant
+    g = r.grant()
+    r.send("s2", b"v2", corrects=first.turn_id)
+    assert r.ids_of(g) == []
+    # A turn enrolled at capture keeps its grants through a correction, and a
+    # grant created later still does not reach it.
+    second = r.send("s3", b"x")
+    assert r.ids_of(g) == ["s3"]
+    r.send("s4", b"x2", corrects=second.turn_id)
+    later = r.grant()
+    assert r.ids_of(g) == ["s4"]
+    assert r.ids_of(later) == []
+
+
+def test_non_json_params_are_a_bad_command_not_a_crash() -> None:
+    r = Rig()
+    for params in ({"send_id": "s", **SCOPE, "x": {1, 2}}, {"send_id": float("nan")}):
+        cmd = Command("submit_turn", 1, "op", params, b"hi")
+        with pytest.raises(AuthorityError) as e:
+            r.auth.submit_turn(SignedCommand(cmd, b"sig"))
+        assert code(e) == "bad_command"
+    with pytest.raises(AuthorityError) as e:
+        r.auth.submit_turn(
+            SignedCommand(Command("submit_turn", 1, "op", {"send_id": object()}, b"hi"), b"s")
+        )
+    assert code(e) == "bad_command"
+
+
+def test_total_stored_bytes_are_capped(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr("ciao.chat_authority.MAX_TOTAL_TEXT_BYTES", 10)
+    r = Rig()
+    r.send("s1", b"123456")
+    with pytest.raises(AuthorityError) as e:
+        r.send("s2", b"12345")
+    assert code(e) == "capacity"
+    r.send("s3", b"1234")
+
+
+def test_principal_count_is_capped(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr("ciao.chat_authority.MAX_PRINCIPALS", 1)
+    r = Rig()
+    r.send("s1")
+    with pytest.raises(AuthorityError) as e:
+        r.auth.submit_turn(
+            r.cmd("submit_turn", {"send_id": "s2", **SCOPE}, b"x", principal="op2")
+        )
+    assert code(e) == "capacity"
