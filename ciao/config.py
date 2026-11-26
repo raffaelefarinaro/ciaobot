@@ -612,6 +612,40 @@ DEFAULT_SHARING_POLICY = "review"
 
 
 @dataclass(frozen=True, slots=True)
+class SharingScopeNote:
+    """One destination note type the consent was granted for, as the operator saw it."""
+
+    note_type: str
+    kind: str
+    path: str
+    section: str
+    operations: tuple[str, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class SharingScope:
+    """Exactly what an automatic grant covers; anything not listed is Review.
+
+    ``projects`` are the source project ids, ``producers`` the engine
+    producers allowed to contribute, ``operations`` the edit boundary and
+    ``note_mapping`` the destination notes copied from the link's reviewed
+    guide mapping when the grant was made. ``mapping_generation`` binds the
+    grant to that mapping: any later mapping change pauses it. Every tuple is
+    sorted and unique so two equal choices compare equal.
+    """
+
+    projects: tuple[str, ...]
+    producers: tuple[str, ...]
+    operations: tuple[str, ...]
+    note_mapping: tuple[SharingScopeNote, ...]
+    mapping_generation: int
+
+
+MAX_SCOPE_ITEMS = 64
+MAX_SCOPE_TEXT = 512
+
+
+@dataclass(frozen=True, slots=True)
 class SharingConsent:
     """Durable consent for automatic sharing with one link lifetime and target.
 
@@ -625,6 +659,9 @@ class SharingConsent:
     identity: str
     lifetime_id: str
     granted_at: str
+    # None only for a consent stored before scopes existed; it permits no
+    # project, producer, operation or note type (see shared_brain.sharing_scope_permits).
+    scope: SharingScope | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -695,6 +732,67 @@ def _has_control(text: str) -> bool:
     return any(ord(ch) < 32 or ord(ch) == 127 for ch in text)
 
 
+def _text_tuple(raw: object) -> tuple[str, ...] | None:
+    """A sorted, unique tuple of bounded non-empty strings, else None."""
+    if (
+        not isinstance(raw, list)
+        or len(raw) > MAX_SCOPE_ITEMS
+        or any(not isinstance(x, str) or not x or len(x) > MAX_SCOPE_TEXT or _has_control(x) for x in raw)
+        or raw != sorted(set(raw))
+    ):
+        return None
+    return tuple(raw)
+
+
+def sharing_scope_row(scope: SharingScope) -> dict[str, Any]:
+    return {
+        "projects": list(scope.projects),
+        "producers": list(scope.producers),
+        "operations": list(scope.operations),
+        "note_mapping": [
+            {
+                "note_type": n.note_type, "kind": n.kind, "path": n.path,
+                "section": n.section, "operations": list(n.operations),
+            }
+            for n in scope.note_mapping
+        ],
+        "mapping_generation": scope.mapping_generation,
+    }
+
+
+def _sharing_scope_from_row(raw: object) -> SharingScope | None:
+    if not isinstance(raw, dict):
+        return None
+    projects, producers, operations = (
+        _text_tuple(raw.get(key)) for key in ("projects", "producers", "operations")
+    )
+    entries = raw.get("note_mapping")
+    generation = raw.get("mapping_generation")
+    if (
+        projects is None or producers is None or operations is None
+        or not isinstance(entries, list) or len(entries) > MAX_SCOPE_ITEMS
+        or type(generation) is not int or generation < 0
+    ):
+        return None
+    notes: list[SharingScopeNote] = []
+    for entry in entries:
+        if not isinstance(entry, dict):
+            return None
+        ops = _text_tuple(entry.get("operations"))
+        note_type, kind, path, section = (entry.get(k) for k in ("note_type", "kind", "path", "section"))
+        if (
+            ops is None or not note_type
+            or not isinstance(note_type, str) or not isinstance(kind, str)
+            or not isinstance(path, str) or not isinstance(section, str)
+            or any(len(v) > MAX_SCOPE_TEXT or _has_control(v) for v in (note_type, kind, path, section))
+        ):
+            return None
+        notes.append(SharingScopeNote(note_type, kind, path, section, ops))
+    if [n.note_type for n in notes] != sorted({n.note_type for n in notes}):
+        return None
+    return SharingScope(projects, producers, operations, tuple(notes), generation)
+
+
 def _sharing_consent_from_row(
     raw: object, *, identity: str, lifetime_id: str
 ) -> SharingConsent | None:
@@ -712,11 +810,18 @@ def _sharing_consent_from_row(
         or raw.get("lifetime_id") != lifetime_id
     ):
         return None
+    scope: SharingScope | None = None
+    if "scope" in raw:
+        # A present but malformed scope voids the whole consent (Review).
+        scope = _sharing_scope_from_row(raw["scope"])
+        if scope is None:
+            return None
     return SharingConsent(
         generation=generation,
         identity=identity,
         lifetime_id=lifetime_id,
         granted_at=granted_at,
+        scope=scope,
     )
 
 
@@ -769,6 +874,8 @@ def shared_brain_row(link: SharedBrainLink) -> dict[str, Any]:
             "lifetime_id": link.sharing_consent.lifetime_id,
             "granted_at": link.sharing_consent.granted_at,
         }
+        if link.sharing_consent.scope is not None:
+            row["sharing_consent"]["scope"] = sharing_scope_row(link.sharing_consent.scope)
     if link.guide_mapping_generation:
         row["guide_mapping_generation"] = link.guide_mapping_generation
     if link.guide_generation_from_restore_only:
