@@ -115,7 +115,8 @@ describe('History apply state', () => {
     const lines = view.findAll('.ph-apply')
     expect(lines).toHaveLength(1)
     expect(lines[0].text()).toContain('no longer in the journal')
-    expect(lines[0].classes()).toContain('ph-apply--bad')
+    expect(lines[0].classes()).toContain('ph-apply--muted')
+    expect(lines[0].classes()).not.toContain('ph-apply--bad')
   })
 
   it('shows no apply line for a dismissal with no receipt', async () => {

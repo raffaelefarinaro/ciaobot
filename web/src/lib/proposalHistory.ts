@@ -43,10 +43,10 @@ export function applyLine(row: ProposalHistoryRow): ApplyLine | null {
     }
   }
   if (row.receipt_issue === 'missing') {
-    return { text: 'Unverified · the receipt for this decision is no longer in the journal', tone: 'bad' }
+    return { text: 'Unverified · the receipt for this decision is no longer in the journal', tone: 'muted' }
   }
   if (row.receipt_issue === 'unknown_status') {
-    return { text: 'Unverified · the receipt carries a status this version does not know', tone: 'bad' }
+    return { text: 'Unverified · the receipt carries a status this version does not know', tone: 'muted' }
   }
   switch (row.apply_status) {
     case 'undone': return { text: 'Undone', tone: 'muted' }
