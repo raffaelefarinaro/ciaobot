@@ -458,9 +458,6 @@ ciao vault-search "keyword" --limit 5 # FTS search over the configured vault
 ciao vault-lint --vault-root memory-vault # Vault hygiene lint
 ciao os-audit --json # Strict AI OS setup and context-hygiene audit
 ciao memory-audit --json # Bounded-memory rot only (regions; add --with-vault for note aging)
-ciao eval contracts --json # Deterministic behavioral-eval guard checks (model-free; CI half)
-ciao eval run --model <id> --label candidate # Bounded model-backed behavioral probe (explicit; cost ceiling)
-ciao eval compare --baseline a.json --candidate b.json # Baseline/candidate delta with provenance
 cd web && npm test             # Frontend unit tests
 cd web && npm run build        # Typecheck + Vite build (frontend smoke test)
 ```
@@ -883,7 +880,7 @@ The status and process exit code are a stable contract:
 | `needs_attention` | 1 | The scan completed reliably and found actionable items. |
 | `error` | 2 | Required evidence could not be inspected reliably. Findings may still be present, but the report is not a clean bill of health. |
 
-The daily `system-memory-curation` schedule is presented as **Workspace care**. Its packaged prompt runs lightweight memory passes nightly and uses `Workspace/Curation-Log.md`'s `last_full_pass` marker to catch up the deeper weekly work after downtime. A full pass runs `ciao vault-index --write` before `ciao os-audit --json --scope workspace`; a failed index rebuild or audit exit 2 leaves the marker overdue and prevents a healthy/no-op claim. Exit 1 means reliable findings and the pass continues with only safe structural repairs. A full pass also reviews the workspace guide body (AGENTS.md) for misplacement, drift, and bloat, applying the same state-vs-event and entity-placement rules the regions follow; that model-judged review is separate from the two required weekly checks, so an over-budget run that never reaches it does not suppress the next week's guide care. Ordinary skill-proposal decisions are keyed to the whitespace-normalized proposed change, so a new change can re-enter review while a repeat stays settled; `tests/test_skill_proposals.py` covers this alongside stable queue identity and learning-origin decisions. A legacy sidecar decision with a readable settled proposal is scoped to that proposal when next filed. If the queue file is already missing, the original change cannot be inferred, so the existing decision sidecar persists a `legacy:unresolved` marker before any replacement is written; the skill-wide suppression then survives later filings. Findings overwritten before this fix cannot be classified automatically.
+The daily `system-memory-curation` schedule is presented as **Workspace care**. Its packaged prompt (`ciao/stock/schedules.json`) is one self-contained prompt: the agent reads the durable-memory guide, decides from the read tools what is due (review queue, region sizes, stale notes, weekly hygiene when the last `Workspace/Care-Report.md` is missing or over seven days old), may hand large batches to subagents while it does the writes itself, and writes `Workspace/Care-Report.md` plus a plain-language reply. It no longer calls the `curation-*` lease/worklist commands; those and the care report UI are removed in the follow-up care PR. Packaged system definitions are read from the wheel, so an installed schedule row picks the new prompt up on update with no row change.
 
 #### The migration notices, and why they are probed in one place
 
@@ -1932,17 +1929,6 @@ does not discard the queued frame. Backend state is cleared only after a typed
 V2 success or an authoritative stale result. Resolution events are ephemeral
 for attached tabs, while the persisted chat snapshot reconciles tabs that were
 disconnected. `background_shell_wake.jsonl` and `background_subagent_wake.jsonl` pin OpenCode's own follow-up executions after background work (#1391): inbox delivery ids decide which execution a turn owns, and `drain_events` streams the rest.
-
-## DAG-style schedules (maintainers)
-
-A schedule that is a multi-step workflow (load state, gate, model call, write) can use `ciao.dag` rather than a long `async def`:
-
-- `Node(id, kind, model='', timeout_s=180.0, payload={})` — kinds: `bash`, `prompt`, `gate`, `subagent`.
-- `Edge(src, dst, when='ok')` — `when` is `ok` (default), `fail`, or `always`.
-- `run(dag, edges, job=..., label=..., initial_ctx={})` — records each node in `.runtime/job_runs.jsonl`.
-- `subagent` nodes accept an opt-in `payload['requires']` post-condition list: each item is a file path that must exist and be non-empty after the node ran, or `{"path": ..., "contains": "<regex>"}` where at least one line must match. Paths may reference ctx like the prompt and resolve against `payload['cwd']`; `contains` regexes are used verbatim (never ctx-formatted, so quantifiers like `{2}` are safe). Exit 0 with unmet requirements fails the node (guards against an unauthenticated subagent silently doing nothing); DAGs without `requires` are unchanged.
-
-No shipped producer runs a DAG today — the weekly skill-evolution pass was the canonical example and was retired in #697 — so `tests/test_dag.py` is what to read for a worked pipeline, one case per node kind and per edge. Use a DAG when there are 3+ sequential steps with branching and you want per-step timing on the Automation page.
 
 `ScheduleManager.catch_up()` runs once at server startup on the host; like `tick()`, it returns an empty list without touching anything when the legacy node-state startup gate says this machine is not the host (the one boot verdict from `ciao.legacy_node_state`, which is the whole gate now that no route can rewrite the role under a running server). It dispatches only the latest missed occurrence for each enabled schedule, leaves the prompt unchanged, and records the missed occurrence's local date so a later slot on the startup day can still fire normally. Cover changes to this behavior in `tests/test_schedules.py`. Packaged system routines are excluded when the startup falls inside the post-setup grace window (`ciao/setup_marker.py`, 24h from a first-time setup): a brand-new install is greeted by its onboarding chat, and the routines fire at their next regular tick instead of all replaying missed runs in parallel. Cover that in `tests/test_setup_catch_up_grace.py`.
 

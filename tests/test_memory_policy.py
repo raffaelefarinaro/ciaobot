@@ -272,28 +272,6 @@ def test_unattended_policy_summary_names_the_handover_exception() -> None:
     assert "undo receipt" in summary
 
 
-def test_curation_schedule_defers_and_never_hard_caps() -> None:
-    skill = next(entry["prompt"] for entry in json.loads(_stock("schedules.json"))["schedules"] if entry["schedule_id"] == "system-memory-curation")
-    assert "You are an unattended run: defer, never ask, never route around" in skill
-    assert "The region cap is advisory." in skill
-    # The consolidation contract the architecture test also pins must survive.
-    assert "Do not promote new facts into the bounded" in skill
-    assert "unless `curation-begin` lists its kind in `accept_kinds`" in skill
-    assert "Workspace/Memory-Consolidations.md" in skill
-
-
-def test_care_report_makes_unresolved_audit_findings_locatable() -> None:
-    # A care run once reported only "findings remain" with a total, and the
-    # operator had to ask for the items. The prompt (which owns the run's
-    # report; the skill defers to it) must ask for categories plus the affected
-    # note, and separate a finished scan from resolved findings.
-    prompt = _care_prompt()
-    assert "List unresolved audit findings grouped by category, each naming its note" in prompt
-    assert "a bare count is not actionable" in prompt
-    assert "say separately that the scan finished and how many findings remain" in prompt
-    assert "with its category and the affected note's vault-relative path" in prompt
-
-
 def test_capabilities_skill_does_not_claim_nothing_is_durable_without_approval() -> None:
     skill = _capabilities()
     assert "nothing becomes durable without approval" not in skill
@@ -337,65 +315,6 @@ def test_proposal_cli_exception_is_named_in_docs() -> None:
 
 
 # ── Nothing is promoted unattended (#728-D) ────────────────────────────────
-
-
-def test_the_care_schedule_no_longer_instructs_unattended_promotion_or_settlement() -> None:
-    """The three instructions that contradicted the autonomy rule are gone.
-
-    An x3+ learning is a *routing priority*, not permission: the old Pass 4 and
-    Pass 7 told an unattended run to write it into AGENTS.md or a skill, and
-    Pass 9 told it to settle proposals. An unattended run can verify neither
-    destination nor rejection, so each of those is now a filed proposal a
-    person decides.
-    """
-    prompt = _care_prompt()
-    assert "into canonical guidance (the AGENTS.md body or the relevant skill/doc)" not in prompt
-    assert "belongs here as a standing instruction, citing its sources" not in prompt
-    assert "Only settle a proposal after its change is actually in place" not in prompt
-    # And each is replaced by the routed proposal, named with the commands.
-    assert "Route an entry at x3 or more" in prompt
-    assert "An x3 is a priority order, not permission to edit" in prompt
-    assert "You never edit a skill or this workspace's guide body" in prompt
-    assert "you never settle a skill proposal or a guide-body proposal" in prompt
-    assert "ciao skill-proposal-add NAME --input-file FILE" in prompt
-    assert "ciao skill-draft-add --input-file FILE" in prompt
-    assert "ciao skill-drafts" in prompt
-
-
-def test_the_care_schedule_ground_rules_list_the_new_deferrals() -> None:
-    """The deferred list is the run's own statement of what it may not do.
-
-    A deferral nobody reads is not a deferral, and the two additions are the two
-    actions an unattended run is most likely to reach for precisely because the
-    old passes told it to. So the list the run reads, the capsule the model is
-    given, and the policy module all three have to name them.
-    """
-    from ciao.memory_policy import UNATTENDED_CAPSULE_GUIDANCE, unattended_deferrals
-
-    prompt = next(
-        entry["prompt"]
-        for entry in json.loads(_stock("schedules.json"))["schedules"]
-        if entry["schedule_id"] == "system-memory-curation"
-    )
-    listed = next(
-        line for line in prompt.splitlines() if "The full deferred list:" in line
-    )
-    actions = {action.action for action in unattended_deferrals()}
-    # The policy module is the machine-readable statement, and both new
-    # deferrals are in it with the reason a person can act on.
-    assert any("Edit a skill" in action for action in actions)
-    assert any("Settle a skill proposal" in action for action in actions)
-    assert any("public GitHub issue" in action for action in actions)
-    # The run's own list names both, and the capsule names both, so no surface
-    # can say something different about what an unattended turn may not do.
-    for phrase in (
-        "editing a skill or the AGENTS.md guide body",
-        "settling a skill proposal or draft",
-    ):
-        assert phrase in listed, phrase
-        assert phrase in UNATTENDED_CAPSULE_GUIDANCE, phrase
-    # The entries an unattended run now has to report rather than perform.
-    assert "Report every one under **What needs you**" in prompt
 
 
 def test_the_memory_skill_never_edits_or_settles_unattended() -> None:

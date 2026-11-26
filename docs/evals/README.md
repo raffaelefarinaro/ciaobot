@@ -1,6 +1,6 @@
 # Task-eval results
 
-Each file here records one run of `ciao eval tasks` (see [TASK_EVAL.md](../TASK_EVAL.md)): the engine commit, the provider and model of every column, and pass counts and cost per task. The release process adds one file per release; anyone can reproduce a file from the commit it names.
+Each file here records one run of `python -m evals` (see [TASK_EVAL.md](../TASK_EVAL.md)): the engine commit, the provider and model of every column, and pass counts and cost per task. The release process adds one file per release; anyone can reproduce a file from the commit it names.
 
 | File | Engine | Models |
 |---|---|---|
@@ -15,10 +15,10 @@ The memory comparison is a different kind of record: Ciaobot's memory against ot
 1. Install the commit under test in its own venv, from a detached worktree (`docs/TASK_EVAL.md`, "Running it").
 2. Run the whole suite, three repeats per model:
    ```bash
-   ciao eval tasks run --provider claude --model haiku --repeats 3 --out runs/claude-haiku.jsonl
-   ciao eval tasks run --provider opencode --model <provider/model> --repeats 3 --out runs/<model>.jsonl
+   python -m evals run --provider claude --model haiku --repeats 3 --out runs/claude-haiku.jsonl
+   python -m evals run --provider opencode --model <provider/model> --repeats 3 --out runs/<model>.jsonl
    ```
-3. `ciao eval tasks report runs/*.jsonl` prints the per-task table. Copy it into a new `YYYY-MM-DD.md` (or `vX.Y.Z.md` for a release) with the summary, what changed since the last file, and every check that turned out unfair and was fixed.
+3. `python -m evals report runs/*.jsonl` prints the per-task table. Copy it into a new `YYYY-MM-DD.md` (or `vX.Y.Z.md` for a release) with the summary, what changed since the last file, and every check that turned out unfair and was fixed.
 4. Keep the JSONL out of the repository. The fixture is synthetic, but the files are large and the summary is what readers need.
 
 Read the numbers with these limits in mind: three repeats per task, one machine, and pass/fail decided by deterministic checks on the end state. A check that rejects a correct answer is a harness bug: fix the check, re-run the task, and say so in the file.

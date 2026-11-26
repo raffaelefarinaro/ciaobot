@@ -1874,8 +1874,7 @@ def test_auto_approved_policy_matches_tool_annotations() -> None:
     """The agent CLI ask/allow split must track the annotations on the operations.
 
     Every ``_READ``/``_WRITE`` operation is allow-class, every ``_DESTRUCTIVE``
-    one is ask-class. The argv split is enforced in ``ciao/behavioral_eval.py``
-    and ``tests/test_agent_surface.py``; this keeps the operation table itself
+    one is ask-class. The argv split is enforced in ``tests/test_agent_surface.py``; this keeps the operation table itself
     intact as the shared source.
     """
     declared = [(op.name, op.annotations) for op in mcp_server.OPERATIONS]

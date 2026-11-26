@@ -97,8 +97,6 @@ namespaces = false
   "deploy/*.icns",
   "deploy/*.png",
   "deploy/*.svg",
-  "evals/*.json",
-  "evals/tasks/**/*",
   "entity-types.yaml",
   "retired-entity-types.yaml",
   "public/*.md",
@@ -142,7 +140,7 @@ warn_unused_configs = true
 ignore_missing_imports = true
 explicit_package_bases = true
 # Eval fixture code (hyphenated task dirs) is not engine code and is not a package.
-exclude = ['^ciao/stock/evals/tasks/']
+exclude = ['^evals/tasks/']
 
 [tool.coverage.run]
 source = ["ciao"]

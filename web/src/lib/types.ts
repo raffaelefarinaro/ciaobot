@@ -957,8 +957,6 @@ export interface RoutineSettings {
   // Settings → General: a chat whose turn a restart or crash cut off gets one
   // "Continue after restart" turn at the next start. Missing = on.
   resume_after_restart?: boolean
-  // Settings → General: check vault-grounded answers against the notes read. Missing = on.
-  verify_vault_answers?: boolean
   server_defaults?: {
     pwa_host: string
     log_level: string

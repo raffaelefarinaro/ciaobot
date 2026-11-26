@@ -1172,15 +1172,13 @@ curl -sS -b /tmp/ciao.jar -X POST "http://localhost:${PWA_PORT:-8443}/api/admin/
 # bound and logs at; pwa_host and log_level change only at the next start).
 # resume_after_restart (boolean, default true: at startup a chat whose turn a
 # restart or crash cut off gets one `restart_resume` turn).
-# verify_vault_answers (boolean, default true: a turn that read vault notes gets
-# a one-shot check of its answer's claims against them; see turn_verification).
 curl -sS -b /tmp/ciao.jar "http://localhost:${PWA_PORT:-8443}/api/settings/routines"
 
 # PATCH accepts only provider_default_models, provider_default_modes,
 # provider_default_thinking, provider_insights_models, pwa_host, log_level,
-# dev_mode, app_repo, resume_after_restart and verify_vault_answers (a
+# dev_mode, app_repo and resume_after_restart (a
 # non-boolean value is a 400).
-# The retired insights_enabled key is still accepted but
+# The retired insights_enabled and verify_vault_answers keys are still accepted but
 # ignored; any other key (including response-only fields) returns 400. Updates
 # are persisted in .runtime/app_settings.json and applied to the
 # live config immediately (no restart). Empty string clears an override back

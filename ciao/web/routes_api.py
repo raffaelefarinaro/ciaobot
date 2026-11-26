@@ -5654,7 +5654,7 @@ async def _care_run_for_dispatch(request: Request, schedule_id: str, dispatch_id
     with no counts. The vault is the schedule's own workspace.
     """
     from ciao import care_run_report
-    from ciao.care_eval_run import JobRunsUnreadable, read_runtime_job_runs
+    from ciao.job_runs import JobRunsUnreadable, read_runtime_job_runs
     from ciao.care_run_outcome import bounded_outcome, is_care_schedule_id
     from ciao.config import DEFAULT_WORKSPACE_NAME
     from ciao.curation_run import CurationStateError, load_state
@@ -6021,7 +6021,6 @@ _ROUTINES_SETTINGS_KEYS = frozenset({
     "dev_mode",
     "app_repo",
     "resume_after_restart",
-    "verify_vault_answers",
 })
 
 
@@ -6054,8 +6053,6 @@ def _routines_payload(config, app_settings) -> dict:
         "app_repo": s.app_repo,
         # Settings → General: resume a chat whose turn a restart cut off (#2128).
         "resume_after_restart": s.resume_after_restart,
-        # Settings → General: check a vault-grounded answer's claims against its notes.
-        "verify_vault_answers": s.verify_vault_answers,
         "server_defaults": {
             "pwa_host": DEFAULT_PWA_HOST,
             "log_level": DEFAULT_LOG_LEVEL,
@@ -6111,7 +6108,7 @@ async def settings_routines(request: Request) -> JSONResponse:
             return JSONResponse({"error": "invalid JSON"}, status_code=400)
         if not isinstance(body, dict):
             return JSONResponse({"error": "expected an object"}, status_code=400)
-        unknown = sorted(set(body) - _ROUTINES_SETTINGS_KEYS - {"insights_enabled"})
+        unknown = sorted(set(body) - _ROUTINES_SETTINGS_KEYS - {"insights_enabled", "verify_vault_answers"})
         if unknown:
             return JSONResponse(
                 {"error": f"Unknown routines settings: {', '.join(unknown)}"},

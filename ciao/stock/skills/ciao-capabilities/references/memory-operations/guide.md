@@ -1,10 +1,10 @@
 # Durable memory and vault care
 
-For writing or curating durable vault memory, read [Writing documents and regions](references/writing.md) before document writes or bounded-region edits. For the unattended Workspace care run, follow the [Workspace care procedure](references/curation-run-lifecycle.md) and the pass references it names. Read-only recall stays on the ordinary vault search path.
+For writing or curating durable vault memory, read [Writing documents and regions](references/writing.md) before document writes or bounded-region edits. For the unattended Workspace care run, follow the Workspace care prompt and read the matching pass file before each topic: `references/curation-pass-1-proposals.md` (review queue), `-2-regions.md`, `-3-reverify.md`, `-4-learnings.md`, `-4b-observations.md`, `-6-hygiene.md`, `-7-guide-body.md`, `-7b-decision-rules.md`, `-9-skill-proposals.md`. Read-only recall stays on the ordinary vault search path.
 
 Write only under the `vault=<path>` root in `<ciao-context>`. Existing notes may have been misfiled by an older curator; their location never overrides the configured vault.
 
-Read-only recall is handled inline by the system prompt (`ciao vault search`, answer from vault evidence only). This skill covers writes and curation. The nightly Workspace care schedule owns its own lease, worklist, budget, and unattended rules; follow that prompt for the run. Perform mutating vault passes sequentially.
+Read-only recall is handled inline by the system prompt (`ciao vault search`, answer from vault evidence only). This skill covers writes and curation. The nightly Workspace care schedule owns its unattended rules and decides what is due; follow that prompt for the run. Perform mutating vault passes sequentially.
 
 The writing procedure covers file placement, frontmatter, canonical paths and region syntax.
 
