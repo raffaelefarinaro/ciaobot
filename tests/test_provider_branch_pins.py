@@ -241,7 +241,7 @@ async def test_history_source_is_local_transcript_only_for_non_claude(
     chat = SimpleNamespace(
         chat_id="chat-1", session_id="sess-1", provider=provider,
         previous_session_ids=[], handover_messages=[{"role": "system", "text": "HANDOVER"}],
-        user_turn_timings={}, turn_verification={},
+        user_turn_timings={},
     )
     rows = await transcript_service._assemble_chat_messages(pcm, config, chat)
     if provider == "claude":
@@ -414,7 +414,7 @@ async def test_history_edge_ids_serve_the_local_transcript(tmp_path: Path, monke
     )
     chat = SimpleNamespace(
         chat_id="chat-1", session_id="sess-1", provider=provider, previous_session_ids=[],
-        handover_messages=[], user_turn_timings={}, turn_verification={},
+        handover_messages=[], user_turn_timings={},
     )
     rows = await transcript_service._assemble_chat_messages(pcm, SimpleNamespace(workspace_root=tmp_path), chat)
     assert rows == current

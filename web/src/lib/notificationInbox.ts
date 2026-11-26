@@ -359,11 +359,7 @@ function updateTaskRow(t: UpdateTaskCandidate, freshness: 'fresh' | 'stale'): No
   let reason: string
   if (t.status === 'failed') reason = 'The last attempt did not get going.'
   else if (t.status === 'in_progress') reason = 'Its chat failed.'
-  else if (t.status === 'waiting_review') {
-    reason = t.chatLive
-      ? 'Its chat is open and waiting for you to decide what to do with it.'
-      : 'Its chat was archived or deleted. Open the notice to start a new one.'
-  } else if (offeredUnknown) reason = 'Not yet known whether this applies here. Open it to check again.'
+  else if (offeredUnknown) reason = 'Not yet known whether this applies here. Open it to check again.'
   else reason = 'New since this update.'
 
   return {

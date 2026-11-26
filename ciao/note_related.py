@@ -20,8 +20,8 @@ from pathlib import Path
 from typing import Any
 
 from ciao import file_kernel as fk
-from ciao import memory_receipts as mr
-from ciao import note_receipts as nr
+from ciao import note_paths
+from ciao.note_paths import NoteTargetRefused
 from ciao import vault_index
 from ciao.memory_audit import never_aged
 from ciao.vault_links import FRONTMATTER_RE
@@ -105,15 +105,15 @@ def find_related_notes(
 ) -> RelatedNotes:
     """The notes connected to ``relative_path``, link relations first.
 
-    Raises :class:`ciao.memory_receipts.MemoryReceiptError` for a path outside
+    Raises :class:`ciao.note_paths.NoteTargetRefused` for a path outside
     the vault, a symlink escape or something that is not a note.
     """
-    root = nr.canonical_vault(vault_root)
-    target = nr.resolve_note_path(root, relative_path)
+    root = note_paths.canonical_vault(vault_root)
+    target = note_paths.resolve_note_path(root, relative_path)
     target_key = target.relative_to(root).as_posix()
     target_text = _read(target)
     if target_text is None:
-        raise mr.MemoryReceiptError(f"the note is not readable UTF-8 text: {target_key}")
+        raise NoteTargetRefused(f"the note is not readable UTF-8 text: {target_key}")
     bounded = max(1, min(_MAX_LIMIT, int(limit)))
 
     prefix = vault_index.VAULT_RENDER_PREFIX

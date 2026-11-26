@@ -49,7 +49,7 @@ legible beats large and clever here. Its character budget is *advisory* rather
 than enforced: a write always goes through and reports `over_cap`, because a
 refused write does not shrink the region, it only hides the fact — bounding is
 the job of consolidation during memory curation. The same policy is stated
-once in `ciao/memory_policy.py` and pinned by tests.
+in `docs/ARCHITECTURE.md` and pinned by tests.
 
 The long tail keeps **verbatim transcripts as the store of record**, with what
 the memory pass derived from them as an index over them — never a replacement. The two
@@ -75,7 +75,7 @@ outperforms any pipeline that summarizes those sources away.
 | Recall must survive paraphrase | LongMemEval ablations (arXiv:2410.10813): key expansion + query rewriting | AND-first ranking for multi-word queries, with OR hits filling any slots AND leaves short of the limit (a zero-hit AND is the case where OR fills all of them); system prompt mandates 2–3 reformulations before "not found"; curation maintains `aliases:` frontmatter ("brother-in-law", "hourly rate") |
 | Recall must see the whole fact | LongMemEval-S head-to-head (60 questions, Haiku): 43.3% answering from `ciao vault search` snippets vs 86.7% reading the top-5 notes | snippets (32 tokens of highlighted lines) pick the best-matching note and the agent reads it before answering or abstaining, since a snippet can look settled while hiding a later change; another match is read only when identity or a conflict stays open. Trade-off: full private notes now land in recall transcripts, while answers stay guarded by the "private working evidence" rule; task `H11-recall-value-below-snippet` pins it |
 | Procedures are contracts, not prose | prompt drift: three near-copies of the curation contract had diverged | The nightly procedure lives in the packaged Workspace care schedule prompt; tests pin its contract there, without a separate skill |
-| A managed mutation must be safe and reversible | one read-merge-write per region, plus a queue bullet and a decision record, is not one transaction in plain markdown | `ciao/memory_receipts.py`: every managed region write, queue resolution and prune records a stable-id receipt (`Workspace/Memory-Receipts.jsonl`) with actor/source, revisions and before/after images; the guide lock is required (unavailable = retryable failure, never an unlocked write), preview/apply/undo compare revisions so an external edit is a conflict, startup recovery reconciles an interrupted receipt from its images, and undo refuses a changed destination. External direct edits are conflicts, not audited writes |
+| A managed mutation must be safe and reversible | one read-merge-write per region is not a transaction in plain markdown | Git is the record and the undo; a region write is one locked, atomic replacement of the guide (`ciao/memory_tool.py`), and an unavailable lock is a retryable failure, never an unlocked write |
 
 ## Failure modes this design answers
 

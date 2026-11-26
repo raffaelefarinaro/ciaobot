@@ -580,7 +580,7 @@ describe('automatic task previews', () => {
     const rows = [
       task({ id: 'suppressed', suppressed: true }), task({ id: 'hidden', offered: false }),
       task({ id: 'unknown', applicability: 'unknown' }), task({ id: 'inapplicable', applicability: 'not_applicable' }),
-      ...(['completed', 'dismissed', 'in_progress', 'waiting_review', 'failed'] as const)
+      ...(['completed', 'dismissed', 'in_progress', 'failed'] as const)
         .map(status => task({ id: status, status })),
     ]
     listingGet.mockResolvedValue(listing(rows))

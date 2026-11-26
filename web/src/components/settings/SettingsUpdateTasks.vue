@@ -110,7 +110,6 @@ function stateLabel(row: UpdateTaskRow): string {
     case 'completed': return 'Done'
     case 'dismissed': return 'Hidden'
     case 'failed': return 'Attempt failed'
-    case 'waiting_review': return 'Waiting for review'
     case 'in_progress': return 'Started'
     default: return 'Not started'
   }

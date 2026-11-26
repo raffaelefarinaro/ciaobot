@@ -179,14 +179,12 @@ WORKSPACE_STATE_FILENAME = "Update-Tasks.json"
 INSTALL_STATE_FILENAME = "update-tasks.json"
 
 #: The lifecycles a record may hold. ``offered`` and ``in_progress`` are what an
-#: undecided task is; ``waiting_review`` is a task whose chat is still open;
-#: ``failed`` is an attempt that did not complete; the last two are the operator's
-#: decision or the check's verdict.
+#: undecided task is; ``failed`` is an attempt that did not complete; the last
+#: two are the operator's decision or the check's verdict.
 LIFECYCLES: frozenset[str] = frozenset(
     {
         "offered",
         "in_progress",
-        "waiting_review",
         "failed",
         "completed",
         "dismissed",
@@ -203,8 +201,6 @@ SUPPRESSING_LIFECYCLES: frozenset[str] = frozenset({"completed", "dismissed"})
 #:
 #: * ``in_progress`` — the prompt is in a chat and the chat may have done the
 #:   work by now.
-#: * ``waiting_review`` — the chat is parked on a decision, and that decision
-#:   has since been made.
 #: * ``failed`` — the turn never reached its chat, so the answer here is
 #:   "nothing to settle" rather than a verdict, and the record keeps saying the
 #:   task failed. Including it is what stops a retry from being needed just to
@@ -215,9 +211,7 @@ SUPPRESSING_LIFECYCLES: frozenset[str] = frozenset({"completed", "dismissed"})
 #: because they are decisions already — a dismissal is the operator's, and a
 #: verdict is a check's, and re-asking a check whether its own verdict still
 #: holds would reopen a decision on a timer.
-SETTLING_LIFECYCLES: frozenset[str] = frozenset(
-    {"in_progress", "waiting_review", "failed"}
-)
+SETTLING_LIFECYCLES: frozenset[str] = frozenset({"in_progress", "failed"})
 
 # ── Applicability ───────────────────────────────────────────────────────────
 
