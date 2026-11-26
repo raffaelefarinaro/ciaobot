@@ -16,6 +16,7 @@ import pytest
 
 from ciao.config import CiaoConfig, WorkspaceConfig
 from ciao.control_plane import CiaoControlPlane, McpPrincipal
+from ciao.memory_tool import DEFAULT_MEMORY_CHAR_LIMIT, DEFAULT_USER_CHAR_LIMIT
 from ciao.os_audit import run_os_audit
 
 
@@ -87,6 +88,64 @@ def test_memory_update_writes_the_guide_under_agent_root(tmp_path: Path) -> None
     )["data"]
 
     assert result["ok"] is True
+
+
+def _stamp_cap(root: Path, region: str, cap: int) -> None:
+    import re
+
+    guide = root / "CLAUDE.md"
+    text = guide.read_text(encoding="utf-8")
+    text = re.sub(
+        rf"(<!--\s*ciao:{region}:start)(?:\s+cap=\d+)?(\s*-->)", rf"\g<1> cap={cap}\g<2>", text
+    )
+    guide.write_text(text, encoding="utf-8", newline="")
+
+
+def test_memory_status_measures_against_the_marker_cap(tmp_path: Path) -> None:
+    """A region stamped cap=1000 holding 900 chars is 90%, not a share of the default."""
+    config = _config(tmp_path)
+    _write_guide(config.workspace_root, memory=["m" * 899], profile=["p" * 10])
+    _stamp_cap(config.workspace_root, "memory", 1000)
+    plane = _plane(config)
+
+    regions = plane.memory_status(_principal("personal"))["data"]["regions"]
+
+    assert regions["memory"]["char_limit"] == 1000
+    assert regions["memory"]["pct"] == 90.0
+    assert regions["profile"]["char_limit"] == DEFAULT_USER_CHAR_LIMIT
+
+
+def test_memory_update_reports_over_cap_against_the_marker_cap(tmp_path: Path) -> None:
+    config = _config(tmp_path)
+    _write_guide(config.workspace_root, memory=["m" * 900], profile=[])
+    _stamp_cap(config.workspace_root, "memory", 1000)
+    plane = _plane(config)
+
+    result = plane.memory_update(
+        _principal("personal"), "memory", action="add", entry=("note " * 40).strip()
+    )["data"]
+
+    assert result["char_limit"] == 1000
+    assert result["over_cap"] is True
+
+
+def test_memory_update_falls_back_to_the_default_when_the_marker_has_no_cap(
+    tmp_path: Path,
+) -> None:
+    config = _config(tmp_path)
+    _write_guide(config.workspace_root, memory=[], profile=[])
+    guide = config.workspace_root / "CLAUDE.md"
+    guide.write_text(
+        guide.read_text(encoding="utf-8").replace(" cap=" + str(DEFAULT_MEMORY_CHAR_LIMIT), ""),
+        encoding="utf-8",
+        newline="",
+    )
+    plane = _plane(config)
+
+    status = plane.memory_status(_principal("personal"))["data"]["regions"]["memory"]
+
+    assert "ciao:memory:start -->" in guide.read_text(encoding="utf-8")
+    assert status["char_limit"] == DEFAULT_MEMORY_CHAR_LIMIT
 
 
 def test_audit_reports_one_entry_per_registered_guide(tmp_path: Path) -> None:
