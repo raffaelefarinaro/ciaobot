@@ -16,7 +16,7 @@ function routes(state: State): FixtureRoute[] {
   ]
 }
 function fixture(projectId = intakeProjectId) { return defineComponent({ render: () => h(ProjectView, { projectId }) }) }
-const meta = { id: 'connected-project-view', title: 'Connected/Project view', component: ProjectView, tags: ['!autodocs'], parameters: { docs: { disable: true }, controls: { disable: true } } } satisfies Meta<typeof ProjectView>
+const meta = { id: 'connected-project-view', title: 'Connected/Project view', component: ProjectView, args: { projectId: intakeProjectId }, tags: ['!autodocs'], parameters: { docs: { disable: true }, controls: { disable: true } } } satisfies Meta<typeof ProjectView>
 export default meta
 type Story = StoryObj<typeof meta>
 export const Empty: Story = { parameters: { fixture: { routes: routes('empty') } }, render: () => renderSeeded(fixture(), { label: 'Empty project' }), play: async ({ canvas }) => {
@@ -30,5 +30,5 @@ export const Stale: Story = { parameters: { fixture: { routes: routes('failed') 
   store.schedules = [{ schedule_id: 'synthetic-schedule', title: 'Synthetic routine', prompt: 'Review', web_project_id: intakeProjectId, web_chat_id: null, enabled: false, frequency: 'daily', daily_time_utc: '09:00', timezone_name: 'UTC', days_of_week: null } as Schedule]
   store.schedulesLoaded = true
 } }), play: async ({ canvas }) => { await canvas.findByText('Synthetic routine'); await canvas.findByText(/Showing the last successful load/) } }
-export const Missing: Story = { parameters: { fixture: { routes: routes('empty') } }, render: () => renderSeeded(fixture('synthetic-missing'), { label: 'Missing project' }), play: async ({ canvas }) => { await canvas.findByText('Project not found.') } }
+export const Missing: Story = { args: { projectId: 'synthetic-missing' }, parameters: { fixture: { routes: routes('empty') } }, render: ({ projectId }) => renderSeeded(fixture(projectId), { label: 'Missing project' }), play: async ({ canvas }) => { await canvas.findByText('Project not found.') } }
 export const Archives: Story = { parameters: { fixture: { routes: routes('empty') } }, render: () => renderSeeded(fixture(), { label: 'Archived chats' }), play: async ({ canvas }) => { await userEvent.click(await canvas.findByRole('button', { name: 'Show archived chats' })); await canvas.findByText('No archived chats.') } }
