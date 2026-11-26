@@ -6,7 +6,7 @@ Pure: no files, no clock, no model. Three jobs, all bounded:
   from its receipts into the capped ``last_run.report`` block, and
   :func:`report_valid` is the strict check both state codecs apply to it;
 - :func:`select_run` picks the one ``schedule_dispatch`` job row of an exact
-  dispatch id, mirroring ``care_eval_run._judge``: no row is pending, a
+  dispatch id: no row is pending, a
   duplicate or a row of another chat is ambiguous, and a row of any other
   dispatch is never matched, whatever its age;
 - :func:`join_last_run` accepts the stored run only when it names that same

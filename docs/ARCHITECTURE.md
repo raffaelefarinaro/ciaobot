@@ -480,7 +480,7 @@ scripts/
   dependency_updates.py        PyPI/npm manifest and registry helpers used by release preparation.
   build-server-host.py         Build the universal, ad-hoc-signed Ciaobot Server native host archive (#1009). Compiles both architectures, assembles the app with the tracked icon, signs once, verifies and archives without installing or launching anything.
 
-evals/                         Dev-only evaluation harness, not in the wheel (`python -m evals`): `task_eval.py` (agentic task eval on an isolated engine), `task_eval_contract.py`, the care measurement modules (`care_eval_*.py`, `care_usage.py`) and the `tasks/` catalog with its synthetic fixture vault. See docs/TASK_EVAL.md.
+evals/                         Dev-only evaluation harness, not in the wheel (`python -m evals`): `task_eval.py` (agentic task eval on an isolated engine), and the `tasks/` catalog with its synthetic fixture vault. See docs/TASK_EVAL.md.
 
 native/                        Non-Python, installer-facing sources (see docs/SERVER_HOST.md).
   server-host/ServerHost.swift The persistent macOS host: fixed `serve` (spawns `[python, -I, -m, ciao.cli, supervise]` with public `posix_spawn`, keeping the child in launchd's job group, and mirrors its exit), `request-accessibility`, and `run-move` (spawns `[python, -I, -m, ciao.workspace_move, run, --operation, <id>, --state-dir, <dir>]` the same way, so a macOS folder grant covers the move, #1658) operations. Host protocol revision 2 (host revision 4, #1659, #1642), 35 s stop grace, accessory app, no shell/IPC/network/arbitrary-command surface. The installer does not activate it yet (#1008 child A).
