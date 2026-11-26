@@ -20,4 +20,4 @@ Look for:
 ## Done when
 You read the whole body and applied every lens above. A run that never reached the guide is `blocked`. Finish with `done: reviewed AGENTS.md, N proposals (<paths>), M Unsure lines`, and give each proposal as a `needs you` item.
 
-Verify: run `ciao proposal-check <file>` on every proposal path the done line names; each must print `ok`.
+Verify: run `ciao proposal-check <file>` on every proposal path the done line names; each must print `ok`. When none was routed, the done line must say `no proposals routed` and `grep -l '^created: <today>' <vault>/Workspace/Proposals/*.md` must list none (a count of 0 from that command).

@@ -19,4 +19,4 @@ Skip an entry that already has a proposal file under `Workspace/Proposals/` nami
 ## Done when
 Every x3-or-more entry has a destination (a proposal file that passed `ciao proposal-check`, a project doc line, or an Unsure line) or an existing proposal. Finish with `done: routed N entries (<proposal paths>), merged M, pruned K`.
 
-Verify: run `ciao proposal-check <file>` on every proposal path the done line names; each must print `ok`.
+Verify: run `ciao proposal-check <file>` on every proposal path the done line names; each must print `ok`. When none was routed, the done line must say `no proposals routed` and `grep -l '^created: <today>' <vault>/Workspace/Proposals/*.md` must list none (a count of 0 from that command).

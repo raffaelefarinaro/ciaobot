@@ -15,4 +15,4 @@ Install-wide runtime failures are visible through startup triage and pending upg
 ## Done when
 Both commands ran and the section is written. Evidence: `index rebuilt; audit exit N, F findings (<categories>)`.
 
-Verify: re-read Care-Report.md and confirm the `## Hygiene` section holds the finding count and one line per finding.
+Verify: check that INDEX.md at the vault root (`<V>/../INDEX.md` when V is a workspace folder under `memory-vault/`, else `<V>/INDEX.md`) was rewritten today (`find <path> -newermt <today>` lists it), and that the `## Hygiene` section in Care-Report.md records `audit exit N` with the finding count and one line per finding.
