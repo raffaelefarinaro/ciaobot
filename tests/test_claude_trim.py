@@ -57,18 +57,27 @@ def test_default_denies_put_always_denied_loop_family_first() -> None:
         "DesignSync",
         "Skill(design-sync)",
         "NotebookEdit",
+        "PublishPlugin",
+        "ShareOnboardingGuide",
+        "ListMcpResourcesTool",
+        "ReadMcpResourceTool",
+        "ReadMcpResourceDirTool",
         "Skill(update-config)",
         "Skill(fewer-permission-prompts)",
         "Skill(doctor)",
         "Skill(run)",
         "Skill(run-skill-generator)",
         "Skill(dataviz)",
+        "Skill(slides)",
+        "Skill(whiteboard)",
     ]
 
 
 def test_default_settings_layer() -> None:
     layer = claude_settings_layer({})
-    assert layer["skillOverrides"] == {name: "off" for name in _OLD_HIDDEN_SKILLS}
+    assert layer["skillOverrides"] == {
+        name: "off" for name in (*_OLD_HIDDEN_SKILLS, "slides", "whiteboard")
+    }
     assert layer["disableArtifact"] is True
     assert "disableWorkflows" not in layer
     # Connectors stay on by default, and trimming them is an env var, not a CLI key.
@@ -101,6 +110,34 @@ def test_override_untrims_and_trims() -> None:
     assert "NotebookEdit" not in denies
     assert "ReportFindings" in denies
     assert claude_settings_layer(overrides)["disableWorkflows"] is True
+
+
+def test_mcp_resource_tools_are_trimmed_by_default_and_can_be_untrimmed() -> None:
+    mcp_keys = [
+        "tool:ListMcpResourcesTool",
+        "tool:ReadMcpResourceTool",
+        "tool:ReadMcpResourceDirTool",
+    ]
+    assert all(option(key).default_trimmed for key in mcp_keys)
+    assert all(effective_trim({})[key] for key in mcp_keys)
+    untrimmed = trim_tool_denies({key: False for key in mcp_keys})
+    assert not {"ListMcpResourcesTool", "ReadMcpResourceTool", "ReadMcpResourceDirTool"} & set(untrimmed)
+
+
+def test_unoffered_disable_settings_stay_unset() -> None:
+    offered = {o.name for o in TRIM_OPTIONS if o.kind == "setting"}
+    for name in (
+        "disableAgentView",
+        "disableAutoBackground",
+        "disableAutoMode",
+        "disableDirectMcpSkills",
+        "disableRemoteControl",
+        "disableSkillShellExecution",
+        "disableMobileSimulatorTools",
+        "disableConnectorSignInInApp",
+    ):
+        assert name not in offered
+        assert name not in claude_settings_layer({})
 
 
 def test_coerce_rejects_unknown_and_non_bool() -> None:
