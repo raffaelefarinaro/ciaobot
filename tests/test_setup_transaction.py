@@ -234,10 +234,10 @@ def test_interrupted_setup_after_workspace_pointer_leaves_bootstrap_but_cli_retr
     monkeypatch.setattr(package_version, "running_from_app_bundle", lambda: True)
     real_publish = setup_transaction.SetupTransaction.publish
 
-    def die_at_registry(self, name, text):
+    def die_at_registry(self, name, text, **kwargs):
         if name == "registry":
             raise OSError("killed after the workspace pointer")
-        real_publish(self, name, text)
+        real_publish(self, name, text, **kwargs)
 
     with monkeypatch.context() as patch:
         patch.setattr(setup_transaction.SetupTransaction, "publish", die_at_registry)
@@ -247,3 +247,85 @@ def test_interrupted_setup_after_workspace_pointer_leaves_bootstrap_but_cli_retr
     assert installed_workspace_env({}).get("CIAO_WORKSPACE") == str(engine.resolve())
     assert _cli_setup(cli, tmp_path, notes, "--auth-token", "password") == 0
     assert not setup_transaction.pending_matches(engine.resolve(), notes.resolve())
+
+
+def test_pin_of_a_journal_published_before_values_were_recorded_is_a_clear_error(tmp_path: Path) -> None:
+    root, notes = tmp_path / "engine", tmp_path / "notes"
+    root.mkdir()
+    notes.mkdir()
+    tx = setup_transaction.SetupTransaction(root, notes)
+    try:
+        tx.begin("password")
+        tx.data["env"].update(published="deadbeef")  # journal from before pinning existed
+        with pytest.raises(ValueError, match="predates this version"):
+            tx.pin("env", {"port": "1", "vault_value": "x"})
+    finally:
+        tx.close()
+
+
+@pytest.mark.parametrize("crash_point", ["after_registry", "receipt_lost"])
+def test_retry_after_registry_published_still_records_born_per_root(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, crash_point: str
+) -> None:
+    from ciao import cli, setup_marker
+    from ciao.workspace_reroot import read_receipt
+
+    notes = tmp_path / "notes"
+    notes.mkdir()
+    runtime = tmp_path / "engine" / ".runtime"
+    real = setup_marker.write_vault_index_ownership
+
+    def die(*args, **kwargs):
+        raise OSError("killed after the registry")
+
+    with monkeypatch.context() as patch:
+        patch.setattr(setup_marker, "write_vault_index_ownership", die)
+        assert _cli_setup(cli, tmp_path, notes, "--auth-token", "password") == 1
+    assert (runtime / "workspaces.json").exists()
+    receipt = runtime / "migration" / "workspace-rooting.json"
+    if crash_point == "receipt_lost":
+        # The registry was fsynced; the receipt write is not, so a power cut can keep one and lose the other.
+        receipt.unlink()
+        assert read_receipt(runtime) is None
+    monkeypatch.setattr(setup_marker, "write_vault_index_ownership", real)
+    assert _cli_setup(cli, tmp_path, notes, "--auth-token", "password") == 0
+    migrated = read_receipt(runtime)
+    assert migrated is not None and migrated["born_per_root"] is True
+    # a retry that finds the receipt must not rewrite it (no stray superseded copies)
+    assert [p.name for p in receipt.parent.iterdir() if p.name != receipt.name] == []
+
+
+def test_registry_publication_keeps_the_owner_view_current(tmp_path: Path) -> None:
+    from ciao.workspaces import WorkspaceRegistryConflict, acquire_registry_at
+
+    root, notes = tmp_path / "engine", tmp_path / "notes"
+    root.mkdir()
+    notes.mkdir()
+    tx = setup_transaction.SetupTransaction(root, notes)
+    try:
+        tx.begin("password")
+        with acquire_registry_at(root / ".runtime") as owner:
+            tx.publish("registry", "[]\n", owner=owner)
+            assert owner.current == b"[]\n"
+            owner.replace(b"[1]\n", expected=b"[]\n")  # the compare-and-swap still holds afterwards
+            with pytest.raises(WorkspaceRegistryConflict):
+                owner.replace(b"[2]\n", expected=b"[]\n")
+    finally:
+        tx.close()
+
+
+def test_registry_publication_refuses_an_owner_that_saw_a_registry(tmp_path: Path) -> None:
+    from ciao.workspaces import WorkspaceRegistryConflict, acquire_registry_at
+
+    root, notes = tmp_path / "engine", tmp_path / "notes"
+    (root / ".runtime").mkdir(parents=True)
+    notes.mkdir()
+    tx = setup_transaction.SetupTransaction(root, notes)
+    try:
+        tx.begin("password")
+        with acquire_registry_at(root / ".runtime") as owner:
+            owner.current = b"[]\n"  # the owner loaded a registry that the journal never saw
+            with pytest.raises(WorkspaceRegistryConflict):
+                tx.publish("registry", "[3]\n", owner=owner)
+    finally:
+        tx.close()

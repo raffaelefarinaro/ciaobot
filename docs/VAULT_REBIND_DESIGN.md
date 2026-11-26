@@ -9,6 +9,12 @@
 - `reverse-preview NAME --id ID` and `reverse NAME --id ID --token T`: put the old folder of a completed rebind back.
 - `recover`: resolve an interrupted operation.
 
+Overlap and protected-root checks compare directories with `os.path.samefile` along every ancestor, not path strings, so a case-variant spelling on case-insensitive APFS (`.RunTime` for `.runtime`) is the same folder and refused. A legacy single-segment root on any registered workspace blocks every preview; the refusal names that workspace (`workspace 'NAME': ...`).
+
+### Before you preview: resync INDEX.md
+
+The engine rewrites the source notes folder's `INDEX.md` the first time it starts, so a preview taken after that run refuses with "notes trees do not match" until the same `INDEX.md` is in the destination. Stop the engine, copy the source `INDEX.md` into the destination folder (your cloud client carries it from there), and preview again. Rebind has no Settings or PWA screen: it is a command for a stopped engine by design.
+
 ## Apply sequence
 
 1. Take the engine's `server.lock` (non-blocking; a running engine, or another rebind, refuses) and then the interprocess registry claim (`acquire_registry_at`, non-blocking). Lock contention refuses with no writes beyond the lock files.

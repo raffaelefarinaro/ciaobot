@@ -1653,6 +1653,21 @@ def _setup_selected_workspace(
         and not detect_nested_workspaces(vault_path)
         and not vault_path.exists()
     )
+    # A retry after the journal published the registry: first_setup is false and
+    # the registry now exists, so neither flag above holds. The receipt write is
+    # not fsynced like the registry, so a crash can keep the registry and lose
+    # the receipt; record it again then (and only then).
+    published_retry = (
+        _transaction is not None
+        and bool(_transaction.data["registry"].get("published"))
+        and registered_vaults is not None
+        and vault_mode == "existing"
+    )
+    if published_retry and not (fresh_per_root or fresh_adopted_notes):
+        from ciao.workspace_reroot import mark_born_per_root, read_receipt as read_rooting_receipt
+
+        if read_rooting_receipt(runtime_root) is None:
+            written.extend(mark_born_per_root(root, runtime_root, [name]))
     if fresh_per_root or fresh_adopted_notes:
         from ciao.workspace_reroot import mark_born_per_root
 
@@ -1683,7 +1698,7 @@ def _setup_selected_workspace(
                 indent=2,
             ) + "\n"
         if _transaction is not None:
-            _transaction.publish("registry", registry_text)
+            _transaction.publish("registry", registry_text, owner=owner)
         else:
             create_registry(registry_text)
         written.append(root / ".runtime" / "workspaces.json")
