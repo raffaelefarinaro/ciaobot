@@ -55,15 +55,12 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
 
     workspace = args.workspace.resolve()
-    # Not `workspace / "memory-vault" / "Logs"`: the re-rooting promotes the
-    # archive out of the vault, and a hardcoded pre-migration path makes this
-    # report every archived chat as missing and every SDK blob as orphaned.
     # Every root is read: each workspace keeps its own archive under its Logs/.
     from ciao.config import logs_roots_for
 
     chats_roots = [
         root / "Chats"
-        for root in logs_roots_for(workspace, workspace / "memory-vault", workspace / ".runtime")
+        for root in logs_roots_for(workspace, workspace / ".runtime")
     ]
     projects_dir = claude_projects_dir(workspace)
 

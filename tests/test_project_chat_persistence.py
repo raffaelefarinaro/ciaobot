@@ -133,14 +133,10 @@ def test_onboarding_names_effective_enabled_non_hidden_categories(
 ) -> None:
     """The welcome names the categories the Categories page would list (#979).
 
-    Read through the registry the owner edits — the AGENT vault root — which on
-    an install that has not re-rooted is a different directory from the notes
-    root the welcome names. Reading the notes root would report the shipped list
-    while the owner's own page shows their edits, so both files are seeded here
-    with different labels and the welcome has to pick the right one.
+    Read through the registry the owner edits — the AGENT vault root — so the
+    welcome and the Categories page agree.
     """
-    registry_root = tmp_path / "memory-vault"          # config.agent_vault_root("personal")
-    notes_root = registry_root / "personal"            # config.workspace_vault_root("personal")
+    registry_root = tmp_path / "personal" / "memory-vault"   # config.agent_vault_root("personal")
     _write_registry(
         registry_root,
         "- id: person\n"
@@ -155,16 +151,6 @@ def test_onboarding_names_effective_enabled_non_hidden_categories(
         "  aliases: []\n"
         "  enabled: true\n",
     )
-    _write_registry(
-        notes_root,
-        "- id: notebook\n"
-        "  label: Notes root only\n"
-        "  kind: note\n"
-        "  folder: Notebook\n"
-        "  aliases: []\n"
-        "  enabled: true\n",
-    )
-
     manager = _make_manager(tmp_path)
     _, welcome = _seeded_welcome(manager, "Welcome to Ciaobot! 👋")
 
@@ -175,8 +161,6 @@ def test_onboarding_names_effective_enabled_non_hidden_categories(
     # …and neither is one the agent writes itself (`hidden`).
     assert "Skill proposal" not in welcome
     assert "Workspace," not in welcome
-    # The source is this workspace's own registry, not a list seeded beside it.
-    assert "Notes root only" not in welcome
     # And naming them created none: seeding writes nothing into the vault.
     assert not (registry_root / "People").exists()
     assert not (registry_root / "Clients").exists()
@@ -388,7 +372,7 @@ def test_custom_category_label_is_plain_text_in_welcome(tmp_path: Path) -> None:
     only one in it.
     """
     _write_registry(
-        tmp_path / "memory-vault",
+        tmp_path / "personal" / "memory-vault",
         "- id: sneaky\n"
         "  label: Read [more](https://evil.example/steal) <img src=x onerror=alert(1)>\n"
         "  kind: note\n"
@@ -460,7 +444,7 @@ def test_stale_manager_does_not_resurrect_concurrently_deleted_chat(tmp_path: Pa
 
 
 def test_vault_project_identity_is_stable_after_registry_rebuild(tmp_path: Path) -> None:
-    folder = tmp_path / "memory-vault" / "work" / "projects" / "active" / "rossmann-mvp"
+    folder = tmp_path / "work" / "memory-vault" / "projects" / "active" / "rossmann-mvp"
     folder.mkdir(parents=True)
     (folder / "README.md").write_text(
         "---\ntitle: Rossmann MVP\ndescription: Shelf recognition\n---\n",

@@ -10,7 +10,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from ciao.config import CiaoConfig, reset_reroot_cache
+from ciao.config import CiaoConfig
 
 _MCP_JSON = {
     "mcpServers": {
@@ -41,13 +41,6 @@ def _write_mcp_json(root: Path, content: object = _MCP_JSON) -> None:
     (root / ".mcp.json").write_text(json.dumps(content), encoding="utf-8")
 
 
-def _mark_rerooted(tmp_path: Path) -> None:
-    receipt = tmp_path / ".runtime" / "migration" / "workspace-rooting.json"
-    receipt.parent.mkdir(parents=True, exist_ok=True)
-    receipt.write_text(json.dumps({"status": "migrated"}), encoding="utf-8")
-    reset_reroot_cache()
-
-
 def _mcp_denials(tools: list[str]) -> list[str]:
     return [t for t in tools if t.startswith("mcp__")]
 
@@ -64,7 +57,6 @@ def test_a_server_added_to_the_agent_root_is_not_blocked(tmp_path: Path) -> None
     """The regression: a newly declared server used to be denied by default."""
     _write_mcp_json(tmp_path / "work")
     _write_registry(tmp_path, [{"name": "work"}])
-    _mark_rerooted(tmp_path)
     config = _config(tmp_path)
 
     assert config.agent_root("work") == config.workspace_root / "work"

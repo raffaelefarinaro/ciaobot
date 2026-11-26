@@ -9,7 +9,7 @@ from pathlib import Path
 import pytest
 import yaml
 
-from ciao.config import CiaoConfig, WorkspaceConfig, reset_reroot_cache
+from ciao.config import CiaoConfig, WorkspaceConfig
 from ciao.sessions import StateStore
 from ciao.transcripts import TranscriptStore
 import ciao.web.project_chats as project_chats_module
@@ -47,10 +47,6 @@ def _frontmatter(doc: Path) -> dict:
 def _make_adopted_manager(tmp_path: Path, root: Path) -> ProjectChatManager:
     runtime = tmp_path / ".runtime"
     runtime.mkdir(parents=True, exist_ok=True)
-    receipt = runtime / "migration" / "workspace-rooting.json"
-    receipt.parent.mkdir(parents=True, exist_ok=True)
-    receipt.write_text('{"status":"migrated"}', encoding="utf-8")
-    reset_reroot_cache()
     config = CiaoConfig(
         pwa_auth_token="test-token",
         workspace_root=tmp_path,

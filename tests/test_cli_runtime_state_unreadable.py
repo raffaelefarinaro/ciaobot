@@ -5,16 +5,16 @@ from pathlib import Path
 import pytest
 
 from ciao import cli
-from ciao.workspace_reroot import RuntimeStateUnreadable
+from ciao.config import CiaoConfig, RuntimeStateUnreadable
 
 
 def test_cli_reports_unreadable_runtime_state_without_a_traceback(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    def denied(runtime_root: Path) -> None:
-        raise RuntimeStateUnreadable(Path("/x/.runtime/migration/workspace-rooting.json"))
+    def denied(*args: object, **kwargs: object) -> None:
+        raise RuntimeStateUnreadable(Path("/x/.runtime/workspaces.json"))
 
-    monkeypatch.setattr("ciao.workspace_reroot.read_receipt", denied)
+    monkeypatch.setattr(CiaoConfig, "from_env", classmethod(lambda cls, *a, **k: denied()))
     monkeypatch.setenv("CIAO_WORKSPACE", str(tmp_path))
 
     code = cli.main(["os-audit", "--json", "--scope", "workspace"])

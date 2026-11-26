@@ -16,7 +16,7 @@ from starlette.middleware import Middleware
 from starlette.routing import Route
 from starlette.testclient import TestClient
 
-from ciao.config import CiaoConfig, WorkspaceConfig, reset_reroot_cache
+from ciao.config import CiaoConfig, WorkspaceConfig
 from ciao.web.auth import AuthMiddleware, SESSION_COOKIE
 from ciao.web.routes_api import archive_workspace_setting
 from ciao.web.routes_webhooks import (
@@ -48,7 +48,6 @@ def _world(tmp_path: Path, monkeypatch) -> tuple[TestClient, dict[str, str], Cia
     monkeypatch.setattr(
         "ciao.sync_skills.sync_workspace_skills", lambda *_a, **_kw: None
     )
-    reset_reroot_cache()
     runtime = tmp_path / ".runtime"
     runtime.mkdir(parents=True, exist_ok=True)
     config = CiaoConfig(
@@ -58,9 +57,9 @@ def _world(tmp_path: Path, monkeypatch) -> tuple[TestClient, dict[str, str], Cia
         media_root=runtime / "media",
         workspaces={
             "personal": WorkspaceConfig(
-                name="personal", vault_root="memory-vault/personal"
+                name="personal", vault_root="personal/memory-vault"
             ),
-            "work": WorkspaceConfig(name="work", vault_root="memory-vault/work"),
+            "work": WorkspaceConfig(name="work", vault_root="work/memory-vault"),
         },
     )
     for name in ("personal", "work"):

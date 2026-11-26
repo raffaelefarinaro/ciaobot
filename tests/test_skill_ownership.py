@@ -22,15 +22,10 @@ from ciao.skills_inventory import (
     eligible_owned_skills,
     resolve_owned_skill,
 )
-from ciao.workspace_reroot import mark_born_per_root
 
 
-def _config(tmp_path: Path, *names: str, rerooted: bool = False) -> CiaoConfig:
-    """A config over ``tmp_path`` registered with ``names``.
-
-    Without ``rerooted`` the install answers every workspace with the install
-    root, which is the pre-re-rooting layout; with it, one agent root each.
-    """
+def _config(tmp_path: Path, *names: str) -> CiaoConfig:
+    """A config over ``tmp_path`` registered with ``names``, one agent root each."""
     runtime = tmp_path / ".runtime"
     config = CiaoConfig(
         pwa_auth_token="test-token",
@@ -40,8 +35,6 @@ def _config(tmp_path: Path, *names: str, rerooted: bool = False) -> CiaoConfig:
         vault_root=tmp_path / "memory-vault",
         workspaces={name: WorkspaceConfig(name=name, vault_root=name) for name in names},
     )
-    if rerooted:
-        mark_born_per_root(tmp_path, runtime, list(names))
     return config
 
 
@@ -74,7 +67,7 @@ def _tree(root: Path) -> list[tuple[str, int, bytes]]:
 
 
 def test_workspace_local_source_and_revision(tmp_path: Path) -> None:
-    config = _config(tmp_path, "personal", rerooted=True)
+    config = _config(tmp_path, "personal")
     root = config.agent_root("personal")
     skill_md = _write_skill(root, "demo", "Owned source")
 
@@ -100,7 +93,7 @@ def test_custom_shadow_is_eligible(tmp_path: Path) -> None:
         "the shadow has to shadow a name that actually ships"
     )
 
-    config = _config(tmp_path, "personal", rerooted=True)
+    config = _config(tmp_path, "personal")
     root = config.agent_root("personal")
     # What sync leaves behind when a workspace skill shadows the packaged one.
     installed = _write_skill_file(
@@ -122,7 +115,7 @@ def test_custom_shadow_is_eligible(tmp_path: Path) -> None:
 
 
 def test_stock_and_provider_mirrors_are_ineligible(tmp_path: Path) -> None:
-    config = _config(tmp_path, "personal", rerooted=True)
+    config = _config(tmp_path, "personal")
     root = config.agent_root("personal")
     (root / "skills").mkdir(parents=True)
 
@@ -164,7 +157,7 @@ def test_stock_and_provider_mirrors_are_ineligible(tmp_path: Path) -> None:
 def test_traversal_and_unknown_workspace_are_rejected(
     tmp_path: Path, workspace: str, name: str
 ) -> None:
-    config = _config(tmp_path, "personal", rerooted=True)
+    config = _config(tmp_path, "personal")
     _write_skill(config.agent_root("personal"), "demo")
 
     with pytest.raises(ValueError):
@@ -198,7 +191,7 @@ def _link_catalog(tmp_path: Path, root: Path, target: str) -> Path:
 def test_symlink_components_are_rejected(
     tmp_path: Path, component: str, target: str
 ) -> None:
-    config = _config(tmp_path, "personal", rerooted=True)
+    config = _config(tmp_path, "personal")
     root = config.agent_root("personal")
     root.mkdir(parents=True, exist_ok=True)
     catalog = _link_catalog(tmp_path, root, target)
@@ -223,7 +216,7 @@ def test_symlink_components_are_rejected(
 def test_shared_sources_are_ineligible(tmp_path: Path) -> None:
     from ciao.sync_skills import mirror_shared_skill_sources
 
-    config = _config(tmp_path, "personal", rerooted=True)
+    config = _config(tmp_path, "personal")
     root = config.agent_root("personal")
     (root / "skills").mkdir(parents=True)
     shared = tmp_path / "skills-src"
@@ -249,36 +242,8 @@ def test_shared_sources_are_ineligible(tmp_path: Path) -> None:
     assert eligible_owned_skills(config, "personal") == []
 
 
-def test_ambiguous_shared_root_is_refused(tmp_path: Path) -> None:
-    # Two registered workspaces, one catalog: nobody owns it exclusively.
-    config = _config(tmp_path, "personal", "work")
-    assert config.agent_root("personal") == config.agent_root("work")
-    _write_skill(config.workspace_root, "demo")
-
-    for workspace in ("personal", "work"):
-        with pytest.raises(ValueError, match="shares its agent root"):
-            resolve_owned_skill(config, workspace, "demo")
-        # The catalog refuses the whole workspace rather than quietly returning
-        # nothing: an empty list reads as "no skills", which is the one answer
-        # here that would be a lie.
-        with pytest.raises(ValueError, match="shares its agent root"):
-            eligible_owned_skills(config, workspace)
-
-
-def test_single_workspace_legacy_source_is_eligible(tmp_path: Path) -> None:
-    config = _config(tmp_path, "personal")
-    skill_md = _write_skill(config.workspace_root, "demo", "Legacy source")
-
-    owned = resolve_owned_skill(config, "personal", "demo")
-
-    assert owned.path == skill_md
-    assert owned.content == skill_md.read_text(encoding="utf-8")
-    assert owned.revision == hashlib.sha256(skill_md.read_bytes()).hexdigest()
-    assert eligible_owned_skills(config, "personal") == [owned]
-
-
 def test_catalog_skips_invalid_sources_and_is_sorted(tmp_path: Path) -> None:
-    config = _config(tmp_path, "personal", rerooted=True)
+    config = _config(tmp_path, "personal")
     root = config.agent_root("personal")
     _write_skill(root, "zeta", "Last")
     _write_skill(root, "alpha", "First")
@@ -322,7 +287,7 @@ def test_a_creation_returns_the_source_read_back(tmp_path: Path) -> None:
     """
     from ciao.skills_inventory import create_owned_skill
 
-    config = _config(tmp_path, "personal", rerooted=True)
+    config = _config(tmp_path, "personal")
     content = _skill_body("invoice-recon", "Reconcile an invoice")
 
     created = create_owned_skill(config, "personal", "invoice-recon", content)
@@ -351,7 +316,7 @@ def test_a_creation_refuses_a_name_that_already_exists(tmp_path: Path) -> None:
     """
     from ciao.skills_inventory import create_owned_skill
 
-    config = _config(tmp_path, "personal", rerooted=True)
+    config = _config(tmp_path, "personal")
     existing = _write_skill(config.agent_root("personal"), "notes", "Mine")
 
     with pytest.raises(ValueError, match="already has a skills/notes entry"):
@@ -372,7 +337,7 @@ def test_a_creation_refuses_a_name_an_installed_copy_takes(tmp_path: Path) -> No
     """
     from ciao.skills_inventory import create_owned_skill
 
-    config = _config(tmp_path, "personal", rerooted=True)
+    config = _config(tmp_path, "personal")
     root = config.agent_root("personal")
     installed = _write_skill_file(
         root / ".claude" / "skills" / "web-research", "web-research", "Packaged"
@@ -390,7 +355,7 @@ def test_a_creation_refuses_a_symlinked_catalog(tmp_path: Path) -> None:
     """The shared-mirror shape is refused at the link, not after following it."""
     from ciao.skills_inventory import create_owned_skill
 
-    config = _config(tmp_path, "personal", rerooted=True)
+    config = _config(tmp_path, "personal")
     root = config.agent_root("personal")
     root.mkdir(parents=True, exist_ok=True)
     shared = tmp_path / "shared"
@@ -425,7 +390,7 @@ def test_a_creation_refuses_content_that_would_not_load(
     """
     from ciao.skills_inventory import create_owned_skill
 
-    config = _config(tmp_path, "personal", rerooted=True)
+    config = _config(tmp_path, "personal")
     with pytest.raises(ValueError, match=expected):
         create_owned_skill(config, "personal", "invoice-recon", content)
     assert not (config.agent_root("personal") / "skills" / "invoice-recon").exists()
@@ -440,7 +405,7 @@ def test_an_over_budget_creation_is_written_and_flagged(tmp_path: Path) -> None:
     """
     from ciao.skills_inventory import MAX_SKILL_BYTES, create_owned_skill
 
-    config = _config(tmp_path, "personal", rerooted=True)
+    config = _config(tmp_path, "personal")
     body = "\n".join(f"line {n}" for n in range(MAX_SKILL_BYTES // 4))
     content = _skill_body("invoice-recon", "Reconcile an invoice", body=body)
 
@@ -450,14 +415,10 @@ def test_an_over_budget_creation_is_written_and_flagged(tmp_path: Path) -> None:
     assert (config.agent_root("personal") / "skills" / "invoice-recon" / "SKILL.md").is_file()
 
 
-def test_a_creation_still_refuses_a_shared_agent_root(tmp_path: Path) -> None:
-    """One catalog serving two workspaces means a "new" skill is visible to both."""
+def test_a_creation_refuses_an_unknown_workspace(tmp_path: Path) -> None:
     from ciao.skills_inventory import create_owned_skill
 
-    # Not rerooted: every workspace answers with the install root.
     config = _config(tmp_path, "personal", "work")
-    with pytest.raises(ValueError, match="shares its agent root"):
-        create_owned_skill(config, "personal", "invoice-recon", _skill_body("invoice-recon"))
     with pytest.raises(ValueError, match="unknown workspace"):
         create_owned_skill(config, "elsewhere", "invoice-recon", _skill_body("invoice-recon"))
 
@@ -466,7 +427,7 @@ def test_a_creation_refuses_a_name_that_is_not_one_directory(tmp_path: Path) -> 
     """The same rule `resolve_owned_skill` enforces, for the same reason."""
     from ciao.skills_inventory import create_owned_skill
 
-    config = _config(tmp_path, "personal", rerooted=True)
+    config = _config(tmp_path, "personal")
     for name in ("../escape", "a/b", "", ".", "..", ".hidden"):
         with pytest.raises(ValueError, match="not a skill directory name|not one directory"):
             create_owned_skill(config, "personal", name, _skill_body("x"))

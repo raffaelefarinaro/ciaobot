@@ -207,7 +207,7 @@ def test_delete_project_rejects_vault_backed(tmp_path: Path) -> None:
     """Deleting a vault-backed project must fail by default: otherwise
     auto-discovery re-creates the project on the next list_projects() call. The
     message must name both ways out, so the user is not left guessing."""
-    parent = tmp_path / "memory-vault" / "personal" / "projects" / "active"
+    parent = tmp_path / "personal" / "memory-vault" / "projects" / "active"
     folder = parent / "Stuck"
     folder.mkdir(parents=True)
     (folder / "Stuck.md").write_text(
@@ -238,7 +238,7 @@ def test_delete_project_with_delete_vault_removes_folder_and_cleans_links(tmp_pa
     """Deleting a vault-backed project for real removes its folder, cleans the
     inbound links to its notes, and does not come back on the next
     auto-discovery."""
-    vault = tmp_path / "memory-vault" / "personal"
+    vault = tmp_path / "personal" / "memory-vault"
     folder = vault / "projects" / "active" / "Stuck"
     folder.mkdir(parents=True)
     (folder / "Stuck.md").write_text(
@@ -300,7 +300,7 @@ def test_delete_project_with_delete_vault_restores_links_when_rmtree_fails(
     row were still there: a partial delete the user cannot see, and links
     pointing at notes that are still on disk.
     """
-    vault = tmp_path / "memory-vault" / "personal"
+    vault = tmp_path / "personal" / "memory-vault"
     folder = vault / "projects" / "active" / "Stuck"
     folder.mkdir(parents=True)
     (folder / "Stuck.md").write_text(
@@ -353,7 +353,7 @@ def _vault_delete_setup(tmp_path: Path) -> tuple[Path, Path, Path, str, str]:
     Returns ``(folder, ref, other, ref_text, other_text)``: the project
     folder, the two notes that link into it, and their original texts.
     """
-    vault = tmp_path / "memory-vault" / "personal"
+    vault = tmp_path / "personal" / "memory-vault"
     folder = vault / "projects" / "active" / "Stuck"
     folder.mkdir(parents=True)
     (folder / "Stuck.md").write_text(
@@ -521,7 +521,7 @@ def test_delete_project_with_delete_vault_refuses_symlink_escape(tmp_path: Path)
         "---\nname: Elsewhere\nstatus: active\n---\n# Elsewhere\n",
         encoding="utf-8",
     )
-    parent = tmp_path / "memory-vault" / "personal" / "projects" / "active"
+    parent = tmp_path / "personal" / "memory-vault" / "projects" / "active"
     parent.mkdir(parents=True)
     (parent / "Stuck").symlink_to(outside, target_is_directory=True)
 

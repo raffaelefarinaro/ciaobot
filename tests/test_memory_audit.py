@@ -102,8 +102,8 @@ def test_event_shaped_ignores_durable_state() -> None:
 
 
 def _workspace(tmp_path: Path) -> Path:
-    (tmp_path / "memory-vault" / "personal").mkdir(parents=True)
-    (tmp_path / "memory-vault" / "personal" / "MEMORY.md").write_text("x", "utf-8")
+    (tmp_path / "personal" / "memory-vault").mkdir(parents=True)
+    (tmp_path / "personal" / "memory-vault" / "MEMORY.md").write_text("x", "utf-8")
     return tmp_path
 
 
@@ -112,14 +112,14 @@ def test_stale_paths_flags_missing_file_under_existing_dir(tmp_path: Path) -> No
 
     findings, checked, unverifiable = find_stale_paths(
         "memory",
-        ["Durable notes live in `memory-vault/personal/Gone.md` these days."],
+        ["Durable notes live in `personal/memory-vault/Gone.md` these days."],
         workspace_dir=workspace,
     )
 
     assert checked == 1
     assert unverifiable == 0
     assert len(findings) == 1
-    assert findings[0]["path"] == "memory-vault/personal/Gone.md"
+    assert findings[0]["path"] == "personal/memory-vault/Gone.md"
     assert "does not exist" in findings[0]["message"]
 
 
@@ -138,7 +138,7 @@ def test_stale_paths_keeps_leading_dots(tmp_path: Path) -> None:
     findings, checked, unverifiable = find_stale_paths(
         "memory",
         [
-            "Run `./memory-vault/personal/gone.sh` first.",
+            "Run `./personal/memory-vault/gone.sh` first.",
             "Settings live in `.claude/absent.json`.",
         ],
         workspace_dir=workspace,
@@ -147,7 +147,7 @@ def test_stale_paths_keeps_leading_dots(tmp_path: Path) -> None:
     assert unverifiable == 0
     assert checked == 2
     assert {f["path"] for f in findings} == {
-        "./memory-vault/personal/gone.sh",
+        "./personal/memory-vault/gone.sh",
         ".claude/absent.json",
     }
 
@@ -157,12 +157,12 @@ def test_stale_paths_still_trims_trailing_sentence_punctuation(tmp_path: Path) -
 
     findings, checked, _ = find_stale_paths(
         "memory",
-        ["Notes moved to memory-vault/personal/Gone.md."],
+        ["Notes moved to personal/memory-vault/Gone.md."],
         workspace_dir=workspace,
     )
 
     assert checked == 1
-    assert findings[0]["path"] == "memory-vault/personal/Gone.md"
+    assert findings[0]["path"] == "personal/memory-vault/Gone.md"
 
 
 def test_stale_paths_accepts_existing_file(tmp_path: Path) -> None:
@@ -170,7 +170,7 @@ def test_stale_paths_accepts_existing_file(tmp_path: Path) -> None:
 
     findings, checked, _ = find_stale_paths(
         "memory",
-        ["Durable notes live in `memory-vault/personal/MEMORY.md`."],
+        ["Durable notes live in `personal/memory-vault/MEMORY.md`."],
         workspace_dir=workspace,
     )
 
@@ -183,12 +183,12 @@ def test_stale_paths_strips_line_number_reference(tmp_path: Path) -> None:
 
     findings, checked, _ = find_stale_paths(
         "memory",
-        ["The stale docstring is at memory-vault/personal/absent.py:9 still."],
+        ["The stale docstring is at personal/memory-vault/absent.py:9 still."],
         workspace_dir=workspace,
     )
 
     assert checked == 1
-    assert findings[0]["path"] == "memory-vault/personal/absent.py:9"
+    assert findings[0]["path"] == "personal/memory-vault/absent.py:9"
 
 
 def test_stale_paths_flags_missing_absolute_path_inside_workspace(
@@ -545,7 +545,8 @@ def test_memory_audit_command_tells_the_user_how_to_fix_over_cap(
     from ciao.cli import _memory_audit_command
     from ciao.memory_tool import ensure_regions, write_region
 
-    guide = tmp_path / "CLAUDE.md"
+    guide = tmp_path / "personal" / "CLAUDE.md"
+    guide.parent.mkdir(parents=True, exist_ok=True)
     guide.write_text("# Guide\n\n", encoding="utf-8")
     ensure_regions(guide)
     write_region(
@@ -657,7 +658,8 @@ def test_memory_audit_command_stays_quiet_when_under_cap(
     from ciao.cli import _memory_audit_command
     from ciao.memory_tool import ensure_regions, write_region
 
-    guide = tmp_path / "CLAUDE.md"
+    guide = tmp_path / "personal" / "CLAUDE.md"
+    guide.parent.mkdir(parents=True, exist_ok=True)
     guide.write_text("# Guide\n\n", encoding="utf-8")
     ensure_regions(guide)
     write_region(guide, "memory", ["one small durable lesson"])

@@ -34,7 +34,7 @@ from typing import Any
 
 import pytest
 
-from ciao.config import CiaoConfig, WorkspaceConfig, reset_reroot_cache
+from ciao.config import CiaoConfig, WorkspaceConfig
 from ciao.import_decouple import CIAO_CONTEXT_BEGIN
 from ciao.import_run import batch_store, run_import_batch
 from ciao.import_sources.contract import (
@@ -70,7 +70,6 @@ def _world(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> CiaoConfig:
     """A config over a scratch tree with `personal` and `work` registered."""
     monkeypatch.setenv("CIAO_MEMORY_DIR", str(tmp_path / ".runtime"))
     monkeypatch.setattr("ciao.sync_skills.sync_workspace_skills", lambda *a, **k: None)
-    reset_reroot_cache()
     runtime = tmp_path / ".runtime"
     runtime.mkdir(parents=True, exist_ok=True)
     return CiaoConfig(

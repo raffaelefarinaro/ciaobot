@@ -244,19 +244,6 @@ def test_no_vault_file_is_identical_for_the_bootstrap(tmp_path: Path) -> None:
 
     registry = entity_types.load_entity_types(vault)
 
-    # Workspace bootstrap: a containment test, so it takes the entity categories'
-    # folders and adds the three names an entry's single folder cannot express.
-    assert config._WORKSPACE_EVIDENCE_DIRS == frozenset(
-        {"People", "Projects", "Places", "Ideas", "Resources", "Workspace", "journal", "projects"}
-    )
-    assert config._WORKSPACE_EVIDENCE_DIRS == (
-        frozenset(registry.entity_folders()) | config._WORKSPACE_EVIDENCE_EXTRA_DIRS
-    )
-    assert list(config._bootstrap_registry(vault)) == ["personal"], (
-        "one workspace per vault directory holding an evidence folder"
-    )
-
-
 
 def test_no_vault_file_is_identical_for_the_index_lint_and_staleness(tmp_path: Path) -> None:
     """No `<vault>/entity-types.yaml`: the four consumers read the shipped list.

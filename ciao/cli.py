@@ -1629,17 +1629,8 @@ def _setup_selected_workspace(
 
     runtime_root = root / RUNTIME_DIR_NAME
 
-    # A brand-new install is created in the PER-ROOT layout directly, rather than
-    # in the shared one and then migrated. Setup used to scaffold
-    # `memory-vault/personal` plus agent assets at the install root, so every new
-    # user was manufactured into exactly the state the re-rooting exists to fix —
-    # and met a blocking "migrate now" tile on first boot. The migration engine
-    # then had an audience that regenerated itself.
-    #
-    # The receipt is written here, before anything reads `agent_roots_for`, because
-    # it is what makes `agent_root()` answer per-root. Files in the nested layout
-    # with a gate that still says "shared" is the one combination that breaks
-    # everything downstream.
+    # A brand-new install is created in the per-root layout directly: the vault
+    # at `<name>/<leaf>`, agent assets inside the workspace's own folder.
     fresh_per_root = (
         registered_vaults is None
         and vault_mode != "existing"
@@ -1647,41 +1638,21 @@ def _setup_selected_workspace(
         and not detect_nested_workspaces(vault_path)
         and not vault_path.exists()
     )
-    # A retry after the journal published the registry: first_setup is false and
-    # the registry now exists, so neither flag above holds. The receipt write is
-    # not fsynced like the registry, so a crash can keep the registry and lose
-    # the receipt; record it again then (and only then).
-    published_retry = (
-        _transaction is not None
-        and bool(_transaction.data["registry"].get("published"))
-        and registered_vaults is not None
-        and vault_mode == "existing"
-    )
-    if published_retry and not (fresh_per_root or fresh_adopted_notes):
-        from ciao.workspace_reroot import mark_born_per_root, read_receipt as read_rooting_receipt
-
-        if read_rooting_receipt(runtime_root) is None:
-            written.extend(mark_born_per_root(root, runtime_root, [name]))
     if fresh_per_root or fresh_adopted_notes:
-        from ciao.workspace_reroot import mark_born_per_root
-
         if fresh_per_root:
             vault_path = root / name / vault_path.name
         # Adopting notes is also a new install, not an upgrade target. Keep its
         # vault path exactly where the user chose it; only agent assets get a
-        # per-workspace root. Otherwise first startup snapshots their notes in
-        # Git and tries to relocate them through the legacy re-root migration.
-        written.extend(mark_born_per_root(root, runtime_root, [name]))
+        # per-workspace root.
         resolved_vault_path = vault_path.resolve()
         try:
             stored_vault_root = resolved_vault_path.relative_to(root).as_posix()
         except ValueError:
             stored_vault_root = str(resolved_vault_path)
         # The registry has to exist before the asset loop too: `agent_roots_for`
-        # reads the receipt for the gate and the REGISTRY for the names, and with
-        # no registry it falls back to the install root — which is how the first
-        # attempt at this still put `.claude/`, `commands/` and a stock CLAUDE.md
-        # beside the nested vault instead of inside the workspace's own folder.
+        # reads the REGISTRY for the names, and with no registry it falls back to
+        # the install root — which would put `.claude/`, `commands/` and a stock
+        # guide beside the nested vault instead of inside the workspace's folder.
         # The later branch is `_write_if_missing`, so this does not fight it.
         registry_text = json.dumps(
                 [{
@@ -2313,8 +2284,8 @@ def _search_vault(args: argparse.Namespace) -> int:
     # Every archive root gets indexed, so transcripts written under a workspace's
     # own Logs/ are searchable as well as the shared Logs/. `--logs` answers from
     # this vault's workspace archive plus the shared one, never a sibling's.
-    all_logs_roots = logs_roots_for(key_base, vault_root, runtime_root)
-    shared_logs = logs_root_for(key_base, vault_root, runtime_root)
+    all_logs_roots = logs_roots_for(key_base, runtime_root)
+    shared_logs = logs_root_for(key_base)
     own_logs = vault_root.parent / "Logs"
     search_logs_roots = [
         root for root in all_logs_roots if root in (own_logs, shared_logs)
@@ -2325,7 +2296,7 @@ def _search_vault(args: argparse.Namespace) -> int:
     # the key base differs between installs.
     from ciao.config import configured_connected_workspace
 
-    connected = (configured_connected_workspace(source_env, vault_root, implicit_root=args.vault_root is None)
+    connected = (configured_connected_workspace(source_env, vault_root)
                  if not args.logs else None)
     if connected:
         vault_root = connected.root
@@ -2512,17 +2483,12 @@ def _install_root_for_vault(vault_root: Path) -> Path | None:
     """The install a vault belongs to, for cross-root link validation.
 
     Per-root layout puts a vault at ``<install>/<workspace>/memory-vault``, so
-    the install is two levels up — and only when the receipt says this install
-    re-rooted. Guessing on a shared-layout install would excuse links that
-    really do escape the vault.
+    the install is two levels up — and only when that folder holds a runtime
+    directory. Guessing elsewhere would excuse links that really do escape the
+    vault.
     """
-    from ciao.workspace_reroot import read_receipt  # noqa: PLC0415
-
     candidate = vault_root.parent.parent
-    runtime = candidate / ".runtime"
-    if read_receipt(runtime) is None:
-        return None
-    return candidate
+    return candidate if (candidate / ".runtime").is_dir() else None
 
 
 def _vault_lint_command(args: argparse.Namespace) -> int:
@@ -4580,7 +4546,7 @@ def main(argv: list[str] | None = None) -> int:
         return _dispatch(argv_list)
     except Exception as exc:
         # The import lives in the handler so the agent fast path never pays for it.
-        from ciao.workspace_reroot import RuntimeStateUnreadable  # noqa: PLC0415
+        from ciao.config import RuntimeStateUnreadable  # noqa: PLC0415
 
         if not isinstance(exc, RuntimeStateUnreadable):
             raise

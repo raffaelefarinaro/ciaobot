@@ -118,7 +118,7 @@ def test_build_skill_inventory_reports_custom_over_stock(tmp_path: Path) -> None
     assert inventory["skills"][0]["source"] == "skills/"
 
 
-def _rerooted_config(install: Path) -> SimpleNamespace:
+def _per_root_config(install: Path) -> SimpleNamespace:
     """A re-rooted install: one agent root per workspace, plus the install root."""
     names = ("personal", "work")
     roots = {name: install / name for name in names}
@@ -147,7 +147,7 @@ def test_the_skills_route_is_scoped_to_one_workspace(tmp_path: Path) -> None:
     install.mkdir()
     _write_skill(install / "personal" / "skills", "journal", "Personal journal")
     _write_skill(install / "work" / "skills", "invoice", "Work invoice")
-    client = _skills_client(_rerooted_config(install))
+    client = _skills_client(_per_root_config(install))
 
     personal = client.get("/api/admin/skills?workspace=personal").json()
     work = client.get("/api/admin/skills?workspace=work").json()
@@ -179,7 +179,7 @@ def test_a_workspace_scoped_skills_list_still_shows_built_ins(tmp_path: Path) ->
             encoding="utf-8",
         )
         (skill_dir / ".ciao-stock-skill").write_text("", encoding="utf-8")
-    client = _skills_client(_rerooted_config(install))
+    client = _skills_client(_per_root_config(install))
 
     rows = client.get("/api/admin/skills?workspace=work").json()["skills"]
 
@@ -192,7 +192,7 @@ def test_an_unknown_workspace_falls_back_to_the_merged_list(tmp_path: Path) -> N
     install = tmp_path / "install"
     install.mkdir()
     _write_skill(install / "personal" / "skills", "journal", "Personal journal")
-    client = _skills_client(_rerooted_config(install))
+    client = _skills_client(_per_root_config(install))
 
     rows = client.get("/api/admin/skills?workspace=ghost").json()["skills"]
 

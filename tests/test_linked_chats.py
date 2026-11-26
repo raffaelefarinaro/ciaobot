@@ -379,7 +379,7 @@ def _manager(tmp_path: Path) -> ProjectChatManager:
 
 def test_the_pass_prompt_carries_linked_chats_of_its_own_workspace_only(tmp_path: Path) -> None:
     for name in ("work", "other"):
-        (tmp_path / "memory-vault" / name / "Workspace").mkdir(parents=True)
+        (tmp_path / name / "memory-vault" / "Workspace").mkdir(parents=True)
     manager = _manager(tmp_path)
     memory = manager._memory_pass.ensure_project("work")
     work = manager.create_project("Source work", workspace="work")
@@ -418,7 +418,7 @@ def test_the_pass_prompt_carries_linked_chats_of_its_own_workspace_only(tmp_path
 
 
 def test_an_earlier_attempt_chat_of_the_same_task_is_linked(tmp_path: Path) -> None:
-    (tmp_path / "memory-vault" / "work" / "Workspace").mkdir(parents=True)
+    (tmp_path / "work" / "memory-vault" / "Workspace").mkdir(parents=True)
     manager = _manager(tmp_path)
     memory = manager._memory_pass.ensure_project("work")
     work = manager.create_project("Source work", workspace="work")
@@ -469,7 +469,7 @@ def _per_workspace_roots(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Pat
 def _work_pair(tmp_path: Path) -> tuple[ProjectChatManager, ChatInfo, ChatInfo, ChatInfo]:
     """A manager, the Memory project, a forked child in ``work`` and its parent."""
     for name in ("work", "other"):
-        (tmp_path / "memory-vault" / name / "Workspace").mkdir(parents=True)
+        (tmp_path / name / "memory-vault" / "Workspace").mkdir(parents=True)
     manager = _manager(tmp_path)
     memory = manager._memory_pass.ensure_project("work")
     work = manager.create_project("Source work", workspace="work")
@@ -587,7 +587,7 @@ def test_the_fork_parent_is_kept_before_three_newer_attempt_chats(tmp_path: Path
 
 
 def test_a_fork_parent_is_not_crowded_out_by_newer_attempt_chats(tmp_path: Path) -> None:
-    (tmp_path / "memory-vault" / "work" / "Workspace").mkdir(parents=True)
+    (tmp_path / "work" / "memory-vault" / "Workspace").mkdir(parents=True)
     manager = _manager(tmp_path)
     memory = manager._memory_pass.ensure_project("work")
     work = manager.create_project("Source work", workspace="work")

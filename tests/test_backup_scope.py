@@ -24,18 +24,17 @@ import subprocess
 from pathlib import Path
 
 from ciao import backup_scope
-from ciao.config import CiaoConfig, reset_reroot_cache
-from ciao.workspace_reroot import mark_born_per_root
+from ciao.config import CiaoConfig
 
 # Durable user data, by the reason it is durable.
 ELIGIBLE = (
-    "memory-vault/Notes/day-1.md",
-    "memory-vault/Workspace/Memory-Proposals.md",
-    "memory-vault/INDEX.md",
-    "AGENTS.md",
-    "skills/recipe/SKILL.md",
-    "subagents/researcher.md",
-    "commands/daily-review.md",
+    "personal/memory-vault/Notes/day-1.md",
+    "personal/memory-vault/Workspace/Memory-Proposals.md",
+    "personal/memory-vault/INDEX.md",
+    "personal/AGENTS.md",
+    "personal/skills/recipe/SKILL.md",
+    "personal/subagents/researcher.md",
+    "personal/commands/daily-review.md",
     ".archived-workspaces/old-20260101-000000/memory-vault/Notes/day-9.md",
     ".archived-workspaces/old-20260101-000000/AGENTS.md",
 )
@@ -51,13 +50,13 @@ INELIGIBLE = {
     ".agents/recipe.md": "a provider mirror sync-skills regenerates",
     ".opencode/recipe.md": "a provider mirror sync-skills regenerates",
     "opencode.json": "a provider mirror sync-skills regenerates",
-    "memory-vault/Logs/Chats/2026-09-28/session.md": "the transcript archive",
-    "Logs/Chats/2026-09-28/session.md": "a bare top-level directory, not a durable tree",
+    "Logs/Chats/2026-09-28/session.md": "the shared transcript archive",
+    "personal/Logs/Chats/2026-09-28/session.md": "a bare top-level directory, not a durable tree",
     "node_modules/left-pad/index.js": "a dependency tree",
     "web/node_modules/vite/dist/node.js": "a dependency tree",
     ".venv/lib/python3.13/site-packages/x.py": "a virtualenv",
     "__pycache__/local_session.cpython-313.pyc": "a build cache",
-    "memory-vault/Projects/node_modules/x/y.js": "a dependency tree",
+    "personal/memory-vault/Projects/node_modules/x/y.js": "a dependency tree",
     "ciao/local_session.py": "application source",
     "docs/ARCHITECTURE.md": "application source",
     "Projects/client-repo/notes.md": "an unrelated project checkout",
@@ -96,15 +95,15 @@ def _config(workspace: Path, vault: Path | None = None) -> CiaoConfig:
 
 
 def _install(tmp_path: Path, *, vault: Path | None = None) -> tuple[Path, CiaoConfig]:
-    """A workspace on the default (shared-vault) layout, as a git repository."""
+    """A per-workspace install (one workspace, `personal`), as a git repository."""
     workspace = tmp_path / "install"
-    (workspace / "memory-vault" / "Notes").mkdir(parents=True)
+    (workspace / "personal" / "memory-vault" / "Notes").mkdir(parents=True)
     (workspace / ".runtime").mkdir()
     _git(workspace, "init", "-q", "-b", "main")
     return workspace, _config(workspace, vault)
 
 
-def _rerooted_install(tmp_path: Path) -> tuple[Path, CiaoConfig]:
+def _per_root_install(tmp_path: Path) -> tuple[Path, CiaoConfig]:
     """An install that has been re-rooted per workspace, as a git repository.
 
     The shape matters to what follows, so it is spelled out rather than faked:
@@ -119,8 +118,6 @@ def _rerooted_install(tmp_path: Path) -> tuple[Path, CiaoConfig]:
     (workspace / "personal" / "memory-vault").mkdir(parents=True)
     (workspace / ".runtime").mkdir()
     _git(workspace, "init", "-q", "-b", "main")
-    mark_born_per_root(workspace, workspace / ".runtime", ["personal"])
-    reset_reroot_cache()
     return workspace, _config(workspace)
 
 
@@ -148,10 +145,11 @@ def test_eligible_relpaths_names_the_allowlist(tmp_path: Path) -> None:
         ".archived-workspaces/*/commands/",
         ".archived-workspaces/*/AGENTS.md",
         "memory-vault/",
-        "skills/",
-        "subagents/",
-        "commands/",
-        "AGENTS.md",
+        "personal/memory-vault/",
+        "personal/skills/",
+        "personal/subagents/",
+        "personal/commands/",
+        "personal/AGENTS.md",
         # The one file carved out of a refused directory (#734). It is in the
         # allowlist rather than an exception to it, so the status and the setup
         # prompt can render the scope without a second list of names.
@@ -168,7 +166,7 @@ def test_ineligible_names_every_refusal(tmp_path: Path) -> None:
     for name in (
         ".env", ".envrc", "secrets/", ".claude/", ".agents/",
         ".opencode/", "opencode.json", "node_modules/",
-        "memory-vault/Logs/", ".venv/", "__pycache__/", ".git/",
+        ".venv/", "__pycache__/", ".git/",
     ):
         assert name in refused, name
     # `.runtime` is refused for everything but the one file the scope carves
@@ -177,11 +175,11 @@ def test_ineligible_names_every_refusal(tmp_path: Path) -> None:
     # make, and this tuple is what the setup prompt prints.
     assert ".runtime/" not in refused
     assert ".runtime/*" in refused
-    # The transcript archive is refused where this install keeps it, which here
-    # is inside the vault. The bare name is not refused at any depth any more
+    # The transcript archive is refused where this install keeps it, the
+    # install's own `Logs/`. The bare name is not refused at any depth
     # (#734): a name match cannot tell the archive from a notes folder the
     # operator called `Logs`.
-    assert "Logs/" not in refused
+    assert "Logs/" in refused
 
 
 def test_an_unknown_top_level_directory_is_not_eligible(tmp_path: Path) -> None:
@@ -200,16 +198,16 @@ def test_classify_splits_a_mixed_set(tmp_path: Path) -> None:
 
     eligible, excluded = backup_scope.classify(
         [
-            "memory-vault/Notes/day-1.md",
+            "personal/memory-vault/Notes/day-1.md",
             ".env",
             "ciao/main.py",
-            workspace / "AGENTS.md",
-            "memory-vault/Notes/day-1.md",  # a duplicate is not reported twice
+            workspace / "personal" / "AGENTS.md",
+            "personal/memory-vault/Notes/day-1.md",  # a duplicate is not reported twice
         ],
         config,
     )
 
-    assert eligible == ["memory-vault/Notes/day-1.md", "AGENTS.md"]
+    assert eligible == ["personal/memory-vault/Notes/day-1.md", "personal/AGENTS.md"]
     assert excluded == [".env", "ciao/main.py"]
 
 
@@ -229,10 +227,10 @@ def test_a_symlink_out_of_the_data_root_is_excluded(tmp_path: Path) -> None:
     workspace, config = _install(tmp_path)
     outside = tmp_path / "outside"
     outside.mkdir()
-    (workspace / "memory-vault" / "linked").symlink_to(outside, target_is_directory=True)
+    (workspace / "personal" / "memory-vault" / "linked").symlink_to(outside, target_is_directory=True)
 
-    assert backup_scope.is_eligible("memory-vault/linked/notes.md", config) is False
-    assert backup_scope.is_eligible("memory-vault/Notes/day-1.md", config) is True
+    assert backup_scope.is_eligible("personal/memory-vault/linked/notes.md", config) is False
+    assert backup_scope.is_eligible("personal/memory-vault/Notes/day-1.md", config) is True
 
 
 # ── #734: the three refusals that read as over-refusals ──────────────────────
@@ -250,7 +248,7 @@ def test_the_734_scope_table(tmp_path: Path) -> None:
     rule used to conflate: the archive has been promoted to `<install>/Logs`, so
     a folder the operator named `Logs` inside their own vault is theirs.
     """
-    _workspace, config = _rerooted_install(tmp_path)
+    _workspace, config = _per_root_install(tmp_path)
     table = (
         # A notes folder the operator happens to have called `Logs`. The vault's
         # own layout is the app's canonical structure and its folder names are
@@ -297,7 +295,7 @@ def test_task_records_are_durable(tmp_path: Path) -> None:
     Both layouts are asked, because a scope base is the agent root's own vault
     and which of the two an install uses is not this test's decision to make.
     """
-    _workspace, config = _rerooted_install(tmp_path)
+    _workspace, config = _per_root_install(tmp_path)
 
     assert (
         backup_scope.is_eligible(
@@ -331,8 +329,6 @@ def test_the_archive_denial_wins_where_the_vault_is_the_archive(tmp_path: Path) 
     (workspace / ".runtime").mkdir()
     (workspace / "personal" / "memory-vault").mkdir(parents=True)
     _git(workspace, "init", "-q", "-b", "main")
-    mark_born_per_root(workspace, workspace / ".runtime", ["personal"])
-    reset_reroot_cache()
     # The promoted archive is the configured vault: every note-shaped path
     # inside it is derived output, whatever the vault rule would admit.
     config = _config(workspace, vault=workspace / "Logs")
@@ -380,7 +376,7 @@ def test_an_archived_workspaces_transcripts_stay_refused(tmp_path: Path) -> None
         ".archived-workspaces/old/memory-vault/Notes/day-9.md", config
     ) is True
     # The archive this install does write is still refused, whole.
-    assert backup_scope.is_eligible("memory-vault/Logs/Chats/s.md", config) is False
+    assert backup_scope.is_eligible("Logs/Chats/s.md", config) is False
 
 
 def test_a_live_root_is_not_an_archived_one(tmp_path: Path) -> None:
@@ -393,7 +389,7 @@ def test_a_live_root_is_not_an_archived_one(tmp_path: Path) -> None:
     the answer #734 settled for a live root and the only reason the refusal
     above is scoped to `.archived-workspaces/`.
     """
-    _workspace, config = _rerooted_install(tmp_path)
+    _workspace, config = _per_root_install(tmp_path)
 
     assert backup_scope.is_eligible(
         "personal/memory-vault/Logs/Chats/2026-09-28/s.md", config
@@ -422,7 +418,9 @@ def test_a_vault_in_its_own_repository_is_that_repository(tmp_path: Path) -> Non
     # The vault's own layout is the app's canonical structure, so its contents
     # are durable by provenance rather than by a fixed set of folder names.
     assert backup_scope.is_eligible("Notes/day-1.md", config) is True
-    assert backup_scope.is_eligible("Logs/Chats/s.md", config) is False
+    # The archive is the install's own `Logs`, outside this repository, so a
+    # `Logs` folder in the vault is the vault's own notes.
+    assert backup_scope.is_eligible("Logs/Chats/s.md", config) is True
     assert backup_scope.is_eligible("node_modules/x/y.js", config) is False
     assert backup_scope.is_eligible("secrets/token.json", config) is False
 
@@ -436,11 +434,11 @@ def test_an_operator_named_vault_is_still_scoped(tmp_path: Path) -> None:
     config = _config(workspace, vault=workspace / "brain")
 
     assert backup_scope.is_eligible("brain/People/ada.md", config) is True
-    assert backup_scope.is_eligible("brain/Logs/Chats/s.md", config) is False
-    # The install root is still an agent root, so its own unrelated trees stay
+    assert backup_scope.is_eligible("brain/Logs/Chats/s.md", config) is True
+    # The install root is not an agent root, so its own unrelated trees stay
     # out even though the vault sitting beside them is in.
     assert backup_scope.is_eligible("Projects/client/notes.md", config) is False
-    assert backup_scope.is_eligible("AGENTS.md", config) is True
+    assert backup_scope.is_eligible("AGENTS.md", config) is False
 
 
 def test_a_per_workspace_install_scopes_each_agent_root(tmp_path: Path) -> None:
@@ -449,8 +447,6 @@ def test_a_per_workspace_install_scopes_each_agent_root(tmp_path: Path) -> None:
     workspace = tmp_path / "install"
     (workspace / ".runtime").mkdir(parents=True)
     (workspace / "personal" / "memory-vault").mkdir(parents=True)
-    mark_born_per_root(workspace, workspace / ".runtime", ["personal"])
-    reset_reroot_cache()
     config = _config(workspace)
 
     assert backup_scope.is_eligible("personal/memory-vault/Notes/a.md", config) is True
@@ -472,7 +468,7 @@ def test_tracked_excluded_reports_a_committed_env(tmp_path: Path) -> None:
     """
     workspace, config = _install(tmp_path)
     (workspace / ".env").write_text("API_KEY=secret\n", encoding="utf-8")
-    (workspace / "memory-vault" / "Notes" / "day-1.md").write_text("hi\n", encoding="utf-8")
+    (workspace / "personal" / "memory-vault" / "Notes" / "day-1.md").write_text("hi\n", encoding="utf-8")
     _git(workspace, "add", "-f", "-A")
     _git(workspace, "commit", "-q", "-m", "oops")
 
@@ -481,8 +477,8 @@ def test_tracked_excluded_reports_a_committed_env(tmp_path: Path) -> None:
 
 def test_tracked_excluded_is_empty_for_a_clean_data_repo(tmp_path: Path) -> None:
     workspace, config = _install(tmp_path)
-    (workspace / "memory-vault" / "Notes" / "day-1.md").write_text("hi\n", encoding="utf-8")
-    (workspace / "AGENTS.md").write_text("# guide\n", encoding="utf-8")
+    (workspace / "personal" / "memory-vault" / "Notes" / "day-1.md").write_text("hi\n", encoding="utf-8")
+    (workspace / "personal" / "AGENTS.md").write_text("# guide\n", encoding="utf-8")
     _git(workspace, "add", "-A")
     _git(workspace, "commit", "-q", "-m", "seed")
 
@@ -496,7 +492,7 @@ def test_tracked_excluded_reports_an_application_checkout(tmp_path: Path) -> Non
     workspace, config = _install(tmp_path)
     (workspace / "ciao").mkdir()
     (workspace / "ciao" / "main.py").write_text("# app\n", encoding="utf-8")
-    (workspace / "memory-vault" / "Notes" / "day-1.md").write_text("hi\n", encoding="utf-8")
+    (workspace / "personal" / "memory-vault" / "Notes" / "day-1.md").write_text("hi\n", encoding="utf-8")
     _git(workspace, "add", "-A")
     _git(workspace, "commit", "-q", "-m", "seed")
 
@@ -522,7 +518,7 @@ def test_tracked_excluded_is_empty_outside_a_repository(tmp_path: Path) -> None:
 
 
 def test_a_workspaces_own_transcripts_are_never_backed_up(tmp_path: Path) -> None:
-    _workspace, config = _rerooted_install(tmp_path)
+    _workspace, config = _per_root_install(tmp_path)
 
     assert backup_scope.is_eligible("personal/Logs/Chats/chat-1/claude/s.md", config) is False
     assert backup_scope.is_eligible("personal/Logs/notes.md", config) is False
@@ -530,7 +526,7 @@ def test_a_workspaces_own_transcripts_are_never_backed_up(tmp_path: Path) -> Non
 
 
 def test_an_archived_per_root_workspaces_transcripts_stay_refused(tmp_path: Path) -> None:
-    _workspace, config = _rerooted_install(tmp_path)
+    _workspace, config = _per_root_install(tmp_path)
 
     assert backup_scope.is_eligible(
         ".archived-workspaces/work-20261103-120000/work/Logs/Chats/chat-1/claude/s.md",
@@ -539,7 +535,7 @@ def test_an_archived_per_root_workspaces_transcripts_stay_refused(tmp_path: Path
 
 
 def test_the_shared_logs_root_is_still_refused_after_the_split(tmp_path: Path) -> None:
-    _workspace, config = _rerooted_install(tmp_path)
+    _workspace, config = _per_root_install(tmp_path)
 
     assert backup_scope.is_eligible("Logs/Chats/chat-1/claude/s.md", config) is False
     assert backup_scope.is_eligible("Logs/CLI/x.md", config) is False

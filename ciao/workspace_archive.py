@@ -15,24 +15,15 @@ A workspace is now archived the way a completed project is:
   entry, when, from where, and the user schedules that left with it).
 - Nothing is merged anywhere and nothing is deleted.
 
-Where the folder is depends on the install's layout, decided by the same
-re-rooting receipt as ``CiaoConfig.agent_root``:
+Each workspace owns ``<install>/<name>/`` — its guide, ``.claude/`` assets,
+skills and ``memory-vault/``. The whole agent root moves.
 
-- **Per-root** (fresh and re-rooted installs): each workspace owns
-  ``<install>/<name>/`` — its guide, ``.claude/`` assets, skills and
-  ``memory-vault/``. The whole agent root moves.
-- **Shared** (installs that have not re-rooted): every workspace's notes are a
-  folder of one vault, ``<vault>/<name>/``, and the guide, skills and catalog
-  are shared by all of them. Only that folder moves; the shared guide's bounded
-  memory regions cannot be split per workspace and stay where they are.
-
-The archive root is the same directory in both layouts: beside the agent roots,
+The archive root sits beside the agent roots,
 outside every registered vault, in the install's own repository and on its
 filesystem, so the move is one atomic ``rename``. Shapes this cannot archive
 without guessing are REFUSED with a reason instead: a vault outside the install
-(its own repository), a workspace whose vault is the whole shared vault, a
-legacy vault pinned outside its standard folder, a symlinked folder, or a
-folder on another filesystem.
+(its own repository), a vault outside its own agent root, a symlinked folder,
+or a folder on another filesystem.
 
 Ownership boundary: this module owns the filesystem move, the archive
 metadata, the registry entry and the derived-index cleanup. The route
@@ -63,7 +54,6 @@ METADATA_FILE = "archive.json"
 METADATA_VERSION = 1
 
 LAYOUT_PER_ROOT = "per-root"
-LAYOUT_SHARED = "shared"
 
 _ARCHIVE_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,63}-\d{8}-\d{6}(?:-\d{1,3})?$")
 
@@ -91,13 +81,8 @@ class ArchiveTarget:
 
 
 def archive_root(config: Any) -> Path:
-    """``<install>/.archived-workspaces`` — the same place in both layouts."""
+    """``<install>/.archived-workspaces``."""
     return Path(config.workspace_root) / ARCHIVE_DIR_NAME
-
-
-def _rerooted(config: Any) -> bool:
-    check = getattr(config, "_rerooted", None)
-    return bool(check()) if callable(check) else False
 
 
 def _display(config: Any, path: Path) -> str:
@@ -129,49 +114,13 @@ def plan_archive(config: Any, name: str) -> ArchiveTarget:
             409,
         ) from exc
 
-    if _rerooted(config):
-        source = Path(config.agent_root(name))
-        layout = LAYOUT_PER_ROOT
-        if source == install or not vault.is_relative_to(source):
-            raise WorkspaceArchiveError(
-                f"'{name}' keeps its notes outside its own folder ({vault}); "
-                "move them into it before archiving",
-                409,
-            )
-    else:
-        layout = LAYOUT_SHARED
-        shared = Path(config.vault_root)
-        if not shared.is_relative_to(install):
-            raise WorkspaceArchiveError(
-                f"the vault lives outside the install ({shared}), in its own "
-                "repository; archiving would move notes out of it, so archive "
-                f"'{name}' by hand",
-                409,
-            )
-        if shared != install and (shared / ".git").exists():
-            # The vault is inside the install but is its own repository, the
-            # one git sync commits and pushes (``local_session.sync_root``).
-            # Moving a folder out of it would sync as a deletion to every other
-            # device while the archive sat unversioned on this one.
-            raise WorkspaceArchiveError(
-                f"the vault is its own repository ({shared}); archiving would "
-                "move notes out of it and sync that as a deletion, so archive "
-                f"'{name}' by hand",
-                409,
-            )
-        if vault == shared:
-            raise WorkspaceArchiveError(
-                f"'{name}' uses the whole shared vault, which holds every "
-                "workspace's notes; it cannot be archived on its own",
-                409,
-            )
-        if vault.parent != shared:
-            raise WorkspaceArchiveError(
-                f"'{name}' keeps its notes outside the standard folder "
-                f"({vault}); move it into the standard folder first",
-                409,
-            )
-        source = vault
+    source = Path(config.agent_root(name))
+    if source == install or not vault.is_relative_to(source):
+        raise WorkspaceArchiveError(
+            f"'{name}' keeps its notes outside its own folder ({vault}); "
+            "move them into it before archiving",
+            409,
+        )
 
     if source.is_symlink():
         raise WorkspaceArchiveError(
@@ -190,7 +139,7 @@ def plan_archive(config: Any, name: str) -> ArchiveTarget:
                 "there cannot be atomic, so archive it by hand",
                 409,
             )
-    return ArchiveTarget(name=name, layout=layout, source=source, vault=vault)
+    return ArchiveTarget(name=name, layout=LAYOUT_PER_ROOT, source=source, vault=vault)
 
 
 def _registry_entry(config: Any, workspace: WorkspaceConfig) -> dict[str, Any]:
@@ -318,10 +267,8 @@ def carry_late_transcripts(
     back. This moves every file under that ``Logs`` into the archived root's own
     ``Logs`` (never overwriting, and skipping symlinks), then removes the
     emptied tree and the agent root when nothing else is left in them. Returns
-    how many files moved. The shared layout has no per-workspace ``Logs``.
+    how many files moved.
     """
-    if target.layout != LAYOUT_PER_ROOT:
-        return 0
     late = target.source / "Logs"
     if late.is_symlink() or not late.is_dir():
         return 0
@@ -448,49 +395,14 @@ def mark_rolled_back(config: Any, archived: dict[str, Any]) -> None:
         logger.warning("Could not mark %s as rolled back", folder, exc_info=True)
 
 
-def refresh_shared_index(config: Any, *, registry_owner: Any = None) -> bool:
-    """Rebuild the shared ``INDEX.md`` on an install that has not re-rooted.
-
-    There one index lists every workspace's notes under a workspace prefix, so
-    an archived folder's entries must leave it
-    now rather than at the next restart. A per-root install needs nothing: the
-    archived root's own index moved with it.
-    """
-    if _rerooted(config):
-        return False
-    root = Path(config.vault_root)
-    if not root.is_dir():
-        return False
-    from ciao import vault_index  # noqa: PLC0415
-
-    ownership = getattr(config, "vault_index_ownership", None)
-    if not callable(ownership) or ownership(None) != "ciao":
-        # Connected, external and ambiguous snapshots use the private SQLite
-        # index only; their Markdown INDEX is not ours to rewrite.
-        return False
-    entries = vault_index.scan_vault(root, strict=True)
-    vault_index.write_index_file(
-        entries,
-        root / "INDEX.md",
-        replace_existing=True,
-        authorize=lambda: ownership(None) == "ciao",
-        ownership_runtime=Path(config.state_path).parent,
-        registration_runtime=Path(config.state_path).parent,
-        registry_owner=registry_owner,
-    )
-    return True
-
-
 def _workspace_logs_root(config: Any, vault: Path) -> Path | None:
-    """The ``Logs`` of the agent root holding *vault*, per-root installs only.
+    """The ``Logs`` of the agent root holding *vault*.
 
-    A per-root workspace's vault sits under its own agent root
-    (``<install>/<name>/...``), and that root's ``Logs`` is where its transcripts
-    were written. The shared layout keeps every transcript in the one shared
-    root, so there is nothing per-workspace to drop.
+    A workspace's vault sits under its own agent root (``<install>/<name>/...``),
+    and that root's ``Logs`` is where its transcripts were written.
     """
     install = Path(config.workspace_root)
-    if not _rerooted(config) or not vault.is_relative_to(install):
+    if not vault.is_relative_to(install):
         return None
     parts = vault.relative_to(install).parts
     if not parts:
@@ -699,10 +611,7 @@ def _restored_vault_root(
     dest = Path(os.path.normpath(destination.parent.resolve() / destination.name))
     raw = _workspace_entry(metadata).get("vault_root")
     if raw is None or raw == "":
-        if metadata.get("layout") == LAYOUT_PER_ROOT:
-            candidate = dest / shared.name
-        else:
-            candidate = dest
+        candidate = dest / shared.name
     elif not isinstance(raw, str):
         raise ValueError("the archive's vault location is not a path")
     else:
@@ -751,19 +660,12 @@ def _taken_name(config: Any, name: str) -> str | None:
     return None
 
 
-def _current_layout(config: Any) -> str:
-    return LAYOUT_PER_ROOT if _rerooted(config) else LAYOUT_SHARED
-
-
 def _restore_destination(config: Any, metadata: dict[str, Any]) -> Path:
     # The folder goes back under the name it left with, not the workspace name:
-    # on the shared layout a workspace's vault folder can be named differently
-    # (Settings' free-text "Vault name"), and the restored registry entry still
-    # points at that folder.
+    # a workspace's folder can differ from its name, and the restored registry
+    # entry still points at that folder.
     folder_name = str(metadata.get("content_dir") or "") or str(metadata.get("name") or "")
-    if metadata.get("layout") == LAYOUT_PER_ROOT:
-        return Path(config.workspace_root) / folder_name
-    return Path(config.vault_root) / folder_name
+    return Path(config.workspace_root) / folder_name
 
 
 def _safe_content_dir(content_dir: str) -> bool:
@@ -791,7 +693,7 @@ def _restore_blocker(config: Any, metadata: dict[str, Any], folder: Path) -> str
     taken = _taken_name(config, name)
     if taken is not None:
         return f"a workspace named '{taken}' already exists"
-    if metadata.get("layout") != _current_layout(config):
+    if metadata.get("layout") != LAYOUT_PER_ROOT:
         return (
             "archived before this install moved each workspace into its own "
             f"folder; restore it by hand from {_display(config, folder)}"

@@ -301,7 +301,7 @@ def test_post_workspace_persists_runtime_registry_and_updates_live_config(tmp_pa
     client_workspace = next(item for item in stored if item["name"] == "client-a")
     assert client_workspace == {
         "name": "client-a",
-        "vault_root": "memory-vault/client-a",
+        "vault_root": "client-a/memory-vault",
         "lifetime_id": client_workspace["lifetime_id"],
         "default_provider": "claude",
         "disallowed_tools": ["mcp__claude_ai_Slack", "Bash"],
@@ -334,7 +334,7 @@ def test_patch_and_delete_workspace_update_runtime_registry(tmp_path):
     assert json.loads((tmp_path / ".runtime" / "workspaces.json").read_text()) == [
         {
             "name": "personal",
-            "vault_root": "memory-vault/personal",
+            "vault_root": "personal/memory-vault",
             "lifetime_id": json.loads((tmp_path / ".runtime" / "workspaces.json").read_text())[0]["lifetime_id"],
             "default_provider": "claude",
             "disallowed_tools": None,
@@ -369,7 +369,7 @@ def test_workspace_save_never_accepts_a_request_body_vault_path(tmp_path):
     assert created.status_code == 201
     assert (
         config.workspace_vault_root("research")
-        == tmp_path / "memory-vault" / "research"
+        == tmp_path / "research" / "memory-vault"
     )
 
     existing = config.workspace("research")
@@ -388,10 +388,9 @@ def test_workspace_save_never_accepts_a_request_body_vault_path(tmp_path):
 def test_workspace_creation_rejects_a_symlinked_vault_folder(tmp_path):
     target = tmp_path / "outside"
     target.mkdir()
-    vault = tmp_path / "memory-vault"
-    vault.mkdir()
-    (vault / "research").symlink_to(target, target_is_directory=True)
     client, config, pcm = _client(tmp_path)
+    (tmp_path / "research").mkdir()
+    (tmp_path / "research" / "memory-vault").symlink_to(target, target_is_directory=True)
 
     response = client.post("/api/workspaces", json={"name": "research"})
 
@@ -417,7 +416,7 @@ def test_workspace_creation_rejects_case_and_vault_owner_collisions(tmp_path):
     # workspace serves here — the point is that its vault folder is already owned.
     existing = config.workspace("personal")
     assert existing is not None
-    existing.vault_root = str(tmp_path / "memory-vault" / "client")
+    existing.vault_root = str(tmp_path / "client" / "memory-vault")
     root_collision = client.post(
         "/api/workspaces",
         json={"name": "client"},
@@ -472,13 +471,13 @@ def test_stale_stored_provider_serializes_coerced_and_saves(tmp_path):
             [
                 {
                     "name": "personal",
-                    "vault_root": "memory-vault/personal",
+                    "vault_root": "personal/memory-vault",
                     "default_provider": "ollama",
                     "model_bucket": "big",
                 },
                 {
                     "name": "work",
-                    "vault_root": "memory-vault/work",
+                    "vault_root": "work/memory-vault",
                     "default_provider": "claude",
                 },
             ]
@@ -531,7 +530,7 @@ def test_persist_workspace_registry_normalizes_stale_provider(tmp_path):
     (runtime / "workspaces.json").write_text(
         json.dumps([{
             "name": "personal",
-            "vault_root": "memory-vault/personal",
+            "vault_root": "personal/memory-vault",
             "default_provider": "ollama",
         }]) + "\n",
         encoding="utf-8",
@@ -901,10 +900,10 @@ def test_patch_rename_returns_renamed_and_publishes_from_to(tmp_path, monkeypatc
         media_root=tmp_path / ".runtime" / "media",
         workspaces={
             "alpha": WorkspaceConfig(
-                name="alpha", vault_root="memory-vault/alpha"
+                name="alpha", vault_root="alpha/memory-vault"
             ),
             "work": WorkspaceConfig(
-                name="work", vault_root="memory-vault/work"
+                name="work", vault_root="work/memory-vault"
             ),
         },
     )
@@ -998,9 +997,9 @@ def test_patch_rename_without_the_key_keeps_provider_overrides(tmp_path):
         media_root=tmp_path / ".runtime" / "media",
         workspaces={
             "alpha": WorkspaceConfig(
-                name="alpha", vault_root="memory-vault/alpha", provider_overrides=overrides
+                name="alpha", vault_root="alpha/memory-vault", provider_overrides=overrides
             ),
-            "work": WorkspaceConfig(name="work", vault_root="memory-vault/work"),
+            "work": WorkspaceConfig(name="work", vault_root="work/memory-vault"),
         },
     )
     config.persist_workspace_registry()
@@ -1053,10 +1052,10 @@ def test_patch_rename_with_invalid_setting_writes_nothing(tmp_path, extra):
         media_root=tmp_path / ".runtime" / "media",
         workspaces={
             "alpha": WorkspaceConfig(
-                name="alpha", vault_root="memory-vault/alpha"
+                name="alpha", vault_root="alpha/memory-vault"
             ),
             "work": WorkspaceConfig(
-                name="work", vault_root="memory-vault/work"
+                name="work", vault_root="work/memory-vault"
             ),
         },
     )
@@ -1219,7 +1218,7 @@ def test_a_stored_scope_is_ignored_and_dropped_on_save(tmp_path: Path) -> None:
     (runtime / "workspaces.json").write_text(
         json.dumps([{
             "name": "personal",
-            "vault_root": "memory-vault/personal",
+            "vault_root": "personal/memory-vault",
             "agent_fs_scope": "workspace",
         }]),
         encoding="utf-8",
@@ -1433,7 +1432,7 @@ def _no_personal_client(tmp_path: Path, names=("work", "clientA", "other")):
     client, config, pcm = _client(tmp_path)
     config.workspaces.clear()
     for name in names:
-        config.workspaces[name] = WorkspaceConfig(name=name, vault_root=f"memory-vault/{name}")
+        config.workspaces[name] = WorkspaceConfig(name=name, vault_root=f"{name}/memory-vault")
     config.persist_workspace_registry()
     pcm.events = _ReorderEvents()
     return client, config, pcm

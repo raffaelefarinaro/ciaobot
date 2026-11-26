@@ -319,7 +319,7 @@ async def test_flagged_compact_recap_is_hidden_on_the_fallback_path(
     import ciao.transcripts as transcripts
 
     session_id = "11111111-2222-3333-4444-555555555555"
-    project_dir = tmp_path / ".claude" / "projects" / project_key_for_directory(str(tmp_path))
+    project_dir = tmp_path / ".claude" / "projects" / project_key_for_directory(str(tmp_path / "personal"))
     project_dir.mkdir(parents=True, exist_ok=True)
     entries = [
         {

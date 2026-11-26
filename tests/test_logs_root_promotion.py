@@ -33,42 +33,17 @@ def _config(root: Path) -> CiaoConfig:
     )
 
 
-def _migrated_receipt(root: Path) -> None:
-    path = root / ".runtime" / "migration" / "workspace-rooting.json"
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps({"status": "migrated"}), encoding="utf-8")
-    from ciao.config import reset_reroot_cache
-
-    reset_reroot_cache()
-
-
-def test_logs_root_is_inside_the_vault_before_the_re_rooting(tmp_path: Path) -> None:
-    from ciao.config import reset_reroot_cache
-
-    reset_reroot_cache()
+def test_logs_root_is_the_install_logs_folder(tmp_path: Path) -> None:
     config = _config(tmp_path)
-
-    assert config.logs_root == tmp_path / "memory-vault" / "Logs"
-
-
-def test_logs_root_follows_the_promotion_after_the_re_rooting(tmp_path: Path) -> None:
-    config = _config(tmp_path)
-    _migrated_receipt(tmp_path)
 
     assert config.logs_root == tmp_path / "Logs"
 
 
 def test_the_standalone_form_answers_the_same_question(tmp_path: Path) -> None:
     """A CLI holding only paths must not end up with a second copy of the rule."""
-    from ciao.config import reset_reroot_cache
 
-    reset_reroot_cache()
     config = _config(tmp_path)
-    args = (tmp_path, tmp_path / "memory-vault", tmp_path / ".runtime")
-    assert logs_root_for(*args) == config.logs_root
-
-    _migrated_receipt(tmp_path)
-    assert logs_root_for(*args) == config.logs_root == tmp_path / "Logs"
+    assert logs_root_for(tmp_path) == config.logs_root == tmp_path / "Logs"
 
 
 def test_the_transcript_store_root_follows_the_archive(tmp_path: Path) -> None:
@@ -161,19 +136,12 @@ def test_setup_scaffolds_agent_roots_not_the_install_root(tmp_path: Path) -> Non
     runtime = install / ".runtime"
     runtime.mkdir(parents=True)
 
-    # Before the re-rooting: the install root IS the agent root.
+    # No registry yet: the install root is the only root.
     assert agent_roots_for(install, runtime) == [(install, "")]
 
-    (runtime / "migration").mkdir()
-    (runtime / "migration" / "workspace-rooting.json").write_text(
-        json.dumps({"status": "migrated"}), encoding="utf-8"
-    )
     (runtime / "workspaces.json").write_text(
         json.dumps([{"name": "work"}, {"name": "personal"}]), encoding="utf-8"
     )
-    from ciao.config import reset_reroot_cache
-
-    reset_reroot_cache()
 
     assert agent_roots_for(install, runtime) == [
         (install / "personal", "personal"),
@@ -186,7 +154,7 @@ def test_the_standalone_helper_never_manufactures_workspace_names(tmp_path: Path
     would scaffold two roots for an install that has none."""
     import json
 
-    from ciao.config import agent_roots_for, reset_reroot_cache
+    from ciao.config import agent_roots_for
 
     install = tmp_path / "install"
     runtime = install / ".runtime" / "migration"
@@ -194,7 +162,6 @@ def test_the_standalone_helper_never_manufactures_workspace_names(tmp_path: Path
     (runtime / "workspace-rooting.json").write_text(
         json.dumps({"status": "migrated"}), encoding="utf-8"
     )
-    reset_reroot_cache()
 
     # Migrated receipt but no registry: fall back to the install root, not to
     # invented `personal` and `work` directories.

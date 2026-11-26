@@ -394,9 +394,7 @@ class ConnectedRegistration:
         config = CiaoConfig(pwa_auth_token="", workspace_root=base,
                             state_path=self.registry.parent / "state.json", media_root=self.registry.parent,
                             vault_root=vault_base or base / "memory-vault", workspaces={workspace: replace(row)})
-        sources = [config.workspace_vault_root(workspace)]
-        if config._rerooted():
-            sources.append(config.agent_vault_root(workspace))
+        sources = [config.workspace_vault_root(workspace), config.agent_vault_root(workspace)]
         if not any((root == source or (allow_subfolders and root.is_relative_to(source)))
                    and source.resolve() == source for source in sources):
             raise ConnectedWorkspaceChanged("Source is no longer registered for this workspace")

@@ -5,7 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 from types import SimpleNamespace
 
-from ciao.config import CiaoConfig, WorkspaceConfig, reset_reroot_cache
+from ciao.config import CiaoConfig, WorkspaceConfig
 from ciao.web import commands as commands_module
 from ciao.web.commands import (
     _parse_frontmatter,
@@ -15,7 +15,6 @@ from ciao.web.commands import (
     list_provider_command_entries,
     list_skill_entries,
 )
-from ciao.workspace_reroot import write_receipt
 
 
 def _write_cmd(dir_path: Path, name: str, frontmatter: str, body: str = "body") -> None:
@@ -193,10 +192,8 @@ def test_picker_lists_opencode_system_skills(tmp_path: Path, monkeypatch) -> Non
     commands_module._provider_skills_cache.clear()
 
 
-def _rerooted_config(tmp_path: Path, workspaces: dict[str, str]) -> CiaoConfig:
+def _per_root_config(tmp_path: Path, workspaces: dict[str, str]) -> CiaoConfig:
     runtime_root = tmp_path / ".runtime"
-    write_receipt(runtime_root, {"status": "migrated", "workspaces": list(workspaces)})
-    reset_reroot_cache()
     return CiaoConfig(
         pwa_auth_token="test-token",
         workspace_root=tmp_path,
@@ -223,7 +220,7 @@ def test_workspace_root_uses_agent_root_after_rerooting(tmp_path: Path) -> None:
     custom skill living under a workspace's own `skills/` (moved there by the
     re-rooting migration) never showed up in that workspace's slash picker.
     """
-    config = _rerooted_config(tmp_path, {"personal": "personal", "work": "work"})
+    config = _per_root_config(tmp_path, {"personal": "personal", "work": "work"})
     _write_cmd(tmp_path / "work" / "skills" / "humanizer", "SKILL", "---\ndescription: Humanize text\n---\n")
 
     assert _workspace_root(_request(config, "work")) == tmp_path / "work"
@@ -240,7 +237,7 @@ def test_workspace_root_uses_agent_root_after_rerooting(tmp_path: Path) -> None:
 
 
 def test_workspace_root_falls_back_when_workspace_unknown_or_missing(tmp_path: Path) -> None:
-    config = _rerooted_config(tmp_path, {"personal": "personal", "work": "work"})
+    config = _per_root_config(tmp_path, {"personal": "personal", "work": "work"})
 
     # No workspace param -> primary workspace's agent root, not the bare install root.
     assert _workspace_root(_request(config)) == tmp_path / "personal"

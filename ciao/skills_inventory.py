@@ -520,29 +520,14 @@ def _frontmatter_pair(content: str, name: str) -> tuple[str, str]:
 
 
 def _owned_agent_root(config: CiaoConfig, workspace: str) -> Path:
-    """The agent root this workspace owns alone, or refuse.
-
-    An install that has not re-rooted answers ``agent_root`` with the install
-    root for every registered workspace, so one ``skills/`` catalog is visible
-    to all of them and an edit made on behalf of one rewrites what the others
-    read. The single-workspace case is the same layout and is fine, so the test
-    is not "rerooted or not" but "one owner or several".
-    """
+    """The agent root of a registered workspace, or refuse an unknown name."""
     names = config.workspace_names()
     if workspace not in names:
         raise ValueError(
             f"unknown workspace {workspace!r}: the registry holds "
             f"{', '.join(sorted(names)) or 'nothing'}"
         )
-    root = config.agent_root(workspace)
-    owners = sorted(name for name in names if config.agent_root(name) == root)
-    if len(owners) > 1:
-        raise ValueError(
-            f"workspace {workspace!r} shares its agent root with "
-            f"{', '.join(owners)}: one catalog serves them all, so an edit to it "
-            f"would rewrite another workspace's skills too"
-        )
-    return root
+    return config.agent_root(workspace)
 
 
 def _check_skill_name(name: str) -> None:

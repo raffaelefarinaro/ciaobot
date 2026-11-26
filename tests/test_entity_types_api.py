@@ -29,7 +29,7 @@ from tests.session import signed_in
 
 
 def _note(vault: Path, name: str, note_type: str) -> None:
-    path = vault / "personal" / f"{name}.md"
+    path = vault / f"{name}.md"
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(f"---\ntype: {note_type}\n---\n# {name}\n", encoding="utf-8")
 
@@ -37,7 +37,7 @@ def _note(vault: Path, name: str, note_type: str) -> None:
 @pytest.fixture
 def vault(tmp_path: Path) -> Path:
     """A vault with two `type: person` notes and one of an unlisted `customer`."""
-    root = tmp_path / "memory-vault"
+    root = tmp_path / "personal" / "memory-vault"
     _note(root, "Mo", "person")
     _note(root, "Jo", "person")
     _note(root, "Prospect", "customer")
@@ -46,16 +46,16 @@ def vault(tmp_path: Path) -> Path:
 
 @pytest.fixture
 def client(vault: Path) -> TestClient:
-    tmp_path = vault.parent
+    tmp_path = vault.parent.parent
     cfg = CiaoConfig(
         pwa_auth_token="test-secret",
         workspace_root=tmp_path,
         state_path=tmp_path / ".runtime",
         media_root=tmp_path / "media",
-        vault_root=vault,
+        vault_root=tmp_path / "memory-vault",
         workspaces={
             "personal": WorkspaceConfig(
-                name="personal", vault_root="memory-vault/personal"
+                name="personal", vault_root="personal/memory-vault"
             )
         },
     )
@@ -288,7 +288,7 @@ def test_patch_deleting_a_custom_type_with_notes_is_refused(
     assert [row["id"] for row in _persisted(vault)] == ["customer"]
 
     # With no note naming it, the same omission is a delete.
-    (vault / "personal" / "Prospect.md").unlink()
+    (vault / "Prospect.md").unlink()
     assert _patch(client, without).status_code == 200
     assert "customer" not in _by_id(_rows(client))
     assert _persisted(vault) == []
@@ -387,7 +387,9 @@ def test_write_is_atomic_and_leaves_no_temp_file(client: TestClient, vault: Path
     assert not list(vault.glob(".entity-types.*"))
     # Sort the names: WindowsPath objects compare case-insensitively.
     assert sorted(path.name for path in vault.iterdir()) == [
+        "Jo.md",
+        "Mo.md",
+        "Prospect.md",
         "VOCABULARY.md",
         "entity-types.yaml",
-        "personal",
     ], "the temp file is gone and nothing else was left behind"

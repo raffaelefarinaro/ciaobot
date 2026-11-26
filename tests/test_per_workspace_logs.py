@@ -17,45 +17,39 @@ import pytest
 
 from ciao import config as config_module
 from ciao import main
-from ciao.config import CiaoConfig, WorkspaceConfig, logs_roots_for, reset_reroot_cache
+from ciao.config import CiaoConfig, WorkspaceConfig, logs_roots_for
 from ciao.models import AgentRequest, ChatContext
 from ciao.sessions import StateStore
 from ciao.transcripts import TranscriptStore
 from ciao.web.project_chats import ChatInfo, ProjectChatManager
-from ciao.workspace_reroot import mark_born_per_root, registry_file
 from tests.conftest import attach_stub_mcp
 
 
 @pytest.fixture(autouse=True)
 def _clean_reroot_cache() -> Iterator[None]:
-    reset_reroot_cache()
     yield
-    reset_reroot_cache()
 
 
-def _config(tmp_path: Path, *, rerooted: bool) -> CiaoConfig:
+def _config(tmp_path: Path) -> CiaoConfig:
     runtime = tmp_path / ".runtime"
     runtime.mkdir(parents=True, exist_ok=True)
-    if rerooted:
-        mark_born_per_root(tmp_path, runtime, ["personal", "work"])
-        registry_file(runtime).write_text(
-            json.dumps([{"name": "personal"}, {"name": "work"}]), encoding="utf-8"
-        )
-        reset_reroot_cache()
+    (runtime / "workspaces.json").write_text(
+        json.dumps([{"name": "personal"}, {"name": "work"}]), encoding="utf-8"
+    )
     return CiaoConfig(
         pwa_auth_token="test-token",
         workspace_root=tmp_path,
         state_path=runtime / "state.json",
         media_root=runtime / "media",
         workspaces={
-            name: WorkspaceConfig(name=name, vault_root=f"memory-vault/{name}")
+            name: WorkspaceConfig(name=name, vault_root=f"{name}/memory-vault")
             for name in ("personal", "work")
         },
     )
 
 
-def _manager(tmp_path: Path, *, rerooted: bool = True) -> ProjectChatManager:
-    config = _config(tmp_path, rerooted=rerooted)
+def _manager(tmp_path: Path) -> ProjectChatManager:
+    config = _config(tmp_path)
     runtime = config.state_path.parent
     return attach_stub_mcp(ProjectChatManager(
         config,
@@ -69,22 +63,14 @@ def _manager(tmp_path: Path, *, rerooted: bool = True) -> ProjectChatManager:
 
 
 def test_chats_root_is_per_workspace_after_the_re_rooting(tmp_path: Path) -> None:
-    config = _config(tmp_path, rerooted=True)
+    config = _config(tmp_path)
 
     assert config.chats_root("work") == tmp_path / "work" / "Logs" / "Chats"
     assert config.chats_root("") == tmp_path / "Logs" / "Chats"
 
 
-def test_chats_root_is_the_shared_root_before_the_re_rooting(tmp_path: Path) -> None:
-    config = _config(tmp_path, rerooted=False)
-
-    assert config.chats_root("work") == config.logs_root / "Chats"
-    assert config.chats_root("work") == tmp_path / "memory-vault" / "Logs" / "Chats"
-    assert config.logs_roots() == [config.logs_root]
-
-
 def test_logs_roots_lists_every_agent_root_then_the_shared_root(tmp_path: Path) -> None:
-    config = _config(tmp_path, rerooted=True)
+    config = _config(tmp_path)
     expected = [
         tmp_path / "personal" / "Logs",
         tmp_path / "work" / "Logs",
@@ -92,7 +78,7 @@ def test_logs_roots_lists_every_agent_root_then_the_shared_root(tmp_path: Path) 
     ]
 
     assert config.logs_roots() == expected
-    assert logs_roots_for(tmp_path, tmp_path / "memory-vault", tmp_path / ".runtime") == expected
+    assert logs_roots_for(tmp_path, tmp_path / ".runtime") == expected
 
 
 def test_an_agent_root_with_logs_is_not_vault_evidence(tmp_path: Path) -> None:
@@ -331,52 +317,6 @@ def test_discovery_first_root_wins_for_a_duplicate_chat(tmp_path: Path) -> None:
 
 
 # --- pre-reroot manager (finding 3) ------------------------------------------
-
-
-def test_pre_reroot_archive_lands_in_the_shared_root(tmp_path: Path) -> None:
-    pcm = _manager(tmp_path, rerooted=False)
-    store = pcm._transcripts
-    store.set_archive_root_resolver(pcm.chat_archive_root)
-    project = pcm.create_project("Work project", workspace="work")
-    chat = pcm.create_chat(project.project_id, title="Pre-split chat")
-    ctx = _record_one_turn(store, chat.chat_id)
-
-    archived = store.archive_session(
-        ctx=ctx, active_model="sonnet", last_effective_model="sonnet", session_id="sess-w"
-    )
-
-    assert archived is not None
-    assert archived.parent == tmp_path / "memory-vault" / "Logs" / "Chats" / chat.chat_id / "claude"
-
-
-def test_pre_reroot_discovery_imports_from_the_shared_root(tmp_path: Path) -> None:
-    pcm = _manager(tmp_path, rerooted=False)
-    pcm.create_project("Work project", workspace="work")
-    _write_transcript(tmp_path / "memory-vault" / "Logs" / "Chats", "chat-pre")
-
-    pcm.list_projects()
-
-    chat = pcm.get_chat("chat-pre")
-    assert chat is not None
-    assert chat.archive_path == "memory-vault/Logs/Chats/chat-pre/claude/2026-06-10T12-00-00Z-s.md"
-
-
-def test_pre_reroot_prunes_an_archive_that_is_nowhere(tmp_path: Path) -> None:
-    pcm = _manager(tmp_path, rerooted=False)
-    project = pcm.create_project("Work project", workspace="work")
-    (tmp_path / "memory-vault" / "Logs" / "Chats").mkdir(parents=True)
-    pcm._chats["chat-old"] = ChatInfo(
-        chat_id="chat-old",
-        project_id=project.project_id,
-        title="Old",
-        archived=True,
-        archive_path="memory-vault/Logs/Chats/chat-old/claude/s.md",
-    )
-    pcm._save()
-
-    pcm.list_projects()
-
-    assert pcm.get_chat("chat-old") is None
 
 
 # --- delete through a symlinked chat folder (finding 4) ----------------------

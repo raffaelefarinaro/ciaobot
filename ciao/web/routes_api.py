@@ -511,7 +511,7 @@ async def reorder_workspaces(request: Request) -> JSONResponse:
 async def _bootstrap_new_agent_root(config, name: str) -> bool:
     """Seed a freshly created workspace's own agent root.
 
-    Once the re-rooting receipt has flipped, a new workspace's chats run from
+    A new workspace's chats run from
     `<install>/<name>` immediately - but persisting the registry and refreshing
     the manager only creates the General vault document. Nothing seeded
     `CLAUDE.md`/`AGENTS.md`, commands, agents or the skill mirrors, so a chat
@@ -870,9 +870,8 @@ async def archive_workspace_setting(request: Request) -> JSONResponse:
 
         # The archive is durable before this await. Report its identity even
         # when pruning fails so the operator can recover this specific archive.
-        def _forget() -> tuple[int | None, bool, Exception | None]:
+        def _forget() -> tuple[int | None, Exception | None]:
             rows: int | None = None
-            rebuilt = False
             cleanup_exc: Exception | None = None
             try:
                 rows = workspace_archive.forget_search_rows(
@@ -882,13 +881,9 @@ async def archive_workspace_setting(request: Request) -> JSONResponse:
             except Exception as exc:  # noqa: BLE001 - the archive exists; report it
                 logger.exception("Could not clear the search index for archived workspace %s", name)
                 cleanup_exc = exc
-            try:
-                rebuilt = workspace_archive.refresh_shared_index(config, registry_owner=owner)
-            except Exception:  # regenerated at the next startup
-                logger.exception("Could not rebuild INDEX.md after archiving %s", name)
-            return rows, rebuilt, cleanup_exc
+            return rows, cleanup_exc
 
-        search_rows, index_rebuilt, cleanup_exc = await run_while_claimed(_forget)
+        search_rows, cleanup_exc = await run_while_claimed(_forget)
         cleanup_error = ""
         status = 200
         if cleanup_exc is not None:
@@ -907,7 +902,6 @@ async def archive_workspace_setting(request: Request) -> JSONResponse:
             "chats": int(summary.get("chats", 0)),
             "schedules": len(schedules),
             "search_rows_removed": search_rows,
-            "index_rebuilt": index_rebuilt,
         }
         if cleanup_error:
             payload["error"] = cleanup_error
@@ -1015,14 +1009,9 @@ async def restore_archived_workspace(request: Request) -> JSONResponse:
         _publish_workspaces_changed(request)
         if added:
             _publish_automations_changed(request)
-        try:
-            await run_while_claimed(workspace_archive.refresh_shared_index, config, registry_owner=owner)
-        except Exception:  # noqa: BLE001 - regenerated at the next startup
-            logger.exception("Could not rebuild INDEX.md after restoring %s", name)
-        if getattr(config, "_rerooted", lambda: False)():
-            # The root's guide and assets came back with it, but its skill mirrors
-            # may point at a packaged catalog that changed while it was archived.
-            await _bootstrap_new_agent_root(config, name)
+        # The root's guide and assets came back with it, but its skill mirrors
+        # may point at a packaged catalog that changed while it was archived.
+        await _bootstrap_new_agent_root(config, name)
         payload = _workspaces_payload(config)
         payload["restored"] = {
             "id": archive_id,
@@ -3030,17 +3019,13 @@ async def _read_file_mention_request(request: Request) -> list[str] | Response:
 def _owning_mention_roots(config: CiaoConfig, name: str) -> tuple[Path, ...] | None:
     """The canonical roots one registered workspace may search, or None (fail closed).
 
-    Before the re-rooting the agent root is the shared install root, so only the
-    workspace's vault counts. After it, the agent root and the nested vault both do.
+    The agent root and the nested vault both count.
     """
     try:
-        rerooted = config._rerooted()
         vault = config.workspace_vault_root(name)
         agent = config.agent_root(name)
-        if rerooted and agent != config.workspace_root / name:
-            return None
         roots: list[Path] = []
-        for raw in ([agent, vault] if rerooted else [vault]):
+        for raw in [agent, vault]:
             if raw.is_symlink():
                 return None
             canon = raw.resolve(strict=True)
@@ -3048,9 +3033,6 @@ def _owning_mention_roots(config: CiaoConfig, name: str) -> tuple[Path, ...] | N
                 return None
             roots.append(canon)
         install = config.workspace_root.resolve(strict=True)
-        vault_canon = roots[-1]
-        if not rerooted and (vault_canon == install or install.is_relative_to(vault_canon)):
-            return None
         for other in config.workspaces:
             if other == name:
                 continue
@@ -3128,7 +3110,6 @@ def _file_mention_identity(
         str(config.workspace_root),
         str(config.vault_root),
         str(config.state_path.parent),
-        config._rerooted(),
         repo_path,
         location,
         tuple(repo_now.get(key) for key in _FILE_MENTION_LOCATION_KEYS),
@@ -3976,19 +3957,16 @@ _MAP_ENTRY_FINDINGS = 3
 
 def _vault_graph_payload(config: Any, workspace: str | None) -> dict[str, Any]:
     """Everything vault_graph returns, built off the event loop."""
-    # Every vault in the install, which is ONE shared vault before the
-    # re-rooting and one per agent root after it. Scanning `config.vault_root`
-    # returned zero notes on a migrated install, so the whole map went blank.
+    # Every vault in the install: one per agent root. Scanning `config.vault_root`
+    # would return zero notes.
     from ciao.fts_search import ConnectedRegistration, lookup_connected_entries
 
     registration = ConnectedRegistration.capture(Path(config.state_path).parent)
-    targets = config.index_scan_targets()
-    # After the re-rooting each target IS one workspace, so a `?workspace=`
+    targets = config.vault_scan_targets()
+    # Each target IS one workspace, so a `?workspace=`
     # request can drop the other roots before the scan instead of reading and
     # parsing every note in the install only to filter them out below — the
-    # scan is the whole cost of this route. Before the re-rooting the single
-    # shared target holds every workspace and no target can be dropped, which
-    # is why the `filter_entries` scoping stays where it is either way.
+    # scan is the whole cost of this route.
     in_scope = [t for t in targets if workspace and t[1] == workspace]
     scan_list = in_scope or targets
     # Reads and parses every markdown file. The caller threads the whole
@@ -4012,15 +3990,6 @@ def _vault_graph_payload(config: Any, workspace: str | None) -> dict[str, Any]:
         # from the targets whose vault exists, which is the same set the full
         # scan would have produced entries for.
         workspaces = sorted(ws for root, ws, _ in targets if ws and (connected.get(ws) or Path(root).is_dir()))
-        if not config._rerooted():
-            # Before the re-rooting a workspace that has no registry entry still
-            # exists as a first-level folder of the shared vault. Read the same
-            # shared target the un-scoped pass would have used so the picker
-            # keeps naming it; the entries above stay the scoped snapshot.
-            shared_entries, _shared_absolute = scan_targets(config.vault_scan_targets())
-            workspaces = sorted(
-                set(workspaces) | {e.workspace for e in shared_entries if e.workspace}
-            )
     else:
         workspaces = sorted({e.workspace for e in entries if e.workspace})
     scoped = filter_entries(entries, workspace=workspace) if workspace else entries
@@ -4292,7 +4261,7 @@ async def vault_delete_note(request: Request) -> JSONResponse:
     vault_root = None
     resolved = None
     vault_prefix = None
-    for target, _name, prefix in config.index_scan_targets():
+    for target, _name, prefix in config.vault_scan_targets():
         marker = f"{prefix.as_posix()}/"
         if not raw.startswith(marker):
             continue
@@ -4435,10 +4404,8 @@ async def memory_entity_types(request: Request) -> JSONResponse:
 
     The registry is per vault FILE, and ``<vault>`` is the agent vault root —
     the one that owns ``VOCABULARY.md`` and ``entity-types.yaml``, not a
-    workspace's notes root. On a pre-re-rooting install that root is shared, so
-    two workspaces editing categories edit the same list; that is the same
-    sharing ``INDEX.md`` and ``VOCABULARY.md`` already have, and the registry
-    follows its file rather than inventing a per-workspace split.
+    workspace's notes root. It is the same root that owns ``INDEX.md`` and ``VOCABULARY.md``, and the
+    registry follows its file.
 
     A PATCH is the desired list of entries, not a diff: idempotent, and a
     client that sends the GET's own rows back unchanged writes nothing. Two
@@ -5710,8 +5677,8 @@ def _routines_payload(config, app_settings) -> dict:
         },
         "workspace_context": {
             "workspace_root": str(config.workspace_root),
-            # `vault_root` is the configured path, which after the re-rooting is
-            # the emptied shared one — true but useless on its own, so the vaults
+            # `vault_root` is the configured path, which is
+            # the install's own vault folder name — true but useless on its own, so the vaults
             # that actually hold notes are reported beside it.
             "vault_root": str(config.vault_root),
             "vault_roots": [
@@ -7276,45 +7243,11 @@ async def skill_import(request: Request) -> JSONResponse:
         return JSONResponse(
             {"ok": False, "error": f"Unknown workspace: {workspace_name}"}, status_code=400
         )
-    dest_skills: Path
-    try:
-        if workspace_name:
-            dest_skills = Path(config.agent_root(workspace_name)) / "skills"  # type: ignore[attr-defined]
-        elif getattr(config, "_rerooted", lambda: False)() if callable(getattr(config, "_rerooted", None)) else bool(getattr(config, "_rerooted", False)):
-            # Use primary workspace's agent root when re-rooted
-            try:
-                primary = config.primary_workspace() if callable(getattr(config, "primary_workspace", None)) else ""
-                if primary:
-                    dest_skills = Path(config.agent_root(primary)) / "skills"  # type: ignore[attr-defined]
-                else:
-                    dest_skills = Path(config.workspace_root) / "skills"
-            except Exception:
-                dest_skills = Path(config.workspace_root) / "skills"
-        else:
-            # Shared layout: workspace_root holds skills/
-            # Also check if agent_root_targets exists and is per-root
-            targets = getattr(config, "agent_root_targets", None)
-            if callable(targets):
-                try:
-                    roots = list(targets())  # type: ignore[no-untyped-call]
-                    if len(roots) == 1:
-                        # Single root (shared) – that root is the skills holder
-                        dest_skills = Path(roots[0][0]) / "skills"
-                    elif roots:
-                        # Multiple roots (re-rooted) – use primary
-                        primary = config.primary_workspace() if callable(getattr(config, "primary_workspace", None)) else roots[0][1]
-                        try:
-                            dest_skills = Path(config.agent_root(primary)) / "skills"  # type: ignore[attr-defined]
-                        except Exception:
-                            dest_skills = Path(roots[0][0]) / "skills"
-                    else:
-                        dest_skills = Path(config.workspace_root) / "skills"
-                except Exception:
-                    dest_skills = Path(config.workspace_root) / "skills"
-            else:
-                dest_skills = Path(config.workspace_root) / "skills"
-    except Exception:
-        dest_skills = Path(getattr(config, "workspace_root", ".")) / "skills"
+    # An upload with no workspace lands in the primary workspace's skills.
+    workspace_name = workspace_name or config.primary_workspace()
+    dest_skills: Path = (
+        config.agent_root(workspace_name) if workspace_name else config.workspace_root
+    ) / "skills"
 
     upload = form.get("file")
     # Fallback: allow any file field

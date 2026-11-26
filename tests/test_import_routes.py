@@ -27,7 +27,7 @@ from starlette.routing import Route
 from starlette.testclient import TestClient
 
 from ciao.agent_paths import claude_projects_dir
-from ciao.config import CiaoConfig, WorkspaceConfig, reset_reroot_cache
+from ciao.config import CiaoConfig, WorkspaceConfig
 from ciao.import_discover import BATCH_CAP, MAX_SELECTION
 from ciao.web.auth import AuthMiddleware, SESSION_COOKIE
 from ciao.web.routes_import import import_preview, import_sources
@@ -98,7 +98,6 @@ def _world(
     """
     monkeypatch.setenv("CIAO_MEMORY_DIR", str(tmp_path / ".runtime"))
     monkeypatch.setattr("ciao.sync_skills.sync_workspace_skills", lambda *a, **k: None)
-    reset_reroot_cache()
     runtime = tmp_path / ".runtime"
     runtime.mkdir(parents=True, exist_ok=True)
     config = CiaoConfig(
@@ -107,17 +106,14 @@ def _world(
         state_path=runtime / "state.json",
         media_root=runtime / "media",
         workspaces={
-            "personal": WorkspaceConfig(name="personal", vault_root="memory-vault/personal"),
-            "work": WorkspaceConfig(name="work", vault_root="memory-vault/work"),
+            "personal": WorkspaceConfig(name="personal", vault_root="personal/memory-vault"),
+            "work": WorkspaceConfig(name="work", vault_root="work/memory-vault"),
         },
     )
     for name, ids in (
         ("personal", sessions),
-        # This install has no re-rooting receipt, so both workspaces resolve to
-        # the install root as their agent root and therefore to ONE Claude Code
-        # slug directory. That is the real behaviour discovery inherits
-        # (`agent_root_for` is the seam), so the listing shows both workspaces'
-        # sessions rather than pretending the directory is narrower than it is.
+        # Each workspace has its own agent root, so its own Claude Code slug
+        # directory: the listing for `personal` never shows the `work` session.
         ("work", ("work-session",)),
     ):
         directory = claude_projects_dir(config.agent_root(name))
@@ -274,7 +270,6 @@ def test_the_sources_answer_carries_no_transcript_text(
     sources = response.json()["sources"]
     assert [ref["source_id"] for ref in sources["available"]] == [
         "sess-a",
-        "work-session",
         "ses_open",
     ]
     assert set(sources) == {"available", "excluded", "unsupported", "truncated"}
@@ -461,7 +456,7 @@ def test_a_source_that_could_not_be_listed_is_a_row_in_the_answer(
 
     assert response.status_code == 200
     sources = response.json()["sources"]
-    assert [ref["source_id"] for ref in sources["available"]] == ["sess-a", "work-session"]
+    assert [ref["source_id"] for ref in sources["available"]] == ["sess-a"]
     assert [row["reason"] for row in sources["unsupported"]] == ["unsupported_version"]
 
 

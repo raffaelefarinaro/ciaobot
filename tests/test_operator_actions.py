@@ -44,6 +44,12 @@ class _FakeConfig:
     def workspace_names(self) -> list[str]:
         return list(self._names)
 
+    def agent_root(self, name: str) -> Path:
+        return self.workspace_root / name
+
+    def agent_root_targets(self) -> list[tuple[Path, str]]:
+        return [(self.agent_root(name), name) for name in self._names]
+
     def primary_workspace(self) -> str:
         # Same preference as CiaoConfig: `personal` for continuity, else the
         # first registered. Required rather than optional — the migration must
@@ -546,126 +552,8 @@ class _RerootedConfig(_FakeConfig):
         return [(self.agent_root(n), n) for n in self.workspace_names()]
 
 
-def _shared_layout_config(tmp_path: Path) -> _FakeConfig:
-    """Before the re-rooting every workspace resolves to the install root.
-
-    The target is NAMED, which is what makes this a real test of the gate: an
-    unnamed target is dropped by a later filter anyway, so a fixture using one
-    passes whether the gate exists or not.
-    """
-
-    class _Shared(_RerootedConfig):
-        def __init__(self, path: Path) -> None:
-            super().__init__(path, workspaces=("personal",))
-
-        def agent_root(self, name: str) -> Path:
-            return self.workspace_root
-
-        def agent_root_targets(self) -> list[tuple[Path, str]]:
-            return [(self.workspace_root, "personal")]
-
-    return _Shared(tmp_path)
-
-
 def _kinds(context) -> set[str]:
     return {a.kind for a in detect_actions(context)}
-
-
-def test_a_registered_workspace_with_no_folder_is_reported(tmp_path: Path) -> None:
-    config = _RerootedConfig(tmp_path)
-    (tmp_path / "personal").mkdir()
-    (tmp_path / "personal" / "CLAUDE.md").write_text("# G\n", encoding="utf-8")
-    # 'work' has no directory at all.
-
-    actions = [a for a in detect_actions(_context(tmp_path, config=config))
-               if a.kind == "workspace-root-missing"]
-
-    assert [a.workspace for a in actions] == ["work"]
-    assert actions[0].run_label   # a run button, because repair can fix it
-
-
-def test_generated_assets_missing_beside_a_catalog_are_reported(tmp_path: Path) -> None:
-    config = _RerootedConfig(tmp_path, workspaces=("personal",))
-    root = tmp_path / "personal"
-    (root / "skills" / "demo").mkdir(parents=True)
-    (root / "CLAUDE.md").write_text("# G\n", encoding="utf-8")
-    # No .claude/skills, so the provider sees none of the catalog.
-
-    actions = [a for a in detect_actions(_context(tmp_path, config=config))
-               if a.kind == "workspace-assets-stale"]
-
-    assert len(actions) == 1
-    assert ".claude/skills" in actions[0].detail
-
-
-def test_a_root_with_no_catalog_is_not_called_stale(tmp_path: Path) -> None:
-    """Nothing to generate from is not drift."""
-    config = _RerootedConfig(tmp_path, workspaces=("personal",))
-    root = tmp_path / "personal"
-    root.mkdir()
-    (root / "CLAUDE.md").write_text("# G\n", encoding="utf-8")
-
-    assert "workspace-assets-stale" not in _kinds(_context(tmp_path, config=config))
-
-
-def test_the_drift_detectors_are_silent_before_the_re_rooting(tmp_path: Path) -> None:
-    """One shared root, one guide, one catalog — 'this root has no assets' is the
-    layout, not a fault."""
-    config = _shared_layout_config(tmp_path)
-    # A catalog at the install root and no generated dirs: exactly the shape the
-    # stale-assets check looks for, which must NOT fire here.
-    (tmp_path / "skills" / "demo").mkdir(parents=True)
-
-    kinds = _kinds(_context(tmp_path, config=config))
-
-    assert "workspace-root-missing" not in kinds
-    assert "workspace-assets-stale" not in kinds
-
-
-def _migrated_catalog_install(tmp_path: Path, runtime: Path) -> tuple[_RerootedConfig, Path]:
-    """A re-rooted install whose skill catalog the migration could not place.
-
-    Built by **running** the migration over a synthetic pre-migration install,
-    not by writing a file where the detector happens to read it (#810). A fixture
-    written at the detector's path passes whether or not the two agree, and that
-    is exactly how a card that could never fire stayed green.
-
-    Returns the config to detect against and the sheet the migration wrote.
-    """
-    from ciao.workspace_reroot import apply
-
-    install = tmp_path / "install"
-    install.mkdir()
-    for name in ("personal", "work"):
-        (install / "memory-vault" / name / "People").mkdir(parents=True)
-        (install / "memory-vault" / name / "People" / "Peter.md").write_text(
-            "---\ntype: person\n---\n# Peter\n", encoding="utf-8"
-        )
-    for generated in ("INDEX.md", "MEMORY.md", "VOCABULARY.md"):
-        (install / "memory-vault" / generated).write_text("generated\n", encoding="utf-8")
-    (install / "skills" / "jira-tickets").mkdir(parents=True)
-    (install / "skills" / "jira-tickets" / "SKILL.md").write_text(
-        "---\nname: jira-tickets\ndescription: File a Jira ticket.\n---\n# Jira\n",
-        encoding="utf-8",
-    )
-    (install / "skills" / "linkedin-writing").mkdir(parents=True)
-    (install / "skills" / "linkedin-writing" / "SKILL.md").write_text(
-        "---\nname: linkedin-writing\ndescription: Draft a post | with a pipe\n---\n",
-        encoding="utf-8",
-    )
-
-    result = apply(
-        install,
-        install / "memory-vault",
-        ["personal", "work"],
-        runtime,
-        primary="personal",
-    )
-    assert result["status"] == "migrated", result.get("refusals")
-    config = _RerootedConfig(install, workspaces=("personal", "work"))
-    sheet = install / "personal" / "memory-vault" / "Workspace" / "Skill-Triage.md"
-    assert sheet.is_file(), "the migration wrote no sheet for this test to find"
-    return config, sheet
 
 
 def test_env_vars_the_engine_no_longer_reads_are_surfaced(tmp_path: Path) -> None:
@@ -772,51 +660,6 @@ def test_no_legacy_env_vars_means_no_tile(tmp_path: Path) -> None:
     config.env_source = {"CIAO_VAULT_ROOT": "x"}
 
     assert "legacy-env-ignored" not in _kinds(_context(tmp_path, config=config))
-
-
-def test_a_shared_mcp_config_no_root_inherited_is_reported(tmp_path: Path) -> None:
-    """A chat runs from its agent root, so an install-root `.mcp.json` is nobody's
-    cwd: every server in it went unreachable with the file still sitting there."""
-    config = _RerootedConfig(tmp_path)
-    for name in ("personal", "work"):
-        (tmp_path / name).mkdir()
-        (tmp_path / name / "CLAUDE.md").write_text("# G\n", encoding="utf-8")
-    (tmp_path / ".mcp.json").write_text(
-        json.dumps({"mcpServers": {"notion": {"command": "x"}, "n8n": {"url": "y"}}}),
-        encoding="utf-8",
-    )
-
-    actions = [a for a in detect_actions(_context(tmp_path, config=config))
-               if a.kind == "workspace-mcp-uncomposed"]
-
-    assert len(actions) == 1
-    assert "n8n" in actions[0].detail and "notion" in actions[0].detail
-    # Never a copy button: .mcp.json grants credentialed access, so which root
-    # may reach which server is a decision, not a mechanical fix.
-    assert not actions[0].run_label
-    assert actions[0].chat_prompt
-
-
-def test_roots_that_already_have_their_own_mcp_config_are_silent(tmp_path: Path) -> None:
-    config = _RerootedConfig(tmp_path)
-    for name in ("personal", "work"):
-        (tmp_path / name).mkdir()
-        (tmp_path / name / "CLAUDE.md").write_text("# G\n", encoding="utf-8")
-        (tmp_path / name / ".mcp.json").write_text('{"mcpServers": {}}', encoding="utf-8")
-    (tmp_path / ".mcp.json").write_text('{"mcpServers": {"notion": {}}}', encoding="utf-8")
-
-    assert "workspace-mcp-uncomposed" not in _kinds(_context(tmp_path, config=config))
-
-
-def test_no_shared_mcp_config_means_no_tile(tmp_path: Path) -> None:
-    config = _RerootedConfig(tmp_path)
-    for name in ("personal", "work"):
-        (tmp_path / name).mkdir()
-        (tmp_path / name / "CLAUDE.md").write_text("# G\n", encoding="utf-8")
-
-    assert "workspace-mcp-uncomposed" not in _kinds(_context(tmp_path, config=config))
-
-
 
 
 def test_a_moved_runtime_root_in_dotenv_raises_the_tile(tmp_path: Path) -> None:

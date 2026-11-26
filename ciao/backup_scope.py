@@ -22,8 +22,7 @@ Three properties are deliberate:
 - **Layout-aware.** There are three kinds of scope base, and which one a
   directory is decides what may live under it:
 
-  - an *agent root* — the install root before the per-workspace re-rooting,
-    one directory per workspace after — where the allowlist applies, because
+  - an *agent root* — one directory per workspace — where the allowlist applies, because
     the install root also holds credentials, runtime state and the app itself;
   - the *configured vault*, whose internal layout is the app's own canonical
     structure and whose directory name is the operator's choice
@@ -485,9 +484,8 @@ def _agent_roots(config) -> tuple[Path, ...]:
     """The install's agent roots, through the one seam that answers for it.
 
     ``agent_root_targets`` is already the documented way to ask "where do this
-    install's agent assets live" — the install root itself before the
-    per-workspace re-rooting, one directory per workspace after — so the scope
-    follows a layout change without a second rule to keep in step with it.
+    install's agent assets live" — one directory per workspace — so the
+    scope follows the layout without a second rule to keep in step with it.
     """
     return tuple(root for root, _name in config.agent_root_targets())
 

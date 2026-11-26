@@ -17,14 +17,13 @@ import pytest
 from pathlib import Path
 
 from ciao.cli import setup_workspace
-from ciao.config import CiaoConfig, reset_reroot_cache
+from ciao.config import CiaoConfig
 from ciao.operator_actions import DetectionContext, detect_actions
 from ciao.web.agent_assets import workspace_health
 
 
 def _fresh(tmp_path: Path) -> CiaoConfig:
     setup_workspace(tmp_path, auth_token="t")
-    reset_reroot_cache()
     return CiaoConfig.from_env({
         "PWA_AUTH_TOKEN": "t",
         "CIAO_WORKSPACE": str(tmp_path),
@@ -80,7 +79,6 @@ def test_setup_marks_existing_notes_folder_as_external_for_index_refresh(
     assert read_vault_index_ownership(tmp_path / ".runtime") == {
         str(tmp_path.resolve()): "external"
     }
-    reset_reroot_cache()
     config = CiaoConfig.from_env({
         "PWA_AUTH_TOKEN": "t",
         "CIAO_WORKSPACE": str(tmp_path),
@@ -99,11 +97,9 @@ def test_setup_marks_existing_notes_folder_as_external_for_index_refresh(
 
 
 def test_existing_folder_setup_never_seeds_an_index_on_first_run_or_rerun(tmp_path: Path) -> None:
-    from ciao.config import reset_reroot_cache
 
     (tmp_path / "original.md").write_text("# Original\n")
     for _ in range(2):
-        reset_reroot_cache()
         setup_workspace(tmp_path, auth_token="t", vault_mode="existing")
         assert not (tmp_path / "INDEX.md").exists()
 
@@ -120,7 +116,6 @@ def test_scratch_marker_without_exact_map_does_not_prove_ownership(
     (vault / "People").mkdir(parents=True)
     (vault / "People" / "Ada.md").write_text("# orchid\n", encoding="utf-8")
     (tmp_path / ".runtime" / "vault-index-ownership.json").unlink()
-    reset_reroot_cache()
     config = CiaoConfig.from_env({
         "PWA_AUTH_TOKEN": "t",
         "CIAO_WORKSPACE": str(tmp_path),
@@ -204,7 +199,6 @@ def test_legacy_scratch_install_without_provenance_is_refreshed(
     (vault / "People" / "Ada.md").write_text("# orchid orchard\n", encoding="utf-8")
     (tmp_path / ".runtime" / "vault-index-ownership.json").unlink()
     (tmp_path / ".runtime" / "setup-completed-at").unlink()
-    reset_reroot_cache()
     config = CiaoConfig.from_env({
         "PWA_AUTH_TOKEN": "t",
         "CIAO_WORKSPACE": str(tmp_path),
@@ -218,52 +212,6 @@ def test_legacy_scratch_install_without_provenance_is_refreshed(
         targets=config.vault_scan_targets(),
         ciao_owned_roots={vault},
         runtime_dir=tmp_path / ".runtime",
-    )
-    assert b"Ada" in index.read_bytes()
-
-
-def test_existing_shared_install_without_provenance_upgrades_to_refresh(
-    tmp_path: Path,
-) -> None:
-    """An upgraded legacy shared install rebuilds its aggregate INDEX.md.
-
-    There is no ownership map and no per-root receipt yet; the maintainer
-    decision treats the registered shared vault's generated index as Ciao's.
-    """
-    import json as json_module
-
-    from ciao.main import _refresh_vault_index
-
-    runtime = tmp_path / ".runtime"
-    runtime.mkdir()
-    vault = tmp_path / "memory-vault"
-    (vault / "personal" / "People").mkdir(parents=True)
-    (vault / "personal" / "People" / "Ada.md").write_text(
-        "---\ntype: person\n---\n# Ada\n", encoding="utf-8"
-    )
-    index = vault / "INDEX.md"
-    index.write_bytes(b"legacy generated index\r\n")
-    (runtime / "workspaces.json").write_text(
-        json_module.dumps([{
-            "name": "personal",
-            "vault_root": "memory-vault/personal",
-        }]),
-        encoding="utf-8",
-    )
-    reset_reroot_cache()
-    config = CiaoConfig.from_env({
-        "PWA_AUTH_TOKEN": "t",
-        "CIAO_WORKSPACE": str(tmp_path),
-        "CIAO_RUNTIME_ROOT": str(runtime),
-        "CIAO_VAULT_ROOT": str(vault),
-    })
-
-    assert config.ciao_owned_vault_index("personal")
-    assert _refresh_vault_index(
-        tmp_path,
-        targets=config.vault_scan_targets(),
-        ciao_owned_roots={vault},
-        runtime_dir=runtime,
     )
     assert b"Ada" in index.read_bytes()
 
@@ -282,11 +230,8 @@ def test_a_fresh_setup_puts_the_agent_assets_in_the_workspace(tmp_path: Path) ->
 
 def test_a_fresh_setup_needs_no_migration_and_shows_no_tile(tmp_path: Path) -> None:
     """The point of the whole change: a new user never sees migration UX."""
-    from ciao.workspace_reroot import migrate_if_needed
-
     config = _fresh(tmp_path)
 
-    assert migrate_if_needed(config)["status"] == "already_migrated"
     # A fresh install is a configured install, so the GitHub-star nudge would
     # legitimately surface; it is not migration UX, so silence it here.
     (tmp_path / ".runtime" / "star-receipt.json").write_text(
@@ -313,21 +258,6 @@ def test_a_fresh_setup_is_healthy_before_its_first_boot(tmp_path: Path) -> None:
     ]
 
 
-def test_the_receipt_records_that_it_was_born_this_way(tmp_path: Path) -> None:
-    """A reader can tell "created per-root" from "migrated" without inferring it
-    from an empty move list."""
-    _fresh(tmp_path)
-
-    receipt = json.loads(
-        (tmp_path / ".runtime" / "migration" / "workspace-rooting.json").read_text()
-    )
-
-    assert receipt["status"] == "migrated"
-    assert receipt["born_per_root"] is True
-    assert receipt["origin"] == "born"
-    assert receipt["moves"] == []
-
-
 def test_an_existing_notes_folder_kept_in_place_needs_no_migration(tmp_path: Path) -> None:
     """Choosing an existing notes folder keeps the notes where they are, so the
     vault is the install folder itself. That is a supported layout: the next
@@ -335,11 +265,8 @@ def test_an_existing_notes_folder_kept_in_place_needs_no_migration(tmp_path: Pat
     files and refused on every start) (#2021)."""
     from dotenv import dotenv_values
 
-    from ciao.workspace_reroot import migrate_if_needed
-
     (tmp_path / "existing.md").write_text("# Existing note\n", encoding="utf-8")
     setup_workspace(tmp_path, auth_token="t", vault_mode="existing")
-    reset_reroot_cache()
     env = {k: v for k, v in dotenv_values(tmp_path / ".env").items() if v is not None}
     config = CiaoConfig.from_env({
         **env,
@@ -348,9 +275,6 @@ def test_an_existing_notes_folder_kept_in_place_needs_no_migration(tmp_path: Pat
     })
 
     assert Path(config.vault_root).resolve() == tmp_path.resolve()
-    # Fresh adoption now has the same born-per-root receipt as empty-folder
-    # setup, so startup retires migration before it can snapshot any notes.
-    assert migrate_if_needed(config)["status"] == "already_migrated"
     assert (tmp_path / "existing.md").read_text(encoding="utf-8") == "# Existing note\n"
     assert not (tmp_path / ".git").exists()
 
@@ -417,7 +341,6 @@ def test_truncated_ownership_map_fails_closed_and_refuses_update(
     index.write_bytes(b"external sentinel\r\n")
     ownership_path = tmp_path / ".runtime" / VAULT_INDEX_OWNERSHIP_FILENAME
     ownership_path.write_text('{"roots": [', encoding="utf-8")
-    reset_reroot_cache()
 
     assert read_vault_index_ownership(tmp_path / ".runtime") == {}
     assert not config.ciao_owned_vault_index("personal")
@@ -1031,13 +954,11 @@ def test_api_created_workspace_gets_a_vault_index_on_the_next_refresh(
     from tests.test_workspace_settings_routes import _client
 
     setup_workspace(tmp_path, auth_token="t")
-    reset_reroot_cache()
     client, config, _ = _client(tmp_path, {
         "CIAO_VAULT_ROOT": str(tmp_path / "memory-vault"),
     })
     created = client.post("/api/workspaces", json={"name": "beta"})
     assert created.status_code == 201
-    reset_reroot_cache()
     beta = config.agent_vault_root("beta")
     beta.mkdir(parents=True, exist_ok=True)
     (beta / "People").mkdir(exist_ok=True)

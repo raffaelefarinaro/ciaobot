@@ -23,7 +23,7 @@ from starlette.applications import Starlette
 from starlette.routing import Route
 from starlette.testclient import TestClient
 
-from ciao.config import CiaoConfig
+from ciao.config import CiaoConfig, WorkspaceConfig
 from ciao.sessions import StateStore
 from ciao.transcripts import TranscriptStore
 from ciao.web.project_chats import ProjectChatManager
@@ -39,7 +39,7 @@ from ciao.web.routes_api import (
 
 
 def _make_manager(
-    tmp_path: Path, *, vault_root: Path | None = None
+    tmp_path: Path, *, vault_root: Path | None = None, workspaces: dict | None = None
 ) -> ProjectChatManager:
     runtime = tmp_path / ".runtime"
     runtime.mkdir(parents=True, exist_ok=True)
@@ -49,6 +49,7 @@ def _make_manager(
         state_path=runtime / "state.json",
         media_root=runtime / "media",
         vault_root=vault_root or Path("memory-vault"),
+        **({"workspaces": workspaces} if workspaces else {}),
     )
     state = StateStore(config.state_path, tmp_path, config.media_root)
     transcripts = TranscriptStore(runtime, tmp_path / "transcripts")
@@ -61,7 +62,7 @@ def _make_manager(
 
 
 def _make_work_project(root: Path, folder_name: str) -> Path:
-    folder = root / "memory-vault" / "work" / "projects" / "active" / folder_name
+    folder = root / "work" / "memory-vault" / "projects" / "active" / folder_name
     folder.mkdir(parents=True)
     (folder / "README.md").write_text(
         f"---\nname: {folder_name}\nstatus: active\n---\n# {folder_name}\n",
@@ -71,7 +72,7 @@ def _make_work_project(root: Path, folder_name: str) -> Path:
 
 
 def _make_personal_file(root: Path, stem: str) -> Path:
-    parent = root / "memory-vault" / "personal" / "projects" / "active"
+    parent = root / "personal" / "memory-vault" / "projects" / "active"
     parent.mkdir(parents=True, exist_ok=True)
     md = parent / f"{stem}.md"
     md.write_text(f"---\nname: {stem}\nstatus: active\n---\n# {stem}\n", encoding="utf-8")
@@ -135,7 +136,7 @@ def test_list_returns_files_with_classification(tmp_path: Path) -> None:
     assert by_path["spec.pdf"]["kind"] == "binary"
     # vault_path is workspace-relative and round-trippable.
     assert by_path["notes.md"]["vault_path"].endswith("/notes.md")
-    assert by_path["notes.md"]["vault_path"].startswith("memory-vault/")
+    assert by_path["notes.md"]["vault_path"].startswith("work/memory-vault/")
 
 
 def test_external_vault_files_list_and_upload_with_absolute_viewer_path(
@@ -143,7 +144,7 @@ def test_external_vault_files_list_and_upload_with_absolute_viewer_path(
 ) -> None:
     workspace = tmp_path / "workspace"
     vault = tmp_path / "external-vault"
-    folder = vault / "work" / "projects" / "active" / "external-project"
+    folder = vault / "projects" / "active" / "external-project"
     folder.mkdir(parents=True)
     (folder / "README.md").write_text(
         "---\nname: External\nstatus: active\n---\n# External\n",
@@ -151,7 +152,11 @@ def test_external_vault_files_list_and_upload_with_absolute_viewer_path(
     )
     (folder / "notes.md").write_text("hello", encoding="utf-8")
 
-    pcm = _make_manager(workspace, vault_root=vault)
+    pcm = _make_manager(
+        workspace,
+        vault_root=vault,
+        workspaces={"work": WorkspaceConfig(name="work", vault_root=str(vault))},
+    )
     project = next(
         p for p in pcm.list_projects() if p.vault_folder == "external-project"
     )
@@ -422,7 +427,7 @@ def test_upload_to_promoted_personal_project_succeeds(tmp_path: Path) -> None:
     proj = next(p for p in pcm.list_projects() if p.vault_folder == "Wedding")
     entry = pcm.save_project_file_upload(proj.project_id, b"hello", "guests.md")
     assert entry["path"] == "guests.md"
-    saved = tmp_path / "memory-vault" / "personal" / "projects" / "active" / "Wedding" / "guests.md"
+    saved = tmp_path / "personal" / "memory-vault" / "projects" / "active" / "Wedding" / "guests.md"
     assert saved.read_bytes() == b"hello"
 
 

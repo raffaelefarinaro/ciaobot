@@ -28,7 +28,7 @@ from starlette.middleware import Middleware
 from starlette.routing import Route
 from starlette.testclient import TestClient
 
-from ciao.config import CiaoConfig, WorkspaceConfig, reset_reroot_cache
+from ciao.config import CiaoConfig, WorkspaceConfig
 from ciao.import_discover import BATCH_CAP
 from ciao.web.auth import AuthMiddleware, SESSION_COOKIE
 from ciao.web.routes_import import (
@@ -46,7 +46,6 @@ def _world(
     """A session-guarded batch app over a real config with `personal` and `work`."""
     monkeypatch.setenv("CIAO_MEMORY_DIR", str(tmp_path / ".runtime"))
     monkeypatch.setattr("ciao.sync_skills.sync_workspace_skills", lambda *a, **k: None)
-    reset_reroot_cache()
     runtime = tmp_path / ".runtime"
     runtime.mkdir(parents=True, exist_ok=True)
     config = CiaoConfig(

@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pytest
 
-from ciao.config import CiaoConfig, WorkspaceConfig, reset_reroot_cache
+from ciao.config import CiaoConfig, WorkspaceConfig
 
 
 def _config(tmp_path: Path) -> CiaoConfig:
@@ -15,17 +15,14 @@ def _config(tmp_path: Path) -> CiaoConfig:
     )
 
 
-def test_agent_root_returns_workspace_root_for_every_workspace(tmp_path: Path) -> None:
+def test_agent_root_is_the_workspace_folder_under_the_install(tmp_path: Path) -> None:
     config = _config(tmp_path)
-    assert config.agent_root("personal") == config.workspace_root
-    assert config.agent_root("work") == config.workspace_root
+    assert config.agent_root("personal") == config.workspace_root / "personal"
+    assert config.agent_root("work") == config.workspace_root / "work"
 
 
-def test_agent_root_targets_switch_from_shared_install_to_per_workspace_roots(
-    tmp_path: Path,
-) -> None:
-    """The install root is a target only while it is the shared agent root."""
-    from ciao.workspace_reroot import mark_born_per_root
+def test_agent_root_targets_are_the_per_workspace_roots(tmp_path: Path) -> None:
+    """The install root is never an agent root."""
 
     runtime = tmp_path / ".runtime"
     config = CiaoConfig(
@@ -39,11 +36,6 @@ def test_agent_root_targets_switch_from_shared_install_to_per_workspace_roots(
             "work": WorkspaceConfig(name="work", vault_root="work"),
         },
     )
-    reset_reroot_cache()
-
-    assert config.agent_root_targets() == [(tmp_path, "")]
-
-    mark_born_per_root(tmp_path, runtime, ["personal", "work"])
 
     assert config.agent_root_targets() == [
         (tmp_path / "personal", "personal"),
@@ -53,7 +45,7 @@ def test_agent_root_targets_switch_from_shared_install_to_per_workspace_roots(
 
 def test_agent_root_accepts_a_single_segment_name(tmp_path: Path) -> None:
     config = _config(tmp_path)
-    assert config.agent_root("research") == config.workspace_root
+    assert config.agent_root("research") == config.workspace_root / "research"
 
 
 @pytest.mark.parametrize(

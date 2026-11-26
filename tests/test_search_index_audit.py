@@ -15,7 +15,7 @@ from pathlib import Path
 import pytest
 
 from ciao import os_audit
-from ciao.config import CiaoConfig, WorkspaceConfig, reset_reroot_cache
+from ciao.config import CiaoConfig, WorkspaceConfig
 
 
 @pytest.fixture(autouse=True)
@@ -24,10 +24,6 @@ def _own_index(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 def _install(tmp_path: Path) -> CiaoConfig:
-    (tmp_path / ".runtime" / "migration").mkdir(parents=True, exist_ok=True)
-    (tmp_path / ".runtime" / "migration" / "workspace-rooting.json").write_text(
-        json.dumps({"status": "migrated"}), encoding="utf-8"
-    )
     for name in ("personal", "work"):
         notes = tmp_path / name / "memory-vault" / "People"
         notes.mkdir(parents=True, exist_ok=True)
@@ -39,7 +35,6 @@ def _install(tmp_path: Path) -> CiaoConfig:
             "<!-- ciao:profile:start cap=1375 -->\n<!-- ciao:profile:end -->\n",
             encoding="utf-8",
         )
-    reset_reroot_cache()
     return CiaoConfig(
         pwa_auth_token="t",
         workspace_root=tmp_path,
@@ -71,7 +66,7 @@ def test_an_absent_index_is_reported_when_notes_exist(tmp_path: Path) -> None:
 
 def test_rows_pointing_at_moved_notes_are_reported(tmp_path: Path) -> None:
     """What a hand-migration leaves: notes moved, index untouched."""
-    from ciao.workspace_reroot import rebuild_search_index
+    from tests.conftest import rebuild_search_index
 
     config = _install(tmp_path)
     rebuild_search_index(tmp_path, ["personal", "work"])
@@ -87,7 +82,7 @@ def test_rows_pointing_at_moved_notes_are_reported(tmp_path: Path) -> None:
 
 
 def test_a_current_index_is_silent(tmp_path: Path) -> None:
-    from ciao.workspace_reroot import rebuild_search_index
+    from tests.conftest import rebuild_search_index
 
     config = _install(tmp_path)
     rebuild_search_index(tmp_path, ["personal", "work"])
@@ -108,7 +103,7 @@ def test_an_index_finding_counts_as_a_defect(tmp_path: Path) -> None:
     config = _install(tmp_path)
 
     with_missing = _audit(tmp_path, config)["defect_count"]
-    from ciao.workspace_reroot import rebuild_search_index
+    from tests.conftest import rebuild_search_index
 
     rebuild_search_index(tmp_path, ["personal", "work"])
     with_index = _audit(tmp_path, config)["defect_count"]
@@ -118,11 +113,6 @@ def test_an_index_finding_counts_as_a_defect(tmp_path: Path) -> None:
 
 def test_an_empty_install_is_not_told_its_index_is_missing(tmp_path: Path) -> None:
     """No notes, nothing to index, nothing to report."""
-    (tmp_path / ".runtime" / "migration").mkdir(parents=True, exist_ok=True)
-    (tmp_path / ".runtime" / "migration" / "workspace-rooting.json").write_text(
-        json.dumps({"status": "migrated"}), encoding="utf-8"
-    )
-    reset_reroot_cache()
     config = CiaoConfig(
         pwa_auth_token="t", workspace_root=tmp_path,
         vault_root=tmp_path / "memory-vault",
@@ -132,37 +122,6 @@ def test_an_empty_install_is_not_told_its_index_is_missing(tmp_path: Path) -> No
     )
 
     assert _audit(tmp_path, config)["search_index"]["missing"] is False
-
-
-def test_the_rebuild_also_indexes_the_promoted_transcript_archive(
-    tmp_path: Path,
-) -> None:
-    """A rebuild that skips `Logs/` empties transcript search without saying so.
-
-    `rebuild_search_index` deletes the whole database — rows for transcripts
-    included — then re-indexed only the per-root vaults. On the live install
-    that turned 400+ indexed transcripts into zero, and nothing reported it:
-    the audit only counts vault rows, so the run looked clean.
-    """
-    import sqlite3
-
-    from ciao.workspace_reroot import rebuild_search_index
-
-    _install(tmp_path)
-    archive = tmp_path / "Logs" / "Chats"
-    archive.mkdir(parents=True)
-    (archive / "chat-1.md").write_text("# Chat\nwe discussed the roof\n", encoding="utf-8")
-
-    result = rebuild_search_index(tmp_path, ["personal", "work"])
-
-    assert result["errors"] == []
-    assert result.get("logs", {}).get("indexed") == 1
-    conn = sqlite3.connect(result["database"])
-    try:
-        rows = [r[0] for r in conn.execute("SELECT path FROM transcript_meta")]
-    finally:
-        conn.close()
-    assert rows == ["Logs/Chats/chat-1.md"]
 
 
 def test_os_audit_defaults_its_vault_root_to_the_layout_on_disk(
@@ -180,6 +139,7 @@ def test_os_audit_defaults_its_vault_root_to_the_layout_on_disk(
     from ciao.cli import _os_audit_command
 
     _install(tmp_path)
+    (tmp_path / ".runtime").mkdir(parents=True, exist_ok=True)
     (tmp_path / ".runtime" / "workspaces.json").write_text(
         json.dumps([{"name": "personal"}, {"name": "work"}]), encoding="utf-8"
     )
@@ -201,19 +161,16 @@ def test_os_audit_defaults_its_vault_root_to_the_layout_on_disk(
             if e.get("type") == "missing_vault_root"] == []
 
 
-def test_an_empty_transcript_index_is_reported_and_repaired(tmp_path: Path) -> None:
+def test_an_empty_transcript_index_is_reported(tmp_path: Path) -> None:
     """Zero transcript rows passes every "do the paths resolve" check.
 
     `stale_search_rows` asks whether indexed paths still exist, so a table with
     no rows is trivially healthy — which is exactly the state a vault-only
     rebuild leaves behind. On the live install that was 1470 transcripts
-    unsearchable while `--repair` reported "clean".
+    unsearchable while the audit reported "clean".
     """
-    from ciao.workspace_reroot import (
-        rebuild_search_index,
-        repair,
-        unindexed_transcript_archive,
-    )
+    from ciao.os_audit import unindexed_transcript_archive
+    from tests.conftest import rebuild_search_index
 
     config = _install(tmp_path)
     archive = tmp_path / "Logs" / "Chats"
@@ -236,10 +193,3 @@ def test_an_empty_transcript_index_is_reported_and_repaired(tmp_path: Path) -> N
     assert unindexed_transcript_archive(tmp_path) == 1
     report = _audit(tmp_path, config)
     assert report["search_index"]["transcripts_unindexed"] == 1
-
-    result = repair(
-        tmp_path, tmp_path / ".runtime", ["personal", "work"]
-    )
-    drifts = [r["drift"] for r in result["repaired"]]
-    assert "transcript_index_empty" in drifts
-    assert unindexed_transcript_archive(tmp_path) == 0

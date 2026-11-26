@@ -38,7 +38,6 @@ from ciao.vault_lint import (
     _markdown_source_paths,
     run_validation as run_vault_validation,
 )
-from ciao.workspace_guide import GUIDE_NAME
 from ciao.workspace_guide import guide_path as workspace_guide_path
 
 logger = logging.getLogger(__name__)
@@ -111,20 +110,6 @@ def audit_setup(
             )
             continue
         checks.append({"name": name, "status": "ok", "path": str(path)})
-
-    if workspace_dir.is_dir():
-        # One guide, AGENTS.md. Requiring a CLAUDE.md beside it would report a
-        # correctly-migrated workspace as broken — the whole point of the
-        # rename is that the second file is gone (ciao/workspace_guide.py).
-        guide = workspace_guide_path(workspace_dir)
-        if not guide.is_file():
-            issues.append(
-                _diagnostic(
-                    "missing_instruction_file",
-                    workspace_dir / GUIDE_NAME,
-                    f"{GUIDE_NAME} is missing",
-                )
-            )
 
     return {
         "workspace_root": str(workspace_dir),
@@ -1140,8 +1125,80 @@ def audit_job_runs(
     }
 
 
+def unindexed_transcript_archive(
+    install_root: Path, *, db_path: Path | None = None
+) -> int:
+    """Files in the transcript archives when the transcript index holds nothing.
+
+    `stale_search_rows` answers "do the indexed paths still resolve" — which a
+    table with no rows at all passes trivially. So a rebuild that dropped the
+    database and re-indexed only the vaults left transcript search empty and
+    every check downstream called it clean. The count of what should have been
+    indexed is the signal, summed over the shared `Logs/` and each workspace's
+    `Logs/`; zero archive files means there is nothing to report.
+    """
+    import sqlite3
+
+    from ciao.config import agent_roots_for
+    from ciao.fts_search import get_db_path
+
+    install_root = Path(install_root).resolve()
+    logs_dirs = [install_root / "Logs"] + [
+        root / "Logs"
+        for root, name in agent_roots_for(install_root, install_root / ".runtime")
+        if name
+    ]
+    logs_dirs = [logs for logs in logs_dirs if logs.is_dir()]
+    if not logs_dirs:
+        return 0
+    db = Path(db_path) if db_path is not None else get_db_path(install_root / ".runtime")
+    if not db.exists():
+        return 0
+    conn = sqlite3.connect(db)
+    try:
+        rows = conn.execute("SELECT count(*) FROM transcript_meta").fetchone()[0]
+    except sqlite3.Error:
+        return 0
+    finally:
+        conn.close()
+    if rows:
+        return 0
+    return sum(1 for logs in logs_dirs for _ in logs.rglob("*.md"))
+
+
+def stale_search_rows(
+    install_root: Path, *, db_path: Path | None = None, limit: int = 5
+) -> list[str]:
+    """Indexed paths that no longer resolve under the install root.
+
+    Read only, and bounded: it stops at ``limit`` because the audit only needs
+    to know whether a rebuild is due and one example to name, not the whole list.
+    """
+    import sqlite3
+
+    from ciao.fts_search import get_db_path
+
+    db = Path(db_path) if db_path is not None else get_db_path(install_root / ".runtime")
+    if not db.exists():
+        return []
+    install_root = Path(install_root).resolve()
+    conn = sqlite3.connect(db)
+    stale: list[str] = []
+    try:
+        for (path,) in conn.execute("SELECT path FROM vault_meta"):
+            if not (install_root / str(path)).exists():
+                stale.append(str(path))
+                if len(stale) >= limit:
+                    break
+    except sqlite3.DatabaseError:
+        return []
+    finally:
+        conn.close()
+    return stale
+
+
 def _search_index_audit(
-    install_root: Path, workspaces: Sequence[str], runtime_dir: Path
+    install_root: Path, workspaces: Sequence[str], runtime_dir: Path, vault_leaf: str = "memory-vault"
 ) -> dict[str, Any]:
     """Whether the full-text index still describes the vault on disk.
 
@@ -1162,10 +1219,6 @@ def _search_index_audit(
     }
     try:
         from ciao.fts_search import get_db_path
-        from ciao.workspace_reroot import (
-            stale_search_rows,
-            unindexed_transcript_archive,
-        )
     except ImportError as exc:  # noqa: BLE001 — advisory section
         out["errors"].append({"type": "search_index_unavailable", "detail": str(exc)})
         return out
@@ -1173,7 +1226,7 @@ def _search_index_audit(
     root = Path(install_root)
     try:
         has_notes = any(
-            (root / name).is_dir() and any((root / name).rglob("*.md"))
+            (root / name / vault_leaf).is_dir() and any((root / name / vault_leaf).rglob("*.md"))
             for name in workspaces
         ) if workspaces else False
         db = get_db_path(runtime_dir)
@@ -1371,6 +1424,7 @@ def run_os_audit(
             workspace,
             list(getattr(config, "workspace_names", lambda: [])()),
             runtime,
+            Path(config.vault_root).name if config is not None else "memory-vault",
         )
         if want_global
         else {

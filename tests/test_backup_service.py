@@ -43,9 +43,8 @@ from ciao.backup_service import (
     BackupService,
     sanitize_remote,
 )
-from ciao.config import CiaoConfig, reset_reroot_cache
+from ciao.config import CiaoConfig
 from ciao.git_proc import GIT_TIMEOUT_DETAIL
-from ciao.workspace_reroot import mark_born_per_root
 
 
 # ── a temporary install ──────────────────────────────────────────────────────
@@ -1180,11 +1179,11 @@ async def test_the_status_reports_the_scope_and_the_interval(tmp_path: Path) -> 
     assert status.enabled is True
     # The scope is rendered from the scope itself, so it cannot describe
     # something other than what `commit_scoped` enforces: the durable trees, the
-    # workspace guide, the container holding archived agent roots, and the one
+    # workspace guide, and the one
     # file carved out of a refused directory (#734).
     assert status.scope == (
-        "memory-vault, skills, subagents, commands, .archived-workspaces, AGENTS.md, "
-        ".runtime/schedules.json"
+        "memory-vault, skills, subagents, commands, AGENTS.md, "
+        ".runtime/schedules.json; not a top-level skills/ or subagents/ or commands/ folder"
     )
     assert status.remote.endswith("origin.git")
     assert status.as_dict()["state"] == backup_service.STATE_READY
@@ -1205,8 +1204,6 @@ async def test_the_scope_says_bare_top_level_roots_are_not_covered(
     (workspace / ".runtime").mkdir(parents=True)
     (workspace / "personal" / "memory-vault").mkdir(parents=True)
     _git(workspace, "init", "-q", "-b", "main")
-    mark_born_per_root(workspace, workspace / ".runtime", ["personal"])
-    reset_reroot_cache()
     world = _World(
         workspace,
         CiaoConfig(
@@ -1225,9 +1222,6 @@ async def test_the_scope_says_bare_top_level_roots_are_not_covered(
     # The trees that *are* covered are still named, so the note narrows the
     # scope rather than replacing it.
     assert "memory-vault" in status.scope
-    # The default shared-vault layout has the data root itself as an agent root,
-    # so a bare `commands/` there is in scope and the note would be a lie.
-    assert "not a top-level" not in (await _service(_world(tmp_path / "shared")).status()).scope
 
 
 def test_a_remote_is_never_reported_with_a_credential_in_it() -> None:

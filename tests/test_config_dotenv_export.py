@@ -144,7 +144,6 @@ def test_a_whitespace_only_workspace_does_not_resolve_to_the_cwd(
     became the current directory — the CLI created `.runtime` and minted a
     session secret under wherever the operator was standing.
     """
-    from ciao.config import reset_reroot_cache
 
     stood_here = tmp_path / "some-unrelated-dir"
     stood_here.mkdir()
@@ -154,11 +153,7 @@ def test_a_whitespace_only_workspace_does_not_resolve_to_the_cwd(
     monkeypatch.setenv("CIAO_WORKSPACE", "   ")
     (tmp_path / "home").mkdir()
 
-    reset_reroot_cache()
-    try:
-        config = CiaoConfig.from_env()
-    finally:
-        reset_reroot_cache()
+    config = CiaoConfig.from_env()
 
     # Without the strip this resolved to `<cwd>/"   "` — a directory literally
     # NAMED three spaces, sitting in whatever directory the operator was in.

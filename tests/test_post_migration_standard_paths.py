@@ -11,7 +11,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from ciao.config import CiaoConfig, WorkspaceConfig, reset_reroot_cache
+from ciao.config import CiaoConfig, WorkspaceConfig
 from ciao.operator_actions import DetectionContext, detect_actions
 from ciao.web.agent_assets import repair_workspace_health, workspace_health
 
@@ -23,16 +23,12 @@ def _install(tmp_path: Path, *, migrated: bool) -> CiaoConfig:
         for name in ("personal", "work"):
             (root / name / "memory-vault").mkdir(parents=True, exist_ok=True)
             (root / name / "memory-vault" / "MEMORY.md").write_text("# Memory\n", encoding="utf-8")
-        receipt = root / ".runtime" / "migration" / "workspace-rooting.json"
-        receipt.parent.mkdir(parents=True, exist_ok=True)
-        receipt.write_text(json.dumps({"status": "migrated"}), encoding="utf-8")
         stored = {n: f"{n}/memory-vault" for n in ("personal", "work")}
     else:
         for name in ("personal", "work"):
             (root / "memory-vault" / name).mkdir(parents=True, exist_ok=True)
             (root / "memory-vault" / name / "MEMORY.md").write_text("# Memory\n", encoding="utf-8")
         stored = {n: f"memory-vault/{n}" for n in ("personal", "work")}
-    reset_reroot_cache()
     return CiaoConfig(
         pwa_auth_token="test-token",
         workspace_root=root,
@@ -53,12 +49,6 @@ def test_standard_vault_location_is_under_the_agent_root_once_migrated(tmp_path:
 
     assert config.canonical_workspace_vault_root("work") == tmp_path / "work" / "memory-vault"
     assert config.canonical_workspace_vault_root("work") == config.workspace_vault_root("work")
-
-
-def test_standard_vault_location_stays_shared_before_migrating(tmp_path: Path) -> None:
-    config = _install(tmp_path, migrated=False)
-
-    assert config.canonical_workspace_vault_root("work") == tmp_path / "memory-vault" / "work"
 
 
 def test_no_vault_location_tile_on_a_correctly_migrated_install(tmp_path: Path) -> None:
@@ -87,17 +77,6 @@ def test_each_agent_root_reports_only_its_own_memory_file(tmp_path: Path) -> Non
     assert not any(Path(r["path"]).is_absolute() for r in rows)
 
 
-def test_the_shared_layout_still_reports_every_workspace_memory_file(tmp_path: Path) -> None:
-    config = _install(tmp_path, migrated=False)
-
-    rows = [c for c in workspace_health(config)["checks"] if "MEMORY.md" in c["title"]]
-
-    assert sorted(r["path"] for r in rows) == [
-        "memory-vault/personal/MEMORY.md",
-        "memory-vault/work/MEMORY.md",
-    ]
-
-
 # -- the fix button repairs the roots, not the install root -------------------
 
 
@@ -118,10 +97,3 @@ def test_fix_issues_scaffolds_the_agent_roots_and_leaves_the_install_root_bare(
     assert not (tmp_path / "commands").exists()
 
 
-def test_fix_issues_still_scaffolds_the_install_root_before_migrating(tmp_path: Path) -> None:
-    config = _install(tmp_path, migrated=False)
-
-    repair_workspace_health(config)
-
-    assert (tmp_path / "AGENTS.md").exists()
-    assert (tmp_path / "subagents").is_dir()

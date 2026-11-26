@@ -32,7 +32,7 @@ from typing import Any
 import pytest
 
 from ciao.agent_paths import claude_projects_dir
-from ciao.config import CiaoConfig, WorkspaceConfig, reset_reroot_cache
+from ciao.config import CiaoConfig, WorkspaceConfig
 from ciao.import_decouple import (
     AMBIGUOUS,
     CIAOBOT_OWN,
@@ -103,7 +103,6 @@ def _world(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> CiaoConfig:
     """
     monkeypatch.setenv("CIAO_MEMORY_DIR", str(tmp_path / ".runtime"))
     monkeypatch.setattr("ciao.sync_skills.sync_workspace_skills", lambda *a, **k: None)
-    reset_reroot_cache()
     runtime = tmp_path / ".runtime"
     runtime.mkdir(parents=True, exist_ok=True)
     config = CiaoConfig(
@@ -111,7 +110,7 @@ def _world(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> CiaoConfig:
         workspace_root=tmp_path,
         state_path=runtime / "state.json",
         media_root=runtime / "media",
-        workspaces={"personal": WorkspaceConfig(name="personal", vault_root="memory-vault/personal")},
+        workspaces={"personal": WorkspaceConfig(name="personal", vault_root="personal/memory-vault")},
     )
     Path(config.workspace_vault_root("personal")).mkdir(parents=True, exist_ok=True)
     return config

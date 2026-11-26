@@ -21,7 +21,7 @@ def _make_manager(tmp_path: Path) -> ProjectChatManager:
         state_path=runtime / "state.json",
         media_root=runtime / "media",
         workspaces={
-            name: WorkspaceConfig(name=name, vault_root=f"memory-vault/{name}")
+            name: WorkspaceConfig(name=name, vault_root=f"{name}/memory-vault")
             for name in ("personal", "work")
         },
     )
@@ -44,7 +44,7 @@ def test_discover_archived_chats_happy_path(tmp_path: Path) -> None:
     personal_proj = pcm.create_project("Personal Project B", workspace="personal")
     
     # Create vault structure for transcripts
-    vault_chats_dir = tmp_path / "memory-vault" / "Logs" / "Chats"
+    vault_chats_dir = tmp_path / "Logs" / "Chats"
     vault_chats_dir.mkdir(parents=True, exist_ok=True)
     
     # 1. Create a work chat transcript
@@ -139,7 +139,7 @@ def test_discover_archived_chats_happy_path(tmp_path: Path) -> None:
     assert c1.archived is True
     assert c1.created_at == "2026-06-10T12:00:00Z"
     assert c1.last_activity_at == "2026-06-10T13:00:00Z"
-    assert c1.archive_path == "memory-vault/Logs/Chats/chat-11111111/claude/2026-06-10T12-00-00Z-sess1.md"
+    assert c1.archive_path == "Logs/Chats/chat-11111111/claude/2026-06-10T12-00-00Z-sess1.md"
     
     c2 = pcm.get_chat("chat-22222222")
     assert c2 is not None
@@ -150,7 +150,7 @@ def test_discover_archived_chats_happy_path(tmp_path: Path) -> None:
     assert c2.archived is True
     assert c2.created_at == "2026-06-10T14:00:00Z"
     assert c2.last_activity_at == "2026-06-10T15:00:00Z"
-    assert c2.archive_path == "memory-vault/Logs/Chats/chat-22222222/claude/2026-06-10T14-00-00Z-sess2.md"
+    assert c2.archive_path == "Logs/Chats/chat-22222222/claude/2026-06-10T14-00-00Z-sess2.md"
 
     # Find work General ID
     work_gen = next(p for p in pcm.list_projects() if p.workspace == "work" and p.name == "General")
@@ -162,7 +162,7 @@ def test_discover_archived_chats_happy_path(tmp_path: Path) -> None:
 
 
 def test_archived_chat_project_slug_resolves_to_display_name(tmp_path: Path) -> None:
-    folder = tmp_path / "memory-vault" / "work" / "projects" / "active" / "rossmann-mvp"
+    folder = tmp_path / "work" / "memory-vault" / "projects" / "active" / "rossmann-mvp"
     folder.mkdir(parents=True)
     (folder / "README.md").write_text(
         "---\ntitle: Rossmann MVP\ndescription: Shelf recognition\n---\n",
@@ -175,7 +175,7 @@ def test_archived_chat_project_slug_resolves_to_display_name(tmp_path: Path) -> 
     )
 
     provider_dir = (
-        tmp_path / "memory-vault" / "Logs" / "Chats" / "chat-rossmann" / "claude"
+        tmp_path / "Logs" / "Chats" / "chat-rossmann" / "claude"
     )
     provider_dir.mkdir(parents=True)
     (provider_dir / "2026-07-14T08-49-56Z-session.md").write_text(
@@ -209,7 +209,7 @@ def test_archived_chat_project_slug_resolves_to_display_name(tmp_path: Path) -> 
 def test_recovers_orphaned_active_chat_with_surviving_provider_session(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    folder = tmp_path / "memory-vault" / "work" / "projects" / "active" / "rossmann-mvp"
+    folder = tmp_path / "work" / "memory-vault" / "projects" / "active" / "rossmann-mvp"
     folder.mkdir(parents=True)
     (folder / "README.md").write_text(
         "---\ntitle: Rossmann MVP\ndescription: Shelf recognition\n---\n",
@@ -352,7 +352,7 @@ def test_discover_archived_chats_pruning(tmp_path: Path) -> None:
     proj = pcm.create_project("Work Project A", workspace="work")
     
     # Create the chats root directory so pruning check runs
-    vault_chats_dir = tmp_path / "memory-vault" / "Logs" / "Chats"
+    vault_chats_dir = tmp_path / "Logs" / "Chats"
     vault_chats_dir.mkdir(parents=True, exist_ok=True)
 
     chat = ChatInfo(
@@ -360,7 +360,7 @@ def test_discover_archived_chats_pruning(tmp_path: Path) -> None:
         project_id=proj.project_id,
         title="Old Chat",
         archived=True,
-        archive_path="memory-vault/Logs/Chats/chat-old/claude/2026-06-10T12-00-00Z-sessold.md",
+        archive_path="Logs/Chats/chat-old/claude/2026-06-10T12-00-00Z-sessold.md",
     )
     pcm._chats["chat-old"] = chat
     pcm._save()
@@ -403,7 +403,7 @@ def test_new_session_refuses_to_resurrect_archived_chat(tmp_path: Path) -> None:
     chat = pcm.create_chat(proj.project_id, title="Routine Chat")
     # Simulate the archived state a routine auto-archive leaves behind.
     chat.archived = True
-    chat.archive_path = "memory-vault/Logs/Chats/chat-x/claude/t.md"
+    chat.archive_path = "Logs/Chats/chat-x/claude/t.md"
 
     with pytest.raises(ValueError, match="archived"):
         pcm.new_session(chat.chat_id)
@@ -411,7 +411,7 @@ def test_new_session_refuses_to_resurrect_archived_chat(tmp_path: Path) -> None:
     same = pcm.get_chat(chat.chat_id)
     assert same is not None
     assert same.archived is True  # not resurrected
-    assert same.archive_path == "memory-vault/Logs/Chats/chat-x/claude/t.md"
+    assert same.archive_path == "Logs/Chats/chat-x/claude/t.md"
 
 
 def test_reconcile_heals_half_archived_chat(tmp_path: Path) -> None:
@@ -481,7 +481,7 @@ def test_continue_archived_chat(tmp_path: Path) -> None:
     proj = pcm.create_project("Work Project A", workspace="work")
     
     # 2. Write a transcript file
-    vault_chats_dir = tmp_path / "memory-vault" / "Logs" / "Chats"
+    vault_chats_dir = tmp_path / "Logs" / "Chats"
     chat_dir = vault_chats_dir / "chat-tobecontinued"
     chat_provider_dir = chat_dir / "claude"
     chat_provider_dir.mkdir(parents=True, exist_ok=True)

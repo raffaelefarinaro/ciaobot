@@ -263,38 +263,6 @@ def test_pin_of_a_journal_published_before_values_were_recorded_is_a_clear_error
         tx.close()
 
 
-@pytest.mark.parametrize("crash_point", ["after_registry", "receipt_lost"])
-def test_retry_after_registry_published_still_records_born_per_root(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, crash_point: str
-) -> None:
-    from ciao import cli, setup_marker
-    from ciao.workspace_reroot import read_receipt
-
-    notes = tmp_path / "notes"
-    notes.mkdir()
-    runtime = tmp_path / "engine" / ".runtime"
-    real = setup_marker.write_vault_index_ownership
-
-    def die(*args, **kwargs):
-        raise OSError("killed after the registry")
-
-    with monkeypatch.context() as patch:
-        patch.setattr(setup_marker, "write_vault_index_ownership", die)
-        assert _cli_setup(cli, tmp_path, notes, "--auth-token", "password") == 1
-    assert (runtime / "workspaces.json").exists()
-    receipt = runtime / "migration" / "workspace-rooting.json"
-    if crash_point == "receipt_lost":
-        # The registry was fsynced; the receipt write is not, so a power cut can keep one and lose the other.
-        receipt.unlink()
-        assert read_receipt(runtime) is None
-    monkeypatch.setattr(setup_marker, "write_vault_index_ownership", real)
-    assert _cli_setup(cli, tmp_path, notes, "--auth-token", "password") == 0
-    migrated = read_receipt(runtime)
-    assert migrated is not None and migrated["born_per_root"] is True
-    # a retry that finds the receipt must not rewrite it (no stray superseded copies)
-    assert [p.name for p in receipt.parent.iterdir() if p.name != receipt.name] == []
-
-
 def test_registry_publication_keeps_the_owner_view_current(tmp_path: Path) -> None:
     from ciao.workspaces import WorkspaceRegistryConflict, acquire_registry_at
 

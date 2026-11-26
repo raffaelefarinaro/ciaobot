@@ -260,7 +260,7 @@ def _resolve_workspace_path(
 
 # Automated snapshot commits carry a fixed identity so they never depend on the
 # operator's git config (a fresh machine has none). Same values as cli.py,
-# workspace_guide.py and workspace_reroot.py.
+# workspace_guide.py.
 _SNAPSHOT_GIT_IDENTITY: tuple[str, ...] = (
     "-c", "user.name=Ciaobot",
     "-c", "user.email=ciaobot@localhost",

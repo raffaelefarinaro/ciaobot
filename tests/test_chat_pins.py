@@ -29,6 +29,7 @@ from ciao.web.routes_api import chat_detail, chat_file_path
 def _make_manager(tmp_path: Path) -> ProjectChatManager:
     runtime = tmp_path / ".runtime"
     runtime.mkdir(parents=True, exist_ok=True)
+    (tmp_path / "personal").mkdir(exist_ok=True)
     config = CiaoConfig(
         pwa_auth_token="test-token",
         workspace_root=tmp_path,
@@ -540,8 +541,8 @@ def test_pin_patch_resolves_a_relative_path_to_canonical_identity(
     """
     manager = _make_manager(tmp_path)
     chat = _one_chat(manager)
-    (tmp_path / "reports").mkdir()
-    (tmp_path / "reports" / "october.md").write_text("o", encoding="utf-8")
+    (tmp_path / "personal" / "reports").mkdir()
+    (tmp_path / "personal" / "reports" / "october.md").write_text("o", encoding="utf-8")
     client = _make_client(manager)
 
     response = client.patch(
@@ -550,7 +551,7 @@ def test_pin_patch_resolves_a_relative_path_to_canonical_identity(
     )
 
     assert response.status_code == 200
-    resolved = (tmp_path / "reports" / "october.md").resolve()
+    resolved = (tmp_path / "personal" / "reports" / "october.md").resolve()
     assert response.json()["pinned_file_path"] == resolved.as_posix()
 
 
@@ -564,8 +565,8 @@ def test_pin_patch_does_not_fuzzy_match(tmp_path: Path) -> None:
     """
     manager = _make_manager(tmp_path)
     chat = _one_chat(manager)
-    (tmp_path / "reports").mkdir()
-    (tmp_path / "reports" / "october.md").write_text("o", encoding="utf-8")
+    (tmp_path / "personal" / "reports").mkdir()
+    (tmp_path / "personal" / "reports" / "october.md").write_text("o", encoding="utf-8")
     client = _make_client(manager)
 
     response = client.patch(
@@ -702,7 +703,7 @@ def test_pin_patch_rejects_a_type_the_viewer_would_not_serve(tmp_path: Path) -> 
     """
     manager = _make_manager(tmp_path)
     chat = _one_chat(manager)
-    (tmp_path / ".env").write_text("SECRET=1", encoding="utf-8")
+    (tmp_path / "personal" / ".env").write_text("SECRET=1", encoding="utf-8")
     client = _make_client(manager)
 
     response = client.patch(
@@ -716,7 +717,7 @@ def test_pin_patch_rejects_a_type_the_viewer_would_not_serve(tmp_path: Path) -> 
 def test_pin_patch_pins_a_folder_named_with_a_trailing_slash(tmp_path: Path) -> None:
     manager = _make_manager(tmp_path)
     chat = _one_chat(manager)
-    (tmp_path / "reports").mkdir()
+    (tmp_path / "personal" / "reports").mkdir()
     client = _make_client(manager)
 
     response = client.patch(
@@ -725,14 +726,14 @@ def test_pin_patch_pins_a_folder_named_with_a_trailing_slash(tmp_path: Path) -> 
 
     assert response.status_code == 200
     assert response.json()["pinned_file_path"] == (
-        (tmp_path / "reports").resolve().as_posix() + "/"
+        (tmp_path / "personal" / "reports").resolve().as_posix() + "/"
     )
     assert response.json()["pin_revision"] == 1
 
     # The absolute form of the same folder is the same identity: a no-op.
     again = client.patch(
         f"/api/chats/{chat.chat_id}",
-        json=_pin_body((tmp_path / "reports").as_posix() + "/", 1),
+        json=_pin_body((tmp_path / "personal" / "reports").as_posix() + "/", 1),
     )
     assert again.status_code == 200
     assert again.json()["pin_revision"] == 1
@@ -741,9 +742,9 @@ def test_pin_patch_pins_a_folder_named_with_a_trailing_slash(tmp_path: Path) -> 
 def test_unpinning_a_folder_dismisses_it_and_repinning_clears_it(tmp_path: Path) -> None:
     manager = _make_manager(tmp_path)
     chat = _one_chat(manager)
-    (tmp_path / "reports").mkdir()
+    (tmp_path / "personal" / "reports").mkdir()
     client = _make_client(manager)
-    folder = (tmp_path / "reports").resolve().as_posix() + "/"
+    folder = (tmp_path / "personal" / "reports").resolve().as_posix() + "/"
     client.patch(f"/api/chats/{chat.chat_id}", json=_pin_body("reports/", 0))
 
     closed = client.patch(f"/api/chats/{chat.chat_id}", json=_pin_body("", 1))
@@ -758,7 +759,7 @@ def test_unpinning_a_folder_dismisses_it_and_repinning_clears_it(tmp_path: Path)
 def test_stale_folder_pin_is_409(tmp_path: Path) -> None:
     manager = _make_manager(tmp_path)
     chat = _one_chat(manager)
-    (tmp_path / "reports").mkdir()
+    (tmp_path / "personal" / "reports").mkdir()
     client = _make_client(manager)
     client.patch(f"/api/chats/{chat.chat_id}", json=_pin_body("reports/", 0))
 
@@ -792,7 +793,7 @@ def test_folder_pin_through_a_symlink_out_is_403(
     manager = _make_manager(tmp_path)
     chat = _one_chat(manager)
     other = tmp_path_factory.mktemp("elsewhere")
-    (tmp_path / "link").symlink_to(other, target_is_directory=True)
+    (tmp_path / "personal" / "link").symlink_to(other, target_is_directory=True)
     client = _make_client(manager)
 
     response = client.patch(f"/api/chats/{chat.chat_id}", json=_pin_body("link/", 0))
@@ -805,7 +806,7 @@ def test_folder_pin_through_a_symlink_out_is_403(
 def test_folder_pin_of_a_file_is_400(tmp_path: Path) -> None:
     manager = _make_manager(tmp_path)
     chat = _one_chat(manager)
-    (tmp_path / "note.md").write_text("n", encoding="utf-8")
+    (tmp_path / "personal" / "note.md").write_text("n", encoding="utf-8")
     client = _make_client(manager)
 
     response = client.patch(f"/api/chats/{chat.chat_id}", json=_pin_body("note.md/", 0))
@@ -842,7 +843,7 @@ def test_folder_with_a_narrow_no_break_space_can_be_pinned(tmp_path: Path) -> No
     """macOS puts U+202F in screenshot names; the browser lists such folders, so pins must take them."""
     manager = _make_manager(tmp_path)
     chat = _one_chat(manager)
-    (tmp_path / "Shot\u202fA").mkdir()
+    (tmp_path / "personal" / "Shot\u202fA").mkdir()
     client = _make_client(manager)
 
     response = client.patch(
@@ -1032,8 +1033,8 @@ def test_surface_without_viewers_persists_and_honors_path_dismissal(
     """
     manager = _make_manager(tmp_path)
     chat = _one_chat(manager)
-    first = tmp_path / "first.md"
-    second = tmp_path / "second.md"
+    first = tmp_path / "personal" / "first.md"
+    second = tmp_path / "personal" / "second.md"
     first.write_text("1", encoding="utf-8")
     second.write_text("2", encoding="utf-8")
     plane = _control_plane(manager)
@@ -1076,7 +1077,7 @@ def test_non_chat_principal_mutates_no_pin(tmp_path: Path) -> None:
     """
     manager = _make_manager(tmp_path)
     chat = _one_chat(manager)
-    target = tmp_path / "note.md"
+    target = tmp_path / "personal" / "note.md"
     target.write_text("n", encoding="utf-8")
     plane = _control_plane(manager)
 

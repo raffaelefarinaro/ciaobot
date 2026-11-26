@@ -21,7 +21,7 @@ def _make_manager(tmp_path: Path) -> tuple[ProjectChatManager, CiaoConfig]:
         state_path=runtime / "state.json",
         media_root=runtime / "media",
         workspaces={
-            name: WorkspaceConfig(name=name, vault_root=f"memory-vault/{name}")
+            name: WorkspaceConfig(name=name, vault_root=f"{name}/memory-vault")
             for name in ("personal", "work")
         },
     )
@@ -53,7 +53,7 @@ def test_route_chat_continue(tmp_path: Path) -> None:
     proj = pcm.create_project(name="ProjX", workspace="work")
     
     # 2. Write a transcript file
-    vault_chats_dir = tmp_path / "memory-vault" / "Logs" / "Chats"
+    vault_chats_dir = tmp_path / "Logs" / "Chats"
     chat_dir = vault_chats_dir / "chat-arch"
     chat_provider_dir = chat_dir / "claude"
     chat_provider_dir.mkdir(parents=True, exist_ok=True)

@@ -63,9 +63,7 @@ class ProviderService:
         if self._provider is None:
             factory = provider_registry.require(provider).factory()
             # The agent root is data threaded from the caller, not re-derived
-            # here. A caller that supplies none still lands on ``workspace_root``,
-            # which matches ``CiaoConfig.agent_root`` today, so this is a no-op
-            # seam until the re-rooting release flips ``agent_root``.
+            # here. A caller that supplies none lands on ``workspace_root``.
             root = self._agent_root if self._agent_root is not None else self._config.workspace_root
             self._provider = factory(root, config=self._config)
             self._provider.continuation_hook = self._continuation_hook

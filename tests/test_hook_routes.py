@@ -24,7 +24,7 @@ from starlette.responses import PlainTextResponse
 from starlette.routing import Route
 from starlette.testclient import TestClient
 
-from ciao.config import CiaoConfig, WorkspaceConfig, reset_reroot_cache
+from ciao.config import CiaoConfig, WorkspaceConfig
 from ciao.web.auth import AuthMiddleware, SESSION_COOKIE
 from ciao.web import routes_hooks
 from ciao.web.routes_hooks import webhook_method_not_allowed, webhook_receive
@@ -67,7 +67,6 @@ def _world(
     monkeypatch.setattr(
         "ciao.sync_skills.sync_workspace_skills", lambda *_a, **_kw: None
     )
-    reset_reroot_cache()
     runtime = tmp_path / ".runtime"
     runtime.mkdir(parents=True, exist_ok=True)
     config = CiaoConfig(

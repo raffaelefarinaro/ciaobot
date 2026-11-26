@@ -609,8 +609,6 @@ def _env_dump_command() -> str:
 async def test_schedule_in_a_second_workspace_runs_in_that_workspace(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    # Re-rooted layout: each workspace owns its own agent root and vault.
-    monkeypatch.setattr(CiaoConfig, "_rerooted", lambda self: True)
     manager = _manager(tmp_path, connectors=True)
     (tmp_path / "work").mkdir()
     project = manager.create_project("Notes", workspace="work")
@@ -635,7 +633,6 @@ async def test_schedule_in_a_second_workspace_runs_in_that_workspace(
 async def test_schedule_command_env_matches_a_chat_in_the_same_workspace(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.setattr(CiaoConfig, "_rerooted", lambda self: True)
     manager = _manager(tmp_path, connectors=True)
     project = manager.create_project("Notes", workspace="work")
     chat = manager.create_chat(project.project_id, title="Chat", provider="claude")

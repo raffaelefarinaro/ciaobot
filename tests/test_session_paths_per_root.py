@@ -134,14 +134,10 @@ def _make_manager(tmp_path: Path) -> ProjectChatManager:
 # `config.workspace_root`, so reclaim has to target that root.
 
 
-def _rerooted_manager(tmp_path: Path, workspace: str) -> ProjectChatManager:
+def _per_root_manager(tmp_path: Path, workspace: str) -> ProjectChatManager:
     """A manager on a re-rooted install with one registered workspace."""
-    from ciao.config import WorkspaceConfig, reset_reroot_cache
+    from ciao.config import WorkspaceConfig
 
-    receipt = tmp_path / ".runtime" / "migration" / "workspace-rooting.json"
-    receipt.parent.mkdir(parents=True, exist_ok=True)
-    receipt.write_text(json.dumps({"status": "migrated"}), encoding="utf-8")
-    reset_reroot_cache()
 
     pcm = _make_manager(tmp_path)
     pcm._config.workspaces = {
@@ -166,7 +162,7 @@ def test_reclaim_targets_the_chats_agent_root(
     """The blob lives under the root the chat ran in, so that is the directory
     reclaim must hand the SDK. Pointing it at ``workspace_root`` deleted
     nothing and leaked a session blob per archived workspace chat."""
-    pcm = _rerooted_manager(tmp_path, "work")
+    pcm = _per_root_manager(tmp_path, "work")
     session = "55555555-5555-5555-5555-555555555555"
     chat = _archived_chat(pcm, "work", session)
 
@@ -198,7 +194,7 @@ def test_delete_reclaims_against_the_chats_root_not_the_primary(
     and reclaimed the wrong root — leaving the deleted chat's blob on disk while
     reporting success. The root has to be captured before the pop.
     """
-    pcm = _rerooted_manager(tmp_path, "work")
+    pcm = _per_root_manager(tmp_path, "work")
     pcm._config.workspaces["personal"] = pcm._config.workspaces["work"].__class__(
         name="personal", vault_root=str(tmp_path / "personal" / "memory-vault")
     )
@@ -415,7 +411,7 @@ def test_third_registered_adapter_reclaims_through_the_registry(
     lineage ids are passed once, in original order. No live provider is ever
     constructed or streamed.
     """
-    pcm = _rerooted_manager(tmp_path, "work")
+    pcm = _per_root_manager(tmp_path, "work")
     chat = _acme_chat(pcm, "current-old", ["old-a", "", "old-b", "old-a"])
 
     deletes: list[tuple[str, str]] = []
@@ -465,7 +461,7 @@ def test_reclaim_confirms_only_a_literal_false(
     base default), and an unknown provider id never reaches an adapter —
     neither may produce a warning or start a provider.
     """
-    pcm = _rerooted_manager(tmp_path, "work")
+    pcm = _per_root_manager(tmp_path, "work")
     # The current id repeats the lineage's last entry: first-seen dedup keeps
     # the reclaim at exactly the three successive confirmations.
     chat = _acme_chat(pcm, "s-none", ["s-true", "s-false", "s-none"])
@@ -537,7 +533,7 @@ def test_reclaim_is_fail_open_but_cancellation_propagates(
     Factory resolution failures share the boundary; a cancelled cleanup is
     not an ordinary failure and escapes the reclaim entirely.
     """
-    pcm = _rerooted_manager(tmp_path, "work")
+    pcm = _per_root_manager(tmp_path, "work")
     chat = _acme_chat(pcm, "good", ["bad", "good"])
 
     counts: dict[str, int] = {}
@@ -621,7 +617,7 @@ def test_reset_reclaims_captured_old_lineage_after_disconnect(
     persisted reset/replacement state, nor touches the archived transcript.
     Replacement ids assigned after the reset are invisible to the cleanup.
     """
-    pcm = _rerooted_manager(tmp_path, "work")
+    pcm = _per_root_manager(tmp_path, "work")
     pcm._config.workspaces["personal"] = pcm._config.workspaces["work"].__class__(
         name="personal", vault_root=str(tmp_path / "personal" / "memory-vault")
     )

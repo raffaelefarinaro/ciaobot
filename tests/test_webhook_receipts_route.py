@@ -36,7 +36,7 @@ from starlette.middleware import Middleware
 from starlette.routing import Route
 from starlette.testclient import TestClient
 
-from ciao.config import CiaoConfig, WorkspaceConfig, reset_reroot_cache
+from ciao.config import CiaoConfig, WorkspaceConfig
 from ciao.web.auth import AuthMiddleware, SESSION_COOKIE
 from ciao.web.routes_webhooks import webhook_delete, webhook_receipts, webhook_trigger_receipts
 from ciao.webhooks import (
@@ -71,7 +71,6 @@ def _world(
     monkeypatch.setattr(
         "ciao.sync_skills.sync_workspace_skills", lambda *_a, **_kw: None
     )
-    reset_reroot_cache()
     runtime = tmp_path / ".runtime"
     runtime.mkdir(parents=True, exist_ok=True)
     config = CiaoConfig(

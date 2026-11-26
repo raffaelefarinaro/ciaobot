@@ -114,10 +114,8 @@ def test_chat_project_workspace_resolves_that_workspaces_agent_root(
 
     manager._get_provider(chat.chat_id)
 
-    # The root that reached the factory is this workspace's agent root, which
-    # today equals workspace_root (the no-behaviour-change guarantee).
+    # The root that reached the factory is this workspace's own agent root.
     assert spy_factory["root"] == config.agent_root("client")
-    assert spy_factory["root"] == config.workspace_root
 
 
 def test_project_without_workspace_falls_back_to_primary_workspace(
@@ -133,7 +131,6 @@ def test_project_without_workspace_falls_back_to_primary_workspace(
     manager._get_provider(chat.chat_id)
 
     assert spy_factory["root"] == cfg.agent_root(cfg.primary_workspace())
-    assert spy_factory["root"] == cfg.workspace_root
 
 
 def test_chat_without_project_resolves_primary_workspace_agent_root(
@@ -147,7 +144,6 @@ def test_chat_without_project_resolves_primary_workspace_agent_root(
     manager._get_provider("chat-null")
 
     assert spy_factory["root"] == cfg.agent_root(cfg.primary_workspace())
-    assert spy_factory["root"] == cfg.workspace_root
 
 
 def test_provider_service_without_agent_root_uses_workspace_root(

@@ -25,7 +25,7 @@ from types import SimpleNamespace
 import pytest
 from starlette.requests import Request
 
-from ciao.config import CiaoConfig, WorkspaceConfig, reset_reroot_cache
+from ciao.config import CiaoConfig, WorkspaceConfig
 from ciao.sessions import StateStore
 from ciao.transcripts import TranscriptStore
 from ciao.web.project_chats import ProjectChatManager
@@ -33,14 +33,9 @@ from ciao.web.routes_api import chat_messages
 from ciao.web.transcript_service import _read_session_segment
 
 
-def _manager(tmp_path: Path, *, migrated: bool) -> ProjectChatManager:
+def _manager(tmp_path: Path) -> ProjectChatManager:
     runtime = tmp_path / ".runtime"
     runtime.mkdir(parents=True, exist_ok=True)
-    if migrated:
-        receipt = runtime / "migration" / "workspace-rooting.json"
-        receipt.parent.mkdir(parents=True, exist_ok=True)
-        receipt.write_text(json.dumps({"status": "migrated"}), encoding="utf-8")
-    reset_reroot_cache()
     config = CiaoConfig(
         pwa_auth_token="test-token",
         workspace_root=tmp_path,
@@ -50,7 +45,7 @@ def _manager(tmp_path: Path, *, migrated: bool) -> ProjectChatManager:
         workspaces={
             name: WorkspaceConfig(
                 name=name,
-                vault_root=f"{name}/memory-vault" if migrated else f"memory-vault/{name}",
+                vault_root=f"{name}/memory-vault",
             )
             for name in ("personal", "work")
         },
@@ -89,7 +84,7 @@ async def test_a_session_recorded_under_the_agent_root_renders(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """The regression: the chat was blank because only the install root was tried."""
-    pcm = _manager(tmp_path, migrated=True)
+    pcm = _manager(tmp_path)
     project = pcm.create_project("Sweep", workspace="work")
     chat = pcm.create_chat(project.project_id, title="weekly sweep")
     chat.session_id = "8abd8e52-50bf-54e3-80d0-868b99edfee7"
@@ -114,7 +109,7 @@ async def test_a_pre_migration_session_under_the_install_root_still_renders(
 ) -> None:
     """Chats from before the migration have their transcripts under the install
     root's slug. Preferring the agent root must not lose them."""
-    pcm = _manager(tmp_path, migrated=True)
+    pcm = _manager(tmp_path)
     project = pcm.create_project("Old", workspace="work")
     chat = pcm.create_chat(project.project_id, title="older chat")
     chat.session_id = "ad727ef7-02ed-5369-9f5f-2f5a374c255a"
@@ -180,7 +175,7 @@ async def test_when_both_roots_hold_the_session_the_agent_root_wins(
     under the install root. The chat's own root is the current one, so it must be
     read first; the other is a stale copy that stops at the older turns.
     """
-    pcm = _manager(tmp_path, migrated=True)
+    pcm = _manager(tmp_path)
     project = pcm.create_project("Both", workspace="work")
     chat = pcm.create_chat(project.project_id, title="resumed chat")
     chat.session_id = "0cf8889e-bdbc-5658-9379-db25634a4fb6"

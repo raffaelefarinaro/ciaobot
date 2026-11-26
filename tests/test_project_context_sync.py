@@ -49,8 +49,8 @@ def _make_manager(tmp_path: Path) -> ProjectChatManager:
 def _make_project_folder(
     root: Path, folder_name: str, *, description: str = "", body: str = ""
 ) -> Path:
-    """Create memory-vault/personal/projects/active/<folder>/README.md."""
-    folder = root / "memory-vault" / "personal" / "projects" / "active" / folder_name
+    """Create personal/memory-vault/projects/active/<folder>/README.md."""
+    folder = root / "personal" / "memory-vault" / "projects" / "active" / folder_name
     folder.mkdir(parents=True)
     readme = folder / "README.md"
     readme.write_text(
