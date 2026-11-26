@@ -2,21 +2,17 @@
 
 Why this module exists
 ----------------------
-Four modules need to answer the same questions about a note's body — where does
+Several modules need to answer the same questions about a note's body — where does
 a fenced block start, is this `[` an image or an escaped bracket, what are the
 three parts of `[[ref#anchor|alias]]` — and until this module existed they
-answered them by importing each other's private helpers. `vault_rehome` alone
-reached into eleven underscore-prefixed names across `vault_index`,
-`vault_lint`, and `vault_migrate_links`; `vault_migrate_links` reached into
-`vault_lint._is_escaped`. A change to any one of them could silently corrupt
-links or receipts in a module that never mentioned it.
+answered them by importing each other's private helpers. A change to any one of
+them could silently corrupt links in a module that never mentioned it.
 
 The primitives collected here are the ones with no owner: pure functions and
 patterns over markdown *text*, with no notion of a vault index, a lint finding,
 or a migration receipt. Anything that needs `Entry`, a filename index, or a
 receipt stays in the module that owns that concept — `vault_index` still owns
-resolution (`resolve_related`, `resolve_vault_link`, `markdown_destination`),
-`vault_migrate_links` still owns the receipt and the git rail.
+resolution (`resolve_related`, `resolve_vault_link`, `markdown_destination`).
 
 This module imports nothing from `ciao`, so it can be imported from anywhere in
 the vault stack without creating a cycle. That is the property that makes it
@@ -154,7 +150,7 @@ def parse_wikilink(matched: str) -> tuple[str, str, str]:
 def alias_separator(matched: str) -> str:
     """How ``matched`` spelled its alias pipe, `\\|` or `|`.
 
-    For callers that re-emit a wikilink rather than replace it (`vault_rehome`
+    For callers that re-emit a wikilink rather than replace it (`vault_reference_rewrite`
     repoints a moved target and keeps the dialect). Re-rendering a table cell's
     `\\|` as a bare `|` would close the cell early and break the row, which is
     exactly what `parse_wikilink` dropping the backslash would otherwise cause.

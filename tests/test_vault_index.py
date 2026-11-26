@@ -945,7 +945,7 @@ def test_a_related_ref_is_repointed_whatever_the_line_endings(tmp_path: Path, ne
     matched `---\\n`: a CRLF note's `related:` refs were never repointed when the
     note they named was completed or re-homed.
     """
-    from ciao.vault_rehome import rewrite_references
+    from ciao.vault_reference_rewrite import rewrite_references
 
     vault = tmp_path / "memory-vault"
     # The note as it is before the move: refs resolve against what exists.

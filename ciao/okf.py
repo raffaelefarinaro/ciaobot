@@ -44,7 +44,9 @@ from pathlib import Path
 from typing import Any
 
 from ciao.frontmatter import yaml_scalar
-from ciao.vault_index import Entry, scan_vault
+from ciao.vault_index import EXCLUDED_TOP_DIRS, Entry, is_excluded, scan_vault
+from ciao.vault_lint import EXCLUDE_DIRS
+from ciao.vault_links import FENCED_CODE_RE, INLINE_CODE_RE, WIKILINK_RE, is_escaped
 
 logger = logging.getLogger(__name__)
 
@@ -79,6 +81,29 @@ def _path_scope(vault_root: Path, workspace: str) -> str:
     if Path(vault_root).parent.name == workspace:
         return ""  # re-rooted: this vault already holds only that workspace
     return workspace
+
+
+def _first_wikilink_note(root: Path) -> str:
+    """The first note still holding a `[[wikilink]]` outside code, or "".
+
+    Skips what the index skips and the two files the app regenerates, so it never
+    reports a link the export would not carry.
+    """
+    skip = EXCLUDED_TOP_DIRS | EXCLUDE_DIRS
+    for path in sorted(root.rglob("*.md")):
+        relative = path.relative_to(root)
+        if relative.name.casefold() in {"index.md", "vocabulary.md"} or is_excluded(relative):
+            continue
+        if any(part in skip for part in relative.parts[:-1]):
+            continue
+        try:
+            text = path.read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError):
+            continue
+        stripped = INLINE_CODE_RE.sub("", FENCED_CODE_RE.sub("", text))
+        if any(not is_escaped(stripped, m.start()) for m in WIKILINK_RE.finditer(stripped)):
+            return relative.as_posix()
+    return ""
 
 
 def _bundle_entries(vault_root: Path, scope: str) -> list[Entry]:
@@ -183,9 +208,7 @@ def export_bundle(
         return summary
 
     try:
-        from ciao.vault_migrate_links import has_unmigrated_links
-
-        unmigrated = has_unmigrated_links(root)
+        unmigrated = _first_wikilink_note(root)
     except Exception:  # noqa: BLE001 — never fail an export over the advisory
         logger.exception("okf export: link-dialect check failed")
         unmigrated = ""

@@ -16,6 +16,7 @@ from typing import NamedTuple
 from urllib.parse import quote
 
 from ciao.vault_index import Entry, build_filename_index, scan_vault, temp_prefix
+from ciao.vault_reference_rewrite import rewrite_references
 
 def _discard(path: Path) -> None:
     """Delete a file that no longer records anything real.
@@ -79,8 +80,7 @@ def _write_texts(pairs: list[tuple[Path, str, str]]) -> None:
     caller of this helper already turns into a refusal; a raised error means
     nothing was left half-written either way.
 
-    The pattern ``_commit_staged_edits`` in ``vault_index`` and the per-root move
-    in ``vault_rehome`` already use, for the same reason. Writing each note the
+    The pattern ``_commit_staged_edits`` in ``vault_index`` uses, for the same reason. Writing each note the
     moment its rewrite was computed can leave earlier notes pointing at a
     destination that never arrived, and a half-applied link rewrite is the one
     state a completion must not be able to leave behind.
@@ -261,12 +261,6 @@ def _plan_reference_rewrites(
     to discover that is the cost this skips. A note that is itself moving is read
     regardless, because its own relative links are measured from its new place.
     """
-    # Imported here, not at module scope: `vault_rehome` pulls in the migration
-    # receipt and the git rail, and a read-only listing of this module's queue
-    # must not pay for them. The same reason `delete_permanently` imports
-    # `strip_references` at the point of use.
-    from ciao.vault_rehome import rewrite_references
-
     filename_index = build_filename_index(entries)
     moved_to = dict(moves)
     # `rewrite_references` works in two value spaces, so the one move is spelled
