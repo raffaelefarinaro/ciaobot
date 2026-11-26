@@ -2,7 +2,9 @@
 
 Read-only and not wired into ingress: nothing in the engine calls this module,
 and `chat_evidence_status` still answers `remote_client` or `unprovisioned`.
-The design is `docs/CHAT_AUTHORITY_HELPER.md`.
+The design is `docs/CHAT_AUTHORITY_HELPER.md`. Operator key enrollment and
+replacement are not engine operations at all (replacement is disallowed; the
+only change is an admin-authorized reset).
 
 The engine runs as the same OS user as the agent, so this client is not
 trusted with authority. It has no command, signing or submit path: grants and
@@ -26,7 +28,9 @@ import binascii
 import hashlib
 import json
 import secrets
+import stat
 from collections.abc import Callable
+from pathlib import Path
 from typing import Any, Protocol
 
 from ciao.chat_authority import MAX_LOOKUP, Lookup, TurnEvent
@@ -233,14 +237,16 @@ def _event(raw: object) -> TurnEvent:
     )
 
 
-def helper_status(client: ChatAuthorityClient) -> str:
+def helper_status(client: ChatAuthorityClient, *, provisioned: Callable[[], bool]) -> str:
     """Map the helper's state onto the existing chat-evidence status names.
 
     `unprovisioned` when no service is registered, `degraded` when one is
-    registered but cannot be verified, `available` only after a verified
-    health reply. The engine's own platform and channel statuses
-    (`unsupported_platform`, `remote_client`) are decided before this is
-    asked and are not this function's business.
+    registered but cannot be verified, and `available` only after a verified
+    health reply **and** a passing static provisioning check. `provisioned` has
+    no default so that health alone can never read `available`; pass
+    `static_provisioning_ok`. Use one long-lived client: its rollback memory
+    lives in the object. The engine's own platform and channel statuses
+    (`unsupported_platform`, `remote_client`) are decided before this is asked.
     """
     try:
         client.health()
@@ -248,4 +254,57 @@ def helper_status(client: ChatAuthorityClient) -> str:
         return "unprovisioned"
     except ChatAuthorityUnavailable:
         return "degraded"
-    return "available"
+    return "available" if provisioned() else "degraded"
+
+
+HELPER_FILES = (
+    "Library/PrivilegedHelperTools/com.ciaobot.chat-authority",
+    "Library/PrivilegedHelperTools/com.ciaobot.chat-authority-anchor",
+    "Library/LaunchDaemons/com.ciaobot.chat-authority.plist",
+    "Library/LaunchDaemons/com.ciaobot.chat-authority-anchor.plist",
+)
+HELPER_ACCOUNT = "_ciaoauth"
+
+
+def _account_ok() -> bool:
+    import grp
+    import pwd
+
+    try:
+        pwd.getpwnam(HELPER_ACCOUNT)
+        admin = grp.getgrnam("admin")
+    except KeyError:
+        return False
+    return HELPER_ACCOUNT not in admin.gr_mem
+
+
+def static_provisioning_ok(
+    root: Path = Path("/"),
+    *,
+    owner_uid: int = 0,
+    account_ok: Callable[[], bool] = _account_ok,
+) -> bool:
+    """True when the helper's files and account look provisioned.
+
+    Every helper file and each directory above it (up to `root`) must exist, be
+    owned by `owner_uid` (root), not be a symlink and not be group or world
+    writable; the dedicated account must exist outside the `admin` group. This
+    is the engine's own stat of what the installer should have left, not the
+    helper's word for it. It does not prove the binaries are ours.
+    """
+    seen: set[Path] = set()
+    for rel in HELPER_FILES:
+        path = root / rel
+        for item in (path, *path.parents):
+            if item in seen:
+                break
+            seen.add(item)
+            try:
+                info = item.lstat()
+            except OSError:
+                return False
+            if stat.S_ISLNK(info.st_mode) or info.st_uid != owner_uid or info.st_mode & 0o022:
+                return False
+            if item == root:
+                break
+    return account_ok()

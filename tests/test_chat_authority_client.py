@@ -21,8 +21,13 @@ from ciao.chat_authority_client import (
     TransportTimeout,
     TransportUnprovisioned,
     helper_status,
+    static_provisioning_ok,
 )
 from ciao.share_evidence import CHAT_EVIDENCE_STATUSES
+
+def status(client: ChatAuthorityClient, ok: bool = True) -> str:
+    return helper_status(client, provisioned=lambda: ok)
+
 
 SCOPE = {"workspace": "w1", "project": "p1", "chat": "c1"}
 
@@ -155,14 +160,14 @@ def make(helper: FakeHelper) -> ChatAuthorityClient:
 
 def test_status_enum_values_are_the_existing_ones() -> None:
     helper = FakeHelper()
-    for status in (
-        helper_status(make(helper)),
-        helper_status(make(_raising(TransportUnprovisioned()))),
-        helper_status(make(_raising(TransportTimeout()))),
+    for value in (
+        status(make(helper)),
+        status(make(_raising(TransportUnprovisioned()))),
+        status(make(_raising(TransportTimeout()))),
     ):
-        assert status in CHAT_EVIDENCE_STATUSES
+        assert value in CHAT_EVIDENCE_STATUSES
     # the client never reports platform or channel states; those stay in the engine
-    assert "remote_client" not in {helper_status(make(helper))}
+    assert "remote_client" not in {status(make(helper))}
 
 
 def _raising(exc: Exception) -> FakeHelper:
@@ -172,24 +177,24 @@ def _raising(exc: Exception) -> FakeHelper:
 
 
 def test_available_only_when_helper_verified() -> None:
-    assert helper_status(make(FakeHelper())) == "available"
+    assert status(make(FakeHelper())) == "available"
 
 
 def test_unprovisioned_when_no_service_registered() -> None:
-    assert helper_status(make(_raising(TransportUnprovisioned()))) == "unprovisioned"
+    assert status(make(_raising(TransportUnprovisioned()))) == "unprovisioned"
 
 
 @pytest.mark.parametrize(
     "exc", [TransportTimeout(), TransportError("boom"), OSError("x")]
 )
 def test_degraded_on_transport_failure(exc: Exception) -> None:
-    assert helper_status(make(_raising(exc))) == "degraded"
+    assert status(make(_raising(exc))) == "degraded"
 
 
 def test_degraded_when_helper_not_ready() -> None:
     helper = FakeHelper()
     helper.ready = False
-    assert helper_status(make(helper)) == "degraded"
+    assert status(make(helper)) == "degraded"
 
 
 @pytest.mark.parametrize(
@@ -206,7 +211,7 @@ def test_degraded_when_helper_not_ready() -> None:
 def test_degraded_on_bad_reply(mutate: Any) -> None:
     helper = FakeHelper()
     helper.mutate_reply = mutate
-    assert helper_status(make(helper)) == "degraded"
+    assert status(make(helper)) == "degraded"
 
 
 def test_garbage_and_oversize_replies_degrade() -> None:
@@ -218,18 +223,18 @@ def test_garbage_and_oversize_replies_degrade() -> None:
             return self.data
 
     for data in (b"not json", b"[]", b"x" * (9 * 1024 * 1024)):
-        assert helper_status(ChatAuthorityClient(Garbage(data), nonce_factory=_nonces())) == "degraded"
+        assert status(ChatAuthorityClient(Garbage(data), nonce_factory=_nonces())) == "degraded"
 
 
 def test_counter_rollback_is_degraded_and_sticky_until_new_client() -> None:
     helper = FakeHelper()
     client = make(helper)
-    assert helper_status(client) == "available"
+    assert status(client) == "available"
     helper.state_counter = 4  # restored older blob / counter went backwards
-    assert helper_status(client) == "degraded"
+    assert status(client) == "degraded"
     helper.state_counter = 9  # a higher number does not clear a seen regression
-    assert helper_status(client) == "degraded"
-    assert helper_status(make(helper)) == "available"
+    assert status(client) == "degraded"
+    assert status(make(helper)) == "available"
 
 
 def test_counter_may_advance_and_repeat() -> None:
@@ -237,27 +242,27 @@ def test_counter_may_advance_and_repeat() -> None:
     client = make(helper)
     for value in (5, 5, 6, 100):
         helper.state_counter = value
-        assert helper_status(client) == "available"
+        assert status(client) == "available"
 
 
 def test_authority_key_change_is_degraded() -> None:
     helper = FakeHelper()
     client = make(helper)
-    assert helper_status(client) == "available"
+    assert status(client) == "available"
 
     def other_key(r: dict[str, Any]) -> dict[str, Any]:
         r["result"]["authority_key_id"] = "k2"
         return r
 
     helper.mutate_reply = other_key
-    assert helper_status(client) == "degraded"
+    assert status(client) == "degraded"
 
 
 def test_each_request_uses_a_fresh_nonce_and_a_timeout() -> None:
     helper = FakeHelper()
     client = make(helper)
-    helper_status(client)
-    helper_status(client)
+    status(client)
+    status(client)
     assert len({r["nonce"] for r in helper.requests}) == 2
     assert helper.timeouts and all(0 < t <= 10 for t in helper.timeouts)
 
@@ -359,3 +364,104 @@ def test_limit_validated_before_any_call() -> None:
 def test_engine_client_has_no_way_to_mint_or_change_authority() -> None:
     public = {n for n in dir(ChatAuthorityClient) if not n.startswith("_")}
     assert public == {"health", "eligible_events"}
+
+
+def test_health_alone_never_reads_available() -> None:
+    assert status(make(FakeHelper()), ok=False) == "degraded"
+
+
+def test_unprovisioned_transport_wins_over_a_failing_static_check() -> None:
+    assert status(make(_raising(TransportUnprovisioned())), ok=False) == "unprovisioned"
+
+
+def test_static_check_is_not_asked_when_health_fails() -> None:
+    calls: list[int] = []
+    helper = _raising(TransportTimeout())
+    assert (
+        helper_status(make(helper), provisioned=lambda: calls.append(1) or True) == "degraded"
+    )
+    assert calls == []
+
+
+def test_call_is_reachable_only_from_the_two_public_methods() -> None:
+    import ast
+    import inspect
+
+    import ciao.chat_authority_client as mod
+
+    tree = ast.parse(inspect.getsource(mod))
+    callers: set[str] = set()
+    for cls in (n for n in tree.body if isinstance(n, ast.ClassDef)):
+        for fn in (n for n in cls.body if isinstance(n, ast.FunctionDef)):
+            for node in ast.walk(fn):
+                if isinstance(node, ast.Attribute) and node.attr == "_call":
+                    callers.add(fn.name)
+    assert callers == {"health", "eligible_events"}
+    for fn in (n for n in tree.body if isinstance(n, ast.FunctionDef)):
+        assert not any(
+            isinstance(n, ast.Attribute) and n.attr == "_call" for n in ast.walk(fn)
+        ), fn.name
+
+
+def _tree(tmp_path: Any, mode: int = 0o755) -> Any:
+    import os
+
+    root = tmp_path / "root"
+    for rel in ("Library/PrivilegedHelperTools", "Library/LaunchDaemons"):
+        (root / rel).mkdir(parents=True)
+    files = [
+        "Library/PrivilegedHelperTools/com.ciaobot.chat-authority",
+        "Library/PrivilegedHelperTools/com.ciaobot.chat-authority-anchor",
+        "Library/LaunchDaemons/com.ciaobot.chat-authority.plist",
+        "Library/LaunchDaemons/com.ciaobot.chat-authority-anchor.plist",
+    ]
+    for rel in files:
+        (root / rel).write_text("x")
+        os.chmod(root / rel, mode & 0o755)
+    for p in (root, *[root / "Library", root / "Library/PrivilegedHelperTools", root / "Library/LaunchDaemons"]):
+        os.chmod(p, 0o755)
+    return root, files
+
+
+def test_static_check_passes_on_a_correct_tree(tmp_path: Any) -> None:
+    import os
+
+    root, _ = _tree(tmp_path)
+    assert static_provisioning_ok(root, owner_uid=os.getuid(), account_ok=lambda: True)
+
+
+def test_static_check_refuses_wrong_owner_missing_file_and_bad_account(tmp_path: Any) -> None:
+    import os
+
+    root, files = _tree(tmp_path)
+    me = os.getuid()
+    assert not static_provisioning_ok(root, owner_uid=me + 1, account_ok=lambda: True)
+    assert not static_provisioning_ok(root, owner_uid=me, account_ok=lambda: False)
+    (root / files[0]).unlink()
+    assert not static_provisioning_ok(root, owner_uid=me, account_ok=lambda: True)
+
+
+@pytest.mark.parametrize("target", ["file", "parent", "root"])
+def test_static_check_refuses_group_or_world_writable(tmp_path: Any, target: str) -> None:
+    import os
+
+    root, files = _tree(tmp_path)
+    path = {
+        "file": root / files[0],
+        "parent": root / "Library/PrivilegedHelperTools",
+        "root": root / "Library",
+    }[target]
+    os.chmod(path, 0o775 if target != "file" else 0o775)
+    assert not static_provisioning_ok(root, owner_uid=os.getuid(), account_ok=lambda: True)
+
+
+def test_static_check_refuses_symlinks(tmp_path: Any) -> None:
+    import os
+
+    root, files = _tree(tmp_path)
+    real = tmp_path / "evil"
+    real.write_text("x")
+    os.chmod(real, 0o755)
+    (root / files[2]).unlink()
+    (root / files[2]).symlink_to(real)
+    assert not static_provisioning_ok(root, owner_uid=os.getuid(), account_ok=lambda: True)

@@ -8,6 +8,28 @@ a PR-scoped security review. It builds on the principal-isolation spike
 A1 to D4), the protocol library `ciao/chat_authority.py` and the selected
 direction in `docs/CHAT_INGRESS_AUTHORITY.md`.
 
+## Open maintainer decisions
+
+These are not settled by this design and need an explicit answer before the
+slices that depend on them:
+
+1. **Operator key replacement.** This design disallows replacement: the key is
+   enrolled once, and changing it means the admin-authorized reset (which
+   destroys state and keys, equivalent to revoking every grant) followed by a
+   fresh enrollment. Confirm, or accept a replace operation that bumps the
+   epoch and revokes all grants.
+2. **Is an admin prompt alone enough to authorize enrollment?** It stops a
+   same-user copy of the app racing the real one, but it cannot tell the user
+   which package or app asked for it (see the package-substitution row in the
+   threat model).
+3. **Accepting the byte-copy residual risk (B4).** An agent that runs a copy of
+   the signed app, or inherits an Accessibility grant, can submit as the
+   operator. The helper proves which binary signed, not who typed.
+4. **Scope of the Swift daemon, anchor and package.** Slices 2 and 4 are a
+   native binary pair plus a signed installer, a large permanent surface
+   (release signing, notarization, an uninstaller). Confirm this is wanted
+   before slice 2 starts.
+
 ## Decisions this design takes as given
 
 * Scope is forgery only: an agent running as the engine's user must not be able
@@ -120,14 +142,20 @@ rejected peer receives silence, so every client call has a timeout.
   leaf OIDs), `certificate leaf[subject.OU] = "<TEAMID>"` and an exact
   `identifier` (`com.ciaobot.mac` for the app, a different identifier for
   the bridge). **Never a cdhash** (breaks every Sparkle upgrade, B6) **and never
-  an identifier alone** (B5). A minimum `CFBundleVersion` clause lets a
-  helper release drop a vulnerable old app version.
-* The daemon additionally reads the peer's signing information and refuses a
-  peer that lacks the hardened-runtime flag or carries
-  `com.apple.security.get-task-allow` or
-  `com.apple.security.cs.allow-dyld-environment-variables`. Whether a
-  requirement clause can express this directly is to be settled in the
-  provisioning slice; the code check is the fallback inside the daemon, not a
+  an identifier alone** (B5).
+* Forbidden entitlements are expressed in the requirement itself:
+  `and !(entitlement["com.apple.security.get-task-allow"] exists) and
+  !(entitlement["com.apple.security.cs.allow-dyld-environment-variables"]
+  exists)`. The provisioning slice checks the string with `csreq -t` against
+  real signed binaries (a requirement-language detail not measured here).
+* Two things the requirement language cannot express are checked in daemon
+  code from the peer's audit token (`SecCodeCopyGuestWithAttributes`, then
+  `SecCodeCopySigningInformation`): the hardened-runtime flag
+  (`kSecCodeSignatureRuntime`) must be set, and the build number must meet a
+  minimum. The build number is parsed to an integer and compared numerically;
+  `info[CFBundleVersion]` in a requirement compares strings (`"9"` sorts above
+  `"10"`) and is not used. A helper release raises the minimum to drop a
+  vulnerable old app. These code checks are part of the one design, not a
   compatibility path.
 * The anchor accepts only the daemon (its requirement and euid `_ciaoauth`).
 * Reads are accepted from the app and the bridge, and only from the enrolled
@@ -155,7 +183,7 @@ mismatch is `degraded` and a re-install prompt, not a negotiated older mode.
 | `health` | app, bridge | `ready`, `helper_version`, `state_counter`, `epoch`, `authority_key_id`, event public key |
 | `eligible_events` | app, bridge | `ChatAuthority.eligible_events`; every filter before the limit |
 | `create_grant`, `revoke_grant`, `withdraw_grant`, `withdraw_turn`, `submit_turn` | app only | a signed operator command (below) |
-| `enroll_operator_key` | app only, needs an admin authorization | store the operator public key once, or replace it |
+| `enroll_operator_key` | app only, needs an admin authorization | store the operator public key **once**; refused while a key is enrolled. There is no replace: changing the key is the admin-authorized reset (state, keys and counter destroyed, which revokes everything) followed by a fresh enrollment |
 
 The engine and the agent can call only the first two. The Python client has
 no command, signing or submit method (asserted by a test), and
@@ -185,10 +213,13 @@ a drop-in for the library's tests; the Swift port implements the same bytes.
 
 The operator key proves "the pinned app on this device signed this", which
 matches B4: a copied app can use its keychain item as well. It is a second
-binding on the XPC peer pin, not a person check. Enrollment and replacement go
-through the anchor and require an Authorization Services admin right
+binding on the XPC peer pin, not a person check. Enrollment goes through the
+anchor and requires an Authorization Services admin right
 (`com.ciaobot.chat-authority.enroll`), because otherwise a same-user copy of
-the app could race the real one for the first enrollment. The daemon also
+the app could race the real one for the first enrollment. The key is never
+replaced in place: a replacement would let whoever passes the prompt take over
+existing grants and events, so replacing means reset, which revokes
+everything (open decision 1). The daemon also
 records the enrolling console user's uid and serves reads only to it.
 
 ## Rollback, missing-blob and storage defences
@@ -211,7 +242,11 @@ Library gaps 1, 2 and 7, and how the daemon closes them:
   initialization, and it happens only right after provisioning.
 * **Recovery** is the admin-authorized reset, which destroys state and keys.
   A reset is equivalent to revoking every grant; enrolled events are lost.
-* **Client side:** the engine client remembers the highest `state_counter` it
+* **Client side:** one long-lived client per engine process is required. The
+  rollback memory lives in the client object, so a client created per call
+  would see every counter as the first one and detect nothing. The engine
+  holds a single instance for its lifetime; a new process starts with no
+  memory and relies on the daemon-side checks above. The engine client remembers the highest `state_counter` it
   has seen and a change of `authority_key_id`, and treats a drop or a change
   as `degraded` for the life of that client (a later higher value does not
   clear it). The app additionally records the last (counter, epoch) it saw in
@@ -241,14 +276,16 @@ helper:
 | `remote_client` | macOS, but the request is not the local native app |
 | `unprovisioned` | the Mach service is not registered (nothing installed, or uninstalled) |
 | `degraded` | registered but not verified: timeout or silence, transport error, bad or mismatched reply, version mismatch, `ready:false` (closed after rollback, missing blob, MAC failure, no enrolled operator key), counter regression, key change, or a provisioning check that fails |
-| `available` | only after a verified `health` and the static provisioning check; reserved for the ingress slice |
+| `available` | only after a verified `health` **and** a passing static provisioning check; reserved for the ingress slice |
 
 `ciao/chat_authority_client.helper_status` implements the helper half and
-returns only names from `CHAT_EVIDENCE_STATUSES`. `chat_evidence_status` is
-not changed in this slice and still returns `available: False` in every
-branch. The static provisioning check (planned) stats the plists, binaries and
-parent directories: owner root, not group or world writable, daemon account
-`_ciaoauth` present and not in `admin`.
+returns only names from `CHAT_EVIDENCE_STATUSES`, and requires the caller to
+pass the static provisioning check (no default, so health alone can never
+read `available`). `chat_evidence_status` is not changed in this slice and
+still returns `available: False` in every branch. `static_provisioning_ok`
+(implemented and tested against a temporary tree) lstats the plists, binaries
+and every parent directory: owned by root, not group or world writable, not a
+symlink; and checks that the daemon account exists and is not in `admin`.
 
 ## Disclosure text
 
@@ -256,14 +293,17 @@ Shown before the install prompt and in Settings while the helper exists:
 
 > Ciaobot can let memory and care use messages you type in the Ciaobot for
 > Mac app, but only after you install a small background service. Installing it
-> needs your administrator password, once. The service keeps its own record of
+> needs your administrator password, once; check that the installer window names
+> the Ciaobot publisher as signer before you enter it. The service keeps its own record of
 > what you agreed to, so an AI agent running as you cannot change that record
 > or create messages of its own. This protects against forgery by agent code.
 > It does not prove that you personally typed a message. It stops holding if
 > any app in the chain that starts your agents (for example Terminal, an IDE or
 > a launcher) has Accessibility, Input Monitoring, Automation or Post Event
 > permission, because an agent can then drive the app's text box as if it were
-> you. Review System Settings, Privacy and Security for these before turning
+> you. Protection against code injected into the app itself also depends on
+> macOS System Integrity Protection being on; with it off, injection is not
+> blocked. Review System Settings, Privacy and Security for these before turning
 > sharing on. Restoring your whole disk from an older copy can bring back a
 > permission you had removed. Messages typed in the browser or on a phone are
 > never covered. You can remove the service at any time.
@@ -284,7 +324,13 @@ claimed.
   channel.
 * The app has no programmatic input surface (URL scheme, AppleScript
   dictionary, command line flag, pasteboard-triggered send), ships the hardened
-  runtime with no entitlements, and uses the exact bytes of the native composer
+  runtime with no entitlements (from `mac/scripts/package-notarized.sh`, which
+  signs with `--options runtime` and no entitlements, and `engine_sign.py
+  check --distribution`; read from the scripts, not yet measured on a shipped
+  artifact, and Sparkle's `Downloader.xpc` keeps the entitlements Sparkle
+  signed it with). Ad-hoc development builds (`package-app.sh`) are not
+  hardened and never satisfy the Developer ID pin, so the feature cannot be
+  exercised with one. It uses the exact bytes of the native composer
   as the `submit_turn` payload before provider augmentation.
 * The app holds the operator key and signs; it never forwards a signature
   request from the engine.
@@ -329,12 +375,14 @@ can, run the signed app binary and copy it.
 | Synthetic keystrokes into the composer | refused only while no Accessibility or Post Event grant reaches the agent's process tree (C1, C2); disclosed |
 | DYLD injection or `task_for_pid` into the app | blocked with SIP on and hardened runtime (B7 host, B8); not enforced with SIP off |
 | Edit the PWA the web view shows | harmless: the operator channel is not web content |
+| Swap the installer package the app opens for one signed by another Developer ID | verified by the app (Team ID, identifier, signed manifest hash) before opening; **a same-user race between check and open is not closed**, so the Installer signer display and the admin password are the last defence (residual) |
 | Whole-disk or VM snapshot restore | **not defended**; disclosed |
 | Root, or the admin password | out of scope |
 | Race the first operator enrollment | refused: enrollment needs an admin authorization |
 | Other local users reading chat text | refused: reads limited to the enrolled console user's euid |
 
-Residual risks in order of weight: a granted Accessibility, Input Monitoring or
+Residual risks in order of weight: a swapped installer package winning the race
+between the app's check and Installer's read; a granted Accessibility, Input Monitoring or
 Automation permission in the agent's ancestry; byte-copy use of the pinned app;
 disk-level rollback; a compromised Developer ID or build pipeline; macOS
 releases that change TCC or XPC attribution.
@@ -350,7 +398,7 @@ vectors in one PR.
 
 ## Slices after this one
 
-1. **Library hardening (Python):** asymmetric operator verifier and separate
+1. **Library hardening (Python), with a no-replace enrollment rule:** asymmetric operator verifier and separate
    state and event keys in `chat_authority.py`; destination and audience
    arguments on lookup; `state_counter` and write-ahead hook in the storage
    protocol; shared vector file.
