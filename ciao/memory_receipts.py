@@ -1781,15 +1781,6 @@ def _complete_outcome(receipt: dict[str, Any]) -> bool:
     """
     if receipt.get("outcome_recorded"):
         return True
-    if (
-        str(receipt.get("kind", "")) == "queue_resolve"
-        and str(receipt.get("proposal_kind", "")) == "share"
-        and str(receipt.get("operation_id", "")).startswith("shrpub_")
-    ):
-        # Share publication has its own canonical, receipt-backed History row.
-        # A generic queue outcome would invent a second accepted decision
-        # without the remote publication receipt or a reversible local change.
-        return True
     fact = str(receipt.get("fact_text", "")).strip() or str(
         receipt.get("removed_text", "")
     ).strip()

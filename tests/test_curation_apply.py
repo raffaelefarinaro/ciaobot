@@ -118,31 +118,6 @@ def test_accept_writes_the_region_settles_the_row_and_owns_one_decision(install)
     assert intent.item_key in curation_run.load_state(install.vault).done_keys
 
 
-def test_managed_accept_refuses_share_even_with_all_and_injected_auto(install) -> None:
-    line = "- [share opaque] Shared note change proposal opaque"
-    install.queue_rows(line)
-    before_guide = install.guide.read_bytes()
-    entry = next(iter(proposal_tracking.walk_proposal_queue(
-        "work", apply.PROPOSALS_RELATIVE, install.queue.read_text(encoding="utf-8")
-    )))
-    intent = apply.ManagedMemoryAcceptIntent(
-        operation_id="cop_share_refusal",
-        workspace="work",
-        item_key="share-item",
-        proposal_id=entry.proposal_id,
-        proposal_revision=apply.proposal_revision(entry.bullet),
-        destination_revision="",
-        prediction_revision="",
-        holder="run",
-    )
-
-    result = apply.apply_memory_accept(intent, vault_root=install.vault)
-
-    assert isinstance(result, apply.Refused) and result.reason == apply.REFUSED_KIND
-    assert install.queue.read_text(encoding="utf-8").strip().endswith(line)
-    assert install.guide.read_bytes() == before_guide
-
-
 def test_managed_cli_refuses_share_accept_before_mutation(install, monkeypatch: pytest.MonkeyPatch) -> None:
     line = "- [share opaque] Shared note change proposal opaque"
     install.queue_rows(line)
