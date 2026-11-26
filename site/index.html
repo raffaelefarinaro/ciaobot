@@ -76,7 +76,7 @@
       <div class="home-three">
         <div><h3>You organise the work</h3><p>Workspaces for each part of your life, projects that carry their context, routines on the schedule you set. The agent works inside the structure you chose.</p></div>
         <div><h3>You set how far it goes</h3><p>Each chat has a permission mode, from read-only plans to asking before every action. Unattended runs do only what needs no approval and report the rest.</p></div>
-        <div><h3>You can always look</h3><p>See what every chat and background job is doing, approve or refuse each card, and find every memory change in History with its reason.</p></div>
+        <div><h3>You can always look</h3><p>See what every chat and background job is doing, approve or refuse each card, and read every memory change in your notes folder, where Git keeps the history.</p></div>
       </div>
     </section>
 
@@ -96,7 +96,7 @@
         </div>
         <div>
           <h3>Better every week</h3>
-          <p>Once a day, at a time you choose, Ciaobot <b>tidies your memory</b>: it merges duplicates, retires what expired and flags notes that went stale. When the same correction keeps coming up, it <b>proposes a better skill</b>. You approve each change.</p>
+          <p>Once a day, at a time you choose, Ciaobot <b>tidies your memory</b>: it merges duplicates, retires what expired and flags notes that went stale, then writes a short report you can read. When the same correction keeps coming up, it <b>proposes a better skill</b> as a file you can open.</p>
           <a href="memory.html#nightly">What the daily pass does <svg viewBox="0 0 20 20" width="18" height="18" aria-hidden="true" focusable="false"><path d="M4 10h12m-5-5 5 5-5 5" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg></a>
         </div>
         <div>
@@ -109,16 +109,16 @@
 
     <section class="home-section" id="remembers" aria-labelledby="remembers-title">
       <h2 id="remembers-title">How it remembers</h2>
-      <p class="home-sub">No hidden database. When you archive a chat, its facts are filed into notes in your folder. Anything uncertain waits for you to decide.</p>
+      <p class="home-sub">No hidden database. When you archive a chat, its facts are filed into notes in your folder. Anything uncertain goes on a short list in your folder for you to read.</p>
       <div class="home-map">
         <svg class="diagram" viewBox="0 0 1100 330" overflow="visible" role="img" aria-labelledby="loop-title loop-desc">
           <title id="loop-title">The memory loop</title>
-          <desc id="loop-desc">You chat, then archive the chat. A memory pass files clear facts into your notes and holds uncertain ones in To decide. A daily pass tidies the notes, and your next chat loads them.</desc>
+          <desc id="loop-desc">You chat, then archive the chat. A memory pass files clear facts into your notes and lists uncertain ones in the Unsure list. A daily pass tidies the notes, and your next chat loads them.</desc>
           <rect class="box" x="0" y="60" width="180" height="84" rx="16"/><text x="90" y="109" text-anchor="middle" font-size="20" font-weight="700">Chat</text>
           <rect class="box" x="250" y="60" width="180" height="84" rx="16"/><text x="340" y="109" text-anchor="middle" font-size="20" font-weight="700">Archive</text>
           <rect class="box-solid" x="500" y="60" width="220" height="84" rx="16"/><text class="on-solid" x="610" y="109" text-anchor="middle" font-size="20" font-weight="700">Memory pass</text>
           <rect class="box" x="830" y="0" width="230" height="84" rx="16"/><text x="945" y="49" text-anchor="middle" font-size="20" font-weight="700">Notes</text>
-          <rect class="box-pending" x="830" y="128" width="230" height="84" rx="16"/><text x="945" y="177" text-anchor="middle" font-size="20" font-weight="700">To decide</text>
+          <rect class="box-pending" x="830" y="128" width="230" height="84" rx="16"/><text x="945" y="177" text-anchor="middle" font-size="20" font-weight="700">Unsure list</text>
           <rect class="box" x="380" y="244" width="240" height="70" rx="16"/><text x="500" y="285" text-anchor="middle" font-size="20" font-weight="700">Daily tidy</text>
           <path class="line" d="M180 102H250M430 102H500M720 92 830 42M1060 42H1090V279H620M380 279H90V144"/>
           <path class="line pending" d="M720 112 830 170"/>
@@ -262,14 +262,14 @@
           <summary>What happens if I stop using it?</summary>
           <div class="details-body">
             <p>You keep the folder. Notes are Markdown, archived chats are readable copies, and the Git history stays with them. Uninstall the app and your files are untouched; open them in Obsidian or any editor, or hand the folder to another agent.</p>
-            <p>What you lose is the part that was Ciaobot: the review queue, the daily pass, the search index and the schedules. The index is rebuilt from your files whenever it is needed, so it is the cheapest thing to lose.</p>
+            <p>What you lose is the part that was Ciaobot: the daily pass, the search index and the schedules. The index is rebuilt from your files whenever it is needed, so it is the cheapest thing to lose.</p>
           </div>
         </details>
 
         <details class="guide-details">
           <summary>Can the assistant be wrong?</summary>
           <div class="details-body">
-            <p>Yes, and the design assumes it. The assistant is told to say when the notes do not hold an answer instead of guessing, and to treat a snippet as a pointer to a note rather than as the answer. The memory pass marks what it is unsure of and leaves it in <strong>To decide</strong>, and a confident write still lands in <strong>History</strong> with its reason and, where possible, an undo.</p>
+            <p>Yes, and the design assumes it. The assistant is told to say when the notes do not hold an answer instead of guessing, and to treat a snippet as a pointer to a note rather than as the answer. The agent writes what it is sure of straight into your notes and puts what it is unsure of on a list, <code>Workspace/Unsure.md</code>. Your notes folder is a Git repository, so you can see every change and undo it.</p>
             <p>That reduces the damage of a wrong answer; it does not remove it. In our November 2026 run the best model passed 56 of 63 task runs, and the memory comparison found that reading the note beats reading the snippet. <a href="evals.html#care">The evaluation page says what those numbers cannot establish →</a></p>
           </div>
         </details>
