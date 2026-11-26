@@ -5562,12 +5562,6 @@ def _memory_proposal_dismiss_command(args: argparse.Namespace) -> int:
                 file=sys.stderr,
             )
             return 1
-        if parsed.kind == "share":
-            print(
-                "shared-note proposals can only be dismissed by the PWA after it verifies publication state",
-                file=sys.stderr,
-            )
-            return 2
         from ciao.upstream_drafts import DRAFT_KIND, decision_text
 
         if parsed.kind == DRAFT_KIND and parsed.target and parsed.source == decision_text(parsed.target):
@@ -5821,9 +5815,6 @@ def _memory_proposal_accept_command(args: argparse.Namespace) -> int:
         # before the decision or the progress key. Finish that operation.
         return _resume_memory_accept(args, workspace, vault, name, needle, no_match)
     bullet, _removal_needle = matched
-    if bullet.kind == "share":
-        print("handover refused: publishing to a shared brain requires an attended decision", file=sys.stderr)
-        return 1
     holder = _curation_holder(args)
     if not holder:
         return 1
