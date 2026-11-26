@@ -15,7 +15,7 @@ fixed?* The commit list answers none of them, so it is never the notes; it is
 linked at the bottom for anyone who wants it.
 
 `/ciao-release` calls this skill after its plan-only pass, writes the result to
-a file, and cuts with `--notes-file <file>`. `ciao.release` adds the
+a file, and cuts with `--notes-file <file>`. `scripts/release.py` adds the
 `## vX.Y.Z - date` heading and puts the notes in `CHANGELOG.md`;
 `release-on-main.yml` copies that section into the GitHub release, which is
 what the website's "What's new" link and the in-app update tile point at.
@@ -138,7 +138,7 @@ after it.
 ## Hand-off
 
 Write the body to a file (for a cut: `$TMPDIR/release-notes-vX.Y.Z.md`), show it
-to the operator, and only then hand it to `ciao.release --notes-file`. For a past
+to the operator, and only then hand it to `scripts/release.py --notes-file`. For a past
 release, the same file updates both the `## vX.Y.Z` section in `CHANGELOG.md`
 (keep its heading line) and the GitHub release (`gh release edit vX.Y.Z
 --notes-file <file>` — the release body *includes* the heading, as the workflow

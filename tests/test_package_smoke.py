@@ -9,7 +9,7 @@ from pathlib import Path
 
 import pytest
 
-from ciao.package_smoke import run_package_smoke
+from package_smoke import run_package_smoke
 
 
 def test_package_smoke_runs_build_install_and_installed_probe(tmp_path: Path) -> None:
