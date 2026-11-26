@@ -44,12 +44,6 @@ The owner can turn the service off, pause it, or ask for a run now, and all
 three go through the same durable store (``ciao.app_settings``) and the same
 code path: a paused boot simply never reaches the repository, and a manual run
 is the same serialized call the loop makes, so the two can never interleave.
-
-Host ownership is the one rule this module does not get to decide. A Mac whose
-legacy ``node_state.json`` says it was a *client* of another host must not be a
-second writer on the same runtime root, so the service asks that one boot
-verdict (``ciao.legacy_node_state``) before touching anything, and says so in
-its status rather than quietly backing up where the host already does.
 """
 
 from __future__ import annotations
@@ -67,7 +61,6 @@ from ciao import backup_scope, job_runs, local_session
 from ciao.app_settings import AppSettingsStore
 from ciao.git_mutation import RepositoryBusyError, ensure_mutable, repository_mutation
 from ciao.git_proc import run_git_sync
-from ciao.legacy_node_state import LegacyNodeState, writers_armed
 from ciao.local_session import GitOperationError
 
 logger = logging.getLogger(__name__)
@@ -466,17 +459,11 @@ class BackupService:
         config,
         store: AppSettingsStore,
         *,
-        node_state: Callable[[], LegacyNodeState],
         now: Callable[[], datetime] | None = None,
         admission_closed: Callable[[], bool] | None = None,
     ) -> None:
         self._config = config
         self._store = store
-        # The boot's one verdict, asked per tick rather than copied: a state
-        # that cannot be understood fails closed, and the whole point of
-        # asking again is that the answer is a property of the runtime root, not
-        # of the tick.
-        self._node_state = node_state
         self._now = now or _utcnow
         # True while a restart drain holds admission closed. Both entry
         # paths (the loop and the manual trigger) defer on it rather than
@@ -960,7 +947,7 @@ class BackupService:
           verdict are all re-read per tick, so a repository configured later
           becomes ready, and a pause takes and lifts, without a restart.
         - **It never spins on a boot that will not back up.** A tick refused by
-          the gate (off, paused, or not the host) is deliberately not an attempt,
+          the gate (off or paused) is deliberately not an attempt,
           so it leaves no stamp and the delay derived from that stamp is zero —
           which is exactly what makes the first tick after the gate lifts run at
           once. Zero is not a cadence, so a refused tick waits a full interval of
@@ -1089,12 +1076,6 @@ class BackupService:
     def _gate_reason(self) -> str:
         """Why this boot will not run a backup, or "" when it will.
 
-        Three reasons, one of which is not the owner's to give: a Mac whose
-        legacy node state is a client must not become a second writer on a
-        runtime root the host already owns. The kind is named rather than
-        smoothed over, because "the host does it" is only actionable if the
-        owner can see which of the two verdicts applied.
-
         ``enabled: false`` is the one reason an armed guided setup may read
         past, and only to look. The owner asked a question with that dispatch
         ("is there anything to back up, and did my setup produce it?"), and the
@@ -1110,12 +1091,6 @@ class BackupService:
             return "backup is turned off"
         if settings.backup_paused:
             return "backup is paused"
-        state = self._node_state()
-        if not writers_armed(state):
-            return (
-                f"this Mac is not the host (legacy node state: {state.kind}) — "
-                "the host owns backup"
-            )
         return ""
 
     def _status(

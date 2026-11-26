@@ -14,7 +14,7 @@ or to claim a backup that did not happen:
   ready without a restart, and a pause survives a restart;
 - the cadence is five minutes, overdue-aware at startup, and backs off boundedly
   for a failure that cannot self-heal;
-- a Mac that is not the host never runs it, and a manual run and a scheduled
+- a manual run and a scheduled
   tick cannot overlap.
 
 Everything runs on temporary directories and a local bare remote: no real user
@@ -45,7 +45,6 @@ from ciao.backup_service import (
 )
 from ciao.config import CiaoConfig, reset_reroot_cache
 from ciao.git_proc import GIT_TIMEOUT_DETAIL
-from ciao.legacy_node_state import LegacyNodeState
 from ciao.workspace_reroot import mark_born_per_root
 
 
@@ -148,20 +147,15 @@ def _service(
     world: _World,
     *,
     clock: _Clock | None = None,
-    kind: str = "host",
     store: AppSettingsStore | None = None,
 ) -> BackupService:
     """A service over the world's install, as ``main`` builds one.
 
-    ``kind`` is the boot's legacy node-state verdict; a service can only be
-    built with one, because whether this Mac may write at all is never a
-    question the service is allowed to answer for itself.
     """
     resolved = store or AppSettingsStore(world.config.state_path.parent / "app_settings.json")
     return BackupService(
         world.config,
         resolved,
-        node_state=lambda: LegacyNodeState(kind=kind),
         now=clock,
     )
 
@@ -860,23 +854,6 @@ async def test_a_turned_off_service_does_not_run(tmp_path: Path) -> None:
     assert _git(world.workspace, "status", "--porcelain") != ""
 
 
-async def test_a_client_mac_never_runs_the_backup(tmp_path: Path) -> None:
-    """A former client of another host must not become a second writer on the
-    same runtime root — the same verdict the scheduler asks."""
-    for kind in ("client", "invalid"):
-        world = _world(tmp_path / kind)
-        service = _service(world, kind=kind)
-        world.note("day-2.md", "day two\n")
-
-        status = await service.run_backup()
-
-        assert status.state == backup_service.STATE_PAUSED, kind
-        assert "not the host" in status.reason
-        assert kind in status.reason
-        assert _git(world.workspace, "status", "--porcelain") != ""
-        assert world.head() == world.remote_head()
-
-
 # ── cadence ──────────────────────────────────────────────────────────────────
 
 
@@ -984,15 +961,15 @@ async def test_the_loop_stops_when_asked(tmp_path: Path) -> None:
 
 @pytest.mark.parametrize(
     "gate",
-    [{"enabled": False}, {"paused": True}, {"kind": "client"}],
-    ids=["turned-off", "paused", "not-the-host"],
+    [{"enabled": False}, {"paused": True}],
+    ids=["turned-off", "paused"],
 )
 async def test_a_refused_tick_waits_a_full_interval_instead_of_spinning(
     tmp_path: Path, gate: dict
 ) -> None:
     """A boot that will not back up has to idle at the cadence, not spin.
 
-    All three gate shapes answer the same way — a ``paused`` status with no
+    Both gate shapes answer the same way — a ``paused`` status with no
     attempt stamped — so they are driven as one. The stamp is what
     ``_next_delay`` derives the wait from, so a refused tick leaves nothing to
     wait against and the delay comes back zero; since a refused tick stays
@@ -1003,7 +980,7 @@ async def test_a_refused_tick_waits_a_full_interval_instead_of_spinning(
     """
     world = _world(tmp_path)
     clock = _Clock()
-    service = _service(world, clock=clock, kind=gate.get("kind", "host"))
+    service = _service(world, clock=clock)
     if "enabled" in gate:
         service.set_flags(enabled=bool(gate["enabled"]))
     if "paused" in gate:
@@ -1749,7 +1726,6 @@ async def test_admission_closed_defers_backup_without_running_git(
     service = BackupService(
         world.config,
         store,
-        node_state=lambda: LegacyNodeState(kind="host"),
         now=_Clock(),
         admission_closed=lambda: closed["value"],
     )
