@@ -218,8 +218,16 @@ export interface ShareEvidenceGrant {
   history: Array<Record<string, unknown>>
 }
 
+/** `available` is reserved: the engine never returns it yet. */
+export type ChatEvidenceStatus =
+  | 'available'
+  | 'unprovisioned'
+  | 'unsupported_platform'
+  | 'remote_client'
+  | 'degraded'
+
 export interface ShareEvidenceState {
-  chat_evidence: { available: false; reason: 'protected_authority_unavailable' }
+  chat_evidence: { available: false; status: ChatEvidenceStatus }
   disclosure_tokens: Record<string, string>
   workspace: string
   mode: 'review' | 'automatic'

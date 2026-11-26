@@ -40,6 +40,7 @@ function state(grants: Grant[]) {
   return {
     disclosure_tokens: { 'proj-alpha': 'scope' },
     workspace: 'alpha',
+    chat_evidence: { available: false, status: 'remote_client' },
     mode: grants.some((grant) => grant.active && grant.type === 'standing') ? 'automatic' : 'review',
     fields: ['decision', 'reason', 'effective_date'],
     producers: ['memory_extraction', 'nightly_curation'],
@@ -191,6 +192,8 @@ test.describe('shared brain sources and consent', () => {
     await panel.getByRole('button', { name: 'Sources and consent' }).click()
     const sources = panel.locator('.sources-panel')
     await expect(sources.getByText('Review', { exact: true })).toBeVisible()
+    await expect(sources.getByTestId('chat-evidence-status')).toContainText('Ordinary chat messages remain private and are not shared')
+    await expect(sources.getByTestId('chat-evidence-status')).toContainText('Only the Ciaobot Mac app on this Mac')
     await quiesce(page)
     const { overflow, culprits } = await horizontalOverflow(page)
     expect(overflow, JSON.stringify(culprits)).toBeLessThanOrEqual(0)

@@ -25,8 +25,8 @@
     </template>
 
     <template v-else>
-      <p class="hint">
-        Ordinary chat messages remain private. Sharing them is unavailable until a protected operator authority is supported.
+      <p class="hint" data-testid="chat-evidence-status">
+        Ordinary chat messages remain private and are not shared. {{ chatEvidenceCopy }}
       </p>
       <p v-if="loadError" class="hint hint--warn" role="alert">
         Could not refresh: {{ loadError }}. Showing the last known sources.
@@ -252,6 +252,7 @@ import { askConfirm } from '../../lib/confirm'
 import { apiErrorMessage } from '../../lib/errorMessage'
 import { useProjectStore } from '../../stores/projects'
 import type {
+  ChatEvidenceStatus,
   ShareEvidenceGrant,
   ShareEvidencePreview,
   ShareEvidenceState,
@@ -262,6 +263,18 @@ const projectStore = useProjectStore()
 const workspace = computed(() => projectStore.activeWorkspace)
 
 const data = ref<ShareEvidenceState | null>(null)
+
+// The engine never reports chat evidence as available yet, so an unexpected
+// `available` is shown as unconfirmed rather than as a working channel.
+const CHAT_EVIDENCE_COPY: Record<ChatEvidenceStatus, string> = {
+  remote_client:
+    'Only the Ciaobot Mac app on this Mac could ever authorize sharing chat, and this browser or remote client cannot.',
+  unsupported_platform: 'Sharing chat is not supported on this operating system.',
+  unprovisioned: 'The protected authority for sharing chat has not been set up on this Mac.',
+  degraded: 'The protected authority for sharing chat is not working right now.',
+  available: 'Protected sharing of chat cannot be confirmed.',
+}
+const chatEvidenceCopy = computed(() => (data.value ? CHAT_EVIDENCE_COPY[data.value.chat_evidence.status] : ''))
 const loading = ref(false)
 const loadError = ref('')
 const actionError = ref('')
