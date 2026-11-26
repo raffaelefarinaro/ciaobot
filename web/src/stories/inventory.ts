@@ -179,21 +179,43 @@ export const inventory: InventoryEntry[] = [
     "states": [
       {
         "name": "default",
-        "coverage": "uncovered",
-        "storyIds": [],
-        "note": "<template> in AgentContextSection.vue implements this render; no rendered-state story exists."
+        "coverage": "covered",
+        "storyIds": [
+          "agent-context-section--default"
+        ],
+        "note": "Usage meter and system prompt disclosure."
       },
       {
-        "name": "other states",
-        "coverage": "unknown",
-        "storyIds": [],
-        "note": "Further state branches and their coverage have not yet been audited."
-      }
+        "name": "loading",
+        "coverage": "covered",
+        "storyIds": [
+          "agent-context-section--loading"
+        ],
+        "note": "System prompt read is held."
+      },
+      {
+        "name": "failed",
+        "coverage": "covered",
+        "storyIds": [
+          "agent-context-section--failed"
+        ],
+        "note": "System prompt read fails with a retry action."
+      },
+      {
+        "name": "compacting",
+        "coverage": "covered",
+        "storyIds": [
+          "agent-context-section--compacting"
+        ],
+        "note": "Compaction in flight disables the action."
+      },
+      {"name": "project-guide", "coverage": "covered", "storyIds": ["agent-context-section--project-guide"], "note": "A project brief, workspace guide and repository instructions render together."},
+      {"name": "guide-failed", "coverage": "covered", "storyIds": ["agent-context-section--guide-failed"], "note": "A failed workspace guide read shows a retry row."},
+      {"name": "copy-prompt", "coverage": "covered", "storyIds": ["agent-context-section--copy-prompt"], "note": "Copy writes the synthetic system prompt and shows Copied."},
+      {"name": "guide-retry", "coverage": "covered", "storyIds": ["agent-context-section--guide-retry"], "note": "Retry after a failed guide read displays the recovered guide."},
+      {"name": "repository-instructions-not-found", "coverage": "covered", "storyIds": ["agent-context-section--repository-instructions-not-found"], "note": "A code-mode project with no repository instructions shows the not-found status row."}
     ],
-    "loading": {
-      "status": "unknown",
-      "detail": "Initial and refresh loading fidelity in AgentContextSection.vue has not yet been audited."
-    },
+    "loading": {"status": "known", "detail": "The system prompt and workspace guide load independently; failed reads can retry."},
     "migration": {
       "status": "unassessed",
       "note": "Inventory admission does not approve a design migration."
@@ -662,21 +684,33 @@ export const inventory: InventoryEntry[] = [
     "states": [
       {
         "name": "default",
-        "coverage": "uncovered",
-        "storyIds": [],
-        "note": "<template> in ChatHeaderMoreMenu.vue implements this render; no rendered-state story exists."
+        "coverage": "covered",
+        "storyIds": [
+          "chat-header-more-menu--default"
+        ],
+        "note": "Open menu exposes chat details, notifications and archive; Escape closes it."
       },
       {
-        "name": "other states",
-        "coverage": "unknown",
-        "storyIds": [],
-        "note": "Further state branches and their coverage have not yet been audited."
-      }
+        "name": "no-archive",
+        "coverage": "covered",
+        "storyIds": [
+          "chat-header-more-menu--no-archive"
+        ],
+        "note": "The archive action is omitted when unavailable."
+      },
+      {
+        "name": "unread",
+        "coverage": "covered",
+        "storyIds": [
+          "chat-header-more-menu--unread"
+        ],
+        "note": "Unread count is included in the trigger's accessible name."
+      },
+      {"name": "actions", "coverage": "covered", "storyIds": ["chat-header-more-menu--actions"], "note": "Details and archive selections emit to the host."},
+      {"name": "notifications", "coverage": "covered", "storyIds": ["chat-header-more-menu--notifications"], "note": "Selecting Notifications opens the sheet, moves focus to its heading and Escape returns focus to the trigger."},
+      {"name": "history", "coverage": "covered", "storyIds": ["chat-header-more-menu--history"], "note": "Back to Home navigates a two-entry fixture router to its previous route."}
     ],
-    "loading": {
-      "status": "unknown",
-      "detail": "Initial and refresh loading fidelity in ChatHeaderMoreMenu.vue has not yet been audited."
-    },
+    "loading": {"status": "none", "detail": "The menu reads notification state supplied by stores."},
     "migration": {
       "status": "unassessed",
       "note": "Inventory admission does not approve a design migration."
@@ -841,25 +875,38 @@ export const inventory: InventoryEntry[] = [
     "consumers": [
       "web/src/components/ChatPanel.vue"
     ],
-    "variants": [],
-    "variantNotes": "Missing repo/worktree/dirty/clean variants. Detailed variants are unassessed.",
+    "variants": ["missing", "worktree", "dirty", "clean"],
+    "variantNotes": "The linked checkout or the chat's worktree supplies the displayed path and branch.",
     "states": [
       {
         "name": "default",
-        "coverage": "uncovered",
-        "storyIds": [],
-        "note": "<template> in ChatRepoSection.vue implements this render; no rendered-state story exists."
+        "coverage": "covered",
+        "storyIds": ["chat-repo-section--default"],
+        "note": "A clean linked checkout without the changes control."
       },
       {
-        "name": "other states",
-        "coverage": "unknown",
-        "storyIds": [],
-        "note": "Further state branches and their coverage have not yet been audited."
-      }
+        "name": "missing",
+        "coverage": "covered",
+        "storyIds": ["chat-repo-section--missing"],
+        "note": "A missing linked folder shows guidance instead of copy and branch controls."
+      },
+      {
+        "name": "worktree",
+        "coverage": "covered",
+        "storyIds": ["chat-repo-section--worktree"],
+        "note": "The chat's worktree path and branch replace the linked checkout and expose View changes."
+      },
+      {
+        "name": "changes",
+        "coverage": "covered",
+        "storyIds": ["chat-repo-section--loading", "chat-repo-section--error", "chat-repo-section--empty-changes", "chat-repo-section--changes", "chat-repo-section--unavailable"],
+        "note": "Expanded loading, failure, empty, patch and unsupported-checkout states use isolated transport fixtures."
+      },
+      {"name": "dirty", "coverage": "covered", "storyIds": ["chat-repo-section--dirty"], "note": "A linked checkout reports uncommitted changes."}
     ],
     "loading": {
-      "status": "unknown",
-      "detail": "Initial and refresh loading fidelity in ChatRepoSection.vue has not yet been audited."
+      "status": "known",
+      "detail": "View changes fetches on expansion; refresh is explicit. Loading and failure states are storied."
     },
     "migration": {
       "status": "unassessed",
@@ -3125,21 +3172,25 @@ export const inventory: InventoryEntry[] = [
     "states": [
       {
         "name": "default",
-        "coverage": "uncovered",
-        "storyIds": [],
-        "note": "<template> in ItemHeaderMenu.vue implements this render; no rendered-state story exists."
+        "coverage": "covered",
+        "storyIds": [
+          "item-header-menu--default"
+        ],
+        "note": "A host action is slotted into the open menu and Escape closes it."
       },
       {
-        "name": "other states",
-        "coverage": "unknown",
-        "storyIds": [],
-        "note": "Further state branches and their coverage have not yet been audited."
-      }
+        "name": "phone",
+        "coverage": "covered",
+        "storyIds": [
+          "item-header-menu--phone"
+        ],
+        "note": "The phone menu exposes notifications and the unread count."
+      },
+      {"name": "phone-only-wide", "coverage": "covered", "storyIds": ["item-header-menu--phone-only-wide"], "note": "The phone-only menu trigger is hidden on a wide viewport."},
+      {"name": "notifications", "coverage": "covered", "storyIds": ["item-header-menu--notifications"], "note": "On a phone the Notifications action opens the sheet and restores focus after Escape."},
+      {"name": "history", "coverage": "covered", "storyIds": ["item-header-menu--history"], "note": "On a phone Back to Home navigates to the previous route."}
     ],
-    "loading": {
-      "status": "unknown",
-      "detail": "Initial and refresh loading fidelity in ItemHeaderMenu.vue has not yet been audited."
-    },
+    "loading": {"status": "none", "detail": "The menu reads notification state supplied by stores."},
     "migration": {
       "status": "unassessed",
       "note": "Inventory admission does not approve a design migration."
@@ -3926,57 +3977,45 @@ export const inventory: InventoryEntry[] = [
     "states": [
       {
         "name": "default",
-        "coverage": "uncovered",
-        "storyIds": [],
-        "note": "<template> in ModelSelector.vue implements this render; no rendered-state story exists."
-      },
-      {
-        "name": "search",
-        "coverage": "uncovered",
-        "storyIds": [],
-        "note": "ModelSelector.vue has a search branch; no rendered-state story exists."
-      },
-      {
-        "name": "provider",
-        "coverage": "uncovered",
-        "storyIds": [],
-        "note": "ModelSelector.vue has a provider branch; no rendered-state story exists."
-      },
-      {
-        "name": "selected",
-        "coverage": "uncovered",
-        "storyIds": [],
-        "note": "ModelSelector.vue has a selected branch; no rendered-state story exists."
-      },
-      {
-        "name": "badge",
-        "coverage": "uncovered",
-        "storyIds": [],
-        "note": "ModelSelector.vue has a badge branch; no rendered-state story exists."
+        "coverage": "covered",
+        "storyIds": [
+          "model-selector--default"
+        ],
+        "note": "The selected model opens the provider list."
       },
       {
         "name": "empty",
-        "coverage": "uncovered",
-        "storyIds": [],
-        "note": "ModelSelector.vue has a empty branch; no rendered-state story exists."
+        "coverage": "covered",
+        "storyIds": [
+          "model-selector--empty"
+        ],
+        "note": "The triggerless picker with no sections."
       },
       {
-        "name": "triggerless sheet",
-        "coverage": "uncovered",
-        "storyIds": [],
-        "note": "ModelSelector.vue has a triggerless sheet branch; no rendered-state story exists."
+        "name": "disabled",
+        "coverage": "covered",
+        "storyIds": [
+          "model-selector--disabled"
+        ],
+        "note": "The trigger cannot be opened."
       },
       {
-        "name": "other states",
-        "coverage": "unknown",
-        "storyIds": [],
-        "note": "Further state branches and their coverage have not yet been audited."
-      }
+        "name": "multiple",
+        "coverage": "covered",
+        "storyIds": [
+          "model-selector--multiple"
+        ],
+        "note": "The trigger lists both selected models."
+      },
+      {"name": "search", "coverage": "covered", "storyIds": ["model-selector--search"], "note": "Filtering narrows options and shows no-match text."},
+      {"name": "provider-unavailable", "coverage": "covered", "storyIds": ["model-selector--provider-unavailable"], "note": "A disabled provider retains its sign-in hint."},
+      {"name": "selection", "coverage": "covered", "storyIds": ["model-selector--selection"], "note": "Selecting a model emits the selected value."},
+      {"name": "mobile-sheet", "coverage": "covered", "storyIds": ["model-selector--mobile-sheet"], "note": "The phone sheet shows its close control and model badge."},
+      {"name": "keyboard", "coverage": "covered", "storyIds": ["model-selector--keyboard"], "note": "Keyboard opens the picker, moves to an option and dismisses with Escape."},
+      {"name": "labels-and-filter", "coverage": "covered", "storyIds": ["model-selector--labels-and-filter"], "note": "Friendly labels and badges render, searching uses the friendly label, and filtering excludes other providers."},
+      {"name": "labelled-trigger", "coverage": "covered", "storyIds": ["model-selector--labelled-trigger"], "note": "The trigger combines its external label with the friendly selected model name."}
     ],
-    "loading": {
-      "status": "unknown",
-      "detail": "Initial and refresh loading fidelity in ModelSelector.vue has not yet been audited."
-    },
+    "loading": {"status": "none", "detail": "Model sections are supplied by the parent."},
     "migration": {
       "status": "unassessed",
       "note": "Inventory admission does not approve a design migration."
@@ -4162,21 +4201,25 @@ export const inventory: InventoryEntry[] = [
     "states": [
       {
         "name": "default",
-        "coverage": "uncovered",
-        "storyIds": [],
-        "note": "<template> in NewChatPicker.vue implements this render; no rendered-state story exists."
+        "coverage": "covered",
+        "storyIds": [
+          "new-chat-picker--default"
+        ],
+        "note": "A project list opens and Escape cancels."
       },
       {
-        "name": "other states",
-        "coverage": "unknown",
-        "storyIds": [],
-        "note": "Further state branches and their coverage have not yet been audited."
-      }
+        "name": "empty",
+        "coverage": "covered",
+        "storyIds": [
+          "new-chat-picker--empty"
+        ],
+        "note": "A workspace with no projects produces an empty list."
+      },
+      {"name": "choose", "coverage": "covered", "storyIds": ["new-chat-picker--choose"], "note": "Choosing a project resolves the pending picker with its project id."},
+      {"name": "switch-workspace", "coverage": "covered", "storyIds": ["new-chat-picker--switch-workspace"], "note": "Digit 2 previews the second workspace without selecting it."},
+      {"name": "general-and-memory", "coverage": "covered", "storyIds": ["new-chat-picker--general-and-memory"], "note": "The selected General project shows its badge and the app-owned Memory project is excluded."}
     ],
-    "loading": {
-      "status": "unknown",
-      "detail": "Initial and refresh loading fidelity in NewChatPicker.vue has not yet been audited."
-    },
+    "loading": {"status": "none", "detail": "Projects are supplied by the project store."},
     "migration": {
       "status": "unassessed",
       "note": "Inventory admission does not approve a design migration."
@@ -4483,22 +4526,25 @@ export const inventory: InventoryEntry[] = [
     "variantNotes": "Detailed configurable variants have not yet been audited.",
     "states": [
       {
-        "name": "default",
-        "coverage": "uncovered",
-        "storyIds": [],
-        "note": "<template> in PaneHeader.vue implements this render; no rendered-state story exists."
+        "name": "page",
+        "coverage": "covered",
+        "storyIds": [
+          "pane-header--page"
+        ],
+        "note": "A page tag provides the page heading."
       },
       {
-        "name": "other states",
-        "coverage": "unknown",
-        "storyIds": [],
-        "note": "Further state branches and their coverage have not yet been audited."
-      }
+        "name": "titled",
+        "coverage": "covered",
+        "storyIds": [
+          "pane-header--titled"
+        ],
+        "note": "A title and action share the header with a page tag."
+      },
+      {"name": "phone", "coverage": "covered", "storyIds": ["pane-header--phone"], "note": "The sidebar control receives keyboard focus and has a 44px touch target."},
+      {"name": "history", "coverage": "covered", "storyIds": ["pane-header--history"], "note": "The phone Back control returns to the previous route."}
     ],
-    "loading": {
-      "status": "unknown",
-      "detail": "Initial and refresh loading fidelity in PaneHeader.vue has not yet been audited."
-    },
+    "loading": {"status": "none", "detail": "The header has no read of its own."},
     "migration": {
       "status": "unassessed",
       "note": "Inventory admission does not approve a design migration."
@@ -5130,22 +5176,45 @@ export const inventory: InventoryEntry[] = [
     "variantNotes": "Listing/loading/error/save error. Detailed variants are unassessed.",
     "states": [
       {
-        "name": "default",
-        "coverage": "uncovered",
-        "storyIds": [],
-        "note": "<template> in RepoPickerDialog.vue implements this render; no rendered-state story exists."
+        "name": "loading",
+        "coverage": "covered",
+        "storyIds": [
+          "repo-picker-dialog--loading"
+        ],
+        "note": "Candidate discovery is held."
       },
       {
-        "name": "other states",
-        "coverage": "unknown",
-        "storyIds": [],
-        "note": "Further state branches and their coverage have not yet been audited."
-      }
+        "name": "empty",
+        "coverage": "covered",
+        "storyIds": [
+          "repo-picker-dialog--empty"
+        ],
+        "note": "No repositories were discovered."
+      },
+      {
+        "name": "failed",
+        "coverage": "covered",
+        "storyIds": [
+          "repo-picker-dialog--failed"
+        ],
+        "note": "Discovery fails and offers Retry."
+      },
+      {
+        "name": "candidates",
+        "coverage": "covered",
+        "storyIds": [
+          "repo-picker-dialog--candidates"
+        ],
+        "note": "A discovered path populates the folder input."
+      },
+      {"name": "save-failed", "coverage": "covered", "storyIds": ["repo-picker-dialog--save-failed"], "note": "A rejected link shows the server error in the open dialog."},
+      {"name": "saving", "coverage": "covered", "storyIds": ["repo-picker-dialog--saving"], "note": "A held link disables the saving button."},
+      {"name": "change-existing", "coverage": "covered", "storyIds": ["repo-picker-dialog--change-existing"], "note": "An existing repository path starts unchanged with Change disabled."},
+      {"name": "save", "coverage": "covered", "storyIds": ["repo-picker-dialog--save"], "note": "A successful link emits linked and close."},
+      {"name": "retry", "coverage": "covered", "storyIds": ["repo-picker-dialog--retry"], "note": "Retry after discovery fails loads candidates."},
+      {"name": "selection-while-saving", "coverage": "covered", "storyIds": ["repo-picker-dialog--selection-while-saving"], "note": "Candidate selection remains editable while a save is held; Saving remains disabled."}
     ],
-    "loading": {
-      "status": "unknown",
-      "detail": "Initial and refresh loading fidelity in RepoPickerDialog.vue has not yet been audited."
-    },
+    "loading": {"status": "known", "detail": "Candidates load when the dialog opens; saving has separate busy and error states."},
     "migration": {
       "status": "unassessed",
       "note": "Inventory admission does not approve a design migration."
@@ -5622,25 +5691,25 @@ export const inventory: InventoryEntry[] = [
       "web/src/components/ChatPanel.vue",
       "web/src/components/HomeIntake.vue"
     ],
-    "variants": [],
-    "variantNotes": "Skill/command, active row, argument hint/description; slashCommands.css. Detailed variants are unassessed.",
+    "variants": ["skill", "command", "active", "empty"],
+    "variantNotes": "Skill rows include a kind label; rows can also show an argument hint and description. The parent supplies the highlighted index.",
     "states": [
       {
         "name": "default",
-        "coverage": "uncovered",
-        "storyIds": [],
-        "note": "<template> in SlashCommandPicker.vue implements this render; no rendered-state story exists."
+        "coverage": "covered",
+        "storyIds": ["slash-command-picker--default"],
+        "note": "A selected skill with hint and description and an unselected built-in command; hover and selection emit to the parent."
       },
       {
-        "name": "other states",
-        "coverage": "unknown",
-        "storyIds": [],
-        "note": "Further state branches and their coverage have not yet been audited."
+        "name": "empty",
+        "coverage": "covered",
+        "storyIds": ["slash-command-picker--empty"],
+        "note": "An empty supplied command list renders an empty listbox."
       }
     ],
     "loading": {
-      "status": "unknown",
-      "detail": "Initial and refresh loading fidelity in SlashCommandPicker.vue has not yet been audited."
+      "status": "none",
+      "detail": "The parent supplies commands; the picker performs no reads."
     },
     "migration": {
       "status": "unassessed",
@@ -6880,22 +6949,45 @@ export const inventory: InventoryEntry[] = [
     "variantNotes": "Listing/plan/refusals/warnings/error. Detailed variants are unassessed.",
     "states": [
       {
-        "name": "default",
-        "coverage": "uncovered",
-        "storyIds": [],
-        "note": "<template> in WorkspaceMoveDialog.vue implements this render; no rendered-state story exists."
+        "name": "loading",
+        "coverage": "covered",
+        "storyIds": [
+          "workspace-move-dialog--loading"
+        ],
+        "note": "Folder discovery is held and Move is disabled."
       },
       {
-        "name": "other states",
-        "coverage": "unknown",
-        "storyIds": [],
-        "note": "Further state branches and their coverage have not yet been audited."
-      }
+        "name": "empty",
+        "coverage": "covered",
+        "storyIds": [
+          "workspace-move-dialog--empty"
+        ],
+        "note": "An empty folder listing is shown."
+      },
+      {
+        "name": "failed",
+        "coverage": "covered",
+        "storyIds": [
+          "workspace-move-dialog--failed"
+        ],
+        "note": "A folder read failure is shown."
+      },
+      {
+        "name": "refused",
+        "coverage": "covered",
+        "storyIds": [
+          "workspace-move-dialog--refused"
+        ],
+        "note": "A plan refusal and warning disable Move."
+      },
+      {"name": "planning", "coverage": "covered", "storyIds": ["workspace-move-dialog--planning"], "note": "A held plan keeps Move disabled."},
+      {"name": "start-failed", "coverage": "covered", "storyIds": ["workspace-move-dialog--start-failed"], "note": "A failed start shows an error."},
+      {"name": "starting", "coverage": "covered", "storyIds": ["workspace-move-dialog--starting"], "note": "A held start shows Starting and disables Move."},
+      {"name": "started", "coverage": "covered", "storyIds": ["workspace-move-dialog--started"], "note": "A successful start emits the requested destination."},
+      {"name": "browse", "coverage": "covered", "storyIds": ["workspace-move-dialog--browse"], "note": "Selecting a folder loads and displays its contents."},
+      {"name": "browse-up", "coverage": "covered", "storyIds": ["workspace-move-dialog--browse-up"], "note": "Up loads the parent listing and is disabled at the root."}
     ],
-    "loading": {
-      "status": "unknown",
-      "detail": "Initial and refresh loading fidelity in WorkspaceMoveDialog.vue has not yet been audited."
-    },
+    "loading": {"status": "known", "detail": "Folder browsing and destination planning have separate requests."},
     "migration": {
       "status": "unassessed",
       "note": "Inventory admission does not approve a design migration."
