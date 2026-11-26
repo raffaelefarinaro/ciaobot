@@ -49,6 +49,10 @@ dependencies = [
   # release is already resolved in uv.lock (via pip-audit -> rich), so this
   # only promotes it to a direct requirement for wheel installs.
   "markdown-it-py==4.3.0",
+  # The installer pins uv's standalone Python, which ships no zoneinfo
+  # database; hosts without system tzdata (minimal containers) otherwise fail
+  # ZoneInfo("UTC") on every scheduler tick (#3670).
+  "tzdata==2026.6",
 ]
 
 [project.optional-dependencies]
