@@ -315,3 +315,41 @@ def test_the_care_prompt_and_its_references_name_only_real_files_and_commands() 
                 continue
             problems.append(f"unknown command ciao {first} {second}".strip())
     assert not problems, sorted(set(problems))
+
+
+_BARE_PROCEDURE = re.compile(
+    r"`((?:curation-[a-z0-9-]+|drain-legacy-queues|unsure-and-proposals|writing)\.md)`"
+)
+
+
+def test_the_care_run_names_only_procedure_files_that_ship() -> None:
+    """The orchestrator and the guide name step files by bare name; each must exist."""
+    import json
+
+    root = ROOT / "ciao/stock/skills/ciao-capabilities/references/memory-operations"
+    schedules = json.loads((ROOT / "ciao/stock/schedules.json").read_text(encoding="utf-8"))
+    prompt = next(e["prompt"] for e in schedules["schedules"] if e["schedule_id"] == "system-memory-curation")
+    texts = [prompt, (root / "guide.md").read_text(encoding="utf-8")]
+    texts += [p.read_text(encoding="utf-8") for p in sorted((root / "references").glob("*.md"))]
+    missing = {n for text in texts for n in _BARE_PROCEDURE.findall(text) if not (root / "references" / n).is_file()}
+    assert not missing, sorted(missing)
+
+
+def test_care_preflight_checks_every_command_the_care_run_uses() -> None:
+    """The preflight loop lists real CLI nouns and covers every command a step names."""
+    import json
+
+    root = ROOT / "ciao/stock/skills/ciao-capabilities/references/memory-operations"
+    schedules = json.loads((ROOT / "ciao/stock/schedules.json").read_text(encoding="utf-8"))
+    prompt = next(e["prompt"] for e in schedules["schedules"] if e["schedule_id"] == "system-memory-curation")
+    match = re.search(r"for c in ([a-z -]+); do ciao \$c --help", prompt)
+    assert match, "the preflight loop changed shape"
+    listed = set(match.group(1).split())
+    agent, operator = _all_leaves()
+    nouns = {leaf[0] for leaf in set(agent) | set(operator)}
+    assert listed <= nouns, sorted(listed - nouns)
+    steps = [p.read_text(encoding="utf-8") for p in sorted((root / "references").glob("*.md"))]
+    text = "\n".join([prompt, *(s for s in steps if s.startswith("# Step "))])
+    named = {first for first, _ in re.findall(r"`ciao ([a-z][a-z-]*)(?: ([a-z][a-z-]*))?", text)}
+    # learnings-cleanup is only reported to the person, never run by a step.
+    assert not named - listed - {"learnings-cleanup"}, sorted(named - listed)

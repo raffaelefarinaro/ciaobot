@@ -1,12 +1,16 @@
-# Pass 6: weekly workspace hygiene
+# Step hygiene: weekly workspace hygiene (mechanical)
 
-Run this weekly (see the prompt for when it is due).
+The orchestrator runs this itself with plain `ciao` commands, no subagent and no model judgment. Dispatched weekly.
 
-1. Run `ciao vault-index --write`. If it fails, report the failure and do not claim health. On success, note it in the report.
-2. Run `ciao os-audit --json --scope workspace`. Exit 1 means reliable findings and is safe to continue. Exit 2 means unreliable evidence: report the scan errors, make no audit-derived repair, and leave the full pass due.
-3. When the audit is reliable, apply only low-risk unambiguous repairs: dead links, obvious MEMORY.md path drift, and a non-canonical `type:` whose exact canonical target VOCABULARY.md already names. Leave instruction conflicts, skills, orphaned or duplicate notes, expiration tags, schedules and vocabulary proposals alone, since each needs a person's judgment. A `missing_frontmatter` finding on a file a script or schedule writes is not a note: do not add frontmatter to it; name it to the user and suggest a pattern for the vault's `.ciaoignore`.
-4. Re-run the scoped audit. Record initial and final counts, safe repairs, unresolved findings and vocabulary proposals in the technical part of the report you write to `Workspace/Care-Report.md`. Log each unresolved finding with its category and the affected note's vault-relative path, not just a total.
+## Inputs
+None beyond the workspace: both commands read the configured vault.
 
-If the index rebuild failed or the audit exited 2, say the weekly hygiene is still due in the report: the next run sees no completed hygiene section and repeats it.
+## Procedure
+1. Run `ciao vault-index --write`. If it fails, the step is blocked with its error; do not claim health.
+2. Run `ciao os-audit --json --scope workspace`. Exit 1 means reliable findings and is fine. Exit 2 means unreliable evidence: block the step with the scan errors and make no audit-derived claim.
+3. Record in Care-Report.md under `## Hygiene`: the index result, the finding count, and each finding with its category and the affected note's vault-relative path (not just a total). Make no repair: a dead link, a non-canonical `type:` or any other finding is a `needs you` item. A `missing_frontmatter` finding on a file a script or schedule writes is not a note: name it and suggest a pattern for the vault's `.ciaoignore`.
 
-Install-wide runtime failures are visible through startup triage and pending upgrade work appears in housekeeping, so do not duplicate those global checks in every workspace.
+Install-wide runtime failures are visible through startup triage and pending upgrade work appears in housekeeping, so do not duplicate those global checks here.
+
+## Done when
+Both commands ran and the section is written. Evidence: `index rebuilt; audit exit N, F findings (<categories>)`.
