@@ -1058,7 +1058,7 @@ curl -sS -b /tmp/ciao.jar -X DELETE "http://localhost:${PWA_PORT:-8443}/api/chat
 # that omits kind defaults to Git for backward compatibility, while the Settings form
 # always sends its chosen kind (Folder by default). A folder link may receive a
 # reviewed new note (create only); Ciaobot never replaces or deletes an
-# existing folder file and never claims that cloud sync finished.
+# existing folder file and never claims that cloud sync finished. Existing-note edits stay disabled because the APFS probe found no atomic expected-version replacement (`experiments/ciao-3626-folder-probe/CAPABILITY_MATRIX.md`, #3626).
 # Operator-only: set it with the same PATCH and a whole-list body such as
 # {"shared_brains": [{"path": "<absolute path>", "name": "<optional name>", "kind": "folder"}]}.
 # [] removes all. At most 5; Git paths must be checkouts with an origin remote;
@@ -1686,7 +1686,7 @@ as a missing `change`.
 Every `GET /api/proposals/history` row also says what the decision did, from its
 receipts and nothing else: `apply_status` is `applied`, `failed`, `conflict`,
 `rolled_back`, `undone`, `pending` (the write is prepared but not settled) or
-`none` (no receipt performed or describes it). `applied` is `true` for `applied`,
+`none` (no receipt performed or describes it). An accepted, non-share row that names a receipt the journal no longer holds, or whose receipt status is outside the protocol, also carries `receipt_issue` (`missing` or `unknown_status`) with `apply_status: "none"`, so it reads as unverified rather than as a legacy row or an applied one; the key is absent otherwise. `applied` is `true` for `applied`,
 `false` for `failed`, `conflict`, `rolled_back` and `undone` (an undo wins over the
 applied row it reverses), and `null` for `pending` and `none`. An approval whose
 write failed is therefore an accepted row with `applied: false`, never an applied

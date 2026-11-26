@@ -253,6 +253,7 @@ function statusBadge(row: ProposalHistoryRow): { cls: string; text: string } {
     }
     // The decision stands, but what it wrote is the headline when it did not land.
     const apply = applyLine(row)
+    if (row.receipt_issue) return { cls: 'badge--muted', text: 'Unverified' }
     if (apply?.tone === 'bad') return { cls: 'badge--error', text: 'Not applied' }
     if (row.apply_status === 'undone') return { cls: 'badge--muted', text: 'Undone' }
     if (row.apply_status === 'rolled_back') return { cls: 'badge--muted', text: 'Rolled back' }

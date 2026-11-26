@@ -134,6 +134,12 @@ export const applyRows: ProposalHistoryRow[] = [
     apply_status: 'undone', applied: false, actor: 'human', decided_at: '2026-09-04T10:00:00+00:00',
   },
   {
+    id: 'storybook-apply-unverified', ts: '2026-09-02T10:00:00+00:00', action: 'accepted', via: 'pwa',
+    kind: 'memory', text: 'Storybook approval whose receipt left the journal', source: '', workspace: reviewWorkspace,
+    destination: 'ciao:memory', outcome: 'written', proposal_id: 'storybook-apply-p0',
+    apply_status: 'none', applied: null, receipt_issue: 'missing', actor: 'human', decided_at: '2026-09-02T10:00:00+00:00',
+  },
+  {
     id: 'storybook-apply-care', ts: '2026-09-05T10:00:00+00:00', action: 'accepted', via: 'auto',
     kind: 'skill', text: 'Storybook care run filed a synthetic skill note', source: '', workspace: reviewWorkspace,
     destination: 'skills', outcome: 'written', proposal_id: 'storybook-apply-p3',

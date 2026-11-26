@@ -595,8 +595,10 @@ async def share_evidence_confirm(request: Request) -> JSONResponse:
         )
         # Re-resolve the previewed project through the live manager before persisting.
         _share_project(request, workspace, target["project_id"])
-        result = share_evidence.confirm(
-            config, workspace=workspace, token=token, session=_share_session(request)
+        # Grant writers wait on the admission fence; never on the event loop.
+        result = await asyncio.to_thread(
+            share_evidence.confirm,
+            config, workspace=workspace, token=token, session=_share_session(request),
         )
         return JSONResponse(result)
     except share_evidence.EvidenceError as exc:
@@ -629,8 +631,8 @@ async def share_evidence_revoke(request: Request) -> JSONResponse:
     config = request.app.state.config
     try:
         workspace = _share_workspace(request)
-        return JSONResponse(share_evidence.revoke(
-            config, workspace=workspace,
+        return JSONResponse(await asyncio.to_thread(
+            share_evidence.revoke, config, workspace=workspace,
             grant_id=str(request.path_params.get("grant_id", "")),
         ))
     except share_evidence.EvidenceError as exc:
@@ -650,8 +652,8 @@ async def share_evidence_withdraw(request: Request) -> JSONResponse:
         return JSONResponse({"error": "expected an object"}, status_code=400)
     try:
         workspace = _share_workspace(request)
-        return JSONResponse(share_evidence.withdraw(
-            config, workspace=workspace,
+        return JSONResponse(await asyncio.to_thread(
+            share_evidence.withdraw, config, workspace=workspace,
             grant_id=str(request.path_params.get("grant_id", "")),
             reason=body.get("reason", ""),
         ))
@@ -9249,6 +9251,20 @@ def _history_reason(text: Any) -> str:
     return " ".join(str(text or "").split())[:MAX_REASON]
 
 
+def _receipt_issue(
+    row: dict[str, Any], receipt_id: str, found: list[dict[str, Any]]
+) -> str:
+    """Why an accepted decision's named receipt cannot vouch for it, or ""."""
+    if row.get("action") != "accepted" or str(row.get("kind", "")) == "share":
+        return ""
+    if receipt_id and not found:
+        return "missing"
+    known = {raw for raw, _ in _APPLY_PRECEDENCE}
+    if any(str(r.get("status", "")) not in known for r in found):
+        return "unknown_status"
+    return ""
+
+
 def _attach_apply_state(vault: Path, rows: list[dict[str, Any]]) -> None:
     """Say whether each decision's write landed, from the receipts that performed it.
 
@@ -9261,6 +9277,13 @@ def _attach_apply_state(vault: Path, rows: list[dict[str, Any]]) -> None:
 
     ``applied`` is ``true`` or ``false`` when a receipt says so, and ``null``
     while the write is pending or when no receipt exists to say.
+
+    ``receipt_issue`` is set (and otherwise absent) on an accepted, non-share
+    decision whose evidence cannot be trusted: ``missing`` when it names a
+    receipt the journal does not hold, ``unknown_status`` when the receipt's
+    status is outside the protocol. Both leave ``apply_status`` at ``none``,
+    so the row is never read as applied, and is told apart from a legacy decision
+    that never had a receipt.
     """
     from ciao.memory_receipts import journal_path, read_receipts
 
@@ -9283,6 +9306,9 @@ def _attach_apply_state(vault: Path, rows: list[dict[str, Any]]) -> None:
             (state for raw, state in _APPLY_PRECEDENCE if raw in statuses), "none"
         )
         row["apply_status"] = status
+        issue = _receipt_issue(row, receipt_id, found)
+        if issue:
+            row["receipt_issue"] = issue
         if status == "applied":
             row["applied"] = True
         elif status in _NOT_APPLIED:
