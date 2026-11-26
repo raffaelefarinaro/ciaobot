@@ -99,8 +99,8 @@ or promise recall after publication.
 
 Memory and care retain their engine-resolved `SourceRelation`. Evidence lookup
 must recover only turns belonging to that relation, recheck the live grant and
-withdrawal state, resolve the exact stored bytes and independently apply
-`_project_vocabulary`. The intake receives its existing sealed authorization;
+withdrawal state, resolve the exact stored bytes and independently
+verify the project-vocabulary sentence (its verifier module was removed as dormant). The intake receives its existing sealed authorization;
 no model-provided text, offsets, author, destination or path is authority.
 This requires a protected authority-store design as well as a protected ingress.
 
