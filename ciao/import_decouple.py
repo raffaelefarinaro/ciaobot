@@ -540,3 +540,33 @@ def assert_external_provenance(
             f"Provenance {text!r} names Ciaobot's own session "
             f"{session_id!r}; it is not a fact source."
         )
+
+
+def external_anchor(section: str) -> str:
+    """The ``provider:source_id:anchor`` tag in ``section``, or ``""``.
+
+    A fact filed from an imported conversation carries that tag as its
+    ``source:`` on the Unsure list line.
+
+    It is recognised in code and not by a colon count, by two rules together:
+    the leading segment must be a provider the import contract knows
+    (:data:`ciao.import_sources.contract.KNOWN_PROVIDERS`, which is what
+    :class:`~ciao.import_sources.contract.SourceRef` admits and therefore what
+    the tag was built from), and the whole tag must pass
+    :func:`ciao.import_decouple.assert_external_provenance`, which refuses a
+    Ciaobot chat id however it is written. A heading, a file name, a bare
+    session id and a path with two colons in it are all refusals of the same
+    rule rather than four spellings to remember.
+
+    """
+    from ciao.import_sources.contract import KNOWN_PROVIDERS
+
+    tag = section.strip()
+    provider = tag.split(":", 1)[0].strip()
+    if provider not in KNOWN_PROVIDERS:
+        return ""
+    try:
+        assert_external_provenance(tag)
+    except ProvenanceNotExternal:
+        return ""
+    return tag

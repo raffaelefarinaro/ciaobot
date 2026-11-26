@@ -103,7 +103,7 @@ def _paths(items: list[dict]) -> list[str]:
 
 
 def _proposals(vault: Path, workspace: str) -> str:
-    path = vault / workspace / "Workspace" / "Memory-Proposals.md"
+    path = vault / workspace / "Workspace" / "Unsure.md"
     return path.read_text(encoding="utf-8") if path.is_file() else ""
 
 
@@ -450,7 +450,7 @@ def test_judgement_cases_are_proposed_but_not_moved(tmp_path: Path) -> None:
     assert not (vault / "work/People/Ida.md").exists()
     queue = _proposals(vault, "personal")
     assert "personal/People/Ida.md" in queue
-    assert "_(from: vault-rehome)_" in queue
+    assert "source: vault-rehome" in queue
     assert summary["proposals"]
 
 
@@ -531,7 +531,7 @@ def test_round_trip_is_byte_identical(tmp_path: Path) -> None:
 
     after = _snapshot(vault)
     # The review queue is the user's to resolve and is deliberately not withdrawn.
-    after.pop("personal/Workspace/Memory-Proposals.md", None)
+    after.pop("personal/Workspace/Unsure.md", None)
     assert after == before
 
 
@@ -686,7 +686,7 @@ def test_force_adds_to_the_reverse_map_instead_of_replacing_it(tmp_path: Path) -
 
     unrehome_people(vault, runtime, apply=True)
     after = _snapshot(vault)
-    after.pop("personal/Workspace/Memory-Proposals.md", None)
+    after.pop("personal/Workspace/Unsure.md", None)
     after.pop("personal/People/Late.md", None)
     assert after == before, "both batches restored, byte for byte"
 
@@ -807,7 +807,7 @@ def test_a_partial_run_is_undoable_on_its_own(tmp_path: Path, monkeypatch: pytes
         "work/projects/alpha.md",
     ]
     after = _snapshot(vault)
-    after.pop("personal/Workspace/Memory-Proposals.md", None)
+    after.pop("personal/Workspace/Unsure.md", None)
     assert after == before
 
 
@@ -843,7 +843,7 @@ def test_a_retry_after_a_partial_run_can_undo_both_batches(tmp_path: Path, monke
     unrehome_people(vault, runtime, apply=True)
 
     after = _snapshot(vault)
-    after.pop("personal/Workspace/Memory-Proposals.md", None)
+    after.pop("personal/Workspace/Unsure.md", None)
     assert after == before, "both batches restored, byte for byte"
 
 
@@ -883,7 +883,7 @@ def test_a_rewrite_that_cannot_be_taken_back_is_still_mapped_to_the_real_path(
     unrehome_people(vault, runtime, apply=True)
 
     after = _snapshot(vault)
-    after.pop("personal/Workspace/Memory-Proposals.md", None)
+    after.pop("personal/Workspace/Unsure.md", None)
     assert after == before, "the degraded branch is still an exact inverse"
 
 

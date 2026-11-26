@@ -305,6 +305,7 @@ async def update_project_doc(
     ``workspace`` is the row's workspace: it coordinates the entry identities
     the reply's ``index`` addresses, and the receipt the write journals.
     """
+    from ciao import file_kernel as fk
     try:
         if not doc_path.is_file():
             return False
@@ -352,10 +353,9 @@ async def update_project_doc(
             if decision.action == "covered":
                 return False
 
-            from ciao import memory_receipts as mr
             from ciao import note_receipts as nr
 
-            expected_revision = mr.content_revision(current)
+            expected_revision = fk.content_revision(current)
             if decision.action == "add":
                 receipt = nr.append_list_item(
                     vault_root=vault_root,
@@ -447,6 +447,7 @@ async def fold_fact_into_person_note(
     whose facts live outside bullets gains the fact as a new bullet under
     ``## Notes``.
     """
+    from ciao import file_kernel as fk
     try:
         if not note_path.is_file() or not fact.strip():
             return False
@@ -504,10 +505,9 @@ async def fold_fact_into_person_note(
                     error_out.append(f"{note_path.name} changed during the fold; nothing was written")
                 return False
 
-            from ciao import memory_receipts as mr
             from ciao import note_receipts as nr
 
-            expected_revision = mr.content_revision(current)
+            expected_revision = fk.content_revision(current)
             if decision.action == "add":
                 receipt = nr.append_list_item(
                     vault_root=vault_root,

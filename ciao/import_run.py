@@ -72,18 +72,19 @@ import asyncio
 import hashlib
 import json
 import logging
+import re
 from dataclasses import dataclass
 from pathlib import Path
 
 from ciao.config import CiaoConfig
-from ciao.fact_candidates import external_anchor
+from ciao.import_decouple import external_anchor
 from ciao.import_decouple import canonical_provider, ciaobot_own_session_ids
 from ciao.import_discover import (
     ConversationSummary,
     _opencode_membership,
     _resolve_claude_code_ref,
 )
-from ciao.import_extract import PROPOSALS_RELATIVE, ExtractionResult, extract_facts
+from ciao.import_extract import ExtractionResult, extract_facts
 from ciao.import_sources import (
     PROVIDER_CLAUDE_CODE,
     PROVIDER_OPENCODE,
@@ -110,7 +111,7 @@ from ciao.import_store import (
     engine_store_path,
 )
 from ciao.insights import resolve_insights_model
-from ciao.memory_proposals import list_proposals
+from ciao.unsure_list import read_lines
 from ciao.workspaces import agent_root_for
 
 logger = logging.getLogger(__name__)
@@ -258,30 +259,32 @@ def _known_chat_ids(known_own: frozenset[tuple[str, str]]) -> frozenset[str]:
     return frozenset(session_id for _provider, session_id in known_own)
 
 
-def _queue_rows(vault_root: Path) -> dict[str, dict[str, str]]:
-    """The destination queue as ``{text: row}``, for a before/after diff.
+def _queue_rows(vault_root: Path) -> dict[str, str]:
+    """The destination's Unsure list as `{key: line}`, for a before/after diff.
 
-    Read off the queue rather than inferred from what the run asked about:
-    ``append_proposals`` answers a path for a mixed batch after silently
-    dropping the rows the queue already held, so the rows this run actually
-    *filed* are only knowable from the queue afterwards. The diff is therefore
-    also what decides which anchors get recorded as provenance.
+    Read off the list rather than inferred from what the run asked about:
+    `append_unsure` skips the lines the list already held, so the lines this run
+    actually *filed* are only knowable from the list afterwards. The diff is
+    therefore also what decides which anchors get recorded as provenance.
     """
-    return {row["text"]: row for row in list_proposals(vault_root / PROPOSALS_RELATIVE)}
+    return read_lines(vault_root)
 
 
-def _fact_provenance(row: dict[str, str], *, destination: str) -> FactProvenance | None:
-    """The C6 provenance row for one filed bullet, or ``None``.
+_SOURCE_RE = re.compile(r"source:\s*([^;]+?)\s*(?:;|$)")
 
-    The tag comes from the bullet's own ``_(from: …)_`` tail, which C4 built
-    from the message the row cites. It is recognised by
-    :func:`ciao.fact_candidates.external_anchor` — the same rule the accepted
-    fact's receipt is stamped under — so a row whose source is not an external
-    three-part tag yields no provenance rather than a guess: the store refuses a
-    tag it cannot verify, and dropping one row's evidence beats recording
-    evidence nobody checked.
+
+def _fact_provenance(line: str, *, destination: str) -> FactProvenance | None:
+    """The provenance row for one filed list line, or `None`.
+
+    The tag is the line's own `source: …` field, which the extraction built from
+    the message the row cites. It is recognised by
+    :func:`ciao.import_decouple.external_anchor`, so a line whose source is not an
+    external three-part tag yields no provenance rather than a guess: the store
+    refuses a tag it cannot verify, and dropping one row's evidence beats
+    recording evidence nobody checked.
     """
-    tag = external_anchor(str(row.get("source") or ""))
+    found = _SOURCE_RE.search(line)
+    tag = external_anchor(found.group(1) if found else "")
     if not tag:
         return None
     provider, source_id, anchor = (part.strip() for part in tag.split(":", 2))
@@ -291,7 +294,7 @@ def _fact_provenance(row: dict[str, str], *, destination: str) -> FactProvenance
         anchor=anchor,
         destination=destination,
         accepted=False,
-        note="filed as a review proposal",
+        note="filed on the Unsure list",
     )
 
 

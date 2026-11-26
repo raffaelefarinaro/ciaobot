@@ -298,7 +298,7 @@ def _record(cfg, title: str, *, proposal_id: str = "") -> None:
     """Record a check against one note's current text, as the pass would."""
     from datetime import date, timedelta
 
-    from ciao import memory_receipts as mr
+    from ciao import file_kernel as fk
     from ciao import note_verification as nv
 
     # `workspace_vault_root` IS the workspace's vault after the re-rooting, so
@@ -310,7 +310,7 @@ def _record(cfg, title: str, *, proposal_id: str = "") -> None:
         vault,
         nv.NoteCheck(
             relative_path=relative,
-            content_revision=mr.content_revision(
+            content_revision=fk.content_revision(
                 (vault / relative).read_text(encoding="utf-8")
             ),
             outcome="unverified" if not proposal_id else "update",

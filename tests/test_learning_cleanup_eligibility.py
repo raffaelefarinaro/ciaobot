@@ -33,7 +33,7 @@ from ciao.learning_records import (
     render_learning,
 )
 from ciao.memory_proposals import dismissed_log_path
-from ciao.memory_receipts import content_revision, write_queue_atomically
+from ciao.file_kernel import content_revision, write_queue_atomically
 
 RECEIPT = "mrcpt_0123456789abcdef"
 

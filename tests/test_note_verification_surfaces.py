@@ -44,7 +44,7 @@ from starlette.routing import Route
 from starlette.testclient import TestClient
 
 from ciao import control_plane as cp
-from ciao import memory_receipts as mr
+from ciao import file_kernel as fk
 from ciao.memory_receipts import journal_path, read_receipts
 from ciao import note_edit_proposals as nep
 from ciao import note_verification as nv
@@ -281,7 +281,7 @@ def _verify(
     note = vault / relative
     payload: dict[str, Any] = {
         "relative_path": relative,
-        "expected_revision": mr.content_revision(note.read_bytes().decode("utf-8")),
+        "expected_revision": fk.content_revision(note.read_bytes().decode("utf-8")),
         "outcome": nv.STILL_VALID,
         "coverage": nv.COVERAGE_COMPLETE,
         "evidence": [CITED],
@@ -508,7 +508,7 @@ def test_unreachable_evidence_is_an_answer_not_a_failure(
     assert not nv.should_check(
         pipeline["vault"],
         UNREACHABLE,
-        mr.content_revision(BODIES[UNREACHABLE]),
+        fk.content_revision(BODIES[UNREACHABLE]),
         today=TODAY + timedelta(days=29),
     )
 
@@ -528,7 +528,7 @@ def test_partial_coverage_cannot_claim_the_whole_note(
     )
     assert data["check"]["coverage"] == nv.COVERAGE_PARTIAL
     assert not nv.should_check(
-        pipeline["vault"], PARTIAL, mr.content_revision(BODIES[PARTIAL]), today=TODAY
+        pipeline["vault"], PARTIAL, fk.content_revision(BODIES[PARTIAL]), today=TODAY
     )
 
 
@@ -639,10 +639,10 @@ def test_dismissing_the_retirement_reverses_nothing_and_stays_reversible(
     check = nv.read_note_checks(vault)[RETIREMENT]
     assert check.proposal_id == ""
     assert not nv.should_check(
-        vault, RETIREMENT, mr.content_revision(BODIES[RETIREMENT]), today=TODAY
+        vault, RETIREMENT, fk.content_revision(BODIES[RETIREMENT]), today=TODAY
     )
     assert nv.should_check(
-        vault, RETIREMENT, mr.content_revision(BODIES[RETIREMENT] + "\nnew\n"), today=TODAY
+        vault, RETIREMENT, fk.content_revision(BODIES[RETIREMENT] + "\nnew\n"), today=TODAY
     )
 
 

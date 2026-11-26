@@ -133,41 +133,6 @@ _AS_OF_RE = re.compile(r"\[as-of:\s*(\d{4}-\d{2}-\d{2})\]", re.IGNORECASE)
 _EXPIRES_RE = re.compile(r"\[expires:\s*(\d{4}-\d{2}-\d{2})\]", re.IGNORECASE)
 
 
-def external_anchor(section: str) -> str:
-    """The ``provider:source_id:anchor`` tag in ``section``, or ``""``.
-
-    A proposal sourced from an imported conversation carries that tag in its
-    ``source_section`` — which is where ``MemoryProposal.as_bullet`` flattens it
-    into the bullet's ``_(from: …)_`` tail, and where it still is after a round
-    trip through the queue file.
-
-    It is recognised in code and not by a colon count, by two rules together:
-    the leading segment must be a provider the import contract knows
-    (:data:`ciao.import_sources.contract.KNOWN_PROVIDERS`, which is what
-    :class:`~ciao.import_sources.contract.SourceRef` admits and therefore what
-    the tag was built from), and the whole tag must pass
-    :func:`ciao.import_decouple.assert_external_provenance`, which refuses a
-    Ciaobot chat id however it is written. A heading, a file name, a bare
-    session id and a path with two colons in it are all refusals of the same
-    rule rather than four spellings to remember.
-
-    Imported lazily: ``memory_proposals`` calls into this module while it stamps
-    a receipt, so a module-level import from here would close that cycle.
-    """
-    from ciao.import_decouple import ProvenanceNotExternal, assert_external_provenance
-    from ciao.import_sources.contract import KNOWN_PROVIDERS
-
-    tag = section.strip()
-    provider = tag.split(":", 1)[0].strip()
-    if provider not in KNOWN_PROVIDERS:
-        return ""
-    try:
-        assert_external_provenance(tag)
-    except ProvenanceNotExternal:
-        return ""
-    return tag
-
-
 def candidate_from_proposal(proposal: Any) -> FactCandidate:
     """Lift an already-parsed :class:`~ciao.memory_proposals.MemoryProposal`.
 
@@ -192,6 +157,8 @@ def candidate_from_proposal(proposal: Any) -> FactCandidate:
     as_of = _AS_OF_RE.search(text)
     expires = _EXPIRES_RE.search(text)
     section = str(getattr(proposal, "source_section", "") or "")
+    from ciao.import_decouple import external_anchor
+
     tag = external_anchor(section)
     anchors = (tag,) if tag else ()
     return FactCandidate(

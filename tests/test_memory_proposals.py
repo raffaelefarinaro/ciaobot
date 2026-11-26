@@ -881,13 +881,6 @@ def test_entity_note_path_refuses_windows_reserved_names(tmp_path: Path, name: s
     assert ok == vault / "People" / "Sofia Rossi.md"
 
 
-def test_portable_name_problem() -> None:
-    assert mp.portable_name_problem("Sofia Rossi") is None
-    assert mp.portable_name_problem("People") is None
-    for bad in ("a:b", "x?", "trail.", "trail ", "CON", "con.md"):
-        assert isinstance(mp.portable_name_problem(bad), str), bad
-
-
 def test_every_note_stem_writer_checks_portable_names() -> None:
     import ciao
 

@@ -18,7 +18,7 @@ from pathlib import Path
 from ciao import cli
 from ciao import learnings_migrate as lm
 from ciao.learning_records import METADATA_MARKER
-from ciao.memory_receipts import content_revision
+from ciao.file_kernel import content_revision
 
 
 # A file with one entry of every shape the command has to cope with: a legacy

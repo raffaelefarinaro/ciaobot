@@ -154,7 +154,7 @@ from typing import Any
 
 from ciao.async_reads import keyed_lock, run_read
 from ciao.learning_records import LEARNINGS_RELATIVE
-from ciao.memory_receipts import content_revision
+from ciao.file_kernel import content_revision
 from ciao.update_task_catalog import TaskCatalog, UpdateTask, load_catalog
 
 logger = logging.getLogger(__name__)

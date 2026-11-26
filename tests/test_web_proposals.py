@@ -3041,7 +3041,7 @@ def _note_edit_vault(
     today: date | None = None,
 ) -> tuple[CiaoConfig, Any]:
     """A workspace whose queue holds one `[note_edit]` row over a real note."""
-    from ciao import memory_receipts as mr
+    from ciao import file_kernel as fk
     from ciao import note_edit_proposals as nep
 
     config = _config(tmp_path)
@@ -3054,7 +3054,7 @@ def _note_edit_vault(
         config,
         workspace="personal",
         relative_path=_EDIT_NOTE,
-        expected_revision=mr.content_revision(before),
+        expected_revision=fk.content_revision(before),
         operation=operation,
         before=before,
         after=after,
@@ -3359,7 +3359,7 @@ def test_dismissing_a_note_edit_settles_it_without_refusing_it_forever(
     """
     from ciao import note_edit_proposals as nep
     from ciao import note_verification as nv
-    from ciao.memory_receipts import content_revision
+    from ciao.file_kernel import content_revision
 
     config, proposal = _note_edit_vault(tmp_path)
     vault = config.workspace_vault_root("personal")
@@ -3727,7 +3727,7 @@ def test_the_registry_is_read_inside_the_lock_that_writes_it(
     the ordering rather than about how fast the thread happened to start.
     """
     from ciao import entity_types
-    from ciao.memory_receipts import queue_lock
+    from ciao.file_kernel import queue_lock
 
     config = _category_vault(tmp_path)
     registry = config.agent_vault_root("personal") / "entity-types.yaml"
@@ -3981,7 +3981,7 @@ def test_history_cites_the_evidence_a_verdict_rested_on(tmp_path: Path) -> None:
     record of what was checked — and it is gone from the queue the moment the
     row is resolved.
     """
-    from ciao import memory_receipts as mr
+    from ciao import file_kernel as fk
     from ciao import note_edit_proposals as nep
 
     config = _config(tmp_path)
@@ -4000,7 +4000,7 @@ def test_history_cites_the_evidence_a_verdict_rested_on(tmp_path: Path) -> None:
         config,
         workspace="personal",
         relative_path=_EDIT_NOTE,
-        expected_revision=mr.content_revision(_EDIT_PLAIN),
+        expected_revision=fk.content_revision(_EDIT_PLAIN),
         operation="replace",
         before=_EDIT_PLAIN,
         after=_EDIT_FOURTH,
@@ -4155,7 +4155,7 @@ def _entry_edit_vault(
     today: date | None = None,
 ) -> tuple[CiaoConfig, Any, Any]:
     """A workspace holding one `[note_edit]` row about one entry of one note."""
-    from ciao import memory_receipts as mr
+    from ciao import file_kernel as fk
     from ciao import note_edit_proposals as nep
     from ciao import note_entries as ne
     from ciao import note_receipts as nr
@@ -4179,7 +4179,7 @@ def _entry_edit_vault(
         config,
         workspace="personal",
         relative_path=_ENTRY_NOTE,
-        expected_revision=mr.content_revision(_ENTRY_PLAIN),
+        expected_revision=fk.content_revision(_ENTRY_PLAIN),
         operation=operation,
         before=_ENTRY_PLAIN,
         after=after,

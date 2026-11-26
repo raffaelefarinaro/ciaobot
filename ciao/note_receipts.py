@@ -88,6 +88,7 @@ from pathlib import Path
 from typing import Any
 
 from ciao import memory_receipts as mr
+from ciao import file_kernel as fk
 from ciao import note_entries as ne
 from ciao.os_support.private import carry_mode
 from ciao.vault_index import is_reserved_bookkeeping, temp_prefix
@@ -298,7 +299,7 @@ def _current_revision(target: Path) -> str:
     caller's honest answer is that it no longer knows.
     """
     try:
-        return mr.content_revision(_read_note_text(target))
+        return fk.content_revision(_read_note_text(target))
     except (OSError, mr.MemoryReceiptError):
         return ""
 
@@ -469,15 +470,15 @@ def _commit_note_change(
         ) from exc
     _refuse_oversize(after_text, "the proposed note body")
 
-    with mr.queue_lock(target):
+    with fk.queue_lock(target):
         before_text = _read_note_text(target)
         _refuse_oversize(before_text, "the note as it stands")
-        before_revision = mr.content_revision(before_text)
+        before_revision = fk.content_revision(before_text)
         if before_revision != expected:
             raise mr.RevisionConflict(
                 "the note changed since this operation was planned; nothing was written"
             )
-        after_revision = mr.content_revision(after_text)
+        after_revision = fk.content_revision(after_text)
         base: dict[str, Any] = {
             # The after revision is part of the identity, not just the record.
             # With only the before revision, a note that returned to an earlier
@@ -792,9 +793,9 @@ def apply_entry_edit(
             "an expected revision is required; this primitive never overwrites a "
             "note it has not read"
         )
-    with mr.queue_lock(target):
+    with fk.queue_lock(target):
         text = _read_note_text(target)
-        current = mr.content_revision(text)
+        current = fk.content_revision(text)
         if current != expected:
             raise mr.RevisionConflict(
                 "the note changed since this entry edit was planned; nothing was "
@@ -1042,9 +1043,9 @@ def append_list_item(
             f"{section!r} is not one of them, so nothing was composed"
         )
     _check_one_new_item(str(item), stored_path=stored_path, workspace=workspace)
-    with mr.queue_lock(target):
+    with fk.queue_lock(target):
         text = _read_note_text(target)
-        current = mr.content_revision(text)
+        current = fk.content_revision(text)
         if current != expected:
             raise mr.RevisionConflict(
                 "the note changed since this append was planned; nothing was "
@@ -1116,9 +1117,9 @@ def append_repo_doc_item(
             "note it has not read"
         )
     _check_one_new_item(item, stored_path=REPO_DOC_NAME, workspace=workspace)
-    with mr.queue_lock(target):
+    with fk.queue_lock(target):
         text = _read_note_text(target)
-        if mr.content_revision(text) != expected:
+        if fk.content_revision(text) != expected:
             raise mr.RevisionConflict(
                 "the note changed since this append was planned; nothing was "
                 "written"
@@ -1229,9 +1230,9 @@ def reconcile_note_receipt(
 
 def _classify_note(target: Path, receipt: dict[str, Any]) -> tuple[str, str]:
     """The verdict one note's current state supports, read under its lock."""
-    with mr.queue_lock(target):
+    with fk.queue_lock(target):
         try:
-            current = mr.content_revision(_read_note_text(target))
+            current = fk.content_revision(_read_note_text(target))
         except (OSError, mr.MemoryReceiptError) as exc:
             return mr.CONFLICT, f"the note is unreadable: {exc}"
         if current == str(receipt.get("after_revision", "")):
@@ -1363,7 +1364,7 @@ def undo_note_receipt(
     # revision the receipt itself carries is the only thing that binds them, so
     # a mismatch is "this receipt has no usable before image" — the same
     # refusal as a missing one, and the note is left exactly as it stands.
-    if mr.content_revision(before) != str(receipt.get("before_revision", "")):
+    if fk.content_revision(before) != str(receipt.get("before_revision", "")):
         raise mr.UndoUnsupported(
             "this receipt's before image does not hash to the before revision "
             "it records, so it cannot be restored; the note was not touched"
@@ -1402,9 +1403,9 @@ def undo_note_receipt(
         raise mr.RevisionConflict(
             f"the note is no longer a writable note in this vault: {exc}"
         ) from exc
-    with mr.queue_lock(target):
+    with fk.queue_lock(target):
         try:
-            current = mr.content_revision(_read_note_text(target))
+            current = fk.content_revision(_read_note_text(target))
         except (OSError, mr.MemoryReceiptError) as exc:
             raise mr.RevisionConflict(
                 f"the note is unreadable, so the change cannot be reversed: {exc}"

@@ -749,7 +749,7 @@ def decline_category(vault_root: Path, category_id: str) -> Path:
     taken is reported as a :class:`CategorySidecarError`, the refusal the callers
     already handle.
     """
-    from ciao.memory_receipts import QueueLockError, queue_lock
+    from ciao.file_kernel import QueueLockError, queue_lock
     from ciao.memory_proposals import _PROPOSALS_RELATIVE
 
     try:

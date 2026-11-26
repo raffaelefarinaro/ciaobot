@@ -84,7 +84,7 @@ from ciao.memory_proposals import (
     record_dismissal,
     record_promotion,
 )
-from ciao.memory_receipts import queue_lock, write_queue_atomically
+from ciao.file_kernel import queue_lock, write_queue_atomically
 from ciao.recurrence import RECURRENCE_THRESHOLD, classify_recurrence
 from ciao.recurrence_evidence import EvidenceUnavailable, resolve_completions
 

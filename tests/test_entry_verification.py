@@ -41,6 +41,7 @@ import pytest
 
 from ciao import entry_verification as ev
 from ciao import memory_receipts as mr
+from ciao import file_kernel as fk
 from ciao import note_entries as ne
 from ciao import note_receipts as nr
 from ciao import note_verification as nv
@@ -121,7 +122,7 @@ def _request(entry: ne.NoteEntry, **overrides: Any) -> ev.EntryVerificationReque
         "relative_path": NOTE,
         "identity": entry.identity,
         "entry_fingerprint": entry.fingerprint,
-        "expected_revision": mr.content_revision(PLAIN),
+        "expected_revision": fk.content_revision(PLAIN),
         "outcome": ev.STILL_VALID,
         "evidence": (CITATION,),
         "coverage": ev.COVERAGE_COMPLETE,
@@ -170,7 +171,7 @@ def test_an_entry_check_round_trips_in_the_shared_sidecar(tmp_path: Path) -> Non
         vault,
         nv.NoteCheck(
             relative_path=NOTE,
-            content_revision=mr.content_revision(PLAIN),
+            content_revision=fk.content_revision(PLAIN),
             outcome=nv.UNVERIFIED,
             checked_at=TODAY,
             retry_after=TODAY + timedelta(days=nv.CHECK_COOLDOWN_DAYS),
@@ -226,7 +227,7 @@ def test_recording_an_entry_check_leaves_the_note_map_alone(tmp_path: Path) -> N
         vault,
         nv.NoteCheck(
             relative_path=NOTE,
-            content_revision=mr.content_revision(PLAIN),
+            content_revision=fk.content_revision(PLAIN),
             outcome=ev.UNVERIFIED,
             checked_at=TODAY,
             retry_after=TODAY + timedelta(days=nv.CHECK_COOLDOWN_DAYS),
@@ -1098,7 +1099,7 @@ def test_a_stamp_leaves_a_mid_line_token_and_the_verdict_alone() -> None:
     note = f"---\ntype: person\nupdated: 2024-01-01\n---\n\n# Config\n\n{line}\n"
     entry = _entry(note)
     plan = ev.plan_entry_verification(
-        _request(entry, expected_revision=mr.content_revision(note)),
+        _request(entry, expected_revision=fk.content_revision(note)),
         entry=entry,
         today=TODAY,
     )

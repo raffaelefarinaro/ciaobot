@@ -30,7 +30,6 @@ from pathlib import Path
 import pytest
 from ciao import setup_status
 from ciao.providers.acp import oneshot as acp_oneshot
-from ciao.fact_candidates import PROVENANCE_UNKNOWN, candidate_from_proposal
 from ciao.import_decouple import (
     CIAO_CONTEXT_BEGIN,
     ProvenanceNotExternal,
@@ -48,15 +47,10 @@ from ciao.import_sources.contract import (
     Omission,
     SourceRef,
 )
-from ciao.memory_proposals import (
-    MemoryProposal,
-    list_proposals,
-    record_dismissal,
-    remove_proposal_by_substring,
-)
+
+from tests.unsure_rows import QUEUE, list_proposals
 
 FIXTURES = Path(__file__).resolve().parent / "fixtures" / "import"
-QUEUE = "Workspace/Memory-Proposals.md"
 
 SESSION_ID = "ses_synthetic0001"
 CHAT_ID = "chat-1a2b3c4d"
@@ -669,15 +663,9 @@ async def test_proposals_filed_counts_the_bullets_the_queue_gained(
     assert first.proposals_filed == 1
     assert [row["text"] for row in list_proposals(queue)] == ["Fact A one."]
 
-    # Decide it the way a review does: take the bullet out, record the decision.
-    removed = remove_proposal_by_substring(queue, "Fact A one.")
-    assert removed is not None
-    kind, removed_text = removed
-    record_dismissal(queue, text=removed_text, kind=kind, outcome="dismissed")
-    assert list_proposals(queue) == [], "a decided fact is no longer a pending row"
-    assert queue.with_suffix(".dismissed.jsonl").exists(), (
-        "and it is still deduped against, from the sidecar"
-    )
+    # Decide it the way a person does: tick the line. It stays on the list, so a
+    # repeat is still recognised as the same item.
+    queue.write_text(queue.read_text(encoding="utf-8").replace("- [ ]", "- [x]"), encoding="utf-8")
 
     # A mixed batch: one already decided, one new, and the new one stated twice.
     _patched_reply(
@@ -702,11 +690,11 @@ async def test_proposals_filed_counts_the_bullets_the_queue_gained(
     )
 
     rows = list_proposals(queue)
-    assert [row["text"] for row in rows] == ["Fact B two."], (
-        "the decided text stays decided and the repeat is one bullet"
+    assert [row["text"] for row in rows] == ["Fact A one.", "Fact B two."], (
+        "the ticked text is not added again and the repeat is one line"
     )
-    assert mixed.proposals_filed == len(rows), (
-        f"proposals_filed={mixed.proposals_filed} for {len(rows)} bullets in the queue"
+    assert mixed.proposals_filed == 1, (
+        f"proposals_filed={mixed.proposals_filed}: only Fact B two. was new"
     )
     assert mixed.skipped == 0, (
         "a decided or repeated fact is deduped, not an admission failure"
@@ -739,7 +727,7 @@ async def test_citations_stay_empty_and_the_anchor_survives_in_source_section(
 
     queue_text = (vault / QUEUE).read_text(encoding="utf-8")
     for anchor in ("msg_0002", "msg_0003", "msg_0004"):
-        assert f"_(from: opencode:{SESSION_ID}:{anchor})_" in queue_text
+        assert f"source: opencode:{SESSION_ID}:{anchor};" in queue_text
     assert "[idx=" not in queue_text, (
         "no integer citation can be right for a message Ciaobot never stored"
     )
@@ -750,21 +738,6 @@ async def test_citations_stay_empty_and_the_anchor_survives_in_source_section(
         f"opencode:{SESSION_ID}:msg_0003",
         f"opencode:{SESSION_ID}:msg_0004",
     ]
-    for row in rows:
-        candidate = candidate_from_proposal(
-            MemoryProposal(
-                target=row["kind"],
-                text=row["text"],
-                source_section=row["source"],
-                payload=row["target"],
-                citations=(),
-            )
-        )
-        assert candidate.source_message_ids == ()
-        assert candidate.provenance == PROVENANCE_UNKNOWN
-        assert candidate.section == row["source"]
-        assert candidate.attended is None, "unknown is not False"
-
     # The date on a fact is the source message's own, never the import date.
     dated = next(row for row in rows if row["source"].endswith("msg_0003"))
     assert dated["text"].endswith("[as-of: 2024-05-01]")

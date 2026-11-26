@@ -1262,7 +1262,7 @@ def note_entry_coverage(
     exempt entries and notes of an exempt type contribute counts and no verdict,
     which is what keeps a finding list short enough to read.
     """
-    from ciao import memory_receipts as mr
+    from ciao import file_kernel as fk
 
     current = today or datetime.date.today()
     prefix = Path("memory-vault") if path_prefix is None else Path(path_prefix)
@@ -1283,7 +1283,7 @@ def note_entry_coverage(
     note_exempt = verification.exempt if verification is not None else is_stale_exempt_type(
         note_type, registry=registry
     )
-    revision = mr.content_revision(text)
+    revision = fk.content_revision(text)
     shown = title or relative
 
     checked = exempt = unverified = stale = 0

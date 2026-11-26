@@ -33,6 +33,7 @@ from pathlib import Path
 from typing import Any
 
 from ciao import fact_candidates as fc
+from ciao import import_decouple as idc
 from ciao import memory_proposals as mp
 from ciao.proposal_kinds import parse_bullet
 
@@ -140,8 +141,8 @@ def test_only_an_external_three_part_tag_becomes_an_anchor() -> None:
     be a provider the import contract knows, and the tag must name an *external*
     conversation. Neither is a spelling to remember.
     """
-    assert fc.external_anchor(TAG) == TAG
-    assert fc.external_anchor(f"claude_code:{CLAUDE_SESSION_ID}:uuid-1") == (
+    assert idc.external_anchor(TAG) == TAG
+    assert idc.external_anchor(f"claude_code:{CLAUDE_SESSION_ID}:uuid-1") == (
         f"claude_code:{CLAUDE_SESSION_ID}:uuid-1"
     )
     for not_an_anchor in (
@@ -159,7 +160,7 @@ def test_only_an_external_three_part_tag_becomes_an_anchor() -> None:
         f"opencode:{SESSION_ID}",
         f"opencode:{SESSION_ID}:",
     ):
-        assert fc.external_anchor(not_an_anchor) == "", not_an_anchor
+        assert idc.external_anchor(not_an_anchor) == "", not_an_anchor
 
 
 def test_an_import_records_its_anchor_and_leaves_the_verdicts_alone() -> None:

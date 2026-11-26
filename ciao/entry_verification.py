@@ -60,6 +60,7 @@ from pathlib import Path
 from typing import Any, Mapping
 
 from ciao import memory_receipts as mr
+from ciao import file_kernel as fk
 from ciao import note_entries as ne
 from ciao import note_receipts as nr
 from ciao import note_verification as nv
@@ -847,7 +848,7 @@ def _store(vault_root: Path, check: EntryCheck) -> tuple[EntryCheck, str]:
     """
     try:
         record_entry_check(vault_root, check)
-    except (mr.MemoryReceiptError, mr.QueueLockError, OSError) as exc:
+    except (mr.MemoryReceiptError, fk.QueueLockError, OSError) as exc:
         logger.error("entry verification: could not record the check: %s", exc)
         return check, str(exc)
     return check, ""
@@ -971,7 +972,7 @@ def record_applied_entry_check(
     except (
         nv.NoteCheckRefused,
         mr.MemoryReceiptError,
-        mr.QueueLockError,
+        fk.QueueLockError,
         OSError,
     ) as exc:
         logger.error("entry verification: could not record the check: %s", exc)
@@ -1022,7 +1023,7 @@ def release_entry_check(
     except (
         nv.NoteCheckRefused,
         mr.MemoryReceiptError,
-        mr.QueueLockError,
+        fk.QueueLockError,
         OSError,
     ) as exc:
         # Reported, not raised: the caller is already reporting a failure it did
@@ -1097,7 +1098,7 @@ def verify_entry(
         return EntryVerificationResult(
             FAILED, message=f"the note could not be read as UTF-8: {exc}"
         )
-    current = mr.content_revision(note_text)
+    current = fk.content_revision(note_text)
 
     # A caller bug is reported before anything else, including before the
     # cooldown: an outcome this version cannot interpret must say so rather than
@@ -1208,7 +1209,7 @@ def verify_entry(
         # read nobody rechecked. Nothing is written and nothing recorded, so the
         # caller can re-read and decide again.
         return EntryVerificationResult(CONFLICT, message=str(exc))
-    except (mr.MemoryReceiptError, mr.QueueLockError, OSError) as exc:
+    except (mr.MemoryReceiptError, fk.QueueLockError, OSError) as exc:
         # A journal that would not record, a lock this thread could not take, a
         # filesystem that said no. All three are reported rather than raised: this
         # function's contract is one result per entry, and a caller running a pass
