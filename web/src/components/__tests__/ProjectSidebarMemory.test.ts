@@ -320,19 +320,16 @@ describe('ProjectSidebar memory section', () => {
     expect(nav.findAll('.sidebar-list-label').map(h => h.text())).toEqual(['Explore'])
     const items = nav.findAll('.memory-nav-item')
     expect(items.map(i => i.attributes('href'))).toEqual([
-      '/memory/unsure', '/memory/map', '/memory/categories', '/memory/import',
+      '/memory/unsure', '/memory/map', '/memory/categories',
     ])
     expect(items[0].text()).toContain('Unsure')
-    // Explore holds the map, then the list of what the map is drawing, then the
-    // way conversations get in.
+    // Explore holds the map, then the list of what the map is drawing.
     expect(items[1].text()).toContain('Map')
     expect(items[2].text()).toContain('Categories')
-    expect(items[3].text()).toContain('Import')
-    // The Unsure list is a file, the category list is configuration and Import
-    // lists nothing until the reader asks for a scan: no count on any of them.
+    // The Unsure list is a file and the category list is configuration: no
+    // count on either.
     expect(items[0].find('.memory-nav-count').exists()).toBe(false)
     expect(items[2].find('.memory-nav-count').exists()).toBe(false)
-    expect(items[3].find('.memory-nav-count').exists()).toBe(false)
     expect(items[0].attributes('aria-label')).toBe('Unsure')
   })
 

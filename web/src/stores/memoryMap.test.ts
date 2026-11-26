@@ -130,19 +130,16 @@ describe('sections', () => {
     expect(isMemorySection('categories')).toBe(true)
   })
 
-  test('the sections are the map, categories, import and the Unsure list', () => {
-    expect(MEMORY_SECTIONS).toEqual(['map', 'categories', 'import', 'unsure'])
+  test('the sections are the map, categories and the Unsure list', () => {
+    expect(MEMORY_SECTIONS).toEqual(['map', 'categories', 'unsure'])
     expect(memorySectionPath('unsure')).toBe('/memory/unsure')
     // The queues and ledgers that used to sit beside them are gone.
-    for (const gone of ['review', 'retired', 'history']) expect(isMemorySection(gone)).toBe(false)
+    for (const gone of ['review', 'retired', 'history', 'import']) expect(isMemorySection(gone)).toBe(false)
   })
 
-  test('Import is a section, and its listing is not a card on the map', () => {
-    // #1029: the panel used to sit above the graph, where an unbounded listing
-    // pushed the controls a person has to reach off the pane. It is a page now,
-    // so the six-item list is what that fix looks like.
-    expect(isMemorySection('import')).toBe(true)
-    expect(memorySectionPath('import')).toBe('/memory/import')
+  test('the retired Import section is not a section', () => {
+    expect(isMemorySection('import')).toBe(false)
+    expect(memorySectionPath('unsure')).toBe('/memory/unsure')
   })
 
   test('the map returns to whichever drawing was on screen', () => {

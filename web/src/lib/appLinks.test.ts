@@ -27,7 +27,6 @@ const PAGES = [
   '/memory',
   '/memory/map',
   '/memory/categories',
-  '/memory/import',
   '/memory/unsure',
   '/settings',
   '/settings/home',
@@ -131,13 +130,13 @@ describe('a retired workspace File access link', () => {
 
 describe('the memory sections', () => {
   it('lists the sections that exist', () => {
-    for (const section of ['map', 'categories', 'import', 'unsure']) {
+    for (const section of ['map', 'categories', 'unsure']) {
       expect(isAppRouteHref(`/memory/${section}`)).toBe(true)
     }
   })
 
   it('does not treat the removed review addresses as app links', () => {
-    for (const gone of ['/memory/review', '/memory/retired', '/memory/history', '/proposals']) {
+    for (const gone of ['/memory/review', '/memory/retired', '/memory/history', '/memory/import', '/proposals']) {
       expect(isAppRouteHref(gone)).toBe(false)
     }
     expect(isAppRouteHref('/memory/review?show=suggested&workspace=work&proposal=prv_x')).toBe(false)

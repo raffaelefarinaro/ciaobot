@@ -50,7 +50,7 @@ Each area has a reference file next to this one. Open only the file the question
 | Area | What it covers | Read |
 |---|---|---|
 | Workspaces, projects, chats | hierarchy, permission mode and file access, archiving a workspace, usage statistics (`ciao stats`) and the Usage page, `ciao project`, linked repos, code mode, forks, subagents, long scripts (a subagent, or a background shell: the chat is told when it finishes), plan mode, turn resilience | `references/workspaces-and-chats.md` |
-| Memory and the vault | the memory pass, what is automatic vs yours, the Unsure list, Git as the undo, Memory Map, conversation import, memory backup, shared brains | `references/memory.md` |
+| Memory and the vault | the memory pass, what is automatic vs yours, the Unsure list, Git as the undo, Memory Map, importing past conversations (the `import-conversations` skill), memory backup, shared brains | `references/memory.md` |
 | Automations | schedules, interval runs, project vs chat targets, catch-up, webhook triggers | `references/automations.md` |
 | Files | viewer and pinned panel, folder browser and folder pins, annotations, drafts, previews, document conversion, HTML artifacts, CSV tables, backlinks, keyboard shortcuts | `references/files.md` |
 | Skills, models | skills, subagents, slash commands, skill proposals, providers, permission modes, message queue | `references/models-and-extensions.md` |

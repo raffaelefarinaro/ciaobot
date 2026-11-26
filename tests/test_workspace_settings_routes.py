@@ -929,7 +929,6 @@ def test_patch_rename_returns_renamed_and_publishes_from_to(tmp_path, monkeypatc
 
     from ciao.config import CiaoConfig, WorkspaceConfig
     from ciao.config import SharedBrainLink
-    from ciao.import_store import ImportStore, engine_store_path
     from ciao.schedules import ScheduleStore
     from ciao.webhooks import WebhookStore
 
@@ -977,11 +976,6 @@ def test_patch_rename_returns_renamed_and_publishes_from_to(tmp_path, monkeypatc
     trigger, secret = webhooks.create(
         name="hook", workspace="alpha", instructions="do the thing"
     )
-    imports = ImportStore(engine_store_path(config))
-    batch = imports.create(
-        workspace="alpha",
-        sources=[{"provider": "claude_code", "source_id": "sess-1"}],
-    )
     pcm = _RenamePCM()
     app = Starlette(
         routes=[
@@ -1016,7 +1010,6 @@ def test_patch_rename_returns_renamed_and_publishes_from_to(tmp_path, monkeypatc
     assert schedules.get(user.schedule_id) is not None
     assert schedules.get(user.schedule_id).workspace == "beta"  # type: ignore[union-attr]
     assert webhooks.get(trigger.trigger_id).workspace == "beta"
-    assert imports.get(batch.batch_id).workspace == "beta"
     assert claimed == [True]
     assert config.workspaces["beta"].shared_brains[0].lifetime_id == link.lifetime_id
 
@@ -1081,7 +1074,6 @@ def test_patch_rename_with_invalid_setting_writes_nothing(tmp_path, extra):
     from starlette.testclient import TestClient
 
     from ciao.config import CiaoConfig, WorkspaceConfig
-    from ciao.import_store import ImportStore, engine_store_path
     from ciao.schedules import ScheduleStore
     from ciao.webhooks import WebhookStore
 
@@ -1118,11 +1110,6 @@ def test_patch_rename_with_invalid_setting_writes_nothing(tmp_path, extra):
     trigger = webhooks.update(
         trigger.trigger_id, expected_revision=trigger.revision, enabled=True
     )
-    imports = ImportStore(engine_store_path(config))
-    batch = imports.create(
-        workspace="alpha",
-        sources=[{"provider": "claude_code", "source_id": "sess-1"}],
-    )
     pcm = _RenamePCM()
     app = Starlette(
         routes=[
@@ -1143,7 +1130,6 @@ def test_patch_rename_with_invalid_setting_writes_nothing(tmp_path, extra):
             runtime / "workspaces.json",
             runtime / "schedules.json",
             runtime / "webhooks.json",
-            engine_store_path(config),
         )
     }
 
@@ -1156,7 +1142,6 @@ def test_patch_rename_with_invalid_setting_writes_nothing(tmp_path, extra):
         runtime / "workspaces.json",
         runtime / "schedules.json",
         runtime / "webhooks.json",
-        engine_store_path(config),
     ):
         assert path.read_bytes() == before[path.name]
     assert pcm.events.published == []
@@ -1164,7 +1149,6 @@ def test_patch_rename_with_invalid_setting_writes_nothing(tmp_path, extra):
     assert schedules.get(user.schedule_id).workspace == "alpha"  # type: ignore[union-attr]
     assert webhooks.get(trigger.trigger_id).workspace == "alpha"
     assert webhooks.authenticate(trigger.trigger_id, secret) is not None
-    assert imports.get(batch.batch_id).workspace == "alpha"
     assert not (tmp_path / "beta").exists()
 
 
