@@ -181,7 +181,7 @@ mismatch is `degraded` and a re-install prompt, not a negotiated older mode.
 | Op | Callers | Effect |
 |----|---------|--------|
 | `health` | app, bridge | `ready`, `helper_version`, `state_counter`, `epoch`, `authority_key_id`, event public key |
-| `eligible_events` | app, bridge | `ChatAuthority.eligible_events`; every filter before the limit |
+| `eligible_events` | app, bridge | `ChatAuthority.eligible_events`; every filter before the limit; the request carries the intended `destination` and `audience` and the reply echoes them with the grant id |
 | `create_grant`, `revoke_grant`, `withdraw_grant`, `withdraw_turn`, `submit_turn` | app only | a signed operator command (below) |
 | `enroll_operator_key` | app only, needs an admin authorization | store the operator public key **once**; refused while a key is enrolled. There is no replace: changing the key is the admin-authorized reset (state, keys and counter destroyed, which revokes everything) followed by a fresh enrollment |
 
@@ -398,7 +398,8 @@ vectors in one PR.
 
 ## Slices after this one
 
-1. **Library hardening (Python), with a no-replace enrollment rule:** asymmetric operator verifier and separate
+1. **Library hardening (Python), with a no-replace enrollment rule (done in
+   `ciao/chat_authority.py`, vectors in `tests/vectors/chat_authority_v1.json`):** asymmetric operator verifier and separate
    state and event keys in `chat_authority.py`; destination and audience
    arguments on lookup; `state_counter` and write-ahead hook in the storage
    protocol; shared vector file.

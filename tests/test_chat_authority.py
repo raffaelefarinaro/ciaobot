@@ -7,25 +7,53 @@ from typing import Any
 import pytest
 
 from ciao.chat_authority import (
+    MAX_COUNTER,
+    MAX_GRANT_RECORDS,
     MAX_TEXT_BYTES,
     AuthorityError,
     ChatAuthority,
     Command,
-    HmacSigner,
+    EcdsaP256Signer,
+    EcdsaP256Verifier,
+    Ed25519Signer,
+    Ed25519Verifier,
     SignedCommand,
+    StateMac,
     TurnEvent,
     sign_command,
 )
 
-AUTH_KEY = b"a" * 32
-OP_KEY = b"o" * 32
+STATE_KEY = b"s" * 32
+EVENT_SEED = b"e" * 32
+OP_SCALAR = 0x1234567890ABCDEF1234567890ABCDEF1234567890ABCDEF1234567890ABCDEF
 SCOPE = {"workspace": "w1", "project": "p1", "chat": "c1"}
 
 
-class MemStorage:
+class MemAnchor:
+    """In-memory monotonic counter standing in for the root-owned anchor."""
+
     def __init__(self) -> None:
+        self.value = 0
+        self.fail = False
+        self.calls: list[int] = []
+
+    def current(self) -> int:
+        return self.value
+
+    def advance(self, to: int) -> None:
+        if self.fail:
+            raise OSError("anchor unavailable")
+        if to <= self.value:
+            raise ValueError("anchor only moves forward")
+        self.value = to
+        self.calls.append(to)
+
+
+class MemStorage:
+    def __init__(self, anchor: MemAnchor | None = None) -> None:
         self.blob: bytes | None = None
         self.fail = False
+        self.anchor = anchor
 
     def read(self) -> bytes | None:
         return self.blob
@@ -33,22 +61,28 @@ class MemStorage:
     def write(self, data: bytes) -> None:
         if self.fail:
             raise OSError("disk full")
+        if self.anchor is not None:
+            # Write-ahead: the anchor already holds the counter this blob carries.
+            assert json.loads(data)["state"]["state_counter"] == self.anchor.value
         self.blob = data
 
 
 class Rig:
     def __init__(self, storage: MemStorage | None = None) -> None:
-        self.storage = storage or MemStorage()
-        self.operator = HmacSigner(OP_KEY)
+        self.anchor = MemAnchor()
+        self.storage = storage or MemStorage(self.anchor)
+        self.operator = EcdsaP256Signer.from_private_scalar(OP_SCALAR)
         self.ids = itertools.count(1)
         self.nonces = itertools.count(1)
         self.open()
 
     def open(self) -> None:
         self.auth = ChatAuthority(
-            signer=HmacSigner(AUTH_KEY),
-            operator=self.operator,
+            event_signer=Ed25519Signer.from_seed(EVENT_SEED),
+            state_mac=StateMac(STATE_KEY),
+            operator=self.operator.verifier(),
             storage=self.storage,
+            anchor=self.anchor,
             new_id=lambda: f"id{next(self.ids)}",
         )
 
@@ -62,7 +96,12 @@ class Rig:
         n = next(self.nonces)
         return sign_command(self.operator, Command(kind, n, principal, params, payload))
 
-    def grant(self, chat: str | None = "c1", producers: list[str] | None = None) -> str:
+    def grant(
+        self,
+        chat: str | None = "c1",
+        producers: list[str] | None = None,
+        principal: str = "op",
+    ) -> str:
         g = self.auth.create_grant(
             self.cmd(
                 "create_grant",
@@ -74,6 +113,7 @@ class Rig:
                     "audience": "team",
                     "producers": producers or ["memory_extraction"],
                 },
+                principal=principal,
             )
         )
         return g.grant_id
@@ -83,6 +123,8 @@ class Rig:
         return self.auth.submit_turn(self.cmd("submit_turn", params, text))
 
     def ids_of(self, grant_id: str, limit: int = 50, **kw: Any) -> list[str]:
+        kw.setdefault("destination", "brain")
+        kw.setdefault("audience", "team")
         look = self.auth.eligible_events(
             grant_id=grant_id, producer="memory_extraction", limit=limit, **kw
         )
@@ -123,7 +165,12 @@ def test_revocation_advances_epoch_and_stops_eligibility() -> None:
     assert r.ids_of(g) == []
     with pytest.raises(AuthorityError) as e:
         r.auth.eligible_events(
-            grant_id=g, producer="memory_extraction", limit=5, expected_epoch=before
+            grant_id=g,
+            producer="memory_extraction",
+            limit=5,
+            destination="brain",
+            audience="team",
+            expected_epoch=before,
         )
     assert code(e) == "epoch_changed"
     # Revoking again changes nothing; later turns are not enrolled.
@@ -209,7 +256,9 @@ def test_grant_does_not_reach_older_turns_other_chats_or_other_producers() -> No
     )
     assert r.ids_of(g) == ["new"]
     assert (
-        r.auth.eligible_events(grant_id=g, producer="nightly_curation", limit=5).events
+        r.auth.eligible_events(
+            grant_id=g, producer="nightly_curation", limit=5, destination="brain", audience="team"
+        ).events
         == ()
     )
     project_wide = r.grant(chat=None)
@@ -236,7 +285,8 @@ def test_correction_supersedes_earlier_revision() -> None:
 def test_commands_need_a_valid_operator_signature_and_matching_kind() -> None:
     r = Rig()
     forged = sign_command(
-        HmacSigner(b"x" * 32), Command("submit_turn", 1, "op", {"send_id": "s", **SCOPE}, b"hi")
+        EcdsaP256Signer.generate(),
+        Command("submit_turn", 1, "op", {"send_id": "s", **SCOPE}, b"hi"),
     )
     with pytest.raises(AuthorityError) as e:
         r.auth.submit_turn(forged)
@@ -285,9 +335,11 @@ def test_tampered_or_unsigned_state_refuses_to_load() -> None:
     r.storage.blob = other.storage.blob
     with pytest.raises(AuthorityError) as e:
         ChatAuthority(
-            signer=HmacSigner(b"z" * 32),
-            operator=r.operator,
+            event_signer=Ed25519Signer.from_seed(EVENT_SEED),
+            state_mac=StateMac(b"z" * 32),
+            operator=r.operator.verifier(),
             storage=r.storage,
+            anchor=r.anchor,
             new_id=lambda: "x",
         )
     assert code(e) == "state_invalid"
@@ -315,9 +367,9 @@ def test_event_signature_covers_bytes_and_scope() -> None:
     assert not r.auth.verify_event(replace(ev, grant_ids=("g",)))
 
 
-def test_signer_rejects_short_keys() -> None:
+def test_state_mac_rejects_short_keys() -> None:
     with pytest.raises(ValueError):
-        HmacSigner(b"short")
+        StateMac(b"short")
 
 
 def test_revoke_and_withdraw_still_work_at_capacity_and_refusals_are_final(
@@ -372,9 +424,11 @@ def _cycling_rig(ids: list[str]) -> Rig:
     r.ids = cycle  # type: ignore[assignment]
     r.new_id = lambda: next(cycle)
     r.auth = ChatAuthority(
-        signer=HmacSigner(AUTH_KEY),
-        operator=r.operator,
+        event_signer=Ed25519Signer.from_seed(EVENT_SEED),
+        state_mac=StateMac(STATE_KEY),
+        operator=r.operator.verifier(),
         storage=r.storage,
+        anchor=r.anchor,
         new_id=r.new_id,
     )
     return r
@@ -471,3 +525,258 @@ def test_principal_count_is_capped(monkeypatch: pytest.MonkeyPatch) -> None:
             r.cmd("submit_turn", {"send_id": "s2", **SCOPE}, b"x", principal="op2")
         )
     assert code(e) == "capacity"
+
+
+# ---- hardening (#3623 slice 1, #3662) ---------------------------------
+
+
+def _cmd_with(
+    signer: EcdsaP256Signer, counter: int, kind: str, params: dict[str, Any], payload: bytes = b""
+) -> SignedCommand:
+    return sign_command(signer, Command(kind, counter, "op", params, payload))
+
+
+def test_operator_verifier_holds_no_signing_ability() -> None:
+    r = Rig()
+    verifier = r.operator.verifier()
+    assert isinstance(verifier, EcdsaP256Verifier)
+    assert not hasattr(verifier, "sign")
+    # A signer cannot be handed in as the operator verifier.
+    with pytest.raises(ValueError):
+        ChatAuthority(
+            event_signer=Ed25519Signer.from_seed(EVENT_SEED),
+            state_mac=StateMac(STATE_KEY),
+            operator=r.operator,  # type: ignore[arg-type]
+            storage=r.storage,
+            anchor=r.anchor,
+            new_id=lambda: "x",
+        )
+    # Rebuilding the verifier from the public bytes alone verifies commands.
+    public = EcdsaP256Verifier(r.operator.public_key_x963())
+    signed = r.cmd("submit_turn", {"send_id": "s", **SCOPE}, b"hi")
+    assert public.verify(signed.command.signing_bytes(), signed.signature)
+    assert len(signed.signature) == 64
+    assert not public.verify(signed.command.signing_bytes(), signed.signature[:-1])
+    assert not public.verify(signed.command.signing_bytes() + b"x", signed.signature)
+    with pytest.raises(ValueError):
+        EcdsaP256Verifier(b"\x04" + b"\x01" * 64)  # not a point on the curve
+
+
+def test_state_and_event_keys_are_separate_and_not_interchangeable() -> None:
+    event = Ed25519Signer.from_seed(EVENT_SEED)
+    with pytest.raises(ValueError):
+        ChatAuthority(
+            event_signer=StateMac(STATE_KEY),  # type: ignore[arg-type]
+            state_mac=StateMac(STATE_KEY),
+            operator=EcdsaP256Signer.generate().verifier(),
+            storage=MemStorage(),
+            anchor=MemAnchor(),
+            new_id=lambda: "x",
+        )
+    r = Rig()
+    r.send("s1")
+    # An event signature is not a state MAC and the reverse (domain separation).
+    mac = StateMac(STATE_KEY)
+    sig = event.sign(b"ciao-chat-authority/state/v1\0body")
+    assert not mac.verify(b"ciao-chat-authority/state/v1\0body", sig)
+    assert not Ed25519Verifier(event.public_key()).verify(b"x", mac.tag(b"x"))
+    # Whoever holds only the event public key can check events but not forge them.
+    ev = r.send("s1")
+    verifier = Ed25519Verifier(event.public_key())
+    assert verifier.verify(ev.signing_bytes(), ev.signature)
+    assert not hasattr(verifier, "sign")
+
+
+def test_lookup_is_bound_to_destination_and_audience() -> None:
+    r = Rig()
+    g = r.grant()
+    r.send("s1")
+    assert r.ids_of(g) == ["s1"]
+    look = r.auth.eligible_events(
+        grant_id=g, producer="memory_extraction", limit=5, destination="brain", audience="team"
+    )
+    assert (look.grant_id, look.destination, look.audience) == (g, "brain", "team")
+    assert r.ids_of(g, destination="other") == []
+    assert r.ids_of(g, audience="everyone") == []
+    # A mismatch is checked at lookup, before any event is picked, and echoes the ask.
+    look = r.auth.eligible_events(
+        grant_id=g, producer="memory_extraction", limit=5, destination="other", audience="team"
+    )
+    assert look.events == () and look.destination == "other"
+    with pytest.raises(TypeError):
+        r.auth.eligible_events(grant_id=g, producer="memory_extraction", limit=5)  # type: ignore[call-arg]
+
+
+def test_counter_is_capped_below_two_to_the_53() -> None:
+    r = Rig()
+    assert MAX_COUNTER == 2**53 - 1
+    for bad in (MAX_COUNTER + 1, 2**62):
+        with pytest.raises(AuthorityError) as e:
+            r.auth.submit_turn(_cmd_with(r.operator, bad, "submit_turn", {"send_id": "s", **SCOPE}, b"x"))
+        assert code(e) == "bad_command"
+    # The refused giant counter did not lock the principal out.
+    assert r.send("s").send_id == "s"
+    top = _cmd_with(r.operator, MAX_COUNTER, "submit_turn", {"send_id": "t", **SCOPE}, b"x")
+    assert r.auth.submit_turn(top).send_id == "t"
+
+
+def test_only_live_grants_count_and_ended_unreferenced_grants_are_pruned(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr("ciao.chat_authority.MAX_GRANTS", 2)
+    r = Rig()
+    a = r.grant(chat="a")
+    b = r.grant(chat="b")
+    with pytest.raises(AuthorityError) as e:
+        r.grant(chat="c")
+    assert code(e) == "capacity"
+    r.auth.revoke_grant(r.cmd("revoke_grant", {"grant_id": a}))
+    r.auth.withdraw_grant(r.cmd("withdraw_grant", {"grant_id": b}))
+    # Both slots are free again, however many grants were ended before.
+    for i in range(6):
+        g = r.grant(chat=f"n{i}")
+        r.auth.revoke_grant(r.cmd("revoke_grant", {"grant_id": g}))
+    assert len(r.auth._state.grants) <= 2 + 1
+    assert r.auth.grant(a) is None  # pruned
+    live = r.grant(chat="live")
+    assert r.auth.grant(live) is not None
+
+
+def test_pruning_keeps_grants_that_stored_events_still_name(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr("ciao.chat_authority.MAX_GRANT_RECORDS", 3)
+    r = Rig()
+    g = r.grant()
+    r.send("s1")  # enrolled under g
+    r.auth.revoke_grant(r.cmd("revoke_grant", {"grant_id": g}))
+    r.grant(chat="x0")
+    # The referenced, ended grant stays; the total record cap then refuses.
+    assert r.auth.grant(g) is not None
+    r.grant(chat="x1")
+    assert len(r.auth._state.grants) == 3
+    with pytest.raises(AuthorityError) as e:
+        r.grant(chat="x3")
+    assert code(e) == "capacity"
+    assert MAX_GRANT_RECORDS >= 500
+
+
+def test_correction_must_come_from_the_original_principal() -> None:
+    r = Rig()
+    g = r.grant()
+    first = r.auth.submit_turn(r.cmd("submit_turn", {"send_id": "s1", **SCOPE}, b"v1", principal="alice"))
+    with pytest.raises(AuthorityError) as e:
+        r.auth.submit_turn(
+            r.cmd(
+                "submit_turn",
+                {"send_id": "s2", **SCOPE, "corrects": first.turn_id},
+                b"forged",
+                principal="mallory",
+            )
+        )
+    assert code(e) == "bad_command"
+    assert r.ids_of(g) == ["s1"]
+    ok = r.auth.submit_turn(
+        r.cmd(
+            "submit_turn",
+            {"send_id": "s3", **SCOPE, "corrects": first.turn_id},
+            b"v2",
+            principal="alice",
+        )
+    )
+    assert ok.revision == 2
+
+
+def test_principal_capacity_refuses_a_new_revoker_but_not_known_ones(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr("ciao.chat_authority.MAX_PRINCIPALS", 1)
+    r = Rig()
+    g = r.grant()
+    with pytest.raises(AuthorityError) as e:
+        r.auth.revoke_grant(r.cmd("revoke_grant", {"grant_id": g}, principal="op2"))
+    assert code(e) == "capacity"
+    assert r.auth.revoke_grant(r.cmd("revoke_grant", {"grant_id": g})) == 1
+
+
+def test_anchor_advances_before_the_state_write_and_failure_stops_the_command() -> None:
+    r = Rig()
+    r.send("s1")
+    r.send("s2")
+    assert r.anchor.calls == [1, 2]
+    assert json.loads(r.storage.blob or b"")["state"]["state_counter"] == 2
+    assert r.auth.state_counter == 2
+    # Anchor refusal: nothing is stored, the counter is not burnt, state unchanged.
+    signed = r.cmd("submit_turn", {"send_id": "s3", **SCOPE}, b"x")
+    r.anchor.fail = True
+    with pytest.raises(OSError):
+        r.auth.submit_turn(signed)
+    assert r.anchor.value == 2 and r.auth.state_counter == 2
+    r.anchor.fail = False
+    assert r.auth.submit_turn(signed).send_id == "s3"
+
+
+def test_refusals_also_advance_the_anchor() -> None:
+    r = Rig()
+    with pytest.raises(AuthorityError):
+        r.auth.revoke_grant(r.cmd("revoke_grant", {"grant_id": "nope"}))
+    assert r.anchor.value == 1 and r.auth.state_counter == 1
+
+
+def test_crash_between_anchor_and_blob_is_accepted_once() -> None:
+    r = Rig()
+    r.send("s1")
+    signed = r.cmd("submit_turn", {"send_id": "s2", **SCOPE}, b"x")
+    r.storage.fail = True  # anchor advances, blob write fails: the crash window
+    with pytest.raises(OSError):
+        r.auth.submit_turn(signed)
+    r.storage.fail = False
+    assert r.anchor.value == 2
+    r.open()  # blob counter 1, anchor 2: accepted
+    assert r.auth.state_counter == 2
+    assert [e.send_id for e in r.auth._state.events] == ["s1"]
+    r.send("s3")  # moves on; counter keeps advancing from the anchor
+    assert r.anchor.value == 3
+    r.open()
+    assert r.auth.state_counter == 3
+
+
+def test_rollback_missing_blob_and_forged_counter_leave_the_authority_closed() -> None:
+    r = Rig()
+    r.send("s1")
+    old = r.storage.blob
+    r.send("s2")
+    r.send("s3")
+    # A validly signed older blob: counter 1 against anchor 3.
+    r.storage.blob = old
+    with pytest.raises(AuthorityError) as e:
+        r.open()
+    assert code(e) == "state_rollback"
+    # A missing blob while the anchor is above zero is not a fresh start.
+    r.storage.blob = None
+    with pytest.raises(AuthorityError) as e:
+        r.open()
+    assert code(e) == "state_missing"
+    # A blob ahead of the anchor cannot be real.
+    fresh = Rig()
+    fresh.send("s1")
+    fresh.anchor.value = 0
+    with pytest.raises(AuthorityError) as e:
+        fresh.open()
+    assert code(e) == "state_invalid"
+    # A missing blob with the anchor at zero is the only fresh initialisation.
+    empty = Rig()
+    assert empty.auth.state_counter == 0 and empty.auth.epoch == 0
+
+
+def test_two_failed_writes_in_a_row_fail_closed_on_reload() -> None:
+    r = Rig()
+    r.send("s1")
+    r.storage.fail = True
+    for sid in ("s2", "s3"):
+        with pytest.raises(OSError):
+            r.send(sid)
+    r.storage.fail = False
+    with pytest.raises(AuthorityError) as e:
+        r.open()
+    assert code(e) == "state_rollback"

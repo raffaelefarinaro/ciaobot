@@ -149,14 +149,17 @@ class ChatAuthorityClient:
         grant_id: str,
         producer: str,
         limit: int,
+        destination: str,
+        audience: str,
         chat: str | None = None,
         expected_epoch: int | None = None,
     ) -> Lookup:
         """Newest-first eligible events; every filter is applied by the helper.
 
-        The caller still re-checks the epoch at the point of use and matches
-        destination and audience itself; this client checks only that the
-        reply is consistent with what was asked.
+        The destination and audience are sent to the helper, which returns
+        nothing unless the grant carries exactly those; the reply must echo them
+        with the grant id. The caller still re-checks the epoch at the point of
+        use; this client checks that the reply is consistent with what was asked.
         """
         if not 1 <= limit <= MAX_LOOKUP:
             raise ValueError("bad_limit")
@@ -167,6 +170,8 @@ class ChatAuthorityClient:
                 grant_id=grant_id,
                 producer=producer,
                 limit=limit,
+                destination=destination,
+                audience=audience,
                 chat=chat,
                 expected_epoch=expected_epoch,
             )
@@ -174,7 +179,13 @@ class ChatAuthorityClient:
             raise ChatAuthorityUnavailable("unprovisioned") from exc
         epoch = result.get("epoch")
         raw_events = result.get("events")
-        if type(epoch) is not int or not isinstance(raw_events, list):
+        if (
+            type(epoch) is not int
+            or not isinstance(raw_events, list)
+            or result.get("grant_id") != grant_id
+            or result.get("destination") != destination
+            or result.get("audience") != audience
+        ):
             raise ChatAuthorityUnavailable("bad_reply")
         if (expected_epoch is not None and epoch != expected_epoch) or len(raw_events) > limit:
             raise ChatAuthorityUnavailable("bad_reply")
@@ -189,7 +200,7 @@ class ChatAuthorityClient:
             ):
                 raise ChatAuthorityUnavailable("bad_reply")
             seen.add(event.event_id)
-        return Lookup(epoch, events)
+        return Lookup(epoch, grant_id, destination, audience, events)
 
 
 def _event(raw: object) -> TurnEvent:
