@@ -382,6 +382,8 @@ enum TakeoverCopy {
             return "The existing Ciaobot was installed in a way the app cannot take over. It stays in place."
         case "no_workspace":
             return "The existing Ciaobot's data could not be found by this app. It stays in place."
+        case "unfinished_migration":
+            return "The existing Ciaobot has a 1.10 update that is not finished. Open Ciaobot 1.10 and finish its update task, then use Ciaobot on This Mac to try again. Nothing was changed."
         case "already_settled":
             return alreadyCompleted
         case "plist_changed":
