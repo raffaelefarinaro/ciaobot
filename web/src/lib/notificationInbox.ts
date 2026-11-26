@@ -18,8 +18,6 @@
 // in "Needs you", with the unread flag as an indicator on it. It never also
 // appears under "New replies", so the count is distinct rows, not signals.
 
-import { isVisibleUpdateTask } from './updateTasks'
-
 export type NotificationSection = 'needsYou' | 'toReview' | 'newReplies'
 export const SECTION_ORDER: readonly NotificationSection[] = ['needsYou', 'toReview', 'newReplies']
 export const SECTION_TITLES: Record<NotificationSection, string> = {
@@ -30,13 +28,12 @@ export const SECTION_TITLES: Record<NotificationSection, string> = {
 
 export type SourceStatus = 'checking' | 'ready' | 'stale' | 'unavailable'
 /** Sources the inbox requires. Later units append keys here; a key with no snapshot counts as 'checking'. */
-export const INBOX_SOURCES = ['chats', 'operator', 'automations', 'updateTasks'] as const
+export const INBOX_SOURCES = ['chats', 'operator', 'automations'] as const
 export type NotificationSourceKey = typeof INBOX_SOURCES[number]
 export const SOURCE_LABELS: Record<NotificationSourceKey, string> = {
   chats: 'Chats',
   operator: 'Settings',
   automations: 'Automations',
-  updateTasks: 'Update tasks',
 }
 
 export interface SourceSnapshot {
@@ -52,7 +49,6 @@ export type NotificationKind =
   | 'missed-schedules'
   | 'automation-attention'
   | 'task-review'
-  | 'update-task'
 export type NotificationDestination =
   | { kind: 'chat'; chatId: string }
   | { kind: 'schedule'; scheduleId: string }
@@ -127,22 +123,6 @@ export interface TaskReviewCandidate {
   title: string
 }
 
-/** An update task for the workspace on screen (`housekeeping.updateTasks`). */
-export interface UpdateTaskCandidate {
-  id: string
-  revision: number
-  workspace: string
-  title: string
-  status: string
-  applicability: string
-  /** '' unless chat_live AND the chat exists locally and is not archived. Never a dead remembered chat. */
-  chatId: string
-  chatLive: boolean
-  /** Only ever true when chatId !== ''. */
-  chatNeedsInput: boolean
-  chatFailed: boolean
-}
-
 export interface NotificationInboxInput {
   /** Workspace on screen; scopes row keys. '' keys as 'shared'. */
   workspace?: string
@@ -150,7 +130,6 @@ export interface NotificationInboxInput {
   operators?: readonly OperatorCandidate[]
   schedules?: readonly ScheduleCandidate[]
   reviewTasks?: readonly TaskReviewCandidate[]
-  updateTasks?: readonly UpdateTaskCandidate[]
   sources: readonly SourceSnapshot[]
 }
 
@@ -253,19 +232,12 @@ export function actionNoticeKey(workspace: string, id: string): string {
   return `action:${workspace || 'shared'}:${id}`
 }
 
-/** Key of an update-task Home notice, scoped to the workspace on screen. */
-export function updateNoticeKey(activeWorkspace: string, taskId: string, revision: number): string {
-  return `update:${activeWorkspace || 'shared'}:${taskId}@${revision}`
-}
+const HOME_NOTICE_KEY = /^action:([^:]+):(.+)$/
 
-const HOME_NOTICE_KEY = /^(action|update):([^:]+):(.+)$/
-
-export function parseHomeNoticeKey(
-  key: string,
-): { kind: 'action' | 'update'; workspace: string; id: string } | null {
+export function parseHomeNoticeKey(key: string): { workspace: string; id: string } | null {
   const m = HOME_NOTICE_KEY.exec(key)
   if (!m) return null
-  return { kind: m[1] as 'action' | 'update', workspace: m[2], id: m[3] }
+  return { workspace: m[1], id: m[2] }
 }
 
 function operatorDestination(o: OperatorCandidate): NotificationDestination {
@@ -347,35 +319,6 @@ function taskReviewRow(t: TaskReviewCandidate, ws: string, freshness: 'fresh' | 
   }
 }
 
-function updateTaskRow(t: UpdateTaskCandidate, freshness: 'fresh' | 'stale'): NotificationRow | null {
-  if (!isVisibleUpdateTask(t)) return null
-  // A live question or permission: the chat row owns it.
-  if (t.chatNeedsInput) return null
-  // Ordinary work is not a notification.
-  if (t.status === 'in_progress' && !t.chatFailed) return null
-
-  const failure = t.status === 'failed' || (t.status === 'in_progress' && t.chatFailed)
-  const offeredUnknown = t.status === 'offered' && t.applicability === 'unknown'
-  let reason: string
-  if (t.status === 'failed') reason = 'The last attempt did not get going.'
-  else if (t.status === 'in_progress') reason = 'Its chat failed.'
-  else if (offeredUnknown) reason = 'Not yet known whether this applies here. Open it to check again.'
-  else reason = 'New since this update.'
-
-  return {
-    key: `update-task:${t.workspace || 'shared'}:${t.id}@${t.revision}`,
-    kind: 'update-task',
-    section: failure ? 'needsYou' : 'toReview',
-    urgency: failure ? 'failure' : 'review',
-    source: 'updateTasks',
-    title: plainText(offeredUnknown ? `Check applicability: ${t.title}` : t.title, Number.MAX_SAFE_INTEGER),
-    reason,
-    destination: { kind: 'home-notice', noticeKey: updateNoticeKey(t.workspace, t.id, t.revision) },
-    unread: false,
-    freshness,
-  }
-}
-
 /** The failed chat of an incident, and its unread-result twin. A live question or a delegated wait is not one. */
 function isIncidentTwin(c: ChatCandidate): boolean {
   return !c.needsInput && (c.failed || !c.needsYou)
@@ -448,14 +391,6 @@ export function projectNotificationInbox(input: NotificationInboxInput): Notific
     reviewedTaskIds.add(t.taskId)
   }
 
-  const updateTaskChatIds = new Set<string>()
-  for (const t of input.updateTasks ?? []) {
-    const row = updateTaskRow(t, freshnessOf('updateTasks'))
-    if (!row) continue
-    add(row)
-    if (t.chatId) updateTaskChatIds.add(t.chatId)
-  }
-
   for (const c of input.chats) {
     // The unread result of a delegated task is the same item as its review row.
     // A live question, a failure or a delegated wait stays.
@@ -463,7 +398,6 @@ export function projectNotificationInbox(input: NotificationInboxInput): Notific
     // The failed chat of an incident, and its unread-result twin, are the same
     // problem as the schedule row. A live question or a delegated wait stays.
     if (c.scheduleId && incidentSchedules.has(c.scheduleId) && isIncidentTwin(c)) continue
-    if (updateTaskChatIds.has(c.chatId) && isIncidentTwin(c)) continue
     add(chatRow(c, freshnessOf('chats')))
   }
 

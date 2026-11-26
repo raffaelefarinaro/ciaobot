@@ -395,7 +395,7 @@ test.describe('notification inbox', () => {
 
   test('exact_home_notice_is_revealed_without_running', async ({ page }) => {
     const ACTION_KEY = 'action:shared:e2e-check'
-    const UPDATE_KEY = 'update:alpha:review-legacy-rows@1'
+    const SECOND_KEY = 'action:shared:e2e-backup'
     await seedInbox(page, {
       actions: [{
         id: 'e2e-check',
@@ -411,38 +411,51 @@ test.describe('notification inbox', () => {
         view_label: '',
         view_route: '',
         blocking: false,
+      }, {
+        id: 'e2e-backup',
+        kind: 'setup-check',
+        severity: 20,
+        title: 'Confirm the backup schedule',
+        detail: 'The old schedule points at a branch this install does not push to.',
+        glyph: '',
+        workspace: '',
+        run_label: 'Run check',
+        chat_label: '',
+        chat_prompt: '',
+        view_label: '',
+        view_route: '',
+        blocking: false,
       }],
     })
-    expect((await page.request.post('/__fixture__/update-tasks')).ok()).toBe(true)
     await boot(page, '/')
     const action = page.locator(`[data-notice-key="${ACTION_KEY}"]`)
-    const update = page.locator(`[data-notice-key="${UPDATE_KEY}"]`)
+    const second = page.locator(`[data-notice-key="${SECOND_KEY}"]`)
     await expect(action).toBeVisible()
-    await expect(update).toBeVisible()
+    await expect(second).toBeVisible()
 
     await hideRow(page, action)
-    await hideRow(page, update)
+    await hideRow(page, second)
     await expect(action).toHaveCount(0)
-    await expect(update).toHaveCount(0)
+    await expect(second).toHaveCount(0)
 
     // An SPA navigation, so the in-memory closed set survives: local X is not a dismissal.
     await openInbox(page)
     const operatorRow = row(page, 'operator:shared:e2e-check')
-    const updateRow = row(page, 'update-task:alpha:review-legacy-rows@1')
+    const secondRow = row(page, 'operator:shared:e2e-backup')
     await expect(operatorRow).toBeVisible()
-    await expect(updateRow).toBeVisible()
+    await expect(secondRow).toBeVisible()
 
     await operatorRow.locator(ROWS).click()
     await expect(page).toHaveURL((u) => u.pathname === '/' && !u.search.includes('notice'))
     await expect(action).toBeVisible()
     await expect(action).toBeFocused()
-    await expect(update).toHaveCount(0)
+    await expect(second).toHaveCount(0)
 
     await openInbox(page)
-    await updateRow.locator(ROWS).click()
+    await secondRow.locator(ROWS).click()
     await expect(page).toHaveURL((u) => u.pathname === '/' && !u.search.includes('notice'))
-    await expect(update).toBeVisible()
-    await expect(update).toBeFocused()
+    await expect(second).toBeVisible()
+    await expect(second).toBeFocused()
     expect(await writes(page)).toEqual([])
 
     // A key that names nothing says so and reveals nothing.

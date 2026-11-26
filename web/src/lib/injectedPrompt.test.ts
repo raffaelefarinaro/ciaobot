@@ -374,10 +374,6 @@ describe('parseInjectedPrompt', () => {
     })
   })
 
-  it('update_task returns its kind', () => {
-    expect(parseInjectedPrompt('anything', 'update_task')).toEqual({ kind: 'update_task' })
-  })
-
   it('task_delegation returns null', () => {
     expect(parseInjectedPrompt('anything', 'task_delegation')).toBeNull()
   })
@@ -469,9 +465,6 @@ describe('summarizeInjectedPrompt', () => {
     })
     expect(summarizeInjectedPrompt({ kind: 'webhook', instructions: '', event: '' }, 'Nightly build')).toEqual({
       label: 'Webhook', facts: 'Nightly build', tone: null,
-    })
-    expect(summarizeInjectedPrompt({ kind: 'update_task' }, 'Update')).toEqual({
-      label: 'Update task', facts: 'Update', tone: null,
     })
   })
 

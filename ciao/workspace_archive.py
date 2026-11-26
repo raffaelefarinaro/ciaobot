@@ -168,7 +168,7 @@ def plan_archive(config: Any, name: str) -> ArchiveTarget:
         if vault.parent != shared:
             raise WorkspaceArchiveError(
                 f"'{name}' keeps its notes outside the standard folder "
-                f"({vault}); run `ciao vault-relocate {name} --apply` first",
+                f"({vault}); move it into the standard folder first",
                 409,
             )
         source = vault

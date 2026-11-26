@@ -473,7 +473,7 @@ def test_shared_layout_refuses_a_vault_outside_its_standard_folder(tmp_path):
     response = client.post("/api/workspaces/work/archive")
 
     assert response.status_code == 409
-    assert "vault-relocate" in response.json()["error"]
+    assert "standard folder" in response.json()["error"]
     assert config.workspace("work") is not None
     assert pinned.is_dir()
     assert not archive_root(config).exists()

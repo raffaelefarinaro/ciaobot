@@ -926,9 +926,8 @@ async def _run_server_locked(
             # us identically.
             return RESTART_EXIT_CODE
         elif status == "refused":
-            # Surfaced by the `workspace-unmigrated` action, which reads the
-            # refusal back out of the receipt and offers the retry.
-            tracker.fail("reroot_workspaces", "refused; see the housekeeping strip")
+            # The refusal and its reasons are recorded in the receipt.
+            tracker.fail("reroot_workspaces", "refused")
         else:
             tracker.done("reroot_workspaces", status or "skipped")
     except Exception:
@@ -1674,16 +1673,6 @@ async def _run_server_locked(
                 *(_disconnect_for_shutdown(s) for s in services), return_exceptions=True
             )
 
-    async def _shutdown_links_scan() -> None:
-        # Cancel a Home wikilink scan still in flight and wait for it to
-        # acknowledge, before the read executor below is closed. The walk itself
-        # is not interruptible — `run_read`'s worker finishes and stays joinable —
-        # but leaving a task pending on a closing loop is the part a restart
-        # notices.
-        from ciao.migration_notices import shutdown_links_scan
-
-        await shutdown_links_scan(app.state)
-
     async def _shutdown_vault_reads() -> None:
         # Discard vault reads still queued for the off-loop executor (bounded,
         # cancel_futures=True) so a restart is not held up by a backlog of
@@ -1709,9 +1698,6 @@ async def _run_server_locked(
 
     app.state.shutdown_callbacks = [
         _shutdown_children,
-        # Before the read executor: the scan is waiting on a worker, and closing
-        # the pool out from under a pending task is the leak worth avoiding.
-        _shutdown_links_scan,
         _shutdown_vault_reads,
         _shutdown_backup,
     ]

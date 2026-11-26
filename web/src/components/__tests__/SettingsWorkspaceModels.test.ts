@@ -323,7 +323,7 @@ describe('SettingsWorkspaceModels', () => {
     store.activeWorkspace = 'missing'
     const view = mount(SettingsWorkspaceOverview, { global: {
       provide: { [WORKSPACE_ADMIN_KEY as symbol]: admin },
-      stubs: ['SettingsClaudeTrim', 'SettingsUpdateTasks', 'SettingsAllWorkspaces', 'WorkspaceTile', 'WorkspaceColorPicker'],
+      stubs: ['SettingsClaudeTrim', 'SettingsAllWorkspaces', 'WorkspaceTile', 'WorkspaceColorPicker'],
     } })
     mounted.push(view)
     expect(view.findComponent(SettingsWorkspaceModels).exists()).toBe(false)

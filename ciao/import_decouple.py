@@ -247,7 +247,7 @@ def own_session_ids_from_snapshot(
     ``session_id`` on the archived row precisely so the row keeps naming the
     session it reclaimed, and reclaim is fail-open, so an archived row is the
     evidence that a still-present file is Ciaobot's. Helper chats (the hidden
-    Memory project's pass, a proposal helper, an update-task chat) are ordinary
+    Memory project's pass, a proposal helper) are ordinary
     rows in that registry and carry their own ``session_id``, so there is no
     second helper list to keep in step with the first.
 
