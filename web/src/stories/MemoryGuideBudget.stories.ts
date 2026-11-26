@@ -260,14 +260,14 @@ export const NoGuide: Story = {
     expect(canvas.getByText('AGENTS.md')).toBeTruthy()
     expect(canvas.getByRole('button', { name: 'Open' }).getAttribute('disabled')).not.toBeNull()
     expect(canvas.getByRole('button', { name: 'Discuss' }).getAttribute('disabled')).not.toBeNull()
-    expect(canvas.getByText(/Fixture requests: 4\./)).toBeTruthy()
+    expect(canvas.getByText(/Fixture requests: 2\./)).toBeTruthy()
     await assertSettled(canvas)
     expect(canvas.queryByText(/HTTP/)).toBeNull()
   },
 }
 
 // Every qualified probe errored: the failure note names the last failed read,
-// both actions are blocked, and the bare fallback names are never asked for.
+// both actions are blocked.
 export const Error: Story = {
   parameters: { fixture: { routes: guideRoutes('error') }, ...viewportWide },
   render: () => renderBudget('error'),

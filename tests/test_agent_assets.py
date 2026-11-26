@@ -402,7 +402,7 @@ def test_workspace_health_still_reports_broken_claude_skill_links(tmp_path: Path
     assert any(check["id"] == "broken-skill-stale" for check in data["checks"])
 
 
-def _rerooted_client(root: Path) -> TestClient:
+def _per_root_client(root: Path) -> TestClient:
     """A client on a re-rooted install: one real agent root per workspace.
 
     `agent_root` returns a per-workspace SUBDIRECTORY here, which is the only
@@ -454,7 +454,7 @@ def test_asset_lists_are_scoped_to_the_named_workspace(tmp_path: Path) -> None:
     Two workspaces each own a command of the same name. Scoping the read is
     what makes the write safe: an edit reaches the file the row came from.
     """
-    client = _rerooted_client(tmp_path)
+    client = _per_root_client(tmp_path)
     for workspace in ("personal", "work"):
         assert client.post(
             "/api/agent-assets/commands",
@@ -479,7 +479,7 @@ def test_asset_lists_are_scoped_to_the_named_workspace(tmp_path: Path) -> None:
 
 def test_creating_an_asset_writes_into_the_named_workspaces_root(tmp_path: Path) -> None:
     """The file is created under the workspace, not the install root."""
-    client = _rerooted_client(tmp_path)
+    client = _per_root_client(tmp_path)
 
     resp = client.post(
         "/api/agent-assets/commands",
@@ -505,7 +505,7 @@ def test_a_write_naming_an_unknown_workspace_is_refused(tmp_path: Path) -> None:
     Falling back to the install root would file the asset somewhere the user
     did not ask for, and a delete would remove a different workspace's file.
     """
-    client = _rerooted_client(tmp_path)
+    client = _per_root_client(tmp_path)
 
     created = client.post(
         "/api/agent-assets/commands",
@@ -526,7 +526,7 @@ def test_a_write_naming_an_unknown_workspace_is_refused(tmp_path: Path) -> None:
 
 def test_updating_an_asset_reaches_the_workspaces_own_copy(tmp_path: Path) -> None:
     """An edit updates the file behind the row, not the install root's."""
-    client = _rerooted_client(tmp_path)
+    client = _per_root_client(tmp_path)
     client.post(
         "/api/agent-assets/commands",
         json={
@@ -549,7 +549,7 @@ def test_updating_an_asset_reaches_the_workspaces_own_copy(tmp_path: Path) -> No
 
 
 def test_deleting_an_asset_removes_only_that_workspaces_copy(tmp_path: Path) -> None:
-    client = _rerooted_client(tmp_path)
+    client = _per_root_client(tmp_path)
     for workspace in ("personal", "work"):
         client.post(
             "/api/agent-assets/commands",
@@ -592,21 +592,17 @@ def test_adopted_per_root_vault_health_and_categories_use_registered_root(
 ) -> None:
     """A per-root workspace registered at an adopted folder: health, scan targets
     and custom categories all read that folder, not the standard location."""
-    from ciao.config import CiaoConfig, WorkspaceConfig, reset_reroot_cache
+    from ciao.config import CiaoConfig, WorkspaceConfig
     from ciao.entity_types import load_entity_types
     from ciao.web.agent_assets import workspace_health
 
     root = tmp_path.resolve()
-    receipt = root / ".runtime" / "migration" / "workspace-rooting.json"
-    receipt.parent.mkdir(parents=True)
-    receipt.write_text(json.dumps({"status": "migrated"}), encoding="utf-8")
     notes = root / "work" / "brain"
     notes.mkdir(parents=True)
     (notes / "entity-types.yaml").write_text(
         "- id: client\n  label: Client\n  kind: entity\n  folder: Clients\n",
         encoding="utf-8",
     )
-    reset_reroot_cache()
     config = CiaoConfig(
         pwa_auth_token="test-token",
         workspace_root=root,

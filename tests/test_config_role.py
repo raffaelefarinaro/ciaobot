@@ -6,12 +6,7 @@ import json
 from pathlib import Path
 
 from ciao.claude_trim import claude_settings_layer, trim_tool_denies
-from ciao.config import (
-    CiaoConfig,
-    _WORKSPACE_EVIDENCE_DIRS,
-    _WORKSPACE_EVIDENCE_EXTRA_DIRS,
-)
-from ciao.entity_types import load_entity_types, stock_entity_type_registry
+from ciao.config import CiaoConfig
 
 
 def _config(**overrides: str) -> CiaoConfig:
@@ -48,8 +43,8 @@ def test_vault_root_relative_override_is_workspace_relative(tmp_path: Path) -> N
     assert config.vault_root == (tmp_path / "notes").resolve()
 
 
-def test_the_bootstrap_registry_is_read_off_the_vault(tmp_path: Path) -> None:
-    """An install with no `workspaces.json` gets one workspace per vault folder.
+def test_the_bootstrap_registry_is_read_off_the_install(tmp_path: Path) -> None:
+    """An install with no `workspaces.json` gets one workspace per folder holding a vault.
 
     It used to manufacture `personal` AND `work` unconditionally, plus four
     `*_PERSONAL`/`*_WORK` env vars to configure them. Both are gone: a registered
@@ -63,7 +58,7 @@ def test_the_bootstrap_registry_is_read_off_the_vault(tmp_path: Path) -> None:
     whatever real workspaces.json exists in the checkout the tests run from.
     """
     for name in ("personal", "work"):
-        (tmp_path / "memory-vault" / name / "People").mkdir(parents=True)
+        (tmp_path / name / "memory-vault" / "People").mkdir(parents=True)
 
     config = _config(
         CIAO_WORKSPACE=str(tmp_path),
@@ -71,12 +66,12 @@ def test_the_bootstrap_registry_is_read_off_the_vault(tmp_path: Path) -> None:
     )
 
     assert list(config.workspaces) == ["personal", "work"]
-    assert config.workspace("personal").vault_root == "memory-vault/personal"
+    assert config.workspace("personal").vault_root == "personal/memory-vault"
 
 
 def test_the_bootstrap_registry_claims_only_what_exists(tmp_path: Path) -> None:
     """A vault with one workspace folder yields one workspace, not two."""
-    (tmp_path / "memory-vault" / "personal" / "People").mkdir(parents=True)
+    (tmp_path / "personal" / "memory-vault" / "People").mkdir(parents=True)
 
     config = _config(
         CIAO_WORKSPACE=str(tmp_path),
@@ -84,76 +79,6 @@ def test_the_bootstrap_registry_claims_only_what_exists(tmp_path: Path) -> None:
     )
 
     assert list(config.workspaces) == ["personal"]
-
-
-def test_a_note_folder_is_not_mistaken_for_a_workspace(tmp_path: Path) -> None:
-    """A single-workspace vault keeps its notes directly under `People/`.
-
-    The evidence test is nested for exactly this: `memory-vault/personal/People/`
-    makes `personal` a workspace, while `memory-vault/People/` is a note folder
-    and must not become a workspace called "People".
-    """
-    (tmp_path / "memory-vault" / "People").mkdir(parents=True)
-    (tmp_path / "memory-vault" / "People" / "Sam.md").write_text(
-        "---\ntype: person\n---\n# Sam\n", encoding="utf-8"
-    )
-
-    config = _config(
-        CIAO_WORKSPACE=str(tmp_path),
-        CIAO_RUNTIME_ROOT=str(tmp_path / ".runtime"),
-    )
-
-    assert list(config.workspaces) == ["personal"]
-
-
-def test_the_workspace_evidence_set_is_the_shipped_registry_and_only_that(
-    tmp_path: Path,
-) -> None:
-    """Bootstrap reads the stock categories, and cannot read a vault's.
-
-    `_WORKSPACE_EVIDENCE_DIRS` is the entity categories' own folders — taken from
-    the shipped registry, so a category is added here the way it is added to the
-    indexer and the linter — plus the three names a containment test cannot
-    express (`Workspace`, `journal`, the lower-case `projects`).
-
-    It is built ONCE, at import, and that is the documented half of the deal:
-    `_bootstrap_registry` runs inside `CiaoConfig.__post_init__`, before any
-    workspace has been discovered, so the `<vault>/entity-types.yaml` that could
-    answer a better question is itself inside a directory the scan has not found
-    yet. The second half is pinned below: a vault that names a new entity folder
-    does NOT get that folder claimed as evidence, which is the difference between
-    "a note folder" and "a workspace named after a note type".
-
-    The set is asserted against the literal it replaced, so a stock edit that
-    widened it has to be a decision somebody makes in this file.
-    """
-    assert _WORKSPACE_EVIDENCE_DIRS == frozenset(
-        {"People", "Projects", "Places", "Ideas", "Resources", "Workspace", "journal", "projects"}
-    )
-    assert _WORKSPACE_EVIDENCE_DIRS == (
-        frozenset(stock_entity_type_registry().entity_folders())
-        | _WORKSPACE_EVIDENCE_EXTRA_DIRS
-    )
-
-    (tmp_path / "memory-vault" / "Clients").mkdir(parents=True)
-    (tmp_path / "memory-vault" / "Clients" / "Acme.md").write_text(
-        "---\ntype: client\n---\n# Acme\n", encoding="utf-8"
-    )
-    (tmp_path / "memory-vault" / "entity-types.yaml").write_text(
-        "- id: client\n  label: Client\n  kind: entity\n  folder: Clients\n",
-        encoding="utf-8",
-    )
-
-    config = _config(
-        CIAO_WORKSPACE=str(tmp_path),
-        CIAO_RUNTIME_ROOT=str(tmp_path / ".runtime"),
-    )
-
-    assert load_entity_types(Path(config.vault_root)).dir_type_map()["Clients"] == "client"
-    assert _WORKSPACE_EVIDENCE_DIRS == frozenset(
-        {"People", "Projects", "Places", "Ideas", "Resources", "Workspace", "journal", "projects"}
-    )
-    assert list(config.workspaces) == ["personal"], "a category folder is not a workspace"
 
 
 def test_workspace_registry_file_defines_named_workspaces(tmp_path: Path) -> None:

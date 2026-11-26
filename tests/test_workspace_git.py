@@ -737,12 +737,10 @@ def test_setup_workspace_existing_mode_adopts_folder_as_vault(
 
 
 @pytest.mark.parametrize("vault_relative", [".", "memory-vault", "../external-vault"])
-def test_fresh_existing_notes_are_not_upgrade_migrated_or_committed(
+def test_fresh_existing_notes_are_not_committed(
     tmp_path: Path, vault_relative: str,
 ) -> None:
     from ciao.config import CiaoConfig
-    from ciao.workspace_reroot import migrate_if_needed
-
     workspace = tmp_path / "adopted-notes"
     vault = workspace / vault_relative
     nested = vault / "Nested" / "keep.md"
@@ -761,7 +759,6 @@ def test_fresh_existing_notes_are_not_upgrade_migrated_or_committed(
         "CIAO_WORKSPACE": str(workspace), "CIAO_VAULT_ROOT": str(vault),
     }, export=False)
 
-    assert migrate_if_needed(config) == {"status": "already_migrated"}
     assert Path(config.workspace_vault_root("notes")) == vault.resolve()
     assert config.agent_root("notes") == workspace / "notes"
     assert nested.read_bytes() == original
@@ -774,8 +771,6 @@ def test_existing_notes_setup_preserves_non_new_layout_status(
     tmp_path: Path, status: str,
 ) -> None:
     from ciao.onboarding import OnboardingProgress, OnboardingReceipt, ensure_receipt, write_receipt
-    from ciao.workspace_reroot import read_receipt
-
     workspace = tmp_path / "prior-notes"
     workspace.mkdir()
     note = workspace / "keep.md"
@@ -791,7 +786,6 @@ def test_existing_notes_setup_preserves_non_new_layout_status(
         launch_agents_dir=tmp_path / "LaunchAgents",
         app_dir=tmp_path / "Applications",
     )
-    assert read_receipt(runtime) is None
     assert note.read_text(encoding="utf-8") == "Keep this prior note.\n"
 
 
@@ -1231,7 +1225,7 @@ def _evidence(path: Path) -> Path:
 def test_existing_setup_adopts_per_root_nested_vault(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    from ciao.config import CiaoConfig, reset_reroot_cache
+    from ciao.config import CiaoConfig
 
     ws = (tmp_path / "workspace").resolve()
     vault = _evidence(ws / "work" / "memory-vault")
@@ -1266,7 +1260,6 @@ def test_existing_setup_adopts_per_root_nested_vault(
     assert not (ws / "MEMORY.md").exists()
     assert all(not path.is_relative_to(ws / "memory-vault") for path in scaffold_targets)
 
-    reset_reroot_cache()
     config = CiaoConfig.from_env({
         "PWA_AUTH_TOKEN": "test-token",
         "CIAO_WORKSPACE": str(ws),
@@ -1278,7 +1271,7 @@ def test_existing_setup_adopts_per_root_nested_vault(
 
 
 def test_existing_setup_discovers_custom_registry_vault(tmp_path: Path) -> None:
-    from ciao.config import CiaoConfig, reset_reroot_cache
+    from ciao.config import CiaoConfig
     from ciao.entity_types import load_entity_types
 
     ws = (tmp_path / "workspace").resolve()
@@ -1292,7 +1285,6 @@ def test_existing_setup_discovers_custom_registry_vault(tmp_path: Path) -> None:
 
     assert "CIAO_VAULT_ROOT=brain" in (ws / ".env").read_text(encoding="utf-8").splitlines()
     assert not (ws / "memory-vault").exists()
-    reset_reroot_cache()
     config = CiaoConfig.from_env({
         "PWA_AUTH_TOKEN": "test-token",
         "CIAO_WORKSPACE": str(ws),
@@ -1466,14 +1458,11 @@ def test_documented_manual_recovery_resolves_selected_vault(tmp_path: Path) -> N
     notes live at ``work/memory-vault``. Recovery changes only the global
     ``CIAO_VAULT_ROOT`` and that one registry entry's ``vault_root``.
     """
-    from ciao.config import CiaoConfig, reset_reroot_cache
+    from ciao.config import CiaoConfig
     from ciao.entity_types import load_entity_types
 
     install = (tmp_path / "install").resolve()
     runtime = install / ".runtime"
-    receipt = runtime / "migration" / "workspace-rooting.json"
-    receipt.parent.mkdir(parents=True)
-    receipt.write_text(json.dumps({"status": "migrated"}), encoding="utf-8")
     notes = _evidence(install / "work" / "memory-vault")
     (notes / "MEMORY.md").write_text("# Notes\n", encoding="utf-8")
     research = install / "research" / "memory-vault"
@@ -1488,6 +1477,7 @@ def test_documented_manual_recovery_resolves_selected_vault(tmp_path: Path) -> N
         encoding="utf-8",
     )
     registry_path = runtime / "workspaces.json"
+    runtime.mkdir(parents=True, exist_ok=True)
     registry_path.write_text(json.dumps([
         {"name": "personal", "vault_root": ".", "default_provider": "claude"},
         {
@@ -1516,7 +1506,6 @@ def test_documented_manual_recovery_resolves_selected_vault(tmp_path: Path) -> N
 
     from dotenv import dotenv_values
 
-    reset_reroot_cache()
     # The server reads .env into its environment before building the config.
     config = CiaoConfig.from_env({
         **{key: value or "" for key, value in dotenv_values(env_path).items()},

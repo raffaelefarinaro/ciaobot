@@ -62,7 +62,7 @@ def _path_scope(vault_root: Path, workspace: str) -> str:
     """The path segment to filter and strip, empty when there is nothing to strip.
 
     A workspace used to be a subtree of one shared vault, so scoping was purely a
-    path filter on `Entry.path`. The per-workspace re-rooting broke that: a
+    path filter on `Entry.path`. A per-root vault breaks that: a
     workspace-scoped invocation is handed `<install>/<name>/memory-vault`, whose
     scan yields `memory-vault/People/A.md` with no `<name>/` segment at all. The
     filter then dropped every entry and `ciao vault-export --workspace-name work`
@@ -79,7 +79,7 @@ def _path_scope(vault_root: Path, workspace: str) -> str:
     if (Path(vault_root) / workspace).is_dir():
         return workspace  # legacy shared vault: the workspace is a subtree
     if Path(vault_root).parent.name == workspace:
-        return ""  # re-rooted: this vault already holds only that workspace
+        return ""  # this vault already holds only that workspace
     return workspace
 
 
@@ -110,7 +110,7 @@ def _bundle_entries(vault_root: Path, scope: str) -> list[Entry]:
     """Notes belonging in the bundle, in stable order.
 
     ``scope`` is the result of :func:`_path_scope`, not the raw workspace name:
-    on a re-rooted install there is no segment to filter on.
+    for a per-root vault there is no segment to filter on.
     """
     entries = scan_vault(vault_root)
     if not scope:
@@ -129,7 +129,7 @@ def _bundle_entries(vault_root: Path, scope: str) -> list[Entry]:
 def _relative_within_bundle(entry: Entry, workspace: str) -> str:
     """Path of a note inside the bundle, with the vault/workspace prefix removed.
 
-    The workspace segment is stripped only when it is actually there: a re-rooted
+    The workspace segment is stripped only when it is actually there: a per-root
     vault's entries never carry one, and an unconditional `relative_to` raised
     ValueError out of `format_bundle_index`.
     """
@@ -218,7 +218,7 @@ def export_bundle(
         return summary
 
     # `workspace` stays the bundle's label; `scope` is the path segment that
-    # exists in this layout, which on a re-rooted install is none.
+    # exists in this layout, which for a per-root vault is none.
     scope = _path_scope(root, workspace)
     entries = _bundle_entries(root, scope)
     summary["concepts"] = len(entries)
@@ -231,7 +231,7 @@ def export_bundle(
     if scope:
         # A note in this workspace whose edge leaves it cannot resolve inside a
         # subtree bundle. Reported, not repaired. Only a subtree bundle can have
-        # them: a re-rooted vault is exported whole, so every edge it resolved
+        # them: a per-root vault is exported whole, so every edge it resolved
         # stays inside the bundle root.
         prefix = f"{scope}/"
         for entry in entries:

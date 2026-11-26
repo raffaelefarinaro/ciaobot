@@ -215,9 +215,11 @@ def test_cli_vault_lint_dispatches_command(monkeypatch: pytest.MonkeyPatch) -> N
 def _write_healthy_audit_workspace(root: Path) -> None:
     from ciao.memory_tool import ensure_regions
 
-    root.mkdir(parents=True)
-    (root / "AGENTS.md").write_text("- Use rtk for shell commands.\n", encoding="utf-8")
-    ensure_regions(root / "AGENTS.md")
+    agent_root = root / "personal"
+    agent_root.mkdir(parents=True)
+    (agent_root / "AGENTS.md").write_text("- Use rtk for shell commands.\n", encoding="utf-8")
+    ensure_regions(agent_root / "AGENTS.md")
+    (agent_root / "memory-vault").mkdir()
     (root / "memory-vault").mkdir()
     (root / ".runtime").mkdir()
 
@@ -282,9 +284,13 @@ def test_cli_os_audit_explicit_workspace_beats_an_ambient_runtime_root(
     """
     workspace = tmp_path / "workspace"
     _write_healthy_audit_workspace(workspace)
-    (workspace / "research" / "projects" / "active" / "general").mkdir(parents=True)
+    (workspace / "research" / "memory-vault" / "projects" / "active" / "general").mkdir(parents=True)
+    from ciao.memory_tool import ensure_regions
+
+    (workspace / "research" / "AGENTS.md").write_text("- Use rtk for shell commands.\n", encoding="utf-8")
+    ensure_regions(workspace / "research" / "AGENTS.md")
     (workspace / ".runtime" / "workspaces.json").write_text(
-        json.dumps([{"name": "research", "vault_root": "research"}]),
+        json.dumps([{"name": "research", "vault_root": "research/memory-vault"}]),
         encoding="utf-8",
     )
     memory_dir = tmp_path / "bounded"
@@ -1610,19 +1616,15 @@ def test_cli_vault_search_logs_reads_own_workspace_and_shared_root(
 ) -> None:
     """On a re-rooted install `--logs` answers from the vault's own workspace
     archive and the shared archive, and never from a sibling workspace's."""
-    from ciao.config import reset_reroot_cache
-    from ciao.workspace_reroot import mark_born_per_root, registry_file
-
     install = tmp_path / "install"
     work_vault = install / "work" / "memory-vault"
     work_vault.mkdir(parents=True)
     runtime = install / ".runtime"
-    mark_born_per_root(install, runtime, ["personal", "work"])
-    # The registry names the workspace roots; a re-rooted install always has one.
-    registry_file(runtime).write_text(
+    runtime.mkdir(parents=True)
+    # The registry names the workspace roots.
+    (runtime / "workspaces.json").write_text(
         json.dumps([{"name": "personal"}, {"name": "work"}]), encoding="utf-8"
     )
-    reset_reroot_cache()
     transcripts = {
         "ownchat": install / "work" / "Logs" / "Chats" / "ownchat" / "claude" / "a.md",
         "siblingchat": install / "personal" / "Logs" / "Chats" / "siblingchat" / "claude" / "b.md",
@@ -1731,7 +1733,6 @@ def test_cli_health_reports_the_installed_workspace_from_a_bare_shell(
     warned about a memory vault that was actually healthy. It also created
     `~/.ciao/bootstrap` as a side effect of a read-only diagnostic.
     """
-    from ciao.config import reset_reroot_cache
 
     workspace = tmp_path / "workspace"
     _per_root_workspace(workspace)
@@ -1750,11 +1751,7 @@ def test_cli_health_reports_the_installed_workspace_from_a_bare_shell(
     home = tmp_path / "home"
     home.mkdir()
 
-    reset_reroot_cache()
-    try:
-        assert cli.main(["health", "get"]) == 0
-    finally:
-        reset_reroot_cache()
+    assert cli.main(["health", "get"]) == 0
     out = capsys.readouterr().out
     # setup_workspace prints skill-install progress lines ahead of the JSON.
     report = json.loads(out[out.index("{"):])
@@ -1781,7 +1778,7 @@ def test_config_discovery_applies_the_workspace_auth_before_parsing(
     Discovery used to apply its overlay after PWA_AUTH_TOKEN was parsed, so
     the started server ignored the workspace's configured password.
     """
-    from ciao.config import CiaoConfig, reset_reroot_cache
+    from ciao.config import CiaoConfig
 
     workspace = tmp_path / "workspace"
     _per_root_workspace(workspace)
@@ -1806,11 +1803,7 @@ def test_config_discovery_applies_the_workspace_auth_before_parsing(
         monkeypatch.delenv(name, raising=False)
     (tmp_path / "home").mkdir()
 
-    reset_reroot_cache()
-    try:
-        config = CiaoConfig.from_env()
-    finally:
-        reset_reroot_cache()
+    config = CiaoConfig.from_env()
 
     assert config.workspace_root == workspace.resolve()
     assert config.pwa_auth_token == "ws-secret-token"
@@ -1830,7 +1823,7 @@ def test_config_discovery_survives_an_exported_empty_workspace(
     manufactured bootstrap root, because `bootstrap_mode` still saw no
     workspace.
     """
-    from ciao.config import CiaoConfig, reset_reroot_cache
+    from ciao.config import CiaoConfig
 
     workspace = tmp_path / "workspace"
     _per_root_workspace(workspace)
@@ -1857,11 +1850,7 @@ def test_config_discovery_survives_an_exported_empty_workspace(
     monkeypatch.setenv("CIAO_WORKSPACE", "")
     (tmp_path / "home").mkdir()
 
-    reset_reroot_cache()
-    try:
-        config = CiaoConfig.from_env()
-    finally:
-        reset_reroot_cache()
+    config = CiaoConfig.from_env()
 
     # The discovered install wins, so the .env and the root agree.
     assert config.workspace_root == workspace.resolve()

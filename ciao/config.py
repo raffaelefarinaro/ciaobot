@@ -48,6 +48,41 @@ def _has_external_index_ancestor(ownership: Mapping[str, str], path: Path) -> bo
     )
 
 
+class RuntimeStateUnreadable(RuntimeError):
+    """Ciaobot's runtime state exists but this process may not read it (#1945).
+
+    Raised instead of guessing: a denied registry would otherwise read as
+    "no workspaces" and send the caller to the wrong vault. Check this account
+    can read it.
+    """
+
+    def __init__(self, path: Path) -> None:
+        self.path = Path(path)
+        super().__init__(
+            f"cannot read Ciaobot runtime state at {self.path}: permission denied. "
+            "Check this account can read it."
+        )
+
+
+def read_rooting_receipt(runtime_root: Path) -> dict[str, Any] | None:
+    """The receipt a 1.10 per-workspace re-rooting left, or None.
+
+    Only a ``status: "migrated"`` receipt counts. Its ``applied`` moves are
+    the proof that a workspace vault was moved by Ciao rather than adopted, which
+    :func:`classify_vault_index_destination` reads. Nothing writes it any more.
+    """
+    path = Path(runtime_root) / "migration" / "workspace-rooting.json"
+    try:
+        if not path.is_file():
+            return None
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except PermissionError as exc:
+        raise RuntimeStateUnreadable(path) from exc
+    except (OSError, ValueError, TypeError):
+        return None
+    return data if isinstance(data, dict) and data.get("status") == "migrated" else None
+
+
 def classify_vault_index_destination(
     destination: Path,
     *,
@@ -104,10 +139,6 @@ def classify_vault_index_destination(
     return INDEX_OWNERSHIP_AMBIGUOUS
 
 
-# The one direction the dependency runs: `entity_types` imports no `ciao` module,
-# so the stock workspace-evidence set below can be derived from it (see
-# `_WORKSPACE_EVIDENCE_DIRS`) without a cycle.
-from ciao.entity_types import stock_entity_type_registry
 from ciao.claude_trim import (
     absorb_legacy_claude_ai_connectors,
     claude_settings_layer,
@@ -133,8 +164,6 @@ if TYPE_CHECKING:
 # not work: clearing the field sends null, which restores the defaults, and the
 # value that does clear them drops the harness denies too.
 
-
-_REROOTED_CACHE: dict[str, bool] = {}
 
 # Runtime-root file recording that the retired ``CIAO_WORKSPACES`` variable
 # was imported into ``workspaces.json``. Its presence makes the import one-shot.
@@ -293,17 +322,6 @@ def reset_exported_dotenv() -> None:
     _EXPORTED_DOTENV_KEYS.clear()
 
 
-def reset_reroot_cache() -> None:
-    """Forget whether an install has re-rooted.
-
-    Called by the migration after it writes its receipt, and by tests that build
-    several installs in one process. Without it, the first install's answer would
-    be reused for a later one that has a different runtime directory only if the
-    path matched, so this is mostly a same-path correctness hook.
-    """
-    _REROOTED_CACHE.clear()
-
-
 def agent_roots_for(workspace_root: Path, runtime_root: Path) -> list[tuple[Path, str]]:
     """Every agent root, from explicit paths. See ``CiaoConfig.agent_root_targets``.
 
@@ -311,15 +329,12 @@ def agent_roots_for(workspace_root: Path, runtime_root: Path) -> list[tuple[Path
     exists. Reads the registry off disk rather than through ``CiaoConfig``, and
     deliberately does NOT apply the bootstrap fallback: setup runs on installs
     that have no registry yet, and manufacturing two workspace names there would
-    scaffold two roots for an install that has none.
+    scaffold two roots for an install that has none. With no registry the only
+    root is the install root itself.
     """
-    from ciao.workspace_reroot import read_receipt, registry_file  # noqa: PLC0415
-
     workspace_root = Path(workspace_root)
-    if read_receipt(Path(runtime_root)) is None:
-        return [(workspace_root, "")]
     try:
-        entries = json.loads(registry_file(Path(runtime_root)).read_text(encoding="utf-8"))
+        entries = json.loads((Path(runtime_root) / "workspaces.json").read_text(encoding="utf-8"))
     except (OSError, ValueError, TypeError):
         return [(workspace_root, "")]
     names = [
@@ -332,29 +347,21 @@ def agent_roots_for(workspace_root: Path, runtime_root: Path) -> list[tuple[Path
     return [(workspace_root / name, name) for name in sorted(names)]
 
 
-def logs_root_for(workspace_root: Path, vault_root: Path, runtime_root: Path) -> Path:
-    """Where the derived transcript archive lives, from explicit paths.
+def logs_root_for(workspace_root: Path) -> Path:
+    """Where the shared transcript archive lives, from explicit paths.
 
-    The same receipt gate ``CiaoConfig.logs_root`` uses, exposed as a function so
-    a CLI holding only paths cannot end up with a second copy of the rule. One
-    definition of "has this install re-rooted" is the whole point of the seam.
+    ``<install>/Logs`` holds what could not be attributed to a workspace; a
+    workspace's own chats archive under its agent root. A function so a CLI
+    holding only paths cannot end up with a second copy of the rule.
     """
-    from ciao.workspace_reroot import read_receipt  # noqa: PLC0415
-
-    if read_receipt(Path(runtime_root)) is not None:
-        return Path(workspace_root) / "Logs"
-    return Path(vault_root) / "Logs"
+    return Path(workspace_root) / "Logs"
 
 
-def logs_roots_for(workspace_root: Path, vault_root: Path, runtime_root: Path) -> list[Path]:
+def logs_roots_for(workspace_root: Path, runtime_root: Path) -> list[Path]:
     """Every transcript-archive Logs root, from explicit paths: each agent root's
     <root>/Logs (registry order from agent_roots_for), then the shared
-    logs_root_for(...). Pre-reroot: [<vault>/Logs]. De-duplicated, order kept."""
-    from ciao.workspace_reroot import read_receipt  # noqa: PLC0415
-
-    shared = logs_root_for(workspace_root, vault_root, runtime_root)
-    if read_receipt(Path(runtime_root)) is None:
-        return [shared]
+    logs_root_for(...). De-duplicated, order kept."""
+    shared = logs_root_for(workspace_root)
     roots = [root / "Logs" for root, name in agent_roots_for(workspace_root, runtime_root) if name]
     return list(dict.fromkeys([*roots, shared]))
 
@@ -734,85 +741,24 @@ def _parse_workspaces_json(raw: str, *, generation: tuple[int, ...] | None = Non
     return out
 
 
-# A vault directory is a workspace when it CONTAINS one of these, not when it is
-# one. `memory-vault/personal/People/` makes `personal` a workspace;
-# `memory-vault/People/` is a note folder in a single-workspace vault and must
-# not become a workspace called "People". The nesting is what separates them.
-#
-# The entity categories' own folders come from the shipped registry
-# (`entity_types.stock_entity_type_registry()`), so a category is added here the
-# same way it is added to the indexer and the linter. The three extras are the
-# names a containment test needs that a category's single folder cannot express:
-# the agent's own `Workspace/`, the `journal/` folder, and the lower-case
-# `projects` (the historical name of `Projects/`). A containment test is not a
-# type mapping, which is also why the rest of the folders are absent —
-# `Documents/` is a category folder that is deliberately not evidence of a
-# workspace, and no entry could say otherwise.
-#
-# Stock-ONLY, and by construction: this runs in `CiaoConfig.__post_init__` while
-# the workspace registry is still being bootstrapped, so the
-# `<vault>/entity-types.yaml` that could answer a better question is itself
-# inside a directory this scan has not found yet. Reading one here would be the
-# chicken-and-egg the bootstrap exists to avoid, so an install that configured
-# nothing gets exactly the set it always got, and one that did is discovered by
-# the registry it already has rather than by this.
-_WORKSPACE_EVIDENCE_EXTRA_DIRS: frozenset[str] = frozenset({"Workspace", "journal", "projects"})
-
-_WORKSPACE_EVIDENCE_DIRS: frozenset[str] = (
-    frozenset(stock_entity_type_registry().entity_folders()) | _WORKSPACE_EVIDENCE_EXTRA_DIRS
-)
-
-
-def _looks_like_workspace_dir(path: Path) -> bool:
-    """Whether ``path`` is a workspace folder inside a shared vault."""
-    if not path.is_dir() or path.name.startswith("."):
-        return False
-    if (path / "MEMORY.md").is_file():
-        return True
-    try:
-        return any(
-            child.is_dir() and child.name in _WORKSPACE_EVIDENCE_DIRS
-            for child in path.iterdir()
-        )
-    except OSError:
-        return False
-
-
-def _bootstrap_registry(vault_root: Path | None = None) -> dict[str, WorkspaceConfig]:
-    """The registry an install gets before it has one, read off the vault.
+def _bootstrap_registry(workspace_root: Path, vault_root: Path) -> dict[str, WorkspaceConfig]:
+    """The registry an install gets before it has one, read off the install root.
 
     This is the bootstrap default, not a fallback — nothing else seeds a registry
     for an install that skipped ``ciao setup``, so returning nothing would yield
-    zero workspaces. It used to manufacture BOTH ``personal`` and ``work``
-    unconditionally, which was harmless while every workspace shared one vault
-    directory and is not harmless now:
-
-    - The re-rooting plan refuses when a registered workspace has no vault
-      directory, so a phantom ``work`` entry left such an install permanently
-      unable to migrate while the blocking gate kept telling it to.
-    - Hardcoding ONE instead, as the work order proposed, moves the same problem:
-      an install whose vault really does hold ``personal/`` and ``work/`` would
-      have ``work`` unregistered, and the plan refuses on an unregistered vault
-      directory. Also stuck, from the other side.
-
-    Neither guess is right because the answer is on disk, so read it: one
-    workspace per vault directory that looks like one, and ``personal`` when none
-    do (a fresh or single-workspace vault). The evidence test is deliberately
-    nested — see ``_WORKSPACE_EVIDENCE_DIRS`` — so a vault whose notes sit
-    directly under ``People/`` yields one workspace, not a workspace per folder.
-
-    The four ``*_PERSONAL`` / ``*_WORK`` environment variables that fed the
-    two-entry shape (default model and extra disallowed tools, one pair each)
-    went with it: they could only ever describe those two hardcoded names, and an
-    install that wants per-workspace settings puts them in ``workspaces.json``,
-    which is the supported path and works for any name.
+    zero workspaces. One workspace per install folder that holds a vault folder
+    (``<install>/<name>/<vault folder name>``, the per-root layout), and
+    ``personal`` when none do. The answer is on disk, so it is read rather than
+    guessed: manufacturing ``personal`` and ``work`` unconditionally would
+    register workspaces that have no vault.
     """
     names: list[str] = []
-    if vault_root is not None and Path(vault_root).is_dir():
+    root = Path(workspace_root)
+    if root.is_dir():
         names = sorted(
             child.name
-            for child in Path(vault_root).iterdir()
-            if _looks_like_workspace_dir(child)
+            for child in root.iterdir()
+            if not child.name.startswith(".") and (child / Path(vault_root).name).is_dir()
         )
     if not names:
         names = ["personal"]
@@ -953,7 +899,7 @@ class CiaoConfig:
             vault_root = self.workspace_root / vault_root
         self.vault_root = vault_root.resolve()
         if not self.workspaces:
-            self.workspaces = _bootstrap_registry(self.vault_root)
+            self.workspaces = _bootstrap_registry(self.workspace_root, self.vault_root)
         self._workspace_registry_changed = self._normalize_workspace_vault_roots()
         self._note_unsafe_shared_brains()
 
@@ -1025,39 +971,17 @@ class CiaoConfig:
         return self._resolve_vault_root(raw_root)
 
     def canonical_workspace_vault_root(self, workspace: str) -> Path:
-        """Standard location for a user-named workspace's notes, in the layout
-        this install is actually in.
+        """Standard location for a user-named workspace's notes: the whole vault
+        of its agent root, ``<install>/<name>/<vault folder name>``.
 
-        Two layouts, one question. Shared: a folder per workspace under the one
-        vault (``memory-vault/<name>``). Per-root, after the re-rooting: the
-        whole vault of that workspace's agent root — which is what
-        :meth:`agent_vault_root` already derives from the same receipt.
-
-        Answering "shared" unconditionally made this a claim about the past.
-        The vault-location check compares the resolved vault against this and
-        raised "The personal vault is not in its standard folder" on a correctly
-        migrated install, for every workspace, permanently — with a chat prompt
-        telling the operator to move the vault back to where the migration had
-        just moved it from. A standard location that disagrees with the layout
-        is worse than no check at all.
+        Derived directly, not through :meth:`agent_vault_root`: that resolver
+        follows the registry, and a registered nonstandard root must not become
+        the canonical destination merely by being registered.
         """
         name = _clean_relative_path(workspace)
         if not name or len(Path(name).parts) != 1:
             raise ValueError("workspace name must identify one vault folder")
-        if self.agent_root(name) != self.workspace_root:
-            # Derived directly, not through agent_vault_root: that resolver
-            # follows the registry, and a registered nonstandard root must not
-            # become the canonical destination merely by being registered.
-            return self.agent_root(name) / self.vault_root.name
-        candidate = self.vault_root / name
-        if candidate.is_symlink():
-            raise ValueError("workspace vault folder must not be a symlink")
-        resolved = candidate.resolve()
-        if resolved.parent != self.vault_root:
-            raise ValueError("workspace vault folder must stay inside the vault root")
-        if resolved.exists() and not resolved.is_dir():
-            raise ValueError("workspace vault folder must be a directory")
-        return resolved
+        return self.agent_root(name) / self.vault_root.name
 
     def stored_workspace_vault_root(self, workspace: str) -> str:
         """Portable registry value for a workspace's standard vault folder."""
@@ -1068,49 +992,33 @@ class CiaoConfig:
             return str(root)
 
     def agent_root(self, name: str) -> Path:
-        """Per-workspace directory that will hold that workspace's agent assets.
+        """Per-workspace directory that holds that workspace's agent assets.
 
-        The future home of a workspace's own ``CLAUDE.md``, ``.mcp.json``,
-        ``.claude/`` assets, and ``memory-vault/``. The derivation is
-        ``workspace_root / name``, but the per-workspace subdirectory only
-        exists after the re-rooting release, so every workspace still resolves
-        to ``workspace_root`` itself for now. A later phase flips the return to
-        the derived path; this method is the single seam for that change.
+        The home of a workspace's own ``AGENTS.md``, ``.mcp.json``,
+        ``.claude/`` assets, and ``memory-vault/``: always
+        ``workspace_root / name``.
         """
         name = _clean_relative_path(name)
         if not name or len(Path(name).parts) != 1 or any(
             sep in name for sep in ("/", "\\")
         ):
             raise ValueError("workspace name must identify one folder")
-        # Flipped per install by the re-rooting migration, not by a release date.
-        # Gating on the migration's own receipt is what makes the change atomic:
-        # an install that has not re-rooted keeps resolving to workspace_root, so
-        # a half-flipped state cannot exist. Deleting the legacy filters before
-        # this returns a real subdirectory would leave no filter over a still
-        # prefixed index, which is fail-open and strictly worse than today.
-        if self._rerooted():
-            return self.workspace_root / name
-        return self.workspace_root
+        return self.workspace_root / name
 
     def agent_vault_root(self, name: str) -> Path:
         """The vault whose ``INDEX.md`` this workspace's agent root owns.
 
         Distinct from :meth:`workspace_vault_root`, and the difference matters:
 
-        ``workspace_vault_root`` is where a workspace's NOTES live. Before the
-        re-rooting that is a subtree of one shared vault
-        (``memory-vault/<name>``); after it, the whole vault of that root.
+        ``workspace_vault_root`` is where a workspace's NOTES live: the whole
+        vault of its root.
 
         This is where the aggregate FILES about those notes live — ``INDEX.md``
-        and ``VOCABULARY.md``. Before the re-rooting there is exactly one such
-        pair for the whole install, so every workspace resolves to the shared
-        vault root; after it, each root owns its own pair. Derived from
-        :meth:`agent_root`, so it flips on the same receipt and cannot disagree
-        with it.
+        and ``VOCABULARY.md``. Each root owns its own pair, derived from
+        :meth:`agent_root` so the two cannot disagree.
 
-        Written as ``agent_root / <vault dir name>`` because that is literally
-        what the migration produces: ``workspace_reroot.plan`` moves each vault
-        to ``<name>/<vault dir name>``. A registered per-root workspace is the
+        Written as ``agent_root / <vault dir name>``, the standard per-root
+        vault ``<name>/<vault dir name>``. A registered workspace is the
         exception: its registered root is its vault (notes ownership), so an
         adopted folder such as ``work/brain`` or ``.`` owns its own aggregates.
         """
@@ -1119,18 +1027,18 @@ class CiaoConfig:
         return self.agent_root(name) / self.vault_root.name
 
     def adopted_workspace_vault(self, name: str) -> bool:
-        """Whether a re-rooted workspace's registered vault is an explicit adoption.
+        """Whether a workspace's registered vault is an explicit adoption.
 
         The registry is the evidence: a registered root that is neither the
         per-root standard (``<agent root>/<vault folder name>``) nor the
-        superseded pre-re-rooting shared subfolder (``<vault root>/<name>``)
+        superseded shared subfolder (``<vault root>/<name>``)
         was chosen by setup or by the operator, such as ``work/brain``, a
         nested clone vault, ``.`` or an absolute external folder. Ownership
         (:meth:`agent_vault_root`) reads this, so the folder a workspace owns
         is never the folder it is told to leave.
-        Always ``False`` before the re-rooting and for an unregistered name.
+        Always ``False`` for an unregistered name.
         """
-        if not self._rerooted() or self.workspace(name) is None:
+        if self.workspace(name) is None:
             return False
         registered = self.workspace_vault_root(name)
         return registered not in (
@@ -1165,12 +1073,10 @@ class CiaoConfig:
         links = authoritative_shared_links(runtime)
         if links is None:
             return INDEX_OWNERSHIP_EXTERNAL
-        from ciao.workspace_reroot import read_receipt
-
         ownership, ownership_trusted = read_vault_index_ownership_status(runtime)
         if not ownership_trusted:
             return INDEX_OWNERSHIP_EXTERNAL
-        receipt = read_receipt(runtime)
+        receipt = read_rooting_receipt(runtime)
         decision = classify_vault_index_destination(
             resolved,
             ownership=ownership,
@@ -1204,39 +1110,29 @@ class CiaoConfig:
     def logs_root(self) -> Path:
         """The shared logs root. See :func:`logs_root_for`.
 
-        Before the re-rooting it is the only archive, ``<vault>/Logs``. After it,
-        ``<install>/Logs`` holds what predates per-workspace archives and could not
-        be attributed to a workspace: loose files, ``CLI/``, ``Telegram/``,
-        ``Meetings/``, and chat ids not in the registry. New chat archives go to
-        :meth:`chats_root` for their workspace. Readers scan :meth:`logs_roots`.
-
-        Receipt-gated through the same ``_rerooted`` check as
-        :meth:`agent_root`, so the two can never disagree about which layout the
-        install is on.
+        ``<install>/Logs`` holds what could not be attributed to a workspace:
+        loose files, ``CLI/``, ``Telegram/``, ``Meetings/``, and chat ids not in the
+        registry. New chat archives go to :meth:`chats_root` for their
+        workspace. Readers scan :meth:`logs_roots`.
         """
-        return (
-            self.workspace_root / "Logs" if self._rerooted() else self.vault_root / "Logs"
-        )
+        return logs_root_for(self.workspace_root)
 
     def chats_root(self, workspace: str) -> Path:
         """Where a chat of *workspace* archives: ``<agent_root(workspace)>/Logs/Chats``
-        after the re-rooting; ``self.logs_root / "Chats"`` before it, and for
-        workspace ``""`` (a chat with no workspace has no agent root).
+        ; ``self.logs_root / "Chats"`` for workspace ``""`` (a chat with no
+        workspace has no agent root).
 
         ``agent_root``'s ``ValueError`` propagates for a malformed name. Callers pass
         registered names only.
         """
-        if not workspace or not self._rerooted():
+        if not workspace:
             return self.logs_root / "Chats"
         return self.agent_root(workspace) / "Logs" / "Chats"
 
     def logs_roots(self) -> list[Path]:
-        """Every archive Logs root a reader must scan: each agent root's ``Logs``
-        after the re-rooting, then the shared ``logs_root``. Before the re-rooting,
-        ``[logs_root]``. De-duplicated, order kept.
+        """Every archive Logs root a reader must scan: each agent root's ``Logs``,
+        then the shared ``logs_root``. De-duplicated, order kept.
         """
-        if not self._rerooted():
-            return [self.logs_root]
         roots = [root / "Logs" for root, _ in self.agent_root_targets()]
         return list(dict.fromkeys([*roots, self.logs_root]))
 
@@ -1247,59 +1143,32 @@ class CiaoConfig:
     def agent_root_targets(self) -> list[tuple[Path, str]]:
         """Every agent root in this install, as ``(root, workspace name)``.
 
-        One target before the re-rooting — the install root itself, unnamed,
-        because that is where the single set of provider assets lives. One per
-        workspace afterwards, because each root then owns its own ``AGENTS.md``,
-        ``.claude/``, ``skills/`` and mirrors. The install root is intentionally
-        absent after that transition: ``workspace_reroot`` moves the shared
-        guide into the primary root, and a root-level guide is no longer an
-        agent asset to rename or sync.
-
-        The seam for anything inspecting or listing agent assets. Reading
-        ``workspace_root`` directly still finds the install root's stale
-        ``.claude/`` after the migration, whose links point at a catalog that
-        moved — which is why the health panel reported every custom skill as
-        broken on a correctly migrated install.
+        One per workspace, because each root owns its own ``AGENTS.md``,
+        ``.claude/``, ``skills/`` and mirrors. The install root is not an agent
+        root. The seam for anything inspecting or listing agent assets.
         """
-        if not self._rerooted():
-            return [(self.workspace_root, "")]
         return [
             (self.agent_root(name), name) for name in self.workspace_names() if name
         ]
 
-    def index_scan_targets(self) -> list[tuple[Path, str, Path]]:
-        if self._rerooted() or self.ciao_owned_vault_index(None):
-            return self.vault_scan_targets()
-        targets = []
-        for name in self.workspace_names():
-            root = self.workspace_vault_root(name)
-            prefix = (Path("memory-vault") / root.relative_to(self.vault_root)
-                      if root.is_relative_to(self.vault_root) else Path(name) / root.name)
-            targets.append((root, name, prefix))
-        return targets
-
     def index_source_roots(self) -> frozenset[Path]:
         """Every notes tree that must remain outside the connected index store."""
         return frozenset(
-            [root.resolve() for root, _, _ in self.vault_scan_targets() + self.index_scan_targets()]
+            [root.resolve() for root, _, _ in self.vault_scan_targets()]
             + [Path(link.path).resolve() for ws in self.workspaces.values() for link in ws.shared_brains]
         )
 
     def vault_scan_targets(self) -> list[tuple[Path, str, Path]]:
         """Every vault in this install, as ``(root, workspace, path prefix)``.
 
-        One target before the re-rooting — the shared vault, unstamped, so the
-        first-path-segment inference labels the workspaces exactly as it does
-        today. One target PER ROOT afterwards, each stamped with its workspace
-        and rendering paths under ``<name>/memory-vault`` so two roots holding a
-        note of the same name do not render the same path.
+        One target PER ROOT, each stamped with its workspace and rendering paths
+        under ``<name>/memory-vault`` so two roots holding a note of the same
+        name do not render the same path.
 
         This is the seam for anything that means "all the notes in this install":
-        reading ``vault_root`` directly gives a directory that does not exist
-        after the migration, which is why the Memory Map came back empty.
+        ``vault_root`` is the install's own vault folder name, not a directory
+        that holds notes.
         """
-        if not self._rerooted():
-            return [(self.vault_root, "", Path("memory-vault"))]
         targets: list[tuple[Path, str, Path]] = []
         for name in self.workspace_names():
             if not name:
@@ -1307,24 +1176,6 @@ class CiaoConfig:
             root = self.agent_vault_root(name)
             targets.append((root, name, Path(name) / root.name))
         return targets
-
-    def _rerooted(self) -> bool:
-        """Whether this install has completed the per-workspace re-rooting.
-
-        Cached in a module-level map keyed by runtime directory, because
-        ``CiaoConfig`` uses slots and ``agent_root`` is called on hot paths: a
-        stat per call would be wasteful for a value that changes exactly once in
-        an install's life. ``reset_reroot_cache`` clears it, which the migration
-        itself calls after writing its receipt.
-        """
-        key = str(self.state_path.parent)
-        cached = _REROOTED_CACHE.get(key)
-        if cached is None:
-            from ciao.workspace_reroot import read_receipt
-
-            cached = read_receipt(self.state_path.parent) is not None
-            _REROOTED_CACHE[key] = cached
-        return cached
 
     def _resolve_vault_root(self, raw_root: str) -> Path:
         cleaned = _clean_relative_path(raw_root)
@@ -1979,11 +1830,9 @@ class CiaoConfig:
         except FileNotFoundError:
             registry_bytes = None
         except OSError as exc:
-            from ciao.workspace_reroot import RuntimeStateUnreadable  # noqa: PLC0415
-
             raise RuntimeStateUnreadable(workspaces_path) from exc
 
-        workspaces = _parse_workspaces_json(workspaces_json, generation=generation) or _bootstrap_registry(vault_root)
+        workspaces = _parse_workspaces_json(workspaces_json, generation=generation) or _bootstrap_registry(workspace_root, vault_root)
 
         # Settings the server needs before it exists (bind address, log level),
         # read from the runtime root like the registry above. Read-only: the
@@ -2071,8 +1920,7 @@ class ConnectedWorkspace:
 
 
 def configured_connected_workspace(env: Mapping[str, str], root: Path, *,
-                                   registered_brains_only: bool = False,
-                                   implicit_root: bool = False) -> ConnectedWorkspace | None:
+                                   registered_brains_only: bool = False) -> ConnectedWorkspace | None:
     """Identify a registered connected brain for CLI index and search operations."""
     source = installed_workspace_env(env)
     if not source.get("PWA_AUTH_TOKEN"):
@@ -2080,12 +1928,7 @@ def configured_connected_workspace(env: Mapping[str, str], root: Path, *,
     config = CiaoConfig.from_env(source, export=False)
     wanted = root.resolve()
     active = str(env.get("CIAO_ACTIVE_WORKSPACE") or "")
-    # Agent environments historically export the shared aggregate. An implicit
-    # CLI lookup for an unmanaged workspace uses its own snapshot.
-    if (implicit_root and active in config.workspaces and wanted == config.vault_root
-            and not config._rerooted() and not config.ciao_owned_vault_index(active)):
-        wanted = config.workspace_vault_root(active)
-    targets = config.index_scan_targets()
+    targets = config.vault_scan_targets()
     matches: list[str] = []
     for target, name, _prefix in targets:
         if not name or not wanted.is_relative_to(target.resolve()):
@@ -2141,7 +1984,7 @@ def configured_vault_index_is_ciao_owned(
         root.expanduser().resolve() == wanted
         and config.vault_index_ownership(workspace or None, root)
         == INDEX_OWNERSHIP_CIAO
-        for root, workspace, _prefix in config.index_scan_targets()
+        for root, workspace, _prefix in config.vault_scan_targets()
     )
 
 

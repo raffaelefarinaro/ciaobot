@@ -217,3 +217,67 @@ def test_no_node_state_is_allowed_and_big_one_is_ignored(tmp_path: Path) -> None
     assert check(install(tmp_path)) is None
     big = {"role": "client", "host_url": "https://h.example", "pad": "x" * (2 * 1024 * 1024)}
     assert check(_node_state(install(tmp_path / "big"), big)) is None
+
+
+def _registry(root: Path, entries: list[dict[str, str]]) -> None:
+    (root / ".runtime" / "workspaces.json").write_text(json.dumps(entries), encoding="utf-8")
+
+
+def test_a_vault_kept_in_the_install_folder_is_refused(tmp_path: Path) -> None:
+    # 1.10 writes no rooting receipt for a vault that is the install folder.
+    root = install(tmp_path)
+    _registry(root, [{"name": "personal", "vault_root": "."}])
+    (root / "People").mkdir()
+    (root / "AGENTS.md").write_text("g", encoding="utf-8")
+
+    finding = check(root)
+
+    assert finding is not None and finding.problem == "old_layout"
+    assert "one folder per workspace" in finding.message
+
+
+def test_a_custom_vault_name_without_workspace_folders_is_refused(tmp_path: Path) -> None:
+    root = install(tmp_path)
+    _registry(root, [
+        {"name": "personal", "vault_root": "notes/personal"},
+        {"name": "work", "vault_root": "notes/work"},
+    ])
+    (root / "notes" / "personal" / "People").mkdir(parents=True)
+    (root / "AGENTS.md").write_text("g", encoding="utf-8")
+
+    finding = check(root)
+
+    assert finding is not None and finding.problem == "old_layout"
+
+
+def test_root_assets_without_a_registry_are_refused(tmp_path: Path) -> None:
+    root = install(tmp_path)
+    (root / "skills").mkdir()
+
+    finding = check(root)
+
+    assert finding is not None and finding.problem == "old_layout"
+
+
+def test_a_workspace_folder_clears_the_old_layout_guard(tmp_path: Path) -> None:
+    root = install(tmp_path)
+    _registry(root, [{"name": "personal", "vault_root": "personal/memory-vault"}])
+    (root / "personal" / "memory-vault").mkdir(parents=True)
+
+    assert check(root) is None
+
+
+def test_a_migrated_receipt_clears_the_old_layout_guard(tmp_path: Path) -> None:
+    root = install(tmp_path, MIGRATED)
+    _registry(root, [{"name": "personal", "vault_root": "."}])
+    (root / "People").mkdir()
+
+    assert check(root) is None
+
+
+def test_the_old_layout_refusal_exits_four(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    root = install(tmp_path)
+    _registry(root, [{"name": "personal", "vault_root": "."}])
+
+    assert pf.main([str(root)]) == 4
+    assert "old shared layout" in capsys.readouterr().err

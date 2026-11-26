@@ -1095,18 +1095,15 @@ def test_scan_vault_skips_unheaded_notes_unless_asked(tmp_path: Path):
 
 def test_connected_cli_indexes_outside_folder_and_reads_snapshot_when_offline(tmp_path, monkeypatch, capsys):
     import json
-    from ciao.config import reset_reroot_cache
 
     root = tmp_path / "brain"
     runtime = tmp_path / ".runtime"
     root.mkdir()
-    (runtime / "migration").mkdir(parents=True)
-    (runtime / "migration/workspace-rooting.json").write_text('{"status":"migrated"}')
+    runtime.mkdir()
     (runtime / "workspaces.json").write_text(json.dumps([{"name": "personal", "vault_root": str(root)}]))
     monkeypatch.setenv("CIAO_WORKSPACE", str(tmp_path))
     monkeypatch.setenv("CIAO_RUNTIME_ROOT", str(runtime))
     monkeypatch.setenv("CIAO_ACTIVE_WORKSPACE", "personal")
-    reset_reroot_cache()
     (root / "Topic.md").write_text("# Read the original\n")
     assert vi.main(["--vault-root", str(root), "--write"]) == 0
     assert list(root.iterdir()) == [root / "Topic.md"]
@@ -1124,7 +1121,6 @@ def test_connected_cli_indexes_outside_folder_and_reads_snapshot_when_offline(tm
 
 def test_linked_checkout_cli_explicit_refresh_leaves_index_absent(tmp_path, monkeypatch, capsys):
     import json
-    from ciao.config import reset_reroot_cache
 
     install = tmp_path / "install"
     runtime = install / ".runtime"
@@ -1144,7 +1140,6 @@ def test_linked_checkout_cli_explicit_refresh_leaves_index_absent(tmp_path, monk
     }]))
     monkeypatch.setenv("CIAO_WORKSPACE", str(install))
     monkeypatch.setenv("CIAO_RUNTIME_ROOT", str(runtime))
-    reset_reroot_cache()
     assert vi.main(["--vault-root", str(checkout), "--write"]) == 0
     assert {p.name for p in checkout.iterdir()} == {".git", "Topic.md"}
     from argparse import Namespace

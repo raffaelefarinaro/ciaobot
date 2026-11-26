@@ -165,11 +165,8 @@ def _refresh_vault_index(
 ) -> bool:
     """Regenerate each vault's INDEX.md from frontmatter. Non-fatal on failure.
 
-    ``targets`` comes from ``CiaoConfig.vault_scan_targets()``: one shared vault
-    before the re-rooting and one per agent root after it. Without it this wrote
-    a single index at ``config.vault_root``, which on a migrated install is a
-    directory that no longer exists — so every root's index went stale and the
-    startup log said only "does not exist yet; skipping".
+    ``targets`` comes from ``CiaoConfig.vault_scan_targets()``: one vault per
+    agent root.
     """
     try:
         from ciao import vault_index
@@ -218,7 +215,7 @@ def _refresh_configured_vault_index(config: CiaoConfig) -> bool:
     setup never recorded (one created later through the API) is Ciao-owned in
     both, not only in the first.
     """
-    targets = config.index_scan_targets()
+    targets = config.vault_scan_targets()
     names = {Path(root): name for root, name, _prefix in targets}
     return _refresh_vault_index(
         config.workspace_root,
@@ -837,40 +834,6 @@ async def _run_server_locked(
         tracker.start(phase)
         asyncio.create_task(check_provider_startup(tracker, phase, descriptor))
 
-    # Re-root the install, once, before anything reads the vault. After the git
-    # sync so the clean-tree gate judges the real tree; before the index refresh
-    # so the indexes are rebuilt for the layout that now exists; and before the
-    # server binds, so no chat is holding a session in a directory that moves.
-    tracker.start("reroot_workspaces")
-    try:
-        from ciao.workspace_reroot import migrate_if_needed
-
-        reroot = await asyncio.to_thread(migrate_if_needed, config)
-        status = str(reroot.get("status", ""))
-        if status == "migrated":
-            tracker.done("reroot_workspaces", f"{len(reroot.get('applied') or [])} moves")
-            # This `config` was loaded before the move, so every per-workspace
-            # vault path it holds now points at a directory that has gone —
-            # `workspace_vault_root("personal")` still says `memory-vault/personal`.
-            # Patching the object in place would leave anything already derived
-            # from it stale, so restart into a process that reads the new
-            # registry from disk. Receipt-gated, so the next boot is a no-op and
-            # this happens exactly once in an install's life.
-            logger.info("re-root: restarting to pick up the new layout")
-            # Returned, not raised: the `except RestartRequested` handler wraps
-            # only `server.serve()`, and this happens long before that. The exit
-            # code is the same one that path returns, so the supervisor restarts
-            # us identically.
-            return RESTART_EXIT_CODE
-        elif status == "refused":
-            # The refusal and its reasons are recorded in the receipt.
-            tracker.fail("reroot_workspaces", "refused")
-        else:
-            tracker.done("reroot_workspaces", status or "skipped")
-    except Exception:
-        tracker.fail("reroot_workspaces", "re-root check failed")
-        logger.exception("Workspace re-root check failed")
-
     # Refresh vault index so INDEX.md reflects the current tree
     tracker.start("refresh_vault_index")
     try:
@@ -944,11 +907,7 @@ async def _run_server_locked(
     # Update skills in the background, startup should not wait on npm.
     def _skills_task():
         try:
-            # Every AGENT ROOT, not the install root. After the re-rooting the
-            # install root is not one: syncing it there seeded a stock CLAUDE.md
-            # beside the real per-root guides and pruned the install root's now
-            # stale `.agents/skills` links, reporting 17 tracked deletions for
-            # mirrors nothing reads any more.
+            # Every AGENT ROOT, not the install root, which is not one.
             targets = config.agent_root_targets()
             for root, _name in targets:
                 update_skills(str(root))

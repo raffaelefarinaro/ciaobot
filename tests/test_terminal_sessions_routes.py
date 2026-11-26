@@ -36,8 +36,7 @@ from starlette.routing import Route
 from starlette.testclient import TestClient
 
 from ciao.terminal_auth import TERMINAL_COOKIE, TerminalGrantStore
-from ciao.config import CiaoConfig, WorkspaceConfig, reset_reroot_cache
-from ciao.workspace_reroot import write_receipt
+from ciao.config import CiaoConfig, WorkspaceConfig
 from ciao.terminal_sessions import (
     TERMINAL_MAX_SESSIONS,
     TerminalSessionError,
@@ -333,17 +332,11 @@ def test_workspace_target_uses_real_config_roots(tmp_path: Path) -> None:
     app = _app(tmp_path, factory=factory)
     app.state.config = config
     app.state.project_chat_manager = None
-    reset_reroot_cache()
-    try:
-        with _client(app) as client:
-            assert client.post(SESSIONS, json={"workspace": "one"}, headers=_origin()).status_code == 200
-            assert factory.cwds[-1] == tmp_path.resolve()
-            write_receipt(runtime, {"status": "migrated", "workspaces": ["one", "two"]})
-            reset_reroot_cache()
-            assert client.post(SESSIONS, json={"workspace": "two"}, headers=_origin()).status_code == 200
-            assert factory.cwds[-1] == (tmp_path / "two").resolve()
-    finally:
-        reset_reroot_cache()
+    with _client(app) as client:
+        assert client.post(SESSIONS, json={"workspace": "one"}, headers=_origin()).status_code == 200
+        assert factory.cwds[-1] == (tmp_path / "one").resolve()
+        assert client.post(SESSIONS, json={"workspace": "two"}, headers=_origin()).status_code == 200
+        assert factory.cwds[-1] == (tmp_path / "two").resolve()
 
 
 def test_removed_and_recreated_workspace_keeps_existing_session_semantics(tmp_path: Path) -> None:

@@ -9,22 +9,23 @@ from tests.session import signed_in
 
 @pytest.fixture
 def client(tmp_path):
-    vault = tmp_path / "memory-vault"
-    (vault / "personal").mkdir(parents=True)
-    (vault / "work").mkdir(parents=True)
+    personal = tmp_path / "personal" / "memory-vault"
+    work = tmp_path / "work" / "memory-vault"
+    personal.mkdir(parents=True)
+    work.mkdir(parents=True)
 
     # A relates to B via frontmatter `related:` and to C (a different
     # workspace) via an inline relative markdown link.
-    (vault / "personal" / "A.md").write_text(
+    (personal / "A.md").write_text(
         "---\n"
         "type: note\n"
         "related: [B]\n"
         "description: Note A.\n"
         "---\n"
-        "# A\n\nSee [C](../work/C.md) too.\n",
+        "# A\n\nSee [C](../../work/memory-vault/C.md) too (another root; not an edge here).\n",
         encoding="utf-8", newline=""
     )
-    (vault / "personal" / "B.md").write_text(
+    (personal / "B.md").write_text(
         "---\n"
         "type: note\n"
         "description: Note B, the target.\n"
@@ -32,7 +33,7 @@ def client(tmp_path):
         "# B\n",
         encoding="utf-8", newline=""
     )
-    (vault / "work" / "C.md").write_text(
+    (work / "C.md").write_text(
         "---\n"
         "type: note\n"
         "description: Note C in Work.\n"
@@ -43,13 +44,13 @@ def client(tmp_path):
 
     from ciao.setup_marker import write_vault_index_ownership
 
-    write_vault_index_ownership(tmp_path / ".runtime", [vault], owner="ciao")
+    write_vault_index_ownership(tmp_path / ".runtime", [personal, work], owner="ciao")
     cfg = CiaoConfig(
         pwa_auth_token="test-secret",
         workspace_root=tmp_path,
         state_path=tmp_path / ".runtime" / "state.json",
         media_root=tmp_path / "media",
-        vault_root=vault,
+        vault_root=tmp_path / "memory-vault",
     )
     app = create_app(cfg)
     return signed_in(TestClient(app))
@@ -70,8 +71,7 @@ def test_vault_graph_unscoped_covers_all_workspaces(client):
     assert {"A", "B", "C"} <= titles
 
     edge_pairs = {tuple(sorted((e["source"], e["target"]))) for e in data["edges"]}
-    assert ("memory-vault/personal/A.md", "memory-vault/personal/B.md") in edge_pairs
-    assert ("memory-vault/personal/A.md", "memory-vault/work/C.md") in edge_pairs
+    assert ("personal/memory-vault/A.md", "personal/memory-vault/B.md") in edge_pairs
 
 
 def test_vault_graph_workspace_filter_drops_cross_workspace_edges(client):
@@ -84,7 +84,7 @@ def test_vault_graph_workspace_filter_drops_cross_workspace_edges(client):
     assert titles == {"A", "B"}
 
     edge_pairs = {tuple(sorted((e["source"], e["target"]))) for e in data["edges"]}
-    assert edge_pairs == {("memory-vault/personal/A.md", "memory-vault/personal/B.md")}
+    assert edge_pairs == {("personal/memory-vault/A.md", "personal/memory-vault/B.md")}
 
 
 def test_vault_graph_surfaces_description_and_degree(client):
@@ -97,7 +97,7 @@ def test_vault_graph_surfaces_description_and_degree(client):
 
     a = _node(data, "A")
     assert a["description"] == "Note A."
-    assert a["degree"] == 2
+    assert a["degree"] == 1
 
 
 def test_vault_graph_reports_note_mtimes(client):
@@ -116,13 +116,13 @@ def test_vault_graph_survives_a_note_that_cannot_be_stat_ed(client, tmp_path):
     """A note indexed but unreadable (deleted between scan and stat, broken
     symlink) must degrade to mtime 0 rather than failing the whole request."""
     vault = tmp_path / "memory-vault"
-    (vault / "personal" / "Ghost.md").write_text(
+    (tmp_path / "personal" / "memory-vault" / "Ghost.md").write_text(
         "---\ntype: note\ndescription: Vanishes.\n---\n# Ghost\n", encoding="utf-8", newline=""
     )
     # Replace the file with a dangling symlink: still indexed by name, but
     # stat() on it raises.
-    (vault / "personal" / "Ghost.md").unlink()
-    (vault / "personal" / "Ghost.md").symlink_to(vault / "personal" / "nope.md")
+    (tmp_path / "personal" / "memory-vault" / "Ghost.md").unlink()
+    (tmp_path / "personal" / "memory-vault" / "Ghost.md").symlink_to(tmp_path / "personal" / "memory-vault" / "nope.md")
 
     resp = client.get("/api/vault/graph")
     assert resp.status_code == 200
@@ -140,7 +140,7 @@ def test_vault_graph_reports_staleness_from_mtime(client, tmp_path):
     # Fixture notes are type `note` (the 30-day horizon): push one well
     # past it while its sibling stays fresh.
     old = time.time() - 400 * 86400
-    os.utime(vault / "personal" / "B.md", (old, old))
+    os.utime(tmp_path / "personal" / "memory-vault" / "B.md", (old, old))
 
     resp = client.get("/api/vault/graph")
     assert resp.status_code == 200
@@ -161,12 +161,12 @@ def test_vault_graph_frontmatter_updated_beats_old_mtime(client, tmp_path):
     import time
 
     vault = tmp_path / "memory-vault"
-    (vault / "personal" / "Verified.md").write_text(
+    (tmp_path / "personal" / "memory-vault" / "Verified.md").write_text(
         "---\ntype: person\nupdated: 2099-01-01\n---\n# Verified\n",
         encoding="utf-8", newline=""
     )
     old = time.time() - 400 * 86400
-    os.utime(vault / "personal" / "Verified.md", (old, old))
+    os.utime(tmp_path / "personal" / "memory-vault" / "Verified.md", (old, old))
 
     resp = client.get("/api/vault/graph")
     node = _node(resp.json(), "Verified")
@@ -185,7 +185,7 @@ def _age(path, days):
 
 def test_vault_graph_never_flags_what_the_review_queue_never_lists(client, tmp_path):
     """The map's "unchecked" count must equal what the queue can show."""
-    vault = tmp_path / "memory-vault" / "personal"
+    vault = tmp_path / "personal" / "memory-vault"
     notes = {
         "Workspace/Proposals.md": "note",
         "journal/daily/_template.md": "note",
@@ -227,9 +227,9 @@ def _checked_client(tmp_path):
     from ciao.web.app import create_app
 
     vault = tmp_path / "memory-vault"
-    (vault / "personal").mkdir(parents=True, exist_ok=True)
+    (tmp_path / "personal" / "memory-vault").mkdir(parents=True, exist_ok=True)
     for name in ("Checked", "Pending", "Untouched"):
-        (vault / "personal" / f"{name}.md").write_text(
+        (tmp_path / "personal" / "memory-vault" / f"{name}.md").write_text(
             f"---\ntype: note\nupdated: 2025-01-01\n---\n# {name}\n", encoding="utf-8", newline=""
         )
     cfg = CiaoConfig(
@@ -293,7 +293,7 @@ def test_vault_graph_builds_nodes_off_the_event_loop(client, monkeypatch):
 def test_vault_graph_skips_coverage_for_notes_the_queue_never_lists(
     client, tmp_path, monkeypatch
 ):
-    vault = tmp_path / "memory-vault" / "personal"
+    vault = tmp_path / "personal" / "memory-vault"
     queue = vault / "Workspace" / "Queue.md"
     queue.parent.mkdir(parents=True, exist_ok=True)
     queue.write_text(

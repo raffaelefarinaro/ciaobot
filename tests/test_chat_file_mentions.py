@@ -21,7 +21,7 @@ from starlette.middleware import Middleware
 from starlette.routing import Route
 from starlette.testclient import TestClient
 
-from ciao.config import CiaoConfig, WorkspaceConfig, reset_reroot_cache
+from ciao.config import CiaoConfig, WorkspaceConfig
 from ciao.sessions import StateStore
 from ciao.transcripts import TranscriptStore
 from ciao.web import request_limits, routes_api, routes_helpers
@@ -30,41 +30,13 @@ from ciao.web.project_chats import ProjectChatManager
 from ciao.web.request_limits import ApiRequestBodyLimitMiddleware
 from ciao.web.routes_api import resolve_chat_file_paths
 from ciao.web.security import SecurityHeadersMiddleware
-from ciao.workspace_reroot import write_receipt
 
 ROUTE = "/api/chats/{chat_id}/file-paths/resolve"
 URL = ROUTE
 
 
-@pytest.fixture(autouse=True)
-def _fresh_reroot_cache():
-    reset_reroot_cache()
-    yield
-    reset_reroot_cache()
-
-
-def _legacy_config(tmp_path: Path) -> CiaoConfig:
-    """Two workspaces, no receipt: the pre-reroot layout, all vaults under one shared vault."""
-    install = tmp_path / "install"
-    runtime = install / ".runtime"
-    runtime.mkdir(parents=True)
-    (install / "memory-vault" / "work").mkdir(parents=True)
-    (install / "memory-vault" / "other").mkdir(parents=True)
-    return CiaoConfig(
-        pwa_auth_token="test-token",
-        workspace_root=install,
-        state_path=runtime / "state.json",
-        media_root=runtime / "media",
-        vault_root=install / "memory-vault",
-        workspaces={
-            "work": WorkspaceConfig(name="work", vault_root="memory-vault/work"),
-            "other": WorkspaceConfig(name="other", vault_root="memory-vault/other"),
-        },
-    )
-
-
-def _rerooted_config(tmp_path: Path) -> CiaoConfig:
-    """The same two workspaces after the re-rooting: each has its own agent root with a nested vault."""
+def _per_root_config(tmp_path: Path) -> CiaoConfig:
+    """Two workspaces, each with its own agent root and a nested vault."""
     install = tmp_path / "install"
     runtime = install / ".runtime"
     runtime.mkdir(parents=True)
@@ -81,8 +53,6 @@ def _rerooted_config(tmp_path: Path) -> CiaoConfig:
             "other": WorkspaceConfig(name="other", vault_root="other/memory-vault"),
         },
     )
-    write_receipt(runtime, {"status": "migrated", "workspaces": ["work", "other"]})
-    reset_reroot_cache()
     return config
 
 
@@ -143,35 +113,8 @@ def _case_insensitive(tmp: Path) -> bool:
         probe.unlink()
 
 
-def test_real_legacy_config_only_discovers_owning_vault(tmp_path):
-    config = _legacy_config(tmp_path)
-    assert config.agent_root("work") == config.workspace_root
-    vault = config.workspace_vault_root("work")
-    note = _write(vault / "notes" / "a.md")
-    _write(config.workspace_root / "README.md")
-    other_note = _write(config.workspace_vault_root("other") / "other.md")
-    manager = _manager(config)
-    chat = _chat(manager, "work")
-    rows = _client(manager, config).post(
-        URL.format(chat_id=chat.chat_id),
-        json={"paths": [
-            "notes/a.md",
-            str(note),
-            str(config.workspace_root / "README.md"),
-            str(other_note),
-            "../other/other.md",
-            "memory-vault/other/other.md",
-            "memory-vault/work/notes/a.md",
-            "../README.md",
-        ]},
-    )
-    assert _results(rows) == [
-        _canon(note), _canon(note), None, None, None, None, None, None,
-    ]
-
-
-def test_real_rerooted_config_discovers_workspace_and_vault(tmp_path):
-    config = _rerooted_config(tmp_path)
+def test_real_per_root_config_discovers_workspace_and_vault(tmp_path):
+    config = _per_root_config(tmp_path)
     assert config.agent_root("work") == config.workspace_root / "work"
     agent_file = _write(config.workspace_root / "work" / "AGENTS.md")
     vault_note = _write(config.workspace_vault_root("work") / "notes" / "a.md")
@@ -193,8 +136,8 @@ def test_real_rerooted_config_discovers_workspace_and_vault(tmp_path):
     ]
 
 
-def test_rerooted_symlink_escape_fails(tmp_path):
-    config = _rerooted_config(tmp_path)
+def test_per_root_symlink_escape_fails(tmp_path):
+    config = _per_root_config(tmp_path)
     outside = _write(tmp_path / "outside.md")
     link = config.workspace_vault_root("work") / "escape.md"
     link.symlink_to(outside)
@@ -204,7 +147,7 @@ def test_rerooted_symlink_escape_fails(tmp_path):
 
 
 def test_membership_never_falls_back_to_primary(tmp_path):
-    config = _legacy_config(tmp_path)
+    config = _per_root_config(tmp_path)
     primary = config.primary_workspace()
     _write(config.workspace_vault_root(primary) / "notes.md")
     manager = _manager(config)
@@ -221,7 +164,7 @@ def test_membership_never_falls_back_to_primary(tmp_path):
 
 
 def test_unavailable_or_shared_root_fails_closed(tmp_path):
-    config = _legacy_config(tmp_path)
+    config = _per_root_config(tmp_path)
     manager = _manager(config)
     chat = _chat(manager, "work")
     client = _client(manager, config)
@@ -240,7 +183,7 @@ def test_unavailable_or_shared_root_fails_closed(tmp_path):
     assert _results(_post(_client(manager, config), chat.chat_id, ["install.md"])) == [None]
 
     # Two workspaces sharing one vault: the root is not private to either.
-    config = _legacy_config(tmp_path / "shared")
+    config = _per_root_config(tmp_path / "shared")
     config.workspaces["other"] = WorkspaceConfig(name="other", vault_root="memory-vault/work")
     _write(config.workspace_vault_root("work") / "notes.md")
     manager = _manager(config)
@@ -248,9 +191,12 @@ def test_unavailable_or_shared_root_fails_closed(tmp_path):
     assert _results(_post(_client(manager, config), chat.chat_id, ["notes.md"])) == [None]
 
     # A vault that contains another registered workspace's vault.
-    config = _legacy_config(tmp_path / "nested")
+    config = _per_root_config(tmp_path / "nested")
     config.workspaces["work"] = WorkspaceConfig(
         name="work", vault_root=str(config.workspace_root / "memory-vault")
+    )
+    config.workspaces["other"] = WorkspaceConfig(
+        name="other", vault_root=str(config.workspace_root / "memory-vault" / "other")
     )
     _write(config.workspace_root / "memory-vault" / "notes.md")
     manager = _manager(config)
@@ -259,7 +205,7 @@ def test_unavailable_or_shared_root_fails_closed(tmp_path):
 
 
 def test_batch_order_duplicates_empty_and_ambiguity(tmp_path):
-    config = _rerooted_config(tmp_path)
+    config = _per_root_config(tmp_path)
     vault_note = _write(config.workspace_vault_root("work") / "notes" / "a.md")
     _write(config.workspace_root / "work" / "README.md")
     _write(config.workspace_vault_root("work") / "README.md")
@@ -289,7 +235,7 @@ def test_exact_lookup_never_calls_fuzzy_helpers(tmp_path, monkeypatch):
     monkeypatch.setattr(routes_api, "_resolve_in_chat", forbidden)
     monkeypatch.setattr(routes_api, "_resolve_workspace_path", forbidden)
     monkeypatch.setattr(routes_helpers, "_find_fuzzy_match", forbidden)
-    config = _legacy_config(tmp_path)
+    config = _per_root_config(tmp_path)
     vault = config.workspace_vault_root("work")
     exact = _write(vault / "notes" / "a.md")
     _write(vault / "deep" / "x" / "a.md")
@@ -330,7 +276,7 @@ def test_repo_policy_and_real_worktree_identity(tmp_path):
     _git("-C", str(repo), "worktree", "add", "-q", "-b", "feat", str(worktree))
     _write(worktree / "docs" / "feature.md", "branch only")
 
-    config = _legacy_config(tmp_path)
+    config = _per_root_config(tmp_path)
     manager = _manager(config)
     chat = _chat(manager, "work", repo_path=str(repo))
     client = _client(manager, config)
@@ -366,7 +312,7 @@ def test_repo_policy_and_real_worktree_identity(tmp_path):
 
 
 def test_absolute_home_parent_and_native_path_policy(tmp_path, monkeypatch):
-    config = _legacy_config(tmp_path)
+    config = _per_root_config(tmp_path)
     vault = config.workspace_vault_root("work")
     note = _write(vault / "notes" / "a.md")
     _write(config.workspace_vault_root("other") / "other.md")
@@ -384,7 +330,7 @@ def test_absolute_home_parent_and_native_path_policy(tmp_path, monkeypatch):
 
 
 def test_agent_grants_do_not_expand_discovery(tmp_path):
-    config = _legacy_config(tmp_path)
+    config = _per_root_config(tmp_path)
     credentials = _write(config.workspace_root / "gws" / "token.json", "{}")
     data_root = _write(config.workspace_root / "data" / "secret.md")
     vault_note = _write(config.workspace_vault_root("work") / "n.md")
@@ -396,7 +342,7 @@ def test_agent_grants_do_not_expand_discovery(tmp_path):
 
 
 def test_line_suffix_and_file_type_size_rules(tmp_path):
-    config = _legacy_config(tmp_path)
+    config = _per_root_config(tmp_path)
     vault = config.workspace_vault_root("work")
     note = _write(vault / "notes" / "a.md")
     manager = _manager(config)
@@ -443,7 +389,7 @@ def test_line_suffix_and_file_type_size_rules(tmp_path):
 
 
 def test_fifo_and_symlink_loop_are_null(tmp_path):
-    config = _legacy_config(tmp_path)
+    config = _per_root_config(tmp_path)
     vault = config.workspace_vault_root("work")
     note = _write(vault / "keep.md")
     os.mkfifo(vault / "pipe.md")
@@ -461,7 +407,7 @@ def test_malformed_json_and_surrogates_reject_before_filesystem(tmp_path, monkey
 
     monkeypatch.setattr(routes_api, "_snapshot_file_mention_context", forbidden)
     monkeypatch.setattr(routes_api, "_resolve_file_mention_batch", forbidden)
-    config = _legacy_config(tmp_path)
+    config = _per_root_config(tmp_path)
     manager = _manager(config)
     chat = _chat(manager, "work")
     client = _client(manager, config)
@@ -492,7 +438,7 @@ def test_malformed_body_is_rejected_by_middleware_before_handler(tmp_path, monke
         raise AssertionError("handler ran for a deeply nested body")
 
     monkeypatch.setattr(routes_api, "_snapshot_file_mention_context", forbidden)
-    config = _legacy_config(tmp_path)
+    config = _per_root_config(tmp_path)
     manager = _manager(config)
     chat = _chat(manager, "work")
     serializer = make_serializer("test-secret")
@@ -514,7 +460,7 @@ def _production_middleware(serializer) -> list[Middleware]:
 
 
 def test_body_count_and_stream_limits(tmp_path, monkeypatch):
-    config = _legacy_config(tmp_path)
+    config = _per_root_config(tmp_path)
     vault = config.workspace_vault_root("work")
     _write(vault / "notes" / "a.md")
     manager = _manager(config)
@@ -559,7 +505,7 @@ def create_app_for(config: CiaoConfig, manager: ProjectChatManager):
 
 
 def test_stream_limit_stops_at_the_crossing_chunk_and_rejects_bad_length(tmp_path):
-    config = _legacy_config(tmp_path)
+    config = _per_root_config(tmp_path)
     manager = _manager(config)
     chat = _chat(manager, "work")
     inner = _app(manager, config)
@@ -592,7 +538,7 @@ def test_stream_limit_stops_at_the_crossing_chunk_and_rejects_bad_length(tmp_pat
 
 
 def test_delayed_vault_reconfiguration_same_workspace_discards_result(tmp_path, monkeypatch):
-    config = _legacy_config(tmp_path)
+    config = _per_root_config(tmp_path)
     old_vault = config.workspace_vault_root("work")
     _write(old_vault / "notes.md")
     moved = _write(config.workspace_root / "memory-vault" / "moved" / "notes.md")
@@ -611,11 +557,10 @@ def test_delayed_vault_reconfiguration_same_workspace_discards_result(tmp_path, 
     assert moved.exists()
 
 
-@pytest.mark.parametrize("mutation", ["reroot", "project_move", "code_mode", "repo_location", "chat_deleted"])
-def test_delayed_reroot_membership_and_repo_changes_discard_result(tmp_path, monkeypatch, mutation):
-    config = _legacy_config(tmp_path)
+@pytest.mark.parametrize("mutation", ["project_move", "code_mode", "repo_location", "chat_deleted"])
+def test_delayed_membership_and_repo_changes_discard_result(tmp_path, monkeypatch, mutation):
+    config = _per_root_config(tmp_path)
     _write(config.workspace_vault_root("work") / "notes.md")
-    (config.workspace_root / "work").mkdir()
     repo = _git_repo(tmp_path / "repo")
     manager = _manager(config)
     chat = _chat(manager, "work", repo_path=str(repo))
@@ -623,10 +568,7 @@ def test_delayed_reroot_membership_and_repo_changes_discard_result(tmp_path, mon
     original = routes_api._resolve_file_mention_batch
 
     def mutate_then_resolve(roots, paths):
-        if mutation == "reroot":
-            write_receipt(config.state_path.parent, {"status": "migrated", "workspaces": ["work", "other"]})
-            reset_reroot_cache()
-        elif mutation == "project_move":
+        if mutation == "project_move":
             project.workspace = "other"
         elif mutation == "code_mode":
             project.repo_path = ""
@@ -645,7 +587,7 @@ def test_delayed_reroot_membership_and_repo_changes_discard_result(tmp_path, mon
 
 
 def test_metadata_failures_are_null_and_no_store(tmp_path):
-    config = _legacy_config(tmp_path)
+    config = _per_root_config(tmp_path)
     vault = config.workspace_vault_root("work")
     good = _write(vault / "good.md")
     manager = _manager(config)
@@ -659,7 +601,7 @@ def test_metadata_failures_are_null_and_no_store(tmp_path):
 
 
 def test_unicode_narrow_no_break_space_is_not_rejected(tmp_path):
-    config = _legacy_config(tmp_path)
+    config = _per_root_config(tmp_path)
     name = "Screenshot 2026\u202f11.md"
     note = _write(config.workspace_vault_root("work") / name)
     manager = _manager(config)
@@ -669,7 +611,7 @@ def test_unicode_narrow_no_break_space_is_not_rejected(tmp_path):
 
 
 def test_browser_auth_origin_and_remote_session_boundary(tmp_path):
-    config = _legacy_config(tmp_path)
+    config = _per_root_config(tmp_path)
     note = _write(config.workspace_vault_root("work") / "notes" / "a.md")
     manager = _manager(config)
     chat = _chat(manager, "work")
@@ -695,7 +637,7 @@ def test_browser_auth_origin_and_remote_session_boundary(tmp_path):
 def test_linked_repo_containing_another_workspace_is_not_a_root(tmp_path):
     # The repo is the parent of the install root, so it contains every workspace vault.
     outer = _git_repo(tmp_path / "outer")
-    config = _legacy_config(outer)
+    config = _per_root_config(outer)
     vault_note = _write(config.workspace_vault_root("work") / "notes" / "a.md")
     manager = _manager(config)
     chat = _chat(manager, "work", repo_path=str(outer))

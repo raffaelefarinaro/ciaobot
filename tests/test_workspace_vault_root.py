@@ -13,7 +13,7 @@ from pathlib import Path
 
 import pytest
 
-from ciao.config import CiaoConfig, WorkspaceConfig, reset_reroot_cache
+from ciao.config import CiaoConfig, WorkspaceConfig
 
 
 def _config(tmp_path: Path, workspaces: dict[str, str]) -> CiaoConfig:
@@ -41,9 +41,9 @@ def _config(tmp_path: Path, workspaces: dict[str, str]) -> CiaoConfig:
 def test_bare_name_nests_under_the_vault_for_any_workspace(tmp_path: Path) -> None:
     config = _config(tmp_path, {"personal": "personal", "research": "research"})
 
-    assert config.workspace_vault_root("personal") == tmp_path / "memory-vault" / "personal"
+    assert config.workspace_vault_root("personal") == tmp_path / "personal" / "memory-vault"
     # The whole point: a custom name is treated exactly like the built-in ones.
-    assert config.workspace_vault_root("research") == tmp_path / "memory-vault" / "research"
+    assert config.workspace_vault_root("research") == tmp_path / "research" / "memory-vault"
 
 
 def test_a_legacy_sibling_vault_is_pinned_into_the_registry(tmp_path: Path) -> None:
@@ -93,7 +93,7 @@ def test_an_unrelated_sibling_directory_is_not_adopted_as_a_vault(tmp_path: Path
     (tmp_path / "clients").mkdir()
     config = _config(tmp_path, {"clients": "clients"})
 
-    assert config.workspace_vault_root("clients") == tmp_path / "memory-vault" / "clients"
+    assert config.workspace_vault_root("clients") == tmp_path / "clients" / "memory-vault"
 
 
 def test_one_segment_legacy_values_are_canonicalized_by_workspace_name(
@@ -101,8 +101,8 @@ def test_one_segment_legacy_values_are_canonicalized_by_workspace_name(
 ) -> None:
     config = _config(tmp_path, {"a": "research/"})
 
-    assert config.workspace_vault_root("a") == tmp_path / "memory-vault" / "a"
-    assert config.workspace("a").vault_root == "memory-vault/a"
+    assert config.workspace_vault_root("a") == tmp_path / "a" / "memory-vault"
+    assert config.workspace("a").vault_root == "a/memory-vault"
 
 
 @pytest.mark.parametrize(
@@ -117,7 +117,7 @@ def test_unsafe_relative_root_is_replaced_with_the_standard_vault(
 
     assert (
         config.workspace_vault_root("research")
-        == tmp_path / "memory-vault" / "research"
+        == tmp_path / "research" / "memory-vault"
     )
 
 
@@ -248,28 +248,12 @@ def test_legacy_pin_persists_and_round_trips_across_restart(tmp_path: Path) -> N
     assert second.workspace_vault_root("research") == legacy
 
 
-def test_completed_interactive_migration_repoints_a_pinned_vault(
-    tmp_path: Path,
-) -> None:
-    legacy = tmp_path / "research"
-    standard = tmp_path / "memory-vault" / "research"
-    (standard / "projects" / "active" / "general").mkdir(parents=True)
-    config = _config(tmp_path, {"research": str(legacy)})
-
-    assert config.workspace_vault_root("research") == standard
-    assert config.workspace("research").vault_root == "memory-vault/research"
-
-
 # -- registered per-root ownership ---------------------------------------------
 
 
 def _per_root_config(root: Path, workspaces: dict[str, str]) -> CiaoConfig:
     """A re-rooted install whose registry holds the given vault_root values."""
     runtime = root / ".runtime"
-    receipt = runtime / "migration" / "workspace-rooting.json"
-    receipt.parent.mkdir(parents=True, exist_ok=True)
-    receipt.write_text(json.dumps({"status": "migrated"}), encoding="utf-8")
-    reset_reroot_cache()
     config = CiaoConfig(
         pwa_auth_token="test-token",
         workspace_root=root,
@@ -328,13 +312,6 @@ def test_per_root_agent_vault_uses_explicit_adopted_root(
     assert config.agent_vault_root("work") == registered
 
 
-def test_shared_layout_agent_vault_stays_the_aggregate_vault(tmp_path: Path) -> None:
-    root = tmp_path.resolve()
-    config = _config(root, {"work": "memory-vault/work"})
-
-    assert config.agent_vault_root("work") == root / "memory-vault"
-
-
 def test_adopted_root_does_not_redefine_canonical_destination(tmp_path: Path) -> None:
     root = tmp_path.resolve()
     adopted = root / "work" / "brain"
@@ -360,30 +337,24 @@ def test_per_root_registration_at_old_shared_subpath_keeps_derived_vault(
 
 
 @pytest.mark.parametrize(
-    ("rerooted", "stored", "expected"),
+    ("stored", "expected"),
     [
-        (False, "memory-vault/work", False),
-        (False, "work/brain", False),
-        (True, "work/memory-vault", False),
-        (True, "memory-vault/work", False),
-        (True, "work/brain", True),
-        (True, ".", True),
+        ("work/memory-vault", False),
+        ("memory-vault/work", False),
+        ("work/brain", True),
+        (".", True),
     ],
 )
 def test_adopted_workspace_vault_is_a_registered_nonstandard_per_root_vault(
-    tmp_path: Path, rerooted: bool, stored: str, expected: bool
+    tmp_path: Path, stored: str, expected: bool
 ) -> None:
     root = tmp_path.resolve()
-    if rerooted:
-        config = _per_root_config(root, {"work": stored})
-    else:
-        reset_reroot_cache()
-        config = _config(root, {"work": stored})
+    config = _per_root_config(root, {"work": stored})
 
     assert config.adopted_workspace_vault("work") is expected
     assert config.adopted_workspace_vault("unregistered") is False
     assert config.ciao_owned_vault_index("work") is (not expected)
-    assert config.ciao_owned_vault_index("unregistered") is (not rerooted)
+    assert config.ciao_owned_vault_index("unregistered") is False
 
 
 def test_explicit_pre_reroot_vault_is_not_treated_as_ciao_owned(tmp_path: Path) -> None:

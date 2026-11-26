@@ -2,7 +2,7 @@
 
 The kinds of notes the agent keeps were hardcoded in six places that had to be
 edited in step: ``vault_index``'s ``DIR_TYPE_MAP`` / ``CANONICAL_TYPES`` /
-``TYPE_ALIASES``, ``config``'s ``_WORKSPACE_EVIDENCE_DIRS``,
+``TYPE_ALIASES``,
 ``vault_lint``'s orphan-candidate
 folders and ``memory_audit``'s per-type staleness table (since replaced by one
 ``NOTE_REVIEW_DAYS`` for every note). Nothing showed
@@ -29,8 +29,8 @@ constant it replaced.
 
 **Which vault.** ``<vault>`` is the *agent* vault root
 (``CiaoConfig.agent_vault_root(name)``) — the root that owns the generated
-``INDEX.md`` and ``VOCABULARY.md``, not a workspace's notes root. The two differ
-on a pre-re-rooting install (one shared vault, several workspaces), so
+``INDEX.md`` and ``VOCABULARY.md``, not a workspace's notes root. The two can differ
+for an adopted vault, so
 ``load_entity_types`` takes the directory explicitly and leaves that choice to
 the caller. The entity-note writer is the one consumer that has to name two: the
 note lands in a workspace's **notes** root while the category it files that note
@@ -70,23 +70,6 @@ automation, whose note describes the thing rather than being it.
 **Two views are not fully derivable**, because the wire format they feed
 predates this file and must not change. They are stock-only and documented at
 their definitions: :data:`_LEGACY_DIR_TYPE_MAP` and :data:`_ORPHAN_EXTRA_DIRS`.
-
-``config._WORKSPACE_EVIDENCE_DIRS`` is the one consumer that asks for the
-**stock** registry rather than a vault's, and that is structural rather than a
-preference. It is a *containment* test — a directory that holds one of these is a
-workspace, which is how ``memory-vault/personal/People/`` makes ``personal`` a
-workspace — and it is built inside ``CiaoConfig.__post_init__``, while the
-workspace registry is still being discovered. The
-``<vault>/entity-types.yaml`` that could answer a better question therefore lives
-inside one of the directories that scan has not found yet, and reading one there
-is the chicken-and-egg the bootstrap exists to avoid.
-
-What it does take from the registry is the entity categories' own folders
-(:func:`stock_entity_type_registry`). The three names an entry's single folder
-cannot express — the agent's own ``Workspace``, the ``journal`` folder and the
-lower-case ``projects`` — are spelled out in ``config``, because a containment
-test is not a type mapping: ``Documents/`` is a category folder too, and is
-deliberately not evidence of a workspace.
 
 Loads are cached per vault against the vault file's mtime, so a caller in a hot
 path can ask on every read; :func:`clear_entity_types_cache` is the test hook,
@@ -512,12 +495,8 @@ def load_entity_types(vault: Path) -> EntityTypeRegistry:
 def stock_entity_type_registry() -> EntityTypeRegistry:
     """The shipped categories as a registry, with no vault file involved.
 
-    For the consumer that cannot reach a vault: ``config._WORKSPACE_EVIDENCE_DIRS``
-    is a module constant built while ``CiaoConfig`` is still discovering which
-    directories are workspaces, and the per-vault ``entity-types.yaml`` lives
-    inside one of those directories. ``load_entity_types`` would have to be given
-    a path to be honest about which vault it read, and there is no such path yet,
-    so this is the whole of what that consumer can know.
+    For a consumer that cannot reach a vault: ``load_entity_types`` would have to
+    be given a path to be honest about which vault it read.
 
     Built from the same cached stock list :func:`load_entity_types` merges, and
     dropped by :func:`clear_entity_types_cache` along with it, so it cannot

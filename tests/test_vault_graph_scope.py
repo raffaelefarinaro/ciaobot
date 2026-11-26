@@ -14,7 +14,7 @@ import pytest
 from starlette.testclient import TestClient
 
 from ciao import vault_index
-from ciao.config import CiaoConfig, WorkspaceConfig, reset_reroot_cache
+from ciao.config import CiaoConfig, WorkspaceConfig
 from ciao.web.app import create_app
 from tests.session import signed_in
 
@@ -38,10 +38,6 @@ def rerooted(tmp_path: Path) -> CiaoConfig:
         related="People/User",
     )
     _note(tmp_path / "work" / "memory-vault" / "People" / "User.md", "work user")
-    receipt = tmp_path / ".runtime" / "migration" / "workspace-rooting.json"
-    receipt.parent.mkdir(parents=True, exist_ok=True)
-    receipt.write_text(json.dumps({"status": "migrated"}), encoding="utf-8")
-    reset_reroot_cache()
     return CiaoConfig(
         pwa_auth_token="test-token",
         workspace_root=tmp_path,
@@ -149,25 +145,3 @@ def test_an_unknown_workspace_is_not_read_as_scan_everything(
     assert data["edges"] == []
 
 
-def test_a_shared_vault_install_is_still_scoped_by_the_entry_filter(
-    tmp_path: Path,
-) -> None:
-    """Before the re-rooting one target holds every workspace: nothing to drop."""
-    vault = tmp_path / "memory-vault"
-    _note(vault / "personal" / "A.md", "A")
-    _note(vault / "work" / "B.md", "B")
-    (tmp_path / ".runtime").mkdir(parents=True, exist_ok=True)
-    reset_reroot_cache()
-    config = CiaoConfig(
-        pwa_auth_token="test-token",
-        workspace_root=tmp_path,
-        vault_root=vault,
-        state_path=tmp_path / ".runtime" / "state.json",
-        media_root=tmp_path / ".runtime" / "media",
-    )
-    client = signed_in(TestClient(create_app(config)))
-
-    data = client.get("/api/vault/graph?workspace=personal").json()
-
-    assert {n["title"] for n in data["nodes"]} == {"A"}
-    assert data["workspaces"] == ["personal", "work"]

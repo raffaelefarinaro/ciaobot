@@ -44,7 +44,6 @@ from pathlib import Path
 from typing import Any, Callable
 from zoneinfo import ZoneInfo
 
-from ciao.workspace_guide import GUIDE_NAME, guide_path
 
 logger = logging.getLogger(__name__)
 
@@ -52,7 +51,7 @@ logger = logging.getLogger(__name__)
 class OperatorAction:
     """One clearable condition the operator can act on.
 
-    ``id`` is stable and scope-suffixed (``workspace-root-missing:work``) so a
+    ``id`` is stable and scope-suffixed (``provider-update:claude``) so a
     client can accept it by id across renders. ``severity`` is a sort key only,
     never rendered. ``glyph`` is one character shown next to the amber rule.
     """
@@ -689,49 +688,40 @@ def _detect_missed_schedules(context: DetectionContext) -> list[OperatorAction]:
     ]
 
 
-# -- post-migration drift (§11.2) --------------------------------------------
-#
-# Four read-only detectors over the per-root layout, each mirroring a drift
-# `workspace_reroot.repair` already knows how to fix, so the tile gets a run
-# button instead of prose. Read-only on purpose: a detector runs on every strip
-# render, and one that repaired as a side effect of being looked at would make
-# "what is wrong" unanswerable.
-#
-# All four are silent before the re-rooting. Before it there is one agent root,
-# one guide and one catalog, so "this root has no assets" is not drift — it is
-# the layout.
+# -- workspace folders and GitHub skills ------------------------------------
 
 _DRIFT_SEVERITY = 15
 
 
-def _rerooted_targets(context: DetectionContext) -> list[tuple[str, Path]]:
-    """(workspace, agent root) per registered workspace, or [] before re-rooting."""
-    config = context.config
-    getter = getattr(config, "agent_root_targets", None)
-    install = getattr(config, "workspace_root", None)
-    if not callable(getter) or install is None:
+def _agent_root_targets(context: DetectionContext) -> list[tuple[str, Path]]:
+    """(workspace, agent root) per registered workspace."""
+    getter = getattr(context.config, "agent_root_targets", None)
+    if not callable(getter):
         return []
     try:
-        targets = [(str(name), Path(root)) for root, name in getter()]
+        return [(str(name), Path(root)) for root, name in getter() if name]
     except Exception:  # noqa: BLE001 — advisory
         return []
-    # One target whose root IS the install root means the shared layout.
-    if len(targets) <= 1 and any(root == Path(install) for _n, root in targets):
-        return []
-    return [(name, root) for name, root in targets if name]
 
 
 def _detect_workspace_root_missing(context: DetectionContext) -> list[OperatorAction]:
     """A registered workspace with no directory on disk.
 
-    `repair` recreates the root and installs its assets, so this is a run button.
-    Reported per workspace rather than as one tile: the fix is per root, and a
-    count tells the operator nothing about which of their workspaces is gone.
+    Chat-only: restoring a folder can mean an unmounted drive or a moved
+    install, which is the operator's call, not a button's. Reported per
+    workspace, because the fix is per root.
     """
     actions: list[OperatorAction] = []
-    for name, root in _rerooted_targets(context):
+    for name, root in _agent_root_targets(context):
         if root.is_dir():
             continue
+        prompt = (
+            f"The workspace '{name}' is registered but its folder {root} does not exist, "
+            "so its guide, skills and notes have nowhere to live. Find out whether the "
+            "folder was moved, renamed or sits on a drive that is not mounted, and tell me "
+            "before you create or move anything. If it is simply gone, offer to create "
+            f"{root} and run `ciao sync-skills` for it."
+        )
         actions.append(
             OperatorAction(
                 id=f"workspace-root-missing:{name}",
@@ -744,47 +734,8 @@ def _detect_workspace_root_missing(context: DetectionContext) -> list[OperatorAc
                 ),
                 glyph="⌂",
                 workspace=name,
-                run_label="Recreate it",
-            )
-        )
-    return actions
-
-
-def _detect_workspace_assets_stale(context: DetectionContext) -> list[OperatorAction]:
-    """A root whose generated agent assets no longer match its catalog.
-
-    The catalog (`skills/`, `commands/`, `subagents/`) is the source; `.claude/`,
-    `.agents/` and friends are generated from it. A root holding a catalog but no
-    generated directory means the provider sees none of them.
-    """
-    actions: list[OperatorAction] = []
-    for name, root in _rerooted_targets(context):
-        if not root.is_dir():
-            continue   # the missing-root detector owns that case
-        missing: list[str] = []
-        if (root / "skills").is_dir() and not (root / ".claude" / "skills").exists():
-            missing.append(".claude/skills")
-        if (root / "commands").is_dir() and not (root / ".claude" / "commands").exists():
-            missing.append(".claude/commands")
-        if (root / "subagents").is_dir() and not (root / ".claude" / "agents").exists():
-            missing.append(".claude/agents")
-        if not guide_path(root).is_file():
-            missing.append(GUIDE_NAME)
-        if not missing:
-            continue
-        actions.append(
-            OperatorAction(
-                id=f"workspace-assets-stale:{name}",
-                kind="workspace-assets-stale",
-                severity=_DRIFT_SEVERITY,
-                title=f"The {name} workspace is missing generated assets",
-                detail=(
-                    f"'{name}' has a catalog but no {', '.join(missing)}, so its "
-                    "agents cannot see its skills, commands or guide."
-                ),
-                glyph="⌗",
-                workspace=name,
-                run_label="Rebuild them",
+                chat_label="Sort it out with me",
+                chat_prompt=prompt,
             )
         )
     return actions
@@ -805,9 +756,9 @@ def _detect_locked_skills_orphaned(context: DetectionContext) -> list[OperatorAc
     if install is None:
         return []
     roots = [Path(install)]
-    for _name, root in _rerooted_targets(context):
-        if root not in roots:
-            roots.append(root)
+    for root, _name in config.agent_root_targets():
+        if Path(root) not in roots:
+            roots.append(Path(root))
     locked: list[str] = []
     for root in roots:
         lockfile = root / "skills-lock.json"
@@ -875,7 +826,7 @@ def _detect_mcp_uncomposed(context: DetectionContext) -> list[OperatorAction]:
     shared = Path(install) / ".mcp.json"
     if not shared.is_file():
         return []
-    targets = _rerooted_targets(context)
+    targets = _agent_root_targets(context)
     if not targets:
         return []
     without = [name for name, root in targets if not (root / ".mcp.json").is_file()]
@@ -1044,7 +995,6 @@ _DETECTORS: list[Callable[[DetectionContext], list[OperatorAction]]] = [
     _detect_provider_updates,
     _detect_missed_schedules,
     _detect_workspace_root_missing,
-    _detect_workspace_assets_stale,
     _detect_locked_skills_orphaned,
     _detect_legacy_env_ignored,
     _detect_mcp_uncomposed,
@@ -1073,8 +1023,6 @@ async def run_action(action_id: str, context: DetectionContext) -> tuple[dict[st
         return await _run_missed_schedules(context)
     if action_id == "legacy-env-ignored":
         return _run_legacy_env_cleanup(context)
-    if action_id.startswith(("workspace-root-missing:", "workspace-assets-stale:")):
-        return _run_workspace_repair(context)
     raise ValueError(f"unknown operator action id: {action_id}")
 
 
@@ -1142,40 +1090,6 @@ def _dismiss_github_star(context: DetectionContext) -> tuple[dict[str, Any], str
     """Snooze the ask for a while instead of nagging on every home visit."""
     _write_star_receipt(context, "later")
     return {"status": "later"}, "Maybe later."
-
-
-def _run_workspace_repair(context: DetectionContext) -> tuple[dict[str, Any], str]:
-    """Reconcile every root to the registry — the `--repair` pass, as a button.
-
-    Not scoped to the one workspace the tile named. `repair` is idempotent and
-    whole-install by design, and a root that drifted is rarely the only one: the
-    same interrupted sync or hand-edit usually touched its siblings. Repairing
-    everything is also what makes a second press a no-op rather than a partial fix.
-    """
-    from ciao.workspace_reroot import repair
-
-    config = context.config
-    runtime = context.runtime
-    if runtime is None:
-        raise RuntimeError("no runtime directory, so there is no receipt to repair against")
-    result = repair(
-        Path(config.workspace_root),
-        Path(runtime),
-        list(config.workspace_names()),
-    )
-    status = str(result.get("status", ""))
-    if status == "not_rerooted":
-        raise RuntimeError(str(result.get("reason") or "this install has not re-rooted yet"))
-    errors = result.get("errors") or []
-    if errors:
-        raise RuntimeError(str(errors[0].get("error", errors[0])))
-    repaired = result.get("repaired") or []
-    reported = result.get("reported") or []
-    if not repaired:
-        return result, "Nothing needed repairing."
-    drifts = ", ".join(sorted({str(item.get("drift", "")) for item in repaired}))
-    tail = f"; {len(reported)} left for a decision" if reported else ""
-    return result, f"Repaired {len(repaired)} item(s): {drifts}{tail}."
 
 
 def _comment_out_env_lines(path: Path, keys: set[str]) -> list[str]:

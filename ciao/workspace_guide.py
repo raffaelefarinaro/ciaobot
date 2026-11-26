@@ -17,9 +17,8 @@ more.
 What makes this delicate is not the rename. The guide carries the
 ``ciao:memory`` and ``ciao:profile`` regions — the durable facts the agent has
 remembered — so a migration that writes a fresh file instead of moving the
-existing one silently drops everything the user has taught it. That failure
-already has a scar in this codebase (``workspace_reroot``'s guide split), so
-the migration here only ever *renames*, never creates, and it keeps a backup
+existing one silently drops everything the user has taught it. The
+migration here only ever *renames*, never creates, and it keeps a backup
 of anything it had to merge.
 
 Compatibility: a Claude Code older than 2.1.277 stops seeing the guide, which
@@ -167,11 +166,9 @@ def _rename(
     """Move `source` onto `destination`, keeping the git tree clean.
 
     A plain ``Path.rename`` on a tracked guide leaves the workspace dirty —
-    ``T AGENTS.md`` / ``D CLAUDE.md`` — and `workspace_reroot.apply` refuses
-    to run against uncommitted tracked changes. Nothing else commits it, so
-    the re-root would be blocked on every later boot by a rename Ciaobot performed itself, with the
-    housekeeping strip telling the operator to commit a file they never
-    touched.
+    ``T AGENTS.md`` / ``D CLAUDE.md`` and the
+    housekeeping strip would tell the operator to commit a file they never
+    touched. Nothing else commits it.
 
     So: ``git mv`` and commit the rename when the guide is tracked, and a
     plain rename when it is not (no repo, or an untracked guide). The commit
@@ -184,8 +181,7 @@ def _rename(
             # The destination was tracked even though the source was not — a
             # tracked AGENTS.md replaced by an untracked CLAUDE.md. Its
             # removal is already staged, so without this commit the tree keeps
-            # `D AGENTS.md` plus an untracked AGENTS.md and the re-root's
-            # clean-tree gate refuses on every boot.
+            # `D AGENTS.md` plus an untracked AGENTS.md on every boot.
             _git(root, "add", "--", destination.name)
             _commit_guide_change(
                 root,
@@ -196,8 +192,8 @@ def _rename(
     moved = _git(root, "mv", "-f", source.name, destination.name)
     if moved.returncode != 0:
         # Fall back rather than refuse: a readable guide under the new name
-        # beats a migration that cannot proceed. The tree is left dirty and
-        # the re-root's gate will say so, which is the honest outcome.
+        # beats a migration that cannot proceed. The tree is left dirty,
+        # which is the honest outcome.
         logger.warning("git mv failed for %s: %s", source, moved.stderr.strip())
         source.rename(destination)
         return

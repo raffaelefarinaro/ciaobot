@@ -141,12 +141,7 @@ def test_control_plane_refresh_requires_a_complete_scan_before_publish(plane, mo
 def _reroot(tmp_path: Path) -> None:
     import json
 
-    receipt = tmp_path / ".runtime" / "migration" / "workspace-rooting.json"
-    receipt.parent.mkdir(parents=True, exist_ok=True)
-    receipt.write_text(json.dumps({"status": "migrated"}), encoding="utf-8")
-    from ciao.config import reset_reroot_cache
 
-    reset_reroot_cache()
 
 
 def test_refresh_writes_this_roots_index_after_the_re_rooting(
@@ -155,7 +150,7 @@ def test_refresh_writes_this_roots_index_after_the_re_rooting(
     """Before this it wrote the shared root, which the migration empties, so a
     migrated install's per-root indexes were never rebuilt by the MCP tool."""
     monkeypatch.setenv("CIAO_MEMORY_DIR", str(tmp_path / ".ciao"))
-    from ciao.config import CiaoConfig, WorkspaceConfig, reset_reroot_cache
+    from ciao.config import CiaoConfig, WorkspaceConfig
 
     for name in ("personal", "work"):
         _note(tmp_path / name / "memory-vault" / "People" / f"{name}.md", name.title())
@@ -167,7 +162,6 @@ def test_refresh_writes_this_roots_index_after_the_re_rooting(
         [tmp_path / "personal" / "memory-vault", tmp_path / "work" / "memory-vault"],
         owner="ciao",
     )
-    reset_reroot_cache()
     config = CiaoConfig(
         pwa_auth_token="t",
         workspace_root=tmp_path,
@@ -207,7 +201,7 @@ def test_adopted_refresh_indexes_locally_twice_and_preserves_cloud_index(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     from ciao import vault_index
-    from ciao.config import CiaoConfig, WorkspaceConfig, reset_reroot_cache
+    from ciao.config import CiaoConfig, WorkspaceConfig
     from ciao.fts_search import (
         adopted_vault_key_prefix,
         connected_db_path,
@@ -217,11 +211,6 @@ def test_adopted_refresh_indexes_locally_twice_and_preserves_cloud_index(
     )
 
     runtime = tmp_path / ".runtime"
-    (runtime / "migration").mkdir(parents=True)
-    (runtime / "migration" / "workspace-rooting.json").write_text(
-        json.dumps({"status": "migrated"}), encoding="utf-8"
-    )
-    reset_reroot_cache()
     cloud_root = tmp_path.parent / f"{tmp_path.name}-cloud-vault"
     note = cloud_root / "People" / "Garden.md"
     _note(note, "orchid")
@@ -295,88 +284,6 @@ def test_adopted_refresh_indexes_locally_twice_and_preserves_cloud_index(
         asyncio.run(plane.vault_index_refresh(principal))
     assert local_hits("citrine")
     assert sentinel.read_bytes() == b"cloud provider owns this exact index\r\n"
-
-
-def test_unmanaged_shared_layout_cli_and_server_serialize_one_capture(tmp_path, monkeypatch, capsys):
-    import os
-    from concurrent.futures import ThreadPoolExecutor
-    from threading import Event
-
-    from ciao import cli, fts_search
-    from ciao.config import CiaoConfig
-    from ciao.web.routes_api import _vault_graph_payload
-
-    runtime = tmp_path / ".runtime"
-    runtime.mkdir()
-    (runtime / "vault-index-ownership.json").write_text(
-        json.dumps({"roots": [{"path": str(tmp_path), "owner": "external"}]}),
-        encoding="utf-8",
-    )
-    vault = tmp_path / "memory-vault"
-    root = vault / "personal"
-    note = root / "Note.md"
-    _note(note, "oldword")
-    _note(vault / "work" / "Other.md", "siblingword")
-    (runtime / "workspaces.json").write_text(json.dumps([
-        {"name": name, "vault_root": f"memory-vault/{name}"} for name in ("personal", "work")
-    ]))
-    for key, value in {"CIAO_WORKSPACE": tmp_path, "CIAO_RUNTIME_ROOT": runtime,
-                       "CIAO_VAULT_ROOT": vault, "CIAO_MEMORY_DIR": runtime / "indexes",
-                       "CIAO_ACTIVE_WORKSPACE": "personal", "PWA_AUTH_TOKEN": "test"}.items():
-        monkeypatch.setenv(key, str(value))
-    config = CiaoConfig.from_env(dict(os.environ), export=False)
-    plane = CiaoControlPlane(config, project_chat_manager=SimpleNamespace(
-        _workspace_vault_root=config.workspace_vault_root), schedule_manager=SimpleNamespace())
-    principal = McpPrincipal(token_id="t", chat_id="c", project_id="p", workspace="personal", provider="claude")
-    captured = Event()
-    release = Event()
-    cli_attempt = Event()
-    first_result = Event()
-    reads = []
-    read = fts_search.read_connected_note
-
-    def read_once(base, relative):
-        value = read(base, relative)
-        if base == root:
-            reads.append(value)
-            if len(reads) == 1:
-                _note(note, "newword")
-                captured.set()
-                assert release.wait(5)
-            else:
-                assert first_result.wait(5)
-                assert [n["title"] for n in _vault_graph_payload(config, "personal")["nodes"]] == ["oldword"]
-        return value
-
-    monkeypatch.setattr(fts_search, "read_connected_note", read_once)
-    original_refresh = fts_search.refresh_connected_index
-
-    def cli_refresh(conn, *args):
-        conn.set_trace_callback(lambda sql: cli_attempt.set() if sql == "BEGIN IMMEDIATE" else None)
-        return original_refresh(conn, *args)
-
-    with ThreadPoolExecutor(2) as pool:
-        first = pool.submit(asyncio.run, plane.vault_search(principal, "oldword"))
-        assert captured.wait(5)
-        monkeypatch.setattr(fts_search, "refresh_connected_index", cli_refresh)
-        second = pool.submit(cli.main, ["vault-search", "newword"])
-        try:
-            assert cli_attempt.wait(3)
-            assert len(reads) == 1
-        finally:
-            release.set()
-        try:
-            assert first.result()["data"][0]["title"] == "oldword"
-        finally:
-            first_result.set()
-        assert second.result() == 0
-    assert len(reads) == 2
-    assert note.as_uri() in capsys.readouterr().out
-    note.unlink()
-    assert [n["title"] for n in _vault_graph_payload(config, "personal")["nodes"]] == ["newword"]
-    assert asyncio.run(plane.vault_index_refresh(principal))["ok"]
-    assert _vault_graph_payload(config, "personal")["nodes"] == []
-    assert not (runtime / "indexes" / fts_search.SEARCH_DB_NAME).exists()
 
 
 @pytest.mark.parametrize("operation", ["search", "refresh"])

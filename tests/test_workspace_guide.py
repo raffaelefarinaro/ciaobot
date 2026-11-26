@@ -243,7 +243,7 @@ def _status(root: Path) -> str:
 
 
 def _tracked_status(root: Path) -> str:
-    """Only tracked changes — what the re-root's clean-tree gate judges on.
+    """Only tracked changes — what a clean-tree check judges on.
 
     An untracked `AGENTS.md.bak` is expected after a merge and is ignored
     there (`--untracked-files=no`), so it must not fail these assertions.
@@ -256,12 +256,10 @@ def _tracked_status(root: Path) -> str:
 
 
 def test_a_tracked_guide_is_renamed_without_dirtying_the_tree(tmp_path: Path) -> None:
-    """Regression: a plain rename permanently blocked the workspace re-root.
+    """Regression: a plain rename left the tracked tree dirty.
 
     `ciao setup` commits the guide, so `Path.rename` left `T AGENTS.md` /
-    `D CLAUDE.md` behind. `workspace_reroot.apply` refuses to run against
-    uncommitted tracked changes and nothing else commits them, so the re-root
-    was refused on every later boot over a rename Ciaobot performed itself.
+    `D CLAUDE.md` behind, and nothing else commits them.
     """
     _git(tmp_path, "init", "-q", ".")
     (tmp_path / "CLAUDE.md").write_text(REGIONS, encoding="utf-8")
@@ -440,8 +438,7 @@ def test_a_tracked_destination_is_committed_even_when_the_source_is_not(
 
     A tracked AGENTS.md replaced by an untracked CLAUDE.md staged the
     destination's removal and then renamed without committing, leaving
-    `D AGENTS.md` plus an untracked AGENTS.md — a dirty tracked tree, so the
-    re-root's clean-tree gate refused on every boot.
+    `D AGENTS.md` plus an untracked AGENTS.md — a dirty tracked tree.
     """
     _git(tmp_path, "init", "-q", ".")
     (tmp_path / "AGENTS.md").write_text("# Guide\n", encoding="utf-8")

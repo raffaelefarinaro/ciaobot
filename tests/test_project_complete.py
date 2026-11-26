@@ -204,15 +204,12 @@ def test_configured_workspaces_drive_general_projects_and_discovery(tmp_path: Pa
         / "general"
         / "general.md"
     ).exists()
-    assert (
-        tmp_path
-        / "vaults"
-        / "client"
-        / "projects"
-        / "active"
-        / "general"
-        / "general.md"
-    ).exists()
+    # An adopted vault (a registered location that is not the standard one) is
+    # the owner's own notes folder: the General folder is created but no note is
+    # written into it.
+    client_general = tmp_path / "vaults" / "client" / "projects" / "active" / "general"
+    assert client_general.is_dir()
+    assert not (client_general / "general.md").exists()
 
     client_project = next(
         p for p in pcm.list_projects(workspace="client") if p.vault_folder == "acme"
@@ -749,7 +746,7 @@ def test_general_seed_never_overwrites_a_note_materialized_at_write_seam(
 ) -> None:
     config = _make_custom_workspace_config(tmp_path)
     pcm = _make_manager(tmp_path, config)
-    folder = pcm._vault_active_root("client") / "general"
+    folder = pcm._vault_active_root("home") / "general"
     folder.mkdir(parents=True, exist_ok=True)
     target = folder / "general.md"
     target.unlink(missing_ok=True)
@@ -768,7 +765,7 @@ def test_general_seed_never_overwrites_a_note_materialized_at_write_seam(
         return original_rename(src_fd, source, dst_fd, destination, expected_fd=expected_fd)
 
     monkeypatch.setattr(project_chats_module, "_publish_exclusive_at", sync_wins)
-    pcm._ensure_general_vault_folder("client")
+    pcm._ensure_general_vault_folder("home")
 
     assert target.read_text(encoding="utf-8") == "sync-owned"
 

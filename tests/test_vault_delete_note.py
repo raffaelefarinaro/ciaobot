@@ -13,12 +13,12 @@ from tests.session import signed_in
 
 @pytest.fixture
 def client(tmp_path):
-    vault = tmp_path / "memory-vault"
-    (vault / "personal").mkdir(parents=True)
+    vault = tmp_path / "personal" / "memory-vault"
+    vault.mkdir(parents=True)
 
     # A relates to B via frontmatter `related:` and a body markdown link also
     # points at B, so deleting B should touch A's frontmatter and body.
-    (vault / "personal" / "A.md").write_text(
+    (vault / "A.md").write_text(
         "---\n"
         "type: note\n"
         "related:\n"
@@ -27,11 +27,11 @@ def client(tmp_path):
         "# A\n\nSee [B](./B.md) for context.\n",
         encoding="utf-8",
     )
-    (vault / "personal" / "B.md").write_text(
+    (vault / "B.md").write_text(
         "---\ntype: note\n---\n# B\n",
         encoding="utf-8",
     )
-    (vault / "personal" / "Unrelated.md").write_text(
+    (vault / "Unrelated.md").write_text(
         "---\ntype: note\n---\n# Unrelated\n\nNothing to see here.\n",
         encoding="utf-8",
     )
@@ -41,7 +41,7 @@ def client(tmp_path):
         workspace_root=tmp_path,
         state_path=tmp_path / ".runtime",
         media_root=tmp_path / "media",
-        vault_root=vault,
+        vault_root=tmp_path / "memory-vault",
     )
     app = create_app(cfg)
     return signed_in(TestClient(app)), vault
@@ -54,17 +54,17 @@ def test_delete_note_removes_file_and_cleans_backlinks(client):
     to the note looking live while its target was gone.
     """
     c, vault = client
-    resp = c.delete("/api/vault/note?path=memory-vault/personal/B.md")
+    resp = c.delete("/api/vault/note?path=personal/memory-vault/B.md")
     assert resp.status_code == 200
     data = resp.json()
     assert data["ok"] is True
-    assert data["edited_backlinks"] == ["memory-vault/personal/A.md"]
+    assert data["edited_backlinks"] == ["personal/memory-vault/A.md"]
 
-    assert not (vault / "personal" / "B.md").exists()
-    a_text = (vault / "personal" / "A.md").read_text(encoding="utf-8")
+    assert not (vault / "B.md").exists()
+    a_text = (vault / "A.md").read_text(encoding="utf-8")
     assert "related:" not in a_text
     assert "See B for context." in a_text
-    unrelated_text = (vault / "personal" / "Unrelated.md").read_text(encoding="utf-8")
+    unrelated_text = (vault / "Unrelated.md").read_text(encoding="utf-8")
     assert unrelated_text == "---\ntype: note\n---\n# Unrelated\n\nNothing to see here.\n"
     # the staged cleanup must not leave temp litter behind
     assert list(vault.rglob("*.tmp")) == []
@@ -84,16 +84,16 @@ def test_delete_note_cleanup_failure_returns_500_and_keeps_vault_intact(client, 
         raise OSError("simulated cleanup failure")
 
     monkeypatch.setattr("ciao.web.routes_api.strip_references", boom)
-    a_before = (vault / "personal" / "A.md").read_text(encoding="utf-8")
-    b_before = (vault / "personal" / "B.md").read_text(encoding="utf-8")
+    a_before = (vault / "A.md").read_text(encoding="utf-8")
+    b_before = (vault / "B.md").read_text(encoding="utf-8")
 
-    resp = c.delete("/api/vault/note?path=memory-vault/personal/B.md")
+    resp = c.delete("/api/vault/note?path=personal/memory-vault/B.md")
 
     assert resp.status_code == 500
     assert "error" in resp.json()
     # nothing changed: references intact, target still on disk
-    assert (vault / "personal" / "A.md").read_text(encoding="utf-8") == a_before
-    assert (vault / "personal" / "B.md").read_text(encoding="utf-8") == b_before
+    assert (vault / "A.md").read_text(encoding="utf-8") == a_before
+    assert (vault / "B.md").read_text(encoding="utf-8") == b_before
 
 
 @pytest.mark.skipif(sys.platform == "win32", reason="a read-only directory refusing writes is POSIX permission semantics (os.getuid, chmod)")
@@ -109,12 +109,12 @@ def test_delete_note_unwritable_dir_aborts_before_touching_backlinks(client):
     if os.getuid() == 0:
         pytest.skip("chmod-based writability probe is meaningless as root")
     c, vault = client
-    personal = vault / "personal"
+    personal = vault
     a_before = (personal / "A.md").read_text(encoding="utf-8")
     b_before = (personal / "B.md").read_text(encoding="utf-8")
     personal.chmod(0o555)
     try:
-        resp = c.delete("/api/vault/note?path=memory-vault/personal/B.md")
+        resp = c.delete("/api/vault/note?path=personal/memory-vault/B.md")
         assert resp.status_code == 500
         assert "error" in resp.json()
     finally:
@@ -135,7 +135,7 @@ def test_delete_note_missing_path_400(client):
 
 def test_delete_note_not_found_404(client):
     c, _vault = client
-    resp = c.delete("/api/vault/note?path=memory-vault/personal/Nope.md")
+    resp = c.delete("/api/vault/note?path=personal/memory-vault/Nope.md")
     assert resp.status_code == 404
 
 
@@ -147,7 +147,7 @@ def test_delete_note_rejects_non_vault_prefix(client):
 
 def test_delete_note_rejects_non_markdown_extension(client):
     c, _vault = client
-    resp = c.delete("/api/vault/note?path=memory-vault/personal/A.md.bak")
+    resp = c.delete("/api/vault/note?path=personal/memory-vault/A.md.bak")
     assert resp.status_code in (400, 404, 415)
 
 

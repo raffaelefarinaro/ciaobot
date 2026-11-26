@@ -40,8 +40,7 @@ and long enough that ordinary concurrency never trips it.
 
 # Queue locks live outside the vault. The lock sits beside the queue today only
 # because it was simplest, but the vault is user-owned content: a stray
-# ``*.lock`` there pollutes the tree and broke the re-rooting round-trip's
-# byte-identical invariant. Keep the lock file in a stable per-install
+# ``*.lock`` there pollutes the tree and broke byte-identical round trips. Keep the lock file in a stable per-install
 # directory keyed by the resolved queue path, so the vault stays untouched.
 _QUEUE_LOCK_DIR_ENV = "CIAO_QUEUE_LOCK_DIR"
 

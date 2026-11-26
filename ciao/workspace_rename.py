@@ -124,42 +124,38 @@ def _rename_owned(config: Any, old: str, new: str, projects: Any, schedules: Any
             )
 
     move: tuple[Path, Path] | None = None
-    if config._rerooted():
-        source = Path(config.agent_root(old))
-        if source != Path(config.workspace_root):
-            dest = Path(config.workspace_root) / new
-            if dest.exists() or dest.is_symlink():
-                raise ValueError(
-                    f"cannot rename '{old}': '{dest}' is already in the way"
-                )
-            if source.is_symlink():
-                raise ValueError(
-                    f"cannot rename '{old}': '{source}' is a symlink; "
-                    "move its target by hand"
-                )
-            if source.exists():
-                try:
-                    same_device = (
-                        os.stat(source).st_dev == os.stat(source.parent).st_dev
-                    )
-                except OSError as exc:
-                    raise ValueError(
-                        f"cannot rename '{old}': cannot inspect '{source}' ({exc})"
-                    ) from exc
-                if not same_device:
-                    raise ValueError(
-                        f"'{old}' lives on another filesystem than the install; "
-                        "a move there cannot be atomic, so rename it by hand"
-                    )
-                move = (source, dest)
-
-    search_prefix: str | None = None
-    if config._rerooted():
-        from ciao.fts_search import vault_key_prefix  # noqa: PLC0415
-
-        search_prefix = vault_key_prefix(
-            Path(config.workspace_vault_root(old)), Path(config.workspace_root)
+    source = Path(config.agent_root(old))
+    dest = Path(config.workspace_root) / new
+    if dest.exists() or dest.is_symlink():
+        raise ValueError(
+            f"cannot rename '{old}': '{dest}' is already in the way"
         )
+    if source.is_symlink():
+        raise ValueError(
+            f"cannot rename '{old}': '{source}' is a symlink; "
+            "move its target by hand"
+        )
+    if source.exists():
+        try:
+            same_device = (
+                os.stat(source).st_dev == os.stat(source.parent).st_dev
+            )
+        except OSError as exc:
+            raise ValueError(
+                f"cannot rename '{old}': cannot inspect '{source}' ({exc})"
+            ) from exc
+        if not same_device:
+            raise ValueError(
+                f"'{old}' lives on another filesystem than the install; "
+                "a move there cannot be atomic, so rename it by hand"
+            )
+        move = (source, dest)
+
+    from ciao.fts_search import vault_key_prefix  # noqa: PLC0415
+
+    search_prefix: str | None = vault_key_prefix(
+        Path(config.workspace_vault_root(old)), Path(config.workspace_root)
+    )
 
     if updated is None:
         updated = preview_renamed_config(existing, old=old, new=new)

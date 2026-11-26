@@ -156,7 +156,7 @@ def test_rename_rollback_does_not_clobber_newer_receipt_revision(tmp_path: Path,
 
 
 def test_archive_restore_does_not_register_workspace_progress(tmp_path: Path) -> None:
-    client, config, _pcm, _schedules = _app(tmp_path, rerooted=False)
+    client, config, _pcm, _schedules = _app(tmp_path)
     runtime = Path(config.state_path).parent
     ensure_receipt(runtime, established_install=True)
     receipt = read_receipt(runtime)

@@ -116,7 +116,7 @@ def _is_test_fixture(rel_path: str) -> bool:
     are real credentials.
 
     The user-data root is matched at ANY depth, not only as the first segment:
-    after the per-workspace re-rooting a vault is
+    a vault is
     ``<install>/<workspace>/memory-vault``, so a first-segment test would hand
     the exemption to every ``<workspace>/memory-vault/tests/`` folder — a real
     gap, since that is where the notes now live.

@@ -9,14 +9,13 @@ from pathlib import Path
 
 import pytest
 
-from ciao.config import CiaoConfig, WorkspaceConfig, reset_reroot_cache
+from ciao.config import CiaoConfig, WorkspaceConfig
 from ciao.schedules import ScheduleStore
 from ciao.sessions import StateStore
 from ciao.transcripts import TranscriptStore
 from ciao.web.project_chats import ProjectChatManager, ProjectInfo
 from ciao.webhooks import WebhookStore
 from ciao.workspace_rename import rename_workspace
-from ciao.workspace_reroot import write_receipt
 
 
 class _Projects:
@@ -54,12 +53,8 @@ def _shared_config(tmp_path: Path, names: list[str]) -> CiaoConfig:
     )
 
 
-def _rerooted_config(tmp_path: Path, vault_roots: dict[str, str]) -> CiaoConfig:
+def _per_root_config(tmp_path: Path, vault_roots: dict[str, str]) -> CiaoConfig:
     runtime_root = tmp_path / ".runtime"
-    write_receipt(
-        runtime_root, {"status": "migrated", "workspaces": list(vault_roots)}
-    )
-    reset_reroot_cache()
     return CiaoConfig(
         pwa_auth_token="test-token",
         workspace_root=tmp_path,
@@ -181,10 +176,10 @@ def test_rename_rewrites_registry_projects_schedules_and_webhooks(
     assert not (tmp_path / "santo").exists()
 
 
-def test_rerooted_rename_moves_the_agent_root_and_the_vault_prefix(
+def test_per_root_rename_moves_the_agent_root_and_the_vault_prefix(
     tmp_path: Path,
 ) -> None:
-    config = _rerooted_config(
+    config = _per_root_config(
         tmp_path, {"personal": "personal", "work": "work"}
     )
     assert (
@@ -215,7 +210,7 @@ def test_rerooted_rename_moves_the_agent_root_and_the_vault_prefix(
 def test_absolute_vault_root_is_not_rewritten(tmp_path: Path) -> None:
     external = tmp_path / "ext-vault"
     external.mkdir()
-    config = _rerooted_config(
+    config = _per_root_config(
         tmp_path, {"personal": str(external), "work": "work"}
     )
     (tmp_path / "personal").mkdir()
@@ -277,7 +272,7 @@ def test_invalid_name_collision_archived_name_and_busy_chat_write_nothing(
 def test_failed_persist_after_the_directory_rename_moves_it_back(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    config = _rerooted_config(
+    config = _per_root_config(
         tmp_path, {"personal": "personal", "work": "work"}
     )
     (tmp_path / "personal").mkdir()
@@ -474,11 +469,11 @@ def test_failed_webhook_write_restores_schedules_and_projects(
     _assert_rolled_back(config, tmp_path, projects, ids, before)
 
 
-def test_failed_webhook_write_restores_everything_on_a_rerooted_install(
+def test_failed_webhook_write_restores_everything_on_a_per_root_install(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """A webhook failure after the other stores restores all of them on re-root."""
-    config = _rerooted_config(
+    """A webhook failure after the other stores restores all of them."""
+    config = _per_root_config(
         tmp_path, {"personal": "personal", "work": "work"}
     )
     (tmp_path / "personal" / "memory-vault").mkdir(parents=True)
@@ -609,7 +604,7 @@ def test_rename_evicts_providers_before_the_agent_root_moves(
 ) -> None:
     # #1208: the eviction runs before the directory move, so a provider is never
     # rebuilt from a root that is about to change under it.
-    config = _rerooted_config(tmp_path, {"personal": "personal", "work": "work"})
+    config = _per_root_config(tmp_path, {"personal": "personal", "work": "work"})
     (tmp_path / "personal" / "memory-vault").mkdir(parents=True)
     config.persist_workspace_registry()
     projects = _Projects()

@@ -44,7 +44,7 @@ def _make_manager(tmp_path: Path) -> tuple[ProjectChatManager, ScheduleStore]:
         state_path=runtime / "state.json",
         media_root=runtime / "media",
         workspaces={
-            "personal": WorkspaceConfig(name="personal", vault_root="memory-vault/personal")
+            "personal": WorkspaceConfig(name="personal", vault_root="personal/memory-vault")
         },
     )
     pcm = attach_stub_mcp(
@@ -273,7 +273,7 @@ def test_completing_a_project_ends_the_loops_of_its_chats(tmp_path: Path) -> Non
 def test_archiving_a_workspace_ends_its_loops_and_archives_no_loop_row(
     tmp_path: Path,
 ) -> None:
-    client, config, pcm, store = _app(tmp_path, rerooted=True)
+    client, config, pcm, store = _app(tmp_path)
     pcm.schedule_store = store
     general = next(p for p in pcm.list_projects("work") if p.is_auto)
     chat = pcm.create_chat(general.project_id, title="work loop chat")
@@ -606,7 +606,7 @@ def test_a_disk_error_does_not_abort_the_archived_transcript_prune(
     project = pcm.create_project("Holder", workspace="personal")
     chat = pcm.create_chat(project.project_id, title="Gone")
     chat.archived = True
-    chat.archive_path = "memory-vault/personal/Logs/Chats/gone/claude/none.md"
+    chat.archive_path = "personal/memory-vault/Logs/Chats/gone/claude/none.md"
     for root in pcm._config.chats_roots():
         root.mkdir(parents=True, exist_ok=True)
     _broken_store(store, monkeypatch)
@@ -691,7 +691,7 @@ def test_the_archived_transcript_prune_ends_the_loop_of_a_chat_whose_transcript_
     mine = _loop(store, chat.chat_id)
     other = _loop(store, "chat-kept")
     chat.archived = True
-    chat.archive_path = "memory-vault/personal/Logs/Chats/gone/claude/none.md"
+    chat.archive_path = "personal/memory-vault/Logs/Chats/gone/claude/none.md"
     for root in pcm._config.chats_roots():
         root.mkdir(parents=True, exist_ok=True)
 

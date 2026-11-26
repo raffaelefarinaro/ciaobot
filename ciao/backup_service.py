@@ -319,7 +319,7 @@ def _scope_summary(config) -> str:
         segments = [part for part in prefix.split("/") if part and part != "*"]
         durable = next((s for s in segments if s in backup_scope.DURABLE_ROOTS), None)
         if durable is None:
-            durable = segments[0]
+            durable = backup_scope.GUIDE_NAME if segments[-1] == backup_scope.GUIDE_NAME else segments[0]
         if durable not in names:
             names.append(durable)
     names.extend(name for name in backup_scope.ALLOWED_FILES if name in prefixes)

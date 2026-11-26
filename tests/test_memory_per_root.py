@@ -28,8 +28,8 @@ def _config(tmp_path: Path) -> CiaoConfig:
         state_path=tmp_path / ".runtime" / "state.json",
         media_root=tmp_path / ".runtime" / "media",
         workspaces={
-            "personal": WorkspaceConfig(name="personal", vault_root="memory-vault/personal"),
-            "work": WorkspaceConfig(name="work", vault_root="memory-vault/work"),
+            "personal": WorkspaceConfig(name="personal", vault_root="personal/memory-vault"),
+            "work": WorkspaceConfig(name="work", vault_root="work/memory-vault"),
         },
     )
 
@@ -67,7 +67,7 @@ def test_memory_status_resolves_the_guide_from_agent_root(tmp_path: Path) -> Non
     per-workspace guide without any change here.
     """
     config = _config(tmp_path)
-    _write_guide(config.workspace_root, memory=["one lesson"], profile=["terse"])
+    _write_guide(config.agent_root("personal"), memory=["one lesson"], profile=["terse"])
     plane = _plane(config)
 
     status = plane.memory_status(_principal("personal"))["data"]
@@ -80,7 +80,7 @@ def test_memory_status_resolves_the_guide_from_agent_root(tmp_path: Path) -> Non
 def test_memory_update_writes_the_guide_under_agent_root(tmp_path: Path) -> None:
     """memory_update edits the guide under ``agent_root(workspace)``."""
     config = _config(tmp_path)
-    _write_guide(config.workspace_root, memory=[], profile=[])
+    _write_guide(config.agent_root("personal"), memory=[], profile=[])
     plane = _plane(config)
 
     result = plane.memory_update(
@@ -104,8 +104,8 @@ def _stamp_cap(root: Path, region: str, cap: int) -> None:
 def test_memory_status_measures_against_the_marker_cap(tmp_path: Path) -> None:
     """A region stamped cap=1000 holding 900 chars is 90%, not a share of the default."""
     config = _config(tmp_path)
-    _write_guide(config.workspace_root, memory=["m" * 899], profile=["p" * 10])
-    _stamp_cap(config.workspace_root, "memory", 1000)
+    _write_guide(config.agent_root("personal"), memory=["m" * 899], profile=["p" * 10])
+    _stamp_cap(config.agent_root("personal"), "memory", 1000)
     plane = _plane(config)
 
     regions = plane.memory_status(_principal("personal"))["data"]["regions"]
@@ -117,8 +117,8 @@ def test_memory_status_measures_against_the_marker_cap(tmp_path: Path) -> None:
 
 def test_memory_update_reports_over_cap_against_the_marker_cap(tmp_path: Path) -> None:
     config = _config(tmp_path)
-    _write_guide(config.workspace_root, memory=["m" * 900], profile=[])
-    _stamp_cap(config.workspace_root, "memory", 1000)
+    _write_guide(config.agent_root("personal"), memory=["m" * 900], profile=[])
+    _stamp_cap(config.agent_root("personal"), "memory", 1000)
     plane = _plane(config)
 
     result = plane.memory_update(
@@ -147,8 +147,8 @@ def test_marker_cap_ignores_a_cap_it_cannot_use(tmp_path: Path, cap: str) -> Non
 @pytest.mark.parametrize("cap", ["0", "-5", "abc"])
 def test_memory_update_with_an_unusable_marker_cap(tmp_path: Path, cap: str) -> None:
     config = _config(tmp_path)
-    _write_guide(config.workspace_root, memory=[], profile=[])
-    guide = config.workspace_root / "CLAUDE.md"
+    _write_guide(config.agent_root("personal"), memory=[], profile=[])
+    guide = config.agent_root("personal") / "CLAUDE.md"
     guide.write_text(
         guide.read_text(encoding="utf-8").replace(
             f"cap={DEFAULT_MEMORY_CHAR_LIMIT}", f"cap={cap}"
@@ -176,9 +176,9 @@ def test_memory_update_with_an_unusable_marker_cap(tmp_path: Path, cap: str) -> 
 def test_audit_reports_one_entry_per_registered_guide(tmp_path: Path) -> None:
     """``run_os_audit`` emits one guide entry per registered workspace."""
     config = _config(tmp_path)
-    _write_guide(config.workspace_root, memory=["shared"], profile=[])
+    _write_guide(config.agent_root("personal"), memory=["shared"], profile=[])
     for name in ("personal", "work"):
-        (config.workspace_root / "memory-vault" / name).mkdir(parents=True, exist_ok=True)
+        (config.agent_root(name) / "memory-vault").mkdir(parents=True, exist_ok=True)
 
     report = run_os_audit(
         workspace_dir=config.workspace_root,
@@ -198,9 +198,9 @@ def test_audit_over_cap_is_attributed_per_workspace(tmp_path: Path) -> None:
     # Personal is over the memory cap; work is not. Seeded well above the
     # shipped default so a future default bump cannot silence this fixture.
     huge = ["x" * 3600]
-    _write_guide(config.workspace_root, memory=huge, profile=[])
-    (config.workspace_root / "memory-vault" / "personal").mkdir(parents=True, exist_ok=True)
-    (config.workspace_root / "memory-vault" / "work").mkdir(parents=True, exist_ok=True)
+    _write_guide(config.agent_root("personal"), memory=huge, profile=[])
+    (config.agent_root("personal") / "memory-vault").mkdir(parents=True, exist_ok=True)
+    (config.agent_root("work") / "memory-vault").mkdir(parents=True, exist_ok=True)
 
     report = run_os_audit(
         workspace_dir=config.workspace_root,
@@ -236,7 +236,7 @@ def _seeded(tmp_path: Path) -> CiaoConfig:
             f"---\ntype: note\ntitle: {name}\n---\n# {name}\n", encoding="utf-8", newline=""
         )
     (tmp_path / ".runtime").mkdir(parents=True, exist_ok=True)
-    _write_guide(config.workspace_root, memory=["one lesson"], profile=["terse"])
+    _write_guide(config.agent_root("personal"), memory=["one lesson"], profile=["terse"])
     return config
 
 
@@ -321,8 +321,8 @@ def test_a_named_workspace_audits_its_own_notes_and_not_the_others(
     personal = _audit(config, workspace_name="personal", scope="workspace")
     work = _audit(config, workspace_name="work", scope="workspace")
 
-    assert Path(personal["setup_audit"]["vault_root"]).as_posix().endswith("memory-vault/personal")
-    assert Path(work["setup_audit"]["vault_root"]).as_posix().endswith("memory-vault/work")
+    assert Path(personal["setup_audit"]["vault_root"]).as_posix().endswith("personal/memory-vault")
+    assert Path(work["setup_audit"]["vault_root"]).as_posix().endswith("work/memory-vault")
     assert work["vault_hygiene"]["broken_markdown_links"], "the defect must be found"
     assert personal["vault_hygiene"]["broken_markdown_links"] == [], (
         "a personal run must not report a defect that only exists in work"
@@ -342,22 +342,6 @@ def test_a_named_workspace_reports_only_its_own_guide(tmp_path: Path) -> None:
 def test_an_unregistered_scope_is_rejected(tmp_path: Path) -> None:
     with pytest.raises(ValueError, match="scope must be one of"):
         _audit(_seeded(tmp_path), scope="everything")
-
-
-def test_agent_vault_root_is_the_shared_vault_until_the_install_re_roots(
-    tmp_path: Path,
-) -> None:
-    """The aggregate files, not the notes — and the distinction is the point.
-
-    ``workspace_vault_root`` is where a workspace's NOTES live, a subtree of one
-    shared vault today. ``agent_vault_root`` is where the INDEX.md ABOUT them
-    lives, which is one shared pair today and one pair per root afterwards.
-    """
-    config = _seeded(tmp_path)
-
-    assert config.agent_vault_root("personal") == config.vault_root
-    assert config.agent_vault_root("work") == config.vault_root
-    assert config.workspace_vault_root("personal") != config.agent_vault_root("personal")
 
 
 # -- #2501: a workspace-scoped audit reads only that workspace's MEMORY.md ----
@@ -399,7 +383,7 @@ def test_a_named_workspace_reads_only_its_own_memory_md(
     """A scoped rule audit must not open another workspace's MEMORY.md (#2501)."""
     config = _config(tmp_path)
     _write_guide(
-        config.workspace_root,
+        config.agent_root("personal"),
         memory=["Never use rtk for shell commands."],
         profile=[],
     )

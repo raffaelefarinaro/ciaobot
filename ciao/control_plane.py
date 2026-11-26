@@ -1545,10 +1545,8 @@ class CiaoControlPlane:
     def _index_stamp(self, principal: AgentPrincipal) -> str:
         """Workspace to stamp on scanned entries, or "" to infer from the path.
 
-        Empty before the re-rooting: the shared vault holds every workspace, so
-        the first-path-segment inference is what labels them. The workspace name
-        afterwards, because a root's vault holds exactly one workspace and its
-        first segment is a folder name.
+        The workspace name, because a root's vault holds exactly one workspace and
+        its first segment is a folder name.
         """
         workspace = self._workspace(principal)
         if not workspace:
@@ -1565,9 +1563,8 @@ class CiaoControlPlane:
         """The install root, which every stored search key is relative to.
 
         Falls back to the configured vault root's parent, which is the install
-        root in both layouts: before the re-rooting the vault sits directly under
-        it, and after it ``config.vault_root`` still names that same path even
-        though each root now owns its own vault. The fallback exists because
+        root: ``config.vault_root`` names that path even though each root owns
+        its own vault. The fallback exists because
         several call sites build a minimal config stub.
         """
         base = getattr(self.config, "workspace_root", None)
@@ -1679,12 +1676,9 @@ class CiaoControlPlane:
     async def vault_index_refresh(self, principal: AgentPrincipal) -> dict[str, Any]:
         """Rebuild the entity index covering this chat, and its search index.
 
-        The index root is ``agent_vault_root(workspace)``, which is correct in
-        both layouts and for the same reason each time: it is the vault whose
-        INDEX.md this chat's entity lookup reads. Before the re-rooting that is
-        the ONE shared index, holding every workspace's prefixed paths and
-        filtered per workspace at read time; after it, this root's own index,
-        which needs no prefix because the root holds one vault.
+        The index root is ``agent_vault_root(workspace)``, which is the vault whose
+        INDEX.md this chat's entity lookup reads: this root's own index, which
+        needs no prefix because the root holds one vault.
 
         Deliberately not ``_workspace_vault_root``: before the migration that is
         a subtree of the shared vault, and writing an index there produced one
@@ -6154,8 +6148,7 @@ class CiaoControlPlane:
         # Root at the principal's own agent root, not the install root: sibling
         # workspaces live beside it, and both the existence check and the
         # suggestion walk would otherwise read across the workspace boundary.
-        # Pre-reroot this resolves to the install root itself, so nothing
-        # changes there; post-reroot it is the workspace's own directory.
+        # This is the workspace's own directory.
         root = Path(self.config.agent_root(workspace)).resolve()
         try:
             target = self._safe_relative(root, path, must_exist=True)

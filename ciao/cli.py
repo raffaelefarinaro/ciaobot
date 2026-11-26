@@ -928,11 +928,8 @@ def ensure_vault_git(root: Path, *, initialize_if_missing: bool = True) -> None:
     """
     root = Path(root).expanduser().resolve()
     if not root.is_dir():
-        # Nothing to initialise, and nothing to invent. After the re-rooting the
-        # shared vault path is gone and each root holds its own inside the same
-        # install repo, so scaffolding one here would recreate exactly the
-        # directory the migration removed. `_ensure_vault_gitignore` used to try,
-        # and `ciao setup` died on the FileNotFoundError.
+        # Nothing to initialise, and nothing to invent: each root holds its own vault,
+        # so scaffolding the install-level path here would invent a directory.
         print(f"vault {root} does not exist; skipping vault git init", file=sys.stderr)
         return
     if shutil.which("git") is None:
@@ -1629,17 +1626,8 @@ def _setup_selected_workspace(
 
     runtime_root = root / RUNTIME_DIR_NAME
 
-    # A brand-new install is created in the PER-ROOT layout directly, rather than
-    # in the shared one and then migrated. Setup used to scaffold
-    # `memory-vault/personal` plus agent assets at the install root, so every new
-    # user was manufactured into exactly the state the re-rooting exists to fix —
-    # and met a blocking "migrate now" tile on first boot. The migration engine
-    # then had an audience that regenerated itself.
-    #
-    # The receipt is written here, before anything reads `agent_roots_for`, because
-    # it is what makes `agent_root()` answer per-root. Files in the nested layout
-    # with a gate that still says "shared" is the one combination that breaks
-    # everything downstream.
+    # A brand-new install is created in the per-root layout directly: the vault
+    # at `<name>/<leaf>`, agent assets inside the workspace's own folder.
     fresh_per_root = (
         registered_vaults is None
         and vault_mode != "existing"
@@ -1647,41 +1635,21 @@ def _setup_selected_workspace(
         and not detect_nested_workspaces(vault_path)
         and not vault_path.exists()
     )
-    # A retry after the journal published the registry: first_setup is false and
-    # the registry now exists, so neither flag above holds. The receipt write is
-    # not fsynced like the registry, so a crash can keep the registry and lose
-    # the receipt; record it again then (and only then).
-    published_retry = (
-        _transaction is not None
-        and bool(_transaction.data["registry"].get("published"))
-        and registered_vaults is not None
-        and vault_mode == "existing"
-    )
-    if published_retry and not (fresh_per_root or fresh_adopted_notes):
-        from ciao.workspace_reroot import mark_born_per_root, read_receipt as read_rooting_receipt
-
-        if read_rooting_receipt(runtime_root) is None:
-            written.extend(mark_born_per_root(root, runtime_root, [name]))
     if fresh_per_root or fresh_adopted_notes:
-        from ciao.workspace_reroot import mark_born_per_root
-
         if fresh_per_root:
             vault_path = root / name / vault_path.name
         # Adopting notes is also a new install, not an upgrade target. Keep its
         # vault path exactly where the user chose it; only agent assets get a
-        # per-workspace root. Otherwise first startup snapshots their notes in
-        # Git and tries to relocate them through the legacy re-root migration.
-        written.extend(mark_born_per_root(root, runtime_root, [name]))
+        # per-workspace root.
         resolved_vault_path = vault_path.resolve()
         try:
             stored_vault_root = resolved_vault_path.relative_to(root).as_posix()
         except ValueError:
             stored_vault_root = str(resolved_vault_path)
         # The registry has to exist before the asset loop too: `agent_roots_for`
-        # reads the receipt for the gate and the REGISTRY for the names, and with
-        # no registry it falls back to the install root — which is how the first
-        # attempt at this still put `.claude/`, `commands/` and a stock CLAUDE.md
-        # beside the nested vault instead of inside the workspace's own folder.
+        # reads the REGISTRY for the names, and with no registry it falls back to
+        # the install root — which would put `.claude/`, `commands/` and a stock
+        # guide beside the nested vault instead of inside the workspace's folder.
         # The later branch is `_write_if_missing`, so this does not fight it.
         registry_text = json.dumps(
                 [{
@@ -1729,12 +1697,8 @@ def _setup_selected_workspace(
         sync_workspace_skills,
     )
 
-    # Agent assets go to the AGENT ROOTS, which is the install root before the
-    # re-rooting and one directory per workspace after it. Scaffolding the
-    # install root unconditionally put a stock CLAUDE.md, stock commands and a
-    # subagents/ directory beside the real per-root ones on every migrated
-    # install — `ciao setup --load-launchd` is what the installer runs, so it
-    # happened on every reinstall.
+    # Agent assets go to the AGENT ROOTS, one directory per workspace, never the
+    # install root.
     for asset_root, _name in agent_roots_for(root, runtime_root):
         asset_root.mkdir(parents=True, exist_ok=True)
         for asset_dir in ("subagents", "commands"):
@@ -2288,8 +2252,7 @@ def _search_vault(args: argparse.Namespace) -> int:
     auth_runtime = configured_runtime_root(source_env)
     registration = fts_search.ConnectedRegistration.capture(auth_runtime) if not args.logs else None
     vault_root = _resolve_vault_root(args.vault_root)
-    # The re-rooting promotes Logs/ out of the vault, so the archive root cannot
-    # be derived from the vault root on a migrated install.
+    # The archive root is not derived from the vault root.
     from ciao.config import logs_root_for, logs_roots_for
 
     # The install root defines BOTH the stored-key base and the database: an
@@ -2313,8 +2276,8 @@ def _search_vault(args: argparse.Namespace) -> int:
     # Every archive root gets indexed, so transcripts written under a workspace's
     # own Logs/ are searchable as well as the shared Logs/. `--logs` answers from
     # this vault's workspace archive plus the shared one, never a sibling's.
-    all_logs_roots = logs_roots_for(key_base, vault_root, runtime_root)
-    shared_logs = logs_root_for(key_base, vault_root, runtime_root)
+    all_logs_roots = logs_roots_for(key_base, runtime_root)
+    shared_logs = logs_root_for(key_base)
     own_logs = vault_root.parent / "Logs"
     search_logs_roots = [
         root for root in all_logs_roots if root in (own_logs, shared_logs)
@@ -2325,7 +2288,7 @@ def _search_vault(args: argparse.Namespace) -> int:
     # the key base differs between installs.
     from ciao.config import configured_connected_workspace
 
-    connected = (configured_connected_workspace(source_env, vault_root, implicit_root=args.vault_root is None)
+    connected = (configured_connected_workspace(source_env, vault_root)
                  if not args.logs else None)
     if connected:
         vault_root = connected.root
@@ -2406,8 +2369,7 @@ def _search_vault(args: argparse.Namespace) -> int:
             print(f"Incremental indexing error: {exc}", file=sys.stderr)
 
         # Scope the query to this vault's key prefix. The database is shared and
-        # the migration rebuild deliberately fills it with every re-rooted
-        # workspace's rows, while the prune now preserves sibling roots — so an
+        # it holds every workspace's rows, and the prune preserves sibling roots — so an
         # unscoped query returned another workspace's note titles and snippets to
         # whoever ran `ciao vault-search` here. Same filter the control plane's
         # vault_search applies.
@@ -2417,7 +2379,7 @@ def _search_vault(args: argparse.Namespace) -> int:
                 args.query,
                 limit=args.limit,
                 # Same reason the vault query is scoped: the FTS database
-                # deliberately holds rows from every re-rooted root, so an
+                # holds rows from every root, so an
                 # unscoped search returns another workspace's transcripts.
                 path_prefixes=tuple(
                     fts_search.logs_key_prefix(root, key_base) for root in search_logs_roots
@@ -2440,8 +2402,7 @@ def _search_vault(args: argparse.Namespace) -> int:
 
     print(f"### Search Results for: {args.query}\n")
     for result in results:
-        # Keys are relative to `key_base`, not to the vault's parent: on a
-        # re-rooted install those differ by the workspace segment, so joining
+        # Keys are relative to `key_base`, not to the vault's parent: those differ by the workspace segment, so joining
         # against the parent printed a `file://` link that does not exist.
         abs_path = (vault_root / result["path"].removeprefix(namespace) if namespace
                     else key_base / result["path"])
@@ -2512,17 +2473,12 @@ def _install_root_for_vault(vault_root: Path) -> Path | None:
     """The install a vault belongs to, for cross-root link validation.
 
     Per-root layout puts a vault at ``<install>/<workspace>/memory-vault``, so
-    the install is two levels up — and only when the receipt says this install
-    re-rooted. Guessing on a shared-layout install would excuse links that
-    really do escape the vault.
+    the install is two levels up — and only when that folder holds a runtime
+    directory. Guessing elsewhere would excuse links that really do escape the
+    vault.
     """
-    from ciao.workspace_reroot import read_receipt  # noqa: PLC0415
-
     candidate = vault_root.parent.parent
-    runtime = candidate / ".runtime"
-    if read_receipt(runtime) is None:
-        return None
-    return candidate
+    return candidate if (candidate / ".runtime").is_dir() else None
 
 
 def _vault_lint_command(args: argparse.Namespace) -> int:
@@ -3001,7 +2957,7 @@ def _resolve_workspace_and_vaults(
 
     A scheduled run exports ``CIAO_ACTIVE_WORKSPACE`` (the logical workspace
     name) next to a ``CIAO_VAULT_ROOT`` that points at the install-wide
-    shared vault on layouts that have not re-rooted yet. Appending to that
+    vault folder name. Appending to that
     raw value would file every workspace's proposals into one stray queue
     the review UI never reads, so an active workspace name is resolved
     through the workspace registry instead — the same authority the PWA's
@@ -3009,7 +2965,7 @@ def _resolve_workspace_and_vaults(
     manual invocations.
 
     The third value is where ``entity-types.yaml`` and ``VOCABULARY.md`` live:
-    the agent vault root, which is NOT the notes root before the re-rooting. A
+    the agent vault root, which can differ from the notes root (an adopted vault). A
     registry read from the notes root is the stock list on every such install,
     so a caller that measures notes against it (the category-cluster pass) sees
     every category the owner already added as unlisted. In the explicit-argument
@@ -4580,7 +4536,7 @@ def main(argv: list[str] | None = None) -> int:
         return _dispatch(argv_list)
     except Exception as exc:
         # The import lives in the handler so the agent fast path never pays for it.
-        from ciao.workspace_reroot import RuntimeStateUnreadable  # noqa: PLC0415
+        from ciao.config import RuntimeStateUnreadable  # noqa: PLC0415
 
         if not isinstance(exc, RuntimeStateUnreadable):
             raise

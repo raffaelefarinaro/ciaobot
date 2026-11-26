@@ -66,7 +66,7 @@ def _status(value: object) -> str:
 @dataclass(frozen=True)
 class Finding:
     receipt: str
-    problem: str  # "missing" | "unreadable" | "status:<value>" | "former_client"
+    problem: str  # "missing" | "unreadable" | "status:<value>" | "former_client" | "old_layout"
     runtime_root: str = ""
 
     @property
@@ -76,6 +76,14 @@ class Finding:
                 "This install was a client of another engine; remove "
                 f"{self.runtime_root}/node_state.json (and decide which engine owns the vault) "
                 "before upgrading."
+            )
+        if self.problem == "old_layout":
+            return (
+                "This install still uses the old shared layout; 2.0 needs one folder per workspace. "
+                "Before upgrading, create <install>/<workspace name>/ for each workspace and move "
+                "that workspace's AGENTS.md, .mcp.json, skills/, commands/ and notes folder into it "
+                "by hand (a notes folder kept in place may stay where it is if the workspace's "
+                "vault_root in .runtime/workspaces.json points at it), then upgrade again."
             )
         remedy = next(text for pattern, text in _REMEDY.items() if fnmatch(self.receipt, pattern))
         what = {
@@ -134,6 +142,41 @@ def _former_client(runtime_root: Path) -> bool:
     )
 
 
+_ROOT_ASSETS = ("AGENTS.md", "CLAUDE.md", ".mcp.json", "skills", "commands")
+
+
+def _old_shared_layout(install_root: Path, runtime_root: Path) -> bool:
+    """True when this install holds old shared content and no workspace folder.
+
+    2.0 keeps each workspace in ``<install>/<name>/``. An install with a
+    workspace registry, or a guide or skill catalog at its root, that has no such
+    folder for any workspace still uses the shared layout.
+    """
+    names: list[str] = []
+    state, _ = _load(runtime_root / "workspaces.json")
+    registered = False
+    if state == "ok" or (runtime_root / "workspaces.json").is_file():
+        try:
+            entries = json.loads((runtime_root / "workspaces.json").read_text(encoding="utf-8"))
+        except (OSError, ValueError, RecursionError):
+            entries = None
+        if isinstance(entries, list):
+            registered = True
+            names = [
+                str(e["name"]).strip()
+                for e in entries
+                if isinstance(e, dict) and isinstance(e.get("name"), str) and str(e["name"]).strip()
+            ]
+    if not names:
+        names = ["personal"]
+    if not registered and not any((install_root / asset).exists() for asset in _ROOT_ASSETS):
+        return False
+    return not any(
+        "/" not in name and "\\" not in name and name not in (".", "..") and (install_root / name).is_dir()
+        for name in names
+    )
+
+
 def check(install_root: Path, runtime_root: Path) -> Finding | None:
     """The first unfinished 1.10 migration of this install, or None."""
     base = Path(runtime_root) / "migration"
@@ -146,6 +189,12 @@ def check(install_root: Path, runtime_root: Path) -> Finding | None:
         # and no receipt, and is allowed.
         if reroot_state == "missing" and old_layout:
             return Finding(_REROOT, "missing")
+        # 1.10 records no receipt for a vault that is the install folder itself
+        # or for an install adopted before 1.7, so the vault's name proves
+        # nothing here: the proof is a registered workspace with no folder of
+        # its own under the install.
+        if reroot_state == "missing" and _old_shared_layout(Path(install_root), Path(runtime_root)):
+            return Finding(_REROOT, "old_layout")
         if reroot_state == "unreadable":
             return Finding(_REROOT, "unreadable")
         if reroot_state == "ok" and reroot.get("status") != "migrated":

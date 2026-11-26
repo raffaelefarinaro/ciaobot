@@ -1911,7 +1911,7 @@ def main(argv: list[str] | None = None) -> int:
         record_vault_index_ownership(runtime, vault_root, owner=owner)
         print(f"recorded {owner} ownership for {vault_root / 'INDEX.md'}", file=sys.stderr)
         return 0
-    connected = configured_connected_workspace(os.environ, vault_root, implicit_root=args.vault_root is None)
+    connected = configured_connected_workspace(os.environ, vault_root)
     try:
         registration.verify()
     except ConnectedWorkspaceChanged as exc:

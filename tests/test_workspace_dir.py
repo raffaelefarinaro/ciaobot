@@ -16,7 +16,7 @@ from starlette.applications import Starlette
 from starlette.routing import Route
 from starlette.testclient import TestClient
 
-from ciao.config import CiaoConfig
+from ciao.config import CiaoConfig, WorkspaceConfig
 from ciao.sessions import StateStore
 from ciao.transcripts import TranscriptStore
 from ciao.web import routes_api
@@ -44,6 +44,7 @@ def _make_manager(tmp_path: Path) -> ProjectChatManager:
         workspace_root=tmp_path,
         state_path=runtime / "state.json",
         media_root=runtime / "media",
+        workspaces={"work": WorkspaceConfig(name="work", vault_root="work/memory-vault")},
     )
     return ProjectChatManager(
         config,

@@ -2579,7 +2579,6 @@ def _nested_vault(ws: Path, name: str) -> Path:
 def test_setup_inspection_and_finish_select_same_nested_vault(
     tmp_path, monkeypatch
 ) -> None:
-    from ciao.config import reset_reroot_cache
 
     monkeypatch.setenv("CIAO_WORKSPACE", "")
     monkeypatch.setenv("PWA_PORT", "")
@@ -2611,7 +2610,6 @@ def test_setup_inspection_and_finish_select_same_nested_vault(
     ).splitlines()
     registry = json.loads((ws / ".runtime" / "workspaces.json").read_text(encoding="utf-8"))
     assert registry[0]["vault_root"] == "work/memory-vault"
-    reset_reroot_cache()
     config = CiaoConfig.from_env({
         "PWA_AUTH_TOKEN": "test-token",
         "CIAO_WORKSPACE": str(ws),
@@ -2663,7 +2661,6 @@ def test_setup_ambiguous_non_native_finish_returns_400_without_writes(
 def test_ambiguous_parent_can_be_retried_as_selected_nested_vault(
     tmp_path, monkeypatch
 ) -> None:
-    from ciao.config import reset_reroot_cache
 
     monkeypatch.setenv("CIAO_WORKSPACE", "")
     monkeypatch.setenv("PWA_PORT", "")
@@ -2707,7 +2704,6 @@ def test_ambiguous_parent_can_be_retried_as_selected_nested_vault(
         encoding="utf-8"
     ).splitlines()
     assert not (ws / "memory-vault").exists()
-    reset_reroot_cache()
     config = CiaoConfig.from_env({
         "PWA_AUTH_TOKEN": "test-token",
         "CIAO_WORKSPACE": str(work_vault),

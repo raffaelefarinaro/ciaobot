@@ -23,9 +23,8 @@ from types import SimpleNamespace
 
 import pytest
 
-from ciao.config import CiaoConfig, reset_reroot_cache
+from ciao.config import CiaoConfig
 from ciao.git_proc import GIT_TIMEOUT_DETAIL
-from ciao.workspace_reroot import mark_born_per_root
 from ciao.local_session import (
     PREFLIGHT_STEP,
     GitOperationError,
@@ -1049,12 +1048,10 @@ def _per_root_config(workspace: Path, *names: str) -> CiaoConfig:
     """
     runtime = workspace / ".runtime"
     (runtime / "migration").mkdir(parents=True, exist_ok=True)
-    mark_born_per_root(workspace, runtime, list(names))
     (runtime / "workspaces.json").write_text(
         json.dumps({"workspaces": [{"name": name, "vault_root": name} for name in names]}),
         encoding="utf-8",
     )
-    reset_reroot_cache()
     return CiaoConfig.from_env(
         {
             "PWA_AUTH_TOKEN": "t",

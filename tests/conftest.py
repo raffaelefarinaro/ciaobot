@@ -448,3 +448,43 @@ def never_the_real_launchctl(monkeypatch: pytest.MonkeyPatch) -> None:
         raise RealRunnerReached(f"a test reached the real subprocess runner: {args}")
 
     monkeypatch.setattr(mac_takeover, "_default_runner", lambda: refuse)
+
+
+def rebuild_search_index(install_root, workspaces, *, db_path=None):
+    """Index every workspace vault and every transcript archive into a fresh database.
+
+    A test helper for the search-audit and transcript-archive tests: each vault is
+    keyed against the install root so two roots holding a note of the same name
+    stay distinct. Returns ``{"database", "indexed", "errors", "logs"}``.
+    """
+    import sqlite3
+    from pathlib import Path
+
+    from ciao.fts_search import get_db_path, index_logs, index_vault, init_db
+
+    install_root = Path(install_root).resolve()
+    db = Path(db_path) if db_path is not None else get_db_path(install_root / ".runtime")
+    result: dict = {"database": str(db), "indexed": [], "errors": []}
+    if db.exists():
+        db.unlink()
+    db.parent.mkdir(parents=True, exist_ok=True)
+    conn = sqlite3.connect(db)
+    try:
+        init_db(conn)
+        for name in workspaces:
+            vault = install_root / name / "memory-vault"
+            if not vault.is_dir():
+                result["errors"].append({"workspace": name, "error": f"no vault at {vault}"})
+                continue
+            indexed, removed = index_vault(conn, vault, path_base=install_root)
+            result["indexed"].append({"workspace": name, "indexed": indexed, "removed": removed})
+        for logs in [install_root / name / "Logs" for name in workspaces] + [install_root / "Logs"]:
+            if not logs.is_dir():
+                continue
+            indexed, removed = index_logs(conn, logs.parent, logs_root=logs, path_base=install_root)
+            totals = result.setdefault("logs", {"indexed": 0, "removed": 0})
+            totals["indexed"] += indexed
+            totals["removed"] += removed
+    finally:
+        conn.close()
+    return result
