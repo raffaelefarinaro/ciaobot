@@ -119,12 +119,13 @@ required-version = "==0.13.8"
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["tests"]
-# A hung test must leave a stack trace instead of holding the runner: recent
-# successful macOS coverage runs finished the whole suite in 8-12 minutes, so
-# no single test can legitimately take ten. pytest-xdist installs this per
-# worker; on expiry faulthandler dumps every thread's stack, then the worker
-# exits so xdist reports a crash rather than waiting forever. The macOS CI step
-# also carries a 25-minute outer bound for hangs pytest itself cannot observe.
+# A hung test must leave a stack trace instead of holding the runner. The
+# slowest test in a local full run takes 35 s, so ten minutes is far above any
+# real test. pytest-xdist installs this per worker; on expiry faulthandler dumps
+# every thread's stack, then the worker exits so xdist reports a crash rather
+# than waiting forever. It is per test and cannot fire after the suite has
+# finished, so every CI job and pytest step also has a timeout-minutes bound
+# (docs/DEVELOPMENT.md, "CI time bounds").
 faulthandler_timeout = 600
 faulthandler_exit_on_timeout = true
 # A coroutine a test created and never ran fails the test that dropped it (#2842).
