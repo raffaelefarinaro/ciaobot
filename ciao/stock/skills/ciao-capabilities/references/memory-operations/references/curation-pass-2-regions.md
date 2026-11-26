@@ -11,11 +11,6 @@ Consolidation means:
 - Move project-scoped entries out to their owning project's canonical doc (move, do not delete).
 - Preserve or add the trailing learned-at stamp `[YYYY-MM-DD]` on entries you rewrite (today's date for a merged entry).
 
-When a removal needs judgment you cannot confidently make, keep the entry and queue a yes/no question instead:
-
-1. Write `Keep "<entry text>" in ciao:<region>? Proposed action: drop because <reason>. (memory curation)` to a scratch file.
-2. File it with `ciao memory-proposal-add --kind review --text-file <file>`. The command flattens the text onto one line and dedupes an unanswered question already queued.
-
-The queue cannot apply a drop. The user dismisses the question to keep the entry (`ciao memory-proposal-dismiss --text-file <file>`, since the question template always contains double quotes), or asks an attended chat to drop it. The To decide view's accept button is disabled for review rows on purpose.
+When a removal needs judgment you cannot confidently make, keep the entry and add a line to `Workspace/Unsure.md` instead: `- [ ] drop <region>: "<entry text>" — unsure because <reason>; source: care run; <YYYY-MM-DD>`. Do not add a line that is already there. The person ticks it to approve the drop, or deletes the line to keep the entry. A later run removes a ticked entry after copying it into `Memory-Consolidations.md`.
 
 The cap is advisory: nothing refuses a write at edit time, and an over-cap write reports `over_cap`. A durable fact is never worth dropping just to fit the cap. If a region stays over cap because every entry is high-signal, say so and give the user their options: leave the region over its advisory cap, or ask any attended chat to consolidate further.

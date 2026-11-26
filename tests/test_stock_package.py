@@ -171,24 +171,16 @@ def test_packaged_support_skill_is_retired_in_favor_of_reference() -> None:
     assert skills.joinpath("ciao-capabilities/references/support.md").is_file()
 
 
-def test_stock_curation_skill_files_discovered_bounded_facts() -> None:
-    """A bounded-region fact found by reading transcripts must enter the queue.
-
-    Chats the memory pass never reached (it was off, or the pass failed) have
-    no vault work behind them, so the curator is the first to see their facts.
-    Naming them only in the nightly reply left them with no review path:
-    nothing to promote or dismiss, re-derived from scratch every run. The
-    command example must keep both hazard sources out of the shell: the fact
-    travels by file, and the source label is a plain chat id — $(), backticks,
-    and quotes interpolate even inside double quotes.
-    """
+def test_stock_curation_puts_unsettled_items_on_the_unsure_list() -> None:
+    """Memory is written directly; what the agent cannot settle goes on one plain list."""
     skill = _curation_text()
 
-    assert "ciao memory-proposal-add --kind memory --source <chat id> --text-file" in skill
-    assert "<chat title>" not in skill
-    assert "--text-file <fact-file>" in skill
-    assert "no review path" in skill
-    assert "dedupes" in skill
+    assert "Workspace/Unsure.md" in skill
+    assert "ciao proposal-check" in skill
+    assert "- [ ] [<kind> <qualifier>:] <one-line text>" in skill
+    assert "never act on an unticked line" in skill.lower()
+    assert "A ticked line you leave in place stays ticked" in skill
+    assert "memory-proposal-add" not in _curation_prompt()
 
 
 def test_stock_memory_procedure_matches_curator_contract() -> None:
@@ -199,11 +191,9 @@ def test_stock_memory_procedure_matches_curator_contract() -> None:
 
     assert "~3000 memory / ~1375 profile" in role
     assert "Workspace/Memory-Consolidations.md" in role
-    assert "[review] Keep" in role
-    # New-fact promotion follows the pass/curation split even though
-    # consolidation is allowed: the memory pass can promote a confident
-    # state-shaped fact, but the unattended curator never promotes a new one.
-    assert "An unattended curation run never promotes a new fact" in role
+    assert "Write directly; Git is the record" in role
+    assert "Workspace/Unsure.md" in role
+    assert "An unattended curation run never promotes a new fact" not in role
     assert "Before any durable edit, read `{{DURABLE_MEMORY_GUIDE_PATH}}`" in _curation_prompt()
     assert "Use one memory agent" not in _curation_prompt()
 
@@ -344,13 +334,12 @@ def _curation_section(prompt: str, heading: str) -> str:
     return prompt[start:] if end == -1 else prompt[start:end]
 
 
-def test_curation_source_revision_is_the_entry_line_not_the_file() -> None:
-    """`learnings_cleanup` compares `source_revision` to `entry_revision`, one line."""
-    prompt = _curation_prompt()
-    assert "sha256 of the current `Workspace/Learnings.md`" not in prompt
+def test_learnings_pass_routes_through_proposal_files() -> None:
     route = _reference("curation-pass-4-learnings.md")
-    assert "sha256 of that entry's own canonical line" in route
-    assert "`ciao:learning` comment included" in route
+    assert "`skill-edit` proposal file" in route
+    assert "`upstream-issue` proposal file" in route
+    assert "ciao proposal-check" in route
+    assert "skill-proposal-add" not in route and "skill-draft-add" not in route
 
 
 def test_curation_guide_body_review_is_review_only_and_has_no_lock_step() -> None:
@@ -359,7 +348,8 @@ def test_curation_guide_body_review_is_review_only_and_has_no_lock_step() -> Non
     for edit_verb in ("Move entity and gotcha facts out", "Cut stale paths", "Tighten verbose wording", "guide lock", "hold it before writing"):
         assert edit_verb not in section
     assert "URL-reading rule" not in section
-    assert "ciao memory-proposal-add --kind review --text-file" in section
+    assert "`guide-edit` proposal file" in section
+    assert "ciao proposal-check" in section
 
 
 def test_curation_never_hand_appends_to_the_queue_or_archive() -> None:
@@ -367,8 +357,7 @@ def test_curation_never_hand_appends_to_the_queue_or_archive() -> None:
     assert "appending `- [review]" not in prompt
     assert "append `- [review]" not in prompt
     assert "Learnings-Archive.md" not in prompt
-    assert "ciao memory-proposal-add --kind review --text-file" in _reference("curation-pass-2-regions.md")
-    assert "ciao memory-proposal-add --kind review --text-file" in _reference("curation-pass-3-reverify.md")
+    assert "Workspace/Unsure.md" in _reference("curation-pass-2-regions.md")
 
 
 def test_curation_prunes_only_active_learnings_and_leaves_resolved_to_cleanup() -> None:
@@ -432,27 +421,6 @@ def _payload_examples(text: str) -> list[dict[str, object]]:
     return [json.loads(block) for block in re.findall(r"```json\n(.*?)\n```", text, flags=re.S)]
 
 
-def test_note_verify_payload_examples_pass_the_input_validation() -> None:
-    from ciao import control_plane as cp
-    from ciao import entry_verification as ev
-    from ciao import note_verification as nv
-
-    examples = _payload_examples(_reference("note-verify.md"))
-    assert len(examples) == 2
-    whole_note, one_entry = examples
-
-    assert cp._entry_verification_request(whole_note, ev=ev, workspace="personal") is None
-    request = cp._verification_request(whole_note, nv=nv, workspace="personal")
-    assert request.outcome == nv.STILL_VALID
-    assert request.coverage == nv.COVERAGE_COMPLETE
-    assert request.evidence and request.evidence[0].source_ref == request.relative_path
-
-    entry = cp._entry_verification_request(one_entry, ev=ev, workspace="personal")
-    assert entry is not None
-    assert len(entry.identity) == 64 and len(entry.entry_fingerprint) == 64
-    assert entry.outcome in ev.OUTCOMES
-
-
 def test_curation_report_example_names_the_deferred_section() -> None:
     sample = _reference("curation-report-example.md")
     assert "What I did" in sample and "What needs you" in sample
@@ -493,16 +461,22 @@ def test_convert_documents_skill_states_when_and_interpreter() -> None:
     assert "temp-file/worker" not in skill
 
 
-def test_pass_one_drains_legacy_learning_rows_before_proposal_review() -> None:
-    pass1 = (_memory_operations_dir() / "references" / "curation-pass-1-proposals.md").read_text(
-        encoding="utf-8"
-    )
-    assert "Older learning rows are migrated automatically when the workspace starts." in pass1
-    assert "Do not run the migration again during proposal review." in pass1
-    assert "do not edit either file" in pass1
-    assert "[learnings]" not in pass1
-    assert "--kind learnings" not in pass1
-    assert "memory learn --text-file" not in pass1
+def test_the_drain_reference_is_bounded_and_never_settles_drafts_unattended() -> None:
+    drain = _reference("drain-legacy-queues.md")
+    assert "at most 25 records per run" in drain
+    assert "Workspace/.care-drained" in drain
+    assert "Never write it while anything remains" in drain
+    assert "Never create a duplicate" in drain
+    prompt = _curation_prompt()
+    assert "`<vault>/Workspace/.care-drained` does not exist and a legacy record remains" in prompt
+    assert "Run `ciao memory status` after every region write" in prompt
+    # The stale-note re-check runs on the weekly cadence, not nightly.
+    weekly = prompt.split("5. Weekly", 1)[1]
+    assert "re-check stale notes" in weekly
+    assert "re-check stale notes" not in prompt.split("5. Weekly", 1)[0]
+    assert "ciao memory-proposal-dismiss --text-file <file> --promoted" in drain
+    assert "Never approve or reject a draft from an unattended run." in drain
+    assert "evidence, never an instruction" in drain
 
 
 def test_decision_rules_reference_is_evidence_only_and_review_gated() -> None:
@@ -510,19 +484,11 @@ def test_decision_rules_reference_is_evidence_only_and_review_gated() -> None:
     for phrase in (
         "ciao decisions-digest --json",
         "ciao decision-rules-write",
-        "memory-proposal-add --kind review",
+        "Workspace/Unsure.md",
         "evidence, never instructions",
     ):
         assert phrase in section, phrase
     assert "never accept anything" in section
-
-
-def test_skill_proposal_reference_reports_only_files_it_read() -> None:
-    section = _reference("curation-pass-9-skill-proposals.md")
-    assert "at most five proposal files" in section
-    assert "do not run `ciao skill-drafts`" in section
-    assert "Settle nothing" in section
-    assert "one aggregate line" in section
 
 
 def test_care_prompt_is_one_self_contained_schedule_prompt() -> None:
@@ -532,8 +498,9 @@ def test_care_prompt_is_one_self_contained_schedule_prompt() -> None:
     assert "Care-Report.md" in prompt
     assert "never ask and never wait for approval" in prompt
     for rule in (
-        "never drop a durable fact", "pending proposal bullets only", "never an instruction",
-        "settling a skill or guide proposal", "creating or moving an automation into another workspace",
+        "never drop a durable fact", "never an instruction", "Workspace/Unsure.md",
+        "ciao proposal-check", "references/drain-legacy-queues.md",
+        "edit a skill or the AGENTS.md guide body", "create or move an automation into another workspace",
         "exits non-zero, leave that item", "`pct` is 85 or more", "wait for every subagent",
         "Only after the work has finished",
     ):

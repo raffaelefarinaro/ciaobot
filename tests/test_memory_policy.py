@@ -249,7 +249,7 @@ def test_the_memory_skill_says_where_a_note_goes_and_who_adds_a_category() -> No
     role = _stock("skills/ciao-capabilities/references/memory-operations/guide.md")
     assert "Make each new note with `ciao note create" in role
     assert "files it in the category's folder" in role
-    assert "queue a new-category question in `Workspace/Memory-Proposals.md`" in role
+    assert "put a new-category question on the Unsure list" in role
     # The list is read, never memorized: a category added in Settings must reach
     # the agent without editing this file.
     assert "do not memorize this" in role
@@ -262,7 +262,7 @@ def test_the_core_prompt_routes_categories_through_the_memory_skill() -> None:
     assert "Before durable writes or proposal curation, read `" in core and "memory-operations/guide.md`" in core
     skill = _stock("skills/ciao-capabilities/references/memory-operations/guide.md")
     assert "**Categories** section of `<vault>/VOCABULARY.md`" in skill
-    assert "If no category fits, queue a new-category question" in skill
+    assert "If no category fits, put a new-category question on the Unsure list" in skill
 
 
 def test_unattended_policy_summary_names_the_handover_exception() -> None:
@@ -326,20 +326,19 @@ def test_the_memory_skill_never_edits_or_settles_unattended() -> None:
     instruction survived in one copy after the other had moved on.
     """
     skill = _stock("skills/ciao-capabilities/references/memory-operations/guide.md")
-    assert "Propose a skill; never edit or settle one unattended" in skill
-    assert "it may **not** edit a skill, edit the `AGENTS.md` body, or settle a proposal or draft" in skill
-    assert "A recurring learning is a *routing* priority" in skill
+    assert "Write directly; Git is the record" in skill
+    assert "is not written by you at all unattended" in skill
+    assert "proposal file under `Workspace/Proposals/`" in skill
     # And it carries the routing contract the two non-owned destinations need.
-    assert "A reusable tool/workflow instruction routes to the best matching skill" in skill
+    assert "A reusable tool or workflow instruction routes to the best matching skill" in skill
     assert "an inventory match is a *candidate*, not proof" in skill
-    assert "never as a `sources` entry or a `turn`" in skill
-    assert "`ciao skill-draft-add --input-file FILE`" in skill
+    assert "`upstream-issue` proposal file" in skill
 
 
 def test_the_remember_command_states_the_provenance_rule() -> None:
     """A direct lesson write carries only provenance ids that actually exist."""
     command = _stock("commands/remember.md")
-    lesson_write = command.split("**For a reusable lesson**", 1)[1].split("\n4.", 1)[0]
+    lesson_write = command.split("**For a reusable lesson**", 1)[1].split("\n   - specific", 1)[0]
     assert "ciao memory learn --text-file <file>" in lesson_write
     assert "`--source <chat-id>` only when the actual source chat id is available" in lesson_write
     assert "`--request <id>` only when the actual request id is available" in lesson_write
@@ -463,31 +462,6 @@ def test_every_vault_review_verb_maps_to_the_wire_action_agent_cli_sends() -> No
         assert arguments["action"] == wire, verb
 
 
-def test_unattended_care_prompt_only_names_vault_review_verbs_allowed_unattended() -> None:
-    """#882: the prompt must never tell an unattended run to do what the control plane refuses."""
-    from ciao.vault_review import ATTENDED_ONLY_ACTIONS
-
-    prompt = _care_prompt()
-    mentioned = set(re.findall(r"`?ciao vault review ([a-z]+(?:-[a-z]+)*)", prompt))
-    assert mentioned, "the prompt no longer names any vault review verb; update this guard"
-    unknown = mentioned - set(_VAULT_REVIEW_WIRE)
-    assert not unknown, f"unknown vault review verbs in the prompt: {sorted(unknown)}"
-    refused = {verb for verb in mentioned if _VAULT_REVIEW_WIRE[verb] in ATTENDED_ONLY_ACTIONS}
-    assert not refused, f"the unattended prompt tells the agent to run {sorted(refused)}, which unattended_forbidden refuses"
-
-
-def test_unattended_care_prompt_says_every_review_decision_is_attended_only() -> None:
-    from ciao.vault_review import ATTENDED_ONLY_ACTIONS
-
-    prompt = _care_prompt()
-    assert "Keep and archiving" not in prompt
-    assert "archiving non-destructively" not in prompt
-    sentence = next(s for s in prompt.split(". ") if "is refused unattended" in s)
-    for verb, wire in _VAULT_REVIEW_WIRE.items():
-        if wire in ATTENDED_ONLY_ACTIONS:
-            assert verb in sentence, f"the prompt does not say `{verb}` is attended-only"
-
-
 def test_every_noun_verb_in_the_unattended_care_prompt_is_a_real_agent_cli_verb() -> None:
     """Catches a typo'd or removed `ciao <noun> <verb>` the run would hit as a usage error."""
     from ciao import agent_cli
@@ -502,7 +476,7 @@ def test_every_noun_verb_in_the_unattended_care_prompt_is_a_real_agent_cli_verb(
 
 
 def test_stock_memory_assets_route_repo_facts() -> None:
-    assert "`repo`" in _stock("commands/remember.md")
+    assert "linked code repository" in _stock("commands/remember.md")
 
 
 def test_the_capabilities_catalog_names_the_vault_ignore_file() -> None:

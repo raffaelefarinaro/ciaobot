@@ -797,7 +797,7 @@ def test_prompt_routes_categories_to_the_vocabulary_block() -> None:
     prompt = memory_pass.MEMORY_PASS_PROMPT
     assert "**Categories** section of the vault's `VOCABULARY.md`" in prompt
     assert "the `type:` it lists, in the folder it names" in prompt
-    assert "queue a new-category question" in prompt
+    assert "put a new-category question on the Unsure list" in prompt
     assert "instead of inventing a type" in prompt
 
 
@@ -987,7 +987,6 @@ def test_repo_section_asks_only_for_what_the_code_cannot_say() -> None:
     rendered = memory_pass.REPO_SECTION_PROMPT.format(
         repo="/repos/example",
         doc="It has no AGENTS.md that could be quoted here.",
-        command=memory_pass.REPO_PROPOSAL_COMMAND,
     )
     for phrase in (
         "Proposing nothing is the normal outcome",
@@ -996,7 +995,8 @@ def test_repo_section_asks_only_for_what_the_code_cannot_say() -> None:
     ):
         assert phrase in rendered, phrase
     assert "where something lives" not in rendered
-    assert "Never queue a status snapshot" in memory_pass.MEMORY_PASS_PROMPT
+    assert "`- [ ] repo /repos/example:" in rendered
+    assert "Never record a status snapshot" in memory_pass.MEMORY_PASS_PROMPT
 
 
 def test_superseded_guidance_is_rewritten_not_annotated() -> None:
@@ -1026,7 +1026,7 @@ def test_superseded_guidance_is_rewritten_not_annotated() -> None:
     for phrase in phrases:
         assert phrase in memory_pass.MEMORY_PASS_PROMPT, phrase
         assert phrase in skill, phrase
-    # An unattended run queues the conflict; it does not write either line.
+    # An unattended run lists the conflict; it does not write either line.
     assert "writes neither as the current instruction" in skill
     assert "removes the superseded line" in architecture
 
@@ -3050,7 +3050,8 @@ def test_pass_for_linked_project_carries_repo_section(tmp_path: Path) -> None:
 
     prompt = manager._memory_pass._prompt_for(pass_chat)
 
-    assert memory_pass.REPO_PROPOSAL_COMMAND in prompt
+    assert "Workspace/Unsure.md" in prompt
+    assert f"`- [ ] repo {repo}:" in prompt
     assert str(repo) in prompt
     assert f"ciao memory learn --text-file FILE --source {pass_chat.helper['source_chat_id']}" in prompt
     assert "--kind learnings" not in prompt
@@ -3063,7 +3064,7 @@ def test_pass_for_unlinked_project_has_no_repo_section(tmp_path: Path) -> None:
 
     prompt = manager._memory_pass._prompt_for(pass_chat)
 
-    assert memory_pass.REPO_PROPOSAL_COMMAND not in prompt
+    assert "- [ ] repo " not in prompt
 
 
 def test_pass_for_a_missing_linked_repo_has_no_repo_section(tmp_path: Path) -> None:
@@ -3072,7 +3073,7 @@ def test_pass_for_a_missing_linked_repo_has_no_repo_section(tmp_path: Path) -> N
 
     prompt = manager._memory_pass._prompt_for(pass_chat)
 
-    assert memory_pass.REPO_PROPOSAL_COMMAND not in prompt
+    assert "- [ ] repo " not in prompt
 
 
 def _brains_on(manager: ProjectChatManager, workspace: str, *paths: str) -> list[Path]:
@@ -3418,18 +3419,6 @@ def test_lesson_step_three_requires_origins_and_the_draft_ends_the_turn_in_step_
     assert step7 == "Report. Mention the learning write and each filed proposal or draft."
     assert "ciao skill-draft-add --input-file FILE" in step6
     assert "same command" not in step6
-
-
-def test_pass_prompt_requires_a_decider_on_every_queued_item() -> None:
-    """Every queued item carries a decider and reason, with the rubric to pick one."""
-    prompt = memory_pass.MEMORY_PASS_PROMPT
-    for phrase in (
-        "--decide nightly|you",
-        "--decide-reason-file",
-        "more context would settle it",
-        "identity or preferences",
-    ):
-        assert phrase in prompt, phrase
 
 
 # ── Review rules (#1745) ──────────────────────────────────────────────────

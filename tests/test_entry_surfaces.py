@@ -909,13 +909,8 @@ def test_the_authoring_guidance_names_the_entry_contract() -> None:
     assert "you did not earn" not in command  # not restated in the command
     assert "updated:" in skill
     assert 'follow the "Writing entity notes" steps in the durable-memory guide' in command
-    reverify = (
-        resources.files("ciao.stock")
-        .joinpath("skills/ciao-capabilities/references/memory-operations/references/curation-pass-3-reverify.md")
-        .read_text(encoding="utf-8")
-    )
-    assert '"Writing entity notes"' in reverify
-    assert "uncovered" in reverify
+    assert "Writing entity notes" in skill
+    assert "uncovered" in skill
 
 
 def test_remember_command_uses_the_engine_resolved_guide_from_core_prompt() -> None:
