@@ -17,12 +17,6 @@ from typing import TYPE_CHECKING, Any, Awaitable, Callable, Literal, Mapping
 
 from ciao import shared_brain
 from ciao.config import RESTART_EXIT_CODE, CiaoConfig
-from ciao.legacy_node_state import (
-    LegacyNodeState,
-    STATE_FILENAME as LEGACY_STATE_FILENAME,
-)
-from ciao.legacy_node_state import detect as detect_legacy_node_state
-from ciao.legacy_node_state import writers_armed
 from ciao.models import BridgeMode
 from ciao.schedules import (
     ScheduleEntry,
@@ -271,44 +265,14 @@ def remove_legacy_background_state(runtime_root: Path) -> bool:
     return True
 
 
-# Fail-closed legacy node-state gate (#636). A Mac that was a client of
-# another host, or whose `node_state.json` cannot be understood, must not come
-# up as a local writer: node mode's own refusal is what kept two writers off
-# one runtime root, and #577 removes the proxy that used to carry the rest of
-# that behavior. The verdict comes from `ciao.legacy_node_state`, a leaf module
-# that reads the file raw and imports nothing from `ciao`, so it outlives the
-# `NodeStateManager` that is now gone.
-def guard_legacy_writers(runtime_root: Path) -> tuple[LegacyNodeState, bool]:
-    """Classify `runtime_root` once and say whether the writers may arm.
-
-    Returns the classification (also published as `app.state.legacy_node_state`
-    so routes and tests can read the same verdict) and whether this boot is
-    allowed to run schedules and the backup push. Refusing is not failing: an
-    existing client Mac still starts and still serves, it just does not write,
-    which is exactly what client mode did before the proxy.
-    """
-    legacy = detect_legacy_node_state(runtime_root)
-    if writers_armed(legacy):
-        return legacy, True
-    if legacy.kind == "client":
-        logger.warning(
-            "Legacy node state: %s was a client of %s, so Ciaobot will not run "
-            "its writers (schedules, backup push) on this boot. Serve the PWA "
-            "from the host, or remove %s to make this Mac a host again.",
-            runtime_root,
-            legacy.host_url,
-            Path(runtime_root) / LEGACY_STATE_FILENAME,
+def refuse_legacy_node_state(runtime_root: Path) -> None:
+    """Refuse to start on a runtime root that still holds a node-mode `node_state.json`."""
+    state = Path(runtime_root) / "node_state.json"
+    if state.exists():
+        raise SystemExit(
+            f"Legacy node-mode state found at {state}: node mode is removed. "
+            "Delete that file to start this install as the only writer."
         )
-    else:
-        logger.warning(
-            "Legacy node state: %s is invalid — it could not be read as a host "
-            "or a client, so Ciaobot will not run its writers (schedules, backup "
-            "push) on this boot rather than guess. Fix or remove %s to arm "
-            "them again.",
-            runtime_root,
-            Path(runtime_root) / LEGACY_STATE_FILENAME,
-        )
-    return legacy, False
 
 
 # Web Push (RFC 8292) requires a VAPID "sub" contact URI. No push service
@@ -817,6 +781,8 @@ async def _run_server_locked(
 ) -> int:
     """Server implementation; caller owns the workspace instance lock."""
 
+    refuse_legacy_node_state(config.state_path.parent)
+
     # Runtime-mutable settings overlay (PWA Settings). Applied on top of the
     # env-backed config so PATCHes take effect without a restart and survive
     # one via .runtime/app_settings.json. Loaded first: the log level and the
@@ -934,25 +900,6 @@ async def _run_server_locked(
     except Exception:
         tracker.fail("reroot_workspaces", "re-root check failed")
         logger.exception("Workspace re-root check failed")
-
-    # Move each registered chat's archive from the shared Logs/Chats into its
-    # workspace's own Logs/Chats, once (ciao/logs_split.py). After the re-root,
-    # whose receipt gates it, and before the transcript store and the project
-    # manager read the archive. Never raises: a split that cannot finish is
-    # retried on the next boot.
-    tracker.start("split_chat_logs")
-    try:
-        from ciao.logs_split import migrate_if_needed as split_chat_logs
-
-        split = await asyncio.to_thread(split_chat_logs, config)
-        split_status = str(split.get("status", ""))
-        if split_status == "error":
-            tracker.fail("split_chat_logs", "chat log split failed")
-        else:
-            tracker.done("split_chat_logs", split_status)
-    except Exception:
-        tracker.fail("split_chat_logs", "chat log split failed")
-        logger.exception("Chat log split failed")
 
     # Refresh vault index so INDEX.md reflects the current tree
     tracker.start("refresh_vault_index")
@@ -1160,14 +1107,6 @@ async def _run_server_locked(
         mode = schedule_run_mode(config, entry, provider, workspace)
         return ("claude", model, mode, provider)
 
-    # Classified before anything else touches the runtime root, because the
-    # detector reads the file raw and never writes it: "no state yet" has to
-    # stay "no state yet". The verdict is the boot's answer, published as
-    # `app.state.legacy_node_state`, and both writer sites ask it.
-    legacy_node_state, legacy_writers_armed = guard_legacy_writers(
-        config.state_path.parent
-    )
-
     # An interval schedule bound to an existing chat can only dispatch into a
     # live, non-archived one. Treat an archived (or deleted) target as
     # dispatchable while its project still resolves — the dispatcher forks or
@@ -1191,7 +1130,6 @@ async def _run_server_locked(
         resolve_target=_resolve_schedule_target,
         dispatch_to_web=_dispatch_to_web,
         prepare_chat=_prepare_chat,
-        is_node_active=lambda: legacy_writers_armed,
         chat_busy=pcm.chat_stream_active,
         chat_awaiting_answer=pcm.chat_awaiting_answer,
         chat_dispatchable=_interval_target_dispatchable,
@@ -1218,9 +1156,6 @@ async def _run_server_locked(
         mcp_service=mcp_service,
     )
     app.state.startup_tracker = tracker
-    # The startup gate's own verdict, so routes and tests read the same answer
-    # the writers were armed from instead of re-deriving it from the state file.
-    app.state.legacy_node_state = legacy_node_state
     # Stamp the target project's name on schedules that only recorded its id,
     # while those ids still resolve. After a fresh init they would not, and the
     # run would fall back to General with the user's choice lost.
@@ -1503,10 +1438,7 @@ async def _run_server_locked(
     # a non-git root (a fresh `ciao setup` with no remote yet) simply reports
     # `not_configured` and is re-checked.
     #
-    # It also refuses to run on a Mac that is not the host — the same startup
-    # verdict the scheduler asks, published as `app.state.legacy_node_state` —
-    # because a second writer on the same runtime root is exactly the failure
-    # that gate exists to prevent. The `stop` event is what the service's loop
+    # The `stop` event is what the service's loop
     # waits on instead of a bare sleep, so a shutdown never sits out the
     # interval (or the hour a backoff buys).
     from ciao.backup_service import BackupService
@@ -1515,7 +1447,6 @@ async def _run_server_locked(
     app.state.backup_service = BackupService(
         config,
         app_settings,
-        node_state=lambda: legacy_node_state,
         admission_closed=_update_admission_closed,
     )
     app.state.backup_stop = backup_stop

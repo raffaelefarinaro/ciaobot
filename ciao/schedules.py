@@ -2734,7 +2734,6 @@ class ScheduleManager:
             [ScheduleEntry, str, str, BridgeMode, str], str | None
         ]
         | None = None,
-        is_node_active: Callable[[], bool] | None = None,
         chat_busy: Callable[[str], bool] | None = None,
         chat_dispatchable: Callable[[ScheduleEntry], bool] | None = None,
         target_refusal: Callable[[ScheduleEntry], str] | None = None,
@@ -2760,7 +2759,6 @@ class ScheduleManager:
         self._chat_awaiting_answer = chat_awaiting_answer
         self._dispatch_to_web = dispatch_to_web
         self._prepare_chat = prepare_chat
-        self._is_node_active = is_node_active
         self._chat_busy = chat_busy
         self._chat_dispatchable = chat_dispatchable
         # Why an entry's target is refused, or '' when it may run. The engine
@@ -3587,8 +3585,6 @@ class ScheduleManager:
             # is stamped and no one-shot is consumed: every due entry is still
             # due on the tick after the claim is released.
             return
-        if self._is_node_active is not None and not self._is_node_active():
-            return
         current = now or _now_utc()
         self._record_first_seen(current)
         for entry in self._store.list_entries():
@@ -3767,23 +3763,12 @@ class ScheduleManager:
         replayed — and only once per slot (``last_recovered_on``), so a run
         that keeps failing cannot make every restart dispatch it again.
 
-        The startup pass is automatic, so it is gated on the same predicate
-        :meth:`tick` follows: an install whose legacy ``node_state.json`` reads
-        ``client``/``invalid`` must not dispatch every missed slot locally
-        against a vault it does not own. The guard sits ahead of
-        :meth:`reconcile_interrupted_runs` so such an install does not rewrite
-        persisted run state either. Manual "Run now" (:meth:`dispatch_now`)
-        stays available: that is a person asking, not an automation.
-
         Returns the list of schedule_ids that were fired.
         """
         if self._admission_refuses():
             # Deferred, not lost: a missed one-shot is still in the store and
             # is caught up once admission reopens or on its next exact tick.
             logger.info("Schedule catch-up deferred: a server update is pending")
-            return []
-        if self._is_node_active is not None and not self._is_node_active():
-            logger.info("Schedule catch-up skipped: legacy node state says this install is not the engine's own")
             return []
         # Turns that were streaming when the previous process stopped are
         # indistinguishable from running ones until they are written down as

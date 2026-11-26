@@ -140,11 +140,6 @@ are `Logs/` staying at the install root as `Logs/`, `Templates/` becoming
 `INDEX.md`, `MEMORY.md` and `VOCABULARY.md` are *regenerated*, so they are
 replaced rather than moved.
 
-To survey a vault root you are not sure about — counts per directory,
-symlinks, max depth, duplicate stems, unregistered directories — use
-`ciao workspace-census --vault-root <path>`. It is read-only and always exits
-`0`: an unregistered directory is information, not a failure.
-
 ## Step 1 — mandatory: separate the workspaces
 
 There are two ways to run this, and they are the same code.

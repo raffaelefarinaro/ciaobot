@@ -10,8 +10,8 @@ passes `--runtime-root` so a receipt cannot land in the checkout's `.runtime`.
 What is pinned, and why each is a trap rather than a detail:
 
 * **After re-rooting there is no install-root `memory-vault/`.** The vault
-  default for `vault-migrate-links`, `vault-migrate`, `vault-rehome`,
-  `vault-lint` and `workspace-census` is `CIAO_VAULT_ROOT` or `./memory-vault`,
+  default for `vault-migrate-links`, `vault-migrate`, `vault-rehome`
+  and `vault-lint` is `CIAO_VAULT_ROOT` or `./memory-vault`,
   so a bare invocation from the install root after the migration resolves a path
   that is not there. That is the single fact the document's ordering advice
   ("run the vault migrations before Step 1") rests on.

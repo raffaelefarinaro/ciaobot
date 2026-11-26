@@ -26,7 +26,6 @@ from ciao.app_settings import AppSettingsStore
 from ciao.backup_service import SETUP_CHAT_TITLE, BackupService
 from ciao.claude_trim import catalog_payload
 from ciao.config import CiaoConfig
-from ciao.legacy_node_state import LegacyNodeState
 from ciao.local_session import LocalSessionManager
 from ciao.web.auth import AuthMiddleware, SESSION_COOKIE
 from ciao.web.routes_api import (
@@ -413,7 +412,6 @@ def _backup_client(
     app.state.backup_service = BackupService(
         config,
         app.state.app_settings,
-        node_state=lambda: LegacyNodeState(kind="host"),
         now=lambda: datetime(2026, 9, 28, 12, 0, tzinfo=UTC),
     )
     return (
