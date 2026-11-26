@@ -1203,3 +1203,66 @@ def test_promote_release_script_is_executable_and_posix() -> None:
     assert os.access(script, os.X_OK)
     assert script.read_text(encoding="utf-8").startswith("#!/bin/sh\n")
 
+
+# --- Workflow floor: cheap structural guards, no prose pins ---------------
+
+_WORKFLOWS = sorted((Path(__file__).parents[1] / ".github" / "workflows").glob("*.yml"))
+# Write scopes a workflow may hold, by file. Anything else must stay read-only.
+_WRITE_SCOPES = {
+    "nightly-ci.yml": {"actions"},
+    "pages.yml": {"pages", "id-token"},
+    "publish.yml": {"contents"},
+    "release-on-main.yml": {"contents", "pull-requests"},
+}
+# Jobs that predate the timeout rule; a new job without timeout-minutes fails.
+_NO_TIMEOUT = {
+    ("nightly-ci.yml", "dispatch"), ("pages.yml", "deploy"), ("publish.yml", "build-engine"),
+    ("publish.yml", "release-smoke"), ("release-on-main.yml", "release"),
+    ("release-on-main.yml", "sync-develop"),
+}
+# Workflows whose every checkout must drop the git credentials.
+_NO_PERSIST = {"publish.yml", "release-rehearsal.yml", "release-smoke.yml"}
+_SAFE_RUN_EXPRESSIONS = {"${{ github.sha }}"}
+_PINNED = re.compile(r"^(\./|[\w.-]+/[\w./-]+@(v\d[\w.]*|[0-9a-f]{40})$)")
+
+
+def _workflow_docs() -> list[tuple[str, dict]]:
+    import yaml
+
+    return [(path.name, yaml.safe_load(path.read_text(encoding="utf-8"))) for path in _WORKFLOWS]
+
+
+def _steps(doc: dict):
+    for name, job in doc["jobs"].items():
+        for step in job.get("steps") or []:
+            yield name, step
+
+
+@pytest.mark.parametrize(("name", "doc"), _workflow_docs(), ids=lambda v: v if isinstance(v, str) else "")
+def test_workflow_floor(name: str, doc: dict) -> None:
+    blocks = [doc.get("permissions")] + [job.get("permissions") for job in doc["jobs"].values()]
+    assert doc.get("permissions") is not None or all(
+        job.get("permissions") is not None for job in doc["jobs"].values()
+    ), "set top-level permissions"
+    writes = {
+        scope
+        for block in blocks
+        if isinstance(block, dict)
+        for scope, level in block.items()
+        if level == "write"
+    }
+    assert writes <= _WRITE_SCOPES.get(name, set()), f"unexpected write scopes {writes}"
+    for job_name, job in doc["jobs"].items():
+        if (name, job_name) not in _NO_TIMEOUT:
+            assert "timeout-minutes" in job, f"{job_name} has no timeout-minutes"
+        if "uses" in job:
+            assert _PINNED.match(job["uses"]), job["uses"]
+    for job_name, step in _steps(doc):
+        if "uses" in step:
+            assert _PINNED.match(step["uses"]), f"{job_name}: unpinned {step['uses']}"
+            if step["uses"].startswith("actions/checkout") and name in _NO_PERSIST:
+                assert step.get("with", {}).get("persist-credentials") is False, job_name
+        for expression in re.findall(r"\$\{\{.*?\}\}", step.get("run") or ""):
+            assert expression in _SAFE_RUN_EXPRESSIONS, f"{job_name}: {expression} in a run block"
+    signing = [s for _, s in _steps(doc) if "secrets.TAURI_SIGNING_PRIVATE_KEY" in str(s)]
+    assert len(signing) <= 1, "the signing key belongs in exactly one step"
