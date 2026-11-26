@@ -174,7 +174,7 @@ ARCHIVED_WORKSPACES_DIR = ".archived-workspaces"
 EXCLUDED_PATH_PARTS: set[str] = {".vault-trash", ARCHIVED_WORKSPACES_DIR}
 
 # Vault bookkeeping the app itself writes (casefolded names). Mostly the memory
-# pipeline's own files; `Update-Tasks.json` is the update-task state store.
+# pipeline's own files; `Update-Tasks.json` is a retired state store.
 # Indexing them made the old proposals queue and the curation logs rank above real
 # notes for ordinary recall queries — the system's paperwork must never compete
 # with the memories it manages. Matched only directly under a
@@ -199,9 +199,8 @@ RESERVED_UNINDEXED_FILES = frozenset(
         "curation-log.md",
         "weekly-review-log.md",
         "vault-review.md",
-        # The update-task state store (`ciao/update_tasks.py`): a per-workspace
-        # record of which "After this update" tasks were offered, dismissed or
-        # completed. A guard, not a fix for a live leak: every consumer of this
+        # The retired update-task state store: a per-workspace record that older
+        # versions wrote and that is now ignored. A guard, not a fix for a live leak: every consumer of this
         # set reads markdown only today (`fts_search._index_directory`'s `.md`
         # default, `fts_search.index_file`, `vault_index`'s `rglob("*.md")`,
         # `vault_lint._markdown_source_paths`), so nothing here can reach a

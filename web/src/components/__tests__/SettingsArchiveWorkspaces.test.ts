@@ -27,7 +27,6 @@ vi.mock('../../lib/api', () => {
         ? Promise.reject(new Error('HTTP 500'))
         : Promise.resolve({ archived: state.archived })
     }
-    if (path.startsWith('/api/update-tasks')) return Promise.resolve({ tasks: [] })
     // The Overview's Chats and models card reads the engine defaults.
     if (path === '/api/settings/routines') return Promise.resolve({ model_options: { anthropic: [] } })
     return Promise.resolve({})

@@ -256,7 +256,6 @@ def test_workspace_scope_drops_the_sections_that_are_the_same_for_every_root(
     report = _audit(_seeded(tmp_path), workspace_name="personal", scope="workspace")
 
     assert "job_runs_audit" not in report
-    assert "upgrade_notices" not in report
     # Setup stays: it is a precondition on the roots this scope read, not a
     # finding, and a report that cannot say whether its roots were readable is
     # not a report.
@@ -273,7 +272,6 @@ def test_global_scope_drops_the_sections_that_describe_one_workspace(
     for key in ("vault_hygiene", "skill_audit", "rule_audit", "memory_hygiene"):
         assert key not in report
     assert "job_runs_audit" in report
-    assert "upgrade_notices" in report
 
 
 def test_a_section_outside_the_scope_is_absent_rather_than_zeroed(
@@ -299,7 +297,6 @@ def test_the_default_scope_is_unchanged(tmp_path: Path) -> None:
         "rule_audit",
         "memory_hygiene",
         "job_runs_audit",
-        "upgrade_notices",
     ):
         assert key in report, key
     assert report["scope"] == "all"

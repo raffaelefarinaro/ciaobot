@@ -332,15 +332,9 @@ def test_an_existing_notes_folder_kept_in_place_needs_no_migration(tmp_path: Pat
     """Choosing an existing notes folder keeps the notes where they are, so the
     vault is the install folder itself. That is a supported layout: the next
     boot must not try to re-root it (the plan cannot tell notes from install
-    files and refused on every start), and Home must not offer a relocation
-    that `vault-relocate` refuses for this shape (#2021)."""
+    files and refused on every start) (#2021)."""
     from dotenv import dotenv_values
 
-    from ciao.migration_notices import (
-        RELOCATION_INSTALL_FOLDER,
-        relocation_state,
-        vault_location_findings,
-    )
     from ciao.workspace_reroot import migrate_if_needed
 
     (tmp_path / "existing.md").write_text("# Existing note\n", encoding="utf-8")
@@ -357,13 +351,6 @@ def test_an_existing_notes_folder_kept_in_place_needs_no_migration(tmp_path: Pat
     # Fresh adoption now has the same born-per-root receipt as empty-folder
     # setup, so startup retires migration before it can snapshot any notes.
     assert migrate_if_needed(config)["status"] == "already_migrated"
-    assert vault_location_findings(config) == []
-    # The Home card asks the same question of the same predicate (#2051: the
-    # card still offered a move on a Windows install after the notice stopped).
-    assert all(
-        relocation_state(config, name) == RELOCATION_INSTALL_FOLDER
-        for name in config.workspace_names()
-    )
     assert (tmp_path / "existing.md").read_text(encoding="utf-8") == "# Existing note\n"
     assert not (tmp_path / ".git").exists()
 

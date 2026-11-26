@@ -13,26 +13,16 @@ import os
 from pathlib import Path
 from unittest.mock import patch
 
-import pytest
 from starlette.applications import Starlette
 from starlette.routing import Route
 from starlette.testclient import TestClient
 
 from ciao.config import CiaoConfig
-from ciao.migration_notices import reset_links_cache, resolve_links
 from ciao.web.routes_api import (
     dismiss_housekeeping_action,
     list_housekeeping,
     run_housekeeping_action,
 )
-
-
-@pytest.fixture(autouse=True)
-def _no_shared_link_verdicts():
-    """The wikilink cache is process-wide, so a verdict must not leak between tests."""
-    reset_links_cache()
-    yield
-    reset_links_cache()
 
 
 class _Config(CiaoConfig):
@@ -105,15 +95,8 @@ def _client(config: _Config) -> TestClient:
     return TestClient(app)
 
 
-def _seed_vocabulary_unresolved(tmp_path: Path) -> _Config:
-    config = _config(tmp_path)
-    runtime = _runtime(tmp_path)
-    (runtime / "migration").mkdir(parents=True, exist_ok=True)
-    (runtime / "migration" / "vault-vocabulary.json").write_text(
-        json.dumps({"renamed": [], "unresolved": {"log": ["x.md"]}}),
-        encoding="utf-8",
-    )
-    return config
+def _missed(schedule_id: str = "sched-missed") -> _Entry:
+    return _Entry(frequency="once", run_at_date="2026-01-18", schedule_id=schedule_id)
 
 
 def _starred(tmp_path: Path) -> None:
@@ -126,34 +109,38 @@ def _starred(tmp_path: Path) -> None:
 
 
 def test_get_returns_actions_payload(tmp_path: Path) -> None:
-    config = _seed_vocabulary_unresolved(tmp_path)
-    resp = _client(config).get("/api/housekeeping")
+    _starred(tmp_path)
+    client = _client(_config(tmp_path))
+    client.app.state.schedule_manager = _Store([_missed()])
+    resp = client.get("/api/housekeeping")
     assert resp.status_code == 200
     data = resp.json()
-    assert "actions" in data
     ids = [a["id"] for a in data["actions"]]
-    assert "vault-vocabulary" in ids
-    action = next(a for a in data["actions"] if a["id"] == "vault-vocabulary")
+    assert ids == ["missed-schedules"]
     # Every action carries the run/chat surface the client needs.
-    assert action["run_label"]
-    assert action["chat_prompt"]
+    assert data["actions"][0]["run_label"]
 
 
-def test_run_returns_redetected_list_after_clearing(tmp_path: Path) -> None:
-    config = _seed_vocabulary_unresolved(tmp_path)
-    # The run action migrates the vault, which needs the vault dir to exist.
-    config.vault_root.mkdir(parents=True, exist_ok=True)
-    client = _client(config)
-    # The unresolved type is a chat-only decision, but the tile's run button
-    # re-applies the mechanical renames. A migration that resolves nothing keeps
-    # the tile, so assert the payload shape and the re-detected list rather than
-    # a specific clearing.
-    resp = client.post("/api/housekeeping/vault-vocabulary/run")
+def test_failed_run_keeps_same_id_with_failure_detail(tmp_path: Path) -> None:
+    # A run whose condition persists returns the same id with its detail
+    # replaced by the failure text — never silently re-offered as a fresh tile.
+    _starred(tmp_path)
+    client = _client(_config(tmp_path))
+    client.app.state.package_status_fetcher = lambda: {
+        "update_available": True,
+        "latest_version": "9.9.9",
+        "current_version": "0.1.0",
+    }
+    with patch(
+        "ciao.package_version.update_package",
+        return_value={"ok": False, "error": "This checkout cannot self-update."},
+    ):
+        resp = client.post("/api/housekeeping/package-update/run")
     assert resp.status_code == 200
     data = resp.json()
-    assert data["ok"] is True
-    assert data["action_id"] == "vault-vocabulary"
-    assert isinstance(data["actions"], list)
+    assert data["ok"] is False
+    after = {a["id"]: a for a in data["actions"]}
+    assert after["package-update"]["detail"] == "Run failed: This checkout cannot self-update."
 
 
 def test_run_clears_tile_when_condition_resolved(tmp_path: Path) -> None:
@@ -259,30 +246,6 @@ def test_dismiss_unknown_action_returns_404(tmp_path: Path) -> None:
     assert resp.status_code == 404
 
 
-def test_failed_run_keeps_same_id_with_failure_detail(tmp_path: Path) -> None:
-    # A run whose condition persists returns the same id with its detail
-    # replaced by the failure text — never silently re-offered as a fresh tile.
-    config = _seed_vocabulary_unresolved(tmp_path)
-    client = _client(config)
-    # The run migrates an existing vault. Force a failure by making the vault
-    # root a file, so the migration raises.
-    config.vault_root.write_text("not a directory", encoding="utf-8")
-    _starred(tmp_path)
-    before = client.get("/api/housekeeping").json()["actions"]
-    assert [a["id"] for a in before] == ["vault-vocabulary"]
-
-    resp = client.post("/api/housekeeping/vault-vocabulary/run")
-    assert resp.status_code == 200
-    data = resp.json()
-    assert data["ok"] is False
-    after = {a["id"]: a for a in data["actions"]}
-    assert "vault-vocabulary" in after
-    assert "failed" in after["vault-vocabulary"]["detail"].lower()
-    # The tile is still actionable (same shape), not silently re-offered as
-    # though nothing happened.
-    assert after["vault-vocabulary"]["run_label"]
-
-
 def test_real_app_registers_housekeeping_routes() -> None:
     """Every housekeeping route must exist in the real app.py route table."""
     repo = Path(__file__).resolve().parents[1]
@@ -296,66 +259,6 @@ def test_real_app_registers_housekeeping_routes() -> None:
         'Route("/api/housekeeping/{action_id}/dismiss", dismiss_housekeeping_action, methods=["POST"])'
         in app_source
     )
-
-
-def test_the_listing_starts_one_detached_link_scan_and_never_waits_on_it(
-    tmp_path: Path,
-) -> None:
-    """The wikilink verdict is established off the request path, or not at all.
-
-    The one notice this strip carries that needs a vault walk cannot run inside the
-    detector pass, so the route starts the scan and answers from whatever the last
-    one stored. The response therefore carries no card on a cold engine — the same
-    trade `_cached_update_hint` makes for the release lookup — and the scan is
-    tracked on app state so the next poll can pick the verdict up.
-    """
-    config = _config(tmp_path)
-    vault = config.vault_root / "personal"
-    vault.mkdir(parents=True)
-    (vault / "linked.md").write_text("See [[People/Peter]].\n", encoding="utf-8")
-    _runtime(tmp_path)
-    _starred(tmp_path)
-    client = _client(config)
-    client.app.state.links_scan_task = None
-    started: list[str] = []
-
-    async def _record_scan(cfg: object, runtime: object, **kwargs: object) -> None:
-        started.append(str(runtime))
-
-    with patch("ciao.migration_notices.refresh_links", side_effect=_record_scan):
-        resp = client.get("/api/housekeeping")
-
-    assert resp.status_code == 200
-    ids = [a["id"] for a in resp.json()["actions"]]
-    assert "vault-unmigrated-links" not in ids, "no scan has run, so no card yet"
-    assert client.app.state.links_scan_task is not None
-    assert started == [str(_runtime(tmp_path))]
-
-    # Once a verdict exists the card is real, and it names the note the scan found.
-    resolve_links(config, _runtime(tmp_path))
-    resp = client.get("/api/housekeeping")
-    card = next(
-        a for a in resp.json()["actions"] if a["id"] == "vault-unmigrated-links"
-    )
-    assert "linked.md" in card["detail"]
-
-
-def test_a_poll_inside_the_window_starts_no_second_scan(tmp_path: Path) -> None:
-    """The strip is polled every 60s; the window is what stops that costing a walk."""
-    config = _config(tmp_path)
-    vault = config.vault_root / "personal"
-    vault.mkdir(parents=True)
-    (vault / "linked.md").write_text("See [[People/Peter]].\n", encoding="utf-8")
-    _runtime(tmp_path)
-    _starred(tmp_path)
-    client = _client(config)
-    resolve_links(config, _runtime(tmp_path))
-
-    with patch("ciao.migration_notices.refresh_links") as scan:
-        for _ in range(3):
-            client.get("/api/housekeeping")
-
-    scan.assert_not_called()
 
 
 def test_housekeeping_lists_provider_update_tile(tmp_path: Path) -> None:

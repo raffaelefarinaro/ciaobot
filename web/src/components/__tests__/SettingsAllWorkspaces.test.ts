@@ -18,7 +18,6 @@ vi.mock('../../lib/api', () => {
     if (path === '/api/workspaces') return Promise.resolve(state.workspaces)
     if (path === '/api/workspaces/archived') return Promise.resolve({ archived: [] })
     if (path === '/api/settings/routines') return Promise.resolve({ model_options: { anthropic: [] } })
-    if (path.startsWith('/api/update-tasks')) return Promise.resolve({ tasks: [] })
     return Promise.resolve({})
   })
   return {

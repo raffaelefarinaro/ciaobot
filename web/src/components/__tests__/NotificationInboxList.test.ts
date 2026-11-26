@@ -61,8 +61,6 @@ async function mountView(opts: Opts = {}) {
   taskSignals.health = readyHealth()
   const housekeeping = useHousekeepingStore()
   housekeeping.actionsHealth = readyHealth()
-  housekeeping.updateTasksWorkspace = 'personal'
-  housekeeping.updateTasksHealth = readyHealth()
   useTaskStore().schedulesLoaded = true
 
   vi.mocked(api.get).mockReset()

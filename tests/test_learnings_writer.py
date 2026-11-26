@@ -192,9 +192,8 @@ def test_append_learning_mints_under_the_given_workspace(tmp_path: Path) -> None
 
     A per-root install gives every workspace a vault directory of the same name
     (``memory-vault``), so a writer that scoped the id to the directory minted
-    the same id for ``work`` and ``personal``, and minted them under a name the
-    update-task detector — which mints under the registered one — can never
-    resolve. The id written here is the one that reader will be looking for.
+    the same id for ``work`` and ``personal``, and minted them under a name
+    the registered workspace can never resolve. The id written here is the one that reader will be looking for.
     """
     vault = tmp_path / "memory-vault"
     (vault / "Workspace").mkdir(parents=True)

@@ -340,7 +340,7 @@ def write_receipt(runtime_root: Path, payload: dict[str, Any]) -> Path:
     the reverse map, it moves every agent root back to the install root: no
     guide, no skills, and ``undo`` answering ``nothing_to_undo`` because there is
     no migrated receipt left to reverse. A single
-    ``ciao workspace-reroot --rehearse`` on a migrated install did exactly that.
+    ``rehearse`` on a migrated install did exactly that.
     ``rehearse`` is documented as writing nothing that can make the real
     migration look done; the inverse holds too. So a non-migrated payload is
     dropped when the migration is already recorded — the same guard
@@ -3668,13 +3668,12 @@ def migrate_if_needed(config: Any) -> dict[str, Any]:
     pays for planning, rehearsal, or even a full config read here. The module
     itself stays because installs migrated by earlier releases may still exist;
     deleting it before receipts can be assumed universal would strand them. The
-    manual ``ciao workspace-reroot`` subcommands (rehearse/apply/undo/repair)
+    manual rehearse/apply/undo/repair entry points
     remain available for recovery regardless of this gate.
 
     Never raises. A migration that cannot run is a condition to SURFACE, not a
     reason to fail an upgrade and leave the install half-started — the refusal is
-    already recorded in the receipt, and the `workspace-unmigrated` action reads
-    it back and offers the retry.
+    already recorded in the receipt.
 
     Ordering matters and is the caller's job: after the git sync, so the
     clean-tree gate judges the real tree, and before the index refresh, so the
@@ -3856,7 +3855,7 @@ def _repair_owned(
             "status": "not_rerooted",
             "reason": (
                 "this install has not re-rooted, so there is no per-root layout to "
-                "reconcile; run `ciao workspace-reroot --apply` first"
+                "reconcile"
             ),
             "repaired": [],
             "reported": [],

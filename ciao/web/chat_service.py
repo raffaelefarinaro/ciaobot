@@ -28,11 +28,6 @@ from ciao.model_tiers import canonical_tier, is_tier
 from ciao.prompt_fence import fence, neutralize
 from ciao.providers.connect_errors import annotate_reauth
 from ciao.schedules import supports_auto_archive
-# The two vocabularies an `update_task` helper is checked against, taken from
-# the module that defines the tasks rather than re-spelled here: a scope or an
-# id shape the catalog stopped accepting must stop being accepted here too, in
-# the same commit.
-from ciao.update_task_catalog import SCOPES
 
 # Project-files surface (list + upload). Mirrors the union of the read-only
 # workspace-file/image allowlists plus the new binary one (PDF, ZIP, office
@@ -92,16 +87,6 @@ def _classify_file(path: Path) -> str:
 # convention".
 _VAULT_FOLDER_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*")
 
-# A task id in an `update_task` helper, spelled the way the packaged catalog
-# spells one (`update_task_catalog._ID_RE`, deliberately re-declared rather than
-# imported: the chat store must keep validating this shape if the catalog's
-# loader ever changes, and a chat store that cannot read a helper is a chat the
-# operator cannot find again).
-_TASK_ID_RE = re.compile(r"^[a-z0-9]+(?:-[a-z0-9]+)*$")
-
-# A `prompt_digest`, at the width `update_tasks.FINGERPRINT_CHARS` keeps.
-_HEX_DIGEST_RE = re.compile(r"^[0-9a-f]{16}$")
-
 # A memory pass whose source is a saved task resolution (#1154): the completion
 # id is the 32-hex mint from ``ciao.task_resolution``, the digest is the SHA-256
 # of the resolution text. ``MEMORY_PASS_RESOLUTION_MAX`` bounds that text, so a
@@ -114,7 +99,7 @@ _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 
 # A board task id / attempt id in a `task_delegation` helper, and the SHA-256 hex
 # of the task file's bytes. Deliberately re-declared rather than imported from
-# `ciao.task_board` / `ciao.task_attempts` for the same reason `_TASK_ID_RE` is:
+# `ciao.task_board` / `ciao.task_attempts` so that
 # the chat store must keep validating these shapes if either module's id minting
 # ever changes, and a chat store that cannot read a helper is a chat the board
 # cannot link back to.
@@ -808,38 +793,6 @@ def _normalize_project_closure_pass(value: dict[str, Any], state: str) -> dict[s
     }
 
 
-def _normalize_update_task_helper(value: dict[str, Any]) -> dict[str, Any]:
-    """Fail closed on an update-task helper, same contract as the other two.
-
-    This kind is what makes a launched "After this update" task findable again
-    after a restart: it is the only record of which task a chat is for, so a
-    half-valid one is a chat the store can no longer recognise. Every field is
-    therefore required and typed — the id must be the kebab name the catalog
-    gives a task, the revision a positive integer, the scope one the catalog
-    scopes tasks by, and the digest hex, because a digest that is not one is a
-    value this code did not write.
-    """
-    task_id = str(value.get("task_id") or "")
-    if len(task_id) > 128 or not _TASK_ID_RE.fullmatch(task_id):
-        return {}
-    revision = value.get("revision")
-    if isinstance(revision, bool) or not isinstance(revision, int) or revision < 1:
-        return {}
-    scope = str(value.get("scope") or "")
-    if scope not in SCOPES:
-        return {}
-    prompt_digest = str(value.get("prompt_digest") or "")
-    if not _HEX_DIGEST_RE.fullmatch(prompt_digest):
-        return {}
-    return {
-        "kind": "update_task",
-        "task_id": task_id,
-        "revision": revision,
-        "scope": scope,
-        "prompt_digest": prompt_digest,
-    }
-
-
 def _normalize_task_delegation_helper(value: dict[str, Any]) -> dict[str, Any]:
     """Fail closed on a task-delegation helper, same contract as the other kinds.
 
@@ -874,8 +827,6 @@ def _normalize_chat_helper(value: Any) -> dict[str, Any]:
     kind = value.get("kind")
     if kind == "memory_pass":
         return _normalize_memory_pass_helper(value)
-    if kind == "update_task":
-        return _normalize_update_task_helper(value)
     if kind == "task_delegation":
         return _normalize_task_delegation_helper(value)
     return {}

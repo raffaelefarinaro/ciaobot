@@ -1025,7 +1025,7 @@ class CiaoControlPlane:
     #: engine's.
     _PERSON_TURN_ORIGINS = frozenset({"", "retry"})
     #: Helper chats the engine starts from its own prompt, not a typed one.
-    _ENGINE_HELPER_KINDS = frozenset({"memory_pass", "update_task"})
+    _ENGINE_HELPER_KINDS = frozenset({"memory_pass"})
 
     def _person_typed_turn(self, principal: AgentPrincipal) -> bool:
         """Whether the turn asking right now is one a person typed into this chat.

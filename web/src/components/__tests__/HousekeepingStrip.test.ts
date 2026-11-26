@@ -10,13 +10,13 @@ import { createMemoryHistory, createRouter } from 'vue-router'
 import { resetHomeNoticeWindows, useHomeNoticeWindows } from '../../composables/useHomeNoticeWindows'
 import { api } from '../../lib/api'
 import * as confirmModule from '../../lib/confirm'
-import { actionNoticeKey, updateNoticeKey } from '../../lib/notificationInbox'
+import { actionNoticeKey } from '../../lib/notificationInbox'
 import { resetHostTerminalForTests, useHostTerminal } from '../../composables/useHostTerminal'
 import { leadLabels, leads, menuLabels, pick, rows, titles, visibleControls } from './needsYouHelpers'
 import { readyHealth } from '../../lib/sourceHealth'
 import { useProjectStore } from '../../stores/projects'
 import { useHousekeepingStore } from '../../stores/housekeeping'
-import type { OperatorAction, UpdateTaskRow, WorkspaceHealthCheck } from '../../lib/types'
+import type { OperatorAction, WorkspaceHealthCheck } from '../../lib/types'
 
 // The router is imported lazily inside the click handlers, so it is stubbed as a
 // module: the component's own import is what has to be intercepted.
@@ -504,8 +504,6 @@ describe('workspace health', () => {
       action({ id: 'plain', title: 'Plain' }),
       action({ id: 'gate', title: 'Gate', blocking: true, run_label: 'Fix now' }),
     ]
-    store.updateTasks = [updateTask()]
-    store.updateTasksWorkspace = 'personal'
     useProjectStore().activeWorkspace = 'personal'
     const wrapper = mount(HousekeepingStrip, { global: { plugins: [pinia] } })
     await nextTick()
@@ -513,7 +511,6 @@ describe('workspace health', () => {
       'Vault root for work is missing',
       'Gate',
       'Plain',
-      'Review the rows your old notes left behind',
     ])
     wrapper.unmount()
   })
@@ -984,28 +981,6 @@ describe('a provider update row', () => {
 })
 
 
-function updateTask(overrides: Partial<UpdateTaskRow> = {}): UpdateTaskRow {
-  return {
-    id: 'review-legacy-rows',
-    revision: 1,
-    scope: 'workspace',
-    title: 'Review the rows your old notes left behind',
-    why: 'Rows retired into a folder no surface reads any more.',
-    since_version: '2.1.0',
-    status: 'offered',
-    applicability: 'applicable',
-    applicability_checked_at: '2026-09-01T10:00:00+00:00',
-    offered: true,
-    suppressed: false,
-    chat_id: '',
-    chat_live: false,
-    prompt_digest: '',
-    attempted_fingerprint: '',
-    updated_at: '',
-    ...overrides,
-  }
-}
-
 describe('notice reveal', () => {
   const Empty = defineComponent({ template: '<div />' })
   const UNAVAILABLE = 'This notice is no longer available'
@@ -1022,7 +997,6 @@ describe('notice reveal', () => {
     const housekeeping = useHousekeepingStore()
     vi.spyOn(housekeeping, 'init').mockImplementation(() => {})
     vi.spyOn(housekeeping, 'refresh').mockResolvedValue(undefined)
-    vi.spyOn(housekeeping, 'refreshUpdateTasks').mockResolvedValue(undefined)
     housekeeping.actionsHealth = readyHealth()
   })
 
@@ -1037,13 +1011,6 @@ describe('notice reveal', () => {
 
   function noticeEl(key: string): HTMLElement | undefined {
     return [...document.querySelectorAll<HTMLElement>('[data-home-notice-window]')].find(el => el.dataset.noticeKey === key)
-  }
-
-  function readyUpdates(rows: UpdateTaskRow[], workspace = 'personal') {
-    const store = useHousekeepingStore()
-    store.updateTasks = rows
-    store.updateTasksWorkspace = workspace
-    store.updateTasksHealth = readyHealth()
   }
 
   const q = (key: string) => `/?notice=${encodeURIComponent(key)}`
@@ -1100,13 +1067,10 @@ describe('notice reveal', () => {
     ['unknown action id', actionNoticeKey('personal', 'nope'), []],
     ['wrong-workspace action', actionNoticeKey('work', 'x'), []],
     ['malformed key', 'garbage', []],
-    ['dismissed update task', updateNoticeKey('personal', 'review-legacy-rows', 1), [updateTask({ status: 'dismissed' })]],
-    ['completed update task', updateNoticeKey('personal', 'review-legacy-rows', 1), [updateTask({ status: 'completed' })]],
-    ['not applicable update offer', updateNoticeKey('personal', 'review-legacy-rows', 1), [updateTask({ applicability: 'not_applicable' })]],
-  ])('unavailable_for_missing_keys %s', async (_name, key, tasks) => {
+    ['retired update-task key', 'update:personal:review-legacy-rows@1', []],
+  ])('unavailable_for_missing_keys %s', async (_name, key) => {
     const store = useHousekeepingStore()
     store.actions = [action({ id: 'x', workspace: 'personal' }), action({ id: 'other' })]
-    readyUpdates(tasks as UpdateTaskRow[])
     const windows = useHomeNoticeWindows()
     const closed = actionNoticeKey('personal', 'other')
     windows.close(closed)
@@ -1119,54 +1083,13 @@ describe('notice reveal', () => {
     wrapper.unmount()
   })
 
-  it('previous_workspace_update_key_cannot_target_new_workspace', async () => {
-    useProjectStore().activeWorkspace = 'work'
-    readyUpdates([updateTask()], 'work')
-    const windows = useHomeNoticeWindows()
-    const workKey = updateNoticeKey('work', 'review-legacy-rows', 1)
-    windows.close(workKey)
-    const { wrapper } = await mountAt(q(updateNoticeKey('personal', 'review-legacy-rows', 1)))
-    expect(wrapper.get('.home-notice-unavailable').text()).toBe(UNAVAILABLE)
-    expect(windows.isClosed(workKey)).toBe(true)
-    wrapper.unmount()
-  })
-
-  it('reveals_update_task_notice', async () => {
-    const key = updateNoticeKey('personal', 'review-legacy-rows', 1)
-    readyUpdates([updateTask()])
-    const windows = useHomeNoticeWindows()
-    windows.close(key)
-    const { wrapper } = await mountAt(q(key))
-    expect(windows.isClosed(key)).toBe(false)
-    expect(document.activeElement).toBe(noticeEl(key))
-    wrapper.unmount()
-  })
-
-  it('waits_for_update_tasks_source', async () => {
-    const key = updateNoticeKey('personal', 'review-legacy-rows', 1)
-    const store = useHousekeepingStore()
-    const refreshUpdates = vi.mocked(store.refreshUpdateTasks)
-    const { wrapper } = await mountAt(q(key))
-    expect(wrapper.text()).not.toContain(UNAVAILABLE)
-    expect(refreshUpdates).toHaveBeenCalledTimes(1)
-    expect(refreshUpdates).toHaveBeenCalledWith('personal')
-    readyUpdates([updateTask()])
-    await flushPromises()
-    expect(refreshUpdates).toHaveBeenCalledTimes(1)
-    expect(document.activeElement).toBe(noticeEl(key))
-    wrapper.unmount()
-  })
-
   it('never_acts', async () => {
     const key = actionNoticeKey('personal', 'test-action')
     const store = useHousekeepingStore()
     store.actions = [action({ run_label: 'Run', dismiss_label: 'Later', chat_prompt: 'x' })]
-    readyUpdates([updateTask()])
     const spies = [
       vi.spyOn(store, 'run'),
       vi.spyOn(store, 'dismiss'),
-      vi.spyOn(store, 'startUpdateTask'),
-      vi.spyOn(store, 'dismissUpdateTask'),
       vi.spyOn(api, 'post'),
       vi.spyOn(confirmModule, 'askConfirm'),
     ]
@@ -1196,13 +1119,11 @@ describe('notice reveal', () => {
 
   it('data_notice_key_matches_lib_builder', async () => {
     useHousekeepingStore().actions = [action({ id: 'a' }), action({ id: 'g', workspace: '' })]
-    readyUpdates([updateTask()])
     const { wrapper } = await mountAt('/')
     const keys = [...document.querySelectorAll<HTMLElement>('[data-home-notice-window]')].map(el => el.dataset.noticeKey)
     expect(keys).toEqual(expect.arrayContaining([
       actionNoticeKey('personal', 'a'),
       actionNoticeKey('', 'g'),
-      updateNoticeKey('personal', 'review-legacy-rows', 1),
     ]))
     wrapper.unmount()
   })

@@ -59,7 +59,7 @@ function calledUrls(get: ReturnType<typeof stubGet>): string[] {
 }
 
 describe('Settings pages', () => {
-  const MOVED = ['Appearance', 'This host', 'PWA password', 'Other devices', 'Network access', 'Developer', 'Workspace health', 'Memory backup', 'Update task history']
+  const MOVED = ['Appearance', 'This host', 'PWA password', 'Other devices', 'Network access', 'Developer', 'Workspace health', 'Memory backup']
 
   it('hides Use Ciaobot as an app inside Ciaobot for Mac', async () => {
     ;(globalThis as Record<string, unknown>).__CIAOBOT_DESKTOP__ = true

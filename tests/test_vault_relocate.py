@@ -935,33 +935,6 @@ def test_undo_rolls_earlier_reversals_forward_when_a_later_one_fails(
 # -- CLI: CIAO_RUNTIME_ROOT is honored ---------------------------------------
 
 
-def test_cli_honors_ciao_runtime_root_env_var(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    from ciao import cli
-
-    install, _ = _shared_root_install(tmp_path)
-    custom_runtime = tmp_path / "elsewhere" / "runtime"
-    custom_runtime.mkdir(parents=True)
-    # Move the registry the fixture wrote under install/.runtime to the
-    # custom runtime root, so CiaoConfig and the CLI agree on where it lives.
-    registry = json.loads((install / ".runtime" / "workspaces.json").read_text(encoding="utf-8"))
-    (custom_runtime / "workspaces.json").write_text(
-        json.dumps(registry, indent=2) + "\n", encoding="utf-8"
-    )
-
-    monkeypatch.setenv("CIAO_WORKSPACE", str(install))
-    monkeypatch.setenv("CIAO_RUNTIME_ROOT", str(custom_runtime))
-    monkeypatch.delenv("CIAO_VAULT_ROOT", raising=False)
-    monkeypatch.setenv("PWA_AUTH_TOKEN", "test")
-
-    rc = cli.main(["vault-relocate", "scandit", "--apply"])
-
-    assert rc == 0
-    assert (custom_runtime / "migration" / "vault-relocate-scandit.json").is_file()
-    assert not (install / ".runtime" / "migration").exists()
-
-
 # -- install-root vault (existing-folder setup) ------------------------------
 
 
@@ -1026,37 +999,3 @@ def test_plan_refuses_a_whole_directory_move_containing_another_workspace(
 # -- CLI: an explicit --workspace ignores ambient env, uses the target's .env
 
 
-def test_cli_explicit_workspace_uses_the_target_runtime_root(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """--workspace <install> must use THAT install's `.runtime`, not the
-    calling shell's ambient CIAO_RUNTIME_ROOT — an ambient value belongs to
-    whatever install the caller's own session is for, and letting it leak in
-    means apply can move the target's vault while writing the registry entry
-    to the wrong (caller's own) runtime directory. A CIAO_RUNTIME_ROOT line in
-    the target's `.env` is not read either.
-    """
-    from ciao import cli
-
-    install, _ = _shared_root_install(tmp_path)
-    custom_runtime = tmp_path / "custom-runtime"
-    custom_runtime.mkdir()
-    registry = json.loads((install / ".runtime" / "workspaces.json").read_text(encoding="utf-8"))
-    (custom_runtime / "workspaces.json").write_text(
-        json.dumps(registry, indent=2) + "\n", encoding="utf-8"
-    )
-    (install / ".env").write_text(f"CIAO_RUNTIME_ROOT={custom_runtime}\n", encoding="utf-8")
-
-    decoy_runtime = tmp_path / "decoy-runtime"
-    decoy_runtime.mkdir()
-    monkeypatch.setenv("CIAO_WORKSPACE", str(tmp_path / "unrelated"))
-    monkeypatch.setenv("CIAO_RUNTIME_ROOT", str(decoy_runtime))
-    monkeypatch.delenv("CIAO_VAULT_ROOT", raising=False)
-    monkeypatch.setenv("PWA_AUTH_TOKEN", "test")
-
-    rc = cli.main(["vault-relocate", "scandit", "--workspace", str(install), "--apply"])
-
-    assert rc == 0
-    assert (install / ".runtime" / "migration" / "vault-relocate-scandit.json").is_file()
-    assert not (custom_runtime / "migration").exists()
-    assert not (decoy_runtime / "migration").exists()

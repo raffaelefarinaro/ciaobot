@@ -113,13 +113,6 @@ export const HandoverEmpty: Story = {
   args: { prompt: { kind: 'handover', from: 'Agent A', to: 'Agent B', sent: '' }, raw: '' },
   play: async ({ canvas, userEvent }) => { await userEvent.click(canvas.getByRole('button', { expanded: false })); expect(canvas.getByText('This handover recorded no copy of what was sent.')).toBeTruthy(); expect(canvas.queryByText('Show what the agent received')).toBeNull() },
 }
-export const UpdateTask: Story = {
-  args: { prompt: { kind: 'update_task' }, raw: 'Review the synthetic update task.' },
-  play: async ({ canvas, userEvent }) => {
-    await userEvent.click(canvas.getByRole('button', { expanded: false }))
-    expect(canvas.getByRole('region', { name: 'Injected request' })).toHaveTextContent('Review the synthetic update task.')
-  },
-}
 export const ChatAction: Story = {
   args: { prompt: { kind: 'chat_action' }, raw: '' },
   play: async ({ canvas, userEvent }) => {

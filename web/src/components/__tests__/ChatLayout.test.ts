@@ -306,7 +306,6 @@ describe('ChatLayout', () => {
       expect(rail.find('.home-review-summary .home-today').exists()).toBe(true)
       expect(rail.find('.needs-you').exists()).toBe(false)
       expect(rail.find('.home-notice-reopen').exists()).toBe(false)
-      expect(rail.find('.update-tasks').exists()).toBe(false)
       wrapper.unmount()
     })
 
@@ -4390,8 +4389,6 @@ describe('ChatLayout chat route without a catalog entry', () => {
       vi.spyOn(useTaskStore(), 'fetchSchedules').mockResolvedValue()
       const housekeeping = useHousekeepingStore()
       housekeeping.actionsHealth = { status: 'ready', lastSuccessAt: '2026-08-12T10:00:00.000Z', error: '' }
-      housekeeping.updateTasksWorkspace = 'personal'
-      housekeeping.updateTasksHealth = { status: 'ready', lastSuccessAt: '2026-08-12T10:00:00.000Z', error: '' }
       useTaskStore().schedulesLoaded = true
       vi.spyOn(store, 'fetchAll').mockImplementation(async () => {
         store.projects = [{

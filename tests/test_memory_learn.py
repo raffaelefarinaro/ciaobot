@@ -557,7 +557,7 @@ def test_an_unavailable_chat_keeps_the_existing_attended_policy(
     assert len(spy_append) == 1
 
 
-@pytest.mark.parametrize("origin", ["webhook", "task_delegation", "update_task", "schedule"])
+@pytest.mark.parametrize("origin", ["webhook", "task_delegation", "schedule"])
 def test_engine_origins_cannot_record_a_learning(
     tmp_path: Path, spy_append: list[str], origin: str
 ) -> None:
@@ -574,7 +574,7 @@ def test_engine_origins_cannot_record_a_learning(
     assert spy_append == []
 
 
-@pytest.mark.parametrize("kind", ["update_task", "memory_pass"])
+@pytest.mark.parametrize("kind", ["memory_pass"])
 def test_engine_helper_chats_cannot_record_a_learning(
     tmp_path: Path, spy_append: list[str], kind: str
 ) -> None:

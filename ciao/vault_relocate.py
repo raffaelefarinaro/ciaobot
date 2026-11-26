@@ -38,13 +38,8 @@ by an automated check: :func:`read_receipt` is the one accessor that answers
 ``status == "relocated"``, and after an undo the answer is ``None`` again, so a
 later drift is applicable work rather than a task already finished.
 
-That last property is the reason the "After this update" catalog can carry a
-``vault-relocate`` task at all. A task's completion check is settled once and then
-suppressed for the whole revision, so a condition whose remedy is *reversible*
-needs evidence that disappears when the remedy is reversed — otherwise undoing
-the move would leave the card hidden while the vault was back outside its folder.
-This receipt does that, and ``ciao.migration_notices.completed_relocation`` is the
-only way any surface reads it.
+A completed receipt is the evidence that a relocation happened, and it disappears
+when the relocation is undone, so ``read_receipt`` is the only accessor any caller needs.
 
 ``_write_receipt`` refuses to downgrade a completed receipt with a refusal, and
 that guard is load-bearing here too: retrying ``--apply`` on a relocated
@@ -322,7 +317,7 @@ def read_receipt(runtime_root: Path, workspace: str) -> dict[str, Any] | None:
 
     The canonical completed-only reader, and the one every other surface must go
     through. Two callers need it and they must not each hold their own idea of
-    "done": the "After this update" catalog's completion check, which asks whether
+    "done": a check that asks whether
     the workspace is finished, and :func:`undo`, which is only allowed to reverse
     a run that moved something.
 
@@ -357,8 +352,8 @@ def _write_receipt(runtime_root: Path, workspace: str, payload: dict[str, Any]) 
     Never downgrades a completed ``status: "relocated"`` receipt with a
     non-relocated payload: retrying ``--apply`` after a successful run
     correctly refuses ("already at its standard location"), and writing that
-    refusal over the completed receipt would make ``ciao vault-relocate
-    <name> --undo`` a no-op for a relocation that is still fully in effect.
+    refusal over the completed receipt would make an undo
+    a no-op for a relocation that is still fully in effect.
     """
     path = receipt_path(runtime_root, workspace)
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -767,8 +762,8 @@ def _undo_locked(config: Any, workspace: str, runtime_root: Path, *, owner: Any)
     :func:`read_receipt`, because the three refusals — no run recorded, the file
     unreadable, the last run relocated nothing — have to be told apart and only the
     last of them says the record is fine. The gate on ``status`` is the same rule
-    :func:`read_receipt` applies, so the reverse and the "After this update" task's
-    completion check cannot disagree about which run is reversible.
+    :func:`read_receipt` applies, so the reverse and any completion check
+    cannot disagree about which run is reversible.
     """
     recorded = peek_receipt(runtime_root, workspace)
     if recorded is None:
@@ -984,9 +979,8 @@ def _undo_locked(config: Any, workspace: str, runtime_root: Path, *, owner: Any)
             config._normalize_workspace_vault_roots()
 
     # Deleting the receipt is what makes the reverse *complete* rather than
-    # merely applied: `read_receipt` then answers "no", so an "After this update"
-    # `vault-relocate` task stops claiming the workspace is finished and offers the
-    # work again. A receipt left behind here would hide the card over a vault that
+    # merely applied: `read_receipt` then answers "no", so nothing keeps claiming
+    # the workspace is finished. A receipt left behind here would hide the card over a vault that
     # is outside its folder once more.
     receipt_path(runtime_root, workspace).unlink(missing_ok=True)
     return {

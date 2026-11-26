@@ -242,34 +242,6 @@ def _checked_client(tmp_path):
     return signed_in(TestClient(create_app(cfg))), cfg, vault
 
 
-def _record(cfg, title: str, *, proposal_id: str = "") -> None:
-    """Record a check against one note's current text, as the pass would."""
-    from datetime import date, timedelta
-
-    from ciao import file_kernel as fk
-    from ciao import note_verification as nv
-
-    # `workspace_vault_root` IS the workspace's vault after the re-rooting, so
-    # the note's key in the state is its path inside that root.
-    vault = cfg.workspace_vault_root("personal")
-    relative = f"{title}.md"
-    today = date.today()
-    nv.record_note_check(
-        vault,
-        nv.NoteCheck(
-            relative_path=relative,
-            content_revision=fk.content_revision(
-                (vault / relative).read_text(encoding="utf-8")
-            ),
-            outcome="unverified" if not proposal_id else "update",
-            checked_at=today,
-            retry_after=today + timedelta(days=30),
-            coverage="complete",
-            proposal_id=proposal_id,
-        ),
-    )
-
-
 def _graph_node(client, title):
     return next(
         n for n in client.get("/api/vault/graph").json()["nodes"] if n["title"] == title

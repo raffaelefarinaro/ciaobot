@@ -183,50 +183,33 @@ export const CHATS = WORKSPACES.flatMap((workspace) => ([
 ]))
 
 /**
- * Two open rows for the "After this update" group, which only a spec that opts
- * in through `POST /__fixture__/update-tasks` ever sees. Two rather than one so
- * the gap below the last card is measured against a real end of the section
- * instead of a single card that also happens to be the last one.
+ * Two housekeeping actions for the "Needs you" list, which only a spec that opts
+ * in through `POST /__fixture__/needs-you` ever sees. Two rather than one so
+ * the gap below the last row is measured against a real end of the section
+ * instead of a single row that also happens to be the last one.
  *
- * `applicability: 'applicable'` and an `offered` status are what the strip
- * draws; a row the detector ruled out is filtered out before it renders, and
- * neither a completed nor a dismissed one is.
+ * Each carries a `run_label`, so its lead control is a button; neither is
+ * blocking or has a workspace, so both are drawn in the order given.
  */
-export const UPDATE_TASKS = [
-  {
-    id: 'review-legacy-rows',
-    revision: 1,
-    scope: 'workspace',
-    title: 'Review the rows your old notes left behind',
-    why: 'Rows retired into a folder no surface reads any more.',
-    since_version: '2.1.0',
-    status: 'offered',
-    applicability: 'applicable',
-    applicability_checked_at: '2026-09-01T10:00:00+00:00',
-    offered: true,
-    suppressed: false,
-    chat_id: '',
-    prompt_digest: '',
-    attempted_fingerprint: '',
-    updated_at: '2026-09-01T10:00:00+00:00',
-  },
-  {
-    id: 'confirm-backup-schedule',
-    revision: 1,
-    scope: 'workspace',
-    title: 'Confirm the memory backup schedule',
-    why: 'The old schedule points at a branch this install does not push to.',
-    since_version: '2.1.0',
-    status: 'offered',
-    applicability: 'applicable',
-    applicability_checked_at: '2026-09-01T10:00:00+00:00',
-    offered: true,
-    suppressed: false,
-    chat_id: '',
-    prompt_digest: '',
-    attempted_fingerprint: '',
-    updated_at: '2026-09-01T10:00:00+00:00',
-  },
+const needsYouAction = (id, title, detail) => ({
+  id,
+  kind: 'setup-check',
+  severity: 20,
+  title,
+  detail,
+  glyph: '',
+  workspace: '',
+  run_label: 'Run check',
+  chat_label: '',
+  chat_prompt: '',
+  view_label: '',
+  view_route: '',
+  blocking: false,
+})
+
+export const NEEDS_YOU_ACTIONS = [
+  needsYouAction('review-legacy-rows', 'Review the rows your old notes left behind', 'Rows retired into a folder no surface reads any more.'),
+  needsYouAction('confirm-backup-schedule', 'Confirm the memory backup schedule', 'The old schedule points at a branch this install does not push to.'),
 ]
 
 export const SCHEDULES = [
