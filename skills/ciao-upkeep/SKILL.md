@@ -34,7 +34,7 @@ row you did not check is worse than no date.
 
 ## 1. Dependencies — everything we install
 
-`ciao/dependency_updates.py::check_available_updates` reports updates for
+`scripts/dependency_updates.py::check_available_updates` reports updates for
 **two files only**: `pyproject.toml` and `web/package.json`. It is correct for
 what it covers, and it covers less than we install. `AUTO_UPDATE_KEYS` is
 empty (since #3138 C2b nothing is auto-applied), so `--apply` during a release
@@ -43,8 +43,9 @@ this one.
 
 ```bash
 env -u PYTHONPATH .venv/bin/python -c "
-import pathlib
-from ciao.dependency_updates import check_available_updates
+import pathlib, sys
+sys.path.insert(0, 'scripts')
+from dependency_updates import check_available_updates
 for u in check_available_updates(pathlib.Path('$(pwd)')):
     flags = ('auto' if u.auto else 'manual', 'safe' if u.is_safe else 'major')
     print(f'{u.key:28} {u.ecosystem:7} {u.current:12} -> {u.latest:12} {\" \".join(flags)}')"
