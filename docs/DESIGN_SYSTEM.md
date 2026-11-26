@@ -405,11 +405,12 @@ SettingsSwitch stories render the controlled production native button; the
 wrapper feeds toggle events back into checked. Busy shows an ellipsis and
 `aria-busy` but remains enabled unless explicitly disabled. Narrow uses a
 maximum 390px container. Keyboard-focus and reduced-motion have no dedicated
-stories. Only the vault-check and restart-resume cards use this shared switch
+stories. Only the restart-resume card uses this shared switch
 so far; their persistence, parent loading fidelity and connected-screen story
 coverage are unchanged. Legacy switch styles remain for unmigrated consumers.
 
-This is not an automated browser interaction or visual-regression runner.
+`npm run test-storybook` renders every story in headless Chromium and runs its
+`play` functions; it is not a visual-regression runner.
 
 - [ ] No hex/rgb/hsl literal; no hardcoded `font-size`, `border-radius`, or spacing
 - [ ] No container re-specifying a primitive (Rule L1.1)

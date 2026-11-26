@@ -15,7 +15,7 @@ The retired ``[Report]`` prefix and ``report`` label belong to the
 anonymous bug-report form that was removed on 2026-07-30. They are not in
 the mapping and are surfaced for human decision rather than auto-applied.
 
-Trigger: ``ciao label-hygiene`` (dry-run by default; ``--apply`` writes).
+Trigger: ``python scripts/label_hygiene.py`` (dry-run by default; ``--apply`` writes).
 """
 
 from __future__ import annotations
