@@ -528,11 +528,10 @@ function projectUt(updateTasks: UpdateTaskCandidate[], chats: ChatCandidate[] = 
 }
 
 describe('update-task rows', () => {
-  const STATUSES = ['offered', 'in_progress', 'waiting_review', 'failed', 'completed', 'dismissed']
+  const STATUSES = ['offered', 'in_progress', 'failed', 'completed', 'dismissed']
   const APPLIC = ['applicable', 'not_applicable', 'unknown']
   const expected = (status: string, applicability: string): string | null => {
     if (status === 'offered') return applicability === 'not_applicable' ? null : 'toReview'
-    if (status === 'waiting_review') return 'toReview'
     if (status === 'failed') return 'needsYou'
     return null
   }
@@ -574,9 +573,9 @@ describe('update-task rows', () => {
   })
 
   it('destination_is_always_home_notice', () => {
-    const inbox = projectUt([ut({ status: 'waiting_review', chatId: '', chatLive: false })])
+    const inbox = projectUt([ut({ status: 'failed', chatId: '', chatLive: false })])
     expect(notificationPath(inbox.rows[0].destination)).toBe('/?notice=update%3Apersonal%3At1%401')
-    const live = projectUt([ut({ status: 'waiting_review', chatId: 'c1', chatLive: true })])
+    const live = projectUt([ut({ status: 'failed', chatId: 'c1', chatLive: true })])
     expect(notificationPath(live.rows[0].destination)).toBe('/?notice=update%3Apersonal%3At1%401')
   })
 
@@ -592,7 +591,7 @@ describe('update-task rows', () => {
     const task = ut({ status: 'in_progress', chatId: 'c', chatLive: true, chatFailed: true })
     const failedChat = projectUt([task], [chat({ chatId: 'c', failed: true, needsYou: true })])
     expect(failedChat.rows.map((r) => r.key)).toEqual(['update-task:personal:t1@1'])
-    const twin = projectUt([ut({ status: 'waiting_review', chatId: 'c', chatLive: true })], [chat({ chatId: 'c', unread: true })])
+    const twin = projectUt([ut({ status: 'failed', chatId: 'c', chatLive: true })], [chat({ chatId: 'c', unread: true })])
     expect(twin.rows.map((r) => r.key)).toEqual(['update-task:personal:t1@1'])
   })
 
@@ -613,12 +612,8 @@ describe('update-task rows', () => {
     const reason = (o: Partial<UpdateTaskCandidate>) => projectUt([ut(o)]).rows[0].reason
     expect(reason({ status: 'failed' })).toBe('The last attempt did not get going.')
     expect(reason({ status: 'in_progress', chatFailed: true, chatId: 'c', chatLive: true })).toBe('Its chat failed.')
-    expect(reason({ status: 'waiting_review', chatLive: true, chatId: 'c' }))
-      .toBe('Its chat is open and waiting for you to decide what to do with it.')
-    expect(reason({ status: 'waiting_review' }))
-      .toBe('Its chat was archived or deleted. Open the notice to start a new one.')
     expect(reason({ applicability: 'unknown' })).toBe('Not yet known whether this applies here. Open it to check again.')
     expect(reason({})).toBe('New since this update.')
-    expect(projectUt([ut({ status: 'waiting_review', applicability: 'unknown' })]).rows[0].title).toBe('Task')
+    expect(projectUt([ut({ status: 'failed', applicability: 'unknown' })]).rows[0].title).toBe('Task')
   })
 })

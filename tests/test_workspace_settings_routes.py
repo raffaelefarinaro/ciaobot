@@ -306,7 +306,6 @@ def test_post_workspace_persists_runtime_registry_and_updates_live_config(tmp_pa
         "default_provider": "claude",
         "disallowed_tools": ["mcp__claude_ai_Slack", "Bash"],
         "color": "amber",
-        "memory_handover": "all",
     }
     assert client_workspace["lifetime_id"]
 
@@ -400,44 +399,6 @@ def test_workspace_creation_rejects_a_symlinked_vault_folder(tmp_path):
     assert "symlink" in response.json()["error"]
     assert config.workspace("research") is None
     assert pcm.refresh_count == 0
-
-
-def test_workspace_creation_persists_or_refuses_memory_handover(tmp_path):
-    client, config, _pcm = _client(tmp_path)
-    registry = tmp_path / ".runtime" / "workspaces.json"
-
-    created = client.post("/api/workspaces", json={"name": "research", "memory_handover": "dismiss"})
-    assert created.status_code == 201
-    assert config.workspace("research").memory_handover == "dismiss"
-    stored = next(w for w in json.loads(registry.read_text()) if w["name"] == "research")
-    assert stored["memory_handover"] == "dismiss"
-
-    before = registry.read_bytes()
-    refused = client.post("/api/workspaces", json={"name": "other", "memory_handover": "everything"})
-    assert refused.status_code == 400
-    assert config.workspace("other") is None
-    assert registry.read_bytes() == before
-
-
-def test_new_workspace_defaults_to_all_memory_handover_without_changing_existing(tmp_path):
-    client, config, _pcm = _client(tmp_path)
-    registry = tmp_path / ".runtime" / "workspaces.json"
-
-    created = client.post("/api/workspaces", json={"name": "research"})
-
-    assert created.status_code == 201
-    assert config.workspace("personal").memory_handover == "off"
-    assert config.workspace("research").memory_handover == "all"
-    stored = {w["name"]: w for w in json.loads(registry.read_text())}
-    assert stored["research"]["memory_handover"] == "all"
-    listed = client.get("/api/workspaces").json()
-    assert next(w for w in listed["workspaces"] if w["name"] == "research")["memory_handover"] == "all"
-
-    disabled = client.patch("/api/workspaces/research", json={"memory_handover": "off"})
-    assert disabled.status_code == 200
-    assert config.workspace("research").memory_handover == "off"
-    stored = {w["name"]: w for w in json.loads(registry.read_text())}
-    assert "memory_handover" not in stored["research"]
 
 
 def test_workspace_creation_rejects_case_and_vault_owner_collisions(tmp_path):
@@ -1168,40 +1129,6 @@ def test_patch_rename_with_invalid_setting_writes_nothing(tmp_path, extra):
     assert not (tmp_path / "beta").exists()
 
 
-def test_workspace_memory_handover_defaults_off_persists_and_validates(tmp_path):
-    """The handover is operator-set per workspace, stored only when not off."""
-    client, config, _pcm = _client(tmp_path)
-    registry = tmp_path / ".runtime" / "workspaces.json"
-
-    def stored_row() -> dict:
-        return next(w for w in json.loads(registry.read_text()) if w["name"] == "personal")
-
-    assert config.workspace("personal").memory_handover == "off"
-    listed = client.get("/api/workspaces").json()
-    assert next(w for w in listed["workspaces"] if w["name"] == "personal")["memory_handover"] == "off"
-
-    patched = client.patch("/api/workspaces/personal", json={"memory_handover": "dismiss"})
-    assert patched.status_code == 200
-    updated = next(w for w in patched.json()["workspaces"] if w["name"] == "personal")
-    assert updated["memory_handover"] == "dismiss"
-    assert stored_row()["memory_handover"] == "dismiss"
-
-    # A save that does not mention it keeps it.
-    kept = client.patch("/api/workspaces/personal", json={"color": "cyan"})
-    assert kept.status_code == 200
-    assert config.workspace("personal").memory_handover == "dismiss"
-    assert stored_row()["memory_handover"] == "dismiss"
-
-    # Back to off removes the key from the file.
-    off = client.patch("/api/workspaces/personal", json={"memory_handover": "off"})
-    assert off.status_code == 200
-    assert "memory_handover" not in stored_row()
-
-    bad = client.patch("/api/workspaces/personal", json={"memory_handover": "everything"})
-    assert bad.status_code == 400
-    assert config.workspace("personal").memory_handover == "off"
-
-
 def test_workspace_provider_overrides_persist_validate_and_clear(tmp_path):
     """Overrides are operator-set per workspace and provider, sparse on disk, replaced whole."""
     client, config, _pcm = _client(tmp_path)
@@ -1587,86 +1514,6 @@ def test_reorder_workspaces_waits_for_the_registry_lock(tmp_path):
         assert list(config.workspaces) == wanted
 
     asyncio.run(scenario())
-
-
-def test_memory_approval_patch_merges_one_kind_and_keeps_the_other(tmp_path):
-    client, config, _pcm = _client(tmp_path)
-    registry = tmp_path / ".runtime" / "workspaces.json"
-    assert client.post("/api/workspaces", json={"name": "research"}).status_code == 201
-
-    first = client.patch("/api/workspaces/research", json={"memory_approval": {"profile": "auto"}})
-    second = client.patch("/api/workspaces/research", json={"memory_approval": {"memory": "approve"}})
-    assert first.status_code == second.status_code == 200, second.json()
-    assert config.workspace("research").memory_approval == {"profile": "auto", "memory": "approve"}
-    stored = {w["name"]: w for w in json.loads(registry.read_text())}
-    assert stored["research"]["memory_approval"] == {"profile": "auto", "memory": "approve"}
-    listed = client.get("/api/workspaces").json()
-    row = next(w for w in listed["workspaces"] if w["name"] == "research")
-    assert row["memory_approval"] == {"profile": "auto", "memory": "approve"}
-    # No silent propagation to another workspace.
-    assert config.workspace("personal").memory_approval == {}
-
-
-def test_memory_approval_null_for_one_kind_resets_only_that_kind(tmp_path):
-    client, config, _pcm = _client(tmp_path)
-    registry = tmp_path / ".runtime" / "workspaces.json"
-    client.post("/api/workspaces", json={"name": "research"})
-    client.patch("/api/workspaces/research", json={"memory_approval": {"memory": "approve", "profile": "auto"}})
-
-    reset = client.patch("/api/workspaces/research", json={"memory_approval": {"profile": None}})
-
-    assert reset.status_code == 200, reset.json()
-    assert config.workspace("research").memory_approval == {"memory": "approve"}
-    stored = {w["name"]: w for w in json.loads(registry.read_text())}
-    assert stored["research"]["memory_approval"] == {"memory": "approve"}
-
-
-def test_a_patch_that_leaves_memory_approval_out_keeps_it(tmp_path):
-    client, config, _pcm = _client(tmp_path)
-    client.post("/api/workspaces", json={"name": "research"})
-    client.patch("/api/workspaces/research", json={"memory_approval": {"memory": "auto"}})
-
-    saved = client.patch("/api/workspaces/research", json={"color": "amber"})
-
-    assert saved.status_code == 200, saved.json()
-    assert config.workspace("research").memory_approval == {"memory": "auto"}
-
-
-@pytest.mark.parametrize(
-    "body",
-    [
-        {"memory_approval": None},  # whole-field null is refused; reset per kind
-        {"memory_approval": "auto"},
-        {"memory_approval": {"project": "auto"}},
-        {"memory_approval": {"memory": "everything"}},
-        {"memory_approval": {"memory": "approve", "profile": "Auto"}},  # one bad entry refuses all
-    ],
-)
-def test_a_bad_memory_approval_refuses_the_whole_save(tmp_path, body):
-    client, config, _pcm = _client(tmp_path)
-    registry = tmp_path / ".runtime" / "workspaces.json"
-    client.post("/api/workspaces", json={"name": "research"})
-    client.patch("/api/workspaces/research", json={"memory_approval": {"profile": "auto"}})
-    before_registry = registry.read_bytes()
-
-    refused = client.patch("/api/workspaces/research", json={**body, "color": "amber"})
-
-    assert refused.status_code == 400, refused.json()
-    assert config.workspace("research").memory_approval == {"profile": "auto"}
-    assert registry.read_bytes() == before_registry
-
-
-def test_creating_a_workspace_with_a_kind_choice_stores_it_sparse(tmp_path):
-    client, config, _pcm = _client(tmp_path)
-    registry = tmp_path / ".runtime" / "workspaces.json"
-
-    created = client.post("/api/workspaces", json={"name": "research", "memory_approval": {"memory": "approve"}})
-
-    assert created.status_code == 201, created.json()
-    assert config.workspace("research").memory_approval == {"memory": "approve"}
-    stored = {w["name"]: w for w in json.loads(registry.read_text())}
-    assert stored["research"]["memory_approval"] == {"memory": "approve"}
-    assert "memory_approval" not in stored["personal"]
 
 
 def _away(tmp_path: Path) -> Path:

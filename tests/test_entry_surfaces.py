@@ -226,8 +226,7 @@ def test_an_untouched_bullet_survives_an_unrelated_save(tmp_path: Path) -> None:
     A save that rewrites one bullet in a file must leave every other bullet's
     stamp exactly as it was — including the case this rule is *not* about: a
     bullet whose own date moved because the `still_valid` verdict wrote it. That
-    write is a verification and goes through
-    `ciao.note_receipts.apply_entry_edit`, which never runs this function; an
+    write is a verification, which never runs this function; an
     ordinary save that merely happens to leave the token alone must be a no-op.
     """
     from ciao import note_entries as ne
@@ -300,88 +299,6 @@ def test_a_neighbour_is_left_alone_while_a_redated_sibling_is_put_back() -> None
     assert cleaned == (
         "- Speaks Greek [verified: 2020-01-01]\n- Works at Helios\n"
     )
-
-
-def test_the_fold_writer_strips_stamps_before_it_writes(tmp_path: Path) -> None:
-    """An entry update touches one span; a stamp it did not touch survives.
-
-    The folds no longer rewrite the file, so there is no rewritten whole to
-    scrub: a `[verified:]` stamp on an untouched bullet is unchanged because
-    its bytes are unchanged. This pins that through the update half of the
-    fold write.
-    """
-    from ciao import file_kernel as fk
-    from ciao import note_entries as ne
-    from ciao import note_receipts as nr
-
-    vault = tmp_path / "vault"
-    (vault / "Workspace").mkdir(parents=True)
-    relative = "notes/mo.md"
-    note = vault / relative
-    note.parent.mkdir(parents=True, exist_ok=True)
-    # Byte-exact IO: the revision below must hash the file's own bytes, and
-    # `write_text`/`read_text` translate newlines on Windows, which would
-    # hand the writer a revision of text the file does not hold.
-    note.write_bytes(
-        "- Landlord is Mr Silva [verified: 2020-01-01]\n- Speaks Greek\n".encode(
-            "utf-8"
-        )
-    )
-    text = note.read_bytes().decode("utf-8")
-    entries = ne.parse_note_entries(
-        text, note_path=relative, workspace="personal"
-    ).entries
-    nr.apply_entry_edit(
-        vault_root=vault,
-        relative_path=relative,
-        expected_revision=fk.content_revision(text),
-        identity=entries[1].identity,
-        fingerprint=entries[1].fingerprint,
-        replacement="- Speaks Portuguese",
-        actor="proposal-accept",
-        source="fold",
-        workspace="personal",
-    )
-    assert note.read_bytes().decode("utf-8").splitlines(keepends=True)[0] == (
-        "- Landlord is Mr Silva [verified: 2020-01-01]\n"
-    )
-
-
-def test_the_fold_writer_puts_a_redated_bullet_back(tmp_path: Path) -> None:
-    """An appended bullet does not move the stamps already in the note.
-
-    The add half of the fold write: the new bullet lands under `## Notes`
-    and the untouched bullet keeps the exact stamp it carried, including its
-    date.
-    """
-    from ciao import file_kernel as fk
-    from ciao import note_receipts as nr
-
-    vault = tmp_path / "vault"
-    (vault / "Workspace").mkdir(parents=True)
-    relative = "notes/mo.md"
-    note = vault / relative
-    note.parent.mkdir(parents=True, exist_ok=True)
-    # Byte-exact IO, as above: a translated revision is a different revision.
-    note.write_bytes(
-        "# Mo\n\n## Notes\n- Prefers terse replies [verified: 2024-03-01]\n".encode(
-            "utf-8"
-        )
-    )
-    text = note.read_bytes().decode("utf-8")
-    nr.append_list_item(
-        vault_root=vault,
-        relative_path=relative,
-        expected_revision=fk.content_revision(text),
-        section="Notes",
-        item="- Based in Lisbon.",
-        actor="proposal-accept",
-        source="fold",
-        workspace="personal",
-    )
-    after = note.read_bytes().decode("utf-8")
-    assert "- Prefers terse replies [verified: 2024-03-01]\n" in after
-    assert "- Based in Lisbon.\n" in after
 
 
 def test_the_authoring_guidance_names_the_entry_contract() -> None:

@@ -5940,7 +5940,6 @@ class ProjectChatManager:
                 self._config,
                 provider=provider_name,
                 agent_root=agent_root,
-                workspace=self._workspace_for_chat(chat_id),
             )
             # A provider's own continuation that starts on this chat answers the held shell notices.
             self._providers[chat_id].set_continuation_hook(partial(self._continuation_started, chat_id))

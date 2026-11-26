@@ -1,10 +1,10 @@
 import type { UpdateTaskRow } from './types'
 
-/** The lifecycles where an attempt exists: a chat was opened, is waiting on the
- *  operator, or did not get going. Every state question below turns on this one
+/** The lifecycles where an attempt exists: a chat was opened or did not
+ *  get going. Every state question below turns on this one
  *  list, because it is the difference between "nobody has started this" and
  *  "somebody already did". */
-export const LIVE_ATTEMPT_STATES: readonly string[] = ['in_progress', 'waiting_review', 'failed']
+export const LIVE_ATTEMPT_STATES: readonly string[] = ['in_progress', 'failed']
 
 export function hasLiveAttempt(status: string): boolean {
   return LIVE_ATTEMPT_STATES.includes(status)
@@ -21,8 +21,8 @@ export function hasLiveAttempt(status: string): boolean {
  *  - an offer that *applies* here is new work, and so is one nobody could rule
  *    on yet (`unknown`): a detector that has not run has not established that
  *    there is nothing to do.
- *  - a live attempt (`in_progress`, `waiting_review`, `failed`) always stays.
- *    Its chat is open or needs a decision, which is not a thing to hide.
+ *  - a live attempt (`in_progress`, `failed`) always stays.
+ *    Its chat is open, which is not a thing to hide.
  *
  * What is deliberately gone is an offer the detector says does *not* apply.
  * Every install ships the whole catalog, so drawing those would put a permanent

@@ -324,8 +324,8 @@ def test_task_records_are_not_graph_nodes(tmp_path: Path):
 def test_is_reserved_bookkeeping_covers_the_task_record_directory():
     """The predicate both consumers share, pinned directly.
 
-    `fts_search._is_reserved_key`, `scan_vault`'s `is_excluded`, the lint and
-    `note_receipts` all read this one function, so this is where the shape of
+    `fts_search._is_reserved_key`, `scan_vault`'s `is_excluded`, the lint
+    all read this one function, so this is where the shape of
     the task rule lives. `Other/Tasks/` is the case that would otherwise be
     lost: the plan is the parent directory pair, not the name.
     """

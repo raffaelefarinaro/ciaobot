@@ -713,30 +713,6 @@ def test_restore_carries_claude_trim(tmp_path):
     assert config.workspaces["work"].claude_trim == {"tool:ReportFindings": True}
 
 
-def test_workspace_archive_restore_resets_memory_handover_to_off(tmp_path):
-    """Handover is deliberately not carried through an archive: a restore fails closed."""
-    client, config, _pcm, _store = _app(tmp_path, rerooted=True)
-    config.workspaces["work"].memory_handover = "all"
-    archived = client.post("/api/workspaces/work/archive").json()["archived"]
-
-    restored = client.post("/api/workspaces/archived/restore", json={"id": archived["id"]})
-
-    assert restored.status_code == 200, restored.json()
-    assert config.workspaces["work"].memory_handover == "off"
-
-
-def test_workspace_archive_restore_clears_memory_approval(tmp_path):
-    """Per-kind acceptance is operator consent for this install; a restore starts inherited."""
-    client, config, _pcm, _store = _app(tmp_path, rerooted=True)
-    config.workspaces["work"].memory_approval = {"memory": "auto", "profile": "approve"}
-    archived = client.post("/api/workspaces/work/archive").json()["archived"]
-
-    restored = client.post("/api/workspaces/archived/restore", json={"id": archived["id"]})
-
-    assert restored.status_code == 200, restored.json()
-    assert config.workspaces["work"].memory_approval == {}
-
-
 def test_move_back_refuses_archive_metadata_changed_after_claim_snapshot(tmp_path):
     from ciao import workspace_archive
 

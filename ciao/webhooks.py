@@ -1130,7 +1130,7 @@ def _require_current(record: _StoredTrigger, expected: int) -> None:
 # duplicating and a crash is reviewable instead of a silent replay.
 #
 # The journal is append-only JSONL beside the store
-# (``<runtime>/webhook-receipts.jsonl``), modelled on ``ciao/memory_receipts.py``
+# (``<runtime>/webhook-receipts.jsonl``), modelled on the retired memory receipt journal
 # — a private lock, ``fsync`` per row, latest row per id wins — and not on
 # ``ciao/job_runs.py``, which is fail-open and unlocked. It carries the sender's
 # own event text, so it is created 0600 like the store.

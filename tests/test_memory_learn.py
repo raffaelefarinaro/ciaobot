@@ -574,7 +574,7 @@ def test_engine_origins_cannot_record_a_learning(
     assert spy_append == []
 
 
-@pytest.mark.parametrize("kind", ["update_task", "proposal"])
+@pytest.mark.parametrize("kind", ["update_task", "memory_pass"])
 def test_engine_helper_chats_cannot_record_a_learning(
     tmp_path: Path, spy_append: list[str], kind: str
 ) -> None:
