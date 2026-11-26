@@ -92,7 +92,7 @@ def test_rerooted_install_without_logs_split_is_unfinished(tmp_path: Path) -> No
     ],
 )
 def test_partial_receipts_name_their_step(tmp_path: Path, name: str, status: str, task: str) -> None:
-    root = install(tmp_path, {**MIGRATED, name: {"status": status}})
+    root = install(tmp_path, {**MIGRATED, name: {"status": status}}, old_vault=name == "vault-rehome.json")
     finding = check(root)
     assert finding == pf.Finding(name, f"status:{status}")
     assert task in finding.message
@@ -111,7 +111,7 @@ def test_partial_receipts_name_their_step(tmp_path: Path, name: str, status: str
 )
 @pytest.mark.parametrize("body", ["{not json", "[1, 2]"])
 def test_unreadable_receipt_is_unfinished(tmp_path: Path, name: str, body: str) -> None:
-    root = install(tmp_path, {**MIGRATED, name: body})
+    root = install(tmp_path, {**MIGRATED, name: body}, old_vault=name == "vault-rehome.json")
     finding = check(root)
     assert finding is not None
     assert finding.receipt == name
@@ -138,3 +138,38 @@ def test_main_exit_codes(tmp_path: Path) -> None:
     refused = run(half)
     assert refused.returncode == 4
     assert "Finish the 1.10 update first" in refused.stderr
+
+
+def test_partial_rehome_only_blocks_while_the_shared_vault_exists(tmp_path: Path) -> None:
+    receipts = {**MIGRATED, "vault-rehome.json": {"status": "partial"}}
+    assert check(install(tmp_path / "after", receipts)) is None  # re-rooted: nothing could clear it
+    finding = check(install(tmp_path / "before", {**receipts, "workspace-rooting.json": {"status": "migrated"}}, old_vault=True))
+    assert finding == pf.Finding("vault-rehome.json", "status:partial")
+
+
+def test_status_is_allowlisted_in_the_message(tmp_path: Path) -> None:
+    evil = "x\n\x1b[31mrm -rf / `id`"
+    finding = check(install(tmp_path, {"workspace-rooting.json": {"status": evil}}))
+    assert finding is not None
+    assert finding.problem == "status:unknown"
+    assert "rm -rf" not in finding.message
+    assert check(install(tmp_path / "n", {"workspace-rooting.json": {"status": ["a"]}})).problem == "status:unknown"
+
+
+def test_reroot_advice_is_the_real_command(tmp_path: Path) -> None:
+    finding = check(install(tmp_path, {"workspace-rooting.json": {"status": "refused"}}))
+    assert finding is not None
+    assert "ciao workspace-reroot --workspace" in finding.message
+    assert "--apply" in finding.message
+    assert "uncommitted" in finding.message
+    assert "more than one workspace" in finding.message
+
+
+def test_check_never_raises_on_hostile_receipts(tmp_path: Path) -> None:
+    nested = "[" * 100000 + "]" * 100000
+    root = install(tmp_path, {"workspace-rooting.json": nested})
+    finding = check(root)
+    assert finding == pf.Finding("workspace-rooting.json", "unreadable")
+    big = install(tmp_path / "big", {"workspace-rooting.json": '{"status": "migrated", "pad": "' + "x" * (2 * 1024 * 1024) + '"}'})
+    assert check(big) == pf.Finding("workspace-rooting.json", "unreadable")
+    assert pf.check(tmp_path / "missing-install", tmp_path / "missing-runtime") is None

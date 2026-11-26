@@ -37,7 +37,10 @@ _LEARNINGS = "learnings-*.json"
 # command.
 _REMEDY = {
     _REROOT: (
-        "the `workspace-unmigrated` action (or `ciao workspace-reroot apply`)"
+        "`ciao workspace-reroot --workspace <install dir> --apply` (the `workspace-unmigrated` "
+        "action is only offered with more than one workspace, so with one it stays silent even "
+        "when this receipt is refused or partial; a refused receipt usually means uncommitted "
+        "changes in the vault: commit or stash them first)"
     ),
     _LOGS: "a 1.10 restart: the Logs split runs when the engine starts",
     _REHOME: "the `unrehomed-people` update task",
@@ -45,6 +48,18 @@ _REMEDY = {
     _VOCABULARY: "a 1.10 restart: the vocabulary migration runs when the engine starts",
     _LEARNINGS: "the `learnings-cleanup` update task",
 }
+
+
+# Receipt statuses 1.10 writes. Anything else is shown as "unknown": the value
+# comes from a file and is copied into a message the app and installer print.
+_STATUSES = frozenset(
+    {"migrated", "refused", "partial", "undo-in-progress", "surveyed", "failed", "prepared", "undone", "error"}
+)
+_MAX_RECEIPT_BYTES = 1024 * 1024
+
+
+def _status(value: object) -> str:
+    return f"status:{value if isinstance(value, str) and value in _STATUSES else 'unknown'}"
 
 
 @dataclass(frozen=True)
@@ -70,8 +85,12 @@ def _load(path: Path) -> tuple[str, dict[str, Any]]:
     try:
         if not path.is_file():
             return "missing", {}
-        data = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, ValueError):
+        with path.open("rb") as handle:
+            raw = handle.read(_MAX_RECEIPT_BYTES + 1)
+        if len(raw) > _MAX_RECEIPT_BYTES:
+            return "unreadable", {}
+        data = json.loads(raw.decode("utf-8"))
+    except (OSError, ValueError, RecursionError, MemoryError):
         return "unreadable", {}
     return ("ok", data) if isinstance(data, dict) else ("unreadable", {})
 
@@ -89,7 +108,7 @@ def check(install_root: Path, runtime_root: Path) -> Finding | None:
         if reroot_state == "unreadable":
             return Finding(_REROOT, "unreadable")
         if reroot_state == "ok" and reroot.get("status") != "migrated":
-            return Finding(_REROOT, f"status:{reroot.get('status')}")
+            return Finding(_REROOT, _status(reroot.get("status")))
 
         logs_state, logs = _load(base / _LOGS)
         # Installs born per-root never had a shared archive to split.
@@ -98,21 +117,25 @@ def check(install_root: Path, runtime_root: Path) -> Finding | None:
         if logs_state == "unreadable":
             return Finding(_LOGS, "unreadable")
         if logs_state == "ok" and logs.get("status") != "migrated":
-            return Finding(_LOGS, f"status:{logs.get('status')}")
+            return Finding(_LOGS, _status(logs.get("status")))
 
-        # Receipts written before `status` existed record a completed run.
+        # Receipts written before `status` existed record a completed run. A
+        # partial re-homing can only be finished while the shared vault exists
+        # (1.10's detector needs it); after re-rooting nothing could clear it.
         for name in (_REHOME, _LINKS):
+            if name == _REHOME and not old_layout:
+                continue
             state, data = _load(base / name)
             if state == "unreadable":
                 return Finding(name, "unreadable")
             if state == "ok" and data.get("status", "migrated") != "migrated":
-                return Finding(name, f"status:{data.get('status')}")
+                return Finding(name, _status(data.get("status")))
 
         for pattern in (_VOCABULARY, _LEARNINGS):
             for path in sorted(base.glob(pattern)):
                 if _load(path)[0] == "unreadable":
                     return Finding(path.name, "unreadable")
-    except OSError:
+    except Exception:  # noqa: BLE001 — a preflight must answer, never raise
         return Finding(_REROOT, "unreadable")
     return None
 

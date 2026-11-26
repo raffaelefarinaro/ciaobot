@@ -973,11 +973,6 @@ def plan(
     except (DefinitionReadError, ValueError):
         return _refuse("no_registry", label, **known)
 
-    # 4b. 2.0 upgrades from a finished 1.10 only: a half-migrated install stays put.
-    unfinished = upgrade_preflight.check(workspace, runtime_root)
-    if unfinished is not None:
-        return _refuse(upgrade_preflight.REFUSAL_CODE, label, advice=unfinished.message, **known)
-
     # 5. program kind.
     argv_value = document.get("ProgramArguments")
     argv = (
@@ -1051,6 +1046,13 @@ def plan(
             return _refuse("downgrade", label, old_version=old_version, **known)
         if _version_key(old_version) < _version_key(MIN_TAKEOVER_VERSION):
             return _refuse("engine_too_old", label, old_version=old_version, **known)
+    # 2.0 upgrades from a finished 1.10 only: a half-migrated install stays put.
+    # After the version checks, so "too old" and "downgrade" keep their own codes.
+    unfinished = upgrade_preflight.check(workspace, runtime_root)
+    if unfinished is not None:
+        return _refuse(
+            upgrade_preflight.REFUSAL_CODE, label, old_version=old_version, advice=unfinished.message, **known
+        )
     try:
         active_chats = len(restart_blockers(runtime.port))
     except RestartBlockersUnavailable:

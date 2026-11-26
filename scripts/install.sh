@@ -366,23 +366,39 @@ else
 fi
 
 # 2.0 upgrades from a finished 1.10 only. Read the 1.10 migration receipts of
-# the workspace this run will use (the unit's, else --workspace, else the
-# default) with the wheel's own stdlib-only checker, before uv replaces the
+# every workspace this run could touch (the existing unit's, and --workspace
+# when given) with the wheel's own stdlib-only checker, before uv replaces the
 # installed engine; an unfinished migration, or a check that cannot run, stops
-# the install and leaves the 1.10 engine in place.
+# the install and leaves the 1.10 engine in place. Run from the scratch
+# directory (no project, nothing to shadow ciao) with python -P, so neither the
+# current directory nor a ./ciao folder can stand in for the wheel's module.
+case $wheel in
+  /*) ;;
+  *) wheel=$PWD/$wheel ;;
+esac
+pf_dirs=
+if [ -e "$UNIT_PATH" ]; then
+  pf_dirs=$(sed -n 's/^WorkingDirectory=//p' "$UNIT_PATH" | head -n 1)
+fi
 if [ "$have_workspace" -eq 1 ]; then
-  pf_ws=$workspace_value
-elif [ -e "$UNIT_PATH" ]; then
-  pf_ws=$(sed -n 's/^WorkingDirectory=//p' "$UNIT_PATH" | head -n 1)
-else
-  pf_ws=$HOME/Ciaobot
+  pf_dirs="$pf_dirs
+$workspace_value"
+elif [ -z "$pf_dirs" ] && [ ! -e "$UNIT_PATH" ]; then
+  pf_dirs=$HOME/Ciaobot
 fi
-if [ -n "$pf_ws" ] && [ -d "$pf_ws/.runtime" ]; then
-  PYTHONPATH=$wheel "$uv" run --no-project --python "$PYTHON_VERSION" python -m ciao.upgrade_preflight "$pf_ws" </dev/null || {
-    echo "install.sh: not upgrading $pf_ws; nothing was installed or changed." >&2
-    exit 4
-  }
-fi
+pf_old_ifs=$IFS
+IFS='
+'
+for pf_ws in $pf_dirs; do
+  IFS=$pf_old_ifs
+  if [ -n "$pf_ws" ] && [ -d "$pf_ws/.runtime" ]; then
+    (cd "$tmpd" && PYTHONPATH=$wheel "$uv" run --python "$PYTHON_VERSION" python -P -m ciao.upgrade_preflight "$pf_ws" </dev/null) || {
+      echo "install.sh: not upgrading $pf_ws; nothing was installed or changed." >&2
+      exit 4
+    }
+  fi
+done
+IFS=$pf_old_ifs
 
 echo "install.sh: installing Ciaobot with uv..."
 "$uv" tool install --force --python "$PYTHON_VERSION" "$wheel" </dev/null || {

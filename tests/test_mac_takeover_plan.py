@@ -1525,3 +1525,12 @@ def test_migrated_install_is_not_refused_by_the_preflight(machine: Machine) -> N
     (migration / "workspace-rooting.json").write_text(json.dumps({"status": "migrated"}))
     (migration / "logs-split.json").write_text(json.dumps({"status": "migrated"}))
     assert run_plan(machine).reason != "unfinished_migration"
+
+
+def test_version_refusals_win_over_the_migration_preflight(machine: Machine) -> None:
+    machine.write_plist()
+    machine.write_receipt(version="1.0.0")
+    migration = machine.workspace / ".runtime" / "migration"
+    migration.mkdir()
+    (migration / "workspace-rooting.json").write_text(json.dumps({"status": "refused"}))
+    assert run_plan(machine).reason == "engine_too_old"

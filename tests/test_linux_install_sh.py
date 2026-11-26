@@ -156,8 +156,9 @@ if [ "$1" = "tool" ] && [ "$2" = "install" ]; then
 fi
 if [ "$1" = "run" ]; then
   # The preflight: run the repository's own checker, as the wheel would be.
-  for last in "$@"; do :; done
-  PYTHONPATH="{repo}" exec "{python}" -m ciao.upgrade_preflight "$last"
+  while [ "$1" != "python" ]; do shift; done
+  shift
+  PYTHONPATH="{repo}" exec "{python}" "$@"
 fi
 if [ "$1" = "tool" ] && [ "$2" = "dir" ]; then
   echo "{fakebin}"
@@ -876,3 +877,40 @@ def test_finished_1_10_migration_lets_the_install_proceed(tmp_path):
     result = harness.run("--wheel", str(harness.local_wheel()), "--workspace", str(workspace), "--no-service")
     assert result.returncode == 0, result.stderr
     assert harness.lines_starting("uv tool install") != []
+
+
+def test_preflight_runs_isolated_from_the_current_directory(tmp_path):
+    harness = Harness(tmp_path)
+    workspace = _workspace_with_receipt(tmp_path, "migrated")
+    harness.run("--wheel", str(harness.local_wheel()), "--workspace", str(workspace), "--no-service")
+    (line,) = harness.lines_starting("uv run ")
+    assert " python -P -m ciao.upgrade_preflight " in line
+    # -P keeps a ./ciao folder in the current directory from shadowing the module.
+    decoy = tmp_path / "decoy"
+    (decoy / "ciao").mkdir(parents=True)
+    (decoy / "ciao" / "__init__.py").write_text("raise SystemExit(0)\n", encoding="utf-8")
+    refused = subprocess.run(
+        [sys.executable, "-P", "-m", "ciao.upgrade_preflight", str(_workspace_with_receipt(tmp_path / "x", "refused"))],
+        cwd=decoy, env={"PYTHONPATH": str(REPO_ROOT)}, capture_output=True, text=True,
+    )
+    assert refused.returncode == 4
+
+
+def test_unit_and_flag_workspaces_are_both_checked(tmp_path):
+    harness = Harness(tmp_path, with_unit=True)
+    unit_ws = _workspace_with_receipt(tmp_path / "a", "partial")
+    flag_ws = _workspace_with_receipt(tmp_path / "b", "migrated")
+    harness.unit.write_text(f"WorkingDirectory={unit_ws}\nExecStart=/x\n", encoding="utf-8")
+    result = harness.run("--wheel", str(harness.local_wheel()), "--workspace", str(flag_ws), "--no-service")
+    assert result.returncode == 4
+    assert str(unit_ws) in result.stderr
+    assert harness.lines_starting("uv tool") == []
+    # And the other way round: a clean unit, an unfinished --workspace.
+    harness2 = Harness(tmp_path, name="second", with_unit=True)
+    clean = _workspace_with_receipt(tmp_path / "c", "migrated")
+    bad = _workspace_with_receipt(tmp_path / "d", "refused")
+    harness2.unit.write_text(f"WorkingDirectory={clean}\nExecStart=/x\n", encoding="utf-8")
+    result = harness2.run("--wheel", str(harness2.local_wheel()), "--workspace", str(bad), "--no-service")
+    assert result.returncode == 4
+    assert str(bad) in result.stderr
+    assert harness2.lines_starting("uv tool") == []
