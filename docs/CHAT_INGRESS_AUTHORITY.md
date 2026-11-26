@@ -49,7 +49,7 @@ and reject untrusted callers before accepting any grant or turn. A compromised
 engine account must not be able to rewrite that authority's executable,
 configuration, state, credentials or service definition.
 
-* **macOS:** investigate an installer-provisioned privileged service and
+* **macOS:** (design: `docs/CHAT_AUTHORITY_HELPER.md`) investigate an installer-provisioned privileged service and
   dedicated service identity, together with an operator UI channel whose
   caller and user interaction the service can authenticate. A LaunchAgent
   under the engine user or a same-UID local socket is not a boundary. Service
