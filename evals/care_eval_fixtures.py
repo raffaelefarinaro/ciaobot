@@ -10,7 +10,7 @@ from __future__ import annotations
 from collections.abc import Mapping
 from dataclasses import dataclass
 
-from ciao.task_eval_contract import Outcome, Scenario
+from evals.task_eval_contract import Outcome, Scenario
 
 
 @dataclass(frozen=True)

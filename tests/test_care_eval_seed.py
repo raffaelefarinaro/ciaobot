@@ -7,12 +7,12 @@ from typing import Any
 
 import pytest
 
-from ciao import care_eval_seed as seed
+from evals import care_eval_seed as seed
 from ciao import curation_run, memory_receipts
 from ciao import note_verification as nv
-from ciao.care_eval_fixtures import CARE_FIXTURES, grade_fixture
+from evals.care_eval_fixtures import CARE_FIXTURES, grade_fixture
 from ciao.curation_run import CURATION_LOG_RELATIVE, PROPOSALS_RELATIVE
-from ciao.task_eval import PROPOSALS_PATH, WORKSPACE
+from evals.task_eval import PROPOSALS_PATH, WORKSPACE
 
 SCENARIOS = ("nightly", "weekly_due", "budget_continuation")
 DISPATCH_DATE = date(2026, 11, 24)

@@ -24,10 +24,9 @@ from typing import Any
 import pytest
 
 from ciao import agent_paths
-from ciao import behavioral_eval
-from ciao import cli
 from ciao import fts_search
-from ciao import task_eval as te
+from evals import __main__ as evals_main
+from evals import task_eval as te
 
 
 def _snapshot(
@@ -112,7 +111,7 @@ def test_catalog_rejects_unknown_check_kind(tmp_path: Path) -> None:
 
 def test_catalog_rejects_private_marker(tmp_path: Path) -> None:
     body = _valid_body("leaky")
-    body["prompt"] = f"Ask {behavioral_eval.PRIVATE_MARKERS[0]} about the trip"
+    body["prompt"] = f"Ask {te.PRIVATE_MARKERS[0]} about the trip"
     _write_task(tmp_path, "leaky", body)
 
     with pytest.raises(te.TaskCatalogError):
@@ -892,7 +891,7 @@ def test_read_jsonl_loads_every_row(tmp_path: Path) -> None:
 
 
 def test_cli_eval_tasks_list(capsys: pytest.CaptureFixture[str]) -> None:
-    assert cli.main(["eval", "tasks", "list", "--json"]) == 0
+    assert evals_main.main(["list", "--json"]) == 0
 
     out = json.loads(capsys.readouterr().out)
     ids = {item["id"] for item in out}
@@ -1008,7 +1007,7 @@ def test_eval_tasks_run_refuses_before_running_on_mismatch(
     monkeypatch.setattr(te, "cli_package_mismatch", lambda: "MISMATCH: fix the install")
     monkeypatch.setattr(te, "run_suite", refuse_run)
 
-    assert cli.main(["eval", "tasks", "run", "--model", "haiku"]) == 2
+    assert evals_main.main(["run", "--model", "haiku"]) == 2
     assert "MISMATCH: fix the install" in capsys.readouterr().err
 
 
@@ -1563,7 +1562,7 @@ def test_compare_cli_refuses_mixed_models(tmp_path: Path) -> None:
     cand = _write_jsonl(tmp_path / "cand.jsonl", [_row(label="candidate"), {**_row(label="candidate"), "model": "sonnet"}])
 
     with pytest.raises(SystemExit) as excinfo:
-        cli.main(["eval", "tasks", "compare", "--baseline", str(base), "--candidate", str(cand)])
+        evals_main.main(["compare", "--baseline", str(base), "--candidate", str(cand)])
 
     assert "E2-recall-guest-count" in str(excinfo.value.code)
     assert "haiku,sonnet" in str(excinfo.value.code)
@@ -1575,8 +1574,8 @@ def test_compare_cli_allow_mixed_warns_and_shows_provider_model(
     base = _write_jsonl(tmp_path / "base.jsonl", [_row()])
     cand = _write_jsonl(tmp_path / "cand.jsonl", [_row(label="candidate"), {**_row(label="candidate"), "model": "sonnet"}])
 
-    code = cli.main(
-        ["eval", "tasks", "compare", "--baseline", str(base), "--candidate", str(cand), "--allow-mixed"]
+    code = evals_main.main(
+        ["compare", "--baseline", str(base), "--candidate", str(cand), "--allow-mixed"]
     )
 
     assert code == 0
@@ -1657,19 +1656,19 @@ def test_cli_eval_tasks_run_passes_mode_through(
     monkeypatch.setattr(te, "run_suite", fake_run_suite)
     out = str(tmp_path / "r.jsonl")
 
-    assert cli.main(
-        ["eval", "tasks", "run", "--provider", "opencode", "--model", "m", "--mode", "auto", "--out", out]
+    assert evals_main.main(
+        ["run", "--provider", "opencode", "--model", "m", "--mode", "auto", "--out", out]
     ) == 0
     assert seen["mode"] == "auto"
     assert seen["session_factory"].keywords["mode"] == "auto"
 
-    assert cli.main(["eval", "tasks", "run", "--provider", "opencode", "--model", "m", "--out", out]) == 0
+    assert evals_main.main(["run", "--provider", "opencode", "--model", "m", "--out", out]) == 0
     assert seen["mode"] is None
 
 
 def test_cli_eval_tasks_run_rejects_unknown_mode(capsys: pytest.CaptureFixture[str]) -> None:
     with pytest.raises(SystemExit):
-        cli.main(["eval", "tasks", "run", "--model", "m", "--mode", "plan"])
+        evals_main.main(["run", "--model", "m", "--mode", "plan"])
     assert "invalid choice" in capsys.readouterr().err
 
 

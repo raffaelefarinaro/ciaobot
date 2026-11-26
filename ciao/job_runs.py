@@ -426,3 +426,45 @@ def _run_ts(run: dict) -> datetime | None:
         return datetime.fromisoformat(raw)
     except ValueError:
         return None
+
+
+class JobRunsUnreadable(RuntimeError):
+    """The runtime job-run log is a symlink, oversize, or not readable UTF-8."""
+
+
+# Ceiling on one read of the runtime job-run log. Above it the file is refused
+# rather than truncated: a truncated read could hide the settled row and turn
+# a finished run into a timeout.
+MAX_JOB_RUNS_BYTES: int = 16 * 1024 * 1024
+
+
+def read_runtime_job_runs(runtime_dir: Path) -> list[dict[str, Any]]:
+    """Parsed rows of ``<runtime_dir>/job_runs.jsonl``; a missing file is no rows.
+
+    Lines that are not JSON objects are skipped (the log writes whole lines).
+    A symlink, an oversize file, or a file that is not UTF-8 raises
+    ``JobRunsUnreadable`` instead of returning a partial log.
+    """
+    path = runtime_dir / JOB_RUNS_NAME
+    try:
+        if path.is_symlink():
+            raise JobRunsUnreadable(JOB_RUNS_NAME)
+        if not path.exists():
+            return []
+        if path.stat().st_size > MAX_JOB_RUNS_BYTES:
+            raise JobRunsUnreadable(JOB_RUNS_NAME)
+        text = path.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError) as exc:
+        raise JobRunsUnreadable(JOB_RUNS_NAME) from exc
+
+    rows: list[dict[str, Any]] = []
+    for line in text.splitlines():
+        if not line.strip():
+            continue
+        try:
+            value = json.loads(line)
+        except ValueError:
+            continue
+        if isinstance(value, dict):
+            rows.append(value)
+    return rows

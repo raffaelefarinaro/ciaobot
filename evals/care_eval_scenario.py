@@ -2,9 +2,9 @@
 
 ``run_scenario`` sequences the pieces the other care modules provide: it checks
 that the seed is on disk, triggers the system schedule through
-:func:`ciao.care_eval_run.run_schedule`, observes the files the run left behind
+:func:`evals.care_eval_run.run_schedule`, observes the files the run left behind
 only when the run settled, grades them, and assembles the record through
-:func:`ciao.care_eval_record.build_record`.
+:func:`evals.care_eval_record.build_record`.
 
 It never boots, stops or installs an engine (the caller owns that and passes a
 ``BoundEngine`` from ``bind_isolated``), never calls a model, and leaves the
@@ -36,15 +36,15 @@ from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 
-from ciao.care_eval_record import build_record
-from ciao.care_eval_run import (
+from evals.care_eval_record import build_record
+from evals.care_eval_run import (
     BoundEngine,
     ScheduleRunOutcome,
     ScheduleRunRequest,
     Settled,
     run_schedule,
 )
-from ciao.care_eval_seed import (
+from evals.care_eval_seed import (
     GUIDE_RELATIVE,
     DispatchClock,
     LastRun,
@@ -56,7 +56,7 @@ from ciao.care_eval_seed import (
     observe_last_run,
 )
 from ciao.curation_run import RunBudget
-from ciao.task_eval_contract import MeasurementRecord, Scenario
+from evals.task_eval_contract import MeasurementRecord, Scenario
 
 ORCHESTRATED: tuple[Scenario, ...] = ("nightly", "weekly_due")
 

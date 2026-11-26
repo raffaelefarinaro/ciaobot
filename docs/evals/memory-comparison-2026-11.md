@@ -154,7 +154,7 @@ Embeddings find more on the real vault too, 17 points more than FTS5. The answer
 
 ## Prompt evals
 
-These use Ciaobot's own task suite (`ciao eval tasks`, see [TASK_EVAL.md](../TASK_EVAL.md)). It runs a fresh, isolated engine on a synthetic vault and makes deterministic checks on the end state.
+These use Ciaobot's own task suite (`python -m evals`, see [TASK_EVAL.md](../TASK_EVAL.md)). It runs a fresh, isolated engine on a synthetic vault and makes deterministic checks on the end state.
 
 ### Recall reads the best-matching note (#2737)
 
@@ -208,7 +208,7 @@ Merged into `develop`:
 |---|---|
 | [#2716](https://github.com/raffaelefarinaro/ciaobot/pull/2716) | Search tops up a partial "all words" result with "any word" results, keeping the AND hits first. Strict@5 78.7% → 85.1% on LongMemEval-S. |
 | [#2737](https://github.com/raffaelefarinaro/ciaobot/pull/2737) | Recall reads the best-matching note instead of answering from snippets. Adds task H11. |
-| [#2741](https://github.com/raffaelefarinaro/ciaobot/pull/2741) | `ciao eval tasks compare` pools every run of a task. It had kept only the first revision's runs, which showed H1 as 9/9 when the file held 7/9. |
+| [#2741](https://github.com/raffaelefarinaro/ciaobot/pull/2741) | `python -m evals compare` pools every run of a task. It had kept only the first revision's runs, which showed H1 as 9/9 when the file held 7/9. |
 
 Fixes found along the way, unrelated to memory quality:
 
@@ -246,4 +246,4 @@ The harness scripts are not in the repository yet. Until they are, this is the p
 4. **Per-system context.** For each question, write one note per haystack session named `<date>-chat-sNN.md`, with neutral ids. Give each system a fresh, isolated store with no provider keys in the environment, index, query with the question text, and keep the top 5 (configurations in the table above). "Full sessions" variants replace a system's own snippets with the full notes of its first 5 distinct retrieved sessions.
 5. **Answer and judge.** `claude -p --model claude-haiku-5-5 --tools "" --setting-sources "" --strict-mcp-config --no-session-persistence --system-prompt "You are a helpful assistant."`, with LongMemEval's CoT answer template. Judge each answer with `claude-sonnet-5-5` and the official `get_anscheck_prompt` for its type. Count "yes" as correct.
 6. **Agentic Ciaobot.** Start from the top-5 full notes. Allow up to three `SEARCH: <query>` turns, each returning the top 5 from the same index, with notes already shown marked as such. Stop at `FINAL ANSWER:`. Judge as above.
-7. **Prompt evals.** `ciao eval tasks run --provider claude --model haiku --repeats 3` on the baseline and candidate commits, each installed in its own venv, then `ciao eval tasks compare` (needs #2741 for pooled rounds). The memory-pass comparison replays archived chats from a private vault and cannot be published. The method is to run each prompt's memory pass on chats whose proposals the user already accepted or dismissed, and count both.
+7. **Prompt evals.** `python -m evals run --provider claude --model haiku --repeats 3` on the baseline and candidate commits, each installed in its own venv, then `python -m evals compare` (needs #2741 for pooled rounds). The memory-pass comparison replays archived chats from a private vault and cannot be published. The method is to run each prompt's memory pass on chats whose proposals the user already accepted or dismissed, and count both.

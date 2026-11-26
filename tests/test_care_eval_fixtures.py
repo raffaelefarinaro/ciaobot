@@ -7,8 +7,8 @@ from types import MappingProxyType
 
 import pytest
 
-import ciao.care_eval_fixtures as fixtures_module
-from ciao.care_eval_fixtures import CARE_FIXTURES, CareFixture, Obligation, grade_fixture
+import evals.care_eval_fixtures as fixtures_module
+from evals.care_eval_fixtures import CARE_FIXTURES, CareFixture, Obligation, grade_fixture
 
 
 def fixture_for(scenario: str) -> CareFixture:
@@ -265,7 +265,7 @@ def test_module_has_no_runtime_or_installed_state_imports() -> None:
         "__future__",
         "collections.abc",
         "dataclasses",
-        "ciao.task_eval_contract",
+        "evals.task_eval_contract",
     }
     assert imported <= allowed
     assert "HOME" not in source
