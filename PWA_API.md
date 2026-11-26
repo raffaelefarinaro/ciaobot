@@ -1058,7 +1058,7 @@ curl -sS -b /tmp/ciao.jar -X DELETE "http://localhost:${PWA_PORT:-8443}/api/chat
 # that omits kind defaults to Git for backward compatibility, while the Settings form
 # always sends its chosen kind (Folder by default). A folder link may receive a
 # reviewed new note (create only); Ciaobot never replaces or deletes an
-# existing folder file and never claims that cloud sync finished.
+# existing folder file and never claims that cloud sync finished. Existing-note edits stay disabled because the APFS probe found no atomic expected-version replacement (`experiments/ciao-3626-folder-probe/CAPABILITY_MATRIX.md`, #3626).
 # Operator-only: set it with the same PATCH and a whole-list body such as
 # {"shared_brains": [{"path": "<absolute path>", "name": "<optional name>", "kind": "folder"}]}.
 # [] removes all. At most 5; Git paths must be checkouts with an origin remote;
