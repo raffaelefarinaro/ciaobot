@@ -4455,7 +4455,7 @@ defineExpose({ requestClose, selectAdjacent, closeDetailPage, openCreate })
 .task-stale,
 .task-action-error {
   margin: 0;
-  color: var(--error);
+  color: var(--error-text);
   font-size: var(--text-sm);
   line-height: 1.5;
 }
@@ -4888,7 +4888,7 @@ button.task-check:disabled { cursor: progress; opacity: 0.5; }
 .task-card :is(.task-meta, .task-agent-note, .task-changed, .task-reconcile) {
   margin-inline-start: var(--task-text-inset);
 }
-.task-due--over { color: color-mix(in srgb, var(--error), var(--fg) 25%); }
+.task-due--over { color: color-mix(in srgb, var(--error-text), var(--fg) 25%); }
 .visually-hidden {
   position: absolute;
   width: 1px;
@@ -4927,14 +4927,14 @@ button.task-check:disabled { cursor: progress; opacity: 0.5; }
   --band-tone: var(--success);
   background: color-mix(in srgb, var(--success) 6%, transparent);
 }
-.task-agent-band--settled { --band-tone: var(--error); }
+.task-agent-band--settled { --band-tone: var(--error); --band-text: var(--error-text); }
 .task-agent-status {
   display: inline-flex;
   align-items: center;
   gap: 0;
   min-width: 0;
   white-space: nowrap;
-  color: color-mix(in srgb, var(--band-tone), var(--fg) 25%);
+  color: color-mix(in srgb, var(--band-text, var(--band-tone)), var(--fg) 25%);
 }
 .task-agent-band--running .task-agent-status { color: var(--fg2); }
 .task-agent-dot {
@@ -5384,7 +5384,7 @@ button.task-check:disabled { cursor: progress; opacity: 0.5; }
 .task-detail-sheet .task-delete:hover:not(:disabled),
 .task-detail-sheet .task-delete:focus-visible {
   border-color: color-mix(in srgb, var(--error) 45%, transparent);
-  color: var(--error);
+  color: var(--error-text);
 }
 .task-detail-form {
   flex: 1;
@@ -5517,7 +5517,7 @@ button.task-check:disabled { cursor: progress; opacity: 0.5; }
 .task-detail-page .task-delete:hover:not(:disabled),
 .task-detail-page .task-delete:focus-visible {
   border-color: color-mix(in srgb, var(--error) 45%, transparent);
-  color: var(--error);
+  color: var(--error-text);
 }
 .task-detail-pane {
   display: flex;

@@ -153,7 +153,7 @@ const stateLabel = computed(() => {
 }
 
 .shell-card--failed .shell-card-state {
-  color: var(--error);
+  color: var(--error-text);
 }
 
 .shell-card-exit {

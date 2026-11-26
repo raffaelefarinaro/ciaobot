@@ -508,7 +508,7 @@ watch(workspace, () => {
 .sources-mode { margin: 0; font-size: var(--text-sm); color: var(--fg2); border: 1px solid var(--border); border-radius: 999px; padding: 2px 10px; }
 .sources-mode--automatic { color: var(--fg); border-color: var(--accent); }
 .sources-grid { display: grid; gap: var(--space-3); grid-template-columns: repeat(auto-fit, minmax(190px, 1fr)); min-width: 0; }
-.sources-field { display: grid; gap: var(--space-1); min-width: 0; }
+.sources-field { display: grid; grid-template-columns: minmax(0, 1fr); gap: var(--space-1); min-width: 0; }
 .sources-field--narrow { max-width: 240px; }
 .sources-label { color: var(--fg); font-size: var(--text-sm); }
 .sources-group { display: grid; gap: var(--space-2); margin: 0; padding: var(--space-2) var(--space-3); border: 1px solid var(--border); border-radius: var(--radius-sm); min-width: 0; }

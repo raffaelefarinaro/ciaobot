@@ -1067,7 +1067,7 @@ onUnmounted(() => {
   flex-shrink: 0;
 }
 .prompt--err {
-  color: var(--error);
+  color: var(--error-text);
 }
 
 
@@ -1170,7 +1170,7 @@ onUnmounted(() => {
 }
 .login-error {
   margin: 10px 0 0;
-  color: var(--error);
+  color: var(--error-text);
   font-size: var(--text-sm);
 }
 .login-help {
@@ -1214,7 +1214,7 @@ onUnmounted(() => {
 .login-help:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; border-radius: 2px; }
 
 .line--error {
-  color: var(--error);
+  color: var(--error-text);
   font-size: var(--text-sm);
 }
 
@@ -1536,7 +1536,7 @@ onUnmounted(() => {
 }
 .badge--error {
   background: rgba(231, 76, 60, 0.15);
-  color: var(--error);
+  color: var(--error-text);
   border: 1px solid rgba(231, 76, 60, 0.3);
 }
 

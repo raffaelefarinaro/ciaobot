@@ -185,12 +185,12 @@ export const BadgeWarn: Story = {
   },
 }
 
-// The error badge: a translucent red fill with an --error label.
+// The error badge: a translucent red fill with an --error-text label.
 export const BadgeError: Story = {
   render: () => ({
     template: [
       badge('badge badge--error', 'Storybook error'),
-      probe('label', 'color: var(--error)'),
+      probe('label', 'color: var(--error-text)'),
     ].join(''),
   }),
   play: async ({ canvas, canvasElement }) => {

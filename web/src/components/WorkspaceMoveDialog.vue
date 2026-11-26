@@ -331,7 +331,7 @@ watch(
   font-size: 0.875rem;
 }
 .move-note--refusal {
-  color: var(--error);
+  color: var(--error-text);
 }
 .move-actions {
   display: flex;

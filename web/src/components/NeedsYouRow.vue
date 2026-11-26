@@ -228,7 +228,7 @@ onBeforeUnmount(() => document.removeEventListener('pointerdown', onOutside, tru
 
 /* A refusal has to be readable, not clipped: allow two lines. */
 .needs-you-line--alert {
-  color: var(--error);
+  color: var(--error-text);
   display: -webkit-box;
   -webkit-box-orient: vertical;
   -webkit-line-clamp: 2;

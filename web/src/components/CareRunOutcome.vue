@@ -162,7 +162,7 @@ const incomplete = computed(() => report.value?.care_run?.counts_complete === fa
 }
 
 .care-run-failed {
-  color: var(--error);
+  color: var(--error-text);
   font-weight: 600;
 }
 
@@ -198,7 +198,7 @@ const incomplete = computed(() => report.value?.care_run?.counts_complete === fa
 
 .care-run-group[data-status='failed'] .care-run-group-title,
 .care-run-group[data-status='conflict'] .care-run-group-title {
-  color: var(--error);
+  color: var(--error-text);
 }
 
 .care-run-items,

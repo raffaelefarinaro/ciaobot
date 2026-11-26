@@ -210,13 +210,13 @@ async function onStop(event: Event, id: string) {
   background: var(--bg3);
 }
 
-.chat-loop-menu__item--stop { color: var(--error); }
+.chat-loop-menu__item--stop { color: var(--error-text); }
 
 .chat-loop-menu__item:disabled { color: var(--fg3); cursor: default; }
 
 .chat-loop-menu__error {
   margin: var(--space-1) var(--space-3) var(--space-2);
-  color: var(--error);
+  color: var(--error-text);
   font-size: var(--text-sm);
 }
 

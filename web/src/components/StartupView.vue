@@ -126,7 +126,7 @@ function statusLabel(status: string): string {
 .startup-phase-status { white-space: nowrap; }
 .startup-phase.is-in_progress .startup-phase-status { color: var(--accent); }
 .startup-phase.is-done .startup-phase-status { color: var(--success); }
-.startup-phase.is-failed .startup-phase-status { color: var(--error); }
+.startup-phase.is-failed .startup-phase-status { color: var(--error-text); }
 .startup-phase.is-skipped .startup-phase-status { color: var(--fg2); }
 .startup-phase-message {
   flex-basis: 100%;

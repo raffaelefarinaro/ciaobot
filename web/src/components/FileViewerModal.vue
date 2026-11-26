@@ -1603,7 +1603,7 @@ watch(
   color: var(--fg2);
 }
 .fv-error {
-  color: var(--error, #f87171);
+  color: var(--error-text);
 }
 .fv-libreoffice-notice {
   margin: 24px;

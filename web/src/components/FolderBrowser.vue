@@ -105,7 +105,7 @@ function onPathChange(vfPath: string): void {
 .folder-browser { display: flex; flex-direction: column; flex: 1; min-height: 0; }
 .folder-browser :deep(.vuefinder) { flex: 1; min-height: 0; }
 .fbr-error, .fbr-loading { padding: 24px; color: var(--fg2); }
-.fbr-error { color: var(--error); }
+.fbr-error { color: var(--error-text); }
 .fbr-note { margin: 0; padding: 6px 12px; font-size: 0.85em; color: var(--fg3); border-bottom: 1px solid var(--border); }
 </style>
 

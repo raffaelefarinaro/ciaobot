@@ -67,5 +67,5 @@ defineExpose({ save })
 
 <style scoped>
 .hint { color: var(--fg2); line-height: 1.5; }
-.error { margin: 0; color: var(--error); }
+.error { margin: 0; color: var(--error-text); }
 </style>

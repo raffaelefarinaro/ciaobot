@@ -661,7 +661,7 @@ async function saveDraft() {
 .cat-btn:disabled { opacity: 0.55; cursor: default; }
 .cat-btn--primary { background: var(--accent); border-color: var(--accent); color: var(--on-accent); }
 .cat-btn--danger { background: none; border-color: var(--border); color: var(--fg2); font-weight: 500; }
-.cat-btn--danger:hover:not(:disabled) { color: var(--error); border-color: var(--error); }
+.cat-btn--danger:hover:not(:disabled) { color: var(--error-text); border-color: var(--error); }
 .cat-link {
   min-height: 28px;
   padding: 0 4px;
@@ -677,7 +677,7 @@ async function saveDraft() {
 .cat-error {
   margin: 0;
   flex-basis: 100%;
-  color: var(--error);
+  color: var(--error-text);
   font-size: var(--text-sm);
   line-height: 1.5;
 }
@@ -886,7 +886,7 @@ async function saveDraft() {
 .cat-field textarea:focus-visible { outline: 2px solid var(--accent); outline-offset: -1px; }
 .cat-field input[readonly] { color: var(--fg3); background: var(--bg2); }
 .cat-field-note { margin: 0; color: var(--fg3); font-size: var(--text-sm); line-height: 1.5; }
-.cat-field-error { margin: 0; color: var(--error); font-size: var(--text-sm); line-height: 1.5; }
+.cat-field-error { margin: 0; color: var(--error-text); font-size: var(--text-sm); line-height: 1.5; }
 
 .cat-scope {
   margin: 0;

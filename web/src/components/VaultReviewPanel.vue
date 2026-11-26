@@ -1552,7 +1552,7 @@ function clearedDate(note: VaultClearedNote): string {
 
 /* Destructive, but not competing-pink: the quiet button in the error colour. */
 .vr-danger {
-  color: var(--error);
+  color: var(--error-text);
   border-color: color-mix(in srgb, var(--error) 55%, var(--border));
 }
 

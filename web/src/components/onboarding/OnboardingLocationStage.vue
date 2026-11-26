@@ -156,5 +156,5 @@ onMounted(async () => {
 .set-value { overflow-wrap: anywhere; }
 .change { display: inline-flex; align-items: center; min-height: var(--touch, 44px); padding: 0 var(--space-4, 16px); border: 1px solid transparent; color: var(--accent); text-decoration: none; }
 .change:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
-.error { color: var(--error); }
+.error { color: var(--error-text); }
 </style>

@@ -19,6 +19,8 @@ colors:
   success: "#4caf50"
   warning: "#facc15"
   error: "#f44336"
+  error-text: "#ff7f75"
+  light-error-text: "#b3201f"
   light-primary: "#c2410c"
   light-primary-strong: "#9a3412"
   light-on-primary: "#ffffff"
@@ -199,6 +201,7 @@ Dark mode is the primary visual expression. It uses layered indigo surfaces inst
 - **Body font (opt-in):** `data-body-font` on `<html>` swaps `--font` between system sans (default), a serif stack (`Charter, 'Iowan Old Style', 'Palatino Linotype', Palatino, Georgia`) and `--font-mono`. It applies to chat prose, UI body text and titles (titles use `--font`). Code, badges, commands, timestamps and the wordmark stay `--font-mono` regardless. Components use `var(--font)`, never `var(--font-sans)`, for prose and controls.
 - **Custom colours (opt-in):** `custom_colors` stores a background and text colour per theme; the active theme's pair is written as inline custom properties on `<html>` (`--bg --bg2 --bg3 --bg-elev --fg --fg2 --fg3 --border --border-strong`), with surfaces and secondary text derived from the pair by `lib/contrast.ts` (`deriveCustomTokens`). A pair is applied only if body text clears WCAG AA 4.5:1 on `--bg` and on the hover surface `--bg3`; otherwise the dialog refuses it and says why. Accent, status and canvas-painted surfaces (Memory map) are not recoloured. A custom pair overrides Soft text contrast for that theme.
 - **Engine-wide appearance:** Settings › Appearance (theme, font size, text contrast, body font) is stored on the engine, so every device agrees; `system` theme still resolves per device from its OS. `ciao-theme`, `ciao-font-scale` and `ciao-appearance` in localStorage are paint caches only, restored before mount and overwritten by the engine value. The first browser to load against an engine that has never stored a theme or font size seeds it once from its own values.
+- **Error text (`--error-text`, `#ff7f75` dark / `#b3201f` light):** The colour of any red *text*, including `color-mix()` text built on red. `--error` (`#f44336` / `#c62828`) stays for fills, borders and tints; as 0.8rem text it measures 4.19:1 on dark `--bg2` and 3.53:1 on `--bg3`. `--error-text` is 6.94 / 6.28 / 5.28:1 on dark `--bg` / `--bg2` / `--bg3` and 6.10 / 6.68 / 5.48:1 on light `--bg` / `--bg2` / `--bg3`. It also clears 4.5:1 under the 15% `--error` tint of `.badge--error` on every surface (lowest: 4.67 dark `--bg3`, 4.56 light `--bg3`), so a red-tinted badge or line may sit on any surface. Never set `color: var(--error)`.
 - **Semantic colors:** Green communicates success, orange caution or recoverable risk, and red destructive actions or errors. Never use semantic colors decoratively, and never for a status glyph: accent presets (pink, amber, lime) sit next to them in hue, so status marks take the row's accent and shape carries the meaning.
 
 Light mode keeps the same hierarchy with a soft lavender canvas, white surfaces, crisp crimson accent, and slate text. It is an adaptation of the same system, not a separate aesthetic.

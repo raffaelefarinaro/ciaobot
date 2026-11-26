@@ -442,7 +442,7 @@ watch(workspace, () => {
 .shared-brain-status { margin: var(--space-2) 0 0; font-size: var(--text-sm); line-height: 1.5; overflow-wrap: anywhere; }
 .shared-brain-status--ok { color: var(--fg); }
 .shared-brain-status--warn { color: var(--warning); }
-.shared-brain-status--error { color: var(--error); }
+.shared-brain-status--error { color: var(--error-text); }
 .shared-brain-policy { margin: var(--space-2) 0 var(--space-1); color: var(--fg); font-size: var(--text-sm); line-height: 1.5; overflow-wrap: anywhere; }
 .shared-brain-policy-toggle { margin: 0 0 var(--space-2); }
 .shared-brain-stale { margin: 0 0 var(--space-2); }

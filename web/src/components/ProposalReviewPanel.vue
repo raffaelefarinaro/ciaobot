@@ -2506,7 +2506,7 @@ watch(
 
 
 .pr-error {
-  color: var(--error);
+  color: var(--error-text);
   font-size: 0.85rem;
 }
 
@@ -2895,7 +2895,7 @@ watch(
 
 .pr-card-error {
   margin: 0;
-  color: var(--error);
+  color: var(--error-text);
   font-size: 0.82rem;
 }
 
@@ -3015,7 +3015,7 @@ watch(
 
 .pr-summary-error {
   width: 100%;
-  color: var(--error);
+  color: var(--error-text);
   font-size: 0.78rem;
 }
 
@@ -3597,7 +3597,7 @@ watch(
 .pr-op--none .pr-op-icon,
 .pr-op--skill .pr-op-icon,
 .pr-op--decide .pr-op-icon { color: var(--fg2); }
-.pr-op--blocked .pr-op-icon { color: var(--error); }
+.pr-op--blocked .pr-op-icon { color: var(--error-text); }
 
 .pr-dest {
   font-family: var(--font-mono);
@@ -3642,7 +3642,7 @@ watch(
 }
 
 .pr-checking { color: var(--fg3); }
-.pr-preview-error { color: var(--error); }
+.pr-preview-error { color: var(--error-text); }
 .pr-preview-retry { min-height: 0; }
 
 .pr-deferred-buttons {

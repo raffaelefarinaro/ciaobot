@@ -262,7 +262,7 @@ watch(
   font-size: 0.875rem;
 }
 .repo-note--error {
-  color: var(--error);
+  color: var(--error-text);
 }
 .repo-actions {
   display: flex;

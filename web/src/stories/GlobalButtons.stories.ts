@@ -187,12 +187,12 @@ export const BtnChipActive: Story = {
 
 // The destructive modifier, stacked on a base exactly as production does
 // (SettingsView renders `btn-small btn-danger` on its delete actions): it
-// forces the edge and the label to --error without owning any fill of its own.
+// forces the edge to --error and the label to --error-text without owning any fill of its own.
 export const BtnDanger: Story = {
   render: () => ({
     template: [
       '<button type="button" class="btn-small btn-danger">Storybook delete</button>',
-      probe('label', 'color: var(--error)'),
+      probe('label', 'color: var(--error-text)'),
       probe('edge', 'border-color: var(--error)'),
     ].join(''),
   }),
