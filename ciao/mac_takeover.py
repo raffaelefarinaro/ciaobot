@@ -107,7 +107,7 @@ from typing import Any, Callable
 from xml.parsers.expat import ExpatError
 
 import ciao
-from ciao import app_engine, macos_service
+from ciao import app_engine, macos_service, upgrade_preflight
 from ciao.macos_service import (
     LAUNCHCTL,
     SERVER_LABEL,
@@ -251,6 +251,8 @@ class TakeoverPlan:
     left_in_place: tuple[str, ...] = ()
     dropped_env: tuple[str, ...] = ()
     resume_id: str = ""
+    #: Which 1.10 step to finish, set with the `unfinished_migration` refusal.
+    advice: str = ""
     #: The plan-time protected paths, persisted in the journal so finish()
     #: filters the Trash candidates against the same inputs plan() used. Not
     #: part of the plan JSON the app reads.
@@ -1044,6 +1046,13 @@ def plan(
             return _refuse("downgrade", label, old_version=old_version, **known)
         if _version_key(old_version) < _version_key(MIN_TAKEOVER_VERSION):
             return _refuse("engine_too_old", label, old_version=old_version, **known)
+    # 2.0 upgrades from a finished 1.10 only: a half-migrated install stays put.
+    # After the version checks, so "too old" and "downgrade" keep their own codes.
+    unfinished = upgrade_preflight.check(workspace, runtime_root)
+    if unfinished is not None:
+        return _refuse(
+            upgrade_preflight.REFUSAL_CODE, label, old_version=old_version, advice=unfinished.message, **known
+        )
     try:
         active_chats = len(restart_blockers(runtime.port))
     except RestartBlockersUnavailable:

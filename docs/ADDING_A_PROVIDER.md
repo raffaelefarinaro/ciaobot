@@ -122,9 +122,9 @@ equivalent in its own permission language.
 
 ## Optional, ship only if the CLI has the feature
 
-- **Conversation import.** `ciao/import_sources/` turns one CLI's stored sessions
-  into a `NormalizedSession`. A new source is a module beside `claude_code` and
-  `opencode`, plus a `KNOWN_PROVIDERS` entry. Chat works without it.
+- **Conversation import.** The `import-conversations` stock skill names where each
+  CLI keeps its stored sessions. A new CLI's session location is one more row in
+  that skill. Chat works without it.
 - **Quota.** Claude reports a rate-limit snapshot. OpenCode reports none. A new
   provider reports none unless its CLI exposes one.
 

@@ -293,12 +293,6 @@ def _rename_webhook_store(request: Request) -> Any:
     return webhook_store(request.app.state.config)
 
 
-def _rename_import_store(request: Request) -> Any:
-    from ciao.import_store import ImportStore, engine_store_path  # noqa: PLC0415
-
-    return ImportStore(engine_store_path(request.app.state.config))
-
-
 async def _workspace_from_request_async(
     data: dict, *, config, existing: WorkspaceConfig | None = None
 ) -> WorkspaceConfig:
@@ -417,7 +411,6 @@ async def upsert_workspace_setting(request: Request) -> JSONResponse:
                                 projects=getattr(request.app.state, "project_chat_manager", None),
                                 schedules=_rename_schedule_store(request),
                                 webhooks=_rename_webhook_store(request),
-                                imports=_rename_import_store(request),
                             )
                         except WorkspaceRenameBusy as exc:
                             return JSONResponse({"error": str(exc)}, status_code=409)

@@ -5,24 +5,9 @@
     <PaneHeader :page-tag="`Memory · ${SECTION_LABELS[mm.section]}`" @open-sidebar="emit('open-sidebar')" />
     <MemoryHowItWorks />
 
-    <!-- Import conversations (#1029, C5) is a section of its own, not a card
-         above the graph: a listing can be hundreds of rows long and the
-         controls a person has to reach — Review, Cancel, and everything the
-         confirmation states — sit below them. A page scrolls; the map's pane
-         does not. One column, like Categories: there is nothing for a rail to
-         hold here. The scan inside is opt-in — nothing is listed until the
-         reader presses Find. -->
-    <div v-if="mm.section === 'import'" class="mm-review-wrap">
-      <div class="page-grid page-grid--single mm-review-grid">
-        <div class="page-main">
-          <ImportSources />
-        </div>
-      </div>
-    </div>
-
     <!-- Categories is configuration, not a queue: no always-loaded budget rail
          beside it, and one column for the whole list and its drawer. -->
-    <div v-else-if="mm.section === 'categories'" class="mm-review-wrap">
+    <div v-if="mm.section === 'categories'" class="mm-review-wrap">
       <div class="page-grid page-grid--single mm-review-grid">
         <div class="page-main">
           <MemoryCategoriesPanel />
@@ -296,7 +281,6 @@ import MemoryGuideBudget from './MemoryGuideBudget.vue'
 import MemoryHowItWorks from './MemoryHowItWorks.vue'
 import MemoryCategoriesPanel from './MemoryCategoriesPanel.vue'
 import MemoryUnsurePanel from './MemoryUnsurePanel.vue'
-import ImportSources from './ImportSources.vue'
 import { useProjectStore } from '../stores/projects'
 import {
   useMemoryMapStore, categoryLabelFor, categoryColorFor, catKeyFor, isMemorySection,
@@ -1242,7 +1226,6 @@ const viewRouter = useRouter()
 const SECTION_LABELS: Record<MemorySection, string> = {
   map: 'Map',
   categories: 'Categories',
-  import: 'Import',
   unsure: 'Unsure',
 }
 // The route owns the section. Bare /memory lands on the section last visited
@@ -1499,7 +1482,7 @@ onBeforeUnmount(() => {
   min-height: 0;
 }
 
-/* The page sections (Unsure, Categories, Import) scroll as one page; the map
+/* The page sections (Unsure, Categories) scroll as one page; the map
    takes the whole pane instead. */
 .mm-review-wrap {
   flex: 1;

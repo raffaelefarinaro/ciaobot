@@ -27,7 +27,6 @@ const PAGE_HREFS = [
   '/memory',
   '/memory/map',
   '/memory/categories',
-  '/memory/import',
   '/memory/unsure',
 ]
 

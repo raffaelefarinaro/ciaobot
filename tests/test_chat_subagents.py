@@ -797,7 +797,7 @@ def test_workspace_rename_refused_while_background_work_outstanding(
             rename_workspace(
                 pcm._config,
                 old="personal", new="santo",
-                projects=pcm, schedules=stub, webhooks=stub, imports=stub,
+                projects=pcm, schedules=stub, webhooks=stub,
             )
     else:
         assert pcm.workspace_busy_chat_ids("personal") == []

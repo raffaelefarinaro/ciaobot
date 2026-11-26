@@ -43,7 +43,6 @@ const SECTION_LABELS: Record<string, string> = {
   '/memory': 'Memory',
   '/memory/map': 'Memory map',
   '/memory/categories': 'Categories',
-  '/memory/import': 'Import conversations',
   '/memory/unsure': 'Unsure list',
   '/settings': 'Settings',
 }

@@ -2,8 +2,7 @@
 
 The OpenCode runtime is ``opencode acp`` (``ciao/providers/acp/agents.py``). What stays here is
 the CLI-side work Ciaobot still does outside a chat: finding the binary, the Settings status row,
-the credential and skill inventory, and the version floor shared by Settings, the releaser and
-the conversation importer.
+the credential and skill inventory, and the version floor shared by Settings, and the releaser.
 """
 
 from __future__ import annotations
@@ -31,8 +30,8 @@ if TYPE_CHECKING:
     import subprocess
 
 
-# The lowest OpenCode CLI version Ciaobot will run. Every message below and the
-# importer's refusal are derived from it, so the floor is stated once.
+# The lowest OpenCode CLI version Ciaobot will run. Every message below is
+# derived from it, so the floor is stated once.
 OPENCODE_MIN_VERSION = (2, 3, 2)
 OPENCODE_MIN_TEXT = ".".join(str(part) for part in OPENCODE_MIN_VERSION)
 

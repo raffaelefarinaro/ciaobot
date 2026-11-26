@@ -38,7 +38,6 @@ async function mountAt(path: string) {
         MemoryCategoriesPanel: Panel,
         ProposalReviewPanel: Panel,
         VaultReviewPanel: Panel,
-        ImportSources: Panel,
         MemoryGuideBudget: Panel,
         PinnedFilePanel: Panel,
       },
