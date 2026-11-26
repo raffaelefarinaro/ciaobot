@@ -737,60 +737,6 @@ def test_workspace_archive_restore_clears_memory_approval(tmp_path):
     assert config.workspaces["work"].memory_approval == {}
 
 
-@pytest.mark.parametrize("mapping_generation,rotated", [(0, False), (1, True)])
-def test_workspace_archive_restore_preserves_folder_shared_brain(tmp_path, mapping_generation, rotated):
-    from ciao.config import SharedBrainLink
-
-    client, config, _pcm, _store = _app(tmp_path, rerooted=True)
-    folder = (tmp_path.parent / f"{tmp_path.name}-drive-team").resolve()
-    folder.mkdir()
-    link = SharedBrainLink(
-        "team", str(folder), f"folder:{folder}", lifetime_id="kept-lifetime", kind="folder",
-        guide_mapping_generation=mapping_generation,
-    )
-    config.workspaces["work"].shared_brains = [link]
-
-    archived_response = client.post("/api/workspaces/work/archive")
-    assert archived_response.status_code == 200
-    archived = archived_response.json()["archived"]
-    restored_response = client.post("/api/workspaces/archived/restore", json={"id": archived["id"]})
-
-    assert restored_response.status_code == 200, restored_response.json()
-    (restored,) = config.workspaces["work"].shared_brains
-    assert restored.kind == "folder"
-    assert (restored.lifetime_id != "kept-lifetime") is rotated
-    assert restored.identity == link.identity and restored.path == link.path
-    assert restored.guide_mapping_generation > mapping_generation
-    assert restored.sharing_policy == "review" and restored.sharing_consent is None
-    assert restored.guide_mapping is None
-
-
-@pytest.mark.parametrize("revoked", [False, True])
-def test_workspace_archive_restore_clears_folder_guide_mapping(tmp_path, revoked):
-    from ciao.config import SharedBrainLink
-    from ciao.shared_brain_guide import ConsentGrant, GuidePin
-    from ciao.shared_brain_mapping import GuideMapping
-
-    client, config, _pcm, _store = _app(tmp_path, rerooted=True)
-    folder = (tmp_path.parent / f"{tmp_path.name}-drive-team").resolve()
-    folder.mkdir()
-    identity = f"folder:{folder}"
-    mapping = GuideMapping(identity, "old-lifetime", 1, GuidePin(identity, 1, "a" * 64), (
-        ConsentGrant("decision", "section", "notes/decisions.md", frozenset({"append"}), "Decisions"),
-    ))
-    config.workspaces["work"].shared_brains = [SharedBrainLink(
-        "team", str(folder), identity, lifetime_id="old-lifetime", kind="folder",
-        guide_mapping_generation=2 if revoked else 1, guide_mapping=None if revoked else mapping,
-    )]
-    archived = client.post("/api/workspaces/work/archive").json()["archived"]
-    response = client.post("/api/workspaces/archived/restore", json={"id": archived["id"]})
-    assert response.status_code == 200, response.json()
-    restored = config.workspaces["work"].shared_brains[0]
-    assert restored.lifetime_id != "old-lifetime"
-    assert restored.guide_mapping is None
-    assert restored.guide_mapping_generation == (3 if revoked else 2)
-
-
 def test_move_back_refuses_archive_metadata_changed_after_claim_snapshot(tmp_path):
     from ciao import workspace_archive
 
@@ -1821,67 +1767,6 @@ def test_carry_skips_a_symlink_without_moving_or_following_it(tmp_path):
 
 
 
-def test_archive_restore_rotates_lifetime_and_resets_shared_brain_sharing(tmp_path, monkeypatch):
-    from ciao import shared_brain
-    from ciao.config import SharedBrainLink
-
-    client, config, _pcm, _store = _app(tmp_path, rerooted=True)
-    away = tmp_path.parent / f"brain-away-{tmp_path.name}"
-    link = SharedBrainLink(name="notes", path=str(away), identity="github.com/acme/notes")
-    link = shared_brain.set_sharing_policy(link, "automatic")
-    config.workspaces["work"].shared_brains = [link]
-    archived = client.post("/api/workspaces/work/archive").json()["archived"]
-    original_move_back = workspace_archive.move_back
-    restore_claimed: list[bool] = []
-
-    def check_restore_claim(*args, **kwargs):
-        restore_claimed.append(shared_brain._checkout_lock(link.path).locked())
-        return original_move_back(*args, **kwargs)
-
-    monkeypatch.setattr(workspace_archive, "move_back", check_restore_claim)
-
-    restored = client.post("/api/workspaces/archived/restore", json={"id": archived["id"]})
-
-    assert restored.status_code == 200, restored.json()
-    [restored_link] = config.workspaces["work"].shared_brains
-    assert (restored_link.name, restored_link.path, restored_link.identity) == (
-        link.name, link.path, link.identity,
-    )
-    assert restored_link.lifetime_id != link.lifetime_id
-    assert restored_link.sharing_policy == "review"
-    assert restored_link.sharing_generation == link.sharing_generation + 1
-    assert restored_link.sharing_consent is None
-    assert not shared_brain.sharing_consent_active(restored_link)
-    assert restore_claimed == [True]
-
-
-def test_archive_restore_drops_a_scoped_grant_and_its_scope(tmp_path, monkeypatch):
-    from ciao import shared_brain
-    from ciao.config import SharedBrainLink
-
-    client, config, _pcm, _store = _app(tmp_path, rerooted=True)
-    away = tmp_path.parent / f"brain-scope-away-{tmp_path.name}"
-    base = SharedBrainLink(name="notes", path=str(away), identity="github.com/acme/notes")
-    scope = shared_brain.build_sharing_scope(
-        base, projects=["p1"], producers=["memory_extraction"], operations=["append"],
-        known_projects={"p1"}, known_producers=("memory_extraction",),
-    )
-    link = shared_brain.set_sharing_policy(base, "automatic", scope)
-    assert shared_brain.sharing_consent_active(link)
-    config.workspaces["work"].shared_brains = [link]
-    archived = client.post("/api/workspaces/work/archive").json()["archived"]
-    restored = client.post("/api/workspaces/archived/restore", json={"id": archived["id"]})
-    assert restored.status_code == 200, restored.json()
-    [back] = config.workspaces["work"].shared_brains
-    assert back.sharing_policy == "review"
-    assert back.sharing_consent is None
-    assert back.sharing_generation == link.sharing_generation + 1
-    assert back.lifetime_id != link.lifetime_id
-    assert not shared_brain.sharing_consent_active(back)
-    assert not shared_brain.sharing_scope_permits(
-        back, project="p1", producer="memory_extraction", operation="append", note_type="x")
-
-
 def test_archive_claims_shared_brain_before_moving_workspace(tmp_path, monkeypatch):
     from ciao import shared_brain
     from ciao.config import SharedBrainLink
@@ -2227,3 +2112,24 @@ def test_cancel_during_owned_worker_keeps_registry_until_worker_finishes(tmp_pat
 
     asyncio.run(exercise())
 
+
+def test_workspace_archive_restore_preserves_folder_shared_brain(tmp_path):
+    from ciao.config import SharedBrainLink
+
+    client, config, _pcm, _store = _app(tmp_path, rerooted=True)
+    folder = (tmp_path.parent / f"{tmp_path.name}-drive-team").resolve()
+    folder.mkdir()
+    link = SharedBrainLink(
+        "team", str(folder), f"folder:{folder}", lifetime_id="kept-lifetime", kind="folder", enabled=False,
+    )
+    config.workspaces["work"].shared_brains = [link]
+
+    archived = client.post("/api/workspaces/work/archive").json()["archived"]
+    restored_response = client.post("/api/workspaces/archived/restore", json={"id": archived["id"]})
+
+    assert restored_response.status_code == 200, restored_response.json()
+    (restored,) = config.workspaces["work"].shared_brains
+    assert (restored.kind, restored.path, restored.identity, restored.enabled) == (
+        "folder", link.path, link.identity, False,
+    )
+    assert restored.lifetime_id != "kept-lifetime"

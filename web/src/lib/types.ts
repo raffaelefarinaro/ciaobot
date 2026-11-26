@@ -96,6 +96,8 @@ export interface SharedBrainRow {
   name?: string
   /** Defaults to Git for registry rows written before folder links existed. */
   kind?: 'git' | 'folder'
+  /** Omitted keeps a retained row's value; new rows start on. */
+  enabled?: boolean
 }
 
 /** The payload of a workspace PATCH: a shared-brain save sends rows, not the read links. */
@@ -124,6 +126,8 @@ export interface SharedBrainUpdate {
 export interface SharedBrainState {
   name: string
   kind: SharedBrainKind
+  /** Off keeps the brain registered but out of chats and the memory pass. */
+  enabled: boolean
   identity: string
   path: string
   origin_changed: boolean
