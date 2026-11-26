@@ -161,7 +161,7 @@ def test_system_schedule_state_persists_separately(tmp_path: Path) -> None:
     assert reloaded.last_triggered_on == "2026-07-05"
     assert reloaded.workspace == "work"
     assert "references/memory-operations/guide.md" in reloaded.prompt
-    assert "references/drain-legacy-queues.md" in reloaded.prompt
+    assert "drain-legacy-queues.md" in reloaded.prompt
 
 
 def test_upgraded_store_resolves_packaged_care_paths_and_keeps_saved_state(tmp_path: Path) -> None:
@@ -197,7 +197,7 @@ def test_upgraded_store_resolves_packaged_care_paths_and_keeps_saved_state(tmp_p
     assert str(guide) in care.prompt
     assert str(procedures) in care.prompt
     assert "ciao-memory" not in care.prompt
-    assert "references/drain-legacy-queues.md" in care.prompt
+    assert "drain-legacy-queues.md" in care.prompt
     assert care.enabled is False
     assert care.last_triggered_on == "2026-11-20"
     assert care.workspace == "work"

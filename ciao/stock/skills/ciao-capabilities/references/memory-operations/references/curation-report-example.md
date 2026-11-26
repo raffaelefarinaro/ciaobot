@@ -1,20 +1,33 @@
-# Sample Workspace care reply
+# Sample Workspace care report and reply
 
-The reply is read by someone who has never opened the docs. Use everyday words, name a file only when they must open it, and skip sections that are empty. A reply in this shape:
+`Workspace/Care-Report.md` is a checklist the orchestrator builds first and ticks as each step finishes:
 
 ```
+# Care report 2026-11-26
+Weekly done: 2026-11-19
+Interrupted last run: guide-review
+- [x] unsure: apply ticked Unsure lines (2 ticked) — applied 2, left 0 ticked; verify: 0 `- [x]` lines left
+- [x] regions: consolidate regions at or above 85% (memory 91%) — memory 91% -> 72%, 3 entries logged in Memory-Consolidations.md; verify: memory.pct 72, profile.pct 40
+- [x] stale: re-check stale notes (4 listed, weekly due) — checked 4 notes (People/Rae.md, ...), fixed 1, Unsure 1; verify: 3 of 4 still listed, none of the fixed paths
+- [!] guide-review: review the AGENTS.md body (weekly due) — blocked: AGENTS.md unreadable
+```
+
+The final reply starts with `Care complete: N/N` (or `Care incomplete: N/M, blocked: <ids>`) and is read by someone who has never opened the docs. Use everyday words, name a file only when they must open it, and skip sections that are empty:
+
+```
+Care incomplete: 3/4, blocked: guide-review
+
 What I did
-- Filed 3 facts into their project notes.
-- Merged two duplicate notes about your pricing model.
-- Re-checked 2 older notes about the Atlas project; both still hold.
+- Filed 2 facts into their project notes.
+- Tidied standing memory from 91% to 72% full; the removed lines are saved in Memory-Consolidations.md.
+- Re-checked 4 older notes; fixed one date in the Atlas project note.
 
 What needs you
 1. Cross-project fact waiting for approval: "Invoices go out on the 1st." Remember it for every project?
-2. Skill suggestion: the weekly-review skill could mention the Friday cutoff. I filed the proposal but did not change the skill.
-3. Should I drop "Office wifi password is on the fridge" from your standing memory? It looks out of date.
-4. The scan finished and left 2 findings: a broken link in Projects/Atlas.md and a duplicate of People/Rae.md in People/Rae-2.md.
+2. Should I drop "Office wifi password is on the fridge" from your standing memory? It looks out of date.
+3. The review of AGENTS.md could not run (file unreadable).
 
 Reply with the numbers to remember, or "skip the rest".
 ```
 
-When nothing at all happened, the whole reply is one line: "Nothing new to file today — memory is tidy."
+When nothing was due, the whole reply is one line: "Nothing new to file today — memory is tidy."
