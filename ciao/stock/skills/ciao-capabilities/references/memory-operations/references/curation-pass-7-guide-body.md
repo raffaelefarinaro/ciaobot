@@ -1,6 +1,6 @@
 # Pass 7: review the workspace guide body
 
-Run this on a full pass. Review the guide file's body (AGENTS.md), outside the fenced `ciao:memory` and `ciao:profile` regions, for the things `memory-audit` cannot judge on shape alone. The body is the workspace's standing contract with every session, so a wrong claim there is asserted before the operator has said a word.
+Run this weekly. Review the guide file's body (AGENTS.md), outside the fenced `ciao:memory` and `ciao:profile` regions, for the things `memory-audit` cannot judge on shape alone. The body is the workspace's standing contract with every session, so a wrong claim there is asserted before the operator has said a word.
 
 This pass is review-only. You do not edit the guide body, because a change to what every session loads needs a person's approval. File every finding as a question or proposal with `ciao memory-proposal-add --kind review --text-file <file>` (the command flattens and dedupes the text) and report it under **What needs you**.
 
@@ -12,4 +12,4 @@ Look for:
 - Standing instructions that were never promoted. A learning that recurs (x3+) is a routing priority. File the proposal the learnings pass describes, naming `AGENTS.md` as the intended destination, and report it under **What needs you**. If the body already states it, file nothing.
 - Drift and bloat. Stale paths, superseded rules, and anything a more specific file (a skill, a project doc, the daily journal) covers more precisely are `[review]` questions too, as is anything whose correct home is genuinely ambiguous.
 
-Record the pass only when the review was actually completed: `ciao curation-progress --holder <lease.holder> --key guide:guide-body`. This key is not one of the two required hygiene keys, so an over-budget run that never reached the guide must not report it as done.
+Report the review as done only when it was actually completed; a run that never reached the guide says so.

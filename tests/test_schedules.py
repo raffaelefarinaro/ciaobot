@@ -941,18 +941,6 @@ def test_the_retired_skill_reflection_routine_is_not_installed(tmp_path: Path) -
     )
 
 
-def test_workspace_care_runs_overdue_structured_os_audit(tmp_path: Path) -> None:
-    """Workspace care owns both nightly memory and the overdue weekly audit."""
-    store = ScheduleStore(tmp_path, include_system=True)
-    entry = store.get("system-memory-curation")
-    assert entry is not None
-    text = _curation_text(entry.prompt)
-    assert "ciao vault-index --write" in text
-    assert "ciao os-audit --json --scope workspace" in text
-    assert "last_full_pass" in text
-    assert text.index("vault-index --write") < text.index("os-audit --json")
-
-
 def test_user_schedule_description_round_trips(tmp_path: Path) -> None:
     store = ScheduleStore(tmp_path)
     entry = store.create(

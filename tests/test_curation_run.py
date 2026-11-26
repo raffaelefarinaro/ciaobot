@@ -2861,8 +2861,6 @@ def test_the_schedule_verifies_stale_notes_through_the_managed_operation() -> No
     # Retirement is a human decision all the way down.
     assert "Never delete it unattended" in stale
     assert "a retirement is never applied by this pass at all" in stale
-    # The pass's keys are recorded, so the next run resumes rather than re-asks.
-    assert "ciao curation-progress --holder <lease.holder> --key" in stale
     # The queue's own signals still point at the managed pass rather than at a
     # hand edit.
     assert "`unverified` (facts unchecked past the 30-day review horizon" in prompt

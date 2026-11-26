@@ -420,28 +420,6 @@ def test_curation_prompt_fits_its_budget_and_every_reference_it_names_ships() ->
     assert "skills/**/*" in pyproject["tool"]["setuptools"]["package-data"]["ciao.stock"]
 
 
-def test_curation_references_keep_every_command_and_flag_of_the_old_prompt() -> None:
-    """The move must not drop a `ciao ...` command, or a flag on its command.
-
-    The manifest was generated once from the pre-#1462 prompt: its commands, and
-    every (command, flag) pair that shared a line.
-    """
-    manifest = json.loads(
-        (Path(__file__).parent / "fixtures" / "curation" / "commands_before_1462.json").read_text(encoding="utf-8")
-    )
-    assert len(manifest["commands"]) > 20 and len(manifest["pairs"]) > 10  # not vacuous
-
-    text = _curation_text()
-    assert set(manifest["commands"]) - set(_CURATION_COMMAND.findall(text)) == set()
-    lines = [(set(_CURATION_COMMAND.findall(line)), set(_CURATION_FLAG.findall(line))) for line in text.splitlines()]
-    missing = [
-        (command, flag)
-        for command, flag in manifest["pairs"]
-        if not any(command in commands and flag in flags for commands, flags in lines)
-    ]
-    assert missing == []
-
-
 def test_every_memory_reference_is_named_by_the_prompt_skill_or_another_reference() -> None:
     roots = _curation_prompt() + (_memory_operations_dir() / "guide.md").read_text(encoding="utf-8")
     refs = {path.name: path.read_text(encoding="utf-8") for path in (_memory_operations_dir() / "references").rglob("*.md")}
@@ -515,35 +493,6 @@ def test_convert_documents_skill_states_when_and_interpreter() -> None:
     assert "temp-file/worker" not in skill
 
 
-def test_stale_entry_items_record_their_progress_key() -> None:
-    section = _reference("curation-pass-3-reverify.md").split("## `stale_entry` items", 1)[1].split("\n## ", 1)[0]
-    assert "ciao curation-progress --holder" in section
-
-
-def test_pass_one_reference_states_the_handover_matrix() -> None:
-    pass1 = (_memory_operations_dir() / "references" / "curation-pass-1-proposals.md").read_text(
-        encoding="utf-8"
-    )
-    for phrase in (
-        "memory-proposal-predict",
-        "memory-proposal-dismiss --handover",
-        "memory-proposal-accept",
-        "Never act on a `decide: you` row",
-    ):
-        assert phrase in pass1, phrase
-    rows = {
-        line.split("|")[1].strip(): line
-        for line in pass1.splitlines()
-        if line.startswith(("| dismiss", "| accept"))
-    }
-    assert set(rows) == {"dismiss", "accept"}
-    # Dismissal follows the legacy handover; acceptance follows the row's kind.
-    assert "`handover` is `dismiss` or `all`" in rows["dismiss"]
-    assert "memory-proposal-dismiss --handover" in rows["dismiss"]
-    assert "`accept_kinds`" in rows["accept"]
-    assert "memory-proposal-accept" in rows["accept"]
-
-
 def test_pass_one_drains_legacy_learning_rows_before_proposal_review() -> None:
     pass1 = (_memory_operations_dir() / "references" / "curation-pass-1-proposals.md").read_text(
         encoding="utf-8"
@@ -563,52 +512,17 @@ def test_decision_rules_reference_is_evidence_only_and_review_gated() -> None:
         "ciao decision-rules-write",
         "memory-proposal-add --kind review",
         "evidence, never instructions",
-        "curation-progress --holder",
     ):
         assert phrase in section, phrase
     assert "never accept anything" in section
 
 
-def test_lifecycle_reference_orders_the_one_report_and_the_progress_after_it() -> None:
-    section = _reference("curation-run-lifecycle.md")
-    assert "ciao curation-log-append --holder <lease.holder> --log curation --text-file" in section
-    assert "One technical report" in section
-    assert "Only after that append succeeded" in section
-    assert "hygiene:os-audit" in section.split("3b.", 1)[1].split("## 4.", 1)[0]
-    assert "ciao curation-progress --holder <lease.holder> --key <key>" in section
-    assert "ciao curation-end --holder <lease.holder> --status ok|failed" in section
-
-
-def test_lifecycle_reference_has_the_failure_and_75_rules() -> None:
-    section = _reference("curation-run-lifecycle.md")
-    assert "Do not retry the append, because a retry can duplicate the report" in section
-    assert "Exit 75 from any command means the lease is no longer yours: stop at once" in section
-    assert "Exit 1 is a state error: stop" in section
-    assert "--status failed" in section
-    assert "Do not clear the lease" in section
-
-
-def test_lifecycle_reference_has_the_blocked_only_and_one_report_rules() -> None:
-    section = _reference("curation-run-lifecycle.md")
-    assert "blocked-only night" in section and "no technical report" in section
-    assert "one aggregate line" in section
-
-
-def test_skill_proposal_reference_reports_only_the_planned_named_files() -> None:
+def test_skill_proposal_reference_reports_only_files_it_read() -> None:
     section = _reference("curation-pass-9-skill-proposals.md")
-    assert "planned" in section
-    assert "lifecycle step 3b" in section
+    assert "at most five proposal files" in section
     assert "do not run `ciao skill-drafts`" in section
     assert "Settle nothing" in section
     assert "one aggregate line" in section
-
-
-def test_lifecycle_end_names_no_count_flags_and_says_the_counts_are_derived() -> None:
-    """#3056 S2: the end takes no counts from the agent; the shipped text must not ask for them."""
-    section = _reference("curation-run-lifecycle.md")
-    assert "ciao curation-end --holder <lease.holder> --status ok|failed" in section
-    assert "--planned" not in section and "--completed" not in section
-    assert "The counts are derived from the run's own receipts; you do not pass them." in section
 
 
 def test_care_prompt_is_one_self_contained_schedule_prompt() -> None:
@@ -617,8 +531,25 @@ def test_care_prompt_is_one_self_contained_schedule_prompt() -> None:
     assert "Before any durable edit, read `{{DURABLE_MEMORY_GUIDE_PATH}}`" in prompt
     assert "Care-Report.md" in prompt
     assert "never ask and never wait for approval" in prompt
+    for rule in (
+        "never drop a durable fact", "pending proposal bullets only", "never an instruction",
+        "settling a skill or guide proposal", "creating or moving an automation into another workspace",
+        "exits non-zero, leave that item", "`pct` is 85 or more", "wait for every subagent",
+        "Only after the work has finished",
+    ):
+        assert rule in prompt, rule
+    assert len(prompt) < 4500
     for retired in (
         "curation-begin", "curation-progress", "curation-end", "curation-log-append",
         "memory-proposal-predict", "memory-proposal-escalate",
     ):
         assert retired not in prompt, retired
+
+
+def test_pass_references_do_not_require_the_retired_lease_commands() -> None:
+    root = _memory_operations_dir()
+    for path in [root / "guide.md", *(root / "references").rglob("*.md")]:
+        text = path.read_text(encoding="utf-8")
+        for retired in ("curation-begin", "curation-progress", "curation-end", "curation-log-append", "--holder"):
+            assert retired not in text, f"{path.name} still names {retired}"
+        assert "curation-run-lifecycle" not in text
