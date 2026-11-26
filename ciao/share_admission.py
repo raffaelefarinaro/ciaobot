@@ -22,6 +22,12 @@ Grant writers in `share_evidence` (confirm, revoke, withdraw, supersede) take 3
 then 4. None of them waits for a checkout or proposal lock, so no writer holds
 a later lock while waiting for an earlier one.
 
+Step 4 starts with the source-eligibility check (`share_evidence.check_source_eligibility`:
+withdrawn, revoked, stale generation, foreign workspace, bytes not the confirmed snapshot).
+It runs once under the fence before the journal and again after the journal write,
+immediately before the effect; a refusal in that gap closes the attempt as a retryable
+rejection because no effect started.
+
 The registry owner and the evidence claim stay held across the journal write,
 the effect and the completion record, so once a revocation returns no write can
 start under the old grant, and a write already admitted has finished or is
@@ -54,6 +60,7 @@ AdmissionCode = Literal[
     "brain_unavailable", "consent_changed", "evidence_stale", "destination_changed",
     "audience_unverified", "audience_changed", "registry_busy",
     "attempt_unresolved", "already_applied", "rejected_final", "attempt_limit",
+    "source_foreign", "source_withdrawn", "source_revoked", "source_generation_stale", "source_changed",
 ]
 MAX_ADMISSION_ATTEMPTS = share_publish.MAX_ATTEMPTS
 ATTEMPT_KIND = "admission"
@@ -205,12 +212,18 @@ def _admit_owned(
             return _refusal("consent_changed", "Automatic sharing was revoked for this link.")
         claim_scope = share_evidence.evidence_claim(config, workspace=workspace)
         with claim_scope as claim:
+            # The source-eligibility step (#3614 snapshot and withdrawal state), read here
+            # under the registry owner and the evidence claim, before anything is journaled.
+            share_evidence.check_source_eligibility(
+                config, workspace=workspace, authorization=fields["evidence_authorization"], claim=claim)
             guard = share_evidence.evidence_authorization_guard(
                 config, workspace=workspace, authorization=fields["evidence_authorization"], claim=claim)
             with guard as row:
                 return _admit_checked(
-                    config, owner, workspace, fields, link, dict(row), attempts, audience, effect, expected_revision)
+                    config, owner, workspace, fields, link, dict(row), attempts, audience, effect, expected_revision, claim)
     except share_evidence.EvidenceError as exc:
+        if exc.code in share_evidence.SOURCE_REFUSALS:
+            return _refusal(exc.code, str(exc))  # type: ignore[arg-type]
         if exc.code in ("private_state_unavailable", "private_state_corrupt", "workspace_lifetime_unpersisted"):
             return _refusal("draft_unavailable", "Private consent state is unavailable.")
         return _refusal("evidence_stale", "The evidence permission changed.")
@@ -221,7 +234,7 @@ def _admit_owned(
 def _admit_checked(
     config: Any, owner: Any, workspace: str, fields: dict[str, Any], link: SharedBrainLink,
     row: dict[str, Any], attempts: list[dict[str, Any]], audience: AudienceProbe, effect: Effect | None,
-    token: str,
+    token: str, claim: share_evidence.EvidenceClaim,
 ) -> AdmissionOutcome:
     mapping = fields["destination_mapping"]
     try:
@@ -282,6 +295,20 @@ def _admit_checked(
             share_publish._write_state(config, workspace, fields, {"attempts": attempts})
     except (OSError, ValueError, drafts.ShareDraftError, memory_receipts.QueueLockError):
         return _refusal("draft_unavailable", "The attempt could not be recorded; nothing was written.")
+    # Re-read the source after the journal write and immediately before the effect: the
+    # bytes live in a private file nothing but the claim keeps stable. A refusal here
+    # started no effect, so the attempt is closed as a retryable rejection.
+    try:
+        share_evidence.check_source_eligibility(
+            config, workspace=workspace, authorization=fields["evidence_authorization"], claim=claim)
+    except share_evidence.EvidenceError as exc:
+        code = exc.code if exc.code in share_evidence.SOURCE_REFUSALS else "evidence_stale"
+        try:
+            share_publish._write_state(
+                config, workspace, fields, {"attempts": [*attempts[:-1], {**record, "status": "rejected", "retryable": True}]})
+        except (OSError, ValueError, drafts.ShareDraftError):
+            pass  # stays `admitted`: later attempts fail closed until it is reconciled
+        return _refusal(code, "The source changed before the effect; nothing was written.")  # type: ignore[arg-type]
     admitted = AdmittedEffect(
         attempt_id, record["attempt"], workspace, fields["proposal_id"], fields["revision"], link, fields,
         row, base_commit, link.sharing_generation)
