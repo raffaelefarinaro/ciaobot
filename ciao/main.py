@@ -230,6 +230,36 @@ def _refresh_vault_index(
         return False
 
 
+def _refresh_configured_vault_index(config: CiaoConfig) -> bool:
+    """Refresh every configured vault's index with one ownership decision per root.
+
+    The managed set and the publication recheck must classify a root the same
+    way: both name the workspace, so a registered local workspace root that
+    setup never recorded (one created later through the API) is Ciao-owned in
+    both, not only in the first.
+    """
+    targets = config.index_scan_targets()
+    names = {Path(root): name for root, name, _prefix in targets}
+    return _refresh_vault_index(
+        config.workspace_root,
+        config.vault_root,
+        targets,
+        config.state_path.parent,
+        {
+            Path(root)
+            for root, name, _prefix in targets
+            if config.ciao_owned_vault_index(name or None)
+        },
+        {
+            Path(root)
+            for root, name, _prefix in targets
+            if config.adopted_workspace_vault(name)
+        },
+        config.index_source_roots(),
+        lambda root: config.vault_index_ownership(names.get(Path(root)) or None, root) == "ciao",
+    )
+
+
 # The removed `ciao run` runner kept its registry and logs in
 # `<runtime>/background/` (#2225). Nothing reads it any more, so each boot
 # deletes it if it is still there; a missing folder is the normal case.
@@ -953,25 +983,7 @@ async def _run_server_locked(
     # Refresh vault index so INDEX.md reflects the current tree
     tracker.start("refresh_vault_index")
     try:
-        refreshed = await asyncio.to_thread(
-            _refresh_vault_index,
-            config.workspace_root,
-            config.vault_root,
-            config.index_scan_targets(),
-            config.state_path.parent,
-            {
-                Path(root)
-                for root, name, _prefix in config.index_scan_targets()
-                if config.ciao_owned_vault_index(name or None)
-            },
-            {
-                Path(root)
-                for root, name, _prefix in config.index_scan_targets()
-                if config.adopted_workspace_vault(name)
-            },
-            config.index_source_roots(),
-            lambda root: config.vault_index_ownership(None, root) == "ciao",
-        )
+        refreshed = await asyncio.to_thread(_refresh_configured_vault_index, config)
         if refreshed:
             tracker.done("refresh_vault_index")
         else:
