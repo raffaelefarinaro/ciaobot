@@ -82,6 +82,14 @@ describe('applyLine', () => {
     expect(applyLine(row({ apply_status: 'pending', applied: null }))?.text.startsWith('Pending')).toBe(true)
   })
 
+  it('says Unverified, never Applied, when the named receipt is missing or unreadable', () => {
+    const missing = applyLine(row({ apply_status: 'none', applied: null, receipt_issue: 'missing' }))
+    expect(missing?.tone).toBe('bad')
+    expect(missing?.text).toBe('Unverified · the receipt for this decision is no longer in the journal')
+    const unknown = applyLine(row({ apply_status: 'none', applied: null, receipt_issue: 'unknown_status' }))
+    expect(unknown?.text.startsWith('Unverified')).toBe(true)
+  })
+
   it('says nothing for none, or for a row from an engine without apply_status', () => {
     expect(applyLine(row({ apply_status: 'none', applied: null }))).toBeNull()
     expect(applyLine(row())).toBeNull()

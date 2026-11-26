@@ -2317,6 +2317,8 @@ export interface ProposalHistoryRow {
   /** What the decision's receipts say the write did. ABSENT from an engine
    * that predates it; `none` means no receipt performed or describes it. */
   apply_status?: ProposalApplyStatus
+  /** Set on an accepted row whose named receipt cannot vouch for it: `missing` (the journal does not hold it) or `unknown_status`. ABSENT otherwise. */
+  receipt_issue?: ProposalReceiptIssue
   /** `true` for applied, `false` for failed, conflict, rolled_back and undone,
    * `null` for pending and none. ABSENT from an older engine. */
   applied?: boolean | null
@@ -2336,6 +2338,8 @@ export interface ProposalHistoryRow {
 
 export type ProposalApplyStatus =
   | 'applied' | 'failed' | 'conflict' | 'rolled_back' | 'undone' | 'pending' | 'none'
+
+export type ProposalReceiptIssue = 'missing' | 'unknown_status'
 
 export type ProposalHistoryActor = 'human' | 'automated'
 

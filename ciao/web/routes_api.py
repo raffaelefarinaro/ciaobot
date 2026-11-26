@@ -9248,6 +9248,20 @@ def _history_reason(text: Any) -> str:
     return " ".join(str(text or "").split())[:MAX_REASON]
 
 
+def _receipt_issue(
+    row: dict[str, Any], receipt_id: str, found: list[dict[str, Any]]
+) -> str:
+    """Why an accepted decision's named receipt cannot vouch for it, or ""."""
+    if row.get("action") != "accepted" or str(row.get("kind", "")) == "share":
+        return ""
+    if receipt_id and not found:
+        return "missing"
+    known = {raw for raw, _ in _APPLY_PRECEDENCE}
+    if any(str(r.get("status", "")) not in known for r in found):
+        return "unknown_status"
+    return ""
+
+
 def _attach_apply_state(vault: Path, rows: list[dict[str, Any]]) -> None:
     """Say whether each decision's write landed, from the receipts that performed it.
 
@@ -9260,6 +9274,13 @@ def _attach_apply_state(vault: Path, rows: list[dict[str, Any]]) -> None:
 
     ``applied`` is ``true`` or ``false`` when a receipt says so, and ``null``
     while the write is pending or when no receipt exists to say.
+
+    ``receipt_issue`` is set (and otherwise absent) on an accepted, non-share
+    decision whose evidence cannot be trusted: ``missing`` when it names a
+    receipt the journal does not hold, ``unknown_status`` when the receipt's
+    status is outside the protocol. Both leave ``apply_status`` at ``none``,
+    so the row is never read as applied, and is told apart from a legacy decision
+    that never had a receipt.
     """
     from ciao.memory_receipts import journal_path, read_receipts
 
@@ -9282,6 +9303,9 @@ def _attach_apply_state(vault: Path, rows: list[dict[str, Any]]) -> None:
             (state for raw, state in _APPLY_PRECEDENCE if raw in statuses), "none"
         )
         row["apply_status"] = status
+        issue = _receipt_issue(row, receipt_id, found)
+        if issue:
+            row["receipt_issue"] = issue
         if status == "applied":
             row["applied"] = True
         elif status in _NOT_APPLIED:
