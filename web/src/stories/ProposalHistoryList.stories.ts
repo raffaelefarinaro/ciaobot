@@ -167,6 +167,7 @@ export const ApplyStates: Story = {
     expect(canvas.getByText('Not applied')).toBeTruthy()
     expect(canvas.getAllByText('Undone').length).toBeGreaterThan(0)
     expect(canvas.getByText('Workspace care')).toBeTruthy()
+    expect(canvas.getByText('Unverified')).toBeTruthy()
     expect(canvas.getByText('Show full reason')).toBeTruthy()
     await assertSettled(canvas)
   },
