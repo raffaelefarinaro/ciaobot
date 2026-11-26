@@ -2242,21 +2242,68 @@ def _run_promote(
     return result, calls
 
 
-_FULL_ASSETS = ["install.sh", "ciaobot-2.0.0-py3-none-any.whl", "Ciaobot-2.0.0.dmg"]
+_FULL_ASSETS = ["install.sh", "ciaobot-2.0.1-py3-none-any.whl", "Ciaobot-2.0.1.dmg"]
+
+
+_LEGACY_ASSETS = [
+    "install.sh",
+    "ciaobot-2.0.0-py3-none-any.whl",
+    "Ciaobot-2.0.0.dmg",
+    "ciaobot-engine-manifest.json",
+    "ciaobot-engine-manifest.json.sig",
+]
+
+
+def test_promote_release_requires_the_1x_manifest_on_the_legacy_release(
+    tmp_path: Path,
+) -> None:
+    # publish.yml attaches the manifest and signature for 2.0.0 only, and the 1.x
+    # updater reads them from releases/latest.
+    result, calls = _run_promote(tmp_path, "--tag", "v2.0.0", state="false true", assets=_LEGACY_ASSETS)
+    assert result.returncode == 0, result.stderr
+    assert [c for c in calls if c.startswith("release edit")] == [
+        "release edit v2.0.0 --prerelease=false --latest"
+    ]
+
+
+@pytest.mark.parametrize(
+    "missing", ["ciaobot-engine-manifest.json", "ciaobot-engine-manifest.json.sig"]
+)
+def test_promote_release_refuses_the_legacy_release_without_manifest_or_signature(
+    tmp_path: Path, missing: str
+) -> None:
+    assets = [name for name in _LEGACY_ASSETS if name != missing]
+    result, calls = _run_promote(tmp_path, "--tag", "v2.0.0", state="false true", assets=assets)
+    assert result.returncode == 1
+    assert missing in result.stderr
+    assert not [c for c in calls if c.startswith("release edit")]
+
+
+def test_promote_release_does_not_demand_the_manifest_on_later_releases(
+    tmp_path: Path,
+) -> None:
+    result, calls = _run_promote(tmp_path, "--tag", "v2.0.1", state="false true", assets=_FULL_ASSETS)
+    assert result.returncode == 0, result.stderr
+
+
+def test_promote_release_legacy_version_matches_publish_workflow() -> None:
+    script = _promote_script().read_text(encoding="utf-8")
+    version = _publish_workflow()["env"]["LEGACY_MANIFEST_VERSION"]
+    assert f"LEGACY_MANIFEST_VERSION={version}\n" in script
 
 
 def test_promote_release_marks_a_complete_prerelease_latest(tmp_path: Path) -> None:
     result, calls = _run_promote(
-        tmp_path, "--tag", "v2.0.0", state="false true", assets=_FULL_ASSETS
+        tmp_path, "--tag", "v2.0.1", state="false true", assets=_FULL_ASSETS
     )
     assert result.returncode == 0, result.stderr
     edits = [call for call in calls if call.startswith("release edit")]
-    assert edits == ["release edit v2.0.0 --prerelease=false --latest"]
+    assert edits == ["release edit v2.0.1 --prerelease=false --latest"]
 
 
 def test_promote_release_targets_the_given_repo(tmp_path: Path) -> None:
     result, calls = _run_promote(
-        tmp_path, "--tag", "v2.0.0", "--repo", "o/r", state="false true", assets=_FULL_ASSETS
+        tmp_path, "--tag", "v2.0.1", "--repo", "o/r", state="false true", assets=_FULL_ASSETS
     )
     assert result.returncode == 0, result.stderr
     assert all("--repo o/r" in call for call in calls)
@@ -2264,19 +2311,19 @@ def test_promote_release_targets_the_given_repo(tmp_path: Path) -> None:
 
 def test_promote_release_refuses_a_release_without_the_dmg(tmp_path: Path) -> None:
     result, calls = _run_promote(
-        tmp_path, "--tag", "v2.0.0", state="false true", assets=_FULL_ASSETS[:2]
+        tmp_path, "--tag", "v2.0.1", state="false true", assets=_FULL_ASSETS[:2]
     )
     assert result.returncode == 1
-    assert "Ciaobot-2.0.0.dmg" in result.stderr
+    assert "Ciaobot-2.0.1.dmg" in result.stderr
     assert not [call for call in calls if call.startswith("release edit")]
 
 
-@pytest.mark.parametrize("missing", ["install.sh", "ciaobot-2.0.0-py3-none-any.whl"])
+@pytest.mark.parametrize("missing", ["install.sh", "ciaobot-2.0.1-py3-none-any.whl"])
 def test_promote_release_refuses_a_release_publish_has_not_finished(
     tmp_path: Path, missing: str
 ) -> None:
     assets = [name for name in _FULL_ASSETS if name != missing]
-    result, calls = _run_promote(tmp_path, "--tag", "v2.0.0", state="false true", assets=assets)
+    result, calls = _run_promote(tmp_path, "--tag", "v2.0.1", state="false true", assets=assets)
     assert result.returncode == 1
     assert missing in result.stderr
     assert not [call for call in calls if call.startswith("release edit")]
@@ -2284,14 +2331,14 @@ def test_promote_release_refuses_a_release_publish_has_not_finished(
 
 def test_promote_release_refuses_drafts_and_already_published(tmp_path: Path) -> None:
     result, calls = _run_promote(
-        tmp_path, "--tag", "v2.0.0", state="true true", assets=_FULL_ASSETS
+        tmp_path, "--tag", "v2.0.1", state="true true", assets=_FULL_ASSETS
     )
     assert result.returncode == 1 and "draft" in result.stderr
     assert not [call for call in calls if call.startswith("release edit")]
 
     other = tmp_path / "again"
     other.mkdir()
-    result, calls = _run_promote(other, "--tag", "v2.0.0", state="false false", assets=_FULL_ASSETS)
+    result, calls = _run_promote(other, "--tag", "v2.0.1", state="false false", assets=_FULL_ASSETS)
     assert result.returncode == 1 and "not a pre-release" in result.stderr
     assert not [call for call in calls if call.startswith("release edit")]
 

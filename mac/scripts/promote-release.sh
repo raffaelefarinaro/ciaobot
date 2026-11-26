@@ -7,7 +7,8 @@
 # latest, because the signed DMG is attached by hand after publish.yml. This is
 # the one step that makes it latest. It refuses unless the release is a
 # published pre-release that already holds what a download page needs: the
-# stamped install.sh, the engine wheel and Ciaobot-<version>.dmg. It changes
+# stamped install.sh, the engine wheel and Ciaobot-<version>.dmg (plus the signed
+# 1.x engine manifest and its .sig on 2.0.0). It changes
 # nothing else: no tag, no upload, no feed.
 set -eu
 
@@ -91,7 +92,16 @@ esac
 
 assets=$(gh_repo release view "$tag" --json assets --jq '.assets[].name') \
     || die "cannot list the assets of $tag"
-for want in install.sh "ciaobot-$version-py3-none-any.whl" "Ciaobot-$version.dmg"; do
+# Same rule as publish.yml's legacy step (LEGACY_MANIFEST_VERSION): only this
+# release carries the signed 1.x engine manifest, and the 1.x updater reads it
+# and its signature from releases/latest, so promoting it without them would
+# strand 1.x engines.
+LEGACY_MANIFEST_VERSION=2.0.0
+wanted="install.sh ciaobot-$version-py3-none-any.whl Ciaobot-$version.dmg"
+if [ "$version" = "$LEGACY_MANIFEST_VERSION" ]; then
+    wanted="$wanted ciaobot-engine-manifest.json ciaobot-engine-manifest.json.sig"
+fi
+for want in $wanted; do
     printf '%s\n' "$assets" | grep -Fxq "$want" \
         || die "$tag has no $want; wait for publish.yml and attach the DMG first"
 done

@@ -220,7 +220,9 @@ release `release-on-main` creates is a **pre-release that is not latest**.
 4. **Publish it as latest**, from `mac/`:
    `scripts/promote-release.sh --tag v<version>`. It refuses unless the release
    is a published pre-release that holds `install.sh`, the wheel and
-   `Ciaobot-<version>.dmg`, then runs
+   `Ciaobot-<version>.dmg`, and for 2.0.0 also `ciaobot-engine-manifest.json`
+   and its `.sig` (the 1.x updater reads both from `releases/latest`; the rule
+   mirrors `publish.yml`'s `LEGACY_MANIFEST_VERSION`), then runs
    `gh release edit v<version> --prerelease=false --latest`. From here the
    download page, the one-liner and the 1.x updater see this version.
 5. **Publish `appcast.xml`** as an asset on the dedicated `updates` release in
