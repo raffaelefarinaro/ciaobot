@@ -6,6 +6,7 @@ function brain(over: Partial<SharedBrainState> = {}): SharedBrainState {
   return {
     name: 'team-notes',
     kind: 'git',
+    enabled: true,
     identity: 'github.com/acme/team-notes',
     path: '/Users/me/team-notes',
     origin_changed: false,

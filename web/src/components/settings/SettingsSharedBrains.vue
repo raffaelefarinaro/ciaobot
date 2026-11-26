@@ -34,14 +34,27 @@
         <li v-for="brain in brains" :key="brain.name" class="shared-brain-row">
           <div class="shared-brain-head">
             <p class="shared-brain-name">{{ brain.name }}</p>
-            <button
-              type="button"
-              class="set-link"
-              :disabled="saving || listStale"
-              :aria-label="`Remove ${brain.name}`"
-              @click="removeBrain(brain)"
-            >Remove</button>
+            <div class="shared-brain-actions">
+              <button
+                type="button"
+                class="set-link"
+                :disabled="saving || listStale"
+                :aria-pressed="brain.enabled ? 'true' : 'false'"
+                :aria-label="`${brain.enabled ? 'Turn off' : 'Turn on'} ${brain.name}`"
+                @click="toggleBrain(brain)"
+              >{{ brain.enabled ? 'Turn off' : 'Turn on' }}</button>
+              <button
+                type="button"
+                class="set-link"
+                :disabled="saving || listStale"
+                :aria-label="`Remove ${brain.name}`"
+                @click="removeBrain(brain)"
+              >Remove</button>
+            </div>
           </div>
+          <p v-if="!brain.enabled" class="hint hint--compact shared-brain-off">
+            Off: chats and the memory pass leave this brain out. It stays registered.
+          </p>
           <p class="shared-brain-identity">{{ brain.identity }}</p>
           <p class="shared-brain-path">{{ brain.path }}</p>
           <p class="shared-brain-kind">{{ kindLabel(brain) }}</p>
@@ -166,7 +179,9 @@ function statusOf(brain: SharedBrainState) {
 
 /** The rows a save sends, preserving the kind returned by the engine. */
 function currentRows(): SharedBrainRow[] {
-  return (brains.value ?? []).map((brain) => ({ path: brain.path, name: brain.name, kind: brain.kind ?? 'git' }))
+  return (brains.value ?? []).map((brain) => ({
+    path: brain.path, name: brain.name, kind: brain.kind ?? 'git', enabled: brain.enabled,
+  }))
 }
 
 function kindLabel(brain: SharedBrainState): string {
@@ -223,6 +238,12 @@ async function linkFolder(): Promise<void> {
   await load()
 }
 
+async function toggleBrain(brain: SharedBrainState): Promise<void> {
+  if (saving.value || listStale.value) return
+  const rows = currentRows().map((row) => (row.path === brain.path ? { ...row, enabled: !brain.enabled } : row))
+  if (await save(rows)) await load()
+}
+
 async function removeBrain(brain: SharedBrainState): Promise<void> {
   if (saving.value || listStale.value) return
   const ok = await askConfirm(
@@ -261,6 +282,7 @@ watch(workspace, () => {
   min-width: 0;
 }
 .shared-brain-head { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: var(--space-2); }
+.shared-brain-actions { display: flex; flex-wrap: wrap; gap: var(--space-3); }
 .shared-brain-name { margin: 0; color: var(--fg); font-size: var(--text-sm); font-weight: 600; overflow-wrap: anywhere; }
 .shared-brain-identity,
 .shared-brain-path {

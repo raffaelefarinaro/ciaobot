@@ -42,10 +42,10 @@ def test_new_vault_notes_come_from_the_create_command() -> None:
 
 def test_rewrites_preserve_frontmatter() -> None:
     text = _system_instructions()
-    assert "use managed verification for re-stamping" in text
+    assert "re-stamp only after re-checking against sources" in text
     memory = _stock("skills", "ciao-capabilities", "references", "memory-operations", "references", "writing.md")
     assert "preserve its frontmatter" in memory
-    assert "Re-stamp only through a managed `note verify` still_valid/update verdict or `vault review keep`" in memory
+    assert "Re-stamp only after re-checking the note against its sources" in memory
 
 
 def test_notes_are_typed_from_the_vocabularys_categories_block() -> None:
@@ -59,7 +59,7 @@ def test_notes_are_typed_from_the_vocabularys_categories_block() -> None:
     assert "Before durable writes or proposal curation, read `" in _system_instructions()
     text = _stock("skills", "ciao-capabilities", "references", "memory-operations", "guide.md")
     assert "**Categories** section of `<vault>/VOCABULARY.md`" in text
-    assert "If no category fits, queue a new-category question" in text
+    assert "If no category fits, put a new-category question on the Unsure list" in text
 
 
 def test_working_document_routing_is_always_loaded() -> None:
@@ -152,7 +152,7 @@ def test_category_fallback_is_one_rule_everywhere() -> None:
     remember = _stock("commands", "remember.md")
     assert "use the closest listed value" not in interrogation
     assert "new-category question" in interrogation
-    assert "do not file it under the nearest one" in remember
+    assert "instead of filing it under the nearest one" in remember
     assert "read `" in _system_instructions() and "memory-operations/guide.md`" in _system_instructions()
     assert "new-category question" in _stock("skills", "ciao-capabilities", "references", "memory-operations", "guide.md")
 
@@ -170,7 +170,7 @@ def test_core_prompt_routes_facts_through_remember_not_entry_argv() -> None:
 def test_remember_names_a_kind_for_other_categories() -> None:
     remember = _stock("commands", "remember.md")
     assert "works the same way: pick it from the **Categories** section" not in remember
-    assert "`--kind` accepts only" in remember
+    assert "new-category question on the Unsure list" in remember
 
 
 def test_customization_template_matches_the_core_prompt() -> None:

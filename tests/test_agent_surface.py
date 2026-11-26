@@ -905,7 +905,7 @@ def test_every_agent_command_is_in_the_telemetry_table() -> None:
     `test_every_documented_command_parses` walks the table into the parser, so
     a verb the CLI dispatches but the table never listed passed it — and
     `task report` (#1064) was exactly that for the life of the operation. The
-    cost is quiet and lands on the eval, not the CLI: `behavioral_eval`
+    cost is quiet and lands on the telemetry, not the CLI: telemetry
     normalizes a `ciao <noun> <verb>` invocation to its operation *through this
     table*, by longest matching prefix, so an unlisted verb never becomes
     `task_report` and a probe whose agent reported a delegated task scored as a

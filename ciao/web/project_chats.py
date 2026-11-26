@@ -6470,7 +6470,7 @@ class ProjectChatManager:
             return []
         record = self._config.workspace(project.workspace)
         links = getattr(record, "shared_brains", None) or []
-        return [(link.name, link.path) for link in links]
+        return [(link.name, link.path) for link in links if link.enabled]
 
     def _shared_brain_context(self, chat: ChatInfo, project: ProjectInfo | None) -> tuple[str, str]:
         """(stable ``[Shared brains]`` block, digest fingerprint), ("", "") when none.

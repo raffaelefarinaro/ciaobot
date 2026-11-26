@@ -96,6 +96,8 @@ export interface SharedBrainRow {
   name?: string
   /** Defaults to Git for registry rows written before folder links existed. */
   kind?: 'git' | 'folder'
+  /** Omitted keeps a retained row's value; new rows start on. */
+  enabled?: boolean
 }
 
 /** The payload of a workspace PATCH: a shared-brain save sends rows, not the read links. */
@@ -124,6 +126,8 @@ export interface SharedBrainUpdate {
 export interface SharedBrainState {
   name: string
   kind: SharedBrainKind
+  /** Off keeps the brain registered but out of chats and the memory pass. */
+  enabled: boolean
   identity: string
   path: string
   origin_changed: boolean
@@ -953,8 +957,6 @@ export interface RoutineSettings {
   // Settings → General: a chat whose turn a restart or crash cut off gets one
   // "Continue after restart" turn at the next start. Missing = on.
   resume_after_restart?: boolean
-  // Settings → General: check vault-grounded answers against the notes read. Missing = on.
-  verify_vault_answers?: boolean
   server_defaults?: {
     pwa_host: string
     log_level: string
@@ -2072,49 +2074,6 @@ export interface HandoverAgreement {
   predicted_dismiss: number
   dismiss_matched: number
   suggest_handover: boolean
-}
-
-/**
- * The dry run for switching a workspace's care state to the weekly cycle
- * (`curation_run.migration_report`). `digest` names the exact bytes previewed.
- */
-export interface CareCycleReport {
-  status: 'v1' | 'v2' | 'absent' | 'unreadable'
-  live_lease: { holder?: string; started_at?: string; expires_at?: string } | null
-  marker: 'absent' | 'present' | 'unreadable'
-  last_full_pass: string
-  daily: number
-  weekly_historical: number
-  ambiguous: string[]
-  dropped: string[]
-  backup_path: string
-  digest: string
-  blockers: string[]
-}
-
-/** `GET /api/care/cycle` answered on the engine's own computer. */
-export interface CareCycleHostResponse extends CareCycleReport {
-  workspace: string
-  on_host: true
-  lease_live: boolean
-}
-
-/** `GET /api/care/cycle` answered to a browser elsewhere: explain, show the CLI, no report. */
-export interface CareCycleRemoteResponse {
-  workspace: string
-  on_host: false
-  reason: 'not_on_host'
-  lease_live: null
-}
-
-export type CareCycleResponse = CareCycleHostResponse | CareCycleRemoteResponse
-
-/** `POST /api/care/cycle` on success. */
-export interface CareCycleApplied {
-  workspace: string
-  status: 'migrated'
-  backup_path: string
-  digest: string
 }
 
 export interface HandoverResponse {

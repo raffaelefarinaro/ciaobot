@@ -10,7 +10,6 @@ from __future__ import annotations
 
 import pathlib
 
-import asyncio
 import json
 import re
 import threading
@@ -31,7 +30,6 @@ from ciao.sessions import StateStore
 from ciao.transcripts import TranscriptStore
 from ciao.web import proposal_service
 from ciao.web.project_chats import ProjectChatManager
-from ciao.web import routes_api
 from ciao.web.proposal_service import _scan_proposal_rows
 from ciao.web.routes_api import (
     dismiss_legacy_learning,
@@ -3043,7 +3041,7 @@ def _note_edit_vault(
     today: date | None = None,
 ) -> tuple[CiaoConfig, Any]:
     """A workspace whose queue holds one `[note_edit]` row over a real note."""
-    from ciao import memory_receipts as mr
+    from ciao import file_kernel as fk
     from ciao import note_edit_proposals as nep
 
     config = _config(tmp_path)
@@ -3056,7 +3054,7 @@ def _note_edit_vault(
         config,
         workspace="personal",
         relative_path=_EDIT_NOTE,
-        expected_revision=mr.content_revision(before),
+        expected_revision=fk.content_revision(before),
         operation=operation,
         before=before,
         after=after,
@@ -3361,7 +3359,7 @@ def test_dismissing_a_note_edit_settles_it_without_refusing_it_forever(
     """
     from ciao import note_edit_proposals as nep
     from ciao import note_verification as nv
-    from ciao.memory_receipts import content_revision
+    from ciao.file_kernel import content_revision
 
     config, proposal = _note_edit_vault(tmp_path)
     vault = config.workspace_vault_root("personal")
@@ -3643,49 +3641,6 @@ def test_undoing_an_accepted_category_restores_the_yaml_and_every_note(
         assert (journals / name).read_text(encoding="utf-8") == text
 
 
-def test_an_accepted_category_is_not_offered_again(tmp_path: Path) -> None:
-    """The accepted id is canonical, so the cluster it came from is not drift.
-
-    The accept writes ``entity-types.yaml`` at the AGENT vault root — the same
-    file ``GET``/``PATCH /api/memory/entity-types`` reads, and a different
-    directory from the notes on an install that has not re-rooted. A pass that
-    measured the notes against the registry under the notes root would keep
-    seeing drift: the bullet comes back, and accepting it 400s on a duplicate id
-    and a duplicate folder that no owner edit can resolve.
-    """
-    from ciao import entity_types
-    from ciao import curation_run as cr
-    from ciao.memory_tool import ensure_regions
-
-    config = _category_vault(tmp_path)
-    vault = config.workspace_vault_root("personal")
-    client = _client(config)
-    row = _accept_kind_row(client, "category")
-    assert client.post(f"/api/proposals/{row['id']}/accept").status_code == 200
-    # A fourth note, already carrying the accepted id: the cluster is intact and
-    # every note in it is canonical.
-    (vault / "Journals" / "Four.md").write_text(
-        f"---\ntype: {_CATEGORY_ID}\n---\n# Four\n", encoding="utf-8"
-    )
-    guide = config.agent_root("personal") / "CLAUDE.md"
-    guide.parent.mkdir(parents=True, exist_ok=True)
-    ensure_regions(guide)
-
-    worklist = cr.build_worklist(
-        vault_root=vault,
-        workspace=vault.name,
-        guide_path=guide,
-        category_registry=entity_types.load_entity_types(
-            config.agent_vault_root("personal")
-        ),
-        workspace_dir=config.workspace_root,
-    )
-
-    assert cr.PASS_CATEGORIES not in {item.pass_id for item in worklist.items}
-    queue = (vault / "Workspace" / "Memory-Proposals.md").read_text(encoding="utf-8")
-    assert "[category" not in queue
-
-
 def _append_category_row(
     config: CiaoConfig,
     *,
@@ -3772,7 +3727,7 @@ def test_the_registry_is_read_inside_the_lock_that_writes_it(
     the ordering rather than about how fast the thread happened to start.
     """
     from ciao import entity_types
-    from ciao.memory_receipts import queue_lock
+    from ciao.file_kernel import queue_lock
 
     config = _category_vault(tmp_path)
     registry = config.agent_vault_root("personal") / "entity-types.yaml"
@@ -4026,7 +3981,7 @@ def test_history_cites_the_evidence_a_verdict_rested_on(tmp_path: Path) -> None:
     record of what was checked — and it is gone from the queue the moment the
     row is resolved.
     """
-    from ciao import memory_receipts as mr
+    from ciao import file_kernel as fk
     from ciao import note_edit_proposals as nep
 
     config = _config(tmp_path)
@@ -4045,7 +4000,7 @@ def test_history_cites_the_evidence_a_verdict_rested_on(tmp_path: Path) -> None:
         config,
         workspace="personal",
         relative_path=_EDIT_NOTE,
-        expected_revision=mr.content_revision(_EDIT_PLAIN),
+        expected_revision=fk.content_revision(_EDIT_PLAIN),
         operation="replace",
         before=_EDIT_PLAIN,
         after=_EDIT_FOURTH,
@@ -4200,7 +4155,7 @@ def _entry_edit_vault(
     today: date | None = None,
 ) -> tuple[CiaoConfig, Any, Any]:
     """A workspace holding one `[note_edit]` row about one entry of one note."""
-    from ciao import memory_receipts as mr
+    from ciao import file_kernel as fk
     from ciao import note_edit_proposals as nep
     from ciao import note_entries as ne
     from ciao import note_receipts as nr
@@ -4224,7 +4179,7 @@ def _entry_edit_vault(
         config,
         workspace="personal",
         relative_path=_ENTRY_NOTE,
-        expected_revision=mr.content_revision(_ENTRY_PLAIN),
+        expected_revision=fk.content_revision(_ENTRY_PLAIN),
         operation=operation,
         before=_ENTRY_PLAIN,
         after=after,
@@ -4541,7 +4496,6 @@ def test_a_settled_entry_row_cannot_be_accepted_again(tmp_path: Path) -> None:
 
 
 def _repo_vault(tmp_path: Path) -> tuple[CiaoConfig, Path]:
-    from types import SimpleNamespace  # noqa: F401
 
     repo = tmp_path / "linked-repo"
     (repo / ".git").mkdir(parents=True)

@@ -46,8 +46,9 @@ import json
 import logging
 import os
 import re
+import secrets
 import sqlite3
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -954,7 +955,6 @@ def register_restored(
         )
     vault_root, _vault = _restored_vault_root(config, metadata, folder)
     settings = restored_settings(config, metadata)
-    from ciao.shared_brain import reset_link_for_restore  # noqa: PLC0415
     from ciao.workspaces import (  # noqa: PLC0415
         WorkspaceRegistryConflict,
         persist_workspaces,
@@ -969,8 +969,10 @@ def register_restored(
             disallowed_tools=settings["disallowed_tools"],
             claude_trim=settings["claude_trim"],
             color=settings["color"],
+            # A restored link gets a fresh lifetime, so an index refresh queued
+            # before the archive cannot write into the restored workspace.
             shared_brains=[
-                reset_link_for_restore(link)
+                replace(link, lifetime_id=secrets.token_urlsafe(24))
                 for link in settings["shared_brains"]
             ],
         )

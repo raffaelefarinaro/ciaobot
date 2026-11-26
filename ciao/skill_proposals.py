@@ -92,7 +92,7 @@ from ciao.learning_records import (
 )
 from ciao.prompt_fence import fence
 from ciao.memory_proposals import read_decisions, record_dismissal, record_promotion
-from ciao.memory_receipts import content_revision, queue_lock, write_queue_atomically
+from ciao.file_kernel import content_revision, queue_lock, write_queue_atomically
 
 if TYPE_CHECKING:  # ``CiaoConfig`` is only ever a type here; duck-typed below.
     from ciao.config import CiaoConfig

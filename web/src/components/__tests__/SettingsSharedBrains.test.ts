@@ -33,6 +33,7 @@ function state(over: Partial<SharedBrainState> = {}): SharedBrainState {
   return {
     name: 'team-notes',
     kind: 'git',
+    enabled: true,
     identity: 'github.com/acme/team-notes',
     path: '/Users/me/team-notes',
     origin_changed: false,
@@ -225,8 +226,8 @@ describe('SettingsSharedBrains linking', () => {
     await flushPromises()
     expect(updateWorkspace).toHaveBeenCalledWith('personal', {
       shared_brains: [
-        { path: TEAM.path, name: TEAM.name, kind: 'git' },
-        { path: LOCAL.path, name: LOCAL.name, kind: 'folder' },
+        { path: TEAM.path, name: TEAM.name, kind: 'git', enabled: true },
+        { path: LOCAL.path, name: LOCAL.name, kind: 'folder', enabled: true },
         { path: '/x/y', kind: 'folder' },
       ],
     })
@@ -235,10 +236,10 @@ describe('SettingsSharedBrains linking', () => {
     apiGet.mockResolvedValueOnce({ shared_brains: [TEAM, LOCAL] })
     const removeView = await mountCard()
     askConfirm.mockResolvedValueOnce(true)
-    await removeView.findAll('.shared-brain-row')[0].find('button').trigger('click')
+    await removeView.findAll('.shared-brain-row')[0].findAll('button').find((b) => b.text() === 'Remove')!.trigger('click')
     await flushPromises()
     expect(updateWorkspace).toHaveBeenCalledWith('personal', {
-      shared_brains: [{ path: LOCAL.path, name: LOCAL.name, kind: 'folder' }],
+      shared_brains: [{ path: LOCAL.path, name: LOCAL.name, kind: 'folder', enabled: true }],
     })
   })
 
@@ -337,7 +338,23 @@ describe('SettingsSharedBrains listed brains', () => {
     apiGet.mockResolvedValueOnce({ shared_brains: [OTHER] })
     await view.findAll('.shared-brain-row')[0].findAll('button').find((b) => b.text() === 'Remove')!.trigger('click')
     await flushPromises()
-    expect(updateWorkspace).toHaveBeenCalledWith('personal', { shared_brains: [{ path: OTHER.path, name: OTHER.name, kind: 'git' }] })
+    expect(updateWorkspace).toHaveBeenCalledWith('personal', { shared_brains: [{ path: OTHER.path, name: OTHER.name, kind: 'git', enabled: true }] })
+  })
+
+  it('turns one brain off and back on without touching the others, and says it is off', async () => {
+    apiGet.mockResolvedValueOnce({ shared_brains: [TEAM, OTHER] })
+    const view = await mountCard()
+    apiGet.mockResolvedValueOnce({ shared_brains: [{ ...TEAM, enabled: false }, OTHER] })
+    await view.findAll('.shared-brain-row')[0].findAll('button').find((b) => b.text() === 'Turn off')!.trigger('click')
+    await flushPromises()
+    expect(updateWorkspace).toHaveBeenCalledWith('personal', { shared_brains: [
+      { path: TEAM.path, name: TEAM.name, kind: 'git', enabled: false },
+      { path: OTHER.path, name: OTHER.name, kind: 'git', enabled: true },
+    ] })
+    const first = view.findAll('.shared-brain-row')[0]
+    expect(first.find('.shared-brain-off').text()).toContain('Off')
+    expect(first.find('button[aria-pressed="false"]').text()).toBe('Turn on')
+    expect(view.findAll('.shared-brain-row')[1].find('.shared-brain-off').exists()).toBe(false)
   })
 
   it('a stale read for a previous workspace never lands on the active one', async () => {
@@ -361,13 +378,13 @@ describe('SettingsSharedBrains listed brains', () => {
     const view = await mountCard()
     askConfirm.mockResolvedValueOnce(true)
     apiGet.mockResolvedValueOnce({ shared_brains: [TEAM, third] })
-    await view.findAll('.shared-brain-row')[1].find('button').trigger('click')
+    await view.findAll('.shared-brain-row')[1].findAll('button').find((b) => b.text() === 'Remove')!.trigger('click')
     await flushPromises()
     expect(updateWorkspace).toHaveBeenCalledTimes(1)
     expect(updateWorkspace).toHaveBeenCalledWith('personal', {
       shared_brains: [
-        { path: TEAM.path, name: 'team-notes', kind: 'git' },
-        { path: third.path, name: 'third-notes', kind: 'git' },
+        { path: TEAM.path, name: 'team-notes', kind: 'git', enabled: true },
+        { path: third.path, name: 'third-notes', kind: 'git', enabled: true },
       ],
     })
   })
@@ -413,7 +430,7 @@ describe('SettingsSharedBrains workspace switch and stale lists', () => {
     await view.find('form').trigger('submit')
     await flushPromises()
     expect(updateWorkspace).toHaveBeenCalledWith('personal', {
-      shared_brains: [{ path: TEAM.path, name: TEAM.name, kind: 'git' }, { path: '/x/y', kind: 'folder' }],
+      shared_brains: [{ path: TEAM.path, name: TEAM.name, kind: 'git', enabled: true }, { path: '/x/y', kind: 'folder' }],
     })
 
     expect(view.find('.shared-brain-row button').attributes('disabled')).toBeDefined()

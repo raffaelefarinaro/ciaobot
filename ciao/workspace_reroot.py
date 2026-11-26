@@ -2345,15 +2345,19 @@ def _queue_proposal(region: str, entry: str) -> Any:
     uncountable by every counter and invisible to the dedupe check. Newlines are
     collapsed to single spaces.
     """
-    from ciao.memory_proposals import MemoryProposal  # noqa: PLC0415
+    from ciao.unsure_list import UnsureItem  # noqa: PLC0415
 
     lines = [line for line in entry.splitlines()]
     while lines and (not lines[0].strip() or lines[0].lstrip().startswith("#")):
         lines.pop(0)
-    flattened = " ".join(" ".join(lines).split())
+    flattened = " ".join(" ".join(lines).split()).removeprefix("- ").strip()
     if not flattened:
         return None
-    return MemoryProposal(target=region, text=flattened, source_section=_QUEUE_SOURCE)
+    return UnsureItem(
+        text=flattened,
+        reason=f"it sat in the shared {region} region and names no workspace",
+        source=_QUEUE_SOURCE,
+    )
 
 
 def strip_region_blocks_text(text: str) -> str:
@@ -2483,7 +2487,7 @@ def clear_stranded_sessions(runtime_root: Path, chat_ids: list[str]) -> int:
 # into every root and undo the split it just performed.
 _GUIDE_NAMES = (GUIDE_NAME, LEGACY_GUIDE_NAME)
 
-_QUEUE_RELATIVE = "Workspace/Memory-Proposals.md"
+_QUEUE_RELATIVE = "Workspace/Unsure.md"
 
 
 def guide_moves(install_root: Path, primary: str) -> list[Move]:
@@ -2526,7 +2530,7 @@ def write_guide_split(
     reference install has a `Memory-Proposals.md` in both workspaces, and a fresh
     root has none.
     """
-    from ciao.memory_proposals import append_proposals  # noqa: PLC0415
+    from ciao.unsure_list import append_unsure  # noqa: PLC0415
 
     install_root = Path(install_root)
     created: list[str] = []
@@ -2563,10 +2567,8 @@ def write_guide_split(
                     "backup": target.relative_to(runtime_root).as_posix(),
                 }
             )
-        written = append_proposals(
-            proposals, install_root / destination, source_path=Path(GUIDE_NAME)
-        )
-        if written is not None and not stashed_holds(stashed, destination):
+        written = append_unsure(install_root / destination, proposals)
+        if written and not stashed_holds(stashed, destination):
             created.append(f"{destination}/{_QUEUE_RELATIVE}")
     return created, stashed
 

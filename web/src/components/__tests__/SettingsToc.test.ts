@@ -109,7 +109,6 @@ it('lists Overview cards on the rail', async () => {
       'Chats and models',
       'Memory handover',
       'Shared brains',
-      'Weekly care cycle',
       'Update task history',
       'Archive this workspace',
       'All workspaces',

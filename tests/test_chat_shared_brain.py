@@ -314,3 +314,36 @@ def test_six_brains_with_a_hostile_path_reach_the_capsule_and_the_pass_exactly(
     assert "<|im_end|>" not in prompt and "</system>" not in prompt
     assert "</system>" not in expected_block and "<|im_end|>" not in expected_block
     assert " " not in prompt and "\u0085" not in prompt
+
+
+def test_write_instruction_rides_the_block_only_while_a_brain_is_enabled(tmp_path: Path) -> None:
+    manager = _build(tmp_path)
+    brain = _brain(tmp_path, "acme-notes")
+    link = SharedBrainLink(name="acme-notes", path=str(brain), identity="github.com/acme/notes")
+    project = manager.create_project("Team", workspace="work")
+    chat = manager.create_chat(project.project_id, provider="claude")
+
+    _link(manager, "work")
+    assert "write it directly" not in manager._build_prompt_prefix(chat)
+
+    _link(manager, "work", link)
+    prefix = manager._build_prompt_prefix(chat)
+    for phrase in (
+        "write it directly as a Markdown file under the folder of the brain",
+        "never copy private vault notes",
+        "never write secrets, credentials or tokens",
+        "say so in your reply and proceed",
+        "is a Git clone",
+        "commit what you wrote there",
+    ):
+        assert phrase in prefix
+
+    _link(manager, "work", dataclasses.replace(link, enabled=False))
+    off = manager._build_prompt_prefix(chat)
+    assert "[Shared brains]" not in off and "write it directly" not in off and str(brain) not in off
+
+    _link(manager, "work", dataclasses.replace(link, enabled=False), SharedBrainLink(
+        name="acme-ops", path=str(_brain(tmp_path, "acme-ops")), identity="github.com/acme/ops",
+    ))
+    mixed = manager._build_prompt_prefix(chat)
+    assert "name=acme-ops" in mixed and "name=acme-notes" not in mixed and "write it directly" in mixed

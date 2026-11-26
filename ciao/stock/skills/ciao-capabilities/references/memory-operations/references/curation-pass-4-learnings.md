@@ -4,16 +4,13 @@
 
 ## Route an entry at x3 or more
 
-An x3 is a priority order, not permission to edit: it tells you which finding to file first, and a lesson is resolved only when a person applied or rejected the finding. Read `Workspace/Learnings.md`, decide where the lesson belongs, and file the matching item:
+An x3 is a priority order, not permission to edit a skill: it tells you which lesson to route first. Read `Workspace/Learnings.md`, decide where the lesson belongs, and route it:
 
-1. A skill this workspace owns under `skills/`: read the skill's current source first, and file nothing when it already says this. Otherwise file a skill proposal with `ciao skill-proposal-add NAME --input-file FILE`. The `origins` entry names that entry's `learning_id`, the one specific thing in it this change addresses, and the sha256 of that entry's own canonical line as `source_revision`. The canonical line is the exact bytes of the bullet you read, `ciao:learning` comment included.
-2. A packaged, mirrored or shared skill, or a lesson no skill covers: file a `[review]` draft with `ciao skill-draft-add --input-file FILE`. Somebody else maintains packaged skills, so you do not edit them.
-   - For a packaged skill give the skill name, the owning repository and version if you can identify them (say so in the draft if you cannot; do not guess), and a `body` a stranger could reproduce: what was done, what went wrong, and the instruction that would have prevented it.
-   - For a lesson no skill covers give the proposed skill name, its purpose, the trigger that should load it and the instruction it should carry.
-   - Leave transcript excerpts, chat or vault paths, names and credentials out of the body, because a public issue is public.
-3. A fact true only inside one project: use the existing `[project]` accept. A cross-project preference or identity goes to the user under **What needs you**, never into a region.
+1. A skill this workspace owns under `skills/`: read the skill's current source first, and write nothing when it already says this. Otherwise write a `skill-edit` proposal file (see `unsure-and-proposals.md`) whose `evidence` names the learning entry and the failures you observed, and run `ciao proposal-check` on it.
+2. A packaged, mirrored or shared skill: write an `upstream-issue` proposal file for the owning repository, with the skill name and version if you can identify them (say so if you cannot; do not guess), and a body a stranger could reproduce: what was done, what went wrong, and the instruction that would have prevented it. A lesson no skill covers is a `skill-edit` proposal for a new skill: its name, purpose, trigger and instruction. Leave transcript excerpts, chat or vault paths, names and credentials out of the body, because a public issue is public.
+3. A fact true only inside one project: write it into that project's canonical doc. A cross-project preference or identity: write it to its region when it is clearly true, otherwise put it on the Unsure list.
 
-Leave the entry under `## Active`.
+Leave the entry under `## Active` until a person has acted on its proposal.
 
 ## Merge and prune
 

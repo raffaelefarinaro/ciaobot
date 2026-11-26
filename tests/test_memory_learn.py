@@ -383,12 +383,12 @@ def test_the_sixty_fifth_distinct_sighting_is_refused_and_a_replay_stays_none(
 def test_a_held_queue_lock_is_a_retryable_error_with_no_write(
     tmp_path: Path, spy_append: list[str], monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    from ciao import memory_receipts
+    from ciao import file_kernel as fk
 
     def _held(*_args, **_kwargs):  # type: ignore[no-untyped-def]
-        raise memory_receipts.QueueLockError("held")
+        raise fk.QueueLockError("held")
 
-    monkeypatch.setattr(memory_receipts, "queue_lock", _held)
+    monkeypatch.setattr(fk, "queue_lock", _held)
     plane = _plane(tmp_path, _attended_chat())
     with pytest.raises(ControlPlaneError) as excinfo:
         plane.memory_learn(_principal(), text="A lesson.", source="chat-a")

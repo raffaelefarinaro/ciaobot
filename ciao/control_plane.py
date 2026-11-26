@@ -14,7 +14,6 @@ import difflib
 import hashlib
 import json
 import logging
-import math
 import os
 import sqlite3
 import sys
@@ -976,6 +975,7 @@ def _file_review_proposal(
     success). The verdict stands and its check is recorded either way, so a
     failure has to reach the caller: the note was judged, and nobody was asked.
     """
+    from ciao import file_kernel as fk
     operation = {
         nv.RETIRE: nep.RETIRE,
         nv.STILL_VALID: nep.RESTAMP,
@@ -1018,7 +1018,7 @@ def _file_review_proposal(
         # after the check and its cooldown were already recorded. The note was
         # judged and nobody was asked, and the agent was told the call failed
         # rather than told a verdict exists with a filing error against it.
-        mr.QueueLockError,
+        fk.QueueLockError,
         OSError,
     ) as exc:
         return None, (
@@ -1110,6 +1110,7 @@ def _file_entry_review_proposal(
     the verdict was about, so a stale payload cannot file a splice at offsets that
     now mean other words.
     """
+    from ciao import file_kernel as fk
     from ciao import note_receipts as nr
 
     operation = {
@@ -1175,7 +1176,7 @@ def _file_entry_review_proposal(
         nep.NoteEditError,
         ev.EntryCheckRefused,
         mr.MemoryReceiptError,
-        mr.QueueLockError,
+        fk.QueueLockError,
         OSError,
     ) as exc:
         return None, (
@@ -1559,80 +1560,6 @@ class CiaoControlPlane:
         # callers and no second spelling of the fallback to drift from it.
         return self.workspace_vault_root(self._workspace(principal))
 
-    async def managed_care_begin(self, principal: AgentPrincipal, ttl_s: float, vault: str) -> dict[str, Any]:
-        """Take a care lease only for the engine's currently running care dispatch."""
-        import math  # noqa: PLC0415
-        from ciao import curation_run  # noqa: PLC0415
-
-        workspace = self._workspace(principal)
-        dispatcher = self.pcm._schedule_dispatcher_for()
-        dispatch_id = dispatcher.active_care_dispatch(principal.chat_id, workspace)
-        if not dispatch_id or not principal.token_id or not self._unattended_turn(principal):
-            raise ControlPlaneError("not_care_dispatch", "A live managed Workspace care dispatch is required.")
-        if not vault or Path(vault).resolve() != self._vault_root(principal).resolve():
-            raise ControlPlaneError("invalid_workspace", "The care vault does not match the managed workspace.")
-        if not math.isfinite(ttl_s) or ttl_s < 1 or ttl_s > 86400:
-            raise ControlPlaneError("invalid_request", "Care lease duration must be between 1 and 86400 seconds.")
-        try:
-            lease = await asyncio.to_thread(
-                curation_run.begin_run,
-                Path(self.config.workspace_vault_root(workspace)),
-                ttl_s=ttl_s, chat_id=principal.chat_id,
-            )
-        except curation_run.CurationBusy as exc:
-            raise ControlPlaneError("curation_busy", str(exc)) from None
-        return _ok({**lease.as_dict(), "vault": str(lease.vault_root.resolve())})
-
-    async def managed_care_end(
-        self, principal: AgentPrincipal, holder: str, status: str, reasons: list[str]
-    ) -> dict[str, Any]:
-        """Derive the run outcome and settle it under the active care dispatch."""
-        from ciao import curation_run  # noqa: PLC0415
-        from ciao.cli import _derive_run_counts  # noqa: PLC0415
-        from ciao.entity_types import load_entity_types  # noqa: PLC0415
-        from ciao.proposal_predictions import HandoverPolicy  # noqa: PLC0415
-        from ciao.vault_index import VAULT_RENDER_PREFIX  # noqa: PLC0415
-        from ciao.workspace_guide import guide_path  # noqa: PLC0415
-
-        workspace = self._workspace(principal)
-        dispatcher = self.pcm._schedule_dispatcher_for()
-        dispatch_id = dispatcher.active_care_dispatch(principal.chat_id, workspace)
-        if not dispatch_id or not principal.token_id or not self._unattended_turn(principal):
-            raise ControlPlaneError("not_care_dispatch", "A live managed Workspace care dispatch is required.")
-        if status not in ("ok", "failed") or not holder or len(holder) > 512 or len(reasons) > 100:
-            raise ControlPlaneError("invalid_request", "The care settlement request is invalid.")
-        if any(len(reason) > 4096 for reason in reasons):
-            raise ControlPlaneError("invalid_request", "The care settlement reasons are too long.")
-        vault = Path(self.config.workspace_vault_root(workspace))
-
-        def settle() -> dict[str, Any]:
-            counts = _derive_run_counts(vault, holder=holder, workspace=workspace)
-            state = curation_run.load_state(vault)
-            views = curation_run.build_worklist_views(
-                policy=HandoverPolicy.of(self.config.workspace(workspace)), vault_root=vault,
-                guide_path=guide_path(self.config.agent_root(workspace)),
-                workspace_dir=self.config.workspace_root, done_keys=frozenset(state.done_keys),
-                category_registry=load_entity_types(Path(self.config.agent_vault_root(workspace))),
-                config=self.config, path_prefix=VAULT_RENDER_PREFIX, workspace=workspace,
-            )
-            live_keys = frozenset(key for item in views.remaining.items for key in item.keys)
-            if dispatcher.active_care_dispatch(principal.chat_id, workspace) != dispatch_id:
-                raise curation_run.CurationBusy("the managed care dispatch is no longer active")
-            return curation_run.end_run(
-                vault, holder=holder, status=status, planned=counts.planned,
-                completed=counts.completed, deferred=counts.deferred, reasons=[*reasons, *counts.reasons],
-                live_keys=live_keys, advance_marker=status == "ok", failed=counts.failed,
-                counts_complete=counts.complete, report=counts.report, dispatch_id=dispatch_id,
-            )
-
-        try:
-            summary = await asyncio.to_thread(settle)
-        except curation_run.CurationBusy as exc:
-            raise ControlPlaneError("curation_busy", str(exc)) from None
-        except curation_run.CurationStateError as exc:
-            raise ControlPlaneError("curation_state_error", str(exc)) from None
-        return _ok(summary)
-
     def _unattended_turn(self, principal: AgentPrincipal) -> bool:
         """Whether the turn asking right now was fired by a schedule, not a person.
 
@@ -1892,7 +1819,7 @@ class CiaoControlPlane:
         """
         from ciao import learning_records as lr
         from ciao import memory_proposals
-        from ciao.memory_receipts import QueueLockError, queue_lock
+        from ciao.file_kernel import QueueLockError, queue_lock
         from ciao.redact import redact_text
 
         if not self._memory_learning_turn(principal):

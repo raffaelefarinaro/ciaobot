@@ -282,7 +282,7 @@ def test_update_region_enforces_bound_and_reports_status(tmp_path: Path) -> None
         guide,
         "memory",
         action="add",
-        entry="x" * 100,
+        entry=("word " * 25).strip(),
         char_limit=100,
     )
     assert over["changed"] is True
@@ -290,7 +290,25 @@ def test_update_region_enforces_bound_and_reports_status(tmp_path: Path) -> None
     assert over["char_limit"] == 100
     assert over["used_chars"] > 100
     # And the entry really is in the guide, not merely reported as written.
-    assert "x" * 100 in guide.read_text(encoding="utf-8")
+    assert ("word " * 25).strip() in guide.read_text(encoding="utf-8")
+
+
+def test_update_region_refuses_credential_shaped_text_and_writes_nothing(tmp_path: Path) -> None:
+    guide = _guide_with_regions(tmp_path / "CLAUDE.md")
+    mt.update_region(guide, "memory", action="add", entry="the deploy token lives in 1Password")
+    before = guide.read_text(encoding="utf-8")
+    for action, match in (("add", ""), ("replace", "deploy token")):
+        with pytest.raises(ValueError, match="credential"):
+            mt.update_region(
+                guide,
+                "memory",
+                action=action,  # type: ignore[arg-type]
+                entry="api_key: sk-live-abcdef0123456789",
+                match=match,
+            )
+    assert guide.read_text(encoding="utf-8") == before
+    # Naming a credential is fine, and so is removing an entry.
+    mt.update_region(guide, "memory", action="remove", match="deploy token")
 
 
 def test_migrate_legacy_files(tmp_path: Path) -> None:

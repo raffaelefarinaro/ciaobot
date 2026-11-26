@@ -1,22 +1,20 @@
 # Agentic task eval
 
 The agentic task eval measures whether Ciaobot actually completes a task, and
-what that costs. It is the executed half of the behavioral evaluation: where
-`ciao eval run` asks a model to describe the tool calls it would make
-(`docs/BEHAVIORAL_EVAL.md`), this harness lets Ciaobot act. Each run boots its
+what that costs. It lets Ciaobot act: each run boots its
 own engine on a synthetic fixture vault, sends one real chat turn (or
 delegates one task), grades the resulting workspace state with deterministic
 checks, and records tokens, tool calls, ciao-call errors, cost and wall time.
 
-Implementation: `ciao/task_eval.py`. Catalog: `ciao/stock/evals/tasks/`.
-CLI: `ciao eval tasks`.
+Implementation: `evals/task_eval.py`. Catalog: `evals/tasks/`.
+Entry point: `python -m evals` (dev-only, outside the wheel).
 
 
 Recorded results, one file per run or release: [evals/](evals/README.md). The public summary is the site's [How we measure Ciaobot](https://www.raffaelefarinaro.com/ciaobot/evals.html) page.
 
 ## Cost warning
 
-`ciao eval tasks run` makes real model calls, one per task per repeat, and
+`python -m evals run` makes real model calls, one per task per repeat, and
 each run boots a full engine. Nothing runs in PR CI. The tests in
 `tests/test_task_eval.py` never boot an engine and never call a model.
 
@@ -24,18 +22,18 @@ each run boots a full engine. Nothing runs in PR CI. The tests in
 
 ```bash
 # Catalog: id, tier, category, requirements.
-ciao eval tasks list
-ciao eval tasks list --json
+python -m evals list
+python -m evals list --json
 
 # Run the easy tier, three repeats, into an explicit report file.
-ciao eval tasks run --provider claude --model haiku --label baseline \
+python -m evals run --provider claude --model haiku --label baseline \
     --tier easy --repeats 3 --out /tmp/base.jsonl
 
 # Summarize one or more reports (pass rate, medians, tool errors, timeouts).
-ciao eval tasks report /tmp/base.jsonl
+python -m evals report /tmp/base.jsonl
 
 # Compare two runs task by task.
-ciao eval tasks compare --baseline /tmp/base.jsonl --candidate /tmp/cand.jsonl
+python -m evals compare --baseline /tmp/base.jsonl --candidate /tmp/cand.jsonl
 ```
 
 `run` first checks that the `ciao` an agent would run is this checkout's package
@@ -43,7 +41,7 @@ ciao eval tasks compare --baseline /tmp/base.jsonl --candidate /tmp/cand.jsonl
 it, so on a mismatch `run` prints the two paths and the remedy to stderr and
 exits 2 before anything boots. The remedy is to run the eval from an install of
 the checkout under test, e.g. `uv venv .venv-eval && uv pip install -p .venv-eval -e .`
-in that checkout, then `.venv-eval/bin/ciao eval tasks run ...`.
+in that checkout, then `.venv-eval/bin/python -m evals run ...`.
 
 `run` prints the summary table and exits 0 unless every run errored. Without
 `--out`, the report goes to `.runtime/evals/tasks/<UTC stamp>-<label>.jsonl`
@@ -69,7 +67,7 @@ on every row.
    reaches the live install's index or LaunchAgent. The queue-lock directory
    keeps its per-user temp default: lock names hash the throwaway vault path,
    and the agent's sandbox can write there (it cannot write into `T`).
-2. The fixture vault `ciao/stock/evals/tasks/_fixture/` is copied over
+2. The fixture vault `evals/tasks/_fixture/` is copied over
    `T/ws/personal/memory-vault/`. The task's optional `overlay/` tree is copied
    over `T/ws/personal/`. The workspace defaults to the requested provider, and
    its `personal` registry entry pins the requested model for that provider
@@ -169,188 +167,6 @@ the task and the values (for example `candidate H1-multi-source-synthesis: model
 haiku,sonnet`). Pass `--allow-mixed` to pool them anyway. It prints the same
 list as a warning on stderr and adds provider and model columns for each side.
 
-## Workspace care equivalent-work contract (model-free; not collected yet)
-
-`ciao.task_eval_contract` defines a separate, versioned contract for a future
-privacy-minimized producer. It does not change this CLI, emit care records, run
-schedules, inspect a workspace, grade outcomes, calculate savings, or establish
-representativeness of private usage. Existing per-turn aggregates are not a
-per-call ledger; unknown usage is not zero.
-
-`validate_record` rebuilds the exact `ciao-care-measurement/1` shape.
-`public_record` is the publication seam for that already-minimized shape, not
-an arbitrary-data sanitizer. It rejects legacy rows and extra fields instead of
-dropping answers, traces, errors or paths. It cannot prevent covert payloads in
-identifiers/digests or prove producer assertions true. The producer, evidence,
-and independent grader must be outside the measured agent's writable workspace.
-
-This complete example uses invented synthetic identifiers and hashes for
-contract testing only; it is not a workload claim:
-
-```json
-{
-  "schema": "ciao-care-measurement/1",
-  "run_id": "00000000-0000-4000-8000-000000000001",
-  "scenario": "nightly",
-  "entry": "schedule",
-  "execution": {"status": "completed", "code_revision": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", "dirty": false},
-  "provenance": {
-    "fixture_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-    "workload_sha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
-    "environment_sha256": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
-    "harness_sha256": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
-    "grader_sha256": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
-  },
-  "obligations": ["o001", "o002"],
-  "grade": {
-    "source": "independent",
-    "run_id": "00000000-0000-4000-8000-000000000001",
-    "fixture_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-    "workload_sha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
-    "grader_sha256": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
-    "observation_sha256": "1111111111111111111111111111111111111111111111111111111111111111",
-    "outcomes": {"o001": "passed", "o002": "passed"},
-    "safety": "passed"
-  },
-  "metrics": {
-    "input": {"value": 0, "status": "complete", "scope": "all_model_calls", "source": "provider_usage", "evidence_sha256": "2222222222222222222222222222222222222222222222222222222222222222", "reason": null},
-    "output": {"value": 0, "status": "complete", "scope": "all_model_calls", "source": "provider_usage", "evidence_sha256": "2222222222222222222222222222222222222222222222222222222222222222", "reason": null},
-    "cache_read": {"value": 0, "status": "complete", "scope": "all_model_calls", "source": "provider_usage", "evidence_sha256": "2222222222222222222222222222222222222222222222222222222222222222", "reason": null},
-    "cache_write": {"value": 0, "status": "complete", "scope": "all_model_calls", "source": "provider_usage", "evidence_sha256": "2222222222222222222222222222222222222222222222222222222222222222", "reason": null},
-    "model_calls": {"value": 0, "status": "complete", "scope": "all_model_calls", "source": "provider_usage", "evidence_sha256": "2222222222222222222222222222222222222222222222222222222222222222", "reason": null},
-    "cost_usd": {"value": 0, "status": "complete", "scope": "all_model_calls", "source": "provider_usage", "evidence_sha256": "2222222222222222222222222222222222222222222222222222222222222222", "reason": null},
-    "wall_s": {"value": 0, "status": "complete", "scope": "run", "source": "monotonic_clock", "evidence_sha256": "2222222222222222222222222222222222222222222222222222222222222222", "reason": null}
-  }
-}
-```
-
-The fixture digest identifies the immutable **public synthetic starting
-fixture**, including task overlays and initial seeded progress/weekly markers;
-no private vault is copied, hashed or sampled. The workload digest binds
-predeclared obligations and expected effects, safety invariants, due work,
-scenario/horizon, setup and budgets—not a planner's post-filter list. The
-environment digest covers fixed public configuration and loaded global inputs;
-unknown inherited inputs stay unknown. It deliberately excludes the engine
-revision varied between comparison sides and optimized engine-owned
-prompt/implementation artifacts, which are the code under test. Harness/grader
-digests bind the external measurement and oracle. The grade's observation
-digest identifies immutable synthetic after-state/evidence, including
-preservation and safety evidence and any before-state references the grader
-needs. Grade fields bind that observation to its run and workload. These
-declarations are not signatures. Different engine revisions are expected;
-missing or dirty revisions are not reproducible.
-
-`comparison_eligibility` requires distinct completed schedule runs, matching
-non-null workload/configuration/harness/grader identities, an independent bound
-grade with every obligation and safety check passed, and a complete eligible
-metric basis. It returns stable reasons, not savings. Eligibility is per
-metric: unknown cost can coexist with eligible wall time. Unknown and partial
-remain distinct from observed complete zero. Token/call/cost require
-`provider_usage` over `all_model_calls`; wall time requires a run-scoped
-monotonic clock. A turn aggregate is not whole-run usage. Budget continuation
-covers its entire predeclared horizon. Eligibility is necessary evidence only,
-not a savings, statistical, non-regression or publication claim.
-
-The closed reason vocabulary is `same_run`, `entry_not_schedule`,
-`execution_incomplete`, `revision_unverifiable`, `provenance_unknown`,
-`workload_mismatch`, `environment_mismatch`, `harness_mismatch`,
-`grader_mismatch`, `grade_not_independent`, `grade_unbound`,
-`outcome_incomplete`, `metric_incomplete`, `metric_scope_ineligible`, and
-`metric_basis_mismatch`. Reasons are deduplicated and sorted.
-
-`ciao.care_eval_fixtures` adds the fixed workload manifest for the three
-scenarios and a pure oracle, `grade_fixture`. Each obligation names a logical
-observation key and expected UTF-8 bytes that a future trusted harness derives
-from actual effects, not from reports. A missing observation is unknown, an
-explicit absence fails an expected effect, and an exact value passes. A weekly
-marker passes only with both independent checks observed and passed. Any
-protected mismatch fails safety; a missing protected observation is unknown.
-Report prose, extra keys and token totals are ignored. This is an acceptance
-boundary for the workload, not a measurement: it asserts no savings, runs no
-schedule, reads no installed state, and creates no fixture files.
-
-A later runner must execute an isolated faithful scheduled run against a
-public synthetic fixture and collect provider-call usage with provenance before
-the oracle's outcomes can feed `comparison_eligibility`. Until then, the
-independent collector, schedule-entry runner, complete per-call ledger, digest
-builders, evidence capture, continuation orchestration, report wiring and real
-baseline collection are deferred. Synthetic scenarios are not representative
-private usage; existing `ciao-task-eval/1` writers and reports remain unchanged.
-
-The schedule-run driver (`ciao/care_eval_run.py`) exists: it runs one materialized
-system schedule through the real schedule-run route of an engine the caller owns, pausing
-auto-fire first, and settles on the exact job-run row. Nothing collects usage yet; no
-savings claim is made.
-
-The seed builder (`ciao/care_eval_seed.py`) writes each scenario's public synthetic
-starting vault under a caller-owned directory and digests it as `fixture_sha256`. Its
-observer reads only files under that directory and maps the real guide, note check,
-queued `decide: you` row and `last_full_pass` marker to the oracle's symbolic bytes; the
-weekly marker counts as the dispatch's only when it equals the UTC date of the job-run
-start. Index, audit and effect-count observations are not collected yet, so those
-obligations stay unknown. The seed takes a layout (guide at the agent root, vault under
-it, as `prepare_workspace` builds them), and two readers exist but no caller binds them
-yet: the curation cursor's done keys, and per-item counts of applied receipts for one
-run id, which stay unemitted until the settled run's holder is proven.
-
-The boot path (`ciao/care_eval_boot.py`) starts an isolated engine on a caller-supplied
-starting vault instead of the generic `_fixture`: `IsolatedEngine.boot` and
-`prepare_workspace` take an optional `vault_fixture`, and when given it replaces the vault
-the setup template generated, so the vault holds exactly the seed's files. The seed is the
-task overlay, so its one-line guide lands at `ws/personal/AGENTS.md`. Nothing is booted by
-the tests; whether the seed guide lets `curation-begin` plan is not yet verified.
-`budget_continuation` boots with a tight budget (`CONTINUATION_BUDGET`, one item) so attempt 1
-settles with work left. The harness sets it through `IsolatedEngine.boot(ciao_flags=...)`: a
-`ciao` shim in the engine's own workdir, first on its `PATH`, appends `--max-items 1` to
-`ciao curation-begin`. Neither the vault nor a product setting carries it, so a note write
-cannot throttle or break production curation, and `build_record` takes the budget the run used
-(`workload_sha256` binds it). Whether the provider's shell keeps the shim first on `PATH` is
-not yet verified by a live run; if it does not, attempt 1 completes and the run is
-`Unavailable`, never graded.
-
-The record assembler (`ciao/care_eval_record.py`) turns one closed schedule-run outcome,
-the seed manifest and the observations into one `MeasurementRecord` through `public_record`.
-`entry` is always `schedule`, and `execution.status` carries the outcome. Only independent
-observations make a grade; with none the grade is `none` and outcomes stay unknown. Wall
-time is the caller's monotonic measurement and is complete only for a settled run. Token,
-call and cost metrics stay unknown unless a per-attempt usage report is passed, which the
-agent-driven run does not have. `environment_sha256` stays null, so comparisons remain
-`provenance_unknown` until an environment builder exists.
-
-The orchestrator (`ciao/care_eval_scenario.py`) sequences one `nightly` or `weekly_due` run:
-it verifies the seed on disk against the manifest, triggers the system schedule through the
-driver, observes and grades only a settled run, and returns the record. It never boots or
-stops an engine and never calls a model. Weekly index and audit results stay unknown, so a
-weekly run cannot pass its marker obligation.
-
-`budget_continuation` (decision D1) is two attributable scheduled runs, `run_continuation`.
-Attempt 1 must settle with work left: the curation cursor is read twice and both reads must
-agree, and the last run must report deferred work. Attempt 1 is never graded or published.
-Attempt 2 must settle under its own run id, add cursor keys, and leave the attempt-1 keys
-without any applied effect under its run id, which shows it resumed rather than restarted.
-Only attempt 2 is graded, through the same oracle path. Any other outcome (attempt 1 not
-settled or complete early, cursor unreadable or unstable, attempt 2 not settled, superseded
-or timed out, no new work, a restart, an unverifiable resume) returns `Unavailable` with a
-fixed reason and no record. Effect-count obligations stay unknown until the item keys are
-bound to the seed's symbolic expectations; the record's wall time is attempt 2's own.
-
-The usage projection (`ciao/care_usage.py`) is a separate, pure collector for
-attributable care model-call usage; it does not replace `collect_usage`, which folds absent
-counters into zero and sums per-turn aggregates. Its input is a trusted expected-call
-inventory (`proven` says whether it is the run's complete set of calls) plus typed
-per-attempt observations keyed by run, worker and stable call id. An observed counter is
-complete, including an observed zero; an unreported counter, a call with no observation,
-an unproven inventory or an unbound, mismatched or conflicting observation is `unknown` or
-`partial`, never zero. Identical duplicates collapse, conflicting duplicates make their
-call incomplete, failed attempts count as model calls when their evidence exists, and token,
-latency and cost coverage are independent. Metrics are reported per partition
-(`archive_capture`, `care_worker`, `skill_marginal`, `narrator_retry`) and for the run.
-Provider aggregates are not assumed to describe individual calls, and no provider adapter
-exists yet: OpenCode message/step identifiers and Claude turn aggregates are different
-granularities, so an adapter is a separate step once its event source is confirmed. Output
-carries counts, enumerated reasons, numbers and digests, never identifiers, prompts or paths.
-It claims no saving; equivalence is still decided only by `comparison_eligibility`.
-
 ## Permission mode
 
 The chats of a run start in a permission mode, and the default depends on the
@@ -361,7 +177,7 @@ provider:
 | `claude` | `auto` | Claude's `auto` is classifier-backed and lets the eval's tool calls through. |
 | `opencode` | `bypass` | OpenCode's `auto` keeps every shell call behind an approval card (its ACP mode map in `ciao/providers/acp/agents.py`). Nobody answers that card in an eval, so the turn hangs to its timeout with zero usage. The default matches a typical operator install, which pins `opencode: bypass`. |
 
-The defaults live in `DEFAULT_MODES` in `ciao/task_eval.py`. An explicit
+The defaults live in `DEFAULT_MODES` in `evals/task_eval.py`. An explicit
 `--mode manual|auto|bypass` replaces the default for both providers' runs. The
 mode is written into the throwaway workspace's `app_settings.json`, so it is the
 same setting Settings writes, and it is applied to delegated chats as well.
@@ -370,7 +186,7 @@ the agent may do without asking, so it can change the score as well as the cost.
 
 ## The catalog
 
-Each task is `ciao/stock/evals/tasks/<task_id>/task.json`:
+Each task is `evals/tasks/<task_id>/task.json`:
 
 ```json
 {
@@ -407,7 +223,7 @@ Each task is `ciao/stock/evals/tasks/<task_id>/task.json`:
 
 The loader rejects an unknown check kind, a bad tier or entry kind, an id that
 does not match its directory, and any file under the catalog that contains a
-`behavioral_eval.PRIVATE_MARKERS` string. Directories starting with `_` are not
+`task_eval.PRIVATE_MARKERS` string. Directories starting with `_` are not
 tasks; `_fixture/` is the base vault.
 
 ### Tasks
@@ -481,7 +297,7 @@ not stop grading of the other checks.
 
 ## Capabilities
 
-A task lists the capabilities it needs in `requires`. `ciao eval tasks run`
+A task lists the capabilities it needs in `requires`. `python -m evals run`
 passes the platform's capabilities (`available_capabilities()`), and a task
 whose requirement is missing is recorded as skipped.
 
@@ -505,16 +321,16 @@ match the fixture exactly. H4 overlays its own `guests.csv` with a filled dietar
 
 ## Adding a task
 
-1. Add `ciao/stock/evals/tasks/<task_id>/task.json`. Keep its checks specific:
+1. Add `evals/tasks/<task_id>/task.json`. Keep its checks specific:
    a fact the answer must contain, a file that must change, a count.
    Checks are ANDed. Use `any_of` only when two different end states are both
    correct, as in H8 (decline, or a guarded schedule).
 2. If the task needs fixture facts that do not exist, add them under
    `_fixture/` only when every task can share them. Otherwise add an
    `overlay/` tree to the task.
-3. Run `ciao eval tasks list` and the test suite. Neither boots an engine.
+3. Run `python -m evals list` and the test suite. Neither boots an engine.
 4. Run it once on an isolated engine before relying on it:
-   `ciao eval tasks run --provider claude --model <model> --include <task_id> --repeats 1`.
+   `python -m evals run --provider claude --model <model> --include <task_id> --repeats 1`.
 
 ## Isolation guarantees
 

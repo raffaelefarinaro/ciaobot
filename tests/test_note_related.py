@@ -18,6 +18,7 @@ import pytest
 from ciao import async_reads
 from ciao import control_plane as cp
 from ciao import memory_receipts as mr
+from ciao import file_kernel as fk
 from ciao import note_verification as nv
 from ciao.note_related import (
     LINKED_FROM,
@@ -129,7 +130,7 @@ def test_each_related_note_carries_its_revision_and_due_flag(tmp_path: Path) -> 
         vault,
         nv.NoteCheck(
             relative_path="People/Sofia.md",
-            content_revision=mr.content_revision(text),
+            content_revision=fk.content_revision(text),
             outcome="unverified",
             checked_at=TODAY,
             retry_after=TODAY + timedelta(days=30),
@@ -138,7 +139,7 @@ def test_each_related_note_carries_its_revision_and_due_flag(tmp_path: Path) -> 
 
     found = _by_path(_related(vault))
 
-    assert found["People/Sofia.md"].revision == mr.content_revision(text)
+    assert found["People/Sofia.md"].revision == fk.content_revision(text)
     assert found["People/Sofia.md"].due is False
     assert found["People/Luca.md"].due is True
 
@@ -149,7 +150,7 @@ def _unverified_sofia(vault: Path, *, proposal_id: str = "") -> None:
         vault,
         nv.NoteCheck(
             relative_path="People/Sofia.md",
-            content_revision=mr.content_revision(checked.read_text(encoding="utf-8")),
+            content_revision=fk.content_revision(checked.read_text(encoding="utf-8")),
             outcome="unverified",
             checked_at=TODAY,
             retry_after=TODAY + timedelta(days=30),

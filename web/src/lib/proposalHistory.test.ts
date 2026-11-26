@@ -1,7 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import {
   applyLine,
-  careRunScheduleIndex,
   historyActorLabel,
   normaliseHistoryRow,
   reasonPreview,
@@ -119,39 +118,5 @@ describe('reasonPreview', () => {
     expect(out.text.endsWith('…')).toBe(true)
     expect(out.text.length).toBeLessThanOrEqual(41)
     expect(out.text.slice(0, -1).endsWith(' ')).toBe(false)
-  })
-})
-
-describe('careRunScheduleIndex', () => {
-  const schedule = (id: string, chat: string | undefined) => ({ schedule_id: id, last_run_chat_id: chat })
-
-  it('maps a run id to the care schedule whose last run it is, and skips the rest', async () => {
-    const seen: string[] = []
-    const index = await careRunScheduleIndex(
-      [
-        schedule('system-memory-curation', 'chat_a'),
-        schedule('system-memory-curation@work', 'chat_b'),
-        schedule('daily-news', 'chat_c'),
-        schedule('system-memory-curation@idle', undefined),
-      ],
-      async id => {
-        seen.push(id)
-        if (id === 'system-memory-curation') return { run_id: 'run_1', planned: 1, completed: 1, deferred: 0, failed: 0, counts_complete: true, reasons: [] }
-        if (id === 'system-memory-curation@work') return { run_id: 'run_2', planned: 0, completed: 0, deferred: 0, failed: 0, counts_complete: true, reasons: [] }
-        return null
-      },
-    )
-    expect(seen).toEqual(['system-memory-curation', 'system-memory-curation@work'])
-    expect(index.get('run_1')).toBe('system-memory-curation')
-    expect(index.get('run_2')).toBe('system-memory-curation@work')
-    expect(index.size).toBe(2)
-  })
-
-  it('resolves to nothing when a lookup fails, rather than guessing', async () => {
-    const index = await careRunScheduleIndex(
-      [schedule('system-memory-curation', 'chat_a')],
-      async () => { throw new Error('boom') },
-    )
-    expect(index.size).toBe(0)
   })
 })

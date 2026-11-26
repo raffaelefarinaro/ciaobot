@@ -249,7 +249,7 @@ def test_the_memory_skill_says_where_a_note_goes_and_who_adds_a_category() -> No
     role = _stock("skills/ciao-capabilities/references/memory-operations/guide.md")
     assert "Make each new note with `ciao note create" in role
     assert "files it in the category's folder" in role
-    assert "queue a new-category question in `Workspace/Memory-Proposals.md`" in role
+    assert "put a new-category question on the Unsure list" in role
     # The list is read, never memorized: a category added in Settings must reach
     # the agent without editing this file.
     assert "do not memorize this" in role
@@ -262,7 +262,7 @@ def test_the_core_prompt_routes_categories_through_the_memory_skill() -> None:
     assert "Before durable writes or proposal curation, read `" in core and "memory-operations/guide.md`" in core
     skill = _stock("skills/ciao-capabilities/references/memory-operations/guide.md")
     assert "**Categories** section of `<vault>/VOCABULARY.md`" in skill
-    assert "If no category fits, queue a new-category question" in skill
+    assert "If no category fits, put a new-category question on the Unsure list" in skill
 
 
 def test_unattended_policy_summary_names_the_handover_exception() -> None:
@@ -270,28 +270,6 @@ def test_unattended_policy_summary_names_the_handover_exception() -> None:
     assert "never promotes a NEW region fact" in summary
     assert "handover=all" in summary
     assert "undo receipt" in summary
-
-
-def test_curation_schedule_defers_and_never_hard_caps() -> None:
-    skill = next(entry["prompt"] for entry in json.loads(_stock("schedules.json"))["schedules"] if entry["schedule_id"] == "system-memory-curation")
-    assert "You are an unattended run: defer, never ask, never route around" in skill
-    assert "The region cap is advisory." in skill
-    # The consolidation contract the architecture test also pins must survive.
-    assert "Do not promote new facts into the bounded" in skill
-    assert "unless `curation-begin` lists its kind in `accept_kinds`" in skill
-    assert "Workspace/Memory-Consolidations.md" in skill
-
-
-def test_care_report_makes_unresolved_audit_findings_locatable() -> None:
-    # A care run once reported only "findings remain" with a total, and the
-    # operator had to ask for the items. The prompt (which owns the run's
-    # report; the skill defers to it) must ask for categories plus the affected
-    # note, and separate a finished scan from resolved findings.
-    prompt = _care_prompt()
-    assert "List unresolved audit findings grouped by category, each naming its note" in prompt
-    assert "a bare count is not actionable" in prompt
-    assert "say separately that the scan finished and how many findings remain" in prompt
-    assert "with its category and the affected note's vault-relative path" in prompt
 
 
 def test_capabilities_skill_does_not_claim_nothing_is_durable_without_approval() -> None:
@@ -339,65 +317,6 @@ def test_proposal_cli_exception_is_named_in_docs() -> None:
 # ── Nothing is promoted unattended (#728-D) ────────────────────────────────
 
 
-def test_the_care_schedule_no_longer_instructs_unattended_promotion_or_settlement() -> None:
-    """The three instructions that contradicted the autonomy rule are gone.
-
-    An x3+ learning is a *routing priority*, not permission: the old Pass 4 and
-    Pass 7 told an unattended run to write it into AGENTS.md or a skill, and
-    Pass 9 told it to settle proposals. An unattended run can verify neither
-    destination nor rejection, so each of those is now a filed proposal a
-    person decides.
-    """
-    prompt = _care_prompt()
-    assert "into canonical guidance (the AGENTS.md body or the relevant skill/doc)" not in prompt
-    assert "belongs here as a standing instruction, citing its sources" not in prompt
-    assert "Only settle a proposal after its change is actually in place" not in prompt
-    # And each is replaced by the routed proposal, named with the commands.
-    assert "Route an entry at x3 or more" in prompt
-    assert "An x3 is a priority order, not permission to edit" in prompt
-    assert "You never edit a skill or this workspace's guide body" in prompt
-    assert "you never settle a skill proposal or a guide-body proposal" in prompt
-    assert "ciao skill-proposal-add NAME --input-file FILE" in prompt
-    assert "ciao skill-draft-add --input-file FILE" in prompt
-    assert "ciao skill-drafts" in prompt
-
-
-def test_the_care_schedule_ground_rules_list_the_new_deferrals() -> None:
-    """The deferred list is the run's own statement of what it may not do.
-
-    A deferral nobody reads is not a deferral, and the two additions are the two
-    actions an unattended run is most likely to reach for precisely because the
-    old passes told it to. So the list the run reads, the capsule the model is
-    given, and the policy module all three have to name them.
-    """
-    from ciao.memory_policy import UNATTENDED_CAPSULE_GUIDANCE, unattended_deferrals
-
-    prompt = next(
-        entry["prompt"]
-        for entry in json.loads(_stock("schedules.json"))["schedules"]
-        if entry["schedule_id"] == "system-memory-curation"
-    )
-    listed = next(
-        line for line in prompt.splitlines() if "The full deferred list:" in line
-    )
-    actions = {action.action for action in unattended_deferrals()}
-    # The policy module is the machine-readable statement, and both new
-    # deferrals are in it with the reason a person can act on.
-    assert any("Edit a skill" in action for action in actions)
-    assert any("Settle a skill proposal" in action for action in actions)
-    assert any("public GitHub issue" in action for action in actions)
-    # The run's own list names both, and the capsule names both, so no surface
-    # can say something different about what an unattended turn may not do.
-    for phrase in (
-        "editing a skill or the AGENTS.md guide body",
-        "settling a skill proposal or draft",
-    ):
-        assert phrase in listed, phrase
-        assert phrase in UNATTENDED_CAPSULE_GUIDANCE, phrase
-    # The entries an unattended run now has to report rather than perform.
-    assert "Report every one under **What needs you**" in prompt
-
-
 def test_the_memory_skill_never_edits_or_settles_unattended() -> None:
     """The skill a run loads has to say the same thing the schedule does.
 
@@ -407,20 +326,19 @@ def test_the_memory_skill_never_edits_or_settles_unattended() -> None:
     instruction survived in one copy after the other had moved on.
     """
     skill = _stock("skills/ciao-capabilities/references/memory-operations/guide.md")
-    assert "Propose a skill; never edit or settle one unattended" in skill
-    assert "it may **not** edit a skill, edit the `AGENTS.md` body, or settle a proposal or draft" in skill
-    assert "A recurring learning is a *routing* priority" in skill
+    assert "Write directly; Git is the record" in skill
+    assert "is not written by you at all unattended" in skill
+    assert "proposal file under `Workspace/Proposals/`" in skill
     # And it carries the routing contract the two non-owned destinations need.
-    assert "A reusable tool/workflow instruction routes to the best matching skill" in skill
+    assert "A reusable tool or workflow instruction routes to the best matching skill" in skill
     assert "an inventory match is a *candidate*, not proof" in skill
-    assert "never as a `sources` entry or a `turn`" in skill
-    assert "`ciao skill-draft-add --input-file FILE`" in skill
+    assert "`upstream-issue` proposal file" in skill
 
 
 def test_the_remember_command_states_the_provenance_rule() -> None:
     """A direct lesson write carries only provenance ids that actually exist."""
     command = _stock("commands/remember.md")
-    lesson_write = command.split("**For a reusable lesson**", 1)[1].split("\n4.", 1)[0]
+    lesson_write = command.split("**For a reusable lesson**", 1)[1].split("\n   - specific", 1)[0]
     assert "ciao memory learn --text-file <file>" in lesson_write
     assert "`--source <chat-id>` only when the actual source chat id is available" in lesson_write
     assert "`--request <id>` only when the actual request id is available" in lesson_write
@@ -544,31 +462,6 @@ def test_every_vault_review_verb_maps_to_the_wire_action_agent_cli_sends() -> No
         assert arguments["action"] == wire, verb
 
 
-def test_unattended_care_prompt_only_names_vault_review_verbs_allowed_unattended() -> None:
-    """#882: the prompt must never tell an unattended run to do what the control plane refuses."""
-    from ciao.vault_review import ATTENDED_ONLY_ACTIONS
-
-    prompt = _care_prompt()
-    mentioned = set(re.findall(r"`?ciao vault review ([a-z]+(?:-[a-z]+)*)", prompt))
-    assert mentioned, "the prompt no longer names any vault review verb; update this guard"
-    unknown = mentioned - set(_VAULT_REVIEW_WIRE)
-    assert not unknown, f"unknown vault review verbs in the prompt: {sorted(unknown)}"
-    refused = {verb for verb in mentioned if _VAULT_REVIEW_WIRE[verb] in ATTENDED_ONLY_ACTIONS}
-    assert not refused, f"the unattended prompt tells the agent to run {sorted(refused)}, which unattended_forbidden refuses"
-
-
-def test_unattended_care_prompt_says_every_review_decision_is_attended_only() -> None:
-    from ciao.vault_review import ATTENDED_ONLY_ACTIONS
-
-    prompt = _care_prompt()
-    assert "Keep and archiving" not in prompt
-    assert "archiving non-destructively" not in prompt
-    sentence = next(s for s in prompt.split(". ") if "is refused unattended" in s)
-    for verb, wire in _VAULT_REVIEW_WIRE.items():
-        if wire in ATTENDED_ONLY_ACTIONS:
-            assert verb in sentence, f"the prompt does not say `{verb}` is attended-only"
-
-
 def test_every_noun_verb_in_the_unattended_care_prompt_is_a_real_agent_cli_verb() -> None:
     """Catches a typo'd or removed `ciao <noun> <verb>` the run would hit as a usage error."""
     from ciao import agent_cli
@@ -583,7 +476,7 @@ def test_every_noun_verb_in_the_unattended_care_prompt_is_a_real_agent_cli_verb(
 
 
 def test_stock_memory_assets_route_repo_facts() -> None:
-    assert "`repo`" in _stock("commands/remember.md")
+    assert "linked code repository" in _stock("commands/remember.md")
 
 
 def test_the_capabilities_catalog_names_the_vault_ignore_file() -> None:

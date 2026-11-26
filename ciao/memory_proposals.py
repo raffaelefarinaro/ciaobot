@@ -53,6 +53,7 @@ from datetime import UTC, datetime, date
 from pathlib import Path
 from typing import Any, Literal, NotRequired, TypedDict
 
+from ciao.file_kernel import portable_name_problem, safe_note_stem
 from ciao.learning_records import (
     LEARNINGS_RELATIVE,
     LEARNINGS_STUB,
@@ -378,7 +379,7 @@ def set_note_type(path: Path, type_id: str) -> bool:
     truncated note is not "the old type" but an unparseable file that drops out
     of the index.
     """
-    from ciao.memory_receipts import write_queue_atomically
+    from ciao.file_kernel import write_queue_atomically
 
     target = Path(path)
     if not type_id:
@@ -1190,34 +1191,6 @@ def accept_region_fact(
     )
 
 
-def safe_note_stem(name: str) -> str:
-    """A proposal payload as a filename stem, without path separators."""
-    cleaned = re.sub(r"[\\/:*?\"<>|]+", " ", name).strip().rstrip(".")
-    return cleaned[:80]
-
-
-WINDOWS_RESERVED_STEMS = frozenset(
-    {"CON", "PRN", "AUX", "NUL"}
-    | {f"COM{n}" for n in range(1, 10)}
-    | {f"LPT{n}" for n in range(1, 10)}
-)
-
-
-def portable_name_problem(part: str) -> str | None:
-    """Why *part* cannot be a file or folder name on every platform, or None.
-
-    A vault is synced between machines, and ``NUL.md`` or ``a:b`` would be
-    silently discarded or rejected where the note lands next.
-    """
-    if (
-        any(ch in '<>:"|?*' for ch in part)
-        or part.endswith((".", " "))
-        or part.split(".")[0].strip().upper() in WINDOWS_RESERVED_STEMS
-    ):
-        return "is not a valid file name on every platform"
-    return None
-
-
 EntityNoteOutcome = Literal["written", "exists", "refused"]
 """What one entity-note write did.
 
@@ -1650,7 +1623,7 @@ def append_learning(
     scope a new entry's identity is minted under, so the id this write records
     is the one every later reader resolves it by.
     """
-    from ciao.memory_receipts import queue_lock, write_queue_atomically
+    from ciao.file_kernel import queue_lock, write_queue_atomically
 
     if _workspace_handle is not None:
         if not _secure_destination:
@@ -2101,7 +2074,7 @@ def append_proposals(
     if not proposals:
         return None
 
-    from ciao.memory_receipts import queue_lock, write_queue_atomically
+    from ciao.file_kernel import queue_lock, write_queue_atomically
 
     out_path = workspace_vault_root / _PROPOSALS_RELATIVE
     out_path.parent.mkdir(parents=True, exist_ok=True)
@@ -2400,14 +2373,13 @@ def _record_decision(
         # joined heuristically instead.
         entry["receipt_id"] = receipt_id
     if operation_id:
-        # The managed operation (see :mod:`ciao.curation_apply`) that wrote this
+        # The managed operation that wrote this
         # decision. It owns both receipts it links to, and finds them by this id.
         entry["operation_id"] = operation_id
     if reverses_operation_id:
         entry["reverses_operation_id"] = reverses_operation_id
     if run_id:
-        # The curation lease holder that made this decision. Read back for the
-        # care report's counts; never sent to the History payload.
+        # The run that made this decision; never sent to the History payload.
         entry["run_id"] = run_id
     if item_key:
         # The worklist key this decision settled (see ``run_id``).
@@ -2435,7 +2407,7 @@ def _record_decision(
     # The queue lock also serializes every managed append to its History file.
     # An operation id makes a retried write idempotent; if a crash left exactly
     # a prefix of that same final JSONL row, finish the row instead of duplicating it.
-    from ciao.memory_receipts import queue_lock
+    from ciao.file_kernel import queue_lock
     from ciao.os_support.private import open_private
 
     with queue_lock(proposals_path):
@@ -2845,7 +2817,7 @@ def set_proposal_decider(
     kind/text/source/target/request are unchanged. Writes via
     write_queue_atomically. No receipt: a retag is not a decision.
     """
-    from ciao.memory_receipts import queue_lock, write_queue_atomically
+    from ciao.file_kernel import queue_lock, write_queue_atomically
     from ciao.proposal_kinds import parse_bullet
 
     if not proposals_path.exists():
@@ -2892,7 +2864,7 @@ def remove_proposal_by_substring(
     needle = needle.strip()
     if not needle:
         return None
-    from ciao.memory_receipts import queue_lock
+    from ciao.file_kernel import queue_lock
 
     with queue_lock(proposals_path):
         lines = proposals_path.read_text(encoding="utf-8").splitlines()
@@ -2909,7 +2881,7 @@ def remove_proposal_by_substring(
             return None
         del lines[candidates[0]]
         lines = _sweep_empty_batches(lines)
-        from ciao.memory_receipts import write_queue_atomically
+        from ciao.file_kernel import write_queue_atomically
 
         write_queue_atomically(proposals_path, "\n".join(lines).rstrip() + "\n")
         return bullet.kind, bullet.text

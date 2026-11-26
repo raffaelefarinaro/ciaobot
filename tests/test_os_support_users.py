@@ -7,7 +7,7 @@ import re
 
 import pytest
 
-from ciao import memory_receipts as mr
+from ciao import file_kernel as fk
 from ciao.os_support.users import user_key
 
 
@@ -19,7 +19,7 @@ def test_the_key_is_stable_and_safe_in_a_file_name() -> None:
 
 def test_the_lock_directory_is_keyed_by_the_user(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("CIAO_QUEUE_LOCK_DIR", raising=False)
-    lock = mr.lock_path_for("/vault/queue.md")
+    lock = fk.lock_path_for("/vault/queue.md")
     assert lock.parent.name == f"ciao-queue-locks-{user_key()}"
 
 

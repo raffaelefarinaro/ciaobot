@@ -724,7 +724,7 @@ def test_the_route_and_the_runner_share_one_begin(
 
     monkeypatch.setattr("ciao.import_run.run_import_batch", run_and_signal)
 
-    from ciao.memory_proposals import list_proposals
+    from tests.unsure_rows import list_proposals
 
     with client:
         assert (
@@ -756,7 +756,7 @@ def test_the_route_and_the_runner_share_one_begin(
     assert settled["progress"]["proposals_filed"] == 1
     assert filed == ["called"], "the real runner ran the real turn"
     rows = list_proposals(
-        config.workspace_vault_root("personal") / "Workspace/Memory-Proposals.md"
+        config.workspace_vault_root("personal") / "Workspace/Unsure.md"
     )
     assert [row["text"] for row in rows] == [
         "Deploys happen on Fridays. [as-of: 2025-02-07]"

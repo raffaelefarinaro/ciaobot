@@ -984,7 +984,7 @@ def test_recovery_after_manifest_kill_preserves_post_migration_queue(tmp_path: P
     assert applied["status"] == "migrated"
     receipt = receipt_path(runtime).read_bytes()
     registry = (runtime / "workspaces.json").read_bytes()
-    queue = install / "work/memory-vault/Workspace/Memory-Proposals.md"
+    queue = install / "work/memory-vault/Workspace/Unsure.md"
     before = queue.read_bytes()
     artifact = install / applied["created_files"][0]
     artifact_before = artifact.read_bytes()
@@ -1020,7 +1020,7 @@ def test_stash_copy_interruption_keeps_original_queue(tmp_path: Path, monkeypatc
     install, vault, runtime = _with_guide(tmp_path)
     applied = apply(install, vault, ["personal", "work"], runtime, primary="personal")
     assert applied["status"] == "migrated"
-    entry = next(e for e in applied["stashed_files"] if e["source"].endswith("Memory-Proposals.md"))
+    entry = next(e for e in applied["stashed_files"] if e["source"].endswith("Unsure.md"))
     queue = install / entry["source"]
     before = queue.read_bytes()
     artifact = install / applied["created_files"][0]
@@ -1092,7 +1092,7 @@ def test_stash_copy_refuses_edit_before_publication(tmp_path: Path, monkeypatch)
 
     install, vault, runtime = _with_guide(tmp_path)
     applied = apply(install, vault, ["personal", "work"], runtime, primary="personal")
-    entry = next(e for e in applied["stashed_files"] if e["source"].endswith("Memory-Proposals.md"))
+    entry = next(e for e in applied["stashed_files"] if e["source"].endswith("Unsure.md"))
     queue = install / entry["source"]
     registry = (runtime / "workspaces.json").read_bytes()
     receipt = receipt_path(runtime).read_bytes()
@@ -1119,7 +1119,7 @@ def test_recovery_copy_failure_preserves_postimage_and_retry(tmp_path: Path, mon
 
     install, vault, runtime = _with_guide(tmp_path)
     applied = apply(install, vault, ["personal", "work"], runtime, primary="personal")
-    entry = next(e for e in applied["stashed_files"] if e["source"].endswith("Memory-Proposals.md"))
+    entry = next(e for e in applied["stashed_files"] if e["source"].endswith("Unsure.md"))
     queue = install / entry["source"]
     registry = (runtime / "workspaces.json").read_bytes()
     receipt = receipt_path(runtime).read_bytes()
@@ -1166,7 +1166,7 @@ def test_recovery_refuses_independent_edit_of_restored_stash(tmp_path: Path) -> 
     install, vault, runtime = _with_guide(tmp_path)
     applied = apply(install, vault, ["personal", "work"], runtime, primary="personal")
     assert applied["status"] == "migrated"
-    queue_entry = next(e for e in applied["stashed_files"] if e["source"].endswith("Memory-Proposals.md"))
+    queue_entry = next(e for e in applied["stashed_files"] if e["source"].endswith("Unsure.md"))
     queue = install / queue_entry["source"]
     queue_before = queue.read_bytes()
     registry = (runtime / "workspaces.json").read_bytes()
@@ -1976,46 +1976,42 @@ def test_a_secondary_root_gets_empty_regions() -> None:
 
 
 def test_the_primary_regions_are_queued_for_every_other_root() -> None:
-    """Nothing is lost: a human accepts what belongs in that workspace."""
+    """Nothing is lost: a person ticks what belongs in that workspace."""
     split = split_guide(_GUIDE, ["personal", "work"], "personal")
     queued = split.queued["work"]
 
     texts = " ".join(queued)
     assert "A fact about the engine" in texts
     assert "Raffa prefers direct implementation" in texts
-    assert any(b.startswith("- [memory]") for b in queued)
-    assert any(b.startswith("- [profile]") for b in queued)
+    assert all(b.startswith("- [ ] ") for b in queued)
+    assert any("shared memory region" in b for b in queued)
+    assert any("shared profile region" in b for b in queued)
 
 
 def test_queued_bullets_hold_the_one_bullet_per_line_invariant() -> None:
     """The queue is parsed line by line, so a multi-line bullet corrupts it.
 
     proposal_kinds.BULLET_RE matches per line, so a bullet spanning lines leaves
-    its continuation as loose prose in Memory-Proposals.md: uncountable by every
+    its continuation as loose prose in Unsure.md: uncountable by every
     counter and invisible to the dedupe check. The real guide contains exactly
     such a multi-line entry, which is how this was found.
     """
-    from ciao import proposal_kinds
-
     split = split_guide(_GUIDE, ["personal", "work"], "personal")
 
     for bullet in split.queued["work"]:
         assert "\n" not in bullet, f"multi-line bullet: {bullet!r}"
-        assert proposal_kinds.parse_bullet(bullet) is not None, f"unparseable: {bullet!r}"
+        assert bullet.startswith("- [ ] "), f"not a list line: {bullet!r}"
 
 
 def test_a_region_heading_is_not_queued_as_a_fact() -> None:
     """`## Agent memory` is region scaffolding, not something to remember."""
-    from ciao import proposal_kinds
-
     split = split_guide(_GUIDE, ["personal", "work"], "personal")
 
     for bullet in split.queued["work"]:
-        parsed = proposal_kinds.parse_bullet(bullet)
-        assert parsed is not None
-        assert not parsed.text.lstrip().startswith("#")
-        assert "Agent memory" not in parsed.text
-        assert "User profile" not in parsed.text
+        text = bullet.removeprefix("- [ ] ")
+        assert not text.startswith("#")
+        assert "Agent memory" not in text
+        assert "User profile" not in text
 
 
 def test_a_single_workspace_install_queues_nothing() -> None:
@@ -3345,7 +3341,7 @@ def _with_guide(tmp_path: Path) -> tuple[Path, Path, Path]:
     install, vault, runtime = _git_install(tmp_path)
     (install / "AGENTS.md").write_text(_REAL_GUIDE, encoding="utf-8")
     for name in ("personal", "work"):
-        queue = vault / name / "Workspace" / "Memory-Proposals.md"
+        queue = vault / name / "Workspace" / "Unsure.md"
         queue.parent.mkdir(parents=True, exist_ok=True)
         queue.write_text(
             "---\ntags: [ciao, memory, proposals]\n---\n# Memory Proposals\n",
@@ -3404,22 +3400,21 @@ def test_a_secondary_root_gets_the_body_and_empty_regions(tmp_path: Path) -> Non
 def test_the_primary_regions_reach_every_other_roots_queue(tmp_path: Path) -> None:
     """Nothing is lost and nothing is guessed: the entries land where a human
     decides on them, one parseable bullet per line."""
-    from ciao.proposal_kinds import BULLET_RE
 
     install, vault, runtime = _with_guide(tmp_path)
 
     result = apply(install, vault, ["personal", "work"], runtime, primary="personal")
 
     assert result["guide_split"]["queued"] == {"work": 3}
-    queue = (install / "work" / "memory-vault" / "Workspace" / "Memory-Proposals.md")
+    queue = (install / "work" / "memory-vault" / "Workspace" / "Unsure.md")
     lines = [line for line in queue.read_text(encoding="utf-8").splitlines() if line.startswith("- [")]
     assert len(lines) == 3
-    assert all(BULLET_RE.match(line) for line in lines), lines
+    assert all(line.startswith("- [ ] ") and not line.startswith("- [ ] - ") for line in lines), lines
     assert any("releases go out on Thursdays" in line for line in lines)
     # The region heading is scaffolding, not a remembered fact.
     assert not any("Agent memory" in line for line in lines)
     # The primary already holds these in its own regions, so it queues nothing.
-    primary_queue = install / "personal" / "memory-vault" / "Workspace" / "Memory-Proposals.md"
+    primary_queue = install / "personal" / "memory-vault" / "Workspace" / "Unsure.md"
     assert not [
         line for line in primary_queue.read_text(encoding="utf-8").splitlines()
         if line.startswith("- [")
@@ -5423,7 +5418,7 @@ def test_committed_inventory_preserves_late_descriptor_write(tmp_path: Path) -> 
     install, vault, runtime = _with_guide(tmp_path)
     applied = apply(install, vault, ["personal", "work"], runtime, primary="personal")
     queue = next(item["source"] for item in applied["stashed_files"]
-                 if item["source"].endswith("Memory-Proposals.md"))
+                 if item["source"].endswith("Unsure.md"))
     with (install / queue).open("ab", buffering=0) as writer:
         assert undo(install, runtime)["status"] == "undone"
         writer.write(b"late writer")

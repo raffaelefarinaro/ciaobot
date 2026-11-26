@@ -51,14 +51,14 @@ from ciao import shared_brain
 from ciao import service_backend
 from ciao import transcripts
 from ciao import backup_service
-from ciao import curation_run
 from ciao import entity_types
 from ciao import provider_registry
 from ciao import repo_link
 from ciao.repo_location import resolve_chat_location
 from ciao.git_mutation import RepositoryBusyError, ensure_mutable, repository_mutation
 from ciao.jsonio import loads_untrusted, write_private_text
-from ciao.memory_receipts import QueueLockError, QueueReceiptUnavailable
+from ciao.memory_receipts import QueueReceiptUnavailable
+from ciao.file_kernel import QueueLockError
 from ciao.os_support.child_env import child_env
 from ciao.port_in_use import BIND_PHASE
 from ciao.web.auth import (
@@ -4080,7 +4080,7 @@ def _vault_graph_payload(config: Any, workspace: str | None) -> dict[str, Any]:
     # queue asking a question and a queue asking it twice. The check state lives
     # in the vault the notes came from, so it is read per target root rather
     # than once for the install.
-    from ciao import memory_receipts as mr
+    from ciao import file_kernel as fk
     from ciao.memory_audit import note_verification
     from ciao.note_verification import NoteCheck, _check_settles, read_note_checks
     from ciao.vault_review import never_queued, verification_evidence
@@ -4142,7 +4142,7 @@ def _vault_graph_payload(config: Any, workspace: str | None) -> dict[str, Any]:
             # `verification_evidence` read it as a conflict, which is the
             # honest middle.
             return check, relative, ""
-        return check, relative, mr.content_revision(text)
+        return check, relative, fk.content_revision(text)
 
     def _entry_coverage_for(e) -> dict[str, Any] | None:
         """One node's per-entry freshness, from the audit's own detector.
@@ -4655,7 +4655,7 @@ def _write_entity_types_under_lock(
     Raises :class:`QueueLockError` rather than writing unlocked, like every
     other managed writer of a file behind this lock.
     """
-    from ciao.memory_receipts import queue_lock
+    from ciao.file_kernel import queue_lock
 
     with queue_lock(vault / entity_types.VAULT_FILENAME):
         entity_types.write_vault_file(vault, entries)
@@ -5602,115 +5602,6 @@ async def onboarding_interview(request: Request) -> JSONResponse:
     return JSONResponse({"chat_id": chat_id})
 
 
-async def schedule_care_run(request: Request) -> JSONResponse:
-    """The derived outcome of a schedule's last run, read-only and bound to its chat.
-
-    The stored run is shown only for a care routine, when it was taken by the
-    chat the schedule row names as its latest run and finished no earlier than
-    that dispatch. A newer or unrelated run, an earlier run, a run with no
-    derived counts, and a schedule with no run all answer ``{"care_run": null}``.
-    See ``ciao.care_run_outcome`` for the trust boundary of the chat binding. The
-    vault is the one the run's own CLI resolves: the chat's workspace, falling
-    back to the default workspace name exactly as ``workspace_shell_env`` does.
-    """
-    from ciao.care_run_outcome import is_care_schedule_id, outcome_for_chat
-    from ciao.config import DEFAULT_WORKSPACE_NAME
-    from ciao.curation_run import CurationStateError, load_state
-    from ciao.schedules import parse_dispatch_stamp
-
-    schedule_id = request.path_params["schedule_id"]
-    entry = request.app.state.schedule_manager._store.get(schedule_id)
-    if entry is None:
-        return JSONResponse({"error": "not found"}, status_code=404)
-    dispatch_id = request.query_params.get("dispatch_id")
-    if dispatch_id is not None:
-        return await _care_run_for_dispatch(request, schedule_id, dispatch_id)
-    chat_id = str(entry.last_run_chat_id or "")
-    if not is_care_schedule_id(schedule_id) or not chat_id:
-        return JSONResponse({"care_run": None})
-    pcm = request.app.state.project_chat_manager
-    chat = pcm.get_chat(chat_id)
-    project = pcm.get_project(chat.project_id) if chat is not None else None
-    if project is None:
-        return JSONResponse({"care_run": None})
-    vault = request.app.state.config.workspace_vault_root(project.workspace or DEFAULT_WORKSPACE_NAME)
-    try:
-        state = load_state(vault)
-    except CurationStateError:
-        return JSONResponse(
-            {"error": "care run state is unreadable; nothing is shown"}, status_code=503
-        )
-    outcome = outcome_for_chat(
-        state.last_run, chat_id, dispatched_at=parse_dispatch_stamp(entry)
-    )
-    return JSONResponse({"care_run": outcome})
-
-
-async def _care_run_for_dispatch(request: Request, schedule_id: str, dispatch_id: str) -> JSONResponse:
-    """The care run report of one exact schedule dispatch (#3647).
-
-    The job row is matched on the dispatch id alone and the stored run only when
-    it names that id (``ciao.care_run_report``); anything else answers a state
-    with no counts. The vault is the schedule's own workspace.
-    """
-    from ciao import care_run_report
-    from ciao.care_eval_run import JobRunsUnreadable, read_runtime_job_runs
-    from ciao.care_run_outcome import bounded_outcome, is_care_schedule_id
-    from ciao.config import DEFAULT_WORKSPACE_NAME
-    from ciao.curation_run import CurationStateError, load_state
-
-    if not dispatch_id or len(dispatch_id) > care_run_report.MAX_ID_CHARS:
-        return JSONResponse({"error": "invalid dispatch_id"}, status_code=400)
-    if not is_care_schedule_id(schedule_id):
-        return JSONResponse({"care_run": None})
-    workspace = schedule_id.partition("@")[2] or DEFAULT_WORKSPACE_NAME
-    config = request.app.state.config
-    # The name comes from the URL: it is a vault path only once the registry knows it.
-    if config.workspace(workspace) is None:
-        return JSONResponse({"error": "workspace not found"}, status_code=404)
-
-    def answer(state: str, **extra: Any) -> JSONResponse:
-        return JSONResponse({"care_run": None, "state": state, "report_available": False, **extra})
-
-    try:
-        rows = await asyncio.to_thread(read_runtime_job_runs, Path(config.state_path).parent)
-    except JobRunsUnreadable:
-        return answer("unavailable")
-    picked = care_run_report.select_run(rows, schedule_id, workspace, dispatch_id)
-    if picked.state != "ok":
-        return answer(picked.state)
-    try:
-        state = load_state(config.workspace_vault_root(workspace))
-    except CurationStateError:
-        return JSONResponse(
-            {"error": "care run state is unreadable; nothing is shown"}, status_code=503
-        )
-    last_run = state.last_run
-    if care_run_report.join_last_run(last_run, dispatch_id) != "ok":
-        return answer("superseded", job_status=picked.job_status)
-    # The stored run's own chat must be the chat the job row names.
-    stored_chat = last_run.get("chat_id")
-    if isinstance(stored_chat, str) and stored_chat:
-        picked = care_run_report.select_run(rows, schedule_id, workspace, dispatch_id, chat_id=stored_chat)
-        if picked.state != "ok":
-            return answer(picked.state)
-    outcome = bounded_outcome(last_run)
-    body: dict[str, Any] = {
-        "care_run": outcome,
-        "state": "ok",
-        "job_status": picked.job_status,
-        "report_available": "report" in last_run,
-    }
-    if outcome is not None:
-        body["run_id"] = outcome["run_id"]
-        body["counts"] = {k: outcome[k] for k in ("planned", "completed", "deferred", "failed")}
-    report = last_run.get("report")
-    if report is not None:
-        body["outcomes"] = report["items"]
-        body["weekly"] = report["weekly"]
-    return JSONResponse(body)
-
-
 async def schedule_detail(request: Request) -> JSONResponse:
     """Handle PATCH (update) and DELETE for a single schedule."""
     schedule_id = request.path_params["schedule_id"]
@@ -6021,7 +5912,6 @@ _ROUTINES_SETTINGS_KEYS = frozenset({
     "dev_mode",
     "app_repo",
     "resume_after_restart",
-    "verify_vault_answers",
 })
 
 
@@ -6054,8 +5944,6 @@ def _routines_payload(config, app_settings) -> dict:
         "app_repo": s.app_repo,
         # Settings → General: resume a chat whose turn a restart cut off (#2128).
         "resume_after_restart": s.resume_after_restart,
-        # Settings → General: check a vault-grounded answer's claims against its notes.
-        "verify_vault_answers": s.verify_vault_answers,
         "server_defaults": {
             "pwa_host": DEFAULT_PWA_HOST,
             "log_level": DEFAULT_LOG_LEVEL,
@@ -6111,7 +5999,7 @@ async def settings_routines(request: Request) -> JSONResponse:
             return JSONResponse({"error": "invalid JSON"}, status_code=400)
         if not isinstance(body, dict):
             return JSONResponse({"error": "expected an object"}, status_code=400)
-        unknown = sorted(set(body) - _ROUTINES_SETTINGS_KEYS - {"insights_enabled"})
+        unknown = sorted(set(body) - _ROUTINES_SETTINGS_KEYS - {"insights_enabled", "verify_vault_answers"})
         if unknown:
             return JSONResponse(
                 {"error": f"Unknown routines settings: {', '.join(unknown)}"},
@@ -6836,19 +6724,6 @@ def host_browser_request(request: Request) -> bool:
     # host cannot stand in for the browser's own origin here, because a request
     # carrying proxy headers never reaches this point (`is_loopback_client`).
     return _same_origin(request, source)
-
-
-def care_cycle_browser_request(request: Request) -> bool:
-    """``host_browser_request`` plus a required Origin or Referer.
-
-    Only the care-cycle switch uses this. A browser sends Origin on a same-origin
-    POST, so a request with neither header is a script or a shell caller holding
-    the session cookie, and it is refused even though the peer and Host match.
-    ``host_browser_request`` itself is unchanged: the workspace move relies on it.
-    """
-    if not (request.headers.get("origin") or request.headers.get("referer")):
-        return False
-    return host_browser_request(request)
 
 
 def _workspace_move_local(request: Request) -> bool:
@@ -8882,7 +8757,6 @@ async def proposals_history(request: Request) -> JSONResponse:
     requested = max(1, requested)
     limit = min(requested, _HISTORY_MAX_LIMIT)
 
-    registered_workspaces = set(config.workspace_names())
     rows: list[dict[str, Any]] = []
     # Two registered names can resolve to one vault root (a ``vault_root: "."``
     # entry, or the legacy entity layout), and then they share a sidecar. Read
@@ -9047,105 +8921,6 @@ _CARE_CYCLE_FAILED = (
     "The switch stopped on a file error before it finished. Check the workspace folder, "
     "then run the preview again."
 )
-
-
-async def care_cycle_status(request: Request) -> JSONResponse:
-    """The dry run for switching one workspace's care state to the weekly cycle.
-
-    Read-only. A browser that is not on the engine's computer gets ``on_host:
-    false`` and no report, so the card can explain and show the CLI command.
-    The report is ``curation_run.migration_report`` plus the workspace, the
-    host flag and whether a care run holds the lease.
-    """
-    config = request.app.state.config
-    workspace = request.query_params.get("workspace", "").strip()
-    if not workspace:
-        return JSONResponse({"error": "workspace is required"}, status_code=400)
-    if config.workspace(workspace) is None:
-        return JSONResponse({"error": f"unknown workspace: {workspace}"}, status_code=404)
-    if not host_browser_request(request):
-        return JSONResponse(
-            {"workspace": workspace, "on_host": False, "reason": "not_on_host", "lease_live": None}
-        )
-    vault = Path(config.workspace_vault_root(workspace))
-    try:
-        report = await asyncio.to_thread(curation_run.migration_report, vault)
-    except OSError:
-        logger.exception("care cycle dry run failed")
-        return JSONResponse({"error": _CARE_CYCLE_FAILED}, status_code=500)
-    return JSONResponse(
-        {
-            **report,
-            "workspace": workspace,
-            "on_host": True,
-            "lease_live": report["live_lease"] is not None,
-        }
-    )
-
-
-async def care_cycle_apply(request: Request) -> JSONResponse:
-    """Switch one workspace's care state to the weekly cycle. Host-only, and writes only on proof.
-
-    The body is exactly ``workspace``, ``digest`` (from a dry run) and
-    ``confirm_quiesced: true``. ``curation_run.migrate_state_to_cycle`` refuses
-    a live lease, a stale digest or any blocker, and only then backs up the v1
-    state and publishes v2. Session plus ``host_browser_request``: a remote
-    browser gets 403 and the CLI command instead.
-    """
-    if not host_browser_request(request):
-        return JSONResponse(
-            {"error": "Switching care runs only from the computer running Ciaobot.", "reason": "not_on_host"},
-            status_code=403,
-        )
-    if not care_cycle_browser_request(request):
-        return JSONResponse(
-            {"error": "Switching care runs needs the Ciaobot page in a browser; a script or command cannot switch it.",
-             "reason": "browser_request_required"},
-            status_code=403,
-        )
-    try:
-        body: Any = await request.json()
-    except ValueError:
-        body = None
-    if (
-        not isinstance(body, dict)
-        or set(body) != _CARE_CYCLE_BODY_KEYS
-        or body["confirm_quiesced"] is not True
-        or not isinstance(body["workspace"], str)
-        or not body["workspace"].strip()
-        or not isinstance(body["digest"], str)
-        or not body["digest"]
-    ):
-        return JSONResponse(
-            {"error": "send exactly workspace, digest and confirm_quiesced: true"}, status_code=400
-        )
-    config = request.app.state.config
-    workspace = body["workspace"].strip()
-    if config.workspace(workspace) is None:
-        return JSONResponse({"error": f"unknown workspace: {workspace}"}, status_code=404)
-    vault = Path(config.workspace_vault_root(workspace))
-    try:
-        report = await asyncio.to_thread(
-            curation_run.migrate_state_to_cycle,
-            vault,
-            confirm_quiesced=True,
-            expected_digest=body["digest"],
-        )
-    except curation_run.CurationMigrationRefused as exc:
-        return JSONResponse(
-            {
-                "error": "The switch was refused and nothing was written.",
-                "blockers": list(exc.blockers),
-            },
-            status_code=409,
-        )
-    except curation_run.CurationStateError as exc:
-        # Raised only with constant, user-facing text (the backup and publish steps).
-        return JSONResponse({"error": str(exc), "blockers": []}, status_code=409)
-    except OSError:
-        logger.exception("care cycle switch failed")
-        return JSONResponse({"error": _CARE_CYCLE_FAILED}, status_code=500)
-    return JSONResponse({**report, "workspace": workspace})
 
 
 def _linked_repos_for(request: Request, row: dict[str, Any]) -> list[str]:

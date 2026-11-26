@@ -56,9 +56,9 @@ from ciao.import_store import (
     ImportStoreError,
     engine_store_path,
 )
-from ciao.memory_proposals import list_proposals
+from tests.unsure_rows import list_proposals
 
-QUEUE = "Workspace/Memory-Proposals.md"
+QUEUE = "Workspace/Unsure.md"
 SESSION_ID = "ses_synthetic0001"
 CLAUDE_SESSION_ID = "5e6f7a8b-9c0d-4e1f-8a2b-3c4d5e6f7a8b"
 
@@ -783,20 +783,11 @@ async def test_forgetting_the_batch_leaves_an_accepted_memory_intact(
     await run_import_batch(config, batch.batch_id, store=store)
 
     from ciao import memory_tool as mt
-    from ciao.memory_proposals import accept_region_fact
 
     rows = list_proposals(vault / QUEUE)
     guide = config.workspace_root / "AGENTS.md"
-    outcome, _promotable = accept_region_fact(
-        guide_path=guide,
-        target=rows[0]["kind"],
-        text=rows[0]["text"],
-        vault_root=vault,
-        actor="operator",
-        source="pwa",
-        workspace="personal",
-    )
-    assert outcome == "written", outcome
+    # A person ticks the line and the agent writes the fact where it belongs.
+    mt.update_region(guide, "memory", action="add", entry=rows[0]["text"])
     region = mt.read_region(guide, "memory")[0]
     assert any(
         "Sunday" in entry for entry in region
@@ -812,7 +803,7 @@ async def test_forgetting_the_batch_leaves_an_accepted_memory_intact(
     ), "forgetting an import never deletes an accepted memory"
     assert (
         list_proposals(vault / QUEUE) == rows
-    ), "and it does not unfile the proposals that are still queued"
+    ), "and it does not unfile the lines that are still on the list"
 
 
 # ── Store refusals are the caller's, not swallowed ─────────────────────────

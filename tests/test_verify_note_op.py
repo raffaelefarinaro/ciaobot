@@ -50,6 +50,7 @@ import pytest
 
 from ciao import control_plane as cp
 from ciao import memory_receipts as mr
+from ciao import file_kernel as fk
 from ciao import note_edit_proposals as nep
 from ciao import note_entries as ne
 from ciao import note_verification as nv
@@ -222,7 +223,7 @@ def _verdict(vault: Path, note: Path, **overrides: Any) -> dict[str, Any]:
     """A well-formed `still_valid` payload for the note as it stands on disk."""
     fields: dict[str, Any] = {
         "relative_path": NOTE,
-        "expected_revision": mr.content_revision(note.read_bytes().decode("utf-8")),
+        "expected_revision": fk.content_revision(note.read_bytes().decode("utf-8")),
         "outcome": nv.STILL_VALID,
         "coverage": nv.COVERAGE_COMPLETE,
         "evidence": [CITATION],
@@ -515,7 +516,7 @@ def test_an_auto_applied_verdict_files_no_proposal(tmp_path: Path) -> None:
     # The check describes the revision the note was LEFT at, so the next pass
     # sees a check for the text it will read.
     check = nv.read_note_checks(install._vault)[NOTE]
-    assert check.content_revision == mr.content_revision(stamped)
+    assert check.content_revision == fk.content_revision(stamped)
     assert check.proposal_id == ""
 
 
@@ -536,7 +537,7 @@ def test_an_oversized_note_is_unverified_not_applied(tmp_path: Path) -> None:
         root,
         {
             "relative_path": NOTE,
-            "expected_revision": mr.content_revision(
+            "expected_revision": fk.content_revision(
                 big.read_bytes().decode("utf-8")
             ),
             "outcome": nv.STILL_VALID,
@@ -564,7 +565,7 @@ def test_a_stale_revision_is_a_conflict_and_writes_nothing(tmp_path: Path) -> No
     plane = _plane(install)
     name = _payload(
         root,
-        _verdict(install._vault, note, expected_revision=mr.content_revision("stale")),
+        _verdict(install._vault, note, expected_revision=fk.content_revision("stale")),
     )
 
     data = asyncio.run(plane.verify_note(_principal(), payload_file=name))["data"]
@@ -812,7 +813,7 @@ def test_an_identical_verdict_does_share_one_read(tmp_path: Path) -> None:
     assert first["data"]["receipt_id"] == second["data"]["receipt_id"]
 
 
-@pytest.mark.parametrize("failure", [mr.QueueLockError, OSError])
+@pytest.mark.parametrize("failure", [fk.QueueLockError, OSError])
 def test_a_filing_failure_the_caller_could_not_see_is_still_reported(
     tmp_path: Path, failure: type[BaseException]
 ) -> None:
@@ -918,7 +919,7 @@ def _entry_verdict(note: Path, entry: Any, **overrides: Any) -> dict[str, Any]:
         "relative_path": ENTRY_NOTE,
         "entry": entry.identity,
         "entry_fingerprint": entry.fingerprint,
-        "expected_revision": mr.content_revision(note.read_bytes().decode("utf-8")),
+        "expected_revision": fk.content_revision(note.read_bytes().decode("utf-8")),
         "outcome": nv.STILL_VALID,
         "coverage": nv.COVERAGE_COMPLETE,
         "evidence": [CITATION],
@@ -1316,7 +1317,7 @@ def test_a_note_verdict_and_an_entry_verdict_are_not_the_same_read(
     fields = dict(plain)
     # The entry verdict above re-stamped a bullet, so the note's revision moved;
     # read it again the way a caller would.
-    fields["expected_revision"] = mr.content_revision(
+    fields["expected_revision"] = fk.content_revision(
         note.read_bytes().decode("utf-8")
     )
     fields["evidence"] = [
@@ -1340,7 +1341,7 @@ def test_a_note_verdict_and_an_entry_verdict_are_not_the_same_read(
     checks = ev.read_entry_checks(vault)
     assert list(checks) == [entry.identity]
     assert nv.read_note_checks(vault)[ENTRY_NOTE].content_revision == (
-        mr.content_revision(note.read_bytes().decode("utf-8"))
+        fk.content_revision(note.read_bytes().decode("utf-8"))
     )
     # And the note's verdict re-stamped the frontmatter rather than the bullet.
     assert "updated: " + date.today().isoformat() in note.read_text(encoding="utf-8")
@@ -1645,7 +1646,7 @@ def test_an_attended_verdict_settles_what_an_unattended_pass_left_unverified(
     assert receipt["source"] == "chat"
     check = nv.read_note_checks(install._vault)[NOTE]
     assert check.outcome == nv.UPDATE, "the stored check is the new verdict"
-    assert check.content_revision == mr.content_revision(FOURTH)
+    assert check.content_revision == fk.content_revision(FOURTH)
 
 
 def test_an_unattended_rerun_is_still_held_off_by_its_own_unverified(

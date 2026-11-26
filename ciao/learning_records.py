@@ -5,7 +5,7 @@ Why this exists
 ``ciao/memory_proposals.py`` used to own the one regex that reads a learnings
 entry, mint a four-word key from the statement, truncate the cited sources to
 eight, and count recurrence by comparing normalized prose, and
-``ciao/curation_run.py`` imported that same regex to decide what to promote.
+the curation pass imported that same regex to decide what to promote.
 That was the shape a retry grew: re-filing the same fact twice inflated a
 count, rewording a statement minted a different key, and a promoted entry could
 not be traced back to the episode that produced it because the prose itself was
@@ -20,9 +20,8 @@ without losing a byte of anything it does not understand.
 
 Nothing here touches disk, the network, or a model. :func:`migrate_learnings`
 returns text; a caller decides whether to write it. The production writer
-(``memory_proposals.append_learning``), the curation worklist
-(``curation_run._learning_items``) and the migration command
-(``ciao learnings-migrate``) are all callers of this module, not copies of it.
+(``memory_proposals.append_learning``) and the migration command
+(``ciao learnings-migrate``) are callers of this module, not copies of it.
 
 The four rules everything else follows from
 -------------------------------------------
@@ -91,7 +90,7 @@ from dataclasses import dataclass, replace
 from datetime import date
 from typing import Any
 
-from ciao.memory_receipts import content_revision
+from ciao.file_kernel import content_revision
 
 # ── Constants ──────────────────────────────────────────────────────────────
 
@@ -457,8 +456,7 @@ def _section_of(title: str) -> str:
     normalized = " ".join(title.split()).strip().lower()
     if normalized == "active":
         return SECTION_ACTIVE
-    # `## Promoted / Resolved` is what the curation skill writes and what
-    # `curation_run` partitions on. Both words are accepted so a workspace
+    # `## Promoted / Resolved` is what the curation skill writes. Both words are accepted so a workspace
     # that split the two headings is still read; every other heading — format
     # notes and worked examples included — is content this module leaves alone.
     if normalized.startswith("promoted") or normalized.startswith("resolved"):

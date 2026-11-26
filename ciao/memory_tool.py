@@ -29,6 +29,7 @@ from pathlib import Path
 from typing import Any, Literal
 
 from ciao.os_support.locks import lock_exclusive, unlock
+from ciao.redact import redact_text
 from ciao.vault_index import temp_prefix
 
 logger = logging.getLogger(__name__)
@@ -641,6 +642,11 @@ def update_region(
     needle = _normalize(match)
     if action in {"add", "replace"} and not normalized_entry:
         raise ValueError("entry is required for add and replace")
+    if action in {"add", "replace"} and redact_text(normalized_entry) != normalized_entry:
+        raise ValueError(
+            "entry looks like it contains a credential value; name the credential "
+            "instead of writing its value"
+        )
     if action in {"replace", "remove"} and not needle:
         raise ValueError("match is required for replace and remove")
     lock = guide_lock(guide)

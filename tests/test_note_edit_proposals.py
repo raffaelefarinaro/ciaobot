@@ -41,6 +41,7 @@ from typing import Any
 import pytest
 
 from ciao import memory_receipts as mr
+from ciao import file_kernel as fk
 from ciao import note_edit_proposals as nep
 from ciao import note_entries as ne
 from ciao import note_verification as nv
@@ -94,7 +95,7 @@ def _write(vault: Path, relative: str, text: str) -> Path:
 
 
 def _revision(text: str) -> str:
-    return mr.content_revision(text)
+    return fk.content_revision(text)
 
 
 def _queue_text(vault: Path) -> str:
@@ -165,7 +166,7 @@ def _needs_review(
     fields: dict[str, Any] = {
         "workspace": "personal",
         "relative_path": NOTE,
-        "expected_revision": mr.content_revision(
+        "expected_revision": fk.content_revision(
             note.read_bytes().decode("utf-8")
         ),
         "outcome": nv.UPDATE,
@@ -234,7 +235,7 @@ def test_a_whole_note_id_is_the_one_this_module_always_produced() -> None:
     So the whole-note id is pinned here to the old formula, computed the long way
     round rather than through the function under test.
     """
-    revision = mr.content_revision(PLAIN)
+    revision = fk.content_revision(PLAIN)
 
     assert nep.note_edit_id("personal", NOTE, revision) == hashlib.sha256(
         f"personal\0{NOTE}\0{revision}".encode("utf-8")

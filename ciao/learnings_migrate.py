@@ -66,8 +66,7 @@ from ciao.learning_records import (
     parse_learnings,
     render_learning,
 )
-from ciao.memory_proposals import learnings_path
-from ciao.memory_receipts import content_revision, queue_lock, write_queue_atomically
+from ciao.file_kernel import content_revision, queue_lock, write_queue_atomically
 
 RECEIPT_VERSION = 1
 
@@ -165,7 +164,7 @@ def write_receipt(path: Path, summary: dict[str, Any]) -> Path:
 
 def learnings_file(vault_root: Path) -> Path:
     """Where this workspace's learnings live — the writer's own answer, not a second one."""
-    return learnings_path(vault_root)
+    return Path(vault_root) / LEARNINGS_RELATIVE
 
 
 def _load(vault_root: Path) -> str:

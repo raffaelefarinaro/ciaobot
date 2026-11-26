@@ -431,7 +431,6 @@ ciao dev
 
 ## Testing
 
-Curation log writes (#3101, A1) are verified on macOS and Linux only. `tests/test_curation_log_portability.py` runs real child processes against the canonical state lock, with a pipe handshake rather than sleeps, and it isolates `CIAO_QUEUE_LOCK_DIR` in the parent and the children alike: a parent that locks a different file than its children passes or fails by timing. Windows is skipped by design and unverified. Run it with `PYTHONPATH=$PWD ~/repos/ciaobot/.venv/bin/python -m pytest tests/test_curation_log_portability.py tests/test_curation_logs.py -q`.
 
 Claude slash-invocation regression coverage lives in `tests/test_providers.py`
 (`-k 'slash or non_commands_keep or exact_trusted or forged'`). The SDK wire
@@ -458,9 +457,6 @@ ciao vault-search "keyword" --limit 5 # FTS search over the configured vault
 ciao vault-lint --vault-root memory-vault # Vault hygiene lint
 ciao os-audit --json # Strict AI OS setup and context-hygiene audit
 ciao memory-audit --json # Bounded-memory rot only (regions; add --with-vault for note aging)
-ciao eval contracts --json # Deterministic behavioral-eval guard checks (model-free; CI half)
-ciao eval run --model <id> --label candidate # Bounded model-backed behavioral probe (explicit; cost ceiling)
-ciao eval compare --baseline a.json --candidate b.json # Baseline/candidate delta with provenance
 cd web && npm test             # Frontend unit tests
 cd web && npm run build        # Typecheck + Vite build (frontend smoke test)
 ```
@@ -625,7 +621,7 @@ inspect every path.
 `ciao learnings-migrate` converts an existing workspace's
 `Workspace/Learnings.md` onto the canonical record model in
 `ciao/learning_records.py`, which is also what the writer (`append_learning`) and
-the curation worklist read. Run it once per install that predates #755 — the
+the learnings readers. Run it once per install that predates #755 — the
 legacy shapes it converts are entries nothing downstream can attribute, so a
 sighting of one mints a *new* record instead of adding to the one already there,
 and the `xN` the care schedule promotes on quietly stops meaning anything.
@@ -661,7 +657,7 @@ the lock it takes against concurrent learning writes.
 One consequence worth knowing when reading a vault mid-migration: a line that was
 *read* rather than witnessed keeps its unknown recurrence. A plain bullet renders
 `[unknown → unknown] (?)` and a date-only legacy line `[2024-05-01 → 2024-05-01] (?)`,
-and both stay there. `curation_run` skips an entry whose count is unknown rather than
+and both stay there. The memory-curation reader skips an entry whose count is unknown rather than
 treating it as `x1`, so it is not promotable until attributable evidence
 accumulates — a bullet nobody can attribute has no recurrence, and inventing one
 would be a decision nobody made. A learning recorded through the direct
@@ -675,25 +671,16 @@ a skill or rejected by a person — not when it ages out, and not when a proposa
 is accepted. `ciao/learnings_cleanup.py` is the reconciliation that acts on that
 answer, and `ciao learnings-cleanup` is the attended version of it.
 
-The unattended half is `PASS_LEARNINGS_CLEANUP` in the nightly worklist. It runs
-immediately after `PASS_LEARNINGS`, because cleanup only ever removes an entry
-whose findings are durably settled and a run that reaches it has therefore
-already passed the pass that proposes and decides. It holds no second scheduler
-and takes its keys from the same whole-run budget as everything else, capped at
-`LEARNINGS_CLEANUP_MAX_ITEMS` so a backlog cannot spend the budget the required
-weekly keys need. It plans, and the worklist row names the command that performs
-the plan: `ciao learnings-cleanup --apply-settled`, which retires only the rows
-the reconciliation itself proposed, never reapproves one, and is capped at the
-same number. A worklist whose eligible rows can only be acted on with a person
-holding an approval file is a worklist whose eligible rows never are.
+`ciao learnings-cleanup --apply-settled` retires only the rows the reconciliation
+itself proposed, never reapproves one, and is capped at `LEARNINGS_CLEANUP_MAX_ITEMS`.
+The care prompt may run it; no scheduled worklist plans it any more.
 
 ```bash
 # The table: every Active entry, with the decision and the evidence beside it.
 ciao learnings-cleanup --vault-root memory-vault/personal
 
-# Unattended: the settled entries, and only those. No approval file, no
-# reapproval, no more than LEARNINGS_CLEANUP_MAX_ITEMS. This is what the nightly
-# worklist item points at.
+# The settled entries, and only those. No approval file, no reapproval,
+# no more than LEARNINGS_CLEANUP_MAX_ITEMS.
 ciao learnings-cleanup --vault-root memory-vault/personal --apply-settled
 
 # Retiring approved rows. The approval file names each learning_id, the exact
@@ -883,7 +870,7 @@ The status and process exit code are a stable contract:
 | `needs_attention` | 1 | The scan completed reliably and found actionable items. |
 | `error` | 2 | Required evidence could not be inspected reliably. Findings may still be present, but the report is not a clean bill of health. |
 
-The daily `system-memory-curation` schedule is presented as **Workspace care**. Its packaged prompt runs lightweight memory passes nightly and uses `Workspace/Curation-Log.md`'s `last_full_pass` marker to catch up the deeper weekly work after downtime. A full pass runs `ciao vault-index --write` before `ciao os-audit --json --scope workspace`; a failed index rebuild or audit exit 2 leaves the marker overdue and prevents a healthy/no-op claim. Exit 1 means reliable findings and the pass continues with only safe structural repairs. A full pass also reviews the workspace guide body (AGENTS.md) for misplacement, drift, and bloat, applying the same state-vs-event and entity-placement rules the regions follow; that model-judged review is separate from the two required weekly checks, so an over-budget run that never reaches it does not suppress the next week's guide care. Ordinary skill-proposal decisions are keyed to the whitespace-normalized proposed change, so a new change can re-enter review while a repeat stays settled; `tests/test_skill_proposals.py` covers this alongside stable queue identity and learning-origin decisions. A legacy sidecar decision with a readable settled proposal is scoped to that proposal when next filed. If the queue file is already missing, the original change cannot be inferred, so the existing decision sidecar persists a `legacy:unresolved` marker before any replacement is written; the skill-wide suppression then survives later filings. Findings overwritten before this fix cannot be classified automatically.
+The daily `system-memory-curation` schedule is presented as **Workspace care**. Its packaged prompt (`ciao/stock/schedules.json`) is one self-contained prompt: the agent reads the durable-memory guide, decides from the read tools what is due (review queue, region sizes, stale notes, weekly hygiene when the last `Workspace/Care-Report.md` is missing or over seven days old), may hand large batches to subagents while it does the writes itself, and writes `Workspace/Care-Report.md` plus a plain-language reply. It no longer calls the `curation-*` lease/worklist commands; those and the care report UI are removed in the follow-up care PR. Packaged system definitions are read from the wheel, so an installed schedule row picks the new prompt up on update with no row change.
 
 #### The migration notices, and why they are probed in one place
 
@@ -1330,42 +1317,7 @@ three surfaces ask `note_verification._check_settles` for that, not their own
 test of the cooldown — see the next section.the Memory Map, the vault-review queue,
 and the daily `system-memory-curation` run.
 
-### The stale-note pass and the managed `verify_note` operation
-
-That last one stopped being prose. The selection is `PASS_STALE_NOTE` in
-`ciao/curation_run.py`: one `WorklistItem` per stale note, keyed by its
-**vault-relative** path, oldest first, and capped at
-`STALE_NOTE_MAX_ITEMS` (20) per run. It calls `memory_audit.find_stale_notes` rather
-than re-deriving the thresholds, so the nightly plan, `os-audit`, the Memory Map
-and the review queue cannot disagree about which notes count — and it applies the
-two filters the audit does not: `vault_review.never_queued` (a note the queue
-would never show a person is not tonight's question) and
-`note_verification.should_check` (a note whose check is still inside its 30-day
-cooldown or still waiting on the proposal that check pinned is a question already
-answered — without this the same cooled-down notes take the first slots every
-night, come back `already_checked`, and the rest of the backlog starves). An
-attended chat is the one exception: `verify_note` with `attended=True` is not held
-off by an `unverified` check that has no proposal (`note_verification.reopens_unverified`).
-The cap
-is applied **after** that filter, and both exist for the same reason: the pass
-sits ahead of the two required hygiene keys in `PASS_ORDER` and the budget is a
-whole-run allowance, so an uncapped backlog spends it and `last_full_pass` can
-never advance.
-
-The pass reaches no judgement, and the only body it reads is the flagged note's
-own bytes: its `memory_receipts.content_revision` goes in the item's `reason`, and
-that is the `expected_revision` the managed operation insists on. Without it there,
-the only way to obtain one is to reimplement the hash, and a caller that guesses
-comes back `conflict` for every note forever.
-
-`build_worklist` therefore takes `path_prefix`, and `ciao/cli.py`'s `_curation_plan`
-threads it (`vault_index.VAULT_RENDER_PREFIX` — one constant, so the renderer and
-the reader cannot drift). `path_prefix` must be the prefix
-`vault_index.scan_vault` rendered under, and the same value has to reach
-`find_stale_notes` — a drifted prefix makes every mtime `stat` miss silently,
-which reads as "nothing is stale" rather than as an error.
-
-The plan also reports what it did not cover. `build_worklist` returns a `note_coverage` (`curation_run.NoteCoverage`) next to the items, with a `status` of `complete`, `partial` (the cap stopped the pass, or a flagged note was unreadable, or a note was undated) or `unavailable` (the vault scan failed or the vault is missing). Every flagged note falls in exactly one bucket, so `planned + never_queued + unreadable + settled + eligible_deferred + unexamined == flagged`: `eligible_deferred` is the note that tripped the cap, and `unexamined` is every flagged note after it, which the pass never opened. Both are reported as "not examined this run", never as unchanged. This is metadata only: eligibility, the cap, the order and every write are unchanged, and `curation-plan` adds one `coverage_notes` line when the status is not `complete`.
+### The managed `verify_note` operation
 
 The judgement is `control_plane.verify_note`, exposed as the agent operation
 `verify_note` (`ciao/mcp_server.py`) and the command `ciao note verify
@@ -1399,8 +1351,7 @@ cooldown are already recorded and a failure that escaped instead would leave a
 verdict nobody was asked about. Auto-applied verdicts file nothing, and a
 retirement is never applied here at all — it comes back `needs_review` and
 reaches a person as a proposal. The plan-mode gate is the existing one:
-`mutating=True` on the operation. Tests: `tests/test_verify_note_op.py`,
-`tests/test_curation_run.py` for the pass, and `tests/test_agent_surface.py` for
+`mutating=True` on the operation. Tests: `tests/test_verify_note_op.py` and `tests/test_agent_surface.py` for
 the CLI mapping.
 
 ### Creating a note: `note_create`
@@ -1423,103 +1374,11 @@ index is not refreshed; `vault_search` indexes on every query. Tests:
 `--with-vault` adds the note-aging pass (still informational, never changes the
 exit code). Exit 0 clean, 1 findings, 2 a region could not be read.
 
-### The stale-entry pass and the entry-level operation
-
-A note is not the unit a person keeps current. Its frontmatter `updated:` is one
-date for every fact in it, so re-verifying somebody's address last week silently
-re-certified the landlord's name from 2019 with it — and a whole-note verdict has
-nowhere to put a fact that is two years out of date while its neighbours are
-current. `PASS_STALE_ENTRY` in `ciao/curation_run.py` is that other half: one
-`WorklistItem` per **list item**, keyed by `note_entries.entry_identity`, capped
-at `STALE_ENTRY_MAX_ITEMS`, sitting directly after `PASS_STALE_NOTE` in
-`PASS_ORDER` and nowhere near the weekly hygiene keys.
-
-Three properties are worth preserving before changing any of it.
-
-**The selection walks every note, and ages each entry on its own date.** The
-audit selected *notes*; a bullet stamped in 2024 inside a note re-stamped
-yesterday is not in that list at all, which is the whole point. So the pass calls
-`memory_audit.note_entry_coverage` — the detector — once per note, with the note's
-own `updated:`/mtime handed back from `_stale_findings` so the detector reaches the
-same `memory_audit.note_verification` verdict on the same values with no second
-`stat`. That one function owns the review horizon (`memory_audit.NOTE_REVIEW_DAYS`, the
-same for every type), the type aliases, the exempt event types, the
-per-entry `[verified: YYYY-MM-DD]` stamp, the event-shaped exemptions, the
-unsupported entries and the coverage accounting. An entry with no stamp — or a
-stamp that is malformed, an impossible day, or a date that has not happened, and
-therefore is not a verification — inherits the note's date, so it stays the same
-work the note pass found. Exempt types and `vault_review.never_queued` are the
-audit's and the queue's, not second copies, and the two stale passes share one
-`scan_vault` walk (`_stale_findings`), because scanning a vault twice in one
-worklist is twice the frontmatter parsing for a selection that cannot differ.
-
-**The pass used to age entries its own way, and that was the bug this removed.**
-`curation_run._due_entries` was a second implementation of the same rule: it parsed
-the note, took `entry.verified or note.last_verified`, and compared the age
-against `note.threshold_days`. It agreed with the detector by coincidence, and
-coincidence is not a contract — the two had different exemptions, different
-stamp handling and no coverage accounting at all, so a divergence would have been
-a plan listing work no surface could show. The pass is now a *client* of
-`note_entry_coverage` and holds no rule of its own. Same for the surfaces: the
-Memory Map node's `entry_coverage`, the review row's `entry_verification` and
-`os-audit`'s entry lines all read the detector's own counts, and the map's
-`signatureOf` includes the coverage so a verification that just landed is not
-swallowed by a "nothing changed" comparison.
-
-**The key is the identity, not a path and not a line.** `entry_identity` digests
-the workspace, note path, nearest heading, the entry's own fingerprint and a
-duplicate ordinal — and deliberately no line number and no offset, so a fact keeps
-its key when the note is reordered or a fact is inserted above it, and two
-identical bullets under one heading stay distinct. A key carrying an offset would
-go stale the moment anybody edited the file above it, and the pass holding it would
-re-ask a question it had already answered. The filter is
-`entry_verification.check_settles_entry`, the **same** predicate `verify_entry`
-short-circuits on, and the cap is applied after it for the note pass's reason: the
-cooled-down entry that is still the oldest would otherwise take a slot every night.
-It is the *batch* form of that predicate, over a `read_entry_checks` map read once
-per plan: the per-entry `should_check_entry` re-reads and re-parses the whole
-sidecar on every call, and this is the one caller that asks once per due entry over
-every note in the vault, on every `curation-begin`.
-
-**The workspace name is an input, not a guess.** Because the identity digests the
-workspace, `build_worklist` takes `workspace` and the entry pass mints identities
-with it; `ciao/cli.py`'s `_curation_plan` threads
-`_curation_workspace_name(vault)`, which asks the same registry
-`_resolve_workspace_and_vaults` resolved the vault through and takes its answer
-only when it still points at that vault. A vault directory's own name is the
-workspace's name on the layout where a workspace's vault is a directory of its own,
-and is not otherwise — an install whose `memory-vault/client-a` holds workspace
-`work` would otherwise plan entry work under `client-a`, and every operation would
-come back `conflict` because the identity names nothing there.
-
-**The reason is the payload.** Like the note pass's, the item's `reason` carries
-the note's `content_revision` — the exact `expected_revision` the managed operation
-insists on — plus the entry's **whole** fingerprint and its span. All three whole:
-`find_entry` and `verify_entry` compare a 64-hex fingerprint as a string, so a
-truncated one is not a prefix match but a different value, and the nightly pass
-would return `conflict` for every entry, for ever. Reads bytes only to parse and
-state them; it reaches no verdict and writes nothing.
-
-**The judgement is the same managed operation with an entry selector.** One
-payload file, two requests, and the `entry` field is the only thing that says
-which: an `entry` identity plus the `entry_fingerprint` it was read at names one
-fact, and its absence means the note. Everything else is identical — the payload is
-confined to the caller's own workspace root and capped, a `workspace` naming
-another one is refused, the whole thing runs as one bounded coalesced off-loop
-read (keyed on the entry's identity *and* fingerprint as well as the note and
-revision), the receipt's `source` follows the turn, and an oversized note is
-`failed` rather than `applied`. `before`/`after` change meaning with the selector,
-in the direction of the smaller unit: they are the **entry's** text, because a
-whole-note replacement in an entry payload is the caller rewriting every other
-fact in the file to correct one. The reply carries `scope: "entry"` so a caller
-reading both shapes is never guessing which one it got. The judgement itself is
-`ciao/entry_verification.py`, called rather than reimplemented.
-
 ### The entry-level detector, and what every surface reads from it
 
 `memory_audit.find_stale_entries` is the entry-level sibling of
 `find_stale_notes`, and `memory_audit.note_entry_coverage` is its per-note core —
-the one function the worklist, `os-audit`, the Memory Map and the review queue all
+the one function `os-audit`, the Memory Map and the review queue all
 call. It is deliberately not four callers sharing a convention:
 
 ```python
@@ -1613,8 +1472,7 @@ filed under a heading nobody wrote.
 
 **Where the surfaces get it.** The Memory Map's `vault_graph` node carries an
 `entry_coverage` block and never *raises* `stale` from it — the flag is the
-whole-note verdict and the nightly worklist is where a stale bullet becomes a
-plan; it reports beside it, so a mixed note is visibly mixed. It is `None` for a
+whole-note verdict; it reports beside it, so a mixed note is visibly mixed. It is `None` for a
 node the queue would never show and for a body that could not be read, because a
 default object of zeroes would read as "read nothing, found nothing wrong", and it
 carries `note_exempt` so a client can say "this type never ages out" instead of
@@ -1826,7 +1684,7 @@ follow-up.
 
 Packaged generic skills live in `ciao/stock/skills/` and are installed into every workspace's `.claude/skills/` by `ciao sync-skills` on startup. This includes Ciaobot-specific skills (`ciao-capabilities`, `workspace-authoring`, …); Ciaobot troubleshooting is a reference under `ciao-capabilities`. In a **workspace**, user-owned skills live in `skills/`, project agents in `subagents/`, and slash commands in `commands/`; `ciao sync-skills` mirrors them into the generated `.claude/` directories. A workspace skill with the same name as a packaged one overrides it. A workspace-owned `ciao-capabilities` override replaces the installed skill and its references. Durable-memory procedures are loaded separately from the engine-managed package, so the override does not need to copy them.
 
-No subagents are packaged by default. Attended vault writes and proposal handling use the durable-memory guide under `ciao-capabilities`; the Workspace care schedule carries the unattended lease, worklist, and approval rules and runs vault writes sequentially in its own chat. Reading tasks use the provider's own web-fetch. Startup sync prunes retired stock-managed `memory`, `researcher`, and `secretary` from generated Claude/OpenCode inventories; custom subagents and unmanaged agent files are left alone.
+No subagents are packaged by default. Attended vault writes and proposal handling use the durable-memory guide under `ciao-capabilities`; the Workspace care schedule carries its own unattended rules and runs vault writes sequentially in its own chat. Reading tasks use the provider's own web-fetch. Startup sync prunes retired stock-managed `memory`, `researcher`, and `secretary` from generated Claude/OpenCode inventories; custom subagents and unmanaged agent files are left alone.
 
 ### Provider context and native memory
 
@@ -1932,17 +1790,6 @@ does not discard the queued frame. Backend state is cleared only after a typed
 V2 success or an authoritative stale result. Resolution events are ephemeral
 for attached tabs, while the persisted chat snapshot reconciles tabs that were
 disconnected. `background_shell_wake.jsonl` and `background_subagent_wake.jsonl` pin OpenCode's own follow-up executions after background work (#1391): inbox delivery ids decide which execution a turn owns, and `drain_events` streams the rest.
-
-## DAG-style schedules (maintainers)
-
-A schedule that is a multi-step workflow (load state, gate, model call, write) can use `ciao.dag` rather than a long `async def`:
-
-- `Node(id, kind, model='', timeout_s=180.0, payload={})` — kinds: `bash`, `prompt`, `gate`, `subagent`.
-- `Edge(src, dst, when='ok')` — `when` is `ok` (default), `fail`, or `always`.
-- `run(dag, edges, job=..., label=..., initial_ctx={})` — records each node in `.runtime/job_runs.jsonl`.
-- `subagent` nodes accept an opt-in `payload['requires']` post-condition list: each item is a file path that must exist and be non-empty after the node ran, or `{"path": ..., "contains": "<regex>"}` where at least one line must match. Paths may reference ctx like the prompt and resolve against `payload['cwd']`; `contains` regexes are used verbatim (never ctx-formatted, so quantifiers like `{2}` are safe). Exit 0 with unmet requirements fails the node (guards against an unauthenticated subagent silently doing nothing); DAGs without `requires` are unchanged.
-
-No shipped producer runs a DAG today — the weekly skill-evolution pass was the canonical example and was retired in #697 — so `tests/test_dag.py` is what to read for a worked pipeline, one case per node kind and per edge. Use a DAG when there are 3+ sequential steps with branching and you want per-step timing on the Automation page.
 
 `ScheduleManager.catch_up()` runs once at server startup on the host; like `tick()`, it returns an empty list without touching anything when the legacy node-state startup gate says this machine is not the host (the one boot verdict from `ciao.legacy_node_state`, which is the whole gate now that no route can rewrite the role under a running server). It dispatches only the latest missed occurrence for each enabled schedule, leaves the prompt unchanged, and records the missed occurrence's local date so a later slot on the startup day can still fire normally. Cover changes to this behavior in `tests/test_schedules.py`. Packaged system routines are excluded when the startup falls inside the post-setup grace window (`ciao/setup_marker.py`, 24h from a first-time setup): a brand-new install is greeted by its onboarding chat, and the routines fire at their next regular tick instead of all replaying missed runs in parallel. Cover that in `tests/test_setup_catch_up_grace.py`.
 

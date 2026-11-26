@@ -42,7 +42,7 @@ from ciao.learning_records import (
     parse_learnings,
     render_learning,
 )
-from ciao.memory_receipts import content_revision, write_queue_atomically
+from ciao.file_kernel import content_revision, write_queue_atomically
 
 WORKSPACE = "personal"
 TODAY = date(2026, 9, 30)

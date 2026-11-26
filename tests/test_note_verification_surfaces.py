@@ -44,14 +44,11 @@ from starlette.routing import Route
 from starlette.testclient import TestClient
 
 from ciao import control_plane as cp
-from ciao import curation_run
-from ciao import memory_receipts as mr
+from ciao import file_kernel as fk
 from ciao.memory_receipts import journal_path, read_receipts
 from ciao import note_edit_proposals as nep
 from ciao import note_verification as nv
 from ciao.config import CiaoConfig, WorkspaceConfig
-from ciao.entity_types import load_entity_types
-from ciao.vault_index import VAULT_RENDER_PREFIX
 from ciao.web.routes_api import (
     list_proposals,
     memory_receipt_undo,
@@ -284,7 +281,7 @@ def _verify(
     note = vault / relative
     payload: dict[str, Any] = {
         "relative_path": relative,
-        "expected_revision": mr.content_revision(note.read_bytes().decode("utf-8")),
+        "expected_revision": fk.content_revision(note.read_bytes().decode("utf-8")),
         "outcome": nv.STILL_VALID,
         "coverage": nv.COVERAGE_COMPLETE,
         "evidence": [CITED],
@@ -329,24 +326,7 @@ def pipeline(tmp_path: Path) -> dict[str, Any]:
     plane = _Plane(config, root)
     client = _client(config)
 
-    # 1. Selection. The pass is the model-free half: one worklist item per stale
-    #    note, keyed by its vault-relative path, oldest first, capped.
-    worklist = curation_run.build_worklist(
-        vault_root=vault,
-        workspace=vault.name,
-        guide_path=root / "AGENTS.md",
-        category_registry=load_entity_types(vault),
-        workspace_dir=root,
-        path_prefix=VAULT_RENDER_PREFIX,
-        today=TODAY,
-    )
-    stale = next(
-        (item for item in worklist.items if item.pass_id == curation_run.PASS_STALE_NOTE),
-        None,
-    )
-    selected = list(stale.keys) if stale is not None else []
-
-    # 2. Five verdicts, one per outcome shape.
+    # Five verdicts, one per outcome shape.
     still_valid = _verify(plane, root, vault, STILL_TRUE, outcome=nv.STILL_VALID)
     cited_update = _verify(
         plane,
@@ -408,8 +388,6 @@ def pipeline(tmp_path: Path) -> dict[str, Any]:
         "client": client,
         "plane": plane,
         "root": root,
-        "worklist": worklist,
-        "selected": selected,
         "verdicts": {
             STILL_TRUE: still_valid,
             CITED_UPDATE: cited_update,
@@ -419,29 +397,6 @@ def pipeline(tmp_path: Path) -> dict[str, Any]:
         },
         "partial": partial,
     }
-
-
-def test_the_pass_selects_the_stale_notes_and_states_their_revisions(
-    pipeline: dict[str, Any],
-) -> None:
-    """The worklist is the cheap half, and it never judges anything."""
-    stale = [
-        item
-        for item in pipeline["worklist"].items
-        if item.pass_id == curation_run.PASS_STALE_NOTE
-    ]
-    # One item per note. Every stale note here fits under the cap, so the plan
-    # covers all of them and reports no overflow; the overflow report itself is
-    # pinned in test_curation_run.
-    assert len(stale) == len(BODIES) <= curation_run.STALE_NOTE_MAX_ITEMS
-    assert not any("more than" in note for note in pipeline["worklist"].notes)
-    # Each reason states the revision, which is the whole of what selection is
-    # for: the operation refuses a verdict about text nobody read, and a caller
-    # that cannot say what it read gets nothing.
-    for item in stale:
-        assert "unverified for" in item.reason
-        assert "revision " in item.reason
-        assert len(item.keys) == 1
 
 
 def test_a_cited_still_valid_is_applied_and_settles_the_note(
@@ -553,7 +508,7 @@ def test_unreachable_evidence_is_an_answer_not_a_failure(
     assert not nv.should_check(
         pipeline["vault"],
         UNREACHABLE,
-        mr.content_revision(BODIES[UNREACHABLE]),
+        fk.content_revision(BODIES[UNREACHABLE]),
         today=TODAY + timedelta(days=29),
     )
 
@@ -573,7 +528,7 @@ def test_partial_coverage_cannot_claim_the_whole_note(
     )
     assert data["check"]["coverage"] == nv.COVERAGE_PARTIAL
     assert not nv.should_check(
-        pipeline["vault"], PARTIAL, mr.content_revision(BODIES[PARTIAL]), today=TODAY
+        pipeline["vault"], PARTIAL, fk.content_revision(BODIES[PARTIAL]), today=TODAY
     )
 
 
@@ -684,10 +639,10 @@ def test_dismissing_the_retirement_reverses_nothing_and_stays_reversible(
     check = nv.read_note_checks(vault)[RETIREMENT]
     assert check.proposal_id == ""
     assert not nv.should_check(
-        vault, RETIREMENT, mr.content_revision(BODIES[RETIREMENT]), today=TODAY
+        vault, RETIREMENT, fk.content_revision(BODIES[RETIREMENT]), today=TODAY
     )
     assert nv.should_check(
-        vault, RETIREMENT, mr.content_revision(BODIES[RETIREMENT] + "\nnew\n"), today=TODAY
+        vault, RETIREMENT, fk.content_revision(BODIES[RETIREMENT] + "\nnew\n"), today=TODAY
     )
 
 

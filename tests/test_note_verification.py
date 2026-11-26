@@ -39,6 +39,7 @@ import pytest
 
 from ciao import fts_search
 from ciao import memory_receipts as mr
+from ciao import file_kernel as fk
 from ciao import note_verification as nv
 from ciao import vault_index
 from ciao import vault_review as review
@@ -113,7 +114,7 @@ def _write(vault: Path, relative: str, text: str) -> Path:
 
 def _revision(path: Path) -> str:
     """The revision of a note's exact bytes, as a caller would have read them."""
-    return mr.content_revision(path.read_bytes().decode("utf-8"))
+    return fk.content_revision(path.read_bytes().decode("utf-8"))
 
 
 def _config(vault: Path) -> SimpleNamespace:
@@ -217,7 +218,7 @@ def test_still_valid_with_cited_evidence_restamps_and_undoes(tmp_path: Path) -> 
     assert check is not None
     assert check.relative_path == NOTE
     assert check.outcome == nv.STILL_VALID
-    assert check.content_revision == mr.content_revision(stamped)
+    assert check.content_revision == fk.content_revision(stamped)
     assert check.receipt_id == receipt["id"]
     assert _checks(vault) == {NOTE: check}
 
@@ -291,7 +292,7 @@ def test_update_with_a_contradicting_source_applies_the_exact_text(
     assert receipts[0]["id"] == result.receipt_id
     assert result.check is not None
     assert result.check.outcome == nv.UPDATE
-    assert result.check.content_revision == mr.content_revision(BOM_CRLF_AFTER)
+    assert result.check.content_revision == fk.content_revision(BOM_CRLF_AFTER)
 
 
 def test_an_update_with_one_uncited_row_among_the_citations_needs_review(
@@ -476,7 +477,7 @@ def test_a_stale_revision_is_a_conflict_even_when_nothing_would_be_written(
     assert note.read_bytes() == before_bytes
 
 
-@pytest.mark.parametrize("error", [mr.QueueLockError("the queue lock is held"), OSError("disk went away")])
+@pytest.mark.parametrize("error", [fk.QueueLockError("the queue lock is held"), OSError("disk went away")])
 def test_verify_note_reports_a_write_failure_instead_of_raising(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, error: Exception
 ) -> None:

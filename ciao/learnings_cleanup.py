@@ -119,7 +119,7 @@ from ciao.learnings_migrate import (
     _write_locked,
     learnings_file,
 )
-from ciao.memory_receipts import content_revision, queue_lock, write_queue_atomically
+from ciao.file_kernel import content_revision, queue_lock, write_queue_atomically
 
 logger = logging.getLogger(__name__)
 

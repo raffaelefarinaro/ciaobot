@@ -1728,87 +1728,6 @@ def _checkout(path: Path, origin: str) -> Path:
     return path
 
 
-def test_workspace_shared_brains_default_empty_persist_validate_and_unlink(tmp_path, monkeypatch):
-    """The list is operator-set per workspace, whole-list, stored sparsely and validated."""
-    from ciao.web import routes_api  # noqa: F401  (route module loaded by the helper)
-    from ciao import shared_brain
-
-    scheduled: list[str] = []
-    monkeypatch.setattr(shared_brain, "schedule_update", lambda link, config: scheduled.append(link.path))
-    client, config, _pcm = _client(tmp_path)
-    registry = tmp_path / ".runtime" / "workspaces.json"
-    acme = _checkout(_away(tmp_path) / "acme", "https://github.com/acme/notes")
-    other = _checkout(_away(tmp_path) / "other", "https://github.com/other/notes")
-
-    assert config.workspace("personal").shared_brains == []
-    listed = client.get("/api/workspaces").json()
-    assert next(w for w in listed["workspaces"] if w["name"] == "personal")["shared_brains"] == []
-
-    saved = client.patch(
-        "/api/workspaces/personal",
-        json={"shared_brains": [
-            {
-                "path": str(acme),
-                "lifetime_id": "browser-forgery",
-                "sharing_policy": "automatic",
-                "sharing_consent": {"generation": 1, "identity": "github.com/acme/notes"},
-            },
-            {"path": str(other), "name": "team"},
-        ]},
-    )
-    assert saved.status_code == 200, saved.text
-    assert all(
-        link.sharing_policy == "review" and link.sharing_consent is None
-        for link in config.workspace("personal").shared_brains
-    )
-    rows = next(w for w in json.loads(registry.read_text()) if w["name"] == "personal")["shared_brains"]
-    assert [(r["name"], r["identity"]) for r in rows] == [
-        ("notes", "github.com/acme/notes"),
-        ("team", "github.com/other/notes"),
-    ]
-    first_lifetime = rows[0]["lifetime_id"]
-    assert first_lifetime != "browser-forgery"
-    public_brains = next(w for w in saved.json()["workspaces"] if w["name"] == "personal")["shared_brains"]
-    assert all("lifetime_id" not in link for link in public_brains)
-    assert len(scheduled) == 2
-
-    reloaded = _client(tmp_path)[1]
-    assert [link.name for link in reloaded.workspace("personal").shared_brains] == ["notes", "team"]
-    assert reloaded.workspace("personal").shared_brains[0].lifetime_id == first_lifetime
-
-    original_persist = routes_api.persist_workspaces
-    saved_registry = registry.read_text()
-    def fail_persist(_config, *_args, **_kwargs):
-        raise OSError("disk full")
-    monkeypatch.setattr(routes_api, "persist_workspaces", fail_persist)
-    with pytest.raises(OSError, match="disk full"):
-        client.patch("/api/workspaces/personal", json={"shared_brains": []})
-    assert config.workspace("personal").shared_brains[0].lifetime_id == first_lifetime
-    assert registry.read_text() == saved_registry
-    monkeypatch.setattr(routes_api, "persist_workspaces", original_persist)
-
-    bad = client.patch(
-        "/api/workspaces/personal",
-        json={"shared_brains": [{"path": str(acme)}, {"path": str(tmp_path / "missing")}]},
-    )
-    assert bad.status_code == 400
-    assert [link.name for link in config.workspace("personal").shared_brains] == ["notes", "team"]
-
-    removed_one = client.patch("/api/workspaces/personal", json={"shared_brains": [{"path": str(other)}]})
-    assert removed_one.status_code == 200
-    assert [link.name for link in config.workspace("personal").shared_brains] == ["team"]
-    assert acme.is_dir() and (acme / ".git").is_dir()
-
-    cleared = client.patch("/api/workspaces/personal", json={"shared_brains": []})
-    assert cleared.status_code == 200
-    assert config.workspace("personal").shared_brains == []
-    row = next(w for w in json.loads(registry.read_text()) if w["name"] == "personal")
-    assert "shared_brains" not in row
-    relinked = client.patch("/api/workspaces/personal", json={"shared_brains": [{"path": str(acme)}]})
-    assert relinked.status_code == 200
-    assert config.workspace("personal").shared_brains[0].lifetime_id != first_lifetime
-
-
 def test_shared_brain_folder_paths_preserve_a_trailing_space(tmp_path):
     """Two existing siblings must stay distinct; trim must not link the wrong one."""
     client, config, _pcm = _client(tmp_path)
@@ -2113,53 +2032,77 @@ def test_workspace_lifetime_persists_and_recreate_gets_a_fresh_one(tmp_path):
     assert config.workspace("client-a").lifetime_id
     assert config.workspace("client-a").lifetime_id != lifetime
 
-def test_inaccessible_fence_directory_marks_recovery_pending(tmp_path, monkeypatch):
-    from ciao import shared_brain
-
-    client, config, _pcm = _client(tmp_path)
-    real_glob = Path.glob
-
-    def fail_glob(self, pattern):
-        if self.name == "sharing-pending":
-            raise OSError("permission denied")
-        return real_glob(self, pattern)
-
-    monkeypatch.setattr(Path, "glob", fail_glob)
-    shared_brain.apply_persisted_sharing_revocations(config)
-    assert config._sharing_recovery_pending is True
-
-
 # --- #3615 grant scope and generation binding -------------------------------
 
-def test_legacy_rows_load_unchanged_and_a_malformed_scope_is_review(tmp_path, monkeypatch):
+
+def test_workspace_shared_brains_default_empty_persist_validate_and_unlink(tmp_path, monkeypatch):
+    """The list is operator-set per workspace, whole-list, stored sparsely and validated."""
+    from ciao.web import routes_api  # noqa: F401  (route module loaded by the helper)
     from ciao import shared_brain
-    from ciao.config import SharedBrainLink, shared_brain_row
 
-    link = shared_brain.set_sharing_policy(
-        SharedBrainLink(name="notes", path="/x", identity="github.com/acme/notes"), "automatic")
-    legacy = shared_brain_row(link)
-    assert "scope" not in legacy["sharing_consent"]  # a legacy-shaped consent writes the legacy row
-    from ciao.config import shared_brains_from_rows
+    scheduled: list[str] = []
+    monkeypatch.setattr(shared_brain, "schedule_update", lambda link, config: scheduled.append(link.path))
+    client, config, _pcm = _client(tmp_path)
+    registry = tmp_path / ".runtime" / "workspaces.json"
+    acme = _checkout(_away(tmp_path) / "acme", "https://github.com/acme/notes")
+    other = _checkout(_away(tmp_path) / "other", "https://github.com/other/notes")
 
-    [loaded] = shared_brains_from_rows([legacy])
-    assert shared_brain.sharing_consent_active(loaded) and loaded.sharing_consent.scope is None  # type: ignore[union-attr]
-    assert shared_brain_row(loaded) == legacy
-    assert not shared_brain.sharing_scope_permits(
-        loaded, project="p1", producer="memory_extraction", operation="append", note_type="decision")
-    scoped = shared_brain_row(shared_brain.set_sharing_policy(
-        SharedBrainLink(name="notes", path="/x", identity="github.com/acme/notes"), "automatic",
-        shared_brain.build_sharing_scope(
-            SharedBrainLink(name="notes", path="/x", identity="github.com/acme/notes"),
-            projects=["p1"], producers=["memory_extraction"], operations=["append"],
-            known_projects={"p1"}, known_producers=("memory_extraction",))))
-    for label, scope in {
-        "string": "all",
-        "unsorted": {**scoped["sharing_consent"]["scope"], "projects": ["b", "a"]},
-        "duplicate": {**scoped["sharing_consent"]["scope"], "projects": ["a", "a"]},
-        "missing": {k: v for k, v in scoped["sharing_consent"]["scope"].items() if k != "producers"},
-        "negative": {**scoped["sharing_consent"]["scope"], "mapping_generation": -1},
-    }.items():
-        row = {**scoped, "sharing_consent": {**scoped["sharing_consent"], "scope": scope}}
-        [bad] = shared_brains_from_rows([row])
-        assert bad.sharing_policy == "review" and bad.sharing_consent is None, label
+    assert config.workspace("personal").shared_brains == []
+    listed = client.get("/api/workspaces").json()
+    assert next(w for w in listed["workspaces"] if w["name"] == "personal")["shared_brains"] == []
 
+    saved = client.patch(
+        "/api/workspaces/personal",
+        json={"shared_brains": [
+            {"path": str(acme), "lifetime_id": "browser-forgery"},
+            {"path": str(other), "name": "team"},
+        ]},
+    )
+    assert saved.status_code == 200, saved.text
+    assert all(link.enabled for link in config.workspace("personal").shared_brains)
+    rows = next(w for w in json.loads(registry.read_text()) if w["name"] == "personal")["shared_brains"]
+    assert [(r["name"], r["identity"]) for r in rows] == [
+        ("notes", "github.com/acme/notes"),
+        ("team", "github.com/other/notes"),
+    ]
+    first_lifetime = rows[0]["lifetime_id"]
+    assert first_lifetime != "browser-forgery"
+    public_brains = next(w for w in saved.json()["workspaces"] if w["name"] == "personal")["shared_brains"]
+    assert all("lifetime_id" not in link for link in public_brains)
+    assert len(scheduled) == 2
+
+    reloaded = _client(tmp_path)[1]
+    assert [link.name for link in reloaded.workspace("personal").shared_brains] == ["notes", "team"]
+    assert reloaded.workspace("personal").shared_brains[0].lifetime_id == first_lifetime
+
+    original_persist = routes_api.persist_workspaces
+    saved_registry = registry.read_text()
+    def fail_persist(_config, *_args, **_kwargs):
+        raise OSError("disk full")
+    monkeypatch.setattr(routes_api, "persist_workspaces", fail_persist)
+    with pytest.raises(OSError, match="disk full"):
+        client.patch("/api/workspaces/personal", json={"shared_brains": []})
+    assert config.workspace("personal").shared_brains[0].lifetime_id == first_lifetime
+    assert registry.read_text() == saved_registry
+    monkeypatch.setattr(routes_api, "persist_workspaces", original_persist)
+
+    bad = client.patch(
+        "/api/workspaces/personal",
+        json={"shared_brains": [{"path": str(acme)}, {"path": str(tmp_path / "missing")}]},
+    )
+    assert bad.status_code == 400
+    assert [link.name for link in config.workspace("personal").shared_brains] == ["notes", "team"]
+
+    removed_one = client.patch("/api/workspaces/personal", json={"shared_brains": [{"path": str(other)}]})
+    assert removed_one.status_code == 200
+    assert [link.name for link in config.workspace("personal").shared_brains] == ["team"]
+    assert acme.is_dir() and (acme / ".git").is_dir()
+
+    cleared = client.patch("/api/workspaces/personal", json={"shared_brains": []})
+    assert cleared.status_code == 200
+    assert config.workspace("personal").shared_brains == []
+    row = next(w for w in json.loads(registry.read_text()) if w["name"] == "personal")
+    assert "shared_brains" not in row
+    relinked = client.patch("/api/workspaces/personal", json={"shared_brains": [{"path": str(acme)}]})
+    assert relinked.status_code == 200
+    assert config.workspace("personal").shared_brains[0].lifetime_id != first_lifetime

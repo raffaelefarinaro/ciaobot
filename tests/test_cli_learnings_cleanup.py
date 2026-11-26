@@ -27,7 +27,7 @@ from ciao.learning_records import (
     entry_revision,
     render_learning,
 )
-from ciao.memory_receipts import write_queue_atomically
+from ciao.file_kernel import write_queue_atomically
 
 WORKSPACE = "personal"
 RETIRED = "Blocked pages need a fallback."
@@ -842,42 +842,6 @@ def test_the_unattended_mode_needs_no_approval_file(
         render_learning(record) in _learnings(vault)
         for record in (RETIRED_RECORD, SECOND_RECORD, UNPROPOSED_RECORD)
     )
-
-
-def test_the_unattended_mode_takes_the_pass_budget(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
-) -> None:
-    """A backlog allowed to drain at full speed takes the whole night's budget and
-    the required weekly hygiene keys are never reached, so ``last_full_pass`` can
-    never advance. The cap is what keeps this a pass rather than a takeover, and it
-    is the *plan* that is capped too — a table printing ``REMOVE`` beside a row
-    this run will not remove is a table that lies about what it did."""
-    from ciao.curation_run import LEARNINGS_CLEANUP_MAX_ITEMS
-
-    records = tuple(
-        _record(f"Lesson {index} is settled.", f"lesson-{index}")
-        for index in range(LEARNINGS_CLEANUP_MAX_ITEMS + 3)
-    )
-    vault = _install(tmp_path, monkeypatch, records=records, settled=False)
-    _settle(tmp_path / "workspace", *records)
-    runtime = str(tmp_path / ".runtime")
-
-    assert cli.main(_run("--apply-settled", "--runtime-root", runtime)) == 0
-
-    out = capsys.readouterr().out
-    assert f"Removed {LEARNINGS_CLEANUP_MAX_ITEMS} entr(y/ies)." in out
-    assert "More are settled than one run retires" in out
-    # The rows behind the cap are marked as waiting rather than as removed, so a
-    # reader of the table is not misled about either.
-    assert out.count("REMOVE") == LEARNINGS_CLEANUP_MAX_ITEMS
-    assert out.count("LATER") == 3
-    assert out.count("this run is capped at") == 3
-
-    # And the backlog drains over the next runs rather than stalling.
-    for _ in range(3):
-        cli.main(_run("--apply-settled", "--runtime-root", runtime))
-        capsys.readouterr()
-    assert all(render_learning(record) not in _learnings(vault) for record in records)
 
 
 def test_the_unattended_mode_is_not_the_attended_one(
