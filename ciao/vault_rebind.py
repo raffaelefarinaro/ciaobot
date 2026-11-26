@@ -139,11 +139,9 @@ def _snapshot(root: Path) -> tuple[dict[str, str], dict[str, tuple[int, ...]]]:
 def preview(source: Path, destination: Path, *, expected_registry: bytes, protected_roots: Sequence[Path]) -> RebindPreview:
     """Compare complete local trees and bind evidence to an explicit registry image."""
     source, destination = _directory(source), _directory(destination)
-    def overlaps(a: Path, b: Path) -> bool:
-        return a == b or a in b.parents or b in a.parents
-    if overlaps(source, destination):
+    if _overlaps(source, destination):
         raise ValueError("notes roots overlap")
-    if any(overlaps(destination, _directory(root)) for root in protected_roots):
+    if any(_overlaps(destination, _directory(root)) for root in protected_roots):
         raise ValueError("destination overlaps a protected root")
     before, source_identity = _snapshot(source)
     after, destination_identity = _snapshot(destination)
@@ -219,7 +217,11 @@ def authoritative_preview(install: Path, workspace: str, destination: Path, *, e
         if not isinstance(name, str) or not _NAME.fullmatch(name) or name.casefold() in folded_names or not isinstance(root, str):
             raise ValueError("ambiguous registry")
         folded_names.add(name.casefold())
-        roots[name] = _resolve_root(install, root)
+        try:
+            roots[name] = _resolve_root(install, root)
+        except ValueError as exc:
+            # One unsupported workspace blocks every preview: say which one.
+            raise ValueError(f"workspace '{name}': {exc}") from exc
     if workspace not in roots:
         raise ValueError("workspace is not registered")
     # The install's runtime directory holds the registry, locks, journal and
@@ -235,8 +237,18 @@ def authoritative_preview(install: Path, workspace: str, destination: Path, *, e
     return RebindPreview(result.source, result.destination, result.files, token)
 
 
+def _same_or_inside(path: Path, other: Path) -> bool:
+    """True when `path` is `other` or lies below it, as the filesystem sees it.
+
+    Both are existing directories (`_directory`). Comparing path strings misses
+    a case-variant spelling on case-insensitive APFS (`.RunTime` is `.runtime`),
+    so each ancestor is compared with `os.path.samefile` instead.
+    """
+    return any(os.path.samefile(ancestor, other) for ancestor in (path, *path.parents))
+
+
 def _overlaps(a: Path, b: Path) -> bool:
-    return a == b or a in b.parents or b in a.parents
+    return _same_or_inside(a, b) or _same_or_inside(b, a)
 
 
 def _lexical_root(install: Path, raw: str) -> Path:
