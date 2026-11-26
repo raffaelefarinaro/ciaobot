@@ -80,6 +80,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 import secrets
 import threading
 import time
@@ -88,6 +89,7 @@ from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
 from typing import Any, Callable, Iterator, Protocol
+from urllib.parse import urlsplit
 
 from ciao.os_support.files import open_fd, replace_file
 from ciao.os_support.locks import lock_exclusive, unlock
@@ -431,6 +433,32 @@ def _digest(value: str) -> str:
     ``challenge_unknown``.
     """
     return hashlib.sha256(value.encode("utf-8")).hexdigest()
+
+
+_SCP_LOCATOR = re.compile(r"^(?:[^@/:]+@)?([^@/:]+):(?!//)(.*)$")
+
+
+def _canonical_locator(storage: str) -> str:
+    """The storage locator without anything secret-bearing.
+
+    Userinfo, query and fragment are dropped from URLs (``https://u:s@host/p?token=x``)
+    and from scp-style remotes (``u@host:path``); scheme and host are lower-cased.
+    Anything else (a folder path) is returned unchanged.
+    """
+    if "://" in storage:
+        parts = urlsplit(storage)
+        host = parts.netloc.rpartition("@")[2].lower()  # drops userinfo, keeps the port
+        return f"{parts.scheme.lower()}://{host}{parts.path}"
+    scp = _SCP_LOCATOR.match(storage)
+    if scp is not None and not storage.startswith(("/", ".", "~")):
+        path = scp.group(2).split("?", 1)[0].split("#", 1)[0]
+        return f"{scp.group(1).lower()}:{path}"
+    return storage
+
+
+def _storage_digest(storage: str) -> str:
+    """SHA-256 of the canonical locator: what the audit records for a storage."""
+    return _digest(_canonical_locator(storage))
 
 
 def _required_principal(value: str, reason: str) -> str:
@@ -1149,8 +1177,8 @@ class StewardAuthority:
         fields = {
             "operation": operation.value,
             "brain": connector.brain,
-            # A digest, never the locator: a storage URL can carry credentials.
-            "storage": _digest(connector.storage),
+            # A digest of the canonical locator, never the locator itself.
+            "storage": _storage_digest(connector.storage),
             "actor": actor.principal,
             "previous_steward": previous_steward,
             "steward": successor.principal,
@@ -1181,7 +1209,11 @@ class StewardAuthority:
             self._invalidate_brain(connector.brain)
             try:
                 self._audit_append(AuditKind.COMMITTED, intent, fields)
-            except AuthorityError:
+            except AuthorityError as exc:
+                if exc.reason == "audit_resolved":
+                    # Someone else already resolved our live intent: the audit
+                    # now contradicts the record this call just changed.
+                    raise AuthorityError("audit_inconsistent") from None
                 raise AuthorityError("audit_unconfirmed") from None
         finally:
             with _LIVE_LOCK:
@@ -1227,9 +1259,12 @@ class StewardAuthority:
         if self._durable is None:
             return 0
         try:
-            pending = self._durable.pending()
+            entries = self._durable.view().entries
         except AuditError as exc:
             raise AuthorityError("audit_unavailable") from exc
+        resolved = {e.intent for e in entries if e.kind is not AuditKind.INTENT}
+        pending = [e for e in entries if e.kind is AuditKind.INTENT and e.intent not in resolved]
+        self._check_recovered_aborts(entries)
         settled = 0
         for entry in pending:
             if not self._orphaned(entry):
@@ -1238,7 +1273,7 @@ class StewardAuthority:
                 record = self._store.load(entry.brain)
             except StoreError as exc:
                 raise AuthorityError("store_unavailable") from exc
-            if record is not None and _digest(record.storage) != entry.storage:
+            if record is not None and _storage_digest(record.storage) != entry.storage:
                 raise AuthorityError("audit_inconsistent")
             if (
                 record is not None
@@ -1271,14 +1306,40 @@ class StewardAuthority:
             settled += 1
         return settled
 
+    def _check_recovered_aborts(self, entries: tuple[AuditEntry, ...]) -> None:
+        """A recovered "aborted" must not contradict the authority record.
+
+        If the record shows the very generation and steward an aborted intent
+        was trying to install, the transition did commit and the audit is false
+        (a late committer was settled as aborted). The engine stays closed.
+        """
+        assert self._durable is not None
+        for entry in entries:
+            if entry.kind is not AuditKind.ABORTED or not entry.recovered:
+                continue
+            try:
+                record = self._store.load(entry.brain)
+            except StoreError as exc:
+                raise AuthorityError("store_unavailable") from exc
+            if (
+                record is not None
+                and record.generation == entry.generation
+                and record.steward == entry.steward
+                and _storage_digest(record.storage) == entry.storage
+            ):
+                raise AuthorityError("audit_inconsistent")
+
     def _orphaned(self, entry: AuditEntry) -> bool:
         with _LIVE_LOCK:
             if entry.intent in _LIVE_INTENTS:
                 return False
-        if self._wall_clock() - entry.at >= INTENT_MAX_AGE_S:
-            return True
-        # "self" without a live registration is an abandoned call of this process.
-        return owner_state(entry.owner) != "alive"
+        # "self" without a live registration is an abandoned call of this
+        # process. A live owner is never settled, however old; age decides only
+        # when liveness cannot be determined.
+        state = owner_state(entry.owner)
+        if state == "unknown":
+            return self._wall_clock() - entry.at >= INTENT_MAX_AGE_S
+        return state != "alive"
 
     def durable_audit(self) -> tuple[AuditEntry, ...]:
         """The verified durable audit, oldest first; empty without a durable log."""

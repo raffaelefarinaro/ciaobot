@@ -51,7 +51,6 @@ admission. No nonce, capability seal or evidence is ever written.
 
 from __future__ import annotations
 
-import functools
 import hashlib
 import json
 import math
@@ -89,8 +88,10 @@ GENESIS_HASH = "0" * 64
 MAX_FIELD_BYTES = 512
 MAX_LINE_BYTES = 8192
 
-#: An intent older than this is settled even when its owner still looks alive
-#: (a reused pid): well beyond any admission lifetime.
+#: An intent whose owner's liveness cannot be determined (a pid that exists
+#: under another or unreadable boot id) is settled once it is this old, well
+#: beyond any admission lifetime. A demonstrably live owner is never settled by
+#: age, so a hung committer or a wall-clock step cannot make its audit false.
 INTENT_MAX_AGE_S = 3600.0
 
 #: State schema. Any other value is corrupt.
@@ -183,27 +184,44 @@ _BODY_KEYS = frozenset(
 )
 
 
-@functools.lru_cache(maxsize=1)
+_BOOT_CACHE: list[str] = []
+
+
 def _boot_id() -> str:
-    """An identifier that changes on reboot, so a recycled pid is not mistaken for its owner."""
+    """An identifier that usually changes on reboot; "unknown" when it cannot be read.
+
+    Only a successful read is cached: a transient failure must not pin
+    "unknown" for the life of the process. On macOS the value is the boot time
+    from sysctl, which can shift when the clock is stepped, so a mismatch never
+    proves a reboot on its own (see :func:`owner_state`). In a Linux container
+    this is the host's boot id and a pid is namespace-local, so sharing one
+    audit directory between containers (or between a container and its host) is
+    unsupported: another namespace's pid would read as dead.
+    """
+    if _BOOT_CACHE:
+        return _BOOT_CACHE[0]
+    found = "unknown"
     try:
         with open("/proc/sys/kernel/random/boot_id", encoding="ascii") as handle:
-            return handle.read().strip() or "unknown"
+            found = handle.read().strip() or "unknown"
     except OSError:
-        pass
-    try:
-        done = subprocess.run(
-            ["/usr/sbin/sysctl", "-n", "kern.boottime"],
-            capture_output=True,
-            text=True,
-            encoding="utf-8",
-            timeout=5,
-            check=False,
-        )
-        text = done.stdout.strip()
-        return text.replace(" ", "") if done.returncode == 0 and text else "unknown"
-    except (OSError, subprocess.SubprocessError):
-        return "unknown"
+        try:
+            done = subprocess.run(
+                ["/usr/sbin/sysctl", "-n", "kern.boottime"],
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                timeout=5,
+                check=False,
+            )
+            text = done.stdout.strip()
+            if done.returncode == 0 and text:
+                found = text.replace(" ", "")
+        except (OSError, subprocess.SubprocessError):
+            pass
+    if found != "unknown":
+        _BOOT_CACHE.append(found)
+    return found
 
 
 def current_owner() -> str:
@@ -212,15 +230,18 @@ def current_owner() -> str:
 
 
 def owner_state(owner: str) -> str:
-    """"self", "alive" or "dead" for an intent owner string.
+    """"self", "alive", "dead" or "unknown" for an intent owner string.
 
-    "self" is this very process: the caller's own live-intent registry decides.
-    A different boot, an unparseable owner or a pid that no longer exists is
-    "dead"; a pid that exists but belongs to someone else is conservatively
-    "alive" (the age cap bounds how long that can hold an intent open).
+    "self" is this very process (whatever its boot id says): the caller's own
+    live-intent registry decides. A pid that does not exist is "dead". A pid
+    that exists and carries the same, known boot id is "alive". A pid that
+    exists under a different or unreadable boot id is "unknown": it may be a
+    recycled pid after a reboot or the same process after a clock step shifted
+    the boot time, and only the caller's age rule can tell. A live owner is
+    never settled by age alone; age applies to "unknown" only.
     """
     pid_text, _, boot = owner.partition(":")
-    if not pid_text.isdigit() or boot != _boot_id():
+    if not pid_text.isdigit():
         return "dead"
     pid = int(pid_text)
     if pid == os.getpid():
@@ -230,10 +251,11 @@ def owner_state(owner: str) -> str:
     except ProcessLookupError:
         return "dead"
     except PermissionError:
-        return "alive"
+        pass
     except OSError:
         return "dead"
-    return "alive"
+    here = _boot_id()
+    return "alive" if boot == here and here != "unknown" else "unknown"
 
 
 def _chain(previous: str, body: dict[str, Any]) -> str:

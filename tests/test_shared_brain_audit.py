@@ -27,7 +27,7 @@ from ciao.shared_brain_audit import (
     DurableAuditLog,
 )
 from ciao.shared_brain_authority import (
-    _digest,
+    _storage_digest,
     AuthorityError,
     BrainRef,
     ProtectedAuthorityStore,
@@ -673,11 +673,11 @@ REPO = str(Path(__file__).resolve().parents[1])
 _CHILD = """
 import sys
 from ciao.shared_brain_audit import AuditKind, DurableAuditLog
-from ciao.shared_brain_authority import _digest
+from ciao.shared_brain_authority import _storage_digest
 root, brain, storage = sys.argv[1:4]
 DurableAuditLog(root).append(
     AuditKind.INTENT, intent="live-intent", operation="bootstrap", brain=brain,
-    storage=_digest(storage), actor="alice", previous_steward=None, steward="bob",
+    storage=_storage_digest(storage), actor="alice", previous_steward=None, steward="bob",
     previous_generation=0, generation=1, at=__import__("time").time(),
 )
 print("ready", flush=True)
@@ -725,22 +725,205 @@ def test_another_process_live_intent_is_never_settled_and_an_orphan_is_settled_o
     assert len(_resolutions(rig, "live-intent")) == 1
 
 
-def test_an_old_intent_is_settled_even_when_its_owner_looks_alive(tmp_path: Path) -> None:
+def test_a_live_owner_is_never_settled_by_age_or_a_clock_step(tmp_path: Path) -> None:
     rig = Rig(tmp_path)
     child = _spawn_owner(rig)
     try:
-        late = StewardAuthority(
-            ProtectedAuthorityStore(rig.tmp / "authority"),
-            backend=rig.backend,
-            clock=rig.clock,
-            audit=DurableAuditLog(rig.audit_root),
-            wall_clock=lambda: time.time() + INTENT_MAX_AGE_S + 5,
-        )
-        assert len(_resolutions(rig, "live-intent")) == 1
-        assert late.reconcile_audit() == 0
+        for jump in (INTENT_MAX_AGE_S + 5, 10 * 365 * 86400.0):
+            late = StewardAuthority(
+                ProtectedAuthorityStore(rig.tmp / "authority"),
+                backend=rig.backend,
+                clock=rig.clock,
+                audit=DurableAuditLog(rig.audit_root),
+                wall_clock=lambda jump=jump: time.time() + jump,
+            )
+            assert late.reconcile_audit() == 0
+            assert _resolutions(rig, "live-intent") == []
     finally:
         child.kill()
         child.wait()
+
+
+def test_an_intent_with_undeterminable_liveness_is_settled_only_by_age(
+    tmp_path: Path,
+) -> None:
+    rig = Rig(tmp_path)
+    log = DurableAuditLog(rig.audit_root)
+    parent = os.getppid()  # exists, but under a boot id this process cannot confirm
+    log.append(
+        AuditKind.INTENT,
+        intent="maybe",
+        operation="bootstrap",
+        brain=CONNECTOR.brain,
+        storage=_storage_digest(CONNECTOR.storage),
+        actor="alice",
+        previous_steward=None,
+        steward="bob",
+        previous_generation=0,
+        generation=1,
+        at=1_000.0,
+        owner=f"{parent}:another-boot",
+    )
+    young = StewardAuthority(
+        ProtectedAuthorityStore(rig.tmp / "authority"),
+        backend=rig.backend,
+        clock=rig.clock,
+        audit=DurableAuditLog(rig.audit_root),
+        wall_clock=lambda: 1_000.0 + INTENT_MAX_AGE_S - 1,
+    )
+    assert _resolutions(rig, "maybe") == [] and young.reconcile_audit() == 0
+    old = StewardAuthority(
+        ProtectedAuthorityStore(rig.tmp / "authority"),
+        backend=rig.backend,
+        clock=rig.clock,
+        audit=DurableAuditLog(rig.audit_root),
+        wall_clock=lambda: 1_000.0 + INTENT_MAX_AGE_S,
+    )
+    assert len(_resolutions(rig, "maybe")) == 1 and old.reconcile_audit() == 0
+
+
+def test_a_hung_committer_in_this_process_is_not_settled_by_a_later_engine(
+    tmp_path: Path,
+) -> None:
+    rig = Rig(tmp_path)
+    rig.bootstrap()
+    challenge = rig.begin_transfer()
+    entered, release = threading.Event(), threading.Event()
+    original = rig.backend.commit
+
+    def slow(admission: object, mutation: object):
+        entered.set()
+        assert release.wait(10)
+        return original(admission, mutation)  # type: ignore[arg-type]
+
+    rig.backend.commit = slow  # type: ignore[method-assign,assignment]
+    outcome: list[object] = []
+    worker = threading.Thread(
+        target=lambda: outcome.append(
+            rig.engine.accept_transfer(
+                challenge.nonce, connector=CONNECTOR, successor=rig.sign("carol-token")
+            )
+        )
+    )
+    worker.start()
+    assert entered.wait(10)
+    late = StewardAuthority(
+        ProtectedAuthorityStore(rig.tmp / "authority"),
+        backend=rig.backend,
+        clock=rig.clock,
+        audit=DurableAuditLog(rig.audit_root),
+        wall_clock=lambda: time.time() + 10 * INTENT_MAX_AGE_S,
+    )
+    assert late.reconcile_audit() == 0
+    release.set()
+    worker.join(10)
+    kinds = [(e.kind.value, e.recovered) for e in rig.entries() if e.operation == "transfer"]
+    assert kinds == [("intent", False), ("committed", False)]
+
+
+def test_a_post_commit_duplicate_resolution_is_an_inconsistency(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    rig = Rig(tmp_path)
+    rig.bootstrap()
+    challenge = rig.begin_transfer()
+    original = DurableAuditLog.append
+
+    def settled_by_someone_else(self: DurableAuditLog, kind: AuditKind, **kw: object):
+        if kind is AuditKind.COMMITTED:
+            raise AuditError("duplicate_resolution")
+        return original(self, kind, **kw)  # type: ignore[arg-type]
+
+    with monkeypatch.context() as patch:
+        patch.setattr(DurableAuditLog, "append", settled_by_someone_else)
+        with pytest.raises(AuthorityError) as exc:
+            rig.engine.accept_transfer(
+                challenge.nonce, connector=CONNECTOR, successor=rig.sign("carol-token")
+            )
+    assert exc.value.reason == "audit_inconsistent"
+
+
+def test_a_recovered_abort_that_contradicts_the_record_is_flagged(tmp_path: Path) -> None:
+    rig = Rig(tmp_path)
+    rig.bootstrap()  # record: generation 1, steward bob
+    log = DurableAuditLog(rig.audit_root)
+    fields = dict(
+        operation="bootstrap",
+        brain=CONNECTOR.brain,
+        storage=_storage_digest(CONNECTOR.storage),
+        actor="alice",
+        previous_steward=None,
+        steward="bob",
+        previous_generation=0,
+        generation=1,
+        at=1.0,
+    )
+    log.append(AuditKind.INTENT, intent="late", owner="999999:x", **fields)  # type: ignore[arg-type]
+    log.append(AuditKind.ABORTED, intent="late", recovered=True, **fields)  # type: ignore[arg-type]
+    with pytest.raises(AuthorityError) as exc:
+        rig.new_engine()
+    assert exc.value.reason == "audit_inconsistent"
+
+
+def test_boot_id_failures_are_not_cached(monkeypatch: pytest.MonkeyPatch) -> None:
+    from ciao import shared_brain_audit as audit
+
+    monkeypatch.setattr(audit, "_BOOT_CACHE", [])
+    real_open, real_run = open, subprocess.run
+
+    def no_proc(path, *args, **kw):  # type: ignore[no-untyped-def]
+        if str(path).startswith("/proc/"):
+            raise FileNotFoundError(path)
+        return real_open(path, *args, **kw)
+
+    monkeypatch.setattr("builtins.open", no_proc)
+    monkeypatch.setattr(
+        audit.subprocess,
+        "run",
+        lambda *a, **k: (_ for _ in ()).throw(OSError("transient")),
+    )
+    assert audit._boot_id() == "unknown" and audit._BOOT_CACHE == []
+
+    class Done:
+        returncode = 0
+        stdout = "{ sec = 1, usec = 2 }"
+
+    monkeypatch.setattr(audit.subprocess, "run", lambda *a, **k: Done())
+    assert audit._boot_id() == "{sec=1,usec=2}"
+    assert audit._BOOT_CACHE == ["{sec=1,usec=2}"]
+    del real_run
+
+
+def test_owner_state_distinguishes_dead_self_and_unknown() -> None:
+    from ciao.shared_brain_audit import current_owner, owner_state
+
+    assert owner_state(current_owner()) == "self"
+    assert owner_state(f"{os.getpid()}:some-other-boot") == "self"
+    assert owner_state("not-a-pid:x") == "dead"
+    assert owner_state(f"{os.getppid()}:some-other-boot") == "unknown"
+
+
+@pytest.mark.parametrize(
+    "variant",
+    [
+        "https://deploy:hunter2@Example.invalid/team/brain.git",
+        "https://example.invalid/team/brain.git?token=hunter2",
+        "https://deploy@example.invalid/team/brain.git#frag",
+        "HTTPS://example.invalid/team/brain.git?access_token=hunter2&x=1",
+    ],
+)
+def test_storage_digest_ignores_userinfo_and_query(variant: str) -> None:
+    assert _storage_digest(variant) == _storage_digest("https://example.invalid/team/brain.git")
+    assert _storage_digest("https://example.invalid/other.git") != _storage_digest(variant)
+
+
+def test_scp_and_folder_locators_and_ports() -> None:
+    assert _storage_digest("git@host.invalid:team/brain.git") == _storage_digest(
+        "other@host.invalid:team/brain.git?token=x"
+    )
+    assert _storage_digest("https://h.invalid:8443/p") != _storage_digest("https://h.invalid/p")
+    assert _storage_digest("https://h.invalid:bad/p")  # a malformed port still digests
+    assert _storage_digest("/Users/a@b/x") != _storage_digest("/Users/c/x")
 
 
 def test_racing_reconcilers_settle_an_orphan_exactly_once(tmp_path: Path) -> None:
@@ -751,7 +934,7 @@ def test_racing_reconcilers_settle_an_orphan_exactly_once(tmp_path: Path) -> Non
         intent="orphan",
         operation="bootstrap",
         brain=CONNECTOR.brain,
-        storage=_digest(CONNECTOR.storage),
+        storage=_storage_digest(CONNECTOR.storage),
         actor="alice",
         previous_steward=None,
         steward="bob",
@@ -866,8 +1049,8 @@ def test_non_finite_time_is_refused(tmp_path: Path, bad: float) -> None:
     assert log.view().entries == ()
 
 
-def test_storage_is_audited_as_a_digest_without_userinfo(tmp_path: Path) -> None:
-    secret = "https://deploy:hunter2@example.invalid/team/brain.git"
+def test_storage_is_audited_as_a_storage_digest_without_userinfo(tmp_path: Path) -> None:
+    secret = "https://deploy:hunter2@example.invalid/team/brain.git?token=s3cr3t"
     connector = BrainRef("secret-brain", secret)
     rig = Rig(tmp_path)
     successor = rig.sign("bob-token")  # capability binding is per connector below
@@ -882,9 +1065,9 @@ def test_storage_is_audited_as_a_digest_without_userinfo(tmp_path: Path) -> None
     )
     del successor
     raw = "".join(p.read_text() for p in rig.audit_root.glob("audit*"))
-    assert "hunter2" not in raw and "deploy" not in raw
-    assert _digest(secret) in raw
-    assert rig.entries()[0].storage == _digest(secret)
+    assert not any(bit in raw for bit in ("hunter2", "deploy", "s3cr3t", "token"))
+    assert _storage_digest(secret) in raw
+    assert rig.entries()[0].storage == _storage_digest(secret)
 
 
 def test_stale_state_temporaries_are_removed_on_load(tmp_path: Path) -> None:
