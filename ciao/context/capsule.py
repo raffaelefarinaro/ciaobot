@@ -13,6 +13,7 @@ from datetime import UTC, datetime
 from urllib.parse import quote
 
 from ciao.memory_policy import UNATTENDED_CAPSULE_GUIDANCE
+from ciao.tool_path import engine_path_export
 
 
 def _field(value: str, *, limit: int = 1200) -> str:
@@ -42,6 +43,28 @@ TASK_BOARD_HINT = (
     'attended chat, and a finished turn waits for the user — only they mark a '
     'task done.'
 )
+
+def engine_ciao_line() -> str:
+    """The stable line that points every ``ciao`` command at the running engine.
+
+    The engine starts the agent with its own bin dir first on PATH, but the
+    agent's shell sources the user's rc files, which can put an older ``ciao``
+    (a stale uv-tool install in ``~/.local/bin``) back in front. Skills, step
+    files and schedules keep saying ``ciao …``; this one line is what makes that
+    word mean this engine, for the agent and the subagents it starts.
+
+    The value is the engine's own install directory (``tool_path.engine_bin_dir``),
+    never user input, and it is the same for every chat of a process, so like
+    ``TASK_BOARD_HINT`` it rides the stable block and stays out of
+    ``context_digest``.
+    """
+    return (
+        f"ciao_path=`{engine_path_export()}` puts the running engine's `ciao` first. "
+        "Your shell's own PATH can list an older `ciao` before it, so start every shell "
+        "command that runs `ciao` with that line and `;`, and give the same line to any "
+        "subagent that will run `ciao`."
+    )
+
 
 #: Code-work rules for a chat whose project is linked to a git repository.
 #: Sent with the stable block (once per provider session), only when linked.
@@ -315,6 +338,7 @@ def build_context_capsule(
     if canonical_doc:
         stable.append(f"canonical_doc={_field(canonical_doc, limit=300)}")
     stable.append(_field(TASK_BOARD_HINT, limit=400))
+    stable.append(engine_ciao_line())
     if linked_repo_block:
         stable.append(linked_repo_block)
     if shared_brain_block:

@@ -22,11 +22,13 @@ from __future__ import annotations
 
 import glob
 import os
+import shlex
 import shutil
 import subprocess
+import sys
 import sysconfig
 import threading
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 
 
 def engine_bin_dir() -> str:
@@ -73,6 +75,35 @@ def prepend_engine_path(path: str | None = None) -> str:
     # The engine dir is first, so the dedupe keeps it there and drops any later
     # copy of it; the rest keeps its order, one occurrence each.
     return dedupe_path(os.pathsep.join([engine_bin_dir(), current]))
+
+
+def shell_path_export(directory: str, *, windows: bool) -> str:
+    """The POSIX shell line that puts ``directory`` first on PATH, quoted.
+
+    Agents run shell commands in bash or zsh on every platform (on Windows,
+    Claude Code and OpenCode use Git Bash), so a Windows directory is written
+    the way Git Bash spells it (``C:\\x\\Scripts`` -> ``/c/x/Scripts``): a
+    drive colon would otherwise split the PATH entry in two.
+    """
+    if windows:
+        win = PureWindowsPath(directory)
+        drive = win.drive
+        if len(drive) == 2 and drive.endswith(":"):
+            directory = "/" + "/".join([drive[0].lower(), *win.parts[1:]])
+        else:
+            directory = win.as_posix()
+    return f'export PATH={shlex.quote(directory)}:"$PATH"'
+
+
+def engine_path_export() -> str:
+    """The shell line that makes ``ciao`` in an agent's shell the running engine's.
+
+    The engine already starts the agent with :func:`prepend_engine_path`, but
+    the agent's shell sources the user's rc files, which can put a stale
+    ``ciao`` (an older uv-tool install in ``~/.local/bin``) back in front. The
+    context capsule and the care prompt hand the agent this line to run first.
+    """
+    return shell_path_export(engine_bin_dir(), windows=sys.platform == "win32")
 
 
 # Markers wrap the printed PATH so noisy shell rc files (which may echo

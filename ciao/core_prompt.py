@@ -7,12 +7,17 @@ import logging
 from importlib import resources
 from pathlib import Path
 
+from ciao.tool_path import engine_path_export
+
 logger = logging.getLogger(__name__)
 
 _SYSTEM_PROMPT_PATH = Path(__file__).resolve().parent / "system_prompt.md"
 _MEMORY_GUIDE_PARTS = ("skills", "ciao-capabilities", "references", "memory-operations", "guide.md")
 MEMORY_GUIDE_PATH_TOKEN = "{{DURABLE_MEMORY_GUIDE_PATH}}"
 MEMORY_PROCEDURES_PATH_TOKEN = "{{DURABLE_MEMORY_PROCEDURES_PATH}}"
+#: Expands to ``tool_path.engine_path_export()``, the shell line that puts the
+#: running engine's ``ciao`` first on PATH (a stale install can sit earlier).
+ENGINE_PATH_TOKEN = "{{ENGINE_PATH}}"
 
 
 def durable_memory_guide_path() -> Path:
@@ -23,8 +28,10 @@ def durable_memory_guide_path() -> Path:
 def resolve_prompt_asset_paths(text: str) -> str:
     """Expand packaged asset tokens in prompts before they reach an agent."""
     guide = durable_memory_guide_path()
-    return text.replace(MEMORY_GUIDE_PATH_TOKEN, str(guide)).replace(
-        MEMORY_PROCEDURES_PATH_TOKEN, str(guide.parent)
+    return (
+        text.replace(MEMORY_GUIDE_PATH_TOKEN, str(guide))
+        .replace(MEMORY_PROCEDURES_PATH_TOKEN, str(guide.parent))
+        .replace(ENGINE_PATH_TOKEN, engine_path_export())
     )
 
 
