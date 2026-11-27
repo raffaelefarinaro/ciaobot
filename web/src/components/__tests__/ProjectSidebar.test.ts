@@ -178,6 +178,19 @@ describe('ProjectSidebar chat actions', () => {
     wrapper.unmount()
   })
 
+  it('offers Search chats as a destination-style row that opens the dialog', async () => {
+    const wrapper = await mountSidebar()
+    const row = wrapper.get('button.sidebar-search-item')
+    expect(row.classes()).toContain('nav-item')
+    expect(row.find('.nav-item-icon svg').exists()).toBe(true)
+    expect(row.get('.nav-item-label').text()).toBe('Search chats')
+    expect(wrapper.find('.sidebar-search-button').exists()).toBe(false)
+    expect(wrapper.getComponent({ name: 'ChatSearchDialog' }).props('open')).toBe(false)
+    await row.trigger('click')
+    expect(wrapper.getComponent({ name: 'ChatSearchDialog' }).props('open')).toBe(true)
+    wrapper.unmount()
+  })
+
   it('counts tasks waiting for review on the Tasks item, quietly, and hides zero', async () => {
     const signals = useTaskSignalsStore()
     signals.tasks = [

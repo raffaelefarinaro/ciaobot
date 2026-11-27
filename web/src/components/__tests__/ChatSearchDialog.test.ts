@@ -13,7 +13,19 @@ async function settle() {
   await nextTick()
 }
 
+async function searchFor(q: string) {
+  const input = document.querySelector<HTMLInputElement>('#chat-search-input')!
+  input.value = q
+  input.dispatchEvent(new Event('input', { bubbles: true }))
+  await nextTick()
+  await vi.advanceTimersByTimeAsync(250)
+  await settle()
+  return input
+}
+
 describe('ChatSearchDialog', () => {
+  Element.prototype.scrollIntoView = vi.fn()
+
   afterEach(() => { document.body.innerHTML = ''; vi.clearAllMocks(); vi.useRealTimers() })
 
   it('posts scoped queries in the body and renders matches as literal text', async () => {
@@ -193,6 +205,191 @@ describe('ChatSearchDialog', () => {
     expect(post.mock.calls[2]).toEqual(['/api/chats/search', { workspace: 'work', q: 'history', cursor: 'cursor-2' }])
     expect([...document.querySelectorAll('.chat-search-result-title')].map(node => node.textContent)).toEqual(['First', 'Second'])
     expect(document.body.textContent).toContain('Some large transcripts were skipped')
+    wrapper.unmount()
+  })
+
+  it('shows the project with a labelled Archived chip, or the chip alone without a project', async () => {
+    vi.useFakeTimers()
+    post.mockResolvedValue({ items: [
+      { chat_id: 'a', title: 'Live', project_title: 'Upwordo', archived: false, snippet: '' },
+      { chat_id: 'b', title: 'Old', project_title: 'Upwordo', archived: true, snippet: '' },
+      { chat_id: 'c', title: 'Orphan', project_title: '', archived: true, snippet: '' },
+    ], next_cursor: null, skipped_large_transcripts: false })
+    const wrapper = mount(ChatSearchDialog, { attachTo: document.body, props: { open: true, workspace: 'work' } })
+    await settle()
+    await vi.advanceTimersByTimeAsync(20)
+    await searchFor('upwordo')
+    const metas = [...document.querySelectorAll('.chat-search-meta')]
+    expect(metas).toHaveLength(3)
+    expect(metas[0]!.querySelector('.chat-search-project')?.textContent).toBe('Upwordo')
+    expect(metas[0]!.querySelector('.chat-search-chip')).toBeNull()
+    expect(metas[1]!.querySelector('.chat-search-project')?.textContent).toBe('Upwordo')
+    expect(metas[1]!.querySelector('.chat-search-chip')?.textContent).toBe('Archived')
+    expect(metas[2]!.querySelector('.chat-search-project')).toBeNull()
+    expect(metas[2]!.querySelector('.chat-search-chip')?.textContent).toBe('Archived')
+    wrapper.unmount()
+  })
+
+  it('renders snippets as plain text and highlights query terms in title and snippet', async () => {
+    vi.useFakeTimers()
+    post.mockResolvedValue({ items: [
+      { chat_id: 'a', title: 'Haven fix', project_title: 'P', archived: false, snippet: "**haven't** merged [PR #254](https://x.test/254)\n1. done <b>x</b>" },
+    ], next_cursor: null, skipped_large_transcripts: false })
+    const wrapper = mount(ChatSearchDialog, { attachTo: document.body, props: { open: true, workspace: 'work' } })
+    await settle()
+    await vi.advanceTimersByTimeAsync(20)
+    await searchFor('haven pr')
+    const snippet = document.querySelector('.chat-search-snippet')!
+    expect(snippet.textContent).toBe("haven't merged PR #254 done <b>x</b>")
+    expect(snippet.querySelector('b')).toBeNull()
+    expect([...snippet.querySelectorAll('mark')].map(m => m.textContent)).toEqual(['haven', 'PR'])
+    expect([...document.querySelectorAll('.chat-search-result-title mark')].map(m => m.textContent)).toEqual(['Haven'])
+    wrapper.unmount()
+  })
+
+  it('moves a selection with Up and Down from the input and opens it with Enter', async () => {
+    vi.useFakeTimers()
+    post.mockResolvedValue({ items: [
+      { chat_id: 'one', title: 'One', project_title: 'P', archived: false, snippet: '' },
+      { chat_id: 'two', title: 'Two', project_title: 'P', archived: false, snippet: '' },
+    ], next_cursor: null, skipped_large_transcripts: false })
+    const wrapper = mount(ChatSearchDialog, { attachTo: document.body, props: { open: true, workspace: 'work' } })
+    await settle()
+    await vi.advanceTimersByTimeAsync(20)
+    const input = await searchFor('match')
+    const key = async (name: string) => { input.dispatchEvent(new KeyboardEvent('keydown', { key: name, bubbles: true, cancelable: true })); await nextTick() }
+    const options = () => [...document.querySelectorAll('[role="option"]')]
+    expect(input.getAttribute('role')).toBe('combobox')
+    expect(input.hasAttribute('aria-activedescendant')).toBe(false)
+    await key('ArrowDown')
+    expect(options()[0]!.getAttribute('aria-selected')).toBe('true')
+    expect(input.getAttribute('aria-activedescendant')).toBe(options()[0]!.id)
+    await key('ArrowDown')
+    await key('ArrowDown')
+    expect(options().map(o => o.getAttribute('aria-selected'))).toEqual(['false', 'true'])
+    await key('ArrowUp')
+    await key('ArrowUp')
+    expect(input.hasAttribute('aria-activedescendant')).toBe(false)
+    await key('ArrowDown')
+    await key('ArrowDown')
+    expect(document.activeElement).toBe(input)
+    await key('Enter')
+    expect(wrapper.emitted('select')?.at(-1)).toEqual(['two'])
+    wrapper.unmount()
+  })
+
+  it('names the field with a visually hidden label and a placeholder', async () => {
+    const wrapper = mount(ChatSearchDialog, { attachTo: document.body, props: { open: true, workspace: 'work' } })
+    await settle()
+    const label = document.querySelector<HTMLLabelElement>('label[for="chat-search-input"]')!
+    expect(label.className).toBe('sr-only')
+    expect(label.textContent).toBe('Title or conversation text')
+    expect(document.querySelector<HTMLInputElement>('#chat-search-input')!.placeholder).toBe('Title or conversation text')
+    wrapper.unmount()
+  })
+
+  const two = { items: [
+    { chat_id: 'one', title: 'One', project_title: 'P', archived: false, snippet: '' },
+    { chat_id: 'two', title: 'Two', project_title: 'P', archived: false, snippet: '' },
+  ], next_cursor: null, skipped_large_transcripts: false }
+  const press = async (el: Element, init: KeyboardEventInit) => {
+    const event = new KeyboardEvent('keydown', { bubbles: true, cancelable: true, ...init })
+    el.dispatchEvent(event)
+    await nextTick()
+    return event
+  }
+
+  it('ignores Enter and arrows during IME composition', async () => {
+    vi.useFakeTimers()
+    post.mockResolvedValue(two)
+    const wrapper = mount(ChatSearchDialog, { attachTo: document.body, props: { open: true, workspace: 'work' } })
+    await settle()
+    await vi.advanceTimersByTimeAsync(20)
+    const input = await searchFor('match')
+    await press(input, { key: 'ArrowDown' })
+    expect(input.getAttribute('aria-activedescendant')).toBe('chat-search-option-0')
+    const composingEnter = await press(input, { key: 'Enter', isComposing: true })
+    const legacyEnter = await press(input, { key: 'Enter', keyCode: 229 })
+    const composingArrow = await press(input, { key: 'ArrowDown', isComposing: true })
+    expect(wrapper.emitted('select')).toBeUndefined()
+    expect(composingEnter.defaultPrevented || legacyEnter.defaultPrevented || composingArrow.defaultPrevented).toBe(false)
+    expect(input.getAttribute('aria-activedescendant')).toBe('chat-search-option-0')
+    wrapper.unmount()
+  })
+
+  it('selects on click, and hover moves the single active option', async () => {
+    vi.useFakeTimers()
+    post.mockResolvedValue(two)
+    const wrapper = mount(ChatSearchDialog, { attachTo: document.body, props: { open: true, workspace: 'work' } })
+    await settle()
+    await vi.advanceTimersByTimeAsync(20)
+    const input = await searchFor('match')
+    const options = [...document.querySelectorAll<HTMLElement>('[role="option"]')]
+    options[1]!.dispatchEvent(new MouseEvent('mousemove', { bubbles: true }))
+    await nextTick()
+    expect(input.getAttribute('aria-activedescendant')).toBe(options[1]!.id)
+    expect(document.querySelectorAll('.chat-search-result--active')).toHaveLength(1)
+    options[0]!.click()
+    expect(wrapper.emitted('select')?.at(-1)).toEqual(['one'])
+    wrapper.unmount()
+  })
+
+  it('searches at once on Enter with nothing selected', async () => {
+    vi.useFakeTimers()
+    post.mockResolvedValue(two)
+    const wrapper = mount(ChatSearchDialog, { attachTo: document.body, props: { open: true, workspace: 'work' } })
+    await settle()
+    await vi.advanceTimersByTimeAsync(20)
+    const input = document.querySelector<HTMLInputElement>('#chat-search-input')!
+    input.value = 'quick'
+    input.dispatchEvent(new Event('input', { bubbles: true }))
+    await nextTick()
+    expect(post).not.toHaveBeenCalled()
+    await press(input, { key: 'Enter' })
+    expect(post).toHaveBeenCalledWith('/api/chats/search', { workspace: 'work', q: 'quick' })
+    wrapper.unmount()
+  })
+
+  it('closes on Escape', async () => {
+    const wrapper = mount(ChatSearchDialog, { attachTo: document.body, props: { open: true, workspace: 'work' } })
+    await settle()
+    await press(document.querySelector('#chat-search-input')!, { key: 'Escape' })
+    await settle()
+    expect(wrapper.emitted('close')).toBeTruthy()
+    wrapper.unmount()
+  })
+
+  it('keeps Search more and Try again as real tab stops after the field, and scrolls the active option into view', async () => {
+    vi.useFakeTimers()
+    post.mockResolvedValueOnce({ ...two, next_cursor: 'next' })
+    post.mockRejectedValueOnce(new Error('offline'))
+    const wrapper = mount(ChatSearchDialog, { attachTo: document.body, props: { open: true, workspace: 'work' } })
+    await settle()
+    await vi.advanceTimersByTimeAsync(20)
+    const input = await searchFor('match')
+    const tabbable = () => [...document.querySelectorAll<HTMLElement>('input, button, [tabindex]')].filter(el => el.tabIndex >= 0)
+    expect(tabbable().map(el => el.textContent?.trim() || el.id)).toEqual(['chat-search-input', 'Search more', 'Close'])
+    expect(document.querySelector('[role="option"]')!.hasAttribute('tabindex')).toBe(false)
+    const scroll = vi.mocked(Element.prototype.scrollIntoView)
+    await press(input, { key: 'ArrowDown' })
+    await vi.advanceTimersByTimeAsync(0)
+    expect(scroll).toHaveBeenCalledWith({ block: 'nearest' })
+    document.querySelector<HTMLButtonElement>('.chat-search-more')!.click()
+    await settle()
+    expect(tabbable().map(el => el.textContent?.trim() || el.id)).toContain('Try again')
+    wrapper.unmount()
+  })
+
+  it('only points aria-controls at a rendered listbox', async () => {
+    vi.useFakeTimers()
+    post.mockResolvedValue(two)
+    const wrapper = mount(ChatSearchDialog, { attachTo: document.body, props: { open: true, workspace: 'work' } })
+    await settle()
+    await vi.advanceTimersByTimeAsync(20)
+    const input = document.querySelector<HTMLInputElement>('#chat-search-input')!
+    expect(input.hasAttribute('aria-controls')).toBe(false)
+    await searchFor('match')
+    expect(input.getAttribute('aria-controls')).toBe(document.querySelector('[role="listbox"]')!.id)
     wrapper.unmount()
   })
 })
