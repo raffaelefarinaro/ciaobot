@@ -150,3 +150,59 @@ async def test_acp_history_strips_context_capsule_from_user_rows(acp_chat) -> No
     assert _pairs(rows) == [("user", "real question")]
     assert all("CIAO_CONTEXT" not in row["content"] for row in rows)
     assert all("/secret/ws-path" not in row["content"] for row in rows)
+
+
+@pytest.mark.asyncio
+async def test_acp_history_numbers_user_rows_by_engine_turn_when_journal_lacks_early_prompts(
+    acp_chat, monkeypatch
+) -> None:
+    """A journal rebuilt from a loadSession replay holds no user prompts for the turns it
+    replayed (``user_message_chunk`` is silent), so its first user record is not turn 0.
+    The rows must still carry the engine's turn index: the live ``user_echo`` of a turn is
+    deduped by it, and a mismatch rendered that turn's user bubble twice and hung an older
+    turn's send time and duration on its reply."""
+    pcm, chat, config = acp_chat
+    chat.user_turn_count = 4
+    chat.user_turn_timings = {
+        str(turn): {
+            "sent_at": f"2026-11-27T1{turn}:00:00Z",
+            "completed_at": f"2026-11-27T1{turn}:00:30Z",
+            "duration_ms": 1000 * (turn + 1),
+        }
+        for turn in range(4)
+    }
+    durable = [
+        row
+        for turn, (prompt, reply) in enumerate(
+            [("first", "one"), ("second", "two"), ("third", "three"), ("fourth", "four")]
+        )
+        for row in (
+            {"role": "user", "content": prompt, "sent_at": f"2026-11-27T1{turn}:00:00Z"},
+            {"role": "assistant", "content": reply},
+        )
+    ]
+    monkeypatch.setattr(
+        pcm._transcripts, "current_messages", lambda _ctx, _provider: list(durable)
+    )
+    journal = _journal(config, "sess-1")
+    # Turns 0 and 1, as a replay rebuilt them: their events, without their prompts.
+    for reply in ("one", "two"):
+        journal.event({"type": "text_delta", "text": reply})
+        journal.event({"type": "result", "text": reply, "is_error": False})
+    # Turns 2 and 3, journaled live.
+    for prompt, reply in (("third", "three"), ("fourth", "four")):
+        journal.user(prompt)
+        journal.event({"type": "text_delta", "text": reply})
+        journal.event({"type": "result", "text": reply, "is_error": False})
+
+    rows = await _assemble_chat_messages(pcm, config, chat)
+
+    users = [row for row in rows if row["role"] == "user"]
+    assert [(row["content"], row["turn_index"]) for row in users] == [
+        ("third", 2),
+        ("fourth", 3),
+    ]
+    assert [row["sent_at"] for row in users] == ["2026-11-27T12:00:00Z", "2026-11-27T13:00:00Z"]
+    replies = {row["content"]: row for row in rows if row["role"] == "assistant"}
+    assert replies["three"]["duration_ms"] == 3000
+    assert replies["four"]["duration_ms"] == 4000

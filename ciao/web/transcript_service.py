@@ -1764,8 +1764,21 @@ async def _assemble_chat_messages(
         acp_rows = await _acp_history_rows(pcm, config, provider, chat, session_root)
         if acp_rows:
             current = pcm._transcripts.current_messages(ChatContext.for_web(chat_id), provider)
+            # A journal need not hold every prompt since `turn_index_base`: one rebuilt from a
+            # loadSession replay has the replayed turns' events but not their prompts. Number
+            # the user rows from the durable turns they pair with, as the session path does,
+            # so a row carries the engine's turn index (the live `user_echo` is deduped by it).
+            journal_user_rows = [
+                (position, str(row.get("content") or ""), None)
+                for position, row in enumerate(acp_rows)
+                if row.get("role") == "user"
+            ]
+            acp_rows, paired = _align_user_turns(acp_rows, journal_user_rows, current, chat)
             _append_unrendered_error(acp_rows, current)
-            _overlay_transcript_metadata(acp_rows, current)
+            if paired:
+                _overlay_paired_metadata(acp_rows, current, paired)
+            else:
+                _overlay_transcript_metadata(acp_rows, current)
             _overlay_assistant_timings(acp_rows, chat.user_turn_timings)
             return [*handover_messages, *acp_rows]
     if not provider_registry.flag(provider, "session_jsonl_history"):
