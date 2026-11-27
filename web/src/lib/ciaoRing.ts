@@ -1,7 +1,8 @@
 // Geometry of the Ciaobot mark's open-and-close motion. Pure: no Vue, no DOM.
 // ringShape(p) for p in 0..1 describes the mark at that point: 0 is the resting
 // C with its two dots, 1 is the closed ring. The same motion drives the website
-// header (site/assets/site.js); keep the two in step.
+// header (site/assets/site.js) and the Mac menu-bar mark while a chat works
+// (mac/Sources/CiaobotMac/TrayMark.swift); keep them in step.
 //
 // The C spins, its two dots glide onto its open ends, then spread like clay
 // along the opening until they meet and the ring is closed.
