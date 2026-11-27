@@ -42,7 +42,7 @@ describe('composer model popover footer layout', () => {
 
   it('gives the model list the popover: wide, up to 640px tall, the list the only flexible part', () => {
     const popover = ruleBody(selector, '.model-selector__popover')
-    expect(popover).toMatch(/width:\s*min\(520px,\s*calc\(100vw - 24px\)\)/)
+    expect(popover).toMatch(/width:\s*min\(520px,\s*calc\(100vw - 24px\),\s*calc\(100cqw - 16px\)\)/)
     expect(popover).toMatch(/max-height:\s*min\(\s*640px/)
     expect(ruleBody(selector, '.model-selector__list')).toMatch(/flex:\s*1 1 auto/)
     expect(ruleBody(selector, '.model-selector__list')).toMatch(/overflow-y:\s*auto/)

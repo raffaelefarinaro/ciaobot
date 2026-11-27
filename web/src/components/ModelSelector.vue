@@ -631,8 +631,8 @@ onMounted(() => {
      pane a container), so a narrow pane beside the sidebar never clips it;
      with no container it is the viewport. */
   width: min(520px, calc(100vw - 24px), calc(100cqw - 16px));
-  min-width: min(320px, calc(100vw - 24px));
-  max-width: calc(100vw - 24px);
+  min-width: min(320px, calc(100vw - 24px), calc(100cqw - 16px));
+  max-width: min(calc(100vw - 24px), calc(100cqw - 16px));
   /* Reka reports the room left on the chosen side (flipped above the trigger
      on short landscape phones); the viewport bound alone can overflow it. */
   max-height: min(
