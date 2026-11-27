@@ -711,6 +711,21 @@ const GET_ROUTES = {
   },
   '/api/vault/graph': (req) => ({ workspace: WORKSPACES[0].name, workspaces: orderedWorkspaces(sessionOf(req)).map(w => w.name), nodes: MEMORY_NODES, edges: MEMORY_EDGES }),
   '/api/memory/entity-types': () => ({ workspace: WORKSPACES[0].name, vault: '/fixture/vault', types: MEMORY_CATEGORIES }),
+  // Workspace care as a fresh install answers it: no report yet, the care
+  // schedule on. A spec that needs another state answers the read itself.
+  '/api/care-report': (req, url) => {
+    const workspace = url.searchParams.get('workspace') || WORKSPACES[0].name
+    return {
+      status: 'missing', modified_at: '', updated: '', weekly_done: '', interrupted_ids: [],
+      nothing_due: false, malformed: false, steps: [], needs_you: [],
+      counts: { total: 0, done: 0, blocked: 0, open: 0 },
+      workspace,
+      report_path: `${workspace}/Workspace/Care-Report.md`,
+      unsure_path: `${workspace}/Workspace/Unsure.md`,
+      schedule: { id: `system-memory-curation@${workspace}`, enabled: true, last_status: '', last_run_at: '' },
+      running: null,
+    }
+  },
   '/api/models': () => ({
     // A realistic picker needs enough options to exercise its own scroll
     // container; a single model never overflows at the constrained viewport.

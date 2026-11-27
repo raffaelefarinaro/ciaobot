@@ -79,7 +79,7 @@
             class="mc-link"
             :disabled="care.starting"
             @click="runAgain"
-          >{{ care.starting ? 'Starting…' : 'Run care again' }}</button>
+          >{{ care.starting ? 'Starting…' : report.status === 'missing' ? 'Run care now' : 'Run care again' }}</button>
           <button
             type="button"
             class="mc-link"
