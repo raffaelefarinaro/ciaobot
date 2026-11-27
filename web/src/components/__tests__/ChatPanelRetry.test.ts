@@ -10,6 +10,8 @@ import type { ChatInfo, ProjectInfo } from '../../lib/types'
 import { useProjectStore } from '../../stores/projects'
 import { useTaskStore } from '../../stores/tasks'
 import ChatPanel from '../ChatPanel.vue'
+import PermissionModeMenu from '../PermissionModeMenu.vue'
+import type { BridgeMode } from '../../lib/permissionModes'
 
 // The handover confirmation is a promise, not a dialog: the test answers it.
 const askConfirm = vi.hoisted(() => vi.fn())
@@ -1194,6 +1196,23 @@ describe('ChatPanel recovery model picker', () => {
     await flushPromises()
   }
 
+  // The menu button itself (Reka's menu, keys, labels) is covered by
+  // PermissionModeMenu.test.ts; here it is the shallow stub, and a pick is the
+  // event the real one emits. A disabled button does not open, so it emits nothing.
+  const MODE_BY_NAME: Record<string, BridgeMode> = { Manual: 'normal', Auto: 'auto', Bypass: 'bypass', Plan: 'plan' }
+
+  function permissionMenu(wrapper: VueWrapper) {
+    return wrapper.findComponent(PermissionModeMenu)
+  }
+
+  async function choosePermissionMode(wrapper: VueWrapper, name: string) {
+    const menu = permissionMenu(wrapper)
+    expect(menu.exists()).toBe(true)
+    if (menu.props('disabled')) return
+    menu.vm.$emit('select', MODE_BY_NAME[name])
+    await flushPromises()
+  }
+
   async function openComposerPicker(wrapper: VueWrapper) {
     const chip = wrapper.find('.model-picker-wrap.composer-model .composer-chip')
     expect(chip.exists()).toBe(true)
@@ -1671,18 +1690,12 @@ describe('ChatPanel recovery model picker', () => {
     })
     const handover = vi.spyOn(store, 'handoverChat')
     await openComposerPicker(wrapper)
-    for (const [name, description] of [
-      ['Manual', 'ask for every action'],
-      ['Auto', 'allow safe work, ask on risky'],
-      ['Bypass', 'allow everything'],
-      ['Plan', 'read and propose only, change nothing'],
-    ]) {
-      expect(wrapper.text()).toContain(name)
-      expect(wrapper.text()).toContain(description)
-    }
-    expect(wrapper.findAll('.permission-mode[aria-pressed="true"]').map(button => button.text())).toHaveLength(1)
+    const menu = permissionMenu(wrapper)
+    expect(menu.props('modes')).toEqual(['normal', 'auto', 'bypass', 'plan'])
+    expect(menu.props('modelValue')).toBe('normal')
+    expect(menu.props('disabled')).toBe(false)
     for (const [name, value] of [['Auto', 'auto'], ['Bypass', 'bypass'], ['Plan', 'plan'], ['Manual', 'normal']]) {
-      await wrapper.findAll('.permission-mode').find(button => button.text().includes(name))!.trigger('click')
+      await choosePermissionMode(wrapper, name)
       await flushPromises()
       expect(updateChat).toHaveBeenLastCalledWith('chat-1', { mode: value })
     }
@@ -1700,12 +1713,12 @@ describe('ChatPanel recovery model picker', () => {
     store.pendingImages = ['staged.png']
     await wrapper.get('.chat-input').setValue('keep this draft')
     await openComposerPicker(wrapper)
-    await wrapper.findAll('.permission-mode').find(button => button.text().includes('Auto'))!.trigger('click')
+    await choosePermissionMode(wrapper, 'Auto')
     await flushPromises()
     expect(store.pendingChatModeWrites['chat-1']).toBe(1)
     expect(wrapper.text()).toContain('Saving permission mode… Sending from this composer is paused.')
-    expect(wrapper.findAll('.permission-mode[aria-pressed="true"]').map(button => button.text()).join()).toContain('Manual')
-    expect(wrapper.findAll('.permission-mode').every(button => button.attributes('disabled') !== undefined)).toBe(true)
+    expect(permissionMenu(wrapper).props('modelValue')).toBe('normal')
+    expect(permissionMenu(wrapper).props('disabled')).toBe(true)
     expect(wrapper.findAll('.thinking-chip').filter(button => ['Auto', 'Low', 'Medium', 'High'].includes(button.text())).every(button => button.attributes('disabled') !== undefined)).toBe(true)
     rejectWrite(new Error('connection lost'))
     await flushPromises()
@@ -1726,7 +1739,7 @@ describe('ChatPanel recovery model picker', () => {
     const { wrapper } = await mountPanel({ chat: { mode: 'future-mode' } })
     await openComposerPicker(wrapper)
     expect(wrapper.text()).toContain('Current mode is unknown.')
-    expect(wrapper.findAll('.permission-mode[aria-pressed="true"]')).toHaveLength(0)
+    expect(permissionMenu(wrapper).props('modelValue')).toBe('future-mode')
     wrapper.unmount()
   })
 
@@ -1735,7 +1748,7 @@ describe('ChatPanel recovery model picker', () => {
     let resolveWrite!: (chat: ChatInfo) => void
     vi.spyOn(api, 'patch').mockReturnValue(new Promise(resolve => { resolveWrite = resolve }) as never)
     await openComposerPicker(wrapper)
-    await wrapper.findAll('.permission-mode').find(button => button.text().includes('Auto'))!.trigger('click')
+    await choosePermissionMode(wrapper, 'Auto')
     await flushPromises()
     const textarea = wrapper.get<HTMLTextAreaElement>('.chat-input')
     await textarea.setValue('preserved draft')
@@ -1773,7 +1786,7 @@ describe('ChatPanel recovery model picker', () => {
     let resolveWrite!: (chat: ChatInfo) => void
     vi.spyOn(api, 'patch').mockReturnValue(new Promise(resolve => { resolveWrite = resolve }) as never)
     await openComposerPicker(wrapper)
-    await wrapper.findAll('.permission-mode').find(button => button.text().includes('Auto'))!.trigger('click')
+    await choosePermissionMode(wrapper, 'Auto')
     await flushPromises()
     const textarea = wrapper.get<HTMLTextAreaElement>('.chat-input')
     await textarea.setValue('/mcp')
@@ -1792,7 +1805,7 @@ describe('ChatPanel recovery model picker', () => {
     let resolveModeWrite!: (chat: ChatInfo) => void
     const patch = vi.spyOn(api, 'patch').mockReturnValue(new Promise(resolve => { resolveModeWrite = resolve }) as never)
     await openComposerPicker(wrapper)
-    await wrapper.findAll('.permission-mode').find(button => button.text().includes('Auto'))!.trigger('click')
+    await choosePermissionMode(wrapper, 'Auto')
     await flushPromises()
     expect(store.pendingChatModeWrites['chat-1']).toBe(1)
     const continueRecovery = vi.spyOn(store, 'continueRecovery').mockResolvedValue(undefined as never)
@@ -1825,31 +1838,31 @@ describe('ChatPanel recovery model picker', () => {
     })
     await openComposerPicker(wrapper)
     await openComposerPicker(secondPanel.wrapper)
-    expect(secondPanel.wrapper.findAll('.permission-mode')).toHaveLength(4)
-    await wrapper.findAll('.permission-mode').find(button => button.text().includes('Auto'))!.trigger('click')
+    expect(permissionMenu(secondPanel.wrapper).exists()).toBe(true)
+    await choosePermissionMode(wrapper, 'Auto')
     await flushPromises()
     expect(patch).toHaveBeenCalledTimes(1)
     expect(patch).toHaveBeenCalledWith('/api/chats/chat-1', { mode: 'auto' })
     expect(store.pendingChatModeWrites['chat-1']).toBe(1)
-    expect(wrapper.findAll('.permission-mode').every(button => button.attributes('disabled') !== undefined)).toBe(true)
-    expect(secondPanel.wrapper.findAll('.permission-mode')).toHaveLength(4)
-    expect(secondPanel.wrapper.findAll('.permission-mode').every(button => button.attributes('disabled') !== undefined)).toBe(true)
-    await secondPanel.wrapper.findAll('.permission-mode').find(button => button.text().includes('Auto'))!.trigger('click')
+    expect(permissionMenu(wrapper).props('disabled')).toBe(true)
+    expect(permissionMenu(secondPanel.wrapper).exists()).toBe(true)
+    expect(permissionMenu(secondPanel.wrapper).props('disabled')).toBe(true)
+    await choosePermissionMode(secondPanel.wrapper, 'Auto')
     await flushPromises()
     expect(patch).toHaveBeenCalledTimes(1)
     await wrapper.setProps({ chatId: 'chat-2' })
-    await wrapper.findAll('.permission-mode').find(button => button.text().includes('Auto'))!.trigger('click')
+    await choosePermissionMode(wrapper, 'Auto')
     await flushPromises()
     expect(patch).toHaveBeenCalledWith('/api/chats/chat-2', { mode: 'auto' })
     expect(store.chats.find(chat => chat.chat_id === 'chat-2')?.mode).toBe('auto')
     await wrapper.setProps({ chatId: 'chat-1' })
-    expect(wrapper.findAll('.permission-mode').every(button => button.attributes('disabled') !== undefined)).toBe(true)
+    expect(permissionMenu(wrapper).props('disabled')).toBe(true)
     resolveChatA({ ...makeChat('chat-1'), mode: 'auto' })
     await flushPromises()
     expect(store.pendingChatModeWrites['chat-1']).toBeUndefined()
     expect(store.chats.find(chat => chat.chat_id === 'chat-1')?.mode).toBe('auto')
-    expect(secondPanel.wrapper.findAll('.permission-mode')).toHaveLength(4)
-    expect(secondPanel.wrapper.findAll('.permission-mode').every(button => button.attributes('disabled') === undefined)).toBe(true)
+    expect(permissionMenu(secondPanel.wrapper).exists()).toBe(true)
+    expect(permissionMenu(secondPanel.wrapper).props('disabled')).toBe(false)
     expect(picker(wrapper).exists()).toBe(true)
     expect(wrapper.get('.model-picker-wrap.composer-model .composer-chip').attributes('aria-expanded')).toBe('true')
     secondPanel.wrapper.unmount()
@@ -1863,20 +1876,20 @@ describe('ChatPanel recovery model picker', () => {
     const patch = vi.spyOn(api, 'patch').mockReturnValue(new Promise(resolve => { resolveModeWrite = resolve }) as never)
     await openComposerPicker(wrapper)
     await openComposerPicker(secondPanel.wrapper)
-    expect(secondPanel.wrapper.findAll('.permission-mode')).toHaveLength(4)
-    await wrapper.findAll('.permission-mode').find(button => button.text().includes('Auto'))!.trigger('click')
+    expect(permissionMenu(secondPanel.wrapper).exists()).toBe(true)
+    await choosePermissionMode(wrapper, 'Auto')
     await flushPromises()
     expect(store.pendingChatModeWrites['chat-1']).toBe(1)
     wrapper.unmount()
-    expect(secondPanel.wrapper.findAll('.permission-mode')).toHaveLength(4)
-    expect(secondPanel.wrapper.findAll('.permission-mode').every(button => button.attributes('disabled') !== undefined)).toBe(true)
+    expect(permissionMenu(secondPanel.wrapper).exists()).toBe(true)
+    expect(permissionMenu(secondPanel.wrapper).props('disabled')).toBe(true)
     resolveModeWrite({ ...store.chats[0], mode: 'auto' })
     await flushPromises()
     expect(store.pendingChatModeWrites['chat-1']).toBeUndefined()
     expect(store.chats[0].mode).toBe('auto')
     expect(patch).toHaveBeenCalledTimes(1)
-    expect(secondPanel.wrapper.findAll('.permission-mode')).toHaveLength(4)
-    expect(secondPanel.wrapper.findAll('.permission-mode').every(button => button.attributes('disabled') === undefined)).toBe(true)
+    expect(permissionMenu(secondPanel.wrapper).exists()).toBe(true)
+    expect(permissionMenu(secondPanel.wrapper).props('disabled')).toBe(false)
     secondPanel.wrapper.unmount()
   })
 
@@ -1898,7 +1911,7 @@ describe('ChatPanel recovery model picker', () => {
     await wrapper.findAll('.thinking-chip').find(button => button.text() === 'High')!.trigger('click')
     await flushPromises()
     expect(patch).toHaveBeenCalledWith('/api/chats/chat-1', { thinking_level: 'high' })
-    await wrapper.findAll('.permission-mode').find(button => button.text().includes('Auto'))!.trigger('click')
+    await choosePermissionMode(wrapper, 'Auto')
     await flushPromises()
     expect(store.pendingChatModeWrites['chat-1']).toBe(1)
     expect(patch).toHaveBeenCalledTimes(1)
@@ -1955,7 +1968,7 @@ describe('ChatPanel recovery model picker', () => {
     await wrapper.get('.model-picker-wrap.composer-model .composer-chip').trigger('click')
     await wrapper.setProps({ chatId: 'chat-2' })
     await wrapper.setProps({ chatId: 'chat-1' })
-    await wrapper.findAll('.permission-mode').find(button => button.text().includes('Auto'))!.trigger('click')
+    await choosePermissionMode(wrapper, 'Auto')
     await flushPromises()
     expect(store.pendingChatModeWrites['chat-1']).toBe(1)
     expect(patch).not.toHaveBeenCalled()
@@ -2001,7 +2014,12 @@ describe('ChatPanel recovery model picker', () => {
     const updateChat = vi.spyOn(store, 'updateChat').mockResolvedValue(undefined as never)
     await openComposerPicker(wrapper)
     expect(wrapper.text()).toContain('Changes apply to subsequent turns, not the reply already running. Already queued or external turns may start before a change is saved.')
-    await wrapper.findAll('.permission-mode').find(button => button.text().includes('Auto'))!.trigger('click')
+    // The visible note is one line; the full rule is the control's description.
+    const note = wrapper.get('.permission-modes__note')
+    expect(note.get('[aria-hidden="true"]').text()).toBe('Applies to your next message, not a reply already running.')
+    const describedBy = permissionMenu(wrapper).props('describedBy') as string
+    expect(wrapper.get(`#${describedBy}`).text()).toBe('Changes apply to subsequent turns, not the reply already running. Already queued or external turns may start before a change is saved.')
+    await choosePermissionMode(wrapper, 'Auto')
     await flushPromises()
     expect(updateChat).toHaveBeenCalledTimes(1)
     expect(sendMessage).not.toHaveBeenCalled()

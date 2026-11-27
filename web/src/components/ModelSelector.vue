@@ -260,6 +260,28 @@ function onKeydown(event: KeyboardEvent) {
   if (event.key === 'ArrowDown' || event.key === 'ArrowUp') {
     event.preventDefault()
     focusAdjacentItem(event.key === 'ArrowDown' ? 1 : -1)
+    return
+  }
+  const onItem = (document.activeElement as HTMLElement | null)?.classList.contains('ms-item')
+  if (onItem && (event.key === 'Home' || event.key === 'End')) {
+    event.preventDefault()
+    focusEdgeItem(event.key === 'Home' ? 'first' : 'last')
+    return
+  }
+  // Typing on a highlighted row keeps filtering: the character goes to the
+  // search field, which takes focus back, as in a combobox.
+  if (onItem && props.searchable && event.key.length === 1 && event.key !== ' '
+    && !event.metaKey && !event.ctrlKey && !event.altKey) {
+    event.preventDefault()
+    query.value += event.key
+    searchRef.value?.focus()
+    return
+  }
+  if (onItem && props.searchable && event.key === 'Backspace') {
+    event.preventDefault()
+    query.value = query.value.slice(0, -1)
+    searchRef.value?.focus()
+    return
   }
   if (event.key === 'Enter' || event.key === ' ') {
     const focused = document.activeElement as HTMLElement | null
@@ -271,8 +293,19 @@ function onKeydown(event: KeyboardEvent) {
   }
 }
 
+function enabledItems(): HTMLElement[] {
+  return (Array.from(listRef.value?.querySelectorAll('.ms-item') || []) as HTMLButtonElement[])
+    .filter((el) => !el.disabled)
+}
+
+function focusEdgeItem(edge: 'first' | 'last') {
+  const items = enabledItems()
+  const target = edge === 'first' ? items[0] : items[items.length - 1]
+  target?.focus()
+}
+
 function focusAdjacentItem(direction: 1 | -1) {
-  const items = Array.from(listRef.value?.querySelectorAll('.ms-item') || []) as HTMLElement[]
+  const items = enabledItems()
   if (!items.length) return
   const activeEl = document.activeElement as HTMLElement
   const currentIndex = items.findIndex((el) => el === activeEl)
@@ -381,7 +414,7 @@ onMounted(() => {
           aria-haspopup="listbox"
         >
           <span :id="triggerLabelId" class="model-selector__label">{{ triggerLabel }}</span>
-          <span class="model-selector__chevron" aria-hidden="true">▾</span>
+          <svg class="model-selector__chevron" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m7 9 5 5 5-5" /></svg>
         </button>
       </PopoverTrigger>
 
@@ -410,7 +443,7 @@ onMounted(() => {
               class="model-selector__close"
               aria-label="Close model picker"
               @click.stop="close('close')"
-            >×</button>
+            ><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M18 6 6 18M6 6l12 12" /></svg></button>
           </div>
           <div
             class="model-selector__listbox"
@@ -469,11 +502,11 @@ onMounted(() => {
                 @click="selectModel(model, section.key)"
               >
                 <span v-if="multiple" class="model-selector__check" aria-hidden="true">
-                  <span v-if="isSelected(model)" class="model-selector__checkmark">✓</span>
+                  <svg v-if="isSelected(model)" class="model-selector__checkmark" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6 9 17l-5-5" /></svg>
                 </span>
                 <!-- Single select marks the current model with a check on the
                      hover surface, not a filled accent row that reads as a button. -->
-                <span v-else class="model-selector__tick" aria-hidden="true">{{ isActive(model) ? '✓' : '' }}</span>
+                <span v-else class="model-selector__tick" aria-hidden="true"><svg v-if="isActive(model)" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6 9 17l-5-5" /></svg></span>
                 <span class="model-selector__item-main">
                   <span class="model-selector__item-label">{{ modelLabel(section, model) }}</span>
                   <span v-if="modelBadges(section, model).length" class="model-selector__item-badges">
@@ -561,7 +594,6 @@ onMounted(() => {
 .model-selector__chevron {
   flex: 0 0 auto;
   color: var(--fg2);
-  font-size: 12px;
   transition: transform 120ms var(--ease);
 }
 
@@ -576,12 +608,15 @@ onMounted(() => {
   display: flex;
   flex-direction: column;
   min-height: 0;
+  /* The model list is the task: a fixed, roomy width (long opencode ids fit)
+     and up to 640px of height where the viewport has it. */
+  width: min(520px, calc(100vw - 24px));
   min-width: min(320px, calc(100vw - 24px));
-  max-width: min(480px, calc(100vw - 24px));
+  max-width: calc(100vw - 24px);
   /* Reka reports the room left on the chosen side (flipped above the trigger
      on short landscape phones); the viewport bound alone can overflow it. */
   max-height: min(
-    420px,
+    640px,
     calc(100dvh - var(--safe-top) - var(--safe-bottom) - 32px),
     calc(var(--reka-popper-available-height, 100dvh) - 8px)
   );
@@ -589,6 +624,7 @@ onMounted(() => {
   border: 1px solid var(--border);
   border-radius: var(--radius);
   box-shadow: 0 8px 24px rgba(0, 0, 0, 0.35);
+  overflow: hidden;
 }
 
 .model-selector__listbox {
@@ -624,33 +660,35 @@ onMounted(() => {
 
 .model-selector__list {
   overflow-y: auto;
-  padding: 6px;
+  overscroll-behavior: contain;
+  padding: 0 6px 6px;
   flex: 1 1 auto;
   min-height: 0;
+  scroll-padding-top: 36px;
+  scrollbar-width: thin;
+  scrollbar-color: var(--border-strong) transparent;
 }
 
-.model-selector__section {
-  margin-bottom: 8px;
-  padding-bottom: 8px;
-  border-bottom: 1px solid color-mix(in srgb, var(--border) 70%, transparent);
-}
-
-.model-selector__section:last-child {
-  margin-bottom: 0;
-  padding-bottom: 0;
-  border-bottom: none;
+.model-selector__section + .model-selector__section {
+  margin-top: 4px;
+  border-top: 1px solid color-mix(in srgb, var(--border) 70%, transparent);
 }
 
 .model-selector__section--disabled {
   opacity: 0.55;
 }
 
+/* Provider headers stay pinned while their models scroll under them. */
 .model-selector__section-header {
+  position: sticky;
+  top: 0;
+  z-index: 1;
   display: flex;
   align-items: center;
   gap: 8px;
-  padding: 4px 6px;
-  margin-bottom: 2px;
+  min-height: 32px;
+  padding: 8px 8px 4px;
+  background: var(--bg2);
 }
 
 .model-selector__section-label {
@@ -679,14 +717,14 @@ onMounted(() => {
   align-items: center;
   gap: 8px;
   width: 100%;
-  min-height: 34px;
-  padding: 7px 8px;
+  min-height: 40px;
+  padding: 8px 10px 8px 8px;
   border: none;
   border-radius: calc(var(--radius) - 2px);
   background: transparent;
   color: var(--fg);
   font: inherit;
-  font-size: 13px;
+  font-size: var(--text-base);
   text-align: left;
   cursor: pointer;
   transition: background 120ms var(--ease);
@@ -696,10 +734,15 @@ onMounted(() => {
   cursor: not-allowed;
 }
 
-.model-selector__item:hover,
+.model-selector__item:hover:not(:disabled),
 .model-selector__item:focus {
   background: var(--bg3);
   outline: none;
+}
+
+.model-selector__item:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
 }
 
 /* Must stay below the base .model-selector__* rules it overrides. */
@@ -720,11 +763,12 @@ onMounted(() => {
 }
 
 .model-selector__tick {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
   width: 16px;
   flex: 0 0 auto;
   color: var(--accent);
-  font-size: 12px;
-  text-align: center;
 }
 
 .model-selector__check {
@@ -745,7 +789,6 @@ onMounted(() => {
 }
 
 .model-selector__checkmark {
-  font-size: 11px;
   color: var(--on-accent);
 }
 
@@ -808,7 +851,7 @@ onMounted(() => {
   flex: 0 0 auto;
   min-height: 0;
   overflow-y: auto;
-  padding: 8px 10px;
+  padding: 10px 12px;
   /* A control scrolled into view keeps clear of the footer's edge. */
   scroll-padding: 8px;
   border-top: 1px solid color-mix(in srgb, var(--border) 70%, transparent);
@@ -850,6 +893,12 @@ onMounted(() => {
 
 .model-selector__mobile-header {
   display: none;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .model-selector__trigger,
+  .model-selector__chevron,
+  .model-selector__item { transition: none; }
 }
 
 @media (max-width: 768px) {
@@ -920,7 +969,6 @@ onMounted(() => {
     background: transparent;
     color: var(--fg2);
     font: inherit;
-    font-size: 24px;
     line-height: 1;
     cursor: pointer;
     touch-action: manipulation;

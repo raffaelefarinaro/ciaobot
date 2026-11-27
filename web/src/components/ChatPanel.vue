@@ -1186,24 +1186,21 @@
                     </div>
                     <div v-if="!isRecoveryPicker" class="permission-modes">
                       <span :id="domId('permission-mode-label')" class="thinking-levels__label">Permission mode</span>
-                      <div class="permission-modes__choices" role="group" :aria-labelledby="domId('permission-mode-label')">
-                        <button
-                          v-for="mode in permissionModes"
-                          :key="mode"
-                          type="button"
-                          class="thinking-chip permission-mode"
-                          :class="{ 'thinking-chip--active': chat.mode === mode }"
-                          :aria-pressed="chat.mode === mode"
-                          :disabled="modeWritePending"
-                          @click="selectPermissionMode(mode)"
-                        >
-                          <span>{{ PERMISSION_MODE_COPY[mode].name }}</span>
-                          <span class="permission-mode__description">{{ PERMISSION_MODE_COPY[mode].allows }}</span>
-                          <span v-if="chat.mode === mode" class="permission-mode__check" aria-hidden="true">✓</span>
-                        </button>
-                      </div>
+                      <PermissionModeMenu
+                        :model-value="chat.mode"
+                        :modes="permissionModes"
+                        :disabled="modeWritePending"
+                        :labelled-by="domId('permission-mode-label')"
+                        :described-by="domId('permission-mode-note')"
+                        @select="selectPermissionMode"
+                      />
                       <p v-if="!isBridgeMode(chat.mode)" class="permission-modes__unknown">Current mode is unknown.</p>
-                      <p class="permission-modes__note">Changes apply to subsequent turns, not the reply already running. Already queued or external turns may start before a change is saved.</p>
+                      <!-- One calm line; the full rule is the control's description
+                           and the line's tooltip. -->
+                      <p class="permission-modes__note" :title="MODE_CHANGE_NOTE">
+                        <span aria-hidden="true">Applies to your next message, not a reply already running.</span>
+                        <span :id="domId('permission-mode-note')" class="sr-only">{{ MODE_CHANGE_NOTE }}</span>
+                      </p>
                       <p v-if="modeWritePending" class="permission-modes__status" role="status">Saving permission mode… Sending from this composer is paused.</p>
                     </div>
                   </div>
@@ -1461,6 +1458,7 @@ import ProviderMcpButton from './ProviderMcpButton.vue'
 import NeedsYouStack from './NeedsYouStack.vue'
 import { actionCopy } from '../lib/chatActions'
 import ModelSelector from './ModelSelector.vue'
+import PermissionModeMenu from './PermissionModeMenu.vue'
 import { ARCHIVE_ACTION_LABEL } from '../lib/archiveCopy'
 import AppIcon from './AppIcon.vue'
 import ProviderSignInHint from './ProviderSignInHint.vue'
@@ -1476,7 +1474,7 @@ import { errorNoticePrompt, parseInjectedPrompt, retryScheduledNotice, type Inje
 import { linkifyText, type FileMentionTargets } from '../lib/filePaths'
 import { isChatId } from '../lib/chatLinks'
 import { providerForModelSection, sectionKeyForProvider, sectionsFromModelsResponse } from '../lib/modelSections'
-import { isBridgeMode, PERMISSION_MODE_COPY, type BridgeMode } from '../lib/permissionModes'
+import { isBridgeMode, type BridgeMode } from '../lib/permissionModes'
 import { renderMarkdown as renderSafeMarkdown, renderUserMarkdown as renderSafeUserMarkdown } from '../lib/safeMarkdown'
 import { handleCodeCopyClick, writeClipboard } from '../lib/codeCopy'
 import { handleOpenLocalFileClick } from '../lib/openWorkspaceFile'
@@ -2404,6 +2402,10 @@ const showModelPicker = ref(false)
 const modelPickerRef = ref<HTMLElement>()
 const composerModelTrigger = ref<HTMLButtonElement | null>(null)
 const permissionModes: BridgeMode[] = ['normal', 'auto', 'bypass', 'plan']
+// The whole rule behind the picker's one-line note: a change is a chat update,
+// so a running reply keeps its settings, and a turn queued (or sent from
+// elsewhere) before the write settles may still start with the old ones.
+const MODE_CHANGE_NOTE = 'Changes apply to subsequent turns, not the reply already running. Already queued or external turns may start before a change is saved.'
 let pickerGeneration = 0
 watch(showModelPicker, () => { pickerGeneration += 1 }, { flush: 'sync' })
 
@@ -7868,67 +7870,41 @@ details[open] > .activity-summary::before {
   line-height: 1.4;
 }
 
-.thinking-levels {
-  display: flex;
-  flex-direction: column;
-  align-items: stretch;
-  gap: var(--space-2);
-  min-width: 0;
-  padding: 2px 4px;
-}
-
+/* The picker's footer: two compact label/control rows under the model list,
+   then one note line. Labels share a column so the controls line up; a narrow
+   sheet stacks each label over its control. */
 .picker-footer-groups {
-  display: flex;
-  flex-direction: column;
-  gap: var(--space-2);
+  container-type: inline-size;
+  display: grid;
+  grid-template-columns: max-content minmax(0, 1fr);
+  align-items: center;
+  column-gap: var(--space-3);
+  row-gap: var(--space-2);
 }
 
+.thinking-levels,
 .permission-modes {
-  display: grid;
-  gap: var(--space-2);
+  display: contents;
 }
 
-.permission-modes__choices {
-  display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  /* Every tile in the grid is as tall as the tallest one, so a two-line
-     description (Plan) does not leave its neighbour (Bypass) shorter. */
-  grid-auto-rows: 1fr;
-  gap: 4px;
+@container (max-width: 420px) {
+  .picker-footer-groups {
+    grid-template-columns: minmax(0, 1fr);
+    row-gap: var(--space-1);
+  }
+  .permission-modes > .thinking-levels__label {
+    margin-top: var(--space-1);
+  }
 }
 
-.permission-mode {
-  position: relative;
-  flex-direction: column;
-  align-items: flex-start;
-  justify-content: center;
-  min-width: 0;
-  min-height: 44px;
-  height: auto;
-  gap: 2px;
-  text-align: left;
-  white-space: normal;
-}
-
-.permission-mode__description,
 .permission-modes__note,
 .permission-modes__unknown,
 .permission-modes__status {
+  grid-column: 1 / -1;
   margin: 0;
   color: var(--fg2);
   font-size: var(--text-xs);
   line-height: 1.3;
-}
-
-.permission-mode__check {
-  position: absolute;
-  top: 6px;
-  right: 8px;
-}
-
-.permission-mode:focus-visible {
-  outline: 2px solid var(--accent);
-  outline-offset: 2px;
 }
 
 .thinking-levels__label {
@@ -7955,8 +7931,8 @@ details[open] > .activity-summary::before {
 .thinking-chip {
   display: inline-flex;
   align-items: center;
-  min-height: 28px;
-  padding: 0 10px;
+  min-height: 30px;
+  padding: 0 8px;
   border: 0;
   border-radius: 6px;
   background: none;
@@ -7972,8 +7948,18 @@ details[open] > .activity-summary::before {
   justify-content: center;
 }
 
-.thinking-chip:hover {
+.thinking-chip:hover:not(:disabled) {
   color: var(--fg);
+}
+
+.thinking-chip:disabled {
+  cursor: not-allowed;
+  opacity: 0.6;
+}
+
+.thinking-chip:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
 }
 
 .thinking-chip--active {
