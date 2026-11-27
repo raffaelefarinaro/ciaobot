@@ -546,7 +546,7 @@
           <span class="trace-label">Working</span>
           <span class="live-preview" aria-live="polite" aria-atomic="true">
             <Transition name="live-step" mode="out-in">
-              <span :key="liveStepIdentity" class="live-preview-text">{{ liveStepPreview }}</span>
+              <span :key="liveStepIdentity" class="live-preview-text" :aria-hidden="liveStepPreview === LIVE_STEP_PLACEHOLDER ? 'true' : undefined">{{ liveStepPreview }}</span>
             </Transition>
           </span>
           <span v-if="liveTraceMetaParts.length" class="trace-meta">
@@ -4243,7 +4243,7 @@ const liveTraceMetaParts = computed(() => {
   return parts
 })
 
-// Live trace label: "Working..." when real tool work or visible text is in
+// Live trace detail: the step name, or an ellipsis when real tool work or visible text is in
 // progress, otherwise "Thinking..." while the model reasons.
 // What the agent is doing right now, for the live Activity line. Read from
 // the last timeline entry; empty when the timeline gives nothing concrete.
@@ -4260,11 +4260,13 @@ const liveStepLabel = computed(() => {
   if (last.kind !== 'tool') return ''
   return liveToolStep(activityLines(last.content), last.tool_use_ids, openPermissionLines.value, new Set(view.currentDeniedToolUseIds))
 })
+// The label already says Working, so a step with no detail shows only an ellipsis.
+const LIVE_STEP_PLACEHOLDER = '…'
 const liveStepPreview = computed(() => {
   if (view.currentStreamingThinking) return 'Thinking…'
   if (view.currentStreamingText) return 'Writing response…'
   const last = view.currentTimeline[view.currentTimeline.length - 1]
-  if (last?.kind === 'tool' || last?.kind === 'filecard' || last?.kind === 'subagent' || last?.kind === 'shell') return liveStepLabel.value || 'Working…'
+  if (last?.kind === 'tool' || last?.kind === 'filecard' || last?.kind === 'subagent' || last?.kind === 'shell') return liveStepLabel.value || LIVE_STEP_PLACEHOLDER
   if (last?.kind === 'status') return last.content
   if (last?.kind === 'text') return 'Sharing an update…'
   return 'Thinking…'
