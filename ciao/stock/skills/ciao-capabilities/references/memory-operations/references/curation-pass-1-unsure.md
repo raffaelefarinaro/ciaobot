@@ -11,6 +11,6 @@
 4. If a write fails or a destination is unclear, leave that line as it was and count it.
 
 ## Done when
-Every ticked line was applied and deleted, or left on purpose by step 2. Finish with `done: applied N, left M ticked (<kinds>), promoted K observations, W observations at x3 left for the next run`, and, when M is above 0, one item for the lines left: `needs you: M suggestions are waiting for your decision. Open Memory > Unsure and approve or reject them. (path: Workspace/Unsure.md)`.
+Every ticked line was applied and deleted, or left on purpose by step 2. Finish with `done: applied N, left M ticked (<kinds>), promoted K observations, W observations at x3 left for the next run`, and, when M is above 0, one item for the lines left: `needs you: M suggestions you approved need one more step from you, such as adding a category in Settings. Choose Fix with a chat to finish them. (path: Workspace/Unsure.md)`. The open lines are the run's one Unsure item, not yours.
 
 Verify: count the remaining `- [x]` lines in `<vault>/Workspace/Unsure.md` (`grep -c '^- \[x\]'`); it must equal M, the lines left on purpose.

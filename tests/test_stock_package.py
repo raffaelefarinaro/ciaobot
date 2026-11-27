@@ -976,7 +976,7 @@ def test_the_care_prompt_makes_the_orchestrator_run_the_self_check() -> None:
         assert rule in preamble, rule
     # Each step that emits an item gives it with its path.
     for name, form in (
-        ("curation-pass-1-unsure.md", "suggestions are waiting for your decision. Open Memory > Unsure and approve or reject them. (path: Workspace/Unsure.md)"),
+        ("curation-pass-1-unsure.md", "need one more step from you, such as adding a category in Settings. Choose Fix with a chat to finish them. (path: Workspace/Unsure.md)"),
         ("curation-pass-2-regions.md", "(path: AGENTS.md)`, A and B as whole numbers"),
         ("curation-pass-3-stale-notes.md", "(path: Workspace/Proposals/<slug>.md)"),
         ("curation-pass-4-learnings.md", "(path: Workspace/Proposals/<slug>.md)"),

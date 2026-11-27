@@ -29,7 +29,7 @@ Anything the person need not act on is a note, written in the evidence as `note:
 
 ### Writing the section (the orchestrator)
 
-Under `## What needs you`, each item is one numbered line. Copy a step's `needs you:` text without that lead when it follows the rules above, and rewrite it when it does not. Every item whose path is `Workspace/Unsure.md` folds into the one Unsure item, counting all open lines. An id dropped at 3 runs is one item in plain words, such as "Reviewing your guide has failed three runs in a row. Choose Fix with a chat to look at it together. (path: Workspace/Care-Report.md)".
+Under `## What needs you`, each item is one numbered line. Copy a step's `needs you:` text without that lead when it follows the rules above, and rewrite it when it does not. The open Unsure lines are one item, counting every open line whoever added it. An id dropped at 3 runs is one item in plain words, such as "Reviewing your guide has failed three runs in a row. Choose Fix with a chat to look at it together. (path: Workspace/Care-Report.md)".
 
 Self-check: after writing the section, run this one line with the report's absolute path. It prints every item that has a backtick, a `[x]` or `[!]` marker, a retry count, a step id or field name, more than 280 characters, or no `(path: …)` at its end:
 
