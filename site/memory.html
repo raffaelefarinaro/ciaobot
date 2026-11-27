@@ -130,7 +130,7 @@
         <li><strong>Runs each due step, one at a time.</strong> Each step runs in a fresh subagent that is told only the folder, the date, and two files to read: the rules below and that step's instructions. The exception is hygiene, which is mechanical and which the run does itself.</li>
         <li><strong>Checks the work, then ticks.</strong> The run itself runs the step's check and ticks the line only with the step's evidence and the check's output. Otherwise the line is marked blocked, with the reason.</li>
         <li><strong>Tries a blocked step once more.</strong> After a second block it stays blocked. The run does not finish while any line is still open.</li>
-        <li><strong>Counts and reports.</strong> It adds a numbered “What needs you” list to the report, then ends with “Care complete” or “Care incomplete”, the count of steps done, any blocked steps, and a short summary in plain words.</li>
+        <li><strong>Counts and reports.</strong> It adds a numbered “What needs you” list to the report: one decision per item, in plain words, each naming the file to open. What you need not act on (work a limit left for the next run, a step that runs again tomorrow) goes in a separate “Notes” list instead. Then it ends with “Care complete” or “Care incomplete”, the count of steps done, any blocked steps, and a short summary.</li>
       </ol>
 
       <h3 id="care-steps-h">The steps</h3>
@@ -205,8 +205,8 @@
             <h4>Re-check notes nobody has checked in a while <code>stale</code></h4>
             <dl>
               <dt>Runs when</dt><dd>weekly, when the memory audit lists stale notes in this workspace.</dd>
-              <dt>What it does</dt><dd><p>Takes up to five stale notes, oldest first. For each it reads the note and the notes related to it, and judges each fact against real sources: those related notes and the files and projects the note names. Reading the note alone does not count as checking it. It fixes what the sources plainly contradict, in the note, citing the source, and marks a sentence <code>[verified: date]</code> only after checking that sentence. A doubt, or two sources that disagree (both quoted), goes on the Unsure list. It never retires or deletes a note; it writes a proposal to retire it.</p></dd>
-              <dt>Checked by</dt><dd>it runs the audit again: no note it says it fixed or verified may still be listed as stale, and no more may be left than it reported.</dd>
+              <dt>What it does</dt><dd><p>Takes up to five stale notes, oldest first. For each it reads the note and the notes related to it, and judges each fact against real sources: those related notes and the files and projects the note names. Reading the note alone does not count as checking it. It fixes what the sources plainly contradict, in the note, citing the source, and marks a sentence <code>[verified: date]</code> only after checking that sentence. Once every fact in a note is checked that way, it sets the note's <code>updated:</code> date to today, which is what takes the note off the stale list; a note with any fact left unchecked keeps its old date. A doubt, or two sources that disagree (both quoted), goes on the Unsure list. It never retires or deletes a note; it writes a proposal to retire it.</p></dd>
+              <dt>Checked by</dt><dd>it runs the audit again: no note it says it re-checked in full may still be listed as stale.</dd>
             </dl>
             <p class="care-file">Instructions: <a href="https://github.com/raffaelefarinaro/ciaobot/blob/main/ciao/stock/skills/ciao-capabilities/references/memory-operations/references/curation-pass-3-stale-notes.md">curation-pass-3-stale-notes.md</a></p>
           </li>
@@ -257,7 +257,7 @@
       <h3 id="care-results">Where to see what it did</h3>
       <ul>
         <li><strong>Home.</strong> <em>At a glance</em> always has one quiet care line, such as “Done today 07:12 · 5 of 5 steps”. A row in <em>Needs you</em> appears only when the run left you something, did not finish, or was cut off.</li>
-        <li><strong>Memory › Workspace care.</strong> The full report: what needs you, with a button to the right place; every step with its evidence and check; <strong>Run care again</strong>; and, on a step that is blocked or needs you, <strong>Fix with a chat</strong>, which drafts a chat for you to send.</li>
+        <li><strong>Memory › Workspace care.</strong> What needs you comes first, each item with a button to the file it names (Unsure, your guide, the report) and <strong>Fix with a chat</strong>, which drafts a chat for you to send. A suggested change opens as a proposal you can read in full (what it changes, why, the evidence) and then <strong>Approve</strong> or <strong>Reject</strong>. Reject only marks the proposal rejected. Approve opens a new chat with the request written out; nothing changes until you send it, and the change is made in that chat, with you (an issue for a skill's maintainers is shown to you before it is filed). The steps, with their evidence and checks, and the run's notes are folded below; <strong>Run care again</strong> is at the bottom.</li>
         <li><strong>The files.</strong> <code>Workspace/Care-Report.md</code> is the report itself, <code>Workspace/Unsure.md</code> holds what it could not settle, <code>Workspace/Proposals/</code> holds suggested changes, and <code>Workspace/Memory-Consolidations.md</code> is the undo log.</li>
       </ul>
 

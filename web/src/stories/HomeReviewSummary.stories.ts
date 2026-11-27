@@ -156,5 +156,5 @@ export const CareComplete: Story = careStory(careReports.complete, /Done .* · 5
 export const CareNeedsYou: Story = careStory(careReports.needsYou, /Done .* · 5 of 5 steps/, 'done')
 export const CareBlocked: Story = careStory(careReports.blocked, /4 of 6 steps · 2 blocked/, 'blocked')
 export const CareInterrupted: Story = careStory(careReports.interrupted, /Interrupted · 2 of 6 steps/, 'blocked')
-export const CareRunning: Story = careStory(careReports.running, /Running now · step 3 of 6: learnings/, 'running')
+export const CareRunning: Story = careStory(careReports.running, /Running now · step 3 of 6: Learnings/, 'running')
 export const CareNeverRun: Story = careStory(careReports.never, /Not run yet\. It runs every day\./, 'open')

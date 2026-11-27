@@ -57,6 +57,8 @@ export function parseFrontmatter(source: string): FrontmatterResult {
  *     - item1
  *     - item2
  *   key: [a, b]         → flow list, not used much but supported
+ *   key: |              → block scalar: the indented lines below, newlines kept
+ *     line one            (`>` folds them into one line; `-`/`+` chomping is ignored)
  *
  * Anything we can't classify falls back to the raw string. Comments (`#`)
  * are stripped from the end of scalar lines.
@@ -95,6 +97,24 @@ function parseYamlSubset(text: string): Record<string, FrontmatterValue> {
       continue
     }
 
+    // Block scalar `|` / `>`: every following line that is indented (or blank)
+    // belongs to it, with the common indent removed.
+    const block = /^([|>])[+-]?$/.exec(rest)
+    if (block) {
+      const collected: string[] = []
+      let j = i + 1
+      while (j < lines.length && (!lines[j].trim() || /^\s/.test(lines[j]))) {
+        collected.push(lines[j])
+        j++
+      }
+      while (collected.length && !collected[collected.length - 1].trim()) collected.pop()
+      const indent = Math.min(...collected.filter(l => l.trim()).map(l => l.match(/^\s*/)![0].length))
+      const body = collected.map(l => l.slice(Number.isFinite(indent) ? indent : 0))
+      out[key] = block[1] === '|' ? body.join('\n') : body.map(l => l.trim()).filter(Boolean).join(' ')
+      i = j
+      continue
+    }
+
     // Flow list `[a, b, c]`
     if (rest.startsWith('[') && rest.endsWith(']')) {
       const inside = rest.slice(1, -1).trim()
@@ -103,8 +123,16 @@ function parseYamlSubset(text: string): Record<string, FrontmatterValue> {
       continue
     }
 
-    out[key] = unquote(rest)
-    i++
+    // A plain scalar may continue on indented lines below (YAML folds them
+    // into one line with spaces); an indented `- ` line is never a continuation.
+    let j = i + 1
+    const more: string[] = []
+    while (j < lines.length && /^\s+\S/.test(lines[j]) && !/^\s+-\s/.test(lines[j])) {
+      more.push(lines[j].trim())
+      j++
+    }
+    out[key] = more.length ? unquote([rest, ...more].join(' ')) : unquote(rest)
+    i = j
   }
   return out
 }

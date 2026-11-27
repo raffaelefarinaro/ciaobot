@@ -3,7 +3,7 @@
  * `GET /api/care-report`. Shared by the unit and component tests and the
  * Storybook stories. Synthetic values only: no real paths or vault text.
  */
-import type { CareReport, CareStep } from './careReport'
+import type { CareNeed, CareReport, CareStep } from './careReport'
 
 export const CARE_WORKSPACE = 'storybook-alpha'
 /** When the fixture reports were written: a UTC instant, as `GET /api/care-report` sends it. */
@@ -12,6 +12,15 @@ export const CARE_WRITTEN_AT = '2026-11-27T07:12:00Z'
 function step(id: string, state: CareStep['state'], what: string, evidence = '', verify = ''): CareStep {
   return { id, state, what, evidence, verify, step_file: state === 'open' ? '' : `/stock/references/${id}.md` }
 }
+
+/** A needs-you item as the route sends it: vault path, viewer path, proposal status. */
+export function need(title: string, detail: string, path = '', proposalStatus = ''): CareNeed {
+  const viewer = path && path !== 'AGENTS.md' ? `memory-vault/${CARE_WORKSPACE}/${path}` : ''
+  return { title, detail, path, open_path: viewer, proposal_status: proposalStatus }
+}
+
+/** The proposal the needs-you fixture points at. */
+export const CARE_PROPOSAL_PATH = 'Workspace/Proposals/guide-trim-duplicates.md'
 
 function base(overrides: Partial<CareReport>): CareReport {
   const steps = overrides.steps ?? []
@@ -25,6 +34,7 @@ function base(overrides: Partial<CareReport>): CareReport {
     nothing_due: false,
     malformed: false,
     needs_you: [],
+    notes: [],
     workspace: CARE_WORKSPACE,
     report_path: `memory-vault/${CARE_WORKSPACE}/Workspace/Care-Report.md`,
     unsure_path: `memory-vault/${CARE_WORKSPACE}/Workspace/Unsure.md`,
@@ -51,12 +61,22 @@ const fiveDone = [
 
 export const careReports = {
   complete: base({ steps: fiveDone, weekly_done: '2026-11-27' }),
+  // The items of a real run, rewritten to the needs-you standard
+  // (curation-report-example.md), with its leftovers as notes.
   needsYou: base({
     steps: fiveDone,
     weekly_done: '2026-11-27',
     needs_you: [
-      { title: 'New line in Unsure', detail: '"Synthetic team moved": care could not tell if this replaces the older note.', action: 'unsure' },
-      { title: 'Memory guide at 91%', detail: 'Care trimmed what it safely could. The rest needs your pick.', action: 'guide' },
+      need('A proposal would trim your guide: it removes an outdated status section and a repeated folder path.', 'Open the proposal and approve or reject it.', CARE_PROPOSAL_PATH, 'draft'),
+      need('Your always-loaded memory is nearly full (98% and 95%) and everything in it still matters.', 'Ask a chat to trim it with you.', 'AGENTS.md'),
+      need('13 suggestions are waiting for your tick in Unsure, such as which brief template to keep, a project\'s status and a new People page.', 'Tick the ones you agree with.', 'Workspace/Unsure.md'),
+      need('The vault index lists 63 issues, such as notes nothing links to, notes missing their details and 6 skills that are too long.', 'Open a chat to fix them with you.', 'Workspace/Care-Report.md'),
+    ],
+    notes: [
+      'Re-checking older notes did not finish; it tries again on the next run.',
+      'One suggestion in Unsure waits until memory has room.',
+      '17 memory passes were not re-read this time; the next run continues.',
+      'About 200 older patterns are still to be moved to Unsure; the next run continues.',
     ],
   }),
   blocked: base({
@@ -70,7 +90,7 @@ export const careReports = {
     ],
     weekly_done: '2026-11-17',
     weekly_retry: [{ id: 'hygiene', runs: 2 }, { id: 'guide-review', runs: 1 }],
-    needs_you: [{ title: 'Hygiene is blocked', detail: 'The vault index command exited 2.', action: 'report' }],
+    notes: ['Hygiene did not finish; it runs again on the next run.'],
   }),
   interrupted: base({
     steps: [
