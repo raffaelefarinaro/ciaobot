@@ -11,6 +11,32 @@ final class ConnectionResultTests: XCTestCase {
         XCTAssertNil(ConnectionResult(outcome: .done(left: [])))
     }
 
+    func testCompletedMoveCopyNamesTheUntouchedOldInstall() {
+        let card = ConnectionResult(outcome: .done(left: ["/Users/me/repos/ciaobot"]), now: now)!
+        XCTAssertEqual(card.title, "Ciaobot now runs inside this app")
+        XCTAssertEqual(card.reason, "Your old install at /Users/me/repos/ciaobot was left untouched.")
+        XCTAssertEqual(card.kind, .info)
+        XCTAssertFalse(card.reason.contains("1.x"))
+        XCTAssertFalse(card.canTryAgain)
+        let several = ConnectionResult(outcome: .done(left: ["/a", "/b"]))!
+        XCTAssertEqual(several.reason, "Your old install was left untouched: /a, /b")
+    }
+
+    func testOnlyACompletedMoveClearsItselfAndHidesTheCheckedLine() {
+        let done = ConnectionResult(outcome: .done(left: ["/a"]))!
+        XCTAssertTrue(done.succeeded)
+        XCTAssertEqual(done.autoClearDelay, 8)
+        let info = ConnectionResult(outcome: .refused(code: "downgrade", oldOrigin: nil))!
+        let warning = ConnectionResult(outcome: .refused(code: "engine_too_old", oldOrigin: nil))!
+        let failure = ConnectionResult(outcome: .refused(code: "rollback_failed", oldOrigin: nil))!
+        let rolledBack = ConnectionResult(outcome: .rolledBack(code: "not_healthy", oldOrigin: nil))!
+        for card in [info, warning, failure, rolledBack, ConnectionResult.checking()] {
+            XCTAssertFalse(card.succeeded)
+            XCTAssertNil(card.autoClearDelay)
+        }
+        XCTAssertEqual(ConnectionResult.dismissTitle, "Dismiss")
+    }
+
     func testEveryRefusalCodeHasATitleAndTheFixedReason() {
         let codes = ["downgrade", "engine_too_old", "custom_data_location", "port_mismatch", "legacy_desktop",
                      "unknown_program", "no_workspace", "unfinished_migration", "already_settled", "plist_changed",

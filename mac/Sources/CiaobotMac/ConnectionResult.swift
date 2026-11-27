@@ -29,13 +29,23 @@ struct ConnectionResult: Equatable, Identifiable {
     /// The existing Ciaobot's address, when it answered.
     let existingAddress: String?
     let checkedAt: Date
+    /// True for a completed move: nothing to act on, so the banner clears
+    /// itself and shows no "Checked" line.
+    let succeeded: Bool
+
+    /// Seconds before a completed-move banner clears itself. Warnings and
+    /// errors stay until dismissed.
+    static let successAutoClearSeconds: TimeInterval = 8
+    var autoClearDelay: TimeInterval? { succeeded ? Self.successAutoClearSeconds : nil }
+
+    static let dismissTitle = "Dismiss"
 
     static let checkingTitle = "Checking the Ciaobot on this Mac…"
     static let tryAgainTitle = "Try again"
 
     static func checking(now: Date = Date()) -> ConnectionResult {
         ConnectionResult(kind: .checking, title: checkingTitle, reason: "", nextStep: nil,
-                         canTryAgain: false, existingAddress: nil, checkedAt: now)
+                         canTryAgain: false, existingAddress: nil, checkedAt: now, succeeded: false)
     }
 
     /// The result card for a settled takeover, or nil when the screen says
@@ -49,7 +59,7 @@ struct ConnectionResult: Equatable, Identifiable {
             return nil
         case .done:
             origin = nil
-            detail = Detail(.info, "Ciaobot moved into the app")
+            detail = Detail(.info, TakeoverCopy.doneTitle)
         case .rolledBack(_, let old):
             origin = old
             detail = Detail(.attention, "Moving into the app did not finish", retry: true)
@@ -58,11 +68,13 @@ struct ConnectionResult: Equatable, Identifiable {
             detail = Self.detail(forRefusal: code)
         }
         self.init(kind: detail.kind, title: detail.title, reason: reason, nextStep: detail.nextStep,
-                  canTryAgain: detail.retry, existingAddress: origin?.url.absoluteString, checkedAt: now)
+                  canTryAgain: detail.retry, existingAddress: origin?.url.absoluteString, checkedAt: now,
+                  succeeded: { if case .done = outcome { return true } else { return false } }())
     }
 
     private init(kind: Kind, title: String, reason: String, nextStep: String?,
-                 canTryAgain: Bool, existingAddress: String?, checkedAt: Date) {
+                 canTryAgain: Bool, existingAddress: String?, checkedAt: Date, succeeded: Bool) {
+        self.succeeded = succeeded
         self.kind = kind
         self.title = title
         self.reason = reason
@@ -165,6 +177,8 @@ struct ConnectionResultCard: View {
     /// live connection.
     var onTryAgain: (() -> Void)?
     var tryAgainDisabled = false
+    /// Set where the card is a banner above the session: adds a close button.
+    var onDismiss: (() -> Void)?
 
     var body: some View {
         HStack(alignment: .top, spacing: 12) {
@@ -183,9 +197,11 @@ struct ConnectionResultCard: View {
                                 .disabled(tryAgainDisabled)
                                 .accessibilityHint("Runs the check on the Ciaobot on this Mac again.")
                         }
-                        TimelineView(.periodic(from: result.checkedAt, by: 5)) { context in
-                            Text(result.checkedLabel(now: context.date))
-                                .font(.caption).foregroundStyle(.secondary)
+                        if !result.succeeded {
+                            TimelineView(.periodic(from: result.checkedAt, by: 5)) { context in
+                                Text(result.checkedLabel(now: context.date))
+                                    .font(.caption).foregroundStyle(.secondary)
+                            }
                         }
                     }
                     .padding(.top, 2)
@@ -193,6 +209,18 @@ struct ConnectionResultCard: View {
             }
             .fixedSize(horizontal: false, vertical: true)
             .frame(maxWidth: .infinity, alignment: .leading)
+            if let onDismiss {
+                Button(action: onDismiss) {
+                    Image(systemName: "xmark")
+                        .font(.body.weight(.semibold))
+                        .foregroundStyle(.secondary)
+                        .frame(width: 28, height: 28)
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(.borderless)
+                .help(ConnectionResult.dismissTitle)
+                .accessibilityLabel(ConnectionResult.dismissTitle)
+            }
         }
         .padding(12)
         .background(.quaternary.opacity(0.5), in: RoundedRectangle(cornerRadius: 8))

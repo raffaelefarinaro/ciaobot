@@ -36,7 +36,33 @@ struct CiaobotMacApp: App {
                     }
                     .keyboardShortcut("l", modifiers: [.command, .shift])
                 }
+                ForgetSavedSignInCommand()
             }
+    }
+}
+
+/// The scene's action for Forget Saved Sign-In, published only while a saved
+/// local sign-in exists and nothing else is running.
+struct ForgetSavedSignInKey: FocusedValueKey {
+    typealias Value = () -> Void
+}
+
+extension FocusedValues {
+    var forgetSavedSignIn: (() -> Void)? {
+        get { self[ForgetSavedSignInKey.self] }
+        set { self[ForgetSavedSignInKey.self] = newValue }
+    }
+}
+
+/// Lives in the app menu, not over the web view, so it overlaps nothing.
+struct ForgetSavedSignInCommand: Commands {
+    @FocusedValue(\.forgetSavedSignIn) private var forget
+
+    var body: some Commands {
+        CommandGroup(after: .appSettings) {
+            Button("Forget Saved Sign-In") { forget?() }
+                .disabled(forget == nil)
+        }
     }
 }
 
@@ -596,8 +622,9 @@ struct ConnectionView: View {
             if let local = localEngineScreen {
                 VStack(alignment: .leading, spacing: 0) {
                     if let connectionResult {
-                        ConnectionResultCard(result: connectionResult)
+                        ConnectionResultCard(result: connectionResult, onDismiss: { self.connectionResult = nil })
                             .id(connectionResult.id)
+                            .task(id: connectionResult.id) { await autoClear(connectionResult) }
                             .padding(.horizontal, 32)
                             .padding(.top, 16)
                     }
@@ -619,8 +646,9 @@ struct ConnectionView: View {
                 // connection screen is already gone once the probe succeeds.
                 VStack(spacing: 0) {
                     if let connectionResult {
-                        ConnectionResultCard(result: connectionResult)
+                        ConnectionResultCard(result: connectionResult, onDismiss: { self.connectionResult = nil })
                             .id(connectionResult.id)
+                            .task(id: connectionResult.id) { await autoClear(connectionResult) }
                             .padding(.horizontal, 12)
                             .padding(.vertical, 6)
                     }
@@ -634,16 +662,6 @@ struct ConnectionView: View {
                             .frame(maxWidth: .infinity, alignment: .leading)
                             .padding(.horizontal, 12)
                             .padding(.vertical, 6)
-                    }
-                    if engineMode == .local, signIn.hasSavedSignIn(for: origin, registryKey: .localEngine) {
-                        HStack {
-                            Spacer()
-                            Button(forgetting ? "Forgetting…" : "Forget saved sign-in") {
-                                forgetLocalSavedSignIn()
-                            }
-                            .disabled(busy)
-                            .accessibilityHint("Removes the saved sign-in for Ciaobot running on this Mac.")
-                        }
                     }
                     if let forgetMessage {
                         Text(forgetMessage)
@@ -750,6 +768,7 @@ struct ConnectionView: View {
             keepSignedInChoice = nil
         }
         .onReceive(settledEvents) { applySettled($0) }
+        .focusedSceneValue(\.forgetSavedSignIn, canForgetFromMenu ? { self.forgetLocalSavedSignIn() } : nil)
     }
 
     /// The disconnected screen: one centered column that scrolls when the window
@@ -976,6 +995,20 @@ struct ConnectionView: View {
                 }
             }
         }
+    }
+
+    /// A completed-move banner clears itself; warnings and errors stay.
+    private func autoClear(_ result: ConnectionResult) async {
+        guard let delay = result.autoClearDelay else { return }
+        try? await Task.sleep(nanoseconds: UInt64(delay * 1_000_000_000))
+        guard !Task.isCancelled, connectionResult?.id == result.id else { return }
+        withAnimation(.easeOut(duration: 0.2)) { connectionResult = nil }
+    }
+
+    /// Whether the app menu's Forget Saved Sign-In applies right now.
+    private var canForgetFromMenu: Bool {
+        guard engineMode == .local, let origin, !busy else { return false }
+        return signIn.hasSavedSignIn(for: origin, registryKey: .localEngine)
     }
 
     /// Erases the local engine store from the connected app view. WebKit must
