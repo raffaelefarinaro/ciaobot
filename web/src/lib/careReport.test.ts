@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import {
   careFixSeed, careGlyph, careNeedsYouRow, careRailDetail, careRailLabel, careRailTitle, careRailTone, careState, careSummaryMeta, careSummaryTitle,
-  careNeedFixSeed, dayWords, fenceData, needAction, needActionLabel, openNeeds, stepCanFix, stepGlyph, stepLine,
+  careNeedFixSeed, dayWords, fenceData, needAction, needActionLabel, needCanFix, openNeeds, stepCanFix, stepGlyph, stepLine,
   stepName, stepsCountWords, stepsOpenByDefault, stepWord, whenWords, type CareReport,
 } from './careReport'
 import { CARE_PROPOSAL_PATH, CARE_WRITTEN_AT, careReports, need } from './careReportFixture'
@@ -164,6 +164,17 @@ describe('the report page words', () => {
     expect(['proposal', 'unsure', 'optimize', 'report', 'file', 'none'].map(a => needActionLabel(a as never))).toEqual([
       'Review proposal', 'Open Unsure', 'Optimize', 'Open report', 'Open file', '',
     ])
+  })
+
+  it('gives a proposal, Unsure and the guide one button, and a file or no path a fix chat too', () => {
+    const [proposal, guide, unsure, report] = careReports.needsYou.needs_you
+    expect([proposal, guide, unsure].map(needCanFix)).toEqual([false, false, false])
+    // A file alone does not resolve a problem: it keeps Fix with a chat.
+    expect(needCanFix(report)).toBe(true)
+    expect(needCanFix(need('A note looks out of date.', '', 'People/Rae.md'))).toBe(true)
+    // No path: Fix with a chat is the only action.
+    expect(needCanFix(need('Review the guide.', ''))).toBe(true)
+    expect(needCanFix(need('x', '', 'Workspace/Proposals/Odd Name.md'))).toBe(true)
   })
 
   it('drops a proposal item once its file says applied or rejected', () => {

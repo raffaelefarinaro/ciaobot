@@ -172,7 +172,10 @@ test.describe('Workspace care', () => {
     await expect(needs.nth(1).getByRole('button', { name: /^Optimize: / })).toBeVisible()
     await expect(needs.nth(2).getByRole('button', { name: /^Open Unsure: / })).toBeVisible()
     await expect(needs.nth(3).getByRole('button', { name: /^Open report: / })).toBeVisible()
-    await expect(page.getByRole('button', { name: /^Fix with a chat: / })).toHaveCount(3)
+    // Proposal, guide and Unsure have one destination each; only the report file keeps a chat.
+    for (const i of [0, 1, 2]) await expect(needs.nth(i).getByRole('button', { name: /^Fix with a chat: / })).toHaveCount(0)
+    await expect(needs.nth(3).getByRole('button', { name: /^Fix with a chat: / })).toHaveCount(1)
+    await expect(page.getByRole('button', { name: /^Fix with a chat: / })).toHaveCount(1)
     const steps = page.locator('details.mc-disclosure').first()
     await expect(steps).not.toHaveAttribute('open', '')
     await expect(page.locator('.mc-step').first()).toBeHidden()

@@ -54,9 +54,9 @@
                   :data-path="item.path"
                   @click="act(item)"
                 >{{ needActionLabel(needAction(item)) }}</button>
-                <!-- Optimize already opens a chat about the guide; a second one would repeat it. -->
+                <!-- A proposal, Unsure and the guide each have one destination that resolves the item. -->
                 <button
-                  v-if="needAction(item) !== 'optimize'"
+                  v-if="needCanFix(item)"
                   type="button"
                   class="mc-link mc-fix"
                   :disabled="fixing !== ''"
@@ -155,7 +155,7 @@ import CareGlyph from './CareGlyph.vue'
 import CareProposalReview from './CareProposalReview.vue'
 import {
   careFixSeed, careGlyph, careNeedFixSeed, careState, careSummaryMeta, careSummaryTitle, dayWords, needAction,
-  needActionLabel, openNeeds, stepCanFix, stepGlyph, stepLine, stepName, stepsCountWords, stepsOpenByDefault,
+  needActionLabel, needCanFix, openNeeds, stepCanFix, stepGlyph, stepLine, stepName, stepsCountWords, stepsOpenByDefault,
   stepWord, type CareNeed, type CareStep,
 } from '../lib/careReport'
 import { startFileDiscussion } from '../lib/fileDiscussion'

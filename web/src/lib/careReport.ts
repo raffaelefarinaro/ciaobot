@@ -357,6 +357,17 @@ export function needAction(item: CareNeed): CareNeedAction {
   return 'file'
 }
 
+/**
+ * Whether a needs-you item also offers "Fix with a chat". A proposal, the
+ * Unsure page and the guide each have a dedicated destination that resolves the
+ * item, so they carry that one button; a file alone does not resolve a
+ * problem, and an item with no file has nothing else to offer.
+ */
+export function needCanFix(item: CareNeed): boolean {
+  const action = needAction(item)
+  return action !== 'proposal' && action !== 'unsure' && action !== 'optimize'
+}
+
 const ACTION_LABELS: Record<Exclude<CareNeedAction, 'none'>, string> = {
   proposal: 'Review proposal',
   unsure: 'Open Unsure',

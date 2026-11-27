@@ -54,8 +54,8 @@ export const NeedsYou: Story = {
     expect(canvas.getByRole('button', { name: /^Review proposal: A proposal would trim your guide/ })).toBeTruthy()
     expect(canvas.getByRole('button', { name: /^Optimize: Your always-loaded memory/ })).toBeTruthy()
     expect(canvas.getByRole('button', { name: /^Open Unsure: 13 suggestions/ })).toBeTruthy()
-    // The guide's item opens the trim chat itself, so it has no Fix with a chat.
-    expect(canvas.getAllByRole('button', { name: /^Fix with a chat: / })).toHaveLength(3)
+    // A proposal, the guide and Unsure each have one destination, so only the report file's item keeps a chat.
+    expect(canvas.getAllByRole('button', { name: /^Fix with a chat: / })).toHaveLength(1)
     // Steps and Notes are folded: the step words are not shown until opened.
     const steps = canvas.getByText('Steps').closest('details') as HTMLDetailsElement
     expect(steps.open).toBe(false)
