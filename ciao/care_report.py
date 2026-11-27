@@ -18,6 +18,7 @@ from __future__ import annotations
 import os
 import re
 import stat as stat_module
+import sys
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -170,7 +171,10 @@ def parse_care_report(text: str) -> dict[str, Any]:
                 elif current is not None and line.strip():
                     current.append(line.strip())
                 continue
-        if _SECTION.match(line):
+        # A section heading ends the checklist only once it has begun: a report
+        # titled with `##`, or one that heads its list "## Checklist", still has
+        # its steps below that heading.
+        if _SECTION.match(line) and steps:
             in_checklist = False
             continue
         if not in_checklist:
@@ -235,8 +239,48 @@ def _empty(status: str) -> dict[str, Any]:
     return {"status": status, "modified_at": "", **body}
 
 
-def _read_bounded(vault_root: Path) -> tuple[str, bytes, float]:
-    """Open the report without following a symlink at any step and read it.
+# Read once at import: whether `os.open` takes `dir_fd` (POSIX yes, Windows no).
+_OPEN_TAKES_DIR_FD = os.open in os.supports_dir_fd
+
+
+def _fd_relative_supported() -> bool:
+    return sys.platform != "win32" and _OPEN_TAKES_DIR_FD
+
+
+def _read_fd(fd: int, expect: os.stat_result | None = None) -> tuple[str, bytes, float]:
+    """Judge and read an opened descriptor: a regular file with one link, under the cap.
+
+    `expect` is the `lstat` taken before a path-based open; the opened file must
+    be that same file, so a swap between the check and the open is refused.
+    """
+    info = os.fstat(fd)
+    if not stat_module.S_ISREG(info.st_mode):
+        return "unreadable", b"", 0.0
+    # A hard link makes the report another file's contents under the vault's name.
+    if info.st_nlink != 1:
+        return "unreadable", b"", 0.0
+    if expect is not None and (expect.st_ino or expect.st_dev) and (
+        (info.st_dev, info.st_ino) != (expect.st_dev, expect.st_ino)
+    ):
+        return "unreadable", b"", 0.0
+    if info.st_size > MAX_REPORT_BYTES:
+        return "too_large", b"", 0.0
+    chunks: list[bytes] = []
+    remaining = MAX_REPORT_BYTES + 1
+    while remaining > 0:
+        chunk = os.read(fd, min(remaining, 16384))
+        if not chunk:
+            break
+        chunks.append(chunk)
+        remaining -= len(chunk)
+    raw = b"".join(chunks)
+    if len(raw) > MAX_REPORT_BYTES:
+        return "too_large", b"", 0.0
+    return "ok", raw, info.st_mtime
+
+
+def _read_fd_relative(vault_root: Path) -> tuple[str, bytes, float]:
+    """POSIX: open the report without following a symlink at any step.
 
     The directory and the file are opened relative to the vault's own
     descriptor with `O_NOFOLLOW`, so a symlink planted at `Workspace` or at the
@@ -257,25 +301,48 @@ def _read_bounded(vault_root: Path) -> tuple[str, bytes, float]:
     finally:
         os.close(root_fd)
     try:
-        info = os.fstat(fd)
-        if not stat_module.S_ISREG(info.st_mode):
-            return "unreadable", b"", 0.0
-        if info.st_size > MAX_REPORT_BYTES:
-            return "too_large", b"", 0.0
-        chunks: list[bytes] = []
-        remaining = MAX_REPORT_BYTES + 1
-        while remaining > 0:
-            chunk = os.read(fd, min(remaining, 16384))
-            if not chunk:
-                break
-            chunks.append(chunk)
-            remaining -= len(chunk)
-        raw = b"".join(chunks)
-        if len(raw) > MAX_REPORT_BYTES:
-            return "too_large", b"", 0.0
-        return "ok", raw, info.st_mtime
+        return _read_fd(fd)
     finally:
         os.close(fd)
+
+
+def _is_link(info: os.stat_result) -> bool:
+    """A symlink, or on Windows any reparse point (symlink, junction, mount)."""
+    attributes = getattr(info, "st_file_attributes", 0)
+    return stat_module.S_ISLNK(info.st_mode) or bool(attributes & stat_module.FILE_ATTRIBUTE_REPARSE_POINT)
+
+
+def _read_by_path(vault_root: Path) -> tuple[str, bytes, float]:
+    """Windows (no `dir_fd`): check each step with `lstat`, then open and re-check.
+
+    Neither `Workspace` nor the report may be a symlink or reparse point, the
+    folder must be a folder and the report a regular file, and the resolved
+    path must sit under the vault. The opened file is then `fstat`ed and must be
+    the very file `lstat` saw (device and file index), so a swap between the
+    checks and the open is refused rather than followed.
+    """
+    root = vault_root.resolve()
+    folder = root / REPORT_RELATIVE_PATH.parent.name
+    path = folder / REPORT_RELATIVE_PATH.name
+    folder_info = os.lstat(folder)
+    if _is_link(folder_info) or not stat_module.S_ISDIR(folder_info.st_mode):
+        return "unreadable", b"", 0.0
+    info = os.lstat(path)
+    if _is_link(info) or not stat_module.S_ISREG(info.st_mode):
+        return "unreadable", b"", 0.0
+    if not path.resolve().is_relative_to(root):
+        return "unreadable", b"", 0.0
+    fd = os.open(path, os.O_RDONLY | getattr(os, "O_BINARY", 0))
+    try:
+        return _read_fd(fd, expect=info)
+    finally:
+        os.close(fd)
+
+
+def _read_bounded(vault_root: Path) -> tuple[str, bytes, float]:
+    if _fd_relative_supported():
+        return _read_fd_relative(vault_root)
+    return _read_by_path(vault_root)
 
 
 def read_care_report(vault_root: Path) -> dict[str, Any]:

@@ -140,12 +140,38 @@ def _write_report(vault: Path, text: str) -> Path:
     return path
 
 
+@pytest.fixture(params=["fd-relative", "by-path"])
+def either_branch(request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPatch) -> str:
+    """Run a read test through the POSIX descriptor path and the Windows path-based one."""
+    monkeypatch.setattr(care_report, "_fd_relative_supported", lambda: request.param == "fd-relative")
+    return str(request.param)
+
+
+def test_a_section_title_before_the_steps_keeps_the_checklist() -> None:
+    body = parse_care_report("## Care report 2026-11-27\nWeekly done: 2026-11-20\n- [x] unsure: a \u2014 b; verify: c\n- [!] hygiene: run \u2014 blocked: no index\n")
+    assert body["updated"] == "2026-11-27"
+    assert body["malformed"] is False
+    assert [(s["id"], s["state"]) for s in body["steps"]] == [("unsure", "done"), ("hygiene", "blocked")]
+
+
+def test_a_checklist_heading_before_the_steps_keeps_the_checklist() -> None:
+    body = parse_care_report("# Care report 2026-11-27\n## Checklist\n- [!] hygiene: run \u2014 blocked: no index\n## Hygiene\n- [ ] dead_link: a\n")
+    assert body["counts"] == {"total": 1, "done": 0, "blocked": 1, "open": 0}
+
+
+def test_the_platform_switch_picks_the_path_based_read_on_windows(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(care_report.sys, "platform", "win32")
+    assert care_report._fd_relative_supported() is False
+
+
+@pytest.mark.usefixtures("either_branch")
 def test_missing_report_is_never_run(tmp_path: Path) -> None:
     body = read_care_report(tmp_path)
     assert body["status"] == "missing"
     assert body["steps"] == [] and body["modified_at"] == "" and body["malformed"] is False
 
 
+@pytest.mark.usefixtures("either_branch")
 def test_oversize_report_is_refused_without_parsing(tmp_path: Path) -> None:
     _write_report(tmp_path, "- [x] unsure: a \u2014 b\n" * (MAX_REPORT_BYTES // 10))
     body = read_care_report(tmp_path)
@@ -153,6 +179,7 @@ def test_oversize_report_is_refused_without_parsing(tmp_path: Path) -> None:
     assert body["steps"] == []
 
 
+@pytest.mark.usefixtures("either_branch")
 def test_symlink_out_of_the_vault_is_not_followed(tmp_path: Path) -> None:
     vault = tmp_path / "vault"
     (vault / "Workspace").mkdir(parents=True)
@@ -164,17 +191,20 @@ def test_symlink_out_of_the_vault_is_not_followed(tmp_path: Path) -> None:
     assert body["steps"] == []
 
 
+@pytest.mark.usefixtures("either_branch")
 def test_a_directory_at_the_report_path_is_unreadable(tmp_path: Path) -> None:
     (tmp_path / "Workspace" / "Care-Report.md").mkdir(parents=True)
     assert read_care_report(tmp_path)["status"] == "unreadable"
 
 
+@pytest.mark.usefixtures("either_branch")
 def test_a_fifo_is_refused_without_blocking(tmp_path: Path) -> None:
     (tmp_path / "Workspace").mkdir()
     os.mkfifo(tmp_path / "Workspace" / "Care-Report.md")
     assert read_care_report(tmp_path)["status"] == "unreadable"
 
 
+@pytest.mark.usefixtures("either_branch")
 def test_a_symlinked_workspace_folder_is_not_followed(tmp_path: Path) -> None:
     """A swap of the folder for a link to elsewhere is refused at the open itself."""
     vault = tmp_path / "vault"
@@ -203,12 +233,62 @@ def test_a_symlink_swapped_in_after_a_check_is_not_followed(tmp_path: Path, monk
     assert read_care_report(vault)["status"] == "unreadable"
 
 
+@pytest.mark.usefixtures("either_branch")
+def test_a_hard_linked_report_is_refused(tmp_path: Path) -> None:
+    elsewhere = tmp_path / "elsewhere.md"
+    elsewhere.write_text(COMPLETE, encoding="utf-8")
+    (tmp_path / "Workspace").mkdir()
+    os.link(elsewhere, tmp_path / "Workspace" / "Care-Report.md")
+    assert read_care_report(tmp_path)["status"] == "unreadable"
+
+
+def test_a_plain_report_reads_on_both_branches(tmp_path: Path, either_branch: str) -> None:
+    _write_report(tmp_path, BLOCKED)
+    body = read_care_report(tmp_path)
+    assert body["status"] == "ok"
+    assert body["counts"]["blocked"] == 2
+
+
+def test_the_path_branch_refuses_a_reparse_point(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """On Windows a junction or a symlink reads as a reparse point in lstat's attributes."""
+    monkeypatch.setattr(care_report, "_fd_relative_supported", lambda: False)
+    report = _write_report(tmp_path, COMPLETE)
+    real_lstat = os.lstat
+
+    def lstat(path):  # type: ignore[no-untyped-def]
+        info = real_lstat(path)
+        if Path(path) == report.resolve():
+            return SimpleNamespace(st_mode=info.st_mode, st_ino=info.st_ino, st_dev=info.st_dev, st_file_attributes=0x400)
+        return info
+
+    monkeypatch.setattr(care_report.os, "lstat", lstat)
+    assert read_care_report(tmp_path)["status"] == "unreadable"
+
+
+def test_the_path_branch_refuses_a_swap_between_check_and_open(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(care_report, "_fd_relative_supported", lambda: False)
+    report = _write_report(tmp_path / "vault", COMPLETE)
+    secret = tmp_path / "secret.md"
+    secret.write_text(BLOCKED, encoding="utf-8")
+    real_open = os.open
+
+    def swapping_open(path, flags, *args, **kwargs):  # type: ignore[no-untyped-def]
+        if str(path).endswith("Care-Report.md") and not report.is_symlink():
+            report.unlink()
+            report.symlink_to(secret)
+        return real_open(path, flags, *args, **kwargs)
+
+    monkeypatch.setattr(care_report.os, "open", swapping_open)
+    assert read_care_report(tmp_path / "vault")["status"] == "unreadable"
+
+
 def test_a_file_that_grows_past_the_cap_after_fstat_is_still_bounded(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     _write_report(tmp_path, COMPLETE)
     monkeypatch.setattr(care_report.os, "read", lambda fd, n: b"x" * n)
     assert read_care_report(tmp_path)["status"] == "too_large"
 
 
+@pytest.mark.usefixtures("either_branch")
 def test_invalid_utf8_is_replaced_not_raised(tmp_path: Path) -> None:
     path = tmp_path / "Workspace" / "Care-Report.md"
     path.parent.mkdir(parents=True)
