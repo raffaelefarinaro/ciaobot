@@ -905,26 +905,27 @@ def _self_check_line() -> str:
     preamble = _reference("step-preamble.md")
     block = preamble.split("Self-check:", 1)[1].split("```\n", 2)[1]
     line = block.strip()
-    assert "\n" not in line and line.startswith("awk -v n=") and line.endswith(" <V>/Workspace/Care-Report.md"), line
+    assert "\n" not in line and line.startswith("awk -v n=") and line.endswith(' "<V>/Workspace/Care-Report.md"'), line
     return line
 
 
 def _run_self_check(tmp_path: Path, report: str, unsure: str | None = None) -> list[str]:
-    import shlex
     import shutil
     import subprocess
 
     if shutil.which("awk") is None or shutil.which("sh") is None:
         pytest.skip("no POSIX shell and awk on this machine")
-    workspace = tmp_path / "Workspace"
-    workspace.mkdir(exist_ok=True)
+    # A vault path with a space: the command quotes it.
+    vault = tmp_path / "my vault"
+    workspace = vault / "Workspace"
+    workspace.mkdir(parents=True, exist_ok=True)
     (workspace / "Care-Report.md").write_text(report, encoding="utf-8")
     unsure_path = workspace / "Unsure.md"
     if unsure is None:
         unsure_path.unlink(missing_ok=True)
     else:
         unsure_path.write_text(unsure, encoding="utf-8")
-    command = _self_check_line().replace("<V>", shlex.quote(str(tmp_path)))
+    command = _self_check_line().replace("<V>", str(vault))
     result = subprocess.run(["sh", "-c", command], capture_output=True, text=True, timeout=10)
     assert result.returncode == 0, result.stderr
     return [line for line in result.stdout.splitlines() if line.strip()]
@@ -962,13 +963,18 @@ def test_the_self_check_prints_the_real_runs_items_and_passes_the_standard(tmp_p
     # A long proposal path does not count against the length.
     long_path = "1. A proposal would change a skill. Choose Review proposal, then Approve or Reject. (path: Workspace/Proposals/" + "x" * 200 + ".md)"
     assert _run_self_check(tmp_path, head + long_path + "\n") == []
+    # The tail is read as the parser reads it: any case, trailing space. A hyphenated word is not a step id.
+    assert _run_self_check(tmp_path, head + "1. A peer-review proposal is ready. (Path: AGENTS.md) \n") == []
     # Each rule bites on its own.
     for bad in (
         "1. Hygiene [!] stayed blocked. (path: Workspace/Care-Report.md)",
+        "1. Open `Workspace/Unsure.md` and decide. (path: AGENTS.md)",
+        "1. The second-look found two notes. (path: Workspace/Care-Report.md)",
         "1. Second try, retry 2 of 3. (path: Workspace/Care-Report.md)",
         "1. Notes whose updated: is old. (path: Workspace/Care-Report.md)",
         "1. hygiene: 4 notes need you. (path: Workspace/Care-Report.md)",
         "1. The guide-review found two things. (path: AGENTS.md)",
+        "1. The closed-tasks pass read three tasks. (path: AGENTS.md)",
         "1. " + "word " * 60 + "(path: AGENTS.md)",
         "1. Choose Optimize to trim it together.",
     ):
@@ -990,7 +996,7 @@ def test_the_care_prompt_makes_the_orchestrator_run_the_self_check() -> None:
         assert rule in preamble, rule
     # Each step that emits an item gives it with its path.
     for name, form in (
-        ("curation-pass-1-unsure.md", "need one more step from you, such as adding a category in Settings. Choose Fix with a chat to finish them. (path: Workspace/Unsure.md)"),
+        ("curation-pass-1-unsure.md", "need one more step from you, such as adding a category in Settings. Choose Open Unsure to see them. (path: Workspace/Unsure.md)"),
         ("curation-pass-2-regions.md", "(path: AGENTS.md)`, A and B as whole numbers"),
         ("curation-pass-3-stale-notes.md", "(path: Workspace/Proposals/<slug>.md)"),
         ("curation-pass-4-learnings.md", "(path: Workspace/Proposals/<slug>.md)"),

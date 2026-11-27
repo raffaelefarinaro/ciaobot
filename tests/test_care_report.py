@@ -519,6 +519,14 @@ def test_backticked_fallback_picks_the_first_valid_path_and_never_bare_words() -
     assert care_report.backticked_path("`/etc/passwd` and `../../.ssh/id_rsa`") == ""
     # Unquoted words are never a path.
     assert care_report.backticked_path("Open Workspace/Unsure.md and AGENTS.md") == ""
+    # A stray tick makes the pairing unknowable: no path, not the words between two spans.
+    assert care_report.backticked_path("Stray ` tick, open People/Evil.md `AGENTS.md`") == ""
+    assert care_report.backticked_path("`a` stray ` then People/Evil.md `x`") == ""
+    # A span too long for a path, or padded with space, is not skipped past: no path.
+    assert care_report.backticked_path("`" + "a" * 241 + "` People/Evil.md `Workspace/Unsure.md`") == ""
+    assert care_report.backticked_path("` People/Evil.md ` and `Workspace/Unsure.md`") == ""
+    item = parse_care_report("## What needs you\n1. Stray ` tick, open People/Evil.md `AGENTS.md`.\n")["needs_you"][0]
+    assert item["path"] == ""
     # An explicit tail wins, even an unsafe one: the fallback is only for a missing tail.
     item = parse_care_report("## What needs you\n1. See `Workspace/Unsure.md`. (path: ../outside.md)\n")["needs_you"][0]
     assert item["path"] == ""

@@ -78,9 +78,6 @@ _BOLD_LEAD = re.compile(r"^\*\*(.+?)\*\*\s*[:\-\u2014]?\s*(.*)$")
 # The machine-readable tail of a needs-you item: `(path: Workspace/Unsure.md)`.
 _PATH_TAIL = re.compile(r"\s*\(path:\s*`?([^()`]*?)`?\s*\)\s*\.?\s*$", re.IGNORECASE)
 _NEEDS_LEAD = re.compile(r"^needs you:\s*", re.IGNORECASE)
-# A backticked span, the fallback for an item a model wrote without the tail:
-# "Approve or reject `Workspace/Proposals/x.md`."
-_BACKTICKED = re.compile(r"`([^`\n]{1,%d})`" % MAX_PATH_CHARS)
 # A file name ends in an extension: `ciao memory status` is a command, not a file.
 _FILE_EXTENSION = re.compile(r"\.[A-Za-z0-9]{1,10}$")
 _NOTE_LEAD = re.compile(r"^note:\s*", re.IGNORECASE)
@@ -174,14 +171,24 @@ def is_proposal_path(path: str) -> bool:
 def backticked_path(text: str) -> str:
     """The first backticked vault path in `text`, or "" when none passes.
 
-    Only for an item with no `(path: …)` tail. A span counts when
-    :func:`vault_relative_path` accepts it (the same confinement as the tail)
-    and it is `AGENTS.md` or a file under a folder (`Workspace/Unsure.md`):
-    a bare word or a command in backticks is a mention, not a location. Never
-    read from unquoted words.
+    Only for an item with no `(path: …)` tail. The text must hold an even
+    number of backticks, so every span is a quoted one: with a stray tick the
+    pairing is unknowable and unquoted words could be read as a path, so there
+    is no path at all. The spans are the odd pieces of `text.split("`")`. A
+    span longer than a path may be, or with space at either end, is not a
+    clean quote either, and also gives no path rather than being skipped. A
+    span counts when :func:`vault_relative_path` accepts it (the same
+    confinement as the tail) and it is `AGENTS.md` or a file under a folder
+    (`Workspace/Unsure.md`): a bare word or a command in backticks is a
+    mention, not a location.
     """
-    for found in _BACKTICKED.finditer(text):
-        path = vault_relative_path(found.group(1))
+    pieces = text.split("`")
+    if len(pieces) % 2 == 0:
+        return ""
+    for span in pieces[1::2]:
+        if len(span) > MAX_PATH_CHARS or span != span.strip():
+            return ""
+        path = vault_relative_path(span)
         if path == GUIDE_PATH or ("/" in path and _FILE_EXTENSION.search(path)):
             return path
     return ""

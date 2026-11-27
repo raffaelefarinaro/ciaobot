@@ -34,7 +34,7 @@ Under `## What needs you`, each item is one numbered line. Copy a step's `needs 
 Self-check: after writing the section, run this one line with V as the vault's absolute path. It prints every item that has a backtick, a `[x]` or `[!]` marker, a retry count, a step id or field name, more than 250 characters before its path, or no `(path: …)` at its end, and a `missing:` line when Unsure has open lines but no item says "waiting for your decision" with `(path: Workspace/Unsure.md)`:
 
 ```
-awk -v n="$(grep -c '^- \[ \]' <V>/Workspace/Unsure.md 2>/dev/null)" '/^## What needs you/{f=1;next}/^#/{f=0}f&&NF{t=$0;sub(/ ?\(path: [^()]*\)\.?$/,"",t);if(t~/\140|\[[x!]\]|etry [0-9]|stale step|-(look|tasks|review)|updated:|pct|frontmatter|^[0-9]+[.)] [a-z-]+:/||length(t)>250||t==$0)print;if($0~/waiting for your decision\..*\(path: Workspace\/Unsure\.md\)/)u=1}END{if(n>0&&!u)print "missing: the item for " n " open Unsure lines"}' <V>/Workspace/Care-Report.md
+awk -v n="$(grep -c '^- \[ \]' "<V>/Workspace/Unsure.md" 2>/dev/null)" '/^## What needs you/{f=1;next}/^#/{f=0}f&&NF{t=$0;sub(/ *\([Pp]ath: *[^()]*\) *\.? *$/,"",t);if(t~/\140|\[[x!]\]|etry [0-9]|stale step|second-look|closed-tasks|guide-review|updated:|pct|frontmatter|^[0-9]+[.)] [a-z-]+:/||length(t)>250||t==$0)print;if($0~/waiting for your decision\..*\([Pp]ath: *Workspace\/Unsure\.md *\)/)u=1}END{if(n>0&&!u)print "missing: the item for " n " open Unsure lines"}' "<V>/Workspace/Care-Report.md"
 ```
 
 Rewrite each item it prints, add a missing item, and run it once more. Shorten the words, never a file name: never rename or move a file to pass the check. An item printed only because it has no path may stay when no file fits it; the page then offers Fix with a chat.
