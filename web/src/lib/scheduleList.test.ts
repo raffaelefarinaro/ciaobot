@@ -99,7 +99,9 @@ describe('lastRunState', () => {
     expect(lastRunState(s('a', { last_status: 'running' }), idle)).toBe('working')
     expect(lastRunState(s('a', { last_status: 'ok', last_run_chat_id: 'chat-1' }), id => id === 'chat-1')).toBe('working')
     expect(lastRunState(s('a', { last_status: 'ok', web_chat_id: 'chat-2' }), id => id === 'chat-2')).toBe('working')
-    expect(lastRunState(s('a', { last_status: 'ok' }), idle)).toBe('done')
+    expect(lastRunState(s('a', { last_status: 'ok', last_dispatched_at: '2026-01-01T08:00:00Z' }), idle)).toBe('done')
+    expect(lastRunState(s('a', { last_status: 'ok', last_triggered_on: '2026-01-01' }), idle)).toBe('done')
+    expect(lastRunState(s('a', { last_status: 'ok' }), idle)).toBe('none')
     expect(lastRunState(s('a'), idle)).toBe('none')
   })
   it('names the state in a word where it wants the owner, and in full for assistive tech', () => {

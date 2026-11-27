@@ -99,6 +99,11 @@ const when = computed(() => {
   // A one-off that has not run yet is dated by its run.
   if (s.frequency === 'once' && s.next_run && !s.last_dispatched_at) return relativeWhen(s.next_run)
   if (s.last_dispatched_at) return relativeWhen(s.last_dispatched_at)
+  // An older record keeps only the day it last ran.
+  if (s.last_triggered_on) {
+    const day = new Date(`${s.last_triggered_on}T12:00:00`)
+    if (!Number.isNaN(day.getTime())) return day.toLocaleDateString(undefined, { weekday: 'short', day: 'numeric', month: 'short' })
+  }
   return s.frequency === 'manual' ? 'runs when you ask' : 'not run yet'
 })
 </script>

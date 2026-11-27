@@ -196,7 +196,7 @@ function openItem(key: ReviewItem['key']) {
 
 /* The care line is quiet in every state: the glyph's shape and the detail's
    words carry the status, and Needs you carries the call to act. */
-.home-review-care-title {
+.home-review-item .home-review-care-title {
   display: inline-flex;
   align-items: center;
   gap: var(--space-2);

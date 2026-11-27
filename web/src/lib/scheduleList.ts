@@ -134,7 +134,8 @@ export function lastRunState(s: Schedule, isStreaming: (chatId: string) => boole
   if (s.last_status === 'running'
     || (!!s.last_run_chat_id && isStreaming(s.last_run_chat_id))
     || (s.enabled && !!s.web_chat_id && isStreaming(s.web_chat_id))) return 'working'
-  if (s.last_status === 'ok') return 'done'
+  // A clean status with no run on record (an imported entry) says nothing yet.
+  if (s.last_status === 'ok' && (s.last_dispatched_at || s.last_triggered_on)) return 'done'
   return 'none'
 }
 

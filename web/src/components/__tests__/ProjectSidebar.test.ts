@@ -867,14 +867,16 @@ describe('ProjectSidebar global new chat', () => {
   it('roams schedules then current task rows after a mode switch with the same context root', async () => {
     const schedules = useTaskStore()
     schedules.schedulesLoaded = true
-    schedules.schedules = ['a', 'b'].map(id => ({
+    schedules.schedules = ['a', 'b'].map((id, i) => ({
       schedule_id: id, title: id, prompt: id, workspace: 'personal',
       enabled: true, frequency: 'daily', daily_time_utc: '09:00', project_id: 'project-1',
+      next_run: new Date(Date.now() + (i + 1) * 3_600_000).toISOString(),
     })) as never
     const wrapper = await mountSidebar('schedules')
     const context = wrapper.get('.sidebar-context').element
+    // The three pages, then Next up's two runs: one list for the arrows.
     const rows = wrapper.findAll<HTMLElement>('.schedule-item')
-    expect(rows).toHaveLength(2)
+    expect(rows).toHaveLength(5)
     const vm = wrapper.vm as unknown as { onArrow: (key: string) => boolean }
     rows[0].element.focus()
     expect(vm.onArrow('ArrowDown')).toBe(true)
@@ -972,28 +974,133 @@ describe('ProjectSidebar global new chat', () => {
     wrapper.unmount()
   })
 
-  it('lists a chat loop under its own Loops group, above Routines', async () => {
-    const schedules = useTaskStore()
-    schedules.schedulesLoaded = true
-    schedules.schedules = [
-      { schedule_id: 'routine', title: 'Routine', prompt: 'r', workspace: 'personal', enabled: true, frequency: 'daily', daily_time_utc: '09:00' },
-      {
-        schedule_id: 'loop', title: 'Watch the build', prompt: 'w', workspace: 'personal', enabled: true,
-        frequency: 'interval', interval_minutes: 5, daily_time_utc: '', web_chat_id: 'chat-a',
-        owner_chat_id: 'chat-a', expires_at: '2099-01-01T00:00:00Z', max_runs: 10, run_count: 3,
-      },
+  async function mountAutomations(path: string) {
+    const router = createRouter({
+      history: createMemoryHistory(),
+      routes: [
+        { path: '/', component: { template: '<div />' } },
+        { path: '/schedules/:scheduleId?', component: { template: '<div />' } },
+        { path: '/automations/loops', component: { template: '<div />' } },
+        { path: '/automations/webhooks', component: { template: '<div />' } },
+      ],
+    })
+    await router.push(path)
+    await router.isReady()
+    return mount(ProjectSidebar, {
+      attachTo: document.body,
+      props: { collapsed: false, mode: 'schedules' },
+      global: { plugins: [router] },
+    })
+  }
+
+  const automationBase = {
+    prompt: 'p', daily_time_utc: '09:00', timezone_name: 'UTC', frequency: 'daily', enabled: true,
+    scope: 'user', workspace: 'personal', web_project_id: 'project-1', next_run: '', last_triggered_on: '',
+    days_of_week: null, interval_minutes: 0, day_of_month: null, run_at_date: null, web_chat_id: null,
+    missed: false, model: '', archive_policy: 'manual',
+  }
+  const inHours = (h: number) => new Date(Date.now() + h * 3_600_000 + 60_000).toISOString()
+  const loopEntry = {
+    ...automationBase, schedule_id: 'loop', title: 'Watch the build', frequency: 'interval', interval_minutes: 5,
+    daily_time_utc: '', web_chat_id: 'chat-a', owner_chat_id: 'chat-a', expires_at: '2099-01-01T00:00:00Z',
+    max_runs: 10, run_count: 3, next_run: inHours(0),
+  }
+
+  it('lists Schedules, Loops and Webhooks as destination rows with counts, the current one marked', async () => {
+    const tasks = useTaskStore()
+    tasks.schedulesLoaded = true
+    tasks.schedules = [
+      { ...automationBase, schedule_id: 'r1', title: 'Routine one' },
+      { ...automationBase, schedule_id: 's1', title: 'System job', scope: 'system' },
+      loopEntry,
     ] as never
-    const wrapper = await mountSidebar('schedules')
-    expect(wrapper.findAll('.schedule-group-header').map(h => h.text())).toEqual(['Loops', 'Routines'])
-    const loopRow = wrapper.get('.schedule-item[href="/schedules/loop"]')
-    expect(loopRow.text()).toContain('Watch the build')
-    expect(loopRow.attributes('title')).toContain('every 5 min')
-    expect(loopRow.attributes('title')).toContain('7 runs left')
-    expect(wrapper.findAll('.schedule-group-items')[1].text()).toContain('Routine')
+    const { useWebhookStore } = await import('../../stores/webhooks')
+    const webhooks = useWebhookStore()
+    webhooks.loadedWorkspace = 'personal'
+    webhooks.triggers = [{ trigger_id: 't1' }, { trigger_id: 't2' }, { trigger_id: 't3' }] as never
+    const wrapper = await mountAutomations('/automations/loops')
+    // (A zero count is left off, like every destination's.)
+    const header = wrapper.get('.sidebar-label-row')
+    expect(header.text()).toContain('Automations')
+    expect(header.get('button[aria-label="New automation"]').text()).toBe('New')
+    const links = wrapper.findAll('.automations-subnav a')
+    expect(links.map(l => l.attributes('href'))).toEqual(['/schedules', '/automations/loops', '/automations/webhooks'])
+    expect(links.every(l => l.classes().includes('nav-item'))).toBe(true)
+    expect(links.map(l => l.attributes('data-count'))).toEqual(['2', '1', '3'])
+    expect(links.map(l => l.attributes('aria-current') ?? '')).toEqual(['', 'page', ''])
+    expect(links[1].classes()).toContain('nav-item--active')
+    expect(links[0].attributes('aria-label')).toBe('Schedules, 2')
+    // The old groups are gone from the sidebar.
+    expect(wrapper.findAll('.schedule-group-header').map(h => h.text())).toEqual(['Automations', 'Next up'])
     wrapper.unmount()
   })
 
-  it('puts New automation on the Routines label', async () => {
+  it('marks Loops current while a loop is open, and Schedules for any other automation', async () => {
+    const tasks = useTaskStore()
+    tasks.schedulesLoaded = true
+    tasks.schedules = [{ ...automationBase, schedule_id: 'r1', title: 'Routine one' }, loopEntry] as never
+    const onLoop = await mountAutomations('/schedules/loop')
+    expect(onLoop.get('.automations-subnav a[aria-current="page"]').attributes('href')).toBe('/automations/loops')
+    onLoop.unmount()
+    const onRoutine = await mountAutomations('/schedules/r1')
+    expect(onRoutine.get('.automations-subnav a[aria-current="page"]').attributes('href')).toBe('/schedules')
+    onRoutine.unmount()
+  })
+
+  it('withholds a count until its list has answered, and puts the alert on Schedules when a routine missed a run', async () => {
+    const tasks = useTaskStore()
+    tasks.schedulesLoaded = false
+    tasks.schedules = []
+    const wrapper = await mountAutomations('/schedules')
+    expect(wrapper.findAll('.automations-subnav a').map(l => l.attributes('data-count'))).toEqual([undefined, undefined, undefined])
+    expect(wrapper.text()).toContain('Loading automations')
+    tasks.schedulesLoaded = true
+    tasks.schedules = [{ ...automationBase, schedule_id: 'm', title: 'Missed one', missed: true }] as never
+    await nextTick()
+    // A zero count is left off, like every destination's.
+    expect(wrapper.get('.automations-subnav a[href="/automations/loops"]').attributes('data-count')).toBeUndefined()
+    const schedulesRow = wrapper.get('.automations-subnav a[href="/schedules"]')
+    expect(schedulesRow.find('.nav-item-alert').exists()).toBe(true)
+    expect(schedulesRow.attributes('aria-label')).toBe('Schedules, 1, attention required')
+    wrapper.unmount()
+  })
+
+  it('lists Next up soonest first as sidebar rows: six at most, no paused or loop, with working and missed marks', async () => {
+    const tasks = useTaskStore()
+    tasks.schedulesLoaded = true
+    tasks.schedules = [
+      { ...automationBase, schedule_id: 'r9', title: 'Nine', next_run: inHours(9) },
+      { ...automationBase, schedule_id: 'sys', title: 'Workspace care', scope: 'system', next_run: inHours(22) },
+      { ...automationBase, schedule_id: 'once', title: 'Call the bank', frequency: 'once', run_at_date: '2099-01-01', next_run: inHours(2) },
+      { ...automationBase, schedule_id: 'paused', title: 'Paused one', enabled: false, next_run: inHours(1) },
+      loopEntry,
+      { ...automationBase, schedule_id: 'missed', title: 'Missed one', missed: true, next_run: inHours(16) },
+      { ...automationBase, schedule_id: 'run', title: 'Running one', last_status: 'running', next_run: inHours(17) },
+      { ...automationBase, schedule_id: 'r19', title: 'Nineteen', next_run: inHours(19) },
+      { ...automationBase, schedule_id: 'r23', title: 'Late', next_run: inHours(23) },
+    ] as never
+    const wrapper = await mountAutomations('/schedules/r9')
+    const rows = wrapper.findAllComponents(SidebarRow)
+    expect(rows.map(r => r.props('text'))).toEqual(['Call the bank', 'Nine', 'Missed one', 'Running one', 'Nineteen', 'Workspace care'])
+    expect(rows.every(r => r.element.classList.contains('sidebar-row') && r.element.classList.contains('schedule-item'))).toBe(true)
+    expect(rows.map(r => r.get('.sidebar-row-meta').text())).toEqual(['in 2h', 'in 9h', 'in 16h', 'in 17h', 'in 19h', 'in 22h'])
+    expect(rows[0].attributes('href')).toBe('/schedules/once')
+    expect(rows[1].attributes('aria-current')).toBe('page')
+    expect(rows[2].find('.missed-dot .activity-glyph--alert').exists()).toBe(true)
+    expect(rows[3].find('.activity-glyph--working').exists()).toBe(true)
+    wrapper.unmount()
+  })
+
+  it('says so when nothing is scheduled', async () => {
+    const tasks = useTaskStore()
+    tasks.schedulesLoaded = true
+    tasks.schedules = [{ ...automationBase, schedule_id: 'p', title: 'Paused', enabled: false, next_run: inHours(1) }] as never
+    const wrapper = await mountAutomations('/schedules')
+    expect(wrapper.text()).toContain('Nothing scheduled.')
+    wrapper.unmount()
+  })
+
+  it('puts New automation on the Automations label', async () => {
     const wrapper = await mountSidebar('schedules')
     useTaskStore().schedulesLoaded = true
     await nextTick()
@@ -1002,74 +1109,6 @@ describe('ProjectSidebar global new chat', () => {
     await button.trigger('click')
     expect(wrapper.emitted('new-schedule')).toHaveLength(1)
     expect(wrapper.find('.sidebar-footer').exists()).toBe(false)
-    wrapper.unmount()
-  })
-
-  it('shows routine times in the browser zone, not the schedule zone', async () => {
-    const previousTz = process.env.TZ
-    process.env.TZ = 'Europe/Rome'
-    try {
-      useTaskStore().schedules = [{
-        schedule_id: 'utc-routine',
-        title: 'Early sweep',
-        prompt: 'sweep',
-        daily_time_utc: '00:01',
-        timezone_name: 'UTC',
-        frequency: 'daily',
-        enabled: true,
-        scope: 'user',
-        workspace: 'personal',
-        web_project_id: 'proj-1',
-        next_run: '2026-12-05T00:01:00Z',
-        last_triggered_on: '',
-        days_of_week: null,
-        interval_minutes: 0,
-        day_of_month: null,
-        run_at_date: null,
-        web_chat_id: null,
-        missed: false,
-        model: '',
-        archive_policy: 'manual',
-      } as never]
-      const wrapper = await mountSidebar('schedules')
-      useTaskStore().schedulesLoaded = true
-      await nextTick()
-      const row = wrapper.get('.schedule-item .sidebar-row-meta')
-      expect(row.text()).toBe('01:01')
-      wrapper.unmount()
-    } finally {
-      if (previousTz === undefined) delete process.env.TZ
-      else process.env.TZ = previousTz
-    }
-  })
-
-  it('draws automation rows with the chat row component, keeping groups, badges and state', async () => {
-    const base = {
-      prompt: 'p', daily_time_utc: '09:00', timezone_name: 'UTC', frequency: 'daily', enabled: true,
-      scope: 'user', workspace: 'personal', web_project_id: 'project-1', next_run: '', last_triggered_on: '',
-      days_of_week: null, interval_minutes: 0, day_of_month: null, run_at_date: null, web_chat_id: null,
-      missed: false, model: '', archive_policy: 'manual',
-    }
-    useTaskStore().schedules = [
-      { ...base, schedule_id: 'r1', title: 'Routine one' },
-      { ...base, schedule_id: 'r2', title: 'Paused routine', enabled: false },
-      { ...base, schedule_id: 'r3', title: 'Missed routine', missed: true },
-      { ...base, schedule_id: 's1', title: 'System job', scope: 'system', frequency: 'interval', interval_minutes: 15 },
-    ] as never
-    const wrapper = await mountSidebar('schedules')
-    useTaskStore().schedulesLoaded = true
-    await nextTick()
-
-    const rows = wrapper.findAllComponents(SidebarRow)
-    expect(rows.map(r => r.props('text'))).toEqual(['Routine one', 'Paused routine', 'Missed routine', 'System job'])
-    // The same row element, title and badge classes as a chat row.
-    expect(rows.every(r => r.element.classList.contains('sidebar-row') && r.element.classList.contains('schedule-item'))).toBe(true)
-    expect(rows[0].get('.sidebar-row-title').text()).toBe('Routine one')
-    expect(rows[1].get('.sidebar-row-meta').text()).toBe('off')
-    expect(rows[1].get('.sidebar-row-title').classes()).toContain('sidebar-row-title--muted')
-    expect(rows[2].find('.missed-dot').exists()).toBe(true)
-    expect(rows[3].get('.sidebar-row-meta').text()).toBe('15m')
-    expect(wrapper.findAll('.schedule-group-header').map(h => h.text())).toEqual(['Routines', 'System'])
     wrapper.unmount()
   })
 

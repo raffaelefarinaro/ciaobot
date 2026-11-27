@@ -267,7 +267,7 @@
               class="nav-item automations-subnav-item schedule-item"
               :class="{ 'nav-item--active': automationsPage === page.id }"
               :aria-current="automationsPage === page.id ? 'page' : undefined"
-              :data-count="automationsCounts[page.id] ?? undefined"
+              :data-count="automationsCounts[page.id] || undefined"
               :aria-label="automationsSubnavLabel(page.id, page.label)"
             >
               <span class="nav-item-label" aria-hidden="true">{{ page.label }}</span>

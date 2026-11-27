@@ -69,7 +69,7 @@ defineProps<{ current: AutomationsPage }>()
 
 /* The expanded desktop sidebar already lists these three pages. */
 @media (min-width: 769px) {
-  :global(.chat-layout.sidebar-open) .automations-switcher {
+  :global(.chat-layout.sidebar-open .automations-switcher) {
     display: none;
   }
 }

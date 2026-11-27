@@ -44,7 +44,7 @@ const headingId = props.id || `docked-${useId()}`
   font-size: var(--text-sm);
 }
 
-:global(:root.theme-light) .docked-window {
+:global(:root.theme-light .docked-window) {
   box-shadow: 0 10px 28px -14px rgb(26 26 46 / 28%);
 }
 
@@ -61,8 +61,14 @@ const headingId = props.id || `docked-${useId()}`
   margin: 0;
 }
 
+</style>
+
+<!-- The rows are the host's own elements, often inside a RouterLink, where a
+     scoped :slotted() rule does not reach; these rules are scoped by the
+     window's class instead. -->
+<style>
 /* Hairline rows, not cards: a short list, not a second inbox to clear. */
-:slotted(.docked-row) {
+.docked-window .docked-row {
   display: flex;
   flex-direction: column;
   gap: 2px;
@@ -81,26 +87,26 @@ const headingId = props.id || `docked-${useId()}`
 }
 
 /* A list that ends the window drops the last rule: the window's edge closes it. */
-:slotted(.docked-list--end > .docked-row:last-child) {
+.docked-window .docked-list--end > .docked-row:last-child {
   border-bottom: 0;
 }
 
-:slotted(.docked-row--static) {
+.docked-window .docked-row--static {
   cursor: default;
 }
 
-:slotted(.docked-row:not(.docked-row--static):hover .docked-row-title) {
+.docked-window .docked-row:not(.docked-row--static):hover .docked-row-title {
   color: var(--accent);
 }
 
-:slotted(.docked-row:focus-visible) {
+.docked-window .docked-row:focus-visible {
   outline: 2px solid var(--accent);
   outline-offset: 2px;
   border-radius: var(--radius-xs);
 }
 
 /* Two lines at most: a long automation title wraps once, then ellipsises. */
-:slotted(.docked-row-title) {
+.docked-window .docked-row-title {
   display: -webkit-box;
   min-width: 0;
   overflow: hidden;
@@ -114,7 +120,7 @@ const headingId = props.id || `docked-${useId()}`
   transition: color 120ms var(--ease);
 }
 
-:slotted(.docked-row-detail) {
+.docked-window .docked-row-detail {
   color: var(--fg2);
   font-size: var(--text-sm);
   line-height: 1.4;
@@ -122,7 +128,7 @@ const headingId = props.id || `docked-${useId()}`
 }
 
 @media (prefers-reduced-motion: reduce) {
-  :slotted(.docked-row-title) {
+  .docked-window .docked-row-title {
     transition: none;
   }
 }
