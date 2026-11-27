@@ -15,6 +15,17 @@ async function checkChip(page: Page, chip: Locator) {
   await expect(chip).not.toContainText(/default/i)
   // The catalog read on mount has landed when the model part is named.
   await expect(chip).toContainText('Synthetic Model')
+  // The model part is on screen, not only in the DOM, at every width; a phone
+  // shows the model alone (the provider is in the name), never "Provider ·".
+  const modelPart = chip.locator('.home-intake-chip-label, .composer-chip-label').first()
+  await expect(modelPart).toBeVisible()
+  await expect(modelPart).toHaveText('Synthetic Model')
+  // A long name may ellipsise on a phone, but at least ~8 characters show.
+  expect((await modelPart.boundingBox())!.width).toBeGreaterThanOrEqual(48)
+  const sep = chip.locator('.home-intake-chip-sep, .composer-chip-sep').first()
+  const provider = chip.locator('.home-intake-chip-provider, .composer-chip-provider').first()
+  expect(await sep.isVisible()).toBe(await provider.isVisible())
+  expect(await provider.isVisible()).toBe((page.viewportSize()!.width) > 520)
   const closed = await box(chip)
   await chip.click()
   const popover = page.locator('.model-selector__popover')
@@ -27,6 +38,9 @@ async function checkChip(page: Page, chip: Locator) {
   expect(rect.y + rect.height).toBeLessThanOrEqual(page.viewportSize()!.height)
   await expect(popover.locator('.model-selector__item.ms-item--active')).toContainText('Synthetic Model')
   await expect(popover).not.toContainText(/\bdefault\b/i)
+  await page.keyboard.press('Escape')
+  await expect(popover).toHaveCount(0)
+  expect(await box(chip)).toEqual(closed)
 }
 
 for (const viewport of [{ width: 1280, height: 800 }, { width: 1280, height: 900 }, { width: 390, height: 844 }]) {
@@ -37,9 +51,23 @@ for (const viewport of [{ width: 1280, height: 800 }, { width: 1280, height: 900
       await isolate(page, `model-chip-${viewport.width}-${viewport.height}-${testInfo.workerIndex}`)
     })
 
-    test('on Home', async ({ page }) => {
+    test('on Home, and again after a workspace switch', async ({ page }) => {
       await boot(page, '/', BOOTED)
-      await checkChip(page, page.locator('.home-intake-model-trigger'))
+      const chip = page.locator('.home-intake-model-trigger')
+      await checkChip(page, chip)
+      // A switch drops the catalog; the chip reads the new workspace's
+      // default without the picker being opened.
+      const before = await box(chip)
+      // The switcher is in the drawer on a phone, so read the active workspace
+      // from where the app keeps it.
+      const active = () => page.evaluate(() => localStorage.getItem('ciao-active-workspace'))
+      const start = await active()
+      await page.evaluate(() => (document.activeElement as HTMLElement | null)?.blur())
+      await page.keyboard.press(start === 'beta' ? '1' : '2')
+      await expect.poll(active).not.toBe(start)
+      await expect(chip).toContainText('Synthetic Model')
+      expect(await box(chip)).toEqual(before)
+      await checkChip(page, chip)
     })
 
     test('in the chat composer', async ({ page }) => {

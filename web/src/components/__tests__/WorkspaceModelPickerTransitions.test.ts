@@ -19,7 +19,7 @@ import { askPrompt, pendingPrompt } from '../../lib/prompt'
 import type { ProviderDescriptor } from '../../lib/types'
 
 // The registry row /api/models serves for the Claude catalog.
-const PROVIDERS = [{ id: 'claude', label: 'Anthropic (via Claude Code)', short_label: 'Claude', capabilities: {} }] as ProviderDescriptor[]
+const PROVIDERS = [{ id: 'claude', label: 'Anthropic (via Claude Code)', short_label: 'Claude Code', capabilities: {} }] as ProviderDescriptor[]
 
 vi.mock('../../lib/api', () => ({
   api: { get: vi.fn(), post: vi.fn(), patch: vi.fn(), del: vi.fn() },

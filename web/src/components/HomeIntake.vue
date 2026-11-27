@@ -81,6 +81,8 @@
             ref="modelTrigger"
             type="button"
             class="home-intake-chip home-intake-model-trigger"
+            :class="{ 'home-intake-model-trigger--named': !!modelView.modelLabel }"
+            :title="modelLabel"
             :aria-label="`Model for the new chat — ${modelLabel}`"
             aria-haspopup="listbox"
             :aria-expanded="showModelPicker"
@@ -257,7 +259,10 @@ watch(() => tasks.modelTransition, transition => {
     if (restore && transition === tasks.modelTransition && modelTrigger.value?.isConnected
       && (document.activeElement === document.body || document.activeElement === focused)) modelTrigger.value.focus()
   })
-  if (modelRequested.value && tasks.modelWorkspaceEligible && !tasks.modelLoading && !tasks.models) void tasks.fetchModels()
+  // The chip names the new workspace's default model, so its catalog is read
+  // on every switch, opened or not; otherwise the chip would shrink to the
+  // provider alone until the picker is next opened.
+  if (tasks.modelWorkspaceEligible && !tasks.modelLoading && !tasks.models) void tasks.fetchModels()
 }, { flush: 'sync' })
 
 function modelSelectionHandler(transition: number) {
@@ -724,6 +729,20 @@ async function startWork(options: { workspace?: string; projectId?: string; reme
   white-space: nowrap;
 }
 
+/* The model part never shrinks to nothing behind its provider. */
+.home-intake-model-trigger .home-intake-chip-label {
+  min-width: min(8ch, 100%);
+}
+
+/* A phone shows the model alone; the provider stays in the chip's accessible
+   name and tooltip. With no model named yet the provider still shows. */
+@media (max-width: 520px) {
+  .home-intake-model-trigger--named .home-intake-chip-provider,
+  .home-intake-model-trigger--named .home-intake-chip-sep {
+    display: none;
+  }
+}
+
 /* The separator carries its own spaces (so the chip's text reads
    "Claude Code · Opus"); the negative margin cancels the flex gap. */
 .home-intake-chip-sep {
@@ -733,6 +752,11 @@ async function startWork(options: { workspace?: string; projectId?: string; reme
 
 .home-intake-project {
   flex: 0 1 auto;
+}
+
+/* The project's name keeps a few characters too ("Gene…", not "G…"). */
+.home-intake-project .home-intake-chip-label {
+  min-width: min(5ch, 100%);
 }
 
 .home-intake-model {

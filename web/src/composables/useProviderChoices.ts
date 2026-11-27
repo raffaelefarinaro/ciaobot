@@ -1,5 +1,5 @@
 import { computed, type Ref } from 'vue'
-import { modelName, providerShortLabel, type ModelSection } from '../lib/modelSections'
+import { AGENT_DEFAULT_MODEL, modelName, providerShortLabel, type ModelSection } from '../lib/modelSections'
 import { modelProviderPrefix } from '../lib/modelLabels'
 import { modeLabel } from '../lib/permissionModes'
 import type { ModelsResponse, RoutineSettings, RuntimeProvider } from '../lib/types'
@@ -160,8 +160,16 @@ export function useProviderChoices(deps: {
           ? { modelBadges: { [sentinel]: [namespace] } }
           : {}),
       },
-      aliasSectionEntry(provider),
+      withoutAgentDefault(aliasSectionEntry(provider)),
     ]
+  }
+
+  // The entry above already stands for the default, so the agent's own
+  // `default` row is not listed a second time.
+  function withoutAgentDefault(section: ModelSection): ModelSection {
+    const labels = { ...(section.modelLabels || {}) }
+    delete labels[AGENT_DEFAULT_MODEL]
+    return { ...section, models: section.models.filter((model) => model !== AGENT_DEFAULT_MODEL), modelLabels: labels }
   }
 
   function providerDefaultModelEffective(provider: AliasProviderKey): string {
@@ -191,6 +199,7 @@ export function useProviderChoices(deps: {
     getProviderSection,
     modelLabelsFor,
     modelNameFor,
+    withoutAgentDefault,
     modelBadgesFor,
     aliasSectionEntry,
     providerSectionsWithDefault,

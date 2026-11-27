@@ -1133,6 +1133,8 @@
                 type="button"
                 ref="composerModelTrigger"
                 class="model-picker-summary composer-chip"
+                :class="{ 'composer-chip--named': !!chipModelLabel }"
+                :aria-label="chipTitle"
                 :title="chipTitle"
                 aria-haspopup="listbox"
                 :aria-expanded="showModelPicker"
@@ -1489,7 +1491,7 @@ import InjectedPromptCard from './InjectedPromptCard.vue'
 import { errorNoticePrompt, parseInjectedPrompt, retryScheduledNotice, type InjectedPrompt } from '../lib/injectedPrompt'
 import { linkifyText, type FileMentionTargets } from '../lib/filePaths'
 import { isChatId } from '../lib/chatLinks'
-import { modelName, providerForModelSection, providerShortLabel, sectionKeyForProvider, sectionsFromModelsResponse } from '../lib/modelSections'
+import { displayedModel, modelName, providerForModelSection, providerShortLabel, sectionKeyForProvider, sectionsFromModelsResponse } from '../lib/modelSections'
 import { isBridgeMode, type BridgeMode } from '../lib/permissionModes'
 import { renderMarkdown as renderSafeMarkdown, renderUserMarkdown as renderSafeUserMarkdown } from '../lib/safeMarkdown'
 import { handleCodeCopyClick, writeClipboard } from '../lib/codeCopy'
@@ -3271,7 +3273,8 @@ const activeModelHighlights = computed(() => {
   if (!c) return []
   const model = activeModelId.value
   if (!model) return []
-  return [model]
+  // Claude Code's `default` is highlighted as the concrete row it stands for.
+  return [displayedModel(modelsResponse.value, activeBucket.value, model)]
 })
 
 const bucketLocked = computed(() => {
@@ -5212,7 +5215,10 @@ async function selectModel(value: string | string[], sectionKey = '') {
     ? sectionProvider
     : bucketForSelectedModel(model)
   const currentEntry = canonicalTier(chat.value.model)
-  const sameModelAndRoute = canonicalTier(model) === currentEntry && targetBucket === activeBucket.value
+  // The row a `default` chat shows as current is the same choice, not a pin.
+  const shownEntry = canonicalTier(displayedModel(modelsResponse.value, activeBucket.value, activeModelId.value || ''))
+  const sameModelAndRoute = (canonicalTier(model) === currentEntry || canonicalTier(model) === shownEntry)
+    && targetBucket === activeBucket.value
   if (sameModelAndRoute && !recovery) {
     // The composer's picker is selection-only: the model already in use is a
     // no-op. In a recovery the same model still retries.
@@ -7165,8 +7171,17 @@ details[open] > .activity-summary::before {
   white-space: pre;
 }
 
+/* A phone shows the model alone; the provider stays in the chip's accessible
+   name and tooltip. With no model named yet the provider still shows. */
+@media (max-width: 520px) {
+  .composer-chip--named .composer-chip-provider,
+  .composer-chip--named .composer-chip-sep {
+    display: none;
+  }
+}
+
 .composer-chip-label {
-  min-width: 0;
+  min-width: min(8ch, 100%);
   max-width: 30ch;
   overflow: hidden;
   text-overflow: ellipsis;

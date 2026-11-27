@@ -928,8 +928,12 @@ const delegateModelWorkspace = ref('')
 const taskStore = useTaskStore()
 
 // Named concretely, as on Home: "Claude Code · Opus 4.5" (lib/newChatModel.ts).
+// The default is resolved against the workspace whose catalog the task store
+// holds, the active one: the store only ever loads the active workspace's
+// models, and the hand-over sheet closes when the workspace switches, so the
+// task's workspace is the active one whenever this picker is open.
 const delegateWorkspaceInfo = computed(() => projectStore.workspaceOptions.find(
-  option => option.name === workspace.value,
+  option => option.name === projectStore.activeWorkspace,
 ))
 const delegateModelView = computed(() => newChatModelView(taskStore.models, delegateWorkspaceInfo.value, delegateRuntime.value, projectStore.workspaceProviderOptions))
 const delegateModelLabel = computed(() => (

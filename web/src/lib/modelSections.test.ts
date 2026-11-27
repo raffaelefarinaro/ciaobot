@@ -1,5 +1,8 @@
 import { describe, expect, it } from 'vitest'
 import {
+  defaultDescriptionName,
+  defaultEquivalent,
+  displayedModel,
   modelName,
   providerForModelSection,
   providerModelLabel,
@@ -13,7 +16,7 @@ function descriptor(id: string, label: string, shortLabel: string): ProviderDesc
   return { id, label, short_label: shortLabel, capabilities: {} as ProviderDescriptor['capabilities'] }
 }
 
-const CLAUDE = descriptor('claude', 'Anthropic (via Claude Code)', 'Claude')
+const CLAUDE = descriptor('claude', 'Anthropic (via Claude Code)', 'Claude Code')
 const OPENCODE = descriptor('opencode', 'OpenCode', 'OpenCode')
 const CODEX = descriptor('codex', 'OpenAI (via Codex)', 'Codex')
 
@@ -36,7 +39,7 @@ describe('modelSections', () => {
     const sections = sectionsFromModelsResponse(response)
 
     expect(sections.map((section) => section.label)).toEqual([
-      'Claude',
+      'Claude Code',
       'OpenCode',
     ])
     expect(sections.find((section) => section.key === 'anthropic')?.models).toEqual([
@@ -217,7 +220,7 @@ describe('opencode section', () => {
     expect(claude?.modelLabels).toEqual({ default: 'Opus 4.5', opus: 'Opus' })
     expect(modelName(response, 'claude', 'default')).toBe('Opus 4.5')
     expect(modelName(response, 'claude', '')).toBe('Opus 4.5')
-    expect(providerModelLabel(response, 'claude', 'default')).toBe('Claude · Opus 4.5')
+    expect(providerModelLabel(response, 'claude', 'default')).toBe('Claude Code · Opus 4.5')
   })
 
   it('shows the provider alone while the default entry has no concrete name', () => {
@@ -229,7 +232,64 @@ describe('opencode section', () => {
       provider_defaults: { claude: 'default' },
     } as ModelsResponse
     expect(modelName(response, 'claude', 'default')).toBe('')
-    expect(providerModelLabel(response, 'claude', 'default')).toBe('Claude')
-    expect(sectionsFromModelsResponse(response)[0].modelLabels).toEqual({ default: 'Claude' })
+    expect(providerModelLabel(response, 'claude', 'default')).toBe('Claude Code')
+    expect(sectionsFromModelsResponse(response)[0].modelLabels).toEqual({ default: 'Claude Code' })
+  })
+})
+
+describe('the default entry and catalog labels', () => {
+  const evidence = (models: Array<{ id: string; label: string; description?: string }>) => ({
+    claude: { status: 'observed' as const, source: null, reason: null, models },
+  })
+
+  it('reads a short name, a raw id and a sentence from the adapter description', () => {
+    expect(defaultDescriptionName('Opus 4.5')).toBe('Opus 4.5')
+    expect(defaultDescriptionName('Opus')).toBe('Opus')
+    expect(defaultDescriptionName('claude-opus-4-5-20251101')).toBe('Claude Opus-4-5-20251101')
+    expect(defaultDescriptionName('Use the default model (currently Sonnet 4.5) · $3/$15 per Mtok')).toBe('Sonnet 4.5')
+    expect(defaultDescriptionName('Use the default model · $3/$15 per Mtok')).toBe('')
+    expect(defaultDescriptionName('The model this account is set up to use for most of its work today')).toBe('')
+    expect(defaultDescriptionName('Default')).toBe('')
+    expect(defaultDescriptionName('x'.repeat(200))).toBe('')
+  })
+
+  it("names concrete rows by the agent's label and lists the default once, as its concrete row", () => {
+    const response = {
+      models: [], default: 'default',
+      providers: [descriptor('claude', 'Anthropic (via Claude Code)', 'Claude Code')],
+      provider_models: { claude: ['default', 'opus', 'sonnet', 'haiku', 'sonnet[1m]'] },
+      provider_defaults: { claude: 'default' },
+      provider_catalog_evidence: evidence([
+        { id: 'default', label: 'Default (recommended)', description: 'Opus 4.5' },
+        { id: 'opus', label: 'Opus 4.5' },
+        { id: 'sonnet', label: 'Sonnet 4.5' },
+        { id: 'haiku', label: 'Haiku 4.5' },
+        { id: 'sonnet[1m]', label: 'Sonnet 4.5 (1M context)' },
+      ]),
+    } as unknown as ModelsResponse
+    const claude = sectionsFromModelsResponse(response)[0]
+    expect(claude.models).toEqual(['opus', 'sonnet', 'haiku', 'sonnet[1m]'])
+    expect(claude.modelLabels).toEqual({
+      opus: 'Opus 4.5', sonnet: 'Sonnet 4.5', haiku: 'Haiku 4.5', 'sonnet[1m]': 'Sonnet 4.5 (1M context)',
+    })
+    expect(defaultEquivalent(response, 'claude')).toBe('opus')
+    expect(displayedModel(response, 'claude', 'default')).toBe('opus')
+    expect(displayedModel(response, 'claude', 'sonnet')).toBe('sonnet')
+    expect(modelName(response, 'claude', 'default')).toBe('Opus 4.5')
+  })
+
+  it('keeps the default row when no concrete row has its name', () => {
+    const response = {
+      models: [], default: 'default',
+      providers: [descriptor('claude', 'Anthropic (via Claude Code)', 'Claude Code')],
+      provider_models: { claude: ['default', 'opus'] },
+      provider_defaults: { claude: 'default' },
+      provider_catalog_evidence: evidence([
+        { id: 'default', label: 'Default (recommended)', description: 'Opus 4.5' },
+        { id: 'opus', label: 'Opus' },
+      ]),
+    } as unknown as ModelsResponse
+    expect(sectionsFromModelsResponse(response)[0].models).toEqual(['default', 'opus'])
+    expect(displayedModel(response, 'claude', 'default')).toBe('default')
   })
 })

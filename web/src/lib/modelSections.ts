@@ -42,6 +42,41 @@ export function providerShortLabel(response: ModelsResponse | null | undefined, 
   return response?.providers?.find((item) => item.id === provider)?.short_label || provider
 }
 
+/** A name short enough to be a model's name rather than a sentence. */
+function isShortName(text: string): boolean {
+  return text.length <= 32 && text.split(/\s+/).length <= 4
+}
+
+/**
+ * The model a `default` entry's description names, or ''. The adapter's
+ * description is unchecked text: a display name ("Opus 4.5", "Opus"), a raw
+ * model id ("claude-opus-4-5-20251101") or a sentence ("Use the default model
+ * (currently Sonnet 4.5) · $3/$15 per Mtok"). Only a short name is kept; an id
+ * is made readable; a sentence yields the model it names in "(currently …)",
+ * else nothing, and the caller shows the provider alone.
+ */
+export function defaultDescriptionName(description: string | undefined): string {
+  const text = (description || '').split(' · ')[0].trim().slice(0, 80)
+  if (!text) return ''
+  const current = /\(currently ([^)]+)\)/i.exec(text)?.[1]?.trim()
+  if (current) return isShortName(current) && !/default/i.test(current) ? current : ''
+  if (/default/i.test(text)) return ''
+  if (!/\s/.test(text) && /[-_/:]/.test(text)) return modelDisplayName(text)
+  return isShortName(text) ? text : ''
+}
+
+/** The agent's own label for one catalog entry, when it gave a usable one. */
+function catalogLabel(response: ModelsResponse | null | undefined, provider: string, model: string): string {
+  const label = response?.provider_catalog_evidence?.[provider]?.models
+    ?.find((item) => item.id === model)?.label?.trim() || ''
+  return label && label !== model && isShortName(label) && !/default/i.test(label) ? label : ''
+}
+
+/** A concrete model's readable name: the agent's label, else one made from the id. */
+function concreteName(response: ModelsResponse | null | undefined, provider: string, model: string): string {
+  return catalogLabel(response, provider, model) || modelDisplayName(model)
+}
+
 /**
  * The concrete model a provider's `default` entry runs, as the agent
  * describes it ("Opus 4.5"), or '' when it has not said.
@@ -49,7 +84,31 @@ export function providerShortLabel(response: ModelsResponse | null | undefined, 
 export function agentDefaultModelName(response: ModelsResponse | null | undefined, provider: string): string {
   const entry = response?.provider_catalog_evidence?.[provider]?.models
     ?.find((item) => item.id === AGENT_DEFAULT_MODEL)
-  return entry?.description?.trim() || ''
+  return defaultDescriptionName(entry?.description)
+}
+
+/**
+ * The catalog row the `default` entry stands for: the concrete model whose
+ * name is the one the default runs ("Opus 4.5"), or '' when none is. Pickers
+ * then list that row once, as the default, instead of two look-alike rows.
+ */
+export function defaultEquivalent(response: ModelsResponse | null | undefined, provider: string): string {
+  const name = agentDefaultModelName(response, provider).toLowerCase()
+  if (!name) return ''
+  const models = response?.provider_models?.[provider] ?? []
+  return models.find((model) => (
+    model !== AGENT_DEFAULT_MODEL && concreteName(response, provider, model).toLowerCase() === name
+  )) || ''
+}
+
+/**
+ * The row that shows a stored model: the `default` entry (or no model) is
+ * shown as its concrete equivalent when the catalog lists one.
+ */
+export function displayedModel(response: ModelsResponse | null | undefined, provider: string, model: string): string {
+  const id = model.trim()
+  if (id && id !== AGENT_DEFAULT_MODEL) return id
+  return defaultEquivalent(response, provider) || id
 }
 
 /**
@@ -61,7 +120,7 @@ export function agentDefaultModelName(response: ModelsResponse | null | undefine
 export function modelName(response: ModelsResponse | null | undefined, provider: string, model: string): string {
   const id = model.trim()
   if (!id || id === AGENT_DEFAULT_MODEL) return agentDefaultModelName(response, provider)
-  return modelDisplayName(id)
+  return concreteName(response, provider, id)
 }
 
 /** "Claude Code · Opus 4.5", or the provider alone when the model has no name yet. */
@@ -107,7 +166,10 @@ export function sectionsFromModelsResponse(response: ModelsResponse | null): Mod
   const ids = orderedUnique([...registry.map((item) => item.id), ...Object.keys(catalogs)])
   const sections: ModelSection[] = []
   for (const id of ids) {
-    const models = orderedUnique(catalogs[id] ?? [])
+    // The `default` entry is listed once: as its concrete equivalent when
+    // the catalog has one, otherwise as itself, named by the model it runs.
+    const equivalent = defaultEquivalent(response, id)
+    const models = orderedUnique(catalogs[id] ?? []).filter((model) => !(equivalent && model === AGENT_DEFAULT_MODEL))
     if (!models.length) continue
     const badges = badgesFor(models)
     sections.push({

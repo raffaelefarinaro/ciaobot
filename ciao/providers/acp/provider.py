@@ -98,6 +98,20 @@ def invalidate_acp_catalog(agent_id: str) -> None:
         _catalog_cache.pop(key, None)
 
 
+_DESCRIPTION_MAX = 80
+
+
+def _short_description(description: object) -> str:
+    """The adapter's note on one entry, untrusted: the part before " · ", capped.
+
+    Claude Code's adapter writes a model's name there, sometimes followed by a
+    price ("Sonnet 4.5 · $3/$15 per Mtok"); the PWA reads only the name.
+    """
+    if not isinstance(description, str):
+        return ""
+    return description.split(" · ", 1)[0].strip()[:_DESCRIPTION_MAX].strip()
+
+
 def _option_items(options: list[dict[str, Any]], config_id: str) -> list[tuple[str, str, str]]:
     """``(value, label, description)`` for every value of one config option, grouped or flat, first wins."""
     items: list[tuple[str, str, str]] = []
@@ -121,7 +135,7 @@ def _option_items(options: list[dict[str, Any]], config_id: str) -> list[tuple[s
                 items.append((
                     value,
                     name if isinstance(name, str) and name else value,
-                    description.strip() if isinstance(description, str) else "",
+                    _short_description(description),
                 ))
         break
     return items

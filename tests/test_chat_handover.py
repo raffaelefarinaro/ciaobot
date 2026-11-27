@@ -31,6 +31,23 @@ def _make_manager(tmp_path: Path) -> ProjectChatManager:
     )
 
 
+def test_handover_note_names_the_provider_alone_for_the_cli_default(tmp_path: Path) -> None:
+    pcm = _make_manager(tmp_path)
+    project = pcm.create_project("handover", workspace="personal")
+    chat = pcm.create_chat(project.project_id, model="default", provider="claude")
+    pcm._save()
+
+    updated = pcm.handover_chat(
+        chat.chat_id, provider="opencode", model="openai/gpt-5.6",
+        messages=[{"role": "user", "content": "Carry on"}],
+    )
+
+    assert updated is not None
+    note = updated.handover_messages[-1]["content"]
+    assert note == "Handed over from Claude Code to OpenCode / openai/gpt-5.6."
+    assert "default" not in note.lower()
+
+
 def test_handover_chat_switches_model_and_persists_messages(tmp_path: Path) -> None:
     pcm = _make_manager(tmp_path)
     project = pcm.create_project("handover", workspace="personal")

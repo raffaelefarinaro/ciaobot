@@ -10,6 +10,7 @@
  * pinned); once a model is pinned, one last row offers the way back.
  */
 import {
+  displayedModel,
   modelName,
   providerForModelSection,
   providerModelLabel,
@@ -82,7 +83,9 @@ export function newChatModelView(
         : providerOptions.find(option => option.value === current.provider)?.short_label || current.provider)
       : '',
     modelLabel: current.provider && response ? modelName(response, current.provider, current.model) : '',
-    activeModel: current.model,
+    // Claude Code's `default` is shown (and highlighted) as the concrete row
+    // it stands for, when the catalog lists one.
+    activeModel: current.provider ? displayedModel(response, current.provider, current.model) : current.model,
     sections,
   }
 }
@@ -102,6 +105,7 @@ export function chosenRuntimeFor(
   if (!model || model === FOLLOW_DEFAULT_KEY || sectionKey === FOLLOW_DEFAULT_SECTION) return null
   const provider = providerForModelSection(sectionKey)
   const fallback = workspaceDefaultRuntime(response, workspace)
-  if (!chosen && fallback.provider === provider && fallback.model === model) return null
+  if (!chosen && fallback.provider === provider
+    && (fallback.model === model || displayedModel(response, provider, fallback.model) === model)) return null
   return { model, provider }
 }

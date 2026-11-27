@@ -362,7 +362,8 @@ function onCloseAutoFocus(event: Event): void {
 }
 
 function onInteractOutside(event: Event): void {
-  // A menu opened from the footer (Permission mode, Thinking) is its own layer.
+  // A menu opened from the footer (Permission mode, Thinking; MenuSelect marks
+  // its content data-model-picker-menu) is its own layer.
   // Choosing in it with a pointer closes and unmounts it within the same
   // gesture, so Reka's outside check meets a menu item that is already
   // detached and reads it as outside this popover. A press or focus that
@@ -372,7 +373,7 @@ function onInteractOutside(event: Event): void {
   const target = (original?.target ?? event.target) as Node | null
   if (!target) return
   const element = target instanceof Element ? target : target.parentElement
-  if (!target.isConnected || element?.closest('[role="menu"]')) event.preventDefault()
+  if (!target.isConnected || element?.closest('[data-model-picker-menu]')) event.preventDefault()
 }
 
 function onEscapeKeyDown(event: KeyboardEvent): void {
@@ -937,7 +938,9 @@ onMounted(() => {
   .model-selector__item { transition: none; }
 }
 
-@media (max-width: 768px) {
+/* A phone, and a short landscape screen (844x390), get the sheet: a popover
+   anchored to the chip would have two rows of room above or below it. */
+@media (max-width: 768px), (max-height: 500px) {
   /* Header selectors have no trigger box of their own, so anchor their menu
      to the viewport below the shared top bar and keep both edges visible. */
   .model-selector--triggerless :deep([data-reka-popper-content-wrapper]) {

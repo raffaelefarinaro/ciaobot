@@ -132,7 +132,7 @@ export const NewSchedule: Story = {
   },
 }
 export const NewScheduleModelAndArchive: Story = {
-  parameters: { fixture: { routes: [{ method: 'GET', path: '/api/models?workspace=personal', respond: () => json({ models: ['story-model'], default: '', providers: [{ id: 'claude', label: 'Claude', short_label: 'Claude', capabilities: {} }], provider_models: { claude: ['story-model'] } }) }] } },
+  parameters: { fixture: { routes: [{ method: 'GET', path: '/api/models?workspace=personal', respond: () => json({ models: ['story-model'], default: '', providers: [{ id: 'claude', label: 'Claude', short_label: 'Claude Code', capabilities: {} }], provider_models: { claude: ['story-model'] } }) }] } },
   render: () => connectedRender({ component: NewScheduleForm, seed: (pinia) => {
     const projects = useProjectStore(pinia)
     projects.workspaces = [{ name: 'personal' }] as typeof projects.workspaces

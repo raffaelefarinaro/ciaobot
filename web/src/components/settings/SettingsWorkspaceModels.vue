@@ -138,7 +138,6 @@
 import { computed, inject, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import ModelSelector from '../ModelSelector.vue'
 import { api } from '../../lib/api'
-import { modelDisplayName } from '../../lib/modelLabels'
 import { providerShortLabel } from '../../lib/modelSections'
 import { setOverride } from '../../lib/workspaceOverrides'
 import { BYPASS_NOTE, permissionDocsFor } from '../../lib/permissionDocs'
@@ -238,17 +237,17 @@ function sections(insights: boolean) {
     provider.value,
     WS_DEFAULT,
     (effective) => insights
-      ? `Engine default (${engineInsights.value ? modelDisplayName(engineInsights.value) : 'same as chat model'})`
+      ? `Engine default (${engineInsights.value ? choices.modelNameFor(provider.value, engineInsights.value) : 'same as chat model'})`
       : `Engine default (${effective ? choices.modelNameFor(provider.value, effective) : 'automatic'})`,
     !insights,
   )
-  result[1] = {
+  result[1] = choices.withoutAgentDefault({
     ...result[1],
     models: reportedModels.value,
     modelLabels: choices.modelLabelsFor(reportedModels.value, provider.value),
     modelBadges: choices.modelBadgesFor(reportedModels.value),
     disabled: !providerAvailable.value,
-  }
+  })
   return result
 }
 const modelSections = computed(() => sections(false))

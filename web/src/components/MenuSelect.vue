@@ -25,7 +25,9 @@
       <!-- as-child, with the box in this template: the scoped styles reach only
            elements rendered here, not the popper wrapper Reka builds. -->
       <DropdownMenuContent as-child side="top" align="start" :side-offset="4" :collision-padding="8">
-        <div class="menu-select__menu">
+        <!-- Marked so the model picker that holds this menu knows a press in
+             it is not a press outside the picker. -->
+        <div class="menu-select__menu" data-model-picker-menu>
           <DropdownMenuRadioGroup :model-value="current?.value ?? ''" @update:model-value="onPick">
             <DropdownMenuRadioItem
               v-for="option in options"
