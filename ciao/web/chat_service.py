@@ -842,6 +842,23 @@ def _normalize_chat_helper(value: Any) -> dict[str, Any]:
     return {}
 
 
+# The longest a schedule run waits, after its first result, for the follow-up
+# turns of a background subagent it launched (OpenCode always sends subagents
+# to the background). 30 minutes, the same deadline the Claude CLI gives its
+# own background tasks: a routine's subagent is a bounded piece of work, not a
+# long job. Much shorter than the providers' BACKGROUND_WORK_MAX_S (a day, how
+# long an idle provider is kept for background work) because a waiting run
+# holds the scheduler: its entry stays in flight (the next fire of the same
+# schedule is skipped as busy) and the work count, which a restart, an admin
+# drain and a workspace move wait on, stays up. A run still waiting then is
+# graded as cut off and kept, never archived as clean.
+SCHEDULE_FOLLOW_UP_MAX_S = 30 * 60
+# A follow-up the run stopped waiting for, by reason (``follow_up_unfinished``).
+FOLLOW_UP_CUT_OFF = "cut_off"
+FOLLOW_UP_STOPPED = "stopped"
+FOLLOW_UP_SUPERSEDED = "superseded"
+
+
 @dataclass(slots=True)
 class ScheduleRunOutcome:
     completed: bool = False
@@ -853,11 +870,17 @@ class ScheduleRunOutcome:
     retry_pending: bool = False
     final_text: str = ""
     archived_to: str = ""
+    # Why the dispatch stopped waiting for the follow-up turns of a background
+    # subagent the run launched: "cut_off" (still running past
+    # ``SCHEDULE_FOLLOW_UP_MAX_S``), "stopped" (the owner pressed Stop) or
+    # "superseded" (another turn took the chat). Empty when it did not.
+    follow_up_unfinished: str = ""
 
 
 def _schedule_run_clean(outcome: ScheduleRunOutcome) -> bool:
     return (
         outcome.completed
+        and not outcome.follow_up_unfinished
         and not outcome.is_error
         and not outcome.permission_requested
         and not outcome.permission_denied
@@ -889,6 +912,14 @@ def _schedule_dispatch_status(
     if outcome.stream_error or outcome.is_error:
         error = (outcome.final_text or "stream error")[:1000]
         return "error", annotate_reauth(error, provider, model)
+    if outcome.follow_up_unfinished == FOLLOW_UP_CUT_OFF:
+        return "error", (
+            "Cut off: a subagent this run launched was still running after "
+            f"{SCHEDULE_FOLLOW_UP_MAX_S / 60:g} min. The chat was kept."
+        )
+    if outcome.follow_up_unfinished:
+        # Stopped by the owner or taken over by another turn: not a run error.
+        return "skipped", None
     if outcome.permission_requested or outcome.question_requested:
         return "skipped", None
     return "ok", None

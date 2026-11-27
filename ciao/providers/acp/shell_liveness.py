@@ -36,6 +36,8 @@ class TrackedShell:
     command: str
     output_path: str
     launched_at: float
+    # A background subagent, not a shell: its end notice names it so.
+    subagent: bool = False
 
 
 class ShellLiveness:
@@ -51,22 +53,25 @@ class ShellLiveness:
 
     @property
     def count(self) -> int:
-        """How many background shells are tracked as running."""
-        return len(self._tracked)
+        """How many background shells are tracked as running. Background subagents are not shells."""
+        return sum(1 for shell in self._tracked.values() if not shell.subagent)
 
     @property
     def polling(self) -> bool:
         """True while a shell with a known pid is tracked: only those need the process table."""
         return any(shell.pid for shell in self._tracked.values())
 
-    def track_unpolled(self, call_id: str, *, command: str = "", output_path: str = "") -> bool:
-        """Track a background shell the provider reports no pid for: it ends only by the provider's own settle."""
+    def track_unpolled(
+        self, call_id: str, *, command: str = "", output_path: str = "", subagent: bool = False
+    ) -> bool:
+        """Track a background shell or subagent the provider reports no pid for: it ends only by the provider's own settle."""
         if call_id in self._tracked:
             return True
         if call_id in self._settled or len(self._tracked) >= MAX_TRACKED:
             return False
         self._tracked[call_id] = TrackedShell(
             pid=0, started="", command=command, output_path=output_path, launched_at=time.monotonic(),
+            subagent=subagent,
         )
         return True
 

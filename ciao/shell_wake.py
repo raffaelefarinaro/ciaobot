@@ -137,9 +137,16 @@ def _program_name(command: str) -> str:
 def _label(event: ShellFinishedEvent) -> str:
     # One line: a multi-line command would break the notice's header line.
     command = " ".join(event.command.split())
-    command = redact_text(_safe_command(command))
+    if event.subagent:
+        # A subagent's description, not a command line: shown as given, redacted.
+        command = redact_text(command)
+    else:
+        command = redact_text(_safe_command(command))
     if len(command) > COMMAND_CHARS:
         command = command[: COMMAND_CHARS - 1] + "…"
+    if event.subagent:
+        name = f"subagent {command}" if command else "subagent"
+        return f"{name} (ran {round(event.duration_s)} s)"
     return f"{command or 'shell'} (ran {round(event.duration_s)} s)"
 
 

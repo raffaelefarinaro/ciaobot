@@ -45,6 +45,7 @@ def _session(spec: Any, monkeypatch: pytest.MonkeyPatch, table: dict[int, tuple[
     session._shells = ShellLiveness()
     session._shell_task = None
     session._shell_commands = {}
+    session._subagent_calls = {}
     session._deferred_ends = []
     session._end_tasks = set()
     session._ended_shells = {}

@@ -19,10 +19,12 @@ from __future__ import annotations
 
 import asyncio
 import dataclasses
+import functools
 import json
 import logging
 import re
 import time
+from collections.abc import Callable
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Protocol, cast
@@ -37,7 +39,7 @@ from ciao.provider_service import ProviderService, supported_providers
 from ciao.schedule_command import CommandRun, run_schedule_command
 from ciao.schedules import ScheduleEntry, ScheduleStore
 from ciao.web import chat_service
-from ciao.web.chat_broker import ChatStream, EventsHub
+from ciao.web.chat_broker import ChatStream, ChatStreamBroker, EventsHub
 from ciao.web.memory_pass import (
     MemoryProjectRefused,
     is_memory_pass_chat,
@@ -50,6 +52,12 @@ if TYPE_CHECKING:  # pragma: no cover - typing only
 logger = logging.getLogger(__name__)
 
 _RUN_OUTPUT_CLOSE_RE = re.compile(r"</\s*run-output", re.IGNORECASE)
+
+# How often the wait looks for the chat's next follow-up stream. A follow-up
+# turn holds its stream for at least the provider's quiet period (5 s), so a
+# poll this often sees it; a drain that replays a whole backlogged turn between
+# two polls is not seen, and the run is then graded on the turn before it.
+_FOLLOW_UP_POLL_S = 0.5
 
 # (description, expected needs_user, exact model output). Rendered into the
 # classifier prompt as <example> blocks; a test checks each output parses.
@@ -92,6 +100,64 @@ _ATTENTION_SYSTEM_PROMPT = (
     )
 )
 
+async def _consume_run_stream(
+    stream: ChatStream,
+    outcome: chat_service.ScheduleRunOutcome,
+    *,
+    stop_on_attention: bool = False,
+    still_ours: Callable[[], bool] | None = None,
+) -> bool:
+    """Fold one turn's stream into *outcome*; True when it sent a subagent to the background.
+
+    A ``tool_result`` marked ``background`` for an ``Agent`` call acknowledges
+    a launch: the subagent goes on after the turn's result. A background shell's
+    acknowledgement does not count. A later result replaces the final text, so
+    the last turn grades the run. With *stop_on_attention* (a follow-up turn,
+    which is attended and raises cards) a permission request or a question ends
+    the read at once: that stream waits for the owner, not for the run.
+    *still_ours* guards a foreground wake stream, which also runs any message
+    the owner queues while it streams: a result that arrives once another
+    turn has started on the chat is not the run's, so the read ends there and
+    the run is marked superseded.
+    """
+    launched = False
+    agent_calls: set[str] = set()
+    async for raw_payload in stream.subscribe():
+        if not isinstance(raw_payload, dict):
+            continue
+        payload = cast(dict[str, object], raw_payload)
+        event_type = payload.get("type")
+        if event_type == "permission_request":
+            outcome.permission_requested = True
+        elif event_type == "status" and payload.get("denied_tool"):
+            outcome.permission_denied = str(payload["denied_tool"])
+        elif event_type == "tool_use" and payload.get("tool_name") == "AskUserQuestion":
+            outcome.question_requested = True
+        elif event_type == "tool_use" and payload.get("tool_name") == "Agent":
+            agent_calls.add(str(payload.get("tool_use_id") or ""))
+        elif (
+            event_type == "tool_result"
+            and payload.get("background")
+            and str(payload.get("tool_use_id") or "") in agent_calls
+        ):
+            launched = True
+        elif event_type == "chat_retry":
+            if (payload.get("status") or "") == "pending":
+                outcome.retry_pending = True
+        elif event_type == "error":
+            outcome.stream_error = True
+        elif event_type == "result":
+            if still_ours is not None and not still_ours():
+                outcome.follow_up_unfinished = chat_service.FOLLOW_UP_SUPERSEDED
+                break
+            outcome.completed = True
+            outcome.is_error = bool(payload.get("is_error"))
+            outcome.final_text = str(payload.get("text") or "")
+        if stop_on_attention and (outcome.permission_requested or outcome.question_requested):
+            break
+    return launched
+
+
 class ScheduleDispatchHost(Protocol):
     """The complete, typed manager surface used by ``ScheduleDispatcher``."""
 
@@ -99,6 +165,7 @@ class ScheduleDispatchHost(Protocol):
     _chats: dict[str, ChatInfo]
     _projects: dict[str, ProjectInfo]
     _providers: dict[str, ProviderService]
+    _broker: ChatStreamBroker
     schedule_store: ScheduleStore | None
 
     @property
@@ -159,6 +226,10 @@ class ScheduleDispatchHost(Protocol):
         *, chat_id: str = "",
     ) -> bool: ...
 
+    def _follow_up_pending(self, chat_id: str) -> bool: ...
+
+    def _stop_count(self, chat_id: str) -> int: ...
+
     async def archive_chat(self, chat_id: str) -> ArchiveOutcome | None: ...
 
     async def run_archive_postprocess(
@@ -175,6 +246,92 @@ class ScheduleDispatcher:
 
     def __init__(self, host: ScheduleDispatchHost) -> None:
         self._host = host
+
+    async def _await_follow_up_turns(
+        self,
+        chat_id: str,
+        outcome: chat_service.ScheduleRunOutcome,
+        *,
+        first: ChatStream,
+        stops: int,
+    ) -> None:
+        """Read the follow-up turns of the background subagent a run launched.
+
+        OpenCode runs every subagent in the background: its first result only
+        says the work started, and the child's completion gives the chat
+        another turn. The between-turns drain streams each such turn on the
+        chat's broker stream (a background stream), or the host starts a wake
+        turn for it (origin ``background_run``); this reads those like the
+        first turn, so the run is graded on its last result. It returns once
+        no follow-up stream is live and the host reports no background work
+        and no held or claimed shell notice (``_follow_up_pending``). *stops*
+        is the chat's Stop count taken before the run's turn started. It
+        stops early, leaving the run unclean, when a follow-up
+        asks for the owner, when the owner presses Stop on the chat, when any
+        other turn takes the chat (the owner typing, another run), or past
+        ``SCHEDULE_FOLLOW_UP_MAX_S``.
+        """
+        deadline = time.monotonic() + chat_service.SCHEDULE_FOLLOW_UP_MAX_S
+        if first.user_stopped:
+            outcome.follow_up_unfinished = chat_service.FOLLOW_UP_STOPPED
+            return
+        read: list[ChatStream] = [first]
+        try:
+            while True:
+                if self._host._stop_count(chat_id) != stops:
+                    outcome.follow_up_unfinished = chat_service.FOLLOW_UP_STOPPED
+                    return
+                if not chat_service._schedule_run_clean(outcome):
+                    return  # a follow-up asked for the owner, or failed
+                stream = self._host._broker.get(chat_id)
+                if stream is not None and any(stream is seen for seen in read):
+                    stream = None  # already read to its end
+                if stream is not None:
+                    still_ours: Callable[[], bool] | None = None
+                    if not stream.background:
+                        wake_turns = self._wake_turn_count(chat_id)
+                        if wake_turns is None:
+                            outcome.follow_up_unfinished = chat_service.FOLLOW_UP_SUPERSEDED
+                            return
+                        still_ours = functools.partial(self._turn_count_is, chat_id, wake_turns)
+                    read.append(stream)
+                    try:
+                        await asyncio.wait_for(
+                            _consume_run_stream(
+                                stream, outcome, stop_on_attention=True, still_ours=still_ours
+                            ),
+                            max(deadline - time.monotonic(), 0.0),
+                        )
+                    except TimeoutError:
+                        outcome.follow_up_unfinished = chat_service.FOLLOW_UP_CUT_OFF
+                        return
+                    if still_ours is not None and not still_ours():
+                        outcome.follow_up_unfinished = chat_service.FOLLOW_UP_SUPERSEDED
+                        return
+                    if stream.user_stopped:
+                        outcome.follow_up_unfinished = chat_service.FOLLOW_UP_STOPPED
+                        return
+                    continue
+                if not self._host._follow_up_pending(chat_id):
+                    return
+                if time.monotonic() >= deadline:
+                    outcome.follow_up_unfinished = chat_service.FOLLOW_UP_CUT_OFF
+                    return
+                await asyncio.sleep(_FOLLOW_UP_POLL_S)
+        finally:
+            read.clear()
+
+    def _wake_turn_count(self, chat_id: str) -> int | None:
+        """The chat's turn count when its latest turn is a wake for finished background work, else None."""
+        chat = self._host._chats.get(chat_id)
+        if chat is None or chat.user_turn_count < 1:
+            return None
+        origin = chat.user_turn_origin.get(str(chat.user_turn_count - 1))
+        return chat.user_turn_count if str(origin or "") == "background_run" else None
+
+    def _turn_count_is(self, chat_id: str, count: int) -> bool:
+        chat = self._host._chats.get(chat_id)
+        return chat is not None and chat.user_turn_count == count
 
     async def _schedule_run_needs_user(
         self, entry: ScheduleEntry, outcome: chat_service.ScheduleRunOutcome,
@@ -708,32 +865,19 @@ class ScheduleDispatcher:
             prompt = loop_wake.loop_wake_prompt(entry, now=datetime.now(UTC))
             stream_origin = "loop"
         try:
+            # Taken before the turn starts, so a Stop during it is seen too.
+            stops = self._host._stop_count(target_id)
             stream = self._host.start_stream(
                 target_id, prompt, unattended=True, origin=stream_origin
             )
-            async for raw_payload in stream.subscribe():
-                if not isinstance(raw_payload, dict):
-                    continue
-                payload = cast(dict[str, object], raw_payload)
-                event_type = payload.get("type")
-                if event_type == "permission_request":
-                    outcome.permission_requested = True
-                elif event_type == "status" and payload.get("denied_tool"):
-                    outcome.permission_denied = str(payload["denied_tool"])
-                elif (
-                    event_type == "tool_use"
-                    and payload.get("tool_name") == "AskUserQuestion"
-                ):
-                    outcome.question_requested = True
-                elif event_type == "chat_retry":
-                    if (payload.get("status") or "") == "pending":
-                        outcome.retry_pending = True
-                elif event_type == "error":
-                    outcome.stream_error = True
-                elif event_type == "result":
-                    outcome.completed = True
-                    outcome.is_error = bool(payload.get("is_error"))
-                    outcome.final_text = str(payload.get("text") or "")
+            launched_subagent = await _consume_run_stream(stream, outcome)
+            if launched_subagent and not loop_owned:
+                # The first result may only say the subagent was launched: wait
+                # for the turns it gives the chat before grading the run. A
+                # loop's own chat is never archived by its run, so it does not wait.
+                await self._await_follow_up_turns(
+                    target_id, outcome, first=stream, stops=stops
+                )
             # Only a trusted system routine consumed engine-wide evidence.
             # Clear it after a clean run; a failed triage must not wipe the
             # backlog it never processed, and a user schedule never owns this
