@@ -67,6 +67,35 @@ export function openNeeds(report: CareReport): CareNeed[] {
   return report.needs_you.filter(item => item.proposal_status !== 'applied' && item.proposal_status !== 'rejected')
 }
 
+/**
+ * Whether the report on disk was written by the run in progress. The run
+ * replaces Care-Report.md in its first step, so until the file's modified time
+ * reaches the run's start the file is the previous run's. Not running: the
+ * report is the current one. Running with either time missing or unreadable:
+ * not this run's. A write at the very instant of the start counts as this run's;
+ * one even a moment earlier does not.
+ */
+export function careReportIsFromThisRun(report: CareReport): boolean {
+  if (!report.running) return true
+  const since = parse(report.running.since)
+  const written = parse(report.modified_at)
+  return since !== null && written !== null && written.getTime() >= since.getTime()
+}
+
+/** A run is in progress and the report on disk is still the previous run's. */
+export function careReportIsStale(report: CareReport): boolean {
+  return !!report.running && !careReportIsFromThisRun(report)
+}
+
+/** The quiet line about the last finished run, shown while its report is stale ('' without one). */
+export function careLastRunWords(report: CareReport): string {
+  if (report.status !== 'ok') return ''
+  const stamp = stampWords(report.modified_at)
+  if (!stamp) return ''
+  const n = openNeeds(report).length
+  return `Last run: ${stamp}: ${n ? `${plural(n, 'thing')} needed you` : 'nothing needed you'}`
+}
+
 /** One state, in priority order: a live run, then what the file says. */
 export function careState(report: CareReport): CareState {
   if (report.running) return 'running'
@@ -224,6 +253,7 @@ export function careRailDetail(report: CareReport, now: Date = new Date()): stri
 
 /** The At a glance line's title: the Needs you row's own words when care needs the owner, else the feature's name. */
 export function careRailTitle(report: CareReport, now: Date = new Date()): string {
+  if (report.running) return 'Care is running'
   return careNeedsYouRow(report, now)?.title ?? 'Workspace care'
 }
 

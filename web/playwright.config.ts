@@ -51,6 +51,8 @@ export default defineConfig({
   },
   projects: [
     { name: 'chromium', use: { ...devices['Desktop Chrome'] } },
+    // The Mac app's web view is WebKit: only what differs per engine runs here.
+    { name: 'webkit', testMatch: /workspace-care-motion\.spec\.ts/, use: { ...devices['Desktop Safari'] } },
   ],
   webServer: {
     command: 'node e2e/fixture/server.mjs',

@@ -272,7 +272,7 @@ jobs:
     - name: Install Chromium
       if: needs.web-scope.outputs.web_changed == 'true'
       working-directory: web
-      run: npx playwright install --with-deps chromium
+      run: npx playwright install --with-deps chromium webkit
     # The workshop's gates ride the job that already holds node_modules and
     # Chromium: `build-storybook` also runs the story-index check, and
     # `test-storybook` executes every story and its play function in the same
@@ -498,7 +498,7 @@ jobs:
 
     - name: Install Playwright Chromium
       working-directory: web
-      run: npx playwright install chromium
+      run: npx playwright install chromium webkit
 
     # The PWA build above is the bundle the fixture serves. Build only the
     # terminal harness here and run Playwright directly, instead of going

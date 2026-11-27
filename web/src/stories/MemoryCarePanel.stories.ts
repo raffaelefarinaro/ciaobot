@@ -140,6 +140,21 @@ export const Interrupted: Story = {
   },
 }
 
+export const RunningStale: Story = {
+  ...story(careReports.runningStale),
+  play: async ({ canvas }) => {
+    await summary(canvas, 'Running now')
+    expect(canvas.getByText('Care is starting. Results appear here as steps finish.')).toBeTruthy()
+    expect(canvas.getByText(/^Last run: .*: 1 thing needed you$/)).toBeTruthy()
+    // Nothing from the previous report is shown as current.
+    expect(canvas.queryByRole('heading', { name: 'What needs you' })).toBeNull()
+    expect(canvas.queryByText('Steps')).toBeNull()
+    expect(canvas.queryByText('Notes')).toBeNull()
+    expect(canvas.queryByText('blocked')).toBeNull()
+    expect((canvas.getByRole('button', { name: 'Running…' }) as HTMLButtonElement).disabled).toBe(true)
+  },
+}
+
 export const Running: Story = {
   ...story(careReports.running),
   play: async ({ canvas }) => {

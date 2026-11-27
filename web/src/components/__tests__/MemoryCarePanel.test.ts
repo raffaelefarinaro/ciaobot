@@ -203,6 +203,33 @@ describe('MemoryCarePanel', () => {
     expect(options.seed).toContain('Step file: /stock/references/hygiene.md')
   })
 
+  it('shows nothing of the previous report while a run has not rewritten it', async () => {
+    serve(careReports.runningStale)
+    const wrapper = await mountPanel()
+    expect(wrapper.get('.mc-summary-title').text()).toBe('Running now')
+    expect(wrapper.find('.care-glyph--running').exists()).toBe(true)
+    expect(wrapper.get('.mc-calm').text()).toBe('Care is starting. Results appear here as steps finish.')
+    expect(wrapper.get('.mc-last-run').text()).toMatch(/^Last run: .*: 1 thing needed you$/)
+    // No items, no steps, no notes, no blocked or done segment: every segment is the dashed wait mark.
+    expect(wrapper.find('.mc-need').exists()).toBe(false)
+    expect(wrapper.find('details.mc-disclosure').exists()).toBe(false)
+    expect(wrapper.text()).not.toContain('blocked')
+    const segs = wrapper.findAll('.mc-seg')
+    expect(segs.length).toBeGreaterThan(0)
+    expect(segs.every(s => s.classes().includes('mc-seg--wait'))).toBe(true)
+    const run = wrapper.findAll('.mc-foot .mc-link').find(b => b.text() === 'Running…')!
+    expect(run.attributes('disabled')).toBeDefined()
+  })
+
+  it('shows this run\'s own report, steps open, once the file is newer than the run start', async () => {
+    serve({ ...careReports.running, running: { ...careReports.running.running!, since: '2026-11-27T07:12:00Z' } })
+    const wrapper = await mountPanel()
+    expect(wrapper.find('.mc-last-run').exists()).toBe(false)
+    expect(wrapper.findAll('.mc-seg--wait')).toHaveLength(0)
+    expect((wrapper.get('details.mc-disclosure').element as HTMLDetailsElement).open).toBe(true)
+    expect(wrapper.findAll('.mc-step')).toHaveLength(6)
+  })
+
   it('shows the running step and runs care again only when nothing runs', async () => {
     const post = serve(careReports.running)
     const wrapper = await mountPanel()
