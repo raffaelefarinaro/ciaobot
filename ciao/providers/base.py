@@ -134,6 +134,9 @@ class BaseProvider(ABC):
     # Set by the host: asked when the provider's own continuation after a background shell starts
     # speaking; returns the held shell notice that reply answers, or None. Providers without one ignore it.
     continuation_hook: Callable[[list[Any]], str | None] | None = None
+    # Set by the host: called with no arguments when the provider's running background-shell count
+    # (``running_shells``) changes. Providers that track no shells never call it.
+    shells_hook: Callable[[], None] | None = None
 
     def __init__(self, workspace_root: Path, *, config: object | None = None) -> None:
         self.workspace_root = workspace_root
@@ -307,6 +310,11 @@ class BaseProvider(ABC):
     def background_work_outstanding(self) -> bool:
         """True while background work this provider's process owns is running."""
         return False
+
+    @property
+    def running_shells(self) -> int:
+        """How many background shells this provider's live session runs now."""
+        return 0
 
     @property
     def is_connected(self) -> bool:

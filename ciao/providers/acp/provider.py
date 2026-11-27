@@ -401,6 +401,7 @@ class AcpProvider(BaseProvider):
             self._client.broker = None
             raise
         opened.continuation_hook = self._continuation_notice
+        opened.shells_hook = self._shells_changed
         self._session = opened
         self._broker = broker
         self._client.session = opened
@@ -471,6 +472,19 @@ class AcpProvider(BaseProvider):
     def _continuation_notice(self, ended: list[Any]) -> str | None:
         hook = self.continuation_hook
         return hook(ended) if hook is not None else None
+
+    def _shells_changed(self) -> None:
+        hook = self.shells_hook
+        if hook is not None:
+            hook()
+
+    @property
+    def running_shells(self) -> int:
+        # A dead agent process runs no shells we can still see end: count none rather than a stale set.
+        session = self._session
+        if session is None or not self.is_connected:
+            return 0
+        return session.running_shells
 
     async def abort_session(self, session_id: str) -> ResultEvent | None:
         """Cancel the live session's turn, late turns included (Stop on a background chat)."""

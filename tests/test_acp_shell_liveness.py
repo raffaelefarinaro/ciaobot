@@ -68,6 +68,8 @@ def test_tracking_is_capped_and_a_repeat_is_idempotent() -> None:
 def _session_stub() -> AcpSession:
     # Only the state the shell watch touches; the rest of a session is not needed here.
     session = AcpSession.__new__(AcpSession)
+    session.shells_hook = None
+    session._shells_reported = 0
     session._shells = ShellLiveness()
     session._shell_task = None
     session._shell_commands = {}

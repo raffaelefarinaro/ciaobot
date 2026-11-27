@@ -50,6 +50,11 @@ class ShellLiveness:
         return bool(self._tracked)
 
     @property
+    def count(self) -> int:
+        """How many background shells are tracked as running."""
+        return len(self._tracked)
+
+    @property
     def polling(self) -> bool:
         """True while a shell with a known pid is tracked: only those need the process table."""
         return any(shell.pid for shell in self._tracked.values())

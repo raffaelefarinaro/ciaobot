@@ -62,6 +62,11 @@ export function runningWorkFrom(live: WorkCard[], history: WorkCard[] = []): Run
   return work
 }
 
+/** A chat row's words for its running background shells: "1 shell running", "3 shells running". */
+export function runningShellsLabel(count: number): string {
+  return count === 1 ? '1 shell running' : `${count} shells running`
+}
+
 /** Elapsed time since a live card started: "12s", "3m 4s", "1h 2m". Empty when the start is unknown. */
 export function elapsedLabel(startedAt: number | undefined, now: number): string {
   if (startedAt === undefined || !Number.isFinite(startedAt)) return ''

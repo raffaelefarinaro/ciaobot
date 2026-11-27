@@ -21,6 +21,8 @@
  *                                 removeSchedules?, actions?, events? }  move what the
  *                               notification inbox reads, and push events frames
  *   GET  /__fixture__/writes                         every non-GET /api/ request so far
+ *   POST /__fixture__/shells    { chat_id, count }    set a chat's running background shells
+ *                               (pushes chat_shells; the next snapshot carries the map)
  *
  * Workspace order is per session too: POST /api/workspaces/reorder stores a
  * permutation of the workspace names and GET /api/workspaces answers in it.
@@ -437,7 +439,7 @@ function sessionOf(req) {
   const id = /(?:^|;\s*)e2e_session=([^;]+)/.exec(cookie)?.[1] || 'default'
   let state = sessions.get(id)
   if (!state) {
-    state = { activeStreams: [], sockets: new Set(), chatSockets: new Map(), pendingChatFrames: new Map(), connections: 0, transcript: null, terminals: new Map(), chatActions: new Map(), terminalUnlocked: false, appearance: { text_contrast: 'normal', body_font: 'system', theme: null, font_scale: null, custom_colors: {}, revision: 'a0' }, sharedBrains: {}, workspaceOrder: null, chatPatches: new Map(), removedChats: new Set(), tasksByWorkspace: null, taskPatches: new Map(), taskWrites: 0, schedulePatches: new Map(), removedSchedules: new Set(), actions: null, writes: [], projects: null }
+    state = { activeStreams: [], sockets: new Set(), chatSockets: new Map(), pendingChatFrames: new Map(), connections: 0, transcript: null, terminals: new Map(), chatActions: new Map(), terminalUnlocked: false, appearance: { text_contrast: 'normal', body_font: 'system', theme: null, font_scale: null, custom_colors: {}, revision: 'a0' }, sharedBrains: {}, workspaceOrder: null, chatPatches: new Map(), removedChats: new Set(), tasksByWorkspace: null, taskPatches: new Map(), taskWrites: 0, schedulePatches: new Map(), removedSchedules: new Set(), actions: null, writes: [], projects: null, runningShells: {} }
     sessions.set(id, state)
   }
   return state
@@ -1008,6 +1010,15 @@ const server = http.createServer(async (req, res) => {
       state.activeStreams = Array.isArray(body.chat_ids) ? body.chat_ids : []
       return sendJson(res, { ok: true, active_streams: state.activeStreams })
     }
+    if (pathname === '/__fixture__/shells') {
+      const body = await readBody(req)
+      const chatId = String(body?.chat_id ?? '')
+      const count = Math.max(0, Number(body?.count) || 0)
+      if (count) state.runningShells[chatId] = count
+      else delete state.runningShells[chatId]
+      for (const socket of state.sockets) socket.send({ type: 'chat_shells', chat_id: chatId, project_id: '', running_shells: count })
+      return sendJson(res, { ok: true, running_shells: state.runningShells })
+    }
     if (pathname === '/__fixture__/drop-ws') {
       const dropped = state.sockets.size
       for (const socket of state.sockets) socket.drop()
@@ -1373,6 +1384,7 @@ server.on('upgrade', (req, socket) => {
   const frame = snapshotFrame(state.activeStreams)
   // The needs-you map is complete too: a chat it does not name holds none.
   frame.chat_actions = Object.fromEntries([...state.chatActions].filter(([, list]) => list.length))
+  frame.running_shells = { ...state.runningShells }
   ws.send(frame)
 })
 

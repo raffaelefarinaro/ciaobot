@@ -133,6 +133,21 @@ describe('ProjectSidebar chat actions', () => {
     wrapper.unmount()
   })
 
+  it('marks a chat row whose background shells run after its turn', async () => {
+    const store = useProjectStore()
+    store.runningShells = { [chatId]: 3 }
+    const wrapper = await mountSidebar()
+    const shells = wrapper.get('.chat-item .chat-signal--shells')
+    expect(shells.find('.activity-glyph--run').exists()).toBe(true)
+    expect(shells.attributes('aria-label')).toBe('3 shells running')
+    // The Home item's count is attention only: running shells add nothing to it.
+    expect(wrapper.get('a[href="/"]').attributes('data-count')).toBeUndefined()
+    store.runningShells = {}
+    await nextTick()
+    expect(wrapper.find('.chat-signal--shells').exists()).toBe(false)
+    wrapper.unmount()
+  })
+
   it('shows the workspace attention count on the Home item', async () => {
     const store = useProjectStore()
     store.chats[0].last_activity_at = '2026-08-12T10:00:00Z'

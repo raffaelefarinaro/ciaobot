@@ -109,6 +109,16 @@ describe('ProjectView chat rows', () => {
     expect(wrapper.find('.spinner-dot').exists()).toBe(false)
   })
 
+  it('marks a chat whose background shells run after its turn, and says how many', async () => {
+    const store = seed()
+    store.runningShells = { 'chat-read': 1 }
+    const wrapper = await mountView()
+
+    expect(wrapper.find('.chat-signal--shells').attributes('aria-label')).toBe('1 shell running')
+    const subs = wrapper.findAll('.chat-row-sub').map(sub => sub.text())
+    expect(subs).toContain('1 shell running')
+  })
+
   it('hues the marks from the project workspace, not the active accent', async () => {
     const store = seed()
     store.activeWorkspace = 'personal'
