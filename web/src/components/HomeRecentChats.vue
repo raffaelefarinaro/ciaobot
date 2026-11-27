@@ -94,13 +94,22 @@
                   <!-- A plain span cannot be named, so the relation also reads
                        as text: in the row title for a pointer, and here for AT. -->
                   <span v-if="taskSignals.isTaskChat(chat)" class="sr-only">, {{ taskBadgeTitle(chat) }}</span>
-                  <span v-if="inCodeMode(store.projectFor(chat.chat_id)?.repo)" class="home-chat-code" role="img" aria-label="Code mode" title="Code mode">›_</span>
                 </template>
                 <!-- Project plus a status phrase read from the same signals
                      that sorted the row into its tier, so the sub-line can
                      never claim more than the tier heading above it. -->
                 <template #sub>
-                  <span v-if="store.projectFor(chat.chat_id)?.name" class="home-chat-project">{{ store.projectFor(chat.chat_id)?.name }}</span>
+                  <!-- One group, so the status's separator still follows its
+                       sibling. Code mode is the project's: the glyph follows
+                       the project name, and the repository is named in text
+                       for AT. -->
+                  <span v-if="store.projectFor(chat.chat_id)?.name" class="home-chat-project-group">
+                    <span class="home-chat-project">{{ store.projectFor(chat.chat_id)?.name }}</span>
+                    <template v-if="inCodeMode(store.projectFor(chat.chat_id)?.repo)">
+                      <CodeMark :repo="store.projectFor(chat.chat_id)?.repo" />
+                      <span class="sr-only">, {{ projectCodeTitle(store.projectFor(chat.chat_id)!.repo!) }}</span>
+                    </template>
+                  </span>
                   <span class="home-chat-status">{{ statusPhrase(entry.key, chat) }}</span>
                   <span v-if="chat.local === false" class="remote-chip">remote</span>
                 </template>
@@ -197,7 +206,8 @@ import { classifyError } from '../lib/errorAttribution'
 import { DEFAULT_WORKSPACE_COLOR, colorForWorkspace, type WorkspaceColorId } from '../lib/workspaceColors'
 import { useFileViewerStore } from '../stores/fileViewer'
 import { useTaskSignalsStore } from '../stores/taskSignals'
-import { inCodeMode } from '../lib/repo'
+import { inCodeMode, projectCodeTitle } from '../lib/repo'
+import CodeMark from './CodeMark.vue'
 import ChatSignals from './ChatSignals.vue'
 import ListRow from './ListRow.vue'
 import SkeletonLoader from './SkeletonLoader.vue'
@@ -1069,10 +1079,9 @@ defineExpose({ onArrow })
   white-space: nowrap;
 }
 
-/* The sidebar's task and code marks (ProjectSidebar `.chat-task-tag`,
-   `.chat-code-tag`): a checkbox glyph and a mono `›_` after the title. */
-.home-chat-task,
-.home-chat-code {
+/* The sidebar's task mark (ProjectSidebar `.chat-task-tag`): a checkbox glyph
+   after the title. */
+.home-chat-task {
   display: inline-flex;
   align-items: center;
   flex: 0 0 auto;
@@ -1080,12 +1089,16 @@ defineExpose({ onArrow })
   color: var(--fg3);
 }
 
-.home-chat-code {
-  font: 700 calc(11px * var(--font-scale))/1 var(--font-mono);
-  letter-spacing: -0.04em;
+.home-chat-project-group {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  min-width: 0;
+  flex: 0 1 auto;
+  overflow: hidden;
 }
 
-.home-chat-project + .home-chat-status::before {
+.home-chat-project-group + .home-chat-status::before {
   content: '·';
   margin-right: 6px;
   color: var(--fg3);

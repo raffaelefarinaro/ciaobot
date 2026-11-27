@@ -25,12 +25,14 @@
             v-for="(step, i) in report.steps"
             :key="i"
             class="mc-seg"
-            :class="`mc-seg--${stepGlyph(step, report.running)}`"
+            :class="stale ? 'mc-seg--wait' : `mc-seg--${stepGlyph(step, report.running)}`"
           />
         </div>
       </div>
 
       <p class="mc-status" role="status">{{ status }}</p>
+      <!-- The run replaces the report in its first step: until it has, the file is the previous run's and none of it is shown as current. -->
+      <p v-if="stale && lastRun" class="mc-note mc-last-run">{{ lastRun }}</p>
       <p v-if="care.error" class="mc-note">Could not refresh the report. Showing the last one read.</p>
 
       <section v-if="needs.length" class="mc-section" aria-labelledby="mc-needs-title">
@@ -51,9 +53,9 @@
                   :data-path="item.path"
                   @click="act(item)"
                 >{{ needActionLabel(needAction(item)) }}</button>
-                <!-- Optimize already opens a chat about the guide; a second one would repeat it. -->
+                <!-- A proposal, Unsure and the guide each have one destination that resolves the item. -->
                 <button
-                  v-if="needAction(item) !== 'optimize'"
+                  v-if="needCanFix(item)"
                   type="button"
                   class="mc-link mc-fix"
                   :disabled="fixing !== ''"
@@ -68,7 +70,7 @@
       <p v-else-if="calmWords" class="mc-calm">{{ calmWords }}</p>
 
       <details
-        v-if="report.steps.length"
+        v-if="report.steps.length && !stale"
         class="mc-disclosure"
         :open="stepsOpen"
         @toggle="onToggle($event, 'steps')"
@@ -106,7 +108,7 @@
       </details>
 
       <details
-        v-if="report.notes.length"
+        v-if="report.notes.length && !stale"
         class="mc-disclosure"
         :open="notesOpen"
         @toggle="onToggle($event, 'notes')"
@@ -131,8 +133,8 @@ import AppIcon from './AppIcon.vue'
 import CareGlyph from './CareGlyph.vue'
 import CareProposalReview from './CareProposalReview.vue'
 import {
-  careFixSeed, careGlyph, careNeedChatTitle, careNeedFixSeed, careState, careSummaryMeta, careSummaryTitle, needAction,
-  needActionLabel, openNeeds, stepCanFix, stepGlyph, stepLine, stepName, stepsCountWords, stepsOpenByDefault,
+  careFixSeed, careGlyph, careLastRunWords, careNeedChatTitle, careReportIsStale, careNeedFixSeed, careState, careSummaryMeta, careSummaryTitle, needAction,
+  needActionLabel, needCanFix, openNeeds, stepCanFix, stepGlyph, stepLine, stepName, stepsCountWords, stepsOpenByDefault,
   stepWord, type CareNeed, type CareStep,
 } from '../lib/careReport'
 import { startFileDiscussion } from '../lib/fileDiscussion'
@@ -168,13 +170,16 @@ const report = computed(() => (care.report && care.report.workspace === store.ac
 const glyph = computed(() => (report.value ? careGlyph(careState(report.value)) : 'open'))
 const summaryTitle = computed(() => (report.value ? careSummaryTitle(report.value) : ''))
 const summaryMeta = computed(() => (report.value ? careSummaryMeta(report.value) : ''))
-const needs = computed(() => (report.value ? openNeeds(report.value) : []))
+const stale = computed(() => (report.value ? careReportIsStale(report.value) : false))
+const lastRun = computed(() => (report.value ? careLastRunWords(report.value) : ''))
+const needs = computed(() => (report.value && !stale.value ? openNeeds(report.value) : []))
 /**
  * A finished or stopped run with nothing left for the person says so in one
  * line. A run that stopped does not claim all is well: its blocked steps, with
  * their Fix buttons, are open below.
  */
 const calmWords = computed(() => {
+  if (stale.value) return 'Care is starting. Results appear here as steps finish.'
   switch (report.value ? careState(report.value) : 'never') {
     case 'complete': return 'Nothing needs you.'
     case 'blocked': return 'Nothing needs your decision. Some steps did not finish; they are below.'
@@ -376,6 +381,8 @@ button.mc-back { padding: 0; border: 0; background: none; cursor: pointer; font:
 .mc-seg--done { background: var(--success); }
 .mc-seg--blocked { background: var(--warning); }
 .mc-seg--running { background: var(--accent); }
+/* A run that has not rewritten the report yet: dashed, so no step reads as done or blocked. */
+.mc-seg--wait { background: repeating-linear-gradient(90deg, var(--fg3) 0 4px, transparent 4px 8px); opacity: 0.6; }
 
 .mc-status { margin: 0; color: var(--fg2); font-size: var(--text-sm); }
 .mc-status:empty { display: none; }

@@ -16,6 +16,6 @@ Take at most 5 notes, oldest first, skipping any with a `.care-stale-checked` li
 7. Record the note in `.care-stale-checked` with today's date, replacing its older line, whatever the outcome.
 
 ## Done when
-Each of the chosen notes was read, had `ciao note related` run, and was fixed, verified, or put on the Unsure list. Finish with `done: checked N notes, re-checked in full K (<paths>), fixed X, Unsure Y, retire proposals Z`. The other stale notes are for later runs: their number is not a `needs you` item or a note.
+Each of the chosen notes was read, had `ciao note related` run, and was fixed, verified, or put on the Unsure list. Finish with `done: checked N notes, re-checked in full K (<paths>), fixed X, Unsure Y, retire proposals Z`, then one item per retire proposal: `needs you: <plain sentence naming the note and why it can go>. Choose Review proposal, then Approve or Reject. (path: Workspace/Proposals/<slug>.md)`. Unsure lines are not items. The other stale notes are for later runs: their number is not a `needs you` item or a note.
 
 Verify: re-run `ciao memory-audit --with-vault --json` (exit 1 only means findings exist) and read `stale_notes.stale_notes` (this workspace's paths only): none of the K paths re-checked in full may still be listed, and each of them has `updated: <today>`; `.care-stale-checked` has a line dated today for each of the N notes checked. The total count is not the check: it falls by at most K per run.

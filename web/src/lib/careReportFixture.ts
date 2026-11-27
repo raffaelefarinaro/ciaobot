@@ -113,6 +113,18 @@ export const careReports = {
     ],
     running: { since: '2026-11-27T06:00:00+00:00', step: 'learnings', index: 3, total: 6 },
   }),
+  // A run just started: Care-Report.md on disk is still the previous run's, written before it started.
+  runningStale: base({
+    steps: [
+      step('unsure', 'done', 'apply ticked Unsure lines', 'Nothing due'),
+      step('hygiene', 'blocked', 'vault index and audit', 'cannot write INDEX.md'),
+    ],
+    needs_you: [
+      need('13 suggestions are waiting in Unsure.', 'Open Memory > Unsure and approve or reject them.', 'Workspace/Unsure.md'),
+    ],
+    notes: ['Re-checking older notes did not finish.'],
+    running: { since: '2026-11-27T17:52:00Z', step: '', index: 0, total: 0 },
+  }),
   never: base({
     status: 'missing', modified_at: '', updated: '', weekly_done: '', steps: [],
     schedule: { id: `system-memory-curation@${CARE_WORKSPACE}`, enabled: true, last_status: '', last_run_at: '' },

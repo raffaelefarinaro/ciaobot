@@ -40,6 +40,11 @@ export async function findRepoInstructions(
   return null
 }
 
+/** The words a project's accessible name and tooltip add when it is in code mode. */
+export function projectCodeTitle(repo: ProjectRepo): string {
+  return `Linked to a repository: ${repoName(repo.path)}`
+}
+
 /**
  * Whether chats of a project with this repo link work in code mode. Mirrors the
  * engine rule: a chat is in code mode exactly when its project is linked to a

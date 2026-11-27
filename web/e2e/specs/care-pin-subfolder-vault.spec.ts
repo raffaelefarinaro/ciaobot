@@ -100,8 +100,6 @@ test.describe('chats that pin a file, on a subfolder vault', () => {
   })
 
   const fixes = [
-    ['the proposal item', 0, `${INSTALL}/${VAULT}/${CARE_PROPOSAL_PATH}`, 'Care: A proposal would trim your guide:'],
-    ['the Unsure item', 2, `${INSTALL}/${VAULT}/Workspace/Unsure.md`, 'Care: 13 suggestions are waiting in Unsure,'],
     ['the report item', 3, `${INSTALL}/${VAULT}/Workspace/Care-Report.md`, 'Care: 4 notes need a decision the'],
   ] as const
   for (const [label, index, pin, title] of fixes) {

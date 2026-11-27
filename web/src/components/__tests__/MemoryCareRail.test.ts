@@ -133,6 +133,19 @@ describe('MemoryCareRail', () => {
     expect(post).not.toHaveBeenCalled()
   })
 
+  it('while a run has not rewritten the report, Last run is the new run, not the previous one', async () => {
+    const post = serve([row], careReports.runningStale)
+    const wrapper = await mountRail()
+    const last = wrapper.findAll('.care-rail-fact')[0].text()
+    expect(last).toContain('Running')
+    expect(last).toContain(stampWords(careReports.runningStale.running!.since))
+    expect(last).not.toContain(stampWords(careReports.runningStale.modified_at))
+    const run = wrapper.findAll('.docked-row')[0]
+    expect(run.text()).toBe('Running…')
+    expect(run.attributes('disabled')).toBeDefined()
+    expect(post).not.toHaveBeenCalled()
+  })
+
   it('runs care again through the schedule run-now and says what the engine did', async () => {
     const post = serve([row], careReports.blocked, careReports.blocked, careReports.running)
     const wrapper = await mountRail()

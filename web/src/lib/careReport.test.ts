@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import {
-  careFixSeed, careGlyph, careNeedsYouRow, careRailDetail, careRailLabel, careRailTitle, careRailTone, careState, careSummaryMeta, careSummaryTitle,
-  careNeedChatTitle, careNeedFixSeed, dayWords, fenceData, needAction, needActionLabel, openNeeds, stepCanFix, stepGlyph, stepLine,
+  careFixSeed, careGlyph, careNeedsYouRow, stampWords, careLastRunWords, careReportIsFromThisRun, careReportIsStale, careRailDetail, careRailLabel, careRailTitle, careRailTone, careState, careSummaryMeta, careSummaryTitle,
+  careNeedChatTitle, careNeedFixSeed, dayWords, fenceData, needAction, needActionLabel, needCanFix, openNeeds, stepCanFix, stepGlyph, stepLine,
   stepName, stepsCountWords, stepsOpenByDefault, stepWord, whenWords, type CareReport,
 } from './careReport'
 import { CARE_PROPOSAL_PATH, CARE_WRITTEN_AT, careReports, need } from './careReportFixture'
@@ -125,7 +125,7 @@ describe('the Needs you row', () => {
       line: 'Stopped after 2 of 6 steps. The next run starts fresh.',
       tone: 'attention',
     })
-    for (const quiet of [careReports.complete, careReports.running, careReports.never]) {
+    for (const quiet of [careReports.complete, careReports.running, careReports.runningStale, careReports.never]) {
       expect(careNeedsYouRow(quiet, NOW)).toBeNull()
     }
   })
@@ -194,6 +194,46 @@ describe('the report page words', () => {
     expect(['proposal', 'unsure', 'optimize', 'report', 'file', 'none'].map(a => needActionLabel(a as never))).toEqual([
       'Review proposal', 'Open Unsure', 'Optimize', 'Open report', 'Open file', '',
     ])
+  })
+
+  it('gives a proposal, Unsure and the guide one button, and a file or no path a fix chat too', () => {
+    const [proposal, guide, unsure, report] = careReports.needsYou.needs_you
+    expect([proposal, guide, unsure].map(needCanFix)).toEqual([false, false, false])
+    // A file alone does not resolve a problem: it keeps Fix with a chat.
+    expect(needCanFix(report)).toBe(true)
+    expect(needCanFix(need('A note looks out of date.', '', 'People/Rae.md'))).toBe(true)
+    // No path: Fix with a chat is the only action.
+    expect(needCanFix(need('Review the guide.', ''))).toBe(true)
+    expect(needCanFix(need('x', '', 'Workspace/Proposals/Odd Name.md'))).toBe(true)
+  })
+
+  it('knows whether the report on disk is this run\'s or the previous one\'s', () => {
+    const at = (modified: string, since: string): CareReport => ({
+      ...careReports.running, modified_at: modified, running: { since, step: '', index: 0, total: 0 },
+    })
+    // Not running: always current.
+    expect(careReportIsFromThisRun(careReports.complete)).toBe(true)
+    expect(careReportIsStale(careReports.complete)).toBe(false)
+    // Older, even by a second or two (clock skew): the previous run's.
+    expect(careReportIsFromThisRun(at('2026-11-27T17:51:00Z', '2026-11-27T17:52:00Z'))).toBe(false)
+    expect(careReportIsFromThisRun(at('2026-11-27T17:51:59Z', '2026-11-27T17:52:00Z'))).toBe(false)
+    expect(careReportIsFromThisRun(at('2026-11-27T17:51:58Z', '2026-11-27T17:52:00Z'))).toBe(false)
+    // Equal or newer: this run's.
+    expect(careReportIsFromThisRun(at('2026-11-27T17:52:00Z', '2026-11-27T17:52:00Z'))).toBe(true)
+    expect(careReportIsFromThisRun(at('2026-11-27T17:52:30Z', '2026-11-27T17:52:00Z'))).toBe(true)
+    // Missing or unreadable times: not this run's.
+    expect(careReportIsFromThisRun(at('', '2026-11-27T17:52:00Z'))).toBe(false)
+    expect(careReportIsFromThisRun(at('2026-11-27T17:52:30Z', ''))).toBe(false)
+    expect(careReportIsFromThisRun(at('nonsense', 'nonsense'))).toBe(false)
+    expect(careReportIsStale(careReports.runningStale)).toBe(true)
+    expect(careReportIsStale(careReports.running)).toBe(false)
+  })
+
+  it('words the previous run for the quiet line while a run starts', () => {
+    const stamp = stampWords(careReports.runningStale.modified_at)
+    expect(careLastRunWords(careReports.runningStale)).toBe(`Previous run: ${stamp} · 1 thing needed you`)
+    expect(careLastRunWords({ ...careReports.runningStale, needs_you: [] })).toBe(`Previous run: ${stamp} · nothing needed you`)
+    expect(careLastRunWords(careReports.never)).toBe('')
   })
 
   it('drops a proposal item once its file says applied or rejected', () => {
@@ -267,7 +307,9 @@ describe('the docked At a glance row', () => {
     expect(careRailTitle(careReports.blocked, NOW)).toBe('Care did not finish')
     expect(careRailTone(careReports.blocked)).toBe('error')
     expect(careRailTone(careReports.interrupted)).toBe('attention')
-    for (const quiet of [careReports.complete, careReports.running, careReports.never]) {
+    expect(careRailTitle(careReports.running, NOW)).toBe('Care is running')
+    expect(careRailTitle(careReports.runningStale, NOW)).toBe('Care is running')
+    for (const quiet of [careReports.complete, careReports.never]) {
       expect(careRailTitle(quiet, NOW)).toBe('Workspace care')
       expect(careRailTone(quiet)).toBeNull()
     }

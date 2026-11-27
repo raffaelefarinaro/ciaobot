@@ -58,6 +58,30 @@ describe('HomeIntake', () => {
     wrapper.unmount()
   })
 
+  it('marks the project chip with the code glyph only for a linked repository, named in its label', async () => {
+    const store = useProjectStore()
+    store.activeWorkspace = 'personal'
+    store.projects = [{
+      project_id: 'general', name: 'General', workspace: 'personal', order: 0,
+      repo: { path: '/r/app', branch: 'main', dirty: false, missing: false },
+    }] as typeof store.projects
+    const wrapper = mount(HomeIntake)
+    await flushPromises()
+    const chip = wrapper.get('.home-intake-project')
+    expect(chip.get('.code-mark').text()).toBe('›_')
+    expect(chip.get('.code-mark').attributes('aria-hidden')).toBe('true')
+    expect(chip.attributes('aria-label')).toBe(
+      'Choose a project for the new chat — default General, Linked to a repository: app',
+    )
+
+    store.projects[0].repo = null
+    await flushPromises()
+    expect(wrapper.find('.home-intake-project .code-mark').exists()).toBe(false)
+    expect(wrapper.get('.home-intake-project').attributes('aria-label'))
+      .toBe('Choose a project for the new chat — default General')
+    wrapper.unmount()
+  })
+
   it('discards an OS-shared item without changing an existing draft', async () => {
     window.history.replaceState({}, '', '/?shared=share-2')
     shared.read.mockResolvedValue({ id: 'share-2', title: '', text: 'Secret', url: '', files: [] })

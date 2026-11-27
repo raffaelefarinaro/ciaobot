@@ -78,6 +78,8 @@ _BOLD_LEAD = re.compile(r"^\*\*(.+?)\*\*\s*[:\-\u2014]?\s*(.*)$")
 # The machine-readable tail of a needs-you item: `(path: Workspace/Unsure.md)`.
 _PATH_TAIL = re.compile(r"\s*\(path:\s*`?([^()`]*?)`?\s*\)\s*\.?\s*$", re.IGNORECASE)
 _NEEDS_LEAD = re.compile(r"^needs you:\s*", re.IGNORECASE)
+# A file name ends in an extension: `ciao memory status` is a command, not a file.
+_FILE_EXTENSION = re.compile(r"\.[A-Za-z0-9]{1,10}$")
 _NOTE_LEAD = re.compile(r"^note:\s*", re.IGNORECASE)
 _CHECKBOX_LEAD = re.compile(r"^\[[ xX!]\]\s+")
 # The end of the first sentence: a stop, then a capital, a digit or a quote.
@@ -166,6 +168,32 @@ def is_proposal_path(path: str) -> bool:
     return bool(_PROPOSAL_PATH.fullmatch(path))
 
 
+def backticked_path(text: str) -> str:
+    """The first backticked vault path in `text`, or "" when none passes.
+
+    Only for an item with no `(path: …)` tail. The text must hold an even
+    number of backticks, so every span is a quoted one: with a stray tick the
+    pairing is unknowable and unquoted words could be read as a path, so there
+    is no path at all. The spans are the odd pieces of `text.split("`")`. A
+    span longer than a path may be, or with space at either end, is not a
+    clean quote either, and also gives no path rather than being skipped. A
+    span counts when :func:`vault_relative_path` accepts it (the same
+    confinement as the tail) and it is `AGENTS.md` or a file under a folder
+    (`Workspace/Unsure.md`): a bare word or a command in backticks is a
+    mention, not a location.
+    """
+    pieces = text.split("`")
+    if len(pieces) % 2 == 0:
+        return ""
+    for span in pieces[1::2]:
+        if len(span) > MAX_PATH_CHARS or span != span.strip():
+            return ""
+        path = vault_relative_path(span)
+        if path == GUIDE_PATH or ("/" in path and _FILE_EXTENSION.search(path)):
+            return path
+    return ""
+
+
 def _first_sentence(text: str) -> tuple[str, str]:
     end = _SENTENCE_END.search(text)
     if end is None:
@@ -179,14 +207,18 @@ def _needs_item(text: str) -> dict[str, str]:
     The care prompt asks for `<plain sentence> (path: <vault-relative path>)`.
     The title is the first sentence (or a bold lead), the detail the rest, and
     `path` the tail's path once :func:`vault_relative_path` accepted it; an
-    unsafe or missing path is "", and the app then offers no file to open.
+    unsafe path is "", and the app then offers no file to open. An item with no
+    tail (a model that missed the standard) takes its first backticked vault
+    path instead, and its text loses the backticks the page would show raw.
     """
     text = _NEEDS_LEAD.sub("", " ".join(text.split()))
-    path = ""
     tail = _PATH_TAIL.search(text)
     if tail:
         path = vault_relative_path(tail.group(1))
         text = text[: tail.start()].rstrip()
+    else:
+        path = backticked_path(text)
+        text = text.replace("`", "")
     bold = _BOLD_LEAD.match(text)
     title, detail = (bold.group(1), bold.group(2)) if bold else _first_sentence(text)
     return {"title": _clip(title.strip()), "detail": _clip(detail.strip()), "path": path}

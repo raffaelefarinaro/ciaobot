@@ -29,7 +29,7 @@ Files under `Workspace/` are the run's own paperwork (the report, the Unsure lis
 Every finding was fixed or deliberately left, within the caps. Finish with `done: fixed X of F findings, left G (<kinds>), proposals P (<paths>)`, then the items it leaves, in the preamble's forms:
 - Skills over budget: one item for all of them, naming how many and pointing at the first proposal still open, e.g. `needs you: 6 skills are longer than they should be, and a proposal to shorten each is ready. Choose Review proposal to approve or reject the first. (path: Workspace/Proposals/<slug>.md)`.
 - Findings left that need a decision (a damaged header, two notes for one thing, a link to outside the vault): one item, e.g. `needs you: 4 notes need a decision the run cannot make alone, such as two notes for one person. Choose Fix with a chat to go through them. (path: Workspace/Care-Report.md)`.
-- A suggested `.ciaoignore` pattern: one item with the pattern.
+- A suggested `.ciaoignore` pattern: one item naming the pattern in plain words, listed in `## Hygiene`, with `(path: Workspace/Care-Report.md)`.
 - What the caps left: a `note:`, never a `needs you` item.
 
 Verify: `find <INDEX.md> -newermt <today>` lists INDEX.md at the vault root (`<V>/../INDEX.md` when V is a workspace folder under `memory-vault/`, else `<V>/INDEX.md`); in a fresh `ciao os-audit --json --scope workspace`, none of the X fixed findings (same source and kind) is listed and the vault finding count fell by at least X from the before list; `ciao proposal-check` prints `ok` for each proposal named; the `## Hygiene` section shows the before and after counts.
