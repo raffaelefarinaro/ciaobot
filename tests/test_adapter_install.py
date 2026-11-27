@@ -49,6 +49,8 @@ def prefix(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     monkeypatch.setattr(ai, "adapter_prefix", lambda: root)
     monkeypatch.setattr(ai, "_ATTEMPTED", set())
     monkeypatch.setattr(ai, "_FAILURES", {})
+    monkeypatch.setattr(ai, "_RUNNING", set())
+    monkeypatch.setattr(connection_module, "_GAVE_UP", {})
     monkeypatch.setattr(ai, "_NODE_MAJOR", {})
     monkeypatch.setattr(ai, "_probe_node_major", lambda node: 22)
     monkeypatch.setattr(connection_module, "terminal_path", lambda: "/term/bin")
@@ -1337,3 +1339,159 @@ def test_an_attempt_that_raises_unexpectedly_never_reads_as_ready_on_a_later_cal
     later = ai.install_at_startup(ai.CLAUDE_ADAPTER)
     assert later != "", "nothing recorded must not read as ready"
     assert "is not installed for Ciaobot yet" in later
+
+
+# --- a launch during the startup install waits for it (first launch, adapter upgrade) -------------
+
+
+def _argv_now(name: str) -> list[str]:
+    return asyncio.run(connection_module._adapter_argv(name))
+
+
+def test_launch_in_the_gap_before_the_install_takes_its_lock_reads_as_installing(prefix: Path) -> None:
+    """Claimed by this process but not locked yet: still installing, not \"not installed\"."""
+    ai._RUNNING.add(ai.CLAUDE_ADAPTER)
+    assert ai.install_in_progress(ai.CLAUDE_ADAPTER) is True
+    with pytest.raises(ai.AdapterInstalling, match="being installed"):
+        ai.launch_argv(ai.CLAUDE_ADAPTER)
+    ai._RUNNING.clear()
+    assert ai.install_in_progress(ai.CLAUDE_ADAPTER) is False
+    with pytest.raises(ai.AdapterNotReady, match="not installed for Ciaobot yet") as excinfo:
+        ai.launch_argv(ai.CLAUDE_ADAPTER)
+    assert not isinstance(excinfo.value, ai.AdapterInstalling)
+
+
+def test_launch_waits_for_a_running_install_and_then_starts(
+    prefix: Path, npm: FakeNpm, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(connection_module, "_INSTALL_POLL_S", 0.01)
+    started, release = threading.Event(), threading.Event()
+
+    def slow(call: _Call) -> tuple[int, bytes, bytes]:
+        started.set()
+        release.wait(10)
+        _write_adapter(prefix, ai.CLAUDE_ADAPTER)
+        return 0, b"", b""
+
+    npm.on_run = slow
+    assert ai.start_install_in_background(ai.CLAUDE_ADAPTER) is None
+    assert ai.install_in_progress(ai.CLAUDE_ADAPTER) is True
+    timer = threading.Timer(0.3, release.set)
+    timer.start()
+    try:
+        argv = _argv_now(ai.CLAUDE_ADAPTER)
+    finally:
+        release.set()
+        timer.cancel()
+        _join_installs(ai.CLAUDE_ADAPTER)
+    assert started.is_set()
+    assert argv[1].endswith("dist/index.js")
+    assert ai.install_in_progress(ai.CLAUDE_ADAPTER) is False
+
+
+def test_launch_waiting_on_an_install_that_fails_gets_the_install_failure(
+    prefix: Path, npm: FakeNpm, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(connection_module, "_INSTALL_POLL_S", 0.01)
+    release = threading.Event()
+
+    def failing(call: _Call) -> tuple[int, bytes, bytes]:
+        release.wait(10)
+        return 1, b"", b"npm error code ENOTFOUND\nnpm error network registry.npmjs.org"
+
+    npm.on_run = failing
+    assert ai.start_install_in_background(ai.CLAUDE_ADAPTER) is None
+    timer = threading.Timer(0.2, release.set)
+    timer.start()
+    try:
+        with pytest.raises(connection_module.AgentStartError) as excinfo:
+            _argv_now(ai.CLAUDE_ADAPTER)
+    finally:
+        release.set()
+        timer.cancel()
+        _join_installs(ai.CLAUDE_ADAPTER)
+    message = str(excinfo.value)
+    assert "not installed for Ciaobot yet" in message
+    assert "npm install failed (exit 1): npm error code ENOTFOUND" in message
+    assert "being installed" not in message
+    assert not isinstance(excinfo.value.__cause__, ai.AdapterInstalling)
+
+
+def test_launch_gives_up_at_the_cap_with_the_installing_sentence(
+    prefix: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _ready(prefix, ai.CLAUDE_ADAPTER)
+    monkeypatch.setattr(connection_module, "_INSTALL_POLL_S", 0.01)
+    monkeypatch.setattr(connection_module, "LAUNCH_WAIT_S", 0.1)
+    fd = _hold(prefix, ai.CLAUDE_ADAPTER)
+    try:
+        with pytest.raises(connection_module.AgentStartError, match="being installed. Try again in a moment."):
+            _argv_now(ai.CLAUDE_ADAPTER)
+    finally:
+        os.close(fd)
+
+
+def test_launch_does_not_wait_when_the_adapter_cannot_be_installed(
+    prefix: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """No CLI (or no node): the sentence comes at once, never after the install cap."""
+    monkeypatch.setattr(setup_status, "claude_cli_path", lambda: "")
+    monkeypatch.setattr(connection_module, "LAUNCH_WAIT_S", 60.0)
+    monkeypatch.setattr(connection_module, "_INSTALL_POLL_S", 60.0)
+    with pytest.raises(connection_module.AgentStartError, match="claude CLI is not installed"):
+        _argv_now(ai.CLAUDE_ADAPTER)
+
+
+def test_the_cap_is_as_long_as_npm_may_run() -> None:
+    assert ai.LAUNCH_WAIT_S >= ai.INSTALL_TIMEOUT_S
+
+
+
+def test_after_one_launch_hit_the_cap_later_launches_refuse_at_once(
+    prefix: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A stuck install holding the lock costs one full wait, not one per chat."""
+    _ready(prefix, ai.CLAUDE_ADAPTER)
+    monkeypatch.setattr(connection_module, "_INSTALL_POLL_S", 0.01)
+    monkeypatch.setattr(connection_module, "LAUNCH_WAIT_S", 0.2)
+    fd = _hold(prefix, ai.CLAUDE_ADAPTER)
+    try:
+        with pytest.raises(connection_module.AgentStartError, match="being installed"):
+            _argv_now(ai.CLAUDE_ADAPTER)
+        assert ai.CLAUDE_ADAPTER in connection_module._GAVE_UP
+        calls: list[str] = []
+        real = connection_module.launch_argv
+        monkeypatch.setattr(connection_module, "launch_argv", lambda name: (calls.append(name), real(name))[1])
+        with pytest.raises(connection_module.AgentStartError, match="being installed"):
+            _argv_now(ai.CLAUDE_ADAPTER)
+        assert len(calls) == 1, "the second launch did not wait out another cap"
+    finally:
+        os.close(fd)
+    # Once the lock is free the adapter starts and the record is cleared.
+    assert _argv_now(ai.CLAUDE_ADAPTER)[1].endswith("dist/index.js")
+    assert connection_module._GAVE_UP == {}
+
+
+def test_the_fail_fast_record_expires_after_one_cap(prefix: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    _ready(prefix, ai.CLAUDE_ADAPTER)
+    monkeypatch.setattr(connection_module, "_INSTALL_POLL_S", 0.01)
+    monkeypatch.setattr(connection_module, "LAUNCH_WAIT_S", 0.2)
+    connection_module._GAVE_UP[ai.CLAUDE_ADAPTER] = connection_module.time.monotonic() - 1.0
+    fd = _hold(prefix, ai.CLAUDE_ADAPTER)
+    threading.Timer(0.05, os.close, args=(fd,)).start()
+    assert _argv_now(ai.CLAUDE_ADAPTER)[1].endswith("dist/index.js"), "an old record does not refuse"
+
+
+def test_a_private_folder_problem_names_the_home_folder_as_tilde(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    home = tmp_path / "home" / "alice"
+    folder = home / "Library" / "adapters"
+    folder.mkdir(parents=True)
+    folder.chmod(0o755)
+    monkeypatch.setattr(ai.Path, "home", classmethod(lambda cls: home))
+
+    problem = ai._private_problem(folder)
+
+    assert problem == "~/Library/adapters is open to other users."
+    assert str(home) not in problem

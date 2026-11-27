@@ -191,8 +191,19 @@ def build_issue_report(
     their own runs. ``failures_since`` is forwarded as that function's
     ``since`` floor, so a caller that has already processed a report can keep
     its own acknowledged failures out of the next one.
+
+    After a takeover of a 1.x install (Ciaobot for Mac), the workspace's logs and run history
+    still hold what the old engine recorded. Those belong to an engine that no longer runs, so
+    error records and failed runs from before the handover are left out of every report.
     """
-    error_log = tail_error_records(workspace_root, log_records)
+    from ciao.mac_takeover import handed_over_at
+
+    handover = handed_over_at()
+    if handover is not None:
+        if failures_since is not None and failures_since.tzinfo is None:
+            failures_since = failures_since.replace(tzinfo=UTC)
+        failures_since = handover if failures_since is None else max(failures_since, handover)
+    error_log = tail_error_records(workspace_root, log_records, since=handover)
     debug_log = tail_debug_log(workspace_root, DEFAULT_DEBUG_LOG_LINES)
     failed_jobs = recent_job_failures(
         max_failed_jobs,
