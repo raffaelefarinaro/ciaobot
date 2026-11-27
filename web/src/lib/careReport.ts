@@ -192,6 +192,10 @@ export function careRailDetail(report: CareReport, now: Date = new Date()): stri
       return `Interrupted · ${closed(report)} of ${total} steps`
     case 'blocked':
       return `${done} of ${total} steps · ${blocked} blocked`
+    case 'needs_you': {
+      const n = report.needs_you.length
+      return `${plural(n, 'thing')} ${n === 1 ? 'needs' : 'need'} you`
+    }
     default: {
       const when = whenWords(report.modified_at, now)
       const lead = when ? `Done ${when}` : 'Done'
@@ -203,6 +207,26 @@ export function careRailDetail(report: CareReport, now: Date = new Date()): stri
 function lowerLead(text: string): string {
   // "New line in Unsure" -> "new line in Unsure"; keep "AGENTS.md" as it is.
   return /^[A-Z][a-z]/.test(text) ? text[0].toLowerCase() + text.slice(1) : text
+}
+
+const RAIL_STATE_WORDS: Record<CareState, string> = {
+  running: 'running',
+  never: 'not run yet',
+  unreadable: 'report unreadable',
+  interrupted: 'cut off',
+  blocked: 'did not finish',
+  needs_you: 'needs you',
+  complete: 'done',
+}
+
+/** The At a glance line's spoken name: the state in words, then the detail and where it goes. */
+export function careRailLabel(report: CareReport, now: Date = new Date()): string {
+  return `Workspace care, ${RAIL_STATE_WORDS[careState(report)]}. ${careRailDetail(report, now)}. Open the care report.`
+}
+
+/** Whether care needs the person: the states that raise a Needs you row when the rail is not beside. */
+export function careNeedsPerson(report: CareReport): boolean {
+  return careNeedsYouRow(report) !== null
 }
 
 export interface CareRow {

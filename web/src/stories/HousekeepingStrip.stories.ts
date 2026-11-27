@@ -11,6 +11,7 @@ import type { FixtureRoute } from './fixtureBoundary'
 import { assertFenceQuiet, held, homeWorkspace, json, renderHome } from './homeWindowsFixture'
 import type { CareReport } from '../lib/careReport'
 import { careReports, careRoute, careRunRoutes } from './careFixture'
+import { setHomeRailBeside } from '../composables/useHomeRail'
 
 type Canvas = Parameters<NonNullable<StoryObj['play']>>[0]['canvas']
 
@@ -135,6 +136,8 @@ const meta = {
   title: 'Home windows/HousekeepingStrip',
   component: HousekeepingStrip,
   tags: ['!autodocs'],
+  // The rail is dropped below the column unless a story docks it.
+  beforeEach: () => { setHomeRailBeside(false) },
   parameters: { docs: { disable: true, story: { inline: false } }, controls: { disable: true } },
 } satisfies Meta<typeof HousekeepingStrip>
 
@@ -262,6 +265,13 @@ export const CareCutOff: Story = {
     expect(canvas.getByText(/^Care was cut off/)).toBeTruthy()
     await assertFenceQuiet(canvas)
   },
+}
+
+// The rail docked beside the column carries care alone: no row here.
+export const CareRailBesideRendersNothing: Story = {
+  ...story(routes({ care: careReports.blocked })),
+  beforeEach: () => { setHomeRailBeside(true); return () => setHomeRailBeside(false) },
+  play: async ({ canvas }) => { await settledEmpty(canvas) },
 }
 
 export const CareRunningRendersNothing: Story = {

@@ -56,7 +56,7 @@ describe('careState', () => {
 describe('the At a glance line', () => {
   it('says each state in the approved words', () => {
     expect(careRailDetail(careReports.complete, NOW)).toBe(`Done today ${CLOCK} · 5 of 5 steps`)
-    expect(careRailDetail(careReports.needsYou, NOW)).toBe(`Done today ${CLOCK} · 5 of 5 steps`)
+    expect(careRailDetail(careReports.needsYou, NOW)).toBe('2 things need you')
     expect(careRailDetail(careReports.running, NOW)).toBe('Running now · step 3 of 6: learnings')
     expect(careRailDetail(careReports.interrupted, NOW)).toBe('Interrupted · 2 of 6 steps')
     expect(careRailDetail(careReports.blocked, NOW)).toBe('4 of 6 steps · 2 blocked')

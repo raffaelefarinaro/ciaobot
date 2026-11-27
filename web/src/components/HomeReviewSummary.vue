@@ -7,13 +7,19 @@
     <!-- Only what needs a look: an up-to-date queue is not news, so it drops
          out instead of holding a row that says "nothing here". -->
     <div v-if="visibleItems.length || careLine" class="home-review-list">
-      <!-- Workspace care: always one quiet line once its report is read. The
-           Needs you list carries the signal; this line only states the fact. -->
+      <!-- Workspace care: one line once its report is read, only while this
+           rail sits beside the request column. There it is the single care
+           signal and opens the report; when the rail has dropped below the
+           column, the Needs you row carries it and this line is not drawn. -->
       <button
         v-if="careLine"
         type="button"
         class="home-review-item home-review-item--care"
-        :class="{ 'home-review-item--care-running': careLine.running }"
+        :class="{
+          'home-review-item--care-running': careLine.running,
+          'home-review-item--care-attention': careLine.attention,
+        }"
+        :aria-label="careLine.label"
         @click="openCare"
       >
         <span class="home-review-title home-review-care-title"><CareGlyph :kind="careLine.glyph" />Workspace care</span>
@@ -50,7 +56,8 @@ import type { Schedule } from '../lib/types'
 import { scheduleInWorkspace, scheduleNeedsAttention } from '../lib/automationWorkspace'
 import HomeTodayStats from './HomeTodayStats.vue'
 import CareGlyph from './CareGlyph.vue'
-import { careGlyph, careRailDetail, careState } from '../lib/careReport'
+import { careGlyph, careNeedsPerson, careRailDetail, careRailLabel, careState } from '../lib/careReport'
+import { useHomeRail } from '../composables/useHomeRail'
 import { useCareReportStore } from '../stores/careReport'
 import { memorySectionPath } from '../stores/memoryMap'
 
@@ -154,11 +161,22 @@ let releaseCare: () => void = () => {}
 onMounted(() => { releaseCare = care.attach() })
 onBeforeUnmount(() => releaseCare())
 
+const homeRail = useHomeRail()
 const careLine = computed(() => {
   const report = care.report
+  if (!homeRail.beside.value) return null
   if (!report || report.workspace !== projects.activeWorkspace) return null
   const state = careState(report)
-  return { glyph: careGlyph(state), detail: careRailDetail(report), running: state === 'running' }
+  const attention = careNeedsPerson(report)
+  return {
+    // A run that left something for the person wears the warning shape; the
+    // report page keeps the tick for "done with things for you".
+    glyph: attention ? 'blocked' as const : careGlyph(state),
+    detail: careRailDetail(report),
+    label: careRailLabel(report),
+    running: state === 'running',
+    attention,
+  }
 })
 
 function openCare(): void {
@@ -272,7 +290,9 @@ function openItem(key: ReviewItem['key']) {
 }
 
 /* The care line is quiet in every state: the glyph's shape and the detail's
-   words carry the status, and Needs you carries the call to act. */
+   words carry the status. When care needs the person the title takes the
+   warning colour, as an automation that needs a look does; hover and focus
+   are the other rows'. */
 .home-review-care-title {
   display: inline-flex;
   align-items: center;
@@ -280,6 +300,8 @@ function openItem(key: ReviewItem['key']) {
   color: var(--fg2);
 }
 .home-review-item--care-running .home-review-care-title { color: var(--fg); }
+.home-review-item--care-attention .home-review-care-title { color: var(--warning); }
+.home-review-item--care-attention .home-review-detail { color: var(--fg); }
 
 .home-review-item--loading .home-review-title {
   color: var(--fg2);
