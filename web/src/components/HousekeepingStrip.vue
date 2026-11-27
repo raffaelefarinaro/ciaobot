@@ -10,6 +10,9 @@ import { useCommandCopy } from '../composables/useCommandCopy'
 import { useHostTerminal } from '../composables/useHostTerminal'
 import { focusAfterNoticeClose, useHomeNoticeWindows } from '../composables/useHomeNoticeWindows'
 import { actionNoticeKey, parseHomeNoticeKey } from '../lib/notificationInbox'
+import { careNeedsYouRow } from '../lib/careReport'
+import { useCareReportStore } from '../stores/careReport'
+import { memorySectionPath } from '../stores/memoryMap'
 
 const housekeeping = useHousekeepingStore()
 const projectStore = useProjectStore()
@@ -274,6 +277,67 @@ watch(
 )
 onBeforeUnmount(() => noticeWindows.clearAvailable('housekeeping'))
 
+// ── Workspace care ──────────────────────────────────────────────────────────
+//
+// One row when the last care run left something for the owner: items to look
+// at, a step it could not finish, or a run that was cut off. A run in progress,
+// a clean run and a workspace care has never run in raise no row; At a glance
+// says those quietly. The row opens Memory → Workspace care; its menu runs care
+// again through the schedule's own run-now.
+
+const care = useCareReportStore()
+watch(() => projectStore.activeWorkspace, ws => care.show(ws), { immediate: true })
+let releaseCare: () => void = () => {}
+onMounted(() => { releaseCare = care.attach() })
+onBeforeUnmount(() => releaseCare())
+
+const careRow = computed(() => {
+  const report = care.report
+  if (!report || report.workspace !== projectStore.activeWorkspace) return null
+  return careNeedsYouRow(report)
+})
+// Keyed on the report's write time, so the next run's outcome is offered again
+// even when this one was hidden.
+const careKey = computed(() => actionNoticeKey(
+  projectStore.activeWorkspace,
+  `care-report:${care.report?.modified_at || ''}`,
+))
+const visibleCareRow = computed(() => (careRow.value && !noticeWindows.isClosed(careKey.value) ? careRow.value : null))
+const careItems = computed<NeedsYouMenuItem[]>(() => [
+  { id: 'care-run', label: care.starting ? 'Starting…' : 'Run care again', disabled: care.starting },
+  { id: 'hide', label: 'Hide for now' },
+])
+// The care read joins the first-load gate once, so the list still arrives in
+// one piece; a later workspace switch does not hide the list while it reloads.
+const careGateOpen = ref(false)
+watch(
+  () => care.settled || !projectStore.activeWorkspace,
+  ready => { if (ready) careGateOpen.value = true },
+  { immediate: true },
+)
+watch(
+  () => (careRow.value ? [careKey.value] : []),
+  keys => noticeWindows.setAvailable('care', keys),
+  { immediate: true },
+)
+onBeforeUnmount(() => noticeWindows.clearAvailable('care'))
+
+async function openCareReport(): Promise<void> {
+  const { router } = await import('../router')
+  await router.push(memorySectionPath('care'))
+}
+
+async function runCareAgain(): Promise<void> {
+  const at = projectStore.activeWorkspace || ''
+  const { message } = await care.runAgain()
+  if (message) await report(message, at)
+}
+
+async function onCareSelect(id: string): Promise<void> {
+  if (id === 'care-run') return runCareAgain()
+  if (id === 'hide') return hideNotice(careKey.value)
+}
+
 /** Whether the list draws anything at all.
  *
  * Real rows, plus one exception: a list that still has an announcement to
@@ -299,10 +363,10 @@ onBeforeUnmount(() => noticeWindows.clearAvailable('housekeeping'))
  * (`initialLoadPending`), so the list arrives once instead of growing source by
  * source under the composer. */
 const rowCount = computed(
-  () => housekeeping.healthErrors.length + orderedActions.value.length,
+  () => housekeeping.healthErrors.length + orderedActions.value.length + (visibleCareRow.value ? 1 : 0),
 )
 const showNeedsYou = computed(
-  () => !housekeeping.initialLoadPending && (rowCount.value > 0 || groupStatus.value !== ''),
+  () => !housekeeping.initialLoadPending && careGateOpen.value && (rowCount.value > 0 || groupStatus.value !== ''),
 )
 
 const groupEl = ref<HTMLElement | null>(null)
@@ -583,6 +647,20 @@ watch(
         </template>
       </NeedsYouRow>
 
+      <NeedsYouRow
+        v-if="visibleCareRow"
+        :key="careKey"
+        :tone="visibleCareRow.tone"
+        :title="visibleCareRow.title"
+        :line="visibleCareRow.line"
+        :notice-key="careKey"
+        :items="careItems"
+        @select="onCareSelect"
+      >
+        <template #primary>
+          <button type="button" class="btn-small btn-primary" @click="openCareReport">Open report</button>
+        </template>
+      </NeedsYouRow>
     </ul>
   </section>
 </template>

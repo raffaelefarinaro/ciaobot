@@ -1110,6 +1110,8 @@ const MEMORY_NAV: { label?: string; items: MemoryNavItem[] }[] = [
     // The list of what Ciaobot could not settle: a Markdown file, so no count —
     // reading it for a number would put a file read on every page.
     { section: 'unsure', label: 'Unsure' },
+    // The last nightly care run, read from its report file: no count either.
+    { section: 'care', label: 'Workspace care' },
   ] },
   { label: 'Explore', items: [
     { section: 'map', label: 'Map' },
@@ -1126,6 +1128,7 @@ function memoryNavCount(section: MemorySection): number | null {
     // says how much of the vault there is.
     case 'categories': return null
     case 'unsure': return null
+    case 'care': return null
   }
 }
 function memoryNavLabel(item: MemoryNavItem): string {

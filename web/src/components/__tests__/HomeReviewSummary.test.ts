@@ -10,6 +10,8 @@ import { useProjectStore } from '../../stores/projects'
 import { useTaskSignalsStore } from '../../stores/taskSignals'
 import { api } from '../../lib/api'
 import type { Schedule, Task } from '../../lib/types'
+import type { CareReport } from '../../lib/careReport'
+import { careReports } from '../../lib/careReportFixture'
 
 const router = {
   push: vi.fn(() => Promise.resolve()),
@@ -131,11 +133,62 @@ describe('HomeReviewSummary', () => {
     loading.unmount()
   })
 
-  it('makes no requests of its own', async () => {
+  it('makes no requests of its own beyond the care report', async () => {
     const wrapper = mount(HomeReviewSummary)
     await flushPromises()
-    expect(get).not.toHaveBeenCalled()
+    expect(get.mock.calls.map(call => call[0])).toEqual(['/api/care-report?workspace=personal'])
     wrapper.unmount()
+  })
+
+
+  describe('workspace care', () => {
+    function serveCare(report: CareReport) {
+      get.mockImplementation((path: string) => Promise.resolve(
+        path.startsWith('/api/care-report') ? { ...report, workspace: 'personal' } : {},
+      ) as never)
+    }
+
+    it.each([
+      ['complete', 'done', /^Done .* · 5 of 5 steps$/],
+      ['needsYou', 'done', /^Done .* · 5 of 5 steps$/],
+      ['blocked', 'blocked', /^4 of 6 steps · 2 blocked$/],
+      ['interrupted', 'blocked', /^Interrupted · 2 of 6 steps$/],
+      ['running', 'running', /^Running now · step 3 of 6: learnings$/],
+      ['never', 'open', /^Not run yet\. It runs every night\.$/],
+    ] as const)('shows one quiet line for %s with its glyph and words', async (state, glyph, detail) => {
+      serveCare(careReports[state])
+      useTaskStore().schedules = []
+      const wrapper = mount(HomeReviewSummary)
+      await flushPromises()
+      const line = wrapper.get('.home-review-item--care')
+      expect(line.get('.home-review-care-title').text()).toBe('Workspace care')
+      expect(line.find(`.care-glyph--${glyph}`).exists()).toBe(true)
+      expect(line.get('.home-review-detail').text()).toMatch(detail)
+      // Quiet: never the warning colour a failing automation takes.
+      expect(line.classes()).not.toContain('home-review-item--attention')
+      // The care line stands in for "Nothing to review.".
+      expect(wrapper.find('.home-review-clear').exists()).toBe(false)
+      wrapper.unmount()
+    })
+
+    it('opens Memory → Workspace care', async () => {
+      serveCare(careReports.blocked)
+      const wrapper = mount(HomeReviewSummary)
+      await flushPromises()
+      await wrapper.get('.home-review-item--care').trigger('click')
+      expect(router.push).toHaveBeenCalledWith('/memory/care')
+      wrapper.unmount()
+    })
+
+    it('shows no care line before the report is read', async () => {
+      get.mockImplementation(() => new Promise(() => {}))
+      useTaskStore().schedules = []
+      const wrapper = mount(HomeReviewSummary)
+      await flushPromises()
+      expect(wrapper.find('.home-review-item--care').exists()).toBe(false)
+      expect(wrapper.text()).toContain('Nothing to review.')
+      wrapper.unmount()
+    })
   })
 
   describe('automations', () => {
