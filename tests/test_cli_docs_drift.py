@@ -342,8 +342,12 @@ def test_care_preflight_checks_every_command_the_care_run_uses() -> None:
     agent, operator = _all_leaves()
     leaves = set(agent) | set(operator)
     assert listed and set(listed) <= leaves, sorted(set(listed) - leaves)
-    for flag in ("--with-vault", "--write", "--json"):
-        assert f"grep -q -- {flag}" in snippet, flag
+    assert 'grep -q -- $f || echo "missing: $f"' in snippet
+    for flag, command in (
+        ("--with-vault", "memory-audit"), ("--write", "vault-index"), ("--json", "decisions-digest"),
+        ("--completed-since", "task list"),
+    ):
+        assert f"has {flag} ciao {command}" in snippet, flag
     steps = [p.read_text(encoding="utf-8") for p in sorted((root / "references").glob("*.md"))]
     text = "\n".join([prompt, *(s for s in steps if s.startswith("# Step "))])
     named = {
@@ -368,7 +372,7 @@ def test_care_preflight_runs_the_same_in_bash_and_zsh(shell: str, tmp_path: Path
     fake.write_text(
         '#!/bin/sh\n'
         'if [ "$1 $2" = "note related" ] && [ -n "$CIAO_FAKE_MISSING" ]; then exit 2; fi\n'
-        'echo "usage: ciao $* --with-vault --write --json"\n',
+        'echo "usage: ciao $* --with-vault --write --json --completed-since"\n',
         encoding="utf-8",
     )
     fake.chmod(0o755)

@@ -6,7 +6,7 @@ import {
 } from './careReport'
 import { careReports } from './careReportFixture'
 
-// The fixtures write at 03:12 local on Nov 27; "now" is later the same day.
+// The fixtures write at 07:12 local on Nov 27; "now" is later the same day.
 const NOW = new Date(2026, 10, 27, 9, 30)
 
 describe('careState', () => {
@@ -40,12 +40,12 @@ describe('careState', () => {
 
 describe('the At a glance line', () => {
   it('says each state in the approved words', () => {
-    expect(careRailDetail(careReports.complete, NOW)).toBe('Done today 03:12 · 5 of 5 steps')
-    expect(careRailDetail(careReports.needsYou, NOW)).toBe('Done today 03:12 · 5 of 5 steps')
+    expect(careRailDetail(careReports.complete, NOW)).toBe('Done today 07:12 · 5 of 5 steps')
+    expect(careRailDetail(careReports.needsYou, NOW)).toBe('Done today 07:12 · 5 of 5 steps')
     expect(careRailDetail(careReports.running, NOW)).toBe('Running now · step 3 of 6: learnings')
     expect(careRailDetail(careReports.interrupted, NOW)).toBe('Interrupted · 2 of 6 steps')
     expect(careRailDetail(careReports.blocked, NOW)).toBe('4 of 6 steps · 2 blocked')
-    expect(careRailDetail(careReports.never, NOW)).toBe('Not run yet. It runs every night.')
+    expect(careRailDetail(careReports.never, NOW)).toBe('Not run yet. It runs every day.')
   })
 
   it('covers the edges without inventing a step', () => {
@@ -54,9 +54,9 @@ describe('the At a glance line', () => {
     const paused = { ...careReports.never, schedule: { ...careReports.never.schedule!, enabled: false } }
     expect(careRailDetail(paused, NOW)).toBe('Not run yet. It is paused in Automations.')
     const nothing = { ...careReports.complete, steps: [], counts: { total: 0, done: 0, blocked: 0, open: 0 }, nothing_due: true }
-    expect(careRailDetail(nothing, NOW)).toBe('Done today 03:12 · nothing was due')
+    expect(careRailDetail(nothing, NOW)).toBe('Done today 07:12 · nothing was due')
     expect(careRailDetail({ ...careReports.complete, status: 'too_large' }, NOW)).toBe('The report is too large to read.')
-    // No care schedule at all is not "it runs every night".
+    // No care schedule at all is not "it runs every day".
     const unset = { ...careReports.never, schedule: null }
     expect(careRailDetail(unset, NOW)).toBe('Care is not set up for this workspace.')
     expect(careSummaryMeta(unset)).toBe('Care is not set up for this workspace, so there is no report to show.')
@@ -76,8 +76,8 @@ describe('the Needs you row', () => {
       tone: 'error',
     })
     expect(careNeedsYouRow(careReports.interrupted, NOW)).toEqual({
-      title: 'Care was cut off last night',
-      line: "Stopped after 2 of 6 steps. Tonight's run starts fresh.",
+      title: 'Care was cut off today',
+      line: 'Stopped after 2 of 6 steps. The next run starts fresh.',
       tone: 'attention',
     })
     for (const quiet of [careReports.complete, careReports.running, careReports.never]) {
@@ -85,15 +85,18 @@ describe('the Needs you row', () => {
     }
   })
 
-  it('does not promise tonight\'s run when care is paused or not set up', () => {
+  it('does not promise the next run when care is paused or not set up', () => {
     const paused = { ...careReports.interrupted, schedule: { ...careReports.interrupted.schedule!, enabled: false } }
     expect(careNeedsYouRow(paused, NOW)?.line).toBe('Stopped after 2 of 6 steps. Care is paused in Automations.')
     expect(careNeedsYouRow({ ...careReports.interrupted, schedule: null }, NOW)?.line).toBe('Stopped after 2 of 6 steps.')
   })
 
-  it('does not claim last night for a run cut off in the afternoon', () => {
-    const afternoon = { ...careReports.interrupted, modified_at: '2026-11-27T15:00:00' }
-    expect(careNeedsYouRow(afternoon, NOW)?.title).toBe('Care was cut off')
+  it('names the day the run was cut off, whatever the hour', () => {
+    const lateYesterday = { ...careReports.interrupted, modified_at: '2026-11-26T23:50:00' }
+    expect(careNeedsYouRow(lateYesterday, NOW)?.title).toBe('Care was cut off yesterday')
+    const older = { ...careReports.interrupted, modified_at: '2026-11-24T07:05:00' }
+    expect(careNeedsYouRow(older, NOW)?.title).toBe('Care was cut off on Nov 24')
+    expect(careNeedsYouRow({ ...careReports.interrupted, modified_at: '' }, NOW)?.title).toBe('Care was cut off')
   })
 })
 
@@ -105,9 +108,9 @@ describe('the report page words', () => {
     expect(careSummaryTitle(careReports.running)).toBe('Running: step 3 of 6')
     expect(careSummaryTitle(careReports.never)).toBe('Not run yet')
     expect(careSummaryTitle(careReports.complete)).toBe('Done')
-    expect(careSummaryMeta(careReports.needsYou)).toBe('Nov 27, 03:12 · 5 of 5 steps ticked · weekly checks done')
-    expect(careSummaryMeta(careReports.blocked)).toBe('Nov 27, 03:12 · blocked: hygiene, guide-review')
-    expect(careSummaryMeta(careReports.interrupted)).toBe('Nov 27, 03:12 · stopped before learnings')
+    expect(careSummaryMeta(careReports.needsYou)).toBe('Nov 27, 07:12 · 5 of 5 steps ticked · weekly checks done')
+    expect(careSummaryMeta(careReports.blocked)).toBe('Nov 27, 07:12 · blocked: hygiene, guide-review')
+    expect(careSummaryMeta(careReports.interrupted)).toBe('Nov 27, 07:12 · stopped before learnings')
   })
 
   it('names steps, their line, glyph and word', () => {

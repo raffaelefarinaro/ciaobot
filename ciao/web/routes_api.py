@@ -4038,7 +4038,7 @@ def _vault_graph_payload(config: Any, workspace: str | None) -> dict[str, Any]:
         figure of zero would read as "nothing to check".
 
         The counts come from :func:`ciao.memory_audit.note_entry_coverage`, the
-        same function the nightly ``stale_entry`` pass and ``os-audit`` call, so
+        same function the care run's ``stale_entry`` pass and ``os-audit`` call, so
         the map, the audit and the plan cannot disagree about which bullet is
         overdue. A node whose note is exempt (a journal is as true as the day it
         was written) or one the review queue would never show still reports its
@@ -4257,7 +4257,7 @@ def _parse_iso(value: str) -> datetime | None:
 async def care_report(request: Request) -> JSONResponse:
     """GET one workspace's Workspace care report, parsed (read-only).
 
-    The source is `<vault>/Workspace/Care-Report.md`, the checklist the nightly
+    The source is `<vault>/Workspace/Care-Report.md`, the checklist the daily
     care run writes; :mod:`ciao.care_report` reads it with a size cap and never
     raises, so a missing file is the "never run" state, not an error.
 

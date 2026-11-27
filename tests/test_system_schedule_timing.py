@@ -88,6 +88,13 @@ def test_direct_changed_timing_replace_updates_existing_overlay(tmp_path: Path) 
     assert _store(tmp_path, "personal").get(entry.schedule_id).daily_time_utc == "08:25"
 
 
+def test_care_runs_in_the_morning_by_default(tmp_path: Path) -> None:
+    """Care runs while the computer is awake, so the packaged slot is a morning one, not midnight."""
+    rows = {e.workspace: e for e in _store(tmp_path, "personal", "work").list_entries()}
+    assert (rows["personal"].daily_time_utc, rows["personal"].timezone_name) == ("06:00", "UTC")
+    assert rows["work"].daily_time_utc == "06:07"
+
+
 def test_untouched_rows_keep_packaged_stagger(tmp_path: Path) -> None:
     store = _store(tmp_path, "personal", "work")
     rows = [e for e in store.list_entries() if e.schedule_id.startswith("system-memory-curation@")]

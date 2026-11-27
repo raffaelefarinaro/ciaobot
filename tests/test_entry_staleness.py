@@ -119,7 +119,7 @@ def test_the_boundary_date_counts_and_one_day_short_does_not() -> None:
 
     An entry aged exactly the threshold is due: a note is due every 30 days, and
     on the 30th it is due. A detector that used `>` would keep a fact alive for
-    one extra night for no reason a reader could see.
+    one extra day for no reason a reader could see.
     """
     horizon = 30
     exact = f"- Landlord is Mr Silva [verified: {TODAY - datetime.timedelta(days=horizon)}]"
@@ -379,7 +379,7 @@ def test_an_unstamped_bullet_in_a_fresh_note_is_current() -> None:
 
     Nearly every bullet in a vault written before `[verified:]` stamps existed
     has no stamp, so selecting them unconditionally made every note read as
-    "never checked" and filled a nightly plan with one-day-old entries in any
+    "never checked" and filled a care plan with one-day-old entries in any
     vault that had been re-stamped. The note *is* the claim at that width: a note
     re-stamped yesterday has been re-read, and its unstamped bullets are as
     current as the file is.

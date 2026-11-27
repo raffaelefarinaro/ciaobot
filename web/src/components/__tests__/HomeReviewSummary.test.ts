@@ -154,7 +154,7 @@ describe('HomeReviewSummary', () => {
       ['blocked', 'blocked', /^4 of 6 steps · 2 blocked$/],
       ['interrupted', 'blocked', /^Interrupted · 2 of 6 steps$/],
       ['running', 'running', /^Running now · step 3 of 6: learnings$/],
-      ['never', 'open', /^Not run yet\. It runs every night\.$/],
+      ['never', 'open', /^Not run yet\. It runs every day\.$/],
     ] as const)('shows one quiet line for %s with its glyph and words', async (state, glyph, detail) => {
       serveCare(careReports[state])
       useTaskStore().schedules = []

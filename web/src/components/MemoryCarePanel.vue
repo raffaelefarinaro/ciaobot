@@ -4,7 +4,7 @@
       <span aria-hidden="true">‹</span> Memory
     </RouterLink>
     <h2 id="mc-title" class="mc-title">Workspace care</h2>
-    <p class="mc-lede">The nightly run, step by step. Read from Workspace/Care-Report.md.</p>
+    <p class="mc-lede">The daily run, step by step. Read from Workspace/Care-Report.md.</p>
 
     <p v-if="!report && !care.error" class="mc-note">Reading the report…</p>
     <p v-else-if="!report" class="mc-note mc-note--error" role="alert">Could not read the care report: {{ care.error }}</p>
@@ -75,7 +75,7 @@
           The previous run stopped before finishing {{ report.interrupted_ids.join(', ') }}.
         </p>
         <p v-if="report.weekly_retry.length" class="mc-note">
-          Retried each night until it works, for up to 3 nights: {{ retryWords }}.
+          Retried on each run until it works, for up to 3 runs: {{ retryWords }}.
         </p>
       </section>
 
@@ -146,7 +146,7 @@ const weeklyWords = computed(() => {
 })
 
 const retryWords = computed(() => (report.value?.weekly_retry ?? [])
-  .map(r => `${r.id} (night ${r.nights} of 3)`).join(', '))
+  .map(r => `${r.id} (run ${r.runs} of 3)`).join(', '))
 
 const status = ref('')
 const fixing = ref('')

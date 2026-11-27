@@ -47,7 +47,7 @@ export interface MemoryGraphNode {
    * answer the file-level question would show that note as clean.
    *
    * It never *raises* `stale` — the flag is the whole-note verdict, and the
-   * nightly `stale_entry` worklist is where an overdue bullet becomes a plan.
+   * care run's `stale_entry` worklist is where an overdue bullet becomes a plan.
    * It reports beside it, so a mixed note is visibly mixed.
    */
   entryCoverage?: MemoryGraphEntryCoverage | null
@@ -324,7 +324,7 @@ export const useMemoryMapStore = defineStore('memoryMap', () => {
    * A person note re-stamped last week is absent from `staleNotes` and belongs
    * here with a fact from 2019 in it. Listed rather than counted for the same
    * reason orphans are: each one is a bullet somebody has to go and decide
-   * about, and the nightly `stale_entry` worklist is built from exactly these
+   * about, and the care run's `stale_entry` worklist is built from exactly these
    * entries.
    */
   const entryStaleNotes = computed(() =>

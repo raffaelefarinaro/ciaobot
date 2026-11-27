@@ -234,7 +234,7 @@ web/
                            MemoryMapView under the header (so every Memory section shows it). Its open
                            state is the only storage, `ciao.memory.howOpen` ('1'/'0', read and written in
                            try/catch). The tag table is static data (`TAG_ROWS`), labelled through
-                           `kindLabel`, and is cross-checked against the nightly and memory-pass prompts
+                           `kindLabel`, and is cross-checked against the care and memory-pass prompts
                            in `ciao/stock/skills/ciao-memory/references/`
     stores/               Pinia stores (auth, projects, tasks, taskBoard, webhooks, fileViewer, itemPeek, notificationInbox), and store
                            modules (chatAnnotations) — see the ownership boundary below

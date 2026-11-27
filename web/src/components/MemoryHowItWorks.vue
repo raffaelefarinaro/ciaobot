@@ -47,7 +47,7 @@
             <li>Facts it is sure of are written straight away.</li>
             <li>Facts it is unsure of go on the Unsure list, one line each.</li>
             <li>Tick a line to say yes, or delete it to say no. A later run writes what you ticked.</li>
-            <li>Each night, Workspace care re-checks notes that have gone too long without a check.</li>
+            <li>Once a week, Workspace care re-checks notes that have gone too long without a check.</li>
           </ol>
 
           <h3 class="mhw-sub">What is not saved</h3>

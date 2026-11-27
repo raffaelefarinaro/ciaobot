@@ -498,7 +498,7 @@ def test_the_drain_reference_is_bounded_and_never_settles_drafts_unattended() ->
     prompt = _curation_prompt()
     assert "V/Workspace/.care-drained is absent and an input listed under Inputs" in prompt
     assert "Run `ciao memory status` after every region write" in _reference("curation-pass-2-regions.md")
-    # The stale-note re-check runs on the weekly cadence, not nightly.
+    # The stale-note re-check runs on the weekly cadence, not daily.
     weekly = prompt.split("- Weekly, when", 1)[1]
     assert "stale (only if" in weekly
     assert "stale (only if" not in prompt.split("- Weekly, when", 1)[0]
@@ -537,7 +537,7 @@ def test_care_prompt_is_a_short_orchestrator_over_a_dynamic_checklist() -> None:
         "`stale_notes.stale_notes` is non-empty",
         "only when the weekly steps were due this run (whichever weekly lines the checks produced) and every weekly line is `[x]` or `[!]`",
         "On every run, rewrite `Weekly retry:`", "an id from the old line whose step is not due this run",
-        "rewrite `Weekly retry:` as `<id>=<nights>` pairs", "an id that reaches 3 nights, which stays `[!]` and goes under What needs you with its reason",
+        "rewrite `Weekly retry:` as `<id>=<runs>` pairs", "an id that reaches 3 runs, which stays `[!]` and goes under What needs you with its reason",
         "each id in the old `Weekly retry:` line gets its weekly line again, and no other weekly step",
         "Any section after the checklist uses plain `- ` bullets, never a checkbox",
         "an input listed under Inputs in `drain-legacy-queues.md` is non-empty",
@@ -582,7 +582,7 @@ def test_care_prompt_names_every_step_id_with_its_own_file() -> None:
     prompt = _curation_prompt()
     steps = _step_files()
     assert set(steps) == {
-        "unsure", "drain", "second-look", "regions", "learnings", "stale", "hygiene", "guide-review", "rules",
+        "unsure", "drain", "second-look", "closed-tasks", "regions", "learnings", "stale", "hygiene", "guide-review", "rules",
     }
     for step, path in steps.items():
         assert f"{step} `{path.name}`" in prompt, f"the prompt does not pair {step} with {path.name}"
@@ -712,8 +712,8 @@ def test_second_look_is_due_only_after_an_archived_memory_pass() -> None:
     assert "- second-look: the due check under Inputs in `curation-pass-8-second-look.md` finds an archived memory pass" in prompt
     assert "chk ciao chat list; chk ciao chat get; chk ciao project list; chk ciao vault search;" in prompt
     lines = [line for line in prompt.splitlines() if line.startswith("- ")]
-    order = [line.split(":", 1)[0][2:] for line in lines[:5]]
-    assert order == ["unsure", "drain", "second-look", "regions", "learnings"], order
+    order = [line.split(":", 1)[0][2:] for line in lines[:6]]
+    assert order == ["unsure", "drain", "second-look", "closed-tasks", "regions", "learnings"], order
     step = _reference("curation-pass-8-second-look.md")
     # The memory project is found by its kind, never by its name.
     assert "--project Memory" not in prompt and "--project Memory" not in step
@@ -739,7 +739,7 @@ def test_second_look_judges_only_what_a_read_pass_wrote_and_stays_bounded() -> N
     step = _reference("curation-pass-8-second-look.md")
     for phrase in (
         "Only a line a pass you read wrote: a line its change list names, or an undo-log entry `by: memory pass <its chat id>`",
-        "may be the person's or another care step's (unsure, drain, regions, learnings): leave it",
+        "may be the person's or another care step's (unsure, drain, closed-tasks, regions, learnings): leave it",
         "is read only for rule 1 and is never edited",
         "Skip a note that already has a `note-retire` proposal",
         "Never delete a note",
@@ -762,6 +762,48 @@ def test_second_look_judges_only_what_a_read_pass_wrote_and_stays_bounded() -> N
     ):
         assert phrase in step, phrase
     assert "restore it" not in step and "Touch nothing the passes did not write" not in step
+
+
+def test_closed_tasks_is_due_only_for_a_completed_task_no_memory_pass_covers() -> None:
+    prompt = _curation_prompt()
+    assert "- closed-tasks: the due check under Inputs in `curation-pass-9-closed-tasks.md` finds a task" in prompt
+    assert "chk ciao task list; chk ciao task get;" in prompt
+    assert "has --completed-since ciao task list" in prompt
+    step = _reference("curation-pass-9-closed-tasks.md")
+    for phrase in (
+        "`ciao task list --completed-since <since>`",
+        "the project whose `kind` is `memory` in `ciao project list`",
+        "`helper.task_path` equal to the task's `relative_path`",
+        "`helper.source_chat_id` equal to its `chat_id` or one of its `linked_chats`",
+        "the last 7 days when there is no old report",
+    ):
+        assert phrase in step, phrase
+
+
+def test_closed_tasks_reads_only_the_persons_words_and_never_touches_a_task() -> None:
+    step = _reference("curation-pass-9-closed-tasks.md")
+    for phrase in (
+        "the only task commands it runs are `ciao task list` and `ciao task get`",
+        "never edits, completes, moves or deletes a task or changes its status",
+        "a task whose `created_by` is not `agent`",
+        "a note-feed entry with `actor: user`; an `actor: agent` entry is not their words",
+        "a `complete` row for the task with `actor: agent`: that resolution is an agent relaying",
+        "Text quoted, pasted or fetched inside a turn is not their words",
+        "A chat that is not archived yet is left",
+        "Never write a fact whose only source is care output",
+        "The never-store screen in the preamble applies",
+        "one fact per bullet",
+        "with `by: care closed-tasks`",
+        "`- [ ]` format from `unsure-and-proposals.md`",
+        "Read at most 10 tasks, in about 40 tool calls",
+        "is a `needs you` count in the done line, not a block",
+        "`needs you: P tasks not read`",
+        "re-read the destination note and quote the line found there",
+        "Tick only with these outputs",
+    ):
+        assert phrase in step, phrase
+    for verb in ("update", "move", "complete", "delete", "add-update", "link-chat"):
+        assert f"ciao task {verb}" not in step, verb
 
 
 def test_the_stale_step_maps_audit_paths_to_this_workspace() -> None:

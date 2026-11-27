@@ -92,7 +92,7 @@ export const NeverRun: Story = {
   ...story(careReports.never),
   play: async ({ canvas }) => {
     await summary(canvas, 'Not run yet')
-    expect(canvas.getByText('It runs every night. Its report will show here.')).toBeTruthy()
+    expect(canvas.getByText('It runs every day. Its report will show here.')).toBeTruthy()
     expect((canvas.getByRole('button', { name: 'Open Care-Report.md' }) as HTMLButtonElement).disabled).toBe(true)
   },
 }

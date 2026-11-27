@@ -77,7 +77,7 @@ describe('HousekeepingStrip — Workspace care', () => {
     serve(careReports.interrupted)
     const wrapper = await mountStrip()
     expect(titles(wrapper)[0]).toMatch(/^Care was cut off/)
-    expect(rows(wrapper)[0].get('.needs-you-line').text()).toBe("Stopped after 2 of 6 steps. Tonight's run starts fresh.")
+    expect(rows(wrapper)[0].get('.needs-you-line').text()).toBe('Stopped after 2 of 6 steps. The next run starts fresh.')
   })
 
   it.each(['complete', 'running', 'never'] as const)('renders no element at all when care is %s', async (state) => {

@@ -2,7 +2,7 @@
  * Workspace care, as Home and Memory → Workspace care show it.
  *
  * The data is `GET /api/care-report`: the engine's read-only parse of the
- * workspace's `Workspace/Care-Report.md`, the checklist the nightly care run
+ * workspace's `Workspace/Care-Report.md`, the checklist the daily care run
  * writes, plus whether the care schedule is running now. Everything here is a
  * pure function of that payload and the clock, so every state has one wording.
  */
@@ -32,8 +32,8 @@ export interface CareReport {
   modified_at: string
   updated: string
   weekly_done: string
-  /** Weekly steps still blocked, and for how many nights in a row (the run drops one at 3). */
-  weekly_retry: { id: string; nights: number }[]
+  /** Weekly steps still blocked, and for how many runs in a row (the run drops one at 3). */
+  weekly_retry: { id: string; runs: number }[]
   interrupted_ids: string[]
   nothing_due: boolean
   malformed: boolean
@@ -89,6 +89,7 @@ const STEP_NAMES: Record<string, string> = {
   unsure: 'Unsure',
   drain: 'Legacy queues',
   'second-look': 'Second look',
+  'closed-tasks': 'Closed tasks',
   regions: 'Memory regions',
   learnings: 'Learnings',
   stale: 'Stale notes',
@@ -138,7 +139,7 @@ function parse(iso: string): Date | null {
   return Number.isNaN(d.getTime()) ? null : d
 }
 
-/** "today 03:12", "yesterday 23:40" or "Nov 24", in the browser's time zone. */
+/** "today 07:12", "yesterday 23:40" or "Nov 24", in the browser's time zone. */
 export function whenWords(iso: string, now: Date = new Date()): string {
   const d = parse(iso)
   if (!d) return ''
@@ -183,7 +184,7 @@ export function careRailDetail(report: CareReport, now: Date = new Date()): stri
     case 'never':
       if (!report.schedule) return 'Care is not set up for this workspace.'
       return report.schedule.enabled
-        ? 'Not run yet. It runs every night.'
+        ? 'Not run yet. It runs every day.'
         : 'Not run yet. It is paused in Automations.'
     case 'unreadable':
       return report.status === 'too_large' ? 'The report is too large to read.' : 'The report could not be read.'
@@ -210,20 +211,21 @@ export interface CareRow {
   tone: 'attention' | 'error'
 }
 
-/** Whether a cut-off run most likely was the nightly one. */
-function lastNight(iso: string, now: Date): boolean {
+/** "today", "yesterday" or "on Nov 24": the day a cut-off run last wrote its report. */
+function dayPhrase(iso: string, now: Date): string {
   const d = parse(iso)
-  if (!d) return false
+  if (!d) return ''
+  if (sameDay(d, now)) return 'today'
   const yesterday = new Date(now)
   yesterday.setDate(now.getDate() - 1)
-  const hour = d.getHours()
-  return (sameDay(d, now) && hour < 9) || (sameDay(d, yesterday) && hour >= 18)
+  if (sameDay(d, yesterday)) return 'yesterday'
+  return `on ${d.toLocaleDateString('en-US', { month: 'short', day: 'numeric' })}`
 }
 
-/** What happens next after a cut-off run: only a schedule that is on runs again tonight. */
+/** What happens next after a cut-off run: only a schedule that is on runs again. */
 function nextRunWords(report: CareReport): string {
   if (!report.schedule) return ''
-  return report.schedule.enabled ? " Tonight's run starts fresh." : ' Care is paused in Automations.'
+  return report.schedule.enabled ? ' The next run starts fresh.' : ' Care is paused in Automations.'
 }
 
 /** The Home "Needs you" row, or null: running, done, never run and unreadable raise none. */
@@ -244,7 +246,7 @@ export function careNeedsYouRow(report: CareReport, now: Date = new Date()): Car
   }
   if (state === 'interrupted') {
     return {
-      title: lastNight(report.modified_at, now) ? 'Care was cut off last night' : 'Care was cut off',
+      title: ['Care was cut off', dayPhrase(report.modified_at, now)].filter(Boolean).join(' '),
       line: `Stopped after ${closed(report)} of ${total} steps.${nextRunWords(report)}`,
       tone: 'attention',
     }
@@ -281,7 +283,7 @@ export function careSummaryMeta(report: CareReport): string {
   if (state === 'never') {
     if (!report.schedule) return 'Care is not set up for this workspace, so there is no report to show.'
     return report.schedule.enabled
-      ? 'It runs every night. Its report will show here.'
+      ? 'It runs every day. Its report will show here.'
       : 'Care is paused in Automations. Its report will show here once it runs.'
   }
   if (state === 'unreadable') {
