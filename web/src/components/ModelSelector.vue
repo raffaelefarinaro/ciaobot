@@ -14,6 +14,8 @@ export interface ModelSection {
   badge?: string
   modelBadges?: Record<string, string[]>
   modelLabels?: Record<string, string>
+  /** A stored value shown as another row (lib/modelSections: Claude Code's `default`). */
+  modelAliases?: Record<string, string>
   disabled?: boolean
   hint?: string
 }
@@ -124,9 +126,20 @@ const hasAnyModels = computed(
   () => filteredSections.value.length > 0
 )
 
+/** The row a stored value is shown as: itself, or the row it is an alias of. */
+function shownModel(model: string): string {
+  if (normalizedSections.value.some((item) => item.models.includes(model))) return model
+  for (const item of normalizedSections.value) {
+    const target = item.modelAliases?.[model]
+    if (target) return target
+  }
+  return model
+}
+
 function displayModelLabel(model: string): string {
-  const section = normalizedSections.value.find((item) => item.models.includes(model))
-  return section?.modelLabels?.[model] || model
+  const shown = shownModel(model)
+  const section = normalizedSections.value.find((item) => item.models.includes(shown))
+  return section?.modelLabels?.[shown] || model
 }
 
 const triggerLabel = computed(() => {
@@ -139,14 +152,14 @@ const triggerLabel = computed(() => {
 })
 
 const explicitActiveModels = computed(() =>
-  props.activeModels.map((model) => model.trim()).filter(Boolean),
+  props.activeModels.map((model) => shownModel(model.trim())).filter(Boolean),
 )
 
 const activeModelSet = computed(() => {
   if (explicitActiveModels.value.length) return new Set(explicitActiveModels.value)
   return new Set(
     (props.multiple ? (effectiveValue.value as string[]) : [effectiveValue.value as string])
-      .map((model) => model.trim())
+      .map((model) => shownModel(model.trim()))
       .filter(Boolean),
   )
 })
@@ -235,11 +248,24 @@ function badgeClass(badge: string): string {
 }
 
 function scrollActiveIntoView() {
-  if (!listRef.value) return
-  const active = listRef.value.querySelector('.ms-item--active') as HTMLElement | null
-  if (active && typeof active.scrollIntoView === 'function') {
-    active.scrollIntoView({ block: 'nearest' })
-  }
+  // Scroll only the picker's own scroller (the list, or the whole popover on
+  // a short screen), never the page: Element.scrollIntoView also scrolls every
+  // ancestor, and it ran before Popper had placed the popover, which scrolled
+  // Home's page away under it on a phone.
+  const list = listRef.value
+  const active = list?.querySelector('.ms-item--active') as HTMLElement | null
+  if (!list || !active) return
+  const popover = list.closest('.model-selector__popover') as HTMLElement | null
+  const scroller = [list, popover].find((el): el is HTMLElement => (
+    !!el && el.scrollHeight > el.clientHeight && getComputedStyle(el).overflowY !== 'visible'
+  ))
+  if (!scroller) return
+  const box = scroller.getBoundingClientRect()
+  const row = active.getBoundingClientRect()
+  // Leave room for the sticky provider heading above the row.
+  const top = box.top + 36
+  if (row.top < top) scroller.scrollTop -= top - row.top
+  else if (row.bottom > box.bottom) scroller.scrollTop += row.bottom - box.bottom
 }
 
 function onKeydown(event: KeyboardEvent) {
@@ -260,6 +286,28 @@ function onKeydown(event: KeyboardEvent) {
   if (event.key === 'ArrowDown' || event.key === 'ArrowUp') {
     event.preventDefault()
     focusAdjacentItem(event.key === 'ArrowDown' ? 1 : -1)
+    return
+  }
+  const onItem = (document.activeElement as HTMLElement | null)?.classList.contains('ms-item')
+  if (onItem && (event.key === 'Home' || event.key === 'End')) {
+    event.preventDefault()
+    focusEdgeItem(event.key === 'Home' ? 'first' : 'last')
+    return
+  }
+  // Typing on a highlighted row keeps filtering: the character goes to the
+  // search field, which takes focus back, as in a combobox.
+  if (onItem && props.searchable && event.key.length === 1 && event.key !== ' '
+    && !event.metaKey && !event.ctrlKey && !event.altKey) {
+    event.preventDefault()
+    query.value += event.key
+    searchRef.value?.focus()
+    return
+  }
+  if (onItem && props.searchable && event.key === 'Backspace') {
+    event.preventDefault()
+    query.value = query.value.slice(0, -1)
+    searchRef.value?.focus()
+    return
   }
   if (event.key === 'Enter' || event.key === ' ') {
     const focused = document.activeElement as HTMLElement | null
@@ -271,8 +319,19 @@ function onKeydown(event: KeyboardEvent) {
   }
 }
 
+function enabledItems(): HTMLElement[] {
+  return (Array.from(listRef.value?.querySelectorAll('.ms-item') || []) as HTMLButtonElement[])
+    .filter((el) => !el.disabled)
+}
+
+function focusEdgeItem(edge: 'first' | 'last') {
+  const items = enabledItems()
+  const target = edge === 'first' ? items[0] : items[items.length - 1]
+  target?.focus()
+}
+
 function focusAdjacentItem(direction: 1 | -1) {
-  const items = Array.from(listRef.value?.querySelectorAll('.ms-item') || []) as HTMLElement[]
+  const items = enabledItems()
   if (!items.length) return
   const activeEl = document.activeElement as HTMLElement
   const currentIndex = items.findIndex((el) => el === activeEl)
@@ -313,6 +372,21 @@ function onCloseAutoFocus(event: Event): void {
   if (preserveFocusOnUnmount || (active && active !== document.body && !rootRef.value?.contains(active))) {
     event.preventDefault()
   }
+}
+
+function onInteractOutside(event: Event): void {
+  // A menu opened from the footer (Permission mode, Thinking; MenuSelect marks
+  // its content data-model-picker-menu) is its own layer.
+  // Choosing in it with a pointer closes and unmounts it within the same
+  // gesture, so Reka's outside check meets a menu item that is already
+  // detached and reads it as outside this popover. A press or focus that
+  // came from a menu, or from anything no longer in the document, is not a
+  // dismissal of the picker.
+  const original = (event as CustomEvent<{ originalEvent?: Event }>).detail?.originalEvent
+  const target = (original?.target ?? event.target) as Node | null
+  if (!target) return
+  const element = target instanceof Element ? target : target.parentElement
+  if (!target.isConnected || element?.closest('[data-model-picker-menu]')) event.preventDefault()
 }
 
 function onEscapeKeyDown(event: KeyboardEvent): void {
@@ -381,7 +455,7 @@ onMounted(() => {
           aria-haspopup="listbox"
         >
           <span :id="triggerLabelId" class="model-selector__label">{{ triggerLabel }}</span>
-          <span class="model-selector__chevron" aria-hidden="true">▾</span>
+          <svg class="model-selector__chevron" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m7 9 5 5 5-5" /></svg>
         </button>
       </PopoverTrigger>
 
@@ -397,6 +471,7 @@ onMounted(() => {
         @open-auto-focus="onOpenAutoFocus"
         @close-auto-focus="onCloseAutoFocus"
         @escape-key-down="onEscapeKeyDown"
+        @interact-outside="onInteractOutside"
       >
         <div
           class="model-selector__popover"
@@ -410,7 +485,7 @@ onMounted(() => {
               class="model-selector__close"
               aria-label="Close model picker"
               @click.stop="close('close')"
-            >×</button>
+            ><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M18 6 6 18M6 6l12 12" /></svg></button>
           </div>
           <div
             class="model-selector__listbox"
@@ -446,8 +521,10 @@ onMounted(() => {
               :key="section.key"
               class="model-selector__section"
               :class="{ 'model-selector__section--disabled': section.disabled }"
+              role="group"
+              :aria-label="section.label || undefined"
             >
-              <div class="model-selector__section-header">
+              <div v-if="section.label" class="model-selector__section-header">
                 <span class="model-selector__section-label">{{ section.label }}</span>
                 <span v-if="section.badge" class="model-selector__badge">{{ section.badge }}</span>
               </div>
@@ -469,11 +546,11 @@ onMounted(() => {
                 @click="selectModel(model, section.key)"
               >
                 <span v-if="multiple" class="model-selector__check" aria-hidden="true">
-                  <span v-if="isSelected(model)" class="model-selector__checkmark">✓</span>
+                  <svg v-if="isSelected(model)" class="model-selector__checkmark" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6 9 17l-5-5" /></svg>
                 </span>
                 <!-- Single select marks the current model with a check on the
                      hover surface, not a filled accent row that reads as a button. -->
-                <span v-else class="model-selector__tick" aria-hidden="true">{{ isActive(model) ? '✓' : '' }}</span>
+                <span v-else class="model-selector__tick" aria-hidden="true"><svg v-if="isActive(model)" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6 9 17l-5-5" /></svg></span>
                 <span class="model-selector__item-main">
                   <span class="model-selector__item-label">{{ modelLabel(section, model) }}</span>
                   <span v-if="modelBadges(section, model).length" class="model-selector__item-badges">
@@ -489,8 +566,8 @@ onMounted(() => {
             </div>
           </div>
 
-          <div v-else class="model-selector__empty">
-            No models match "{{ query }}"
+          <div v-else class="model-selector__empty" role="status">
+            {{ normalizedQuery ? `No models match "${query}"` : 'No models listed.' }}
           </div>
 
           </div>
@@ -512,11 +589,18 @@ onMounted(() => {
   width: 100%;
 }
 
+/* A triggerless picker belongs to a chip its host draws. Its root only
+   anchors the popover over that chip's (positioned) wrapper and takes no room
+   in the row, so the chip keeps the same width open or closed. */
 .model-selector--triggerless {
-  width: 100%;
-  height: 100%;
-  min-height: 30px;
-  align-self: stretch;
+  position: absolute;
+  inset: 0;
+  width: auto;
+  pointer-events: none;
+}
+
+.model-selector--triggerless .model-selector__popover {
+  pointer-events: auto;
 }
 
 .model-selector__trigger {
@@ -561,7 +645,6 @@ onMounted(() => {
 .model-selector__chevron {
   flex: 0 0 auto;
   color: var(--fg2);
-  font-size: 12px;
   transition: transform 120ms var(--ease);
 }
 
@@ -576,12 +659,18 @@ onMounted(() => {
   display: flex;
   flex-direction: column;
   min-height: 0;
-  min-width: min(320px, calc(100vw - 24px));
-  max-width: min(480px, calc(100vw - 24px));
+  /* The model list is the task: a fixed, roomy width (long opencode ids fit)
+     and up to 640px of height where the viewport has it. */
+  /* 100cqw is the chat pane when the picker is in one (ChatLayout makes the
+     pane a container), so a narrow pane beside the sidebar never clips it;
+     with no container it is the viewport. */
+  width: min(520px, calc(100vw - 24px), calc(100cqw - 16px));
+  min-width: min(320px, calc(100vw - 24px), calc(100cqw - 16px));
+  max-width: min(calc(100vw - 24px), calc(100cqw - 16px));
   /* Reka reports the room left on the chosen side (flipped above the trigger
      on short landscape phones); the viewport bound alone can overflow it. */
   max-height: min(
-    420px,
+    640px,
     calc(100dvh - var(--safe-top) - var(--safe-bottom) - 32px),
     calc(var(--reka-popper-available-height, 100dvh) - 8px)
   );
@@ -589,6 +678,7 @@ onMounted(() => {
   border: 1px solid var(--border);
   border-radius: var(--radius);
   box-shadow: 0 8px 24px rgba(0, 0, 0, 0.35);
+  overflow: hidden;
 }
 
 .model-selector__listbox {
@@ -624,33 +714,35 @@ onMounted(() => {
 
 .model-selector__list {
   overflow-y: auto;
-  padding: 6px;
+  overscroll-behavior: contain;
+  padding: 0 6px 6px;
   flex: 1 1 auto;
   min-height: 0;
+  scroll-padding-top: 36px;
+  scrollbar-width: thin;
+  scrollbar-color: var(--border-strong) transparent;
 }
 
-.model-selector__section {
-  margin-bottom: 8px;
-  padding-bottom: 8px;
-  border-bottom: 1px solid color-mix(in srgb, var(--border) 70%, transparent);
-}
-
-.model-selector__section:last-child {
-  margin-bottom: 0;
-  padding-bottom: 0;
-  border-bottom: none;
+.model-selector__section + .model-selector__section {
+  margin-top: 4px;
+  border-top: 1px solid color-mix(in srgb, var(--border) 70%, transparent);
 }
 
 .model-selector__section--disabled {
   opacity: 0.55;
 }
 
+/* Provider headers stay pinned while their models scroll under them. */
 .model-selector__section-header {
+  position: sticky;
+  top: 0;
+  z-index: 1;
   display: flex;
   align-items: center;
   gap: 8px;
-  padding: 4px 6px;
-  margin-bottom: 2px;
+  min-height: 32px;
+  padding: 8px 8px 4px;
+  background: var(--bg2);
 }
 
 .model-selector__section-label {
@@ -679,14 +771,14 @@ onMounted(() => {
   align-items: center;
   gap: 8px;
   width: 100%;
-  min-height: 34px;
-  padding: 7px 8px;
+  min-height: 40px;
+  padding: 8px 10px 8px 8px;
   border: none;
   border-radius: calc(var(--radius) - 2px);
   background: transparent;
   color: var(--fg);
   font: inherit;
-  font-size: 13px;
+  font-size: var(--text-base);
   text-align: left;
   cursor: pointer;
   transition: background 120ms var(--ease);
@@ -696,10 +788,15 @@ onMounted(() => {
   cursor: not-allowed;
 }
 
-.model-selector__item:hover,
+.model-selector__item:hover:not(:disabled),
 .model-selector__item:focus {
   background: var(--bg3);
   outline: none;
+}
+
+.model-selector__item:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
 }
 
 /* Must stay below the base .model-selector__* rules it overrides. */
@@ -720,11 +817,12 @@ onMounted(() => {
 }
 
 .model-selector__tick {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
   width: 16px;
   flex: 0 0 auto;
   color: var(--accent);
-  font-size: 12px;
-  text-align: center;
 }
 
 .model-selector__check {
@@ -745,7 +843,6 @@ onMounted(() => {
 }
 
 .model-selector__checkmark {
-  font-size: 11px;
   color: var(--on-accent);
 }
 
@@ -808,7 +905,7 @@ onMounted(() => {
   flex: 0 0 auto;
   min-height: 0;
   overflow-y: auto;
-  padding: 8px 10px;
+  padding: 10px 12px;
   /* A control scrolled into view keeps clear of the footer's edge. */
   scroll-padding: 8px;
   border-top: 1px solid color-mix(in srgb, var(--border) 70%, transparent);
@@ -816,27 +913,23 @@ onMounted(() => {
   border-radius: 0 0 var(--radius) var(--radius);
 }
 
-@media (max-height: 600px) {
-  .model-selector__footer {
-    flex: 0 1 auto;
-    scrollbar-gutter: stable;
+/* A short or very narrow screen (a landscape phone, 200% zoom) has no room
+   for two scrollers: the whole popover scrolls as one, list and footer
+   together, instead of squeezing the footer into a strip of its own. */
+@media (max-height: 500px), (max-width: 260px) {
+  .model-selector__popover {
+    overflow-y: auto;
+    overscroll-behavior: contain;
     scrollbar-width: thin;
-    scrollbar-color: var(--fg2) var(--bg3);
+    scrollbar-color: var(--border-strong) transparent;
   }
 
-  .model-selector__footer::-webkit-scrollbar {
-    width: 10px;
-  }
-
-  .model-selector__footer::-webkit-scrollbar-track {
-    background: var(--bg3);
-    border-radius: 999px;
-  }
-
-  .model-selector__footer::-webkit-scrollbar-thumb {
-    background: var(--fg2);
-    border: 2px solid var(--bg3);
-    border-radius: 999px;
+  .model-selector__listbox,
+  .model-selector__list,
+  .model-selector__footer {
+    flex: 0 0 auto;
+    min-height: auto;
+    overflow: visible;
   }
 }
 
@@ -852,7 +945,15 @@ onMounted(() => {
   display: none;
 }
 
-@media (max-width: 768px) {
+@media (prefers-reduced-motion: reduce) {
+  .model-selector__trigger,
+  .model-selector__chevron,
+  .model-selector__item { transition: none; }
+}
+
+/* A phone, and a short landscape screen (844x390), get the sheet: a popover
+   anchored to the chip would have two rows of room above or below it. */
+@media (max-width: 768px), (max-height: 500px) {
   /* Header selectors have no trigger box of their own, so anchor their menu
      to the viewport below the shared top bar and keep both edges visible. */
   .model-selector--triggerless :deep([data-reka-popper-content-wrapper]) {
@@ -920,7 +1021,6 @@ onMounted(() => {
     background: transparent;
     color: var(--fg2);
     font: inherit;
-    font-size: 24px;
     line-height: 1;
     cursor: pointer;
     touch-action: manipulation;

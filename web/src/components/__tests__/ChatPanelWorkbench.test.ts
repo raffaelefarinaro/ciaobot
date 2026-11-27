@@ -161,7 +161,7 @@ describe('ChatPanel aligned layout', () => {
     const wrapper = await mountPanel()
     expect(wrapper.find('.pane-header .model-picker-summary').exists()).toBe(false)
     const trigger = wrapper.get('.composer-bar .model-picker-summary')
-    expect(trigger.text()).toContain('sonnet')
+    expect(trigger.text()).toContain('Sonnet')
     expect(trigger.attributes('aria-expanded')).toBe('false')
 
     await trigger.trigger('click')

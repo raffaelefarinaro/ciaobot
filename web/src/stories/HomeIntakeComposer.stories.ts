@@ -69,7 +69,7 @@ export const Model: Story = {
     await assertFenceQuiet(canvas)
     await openModelPicker(canvas)
     await userEvent.click(await canvas.findByRole('option', { name: /beta/i }))
-    await waitFor(() => expect(canvas.getByRole('button', { name: /Model for the new chat — storybook-model-beta/ })).toBeTruthy())
+    await waitFor(() => expect(canvas.getByRole('button', { name: /Model for the new chat — .* · Storybook Model Beta/ })).toBeTruthy())
   },
 }
 

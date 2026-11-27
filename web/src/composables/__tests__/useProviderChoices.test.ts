@@ -28,6 +28,35 @@ describe('useProviderChoices', () => {
     expect(providerThinkingOptions('claude')[0].value).toBe(DEFAULT_THINKING_SELECTION)
   })
 
+  it("lists the agent's default once: as the Automatic entry, named by the model it runs", () => {
+    const routines = ref({
+      model_options: { anthropic: ['default', 'opus', 'sonnet'] },
+      provider_default_models: {},
+    } as unknown as RoutineSettings)
+    const workspaceModels = ref({
+      models: [], default: 'default',
+      provider_models: { claude: ['default', 'opus', 'sonnet'] },
+      provider_defaults: { claude: 'default' },
+      providers: [{ id: 'claude', label: 'Anthropic (via Claude Code)', short_label: 'Claude Code', capabilities: {} }],
+      provider_catalog_evidence: { claude: { status: 'observed', source: null, reason: null, models: [
+        { id: 'default', label: 'Default (recommended)', description: 'Opus 4.5' },
+        { id: 'opus', label: 'Opus 4.5' },
+        { id: 'sonnet', label: 'Sonnet 4.5' },
+      ] } },
+    } as unknown as ModelsResponse)
+    const { providerSectionsWithDefault, modelNameFor } = useProviderChoices({ routines, workspaceModels })
+    const sections = providerSectionsWithDefault(
+      'claude', DEFAULT_MODEL_SELECTION, (effective) => `Automatic (${modelNameFor('claude', effective)})`, true,
+    )
+    expect(sections[0].label).toBe('')
+    expect(sections[0].modelLabels?.[DEFAULT_MODEL_SELECTION]).toBe('Automatic (Opus 4.5)')
+    expect(sections[1].label).toBe('Claude Code')
+    expect(sections[1].models).toEqual(['opus', 'sonnet'])
+    expect(sections[1].modelLabels).toEqual({ opus: 'Opus 4.5', sonnet: 'Sonnet 4.5' })
+    // An override stored as `default` reads, and is highlighted, as that row.
+    expect(sections[1].modelAliases).toEqual({ default: 'opus' })
+  })
+
   it('lists every provider from /api/models including codex', () => {
     const routines = ref({
       model_options: { anthropic: ['opus'] },

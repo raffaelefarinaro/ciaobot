@@ -2278,9 +2278,10 @@ describe('TaskBoardView', () => {
       const sheet = wrapper.get('.task-sheet')
       // The task's own project, not a guess: `project_id: 'p1'` on the card.
       expect(sheet.get('.task-preview-facts').text()).toContain('Website')
-      // The model and provider are the operator's own defaults, said as such
-      // rather than shown as a value the board cannot promise.
-      expect(sheet.get('.task-preview-facts').text()).toContain('workspace default')
+      // The provider and model are the workspace default, named as the
+      // provider (its model joins once the catalog has loaded), never "default".
+      expect(sheet.get('.task-delegate-model').text()).toMatch(/^(claude|Claude Code)\b/)
+      expect(sheet.get('.task-preview-facts').text()).not.toMatch(/\bdefault\b/i)
       // And the one fact a board cannot imply.
       expect(sheet.text()).toContain('Attended')
       // The description that goes into the chat, read by id because a row carries
@@ -2349,7 +2350,7 @@ describe('TaskBoardView', () => {
     expect(sonnet).toBeTruthy()
     sonnet!.click()
     await flushPromises()
-    expect(wrapper.get('.task-delegate-model').text()).toContain('sonnet')
+    expect(wrapper.get('.task-delegate-model').text()).toContain('Sonnet')
     await wrapper.get('.task-sheet .btn-primary').trigger('click')
     await flushPromises()
 
