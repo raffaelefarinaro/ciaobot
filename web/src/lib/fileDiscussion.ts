@@ -46,15 +46,6 @@ export async function startFileDiscussion(
   { path, seed, title, workspace }: FileDiscussionOptions,
 ): Promise<ChatInfo | null> {
   if (!path) return null
-  // Resolved first, with the viewer's own resolver, so a file that cannot be
-  // found costs no workspace switch and no orphan chat.
-  let identity: string
-  try {
-    identity = (await api.get<{ path: string }>(`/api/workspace-file-path?path=${encodeURIComponent(path)}`)).path
-  } catch (e) {
-    store.pushErrorToast('Could not start discussion', e instanceof Error ? e.message : String(e))
-    return null
-  }
   const previous = store.activeWorkspace
   const previousChatId = store.activeChatId
   const target = workspace || previous
@@ -65,6 +56,15 @@ export async function startFileDiscussion(
   const general = store.generalProject(target)
   if (!general) {
     store.pushErrorToast('Cannot start chat', `No General project found in the ${target} workspace.`)
+    return null
+  }
+  // Resolved before the switch, with the viewer's own resolver, so a file that
+  // cannot be found costs no workspace switch and no orphan chat.
+  let identity: string
+  try {
+    identity = (await api.get<{ path: string }>(`/api/workspace-file-path?path=${encodeURIComponent(path)}`)).path
+  } catch (e) {
+    store.pushErrorToast('Could not start discussion', e instanceof Error ? e.message : String(e))
     return null
   }
   if (target !== previous) {
