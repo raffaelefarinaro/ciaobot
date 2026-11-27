@@ -622,9 +622,7 @@ struct ConnectionView: View {
             if let local = localEngineScreen {
                 VStack(alignment: .leading, spacing: 0) {
                     if let connectionResult {
-                        ConnectionResultCard(result: connectionResult, onDismiss: { self.connectionResult = nil })
-                            .id(connectionResult.id)
-                            .task(id: connectionResult.id) { await autoClear(connectionResult) }
+                        ResultBanner(result: connectionResult, current: $connectionResult)
                             .padding(.horizontal, 32)
                             .padding(.top, 16)
                     }
@@ -646,9 +644,7 @@ struct ConnectionView: View {
                 // connection screen is already gone once the probe succeeds.
                 VStack(spacing: 0) {
                     if let connectionResult {
-                        ConnectionResultCard(result: connectionResult, onDismiss: { self.connectionResult = nil })
-                            .id(connectionResult.id)
-                            .task(id: connectionResult.id) { await autoClear(connectionResult) }
+                        ResultBanner(result: connectionResult, current: $connectionResult)
                             .padding(.horizontal, 12)
                             .padding(.vertical, 6)
                     }
@@ -780,12 +776,12 @@ struct ConnectionView: View {
                 VStack(spacing: 24) {
                     wordmarkView
                     if let connectionResult {
-                        ConnectionResultCard(
+                        ResultBanner(
                             result: connectionResult,
+                            current: $connectionResult,
                             onTryAgain: offersThisMac ? { useThisMac() } : nil,
                             tryAgainDisabled: busy
                         )
-                        .id(connectionResult.id)
                         .transition(.opacity)
                     }
                     if offersThisMac {
@@ -997,18 +993,11 @@ struct ConnectionView: View {
         }
     }
 
-    /// A completed-move banner clears itself; warnings and errors stay.
-    private func autoClear(_ result: ConnectionResult) async {
-        guard let delay = result.autoClearDelay else { return }
-        try? await Task.sleep(nanoseconds: UInt64(delay * 1_000_000_000))
-        guard !Task.isCancelled, connectionResult?.id == result.id else { return }
-        withAnimation(.easeOut(duration: 0.2)) { connectionResult = nil }
-    }
-
     /// Whether the app menu's Forget Saved Sign-In applies right now.
     private var canForgetFromMenu: Bool {
-        guard engineMode == .local, let origin, !busy else { return false }
-        return signIn.hasSavedSignIn(for: origin, registryKey: .localEngine)
+        ForgetMenuPolicy.isEnabled(
+            mode: engineMode, hasOrigin: origin != nil, busy: busy,
+            hasSavedLocalSignIn: origin.map { signIn.hasSavedSignIn(for: $0, registryKey: .localEngine) } ?? false)
     }
 
     /// Erases the local engine store from the connected app view. WebKit must

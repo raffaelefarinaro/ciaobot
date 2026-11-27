@@ -25,7 +25,7 @@ final class ConnectionResultTests: XCTestCase {
     func testOnlyACompletedMoveClearsItselfAndHidesTheCheckedLine() {
         let done = ConnectionResult(outcome: .done(left: ["/a"]))!
         XCTAssertTrue(done.succeeded)
-        XCTAssertEqual(done.autoClearDelay, 8)
+        XCTAssertEqual(done.autoClearDelay, 12)
         let info = ConnectionResult(outcome: .refused(code: "downgrade", oldOrigin: nil))!
         let warning = ConnectionResult(outcome: .refused(code: "engine_too_old", oldOrigin: nil))!
         let failure = ConnectionResult(outcome: .refused(code: "rollback_failed", oldOrigin: nil))!
@@ -34,7 +34,40 @@ final class ConnectionResultTests: XCTestCase {
             XCTAssertFalse(card.succeeded)
             XCTAssertNil(card.autoClearDelay)
         }
-        XCTAssertEqual(ConnectionResult.dismissTitle, "Dismiss")
+    }
+
+    func testStaleTimerNeverClearsALaterBanner() {
+        let done = ConnectionResult(outcome: .done(left: ["/a"]))!
+        let later = ConnectionResult(outcome: .done(left: ["/b"]))!
+        XCTAssertTrue(BannerClearPolicy.shouldClear(current: done, timerResult: done))
+        XCTAssertFalse(BannerClearPolicy.shouldClear(current: later, timerResult: done))
+    }
+
+    func testAWarningReplacingASuccessIsNeverAutoCleared() {
+        let done = ConnectionResult(outcome: .done(left: ["/a"]))!
+        let warning = ConnectionResult(outcome: .refused(code: "engine_too_old", oldOrigin: nil))!
+        let failure = ConnectionResult(outcome: .refused(code: "rollback_failed", oldOrigin: nil))!
+        XCTAssertFalse(BannerClearPolicy.shouldClear(current: warning, timerResult: done))
+        XCTAssertFalse(BannerClearPolicy.shouldClear(current: failure, timerResult: done))
+        // A warning's own timer (never started in the view) would not clear it either.
+        XCTAssertFalse(BannerClearPolicy.shouldClear(current: warning, timerResult: warning))
+        XCTAssertFalse(BannerClearPolicy.shouldClear(current: failure, timerResult: failure))
+    }
+
+    func testDismissThenTimerIsANoOp() {
+        let done = ConnectionResult(outcome: .done(left: ["/a"]))!
+        XCTAssertFalse(BannerClearPolicy.shouldClear(current: nil, timerResult: done))
+    }
+
+    func testForgetMenuNeedsLocalOriginIdleAndASavedSignIn() {
+        func on(_ mode: EngineMode = .local, origin: Bool = true, busy: Bool = false, saved: Bool = true) -> Bool {
+            ForgetMenuPolicy.isEnabled(mode: mode, hasOrigin: origin, busy: busy, hasSavedLocalSignIn: saved)
+        }
+        XCTAssertTrue(on())
+        XCTAssertFalse(on(.external))
+        XCTAssertFalse(on(origin: false))
+        XCTAssertFalse(on(busy: true))
+        XCTAssertFalse(on(saved: false))
     }
 
     func testEveryRefusalCodeHasATitleAndTheFixedReason() {

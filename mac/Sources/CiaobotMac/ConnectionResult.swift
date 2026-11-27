@@ -35,7 +35,7 @@ struct ConnectionResult: Equatable, Identifiable {
 
     /// Seconds before a completed-move banner clears itself. Warnings and
     /// errors stay until dismissed.
-    static let successAutoClearSeconds: TimeInterval = 8
+    static let successAutoClearSeconds: TimeInterval = 12
     var autoClearDelay: TimeInterval? { succeeded ? Self.successAutoClearSeconds : nil }
 
     static let dismissTitle = "Dismiss"
@@ -166,6 +166,47 @@ enum SignInPersistenceHint: Equatable {
         guard let origin else { return .hidden }
         if !origin.usesTLS { return .line(httpsOnlyLine) }
         return canPersist ? .toggle(help: explanation) : .line(explanation)
+    }
+}
+
+/// When a banner clears itself. Pure so a stale timer, a replaced banner and a
+/// dismissal are tested without a view.
+enum BannerClearPolicy {
+    /// A timer started for `timerResult` clears the banner only if that same
+    /// result is still showing and it is a completed move; a dismissal (nil) or a
+    /// newer result (other id, such as a warning) is left alone.
+    static func shouldClear(current: ConnectionResult?, timerResult: ConnectionResult) -> Bool {
+        timerResult.autoClearDelay != nil && current?.id == timerResult.id
+    }
+}
+
+/// Whether the app menu's Forget Saved Sign-In is available: a saved sign-in
+/// exists for the running local engine and nothing else is running.
+enum ForgetMenuPolicy {
+    static func isEnabled(mode: EngineMode, hasOrigin: Bool, busy: Bool, hasSavedLocalSignIn: Bool) -> Bool {
+        mode == .local && hasOrigin && !busy && hasSavedLocalSignIn
+    }
+}
+
+/// The result card as a banner: Dismiss, plus the self-clear of a completed
+/// move. One place for all three sites, so they cannot drift.
+struct ResultBanner: View {
+    let result: ConnectionResult
+    @Binding var current: ConnectionResult?
+    var onTryAgain: (() -> Void)?
+    var tryAgainDisabled = false
+
+    var body: some View {
+        ConnectionResultCard(result: result, onTryAgain: onTryAgain, tryAgainDisabled: tryAgainDisabled,
+                             onDismiss: { current = nil })
+            .id(result.id)
+            .task(id: result.id) {
+                guard let delay = result.autoClearDelay else { return }
+                try? await Task.sleep(nanoseconds: UInt64(delay * 1_000_000_000))
+                guard !Task.isCancelled,
+                      BannerClearPolicy.shouldClear(current: current, timerResult: result) else { return }
+                withAnimation(.easeOut(duration: 0.2)) { current = nil }
+            }
     }
 }
 
