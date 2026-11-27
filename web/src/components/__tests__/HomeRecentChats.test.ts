@@ -133,6 +133,37 @@ describe('HomeRecentChats lanes and tiers', () => {
     expect(wrapper.findAll('.home-chat-item')).toHaveLength(2)
   })
 
+  it('keeps the Workspace care run chat out of the lanes, but not a user routine or a care run that needs you', async () => {
+    const wrapper = await mountHome()
+    const store = useProjectStore()
+    const base = { project_id: 'personal-project', archived: false, local: true, created_at: timestamp(60), last_activity_at: timestamp(60), last_read_at: timestamp(60) }
+    store.chats = [
+      ...store.chats,
+      { ...base, chat_id: 'care', title: 'Workspace care run', schedule_id: 'system-memory-curation@personal' },
+      { ...base, chat_id: 'routine', title: 'Morning routine', schedule_id: 'daily-digest' },
+    ] as unknown as typeof store.chats
+    await nextTick()
+    let titles = wrapper.findAll('.home-chat-title').map(el => el.text())
+    expect(titles).toContain('Morning routine')
+    expect(titles).toContain('A quiet chat')
+    expect(titles).not.toContain('Workspace care run')
+    // Needs the person (a question card): Home still surfaces it, in Needs you.
+    store.chats = store.chats.map(c => c.chat_id === 'care'
+      ? { ...c, pending_question: JSON.stringify({ questions: [{ question: 'Merge these notes?' }] }) }
+      : c)
+    await nextTick()
+    titles = wrapper.findAll('.home-tier--needsYou .home-chat-title').map(el => el.text())
+    expect(titles).toContain('Workspace care run')
+  })
+
+  it('does not show Home activity for a lane whose only chat is the care run', async () => {
+    const wrapper = await mountHome(false)
+    const store = useProjectStore()
+    store.chats = [{ chat_id: 'care', project_id: 'personal-project', title: 'Workspace care run', schedule_id: 'system-memory-curation@personal', archived: false, local: true, created_at: timestamp(60), last_activity_at: timestamp(60), last_read_at: timestamp(60) }] as unknown as typeof store.chats
+    await nextTick()
+    expect(wrapper.find('.home-chat-item').exists()).toBe(false)
+  })
+
   // A chat whose turn ended but whose background shells still run is alive: it sits
   // in Working with the shell mark and a counted sub-line, not in Earlier.
   it('files a chat with only background shells running under Working', async () => {

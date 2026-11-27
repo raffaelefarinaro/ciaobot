@@ -197,6 +197,7 @@
 import { computed, ref } from 'vue'
 import { useProjectStore } from '../stores/projects'
 import type { ChatInfo, ProjectInfo } from '../lib/types'
+import { isCareChat } from '../lib/automationWorkspace'
 import { ageBucket, chatActivityTimestamp, groupHomeTiers, type HomeTierKey, type HomeTiers } from '../lib/homeLanes'
 import { activeInsightSummary, type MemoryInsight } from '../lib/memoryInsights'
 import { formatRelative } from '../lib/relativeTime'
@@ -223,11 +224,18 @@ const emit = defineEmits<{
 const store = useProjectStore()
 const fileViewer = useFileViewerStore()
 const taskSignals = useTaskSignalsStore()
+// The Workspace care run's chat has its own entry (Memory > Workspace care and
+// Home's care signal), so it is not a Home chat. The one exception is a run
+// that needs the person (a permission or question card, a failed turn): Home
+// never hides those, and the care signal carries only the report's findings.
+const homeChats = computed<ChatInfo[]>(() => store.activeChatsAll.filter(
+  chat => !isCareChat(chat) || store.chatNeedsYou(chat.chat_id),
+))
 // A pass is no longer a chat row, so the memory-insight rail is the only thing
 // left that says memory work is happening. Without it a workspace whose only
 // activity is a running pass would read as empty.
 const hasHomeActivity = computed(() => (
-  store.activeChatsAll.length > 0 || store.memoryInsightRows.length > 0
+  homeChats.value.length > 0 || store.memoryInsightRows.length > 0
 ))
 const lanesEl = ref<HTMLElement | null>(null)
 const laneElements = ref<Record<string, HTMLElement>>({})
@@ -288,7 +296,7 @@ const insightsByWorkspace = computed(() => groupInsightsByWorkspace(store.memory
 const lanes = computed<HomeLane[]>(() => {
   const grouped = new Map<string, ChatInfo[]>()
   const unknown: ChatInfo[] = []
-  for (const chat of store.activeChatsAll) {
+  for (const chat of homeChats.value) {
     const workspace = store.projectFor(chat.chat_id)?.workspace
     if (!workspace) {
       unknown.push(chat)
