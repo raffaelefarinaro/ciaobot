@@ -3,6 +3,7 @@ import { ref, computed, onScopeDispose, watch, toRaw } from 'vue'
 import { api } from '../lib/api'
 import { postFormWithProgress, type UploadProgressHandler } from '../lib/chatAttachments'
 import { buildFixPrompt } from '../lib/fixError'
+import { isCareChat } from '../lib/automationWorkspace'
 import { isPlausibleFilePath } from '../lib/filePaths'
 import { activityLines, permissionActivityLine } from '../lib/chatActivity'
 import {
@@ -1734,6 +1735,10 @@ export const useProjectStore = defineStore('projects', () => {
     // malformed-helper fallback stays reachable but is never unread mail.
     if (chatIsMemoryPass(chatId)) return 0
     const chat = chats.value.find(c => c.chat_id === chatId)
+    // The Workspace care run's chat is not a Home chat (it has the care page and
+    // the care signal), so its finished reply is not unread mail on any badge.
+    // A run that needs the person still counts, through chatNeedsYou.
+    if (chat && isCareChat(chat)) return 0
     // Invariant: the chat the user is actively looking at is, by definition,
     // read. Suppress the badge regardless of the server's last_read_at. This
     // also closes a race in `chat_result_ready` where api.get('/api/chats')

@@ -156,6 +156,20 @@ describe('HomeRecentChats lanes and tiers', () => {
     expect(titles).toContain('Workspace care run')
   })
 
+  it('keeps a care run that failed, or waits on a permission card, under Needs you', async () => {
+    const wrapper = await mountHome(false)
+    const store = useProjectStore()
+    const base = { project_id: 'personal-project', archived: false, local: true, created_at: timestamp(60), last_activity_at: timestamp(60), last_read_at: timestamp(60), schedule_id: 'system-memory-curation@personal' }
+    store.chats = [
+      { ...base, chat_id: 'care-failed', title: 'Care failed', last_error: 'boom' },
+      { ...base, chat_id: 'care-perm', title: 'Care permission' },
+    ] as unknown as typeof store.chats
+    store.pendingPermissions = { 'care-perm': [{ request_id: 'r1', tool_name: 'Bash' }] } as unknown as typeof store.pendingPermissions
+    await nextTick()
+    const titles = wrapper.findAll('.home-tier--needsYou .home-chat-title').map(el => el.text())
+    expect(titles).toEqual(expect.arrayContaining(['Care failed', 'Care permission']))
+  })
+
   it('does not show Home activity for a lane whose only chat is the care run', async () => {
     const wrapper = await mountHome(false)
     const store = useProjectStore()
