@@ -1,6 +1,6 @@
 # PWA frontend
 
-The sidebar's **Search chats** dialog searches saved titles and visible transcript text in the selected workspace. It sends the query only in a bounded JSON body, shows literal plain-text excerpts, and opens archived results through the existing read-only chat flow. Search results are fetched a page at a time.
+The sidebar's **Search chats** dialog searches saved titles and visible transcript text in the selected workspace. It sends the query only in a bounded JSON body, shows literal plain-text excerpts (markdown flattened by `lib/searchText.ts`, query terms marked by splitting text, never as HTML), lists results as a combobox listbox (Up/Down select, Enter opens), shows the project and an *Archived* chip on each row, and opens archived results through the existing read-only chat flow. Search results are fetched a page at a time.
 
 Vue 3 + Vite + Pinia + TypeScript. Built output goes to `ciao/web/static/`, served by the same Starlette server as the API. See `../README.md` for the repo-wide layout and `../PWA_API.md` for backend routes.
 

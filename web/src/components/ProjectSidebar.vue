@@ -198,7 +198,12 @@
           </router-link>
         </nav>
         <div class="sidebar-search-utility">
-          <button type="button" class="sidebar-search-button" @click="chatSearchOpen = true">Search chats</button>
+          <button type="button" class="nav-item sidebar-search-item" @click="chatSearchOpen = true">
+            <span class="nav-item-icon" aria-hidden="true">
+              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="square" stroke-linejoin="miter"><circle cx="10.5" cy="10.5" r="6.5" /><path d="m16 16 5 5" /></svg>
+            </span>
+            <span class="nav-item-label">Search chats</span>
+          </button>
         </div>
 
       </template>
@@ -2247,9 +2252,11 @@ async function confirmDeleteChat(chatId: string) {
   min-width: 0;
 }
 
-.sidebar-search-utility { padding: 4px 0 8px; }
-.sidebar-search-button { width: 100%; min-height: 44px; padding: 0 10px; color: var(--fg2); background: transparent; border: 1px solid var(--border); border-radius: var(--radius); text-align: left; cursor: pointer; }
-.sidebar-search-button:hover, .sidebar-search-rail:hover { background: var(--bg2); color: var(--fg); }
+.sidebar-search-utility { padding: 3px 0 8px; }
+/* A destination-style row: .nav-item supplies height, hover and focus; this
+   only resets the native button chrome. */
+.sidebar-search-item { box-sizing: border-box; width: 100%; background: transparent; font: inherit; text-align: left; cursor: pointer; }
+.sidebar-search-rail:hover { background: var(--bg2); color: var(--fg); }
 .sidebar-search-rail { display: flex; align-items: center; justify-content: center; width: 44px; color: var(--fg2); background: transparent; border: 0; border-radius: var(--radius); }
 
 .nav-item {
