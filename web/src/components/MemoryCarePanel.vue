@@ -1,13 +1,18 @@
 <template>
   <section class="mc" aria-labelledby="mc-title">
-    <RouterLink class="mc-back" :to="memorySectionPath('map')">
+    <button v-if="proposalPath" type="button" class="mc-back" @click="closeProposal">
+      <span aria-hidden="true">‹</span> Workspace care
+    </button>
+    <RouterLink v-else class="mc-back" :to="memorySectionPath('map')">
       <span aria-hidden="true">‹</span> Memory
     </RouterLink>
-    <h2 id="mc-title" class="mc-title">Workspace care</h2>
-    <p class="mc-lede">The daily run, step by step. Read from Workspace/Care-Report.md.</p>
+    <h2 id="mc-title" ref="titleEl" class="mc-title" tabindex="-1">{{ proposalPath ? 'Review proposal' : 'Workspace care' }}</h2>
+    <p v-if="!proposalPath" class="mc-lede">What the daily run left for you, and how it went. Read from Workspace/Care-Report.md.</p>
 
     <p v-if="!report && !care.error" class="mc-note">Reading the report…</p>
     <p v-else-if="!report" class="mc-note mc-note--error" role="alert">Could not read the care report: {{ care.error }}</p>
+
+    <CareProposalReview v-else-if="proposalPath" :report="report" :path="proposalPath" />
 
     <div v-else class="mc-card">
       <div class="mc-summary">
@@ -31,27 +36,51 @@
       <p class="mc-status" role="status">{{ status }}</p>
       <p v-if="care.error" class="mc-note">Could not refresh the report. Showing the last one read.</p>
 
-      <section v-if="report.needs_you.length" class="mc-section" aria-labelledby="mc-needs-title">
+      <section v-if="needs.length" class="mc-section" aria-labelledby="mc-needs-title">
         <h3 id="mc-needs-title" class="rail-title">What needs you</h3>
         <ol class="mc-needs">
-          <li v-for="(item, i) in report.needs_you" :key="i" class="mc-need">
+          <li v-for="(item, i) in needs" :key="`${i}:${item.path}`" class="mc-need">
             <span class="mc-need-n" aria-hidden="true">{{ i + 1 }}</span>
             <div class="mc-need-body">
               <p class="mc-need-title">{{ item.title }}</p>
               <p v-if="item.detail" class="mc-need-detail">{{ item.detail }}</p>
-              <button
-                type="button"
-                class="btn-small mc-action"
-                :aria-label="`${needActionLabel(item.action)}: ${item.title}`"
-                @click="act(item.action)"
-              >{{ needActionLabel(item.action) }}</button>
+              <div class="mc-need-actions">
+                <button
+                  v-if="needActionLabel(needAction(item))"
+                  type="button"
+                  class="btn-small mc-action"
+                  :class="{ 'btn-primary': needAction(item) === 'proposal' }"
+                  :aria-label="`${needActionLabel(needAction(item))}: ${item.title}`"
+                  :data-path="item.path"
+                  @click="act(item)"
+                >{{ needActionLabel(needAction(item)) }}</button>
+                <!-- Optimize already opens a chat about the guide; a second one would repeat it. -->
+                <button
+                  v-if="needAction(item) !== 'optimize'"
+                  type="button"
+                  class="mc-link mc-fix"
+                  :disabled="fixing !== ''"
+                  :aria-label="`Fix with a chat: ${item.title}`"
+                  @click="fixNeed(item, i)"
+                >{{ fixing === `need:${i}` ? 'Opening…' : 'Fix with a chat' }}</button>
+              </div>
             </div>
           </li>
         </ol>
       </section>
+      <p v-else-if="calmWords" class="mc-calm">{{ calmWords }}</p>
 
-      <section v-if="report.steps.length" class="mc-section" aria-labelledby="mc-steps-title">
-        <h3 id="mc-steps-title" class="rail-title">Steps</h3>
+      <details
+        v-if="report.steps.length"
+        class="mc-disclosure"
+        :open="stepsOpen"
+        @toggle="onToggle($event, 'steps')"
+      >
+        <summary class="mc-disclosure-summary">
+          <AppIcon name="chevron" class="mc-chevron" :size="14" />
+          <span class="mc-disclosure-label">Steps</span>
+          <span class="mc-disclosure-count">{{ stepsCount }}</span>
+        </summary>
         <ul class="mc-steps">
           <li v-for="(step, i) in report.steps" :key="i" class="mc-step">
             <CareGlyph class="mc-step-glyph" :kind="stepGlyph(step, report.running)" />
@@ -72,12 +101,28 @@
           </li>
         </ul>
         <p v-if="report.interrupted_ids.length" class="mc-note">
-          The previous run stopped before finishing {{ report.interrupted_ids.join(', ') }}.
+          The previous run stopped before finishing {{ report.interrupted_ids.map(stepName).join(', ') }}.
         </p>
         <p v-if="report.weekly_retry.length" class="mc-note">
           Retried on each run until it works, for up to 3 runs: {{ retryWords }}.
         </p>
-      </section>
+      </details>
+
+      <details
+        v-if="report.notes.length"
+        class="mc-disclosure"
+        :open="notesOpen"
+        @toggle="onToggle($event, 'notes')"
+      >
+        <summary class="mc-disclosure-summary">
+          <AppIcon name="chevron" class="mc-chevron" :size="14" />
+          <span class="mc-disclosure-label">Notes</span>
+          <span class="mc-disclosure-count">{{ report.notes.length }}</span>
+        </summary>
+        <ul class="mc-notes">
+          <li v-for="(note, i) in report.notes" :key="i">{{ note }}</li>
+        </ul>
+      </details>
 
       <div class="mc-foot">
         <span class="mc-foot-note">{{ weeklyWords }}</span>
@@ -103,15 +148,18 @@
 </template>
 
 <script setup lang="ts">
-import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
-import { RouterLink } from 'vue-router'
+import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
+import { RouterLink, useRoute, useRouter } from 'vue-router'
+import AppIcon from './AppIcon.vue'
 import CareGlyph from './CareGlyph.vue'
+import CareProposalReview from './CareProposalReview.vue'
 import {
-  careFixSeed, careGlyph, careState, careSummaryMeta, careSummaryTitle, dayWords, needActionLabel,
-  stepCanFix, stepGlyph, stepLine, stepName, stepWord, type CareNeedAction, type CareStep,
+  careFixSeed, careGlyph, careNeedFixSeed, careState, careSummaryMeta, careSummaryTitle, dayWords, needAction,
+  needActionLabel, openNeeds, stepCanFix, stepGlyph, stepLine, stepName, stepsCountWords, stepsOpenByDefault,
+  stepWord, type CareNeed, type CareStep,
 } from '../lib/careReport'
 import { startFileDiscussion } from '../lib/fileDiscussion'
-import { fetchWorkspaceGuide } from '../lib/workspaceGuide'
+import { startMemoryOptimizeChat } from '../lib/memoryOptimize'
 import { useCareReportStore } from '../stores/careReport'
 import { useFileViewerStore } from '../stores/fileViewer'
 import { memorySectionPath } from '../stores/memoryMap'
@@ -119,13 +167,16 @@ import { useProjectStore } from '../stores/projects'
 
 /**
  * Memory → Workspace care: the last care run as the report file states it.
- * Read-only. Every button goes somewhere that already exists — the file viewer
- * (Unsure.md, the workspace guide, the report itself), a new chat with a draft
- * that is never sent, or the care schedule's own run-now.
+ * What needs the person leads; the steps and the run's notes fold away below.
+ * Every button goes somewhere that already exists — the file viewer, a new chat
+ * with a draft that is never sent, the care schedule's own run-now — or to the
+ * proposal review (`?proposal=<vault path>`), whose only write is Reject.
  */
 const store = useProjectStore()
 const care = useCareReportStore()
 const fileViewer = useFileViewerStore()
+const route = useRoute()
+const router = useRouter()
 
 watch(() => store.activeWorkspace, ws => care.show(ws), { immediate: true })
 let release: () => void = () => {}
@@ -140,16 +191,101 @@ const report = computed(() => (care.report && care.report.workspace === store.ac
 const glyph = computed(() => (report.value ? careGlyph(careState(report.value)) : 'open'))
 const summaryTitle = computed(() => (report.value ? careSummaryTitle(report.value) : ''))
 const summaryMeta = computed(() => (report.value ? careSummaryMeta(report.value) : ''))
+const needs = computed(() => (report.value ? openNeeds(report.value) : []))
+/**
+ * A finished or stopped run with nothing left for the person says so in one
+ * line. A run that stopped does not claim all is well: its blocked steps, with
+ * their Fix buttons, are open below.
+ */
+const calmWords = computed(() => {
+  switch (report.value ? careState(report.value) : 'never') {
+    case 'complete': return 'Nothing needs you.'
+    case 'blocked': return 'Nothing needs your decision. Some steps did not finish; they are below.'
+    case 'interrupted': return 'Nothing needs your decision. The run stopped early; the steps below show where.'
+    default: return ''
+  }
+})
+const stepsCount = computed(() => (report.value ? stepsCountWords(report.value) : ''))
 const weeklyWords = computed(() => {
   const day = report.value ? dayWords(report.value.weekly_done) : ''
   return day ? `Weekly checks last done ${day}` : 'Weekly checks not done yet'
 })
 
 const retryWords = computed(() => (report.value?.weekly_retry ?? [])
-  .map(r => `${r.id} (run ${r.runs} of 3)`).join(', '))
+  .map(r => `${stepName(r.id)} (run ${r.runs} of 3)`).join(', '))
+
+// The disclosures start from the run's state; once the person opens or closes
+// one, that choice holds for the rest of the browser session.
+const STORAGE = { steps: 'ciao.care.stepsOpen', notes: 'ciao.care.notesOpen' } as const
+type Disclosure = keyof typeof STORAGE
+
+function remembered(which: Disclosure): boolean | null {
+  try {
+    const value = sessionStorage.getItem(STORAGE[which])
+    return value === 'open' ? true : value === 'closed' ? false : null
+  } catch {
+    return null
+  }
+}
+
+const choice = ref<Record<Disclosure, boolean | null>>({ steps: remembered('steps'), notes: remembered('notes') })
+const stepsOpen = computed(() => choice.value.steps ?? (report.value ? stepsOpenByDefault(report.value) : false))
+const notesOpen = computed(() => choice.value.notes ?? false)
+
+function onToggle(event: Event, which: Disclosure): void {
+  const open = (event.target as HTMLDetailsElement).open
+  const shown = which === 'steps' ? stepsOpen.value : notesOpen.value
+  // The toggle event also fires when the page itself sets `open`: only a
+  // change the bound state did not make is the person's choice.
+  if (open === shown) return
+  choice.value = { ...choice.value, [which]: open }
+  try {
+    sessionStorage.setItem(STORAGE[which], open ? 'open' : 'closed')
+  } catch {
+    // Storage refused (private mode): the choice still holds for this page.
+  }
+}
 
 const status = ref('')
 const fixing = ref('')
+
+/** The proposal the review is showing: only a proposal path, never any file. */
+const proposalPath = computed(() => {
+  const raw = route.query.proposal
+  return typeof raw === 'string' && /^Workspace\/Proposals\/[a-z0-9]+(?:-[a-z0-9]+)*\.md$/.test(raw) ? raw : ''
+})
+
+// The review is this page with `?proposal=`: opening and closing it keeps the path.
+function closeProposal(): void {
+  void router.push({ query: {} })
+}
+
+// Focus follows the view: into the review's heading when it opens, and back to
+// the item's Review proposal button when it closes.
+const titleEl = ref<HTMLElement | null>(null)
+watch(proposalPath, async (now, before) => {
+  await nextTick()
+  const back = !now && before
+    ? document.querySelector<HTMLElement>(`.mc-action[data-path="${CSS.escape(before)}"]`)
+    : null
+  ;(back ?? titleEl.value)?.focus()
+})
+
+/** Open a vault file only once the engine serves it; a gone file gets a calm line. */
+async function openChecked(path: string): Promise<void> {
+  try {
+    const resp = await fetch(`/api/workspace-file?exact=1&path=${encodeURIComponent(path)}`, { credentials: 'same-origin' })
+    if (resp.ok) {
+      void fileViewer.open(path)
+      return
+    }
+    status.value = resp.status === 404
+      ? 'That file is not there any more. The next care run updates this list.'
+      : 'That file cannot be opened here.'
+  } catch {
+    status.value = 'That file cannot be opened right now.'
+  }
+}
 
 async function runAgain(): Promise<void> {
   status.value = ''
@@ -161,20 +297,42 @@ function openReport(): void {
   if (report.value) void fileViewer.open(report.value.report_path)
 }
 
-async function act(action: CareNeedAction): Promise<void> {
+async function act(item: CareNeed): Promise<void> {
   const current = report.value
   if (!current) return
+  const action = needAction(item)
+  if (action === 'proposal') {
+    void router.push({ query: { proposal: item.path } })
+    return
+  }
+  // The Unsure page, where each suggestion has its own Approve and Reject.
   if (action === 'unsure') {
-    void fileViewer.open(current.unsure_path)
+    void router.push(memorySectionPath('unsure'))
     return
   }
-  if (action === 'guide') {
-    const guide = await fetchWorkspaceGuide(current.workspace)
-    if (guide.path) void fileViewer.open(guide.path)
-    else status.value = guide.error || 'This workspace has no guide yet.'
+  // The guide's regions are nearly full: the same trim chat as Memory's Always
+  // loaded window (a draft with the guide pinned; nothing changes unasked).
+  if (action === 'optimize') {
+    await startMemoryOptimizeChat(store, { workspace: current.workspace })
     return
   }
-  openReport()
+  if (item.open_path) await openChecked(item.open_path)
+}
+
+async function fixNeed(item: CareNeed, index: number): Promise<void> {
+  const current = report.value
+  if (!current || fixing.value) return
+  fixing.value = `need:${index}`
+  try {
+    await startFileDiscussion(store, {
+      path: item.open_path || current.report_path,
+      seed: careNeedFixSeed(current, item),
+      title: `Care: ${item.title.replace(/[.:]+$/, '').slice(0, 60)}`,
+      workspace: current.workspace,
+    })
+  } finally {
+    fixing.value = ''
+  }
 }
 
 async function fix(step: CareStep): Promise<void> {
@@ -214,8 +372,11 @@ async function fix(step: CareStep): Promise<void> {
   text-decoration: none;
 }
 .mc-back:hover { color: var(--fg); }
+button.mc-back { padding: 0; border: 0; background: none; cursor: pointer; font: inherit; font-size: var(--text-sm); }
 .mc-back:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; border-radius: var(--radius-xs); }
 .mc-title { margin: 0; font-size: var(--text-lg); }
+.mc-title:focus { outline: none; }
+.mc-title:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; border-radius: var(--radius-xs); }
 .mc-lede, .mc-note { margin: 0; color: var(--fg3); font-size: var(--text-sm); line-height: 1.5; }
 .mc-note--error { color: var(--error-text); }
 
@@ -258,6 +419,39 @@ async function fix(step: CareStep): Promise<void> {
 
 .mc-section { display: flex; flex-direction: column; gap: var(--space-2); padding-top: var(--space-3); }
 .mc-section .rail-title { margin: 0; }
+.mc-calm { margin: 0; padding-top: var(--space-3); color: var(--fg2); font-size: var(--text-base); }
+
+/* Steps and Notes fold under what needs the person: hairline sections with a
+   44px summary, the chevron turning when open, as Always loaded does. */
+.mc-disclosure { border-top: 1px solid var(--border); }
+.mc-disclosure:first-of-type { margin-top: var(--space-2); }
+.mc-disclosure-summary {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  min-height: var(--touch);
+  cursor: pointer;
+  list-style: none;
+  color: var(--fg2);
+  font-size: var(--text-sm);
+  font-weight: 600;
+}
+.mc-disclosure-summary::-webkit-details-marker { display: none; }
+.mc-disclosure-summary:hover { color: var(--fg); }
+.mc-disclosure-summary:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; border-radius: var(--radius-xs); }
+.mc-chevron { color: var(--fg3); transition: transform 0.15s ease-out; }
+.mc-disclosure[open] .mc-chevron { transform: rotate(90deg); }
+@media (prefers-reduced-motion: reduce) { .mc-chevron { transition: none; } }
+.mc-disclosure-count { color: var(--fg3); font-size: var(--text-xs); font-variant-numeric: tabular-nums; font-weight: 400; }
+.mc-disclosure > .mc-note { margin-top: var(--space-2); }
+.mc-notes {
+  margin: 0 0 var(--space-3);
+  padding-left: var(--space-5);
+  color: var(--fg2);
+  font-size: var(--text-sm);
+  line-height: 1.5;
+}
+.mc-notes li + li { margin-top: var(--space-1); }
 
 .mc-needs, .mc-steps { margin: 0; padding: 0; list-style: none; }
 .mc-need, .mc-step {
@@ -272,6 +466,12 @@ async function fix(step: CareStep): Promise<void> {
 .mc-need-title, .mc-step-name { margin: 0; font-size: var(--text-base); font-weight: 650; line-height: 1.4; }
 .mc-need-detail, .mc-step-line { margin: 0; color: var(--fg2); font-size: var(--text-sm); line-height: 1.5; overflow-wrap: anywhere; }
 .mc-action { margin-top: var(--space-1); min-height: var(--touch); }
+.mc-need-actions { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-1) var(--space-4); }
+.mc-fix { margin-top: var(--space-1); }
+/* Straight after the summary there is already a rule: no second one. */
+.mc-status:empty + .mc-disclosure { border-top: 0; margin-top: 0; }
+.mc-steps { border-top: 1px solid var(--border); }
+.mc-steps .mc-step:last-child { border-bottom: 0; }
 
 .mc-step { grid-template-columns: auto minmax(0, 1fr) auto; align-items: start; }
 .mc-step-glyph { margin-top: 2px; }

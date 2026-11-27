@@ -20,6 +20,6 @@ Handle at most 25 records per run in total, across every part. This step may use
 4. When parts 1 to 3 find nothing left (the queue is empty, every record has a proposal file, every observation is on the Unsure list or in `.care-drained-ids`), write `<vault>/Workspace/.care-drained` containing today's date and one line, `legacy queues drained`. Never write it while anything remains.
 
 ## Done when
-The budget was spent or nothing remains. Finish with `done: handled N records, M remain` (`marker written` when step 4 ran). Reaching the 25-record limit with records left is done: the next run continues.
+The budget was spent or nothing remains. Finish with `done: handled N records, M remain` (`marker written` when step 4 ran). Reaching the 25-record limit with records left is done: the next run continues, so add `note: About M older items are still to be moved; the next run continues.`, never a `needs you` item.
 
 Verify: count the remaining bullet lines in `Workspace/Memory-Proposals.md` (`grep -c '^- \[' <file>`); the count must match the M the step reported for queue rows, and be 0 before the marker was written.

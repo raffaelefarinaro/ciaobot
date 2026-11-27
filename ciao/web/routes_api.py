@@ -86,6 +86,7 @@ from ciao.workspaces import (
 _WORKSPACE_NAME_RE = WORKSPACE_NAME_RE
 from ciao.core_prompt import durable_memory_guide_path, unified_core
 from ciao.care_report import (
+    GUIDE_PATH as CARE_GUIDE_PATH,
     REPORT_RELATIVE_PATH as CARE_REPORT_PATH,
     STEP_FILES as CARE_STEP_FILES,
     UNSURE_RELATIVE_PATH as CARE_UNSURE_PATH,
@@ -4283,6 +4284,12 @@ async def care_report(request: Request) -> JSONResponse:
     for step in body["steps"]:
         name = CARE_STEP_FILES.get(step["id"], "")
         step["step_file"] = str(references / name) if name else ""
+    # The item's own path is vault-relative (and confined by the parser); the
+    # file viewer wants the workspace-relative one. The guide is found by the
+    # app itself, so it has none here.
+    for item in body["needs_you"]:
+        path = item["path"]
+        item["open_path"] = _care_display_path(config, vault / path) if path and path != CARE_GUIDE_PATH else ""
 
     schedule: dict[str, Any] | None = None
     running: dict[str, Any] | None = None

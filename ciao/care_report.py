@@ -19,19 +19,27 @@ import os
 import re
 import stat as stat_module
 import sys
+import unicodedata
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
+from ciao.proposal_files import PROPOSAL_STATUSES
+
 REPORT_RELATIVE_PATH = Path("Workspace") / "Care-Report.md"
 UNSURE_RELATIVE_PATH = Path("Workspace") / "Unsure.md"
+# The workspace guide, which sits beside the vault rather than in it: the one
+# needs-you path that is not vault-relative.
+GUIDE_PATH = "AGENTS.md"
 
 # A real report is a few kilobytes: a header, under ten step lines and a short
 # list. Anything past this is not a checklist the run wrote.
 MAX_REPORT_BYTES = 64 * 1024
 MAX_STEPS = 40
 MAX_NEEDS = 20
+MAX_NOTES = 20
 MAX_FIELD_CHARS = 600
+MAX_PATH_CHARS = 240
 
 # The step files the care prompt dispatches (ciao/stock/schedules.json, step 2),
 # under the durable-memory procedures' `references/` folder. A test keeps this
@@ -60,12 +68,29 @@ _RETRY_PAIR = re.compile(r"^([A-Za-z0-9][A-Za-z0-9_-]{0,63})\s*=\s*(\d{1,3})$")
 # optional trailing colon: the prompt asks for the heading, the reply style
 # writes the bare line, and a model may bold it.
 _NEEDS_HEADING = re.compile(r"^\s*(?:#{1,6}\s+)?(\*\*)?What needs you:?(?(1)\*\*):?\s*$", re.IGNORECASE)
+_NOTES_HEADING = re.compile(r"^\s*(?:#{1,6}\s+)?(\*\*)?Notes:?(?(1)\*\*):?\s*$", re.IGNORECASE)
 _HEADING = re.compile(r"^\s*#{1,6}\s+")
 _SECTION = re.compile(r"^\s*#{2,6}\s+")
 _LIST_ITEM = re.compile(r"^\s*(?:\d{1,3}[.)]|[-*+])\s+(.*)$")
 # What a model writes for "no ids" instead of leaving the line out.
 _PLACEHOLDERS = {"none", "n/a", "na", "-", "\u2014", "empty", "nothing"}
 _BOLD_LEAD = re.compile(r"^\*\*(.+?)\*\*\s*[:\-\u2014]?\s*(.*)$")
+# The machine-readable tail of a needs-you item: `(path: Workspace/Unsure.md)`.
+_PATH_TAIL = re.compile(r"\s*\(path:\s*`?([^()`]*?)`?\s*\)\s*\.?\s*$", re.IGNORECASE)
+_NEEDS_LEAD = re.compile(r"^needs you:\s*", re.IGNORECASE)
+_NOTE_LEAD = re.compile(r"^note:\s*", re.IGNORECASE)
+_CHECKBOX_LEAD = re.compile(r"^\[[ xX!]\]\s+")
+# The end of the first sentence: a stop, then a capital, a digit or a quote.
+_SENTENCE_END = re.compile(r"[.?!](?=\s+[A-Z0-9\"\u201c(])")
+# Path characters: ASCII letters, digits and a few marks, or any non-ASCII
+# letter, mark or digit. No parentheses (the `(path: …)` tail cannot hold them)
+# and no control, format or bidi character (U+202E would make a path read
+# backwards on screen).
+_PATH_ASCII = frozenset("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789 _.,'&+-")
+# A proposal file, named as `ciao proposal-check` accepts it.
+_PROPOSAL_PATH = re.compile(r"Workspace/Proposals/[a-z0-9]+(?:-[a-z0-9]+)*\.md")
+_FRONT_MATTER = re.compile(r"\A---[ \t]*\r?\n(.*?\r?\n)---[ \t]*(?:\r?\n|\Z)", re.DOTALL)
+_PROPOSAL_STATUS = re.compile(r"^status[ \t]*:[ \t]*['\"]?([^'\"\r\n#]*?)['\"]?[ \t]*(?:#.*)?\r?$", re.MULTILINE)
 _STATES = {" ": "open", "x": "done", "X": "done", "!": "blocked"}
 # The em dash the prompt writes, and the ASCII stand-ins a model may use instead.
 _EVIDENCE_SEPARATORS = (" \u2014 ", " -- ", " \u2013 ")
@@ -108,24 +133,63 @@ def _retry(raw: str) -> list[dict[str, Any]]:
     return pairs
 
 
+def vault_relative_path(raw: str) -> str:
+    """`raw` as a confined vault-relative path, or "" when it is not one.
+
+    The path a care item names becomes a button, so it must stay inside the
+    vault: no absolute or home path, no drive letter, no backslash, no empty,
+    `.` or `..` segment, no control character. `AGENTS.md` names the
+    workspace guide.
+    """
+    value = raw.strip().strip("`").strip()
+    if not value or len(value) > MAX_PATH_CHARS:
+        return ""
+    if value.startswith(("/", "~")) or "\\" in value or re.match(r"^[A-Za-z]:", value):
+        return ""
+    for segment in value.split("/"):
+        # A dot-segment is `.`, `..` or a hidden file (`.env`, `.git`): none is a note.
+        if not segment or segment.startswith(".") or segment != segment.strip():
+            return ""
+        if not all(_path_char(ch) for ch in segment):
+            return ""
+    return value
+
+
+def _path_char(ch: str) -> bool:
+    if ch in _PATH_ASCII:
+        return True
+    return ord(ch) > 127 and unicodedata.category(ch)[0] in "LMN"
+
+
+def is_proposal_path(path: str) -> bool:
+    """Whether a needs-you path is a proposal file under `Workspace/Proposals/`."""
+    return bool(_PROPOSAL_PATH.fullmatch(path))
+
+
+def _first_sentence(text: str) -> tuple[str, str]:
+    end = _SENTENCE_END.search(text)
+    if end is None:
+        return text, ""
+    return text[: end.end()], text[end.end():]
+
+
 def _needs_item(text: str) -> dict[str, str]:
-    text = " ".join(text.split())
-    title, detail = text, ""
+    """One needs-you item: a short title, the rest, and the file it points at.
+
+    The care prompt asks for `<plain sentence> (path: <vault-relative path>)`.
+    The title is the first sentence (or a bold lead), the detail the rest, and
+    `path` the tail's path once :func:`vault_relative_path` accepted it; an
+    unsafe or missing path is "", and the app then offers no file to open.
+    """
+    text = _NEEDS_LEAD.sub("", " ".join(text.split()))
+    path = ""
+    tail = _PATH_TAIL.search(text)
+    if tail:
+        path = vault_relative_path(tail.group(1))
+        text = text[: tail.start()].rstrip()
     bold = _BOLD_LEAD.match(text)
-    if bold:
-        title, detail = bold.group(1), bold.group(2)
-    else:
-        colon = text.find(": ")
-        if 0 < colon <= 80:
-            title, detail = text[:colon], text[colon + 2:]
-    lowered = text.lower()
-    if "unsure" in lowered:
-        action = "unsure"
-    elif "agents.md" in lowered or "guide" in lowered or "region" in lowered or "standing memory" in lowered:
-        action = "guide"
-    else:
-        action = "report"
-    return {"title": _clip(title.strip()), "detail": _clip(detail.strip()), "action": action}
+    title, detail = (bold.group(1), bold.group(2)) if bold else _first_sentence(text)
+    return {"title": _clip(title.strip()), "detail": _clip(detail.strip()), "path": path}
 
 
 def parse_care_report(text: str) -> dict[str, Any]:
@@ -134,7 +198,8 @@ def parse_care_report(text: str) -> dict[str, Any]:
     The checklist is the `- [ ]` / `- [x]` / `- [!]` lines before the first
     `##` heading; a checkbox in a later section (a hygiene finding, say) is not a
     step. `## What needs you` (or a bare or bold "What needs you" line) opens a
-    list of numbered or bulleted items, ended by the next heading.
+    list of numbered or bulleted items, ended by the next heading. `## Notes`
+    opens the run's informational bullets, which ask nothing of the person.
     """
     updated = ""
     weekly_done = ""
@@ -142,20 +207,31 @@ def parse_care_report(text: str) -> dict[str, Any]:
     interrupted: list[str] = []
     steps: list[dict[str, str]] = []
     needs: list[dict[str, str]] = []
+    notes: list[str] = []
     nothing_due = False
     recognised = False
     in_checklist = True
     in_needs = False
+    in_notes = False
     current: list[str] | None = None
 
     def flush() -> None:
-        if current is not None and len(needs) < MAX_NEEDS:
-            needs.append(_needs_item(" ".join(current)))
+        if current is None:
+            return
+        joined = " ".join(current)
+        if in_notes:
+            note = _clip(_NOTE_LEAD.sub("", _CHECKBOX_LEAD.sub("", " ".join(joined.split()))))
+            if note and len(notes) < MAX_NOTES:
+                notes.append(note)
+        elif len(needs) < MAX_NEEDS:
+            needs.append(_needs_item(joined))
 
     for line in text.splitlines():
-        if _NEEDS_HEADING.match(line):
+        notes_heading = bool(_NOTES_HEADING.match(line))
+        if notes_heading or _NEEDS_HEADING.match(line):
             flush()
             current = None
+            in_notes = notes_heading
             in_needs = True
             in_checklist = False
             recognised = True
@@ -165,6 +241,7 @@ def parse_care_report(text: str) -> dict[str, Any]:
                 flush()
                 current = None
                 in_needs = False
+                in_notes = False
             else:
                 item = _LIST_ITEM.match(line)
                 if item:
@@ -230,6 +307,7 @@ def parse_care_report(text: str) -> dict[str, Any]:
         "nothing_due": nothing_due and not steps,
         "steps": steps,
         "needs_you": needs,
+        "notes": notes,
         "counts": counts,
         "malformed": not recognised,
     }
@@ -281,27 +359,27 @@ def _read_fd(fd: int, expect: os.stat_result | None = None) -> tuple[str, bytes,
     return "ok", raw, info.st_mtime
 
 
-def _read_fd_relative(vault_root: Path) -> tuple[str, bytes, float]:
+def _read_fd_relative(vault_root: Path, parts: tuple[str, ...]) -> tuple[str, bytes, float]:
     """POSIX: open the report without following a symlink at any step.
 
-    The directory and the file are opened relative to the vault's own
-    descriptor with `O_NOFOLLOW`, so a symlink planted at `Workspace` or at the
-    report (or swapped in between a check and the open) is refused, not
-    followed. `O_NONBLOCK` keeps a FIFO from hanging the open; the descriptor is
+    Each folder and the file are opened relative to the one before, from the
+    vault's own descriptor, with `O_NOFOLLOW`, so a symlink planted at
+    `Workspace` or at the file (or swapped in between a check and the open) is
+    refused, not followed. `O_NONBLOCK` keeps a FIFO from hanging the open; the descriptor is
     then `fstat`ed, so the type and size checked are those of what was opened.
     """
     nofollow = getattr(os, "O_NOFOLLOW", 0)
     nonblock = getattr(os, "O_NONBLOCK", 0)
     directory = getattr(os, "O_DIRECTORY", 0)
-    root_fd = os.open(vault_root, os.O_RDONLY | directory)
+    dir_fd = os.open(vault_root, os.O_RDONLY | directory)
     try:
-        dir_fd = os.open(REPORT_RELATIVE_PATH.parent.name, os.O_RDONLY | directory | nofollow, dir_fd=root_fd)
-        try:
-            fd = os.open(REPORT_RELATIVE_PATH.name, os.O_RDONLY | nofollow | nonblock, dir_fd=dir_fd)
-        finally:
+        for folder in parts[:-1]:
+            next_fd = os.open(folder, os.O_RDONLY | directory | nofollow, dir_fd=dir_fd)
             os.close(dir_fd)
+            dir_fd = next_fd
+        fd = os.open(parts[-1], os.O_RDONLY | nofollow | nonblock, dir_fd=dir_fd)
     finally:
-        os.close(root_fd)
+        os.close(dir_fd)
     try:
         return _read_fd(fd)
     finally:
@@ -331,21 +409,23 @@ def _is_link(info: os.stat_result) -> bool:
     return getattr(info, "st_reparse_tag", 0) in _LINK_REPARSE_TAGS
 
 
-def _read_by_path(vault_root: Path) -> tuple[str, bytes, float]:
+def _read_by_path(vault_root: Path, parts: tuple[str, ...]) -> tuple[str, bytes, float]:
     """Windows (no `dir_fd`): check each step with `lstat`, then open and re-check.
 
-    Neither `Workspace` nor the report may be a symlink or reparse point, the
-    folder must be a folder and the report a regular file, and the resolved
+    No folder on the way and not the file may be a symlink or reparse point,
+    each folder must be a folder and the file a regular file, and the resolved
     path must sit under the vault. The opened file is then `fstat`ed and must be
     the very file `lstat` saw (device and file index), so a swap between the
     checks and the open is refused rather than followed.
     """
     root = vault_root.resolve()
-    folder = root / REPORT_RELATIVE_PATH.parent.name
-    path = folder / REPORT_RELATIVE_PATH.name
-    folder_info = os.lstat(folder)
-    if _is_link(folder_info) or not stat_module.S_ISDIR(folder_info.st_mode):
-        return "unreadable", b"", 0.0
+    folder = root
+    for name in parts[:-1]:
+        folder = folder / name
+        folder_info = os.lstat(folder)
+        if _is_link(folder_info) or not stat_module.S_ISDIR(folder_info.st_mode):
+            return "unreadable", b"", 0.0
+    path = folder / parts[-1]
     info = os.lstat(path)
     if _is_link(info) or not stat_module.S_ISREG(info.st_mode):
         return "unreadable", b"", 0.0
@@ -358,10 +438,37 @@ def _read_by_path(vault_root: Path) -> tuple[str, bytes, float]:
         os.close(fd)
 
 
-def _read_bounded(vault_root: Path) -> tuple[str, bytes, float]:
+def _read_bounded(vault_root: Path, parts: tuple[str, ...] = REPORT_RELATIVE_PATH.parts) -> tuple[str, bytes, float]:
     if _fd_relative_supported():
-        return _read_fd_relative(vault_root)
-    return _read_by_path(vault_root)
+        return _read_fd_relative(vault_root, parts)
+    return _read_by_path(vault_root, parts)
+
+
+def read_proposal_status(vault_root: Path, path: str) -> str:
+    """The `status:` of the proposal file at vault-relative `path`, or "". Never raises.
+
+    Read the same way as the report (bounded, no symlink at any step), and only
+    for a path :func:`is_proposal_path` accepts. "" means the file is missing,
+    unreadable or has no valid status. Lets the page drop an item a person has
+    already approved and applied, or rejected, before the next run rewrites
+    the report.
+    """
+    if not is_proposal_path(path):
+        return ""
+    try:
+        status, raw, _mtime = _read_bounded(vault_root, tuple(path.split("/")))
+    except (OSError, ValueError, RuntimeError):
+        return ""
+    if status != "ok":
+        return ""
+    text = raw.decode("utf-8", errors="replace")
+    front = _FRONT_MATTER.match(text)
+    if front is None:
+        return ""
+    # Exactly one status key: two would mean the file says two things.
+    found = _PROPOSAL_STATUS.findall(front.group(1))
+    value = found[0] if len(found) == 1 else ""
+    return value if value in PROPOSAL_STATUSES else ""
 
 
 def read_care_report(vault_root: Path) -> dict[str, Any]:
@@ -384,4 +491,7 @@ def read_care_report(vault_root: Path) -> dict[str, Any]:
         return _empty(status)
     text = raw.decode("utf-8", errors="replace")
     modified = datetime.fromtimestamp(mtime, UTC).isoformat().replace("+00:00", "Z")
-    return {"status": "ok", "modified_at": modified, **parse_care_report(text)}
+    body = parse_care_report(text)
+    for item in body["needs_you"]:
+        item["proposal_status"] = read_proposal_status(vault_root, item["path"]) if is_proposal_path(item["path"]) else ""
+    return {"status": "ok", "modified_at": modified, **body}

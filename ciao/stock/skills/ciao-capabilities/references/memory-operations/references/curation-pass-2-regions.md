@@ -16,7 +16,7 @@ Consolidate each region at or above ~85% (or over its cap). Consolidation rewrit
 
 Run `ciao memory status` after every region write. When a removal needs judgment you cannot make confidently, keep the entry and add a line to `Workspace/Unsure.md` (skip one already there): `- [ ] drop <region>: <plain question, e.g. Remove the note that … from what every chat loads?> "<entry text>" — unsure because <reason>; source: care run; <YYYY-MM-DD>` (the line format is in `unsure-and-proposals.md`).
 
-The cap is advisory: nothing refuses a write, and a durable fact is never worth dropping to fit it. If a region stays over because every entry is high-signal, say so as a `needs you` item: leave it over the cap, or ask an attended chat to consolidate further.
+The cap is advisory: nothing refuses a write, and a durable fact is never worth dropping to fit it. If a region stays at or above 85% because every entry is high-signal, leave it and write one item for both regions: `needs you: Your always-loaded memory is nearly full (A% and B%) and everything in it still matters. Choose Fix with a chat to trim it together. (path: AGENTS.md)`. A write that waits for room (an Unsure line, say) is a `note:`, not a second item.
 
 ## Done when
 `ciao memory status` is below 85% for every region, or each region still at or above it has a reason (all high-signal, or Unsure lines added). Finish with `done: memory A% -> B%, profile C% -> D%, N entries logged in Memory-Consolidations.md`.

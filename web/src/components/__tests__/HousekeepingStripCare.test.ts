@@ -58,8 +58,8 @@ describe('HousekeepingStrip — Workspace care', () => {
   })
 
   it.each([
-    ['needsYou', 'Care needs you', '2 things to look at: new line in Unsure, memory guide at 91%.', 'Needs attention:'],
-    ['blocked', 'Care did not finish', '4 of 6 steps done. Blocked: hygiene, guide-review.', 'Error:'],
+    ['needsYou', 'Care needs you', '4 things to look at in Workspace care.', 'Needs attention:'],
+    ['blocked', 'Care did not finish', '4 of 6 steps done. Blocked: Hygiene, Guide review.', 'Error:'],
   ] as const)('raises one row for %s, with Open report and the care menu', async (state, title, line, spoken) => {
     serve(careReports[state])
     const wrapper = await mountStrip()

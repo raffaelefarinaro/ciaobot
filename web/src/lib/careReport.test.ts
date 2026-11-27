@@ -1,10 +1,10 @@
 import { describe, expect, it } from 'vitest'
 import {
   careFixSeed, careGlyph, careNeedsYouRow, careRailDetail, careState, careSummaryMeta, careSummaryTitle,
-  dayWords, fenceData, needActionLabel, stepCanFix, stepGlyph, stepLine, stepName, stepWord, whenWords,
-  type CareReport,
+  careNeedFixSeed, dayWords, fenceData, needAction, needActionLabel, openNeeds, stepCanFix, stepGlyph, stepLine,
+  stepName, stepsCountWords, stepsOpenByDefault, stepWord, whenWords, type CareReport,
 } from './careReport'
-import { CARE_WRITTEN_AT, careReports } from './careReportFixture'
+import { CARE_PROPOSAL_PATH, CARE_WRITTEN_AT, careReports, need } from './careReportFixture'
 
 // The fixtures carry a UTC instant like the API; every expectation reads it in
 // the test machine's zone. "Now" is half an hour later, the same local day in
@@ -57,7 +57,7 @@ describe('the At a glance line', () => {
   it('says each state in the approved words', () => {
     expect(careRailDetail(careReports.complete, NOW)).toBe(`Done today ${CLOCK} · 5 of 5 steps`)
     expect(careRailDetail(careReports.needsYou, NOW)).toBe(`Done today ${CLOCK} · 5 of 5 steps`)
-    expect(careRailDetail(careReports.running, NOW)).toBe('Running now · step 3 of 6: learnings')
+    expect(careRailDetail(careReports.running, NOW)).toBe('Running now · step 3 of 6: Learnings')
     expect(careRailDetail(careReports.interrupted, NOW)).toBe('Interrupted · 2 of 6 steps')
     expect(careRailDetail(careReports.blocked, NOW)).toBe('4 of 6 steps · 2 blocked')
     expect(careRailDetail(careReports.never, NOW)).toBe('Not run yet. It runs every day.')
@@ -82,12 +82,12 @@ describe('the Needs you row', () => {
   it('raises a row only when the owner has something to do', () => {
     expect(careNeedsYouRow(careReports.needsYou, NOW)).toEqual({
       title: 'Care needs you',
-      line: '2 things to look at: new line in Unsure, memory guide at 91%.',
+      line: '4 things to look at in Workspace care.',
       tone: 'attention',
     })
     expect(careNeedsYouRow(careReports.blocked, NOW)).toEqual({
       title: 'Care did not finish',
-      line: '4 of 6 steps done. Blocked: hygiene, guide-review.',
+      line: '4 of 6 steps done. Blocked: Hygiene, Guide review.',
       tone: 'error',
     })
     expect(careNeedsYouRow(careReports.interrupted, NOW)).toEqual({
@@ -120,15 +120,15 @@ describe('the Needs you row', () => {
 
 describe('the report page words', () => {
   it('titles and describes each state', () => {
-    expect(careSummaryTitle(careReports.needsYou)).toBe('Done with 2 things for you')
+    expect(careSummaryTitle(careReports.needsYou)).toBe('Done with 4 things for you')
     expect(careSummaryTitle(careReports.blocked)).toBe('Did not finish: 4 of 6 steps')
     expect(careSummaryTitle(careReports.interrupted)).toBe('Cut off after 2 of 6 steps')
     expect(careSummaryTitle(careReports.running)).toBe('Running: step 3 of 6')
     expect(careSummaryTitle(careReports.never)).toBe('Not run yet')
     expect(careSummaryTitle(careReports.complete)).toBe('Done')
     expect(careSummaryMeta(careReports.needsYou)).toBe(`${DAY}, ${CLOCK} · 5 of 5 steps ticked · weekly checks done`)
-    expect(careSummaryMeta(careReports.blocked)).toBe(`${DAY}, ${CLOCK} · blocked: hygiene, guide-review`)
-    expect(careSummaryMeta(careReports.interrupted)).toBe(`${DAY}, ${CLOCK} · stopped before learnings`)
+    expect(careSummaryMeta(careReports.blocked)).toBe(`${DAY}, ${CLOCK} · blocked: Hygiene, Guide review`)
+    expect(careSummaryMeta(careReports.interrupted)).toBe(`${DAY}, ${CLOCK} · stopped before Learnings`)
   })
 
   it('names steps, their line, glyph and word', () => {
@@ -153,10 +153,51 @@ describe('the report page words', () => {
     expect(stepCanFix({ ...careReports.blocked.steps[0], evidence: '1 needs you item: a dead link' })).toBe(true)
   })
 
-  it('maps needs-you actions to existing destinations', () => {
-    expect(needActionLabel('unsure')).toBe('Open Unsure')
-    expect(needActionLabel('guide')).toBe('Review guide')
-    expect(needActionLabel('report')).toBe('Open report file')
+  it('picks each button from the item\'s path, never from its words', () => {
+    const [proposal, guide, unsure, report] = careReports.needsYou.needs_you
+    expect([proposal, guide, unsure, report].map(needAction)).toEqual(['proposal', 'optimize', 'unsure', 'report'])
+    expect(needAction(need('A note looks out of date.', '', 'People/Rae.md'))).toBe('file')
+    // Words that used to pick a button no longer do: no path, no file button.
+    expect(needAction(need('Review the guide and the Unsure list.', ''))).toBe('none')
+    // A proposal-looking path that is not a proposal slug is an ordinary file.
+    expect(needAction(need('x', '', 'Workspace/Proposals/Odd Name.md'))).toBe('file')
+    expect(['proposal', 'unsure', 'optimize', 'report', 'file', 'none'].map(a => needActionLabel(a as never))).toEqual([
+      'Review proposal', 'Open Unsure', 'Optimize', 'Open report', 'Open file', '',
+    ])
+  })
+
+  it('drops a proposal item once its file says applied or rejected', () => {
+    const decided = (status: string): CareReport => ({
+      ...careReports.needsYou,
+      needs_you: careReports.needsYou.needs_you.map(item => (item.path === CARE_PROPOSAL_PATH ? { ...item, proposal_status: status } : item)),
+    })
+    expect(openNeeds(decided('ready'))).toHaveLength(4)
+    expect(openNeeds(decided('rejected'))).toHaveLength(3)
+    expect(openNeeds(decided('applied')).map(n => n.path)).not.toContain(CARE_PROPOSAL_PATH)
+    const onlyProposal = { ...careReports.complete, needs_you: [need('x', '', CARE_PROPOSAL_PATH, 'applied')] }
+    expect(careState(onlyProposal)).toBe('complete')
+    expect(careNeedsYouRow(onlyProposal, NOW)).toBeNull()
+  })
+
+  it('folds the steps when something needs the person or the run is done', () => {
+    expect(stepsOpenByDefault(careReports.needsYou)).toBe(false)
+    expect(stepsOpenByDefault(careReports.complete)).toBe(false)
+    expect(stepsOpenByDefault(careReports.running)).toBe(true)
+    expect(stepsOpenByDefault(careReports.blocked)).toBe(true)
+    expect(stepsOpenByDefault(careReports.interrupted)).toBe(true)
+    expect(stepsOpenByDefault({ ...careReports.blocked, needs_you: careReports.needsYou.needs_you })).toBe(false)
+    expect(stepsCountWords(careReports.blocked)).toBe('6: 4 done, 2 blocked')
+    expect(stepsCountWords(careReports.running)).toBe('6: 2 done, 4 to go')
+    expect(stepsCountWords(careReports.interrupted)).toBe('6: 2 done, 4 not done')
+  })
+
+  it('seeds an item\'s fix chat with its file and fences the run\'s words', () => {
+    const item = { ...careReports.needsYou.needs_you[2], title: 'Tick them ```' }
+    const seed = careNeedFixSeed(careReports.needsYou, item)
+    expect(seed).toContain('File: memory-vault/storybook-alpha/Workspace/Unsure.md')
+    expect(seed).toContain('Report: memory-vault/storybook-alpha/Workspace/Care-Report.md')
+    expect(seed).toContain('````text\nTick them ``` Open Memory > Unsure and approve or reject them.\n````')
+    expect(careNeedFixSeed(careReports.needsYou, careReports.needsYou.needs_you[1])).toContain('File: AGENTS.md')
   })
 
   it('seeds the fix chat with the step, the reason, the report and the step file', () => {

@@ -2,9 +2,10 @@
  * Start the chat that trims the two bounded regions every chat loads
  * (`ciao:memory` and `ciao:profile` in the workspace guide).
  *
- * Called by Memory's Always loaded window (MemoryGuideBudget.vue). Any other
- * surface that offers to trim the regions should call this too, so they all
- * open the same conversation. The prompt is a draft the person sends
+ * Called by Memory's Always loaded window (MemoryGuideBudget.vue) and by the
+ * care page's item for the workspace guide (MemoryCarePanel.vue, Optimize).
+ * Any other surface that offers to trim the regions should call this too, so
+ * they all open the same conversation. The prompt is a draft the person sends
  * (startFileDiscussion never auto-sends), the guide is pinned beside it, and the
  * prompt asks the agent to show the trimmed version and wait for approval
  * before it changes anything.
