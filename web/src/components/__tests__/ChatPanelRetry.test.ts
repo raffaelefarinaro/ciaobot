@@ -141,6 +141,8 @@ interface MountOptions {
   chat?: Partial<ChatInfo>
   chatId?: string
   pinia?: ReturnType<typeof createPinia>
+  /** A model catalog other than MODELS_RESPONSE. */
+  models?: unknown
 }
 
 async function mountPanel(options: MountOptions = {}): Promise<{
@@ -165,7 +167,7 @@ async function mountPanel(options: MountOptions = {}): Promise<{
   vi.spyOn(taskStore, 'fetchSchedules').mockResolvedValue()
 
   vi.spyOn(api, 'get').mockImplementation((path: string) => {
-    if (path === '/api/models') return Promise.resolve(MODELS_RESPONSE) as never
+    if (path === '/api/models') return Promise.resolve(options.models ?? MODELS_RESPONSE) as never
     if (path.startsWith('/api/commands')) return Promise.resolve({ commands: [], skills: [] }) as never
     return Promise.resolve([]) as never
   })
@@ -1681,6 +1683,44 @@ describe('ChatPanel recovery model picker', () => {
 
     expect(updateChat).toHaveBeenCalledWith('chat-1', { thinking_level: 'high' })
     wrapper.unmount()
+  })
+
+  describe("Claude Code's own pick", () => {
+    // Claude Code lists `default` and describes it as Opus 4.5, which is also
+    // the `opus` row: the list shows that row once.
+    const PICK_MODELS = {
+      ...MODELS_RESPONSE,
+      provider_models: { ...MODELS_RESPONSE.provider_models, claude: ['default', 'opus', 'sonnet'] },
+      provider_catalog_evidence: { claude: { status: 'observed', source: null, reason: null, models: [
+        { id: 'default', label: 'Default (recommended)', description: 'Opus 4.5' },
+        { id: 'opus', label: 'Opus 4.5' },
+        { id: 'sonnet', label: 'Sonnet 4.5' },
+      ] } },
+    }
+    type Section = { key: string; models: string[]; modelLabels?: Record<string, string> }
+
+    it('a chat on the pick shows and highlights its concrete row, and picking that row changes nothing', async () => {
+      const { wrapper, store } = await mountPanel({ chat: { provider: 'claude', model: 'default' }, models: PICK_MODELS })
+      const updateChat = vi.spyOn(store, 'updateChat')
+      expect(wrapper.get('.model-picker-wrap.composer-model .composer-chip').text()).toBe('Claude Code · Opus 4.5')
+      await openComposerPicker(wrapper)
+      const claude = (picker(wrapper).vm.$attrs.sections as Section[]).find(section => section.key === 'anthropic')!
+      expect(claude.models).toEqual(['opus', 'sonnet'])
+      expect(picker(wrapper).vm.$attrs['active-models']).toEqual(['opus'])
+      picker(wrapper).vm.$emit('select', 'opus', 'anthropic')
+      await flushPromises()
+      expect(updateChat).not.toHaveBeenCalled()
+      wrapper.unmount()
+    })
+
+    it('a chat pinned to another model can go back to the pick from its last row', async () => {
+      const { wrapper } = await mountPanel({ chat: { provider: 'claude', model: 'sonnet' }, models: PICK_MODELS })
+      await openComposerPicker(wrapper)
+      const claude = (picker(wrapper).vm.$attrs.sections as Section[]).find(section => section.key === 'anthropic')!
+      expect(claude.models).toEqual(['opus', 'sonnet', 'default'])
+      expect(claude.modelLabels?.default).toBe("Use Claude Code's pick (Opus 4.5)")
+      wrapper.unmount()
+    })
   })
 
   it('shows confirmed permission modes and exact engine mappings', async () => {

@@ -53,6 +53,8 @@ describe('useProviderChoices', () => {
     expect(sections[1].label).toBe('Claude Code')
     expect(sections[1].models).toEqual(['opus', 'sonnet'])
     expect(sections[1].modelLabels).toEqual({ opus: 'Opus 4.5', sonnet: 'Sonnet 4.5' })
+    // An override stored as `default` reads, and is highlighted, as that row.
+    expect(sections[1].modelAliases).toEqual({ default: 'opus' })
   })
 
   it('lists every provider from /api/models including codex', () => {

@@ -247,7 +247,7 @@ function sections(insights: boolean) {
     modelLabels: choices.modelLabelsFor(reportedModels.value, provider.value),
     modelBadges: choices.modelBadgesFor(reportedModels.value),
     disabled: !providerAvailable.value,
-  })
+  }, provider.value, WS_DEFAULT)
   return result
 }
 const modelSections = computed(() => sections(false))

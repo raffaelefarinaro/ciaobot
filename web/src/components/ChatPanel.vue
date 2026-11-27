@@ -1491,7 +1491,7 @@ import InjectedPromptCard from './InjectedPromptCard.vue'
 import { errorNoticePrompt, parseInjectedPrompt, retryScheduledNotice, type InjectedPrompt } from '../lib/injectedPrompt'
 import { linkifyText, type FileMentionTargets } from '../lib/filePaths'
 import { isChatId } from '../lib/chatLinks'
-import { displayedModel, modelName, providerForModelSection, providerShortLabel, sectionKeyForProvider, sectionsFromModelsResponse } from '../lib/modelSections'
+import { AGENT_DEFAULT_MODEL, agentPickLabel, displayedModel, modelName, providerForModelSection, providerShortLabel, sectionKeyForProvider, sectionsFromModelsResponse } from '../lib/modelSections'
 import { isBridgeMode, type BridgeMode } from '../lib/permissionModes'
 import { renderMarkdown as renderSafeMarkdown, renderUserMarkdown as renderSafeUserMarkdown } from '../lib/safeMarkdown'
 import { handleCodeCopyClick, writeClipboard } from '../lib/codeCopy'
@@ -3245,7 +3245,23 @@ const activeBucket = computed<BucketKey>(() => {
 })
 
 // One section per provider, headed by the CLI's short name ("Claude Code").
-const chatModelSections = computed(() => sectionsFromModelsResponse(modelsResponse.value))
+// When the CLI's own `default` is listed as the concrete row it runs, a chat
+// pinned to another model keeps a way back to it: a last row in its
+// provider's group, "Use Claude Code's pick (Opus 4.5)".
+const chatModelSections = computed(() => {
+  const response = modelsResponse.value
+  const provider = activeBucket.value
+  const key = sectionKeyForProvider(provider)
+  const followsPick = (activeModelId.value || '') === AGENT_DEFAULT_MODEL
+  return sectionsFromModelsResponse(response).map(section => {
+    if (section.key !== key || followsPick || !section.modelAliases?.[AGENT_DEFAULT_MODEL]) return section
+    return {
+      ...section,
+      models: [...section.models, AGENT_DEFAULT_MODEL],
+      modelLabels: { ...section.modelLabels, [AGENT_DEFAULT_MODEL]: `Use ${agentPickLabel(response, provider)}` },
+    }
+  })
+})
 const pickerModelSections = computed(() => chatModelSections.value.map(section => ({
   ...section,
   disabled: section.disabled || (pickerMode.value === 'normal' && modeWritePending.value),
@@ -7178,10 +7194,16 @@ details[open] > .activity-summary::before {
   .composer-chip--named .composer-chip-sep {
     display: none;
   }
+
+  /* The model part never shrinks to nothing; a minimum only where the row is
+     tight, so a wide screen does not pad short names. */
+  .composer-chip--named .composer-chip-label {
+    min-width: min(8ch, 100%);
+  }
 }
 
 .composer-chip-label {
-  min-width: min(8ch, 100%);
+  min-width: 0;
   max-width: 30ch;
   overflow: hidden;
   text-overflow: ellipsis;

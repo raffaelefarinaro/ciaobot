@@ -14,6 +14,8 @@ export interface ModelSection {
   badge?: string
   modelBadges?: Record<string, string[]>
   modelLabels?: Record<string, string>
+  /** A stored value shown as another row (lib/modelSections: Claude Code's `default`). */
+  modelAliases?: Record<string, string>
   disabled?: boolean
   hint?: string
 }
@@ -124,9 +126,20 @@ const hasAnyModels = computed(
   () => filteredSections.value.length > 0
 )
 
+/** The row a stored value is shown as: itself, or the row it is an alias of. */
+function shownModel(model: string): string {
+  if (normalizedSections.value.some((item) => item.models.includes(model))) return model
+  for (const item of normalizedSections.value) {
+    const target = item.modelAliases?.[model]
+    if (target) return target
+  }
+  return model
+}
+
 function displayModelLabel(model: string): string {
-  const section = normalizedSections.value.find((item) => item.models.includes(model))
-  return section?.modelLabels?.[model] || model
+  const shown = shownModel(model)
+  const section = normalizedSections.value.find((item) => item.models.includes(shown))
+  return section?.modelLabels?.[shown] || model
 }
 
 const triggerLabel = computed(() => {
@@ -139,14 +152,14 @@ const triggerLabel = computed(() => {
 })
 
 const explicitActiveModels = computed(() =>
-  props.activeModels.map((model) => model.trim()).filter(Boolean),
+  props.activeModels.map((model) => shownModel(model.trim())).filter(Boolean),
 )
 
 const activeModelSet = computed(() => {
   if (explicitActiveModels.value.length) return new Set(explicitActiveModels.value)
   return new Set(
     (props.multiple ? (effectiveValue.value as string[]) : [effectiveValue.value as string])
-      .map((model) => model.trim())
+      .map((model) => shownModel(model.trim()))
       .filter(Boolean),
   )
 })

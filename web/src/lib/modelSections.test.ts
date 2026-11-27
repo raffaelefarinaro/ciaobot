@@ -217,7 +217,9 @@ describe('opencode section', () => {
       },
     } as ModelsResponse
     const claude = sectionsFromModelsResponse(response).find((s) => s.key === 'anthropic')
-    expect(claude?.modelLabels).toEqual({ default: 'Opus 4.5', opus: 'Opus' })
+    // No concrete row is Opus 4.5, so the default stays its own row, named as
+    // the CLI's pick of that model.
+    expect(claude?.modelLabels).toEqual({ default: "Claude Code's pick (Opus 4.5)", opus: 'Opus' })
     expect(modelName(response, 'claude', 'default')).toBe('Opus 4.5')
     expect(modelName(response, 'claude', '')).toBe('Opus 4.5')
     expect(providerModelLabel(response, 'claude', 'default')).toBe('Claude Code · Opus 4.5')
@@ -233,7 +235,9 @@ describe('opencode section', () => {
     } as ModelsResponse
     expect(modelName(response, 'claude', 'default')).toBe('')
     expect(providerModelLabel(response, 'claude', 'default')).toBe('Claude Code')
-    expect(sectionsFromModelsResponse(response)[0].modelLabels).toEqual({ default: 'Claude Code' })
+    // The listed default row is the CLI's pick, never "Claude Code" again under
+    // a "Claude Code" heading, and never the word "default".
+    expect(sectionsFromModelsResponse(response)[0].modelLabels).toEqual({ default: "Claude Code's pick" })
   })
 })
 
@@ -245,7 +249,8 @@ describe('the default entry and catalog labels', () => {
   it('reads a short name, a raw id and a sentence from the adapter description', () => {
     expect(defaultDescriptionName('Opus 4.5')).toBe('Opus 4.5')
     expect(defaultDescriptionName('Opus')).toBe('Opus')
-    expect(defaultDescriptionName('claude-opus-4-5-20251101')).toBe('Claude Opus-4-5-20251101')
+    expect(defaultDescriptionName('claude-opus-4-5-20251101')).toBe('Opus 4.5')
+    expect(defaultDescriptionName('openai/gpt-5.6')).toBe('GPT-5.6')
     expect(defaultDescriptionName('Use the default model (currently Sonnet 4.5) · $3/$15 per Mtok')).toBe('Sonnet 4.5')
     expect(defaultDescriptionName('Use the default model · $3/$15 per Mtok')).toBe('')
     expect(defaultDescriptionName('The model this account is set up to use for most of its work today')).toBe('')
@@ -276,6 +281,56 @@ describe('the default entry and catalog labels', () => {
     expect(displayedModel(response, 'claude', 'default')).toBe('opus')
     expect(displayedModel(response, 'claude', 'sonnet')).toBe('sonnet')
     expect(modelName(response, 'claude', 'default')).toBe('Opus 4.5')
+  })
+
+  const catalog = (description: string, rows: Array<[string, string]>) => ({
+    models: [], default: 'default',
+    providers: [descriptor('claude', 'Anthropic (via Claude Code)', 'Claude Code')],
+    provider_models: { claude: ['default', ...rows.map(([id]) => id)] },
+    provider_defaults: { claude: 'default' },
+    provider_catalog_evidence: evidence([
+      { id: 'default', label: 'Default (recommended)', description },
+      ...rows.map(([id, label]) => ({ id, label })),
+    ]),
+  } as unknown as ModelsResponse)
+
+  it("matches a family alone ('Opus') to the one row that starts with it", () => {
+    const response = catalog('Opus', [['opus', 'Opus 4.5'], ['sonnet', 'Sonnet 4.5']])
+    expect(defaultEquivalent(response, 'claude')).toBe('opus')
+    expect(modelName(response, 'claude', 'default')).toBe('Opus 4.5')
+    const claude = sectionsFromModelsResponse(response)[0]
+    expect(claude.models).toEqual(['opus', 'sonnet'])
+    expect(claude.modelAliases).toEqual({ default: 'opus' })
+  })
+
+  it("does not guess when two rows fit ('Sonnet' with two Sonnet rows)", () => {
+    const response = catalog('Sonnet', [['sonnet', 'Sonnet 4.5'], ['claude-sonnet-4', 'Sonnet 4'], ['opus', 'Opus 4.5']])
+    expect(defaultEquivalent(response, 'claude')).toBe('')
+    expect(modelName(response, 'claude', 'default')).toBe('Sonnet')
+    const claude = sectionsFromModelsResponse(response)[0]
+    expect(claude.models).toEqual(['default', 'sonnet', 'claude-sonnet-4', 'opus'])
+    expect(claude.modelLabels?.default).toBe("Claude Code's pick (Sonnet)")
+    expect(claude.modelAliases).toBeUndefined()
+  })
+
+  it('matches a raw model id by family and version', () => {
+    const response = catalog('claude-opus-4-5-20251101', [['opus', 'Opus 4.5'], ['claude-opus-4-1', 'Opus 4.1']])
+    expect(defaultEquivalent(response, 'claude')).toBe('opus')
+    expect(modelName(response, 'claude', 'default')).toBe('Opus 4.5')
+  })
+
+  it("matches the model a '(currently Sonnet 4.5)' sentence names", () => {
+    const response = catalog('Use the default model (currently Sonnet 4.5) · $3/$15 per Mtok', [['opus', 'Opus 4.5'], ['sonnet', 'Sonnet 4.5']])
+    expect(defaultEquivalent(response, 'claude')).toBe('sonnet')
+    expect(sectionsFromModelsResponse(response)[0].models).toEqual(['opus', 'sonnet'])
+  })
+
+  it("names a rejected description's row as the CLI's pick", () => {
+    for (const description of ['Default', 'gpt-5-default']) {
+      const response = catalog(description, [['opus', 'Opus 4.5']])
+      expect(sectionsFromModelsResponse(response)[0].modelLabels?.default).toBe("Claude Code's pick")
+      expect(modelName(response, 'claude', 'default')).toBe('')
+    }
   })
 
   it('keeps the default row when no concrete row has its name', () => {

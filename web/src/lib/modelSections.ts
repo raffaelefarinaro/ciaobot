@@ -18,6 +18,12 @@ export interface ModelSection {
   badge?: string
   modelBadges?: Record<string, string[]>
   modelLabels?: Record<string, string>
+  /**
+   * A stored value that is shown as another row of the picker: Claude Code's
+   * `default` when a concrete row stands for it. The trigger names it by that
+   * row and the row is highlighted.
+   */
+  modelAliases?: Record<string, string>
   disabled?: boolean
   hint?: string
 }
@@ -47,21 +53,42 @@ function isShortName(text: string): boolean {
   return text.length <= 32 && text.split(/\s+/).length <= 4
 }
 
+/** The adapter's note on the `default` entry: the part before " · ", capped. */
+function defaultDescriptionText(description: string | undefined): string {
+  return (description || '').split(' · ')[0].trim().slice(0, 80)
+}
+
+/** A Claude model id's family and version: "claude-opus-4-5-20251101" -> Opus 4.5. */
+function idFamilyVersion(text: string): { family: string; version: string } | null {
+  const match = /(opus|sonnet|haiku|fable)[-_]?(\d+)(?:[-_.](\d{1,2})(?!\d))?/i.exec(text)
+  if (!match) return null
+  const family = match[1].charAt(0).toUpperCase() + match[1].slice(1).toLowerCase()
+  return { family, version: match[3] ? `${match[2]}.${match[3]}` : match[2] }
+}
+
+function words(text: string): string[] {
+  return text.toLowerCase().split(/[^a-z0-9.]+/).filter(Boolean)
+}
+
 /**
  * The model a `default` entry's description names, or ''. The adapter's
  * description is unchecked text: a display name ("Opus 4.5", "Opus"), a raw
  * model id ("claude-opus-4-5-20251101") or a sentence ("Use the default model
- * (currently Sonnet 4.5) · $3/$15 per Mtok"). Only a short name is kept; an id
- * is made readable; a sentence yields the model it names in "(currently …)",
- * else nothing, and the caller shows the provider alone.
+ * (currently Sonnet 4.5) · $3/$15 per Mtok"). Only a short name is kept; a
+ * Claude id is read as family and version ("Opus 4.5"), any other id is made
+ * readable; a sentence yields the model it names in "(currently …)", else
+ * nothing, and the caller shows the provider alone.
  */
 export function defaultDescriptionName(description: string | undefined): string {
-  const text = (description || '').split(' · ')[0].trim().slice(0, 80)
+  const text = defaultDescriptionText(description)
   if (!text) return ''
   const current = /\(currently ([^)]+)\)/i.exec(text)?.[1]?.trim()
   if (current) return isShortName(current) && !/default/i.test(current) ? current : ''
   if (/default/i.test(text)) return ''
-  if (!/\s/.test(text) && /[-_/:]/.test(text)) return modelDisplayName(text)
+  if (!/\s/.test(text) && /[-_/:]/.test(text)) {
+    const parsed = idFamilyVersion(text)
+    return parsed ? `${parsed.family} ${parsed.version}` : modelDisplayName(text)
+  }
   return isShortName(text) ? text : ''
 }
 
@@ -77,28 +104,66 @@ function concreteName(response: ModelsResponse | null | undefined, provider: str
   return catalogLabel(response, provider, model) || modelDisplayName(model)
 }
 
+interface DefaultResolution {
+  /** The concrete row the default stands for, '' when none fits or several do. */
+  equivalent: string
+  /** What the default runs, as far as the agent said: "Opus 4.5", "Sonnet", or ''. */
+  name: string
+}
+
+/**
+ * What a provider's `default` entry runs, matched against its concrete rows.
+ * A full name ("Opus 4.5") matches a row of that name; a family alone
+ * ("Opus") matches the one row whose name starts with it; a raw id
+ * ("claude-opus-4-5-20251101") matches the row of that family and version.
+ * When two rows fit ("Sonnet" with Sonnet 4.5 and Sonnet 4) nothing is
+ * guessed: the default stays its own row, named by what the agent said.
+ */
+function resolveDefault(response: ModelsResponse | null | undefined, provider: string): DefaultResolution {
+  const entry = response?.provider_catalog_evidence?.[provider]?.models
+    ?.find((item) => item.id === AGENT_DEFAULT_MODEL)
+  const name = defaultDescriptionName(entry?.description)
+  if (!name) return { equivalent: '', name: '' }
+  const rows = (response?.provider_models?.[provider] ?? [])
+    .filter((model) => model !== AGENT_DEFAULT_MODEL)
+    .map((model) => ({ model, name: concreteName(response, provider, model) }))
+  const exact = rows.filter((row) => row.name.toLowerCase() === name.toLowerCase())
+  if (exact.length === 1) return { equivalent: exact[0].model, name: exact[0].name }
+  const wanted = words(name)
+  const prefixed = rows.filter((row) => {
+    const have = words(row.name)
+    return wanted.length > 0 && wanted.every((word, index) => have[index] === word)
+  })
+  if (prefixed.length === 1) return { equivalent: prefixed[0].model, name: prefixed[0].name }
+  return { equivalent: '', name }
+}
+
 /**
  * The concrete model a provider's `default` entry runs, as the agent
  * describes it ("Opus 4.5"), or '' when it has not said.
  */
 export function agentDefaultModelName(response: ModelsResponse | null | undefined, provider: string): string {
-  const entry = response?.provider_catalog_evidence?.[provider]?.models
-    ?.find((item) => item.id === AGENT_DEFAULT_MODEL)
-  return defaultDescriptionName(entry?.description)
+  return resolveDefault(response, provider).name
 }
 
 /**
- * The catalog row the `default` entry stands for: the concrete model whose
- * name is the one the default runs ("Opus 4.5"), or '' when none is. Pickers
- * then list that row once, as the default, instead of two look-alike rows.
+ * The catalog row the `default` entry stands for, or '' when none (or more
+ * than one) fits. Pickers then list that row once, as the default, instead of
+ * two look-alike rows.
  */
 export function defaultEquivalent(response: ModelsResponse | null | undefined, provider: string): string {
-  const name = agentDefaultModelName(response, provider).toLowerCase()
-  if (!name) return ''
-  const models = response?.provider_models?.[provider] ?? []
-  return models.find((model) => (
-    model !== AGENT_DEFAULT_MODEL && concreteName(response, provider, model).toLowerCase() === name
-  )) || ''
+  return resolveDefault(response, provider).equivalent
+}
+
+/**
+ * The `default` row's own name when it is listed (no concrete row stands for
+ * it): "Claude Code's pick (Sonnet)", or "Claude Code's pick" when the agent
+ * did not say. Never the word "default".
+ */
+export function agentPickLabel(response: ModelsResponse | null | undefined, provider: string): string {
+  const name = agentDefaultModelName(response, provider)
+  const pick = `${providerShortLabel(response, provider)}'s pick`
+  return name ? `${pick} (${name})` : pick
 }
 
 /**
@@ -133,7 +198,11 @@ export function providerModelLabel(response: ModelsResponse | null | undefined, 
 /** The readable name of every model in a section, keyed by its raw id. */
 function labelsFor(response: ModelsResponse, provider: string, models: string[]): Record<string, string> {
   const labels: Record<string, string> = {}
-  for (const model of models) labels[model] = modelName(response, provider, model) || providerShortLabel(response, provider)
+  for (const model of models) {
+    labels[model] = model === AGENT_DEFAULT_MODEL
+      ? agentPickLabel(response, provider)
+      : modelName(response, provider, model)
+  }
   return labels
 }
 
@@ -178,6 +247,10 @@ export function sectionsFromModelsResponse(response: ModelsResponse | null): Mod
       models,
       modelLabels: labelsFor(response, id, models),
       ...(Object.keys(badges).length ? { modelBadges: badges } : {}),
+      // A value stored as `default` reads, and is highlighted, as its row.
+      ...(equivalent && (catalogs[id] ?? []).includes(AGENT_DEFAULT_MODEL)
+        ? { modelAliases: { [AGENT_DEFAULT_MODEL]: equivalent } }
+        : {}),
     })
   }
   return sections

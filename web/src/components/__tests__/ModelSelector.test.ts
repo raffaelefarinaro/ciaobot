@@ -737,3 +737,28 @@ describe('ModelSelector list keyboard and selection', () => {
     expect(wrapper.get('.model-selector__popover').text()).not.toMatch(/[✓▾×]/)
   })
 })
+
+describe('ModelSelector aliases', () => {
+  afterEach(() => { document.body.innerHTML = '' })
+
+  it('names and highlights a stored alias by the row it stands for, never the raw value', async () => {
+    const wrapper = mount(ModelSelector, {
+      attachTo: document.body,
+      props: {
+        modelValue: 'default',
+        sections: [{
+          key: 'anthropic', label: 'Claude Code', models: ['opus', 'sonnet'],
+          modelLabels: { opus: 'Opus 4.5', sonnet: 'Sonnet 4.5' }, modelAliases: { default: 'opus' },
+        }],
+      },
+    })
+    const trigger = wrapper.get('.model-selector__trigger')
+    expect(trigger.text()).toContain('Opus 4.5')
+    expect(trigger.text()).not.toMatch(/default/i)
+    await trigger.trigger('click')
+    await flushPromises()
+    expect(wrapper.get('[data-model="opus"]').attributes('aria-selected')).toBe('true')
+    expect(wrapper.get('[data-model="sonnet"]').attributes('aria-selected')).toBe('false')
+    wrapper.unmount()
+  })
+})

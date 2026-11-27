@@ -729,17 +729,18 @@ async function startWork(options: { workspace?: string; projectId?: string; reme
   white-space: nowrap;
 }
 
-/* The model part never shrinks to nothing behind its provider. */
-.home-intake-model-trigger .home-intake-chip-label {
-  min-width: min(8ch, 100%);
-}
-
 /* A phone shows the model alone; the provider stays in the chip's accessible
    name and tooltip. With no model named yet the provider still shows. */
 @media (max-width: 520px) {
   .home-intake-model-trigger--named .home-intake-chip-provider,
   .home-intake-model-trigger--named .home-intake-chip-sep {
     display: none;
+  }
+
+  /* The model part never shrinks to nothing (a minimum only here, where the
+     row is tight: on a wide screen it would pad short names). */
+  .home-intake-model-trigger .home-intake-chip-label {
+    min-width: min(8ch, 100%);
   }
 }
 

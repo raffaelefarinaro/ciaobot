@@ -1,5 +1,5 @@
 import { computed, type Ref } from 'vue'
-import { AGENT_DEFAULT_MODEL, modelName, providerShortLabel, type ModelSection } from '../lib/modelSections'
+import { AGENT_DEFAULT_MODEL, defaultEquivalent, modelName, providerShortLabel, type ModelSection } from '../lib/modelSections'
 import { modelProviderPrefix } from '../lib/modelLabels'
 import { modeLabel } from '../lib/permissionModes'
 import type { ModelsResponse, RoutineSettings, RuntimeProvider } from '../lib/types'
@@ -160,16 +160,23 @@ export function useProviderChoices(deps: {
           ? { modelBadges: { [sentinel]: [namespace] } }
           : {}),
       },
-      withoutAgentDefault(aliasSectionEntry(provider)),
+      withoutAgentDefault(aliasSectionEntry(provider), provider, sentinel),
     ]
   }
 
   // The entry above already stands for the default, so the agent's own
-  // `default` row is not listed a second time.
-  function withoutAgentDefault(section: ModelSection): ModelSection {
+  // `default` row is not listed a second time. A value stored as `default`
+  // still reads as a model: the concrete row it runs when the catalog has
+  // one, else the entry above.
+  function withoutAgentDefault(section: ModelSection, provider: string, sentinel: string): ModelSection {
     const labels = { ...(section.modelLabels || {}) }
     delete labels[AGENT_DEFAULT_MODEL]
-    return { ...section, models: section.models.filter((model) => model !== AGENT_DEFAULT_MODEL), modelLabels: labels }
+    return {
+      ...section,
+      models: section.models.filter((model) => model !== AGENT_DEFAULT_MODEL),
+      modelLabels: labels,
+      modelAliases: { [AGENT_DEFAULT_MODEL]: defaultEquivalent(workspaceModels.value, provider) || sentinel },
+    }
   }
 
   function providerDefaultModelEffective(provider: AliasProviderKey): string {
