@@ -288,7 +288,7 @@ async def test_rebuilt_journal_start_without_a_durable_transcript_takes_the_last
 
 
 @pytest.mark.asyncio
-async def test_rebuilt_journal_start_keeps_a_failed_send_the_journal_never_got(
+async def test_rebuilt_journal_start_with_a_failed_turn_before_its_first_prompt(
     acp_chat, monkeypatch
 ) -> None:
     pcm, chat, config, journal = _counted_chat(
@@ -300,7 +300,9 @@ async def test_rebuilt_journal_start_keeps_a_failed_send_the_journal_never_got(
 
     rows = await _assemble_chat_messages(pcm, config, chat)
 
-    assert _user_turns(rows) == [("p1", 1), ("p2", 2), ("p3", 3)]
+    # The failure sits before the journal's first prompt, among the turns the replay
+    # rebuilt without prompts: it is not counted against the journal's block.
+    assert [turn for turn in _user_turns(rows) if turn[0] != "p1"] == [("p2", 2), ("p3", 3)]
 
 
 @pytest.mark.asyncio
@@ -318,3 +320,71 @@ async def test_full_journal_with_repeated_prompts_pairs_each_turn_with_its_own(
     replies = [row for row in rows if row["role"] == "assistant"]
     assert [row["usage"]["tok"] for row in replies] == [str(turn) for turn in range(6)]
     assert [row["duration_ms"] for row in replies] == [1000 * (turn + 1) for turn in range(6)]
+
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("prompts", "replayed", "live"),
+    [
+        # A failed turn among the replayed ones has no prompt in the journal either.
+        (["a", "b", "boom", "continue", "c", "continue", "d"], 5, ["continue", "d"]),
+        (["a", "b", "boom", "x", "c", "y", "d"], 5, ["y", "d"]),
+        (["a", "b", "boom", "x", "continue", "continue", "d"], 5, ["continue", "d"]),
+    ],
+    ids=["repeat-later", "unique", "repeat-at-boundary"],
+)
+async def test_rebuilt_journal_start_counts_only_failures_after_the_boundary(
+    acp_chat, monkeypatch, prompts, replayed, live
+) -> None:
+    pcm, chat, config, journal = _counted_chat(acp_chat, monkeypatch, prompts, 7, errors=(2,))
+    _replayed(journal, replayed)
+    for offset, prompt in enumerate(live):
+        _live_turn(journal, prompt, replayed + offset)
+
+    rows = await _assemble_chat_messages(pcm, config, chat)
+
+    assert _user_turns(rows) == [(prompt, replayed + offset) for offset, prompt in enumerate(live)]
+    reply = next(row for row in rows if row["role"] == "assistant" and row["content"] == "reply-5")
+    assert reply["duration_ms"] == 6000
+    assert reply["usage"] == {"tok": "5"}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("prompts", "live"),
+    [
+        (["a", "continue", "b", "c", "z", "continue", "y"], ["continue", "y"]),
+        # A retry of the failed text: the journal holds the retry, not the failure.
+        (["a", "b", "c", "d", "x", "x", "y"], ["x", "y"]),
+    ],
+    ids=["repeat", "retry"],
+)
+async def test_rebuilt_journal_start_with_a_live_failure_the_journal_never_got(
+    acp_chat, monkeypatch, prompts, live
+) -> None:
+    pcm, chat, config, journal = _counted_chat(acp_chat, monkeypatch, prompts, 7, errors=(4,))
+    _replayed(journal, 4)
+    _live_turn(journal, live[0], 5)
+    _live_turn(journal, live[1], 6)
+
+    rows = await _assemble_chat_messages(pcm, config, chat)
+
+    assert _user_turns(rows)[-2:] == [(live[0], 5), (live[1], 6)]
+
+
+@pytest.mark.asyncio
+async def test_rebuilt_journal_start_with_a_wake_notice_numbers_the_prompts(
+    acp_chat, monkeypatch
+) -> None:
+    pcm, chat, config, journal = _counted_chat(acp_chat, monkeypatch, ["a", "b", "c", "continue"], 4)
+    _replayed(journal, 2)
+    _live_turn(journal, "c", 2)
+    journal.user("shell done", turn_origin="background_run")
+    journal.event({"type": "text_delta", "text": "wake reply"})
+    journal.event({"type": "result", "text": "", "is_error": False})
+    _live_turn(journal, "continue", 3)
+
+    rows = await _assemble_chat_messages(pcm, config, chat)
+
+    assert _user_turns(rows) == [("c", 2), ("continue", 3)]

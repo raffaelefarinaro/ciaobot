@@ -1352,17 +1352,28 @@ def _align_user_turns(
         # END: of the turns the stint counted, the session holds the last ones, except failed
         # sends it never recorded. Matching from the start instead paired a repeated text with
         # its first, older occurrence.
-        stint_turns = expected if count else len(durable)
         session_seen = {" ".join(text.split()) for _pos, text, _message in session_user_rows}
-        unrecorded_failures = sum(
-            1
-            for index, row in durable
-            if index + 1 < len(current_rows)
-            and current_rows[index + 1].get("role") == "assistant"
-            and current_rows[index + 1].get("is_error")
-            and " ".join(str(row.get("content") or "").split()) not in session_seen
-        )
-        head = max(0, stint_turns - len(session_user_rows) - unrecorded_failures)
+
+        def unrecorded_failure(position: int) -> bool:
+            index, row = durable[position]
+            reply = current_rows[index + 1] if index + 1 < len(current_rows) else {}
+            return (
+                reply.get("role") == "assistant"
+                and bool(reply.get("is_error"))
+                and " ".join(str(row.get("content") or "").split()) not in session_seen
+            )
+
+        # Walk back from the newest counted turn until the session's prompts are used up. A
+        # failed send the session never recorded consumes no prompt; only the failures after
+        # the boundary count, since the replayed turns before it have no prompts to match.
+        # Positions past the durable list are counted turns the transcript has not recorded
+        # yet (the running turn); each holds one of the session's prompts.
+        head = expected if count else len(durable)
+        need = len(session_user_rows)
+        while head > 0 and need > 0:
+            head -= 1
+            if head >= len(durable) or not unrecorded_failure(head):
+                need -= 1
         durable = durable[head:]
         base += head
         if count:
