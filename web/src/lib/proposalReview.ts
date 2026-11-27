@@ -90,7 +90,7 @@ export function withProposalStatus(source: string, status: 'rejected'): string |
   const after = rest.slice(close.index)
   // Two status keys would leave the file saying two things: refuse, edit nothing.
   if ((front.match(/^status[ \t]*:/gm) ?? []).length > 1) return null
-  const line = /^status:[^\r\n]*/m
+  const line = /^status[ \t]*:[^\r\n]*/m
   const next = line.test(front)
     ? front.replace(line, `status: ${status}`)
     : `${front}${front && !front.endsWith('\n') ? '\n' : ''}status: ${status}`

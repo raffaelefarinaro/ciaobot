@@ -51,6 +51,18 @@ describe('proposal files', () => {
     expect(withProposalStatus(FILE.replace('created: 2026-11-26', 'status: draft\ncreated: 2026-11-26'), 'rejected')).toBeNull()
   })
 
+  it('replaces the one status line however it is spaced, and never adds a second', () => {
+    for (const written of ['status : draft', 'status:draft', 'status:\tready']) {
+      const source = FILE.replace('status: ready  # set by care', written)
+      const next = withProposalStatus(source, 'rejected')!
+      expect(next).toBe(FILE.replace('status: ready  # set by care', 'status: rejected'))
+      expect(next.match(/^status/gm)).toHaveLength(1)
+    }
+    const crlf = FILE.replace('status: ready  # set by care', 'status : draft').replace(/\n/g, '\r\n')
+    const next = withProposalStatus(crlf, 'rejected')!
+    expect(next).toBe(FILE.replace('status: ready  # set by care', 'status: rejected').replace(/\n/g, '\r\n'))
+  })
+
   it('reads front matter only when it opens the file, as the engine does', () => {
     expect(parseProposal(`\n${FILE}`)).toBeNull()
     expect(parseProposal(`${String.fromCharCode(0xfeff)}${FILE}`)).toBeNull()
