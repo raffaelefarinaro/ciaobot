@@ -715,6 +715,12 @@ const GET_ROUTES = {
   '/api/memory/entity-types': () => ({ workspace: WORKSPACES[0].name, vault: '/fixture/vault', types: MEMORY_CATEGORIES }),
   // Workspace care as a fresh install answers it: no report yet, the care
   // schedule on. A spec that needs another state answers the read itself.
+  // The engine's viewer-path resolution: the fixture has no files, so every
+  // path resolves, relative ones against the install root.
+  '/api/workspace-file-path': (req, url) => {
+    const requested = url.searchParams.get('path') || ''
+    return { path: requested.startsWith('/') ? requested : `/fixture/workspace/${requested}` }
+  },
   '/api/care-report': (req, url) => {
     const workspace = url.searchParams.get('workspace') || WORKSPACES[0].name
     return {

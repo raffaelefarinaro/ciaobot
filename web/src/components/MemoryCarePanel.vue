@@ -133,7 +133,7 @@ import AppIcon from './AppIcon.vue'
 import CareGlyph from './CareGlyph.vue'
 import CareProposalReview from './CareProposalReview.vue'
 import {
-  careFixSeed, careGlyph, careLastRunWords, careReportIsStale, careNeedFixSeed, careState, careSummaryMeta, careSummaryTitle, needAction,
+  careFixSeed, careGlyph, careLastRunWords, careNeedChatTitle, careReportIsStale, careNeedFixSeed, careState, careSummaryMeta, careSummaryTitle, needAction,
   needActionLabel, needCanFix, openNeeds, stepCanFix, stepGlyph, stepLine, stepName, stepsCountWords, stepsOpenByDefault,
   stepWord, type CareNeed, type CareStep,
 } from '../lib/careReport'
@@ -295,7 +295,7 @@ async function fixNeed(item: CareNeed, index: number): Promise<void> {
     await startFileDiscussion(store, {
       path: item.open_path || current.report_path,
       seed: careNeedFixSeed(current, item),
-      title: `Care: ${item.title.replace(/[.:]+$/, '').slice(0, 60)}`,
+      title: careNeedChatTitle(item),
       workspace: current.workspace,
     })
   } finally {
@@ -311,7 +311,7 @@ async function fix(step: CareStep): Promise<void> {
     await startFileDiscussion(store, {
       path: current.report_path,
       seed: careFixSeed(current, step),
-      title: `Fix care step: ${step.id}`,
+      title: `Care: ${stepName(step.id)}`,
       workspace: current.workspace,
     })
   } finally {

@@ -196,7 +196,7 @@ describe('MemoryCarePanel', () => {
     expect(startFileDiscussion).toHaveBeenCalledTimes(1)
     const [, options] = startFileDiscussion.mock.calls[0] as unknown as [unknown, { path: string; seed: string; title: string; workspace: string }]
     expect(options.path).toBe('memory-vault/storybook-alpha/Workspace/Care-Report.md')
-    expect(options.title).toBe('Fix care step: hygiene')
+    expect(options.title).toBe('Care: Hygiene')
     expect(options.workspace).toBe(CARE_WORKSPACE)
     expect(options.seed).toContain('```text\ncannot write INDEX.md\n```')
     expect(options.seed).toContain('Step file: /stock/references/hygiene.md')

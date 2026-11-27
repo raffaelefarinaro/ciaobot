@@ -23,7 +23,7 @@ from ciao.control_plane import CiaoControlPlane, ControlPlaneError, McpPrincipal
 from ciao.sessions import StateStore
 from ciao.transcripts import TranscriptStore
 from ciao.web.project_chats import ChatPinConflictError, ProjectChatManager
-from ciao.web.routes_api import chat_detail, chat_file_path
+from ciao.web.routes_api import chat_detail, chat_file_path, workspace_file_path
 
 
 def _make_manager(tmp_path: Path) -> ProjectChatManager:
@@ -107,6 +107,47 @@ def test_pin_relative_path_uses_chat_agent_root(tmp_path, monkeypatch):
     )
     assert response.status_code == 200
     assert response.json()["pinned_file_path"] == (root / "draft.md").as_posix()
+
+
+def test_pin_of_a_viewer_path_for_a_subfolder_vault_resolves_first(tmp_path):
+    """The care page's "Fix with a chat" bug: the report path is install-relative.
+
+    The viewer anchors `work/memory-vault/...` at the install root, a pin anchors
+    it at the chat's agent root (`<install>/work`), so pinning the raw path 404s.
+    `/api/workspace-file-path` resolves it the viewer's way to the absolute
+    identity the pin accepts.
+    """
+    manager = _make_manager(tmp_path)
+    manager._config.workspaces["work"] = WorkspaceConfig(name="work", vault_root="work/memory-vault")
+    report = tmp_path / "work" / "memory-vault" / "Workspace" / "Care-Report.md"
+    report.parent.mkdir(parents=True)
+    report.write_text("# Care\n")
+    chat = _one_chat(manager)
+    viewer_path = "work/memory-vault/Workspace/Care-Report.md"
+    app = Starlette(routes=[
+        Route("/api/chats/{chat_id}", chat_detail, methods=["PATCH"]),
+        Route("/api/workspace-file-path", workspace_file_path, methods=["GET"]),
+    ])
+    app.state.project_chat_manager = manager
+    app.state.config = manager._config
+    client = TestClient(app, raise_server_exceptions=False)
+
+    raw = client.patch(f"/api/chats/{chat.chat_id}", json={"pin": {"path": viewer_path, "expected_revision": 0}})
+    assert raw.status_code == 404
+
+    resolved = client.get("/api/workspace-file-path", params={"path": viewer_path})
+    assert resolved.status_code == 200
+    assert resolved.json() == {"path": report.resolve().as_posix()}
+
+    pinned = client.patch(
+        f"/api/chats/{chat.chat_id}", json={"pin": {"path": resolved.json()["path"], "expected_revision": 0}}
+    )
+    assert pinned.status_code == 200
+    assert pinned.json()["pinned_file_path"] == report.resolve().as_posix()
+
+    assert client.get("/api/workspace-file-path", params={"path": "work/memory-vault/Nope.md"}).status_code == 404
+    (tmp_path / "work" / "memory-vault" / "x.bin").write_bytes(b"\0")
+    assert client.get("/api/workspace-file-path", params={"path": "work/memory-vault/x.bin"}).status_code == 415
 
 
 def test_chat_file_identity_missing_target_never_searches_another_workspace(tmp_path, monkeypatch):

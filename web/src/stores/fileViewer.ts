@@ -1,6 +1,8 @@
 import { defineStore } from 'pinia'
 import { computed, ref, watch } from 'vue'
 import { api } from '../lib/api'
+import { isPinnableFilePath } from '../lib/pinnableFile'
+export { isPinnableFilePath }
 import { askConfirm } from '../lib/confirm'
 import { fileLoadErrorMessage } from '../lib/fileLoadError'
 import { isImageFilePath } from '../lib/chatActivity'
@@ -30,18 +32,6 @@ export function fileViewerKindForPath(filePath: string): FileViewerKind {
 /** A folder pin is stored with one trailing slash (PATCH /api/chats/{id} pin contract, D1). */
 export function isFolderPin(path: string): boolean {
   return /[/\\]$/.test(path)
-}
-
-// Mirrors `_WORKSPACE_FILE_EXTS` in ciao/web/routes_api.py: the only files the
-// server accepts as a pin. Anything else would 415 and toast, so the tile
-// opens it in the viewer instead of trying to dock it.
-const PINNABLE_FILE_EXTS = new Set([
-  'md', 'markdown', 'txt', 'py', 'ts', 'tsx', 'js', 'jsx', 'vue', 'css', 'html', 'htm', 'json',
-  'yaml', 'yml', 'toml', 'sh', 'rs', 'go', 'java', 'xml', 'sql', 'cfg', 'ini', 'log', 'csv',
-])
-export function isPinnableFilePath(path: string): boolean {
-  const m = /\.([^./\\]+)$/.exec(path.replace(/:\d+$/, ''))
-  return !!m && PINNABLE_FILE_EXTS.has(m[1].toLowerCase())
 }
 
 export const useFileViewerStore = defineStore('fileViewer', () => {

@@ -146,7 +146,7 @@ const STEP_NAMES: Record<string, string> = {
 
 /** A step's display name; an id the app does not know reads as itself. */
 export function stepName(id: string): string {
-  if (STEP_NAMES[id]) return STEP_NAMES[id]
+  if (Object.hasOwn(STEP_NAMES, id)) return STEP_NAMES[id]
   const words = id.replace(/[-_]+/g, ' ').trim()
   return words ? words[0].toUpperCase() + words.slice(1) : id
 }
@@ -459,6 +459,32 @@ export function careFixSeed(report: CareReport, step: CareStep): string {
     'Help me work out what went wrong and fix it.',
   )
   return lines.join('\n')
+}
+
+const TITLE_CAP = 60
+
+/**
+ * The chat title for a needs-you item: plain words, never the report's markers.
+ * The run writes the item in markdown, often led by its step id and a status
+ * mark (`stale [!]: the stale-notes audit reads frontmatter \`updated:\``). A lead
+ * that names a known step reads as that step ("Care: Stale notes"); anything
+ * else is the first six plain words of the sentence.
+ */
+export function careNeedChatTitle(item: CareNeed): string {
+  const plain = item.title
+    .replace(/\[([^\]]+)\]\([^)]*\)/g, '$1')
+    .replace(/\[[ xX!]\]/g, ' ')
+    .replace(/[`*_]+/g, '')
+    .replace(/\s+/g, ' ')
+    .trim()
+  const lead = /^([a-z][a-z-]*)\s*:/i.exec(plain)
+  const stepId = lead ? lead[1].toLowerCase() : ''
+  if (Object.hasOwn(STEP_NAMES, stepId)) return `Care: ${STEP_NAMES[stepId]}`
+  const words = plain.replace(/[.:\s]+$/, '').split(' ').filter(Boolean)
+  if (!words.length) return 'Care: needs you'
+  const sentence = words.slice(0, 6).join(' ')
+  const cut = words.length > 6 || sentence.length > TITLE_CAP
+  return `Care: ${sentence.slice(0, TITLE_CAP)}${cut ? '…' : ''}`
 }
 
 /**
