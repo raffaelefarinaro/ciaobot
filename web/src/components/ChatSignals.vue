@@ -25,6 +25,14 @@
       :title="workingTitle"
       :aria-label="workingTitle"
     ><ActivityGlyph kind="working" /></span>
+    <!-- Background shells still running after the turn ended. A streaming chat
+         shows working instead: its turn already says the chat is alive. -->
+    <span
+      v-else-if="primarySignal === 'shells'"
+      class="chat-signal chat-signal--shells"
+      :title="shellsTitle"
+      :aria-label="shellsTitle"
+    ><ActivityGlyph kind="run" /></span>
     <!-- A retry follows a failed run, or was scheduled by the agent from a
          turn that succeeded; the alert mark is the same for both, the label says which. -->
     <span
@@ -63,6 +71,7 @@ import { computed } from 'vue'
 import { useProjectStore } from '../stores/projects'
 import { useTaskStore } from '../stores/tasks'
 import type { WorkspaceAccent } from '../lib/workspaceColors'
+import { runningShellsLabel } from '../lib/runningWork'
 import ActivityGlyph from './ActivityGlyph.vue'
 import ScheduleGlyph from './ScheduleGlyph.vue'
 
@@ -89,6 +98,8 @@ const retryTitle = computed(() =>
     : 'Retry scheduled',
 )
 const unread = computed(() => store.chatUnread(props.chatId) > 0)
+const shells = computed(() => store.chatRunningShells(props.chatId))
+const shellsTitle = computed(() => runningShellsLabel(shells.value))
 
 // A memory pass that ended unclean. Ranked below `needs` and above `working`:
 // it is the one background job whose unfinished state is the owner's problem,
@@ -97,10 +108,13 @@ const memoryAttention = computed(() => store.memoryPassNeedsAttention(props.chat
 
 // Unread is a separate static notification eye. The per-chat value is binary,
 // so the numeric counts remain reserved for project/workspace rollups.
-const primarySignal = computed<'needs' | 'memory' | 'working' | 'retry' | null>(() => {
+// Shells rank under working and over retry: a chat whose shells still run is
+// alive, and its retry (if any) waits behind them anyway.
+const primarySignal = computed<'needs' | 'memory' | 'working' | 'shells' | 'retry' | null>(() => {
   if (needsInput.value) return 'needs'
   if (memoryAttention.value) return 'memory'
   if (working.value) return 'working'
+  if (shells.value > 0) return 'shells'
   if (props.density === 'row' && retryPending.value) return 'retry'
   return null
 })
@@ -175,8 +189,9 @@ const scheduleTitle = computed(() => {
   white-space: nowrap;
 }
 
-/* Working draws ActivityGlyph. */
-.chat-signal--working {
+/* Working and shells draw ActivityGlyph. */
+.chat-signal--working,
+.chat-signal--shells {
   gap: var(--space-1);
 }
 

@@ -133,6 +133,21 @@ describe('ProjectSidebar chat actions', () => {
     wrapper.unmount()
   })
 
+  it('marks a chat row whose background shells run after its turn', async () => {
+    const store = useProjectStore()
+    store.runningShells = { [chatId]: 3 }
+    const wrapper = await mountSidebar()
+    const shells = wrapper.get('.chat-item .chat-signal--shells')
+    expect(shells.find('.activity-glyph--run').exists()).toBe(true)
+    expect(shells.attributes('aria-label')).toBe('3 shells running')
+    // The Home item's count is attention only: running shells add nothing to it.
+    expect(wrapper.get('a[href="/"]').attributes('data-count')).toBeUndefined()
+    store.runningShells = {}
+    await nextTick()
+    expect(wrapper.find('.chat-signal--shells').exists()).toBe(false)
+    wrapper.unmount()
+  })
+
   it('shows the workspace attention count on the Home item', async () => {
     const store = useProjectStore()
     store.chats[0].last_activity_at = '2026-08-12T10:00:00Z'
@@ -316,6 +331,26 @@ describe('ProjectSidebar chat actions', () => {
     const dot = group().get('.project-dot')
     expect(dot.text()).toBe('')
     expect(dot.attributes('aria-label')).toBe('1 unread')
+    wrapper.unmount()
+  })
+
+  it('adds the run glyph to a collapsed project whose chat runs background shells', async () => {
+    const store = useProjectStore()
+    const wrapper = await mountSidebar()
+    await nextTick()
+    const group = () => wrapper.findAll('.project-group').find(g => g.find('.project-name').text().includes('General'))!
+    const chevron = () => group().get('.project-icon')
+    if (chevron().attributes('aria-expanded') === 'true') await chevron().trigger('click')
+    expect(group().find('.project-shells').exists()).toBe(false)
+    store.runningShells = { [chatId]: 2 }
+    await nextTick()
+    const mark = group().get('.project-shells')
+    expect(mark.find('.activity-glyph--run').exists()).toBe(true)
+    expect(mark.attributes('aria-label')).toBe('Background shells are running in this project')
+    // Expanded, the chat row carries the mark instead of the project.
+    await chevron().trigger('click')
+    expect(group().find('.project-shells').exists()).toBe(false)
+    expect(group().find('.chat-signal--shells').exists()).toBe(true)
     wrapper.unmount()
   })
 

@@ -191,6 +191,7 @@ import type { ChatInfo, ProjectInfo } from '../lib/types'
 import { ageBucket, chatActivityTimestamp, groupHomeTiers, type HomeTierKey, type HomeTiers } from '../lib/homeLanes'
 import { activeInsightSummary, type MemoryInsight } from '../lib/memoryInsights'
 import { formatRelative } from '../lib/relativeTime'
+import { runningShellsLabel } from '../lib/runningWork'
 import { formatTime } from '../lib/time'
 import { classifyError } from '../lib/errorAttribution'
 import { DEFAULT_WORKSPACE_COLOR, colorForWorkspace, type WorkspaceColorId } from '../lib/workspaceColors'
@@ -349,7 +350,8 @@ function makeLane(
     tiers: groupHomeTiers(
       chats,
       chatId => store.chatNeedsYou(chatId),
-      chatId => store.chatIsWorking(chatId),
+      // A chat whose background shells still run after its turn is alive: Working, not Earlier.
+      chatId => store.chatIsRunning(chatId),
       chatId => store.chatUnread(chatId) > 0,
     ),
     insights: (workspace && workspace !== 'unknown' && insightsByWorkspace.value.get(workspace)) || [],
@@ -510,6 +512,11 @@ function statusPhrase(tier: HomeTierKey, chat: ChatInfo): string {
     }
     if (taskSignals.isAwaitingReview(task)) return 'ready for review'
     if (tier === 'working' || task.attempt_state === 'running') return 'working'
+  }
+  // In Working only for its background shells: say so, with the count.
+  if (tier === 'working' && !store.chatIsWorking(chat.chat_id)) {
+    const shells = store.chatRunningShells(chat.chat_id)
+    if (shells > 0) return runningShellsLabel(shells)
   }
   return tierPhrase(tier)
 }

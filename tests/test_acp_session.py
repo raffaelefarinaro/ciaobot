@@ -630,6 +630,38 @@ async def test_close_forgets_tracked_shells_and_pending_launch_commands(tmp_path
         assert session.background_shells_running is False
 
 
+@pytest.mark.asyncio
+async def test_close_reports_zero_running_shells_to_the_host(tmp_path: Path) -> None:
+    async with _started(tmp_path) as harness:
+        session = harness.session
+        counts: list[int] = []
+        session.shells_hook = lambda: counts.append(session.running_shells)
+        session._shells.track_unpolled("call-1", command="make dev")
+        session._shells.track_unpolled("call-2", command="sleep 60")
+        session._report_shells()
+        assert counts == [2]
+
+        await session.close()
+
+        # The closed session runs nothing the chat row may keep showing.
+        assert counts == [2, 0]
+        assert session.running_shells == 0
+
+
+@pytest.mark.asyncio
+async def test_background_cancel_reports_zero_running_shells(tmp_path: Path) -> None:
+    async with _started(tmp_path) as harness:
+        session = harness.session
+        counts: list[int] = []
+        session.shells_hook = lambda: counts.append(session.running_shells)
+        session._shells.track_unpolled("call-1", command="make dev")
+        session._report_shells()
+
+        await session.cancel()
+
+        assert counts == [1, 0]
+
+
 def test_shell_liveness_clear_stops_watching_every_shell() -> None:
     shells = ShellLiveness()
     assert shells.track_unpolled("call-1", command="make dev") is True

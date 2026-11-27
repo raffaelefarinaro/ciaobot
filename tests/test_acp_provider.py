@@ -9,6 +9,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import sys
+import threading
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, ClassVar
@@ -860,3 +861,140 @@ async def test_config_error_log_omits_adapter_text(
     assert "qqq555secret" not in caplog.text
     assert "access_token" not in caplog.text
     assert "could not set model (RequestError)" in caplog.text
+
+
+# -- running background shells reach the host ------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_shell_count_changes_reach_the_service_hook_and_a_dead_agent_reports_zero(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The hook chain the chat rows depend on: session -> AcpProvider -> ProviderService -> host.
+
+    The hook is installed before the provider exists, so the service hands it to the provider it
+    creates, and the provider to the session it opens. When the agent process exits, the count
+    is reported again and reads 0: a dead agent's shells are never seen to end.
+    """
+    config, _ = _install(monkeypatch, tmp_path, sessions=["sess-sh"], prompts=[_text_turn("ok")])
+    service = ProviderService(config)  # type: ignore[arg-type]
+    seen: list[int] = []
+    service.set_shells_hook(lambda: seen.append(service.running_shells))
+    try:
+        await _turn(service, _request())
+        provider = service.provider
+        assert isinstance(provider, AcpProvider)
+        session = provider._session
+        assert session is not None
+        session._shells.track_unpolled("call-1", command="sleep 60")
+        session._shells.track_unpolled("call-2", command="sleep 61")
+        session._report_shells()
+        assert seen == [2]
+        assert service.running_shells == 2
+
+        connection = provider._connection
+        assert connection is not None
+        connection._process.kill()
+        await _until(lambda: len(seen) == 2, timeout=10)
+        assert seen == [2, 0]
+        assert provider.running_shells == 0
+        # The session still tracks both: the count is 0 because the connection is not alive.
+        assert session.running_shells == 2
+    finally:
+        await service.disconnect()
+
+
+@pytest.mark.asyncio
+async def test_running_shells_is_zero_once_the_connection_is_not_alive(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    config, _ = _install(monkeypatch, tmp_path)
+    provider = FakeAcpProvider(config.workspace_root, config=config)
+    provider._session = SimpleNamespace(running_shells=3)  # type: ignore[assignment]
+    provider._connection = SimpleNamespace(alive=True)  # type: ignore[assignment]
+    assert provider.running_shells == 3
+    provider._connection = SimpleNamespace(alive=False)  # type: ignore[assignment]
+    assert provider.running_shells == 0
+    provider._connection = None
+    assert provider.running_shells == 0
+
+
+def _as_managed_adapter(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Run the installed fake spec as if it were the pinned claude-agent-acp adapter."""
+    import dataclasses
+
+    assert FAKE_SPEC is not None
+    spec = dataclasses.replace(FAKE_SPEC, binary="claude-agent-acp", args=(*FAKE_SPEC.args,))
+    monkeypatch.setattr(sys.modules[__name__], "FAKE_SPEC", spec)
+    monkeypatch.setattr(FakeAcpProvider, "spec", spec, raising=False)
+
+
+@pytest.mark.asyncio
+async def test_a_start_during_the_adapter_install_says_so_and_waits(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    from ciao import adapter_install
+    from ciao.providers.acp import connection as connection_module
+
+    config, _ = _install(monkeypatch, tmp_path)
+    _as_managed_adapter(monkeypatch)
+    installed = threading.Event()
+    launches: list[str] = []
+
+    def launch(name: str) -> list[str]:
+        launches.append(name)
+        if not installed.is_set():
+            raise adapter_install.AdapterInstalling("being installed")
+        return [sys.executable]
+
+    monkeypatch.setattr(adapter_install, "install_in_progress", lambda name: not installed.is_set())
+    monkeypatch.setattr(connection_module, "launch_argv", launch)
+    monkeypatch.setattr(connection_module, "_INSTALL_POLL_S", 0.01)
+    monkeypatch.setattr(connection_module, "_GAVE_UP", {})
+    service = ProviderService(config)  # type: ignore[arg-type]
+    stream = service.execute_streaming(_request())
+    try:
+        first = await asyncio.wait_for(anext(stream), timeout=5)
+        assert isinstance(first, SystemStatusEvent)
+        assert first.status == "Setting up Fake, one moment."
+
+        # The turn is now blocked on the install: it keeps polling and yields nothing more.
+        following = asyncio.ensure_future(anext(stream))
+        await _until(lambda: len(launches) >= 3)
+        assert not following.done(), "the turn went on before the install finished"
+
+        installed.set()
+        events = [await asyncio.wait_for(following, timeout=10)]
+        events += [event async for event in stream]
+    finally:
+        await stream.aclose()
+
+    assert not any(isinstance(event, SystemStatusEvent) for event in events)
+    assert isinstance(events[-1], ResultEvent)
+    assert events[-1].is_error is False
+
+
+@pytest.mark.asyncio
+async def test_an_adapter_that_is_not_ready_says_why_in_the_result(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    from ciao import adapter_install
+    from ciao.providers.acp import connection as connection_module
+
+    config, _ = _install(monkeypatch, tmp_path)
+    _as_managed_adapter(monkeypatch)
+    sentence = "The ACP adapter claude-agent-acp 0.108.1 is not installed for Ciaobot yet. npm was not found on this machine."
+
+    def launch(name: str) -> list[str]:
+        raise adapter_install.AdapterNotReady(sentence)
+
+    monkeypatch.setattr(adapter_install, "install_in_progress", lambda name: False)
+    monkeypatch.setattr(connection_module, "launch_argv", launch)
+    service = ProviderService(config)  # type: ignore[arg-type]
+
+    events = await _turn(service, _request())
+
+    assert len(events) == 1
+    assert isinstance(events[0], ResultEvent)
+    assert events[0].is_error is True
+    assert events[0].result == f"fake agent did not start: {sentence}"

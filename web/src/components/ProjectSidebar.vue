@@ -651,8 +651,9 @@
                   <!-- Only a collapsed project summarises its chats: expanded,
                        each chat row already carries its own signal. One static
                        dot when a chat wants the user (accent if it waits for an
-                       answer), else the working grid - never a count. A chat's
-                       background run adds the static run glyph beside either. -->
+                       answer), else the working grid - never a count. A chat
+                       whose background shells still run adds the run glyph
+                       beside either. -->
                   <template v-if="!expandedProjects.has(project.project_id)">
                     <span
                       v-if="projectAttention(project.project_id)"
@@ -669,6 +670,13 @@
                       aria-label="A chat in this project is working"
                       role="img"
                     ><ActivityGlyph kind="working" /></span>
+                    <span
+                      v-if="store.projectChats(project.project_id).some(chat => store.chatRunningShells(chat.chat_id) > 0)"
+                      class="project-working project-shells"
+                      title="Background shells are running in this project"
+                      aria-label="Background shells are running in this project"
+                      role="img"
+                    ><ActivityGlyph kind="run" /></span>
                   </template>
                 </button>
                 <input

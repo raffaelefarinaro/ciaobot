@@ -58,12 +58,18 @@ function defaultDescriptionText(description: string | undefined): string {
   return (description || '').split(' · ')[0].trim().slice(0, 80)
 }
 
-/** A Claude model id's family and version: "claude-opus-4-5-20251101" -> Opus 4.5. */
+/**
+ * A Claude model id's family and version: "claude-opus-4-5-20251101" ->
+ * Opus 4.5, and the older order "claude-3-5-sonnet-20241022" -> Sonnet 3.5.
+ * A date is never a version: a number longer than two digits reads as none.
+ */
 function idFamilyVersion(text: string): { family: string; version: string } | null {
-  const match = /(opus|sonnet|haiku|fable)[-_]?(\d+)(?:[-_.](\d{1,2})(?!\d))?/i.exec(text)
+  const cased = (family: string) => family.charAt(0).toUpperCase() + family.slice(1).toLowerCase()
+  const old = /claude-(\d{1,2})(?:-(\d{1,2}))?-(opus|sonnet|haiku)(?![a-z])/i.exec(text)
+  if (old) return { family: cased(old[3]), version: old[2] ? `${old[1]}.${old[2]}` : old[1] }
+  const match = /(opus|sonnet|haiku|fable)[-_]?(\d{1,2})(?!\d)(?:[-_.](\d{1,2})(?!\d))?/i.exec(text)
   if (!match) return null
-  const family = match[1].charAt(0).toUpperCase() + match[1].slice(1).toLowerCase()
-  return { family, version: match[3] ? `${match[2]}.${match[3]}` : match[2] }
+  return { family: cased(match[1]), version: match[3] ? `${match[2]}.${match[3]}` : match[2] }
 }
 
 function words(text: string): string[] {

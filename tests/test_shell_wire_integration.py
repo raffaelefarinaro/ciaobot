@@ -34,6 +34,8 @@ def _session(spec: Any, monkeypatch: pytest.MonkeyPatch, table: dict[int, tuple[
     monkeypatch.setattr(session_module, "process_table", lambda: dict(table))
     monkeypatch.setattr(session_module, "CHECK_INTERVAL_S", 0.01)
     session = AcpSession.__new__(AcpSession)
+    session.shells_hook = None
+    session._shells_reported = 0
     session.spec = spec
     session.session_id = ""  # the frames' session check is skipped
     session._normalizer = UpdateNormalizer(spec, "")
@@ -106,3 +108,35 @@ async def test_claude_wire_terminal_exit_ends_the_shell_once_and_is_never_polled
     assert session._shell_task is None and not session._shells.polling  # never polled
     assert not session._shells.tracking  # settled by the terminal_exit, not left running
     assert "exit status unknown" in _notice_text(ended)
+
+
+@pytest.mark.asyncio
+async def test_claude_wire_reports_the_running_shell_count_on_launch_and_on_terminal_exit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    table = {1: (0, "boot")}
+    session = _session(CLAUDE, monkeypatch, table, [])
+    counts: list[int] = []
+    session.shells_hook = lambda: counts.append(session.running_shells)
+    for params in _frames("shell_claude_wire_background.jsonl"):
+        session.on_update(params)
+    await _settle(session)
+    # One report when the launch acknowledgement starts tracking, one when terminal_exit ends it.
+    assert counts == [1, 0]
+    assert session.running_shells == 0
+
+
+@pytest.mark.asyncio
+async def test_opencode_wire_reports_zero_when_the_poll_finds_the_pid_gone(monkeypatch: pytest.MonkeyPatch) -> None:
+    table = {22660: (1, STARTED)}
+    session = _session(OPENCODE, monkeypatch, table, [])
+    counts: list[int] = []
+    session.shells_hook = lambda: counts.append(session.running_shells)
+    for params in _frames("shell_opencode_wire_background.jsonl"):
+        session.on_update(params)
+    assert counts == [1]
+    del table[22660]
+    table[1] = (0, "boot")
+    await asyncio.wait_for(session._shell_task, timeout=2)
+    await _settle(session)
+    assert counts == [1, 0]

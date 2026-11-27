@@ -56,6 +56,48 @@ describe('ChatSignals', () => {
     expect(working.find('.chat-signal--working').attributes('aria-label')).toBe('Working')
   })
 
+  // Background shells outlive the turn that started them, so the row keeps a mark
+  // for them from the engine's count: the run glyph, named with the count.
+  it('marks running background shells with the run glyph and a counted label', () => {
+    const { store } = seed()
+    store.runningShells = { 'chat-1': 1 }
+    const one = mount(ChatSignals, { props: { chatId: 'chat-1', density: 'row' } })
+    expect(one.find('.chat-signal--shells .activity-glyph--run').exists()).toBe(true)
+    expect(one.find('.chat-signal--shells').attributes('aria-label')).toBe('1 shell running')
+    expect(one.find('.chat-signal--shells').attributes('title')).toBe('1 shell running')
+
+    store.runningShells = { 'chat-1': 3 }
+    const three = mount(ChatSignals, { props: { chatId: 'chat-1', density: 'card' } })
+    expect(three.find('.chat-signal--shells').attributes('aria-label')).toBe('3 shells running')
+    expect(three.text()).toBe('')
+  })
+
+  it('ranks shells under needs, memory and working, and over a scheduled retry', () => {
+    const { store } = seed()
+    store.runningShells = { 'chat-1': 2 }
+    store.chats[0].retry = { status: 'pending' } as never
+    const overRetry = mount(ChatSignals, { props: { chatId: 'chat-1', density: 'row' } })
+    expect(overRetry.find('.chat-signal--shells').exists()).toBe(true)
+    expect(overRetry.find('.chat-signal--retry').exists()).toBe(false)
+
+    store.projectStreaming = { 'chat-1': true }
+    const streaming = mount(ChatSignals, { props: { chatId: 'chat-1', density: 'row' } })
+    expect(streaming.find('.chat-signal--working').exists()).toBe(true)
+    expect(streaming.find('.chat-signal--shells').exists()).toBe(false)
+
+    store.chats[0].pending_question = JSON.stringify({ questions: [{ question: 'Which option?' }] })
+    const needs = mount(ChatSignals, { props: { chatId: 'chat-1', density: 'row' } })
+    expect(needs.find('.chat-signal--needs').exists()).toBe(true)
+    expect(needs.findAll('.activity-glyph')).toHaveLength(1)
+  })
+
+  it('shows no shell mark for a chat the engine reports none for', () => {
+    const { store } = seed()
+    store.runningShells = { 'other-chat': 4 }
+    const wrapper = mount(ChatSignals, { props: { chatId: 'chat-1', density: 'row' } })
+    expect(wrapper.find('.chat-signal--shells').exists()).toBe(false)
+  })
+
   it('renders the schedule clock and the retry alert with their accessible labels', () => {
     const { store, taskStore } = seed()
     store.chats[0].retry = { status: 'pending' } as never

@@ -1474,6 +1474,9 @@ class ProjectChatManager:
         self._provider_reaper: asyncio.Task | None = None
         # Background shells that finished, not yet announced, by chat; and the flush task per chat.
         self._shell_finished_pending: dict[str, list[ShellFinishedEvent]] = {}
+        # The running background-shell count last published per chat (`chat_shells`), only non-zero
+        # entries. The count itself is always read from the live provider, never from here.
+        self._running_shells_published: dict[str, int] = {}
         self._shell_finished_flushes: dict[str, asyncio.Task[object]] = {}
         # Finished shells held while the chat waits on a question or permission, by chat.
         self._shell_finished_waiting: dict[str, list[ShellFinishedEvent]] = {}
@@ -5934,6 +5937,8 @@ class ProjectChatManager:
             )
             # A provider's own continuation that starts on this chat answers the held shell notices.
             self._providers[chat_id].set_continuation_hook(partial(self._continuation_started, chat_id))
+            # The chat rows mark running background shells; the count is pushed when it changes.
+            self._providers[chat_id].set_shells_hook(partial(self._publish_running_shells, chat_id))
             # Only on creation: the kind must describe the provider object that
             # is actually in the map, not whatever the chat row says later.
             self._provider_kind[chat_id] = provider_name
@@ -5956,7 +5961,10 @@ class ProjectChatManager:
         self._provider_last_used.pop(chat_id, None)
         self._provider_disconnect_failures.pop(chat_id, None)
         self._provider_kind.pop(chat_id, None)
-        return self._providers.pop(chat_id, None)
+        provider = self._providers.pop(chat_id, None)
+        # A chat with no provider runs no shells: its row loses the mark now, not at disconnect.
+        self._publish_running_shells(chat_id)
+        return provider
 
     def evict_workspace_providers(self, workspace: str) -> list[str]:
         """Disconnect and forget the cached providers of *workspace*'s chats.
@@ -9759,6 +9767,41 @@ class ProjectChatManager:
         """True while the chat's provider reports background work still running."""
         service = self._providers.get(chat_id)
         return bool(service is not None and service.background_work_outstanding)
+
+    def running_shells(self, chat_id: str) -> int:
+        """Background shells the chat's live provider runs now; 0 with no provider.
+
+        Read from the live session every time, never stored: an engine restart, a closed session
+        or a dropped provider all read as 0.
+        """
+        service = self._providers.get(chat_id)
+        return service.running_shells if service is not None else 0
+
+    def running_shells_by_chat(self) -> dict[str, int]:
+        """Every chat running background shells now, with its count (the `/ws/events` snapshot map)."""
+        counts: dict[str, int] = {}
+        for chat_id in list(self._providers):
+            count = self.running_shells(chat_id)
+            if count:
+                counts[chat_id] = count
+        return counts
+
+    def _publish_running_shells(self, chat_id: str) -> None:
+        """Publish `chat_shells` when the chat's running background-shell count differs from the last one sent."""
+        count = self.running_shells(chat_id)
+        if count == self._running_shells_published.get(chat_id, 0):
+            return
+        if count:
+            self._running_shells_published[chat_id] = count
+        else:
+            self._running_shells_published.pop(chat_id, None)
+        chat = self._chats.get(chat_id)
+        self._events.publish({
+            "type": "chat_shells",
+            "chat_id": chat_id,
+            "project_id": chat.project_id if chat is not None else "",
+            "running_shells": count,
+        })
 
 
     def _note_shell_finished(self, chat_id: str, event: ShellFinishedEvent) -> None:

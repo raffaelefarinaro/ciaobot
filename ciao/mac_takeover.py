@@ -101,7 +101,7 @@ import time
 from collections.abc import Iterator
 from contextlib import contextmanager
 from dataclasses import asdict, dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path, PurePosixPath
 from typing import Any, Callable
 from xml.parsers.expat import ExpatError
@@ -393,6 +393,40 @@ def _entry_state(entry: Path) -> str | None:
     journal = _read_journal_file(entry)
     state = journal.get("state") if journal is not None else None
     return state if isinstance(state, str) else _UNREADABLE
+
+
+#: How far in the future a handover stamp may be and still count (clock slack).
+_HANDOVER_CLOCK_SLACK = timedelta(minutes=5)
+
+
+def handed_over_at() -> datetime | None:
+    """When the newest takeover handed its workspace to the bundled engine, or ``None``.
+
+    The stamp is written as the pointer names the workspace, after the old engine was proven gone,
+    so every record the old engine logged is older. A rolled-back or unfinished takeover handed
+    nothing over; a journal that cannot be read strictly, or has no readable stamp, is skipped.
+    A stamp later than now (beyond a few minutes of clock slack) is skipped too: a clock that was
+    set back, or a forged journal, must not hide every error from the triage until that date.
+    """
+    latest = datetime.now(UTC) + _HANDOVER_CLOCK_SLACK
+    try:
+        entries = list(_takeover_root().iterdir())
+    except OSError:
+        return None
+    newest: datetime | None = None
+    for entry in entries:
+        if _entry_state(entry) not in (STATE_POINTER_WRITTEN, STATE_HEALTHY, STATE_FINISHED):
+            continue
+        stamp = (_read_journal_file(entry) or {}).get("handed_over")
+        try:
+            when = datetime.strptime(str(stamp), "%Y%m%dT%H%M%SZ").replace(tzinfo=UTC)
+        except ValueError:
+            continue
+        if when > latest:
+            continue
+        if newest is None or when > newest:
+            newest = when
+    return newest
 
 
 def _unfinished_journal() -> str:
@@ -2011,7 +2045,8 @@ def _drive(
             app_engine.write_pointer(
                 Path(str(journal["workspace"])), Path(str(journal["runtime_root"]))
             )
-            _advance(entry, state, STATE_POINTER_WRITTEN)
+            # The old engine is proven gone: anything it logged is older than this stamp.
+            _advance(entry, state, STATE_POINTER_WRITTEN, handed_over=_utc_stamp())
         elif state == STATE_POINTER_WRITTEN:
             # The bundled engine may be running by now, so only the old service
             # definition and job are re-proven absent.

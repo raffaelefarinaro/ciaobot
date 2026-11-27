@@ -251,6 +251,10 @@ describe('the default entry and catalog labels', () => {
     expect(defaultDescriptionName('Opus')).toBe('Opus')
     expect(defaultDescriptionName('claude-opus-4-5-20251101')).toBe('Opus 4.5')
     expect(defaultDescriptionName('openai/gpt-5.6')).toBe('GPT-5.6')
+    // The older id order, and a date that is never read as a version.
+    expect(defaultDescriptionName('claude-3-5-sonnet-20241022')).toBe('Sonnet 3.5')
+    expect(defaultDescriptionName('claude-3-opus-20240229')).toBe('Opus 3')
+    expect(defaultDescriptionName('claude-sonnet-20241022')).toBe('Claude Sonnet-20241022')
     expect(defaultDescriptionName('Use the default model (currently Sonnet 4.5) · $3/$15 per Mtok')).toBe('Sonnet 4.5')
     expect(defaultDescriptionName('Use the default model · $3/$15 per Mtok')).toBe('')
     expect(defaultDescriptionName('The model this account is set up to use for most of its work today')).toBe('')

@@ -620,11 +620,13 @@ export type WsEvent =
 // Global awareness events from /ws/events
 export type EventsWsMessage =
   | { type: 'keepalive' }
-  | { type: 'snapshot'; active_streams: { chat_id: string; project_id: string; background?: boolean }[]; restarting?: boolean; chat_pins: Record<string, ChatPinState>; chat_actions?: Record<string, ChatAction[]>; keyboard_shortcuts?: Record<string, string>; keyboard_send_mode?: 'modifier' | 'enter'; keyboard_revision?: string; appearance?: AppearancePayload | null }
+  | { type: 'snapshot'; active_streams: { chat_id: string; project_id: string; background?: boolean }[]; restarting?: boolean; chat_pins: Record<string, ChatPinState>; chat_actions?: Record<string, ChatAction[]>; running_shells?: Record<string, number>; keyboard_shortcuts?: Record<string, string>; keyboard_send_mode?: 'modifier' | 'enter'; keyboard_revision?: string; appearance?: AppearancePayload | null }
   | { type: 'keyboard_settings_changed'; keyboard_shortcuts: Record<string, string>; keyboard_send_mode: 'modifier' | 'enter'; revision: string }
   | ({ type: 'appearance_settings_changed' } & AppearancePayload)
   | { type: 'chat_pin_changed'; chat_id: string; path: string; dismissed_paths: string[]; revision: number }
   | { type: 'chat_actions_changed'; chat_id: string; actions: ChatAction[] }
+  // How many background shells the chat's live agent session runs now; 0 clears the mark.
+  | { type: 'chat_shells'; chat_id: string; project_id: string; running_shells: number }
   | { type: 'chat_created'; chat: ChatInfo }
   | { type: 'chat_streaming_started'; chat_id: string; project_id: string; background?: boolean }
   | { type: 'chat_streaming_done'; chat_id: string; project_id: string; is_error: boolean; last_error?: string; failure_id?: string; repo_location?: Partial<RepoLocation> }

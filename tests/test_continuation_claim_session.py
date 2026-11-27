@@ -39,6 +39,8 @@ class _Journal:
 
 def _session(journal: _Journal | None = None) -> AcpSession:
     session = AcpSession.__new__(AcpSession)
+    session.shells_hook = None
+    session._shells_reported = 0
     session._journal = journal or _Journal()
     session._late_queue = asyncio.Queue()
     session._late_text = TurnText()

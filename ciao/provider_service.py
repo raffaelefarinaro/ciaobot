@@ -54,6 +54,7 @@ class ProviderService:
         self._agent_root = agent_root
         self._provider: ProviderImpl | None = None
         self._continuation_hook: Callable[[list[Any]], str | None] | None = None
+        self._shells_hook: Callable[[], None] | None = None
         self._active_handle: ActiveHandle | None = None
         if provider:
             self._ensure_provider(provider)
@@ -67,6 +68,7 @@ class ProviderService:
             root = self._agent_root if self._agent_root is not None else self._config.workspace_root
             self._provider = factory(root, config=self._config)
             self._provider.continuation_hook = self._continuation_hook
+            self._provider.shells_hook = self._shells_hook
         return self._provider
 
     def ensure_provider(self, provider: str) -> ProviderImpl:
@@ -142,6 +144,17 @@ class ProviderService:
         self._continuation_hook = hook
         if self._provider is not None:
             self._provider.continuation_hook = hook
+
+    def set_shells_hook(self, hook: Callable[[], None]) -> None:
+        """Ask to be told when the live provider's running background-shell count changes."""
+        self._shells_hook = hook
+        if self._provider is not None:
+            self._provider.shells_hook = hook
+
+    @property
+    def running_shells(self) -> int:
+        """Background shells the live provider runs now; 0 with no provider."""
+        return self._provider.running_shells if self._provider is not None else 0
 
     @property
     def continues_after_shell(self) -> bool:

@@ -1162,7 +1162,11 @@ export const useProjectStore = defineStore('projects', () => {
       if (message.subagent) history.push({ kind: 'subagent', card: message.subagent })
       else if (message.shell) history.push({ kind: 'shell', card: message.shell })
     }
-    return runningWorkFrom(live, history)
+    const work = runningWorkFrom(live, history)
+    // A shell card can still read running after the engine lost the shell (a restart, a closed
+    // session): the engine's count decides whether any shell runs, the cards only name them.
+    if (work.shells.length && chatRunningShells(chatId) === 0) return { ...work, shells: [] }
+    return work
   }
 
   /** The chat open beside the active one in ChatLayout's split, or null. Live viewing state only:
@@ -1295,6 +1299,28 @@ export const useProjectStore = defineStore('projects', () => {
 
   function isChatStreaming(chatId: string): boolean {
     return Boolean(projectStreaming.value[chatId] || streaming.value[chatId])
+  }
+
+  // Background shells each chat's live agent session runs now, from the engine only: the
+  // `/ws/events` snapshot (sparse and complete, so a chat it omits runs none) and `chat_shells`.
+  // This is the one per-chat source: the composer's shell chip and every chat row read it.
+  const runningShells = ref<Record<string, number>>({})
+
+  function chatRunningShells(chatId: string): number {
+    return runningShells.value[chatId] ?? 0
+  }
+
+  function applyRunningShells(chatId: string, count: number) {
+    if (Number.isFinite(count) && count > 0) runningShells.value[chatId] = Math.floor(count)
+    else delete runningShells.value[chatId]
+  }
+
+  /**
+   * Is this chat alive: a turn streaming, or background shells still running after it?
+   * Home's Working tier uses this; attention (`chatFailed`, needs-you) still reads chatIsWorking.
+   */
+  function chatIsRunning(chatId: string): boolean {
+    return chatIsWorking(chatId) || chatRunningShells(chatId) > 0
   }
 
   /**
@@ -4884,6 +4910,8 @@ export const useProjectStore = defineStore('projects', () => {
         // was down heals to server truth instead of writing stale browser state.
         applyChatPinsSnapshot(msg.chat_pins)
         applyChatActionsSnapshot(msg.chat_actions)
+        runningShells.value = {}
+        for (const [chatId, count] of Object.entries(msg.running_shells ?? {})) applyRunningShells(chatId, count)
         if (msg.restarting) {
           beginServerRestart()
         }
@@ -4914,6 +4942,9 @@ export const useProjectStore = defineStore('projects', () => {
       // overlay would otherwise stick and block a perfectly working engine.
       case 'server_restart_cancelled':
         cancelServerRestart()
+        break
+      case 'chat_shells':
+        applyRunningShells(msg.chat_id, msg.running_shells)
         break
       case 'chat_streaming_started':
         {
@@ -7122,7 +7153,7 @@ export const useProjectStore = defineStore('projects', () => {
     // State
     projects, chats, workspaces, workspaceRegistryStatus, workspaceRegistryError, workspaceProviderOptions, claudeTrimOptions, activeWorkspace, activeChatId, besideChatId, bootstrapped, chatsHealth, messages, messageHistoryLoading, unread, lastResultSnippet, lastResultSnippetAt, lastResultSnippetNeedsRebase,
     streaming, streamingText, streamingThinking, pendingImages, pendingComments, pendingChatComments, fileComments, queuedMessages,
-    projectStreaming, wakeStreaming, isWakeStreaming, toasts, pendingPermissions, permissionSubmissions, activeQuestions, questionSubmissions, activeCapabilityQuestions, creatingChatProjectIds,
+    projectStreaming, runningShells, wakeStreaming, isWakeStreaming, toasts, pendingPermissions, permissionSubmissions, activeQuestions, questionSubmissions, activeCapabilityQuestions, creatingChatProjectIds,
     chatActions, pendingChatModeWrites,
     serverRestarting, serverRestartMessage,
     // Computed
@@ -7132,7 +7163,7 @@ export const useProjectStore = defineStore('projects', () => {
     deniedToolUseIdsFor, streamStartedAtFor, runningWorkFor, pendingImagesFor, pendingFilesFor, pendingCommentsFor, pendingChatCommentsFor,
     isStreaming, currentStreamingText, currentStreamingThinking, currentQueued, currentActivity, currentTimeline, currentDeniedToolUseIds, currentLiveUsage, currentStreamStartedAt, projectChats,
     chatUnread, chatNeedsInput, chatFailed, chatNeedsYou, chatPendingQuestion, chatLastSnippet, chatIsAttentionItem, projectNeedsInput, projectUnread, workspaceUnread, workspaceNeedsInput, totalUnread, attentionChatCount, clearUnread, markRead, markUnread, markAllRead,
-    recentChats, activeChatsAll, projectIsStreaming, isChatStreaming, chatIsWorking, workspaceIsStreaming, projectFor,
+    recentChats, activeChatsAll, projectIsStreaming, isChatStreaming, chatIsWorking, chatIsRunning, chatRunningShells, workspaceIsStreaming, projectFor,
     chatPostprocess,
     memoryPassNeedsAttention, memoryInsightRows,
     archivingChats, isArchiving,

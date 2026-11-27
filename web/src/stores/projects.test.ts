@@ -10843,3 +10843,43 @@ describe('chatIsWorking', () => {
     expect(store.chatIsWorking('c1')).toBe(false)
   })
 })
+
+
+describe('running background shells from /ws/events', () => {
+  function send(sock: (typeof fakeSockets)[number], payload: unknown) {
+    sock.onmessage?.({ data: JSON.stringify(payload) })
+  }
+  const snapshot = (running_shells?: Record<string, number>) => ({
+    type: 'snapshot', active_streams: [], chat_pins: {}, chat_actions: {}, ...(running_shells ? { running_shells } : {}),
+  })
+
+  it('reads the snapshot map and chat_shells, and 0 clears a chat', () => {
+    apiGet.mockResolvedValue([])
+    const store = useProjectStore()
+    store.connectEventsWs()
+    const sock = fakeSockets[fakeSockets.length - 1]
+    send(sock, snapshot({ a: 3, b: 1 }))
+    expect(store.chatRunningShells('a')).toBe(3)
+    expect(store.chatRunningShells('b')).toBe(1)
+    expect(store.chatIsRunning('a')).toBe(true)
+    // Attention reads the streaming state only: shells never make a chat "working" there.
+    expect(store.chatIsWorking('a')).toBe(false)
+
+    send(sock, { type: 'chat_shells', chat_id: 'a', project_id: 'p1', running_shells: 2 })
+    send(sock, { type: 'chat_shells', chat_id: 'b', project_id: 'p1', running_shells: 0 })
+    expect(store.chatRunningShells('a')).toBe(2)
+    expect(store.chatRunningShells('b')).toBe(0)
+    expect(store.runningShells).toEqual({ a: 2 })
+  })
+
+  it('a reconnect snapshot without a chat drops its count (an engine restart runs none)', () => {
+    apiGet.mockResolvedValue([])
+    const store = useProjectStore()
+    store.connectEventsWs()
+    const sock = fakeSockets[fakeSockets.length - 1]
+    send(sock, snapshot({ a: 3 }))
+    send(sock, snapshot())
+    expect(store.chatRunningShells('a')).toBe(0)
+    expect(store.chatIsRunning('a')).toBe(false)
+  })
+})

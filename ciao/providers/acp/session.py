@@ -217,6 +217,10 @@ class AcpSession:
         # Set by the host: called with the shell ends this session has emitted and not yet offered,
         # when a late turn starts speaking. Returns the notice the reply answers, or None.
         self.continuation_hook: Callable[[list[ShellFinishedEvent]], str | None] | None = None
+        # Set by the host: called with no arguments whenever the number of running background shells
+        # changes, so the chat rows can show it. The count itself is read from ``running_shells``.
+        self.shells_hook: Callable[[], None] | None = None
+        self._shells_reported = 0
         # The shell ends this session emitted and has not offered to a continuation, by call id.
         self._ended_shells: dict[str, ShellFinishedEvent] = {}
         self._late_speaking = False
@@ -408,6 +412,7 @@ class AcpSession:
     def _note_update(self, events: list[StreamEvent], *, kind: str) -> None:
         self._finish_shells(events)
         self._track_shells(events)
+        self._report_shells()
         if self._prompt_active:
             for event in events:
                 self._queue.put_nowait(event)
@@ -567,6 +572,7 @@ class AcpSession:
             return
         for call_id, shell in self._shells.settled(table):
             self._end_shell(call_id, shell, None, claiming=True)
+        self._report_shells()
 
     def _claim_continuation(self) -> None:
         """Offer this session's unclaimed shell ends to the host; journal and queue the notice it returns.
@@ -921,6 +927,25 @@ class AcpSession:
         return self._late_open
 
     @property
+    def running_shells(self) -> int:
+        """How many background shells this session tracks as running now (end notices in flight excluded)."""
+        return self._shells.count
+
+    def _report_shells(self) -> None:
+        """Tell the host when the running-shell count changed. Never raises."""
+        count = self._shells.count
+        if count == self._shells_reported:
+            return
+        self._shells_reported = count
+        hook = self.shells_hook
+        if hook is None:
+            return
+        try:
+            hook()
+        except Exception:
+            logger.exception("Running-shell count notification failed")
+
+    @property
     def background_shells_running(self) -> bool:
         """True while a tracked background shell runs, or its end notice is still on its way."""
         return self._shells.tracking or bool(self._deferred_ends) or bool(self._end_tasks)
@@ -936,6 +961,7 @@ class AcpSession:
         self._ended_shells.clear()
         self._shells.clear()
         self._shell_commands.clear()
+        self._report_shells()
 
     async def close(self) -> None:
         """``session/close`` when the agent advertises it, then nothing else."""
