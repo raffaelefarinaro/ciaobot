@@ -5,7 +5,7 @@ import { boot, isolate } from '../support/app'
  * One row language across the app's lists: the Settings and Memory section
  * lists are sidebar rows like a chat's (the fill alone marks the open one),
  * the sidebar's lists load in that row's shape, Home's chats and the
- * Automations overview share one page-row component and one arrow-key roaming,
+ * Automations pages share one page-row component and one arrow-key roaming,
  * and Usage loads in the shared skeleton.
  */
 
@@ -36,7 +36,7 @@ test.describe('unified rows, desktop', () => {
     expect(await current.evaluate(weight)).toBe('400')
   })
 
-  test('the automation list loads as sidebar rows', async ({ page }) => {
+  test('Next up loads as sidebar rows', async ({ page }) => {
     let release!: () => void
     const held = new Promise<void>(resolve => { release = resolve })
     await page.route('**/api/schedules**', async route => { await held; await route.continue() })
@@ -47,11 +47,11 @@ test.describe('unified rows, desktop', () => {
     // The placeholder is the row's box: same height as the rows that replace it.
     expect((await skeleton.locator('.sidebar-row--placeholder').first().boundingBox())!.height).toBe(36)
     release()
-    await expect(page.locator('.schedules-list .schedule-item')).toHaveCount(3)
+    await expect(page.locator('.schedules-list .automations-next-item')).toHaveCount(3)
     await expect(skeleton).toHaveCount(0)
   })
 
-  test('Home and the Automations overview share one row, and arrows roam both', async ({ page }) => {
+  test('Home and the Schedules page share one row, and arrows roam both', async ({ page }) => {
     await boot(page, '/')
     const home = page.locator('.home-chat-item:not(.home-chat-item--insight)').first()
     await expect(home).toHaveClass(/list-row/)
@@ -61,13 +61,13 @@ test.describe('unified rows, desktop', () => {
     const rows = page.locator('.overview-body a.ov-item')
     await expect(rows).toHaveCount(3)
     await expect(rows.first()).toHaveClass(/list-row/)
-    // The first overview row also draws the rule above it, so compare the second.
+    // The first row also draws the rule above it, so compare the second.
     expect((await rows.nth(1).boundingBox())!.height).toBe(homeBox.height)
     const end = (el: Element) => getComputedStyle(el.querySelector('.list-row-when')!).fontFamily
     expect(await rows.first().evaluate(end)).toBe(await page.locator('.schedules-list .sidebar-row-meta').first().evaluate(el => getComputedStyle(el).fontFamily))
 
     // Arrows from the page body roam the sidebar list first, as before; with
-    // focus on an overview row they move along the overview.
+    // focus on a page row they move along the page.
     await rows.nth(0).focus()
     await page.keyboard.press('ArrowDown')
     await expect(rows.nth(1)).toBeFocused()

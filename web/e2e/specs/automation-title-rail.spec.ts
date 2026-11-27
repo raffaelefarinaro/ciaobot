@@ -3,10 +3,10 @@ import { boot, isolate } from '../support/app'
 
 /**
  * An open automation has the same header as an open chat: a title rail over the
- * workspace's automations in sidebar order, swiped (or arrow-keyed) between, and
- * pulled down to close back to the automation list. The fixture gives alpha
- * three routines, so the rail order is Daily project briefing, Weekly review,
- * Inbox sweep.
+ * workspace's automations in the Automations pages' order, swiped (or
+ * arrow-keyed) between, and pulled down to close back to the automation list.
+ * The fixture gives alpha three routines whose next runs order the rail Daily
+ * project briefing, Weekly review, Inbox sweep.
  */
 
 const CURRENT = '.schedule-panel .title-rail-item[aria-current="page"]'
@@ -133,8 +133,8 @@ test.describe('automation title rail, desktop', () => {
   })
 
   test('Option+Left at the first automation is consumed, never the browser\'s Back', async ({ page }) => {
-    await boot(page, '/schedules', '.schedules-list .schedule-item')
-    await page.locator('.schedules-list .schedule-item').first().click()
+    await boot(page, '/schedules', '.overview-body a.ov-item')
+    await page.locator('.overview-body a.ov-item').first().click()
     await expect(page).toHaveURL(/\/schedules\/alpha-daily-brief$/)
     await page.locator('body').click({ position: { x: 900, y: 600 } })
     await page.keyboard.press('Alt+ArrowLeft')

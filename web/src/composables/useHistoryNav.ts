@@ -38,6 +38,8 @@ function install(router: Router): void {
 const SECTION_LABELS: Record<string, string> = {
   '/': 'Home',
   '/schedules': 'Automations',
+  '/automations/loops': 'Loops',
+  '/automations/webhooks': 'Webhooks',
   '/tasks': 'Tasks',
   '/stats': 'Usage',
   '/memory': 'Memory',

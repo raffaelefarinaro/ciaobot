@@ -32,6 +32,8 @@ const MAIN_SURFACES: Array<[string, string]> = [
   ['/tasks', '.task-card'],
   ['/stats', '.usage-kpi'],
   ['/automations', '.schedule-panel .page-tag'],
+  ['/automations/loops', '.schedule-panel #ov-loops-title'],
+  ['/automations/webhooks', '.schedule-panel #wh-section-title'],
   ['/memory/map', '.mm-toolbar-stale'],
   ['/memory/categories', '.cat-h'],
   ['/memory/unsure', '.mu-link'],

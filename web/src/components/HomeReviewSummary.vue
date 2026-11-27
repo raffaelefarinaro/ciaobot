@@ -1,8 +1,5 @@
 <template>
-  <section class="home-review-summary" aria-labelledby="home-review-title">
-    <div class="home-review-head">
-      <h2 id="home-review-title" class="rail-title">At a glance</h2>
-    </div>
+  <DockedWindow id="home-review-title" title="At a glance" class="home-review-summary">
 
     <!-- Only what needs a look: an up-to-date queue is not news, so it drops
          out instead of holding a row that says "nothing here". -->
@@ -12,18 +9,18 @@
       <button
         v-if="careLine"
         type="button"
-        class="home-review-item home-review-item--care"
+        class="docked-row home-review-item home-review-item--care"
         :class="{ 'home-review-item--care-running': careLine.running }"
         @click="openCare"
       >
-        <span class="home-review-title home-review-care-title"><CareGlyph :kind="careLine.glyph" />Workspace care</span>
-        <span class="home-review-detail">{{ careLine.detail }}</span>
+        <span class="docked-row-title home-review-title home-review-care-title"><CareGlyph :kind="careLine.glyph" />Workspace care</span>
+        <span class="docked-row-detail home-review-detail">{{ careLine.detail }}</span>
       </button>
       <button
         v-for="item in visibleItems"
         :key="item.key"
         type="button"
-        class="home-review-item"
+        class="docked-row home-review-item"
         :class="{
           'home-review-item--attention': item.state === 'error' || item.attention,
           'home-review-item--stale': item.state === 'stale',
@@ -31,13 +28,13 @@
         }"
         @click="openItem(item.key)"
       >
-        <span class="home-review-title">{{ item.title }}</span>
-        <span class="home-review-detail">{{ item.detail }}</span>
+        <span class="docked-row-title home-review-title">{{ item.title }}</span>
+        <span class="docked-row-detail home-review-detail">{{ item.detail }}</span>
       </button>
     </div>
     <p v-else class="home-review-clear">Nothing to review.</p>
     <HomeTodayStats />
-  </section>
+  </DockedWindow>
 </template>
 
 <script setup lang="ts">
@@ -50,6 +47,7 @@ import type { Schedule } from '../lib/types'
 import { scheduleInWorkspace, scheduleNeedsAttention } from '../lib/automationWorkspace'
 import HomeTodayStats from './HomeTodayStats.vue'
 import CareGlyph from './CareGlyph.vue'
+import DockedWindow from './DockedWindow.vue'
 import { careGlyph, careRailDetail, careState } from '../lib/careReport'
 import { useCareReportStore } from '../stores/careReport'
 import { memorySectionPath } from '../stores/memoryMap'
@@ -187,82 +185,7 @@ function openItem(key: ReviewItem['key']) {
 </script>
 
 <style scoped>
-/* The Chat details window (ChatPanel .chat-rail / .chat-rail-head), without its
-   close: Home's rail is one docked window, not a dismissible panel. */
-.home-review-summary {
-  box-sizing: border-box;
-  width: 100%;
-  min-width: 0;
-  padding: 16px;
-  border: 1px solid var(--border);
-  border-radius: var(--radius-lg);
-  background: var(--bg2);
-  box-shadow: 0 12px 32px -14px rgb(0 0 0 / 45%);
-  font-size: var(--text-sm);
-}
-
-:global(:root.theme-light) .home-review-summary {
-  box-shadow: 0 10px 28px -14px rgb(26 26 46 / 28%);
-}
-
-.home-review-head {
-  display: flex;
-  align-items: center;
-  min-height: 44px;
-  margin: -16px -16px 6px;
-  padding: 0 16px;
-  border-bottom: 1px solid var(--border);
-}
-
-.home-review-head .rail-title {
-  margin: 0;
-}
-
-/* Hairline rows, not cards: "what changed" reads as a short list, where a
-   stack of bordered tiles read as a second inbox to clear. */
-.home-review-list {
-  border-top: 0;
-}
-
-.home-review-item {
-  display: flex;
-  flex-direction: column;
-  gap: 2px;
-  width: 100%;
-  min-height: var(--touch);
-  padding: 13px 0;
-  border: 0;
-  border-bottom: 1px solid var(--border);
-  background: transparent;
-  color: var(--fg);
-  font: inherit;
-  text-align: left;
-  cursor: pointer;
-}
-
-.home-review-item:hover .home-review-title {
-  color: var(--accent);
-}
-
-.home-review-item:focus-visible {
-  outline: 2px solid var(--accent);
-  outline-offset: 2px;
-  border-radius: var(--radius-xs);
-}
-
-.home-review-title {
-  font-size: calc(13px * var(--font-scale));
-  font-weight: 650;
-  transition: color 120ms var(--ease);
-}
-
-.home-review-detail {
-  color: var(--fg2);
-  font-size: var(--text-sm);
-  line-height: 1.4;
-  overflow-wrap: anywhere;
-}
-
+/* The window and its rows are DockedWindow's; only Home's own registers here. */
 .home-review-item--stale .home-review-detail {
   color: var(--fg);
 }
@@ -273,7 +196,7 @@ function openItem(key: ReviewItem['key']) {
 
 /* The care line is quiet in every state: the glyph's shape and the detail's
    words carry the status, and Needs you carries the call to act. */
-.home-review-care-title {
+.home-review-item .home-review-care-title {
   display: inline-flex;
   align-items: center;
   gap: var(--space-2);
@@ -292,11 +215,5 @@ function openItem(key: ReviewItem['key']) {
   border-bottom: 1px solid var(--border);
   color: var(--fg3);
   font-size: var(--text-sm);
-}
-
-@media (prefers-reduced-motion: reduce) {
-  .home-review-title {
-    transition: none;
-  }
 }
 </style>

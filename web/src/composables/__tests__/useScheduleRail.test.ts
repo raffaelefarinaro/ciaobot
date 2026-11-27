@@ -32,21 +32,22 @@ describe('useScheduleRail', () => {
   })
   afterEach(() => resetRailState('schedule'))
 
-  it('follows the sidebar: one-offs, then routines, then system; other workspaces left out', () => {
+  it('follows the pages: system, then the user\'s routines by next run (one-offs among them), then loops; other workspaces left out', () => {
     useTaskStore().schedules = [
-      schedule('sys', { scope: 'system' }),
-      schedule('r1'),
-      schedule('once', { frequency: 'once', run_at_date: '2026-12-01' }),
+      schedule('sys', { scope: 'system', next_run: '2026-12-01T06:00:00Z' }),
+      schedule('r1', { next_run: '2026-12-01T09:00:00Z' }),
+      schedule('once', { frequency: 'once', run_at_date: '2026-12-01', next_run: '2026-12-01T08:00:00Z' }),
       schedule('elsewhere', { workspace: 'work' }),
-      schedule('r2', { frequency: 'interval', interval_minutes: 30 }),
+      schedule('r2', { frequency: 'interval', interval_minutes: 30, next_run: '2026-12-01T10:00:00Z' }),
+      schedule('paused', { enabled: false, next_run: '2026-12-01T07:00:00Z' }),
     ] as never
     const rail = useScheduleRail(() => 'r1')
-    expect(rail.items.value.map(i => i.id)).toEqual(['once', 'r1', 'r2', 'sys'])
-    expect(rail.items.value.map(i => i.subtitle.split(' · ')[0])).toEqual(['One-off', 'Routine', 'Routine', 'System'])
-    expect(rail.items.value[2].subtitle).toBe('Routine · 30m')
+    expect(rail.items.value.map(i => i.id)).toEqual(['sys', 'once', 'r1', 'r2', 'paused'])
+    expect(rail.items.value.map(i => i.subtitle.split(' · ')[0])).toEqual(['System', 'One-off', 'Routine', 'Routine', 'Routine'])
+    expect(rail.items.value[3].subtitle).toBe('Routine · 30m')
   })
 
-  it('lists a chat loop as a Loop between one-offs and routines, with its cadence', () => {
+  it('lists a chat loop as a Loop after the routines, with its cadence', () => {
     useTaskStore().schedules = [
       schedule('r1'),
       schedule('lp', {
@@ -56,8 +57,8 @@ describe('useScheduleRail', () => {
       schedule('once', { frequency: 'once', run_at_date: '2026-12-01' }),
     ] as never
     const rail = useScheduleRail(() => 'lp')
-    expect(rail.items.value.map(i => i.id)).toEqual(['once', 'lp', 'r1'])
-    const loop = rail.items.value[1]
+    expect(rail.items.value.map(i => i.id)).toEqual(['once', 'r1', 'lp'])
+    const loop = rail.items.value[2]
     expect(loop.subtitle).toBe('Loop · every 5 min')
     expect(loop.label).toBe('title lp, Loop, every 5 min')
   })
@@ -115,7 +116,8 @@ describe('schedule rail subtitles', () => {
       schedule('once', { frequency: 'once', run_at_date: '2026-12-01', enabled: false }),
       schedule('manual', { frequency: 'manual' }),
     ] as never
-    const [once, manual] = useScheduleRail(() => 'manual').items.value
+    // The paused one-off sorts after the routine that will run.
+    const [manual, once] = useScheduleRail(() => 'manual').items.value
     expect(manual.subtitle).toBe('Routine')
     expect(manual.label).toBe('title manual, Routine')
     expect(once.subtitle).toBe('One-off · paused')

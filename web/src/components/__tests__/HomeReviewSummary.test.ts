@@ -99,12 +99,13 @@ describe('HomeReviewSummary', () => {
   it('is one window: a title bar, then the queues, then Today even when nothing needs review', () => {
     useTaskStore().schedules = []
     const wrapper = mount(HomeReviewSummary)
+    // The shared docked window (DockedWindow.vue): a title bar and no close.
     const root = wrapper.get('.home-review-summary')
-    expect(root.classes()[0]).toBe('home-review-summary')
-    const title = root.get('.home-review-head #home-review-title')
+    expect(root.classes()).toContain('docked-window')
+    const title = root.get('.docked-window-head #home-review-title')
     expect(title.text()).toBe('At a glance')
     expect(title.classes()).toContain('rail-title')
-    expect(root.find('.home-review-head button').exists()).toBe(false)
+    expect(root.find('.docked-window-head button').exists()).toBe(false)
     expect(root.get('.home-review-clear').text()).toBe('Nothing to review.')
     expect(root.find('.home-today').exists()).toBe(true)
     const html = wrapper.html()

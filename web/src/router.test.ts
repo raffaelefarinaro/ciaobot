@@ -74,6 +74,24 @@ describe('router', () => {
     expect(router.currentRoute.value.name).toBe('stats')
   })
 
+  it('routes the three Automations pages and keeps every automation address', async () => {
+    const router = makeRouter()
+    await router.push('/schedules')
+    expect(router.currentRoute.value.name).toBe('schedules')
+    await router.push('/automations/loops')
+    expect(router.currentRoute.value.name).toBe('automations-loops')
+    await router.push('/automations/webhooks')
+    expect(router.currentRoute.value.name).toBe('automations-webhooks')
+    await router.push('/automations')
+    expect(router.currentRoute.value.path).toBe('/schedules')
+    // An automation literally named like a page is still an automation.
+    for (const id of ['sched-1a2b3c4d', 'loops', 'webhooks']) {
+      await router.push(`/schedules/${id}`)
+      expect(router.currentRoute.value.name).toBe('schedule-detail')
+      expect(router.currentRoute.value.params.scheduleId).toBe(id)
+    }
+  })
+
   it('notifications_path_is_not_a_route', () => {
     expect(routes.find((r) => r.path === '/notifications')).toBeUndefined()
   })

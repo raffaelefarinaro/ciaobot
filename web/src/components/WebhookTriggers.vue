@@ -1,8 +1,12 @@
 <template>
   <section class="ov-section" aria-labelledby="wh-section-title">
-    <div class="ov-head">
-      <h2 id="wh-section-title">Webhook triggers</h2>
-      <span class="ov-hint">other tools can post an event here</span>
+    <!-- The Automations pages' heading: the page's name over one line, and the
+         one primary action at the right (as Your routines' New routine). -->
+    <div class="ov-head ov-head--stacked ov-head--action">
+      <div class="ov-head-text">
+        <h2 id="wh-section-title">Webhooks</h2>
+        <p class="ov-intro">Other tools can post an event straight into this workspace.</p>
+      </div>
       <!-- `showFormArea`, not merely "no error": a toggle that opened nothing while
            the first read is still in flight, or beside a refusal, is a control
            that lies about what it does. Retry is the whole answer in those two
@@ -11,7 +15,8 @@
         v-if="showFormArea"
         ref="newTriggerBtn"
         type="button"
-        class="btn-small ov-run-all"
+        class="wh-new"
+        :class="showForm ? 'btn-small' : 'btn-primary'"
         :aria-expanded="showForm"
         @click="toggleForm"
       >{{ showForm ? 'Cancel' : 'New trigger' }}</button>
@@ -849,6 +854,10 @@ const secretCopyLabel = computed(() => copyLabel('secret', 'Copy secret'))
   font-size: var(--text-sm);
 }
 .wh-error p { margin: 0; flex: 1; }
+.wh-new { flex: none; min-height: 36px; }
+@media (pointer: coarse) {
+  .wh-new { min-height: var(--touch); }
+}
 .wh-stale { color: var(--fg3); }
 /* The row wraps rather than squeezing its name.
  *

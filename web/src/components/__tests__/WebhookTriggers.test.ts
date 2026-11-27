@@ -1281,8 +1281,10 @@ describe('reading order and touch targets', () => {
     expect(wrapper.find('.ov-head').exists()).toBe(true)
     const disable = button(wrapper, 'Disable')
     expect(disable.classes()).toContain('btn-small')
+    // The page's one primary action, as New routine is on Schedules.
     const create = button(wrapper, 'New trigger')
-    expect(create.classes()).toContain('btn-small')
+    expect(create.classes()).toContain('btn-primary')
+    expect(wrapper.get('.ov-head h2').text()).toBe('Webhooks')
     wrapper.unmount()
   })
 
