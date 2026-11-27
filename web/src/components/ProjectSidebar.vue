@@ -418,6 +418,15 @@
             >{{ memoryNavCount(item.section)?.toLocaleString() }}</span>
           </SidebarRow>
         </template>
+        <!-- The explainer lives on the site, not in the app: one quiet row, last. -->
+        <SidebarRow
+          class="settings-nav-item memory-nav-item memory-nav-help"
+          text="How memory works"
+          :href="MEMORY_GUIDE_URL"
+          aria-label="How memory works, opens the website in a new tab"
+        >
+          <span class="memory-nav-count" aria-hidden="true">↗</span>
+        </SidebarRow>
       </nav>
 
       <div v-if="mm.section === 'map'" class="mm-sidebar-scroll">
@@ -1074,6 +1083,8 @@ const unsureWaiting = computed(() => (
 // Memory's sections. Scoped counts come from the stores so they use the same
 // workspace rule as each page's list — a count that disagreed with the rows
 // under it would be worse than none.
+/** The site page that explains memory; opens outside the app. */
+const MEMORY_GUIDE_URL = 'https://www.raffaelefarinaro.com/ciaobot/memory.html'
 type MemoryNavItem = { section: MemorySection; label: string }
 const MEMORY_NAV: { label?: string; items: MemoryNavItem[] }[] = [
   { items: [
@@ -3298,6 +3309,7 @@ async function confirmDeleteChat(chatId: string) {
    The fill alone marks the open section, as for chats. */
 .memory-nav-list .sidebar-list-label { margin-top: 8px; }
 .memory-nav-list .sidebar-list-label:first-child { margin-top: 0; }
+.memory-nav-help { margin-top: 8px; }
 .memory-nav-count { flex: none; padding-right: 6px; color: var(--fg3); font-size: var(--text-xs); font-variant-numeric: tabular-nums; }
 
 /* Memory Map sidebar (search, categories) */

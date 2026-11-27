@@ -232,15 +232,3 @@ export function mountGuideFixture(host: HTMLElement, component: Component): Conn
     },
   })
 }
-
-/**
- * Mounts the production MemoryHowItWorks owner into the preview's boundary.
- * The explainer makes no request at all; the connected mount supplies the
- * memory router its Categories RouterLink resolves through.
- */
-export function mountExplainerFixture(host: HTMLElement, component: Component): ConnectedFixture {
-  return mountConnected(host, {
-    component,
-    routerRoutes: memoryRouterRoutes(),
-  })
-}

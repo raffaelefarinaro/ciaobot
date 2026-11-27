@@ -134,7 +134,9 @@ describe('MemoryCarePanel', () => {
     expect(steps[1].get('.mc-step-evidence').text()).toBe('verify: ciao memory status -> pct 83')
     expect(steps[1].get('.mc-step-state').text()).toBe('done')
     expect(steps[1].find('.care-glyph--done').exists()).toBe(true)
-    expect(wrapper.get('.mc-foot-note').text()).toBe('Weekly checks last done Nov 27')
+    // The footer is gone: its actions and the weekly line live in the Daily care window.
+    expect(wrapper.find('.mc-foot').exists()).toBe(false)
+    expect(wrapper.text()).not.toContain('Weekly checks')
   })
 
   it('opens what each item names: the Unsure page, the trim chat for the guide, the report', async () => {
@@ -172,9 +174,6 @@ describe('MemoryCarePanel', () => {
     await flushPromises()
     expect(open).not.toHaveBeenCalled()
     expect(wrapper.get('.mc-status').text()).toBe('That file is not there any more. The next care run updates this list.')
-    const report = wrapper.findAll('.mc-link').find(b => b.text() === 'Open Care-Report.md')!
-    await report.trigger('click')
-    expect(open).toHaveBeenLastCalledWith('memory-vault/storybook-alpha/Workspace/Care-Report.md')
     // A proposal opens the review in place, by its path.
     await button(0).trigger('click')
     await flushPromises()
@@ -210,21 +209,9 @@ describe('MemoryCarePanel', () => {
     const learnings = wrapper.findAll('.mc-step')[2]
     expect(learnings.find('.care-glyph--running').exists()).toBe(true)
     expect(learnings.get('.mc-step-state').text()).toBe('running')
-    // While a run is in progress the control says so and cannot start another.
-    const run = wrapper.findAll('.mc-link').find(b => b.text() === 'Running…')!
-    expect(run.attributes('disabled')).toBeDefined()
-    await run.trigger('click')
-    await flushPromises()
+    // The run-now control is in the Daily care window, not in this card.
+    expect(wrapper.text()).not.toContain('Run care again')
     expect(post).not.toHaveBeenCalled()
-  })
-
-  it('says it only asked when the run has not started yet', async () => {
-    const post = serve(careReports.blocked)
-    const wrapper = await mountPanel()
-    await wrapper.findAll('.mc-link').find(b => b.text() === 'Run care again')!.trigger('click')
-    await flushPromises()
-    expect(post).toHaveBeenCalledTimes(1)
-    expect(wrapper.get('.mc-status').text()).toBe('Care was asked to run but has not started yet.')
   })
 
   it('keeps the last report up with a quiet hint when a refresh fails', async () => {
@@ -455,32 +442,19 @@ describe('MemoryCarePanel', () => {
     expect(wrapper.router.currentRoute.value.fullPath).toBe('/memory/care')
   })
 
-  it('runs care again through the schedule run-now', async () => {
-    const post = serve(careReports.blocked, careReports.blocked, careReports.blocked, careReports.running)
-    const wrapper = await mountPanel()
-    const run = wrapper.findAll('.mc-link').find(b => b.text() === 'Run care again')!
-    await run.trigger('click')
-    await flushPromises()
-    expect(post).toHaveBeenCalledWith(`/api/schedule-run/${SCHEDULE}`)
-    expect(wrapper.get('.mc-status').text()).toBe('Care started.')
-    expect(wrapper.get('.mc-summary-title').text()).toBe('Running: step 3 of 6')
-  })
-
   it('says never run plainly and cannot open a file that does not exist', async () => {
     serve(careReports.never)
     const wrapper = await mountPanel()
     expect(wrapper.get('.mc-summary-title').text()).toBe('Not run yet')
     expect(wrapper.get('.mc-summary-meta').text()).toBe('It runs every day. Its report will show here.')
     expect(wrapper.find('.mc-steps').exists()).toBe(false)
-    const report = wrapper.findAll('.mc-link').find(b => b.text() === 'Open Care-Report.md')!
-    expect(report.attributes('disabled')).toBeDefined()
-    expect(wrapper.get('.mc-foot-note').text()).toBe('Weekly checks not done yet')
   })
 
-  it('links back to Memory and keeps every control a real, focusable button', async () => {
+  it('has no link back to Memory and keeps every control a real, focusable button', async () => {
     serve(careReports.blocked)
     const wrapper = await mountPanel()
-    expect(wrapper.get('.mc-back').attributes('href')).toBe('/memory/map')
+    expect(wrapper.find('.mc-back').exists()).toBe(false)
+    expect(wrapper.text()).not.toContain('‹')
     for (const control of wrapper.findAll('button')) {
       expect(control.attributes('type')).toBe('button')
       ;(control.element as HTMLButtonElement).focus()

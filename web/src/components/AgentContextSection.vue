@@ -229,7 +229,7 @@ function openContextFile(event: MouseEvent) {
   emit('open-file', path)
 }
 
-// Open or closed is remembered per browser, like Memory's "How memory works".
+// Open or closed is remembered per browser.
 const LOADED_OPEN_KEY = 'ciao.chatDetails.alwaysLoadedOpen'
 function readLoadedOpen(): boolean {
   try { return localStorage.getItem(LOADED_OPEN_KEY) === '1' } catch { return false }
