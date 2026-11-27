@@ -13,6 +13,7 @@ import { actionNoticeKey, parseHomeNoticeKey } from '../lib/notificationInbox'
 import { careNeedsYouRow } from '../lib/careReport'
 import { useCareReportStore } from '../stores/careReport'
 import { memorySectionPath } from '../stores/memoryMap'
+import { useHomeRail } from '../composables/useHomeRail'
 
 const housekeeping = useHousekeepingStore()
 const projectStore = useProjectStore()
@@ -282,7 +283,9 @@ onBeforeUnmount(() => noticeWindows.clearAvailable('housekeeping'))
 // One row when the last care run left something for the owner: items to look
 // at, a step it could not finish, or a run that was cut off. A run in progress,
 // a clean run and a workspace care has never run in raise no row; At a glance
-// says those quietly. The row opens Memory → Workspace care; its menu runs care
+// says those quietly. While At a glance sits beside the request column it
+// carries the signal alone (as an actionable line), so this row only exists
+// when the rail has dropped below the column. The row opens Memory → Workspace care; its menu runs care
 // again through the schedule's own run-now.
 
 const care = useCareReportStore()
@@ -291,9 +294,12 @@ let releaseCare: () => void = () => {}
 onMounted(() => { releaseCare = care.attach() })
 onBeforeUnmount(() => releaseCare())
 
+const homeRail = useHomeRail()
 const careRow = computed(() => {
   const report = care.report
   if (!report || report.workspace !== projectStore.activeWorkspace) return null
+  // At a glance beside the column already carries the signal: once, not twice.
+  if (homeRail.beside.value) return null
   return careNeedsYouRow(report)
 })
 // Keyed on the report's write time, so the next run's outcome is offered again

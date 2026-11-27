@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import {
-  careFixSeed, careGlyph, careNeedsYouRow, careRailDetail, careState, careSummaryMeta, careSummaryTitle,
+  careFixSeed, careGlyph, careNeedsYouRow, careRailDetail, careRailLabel, careRailTitle, careRailTone, careState, careSummaryMeta, careSummaryTitle,
   careNeedFixSeed, dayWords, fenceData, needAction, needActionLabel, openNeeds, stepCanFix, stepGlyph, stepLine,
   stepName, stepsCountWords, stepsOpenByDefault, stepWord, whenWords, type CareReport,
 } from './careReport'
@@ -56,7 +56,7 @@ describe('careState', () => {
 describe('the At a glance line', () => {
   it('says each state in the approved words', () => {
     expect(careRailDetail(careReports.complete, NOW)).toBe(`Done today ${CLOCK} · 5 of 5 steps`)
-    expect(careRailDetail(careReports.needsYou, NOW)).toBe(`Done today ${CLOCK} · 5 of 5 steps`)
+    expect(careRailDetail(careReports.needsYou, NOW)).toBe('4 things need you')
     expect(careRailDetail(careReports.running, NOW)).toBe('Running now · step 3 of 6: Learnings')
     expect(careRailDetail(careReports.interrupted, NOW)).toBe('Interrupted · 2 of 6 steps')
     expect(careRailDetail(careReports.blocked, NOW)).toBe('4 of 6 steps · 2 blocked')
@@ -222,5 +222,48 @@ describe('the report page words', () => {
     expect(whenWords('', NOW)).toBe('')
     expect(dayWords('2026-11-24')).toBe('Nov 24')
     expect(dayWords('soon')).toBe('')
+  })
+})
+
+describe('the docked At a glance row', () => {
+  const decided = (status: string): CareReport => ({
+    ...careReports.needsYou,
+    needs_you: careReports.needsYou.needs_you.map(item => (item.path === CARE_PROPOSAL_PATH ? { ...item, proposal_status: status } : item)),
+  })
+
+  it('uses the Needs you row title and tone when care needs the owner, else the feature name', () => {
+    expect(careRailTitle(careReports.needsYou, NOW)).toBe('Care needs you')
+    expect(careRailTone(careReports.needsYou)).toBe('attention')
+    expect(careRailTitle(careReports.blocked, NOW)).toBe('Care did not finish')
+    expect(careRailTone(careReports.blocked)).toBe('error')
+    expect(careRailTone(careReports.interrupted)).toBe('attention')
+    for (const quiet of [careReports.complete, careReports.running, careReports.never]) {
+      expect(careRailTitle(quiet, NOW)).toBe('Workspace care')
+      expect(careRailTone(quiet)).toBeNull()
+    }
+  })
+
+  it('names the row once: title, line, then where it goes', () => {
+    expect(careRailLabel(careReports.needsYou, NOW)).toBe('Care needs you. 4 things need you. Open the care report.')
+    expect(careRailLabel(careReports.blocked, NOW)).toBe('Care did not finish. 4 of 6 steps · 2 blocked. Open the care report.')
+  })
+
+  it('counts only the open items, after a reject and when every item is decided', () => {
+    expect(careRailDetail(decided('rejected'), NOW)).toBe('3 things need you')
+    const one = { ...careReports.needsYou, needs_you: [need('x', '', CARE_PROPOSAL_PATH, 'draft')] }
+    expect(careRailDetail(one, NOW)).toBe('1 thing needs you')
+    // Every item decided: care is done, the rail goes quiet and never says "0 things".
+    const none = { ...careReports.needsYou, needs_you: [need('x', '', CARE_PROPOSAL_PATH, 'applied')] }
+    expect(careRailTone(none)).toBeNull()
+    expect(careRailTitle(none, NOW)).toBe('Workspace care')
+    expect(careRailDetail(none, NOW)).not.toMatch(/\bneeds? you\b/)
+  })
+
+  it('a did-not-finish run with no open items says so from the steps and never claims N things', () => {
+    const blockedNoNeeds = { ...careReports.blocked, needs_you: [] }
+    expect(careRailTitle(blockedNoNeeds, NOW)).toBe('Care did not finish')
+    expect(careRailDetail(blockedNoNeeds, NOW)).toBe('4 of 6 steps · 2 blocked')
+    const blockedDecided = { ...careReports.blocked, needs_you: [need('x', '', CARE_PROPOSAL_PATH, 'rejected')] }
+    expect(careRailDetail(blockedDecided, NOW)).not.toMatch(/things? needs? you/)
   })
 })

@@ -94,7 +94,7 @@
           <div v-else-if="!(isMobile && !sidebarCollapsed)" class="empty-shell">
             <PaneHeader page-tag="Home" @open-sidebar="sidebarCollapsed = false" />
             <div class="empty-state">
-              <div class="home-workbench">
+              <div :ref="trackHomeWorkbench" class="home-workbench">
                 <div class="home-main">
                   <HousekeepingStrip />
                   <HomeNoticeReopen />
@@ -217,7 +217,7 @@
           <div v-else-if="!(isMobile && !sidebarCollapsed)" class="empty-shell">
             <PaneHeader page-tag="Home" @open-sidebar="sidebarCollapsed = false" />
             <div class="empty-state">
-              <div class="home-workbench">
+              <div :ref="trackHomeWorkbench" class="home-workbench">
                 <div class="home-main">
                   <HousekeepingStrip />
                   <HomeNoticeReopen />
@@ -355,6 +355,7 @@ import PaneHeader from './PaneHeader.vue'
 import HomeRecentChats from './HomeRecentChats.vue'
 import HomeIntake from './HomeIntake.vue'
 import HomeReviewSummary from './HomeReviewSummary.vue'
+import { trackHomeWorkbench } from '../composables/useHomeRail'
 import HousekeepingStrip from './HousekeepingStrip.vue'
 import HomeSetupCard from './HomeSetupCard.vue'
 import HomeOnboardingResume from './HomeOnboardingResume.vue'
@@ -2153,7 +2154,9 @@ onBeforeUnmount(() => {
   top: var(--space-2);
 }
 
-/* Keyed to the pane, not the viewport: with the resizable sidebar open, a
+/* The care signal reads this query's result (useHomeRail counts the grid's
+   columns): the rail beside the column carries it, the dropped rail does not.
+   Keyed to the pane, not the viewport: with the resizable sidebar open, a
    1280px window leaves the pane well under 980px, and a viewport query kept
    the rail beside a request column too narrow for its own chips. */
 @container chat-pane (max-width: 940px) {
