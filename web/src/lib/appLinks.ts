@@ -24,6 +24,8 @@ const PAGE_HREFS = [
   '/tasks',
   '/schedules',
   '/automations',
+  '/automations/loops',
+  '/automations/webhooks',
   '/memory',
   '/memory/map',
   '/memory/categories',

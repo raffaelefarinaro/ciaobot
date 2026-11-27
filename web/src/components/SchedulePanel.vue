@@ -149,6 +149,19 @@
       </div>
     </div>
 
+    <!-- Webhooks: the triggers page. A trigger needs no automation, so the
+         page does not wait on the automation list's first load. -->
+    <div v-else-if="!scheduleId && overviewPage === 'webhooks'" ref="overviewEl" class="scroll-body overview-body">
+      <div class="page-grid page-grid--single automations-switcher-row">
+        <AutomationsSwitcher current="webhooks" />
+      </div>
+      <div class="page-grid page-grid--single automations-page">
+        <div class="page-main">
+          <WebhookTriggers />
+        </div>
+      </div>
+    </div>
+
     <div
       v-else-if="store.scheduleLoadError && !store.schedulesLoaded"
       class="schedule-load-state schedule-load-state--error"
@@ -159,7 +172,12 @@
     </div>
 
     <div v-else-if="!store.schedulesLoaded" class="scroll-body">
-      <SkeletonLoader label="Loading automations" variant="cards" :count="3" />
+      <div v-if="!scheduleId" class="page-grid page-grid--single automations-switcher-row">
+        <AutomationsSwitcher :current="overviewPage" />
+      </div>
+      <div class="page-grid page-grid--single">
+        <SkeletonLoader label="Loading automations" :variant="scheduleId ? 'cards' : 'rows'" :count="scheduleId ? 3 : 5" />
+      </div>
     </div>
 
     <!-- Detail -->
@@ -597,174 +615,20 @@
       </div>
     </div>
 
-    <!-- Overview: shown when nothing is selected but automations exist -->
-    <div v-else-if="workspaceSchedules.length" ref="overviewEl" class="scroll-body overview-body">
-      <div class="page-grid">
-        <div class="page-main">
-          <section v-if="missedSchedules.length" class="ov-section ov-section--alert" aria-labelledby="ov-missed-title">
-            <div class="ov-head">
-              <h2 id="ov-missed-title">Missed</h2>
-              <span class="ov-hint">expected to run, didn't</span>
-              <button
-                type="button"
-                class="btn-small ov-run-all"
-                :disabled="runningAllMissed"
-                :aria-busy="runningAllMissed"
-                @click.stop="runAllMissed"
-              >{{ runningAllMissed ? 'Starting…' : 'Run all' }}</button>
-            </div>
-            <ListRow
-              v-for="s in missedSchedules"
-              :key="s.schedule_id"
-              :to="`/schedules/${s.schedule_id}`"
-              class="ov-item"
-            >
-              <template #heading><span class="list-row-title ov-title">{{ s.title || promptTitle(s.prompt) }}</span></template>
-              <template #sub>{{ cadenceSummary(s) }}</template>
-              <template #end><span class="list-row-when ov-when--alert">due {{ relativeWhen(s.last_expected_run) }}</span></template>
-            </ListRow>
-          </section>
-
-          <section v-if="loops.length" class="ov-section" aria-labelledby="ov-loops-title">
-            <div class="ov-head">
-              <h2 id="ov-loops-title" title="A loop runs inside one chat and ends on its own">Loops</h2>
-            </div>
-            <ListRow
-              v-for="s in loops"
-              :key="s.schedule_id"
-              :to="`/schedules/${s.schedule_id}`"
-              class="ov-item"
-            >
-              <template #heading>
-                <span class="list-row-title ov-title">{{ s.title || promptTitle(s.prompt) }}</span>
-                <span v-if="s.web_chat_id && projectStore.isChatStreaming(s.web_chat_id)" class="spinner-dot" title="Running now" />
-              </template>
-              <template #sub>in {{ ownerChatTitle(s) }} · {{ loopCadenceLabel(s) }} · {{ loopRunsLeftLabel(s) }}</template>
-              <template #end><span class="list-row-when">{{ loopEndsWhen(s, Date.now()) }}</span></template>
-            </ListRow>
-          </section>
-
-          <section class="ov-section" aria-labelledby="ov-next-title">
-            <div class="ov-head">
-              <h2 id="ov-next-title" title="Soonest first. Missed time-of-day runs are caught up on the next launch; interval runs just resume.">Next up</h2>
-            </div>
-            <ListRow
-              v-for="s in upcomingRoutines"
-              :key="s.schedule_id"
-              :to="`/schedules/${s.schedule_id}`"
-              class="ov-item"
-            >
-              <template #heading>
-                <span class="list-row-title ov-title">{{ s.title || promptTitle(s.prompt) }}</span>
-                <span v-if="s.web_chat_id && projectStore.isChatStreaming(s.web_chat_id)" class="spinner-dot" title="Running now" />
-              </template>
-              <template #sub>{{ cadenceSummary(s) }} · {{ deliverySummary(s) }}</template>
-              <template #end><span class="list-row-when">{{ relativeWhen(s.next_run) }}</span></template>
-            </ListRow>
-            <p v-if="!upcomingRoutines.length" class="ov-empty">
-              Nothing scheduled. The rest run only when you click Run now, or are paused.
-            </p>
-          </section>
-
-          <section v-if="pausedRoutines.length" class="ov-section" aria-labelledby="ov-paused-title">
-            <div class="ov-head"><h2 id="ov-paused-title">Paused</h2></div>
-            <ListRow
-              v-for="s in pausedRoutines"
-              :key="s.schedule_id"
-              :to="`/schedules/${s.schedule_id}`"
-              class="ov-item ov-item--paused"
-            >
-              <template #heading><span class="list-row-title ov-title">{{ s.title || promptTitle(s.prompt) }}</span></template>
-              <template #sub>{{ cadenceSummary(s) }} · paused</template>
-            </ListRow>
-          </section>
-
-          <section v-if="systemRoutines.length" class="ov-section" aria-labelledby="ov-system-title">
-            <div class="ov-head"><h2 id="ov-system-title">System routines</h2></div>
-            <p class="ov-intro">Ciaobot's own upkeep. They run on their own and never need you.</p>
-            <ListRow
-              v-for="s in systemRoutines"
-              :key="s.schedule_id"
-              :to="`/schedules/${s.schedule_id}`"
-              class="ov-item"
-              :class="{ 'ov-item--paused': !s.enabled }"
-            >
-              <template #heading><span class="list-row-title ov-title">{{ s.title || promptTitle(s.prompt) }}</span></template>
-              <template #sub>{{ cadenceSummary(s) }}<template v-if="!s.enabled"> · paused</template></template>
-              <template v-if="s.enabled && s.next_run" #end><span class="list-row-when">{{ relativeWhen(s.next_run) }}</span></template>
-            </ListRow>
-          </section>
-
-          <!-- Webhooks live here rather than in a top-level inbox: a trigger is
-               another way for something outside the app to reach this
-               workspace, and Automations is where the user already looks for
-               "things that happen without me". -->
-          <WebhookTriggers />
-        </div>
-
-        <aside class="page-rail" aria-labelledby="ov-rail-title">
-          <h2 id="ov-rail-title" class="rail-title">In this workspace</h2>
-          <div class="rail-kvs">
-            <div class="rail-kv"><span>Active</span><strong>{{ activeCount }}</strong></div>
-            <div class="rail-kv"><span>Paused</span><strong>{{ pausedCount }}</strong></div>
-          </div>
-
-          <template v-if="needsLook.length">
-            <h2 class="rail-title rail-title--spaced">Needs a look</h2>
-            <div class="rail-list">
-              <router-link
-                v-for="s in needsLook"
-                :key="s.schedule_id"
-                :to="needsLookTarget(s)"
-                class="rail-item"
-              >
-                {{ s.title || promptTitle(s.prompt) }}
-                <small class="rail-attention">{{ s.missed ? 'missed a run' : intervalStatusLabel(s) }}</small>
-              </router-link>
-            </div>
-          </template>
-
-          <template v-if="recentRuns.length">
-            <h2 class="rail-title rail-title--spaced">Recent runs</h2>
-            <div class="rail-list">
-              <router-link
-                v-for="r in recentRuns"
-                :key="r.id"
-                :to="`/chat/${r.chatId}`"
-                class="rail-item"
-              >
-                {{ r.title }}
-                <small>{{ relativeWhen(r.lastRunAt) }}<template v-if="projectStore.isChatStreaming(r.chatId)"> · running</template></small>
-              </router-link>
-            </div>
-          </template>
-        </aside>
+    <!-- The Automations pages (Schedules, Loops), shown when no automation is
+         open. Webhooks is its own branch above: it does not wait on the
+         automation list. -->
+    <div v-else ref="overviewEl" class="scroll-body overview-body">
+      <div class="page-grid page-grid--single automations-switcher-row">
+        <AutomationsSwitcher :current="overviewPage" />
       </div>
-    </div>
-
-    <!-- No automations in this workspace. The same page grid as the overview with
-         the routine sections replaced by one note, so the webhook section below
-         sits in the column it sits in above: a trigger needs no routine to exist
-         first, and the first run of this workspace is exactly where somebody
-         looking for one will be. No rail here — there is nothing for it to
-         count. -->
-    <div v-else class="scroll-body overview-body">
-      <div class="page-grid page-grid--single">
-        <div class="page-main">
-          <section class="ov-section" aria-labelledby="ov-empty-title">
-            <div class="ov-head"><h2 id="ov-empty-title">No automations yet</h2></div>
-            <p class="ov-intro">
-              An automation runs a prompt on a schedule — at a time of day or every
-              N minutes — in a new chat each time, or continuing one you pick. Start
-              one with <strong>New</strong> next to Routines in the sidebar.
-            </p>
-          </section>
-
-          <!-- Webhooks, again: a trigger is not an automation and does not wait
-               for one. See the note on the same component in the overview above. -->
-          <WebhookTriggers />
-        </div>
-      </div>
+      <AutomationLoopsPage v-if="overviewPage === 'loops'" />
+      <AutomationSchedulesPage
+        v-else
+        :running-all-missed="runningAllMissed"
+        @run-all-missed="runAllMissed"
+        @new="emit('new')"
+      />
     </div>
   </div>
 </template>
@@ -774,7 +638,6 @@ import SkeletonLoader from './SkeletonLoader.vue'
 import { computed, nextTick, onMounted, onUnmounted, ref, useId, watch } from 'vue'
 import { DropdownMenuItem } from 'reka-ui'
 import { bindsFixedChat, contextBindsFixedChat, scheduleSupportsAutoArchive } from '../lib/scheduleBinding'
-import { cadenceSummary } from '../lib/scheduleClock'
 import { useRoute, useRouter } from 'vue-router'
 import { useTaskStore } from '../stores/tasks'
 import type { ScheduleUpdate } from '../stores/tasks'
@@ -785,14 +648,17 @@ import PaneHeader from './PaneHeader.vue'
 import TitleRail from './TitleRail.vue'
 import ItemTitleRow from './ItemTitleRow.vue'
 import ItemHeaderMenu from './ItemHeaderMenu.vue'
-import ListRow from './ListRow.vue'
 import { listAnchor, roamFocus } from '../lib/listRoaming'
 import { railLeanStyle, railMotionClass } from '../lib/titleRail'
 import { takeScheduleRailArrival, useScheduleRail } from '../composables/useScheduleRail'
-import { scheduleTitle } from '../lib/scheduleList'
-import { isOwnedLoop, loopCadenceLabel, loopEndsWhen, loopRunsLeft, loopRunsLeftLabel } from '../lib/loops'
+import { relativeWhen, scheduleTitle } from '../lib/scheduleList'
+import { isOwnedLoop, loopEndsWhen, loopRunsLeft } from '../lib/loops'
 import ModelSelector from './ModelSelector.vue'
 import WebhookTriggers from './WebhookTriggers.vue'
+import AutomationsSwitcher from './AutomationsSwitcher.vue'
+import AutomationSchedulesPage from './AutomationSchedulesPage.vue'
+import AutomationLoopsPage from './AutomationLoopsPage.vue'
+import { automationsPageFor, automationsPagePath } from '../lib/automationsNav'
 import { providerForModelSection, sectionsFromModelsResponse } from '../lib/modelSections'
 import { isPerWorkspaceRoutine, workspaceForSchedule } from '../lib/automationWorkspace'
 import { useWorkspaceSchedules } from '../composables/useWorkspaceSchedules'
@@ -805,6 +671,8 @@ import { effectiveWorkspaceDefaultModel } from '../lib/workspaceOverrides'
 const props = defineProps<{ showNew?: boolean }>()
 const emit = defineEmits<{
   (e: 'created'): void
+  // The New routine button on the Schedules page: ChatLayout opens the form.
+  (e: 'new'): void
   (e: 'open-sidebar'): void
   (e: 'close'): void
   // A downward drag on the title rail, and its release: ChatLayout's pull-to-close.
@@ -993,56 +861,25 @@ watch(
   { deep: true },
 )
 
-// Overview (homepage): soonest upcoming runs and missed runs (expected to
-// fire, no trigger recorded — flagged server-side via the `missed` field).
+// The Automations pages: which one the route shows, and the missed routines
+// Run all starts (the Schedules page's notice).
 const workspaceSchedules = useWorkspaceSchedules()
-const missedSchedules = computed(() => workspaceSchedules.value.filter(s => s.missed))
+const missedSchedules = computed(() => workspaceSchedules.value.filter(s => s.missed && !isOwnedLoop(s)))
+const overviewPage = computed(() => automationsPageFor(route.path, schedule.value))
 
-// The overview splits the user's own routines from Ciaobot's system ones, and
-// keeps paused routines out of "Next up": they have no run coming.
-// Chat loops have their own section: they cannot be paused, and their end is
-// what matters, not a next run.
-const userRoutines = computed(() => workspaceSchedules.value.filter(s => s.scope !== 'system' && !isOwnedLoop(s)))
-const loops = computed(() =>
-  workspaceSchedules.value
-    .filter(isOwnedLoop)
-    .sort((a, b) => (Date.parse(a.expires_at || '') || Infinity) - (Date.parse(b.expires_at || '') || Infinity)),
-)
-const upcomingRoutines = computed(() =>
-  userRoutines.value
-    .filter(s => s.enabled && s.next_run)
-    .sort((a, b) => Date.parse(a.next_run!) - Date.parse(b.next_run!))
-    .slice(0, 8),
-)
-const pausedRoutines = computed(() => userRoutines.value.filter(s => !s.enabled))
-const systemRoutines = computed(() =>
-  workspaceSchedules.value
-    .filter(s => s.scope === 'system')
-    .sort((a, b) => Date.parse(a.next_run || '') - Date.parse(b.next_run || '') || 0),
-)
-const activeCount = computed(() => workspaceSchedules.value.filter(s => s.enabled).length)
-const pausedCount = computed(() => workspaceSchedules.value.filter(s => !s.enabled).length)
-// Schedules whose own record says something went wrong: a missed slot, or a
-// last dispatch that failed, stopped short, or lost its chat.
-const needsLook = computed(() => workspaceSchedules.value.filter(scheduleNeedsAttention))
-
-const recentRuns = computed(() =>
-  workspaceSchedules.value
-    .filter(s => s.last_dispatched_at && s.last_run_chat_id)
-    .map(s => ({
-      id: s.schedule_id,
-      title: s.title || promptTitle(s.prompt),
-      lastRunAt: s.last_dispatched_at!,
-      chatId: s.last_run_chat_id!,
-    }))
-    // Compared as instants, not as strings. `last_dispatched_at` is written in
-    // two offsets — UTC from the interval and run-now paths, the entry's own
-    // timezone from the wall-clock tick/catch-up — and ISO strings only sort
-    // correctly at a fixed offset, so an evening-local stamp sorted above a
-    // genuinely newer UTC one and could push it off the five-row list.
-    .sort((a, b) => Date.parse(b.lastRunAt) - Date.parse(a.lastRunAt))
-    .slice(0, 5),
-)
+// Moving between the three pages moves focus to the new page's heading, the
+// way a page load would, so a screen reader hears where it landed. Not from
+// the phone switcher: a segment keeps focus, like a tab.
+watch(overviewPage, async () => {
+  if (scheduleId.value || props.showNew) return
+  const from = document.activeElement
+  await nextTick()
+  if (from instanceof Element && from.closest('.automations-switcher')) return
+  const heading = overviewEl.value?.querySelector<HTMLElement>('[data-page-heading], h2')
+  if (!heading) return
+  if (!heading.hasAttribute('tabindex')) heading.setAttribute('tabindex', '-1')
+  heading.focus({ preventScroll: true })
+})
 
 function archiveLabel(policy: ScheduleArchivePolicy | undefined): string {
   return policy === 'auto'
@@ -1070,37 +907,6 @@ function formatWhen(iso: string | null): string {
   return past ? `${clock} (${rel} ago)` : `${clock} (in ${rel})`
 }
 
-// Short relative form for rows and the rail: "Fri 10:00 · in 10h".
-// Times are in the browser's local zone, the same as Home's next-run line. The
-// automation's own zone is named once, in the "At" row of its detail.
-function relativeWhen(iso: string | null | undefined): string {
-  if (!iso) return '—'
-  const d = new Date(iso)
-  if (Number.isNaN(d.getTime())) return '—'
-  const diffMs = d.getTime() - Date.now()
-  const absMin = Math.round(Math.abs(diffMs) / 60000)
-  const clock = d.toLocaleString(undefined, { weekday: 'short', hour: '2-digit', minute: '2-digit', hour12: false })
-  if (absMin < 1) return `${clock} · now`
-  let rel: string
-  if (absMin < 60) rel = `${absMin}m`
-  else if (absMin < 60 * 24) rel = `${Math.round(absMin / 60)}h`
-  else rel = `${Math.round(absMin / 1440)}d`
-  return diffMs < 0 ? `${clock} · ${rel} ago` : `${clock} · in ${rel}`
-}
-
-// Where each run lands, in the sub-line's words.
-function deliverySummary(s: Schedule): string {
-  if (s.web_chat_id) {
-    const chat = projectStore.chats.find(c => c.chat_id === s.web_chat_id)
-    return chat ? `continues “${chat.title || 'Untitled chat'}”` : 'continues one chat'
-  }
-  if (s.web_project_id) {
-    const proj = projectStore.projects.find(p => p.project_id === s.web_project_id)
-    if (proj) return `new chat in ${proj.name}`
-  }
-  return s.context_label ? `new chat in ${s.context_label}` : 'new chat each run'
-}
-
 function scheduleNeedsAttention(s: Schedule): boolean {
   return Boolean(s.missed)
     || s.last_status === 'error'
@@ -1118,14 +924,6 @@ function scheduleStateLabel(s: Schedule): string {
   return 'Scheduled'
 }
 
-// A row whose label sends you to the run's chat ("check the chat") opens that
-// chat. Everything else (a missed slot, a failed run, a missing target) is
-// explained on the automation's own page.
-function needsLookTarget(s: Schedule): string {
-  const chatStatus = s.last_status === 'skipped'
-  if (!s.missed && chatStatus && s.last_run_chat_id) return `/chat/${s.last_run_chat_id}`
-  return `/schedules/${s.schedule_id}`
-}
 
 function lastRunChatTitle(s: Schedule): string {
   const chat = projectStore.chats.find(c => c.chat_id === s.last_run_chat_id)
@@ -1496,7 +1294,7 @@ async function onStopLoop() {
   } finally {
     stoppingLoop.value = false
   }
-  router.push('/schedules')
+  router.push(automationsPagePath('loops'))
 }
 
 // Every card seeds the full editData from the schedule, so an unedited field
@@ -1777,8 +1575,9 @@ async function onDelete() {
     confirmLabel: 'Delete automation',
     destructive: true,
   })) return
+  const listPage = automationsPagePath(overviewPage.value)
   await store.deleteSchedule(id)
-  router.push('/schedules')
+  router.push(listPage)
 }
 
 function onCreated() {
@@ -1811,7 +1610,7 @@ function closeSchedule() {
   if (props.showNew) {
     emit('close')
   } else {
-    router.push('/schedules')
+    router.push(automationsPagePath(overviewPage.value))
   }
 }
 </script>
