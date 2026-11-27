@@ -335,12 +335,12 @@
             </div>
           </div>
         </div>
-        <!-- A failed turn: the compact notice card, never a bubble. Both an
-             assistant error and an `Error:` system row land here. The resend
-             actions give way once any later item exists; see errorBubbleAction. -->
         <!-- The failure a pending retry already carries: the retry card below
              draws it once, with the next try and the actions. -->
         <template v-else-if="i === retryCoveredIdx" />
+        <!-- A failed turn: the compact notice card, never a bubble. Both an
+             assistant error and an `Error:` system row land here. The resend
+             actions give way once any later item exists; see errorBubbleAction. -->
         <div
           v-else-if="(item.kind === 'assistant' && item.msg.is_error) || (item.kind === 'system' && isErrorMsg(item.msg.content))"
           class="message-wrap injected-prompt-wrap"
@@ -511,8 +511,8 @@
       <!-- The stored reason does not prove that a transcript error owns this schedule. -->
       <div v-if="retryPending && chat.retry" class="message-wrap injected-prompt-wrap">
         <InjectedPromptCard
-          :prompt="retryScheduledNotice(chat.retry.last_error || '')"
-          raw=""
+          :prompt="retryNotice"
+          :raw="retryCoveredItem?.content ?? ''"
           :timestamp="retryCoveredTimestamp"
           :chat-title="chat.title"
           :known-paths="knownFilePaths"
@@ -4806,28 +4806,6 @@ function hasLaterItem(errorIdx: number): boolean {
 }
 const hasPendingRetry = computed(() => chat.value?.retry?.status === 'pending')
 const retryPending = computed(() => hasPendingRetry.value && !view.isStreaming)
-// The error row a pending retry replaces: the last item of the chat, when it
-// is a failed turn whose message is the retry's own reason. The retry card
-// then carries that failure, so the plain error card is not drawn beside it.
-// A retry whose reason differs from the transcript error (or any later item)
-// leaves both cards, and a stopped or exhausted retry brings the error card back.
-const retryCoveredIdx = computed(() => {
-  const reason = chat.value?.retry?.last_error
-  if (!retryPending.value || !reason) return -1
-  const items = renderItems.value
-  for (let k = items.length - 1; k >= 0; k--) {
-    const it = items[k]
-    if (it.kind === 'trace') continue
-    const failed = (it.kind === 'assistant' && it.msg.is_error) || (it.kind === 'system' && isErrorMsg(it.msg.content))
-    return failed && sameErrorMessage(it.msg.content, reason) ? k : -1
-  }
-  return -1
-})
-const retryCoveredItem = computed(() => {
-  const it = retryCoveredIdx.value >= 0 ? renderItems.value[retryCoveredIdx.value] : undefined
-  return it && 'msg' in it ? it.msg : undefined
-})
-const retryCoveredTimestamp = computed(() => retryCoveredItem.value?.timestamp)
 // An error with no known fix of its own keeps its diagnosis chat on the retry card.
 const retryCoveredFixable = computed(() => {
   const msg = retryCoveredItem.value
@@ -4886,6 +4864,56 @@ function recoveryForError(errorIdx: number) {
   return ready && !store.recoveryOutcomeStorageUnavailable && !store.unknownRecoveryOutcomes[ready.chatId] && item && 'msg' in item && item.msg.i === ready.rowIndex && !hasLaterItem(errorIdx)
     ? ready : null
 }
+// The error row a pending retry replaces: the last item of the chat, when it
+// is a failed turn whose message is the retry's own reason. The retry card
+// then carries that failure, so the plain error card is not drawn beside it.
+// A retry whose reason differs from the transcript error (or any later item)
+// leaves both cards, and a stopped or exhausted retry brings the error card back.
+const retryCoveredIdx = computed(() => {
+  const reason = chat.value?.retry?.last_error
+  if (!retryPending.value || !reason) return -1
+  const items = renderItems.value
+  for (let k = items.length - 1; k >= 0; k--) {
+    const it = items[k]
+    if (it.kind === 'trace') continue
+    const failed = (it.kind === 'assistant' && it.msg.is_error) || (it.kind === 'system' && isErrorMsg(it.msg.content))
+    if (!failed) return -1
+    return sameErrorMessage(it.msg.content, reason) ? k : -1
+  }
+  return -1
+})
+const retryCoveredItem = computed(() => {
+  const it = retryCoveredIdx.value >= 0 ? renderItems.value[retryCoveredIdx.value] : undefined
+  return it && 'msg' in it ? it.msg : undefined
+})
+const retryCoveredTimestamp = computed(() => retryCoveredItem.value?.timestamp)
+// The card reads as the failure it replaced, including "Retry failed" for a retried turn.
+const retryNotice = computed(() => {
+  const msg = retryCoveredItem.value
+  if (msg) return errorNoticePrompt(msg.content, retryFailedFrom(retryCoveredIdx.value))
+  return retryScheduledNotice(chat.value?.retry?.last_error || '')
+})
+// When the retry ends (stopped or exhausted) its card, and the focus on it,
+// goes away: land on the first action of the error card that comes back, or
+// the composer when it has none. A retry that fired leaves focus alone.
+let stopFocusPending = false
+watch(
+  () => [retryCoveredIdx.value, hasPendingRetry.value] as const,
+  async ([idx, pending], [prevIdx]) => {
+    if (prevIdx < 0 || idx >= 0 || pending || view.isStreaming) return
+    // The confirm dialog has already handed focus back to a button that is gone.
+    const wanted = stopFocusPending || Boolean(document.activeElement?.closest('.retry-state'))
+    stopFocusPending = false
+    if (!wanted) return
+    await nextTick()
+    const row = document.querySelector<HTMLElement>(`[data-msg-index="${prevIdx}"]`)
+    const target = row?.querySelector<HTMLElement>('.error-actions button:not(:disabled)')
+      ?? row?.querySelector<HTMLElement>('.injected-card-toggle')
+    if (target) target.focus()
+    else focusComposer()
+  },
+  { flush: 'pre' },
+)
 async function checkUnknownRecovery() {
   const chatId = chat.value.chat_id
   try {
@@ -5044,8 +5072,9 @@ async function stopRetry() {
       title: 'Stop scheduled prompt?', confirmLabel: 'Stop trying',
     })) return
     if (chat.value?.chat_id !== chatId) return
+    stopFocusPending = true
     try { await store.stopChatRetry(chatId, scheduleId) }
-    catch (e) { store.pushErrorToast('Could not stop scheduled prompt', `The schedule may have changed. Inspect it before trying again. ${errorMessage(e)}`) }
+    catch (e) { stopFocusPending = false; store.pushErrorToast('Could not stop scheduled prompt', `The schedule may have changed. Inspect it before trying again. ${errorMessage(e)}`) }
     return
   }
   await stopObservedRecovery()
@@ -5062,7 +5091,10 @@ async function stopObservedRecovery() {
     if (!await askConfirm('Stop the currently observed continuation schedule? An in-flight or replaced recovery cannot be stopped here.', {
       title: 'Stop continuation?', confirmLabel: 'Stop trying',
     })) return
-    if (chat.value?.chat_id === chatId) await store.stopRecovery(chatId, recoveryId)
+    if (chat.value?.chat_id === chatId) {
+      stopFocusPending = true
+      try { await store.stopRecovery(chatId, recoveryId) } catch (e) { stopFocusPending = false; throw e }
+    }
   } catch (e) {
     store.pushErrorToast('Could not stop continuation', errorMessage(e))
   }
