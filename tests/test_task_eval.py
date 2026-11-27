@@ -637,8 +637,8 @@ def test_usage_sums_all_transcripts(tmp_path: Path) -> None:
             "usage": {
                 "input_tokens": "10",
                 "output_tokens": "5",
-                "cache_read_input_tokens": "3",
-                "cache_creation_input_tokens": "2",
+                "cached_read_tokens": "3",
+                "cached_write_tokens": "2",
             },
             "tool_calls": [{"name": "x", "input_chars": 3}, {"name": "y", "error": "bad"}],
         }
@@ -960,7 +960,7 @@ def _completed(stdout: str, returncode: int = 0) -> Any:
 
 
 def test_cli_package_mismatch_is_none_for_the_same_package(monkeypatch: pytest.MonkeyPatch) -> None:
-    harness_init = Path(te.__file__).resolve().parent / "__init__.py"
+    harness_init = Path(te.__file__).resolve().parents[1] / "ciao" / "__init__.py"
     calls: list[list[str]] = []
 
     def fake_run(argv: list[str], **kwargs: Any) -> Any:
@@ -984,9 +984,13 @@ def test_cli_package_mismatch_names_both_packages(monkeypatch: pytest.MonkeyPatc
     assert message is not None
     # The message names the resolved package directory.
     assert str(Path("/Users/someone/repos/ciaobot/ciao/__init__.py").resolve().parent) in message
-    assert str(Path(te.__file__).resolve().parent) in message
+    assert str(Path(te.__file__).resolve().parents[1] / "ciao") in message
     assert "uv venv .venv-eval" in message
-    assert ".venv-eval/bin/ciao eval tasks run" in message
+    assert ".venv-eval/bin/python -m evals run" in message
+    assert "ciao eval tasks" not in message
+    import importlib.util
+
+    assert importlib.util.find_spec("evals.__main__") is not None
 
 
 def test_cli_package_mismatch_reports_failed_isolated_import(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -1603,7 +1607,7 @@ def test_compare_reports_missing_identity_like_summarize() -> None:
     assert item["baseline"]["code_revision"] == te.summarize([row])[0]["code_revision"] == "None"
 
 
-def test_usage_reads_opencode_camel_case_and_prefers_snake(tmp_path: Path) -> None:
+def test_usage_reads_acp_cached_token_keys(tmp_path: Path) -> None:
     runtime = tmp_path / ".runtime"
     folder = runtime / "transcripts" / "chat-oc"
     folder.mkdir(parents=True)
@@ -1611,24 +1615,20 @@ def test_usage_reads_opencode_camel_case_and_prefers_snake(tmp_path: Path) -> No
         {
             "response": "first",
             "usage": {
-                "inputTokens": "45564",
-                "outputTokens": "120",
-                "cacheReadTokens": "9000",
-                "cacheWriteTokens": "0",
+                "input_tokens": "45564",
+                "output_tokens": "120",
+                "cached_read_tokens": "9000",
+                "cached_write_tokens": "40",
             },
             "tool_calls": [],
         },
-        {
-            "response": "second",
-            "usage": {"input_tokens": 7, "inputTokens": "999", "outputTokens": "3"},
-            "tool_calls": [],
-        },
+        {"response": "second", "usage": {"input_tokens": 7, "output_tokens": "3"}, "tool_calls": []},
     ]
     (folder / "opencode.json").write_text(json.dumps({"turns": turns}), encoding="utf-8")
 
     usage = te.collect_usage(runtime)
 
-    assert usage["tokens"] == {"input": 45571, "output": 123, "cache_read": 9000, "cache_write": 0}
+    assert usage["tokens"] == {"input": 45571, "output": 123, "cache_read": 9000, "cache_write": 40}
 
 
 def test_cli_eval_tasks_run_passes_mode_through(
@@ -1797,8 +1797,8 @@ def test_memory_pass_usage_reads_archive_frontmatter(tmp_path: Path) -> None:
     usage = {
         "input_tokens": "10",
         "output_tokens": "5",
-        "cache_read_input_tokens": "3",
-        "cache_creation_input_tokens": "2",
+        "cached_read_tokens": "3",
+        "cached_write_tokens": "2",
     }
     _write_runtime_transcript(
         tmp_path,
@@ -1819,6 +1819,20 @@ def test_memory_pass_usage_reads_archive_frontmatter(tmp_path: Path) -> None:
 
     assert tokens == {"input": 10, "output": 5, "cache_read": 3, "cache_write": 2}
     assert response == "Queued 1 fact."
+    assert known is True
+
+
+def test_memory_pass_usage_reads_frontmatter_cached_keys(tmp_path: Path) -> None:
+    archive = tmp_path / "pass.md"
+    archive.write_text(
+        "---\nusage_totals:\n  input_tokens: 15499\n  output_tokens: 33\n"
+        "  cached_read_tokens: 20480\n  cached_write_tokens: 512\n  total_tokens: 36012\n---\n\nbody\n",
+        encoding="utf-8",
+    )
+
+    tokens, _, known = te.memory_pass_usage(tmp_path, "pass-3", "pass.md")
+
+    assert tokens == {"input": 15499, "output": 33, "cache_read": 20480, "cache_write": 512}
     assert known is True
 
 
