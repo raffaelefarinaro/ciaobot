@@ -3482,6 +3482,25 @@ async def workspace_file(request: Request) -> Response:
     )
 
 
+async def workspace_file_path(request: Request) -> Response:
+    """Canonical absolute identity of a path the standalone viewer opens.
+
+    The file viewer anchors a relative path to `workspace_root` (the install
+    root), while a chat pin anchors it to the chat's agent root. A caller that
+    holds a viewer path (the care report, the workspace guide, the viewer's own
+    open file) and has to pin it resolves it here first, with the viewer's own
+    resolver and no fuzzy matching, and pins the absolute result.
+    """
+    config = request.app.state.config
+    raw = request.query_params.get("path", "").strip()
+    result = _resolve_workspace_path(_allowed_roots(config), raw, allow_fuzzy=False)
+    if isinstance(result, Response):
+        return result
+    if result.suffix.lower() not in _WORKSPACE_FILE_EXTS:
+        return JSONResponse({"error": "unsupported type"}, status_code=415)
+    return JSONResponse({"path": result.as_posix()}, headers={"Cache-Control": "no-store"})
+
+
 # ── HTML artifacts ───────────────────────────────────────────────────────
 # An artifact is a self-contained page the model authored (a dashboard, an
 # annotated diff, a comparison) that the PWA embeds in the pinned panel.

@@ -1,5 +1,8 @@
-import { describe, expect, it, vi } from 'vitest'
+import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { startFileDiscussion } from './fileDiscussion'
+
+const apiGet = vi.hoisted(() => vi.fn())
+vi.mock('./api', () => ({ api: { get: apiGet } }))
 
 type StoreArg = Parameters<typeof startFileDiscussion>[0]
 
@@ -48,6 +51,35 @@ function asStore(store: ReturnType<typeof makeStore>): StoreArg {
 }
 
 describe('startFileDiscussion', () => {
+  beforeEach(() => {
+    apiGet.mockReset()
+    // The engine's answer: the viewer path anchored at the install root.
+    apiGet.mockImplementation(async (url: string) => ({
+      path: `/install/${decodeURIComponent(url.split('path=')[1])}`,
+    }))
+  })
+
+  it('pins the absolute identity of a subfolder-vault path, not the viewer path', async () => {
+    const store = makeStore()
+    const viewerPath = 'work/memory-vault/Workspace/Care-Report.md'
+    await startFileDiscussion(asStore(store), { path: viewerPath, seed: 'hello' })
+
+    expect(apiGet).toHaveBeenCalledWith(`/api/workspace-file-path?path=${encodeURIComponent(viewerPath)}`)
+    expect(store.pinFile).toHaveBeenCalledWith('c1', `/install/${viewerPath}`)
+  })
+
+  it('toasts and creates nothing when the file cannot be resolved', async () => {
+    apiGet.mockRejectedValue(new Error('not found'))
+    const store = makeStore()
+    const chat = await startFileDiscussion(asStore(store), { path: 'work/gone.md', seed: 'hello', workspace: 'work' })
+
+    expect(chat).toBeNull()
+    expect(store.switchWorkspace).not.toHaveBeenCalled()
+    expect(store.createChat).not.toHaveBeenCalled()
+    expect(store.pinFile).not.toHaveBeenCalled()
+    expect(store.pushErrorToast).toHaveBeenCalledWith('Could not start discussion', 'not found')
+  })
+
   it('creates the chat in the active workspace General and pins the file', async () => {
     const store = makeStore()
     const chat = await startFileDiscussion(asStore(store), {
@@ -58,7 +90,7 @@ describe('startFileDiscussion', () => {
     expect(chat).toEqual({ chat_id: 'c1' })
     expect(store.switchWorkspace).not.toHaveBeenCalled()
     expect(store.createChat).toHaveBeenCalledWith('p-personal', 'Discuss Mo.md', 'hello')
-    expect(store.pinFile).toHaveBeenCalledWith('c1', 'memory-vault/People/Mo.md')
+    expect(store.pinFile).toHaveBeenCalledWith('c1', '/install/memory-vault/People/Mo.md')
   })
 
   it('switches to the named workspace first, so the note is read against its own vault', async () => {

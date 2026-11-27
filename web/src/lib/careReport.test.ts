@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import {
   careFixSeed, careGlyph, careNeedsYouRow, careRailDetail, careRailLabel, careRailTitle, careRailTone, careState, careSummaryMeta, careSummaryTitle,
-  careNeedFixSeed, dayWords, fenceData, needAction, needActionLabel, openNeeds, stepCanFix, stepGlyph, stepLine,
+  careNeedChatTitle, careNeedFixSeed, dayWords, fenceData, needAction, needActionLabel, openNeeds, stepCanFix, stepGlyph, stepLine,
   stepName, stepsCountWords, stepsOpenByDefault, stepWord, whenWords, type CareReport,
 } from './careReport'
 import { CARE_PROPOSAL_PATH, CARE_WRITTEN_AT, careReports, need } from './careReportFixture'
@@ -50,6 +50,25 @@ describe('careState', () => {
     expect(careGlyph('interrupted')).toBe('blocked')
     expect(careGlyph('running')).toBe('running')
     expect(careGlyph('never')).toBe('open')
+  })
+})
+
+describe('careNeedChatTitle', () => {
+  const titled = (title: string) => careNeedChatTitle(need(title, ''))
+
+  it('reads a step-led item as the step, without markers or backticks', () => {
+    expect(titled('stale [!]: the stale-notes audit reads frontmatter `updated:`')).toBe('Care: Stale notes')
+    expect(titled('**hygiene** [ ]: cannot write INDEX.md')).toBe('Care: Hygiene')
+  })
+
+  it('keeps the first six plain words of any other sentence', () => {
+    expect(titled('13 suggestions are waiting in `Unsure.md` for your tick.')).toBe('Care: 13 suggestions are waiting in Unsure.md…')
+    expect(titled('Two proposals are ready.')).toBe('Care: Two proposals are ready')
+    expect(titled('[!] see [the report](Workspace/Care-Report.md)')).toBe('Care: see the report')
+  })
+
+  it('never leaks a marker into the title', () => {
+    for (const raw of ['[!] foo', 'x [x]: **bold** `code`', '[ ]  ']) expect(titled(raw)).not.toMatch(/[\[\]`*]/)
   })
 })
 

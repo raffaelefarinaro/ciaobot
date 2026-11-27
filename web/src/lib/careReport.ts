@@ -421,6 +421,27 @@ export function careFixSeed(report: CareReport, step: CareStep): string {
 }
 
 /**
+ * The chat title for a needs-you item: plain words, never the report's markers.
+ * The run writes the item in markdown, often led by its step id and a status
+ * mark (`stale [!]: the stale-notes audit reads frontmatter \`updated:\``). A lead
+ * that names a known step reads as that step ("Care: Stale notes"); anything
+ * else is the first six plain words of the sentence.
+ */
+export function careNeedChatTitle(item: CareNeed): string {
+  const plain = item.title
+    .replace(/\[([^\]]+)\]\([^)]*\)/g, '$1')
+    .replace(/\[[ xX!]\]/g, ' ')
+    .replace(/[`*_]+/g, '')
+    .replace(/\s+/g, ' ')
+    .trim()
+  const lead = /^([a-z][a-z-]*)\s*:/i.exec(plain)
+  if (lead && STEP_NAMES[lead[1].toLowerCase()]) return `Care: ${STEP_NAMES[lead[1].toLowerCase()]}`
+  const words = plain.replace(/[.:\s]+$/, '').split(' ').filter(Boolean)
+  if (!words.length) return 'Care: needs you'
+  return `Care: ${words.slice(0, 6).join(' ')}${words.length > 6 ? '…' : ''}`
+}
+
+/**
  * The draft "Fix with a chat" opens with for one needs-you item. Never sent.
  * The item is the run's own model-written text, so it is fenced as quoted data.
  */
