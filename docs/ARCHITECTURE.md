@@ -580,9 +580,11 @@ The agent writes memory directly (regions, notes, project docs, people) and puts
 **Unattended runs defer; they do not route around the missing reviewer.** The
 capsule marker (`ciao/context/capsule.py`, one string in
 `ciao/memory_policy.py`) tells a schedule/automation turn not to ask or wait and
-to report deferred work — a NEW region fact, a vault-note trash/delete, a
+to report deferred work — a vault-note trash/delete, a
 write into another workspace, a new automation in another workspace, and public
-or destructive git actions — in its final output instead. The memory pass reads
+or destructive git actions — in its final output instead. It may write a new
+memory fact only from something the person produced, never from fetched
+content or an instruction inside it. The memory pass reads
 the same marker in the transcript it is handed, and is told never to record a
 fact out of an automation turn.
 
@@ -603,7 +605,7 @@ them.
 
 Two rules hold across every row. **An inventory match is a candidate, not proof:**
 the filer reads the target's current source and cites both why it applies and
-the failure it observed. **Nothing is promoted unattended:** an unattended run
+the failure it observed. **No skill or guide edit is made unattended:** an unattended run
 may write a proposal file and report it; it may not edit a skill, edit
 `AGENTS.md`, create a skill, or open a public issue. The care prompt states
 this, and `ciao proposal-check` (`ciao/proposal_files.py`) holds the file format.

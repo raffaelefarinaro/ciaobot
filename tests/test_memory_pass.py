@@ -969,7 +969,7 @@ def test_pass_records_a_lean_as_a_preference_and_splits_two_fact_lines() -> None
     assert "record it as a preference or an open option, never as chosen" in prompt
     assert "split it and keep the unchanged one; never drop it" in prompt
     # The undo log is stated once, in the guide; the pass only points at it.
-    assert "log it as the durable-memory guide's undo log rule says" in prompt
+    assert "log it as the durable-memory guide's undo log rule says, with `by: memory pass <this chat's id>`" in prompt
     assert "**Undo log.**" in _ciao_memory_skill()
     assert "Memory-Consolidations.md" not in prompt
 

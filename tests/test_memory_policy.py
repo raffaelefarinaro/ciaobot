@@ -73,6 +73,7 @@ def test_capsule_unattended_guidance_defers_source_and_runtime_edits() -> None:
     assert "editing application source code" in text
     # Writing a confident memory fact is not an approval-gated action.
     assert "memory regions" not in text
+    assert "Write a new memory fact only from something the person produced" in text
     assert "hand-editing `.runtime/` state files" in text
     assert "Never print secret values (env files, tokens, provider configs) into the conversation." in text
 
@@ -253,7 +254,7 @@ def test_the_routing_contract_is_documented() -> None:
     ):
         assert row in doc, row
     assert "An inventory match is a candidate, not proof" in doc
-    assert "Nothing is promoted unattended" in doc
+    assert "No skill or guide edit is made unattended" in doc
     assert "`x3+` recurrence is a" in doc
     assert "`/remember` keeps a real origin" in doc
     assert "`req:<id>`" in doc
