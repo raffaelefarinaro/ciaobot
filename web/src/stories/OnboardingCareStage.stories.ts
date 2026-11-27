@@ -112,7 +112,8 @@ export const RefreshFailure: Story = {
     await waitFor(() => expect(canvasElement.querySelector('[role="alert"]')?.textContent).toBe('Synthetic refusal'))
     expect(canvasElement.textContent).toContain('Workspace care is on.')
     expect(canvasElement.textContent).toContain('Fixture requests: 2.')
-    expect(canvasElement.textContent).toContain('StageState: {"dirty":false,"pending":false,"canContinue":true,"error":"Synthetic refusal"}.')
+    // The first read's proposal is still on screen, unsaved, beside the refusal.
+    expect(canvasElement.textContent).toContain('StageState: {"dirty":true,"pending":false,"canContinue":true,"error":"Synthetic refusal"}.')
     expect(canvasElement.textContent).toMatch(/Violations: 0\./)
   },
 }
