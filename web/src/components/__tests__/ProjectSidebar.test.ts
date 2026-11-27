@@ -334,6 +334,26 @@ describe('ProjectSidebar chat actions', () => {
     wrapper.unmount()
   })
 
+  it('adds the run glyph to a collapsed project whose chat runs background shells', async () => {
+    const store = useProjectStore()
+    const wrapper = await mountSidebar()
+    await nextTick()
+    const group = () => wrapper.findAll('.project-group').find(g => g.find('.project-name').text().includes('General'))!
+    const chevron = () => group().get('.project-icon')
+    if (chevron().attributes('aria-expanded') === 'true') await chevron().trigger('click')
+    expect(group().find('.project-shells').exists()).toBe(false)
+    store.runningShells = { [chatId]: 2 }
+    await nextTick()
+    const mark = group().get('.project-shells')
+    expect(mark.find('.activity-glyph--run').exists()).toBe(true)
+    expect(mark.attributes('aria-label')).toBe('Background shells are running in this project')
+    // Expanded, the chat row carries the mark instead of the project.
+    await chevron().trigger('click')
+    expect(group().find('.project-shells').exists()).toBe(false)
+    expect(group().find('.chat-signal--shells').exists()).toBe(true)
+    wrapper.unmount()
+  })
+
   it('copies the selected chat ID from the action menu', async () => {
     const writeText = vi.fn().mockResolvedValue(undefined)
     Object.defineProperty(navigator, 'clipboard', {

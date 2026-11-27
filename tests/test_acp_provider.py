@@ -860,3 +860,59 @@ async def test_config_error_log_omits_adapter_text(
     assert "qqq555secret" not in caplog.text
     assert "access_token" not in caplog.text
     assert "could not set model (RequestError)" in caplog.text
+
+
+# -- running background shells reach the host ------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_shell_count_changes_reach_the_service_hook_and_a_dead_agent_reports_zero(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The hook chain the chat rows depend on: session -> AcpProvider -> ProviderService -> host.
+
+    The hook is installed before the provider exists, so the service hands it to the provider it
+    creates, and the provider to the session it opens. When the agent process exits, the count
+    is reported again and reads 0: a dead agent's shells are never seen to end.
+    """
+    config, _ = _install(monkeypatch, tmp_path, sessions=["sess-sh"], prompts=[_text_turn("ok")])
+    service = ProviderService(config)  # type: ignore[arg-type]
+    seen: list[int] = []
+    service.set_shells_hook(lambda: seen.append(service.running_shells))
+    try:
+        await _turn(service, _request())
+        provider = service.provider
+        assert isinstance(provider, AcpProvider)
+        session = provider._session
+        assert session is not None
+        session._shells.track_unpolled("call-1", command="sleep 60")
+        session._shells.track_unpolled("call-2", command="sleep 61")
+        session._report_shells()
+        assert seen == [2]
+        assert service.running_shells == 2
+
+        connection = provider._connection
+        assert connection is not None
+        connection._process.kill()
+        await _until(lambda: len(seen) == 2, timeout=10)
+        assert seen == [2, 0]
+        assert provider.running_shells == 0
+        # The session still tracks both: the count is 0 because the connection is not alive.
+        assert session.running_shells == 2
+    finally:
+        await service.disconnect()
+
+
+@pytest.mark.asyncio
+async def test_running_shells_is_zero_once_the_connection_is_not_alive(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    config, _ = _install(monkeypatch, tmp_path)
+    provider = FakeAcpProvider(config.workspace_root, config=config)
+    provider._session = SimpleNamespace(running_shells=3)  # type: ignore[assignment]
+    provider._connection = SimpleNamespace(alive=True)  # type: ignore[assignment]
+    assert provider.running_shells == 3
+    provider._connection = SimpleNamespace(alive=False)  # type: ignore[assignment]
+    assert provider.running_shells == 0
+    provider._connection = None
+    assert provider.running_shells == 0

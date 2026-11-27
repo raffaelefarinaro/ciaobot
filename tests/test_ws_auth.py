@@ -347,3 +347,27 @@ def test_running_shells_publish_on_change_only_and_drop_to_zero_with_the_provide
         {"type": "chat_shells", "chat_id": chat.chat_id, "project_id": project.project_id, "running_shells": 0},
     ]
     assert manager.running_shells_by_chat() == {}
+
+
+def test_a_provider_shell_count_change_publishes_through_the_chat_provider(tmp_path: Path) -> None:
+    """The host wiring: the provider a chat gets from ``_get_provider`` reports to ``chat_shells``."""
+    app = _real_events_app(tmp_path)
+    manager = app.state.project_chat_manager
+    project = manager.create_project("Shells", workspace="work")
+    chat = manager.create_chat(project.project_id, title="Running")
+    service = manager._get_provider(chat.chat_id)
+    provider = service.ensure_provider(chat.provider or "claude")
+
+    published: list[dict] = []
+    original = manager._events.publish
+    manager._events.publish = lambda payload: (published.append(payload), original(payload))  # type: ignore[method-assign]
+
+    provider._session = SimpleNamespace(running_shells=2)
+    provider._connection = SimpleNamespace(alive=True)
+    provider._shells_changed()  # what the session's hook calls
+
+    assert [p for p in published if p["type"] == "chat_shells"] == [
+        {"type": "chat_shells", "chat_id": chat.chat_id, "project_id": project.project_id, "running_shells": 2},
+    ]
+    provider._session = None
+    provider._connection = None
