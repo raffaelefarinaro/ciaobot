@@ -11,6 +11,7 @@ were copies (see issue #500), which is the reason this module exists.
 from __future__ import annotations
 
 import re
+from collections.abc import Sequence
 from dataclasses import dataclass
 
 # CLI-internal user-message envelopes. The Claude Code CLI synthesizes
@@ -135,15 +136,19 @@ def is_interrupted_request_sentinel(content: str) -> bool:
     return bool(INTERRUPTED_REQUEST_RE.fullmatch(content.strip()))
 
 
-def strip_injected_context(content: str) -> str:
-    """Remove Ciaobot's leading context capsule from a CLI user record."""
+def remove_injected_context(content: str) -> str:
+    """``content`` without Ciaobot's leading context capsules: empty when it held nothing else."""
     stripped = content
     while True:
         nxt = _CONTEXT_BLOCK_RE.sub("", stripped, count=1)
         if nxt == stripped:
-            break
+            return stripped
         stripped = nxt
-    return stripped or content
+
+
+def strip_injected_context(content: str) -> str:
+    """Remove Ciaobot's leading context capsule from a CLI user record."""
+    return remove_injected_context(content) or content
 
 
 #: The hidden turn the engine sent when an agent switched its own chat into
@@ -170,6 +175,52 @@ _HIDDEN_CONTINUATIONS = frozenset(
 def is_hidden_continuation(content: str) -> bool:
     """True when `content` (with or without the context capsule) is a hidden continuation prompt."""
     return " ".join(strip_injected_context(content).split()) in _HIDDEN_CONTINUATIONS
+
+
+#: The URI of the context capsule when it is sent as an embedded resource. Claude's adapter
+#: saves such a resource as two text blocks of the user message: this link, then the capsule
+#: wrapped in a ``<context ref="...">`` element.
+CONTEXT_URI = "ciaobot://context"
+_CONTEXT_REF_OPEN = f'<context ref="{CONTEXT_URI}">'
+_CONTEXT_REF_CLOSE = "</context>"
+# Context the CLI injects into a user message, which a replay can carry as a block of its own.
+_INJECTED_BLOCK_RE = re.compile(r"^\s*<system-reminder>")
+
+
+def _replayed_block(block: str) -> str:
+    """One text block of a replayed user message as typed, or "" when nobody typed it.
+
+    The capsule's ``<context ref>`` block goes only when the whole block is that element: the
+    capsule can itself hold ``</context>``, and a person can quote the tag in a sentence.
+    """
+    text = block.strip()
+    if text.startswith(_CONTEXT_REF_OPEN) and text.endswith(_CONTEXT_REF_CLOSE):
+        return ""
+    text = remove_injected_context(text).strip()
+    if (
+        text == CONTEXT_URI
+        or is_cli_envelope(text)
+        or _INJECTED_BLOCK_RE.match(text)
+        or is_control_slash_command(text)
+        or is_no_response_sentinel(text)
+        or is_interrupted_request_sentinel(text)
+    ):
+        return ""
+    return text
+
+
+def replayed_prompt(blocks: Sequence[str]) -> str:
+    """The prompt to journal for one user message a ``session/load`` replay sent, or "" for none.
+
+    ``blocks`` are the message's text blocks in order, each filtered on its own so a block the
+    CLI wrote never takes the person's block with it: the context capsule goes (a leading
+    capsule, Claude's capsule link block and its ``<context ref>`` block), and so does a block
+    nobody typed (a CLI envelope, a system reminder, a /model or /mode echo, an interrupt
+    sentinel). The rest is joined by newlines. That is what the live path journals for the
+    turn: the person's prompt, or a hidden continuation (journaled live too, and hidden by the
+    renderer).
+    """
+    return "\n".join(text for text in map(_replayed_block, blocks) if text).strip()
 
 
 def _flag_on(value: object, name: str) -> bool:

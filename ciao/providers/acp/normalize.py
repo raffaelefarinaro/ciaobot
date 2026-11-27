@@ -297,12 +297,12 @@ class UpdateNormalizer:
         u = canonical(update)
         kind = u.get("sessionUpdate")
         if kind == "agent_message_chunk":
-            text = _chunk_text(u)
+            text = chunk_text(u)
             if text is None:
                 return []
             return [AssistantTextDelta(type="text", text=text, parent_tool_use_id=self.parent_of(u))]
         if kind == "agent_thought_chunk":
-            text = _chunk_text(u)
+            text = chunk_text(u)
             if text is None:
                 return []
             return [ThinkingEvent(type="thinking", text=text, parent_tool_use_id=self.parent_of(u))]
@@ -514,7 +514,8 @@ _SILENT_KINDS = frozenset(
 )
 
 
-def _chunk_text(u: Mapping[str, Any]) -> str | None:
+def chunk_text(u: Mapping[str, Any]) -> str | None:
+    """The text of a canonical message chunk, or None when its content is not a text block."""
     content = u.get("content")
     if isinstance(content, Mapping) and content.get("type") == "text":
         text = content.get("text")

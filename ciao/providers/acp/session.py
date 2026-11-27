@@ -30,6 +30,7 @@ from acp.schema import (
 )
 from pydantic import TypeAdapter
 
+from ciao.cli_envelopes import replayed_prompt
 from ciao.model_tiers import resolve_tier
 from ciao.models import (
     AssistantTextDelta,
@@ -47,7 +48,7 @@ from ciao.models import (
 )
 from ciao.os_support.processes import process_table
 from ciao.providers.acp.connection import AcpConnection
-from ciao.providers.acp.normalize import TurnText, UpdateNormalizer, canonical, result_event
+from ciao.providers.acp.normalize import TurnText, UpdateNormalizer, canonical, chunk_text, result_event
 from ciao.providers.acp.permissions import PermissionBroker, mode_choices, pick_value
 from ciao.providers.acp.shell_liveness import CHECK_INTERVAL_S, ShellLiveness, TrackedShell
 from ciao.providers.acp.shell_output import read_tail
@@ -661,10 +662,44 @@ class AcpSession:
             self._journal.event(payload)
 
     def _rebuild(self, updates: Sequence[Mapping[str, Any]]) -> None:
+        """Journal a load replay as the live path would have: each turn's prompt, then its events.
+
+        The normalizer drops ``user_message_chunk`` (live, ``_prompt`` journals the prompt), so
+        the replayed prompts are taken here. Consecutive chunks of one message are one row, written
+        before the next update reaches the normalizer, so it sits before its turn's events. A
+        subagent's prompt and a block nobody typed (``replayed_prompt``) are not journaled.
+        """
         normalizer = UpdateNormalizer(self.spec, self.session_id)
+        blocks: list[str] = []
+        message: object = None
+
+        def flush() -> None:
+            prompt = replayed_prompt(blocks)
+            blocks.clear()
+            if prompt:
+                self._journal.user(prompt)
+
         for update in updates:
-            for event in normalizer.feed(_update_body(update)):
+            body = _update_body(update)
+            fields = canonical(body)
+            if fields.get("sessionUpdate") == "user_message_chunk":
+                if normalizer.parent_of(fields) is not None:
+                    continue
+                # A message is the chunks that share a messageId (both real adapters stamp
+                # one); chunks without one are one message only while nothing came between.
+                message_id = fields.get("messageId")
+                if message_id != message:
+                    flush()
+                message = message_id
+                text = chunk_text(fields)
+                if text is not None:
+                    blocks.append(text)
+                continue
+            flush()
+            message = None
+            for event in normalizer.feed(body):
                 self._journal_event(event)
+        flush()
 
     async def apply(self, *, mode: BridgeMode, model: str, thinking: str) -> list[StreamEvent]:
         """Hold the agent at the chat's mode, model and thinking level before a turn.
