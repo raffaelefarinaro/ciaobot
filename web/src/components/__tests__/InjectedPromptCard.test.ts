@@ -304,7 +304,7 @@ describe('InjectedPromptCard', () => {
     expect(wrapper.get('.injected-card-raw-toggle').text()).toBe('Show full prompt')
   })
 
-  it('links a loop card to the Automations list, not to a fake entry', async () => {
+  it('links a loop card to the Loops page, not to a fake entry', async () => {
     const wrapper = mountCard({
       prompt: { kind: 'loop', run: 1, of: 2, ends: '14:30 (Europe/Zurich)', prompt: 'x' },
       raw: 'raw',
@@ -312,8 +312,8 @@ describe('InjectedPromptCard', () => {
     })
     await wrapper.get('.injected-card-toggle').trigger('click')
     const link = wrapper.getComponent(RouterLinkStub)
-    expect(link.props('to')).toBe('/schedules')
-    expect(link.text()).toBe('Open Automations')
+    expect(link.props('to')).toBe('/automations/loops')
+    expect(link.text()).toBe('Open Loops')
   })
 
   it('keeps a webhook instruction reachable and named', async () => {

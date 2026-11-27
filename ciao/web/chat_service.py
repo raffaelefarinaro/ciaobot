@@ -162,6 +162,16 @@ def _provider_label(provider: str) -> str:
     return provider_registry.label(provider, short=True)
 
 
+def _runtime_label(provider: str, model: str) -> str:
+    """"Claude Code / opus"; the provider alone for no model or the CLI's own
+    ``default``, which names no model and is never written as the word."""
+    label = _provider_label(provider)
+    model = (model or "").strip()
+    if not model or model == "default":
+        return label
+    return f"{label} / {model}"
+
+
 def strip_engine_fields(messages: list[Any] | None) -> list[Any]:
     """Drop the engine-written ``sent_context`` a caller-supplied row must not carry."""
     return [
@@ -313,8 +323,8 @@ def _handover_marker(
         "role": "system",
         "content": (
             "Handed over from "
-            f"{_provider_label(old_provider)} / {old_model} to "
-            f"{_provider_label(new_provider)} / {new_model}."
+            f"{_runtime_label(old_provider, old_model)} to "
+            f"{_runtime_label(new_provider, new_model)}."
         ),
         "timestamp": _now_iso(),
         "origin": "handover",

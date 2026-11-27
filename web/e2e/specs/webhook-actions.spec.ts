@@ -43,7 +43,7 @@ for (const scenario of ['desktop', 'phone', '200% page zoom reflow'] as const) {
       if (scenario === '200% page zoom reflow') {
         await page.setViewportSize({ width: 780, height: 1688 })
       }
-      await boot(page, '/schedules', '.wh-row')
+      await boot(page, '/automations/webhooks', '.wh-row')
       // Follow browser-zoom.spec.ts: 200% page zoom halves the CSS viewport.
       // Resize AFTER boot to exercise reflow, not just initial phone layout.
       if (scenario === '200% page zoom reflow') {

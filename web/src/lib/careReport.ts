@@ -209,24 +209,19 @@ function lowerLead(text: string): string {
   return /^[A-Z][a-z]/.test(text) ? text[0].toLowerCase() + text.slice(1) : text
 }
 
-const RAIL_STATE_WORDS: Record<CareState, string> = {
-  running: 'running',
-  never: 'not run yet',
-  unreadable: 'report unreadable',
-  interrupted: 'cut off',
-  blocked: 'did not finish',
-  needs_you: 'needs you',
-  complete: 'done',
+/** The At a glance line's title: the Needs you row's own words when care needs the owner, else the feature's name. */
+export function careRailTitle(report: CareReport, now: Date = new Date()): string {
+  return careNeedsYouRow(report, now)?.title ?? 'Workspace care'
 }
 
-/** The At a glance line's spoken name: the state in words, then the detail and where it goes. */
+/** How the docked line wears a run that needs the owner (null: it stays quiet). */
+export function careRailTone(report: CareReport): CareRow['tone'] | null {
+  return careNeedsYouRow(report)?.tone ?? null
+}
+
+/** The At a glance line's spoken name: what it shows, then where it goes. */
 export function careRailLabel(report: CareReport, now: Date = new Date()): string {
-  return `Workspace care, ${RAIL_STATE_WORDS[careState(report)]}. ${careRailDetail(report, now)}. Open the care report.`
-}
-
-/** Whether care needs the person: the states that raise a Needs you row when the rail is not beside. */
-export function careNeedsPerson(report: CareReport): boolean {
-  return careNeedsYouRow(report) !== null
+  return `${careRailTitle(report, now)}. ${careRailDetail(report, now)}. Open the care report.`
 }
 
 export interface CareRow {

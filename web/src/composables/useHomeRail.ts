@@ -12,9 +12,33 @@ const beside = ref(false)
 let tracked: HTMLElement | null = null
 let observer: ResizeObserver | null = null
 
+/** Top-level tracks of a grid-template-columns value; `minmax(0px, 1fr)` is one track. */
+export function countTracks(columns: string): number {
+  let depth = 0
+  let count = 0
+  let inTrack = false
+  for (const ch of columns) {
+    if (ch === '(') depth++
+    else if (ch === ')') depth = Math.max(0, depth - 1)
+    if (depth === 0 && /\s/.test(ch)) {
+      inTrack = false
+    } else if (!inTrack) {
+      inTrack = true
+      count++
+    }
+  }
+  return count
+}
+
 function measure(): void {
-  const columns = tracked ? getComputedStyle(tracked).gridTemplateColumns.trim() : ''
-  beside.value = columns.split(/\s+/).filter(Boolean).length > 1
+  if (!tracked) {
+    beside.value = false
+    return
+  }
+  // A `display: none` ancestor resolves no tracks: keep the last answer
+  // rather than reading the specified value of a layout nobody sees.
+  if (tracked.getClientRects().length === 0) return
+  beside.value = countTracks(getComputedStyle(tracked).gridTemplateColumns.trim()) > 1
 }
 
 /** A function ref for the `.home-workbench` element; called again on every patch, so it is idempotent. */

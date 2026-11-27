@@ -63,7 +63,8 @@ import { useProjectStore, type NewChatRuntime } from '../stores/projects'
 import { useTaskBoardStore, type TaskChanges } from '../stores/taskBoard'
 import { useTaskSignalsStore } from '../stores/taskSignals'
 import { useTaskStore } from '../stores/tasks'
-import { providerForModelSection, sectionsFromModelsResponse, type ModelSection } from '../lib/modelSections'
+import type { ModelSection } from '../lib/modelSections'
+import { chosenRuntimeFor, newChatModelView } from '../lib/newChatModel'
 import ModelSelector from './ModelSelector.vue'
 import { askConfirm, askConfirmReason, pendingConfirm } from '../lib/confirm'
 import { pendingPrompt } from '../lib/prompt'
@@ -917,8 +918,6 @@ const delegatePreview = computed(() => {
   }
 })
 
-/** Sentinel row for "no override": the workspace default, offered as its own model row. */
-const DELEGATE_DEFAULT_KEY = '__workspace-default__'
 /** The provider and model the hand-over runs on; null keeps the workspace default. */
 const delegateRuntime = ref<NewChatRuntime | null>(null)
 const delegateModelPickerOpen = ref(false)
@@ -928,31 +927,21 @@ const delegateModelRegion = ref<HTMLElement | null>(null)
 const delegateModelWorkspace = ref('')
 const taskStore = useTaskStore()
 
-// The provider the workspace starts chats on; names the default row.
-const delegateProviderLabel = computed(() => {
-  const provider = projectStore.workspaceOptions.find(
-    option => option.name === workspace.value,
-  )?.default_provider
-  if (!provider) return ''
-  return projectStore.workspaceProviderOptions.find(option => option.value === provider)?.label || provider
-})
-const delegateDefaultModelLabel = computed(() => (
-  delegateProviderLabel.value
-    ? `Your workspace default (${delegateProviderLabel.value})`
-    : 'Your workspace default'
+// Named concretely, as on Home: "Claude Code · Opus 4.5" (lib/newChatModel.ts).
+// The default is resolved against the workspace whose catalog the task store
+// holds, the active one: the store only ever loads the active workspace's
+// models, and the hand-over sheet closes when the workspace switches, so the
+// task's workspace is the active one whenever this picker is open.
+const delegateWorkspaceInfo = computed(() => projectStore.workspaceOptions.find(
+  option => option.name === projectStore.activeWorkspace,
 ))
-const delegateModelLabel = computed(() => delegateRuntime.value?.model || delegateDefaultModelLabel.value)
-const delegateModelSections = computed<ModelSection[]>(() => [
-  {
-    key: 'default',
-    label: 'Workspace default',
-    models: [DELEGATE_DEFAULT_KEY],
-    modelLabels: { [DELEGATE_DEFAULT_KEY]: delegateDefaultModelLabel.value },
-  },
-  ...sectionsFromModelsResponse(taskStore.models).map(section => (
-    section.key === 'anthropic' ? { ...section, label: 'Claude (Anthropic)' } : section
-  )),
-])
+const delegateModelView = computed(() => newChatModelView(taskStore.models, delegateWorkspaceInfo.value, delegateRuntime.value, projectStore.workspaceProviderOptions))
+const delegateModelLabel = computed(() => (
+  delegateModelView.value.providerLabel
+    ? [delegateModelView.value.providerLabel, delegateModelView.value.modelLabel].filter(Boolean).join(' · ')
+    : 'Loading model…'
+))
+const delegateModelSections = computed<ModelSection[]>(() => delegateModelView.value.sections)
 
 // The triggerless selector does not own the chip, so return focus to it
 // ourselves when the list closes (Escape, outside click, or a pick).
@@ -975,11 +964,7 @@ function toggleDelegateModelPicker(): void {
 function selectDelegateModel(value: string | string[], sectionKey: string): void {
   const model = Array.isArray(value) ? value[0] : value
   closeDelegateModelPicker()
-  if (!model || model === DELEGATE_DEFAULT_KEY || sectionKey === 'default') {
-    delegateRuntime.value = null
-    return
-  }
-  delegateRuntime.value = { model, provider: providerForModelSection(sectionKey) }
+  delegateRuntime.value = chosenRuntimeFor(model || '', sectionKey, delegateRuntime.value, taskStore.models, delegateWorkspaceInfo.value)
 }
 
 watch(() => projectStore.activeWorkspace, () => { delegateRuntime.value = null }, { flush: 'sync' })
@@ -3647,7 +3632,8 @@ defineExpose({ requestClose, selectAdjacent, closeDetailPage, openCreate })
                   <ModelSelector
                     v-if="delegateModelPickerOpen"
                     triggerless
-                    :model-value="delegateRuntime?.model || DELEGATE_DEFAULT_KEY"
+                    :model-value="delegateModelView.activeModel"
+                    :active-models="delegateModelView.activeModel ? [delegateModelView.activeModel] : []"
                     :sections="delegateModelSections"
                     :labelled-by="delegateModelLabelId"
                     placeholder="Model"

@@ -226,6 +226,49 @@ def _models_request(config: CiaoConfig):
     })
 
 
+@pytest.mark.asyncio
+async def test_catalog_keeps_the_description_that_names_the_default_entry(
+    monkeypatch, tmp_path: Path,
+) -> None:
+    # Claude Code's adapter describes its `default` entry by the model it runs;
+    # the PWA names that entry by it instead of showing the word "Default".
+    options = [
+        {
+            **_OPTIONS[0],
+            "currentValue": "default",
+            "options": [
+                {"value": "default", "name": "Default (recommended)", "description": "Opus 4.5"},
+                {"value": "m-b", "name": "Model B", "description": "  "},
+                {"value": "m-c", "name": "Model C", "description": "Sonnet 4.5 · $3/$15 per Mtok"},
+                {"value": "m-d", "name": "Model D", "description": "x" * 200},
+            ],
+        },
+        _OPTIONS[1],
+    ]
+    _install(monkeypatch, tmp_path, config_options=options)
+    monkeypatch.setattr(OpencodeAcpProvider, "model_catalog", AsyncMock(return_value=[]))
+
+    rows = await FakeCatalogProvider.model_catalog(_workspace(tmp_path), force=True)
+    assert rows == [
+        {
+            "model": "default", "label": "Default (recommended)",
+            "variants": ["low", "high"], "description": "Opus 4.5",
+        },
+        {"model": "m-b", "label": "Model B", "variants": ["low", "high"]},
+        # Only the part before " · ", and never more than 80 characters.
+        {"model": "m-c", "label": "Model C", "variants": ["low", "high"], "description": "Sonnet 4.5"},
+        {"model": "m-d", "label": "Model D", "variants": ["low", "high"], "description": "x" * 80},
+    ]
+
+    body = json.loads((await list_models(_models_request(_route_config(tmp_path)))).body)
+    assert body["provider_catalog_evidence"]["fake"]["models"] == [
+        {"id": "default", "label": "Default (recommended)", "description": "Opus 4.5"},
+        {"id": "m-b", "label": "Model B"},
+        {"id": "m-c", "label": "Model C", "description": "Sonnet 4.5"},
+        {"id": "m-d", "label": "Model D", "description": "x" * 80},
+    ]
+
+
 def test_list_models_includes_acp_provider_catalog(monkeypatch, tmp_path: Path) -> None:
     _install(monkeypatch, tmp_path, config_options=_OPTIONS)
     monkeypatch.setattr(OpencodeAcpProvider, "model_catalog", AsyncMock(return_value=[]))

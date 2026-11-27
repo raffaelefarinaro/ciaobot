@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import {
-  careFixSeed, careGlyph, careNeedsYouRow, careRailDetail, careState, careSummaryMeta, careSummaryTitle,
+  careFixSeed, careGlyph, careRailLabel, careRailTitle, careRailTone, careNeedsYouRow, careRailDetail, careState, careSummaryMeta, careSummaryTitle,
   dayWords, fenceData, needActionLabel, stepCanFix, stepGlyph, stepLine, stepName, stepWord, whenWords,
   type CareReport,
 } from './careReport'
@@ -181,5 +181,24 @@ describe('the report page words', () => {
     expect(whenWords('', NOW)).toBe('')
     expect(dayWords('2026-11-24')).toBe('Nov 24')
     expect(dayWords('soon')).toBe('')
+  })
+})
+
+describe('the docked At a glance row', () => {
+  it('uses the Needs you row title and tone when care needs the owner, else the feature name', () => {
+    expect(careRailTitle(careReports.needsYou, NOW)).toBe('Care needs you')
+    expect(careRailTone(careReports.needsYou)).toBe('attention')
+    expect(careRailTitle(careReports.blocked, NOW)).toBe('Care did not finish')
+    expect(careRailTone(careReports.blocked)).toBe('error')
+    expect(careRailTone(careReports.interrupted)).toBe('attention')
+    for (const quiet of [careReports.complete, careReports.running, careReports.never]) {
+      expect(careRailTitle(quiet, NOW)).toBe('Workspace care')
+      expect(careRailTone(quiet)).toBeNull()
+    }
+  })
+
+  it('names the row once: title, line, then where it goes', () => {
+    expect(careRailLabel(careReports.needsYou, NOW)).toBe('Care needs you. 2 things need you. Open the care report.')
+    expect(careRailLabel(careReports.blocked, NOW)).toBe('Care did not finish. 4 of 6 steps · 2 blocked. Open the care report.')
   })
 })

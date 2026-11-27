@@ -241,119 +241,67 @@
     <ChatSearchDialog :open="chatSearchOpen" :workspace="store.activeWorkspace" @close="chatSearchOpen = false" @select="openSearchedChat" />
 
     <div v-if="!collapsed" ref="contextListEl" class="sidebar-context">
-    <!-- No section title here: the nav pill above already names this view.
-         The create action sits on the Routines label, the way New sits on the
-         Projects label in the chat sidebar. -->
+    <!-- Automations: the create action on the group label (as New sits on
+         Projects), then the destination's three pages as destination-style
+         rows (the primary nav's .nav-item: 38px, 44px on a coarse pointer, the
+         accent-tinted fill on the current one, a quiet count at the end), then
+         Next up: the soonest runs as the Projects tree's own rows. -->
     <template v-if="!collapsed && (mode === 'schedules')">
-      <div class="schedules-list">
-        <SidebarListSkeleton v-if="!taskStore.schedulesLoaded && !taskStore.scheduleLoadError" label="Loading automations" :rows="3" />
-        <template v-else>
-          <template v-if="scheduleGroups.oneOffs.length">
-          <div class="schedule-group schedule-group--once">
-            <h2 class="schedule-group-header" title="One-off automations delete themselves after they run">One-offs</h2>
-            <div class="schedule-group-items">
-              <SidebarRow
-                v-for="s in scheduleGroups.oneOffs"
-                :key="s.schedule_id"
-                :to="`/schedules/${s.schedule_id}`"
-                class="schedule-item"
-                :text="scheduleTitle(s)"
-                :meta="cadenceBadge(s)"
-                :muted="!s.enabled"
-              >
-                <span v-if="s.missed" class="schedule-mark missed-dot" title="Expected to run but didn't"><ActivityGlyph kind="alert" /></span>
-              </SidebarRow>
-            </div>
-          </div>
-        </template>
-
-        <!-- A chat's loops: model-made, bounded, never paused. Shown only when
-             there is one; the row's title carries the full summary. -->
-        <template v-if="scheduleGroups.loops.length">
-          <div class="schedule-group schedule-group--loops">
-            <h2 class="schedule-group-header" title="Loops run inside one chat and end on their own">Loops</h2>
-            <div class="schedule-group-items">
-              <SidebarRow
-                v-for="s in scheduleGroups.loops"
-                :key="s.schedule_id"
-                :to="`/schedules/${s.schedule_id}`"
-                class="schedule-item"
-                :text="scheduleTitle(s)"
-                :meta="cadenceBadge(s)"
-                :title="loopSummary(s, Date.now())"
-              >
-                <span
-                  v-if="s.enabled && s.web_chat_id && store.isChatStreaming(s.web_chat_id)"
-                  class="schedule-mark"
-                  title="This automation is working"
-                ><ActivityGlyph kind="working" /></span>
-                <span v-if="s.missed" class="schedule-mark missed-dot" title="Expected to run but didn't"><ActivityGlyph kind="alert" /></span>
-              </SidebarRow>
-            </div>
-          </div>
-        </template>
-
-        <!-- Routines always shows, so its label can carry the create action
-             (it used to be a footer button); an empty workspace says so. -->
+      <div class="schedules-list automations-sidebar">
         <div class="schedule-group">
-            <div class="sidebar-label-row">
-              <h2 class="schedule-group-header">Routines</h2>
-              <button
-                type="button"
-                class="sidebar-label-link"
-                aria-label="New automation"
-                title="New automation"
-                @click="emit('new-schedule')"
-              ><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" aria-hidden="true"><line x1="12" y1="5" x2="12" y2="19" /><line x1="5" y1="12" x2="19" y2="12" /></svg>New</button>
-            </div>
-            <p v-if="!scheduleGroups.routines.length" class="sidebar-empty-note">No routines in this workspace yet.</p>
-            <div v-else class="schedule-group-items">
-              <SidebarRow
-                v-for="s in scheduleGroups.routines"
-                :key="s.schedule_id"
-                :to="`/schedules/${s.schedule_id}`"
-                class="schedule-item"
-                :text="scheduleTitle(s)"
-                :meta="cadenceBadge(s)"
-                :muted="!s.enabled"
-              >
-                <span
-                  v-if="s.enabled && s.web_chat_id && store.isChatStreaming(s.web_chat_id)"
-                  class="schedule-mark"
-                  title="This automation is working"
-                ><ActivityGlyph kind="working" /></span>
-                <span v-if="s.missed" class="schedule-mark missed-dot" title="Expected to run but didn't"><ActivityGlyph kind="alert" /></span>
-              </SidebarRow>
-            </div>
+          <div class="sidebar-label-row">
+            <h2 id="automations-nav-heading" class="schedule-group-header">Automations</h2>
+            <button
+              type="button"
+              class="sidebar-label-link"
+              aria-label="New automation"
+              title="New automation"
+              @click="emit('new-schedule')"
+            ><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" aria-hidden="true"><line x1="12" y1="5" x2="12" y2="19" /><line x1="5" y1="12" x2="19" y2="12" /></svg>New</button>
+          </div>
+          <nav class="automations-subnav" aria-labelledby="automations-nav-heading">
+            <router-link
+              v-for="page in AUTOMATIONS_PAGES"
+              :key="page.id"
+              :to="page.to"
+              class="nav-item automations-subnav-item schedule-item"
+              :class="{ 'nav-item--active': automationsPage === page.id }"
+              :aria-current="automationsPage === page.id && !routeScheduleId ? 'page' : undefined"
+              :data-count="automationsCounts[page.id] || undefined"
+              :aria-label="automationsSubnavLabel(page.id, page.label)"
+              @click="emit('chat-selected')"
+            >
+              <span class="nav-item-label" aria-hidden="true">{{ page.label }}</span>
+              <span v-if="page.id === 'schedules' && schedulesNeedLook" class="nav-item-alert" aria-hidden="true"><ActivityGlyph kind="alert" /></span>
+            </router-link>
+          </nav>
         </div>
 
-        <template v-if="scheduleGroups.system.length">
-          <div class="schedule-group schedule-group--system">
-            <h2 class="schedule-group-header">System</h2>
-            <div class="schedule-group-items">
-              <SidebarRow
-                v-for="s in scheduleGroups.system"
-                :key="s.schedule_id"
-                :to="`/schedules/${s.schedule_id}`"
-                class="schedule-item"
-                :text="scheduleTitle(s)"
-                :meta="cadenceBadge(s)"
-                :muted="!s.enabled"
-              >
-                <span
-                  v-if="s.enabled && s.web_chat_id && store.isChatStreaming(s.web_chat_id)"
-                  class="schedule-mark"
-                  title="This automation is working"
-                ><ActivityGlyph kind="working" /></span>
-                <span v-if="s.missed" class="schedule-mark missed-dot" title="Expected to run but didn't"><ActivityGlyph kind="alert" /></span>
-              </SidebarRow>
-            </div>
+        <div class="schedule-group" role="group" aria-labelledby="automations-next-heading">
+          <h2 id="automations-next-heading" class="schedule-group-header">Next up</h2>
+          <SidebarListSkeleton v-if="!taskStore.schedulesLoaded && !taskStore.scheduleLoadError" label="Loading automations" :rows="3" />
+          <p v-else-if="!nextUp.length" class="sidebar-empty-note">Nothing scheduled.</p>
+          <div v-else class="schedule-group-items">
+            <SidebarRow
+              v-for="s in nextUp"
+              :key="s.schedule_id"
+              :to="`/schedules/${s.schedule_id}`"
+              class="schedule-item automations-next-item"
+              :text="scheduleTitle(s)"
+              :meta="untilNext(s.next_run, nowTick)"
+              :aria-current="routeScheduleId === s.schedule_id ? 'page' : undefined"
+              @click="emit('chat-selected')"
+            >
+              <span
+                v-if="nextUpWorking(s)"
+                class="schedule-mark"
+                title="This automation is working"
+              ><ActivityGlyph kind="working" /><span class="sr-only">Working</span></span>
+              <span v-if="s.missed" class="schedule-mark missed-dot" title="Expected to run but didn't"><ActivityGlyph kind="alert" /><span class="sr-only">Missed a run</span></span>
+            </SidebarRow>
           </div>
-        </template>
-
-        </template>
+        </div>
       </div>
-
     </template>
 
     <!-- Tasks lists the board's lanes the way Automations lists its groups:
@@ -1064,8 +1012,9 @@ import ChatSearchDialog from './ChatSearchDialog.vue'
 import { isApplePlatform } from '../lib/platform'
 import { scheduleInWorkspace, scheduleNeedsAttention } from '../lib/automationWorkspace'
 import { useWorkspaceSchedules } from '../composables/useWorkspaceSchedules'
-import { cadenceBadge, groupSidebarSchedules, scheduleTitle } from '../lib/scheduleList'
-import { loopSummary } from '../lib/loops'
+import { groupAutomations, lastRunState, nextUpSchedules, scheduleTitle, untilNext } from '../lib/scheduleList'
+import { AUTOMATIONS_PAGES, automationsPageFor, automationsPagePath, type AutomationsPage } from '../lib/automationsNav'
+import { useWebhookStore } from '../stores/webhooks'
 import SidebarRow from './SidebarRow.vue'
 import SidebarListSkeleton from './SidebarListSkeleton.vue'
 import { listAnchor, roamFocus } from '../lib/listRoaming'
@@ -1362,11 +1311,53 @@ function closeWorkspaceMenuOnOutside(event: MouseEvent): void {
   closeWorkspaceMenu(false)
 }
 
-// Schedule list split: one-offs first (sorted by datetime), then recurring.
+// The selected workspace's automations: what Automations lists and counts.
 const workspaceSchedules = useWorkspaceSchedules()
 
-// The sidebar's automation groups, in the order the open automation's title rail walks.
-const scheduleGroups = computed(() => groupSidebarSchedules(workspaceSchedules.value))
+// ── Automations: the three pages, their counts, and Next up ──────────────
+const webhookStore = useWebhookStore()
+const routeScheduleId = computed(() => (typeof route.params.scheduleId === 'string' ? route.params.scheduleId : ''))
+const automationsPage = computed<AutomationsPage>(() => automationsPageFor(
+  route.path,
+  taskStore.schedules.find(s => s.schedule_id === routeScheduleId.value),
+))
+const automationGroups = computed(() => groupAutomations(workspaceSchedules.value))
+// Counts appear once their list has answered for this workspace, never a
+// guess: the webhook count waits for the triggers' own first read.
+const automationsCounts = computed<Partial<Record<AutomationsPage, number>>>(() => {
+  const counts: Partial<Record<AutomationsPage, number>> = {}
+  if (taskStore.schedulesLoaded) {
+    counts.schedules = automationGroups.value.system.length + automationGroups.value.routines.length
+    counts.loops = automationGroups.value.loops.length
+  }
+  if (webhookStore.loadedWorkspace === store.activeWorkspace) counts.webhooks = webhookStore.triggers.length
+  return counts
+})
+// A routine that missed a run or failed puts the alert on Schedules, the page
+// whose row carries it, as the Automations destination does above.
+const schedulesNeedLook = computed(() => [...automationGroups.value.system, ...automationGroups.value.routines]
+  .some(scheduleNeedsAttention))
+function automationsSubnavLabel(page: AutomationsPage, label: string): string {
+  const count = automationsCounts.value[page]
+  const parts = [count === undefined ? label : `${label}, ${count}`]
+  if (page === 'schedules' && schedulesNeedLook.value) parts.push('attention required')
+  return parts.join(', ')
+}
+// The triggers are their own read; the sidebar asks for them once Automations is showing.
+watch(
+  () => (props.mode === 'schedules' && !props.collapsed ? store.activeWorkspace : ''),
+  workspace => { if (workspace) void webhookStore.ensureLoaded(workspace).catch(() => {}) },
+  { immediate: true },
+)
+// Next up's "in 9h" stays current while the sidebar is open.
+const nowTick = ref(Date.now())
+let nowTimer: number | undefined
+onMounted(() => { nowTimer = window.setInterval(() => { nowTick.value = Date.now() }, 60_000) })
+onBeforeUnmount(() => { if (nowTimer !== undefined) window.clearInterval(nowTimer) })
+const nextUp = computed(() => nextUpSchedules(workspaceSchedules.value))
+function nextUpWorking(s: Schedule): boolean {
+  return lastRunState(s, id => store.isChatStreaming(id)) === 'working'
+}
 
 // ── Tasks: the board's lanes, read from the board's own store ────────────
 const taskBoard = useTaskBoardStore()
@@ -1407,7 +1398,8 @@ async function selectAutomationWorkspace(workspace: string) {
   if (store.activeWorkspace !== workspace) {
     if ((await store.switchWorkspace(workspace, { transition: false })) === false) return
   }
-  if (props.mode === 'schedules') await router.push('/schedules')
+  // The list page stays; an open automation belonged to the other workspace.
+  if (props.mode === 'schedules') await router.push(automationsPagePath(automationsPage.value))
 }
 
 function missedCountFor(workspace: string): number {
@@ -1422,7 +1414,7 @@ function missedCountFor(workspace: string): number {
   ).length
 }
 
-import type { ChatInfo, ProjectInfo } from '../lib/types'
+import type { ChatInfo, ProjectInfo, Schedule } from '../lib/types'
 function openProject(projectId: string) {
   router.push(`/project/${projectId}`)
   emit('chat-selected') // collapse sidebar on mobile
@@ -3211,6 +3203,13 @@ async function confirmDeleteChat(chatId: string) {
   flex-direction: column;
   padding: 8px 8px 12px;
   gap: 12px;
+}
+
+/* Automations' three pages: the primary nav's rows, one level down. */
+.automations-subnav {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
 }
 
 /* Grouped schedule sections: a sentence-case label over the sidebar's chat

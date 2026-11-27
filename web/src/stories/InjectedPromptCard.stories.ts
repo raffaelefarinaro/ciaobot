@@ -82,7 +82,7 @@ export const Loop: Story = {
   play: async ({ canvas, userEvent }) => {
     await userEvent.click(await canvas.findByRole('button', { expanded: false }))
     expect(canvas.getByRole('region', { name: 'Loop prompt' })).toHaveTextContent('Check the synthetic build.')
-    expect(canvas.getByRole('link', { name: 'Open Automations' })).toHaveAttribute('href', '/schedules')
+    expect(canvas.getByRole('link', { name: 'Open Loops' })).toHaveAttribute('href', '/automations/loops')
   },
 }
 export const TaskResume: Story = {

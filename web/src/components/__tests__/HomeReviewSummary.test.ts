@@ -102,12 +102,13 @@ describe('HomeReviewSummary', () => {
   it('is one window: a title bar, then the queues, then Today even when nothing needs review', () => {
     useTaskStore().schedules = []
     const wrapper = mount(HomeReviewSummary)
+    // The shared docked window (DockedWindow.vue): a title bar and no close.
     const root = wrapper.get('.home-review-summary')
-    expect(root.classes()[0]).toBe('home-review-summary')
-    const title = root.get('.home-review-head #home-review-title')
+    expect(root.classes()).toContain('docked-window')
+    const title = root.get('.docked-window-head #home-review-title')
     expect(title.text()).toBe('At a glance')
     expect(title.classes()).toContain('rail-title')
-    expect(root.find('.home-review-head button').exists()).toBe(false)
+    expect(root.find('.docked-window-head button').exists()).toBe(false)
     expect(root.get('.home-review-clear').text()).toBe('Nothing to review.')
     expect(root.find('.home-today').exists()).toBe(true)
     const html = wrapper.html()
@@ -152,26 +153,28 @@ describe('HomeReviewSummary', () => {
     }
 
     it.each([
-      ['complete', 'done', /^Done .* · 5 of 5 steps$/],
-      ['needsYou', 'blocked', /^2 things need you$/],
-      ['blocked', 'blocked', /^4 of 6 steps · 2 blocked$/],
-      ['interrupted', 'blocked', /^Interrupted · 2 of 6 steps$/],
-      ['running', 'running', /^Running now · step 3 of 6: learnings$/],
-      ['never', 'open', /^Not run yet\. It runs every day\.$/],
-    ] as const)('shows one quiet line for %s with its glyph and words', async (state, glyph, detail) => {
+      ['complete', 'done', 'Workspace care', /^Done .* · 5 of 5 steps$/],
+      ['needsYou', 'blocked', 'Care needs you', /^2 things need you$/],
+      ['blocked', 'blocked', 'Care did not finish', /^4 of 6 steps · 2 blocked$/],
+      ['interrupted', 'blocked', /^Care was cut off/, /^Interrupted · 2 of 6 steps$/],
+      ['running', 'running', 'Workspace care', /^Running now · step 3 of 6: learnings$/],
+      ['never', 'open', 'Workspace care', /^Not run yet\. It runs every day\.$/],
+    ] as const)('shows one line for %s with its glyph, title and words', async (state, glyph, title, detail) => {
       serveCare(careReports[state])
       useTaskStore().schedules = []
       const wrapper = mount(HomeReviewSummary)
       await flushPromises()
       const line = wrapper.get('.home-review-item--care')
-      expect(line.get('.home-review-care-title').text()).toBe('Workspace care')
+      const shown = line.get('.home-review-care-title').text()
+      if (typeof title === 'string') expect(shown).toBe(title)
+      else expect(shown).toMatch(title)
       expect(line.find(`.care-glyph--${glyph}`).exists()).toBe(true)
       expect(line.get('.home-review-detail').text()).toMatch(detail)
       // The care line has its own attention class, never the automations' one.
       expect(line.classes()).not.toContain('home-review-item--attention')
-      expect(line.classes().includes('home-review-item--care-attention')).toBe(
-        ['needsYou', 'blocked', 'interrupted'].includes(state),
-      )
+      // Warning tone for needs you and cut off, error tone for did not finish, none otherwise.
+      expect(line.classes().includes('home-review-item--care-attention')).toBe(['needsYou', 'interrupted'].includes(state))
+      expect(line.classes().includes('home-review-item--care-error')).toBe(state === 'blocked')
       // The care line stands in for "Nothing to review.".
       expect(wrapper.find('.home-review-clear').exists()).toBe(false)
       wrapper.unmount()
@@ -187,10 +190,10 @@ describe('HomeReviewSummary', () => {
     })
 
     it.each([
-      ['needsYou', /^Workspace care, needs you\. 2 things need you\. Open the care report\.$/],
-      ['blocked', /^Workspace care, did not finish\. 4 of 6 steps · 2 blocked\. Open the care report\.$/],
-      ['complete', /^Workspace care, done\. Done .* · 5 of 5 steps\. Open the care report\.$/],
-    ] as const)('names the %s state in words and opens the report from the keyboard-reachable row', async (state, label) => {
+      ['needsYou', /^Care needs you\. 2 things need you\. Open the care report\.$/],
+      ['blocked', /^Care did not finish\. 4 of 6 steps · 2 blocked\. Open the care report\.$/],
+      ['complete', /^Workspace care\. Done .* · 5 of 5 steps\. Open the care report\.$/],
+    ] as const)('names the %s state once, in the visible words, on a keyboard-reachable row', async (state, label) => {
       serveCare(careReports[state])
       const wrapper = mount(HomeReviewSummary, { attachTo: document.body })
       await flushPromises()

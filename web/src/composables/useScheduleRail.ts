@@ -1,7 +1,7 @@
 import { computed } from 'vue'
 import { useRouter } from 'vue-router'
 import { useProjectStore } from '../stores/projects'
-import { cadenceBadge, groupSidebarSchedules, scheduleTitle } from '../lib/scheduleList'
+import { automationOrder, cadenceBadge, scheduleTitle } from '../lib/scheduleList'
 import { isOwnedLoop, loopCadenceLabel } from '../lib/loops'
 import type { RailItem, RailMark } from '../lib/titleRail'
 import type { Schedule } from '../lib/types'
@@ -33,15 +33,27 @@ export function scheduleRailLabel(title: string, group: string, when: string, ma
   return parts.join(', ')
 }
 
-/** The open automation's title rail: the workspace's automations in sidebar order. */
+/** The group an automation is named by on the rail. */
+function railGroup(s: Schedule): string {
+  if (isOwnedLoop(s)) return 'Loop'
+  if (s.scope === 'system') return 'System'
+  return s.frequency === 'once' ? 'One-off' : 'Routine'
+}
+
+/**
+ * The open automation's title rail: the workspace's automations in the order
+ * the Automations pages list them (`automationOrder`): the Schedules page's
+ * system routines, then the user's routines and one-offs by next run with the
+ * paused ones last, then the Loops page.
+ */
 export function useScheduleRail(currentId: () => string): TitleRail {
   const store = useProjectStore()
   const router = useRouter()
   const schedules = useWorkspaceSchedules()
 
   const entries = computed<RailItem[]>(() => {
-    const groups = groupSidebarSchedules(schedules.value)
-    const item = (s: Schedule, group: string): RailItem => {
+    const item = (s: Schedule): RailItem => {
+      const group = railGroup(s)
       const working = s.enabled && !!s.web_chat_id && store.isChatStreaming(s.web_chat_id)
       const mark: RailMark | null = s.missed ? 'needs' : working ? 'working' : null
       const title = scheduleTitle(s)
@@ -55,12 +67,7 @@ export function useScheduleRail(currentId: () => string): TitleRail {
         label: scheduleRailLabel(title, group, when, mark),
       }
     }
-    return [
-      ...groups.oneOffs.map(s => item(s, 'One-off')),
-      ...groups.loops.map(s => item(s, 'Loop')),
-      ...groups.routines.map(s => item(s, 'Routine')),
-      ...groups.system.map(s => item(s, 'System')),
-    ]
+    return automationOrder(schedules.value).map(item)
   })
 
   return useTitleRail(KEY, {

@@ -32,6 +32,8 @@ const MAIN_SURFACES: Array<[string, string]> = [
   ['/tasks', '.task-card'],
   ['/stats', '.usage-kpi'],
   ['/automations', '.schedule-panel .page-tag'],
+  ['/automations/loops', '.schedule-panel #ov-loops-title'],
+  ['/automations/webhooks', '.schedule-panel #wh-section-title'],
   ['/memory/map', '.mm-toolbar-stale'],
   ['/memory/categories', '.cat-h'],
   ['/memory/unsure', '.mu-link'],
@@ -490,8 +492,11 @@ test.describe('touch targets', () => {
     await expect(popup).toBeVisible()
     await quiesce(page)
 
-    async function checkModeButton(name: string) {
-      const button = popup.locator('.permission-modes__choices').getByRole('button', { name: new RegExp(name) })
+    // Permission mode is a menu button in the footer; its four modes open in a
+    // menu above the popover. Both the button and every mode are 44px targets
+    // that are really hit at their centre, and Escape closes only the menu.
+    async function checkPermissionControl({ openMenu = true } = {}) {
+      const button = popup.locator('.permission-mode-trigger')
       await button.scrollIntoViewIfNeeded()
       await expect(button).toBeVisible()
       await expect(button).toBeInViewport()
@@ -510,18 +515,34 @@ test.describe('touch targets', () => {
       expect(geometry.height).toBeGreaterThanOrEqual(TOUCH_MIN)
       expect(geometry.withinFooter).toBe(true)
       expect(geometry.hit).toBe(true)
+      if (!openMenu) return
+      await button.click()
+      const options = page.getByRole('menuitemradio')
+      await expect(options).toHaveCount(4)
+      for (const name of ['Manual', 'Auto', 'Bypass', 'Plan']) {
+        const option = page.getByRole('menuitemradio', { name: new RegExp(name) })
+        await expect(option).toBeInViewport()
+        const box = await option.evaluate(el => {
+          const rect = el.getBoundingClientRect()
+          const hit = document.elementFromPoint(rect.left + rect.width / 2, rect.top + rect.height / 2)
+          return { width: rect.width, height: rect.height, hit: !!hit && (hit === el || el.contains(hit)) }
+        })
+        expect(box.width).toBeGreaterThanOrEqual(TOUCH_MIN)
+        expect(box.height).toBeGreaterThanOrEqual(TOUCH_MIN)
+        expect(box.hit).toBe(true)
+      }
+      await page.keyboard.press('Escape')
+      await expect(options).toHaveCount(0)
+      await expect(popup).toBeVisible()
+      await expect(button).toBeFocused()
     }
 
     await page.setViewportSize({ width: 1280, height: 900 })
     const desktopFooter = popup.locator('.model-selector__footer')
     const desktopFooterMetrics = await desktopFooter.evaluate(el => ({ height: el.clientHeight, scrollHeight: el.scrollHeight }))
     expect(desktopFooterMetrics.scrollHeight).toBeLessThanOrEqual(desktopFooterMetrics.height)
-    for (const name of ['Manual', 'Auto', 'Bypass', 'Plan']) {
-      await checkModeButton(name)
-      await expect(
-        popup.locator('.permission-modes__choices').getByRole('button', { name: new RegExp(name) }).locator('.permission-mode__description'),
-      ).toBeInViewport()
-    }
+    await checkPermissionControl()
+    await expect(popup.locator('.permission-mode-trigger .menu-select__detail')).toBeInViewport()
     for (const viewport of [{ width: 390, height: 844 }, { width: 844, height: 390 }]) {
       await page.setViewportSize(viewport)
       await expect(popup).toBeVisible()
@@ -532,25 +553,28 @@ test.describe('touch targets', () => {
       await expect(list).toBeVisible()
       await expect(footer).toBeVisible()
       await expect(popup.locator('.model-selector__search')).toBeVisible()
-      expect(await listbox.evaluate(el => getComputedStyle(el).overflowY)).toBe('visible')
-      expect(await list.evaluate(el => getComputedStyle(el).overflowY)).toBe('auto')
-      expect(await footer.evaluate(el => getComputedStyle(el).overflowY)).toBe('auto')
-      if (viewport.height <= 600) {
-        expect(await footer.evaluate(el => getComputedStyle(el).scrollbarWidth)).toBe('thin')
+      if (viewport.height > 500) {
+        // Room for both: the list is the scroller and the footer is whole.
+        expect(await list.evaluate(el => getComputedStyle(el).overflowY)).toBe('auto')
+        const footerMetrics = await footer.evaluate(el => ({ height: el.clientHeight, scrollHeight: el.scrollHeight }))
+        expect(footerMetrics.scrollHeight).toBeLessThanOrEqual(footerMetrics.height)
+        await list.evaluate(el => { el.scrollTop = el.scrollHeight })
+        await expect(popup.locator('.model-selector__item').last()).toBeInViewport()
+        expect(await list.evaluate(el => el.scrollTop)).toBeGreaterThan(0)
+      } else {
+        // A short screen: one scroller, the popover, with list and footer in
+        // it; the footer is never a strip of its own.
+        expect(await popup.evaluate(el => getComputedStyle(el).overflowY)).toBe('auto')
+        expect(await list.evaluate(el => getComputedStyle(el).overflowY)).toBe('visible')
+        expect(await footer.evaluate(el => getComputedStyle(el).overflowY)).toBe('visible')
+        expect(await footer.evaluate(el => el.scrollHeight <= el.clientHeight)).toBe(true)
+        // The note line gives its room to the list; its text is still the
+        // permission button's description.
+        await expect(popup.locator('.permission-modes__note')).toBeHidden()
+        await popup.evaluate(el => { el.scrollTop = el.scrollHeight })
+        await expect(popup.locator('.permission-mode-trigger')).toBeInViewport()
       }
-      const footerScrollBeforeList = await footer.evaluate(el => el.scrollTop)
-      await list.evaluate(el => { el.scrollTop = el.scrollHeight })
-      await expect(popup.locator('.model-selector__item').last()).toBeInViewport()
-      const listScrollAfterList = await list.evaluate(el => el.scrollTop)
-      expect(listScrollAfterList).toBeGreaterThan(0)
-      expect(await footer.evaluate(el => el.scrollTop)).toBe(footerScrollBeforeList)
-      const listScrollBeforeFooter = await list.evaluate(el => el.scrollTop)
-      await footer.evaluate(el => { el.scrollTop = el.scrollHeight })
-      const footerScrollAfterFooter = await footer.evaluate(el => el.scrollTop)
-      const footerMetrics = await footer.evaluate(el => ({ height: el.clientHeight, scrollHeight: el.scrollHeight }))
-      if (footerMetrics.scrollHeight > footerMetrics.height) expect(footerScrollAfterFooter).toBeGreaterThan(0)
-      expect(await list.evaluate(el => el.scrollTop)).toBe(listScrollBeforeFooter)
-      for (const name of ['Manual', 'Auto', 'Bypass', 'Plan']) await checkModeButton(name)
+      await checkPermissionControl()
       await expect(popup).toBeInViewport()
       expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true)
       expect(await popup.evaluate(el => el.scrollWidth <= el.clientWidth)).toBe(true)
@@ -559,8 +583,18 @@ test.describe('touch targets', () => {
     await page.setViewportSize({ width: 390, height: 844 })
     await page.evaluate(() => { document.documentElement.style.zoom = '200%' })
     await expect(popup).toBeVisible()
-    for (const name of ['Manual', 'Auto', 'Bypass', 'Plan']) await checkModeButton(name)
+    // CSS zoom on the root is not browser zoom for a portaled popper: Floating
+    // UI places the menu in unzoomed coordinates. The footer button is checked
+    // here; the menu is checked below at what 200% browser zoom really gives a
+    // 390px phone, a 195px-wide CSS viewport.
+    await checkPermissionControl({ openMenu: false })
     expect(await popup.evaluate(el => el.scrollWidth <= el.clientWidth)).toBe(true)
+    expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true)
+
+    await page.evaluate(() => { document.documentElement.style.zoom = '' })
+    await page.setViewportSize({ width: 195, height: 422 })
+    await expect(popup).toBeVisible()
+    await checkPermissionControl()
     expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true)
   })
 

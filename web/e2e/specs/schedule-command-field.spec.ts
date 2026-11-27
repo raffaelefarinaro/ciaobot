@@ -8,7 +8,7 @@ const ZOOMED = { width: 640, height: 450 }
 
 /** Open the new-automation form; on a phone the sidebar is a drawer. */
 async function openNewForm(page: Page, mobile = false) {
-  await boot(page, '/schedules', 'text=Next up')
+  await boot(page, '/schedules', '.overview-body a.ov-item')
   if (mobile) await page.getByRole('button', { name: 'Open sidebar' }).click()
   await page.getByRole('button', { name: 'New automation' }).first().click()
   // The phone drawer does not close itself when New is chosen; close it so the

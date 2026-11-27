@@ -67,12 +67,14 @@ test.describe('Workspace care', () => {
     await answerCare(page, careReports.needsYou)
     await boot(page)
     const line = page.locator('.home-review-item--care')
-    await expect(line).toContainText('Workspace care')
+    await expect(line).toContainText('Care needs you')
     await expect(line).toContainText('2 things need you')
     await expect(line).toHaveClass(/home-review-item--care-attention/)
-    await expect(line).toHaveAttribute('aria-label', /^Workspace care, needs you\. 2 things need you\./)
+    await expect(line).toHaveAttribute('aria-label', 'Care needs you. 2 things need you. Open the care report.')
+    await expect(line.locator('.care-glyph--blocked')).toBeVisible()
+    // Once: the words appear on the page a single time, and there is no row.
     await expect(page.locator('.needs-you-row', { hasText: 'Care needs you' })).toHaveCount(0)
-    await expect(page.getByText('Care needs you')).toHaveCount(0)
+    await expect(page.getByText('Care needs you')).toHaveCount(1)
     await page.screenshot({ path: 'test-results/workspace-care-rail-docked.png' })
 
     // Keyboard: the row is reachable and opens the report page.
@@ -87,9 +89,33 @@ test.describe('Workspace care', () => {
     await page.setViewportSize(DOCKED)
     await answerCare(page, careReports.blocked)
     await boot(page)
-    await expect(page.locator('.home-review-item--care')).toContainText('4 of 6 steps · 2 blocked')
-    await expect(page.getByText('Care did not finish')).toHaveCount(0)
+    const line = page.locator('.home-review-item--care')
+    await expect(line).toContainText('Care did not finish')
+    await expect(line).toContainText('4 of 6 steps · 2 blocked')
+    await expect(line).toHaveClass(/home-review-item--care-error/)
+    await expect(line.locator('.care-glyph--blocked')).toBeVisible()
+    await expect(page.getByText('Care did not finish')).toHaveCount(1)
     await expect(page.locator('section.needs-you')).toHaveCount(0)
+    await page.screenshot({ path: 'test-results/workspace-care-rail-error.png' })
+  })
+
+  test('the switch is at the pane edge: 940px is dropped, 941px and 960px are docked', async ({ page }) => {
+    await answerCare(page, careReports.blocked)
+    await boot(page)
+    const pane = page.locator('.chat-main')
+    // The sidebar has a fixed width, so the pane is the window less a constant.
+    const paneAt = async (window: number) => {
+      await page.setViewportSize({ width: window, height: 900 })
+      return pane.evaluate(el => el.clientWidth)
+    }
+    const offset = 1200 - (await paneAt(1200))
+    const line = page.locator('.home-review-item--care')
+    const row = page.locator('.needs-you-row', { hasText: 'Care did not finish' })
+    for (const [width, docked] of [[940, false], [941, true], [960, true]] as const) {
+      expect(await paneAt(width + offset)).toBe(width)
+      await expect(line).toHaveCount(docked ? 1 : 0)
+      await expect(row).toHaveCount(docked ? 0 : 1)
+    }
   })
 
   test('resizing across the rail drop swaps the one care signal live', async ({ page }) => {

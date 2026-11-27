@@ -281,7 +281,7 @@ function workspacesPayload(state) {
   return {
     workspaces: ordered.map(w => ({ ...w, shared_brains: state.sharedBrains?.[w.name] ?? [] })),
     active: ordered[0].name,
-    provider_options: [{ value: 'claude', label: 'Claude' }],
+    provider_options: [{ value: 'claude', label: 'Anthropic (via Claude Code)', short_label: 'Claude Code' }],
   }
 }
 
@@ -765,7 +765,7 @@ const GET_ROUTES = {
     },
     provider_defaults: { claude: 'synthetic-model' },
     providers: [
-      { id: 'claude', label: 'Anthropic (via Claude Code)', short_label: 'Claude', capabilities: {} },
+      { id: 'claude', label: 'Anthropic (via Claude Code)', short_label: 'Claude Code', capabilities: {} },
       { id: 'codex', label: 'OpenAI (via Codex)', short_label: 'Codex', capabilities: {} },
     ],
     thinking_levels: { claude: ['low', 'high'] },
@@ -1257,6 +1257,20 @@ const server = http.createServer(async (req, res) => {
         if (refused) return sendJson(res, { error: refused }, 400)
       }
       return sendJson(res, workspacesPayload(state))
+    }
+    // A chat settings write (permission mode, thinking level) is stored for
+    // the session and answers with the chat, as the engine does, so the
+    // composer picker keeps its chat.
+    const chatPatch = req.method === 'PATCH' ? /^\/api\/chats\/([^/]+)$/.exec(pathname) : null
+    if (chatPatch) {
+      const state = sessionOf(req)
+      const chatId = decodeURIComponent(chatPatch[1])
+      if (!chatDetail(state, chatId).chat_id) return sendJson(res, { error: 'no such chat' }, 404)
+      const patch = Object.fromEntries(
+        ['mode', 'thinking_level'].filter(key => body && body[key] !== undefined).map(key => [key, body[key]]),
+      )
+      state.chatPatches.set(chatId, { ...state.chatPatches.get(chatId), ...patch })
+      return sendJson(res, chatDetail(state, chatId))
     }
     // A task write answers with the record it stored, at a new revision, so a
     // spec can close the overlay, reopen the task and see what it typed. Only

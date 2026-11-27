@@ -81,13 +81,21 @@
             ref="modelTrigger"
             type="button"
             class="home-intake-chip home-intake-model-trigger"
+            :class="{ 'home-intake-model-trigger--named': !!modelView.modelLabel }"
+            :title="modelLabel"
             :aria-label="`Model for the new chat — ${modelLabel}`"
             aria-haspopup="listbox"
             :aria-expanded="showModelPicker"
             @click="toggleModelPicker"
           >
             <span class="home-intake-model-dot" aria-hidden="true" />
-            <span class="home-intake-chip-label">{{ modelLabel }}</span>
+            <!-- The provider never ellipsises; only the model part does. -->
+            <span v-if="modelView.providerLabel" class="home-intake-chip-provider">{{ modelView.providerLabel }}</span>
+            <template v-if="modelView.modelLabel">
+              <span class="home-intake-chip-sep"> · </span>
+              <span class="home-intake-chip-label">{{ modelView.modelLabel }}</span>
+            </template>
+            <span v-if="!modelView.providerLabel" class="home-intake-chip-label">Loading model…</span>
             <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
               <path d="m7 9 5 5 5-5" />
             </svg>
@@ -95,7 +103,9 @@
           <ModelSelector
             v-if="showModelPicker"
             triggerless
-            :model-value="selectedModel?.model || DEFAULT_KEY"
+            mobile-sheet
+            :model-value="modelView.activeModel"
+            :active-models="modelView.activeModel ? [modelView.activeModel] : []"
             :sections="modelSections"
             placeholder="Model"
             placement="bottom-start"
@@ -149,7 +159,8 @@ import { useTaskStore } from '../stores/tasks'
 import { homeNewChatProjectId, openNewChatPicker } from '../lib/newChat'
 import { isApplePlatform } from '../lib/platform'
 import { isMemoryProject } from '../lib/memoryPass'
-import { providerForModelSection, sectionsFromModelsResponse, type ModelSection } from '../lib/modelSections'
+import type { ModelSection } from '../lib/modelSections'
+import { chosenRuntimeFor, newChatModelView } from '../lib/newChatModel'
 import ModelSelector from './ModelSelector.vue'
 import { importDesktopDrop, uploadChatAttachments } from '../lib/chatAttachments'
 import { useKeyboardSettings } from '../composables/useKeyboardSettings'
@@ -157,9 +168,6 @@ import { useSlashCommands } from '../composables/useSlashCommands'
 import { readSharedContent, removeSharedContent, sharedPrompt, type SharedContent } from '../lib/sharedContent'
 import SlashCommandPicker from './SlashCommandPicker.vue'
 
-// Sentinel row for "no override": ModelSelector lists models, so the
-// workspace default is offered as its own one-model section.
-const DEFAULT_KEY = '__workspace-default__'
 
 const store = useProjectStore()
 const prompt = ref('')
@@ -204,29 +212,21 @@ const defaultProvider = computed(() => store.workspaceOptions.find(
   workspace => workspace.name === store.activeWorkspace,
 )?.default_provider || '')
 
-// The provider the workspace starts new chats on; names the default row.
-const providerLabel = computed(() => {
-  const provider = defaultProvider.value
-  if (!provider) return ''
-  return store.workspaceProviderOptions.find(option => option.value === provider)?.label || provider
-})
-const defaultModelLabel = computed(() => (providerLabel.value ? `${providerLabel.value} default` : 'Default model'))
-
 const tasks = useTaskStore()
 const showModelPicker = ref(false)
 const selectedModel = ref<NewChatRuntime | null>(null)
-const modelLabel = computed(() => selectedModel.value?.model || defaultModelLabel.value)
-const modelSections = computed<ModelSection[]>(() => [
-  {
-    key: 'default',
-    label: 'Workspace default',
-    models: [DEFAULT_KEY],
-    modelLabels: { [DEFAULT_KEY]: defaultModelLabel.value },
-  },
-  ...sectionsFromModelsResponse(tasks.models).map(section => (
-    section.key === 'anthropic' ? { ...section, label: 'Claude (Anthropic)' } : section
-  )),
-])
+const activeWorkspaceInfo = computed(() => store.workspaceOptions.find(
+  workspace => workspace.name === store.activeWorkspace,
+))
+// The chip and the list name the model concretely: "Claude Code · Opus 4.5"
+// for the workspace default as for a pick (lib/newChatModel.ts).
+const modelView = computed(() => newChatModelView(tasks.models, activeWorkspaceInfo.value, selectedModel.value, store.workspaceProviderOptions))
+const modelLabel = computed(() => (
+  modelView.value.providerLabel
+    ? [modelView.value.providerLabel, modelView.value.modelLabel].filter(Boolean).join(' · ')
+    : 'Loading model…'
+))
+const modelSections = computed<ModelSection[]>(() => modelView.value.sections)
 
 const modelTrigger = ref<HTMLButtonElement | null>(null)
 const modelRegion = ref<HTMLElement | null>(null)
@@ -247,7 +247,7 @@ function closeModelPicker(): void {
 
 function toggleModelPicker(): void {
   modelRequested.value = true
-  if (!showModelPicker.value && !tasks.models) void tasks.fetchModels()
+  if (!showModelPicker.value && !tasks.models && !tasks.modelLoading) void tasks.fetchModels()
   showModelPicker.value = !showModelPicker.value
 }
 
@@ -259,7 +259,10 @@ watch(() => tasks.modelTransition, transition => {
     if (restore && transition === tasks.modelTransition && modelTrigger.value?.isConnected
       && (document.activeElement === document.body || document.activeElement === focused)) modelTrigger.value.focus()
   })
-  if (modelRequested.value && tasks.modelWorkspaceEligible && !tasks.modelLoading && !tasks.models) void tasks.fetchModels()
+  // The chip names the new workspace's default model, so its catalog is read
+  // on every switch, opened or not; otherwise the chip would shrink to the
+  // provider alone until the picker is next opened.
+  if (tasks.modelWorkspaceEligible && !tasks.modelLoading && !tasks.models) void tasks.fetchModels()
 }, { flush: 'sync' })
 
 function modelSelectionHandler(transition: number) {
@@ -274,11 +277,7 @@ function modelCloseHandler(transition: number) {
 function selectModel(value: string | string[], sectionKey: string): void {
   const model = Array.isArray(value) ? value[0] : value
   closeModelPicker()
-  if (!model || model === DEFAULT_KEY || sectionKey === 'default') {
-    selectedModel.value = null
-    return
-  }
-  selectedModel.value = { model, provider: providerForModelSection(sectionKey) }
+  selectedModel.value = chosenRuntimeFor(model || '', sectionKey, selectedModel.value, tasks.models, activeWorkspaceInfo.value)
 }
 
 // Same send chord as the chat composer: bare Enter is a newline everywhere.
@@ -394,6 +393,10 @@ function onNativeDrop(event: Event): void {
   })
 }
 onMounted(() => {
+  // The chip names the workspace default's concrete model, which only the
+  // catalog knows, so read it now: the chip then reads the same open or
+  // closed instead of growing on the first open.
+  if (tasks.modelWorkspaceEligible && !tasks.models && !tasks.modelLoading) void tasks.fetchModels()
   window.addEventListener('ciao:native-file-drag-enter', onNativeDragEnter)
   window.addEventListener('ciao:native-file-drag-leave', onNativeDragLeave)
   window.addEventListener('ciao:native-file-drop', onNativeDrop)
@@ -720,8 +723,41 @@ async function startWork(options: { workspace?: string; projectId?: string; reme
   white-space: nowrap;
 }
 
+.home-intake-chip-provider,
+.home-intake-chip-sep {
+  flex: none;
+  white-space: nowrap;
+}
+
+/* A phone shows the model alone; the provider stays in the chip's accessible
+   name and tooltip. With no model named yet the provider still shows. */
+@media (max-width: 520px) {
+  .home-intake-model-trigger--named .home-intake-chip-provider,
+  .home-intake-model-trigger--named .home-intake-chip-sep {
+    display: none;
+  }
+
+  /* The model part never shrinks to nothing (a minimum only here, where the
+     row is tight: on a wide screen it would pad short names). */
+  .home-intake-model-trigger .home-intake-chip-label {
+    min-width: min(8ch, 100%);
+  }
+}
+
+/* The separator carries its own spaces (so the chip's text reads
+   "Claude Code · Opus"); the negative margin cancels the flex gap. */
+.home-intake-chip-sep {
+  margin: 0 -6px;
+  white-space: pre;
+}
+
 .home-intake-project {
   flex: 0 1 auto;
+}
+
+/* The project's name keeps a few characters too ("Gene…", not "G…"). */
+.home-intake-project .home-intake-chip-label {
+  min-width: min(5ch, 100%);
 }
 
 .home-intake-model {

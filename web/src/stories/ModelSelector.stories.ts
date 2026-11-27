@@ -1,7 +1,8 @@
 import type { Meta, StoryObj } from '@storybook/vue3-vite'
 import { expect, screen, waitFor } from 'storybook/test'
 import { ref } from 'vue'
-import ModelSelector from '../components/ModelSelector.vue'
+import ModelSelector, { type ModelSection } from '../components/ModelSelector.vue'
+import PermissionModeMenu from '../components/PermissionModeMenu.vue'
 
 const meta = {
   id: 'model-selector', title: 'Chat/ModelSelector', component: ModelSelector,
@@ -19,7 +20,7 @@ export const Default: Story = {
 }
 export const Empty: Story = {
   args: { sections: [], modelValue: '', triggerless: true },
-  play: async ({ canvas }) => { expect(canvas.getByText('No models match ""')).toBeTruthy() },
+  play: async ({ canvas }) => { expect(canvas.getByText('No models listed.')).toBeTruthy() },
 }
 export const Disabled: Story = {
   args: { disabled: true },
@@ -99,4 +100,104 @@ export const LabelledTrigger: Story = {
   args: { labelledBy: 'model-label', sections: [{ key: 'local', label: 'Local', models: ['alpha'], modelLabels: { alpha: 'Friendly model' } }] },
   render: (args) => ({ components: { ModelSelector }, setup: () => ({ args }), template: '<span id="model-label">Default model</span><ModelSelector v-bind="args" />' }),
   play: async ({ canvas }) => { expect(canvas.getByRole('button', { name: 'Default model Friendly model' })).toBeTruthy() },
+}
+
+// A realistic composer catalog: Claude tiers and ids, then opencode routes with
+// long provider-prefixed ids. Synthetic names only.
+const CLAUDE_MODELS = ['default', 'opus', 'sonnet', 'haiku', 'claude-opus-4-1', 'claude-sonnet-4-5', 'claude-haiku-3-5', 'claude-3-opus-20240229']
+const OPENCODE_MODELS = [
+  'openrouter/anthropic/claude-sonnet-4.5-with-an-unusually-long-model-identifier',
+  'openai/gpt-5.6', 'openai/gpt-5.5-mini', 'ollama-cloud/glm-5.3-flash', 'ollama-cloud/kimi-k2.7-code:cloud',
+  'google/gemini-3-pro', 'deepseek/deepseek-v4', 'mistral/devstral-2',
+]
+const MANY_SECTIONS: ModelSection[] = [
+  // Claude Code's own default entry is named by the model it runs, never "Default".
+  { key: 'anthropic', label: 'Claude Code', models: CLAUDE_MODELS, modelLabels: { default: 'Opus 4.5', opus: 'Opus', sonnet: 'Sonnet', haiku: 'Haiku' } },
+  { key: 'opencode', label: 'OpenCode', models: OPENCODE_MODELS },
+]
+
+/** The composer's picker: the triggerless popover with the Permission mode menu in its footer. */
+const composerRender: Story['render'] = (args) => ({
+  components: { ModelSelector, PermissionModeMenu },
+  setup() {
+    const mode = ref('auto')
+    return { args, mode, modes: ['normal', 'auto', 'bypass', 'plan'] }
+  },
+  template: `<div style="position: fixed; left: 24px; bottom: 24px; width: 200px; height: 36px">
+    <ModelSelector v-bind="args">
+      <template #footer>
+        <div style="display: grid; grid-template-columns: max-content minmax(0, 1fr); align-items: center; gap: 8px 12px">
+          <span id="story-mode-label" style="font-size: var(--text-sm); color: var(--fg2)">Permission mode</span>
+          <PermissionModeMenu :model-value="mode" :modes="modes" labelled-by="story-mode-label" @select="mode = $event" />
+        </div>
+      </template>
+    </ModelSelector>
+  </div>`,
+})
+
+export const ComposerManyModels: Story = {
+  args: { triggerless: true, placement: 'top-start', modelValue: 'sonnet', sections: MANY_SECTIONS },
+  render: composerRender,
+  play: async ({ canvas }) => {
+    expect(canvas.getByText('Claude Code')).toBeTruthy()
+    expect(canvas.getByText('OpenCode')).toBeTruthy()
+    expect(document.querySelector('.model-selector__popover')!.textContent).not.toMatch(/\bdefault\b/i)
+    expect(canvas.getByRole('option', { name: /Sonnet/ }).getAttribute('aria-selected')).toBe('true')
+    // The list is the roomy part: it holds far more than a hundred pixels of rows.
+    const list = document.querySelector<HTMLElement>('.model-selector__list')!
+    expect(list.getBoundingClientRect().height).toBeGreaterThan(240)
+  },
+}
+export const ComposerLight: Story = {
+  ...ComposerManyModels,
+  globals: { theme: 'light' },
+}
+export const ComposerLongNames: Story = {
+  args: { triggerless: true, placement: 'top-start', modelValue: OPENCODE_MODELS[0], sections: [MANY_SECTIONS[1]] },
+  render: composerRender,
+  play: async ({ canvas }) => {
+    const option = canvas.getByRole('option', { name: /unusually-long/ })
+    expect(option.getAttribute('title')).toBe(OPENCODE_MODELS[0])
+    const popover = document.querySelector<HTMLElement>('.model-selector__popover')!
+    expect(popover.scrollWidth).toBeLessThanOrEqual(popover.clientWidth)
+  },
+}
+export const ComposerFilteredEmpty: Story = {
+  args: { triggerless: true, placement: 'top-start', modelValue: 'sonnet', sections: MANY_SECTIONS },
+  render: composerRender,
+  play: async ({ canvas, userEvent }) => {
+    await userEvent.type(canvas.getByPlaceholderText('Search models'), 'no-such-model')
+    expect(canvas.getByText('No models match "no-such-model"')).toBeTruthy()
+    // The footer controls stay usable with an empty list.
+    expect(canvas.getByRole('button', { name: /Permission mode/ })).toBeTruthy()
+  },
+}
+export const ComposerPhoneSheet: Story = {
+  globals: { viewport: { value: 'narrow' } },
+  args: { triggerless: true, mobileSheet: true, placement: 'top-start', modelValue: 'sonnet', sections: MANY_SECTIONS },
+  render: composerRender,
+  play: async ({ canvas }) => {
+    expect(canvas.getByText('Choose model')).toBeTruthy()
+    const popover = document.querySelector<HTMLElement>('.model-selector__popover')!
+    expect(document.documentElement.scrollWidth).toBeLessThanOrEqual(window.innerWidth)
+    expect(popover.scrollWidth).toBeLessThanOrEqual(popover.clientWidth)
+  },
+}
+export const ComposerPhoneSheetLight: Story = {
+  ...ComposerPhoneSheet,
+  globals: { viewport: { value: 'narrow' }, theme: 'light' },
+}
+export const TypeToFilterFromList: Story = {
+  args: { triggerless: true, modelValue: 'sonnet', sections: MANY_SECTIONS },
+  play: async ({ canvas, userEvent }) => {
+    const search = canvas.getByPlaceholderText('Search models')
+    await userEvent.click(search)
+    await userEvent.keyboard('{ArrowDown}')
+    expect(document.activeElement?.getAttribute('role')).toBe('option')
+    await userEvent.keyboard('g')
+    await waitFor(() => expect(document.activeElement).toBe(search))
+    expect((search as HTMLInputElement).value).toBe('g')
+    await userEvent.keyboard('{ArrowDown}{End}')
+    expect(document.activeElement?.getAttribute('role')).toBe('option')
+  },
 }

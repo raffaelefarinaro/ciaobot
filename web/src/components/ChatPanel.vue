@@ -1133,13 +1133,20 @@
                 type="button"
                 ref="composerModelTrigger"
                 class="model-picker-summary composer-chip"
-                :title="`${routingProviderLabel(activeBucket, chat.provider)} · ${chipModelLabel}${chipThinkingLabel ? ' · ' + chipThinkingLabel : ''}`"
+                :class="{ 'composer-chip--named': !!chipModelLabel }"
+                :aria-label="chipTitle"
+                :title="chipTitle"
                 aria-haspopup="listbox"
                 :aria-expanded="showModelPicker"
                 @click.stop="toggleModelPicker"
               >
                 <span class="composer-model-dot" aria-hidden="true"></span>
-                <span class="composer-chip-label"><template v-if="chat.provider">{{ routingProviderLabel(activeBucket, chat.provider) }} · </template>{{ chipModelLabel }}<template v-if="chipThinkingLabel"> · {{ chipThinkingLabel }}</template></span>
+                <!-- The provider never ellipsises; only the model part does. -->
+                <span class="composer-chip-provider">{{ chipProviderLabel }}</span>
+                <template v-if="chipModelLabel || chipThinkingLabel">
+                  <span class="composer-chip-sep"> · </span>
+                  <span class="composer-chip-label">{{ chipModelLabel }}<template v-if="chipThinkingLabel">{{ chipModelLabel ? ' · ' : '' }}{{ chipThinkingLabel }}</template></span>
+                </template>
                 <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m7 9 5 5 5-5" /></svg>
               </button>
               <ModelSelector
@@ -1183,27 +1190,34 @@
                           {{ level ? level.charAt(0).toUpperCase() + level.slice(1) : 'Auto' }}
                         </button>
                       </div>
+                      <!-- A narrow footer swaps the segments for a menu button, so
+                           six levels never scroll sideways on a phone. -->
+                      <MenuSelect
+                        trigger-class="thinking-levels__menu"
+                        :model-value="thinkingChipLevel"
+                        :options="thinkingMenuOptions"
+                        :disabled="isRecoveryPicker || modeWritePending"
+                        :labelled-by="domId('thinking-levels-label')"
+                        @select="selectThinking"
+                      />
                     </div>
                     <div v-if="!isRecoveryPicker" class="permission-modes">
                       <span :id="domId('permission-mode-label')" class="thinking-levels__label">Permission mode</span>
-                      <div class="permission-modes__choices" role="group" :aria-labelledby="domId('permission-mode-label')">
-                        <button
-                          v-for="mode in permissionModes"
-                          :key="mode"
-                          type="button"
-                          class="thinking-chip permission-mode"
-                          :class="{ 'thinking-chip--active': chat.mode === mode }"
-                          :aria-pressed="chat.mode === mode"
-                          :disabled="modeWritePending"
-                          @click="selectPermissionMode(mode)"
-                        >
-                          <span>{{ PERMISSION_MODE_COPY[mode].name }}</span>
-                          <span class="permission-mode__description">{{ PERMISSION_MODE_COPY[mode].allows }}</span>
-                          <span v-if="chat.mode === mode" class="permission-mode__check" aria-hidden="true">✓</span>
-                        </button>
-                      </div>
+                      <PermissionModeMenu
+                        :model-value="chat.mode"
+                        :modes="permissionModes"
+                        :disabled="modeWritePending"
+                        :labelled-by="domId('permission-mode-label')"
+                        :described-by="domId('permission-mode-note')"
+                        @select="selectPermissionMode"
+                      />
                       <p v-if="!isBridgeMode(chat.mode)" class="permission-modes__unknown">Current mode is unknown.</p>
-                      <p class="permission-modes__note">Changes apply to subsequent turns, not the reply already running. Already queued or external turns may start before a change is saved.</p>
+                      <!-- One calm line; the full rule is the control's description
+                           and the line's tooltip. -->
+                      <p class="permission-modes__note" :title="MODE_CHANGE_NOTE">
+                        <span aria-hidden="true">Applies to your next message, not a reply already running.</span>
+                        <span :id="domId('permission-mode-note')" class="sr-only">{{ MODE_CHANGE_NOTE }}</span>
+                      </p>
                       <p v-if="modeWritePending" class="permission-modes__status" role="status">Saving permission mode… Sending from this composer is paused.</p>
                     </div>
                   </div>
@@ -1461,6 +1475,8 @@ import ProviderMcpButton from './ProviderMcpButton.vue'
 import NeedsYouStack from './NeedsYouStack.vue'
 import { actionCopy } from '../lib/chatActions'
 import ModelSelector from './ModelSelector.vue'
+import PermissionModeMenu from './PermissionModeMenu.vue'
+import MenuSelect from './MenuSelect.vue'
 import { ARCHIVE_ACTION_LABEL } from '../lib/archiveCopy'
 import AppIcon from './AppIcon.vue'
 import ProviderSignInHint from './ProviderSignInHint.vue'
@@ -1475,8 +1491,8 @@ import InjectedPromptCard from './InjectedPromptCard.vue'
 import { errorNoticePrompt, parseInjectedPrompt, retryScheduledNotice, type InjectedPrompt } from '../lib/injectedPrompt'
 import { linkifyText, type FileMentionTargets } from '../lib/filePaths'
 import { isChatId } from '../lib/chatLinks'
-import { providerForModelSection, sectionKeyForProvider, sectionsFromModelsResponse } from '../lib/modelSections'
-import { isBridgeMode, PERMISSION_MODE_COPY, type BridgeMode } from '../lib/permissionModes'
+import { AGENT_DEFAULT_MODEL, agentPickLabel, displayedModel, modelName, providerForModelSection, providerShortLabel, sectionKeyForProvider, sectionsFromModelsResponse } from '../lib/modelSections'
+import { isBridgeMode, type BridgeMode } from '../lib/permissionModes'
 import { renderMarkdown as renderSafeMarkdown, renderUserMarkdown as renderSafeUserMarkdown } from '../lib/safeMarkdown'
 import { handleCodeCopyClick, writeClipboard } from '../lib/codeCopy'
 import { handleOpenLocalFileClick } from '../lib/openWorkspaceFile'
@@ -2404,6 +2420,10 @@ const showModelPicker = ref(false)
 const modelPickerRef = ref<HTMLElement>()
 const composerModelTrigger = ref<HTMLButtonElement | null>(null)
 const permissionModes: BridgeMode[] = ['normal', 'auto', 'bypass', 'plan']
+// The whole rule behind the picker's one-line note: a change is a chat update,
+// so a running reply keeps its settings, and a turn queued (or sent from
+// elsewhere) before the write settles may still start with the old ones.
+const MODE_CHANGE_NOTE = 'Changes apply to subsequent turns, not the reply already running. Already queued or external turns may start before a change is saved.'
 let pickerGeneration = 0
 watch(showModelPicker, () => { pickerGeneration += 1 }, { flush: 'sync' })
 
@@ -3224,15 +3244,22 @@ const activeBucket = computed<BucketKey>(() => {
   return (chat.value?.provider as BucketKey) || 'claude'
 })
 
+// One section per provider, headed by the CLI's short name ("Claude Code").
+// When the CLI's own `default` is listed as the concrete row it runs, a chat
+// pinned to another model keeps a way back to it: a last row in its
+// provider's group, "Use Claude Code's pick (Opus 4.5)".
 const chatModelSections = computed(() => {
-  const baseSections = sectionsFromModelsResponse(modelsResponse.value)
-  // Name the Anthropic section for its vendor so it reads as a peer of the
-  // opencode section rather than as "the default".
-  return baseSections.map(section => {
-    if (section.key === 'anthropic') {
-      return { ...section, label: 'Claude (Anthropic)' }
+  const response = modelsResponse.value
+  const provider = activeBucket.value
+  const key = sectionKeyForProvider(provider)
+  const followsPick = (activeModelId.value || '') === AGENT_DEFAULT_MODEL
+  return sectionsFromModelsResponse(response).map(section => {
+    if (section.key !== key || followsPick || !section.modelAliases?.[AGENT_DEFAULT_MODEL]) return section
+    return {
+      ...section,
+      models: [...section.models, AGENT_DEFAULT_MODEL],
+      modelLabels: { ...section.modelLabels, [AGENT_DEFAULT_MODEL]: `Use ${agentPickLabel(response, provider)}` },
     }
-    return section
   })
 })
 const pickerModelSections = computed(() => chatModelSections.value.map(section => ({
@@ -3262,7 +3289,8 @@ const activeModelHighlights = computed(() => {
   if (!c) return []
   const model = activeModelId.value
   if (!model) return []
-  return [model]
+  // Claude Code's `default` is highlighted as the concrete row it stands for.
+  return [displayedModel(modelsResponse.value, activeBucket.value, model)]
 })
 
 const bucketLocked = computed(() => {
@@ -3290,6 +3318,12 @@ const filteredThinkingLevels = computed(() => {
   return levels
 })
 
+// The same levels for the narrow footer's menu button: '' is Auto.
+const thinkingMenuOptions = computed(() => ['', ...filteredThinkingLevels.value].map(level => ({
+  value: level,
+  label: level ? level.charAt(0).toUpperCase() + level.slice(1) : 'Auto',
+})))
+
 const showThinkingLevels = computed(() => {
   if (!filteredThinkingLevels.value.length) return false
   return true
@@ -3310,14 +3344,13 @@ const chipThinkingLabel = computed(() => {
 // The provider is already the chip's first segment, so a model id that
 // repeats it as a prefix ("opencode/deepseek-...") wastes the width budget.
 // The tooltip keeps the full id.
-const chipModelLabel = computed(() => {
-  const model = activeModelId.value || ''
-  const provider = chat.value?.provider || ''
-  if (!model) return 'select model'
-  return provider && model.startsWith(`${provider}/`)
-    ? model.slice(provider.length + 1)
-    : model
-})
+// The chip reads "<provider> · <model>": the provider is the CLI's short name
+// and the model its readable name, the agent's own "default" entry named by
+// the model it runs. While the catalog is loading (or the agent has not said
+// which model its default is) the chip shows the provider alone.
+const chipProviderLabel = computed(() => providerShortLabel(modelsResponse.value, activeBucket.value))
+const chipModelLabel = computed(() => modelName(modelsResponse.value, activeBucket.value, activeModelId.value || ''))
+const chipTitle = computed(() => [chipProviderLabel.value, chipModelLabel.value, chipThinkingLabel.value].filter(Boolean).join(' · '))
 
 const inputPlaceholder = computed(() => {
   const comments = view.pendingChatComments.length + view.pendingComments.length
@@ -5108,26 +5141,6 @@ function canonicalTier(model: string): string {
   return model
 }
 
-// Render the vendor behind the chat as the operator in the brain chip. Falls
-// back to the CLI provider when no bucket is set, so a chat in the legacy /
-// auto state still shows something sensible instead of going blank.
-function routingBucketLabel(bucket: string | undefined, provider: string): string {
-  if (!bucket) return provider
-  if (bucket === 'claude') return 'anthropic'
-  return bucket
-}
-
-// Vendor name for the header chip, from the chat's provider.
-function routingProviderLabel(bucket: string | undefined, provider: string): string {
-  const lower = routingBucketLabel(bucket, provider)
-  if (!lower) return ''
-  if (lower === 'anthropic') return 'Anthropic'
-  // Lower-case on purpose: that is how opencode brands itself.
-  if (lower === 'opencode') return 'opencode'
-  if (lower === 'claude') return 'Claude'
-  return lower.charAt(0).toUpperCase() + lower.slice(1)
-}
-
 function bucketLabel(bucket: BucketKey): string {
   return BUCKET_DEFS.value.find((def) => def.key === bucket)?.label || bucket
 }
@@ -5218,7 +5231,10 @@ async function selectModel(value: string | string[], sectionKey = '') {
     ? sectionProvider
     : bucketForSelectedModel(model)
   const currentEntry = canonicalTier(chat.value.model)
-  const sameModelAndRoute = canonicalTier(model) === currentEntry && targetBucket === activeBucket.value
+  // The row a `default` chat shows as current is the same choice, not a pin.
+  const shownEntry = canonicalTier(displayedModel(modelsResponse.value, activeBucket.value, activeModelId.value || ''))
+  const sameModelAndRoute = (canonicalTier(model) === currentEntry || canonicalTier(model) === shownEntry)
+    && targetBucket === activeBucket.value
   if (sameModelAndRoute && !recovery) {
     // The composer's picker is selection-only: the model already in use is a
     // no-op. In a recovery the same model still retries.
@@ -7158,6 +7174,34 @@ details[open] > .activity-summary::before {
 
 .composer-chip svg { flex: none; }
 
+.composer-chip-provider,
+.composer-chip-sep {
+  flex: none;
+  white-space: nowrap;
+}
+
+/* The separator carries its own spaces (so the chip's text reads
+   "Claude Code · Opus"); the negative margin cancels the flex gap. */
+.composer-chip-sep {
+  margin: 0 -6px;
+  white-space: pre;
+}
+
+/* A phone shows the model alone; the provider stays in the chip's accessible
+   name and tooltip. With no model named yet the provider still shows. */
+@media (max-width: 520px) {
+  .composer-chip--named .composer-chip-provider,
+  .composer-chip--named .composer-chip-sep {
+    display: none;
+  }
+
+  /* The model part never shrinks to nothing; a minimum only where the row is
+     tight, so a wide screen does not pad short names. */
+  .composer-chip--named .composer-chip-label {
+    min-width: min(8ch, 100%);
+  }
+}
+
 .composer-chip-label {
   min-width: 0;
   max-width: 30ch;
@@ -7868,67 +7912,55 @@ details[open] > .activity-summary::before {
   line-height: 1.4;
 }
 
-.thinking-levels {
-  display: flex;
-  flex-direction: column;
-  align-items: stretch;
-  gap: var(--space-2);
-  min-width: 0;
-  padding: 2px 4px;
-}
-
+/* The picker's footer: two compact label/control rows under the model list,
+   then one note line. Labels share a column so the controls line up; a narrow
+   sheet stacks each label over its control. */
 .picker-footer-groups {
-  display: flex;
-  flex-direction: column;
-  gap: var(--space-2);
+  container-type: inline-size;
+  display: grid;
+  grid-template-columns: max-content minmax(0, 1fr);
+  align-items: center;
+  column-gap: var(--space-3);
+  row-gap: var(--space-2);
 }
 
+.thinking-levels,
 .permission-modes {
-  display: grid;
-  gap: var(--space-2);
+  display: contents;
 }
 
-.permission-modes__choices {
-  display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  /* Every tile in the grid is as tall as the tallest one, so a two-line
-     description (Plan) does not leave its neighbour (Bypass) shorter. */
-  grid-auto-rows: 1fr;
-  gap: 4px;
+/* The narrow footer's Thinking control is the menu button; the wide one is
+   the segmented row. Only one is ever rendered visible. */
+.thinking-levels :deep(.thinking-levels__menu) {
+  display: none;
 }
 
-.permission-mode {
-  position: relative;
-  flex-direction: column;
-  align-items: flex-start;
-  justify-content: center;
-  min-width: 0;
-  min-height: 44px;
-  height: auto;
-  gap: 2px;
-  text-align: left;
-  white-space: normal;
+@container (max-width: 420px) {
+  .picker-footer-groups {
+    grid-template-columns: minmax(0, 1fr);
+    row-gap: var(--space-1);
+  }
+  .permission-modes > .thinking-levels__label {
+    margin-top: var(--space-1);
+  }
 }
 
-.permission-mode__description,
 .permission-modes__note,
 .permission-modes__unknown,
 .permission-modes__status {
+  grid-column: 1 / -1;
   margin: 0;
   color: var(--fg2);
   font-size: var(--text-xs);
   line-height: 1.3;
 }
 
-.permission-mode__check {
-  position: absolute;
-  top: 6px;
-  right: 8px;
-}
-
-.permission-mode:focus-visible {
-  outline: 2px solid var(--accent);
-  outline-offset: 2px;
+/* On a short or very narrow screen the note line gives its room to the list;
+   the full rule stays the permission button's description. */
+@media (max-height: 500px), (max-width: 260px) {
+  .permission-modes__note {
+    display: none;
+  }
 }
 
 .thinking-levels__label {
@@ -7955,8 +7987,10 @@ details[open] > .activity-summary::before {
 .thinking-chip {
   display: inline-flex;
   align-items: center;
-  min-height: 28px;
-  padding: 0 10px;
+  /* With the track's padding and border the row is 40px, the model rows'
+     height; 44px segments on touch. */
+  min-height: 34px;
+  padding: 0 8px;
   border: 0;
   border-radius: 6px;
   background: none;
@@ -7972,8 +8006,18 @@ details[open] > .activity-summary::before {
   justify-content: center;
 }
 
-.thinking-chip:hover {
+.thinking-chip:hover:not(:disabled) {
   color: var(--fg);
+}
+
+.thinking-chip:disabled {
+  cursor: not-allowed;
+  opacity: 0.6;
+}
+
+.thinking-chip:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
 }
 
 .thinking-chip--active {
@@ -7984,6 +8028,16 @@ details[open] > .activity-summary::before {
 
 @media (pointer: coarse) {
   .thinking-chip { min-height: var(--touch); }
+}
+
+/* After the segmented control's own rules, which it overrides. */
+@container (max-width: 420px) {
+  .thinking-levels__chips {
+    display: none;
+  }
+  .thinking-levels :deep(.thinking-levels__menu) {
+    display: flex;
+  }
 }
 
 /* PaneHeader squares every header .btn-icon to 30px, which crushed this

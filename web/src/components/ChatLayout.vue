@@ -118,6 +118,7 @@
             ref="schedulePanelRef"
             :show-new="showNewSchedule"
             @created="showNewSchedule = false"
+            @new="showNewSchedule = true"
             :class="{ 'chat-rise': scheduleRising }"
             :style="pullStyle"
             @close="showNewSchedule = false"
@@ -284,6 +285,7 @@
 </template>
 
 <script setup lang="ts">
+import { automationsPageFor, automationsPagePath, isAutomationsPath } from '../lib/automationsNav'
 import { computed, defineAsyncComponent, nextTick, onBeforeUnmount, onMounted, ref, shallowRef, watch } from 'vue'
 import HomeNoticeReopen from './HomeNoticeReopen.vue'
 import { useRoute, useRouter, type RouteLocationNormalized } from 'vue-router'
@@ -666,7 +668,7 @@ const chatRoutePending = computed(() => {
 const viewMode = computed<'chat' | 'project' | 'schedules' | 'tasks' | 'settings' | 'memory' | 'stats'>(() => {
   const path = route.path
   if (path.startsWith('/settings')) return 'settings'
-  if (path.startsWith('/schedules')) return 'schedules'
+  if (isAutomationsPath(path)) return 'schedules'
   if (path.startsWith('/tasks')) return 'tasks'
   if (path.startsWith('/stats')) return 'stats'
   if (path.startsWith('/memory')) return 'memory'
@@ -757,6 +759,8 @@ const pageDocumentTitle = computed(() => {
       const schedule = taskStore.schedules.find(s => s.schedule_id === scheduleId)
       if (schedule?.title) return schedule.title
     }
+    if (route.path === '/automations/loops') return 'loops'
+    if (route.path === '/automations/webhooks') return 'webhooks'
     return 'automations'
   }
   if (viewMode.value === 'memory') return 'memory'
@@ -1065,7 +1069,7 @@ onMounted(async () => {
 })
 
 watch(() => route.path, (p) => {
-  if (!p.startsWith('/schedules')) showNewSchedule.value = false
+  if (!isAutomationsPath(p)) showNewSchedule.value = false
 })
 
 // React to route changes (e.g. clicking a chat link from ProjectView).
@@ -1277,7 +1281,7 @@ onBeforeUnmount(() => {
 // rail moves between automations sideways instead.
 const scheduleRising = ref(false)
 let scheduleRiseTimer: ReturnType<typeof setTimeout> | null = null
-watch(() => (route.path.startsWith('/schedules') ? (route.params.scheduleId as string) || '' : null), (id, was) => {
+watch(() => (isAutomationsPath(route.path) ? (route.params.scheduleId as string) || '' : null), (id, was) => {
   if (!id || was !== '') return
   if (prefersReducedMotion()) return
   scheduleRising.value = true
@@ -1312,7 +1316,11 @@ const {
   invalidate: invalidatePull,
 } = usePullToClose(
   target => {
-    if (target === 'schedule') void router.push('/schedules')
+    // Back to the page that lists it: a loop closes to Loops.
+    if (target === 'schedule') {
+      const open = taskStore.schedules.find(s => s.schedule_id === route.params.scheduleId)
+      void router.push(automationsPagePath(automationsPageFor(route.path, open)))
+    }
     else if (target === 'project') void router.push('/')
     // The open task closes through its own save; a refused one stays open.
     else if (target === 'task') void taskBoardRef.value?.closeDetailPage?.()

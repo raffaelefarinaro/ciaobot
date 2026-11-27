@@ -520,7 +520,12 @@ _WORKSPACE_PROVIDER_LABELS = {
 def workspace_provider_options(config: Any) -> list[dict[str, str]]:
     values = list(provider_registry.provider_ids())
     return [
-        {"value": value, "label": _WORKSPACE_PROVIDER_LABELS[value]}
+        {
+            "value": value,
+            "label": _WORKSPACE_PROVIDER_LABELS[value],
+            # The CLI's short name, which chips and picker headings show.
+            "short_label": provider_registry.label(value, short=True),
+        }
         for value in values
     ]
 
