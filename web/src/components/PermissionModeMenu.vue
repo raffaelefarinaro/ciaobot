@@ -163,9 +163,11 @@ function onPick(value: unknown): void {
   /* Above the model popover (300) it opens from. */
   z-index: 310;
   box-sizing: border-box;
-  min-width: max(var(--reka-dropdown-menu-trigger-width, 240px), 240px);
+  /* As wide as its button, never narrower than the descriptions need, and
+     never wider than the viewport (a phone at 200% zoom is 195px wide). */
+  min-width: min(max(var(--reka-popper-anchor-width, 240px), 240px), calc(100vw - 16px));
   max-width: min(380px, calc(100vw - 16px));
-  max-height: var(--reka-dropdown-menu-content-available-height, 60dvh);
+  max-height: var(--reka-popper-available-height, 60dvh);
   overflow-y: auto;
   padding: var(--space-1);
   border: 1px solid var(--border-strong);

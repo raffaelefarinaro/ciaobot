@@ -490,8 +490,11 @@ test.describe('touch targets', () => {
     await expect(popup).toBeVisible()
     await quiesce(page)
 
-    async function checkModeButton(name: string) {
-      const button = popup.locator('.permission-modes__choices').getByRole('button', { name: new RegExp(name) })
+    // Permission mode is a menu button in the footer; its four modes open in a
+    // menu above the popover. Both the button and every mode are 44px targets
+    // that are really hit at their centre, and Escape closes only the menu.
+    async function checkPermissionControl({ openMenu = true } = {}) {
+      const button = popup.locator('.permission-mode-trigger')
       await button.scrollIntoViewIfNeeded()
       await expect(button).toBeVisible()
       await expect(button).toBeInViewport()
@@ -510,18 +513,34 @@ test.describe('touch targets', () => {
       expect(geometry.height).toBeGreaterThanOrEqual(TOUCH_MIN)
       expect(geometry.withinFooter).toBe(true)
       expect(geometry.hit).toBe(true)
+      if (!openMenu) return
+      await button.click()
+      const options = page.getByRole('menuitemradio')
+      await expect(options).toHaveCount(4)
+      for (const name of ['Manual', 'Auto', 'Bypass', 'Plan']) {
+        const option = page.getByRole('menuitemradio', { name: new RegExp(name) })
+        await expect(option).toBeInViewport()
+        const box = await option.evaluate(el => {
+          const rect = el.getBoundingClientRect()
+          const hit = document.elementFromPoint(rect.left + rect.width / 2, rect.top + rect.height / 2)
+          return { width: rect.width, height: rect.height, hit: !!hit && (hit === el || el.contains(hit)) }
+        })
+        expect(box.width).toBeGreaterThanOrEqual(TOUCH_MIN)
+        expect(box.height).toBeGreaterThanOrEqual(TOUCH_MIN)
+        expect(box.hit).toBe(true)
+      }
+      await page.keyboard.press('Escape')
+      await expect(options).toHaveCount(0)
+      await expect(popup).toBeVisible()
+      await expect(button).toBeFocused()
     }
 
     await page.setViewportSize({ width: 1280, height: 900 })
     const desktopFooter = popup.locator('.model-selector__footer')
     const desktopFooterMetrics = await desktopFooter.evaluate(el => ({ height: el.clientHeight, scrollHeight: el.scrollHeight }))
     expect(desktopFooterMetrics.scrollHeight).toBeLessThanOrEqual(desktopFooterMetrics.height)
-    for (const name of ['Manual', 'Auto', 'Bypass', 'Plan']) {
-      await checkModeButton(name)
-      await expect(
-        popup.locator('.permission-modes__choices').getByRole('button', { name: new RegExp(name) }).locator('.permission-mode__description'),
-      ).toBeInViewport()
-    }
+    await checkPermissionControl()
+    await expect(popup.locator('.permission-mode-trigger__allows')).toBeInViewport()
     for (const viewport of [{ width: 390, height: 844 }, { width: 844, height: 390 }]) {
       await page.setViewportSize(viewport)
       await expect(popup).toBeVisible()
@@ -550,7 +569,7 @@ test.describe('touch targets', () => {
       const footerMetrics = await footer.evaluate(el => ({ height: el.clientHeight, scrollHeight: el.scrollHeight }))
       if (footerMetrics.scrollHeight > footerMetrics.height) expect(footerScrollAfterFooter).toBeGreaterThan(0)
       expect(await list.evaluate(el => el.scrollTop)).toBe(listScrollBeforeFooter)
-      for (const name of ['Manual', 'Auto', 'Bypass', 'Plan']) await checkModeButton(name)
+      await checkPermissionControl()
       await expect(popup).toBeInViewport()
       expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true)
       expect(await popup.evaluate(el => el.scrollWidth <= el.clientWidth)).toBe(true)
@@ -559,8 +578,18 @@ test.describe('touch targets', () => {
     await page.setViewportSize({ width: 390, height: 844 })
     await page.evaluate(() => { document.documentElement.style.zoom = '200%' })
     await expect(popup).toBeVisible()
-    for (const name of ['Manual', 'Auto', 'Bypass', 'Plan']) await checkModeButton(name)
+    // CSS zoom on the root is not browser zoom for a portaled popper: Floating
+    // UI places the menu in unzoomed coordinates. The footer button is checked
+    // here; the menu is checked below at what 200% browser zoom really gives a
+    // 390px phone, a 195px-wide CSS viewport.
+    await checkPermissionControl({ openMenu: false })
     expect(await popup.evaluate(el => el.scrollWidth <= el.clientWidth)).toBe(true)
+    expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true)
+
+    await page.evaluate(() => { document.documentElement.style.zoom = '' })
+    await page.setViewportSize({ width: 195, height: 422 })
+    await expect(popup).toBeVisible()
+    await checkPermissionControl()
     expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true)
   })
 

@@ -79,8 +79,10 @@ function definedTokens(): Set<string> {
 /** Variables a UI library sets on its own elements at runtime; they are never in
  * our palette and never in our source, so they are named here one by one. Reka's
  * popper writes `--reka-popper-available-height` on the content element (the
- * room left on the chosen side; ModelSelector bounds its popover with it). */
-const LIBRARY_PROVIDED = new Set(['--reka-popper-available-height'])
+ * room left on the chosen side; ModelSelector bounds its popover with it) and
+ * `--reka-popper-anchor-width` (the trigger's width; PermissionModeMenu matches
+ * its menu to its button with it). */
+const LIBRARY_PROVIDED = new Set(['--reka-popper-available-height', '--reka-popper-anchor-width'])
 
 function usedTokens(text: string): Set<string> {
   const body = stripComments(text)
