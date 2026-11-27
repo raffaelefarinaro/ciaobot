@@ -1504,20 +1504,14 @@ def available_capabilities() -> frozenset[str]:
 
 # --- usage and transcripts --------------------------------------------------------
 
+# The keys an ACP `PromptResponse.usage` lands under in a turn's `usage` and in an
+# archive's `usage_totals` frontmatter (`UpdateNormalizer.record_prompt_usage`
+# snake-cases the protocol's camelCase names).
 _TOKEN_FIELDS: dict[str, str] = {
     "input": "input_tokens",
     "output": "output_tokens",
-    "cache_read": "cache_read_input_tokens",
-    "cache_write": "cache_creation_input_tokens",
-}
-# OpenCode transcripts spell the same counts in camelCase (the USAGE_ALIASES
-# table in scripts/session_audit.py). A field present in both spellings counts
-# the snake_case one only, so a turn is never counted twice.
-_TOKEN_CAMEL_FIELDS: dict[str, str] = {
-    "input": "inputTokens",
-    "output": "outputTokens",
-    "cache_read": "cacheReadTokens",
-    "cache_write": "cacheWriteTokens",
+    "cache_read": "cached_read_tokens",
+    "cache_write": "cached_write_tokens",
 }
 
 
@@ -1554,14 +1548,11 @@ def answer_from_transcripts(runtime: Path) -> str:
 
 
 def _add_usage(tokens: dict[str, int], usage: Any) -> None:
-    """Add one turn's usage to ``tokens``. A snake_case key wins over its camelCase twin."""
+    """Add one turn's usage to ``tokens``."""
     if not isinstance(usage, dict):
         return
     for name, key in _TOKEN_FIELDS.items():
-        value = usage.get(key)
-        if value is None:
-            value = usage.get(_TOKEN_CAMEL_FIELDS[name])
-        tokens[name] += _as_int(value)
+        tokens[name] += _as_int(usage.get(key))
 
 
 def _clip(text: str) -> str:
@@ -1920,14 +1911,14 @@ def provider_version(provider: str) -> str | None:
 
 
 def cli_package_mismatch() -> str | None:
-    """Why the ``ciao`` an agent would run is not this harness's package, or None.
+    """Why the ``ciao`` an agent would run is not this checkout's package, or None.
 
-    An agent only sees the package that is running it, so a
-    ``ciao`` on the agent's PATH that imports a different checkout is refused.
-    Isolated mode (``-I``) ignores PYTHONPATH, which is what the venv's ``ciao``
+    The harness must drive the ``ciao`` package of the checkout it lives in
+    (``<checkout>/ciao``), not another install. Isolated mode (``-I``) ignores
+    PYTHONPATH and the working directory, which is what the venv's ``ciao``
     script sees.
     """
-    harness = Path(__file__).resolve().parent
+    expected = Path(__file__).resolve().parents[1] / "ciao"
     probe = [sys.executable, *isolated_probe_flags(), "-c", "import ciao; print(ciao.__file__)"]
     try:
         proc = subprocess.run(
@@ -1939,14 +1930,14 @@ def cli_package_mismatch() -> str | None:
     if proc.returncode != 0 or not printed:
         return f"could not import ciao in isolated mode (exit {proc.returncode}): {(proc.stderr or '')[-300:]}"
     installed = Path(printed[-1]).resolve().parent
-    if installed == harness:
+    if installed == expected:
         return None
     return (
         f"CLI package mismatch: the `ciao` an agent runs imports {installed}, "
-        f"but this harness runs {harness}. An agent only sees the running "
-        "package, so the agent's ciao calls would be refused. Remedy: run the eval from "
-        "an install of the checkout under test, e.g. `uv venv .venv-eval && uv pip install "
-        "-p .venv-eval -e .` in that checkout, then `.venv-eval/bin/ciao eval tasks run ...`."
+        f"but this checkout's package is {expected}. The agent's ciao calls would drive "
+        "a different install. Remedy: install this checkout editable into a fresh venv, "
+        "e.g. `uv venv .venv-eval && uv pip install -p .venv-eval -e .` in the checkout, "
+        "then `.venv-eval/bin/python -m evals run ...`."
     )
 
 
