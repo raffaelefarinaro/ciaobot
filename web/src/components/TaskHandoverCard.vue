@@ -4,8 +4,11 @@
  *
  * The engine wrote that message for the agent (`ciao/task_attempts.py::
  * build_prompt`), so the transcript shows the parts a person reads — the task's
- * title and its description, rendered — and keeps the prompt itself, verbatim,
- * behind "Show what the agent received". ChatPanel draws this only once
+ * title and its description, rendered — then the instructions the user typed
+ * into the delegation sheet, when there are any, under their own label, and keeps
+ * the prompt itself, verbatim, behind "Show what the agent received". Both
+ * Markdown blocks go through the transcript's sanitising renderer. ChatPanel
+ * draws this only once
  * {@link parseTaskHandover} has found both fences; anything else is an ordinary
  * message.
  */
@@ -23,6 +26,10 @@ const props = defineProps<{
 const descriptionHtml = computed(() =>
   props.handover.description ? renderUserMarkdown(props.handover.description, props.knownPaths ?? []) : '',
 )
+
+const instructionsHtml = computed(() =>
+  props.handover.instructions ? renderUserMarkdown(props.handover.instructions, props.knownPaths ?? []) : '',
+)
 </script>
 
 <template>
@@ -32,9 +39,14 @@ const descriptionHtml = computed(() =>
     <!-- eslint-disable-next-line vue/no-v-html -- renderUserMarkdown is the transcript's sanitising renderer -->
     <div v-if="descriptionHtml" class="task-handover-description" v-html="descriptionHtml"></div>
     <p v-else class="task-handover-empty">No description.</p>
+    <div v-if="instructionsHtml" class="task-handover-instructions" role="group" aria-label="Your instructions">
+      <p class="task-handover-label">Your instructions</p>
+      <!-- eslint-disable-next-line vue/no-v-html -- renderUserMarkdown is the transcript's sanitising renderer -->
+      <div class="task-handover-instructions-text" v-html="instructionsHtml"></div>
+    </div>
     <details class="task-handover-raw">
       <summary>Show what the agent received</summary>
-      <pre>{{ prompt }}</pre>
+      <pre tabindex="0" role="region" aria-label="Prompt the agent received">{{ prompt }}</pre>
     </details>
   </section>
 </template>
@@ -65,10 +77,24 @@ const descriptionHtml = computed(() =>
   overflow-wrap: anywhere;
   line-height: 1.55;
 }
-.task-handover-description :deep(> :first-child) { margin-top: 0; }
+.task-handover-description :deep(> :first-child),
+.task-handover-instructions-text :deep(> :first-child) { margin-top: 0; }
 .task-handover-description :deep(ul),
-.task-handover-description :deep(ol) { padding-left: 1.4em; }
-.task-handover-description :deep(> :last-child) { margin-bottom: 0; }
+.task-handover-description :deep(ol),
+.task-handover-instructions-text :deep(ul),
+.task-handover-instructions-text :deep(ol) { padding-left: 1.4em; }
+.task-handover-description :deep(> :last-child),
+.task-handover-instructions-text :deep(> :last-child) { margin-bottom: 0; }
+/* The user's own words, set apart from the task by a hairline and a label. */
+.task-handover-instructions {
+  margin-top: 12px;
+  padding-top: 10px;
+  border-top: 1px solid var(--border);
+}
+.task-handover-instructions-text {
+  overflow-wrap: anywhere;
+  line-height: 1.55;
+}
 .task-handover-empty {
   margin: 0;
   color: var(--fg3);
@@ -94,7 +120,7 @@ const descriptionHtml = computed(() =>
 }
 .task-handover-raw pre {
   margin: 8px 0 0;
-  max-height: 360px;
+  max-height: min(70vh, 560px);
   overflow: auto;
   padding: 10px 12px;
   border: 1px solid var(--border);
@@ -102,12 +128,20 @@ const descriptionHtml = computed(() =>
   background: var(--bg);
   color: var(--fg2);
   font-family: var(--font-mono);
-  font-size: var(--text-xs);
-  line-height: 1.5;
+  font-size: var(--text-sm);
+  line-height: 1.55;
   white-space: pre-wrap;
   overflow-wrap: anywhere;
 }
+.task-handover-raw pre:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
 @media (pointer: coarse) {
-  .task-handover-raw summary { padding: 12px 0; }
+  .task-handover-raw summary {
+    box-sizing: border-box;
+    min-height: var(--touch);
+    padding: 12px 0;
+  }
 }
 </style>

@@ -457,6 +457,201 @@ describe('TaskWorkspaceSurface overlay mode', () => {
     wrapper.unmount()
   })
 
+  it('lands on the delegated chat and ends the overlay instead of reopening the editor', async () => {
+    answerWith(BOARD, 'Write the runbook.')
+    apiPost.mockResolvedValue({
+      workspace: 'personal',
+      created: true,
+      chat_id: 'chat-9',
+      attempt: {
+        attempt_id: 'f'.repeat(32), task_id: 'ship', task_revision: NEXT_REVISION, chat_id: 'chat-9',
+        state: 'running', created_at: '', updated_at: '', ended_at: '', detail: '', live: true,
+      },
+      task: { ...task({ chat_id: 'chat-9', assignee: 'agent' }), revision: THIRD_REVISION, body: '' },
+    })
+    const store = useProjectStore()
+    const open = vi.spyOn(store, 'openChatFromDeepLink').mockImplementation(async (chatId: string) => {
+      store.activeChatId = chatId
+    })
+    // The arrived pane, with its composer group (a landmark that is not a text field)
+    // and a beside pane earlier in the document whose composer must not be touched.
+    const side = document.createElement('div')
+    side.className = 'chat-split-side'
+    side.innerHTML = '<div class="chat-panel"><div class="composer-bar" tabindex="-1"></div></div>'
+    const pane = document.createElement('div')
+    pane.className = 'chat-panel'
+    pane.innerHTML = '<textarea class="chat-input"></textarea><div class="composer-bar" tabindex="-1"></div>'
+    document.body.append(side, pane)
+
+    const { wrapper } = mountOverlay()
+    await flushPromises()
+    await nextTick()
+    await editor(wrapper).get('.task-delegate-go').trigger('click')
+    await flushPromises()
+    await nextTick()
+    const preview = wrapper.findAll('.task-sheet').find((sheet) => sheet.find('#task-delegate-title').exists())!
+    await preview.get('.btn-primary').trigger('click')
+    await flushPromises()
+    await nextTick()
+
+    expect(apiPost).toHaveBeenCalledWith('/api/tasks/ship/delegate', expect.objectContaining({ workspace: 'personal' }))
+    expect(open).toHaveBeenCalledWith('chat-9')
+    // Neither the sheet nor the editor it was opened from comes back.
+    expect(wrapper.find('#task-delegate-title').exists()).toBe(false)
+    expect(editor(wrapper).exists()).toBe(false)
+    expect(wrapper.emitted('close')).toHaveLength(1)
+    await new Promise((resolve) => setTimeout(resolve, 250))
+    // Focus did not fall to <body>: it is on the main pane's composer group, not
+    // the beside pane's, and the text field was not forced (that is ChatPanel's call).
+    expect(document.activeElement).toBe(pane.querySelector('.composer-bar'))
+    wrapper.unmount()
+  })
+
+  /** The delegation answer the engine gives: a running attempt in `chatId`. */
+  function delegationAnswer(chatId: string) {
+    return {
+      workspace: 'personal',
+      created: true,
+      chat_id: chatId,
+      attempt: {
+        attempt_id: 'f'.repeat(32), task_id: 'ship', task_revision: NEXT_REVISION, chat_id: chatId,
+        state: 'running', created_at: '', updated_at: '', ended_at: '', detail: '', live: true,
+      },
+      task: { ...task({ chat_id: chatId, assignee: 'agent' }), revision: THIRD_REVISION, body: '' },
+    }
+  }
+
+  /** Open the preview from the editor, and return the sheet. */
+  async function openSheet(wrapper: ReturnType<typeof mount>) {
+    await editor(wrapper).get('.task-delegate-go').trigger('click')
+    await flushPromises()
+    await nextTick()
+    return wrapper.findAll('.task-sheet').find((sheet) => sheet.find('#task-delegate-title').exists())!
+  }
+
+  it('resumes into the attempt\'s own chat and lands on it', async () => {
+    answerWith([task({ attempt_id: LIVE_ID, attempt_state: 'failed', chat_id: 'c2' })], 'Body.')
+    apiPost.mockResolvedValue(delegationAnswer('c2'))
+    const open = vi.spyOn(useProjectStore(), 'openChatFromDeepLink').mockResolvedValue(undefined)
+    const { wrapper } = mountOverlay()
+    await flushPromises()
+    await nextTick()
+
+    const sheet = await openSheet(wrapper)
+    await sheet.get('.btn-primary').trigger('click')
+    await flushPromises()
+
+    expect(apiPost).toHaveBeenCalledWith(`/api/tasks/ship/attempt/${LIVE_ID}/resume`, expect.anything())
+    expect(open).toHaveBeenCalledWith('c2')
+    expect(editor(wrapper).exists()).toBe(false)
+    expect(wrapper.emitted('close')).toHaveLength(1)
+    wrapper.unmount()
+  })
+
+  it('retries into a new chat and lands on it', async () => {
+    answerWith([task({ attempt_id: LIVE_ID, attempt_state: 'failed', chat_id: 'c2' })], 'Body.')
+    apiPost.mockResolvedValue(delegationAnswer('c3'))
+    const store = useProjectStore()
+    store.chats = [{ chat_id: 'c2', archived: true, title: 'Old', project_id: 'general' } as never]
+    const open = vi.spyOn(store, 'openChatFromDeepLink').mockResolvedValue(undefined)
+    const { wrapper } = mountOverlay()
+    await flushPromises()
+    await nextTick()
+
+    const sheet = await openSheet(wrapper)
+    await sheet.get('.btn-primary').trigger('click')
+    await flushPromises()
+
+    expect(apiPost).toHaveBeenCalledWith('/api/tasks/ship/delegate', expect.objectContaining({ workspace: 'personal' }))
+    expect(open).toHaveBeenCalledWith('c3')
+    expect(wrapper.emitted('close')).toHaveLength(1)
+    wrapper.unmount()
+  })
+
+  it('sends one delegation for a double submit', async () => {
+    answerWith(BOARD, 'Body.')
+    let release: (value: unknown) => void = () => {}
+    apiPost.mockReturnValue(new Promise((resolve) => { release = resolve }))
+    const open = vi.spyOn(useProjectStore(), 'openChatFromDeepLink').mockResolvedValue(undefined)
+    const { wrapper } = mountOverlay()
+    await flushPromises()
+    await nextTick()
+
+    const sheet = await openSheet(wrapper)
+    const go = sheet.get('.btn-primary')
+    await go.trigger('click')
+    await go.trigger('click')
+    await flushPromises()
+    expect(apiPost).toHaveBeenCalledTimes(1)
+    release(delegationAnswer('c9'))
+    await flushPromises()
+    expect(open).toHaveBeenCalledTimes(1)
+    wrapper.unmount()
+  })
+
+  it('opens no chat and keeps the editor when an unsaved draft refuses the close', async () => {
+    answerWith([task({ attempt_id: LIVE_ID, live_attempt_id: LIVE_ID, attempt_state: 'running', chat_id: 'c1' })], 'Body.')
+    const open = vi.spyOn(useProjectStore(), 'openChatFromDeepLink').mockResolvedValue(undefined)
+    const { wrapper } = mountOverlay()
+    await flushPromises()
+    await nextTick()
+
+    await wrapper.get('#task-detail-name').setValue('   ')
+    await nextTick()
+    await editor(wrapper).get('.task-delegate-go').trigger('click')
+    await flushPromises()
+    await nextTick()
+
+    expect(open).not.toHaveBeenCalled()
+    expect(editor(wrapper).exists()).toBe(true)
+    expect(wrapper.emitted('close')).toBeUndefined()
+    wrapper.unmount()
+  })
+
+  it('opens a fresh chat this browser has not listed yet through the engine, then switches to it', async () => {
+    answerWith(BOARD, 'Body.')
+    apiPost.mockResolvedValue(delegationAnswer('chat-new'))
+    const store = useProjectStore()
+    const baseGet = apiGet.getMockImplementation()!
+    apiGet.mockImplementation((url: string) => url.startsWith('/api/chats/chat-new')
+      ? Promise.resolve({ chat_id: 'chat-new', project_id: 'general', workspace: 'personal', title: 'Ship', archived: false })
+      : baseGet(url))
+    const { wrapper } = mountOverlay()
+    await flushPromises()
+    await nextTick()
+    expect(store.chats.some((chat) => chat.chat_id === 'chat-new')).toBe(false)
+
+    const sheet = await openSheet(wrapper)
+    await sheet.get('.btn-primary').trigger('click')
+    await flushPromises()
+
+    expect(apiGet).toHaveBeenCalledWith(expect.stringContaining('/api/chats/chat-new'))
+    // The deep-link entry learned the chat from the engine before opening it.
+    expect(store.chats.some((chat) => chat.chat_id === 'chat-new')).toBe(true)
+    expect(store.toasts.some((toast) => toast.title === 'Chat not opened')).toBe(false)
+    wrapper.unmount()
+  })
+
+  it('says so, calmly, when the chat could not be opened', async () => {
+    answerWith(BOARD, 'Body.')
+    apiPost.mockResolvedValue(delegationAnswer('chat-gone'))
+    const store = useProjectStore()
+    vi.spyOn(store, 'openChatFromDeepLink').mockResolvedValue(undefined)
+    const { wrapper } = mountOverlay()
+    await flushPromises()
+    await nextTick()
+
+    const sheet = await openSheet(wrapper)
+    await sheet.get('.btn-primary').trigger('click')
+    await flushPromises()
+
+    const toast = store.toasts.at(-1)
+    expect(toast?.title).toBe('Chat not opened')
+    expect(toast?.variant).toBe('info')
+    expect(wrapper.emitted('close')).toHaveLength(1)
+    wrapper.unmount()
+  })
+
   it('closes the surface on a workspace switch, without writing the old draft', async () => {
     answerWith(BOARD)
     const { wrapper } = mountOverlay()
@@ -595,7 +790,7 @@ describe('TaskWorkspaceSurface overlay mode', () => {
       }),
     ], 'Write the runbook.')
     const store = useProjectStore()
-    const switchChat = vi.spyOn(store, 'switchChat').mockResolvedValue(undefined)
+    const open = vi.spyOn(store, 'openChatFromDeepLink').mockResolvedValue(undefined)
 
     const { wrapper, route, replace } = mountOverlay()
     await flushPromises()
@@ -608,7 +803,7 @@ describe('TaskWorkspaceSurface overlay mode', () => {
 
     // Open chat is not a preview: it navigates, and the overlay must tell the
     // host it is finished instead of leaving an invisible mounted surface.
-    expect(switchChat).toHaveBeenCalledWith('c1')
+    expect(open).toHaveBeenCalledWith('c1')
     expect(editor(wrapper).exists()).toBe(false)
     expect(wrapper.find('#task-delegate-title').exists()).toBe(false)
     expect(overlayState(wrapper).exists()).toBe(false)
