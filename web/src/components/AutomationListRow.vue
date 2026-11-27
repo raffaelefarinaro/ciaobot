@@ -1,9 +1,10 @@
 <template>
   <!-- One automation on an Automations page: the shared page row (ListRow),
        its title over one muted line (cadence and where it runs; for a loop, its
-       chat, cadence and end), and the end column. A paused one says so with a
-       tag; otherwise the end column is the last run (a loop's next one) with its
-       state as a shape and, where it wants the owner, a word. -->
+       chat, cadence and end), and the end column: the last run (a loop's next
+       one) with its state as a shape and, where it wants the owner, a word. A
+       paused one says so with a tag and shows a state only when it wants a look
+       (the engine turns an automation off when its chat is deleted). -->
   <ListRow
     :to="`/schedules/${schedule.schedule_id}`"
     class="ov-item automation-row"
@@ -15,8 +16,8 @@
     <template #sub>{{ sub }}</template>
     <template #end>
       <span v-if="!schedule.enabled" class="automation-tag">paused</span>
-      <template v-else>
-        <span v-if="schedule.frequency === 'once'" class="automation-tag">once</span>
+      <span v-else-if="schedule.frequency === 'once'" class="automation-tag">once</span>
+      <template v-if="schedule.enabled || alert">
         <span class="list-row-when automation-when" :class="{ 'automation-when--alert': alert }">
           <span v-if="state !== 'none'" class="automation-state" :title="stateLabel">
             <ActivityGlyph v-if="alert" kind="alert" />
@@ -40,7 +41,7 @@ import CareGlyph from './CareGlyph.vue'
 import type { Schedule } from '../lib/types'
 import { cadenceSummary } from '../lib/scheduleClock'
 import { isOwnedLoop, loopCadenceLabel, loopEndsLabel } from '../lib/loops'
-import { lastRunLabel, lastRunState, lastRunWord, relativeOffset, relativeWhen } from '../lib/scheduleList'
+import { lastRunLabel, lastRunState, lastRunWord, relativeWhen, untilNext } from '../lib/scheduleList'
 import { useProjectStore } from '../stores/projects'
 
 const props = defineProps<{ schedule: Schedule }>()
@@ -93,7 +94,11 @@ const stateLabel = computed(() => lastRunLabel(props.schedule, state.value))
 const when = computed(() => {
   const s = props.schedule
   // A loop is about what comes next, not what already ran.
-  if (isLoop.value) return s.next_run ? `next ${relativeOffset(s.next_run)}` : 'ends soon'
+  if (isLoop.value) {
+    const next = untilNext(s.next_run)
+    if (!next) return 'ends soon'
+    return next.startsWith('in ') ? `next ${next}` : `next run ${next}`
+  }
   // A missed slot is dated by when it was due.
   if (state.value === 'missed' && s.last_expected_run) return relativeWhen(s.last_expected_run)
   // A one-off that has not run yet is dated by its run.

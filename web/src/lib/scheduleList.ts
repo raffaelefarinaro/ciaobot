@@ -10,6 +10,7 @@
 import type { Schedule } from './types'
 import { scheduleClock, oneOffWhen } from './scheduleClock'
 import { isOwnedLoop } from './loops'
+import { scheduleNeedsAttention } from './automationWorkspace'
 
 export interface AutomationGroups {
   /** Ciaobot's own upkeep (scope 'system'). */
@@ -27,11 +28,16 @@ function nextRunAt(s: Schedule): number {
 
 /**
  * Soonest next run first; an entry with no next run (manual, or a one-off
- * whose time has passed) after the dated ones, and a paused one last. Ties keep
- * a stable, readable order by title.
+ * whose time has passed) after the dated ones, and a paused one last, with a
+ * paused one that wants a look (its chat was deleted) above the plain paused
+ * ones. Ties keep a stable, readable order by title.
  */
 export function byNextRun(a: Schedule, b: Schedule): number {
   if (a.enabled !== b.enabled) return a.enabled ? -1 : 1
+  if (!a.enabled) {
+    const look = Number(scheduleNeedsAttention(b)) - Number(scheduleNeedsAttention(a))
+    if (look) return look
+  }
   const diff = nextRunAt(a) - nextRunAt(b)
   if (diff && Number.isFinite(diff)) return diff
   if (diff) return Number.isFinite(nextRunAt(a)) ? -1 : 1
@@ -62,8 +68,7 @@ export function automationOrder(schedules: readonly Schedule[]): Schedule[] {
 /**
  * The sidebar's Next up: the soonest runs that are coming, routines, one-offs
  * and system routines alike. Paused entries have no run coming; loops are left
- * to their own page, where a five-minute cadence would not crowd everything
- * else out.
+ * out because they have their own page, which lists each one's next run.
  */
 export function nextUpSchedules(schedules: readonly Schedule[], limit = 6): Schedule[] {
   return schedules
@@ -98,13 +103,24 @@ export function relativeOffset(iso: string | null | undefined, now: number = Dat
   const at = Date.parse(iso)
   if (!Number.isFinite(at)) return ''
   const diffMs = at - now
-  const absMin = Math.round(Math.abs(diffMs) / 60000)
+  // Floored to the unit: 23h30m away is "in 23h", never a rounded-up "in 24h".
+  const absMin = Math.floor(Math.abs(diffMs) / 60000)
   if (absMin < 1) return 'now'
   let rel: string
   if (absMin < 60) rel = `${absMin}m`
-  else if (absMin < 60 * 24) rel = `${Math.round(absMin / 60)}h`
-  else rel = `${Math.round(absMin / 1440)}d`
+  else if (absMin < 60 * 24) rel = `${Math.floor(absMin / 60)}h`
+  else rel = `${Math.floor(absMin / 1440)}d`
   return diffMs < 0 ? `${rel} ago` : `in ${rel}`
+}
+
+/**
+ * A next run in words: "in 9h", "now", or "due" once its time has passed (a run
+ * the engine has not picked up yet is due, not "63d ago"); '' when unknown.
+ */
+export function untilNext(iso: string | null | undefined, now: number = Date.now()): string {
+  const offset = relativeOffset(iso, now)
+  if (!offset || offset === 'now' || offset.startsWith('in ')) return offset
+  return 'due'
 }
 
 /**
@@ -129,8 +145,12 @@ export function relativeWhen(iso: string | null | undefined, now: number = Date.
 export type LastRunState = 'missed' | 'failed' | 'working' | 'done' | 'none'
 
 export function lastRunState(s: Schedule, isStreaming: (chatId: string) => boolean): LastRunState {
-  if (s.missed) return 'missed'
-  if (s.last_status === 'error' || s.last_status === 'skipped' || s.last_status === 'missing-chat') return 'failed'
+  // The app's one "wants a look" predicate (lib/automationWorkspace.ts), the
+  // same one behind the Automations alert, its count and the bell: a deleted
+  // chat, or an enabled entry that missed a slot or failed. A run that stopped
+  // on a question or an approval ('skipped') is not one: its chat carries the
+  // needs-you signal itself.
+  if (scheduleNeedsAttention(s)) return s.last_status !== 'missing-chat' && s.missed ? 'missed' : 'failed'
   if (s.last_status === 'running'
     || (!!s.last_run_chat_id && isStreaming(s.last_run_chat_id))
     || (s.enabled && !!s.web_chat_id && isStreaming(s.web_chat_id))) return 'working'
@@ -144,7 +164,6 @@ export function lastRunWord(s: Schedule, state: LastRunState): string {
   if (state === 'missed') return 'missed'
   if (state === 'failed') {
     if (s.last_status === 'missing-chat') return 'chat deleted'
-    if (s.last_status === 'skipped') return 'needs you'
     return 'failed'
   }
   return ''
@@ -154,8 +173,7 @@ export function lastRunWord(s: Schedule, state: LastRunState): string {
 export function lastRunLabel(s: Schedule, state: LastRunState): string {
   if (state === 'missed') return 'Missed a run'
   if (state === 'failed') {
-    if (s.last_status === 'missing-chat') return 'Its chat was deleted'
-    if (s.last_status === 'skipped') return 'The last run needs you: check the chat'
+    if (s.last_status === 'missing-chat') return 'Its chat was deleted, so it is turned off'
     return 'The last run failed'
   }
   if (state === 'working') return 'Running now'

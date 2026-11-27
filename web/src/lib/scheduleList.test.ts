@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import {
   automationOrder, cadenceBadge, groupAutomations, lastRunLabel, lastRunState, lastRunWord,
-  nextUpSchedules, relativeOffset, relativeWhen, scheduleTitle,
+  nextUpSchedules, relativeOffset, relativeWhen, scheduleTitle, untilNext,
 } from './scheduleList'
 import type { Schedule } from './types'
 
@@ -46,6 +46,15 @@ describe('groupAutomations', () => {
     expect(ids(g.routines)).toEqual(['soon', 'once', 'later', 'manual', 'paused-soon'])
   })
 
+  it('puts a paused entry that wants a look (its chat was deleted) above the plain paused ones', () => {
+    const g = groupAutomations([
+      s('a-paused', { enabled: false }),
+      s('z-orphan', { enabled: false, last_status: 'missing-chat' }),
+      s('live'),
+    ])
+    expect(ids(g.routines)).toEqual(['live', 'z-orphan', 'a-paused'])
+  })
+
   it('walks the pages top to bottom: system, then the user\'s routines, then loops', () => {
     const list = [loop('lp'), s('routine'), s('sys', { scope: 'system' })]
     expect(ids(automationOrder(list))).toEqual(['sys', 'routine', 'lp'])
@@ -80,8 +89,17 @@ describe('relative times', () => {
     expect(relativeOffset('2026-01-02T12:02:00Z', now)).toBe('in 2m')
     expect(relativeOffset('2026-01-05T12:00:00Z', now)).toBe('in 3d')
     expect(relativeOffset('2026-01-02T12:00:20Z', now)).toBe('now')
+    // Floored to the unit, never rounded up.
+    expect(relativeOffset('2026-01-03T11:30:00Z', now)).toBe('in 23h')
+    expect(relativeOffset('2026-01-02T12:02:50Z', now)).toBe('in 2m')
     expect(relativeOffset('', now)).toBe('')
     expect(relativeOffset('garbage', now)).toBe('')
+  })
+  it('says a next run whose time has passed is due, not "ago"', () => {
+    expect(untilNext('2026-01-02T21:00:00Z', now)).toBe('in 9h')
+    expect(untilNext('2025-10-30T12:00:00Z', now)).toBe('due')
+    expect(untilNext('2026-01-02T12:00:20Z', now)).toBe('now')
+    expect(untilNext(null, now)).toBe('')
   })
   it('puts the local clock before it', () => {
     expect(relativeWhen('2026-01-02T05:00:00Z', now)).toMatch(/ · 7h ago$/)
@@ -94,7 +112,13 @@ describe('lastRunState', () => {
   it('ranks a missed slot over a failure, a failure over a run in progress, and that over a clean run', () => {
     expect(lastRunState(s('a', { missed: true, last_status: 'error' }), idle)).toBe('missed')
     expect(lastRunState(s('a', { last_status: 'error' }), idle)).toBe('failed')
-    expect(lastRunState(s('a', { last_status: 'skipped' }), idle)).toBe('failed')
+    // One predicate with the Automations alert and the bell: a run that stopped
+    // on a question is its chat's needs-you, not an alert here.
+    expect(lastRunState(s('a', { last_status: 'skipped', last_dispatched_at: '2026-01-01T08:00:00Z' }), idle)).toBe('none')
+    // A deleted chat wants a look even though the engine turned the entry off;
+    // a paused entry's old failure does not.
+    expect(lastRunState(s('a', { last_status: 'missing-chat', enabled: false }), idle)).toBe('failed')
+    expect(lastRunState(s('a', { last_status: 'error', enabled: false }), idle)).toBe('none')
     expect(lastRunState(s('a', { last_status: 'missing-chat' }), idle)).toBe('failed')
     expect(lastRunState(s('a', { last_status: 'running' }), idle)).toBe('working')
     expect(lastRunState(s('a', { last_status: 'ok', last_run_chat_id: 'chat-1' }), id => id === 'chat-1')).toBe('working')
@@ -107,7 +131,7 @@ describe('lastRunState', () => {
   it('names the state in a word where it wants the owner, and in full for assistive tech', () => {
     expect(lastRunWord(s('a'), 'missed')).toBe('missed')
     expect(lastRunWord(s('a', { last_status: 'error' }), 'failed')).toBe('failed')
-    expect(lastRunWord(s('a', { last_status: 'skipped' }), 'failed')).toBe('needs you')
+    expect(lastRunWord(s('a', { last_status: 'missing-chat' }), 'failed')).toBe('chat deleted')
     expect(lastRunWord(s('a'), 'done')).toBe('')
     expect(lastRunLabel(s('a'), 'missed')).toBe('Missed a run')
     expect(lastRunLabel(s('a'), 'working')).toBe('Running now')

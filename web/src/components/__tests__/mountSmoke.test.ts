@@ -463,7 +463,7 @@ describe('component mount smoke', () => {
     // The shared `/api/webhooks` fixture answers `{ triggers: [] }`, which is an
     // empty list rather than a load error: the mount must not mistake one for the
     // other, or it will render a failure over a workspace that simply has none.
-    expect(wrapper.text()).toContain('Webhook triggers')
+    expect(wrapper.get('h2').text()).toBe('Webhooks')
     expect(wrapper.text()).toContain('No webhook triggers yet')
     expect(wrapper.text()).not.toContain('Could not load webhook triggers')
     wrapper.unmount()

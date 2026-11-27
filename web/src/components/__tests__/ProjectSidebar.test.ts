@@ -1040,10 +1040,10 @@ describe('ProjectSidebar global new chat', () => {
     tasks.schedulesLoaded = true
     tasks.schedules = [{ ...automationBase, schedule_id: 'r1', title: 'Routine one' }, loopEntry] as never
     const onLoop = await mountAutomations('/schedules/loop')
-    expect(onLoop.get('.automations-subnav a[aria-current="page"]').attributes('href')).toBe('/automations/loops')
+    expect(onLoop.get('.automations-subnav a.nav-item--active').attributes('href')).toBe('/automations/loops')
     onLoop.unmount()
     const onRoutine = await mountAutomations('/schedules/r1')
-    expect(onRoutine.get('.automations-subnav a[aria-current="page"]').attributes('href')).toBe('/schedules')
+    expect(onRoutine.get('.automations-subnav a.nav-item--active').attributes('href')).toBe('/schedules')
     onRoutine.unmount()
   })
 
@@ -1086,8 +1086,34 @@ describe('ProjectSidebar global new chat', () => {
     expect(rows.map(r => r.get('.sidebar-row-meta').text())).toEqual(['in 2h', 'in 9h', 'in 16h', 'in 17h', 'in 19h', 'in 22h'])
     expect(rows[0].attributes('href')).toBe('/schedules/once')
     expect(rows[1].attributes('aria-current')).toBe('page')
+    // The open automation is the one current page: its Schedules row keeps the
+    // fill, not a second aria-current.
+    const schedulesRow = wrapper.get('.automations-subnav a[href="/schedules"]')
+    expect(schedulesRow.classes()).toContain('nav-item--active')
+    expect(schedulesRow.attributes('aria-current')).toBeUndefined()
     expect(rows[2].find('.missed-dot .activity-glyph--alert').exists()).toBe(true)
     expect(rows[3].find('.activity-glyph--working').exists()).toBe(true)
+    wrapper.unmount()
+  })
+
+  it('closes the phone drawer when a page or a Next up row is followed', async () => {
+    const tasks = useTaskStore()
+    tasks.schedulesLoaded = true
+    tasks.schedules = [{ ...automationBase, schedule_id: 'r1', title: 'Routine one', next_run: inHours(1) }] as never
+    const wrapper = await mountAutomations('/schedules')
+    await wrapper.get('.automations-subnav a[href="/automations/loops"]').trigger('click')
+    expect(wrapper.emitted('chat-selected')).toHaveLength(1)
+    await wrapper.get('.automations-next-item').trigger('click')
+    expect(wrapper.emitted('chat-selected')).toHaveLength(2)
+    wrapper.unmount()
+  })
+
+  it('says a next run whose time has passed is due', async () => {
+    const tasks = useTaskStore()
+    tasks.schedulesLoaded = true
+    tasks.schedules = [{ ...automationBase, schedule_id: 'late', title: 'Late one', next_run: '2020-01-01T00:00:00Z' }] as never
+    const wrapper = await mountAutomations('/schedules')
+    expect(wrapper.get('.automations-next-item .sidebar-row-meta').text()).toBe('due')
     wrapper.unmount()
   })
 

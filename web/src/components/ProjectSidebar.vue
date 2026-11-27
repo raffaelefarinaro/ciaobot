@@ -266,9 +266,10 @@
               :to="page.to"
               class="nav-item automations-subnav-item schedule-item"
               :class="{ 'nav-item--active': automationsPage === page.id }"
-              :aria-current="automationsPage === page.id ? 'page' : undefined"
+              :aria-current="automationsPage === page.id && !routeScheduleId ? 'page' : undefined"
               :data-count="automationsCounts[page.id] || undefined"
               :aria-label="automationsSubnavLabel(page.id, page.label)"
+              @click="emit('chat-selected')"
             >
               <span class="nav-item-label" aria-hidden="true">{{ page.label }}</span>
               <span v-if="page.id === 'schedules' && schedulesNeedLook" class="nav-item-alert" aria-hidden="true"><ActivityGlyph kind="alert" /></span>
@@ -287,8 +288,9 @@
               :to="`/schedules/${s.schedule_id}`"
               class="schedule-item automations-next-item"
               :text="scheduleTitle(s)"
-              :meta="relativeOffset(s.next_run, nowTick)"
+              :meta="untilNext(s.next_run, nowTick)"
               :aria-current="routeScheduleId === s.schedule_id ? 'page' : undefined"
+              @click="emit('chat-selected')"
             >
               <span
                 v-if="nextUpWorking(s)"
@@ -1010,7 +1012,7 @@ import ChatSearchDialog from './ChatSearchDialog.vue'
 import { isApplePlatform } from '../lib/platform'
 import { scheduleInWorkspace, scheduleNeedsAttention } from '../lib/automationWorkspace'
 import { useWorkspaceSchedules } from '../composables/useWorkspaceSchedules'
-import { groupAutomations, lastRunState, nextUpSchedules, relativeOffset, scheduleTitle } from '../lib/scheduleList'
+import { groupAutomations, lastRunState, nextUpSchedules, scheduleTitle, untilNext } from '../lib/scheduleList'
 import { AUTOMATIONS_PAGES, automationsPageFor, automationsPagePath, type AutomationsPage } from '../lib/automationsNav'
 import { useWebhookStore } from '../stores/webhooks'
 import SidebarRow from './SidebarRow.vue'

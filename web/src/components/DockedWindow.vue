@@ -15,9 +15,17 @@
  * surface, a 1px border, the 14px radius, the docked shadow, and a 44px title
  * bar with 16px insets over hairline rows.
  *
- * Rows are the host's own elements with the `docked-row` class (a link or a
- * button), holding a `docked-row-title` over a `docked-row-detail`. A row
- * that opens nothing takes `docked-row--static`.
+ * API, kept small so any rail can adopt it unchanged:
+ * - prop `title` (required): the title bar's text and the window's accessible
+ *   name (a `<section>` labelled by its `<h2 class="rail-title">`);
+ * - prop `id` (optional): the heading's id, for a caller or test that needs a
+ *   stable one; otherwise one is generated;
+ * - default slot: the window's body, anything at all;
+ * - optional row classes for the body: `docked-row` (a link or button row)
+ *   holding `docked-row-title` (two lines at most) over `docked-row-detail`;
+ *   `docked-row--static` for a row that opens nothing; a `docked-list--end`
+ *   wrapper drops the last row's rule where the list ends the window.
+ * Host classes land on the root.
  */
 import { useId } from 'vue'
 

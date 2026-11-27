@@ -766,6 +766,29 @@ describe('SchedulePanel Automations pages', () => {
     expect(row('Flaky one').get('.automation-state-word').text()).toBe('failed')
   })
 
+  it('shows a routine whose chat was deleted as paused and "chat deleted", above the plain paused ones', async () => {
+    const { wrapper } = await mountPage([
+      makeSchedule({ schedule_id: 'p', title: 'Old sweep', enabled: false, next_run: null }),
+      makeSchedule({ schedule_id: 'o', title: 'Orphaned brief', enabled: false, next_run: null, last_status: 'missing-chat', last_dispatched_at: '2026-08-14T06:00:00Z' }),
+      makeSchedule({ schedule_id: 'q', title: 'Asks first', last_status: 'skipped', last_dispatched_at: '2026-08-14T06:00:00Z' }),
+    ])
+    const yours = wrapper.get('[aria-labelledby="ov-routines-title"]')
+    expect(rowTitles(yours)).toEqual(['Asks first', 'Orphaned brief', 'Old sweep'])
+    const orphan = yours.findAll('.automation-row')[1]
+    expect(orphan.get('.automation-tag').text()).toBe('paused')
+    expect(orphan.find('.activity-glyph--alert').exists()).toBe(true)
+    expect(orphan.get('.automation-state-word').text()).toBe('chat deleted')
+    // A plain paused row is the tag alone.
+    expect(yours.findAll('.automation-row')[2].get('.list-row-end').text()).toBe('paused')
+    // A run that stopped on a question is not an alert here (its chat says so).
+    expect(yours.findAll('.automation-row')[0].find('.activity-glyph--alert').exists()).toBe(false)
+  })
+
+  it('says a loop whose next run has passed is due', async () => {
+    const { wrapper } = await mountPage([loopSchedule({ schedule_id: 'l', next_run: '2020-01-01T00:00:00Z' })], '/automations/loops')
+    expect(wrapper.get('.automation-row .list-row-end').text()).toContain('next run due')
+  })
+
   it('docks Recent runs on the right: newest first, five at most, each opening its chat', async () => {
     const runs = Array.from({ length: 6 }, (_, i) => makeSchedule({
       schedule_id: `s${i}`,
@@ -845,7 +868,7 @@ describe('SchedulePanel Automations pages', () => {
     useProjectStore().chats = [{ chat_id: 'chat-a', title: 'Build chat' }] as never
     const { wrapper } = await mountPage([
       makeSchedule({ schedule_id: 'a', title: 'Morning brief' }),
-      loopSchedule({ schedule_id: 'l', next_run: new Date(Date.now() + 2 * 60_000).toISOString() }),
+      loopSchedule({ schedule_id: 'l', next_run: new Date(Date.now() + 2.5 * 60_000).toISOString() }),
     ], '/automations/loops')
     const section = wrapper.get('[aria-labelledby="ov-loops-title"]')
     expect(section.text()).toContain('A loop runs inside one chat and ends on its own.')
@@ -862,7 +885,7 @@ describe('SchedulePanel Automations pages', () => {
   it('draws the Webhooks page without waiting on the automation list', async () => {
     const { wrapper } = await mountPage([], '/automations/webhooks', { loaded: false })
     const webhooks = wrapper.get('[aria-labelledby="wh-section-title"]')
-    expect(webhooks.text()).toContain('Webhook triggers')
+    expect(webhooks.get('h2').text()).toBe('Webhooks')
     expect(webhooks.text()).toContain('New trigger')
     expect(wrapper.find('[aria-label="Loading automations"]').exists()).toBe(false)
   })

@@ -96,5 +96,11 @@ test.describe('automations pages, phone', () => {
       expect((await link.boundingBox())!.height).toBeGreaterThanOrEqual(44)
     }
     await expect(page.locator('.automations-next-item')).toHaveCount(3)
+    // Following a page closes the drawer, so focus lands on the page, not
+    // behind the drawer.
+    await subnav.getByRole('link', { name: /^Loops/ }).click()
+    await expect(page).toHaveURL(/\/automations\/loops$/)
+    await expect(subnav).toBeHidden()
+    await expect(page.locator('#ov-loops-title')).toBeFocused()
   })
 })
