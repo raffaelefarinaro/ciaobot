@@ -108,7 +108,7 @@ test.describe('Workspace care', () => {
     await expect(row).toHaveCount(0)
   })
 
-  test('Hide for now hides the row only; the docked rail line stays', async ({ page }) => {
+  test('Hide for now hides the row only and the docked rail line stays', async ({ page }) => {
     await answerCare(page, careReports.blocked)
     await boot(page)
     const row = page.locator('.needs-you-row', { hasText: 'Care did not finish' })
