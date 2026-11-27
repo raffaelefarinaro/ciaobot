@@ -1550,7 +1550,7 @@ def expand_note(
 #
 # Every vault_search result set is appended here so the memory audit can tell
 # which notes recall actually uses. A note that is both stale and never
-# retrieved is the strongest demotion candidate the nightly curator sees.
+# retrieved is the strongest demotion candidate the care run sees.
 # Strictly best-effort and signal-only: nothing reads this to delete anything.
 
 SEARCH_HITS_NAME = "vault_search_hits.jsonl"

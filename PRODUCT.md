@@ -40,7 +40,7 @@ Confirmed product capabilities include:
 - persistent workspaces, projects, chats, conversation forks, model/provider selection, and visible background-agent or command activity;
 - direct work with workspace and vault files, including previews, editing, pinned context, line and cell annotations, attachments, and document conversion;
 - recurring, interval-based, and one-off automations that dispatch prompts into new or existing chats;
-- archived-conversation insights, scoped durable-memory routing, proposal review, reversible managed changes, nightly curation, vault search, the Memory Map, and deterministic vault review;
+- archived-conversation insights, scoped durable-memory routing, proposal review, reversible managed changes, daily curation, vault search, the Memory Map, and deterministic vault review;
 - per-workspace extensions such as skills, subagents, commands, and permitted MCP servers;
 - an installable browser/PWA surface that is the only client: status, notifications, navigation, and engine maintenance are its own Settings surfaces;
 - host/client access from phones, tablets, and other computers without splitting the source of truth.

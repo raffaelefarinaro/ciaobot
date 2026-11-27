@@ -1,6 +1,6 @@
 """Read a workspace's `Workspace/Care-Report.md` into a fixed shape.
 
-The nightly Workspace care run (the `system-memory-curation` schedule) writes
+The daily Workspace care run (the `system-memory-curation` schedule) writes
 one Markdown checklist per workspace and ticks it as each step finishes. This
 module reads that file for the PWA and never writes it: the agent owns the
 file, and the app only shows what the file says.
@@ -40,6 +40,7 @@ STEP_FILES: dict[str, str] = {
     "unsure": "curation-pass-1-unsure.md",
     "drain": "drain-legacy-queues.md",
     "second-look": "curation-pass-8-second-look.md",
+    "closed-tasks": "curation-pass-9-closed-tasks.md",
     "regions": "curation-pass-2-regions.md",
     "learnings": "curation-pass-4-learnings.md",
     "stale": "curation-pass-3-stale-notes.md",
@@ -103,7 +104,7 @@ def _retry(raw: str) -> list[dict[str, Any]]:
     for piece in raw.split(","):
         found = _RETRY_PAIR.match(piece.replace("`", "").strip())
         if found and len(pairs) < MAX_STEPS:
-            pairs.append({"id": found.group(1).lower(), "nights": int(found.group(2))})
+            pairs.append({"id": found.group(1).lower(), "runs": int(found.group(2))})
     return pairs
 
 

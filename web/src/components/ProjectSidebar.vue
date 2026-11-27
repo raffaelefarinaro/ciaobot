@@ -1115,7 +1115,7 @@ const MEMORY_NAV: { label?: string; items: MemoryNavItem[] }[] = [
     // The list of what Ciaobot could not settle: a Markdown file, so no count —
     // reading it for a number would put a file read on every page.
     { section: 'unsure', label: 'Unsure' },
-    // The last nightly care run, read from its report file: no count either.
+    // The last daily care run, read from its report file: no count either.
     { section: 'care', label: 'Workspace care' },
   ] },
   { label: 'Explore', items: [

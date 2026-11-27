@@ -228,7 +228,7 @@ def test_the_capabilities_catalog_describes_the_routing_without_overclaiming() -
 
     It has to name the lesson route and the drafts, and it has to keep saying
     that the unattended run prepares rather than acts — otherwise the two
-    surfaces tell a person opposite things about the same nightly run.
+    surfaces tell a person opposite things about the same daily run.
     """
     skill = _stock("skills/ciao-capabilities/references/models-and-extensions.md")
     assert "`skill-edit`" in skill and "`upstream-issue`" in skill

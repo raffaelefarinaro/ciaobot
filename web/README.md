@@ -234,7 +234,7 @@ web/
                            MemoryMapView under the header (so every Memory section shows it). Its open
                            state is the only storage, `ciao.memory.howOpen` ('1'/'0', read and written in
                            try/catch). The tag table is static data (`TAG_ROWS`), labelled through
-                           `kindLabel`, and is cross-checked against the nightly and memory-pass prompts
+                           `kindLabel`, and is cross-checked against the care and memory-pass prompts
                            in `ciao/stock/skills/ciao-memory/references/`
     stores/               Pinia stores (auth, projects, tasks, taskBoard, webhooks, fileViewer, itemPeek, notificationInbox), and store
                            modules (chatAnnotations) — see the ownership boundary below
@@ -887,7 +887,7 @@ Browser automation does not reproduce iOS PWA suspension, the software
 keyboard, or native-shell behaviour. The device checklist in "iOS PWA gotchas"
 above still has to be walked by hand on a real phone before a release.
 
-Onboarding's care stage (`components/onboarding/OnboardingCareStage.vue`) asks when the host is usually available, then lets the operator edit the installed workspace-care routine's local time and IANA timezone. It updates only that existing row through the schedules API, and only for a time or zone the operator edited, when Continue commits it through the stage's exposed `save()`; unchanged fields write nothing. No routine is created when the workspace has none.
+Onboarding's care stage (`components/onboarding/OnboardingCareStage.vue`) asks when the host is usually available, then lets the operator edit the installed workspace-care routine's local time and IANA timezone. The fields propose 07:00 in the browser's timezone (a routine already in a zone other than the packaged UTC is proposed as it is), and Continue commits what they show to that existing row through the schedules API via the stage's exposed `save()`; fields that already match the engine write nothing. No routine is created when the workspace has none.
 
 
 ### Onboarding stages

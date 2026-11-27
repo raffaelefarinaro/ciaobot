@@ -6,6 +6,8 @@
 import type { CareReport, CareStep } from './careReport'
 
 export const CARE_WORKSPACE = 'storybook-alpha'
+/** When the fixture reports were written: a UTC instant, as `GET /api/care-report` sends it. */
+export const CARE_WRITTEN_AT = '2026-11-27T07:12:00Z'
 
 function step(id: string, state: CareStep['state'], what: string, evidence = '', verify = ''): CareStep {
   return { id, state, what, evidence, verify, step_file: state === 'open' ? '' : `/stock/references/${id}.md` }
@@ -15,7 +17,7 @@ function base(overrides: Partial<CareReport>): CareReport {
   const steps = overrides.steps ?? []
   return {
     status: 'ok',
-    modified_at: '2026-11-27T03:12:00',
+    modified_at: CARE_WRITTEN_AT,
     updated: '2026-11-27',
     weekly_done: '2026-11-24',
     weekly_retry: [],
@@ -26,7 +28,7 @@ function base(overrides: Partial<CareReport>): CareReport {
     workspace: CARE_WORKSPACE,
     report_path: `memory-vault/${CARE_WORKSPACE}/Workspace/Care-Report.md`,
     unsure_path: `memory-vault/${CARE_WORKSPACE}/Workspace/Unsure.md`,
-    schedule: { id: `system-memory-curation@${CARE_WORKSPACE}`, enabled: true, last_status: 'ok', last_run_at: '2026-11-27T00:01:00+00:00' },
+    schedule: { id: `system-memory-curation@${CARE_WORKSPACE}`, enabled: true, last_status: 'ok', last_run_at: '2026-11-27T06:00:00+00:00' },
     running: null,
     ...overrides,
     steps,
@@ -67,7 +69,7 @@ export const careReports = {
       step('guide-review', 'blocked', 'review the guide body', 'depends on the index'),
     ],
     weekly_done: '2026-11-17',
-    weekly_retry: [{ id: 'hygiene', nights: 2 }, { id: 'guide-review', nights: 1 }],
+    weekly_retry: [{ id: 'hygiene', runs: 2 }, { id: 'guide-review', runs: 1 }],
     needs_you: [{ title: 'Hygiene is blocked', detail: 'The vault index command exited 2.', action: 'report' }],
   }),
   interrupted: base({
@@ -89,7 +91,7 @@ export const careReports = {
       step('hygiene', 'open', 'vault index (weekly due)'),
       step('guide-review', 'open', 'review the guide body (weekly due)'),
     ],
-    running: { since: '2026-11-27T00:01:00+00:00', step: 'learnings', index: 3, total: 6 },
+    running: { since: '2026-11-27T06:00:00+00:00', step: 'learnings', index: 3, total: 6 },
   }),
   never: base({
     status: 'missing', modified_at: '', updated: '', weekly_done: '', steps: [],

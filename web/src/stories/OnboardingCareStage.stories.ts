@@ -112,7 +112,8 @@ export const RefreshFailure: Story = {
     await waitFor(() => expect(canvasElement.querySelector('[role="alert"]')?.textContent).toBe('Synthetic refusal'))
     expect(canvasElement.textContent).toContain('Workspace care is on.')
     expect(canvasElement.textContent).toContain('Fixture requests: 2.')
-    expect(canvasElement.textContent).toContain('StageState: {"dirty":false,"pending":false,"canContinue":true,"error":"Synthetic refusal"}.')
+    // The first read's proposal is still on screen, unsaved, beside the refusal.
+    expect(canvasElement.textContent).toContain('StageState: {"dirty":true,"pending":false,"canContinue":true,"error":"Synthetic refusal"}.')
     expect(canvasElement.textContent).toMatch(/Violations: 0\./)
   },
 }
@@ -130,11 +131,12 @@ export const Default: Story = {
     expect(availability.map((input) => input.value)).toEqual(['always on', 'daytime', 'varies'])
     expect(availability[0]!.checked).toBe(true)
     const time = canvasElement.querySelector<HTMLInputElement>('input[type="time"]')!
-    expect(time.value).toBe('08:00')
+    expect(time.value).toBe('07:00')
     const zone = canvasElement.querySelector<HTMLInputElement>('input[name="timezone"]')!
     expect(zone.value).toBe(Intl.DateTimeFormat().resolvedOptions().timeZone)
-    expect(canvasElement.textContent).toContain('The packaged default stays unless you change it. Nothing is written.')
-    expect(canvasElement.textContent).toContain('StageState: {"dirty":false,"pending":false,"canContinue":true,"error":null}.')
+    // The proposal is what Continue saves: the line says exactly that.
+    expect(canvasElement.textContent).toContain(`Care will run at 07:00 ${zone.value}. Saved when you continue.`)
+    expect(canvasElement.textContent).toContain('StageState: {"dirty":true,"pending":false,"canContinue":true,"error":null}.')
   },
 }
 
@@ -147,7 +149,7 @@ export const Paused: Story = {
     await waitFor(() => expect(canvasElement.textContent).toContain('Workspace care is paused.'))
     expect(canvasElement.querySelector('[role="radiogroup"]')).toBeTruthy()
     expect(canvasElement.textContent).not.toContain('Workspace care is on.')
-    expect(canvasElement.textContent).toContain('The packaged default stays unless you change it. Nothing is written.')
+    expect(canvasElement.textContent).toContain('Saved when you continue.')
   },
 }
 
@@ -207,9 +209,10 @@ export const SaveApplied: Story = {
     const save = canvasElement.querySelector<HTMLButtonElement>('button.stage-host-button')!
     expect(save.textContent?.trim()).toBe('Call stage save')
     await userEvent.click(save)
-    // The write answers: the proposal is stored and the hint returns to the
-    // packaged default, with no further write queued.
-    await waitFor(() => expect(canvasElement.textContent).toContain('The packaged default stays unless you change it. Nothing is written.'))
+    // The write answers: the proposal is stored and the line states the saved
+    // timing, with no further write queued.
+    const zone = canvasElement.querySelector<HTMLInputElement>('input[name="timezone"]')!.value
+    await waitFor(() => expect(canvasElement.textContent).toContain(`Care runs at 09:00 ${zone}.`))
     expect(canvasElement.textContent).toContain('Fixture requests: 2.')
     expect(canvasElement.textContent).toContain('StageState: {"dirty":false,"pending":false,"canContinue":true,"error":null}.')
     expect(canvasElement.textContent).toMatch(/Violations: 0\./)

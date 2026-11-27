@@ -799,7 +799,7 @@ main .home-map { margin: 24px 0; }
 .care-steps dd li { margin-bottom: 6px; }
 .care-file { margin: 12px 0 0; font-size: 15px; color: var(--subtle); }
 .care-file a { overflow-wrap: anywhere; }
-#nightly h3 { margin-top: 36px; scroll-margin-top: 80px; }
+#care h3 { margin-top: 36px; scroll-margin-top: 80px; }
 @media (max-width: 600px) {
   .care-steps dl { grid-template-columns: minmax(0, 1fr); gap: 2px; }
   .care-steps dt { padding-top: 10px; }

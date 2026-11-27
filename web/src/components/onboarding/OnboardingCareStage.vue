@@ -12,23 +12,25 @@ const props = defineProps<OnboardingStageProps>()
 const emit = defineEmits<{ state: [state: StageState] }>()
 const store = useTaskStore()
 const routine = ref<Schedule | null>(null)
-const time = ref('08:00')
+const time = ref('07:00')
 const timezone = ref(Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC')
 const availability = ref('always on')
 const saving = ref(false)
 const error = ref('')
 const touchedTime = ref(false)
-// Only an edit by the person is ever written; the browser-local proposal that
-// load() puts in the fields is not a choice.
-const edited = ref(false)
-// What the engine currently has; `dirty` compares the proposal against it.
-const saved = ref({ time: '08:00', zone: 'UTC' })
-const dirty = computed(() =>
+// What the engine currently has; the proposal on screen is saved on Continue
+// whenever it differs, so the fields always show what the install will run.
+const saved = ref({ time: '06:00', zone: 'UTC' })
+const pendingWrite = computed(() =>
   !!routine.value && (time.value !== saved.value.time || timezone.value !== saved.value.zone),
 )
-const pendingWrite = computed(() => edited.value && dirty.value)
-// Continue is never a dead end: with nothing edited it writes nothing, and an
-// edit is committed by `save`, so only a pending write blocks it. A failed save
+// The packaged default runs in UTC. A routine already in another zone was set
+// by someone (Automations, an earlier onboarding), so it is proposed unchanged.
+const PACKAGED_ZONE = 'UTC'
+const timing = computed(() => `${time.value} ${timezone.value}`.trim())
+// Continue is never a dead end: the proposal on screen is committed by `save`
+// (nothing is written when it already matches the engine), so only a pending
+// write blocks it. A failed save
 // shows its error inline and Continue retries it.
 const state = computed<StageState>(() => ({
   dirty: pendingWrite.value,
@@ -45,10 +47,15 @@ async function load() {
     routine.value = store.schedules.find(row => row.scope === 'system' && row.schedule_id === `system-memory-curation@${props.context.workspace}`) || null
     if (routine.value) {
       saved.value = { time: routine.value.daily_time_utc, zone: routine.value.timezone_name }
-      // The suggestion is local to this browser; the routine's packaged zone is
-      // only the baseline the proposal is compared against.
-      time.value = suggestedTime()
-      timezone.value = Intl.DateTimeFormat().resolvedOptions().timeZone || saved.value.zone
+      if (saved.value.zone !== PACKAGED_ZONE) {
+        time.value = saved.value.time
+        timezone.value = saved.value.zone
+        touchedTime.value = true
+      } else {
+        // A morning in this browser's zone, saved on Continue.
+        time.value = suggestedTime()
+        timezone.value = Intl.DateTimeFormat().resolvedOptions().timeZone || saved.value.zone
+      }
     }
   } catch (cause) { error.value = cause instanceof Error ? cause.message : 'Could not load care timing.' }
 }
@@ -56,7 +63,7 @@ async function load() {
 function suggestedTime(): string {
   if (availability.value === 'daytime') return '13:00'
   if (availability.value === 'varies') return '09:00'
-  return '08:00'
+  return '07:00'
 }
 // Called by the shell on Continue. Unchanged fields write nothing.
 async function save(): Promise<boolean> {
@@ -81,7 +88,6 @@ function chooseAvailability(value: string): void {
   // Re-clicking the current answer is not an edit.
   if (value === availability.value) return
   availability.value = value
-  edited.value = true
   error.value = ''
   if (!touchedTime.value) time.value = suggestedTime()
 }
@@ -106,16 +112,16 @@ defineExpose({ refresh: load, save })
       <div class="fields">
         <OnboardingField id="care-time" label="Local time">
           <template #default="{ describedby }">
-            <input id="care-time" v-model="time" type="time" required :aria-invalid="!!error" :aria-describedby="describedby" @input="touchedTime = true; edited = true; error = ''">
+            <input id="care-time" v-model="time" type="time" required :aria-invalid="!!error" :aria-describedby="describedby" @input="touchedTime = true; error = ''">
           </template>
         </OnboardingField>
         <OnboardingField id="care-timezone" label="Timezone">
           <template #default="{ describedby }">
-            <input id="care-timezone" v-model="timezone" name="timezone" autocomplete="off" required :aria-describedby="describedby" @input="edited = true; error = ''">
+            <input id="care-timezone" v-model="timezone" name="timezone" autocomplete="off" required :aria-describedby="describedby" @input="error = ''">
           </template>
         </OnboardingField>
       </div>
-      <p class="hint" role="status">{{ pendingWrite ? 'Saved when you continue.' : 'The packaged default stays unless you change it. Nothing is written.' }}</p>
+      <p class="hint" role="status">{{ pendingWrite ? `Care will run at ${timing}. Saved when you continue.` : `Care runs at ${timing}.` }}</p>
     </template>
   </OnboardingStack>
 </template>

@@ -8,7 +8,7 @@ import { defineComponent } from 'vue'
 import MemoryCarePanel from '../MemoryCarePanel.vue'
 import { api } from '../../lib/api'
 import type { CareReport } from '../../lib/careReport'
-import { careReports, CARE_WORKSPACE } from '../../lib/careReportFixture'
+import { careReports, CARE_WORKSPACE, CARE_WRITTEN_AT } from '../../lib/careReportFixture'
 import { useCareReportStore } from '../../stores/careReport'
 import { useFileViewerStore } from '../../stores/fileViewer'
 import { useProjectStore } from '../../stores/projects'
@@ -60,7 +60,9 @@ describe('MemoryCarePanel', () => {
     serve(careReports.needsYou)
     const wrapper = await mountPanel()
     expect(wrapper.get('.mc-summary-title').text()).toBe('Done with 2 things for you')
-    expect(wrapper.get('.mc-summary-meta').text()).toBe('Nov 27, 03:12 · 5 of 5 steps ticked · weekly checks done')
+    const written = new Date(CARE_WRITTEN_AT)
+    const stamp = `${written.toLocaleDateString('en-US', { month: 'short', day: 'numeric' })}, ${String(written.getHours()).padStart(2, '0')}:${String(written.getMinutes()).padStart(2, '0')}`
+    expect(wrapper.get('.mc-summary-meta').text()).toBe(`${stamp} · 5 of 5 steps ticked · weekly checks done`)
     expect(wrapper.findAll('.mc-seg--done')).toHaveLength(5)
     expect(wrapper.findAll('.mc-need-title').map(n => n.text())).toEqual(['New line in Unsure', 'Memory guide at 91%'])
     expect(wrapper.findAll('.mc-need .mc-action').map(b => b.text())).toEqual(['Open Unsure', 'Review guide'])
@@ -158,7 +160,7 @@ describe('MemoryCarePanel', () => {
     serve({ ...careReports.blocked, interrupted_ids: ['stale'] })
     const wrapper = await mountPanel()
     expect(wrapper.text()).toContain('The previous run stopped before finishing stale.')
-    expect(wrapper.text()).toContain('Retried each night until it works, for up to 3 nights: hygiene (night 2 of 3), guide-review (night 1 of 3).')
+    expect(wrapper.text()).toContain('Retried on each run until it works, for up to 3 runs: hygiene (run 2 of 3), guide-review (run 1 of 3).')
   })
 
   it('runs care again through the schedule run-now', async () => {
@@ -176,7 +178,7 @@ describe('MemoryCarePanel', () => {
     serve(careReports.never)
     const wrapper = await mountPanel()
     expect(wrapper.get('.mc-summary-title').text()).toBe('Not run yet')
-    expect(wrapper.get('.mc-summary-meta').text()).toBe('It runs every night. Its report will show here.')
+    expect(wrapper.get('.mc-summary-meta').text()).toBe('It runs every day. Its report will show here.')
     expect(wrapper.find('.mc-steps').exists()).toBe(false)
     const report = wrapper.findAll('.mc-link').find(b => b.text() === 'Open Care-Report.md')!
     expect(report.attributes('disabled')).toBeDefined()

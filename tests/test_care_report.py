@@ -1,6 +1,6 @@
 """Workspace care report: the parser and `GET /api/care-report`.
 
-The report is the checklist the nightly care run writes into
+The report is the checklist the daily care run writes into
 `<vault>/Workspace/Care-Report.md`. The reader is read-only, bounded and never
 raises: every state the Home card and the report page show comes from here.
 """
@@ -354,7 +354,7 @@ def test_the_prompt_retries_only_the_blocked_weekly_steps() -> None:
     prompt = next(s["prompt"] for s in schedules["schedules"] if s["schedule_id"] == "system-memory-curation")
     assert "`Weekly retry: <old value>` when present" in prompt
     assert "each id in the old `Weekly retry:` line gets its weekly line again, and no other weekly step" in prompt
-    assert "3 nights" in prompt
+    assert "3 runs" in prompt
 
 
 def test_checkboxes_after_the_first_section_are_not_steps() -> None:
@@ -377,7 +377,7 @@ def test_needs_you_accepts_heading_and_list_variants(heading: str, marker: str) 
 
 def test_weekly_retry_is_read_and_bounded() -> None:
     body = parse_care_report("# Care report 2026-11-26\nWeekly retry: hygiene=2, `guide-review`=1, junk, x=\n- [!] hygiene: run \u2014 blocked: no\n")
-    assert body["weekly_retry"] == [{"id": "hygiene", "nights": 2}, {"id": "guide-review", "nights": 1}]
+    assert body["weekly_retry"] == [{"id": "hygiene", "runs": 2}, {"id": "guide-review", "runs": 1}]
     assert parse_care_report(COMPLETE)["weekly_retry"] == []
 
 
@@ -404,7 +404,7 @@ class _Schedules:
         return (entry, "rev") if entry is not None else None
 
 
-def _entry(status: str = "ok", dispatched: str = "2026-11-26T00:01:00+00:00", enabled: bool = True):
+def _entry(status: str = "ok", dispatched: str = "2026-11-26T06:00:00+00:00", enabled: bool = True):
     return SimpleNamespace(
         schedule_id="system-memory-curation@personal",
         enabled=enabled,
@@ -455,7 +455,7 @@ def test_route_says_missing_for_a_workspace_care_never_ran_in(setup) -> None:
     body = setup.client.get("/api/care-report?workspace=personal").json()
     assert body["status"] == "missing"
     assert body["schedule"] == {
-        "id": "system-memory-curation@personal", "enabled": True, "last_status": "", "last_run_at": "2026-11-26T00:01:00+00:00",
+        "id": "system-memory-curation@personal", "enabled": True, "last_status": "", "last_run_at": "2026-11-26T06:00:00+00:00",
     }
 
 
@@ -475,21 +475,21 @@ def test_route_is_read_only(setup) -> None:
 
 def test_running_names_the_open_step_of_a_report_written_after_dispatch(setup) -> None:
     path = _write_report(setup.vault, INTERRUPTED)
-    stamp = datetime(2026, 11, 26, 0, 5, tzinfo=UTC).timestamp()
+    stamp = datetime(2026, 11, 26, 6, 5, tzinfo=UTC).timestamp()
     os.utime(path, (stamp, stamp))
-    setup.schedules.entries["system-memory-curation@personal"] = _entry(status="running", dispatched="2026-11-26T00:01:00+00:00")
+    setup.schedules.entries["system-memory-curation@personal"] = _entry(status="running", dispatched="2026-11-26T06:00:00+00:00")
     body = setup.client.get("/api/care-report?workspace=personal").json()
-    assert body["running"] == {"since": "2026-11-26T00:01:00+00:00", "step": "learnings", "index": 3, "total": 4}
+    assert body["running"] == {"since": "2026-11-26T06:00:00+00:00", "step": "learnings", "index": 3, "total": 4}
 
 
 def test_running_ignores_the_previous_runs_report(setup) -> None:
     """Before the new run rewrites the checklist, the open lines on disk are the old run's."""
     path = _write_report(setup.vault, INTERRUPTED)
-    stamp = datetime(2026, 11, 25, 0, 5, tzinfo=UTC).timestamp()
+    stamp = datetime(2026, 11, 25, 6, 5, tzinfo=UTC).timestamp()
     os.utime(path, (stamp, stamp))
-    setup.schedules.entries["system-memory-curation@personal"] = _entry(status="running", dispatched="2026-11-26T00:01:00+00:00")
+    setup.schedules.entries["system-memory-curation@personal"] = _entry(status="running", dispatched="2026-11-26T06:00:00+00:00")
     body = setup.client.get("/api/care-report?workspace=personal").json()
-    assert body["running"] == {"since": "2026-11-26T00:01:00+00:00", "step": "", "index": 0, "total": 0}
+    assert body["running"] == {"since": "2026-11-26T06:00:00+00:00", "step": "", "index": 0, "total": 0}
 
 
 def test_route_does_not_leak_the_vault_path_when_it_is_unavailable(setup, monkeypatch, caplog) -> None:

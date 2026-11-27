@@ -773,8 +773,8 @@ def test_repairing_a_near_miss_stamp_does_not_change_the_fingerprint() -> None:
     removed, the parse fingerprinted the near-miss line to a digest of its own,
     and repairing it into ``[verified: 2026-06-30]`` moved the fingerprint:
     the identity (which digests the fingerprint) moved with it, so the re-stamp
-    that a nightly pass files looked like a rewrite of the fact, was refused as
-    one, and was planned and refused again every night with nobody asked.
+    that a daily care pass files looked like a rewrite of the fact, was refused as
+    one, and was planned and refused again every day with nobody asked.
     """
     broken = "- Mo leads the platform team [verified 2026-01-01]\n"
     entry = _parse(broken).entries[0]

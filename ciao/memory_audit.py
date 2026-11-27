@@ -742,7 +742,7 @@ def find_stale_notes(
 #   *future* stamp is nobody having checked either. A bullet with no stamp at all
 #   **inherits the note's date**, so it is current exactly as far as the note is
 #   — selecting it unconditionally made every bullet written before `[verified:]`
-#   stamps existed read as never checked, and turned a nightly plan into a list
+#   stamps existed read as never checked, and turned a care plan into a list
 #   of one-day-old entries in any vault that had been re-stamped. That is the
 #   failure the whole level was supposed to prevent, in a different costume.
 # * **Event-shaped entries and explicit event sections are exempt.** A log entry
@@ -1353,7 +1353,7 @@ def note_entry_coverage(
             # exactly as far as the note is, and counting it as `unverified`
             # would make every bullet in a vault written before `[verified:]`
             # stamps existed read as never checked. Selecting those regardless
-            # is what filled a nightly plan with one-day-old entries: the note
+            # is what filled a care plan with one-day-old entries: the note
             # was re-stamped, not the facts.
             continue
         selected.append(

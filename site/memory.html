@@ -46,7 +46,7 @@
         <li><a href="#loop">The loop</a></li>
         <li><a href="#layers">Three layers</a></li>
         <li><a href="#control">You can always check</a></li>
-        <li><a href="#nightly">Workspace care</a></li>
+        <li><a href="#care">Workspace care</a></li>
         <li><a href="#backup">Back it up</a></li>
       </ul>
     </section>
@@ -57,7 +57,7 @@
       <div class="home-map">
         <svg class="diagram" viewBox="0 0 1100 330" overflow="visible" role="img" aria-labelledby="loop-title-m loop-desc-m">
           <title id="loop-title-m">The memory loop</title>
-          <desc id="loop-desc-m">You chat, then archive the chat. A memory pass files clear facts into your notes and lists uncertain ones in the Unsure list. Workspace care tidies the notes each night, and your next chat loads them.</desc>
+          <desc id="loop-desc-m">You chat, then archive the chat. A memory pass files clear facts into your notes and lists uncertain ones in the Unsure list. Workspace care tidies the notes each day, and your next chat loads them.</desc>
           <rect class="box" x="0" y="60" width="180" height="84" rx="16"/><text x="90" y="109" text-anchor="middle" font-size="20" font-weight="700">Chat</text>
           <rect class="box" x="250" y="60" width="180" height="84" rx="16"/><text x="340" y="109" text-anchor="middle" font-size="20" font-weight="700">Archive</text>
           <rect class="box-solid" x="500" y="60" width="220" height="84" rx="16"/><text class="on-solid" x="610" y="109" text-anchor="middle" font-size="20" font-weight="700">Memory pass</text>
@@ -99,7 +99,7 @@
         <text class="muted" x="600" y="86" text-anchor="middle" font-size="14">After you archive a chat,</text>
         <text class="muted" x="600" y="108" text-anchor="middle" font-size="14">facts are checked and filed,</text>
         <text class="muted" x="600" y="140" text-anchor="middle" font-size="14">or listed as unsure</text>
-        <text class="muted" x="600" y="190" text-anchor="middle" font-size="13">tidied each night</text>
+        <text class="muted" x="600" y="190" text-anchor="middle" font-size="13">tidied each day</text>
       </svg>
       <ul>
         <li><strong>Always known.</strong> A short core memory about you and how you work, plus the project's description, is loaded into every chat. It lives in <code>AGENTS.md</code> in your workspace.</li>
@@ -119,9 +119,9 @@
       </ul>
     </section>
 
-    <section id="nightly" aria-labelledby="nightly-h">
-      <h2 id="nightly-h">Workspace care</h2>
-      <p>Each night, while your computer is awake and Ciaobot is running, each workspace gets one care run. It starts at the time you picked during setup. If you kept the default, the first workspace starts at one minute past midnight UTC and each further workspace seven minutes later, so they do not all start at once. A run missed because Ciaobot was not running is caught up once when it starts again. Care is listed under Automations as a system routine, where you can pause it. It runs unattended: it never asks you anything or waits for an answer. It leaves what needs you in a report and on the Unsure list.</p>
+    <section id="care" aria-labelledby="care-h">
+      <h2 id="care-h">Workspace care</h2>
+      <p>Each day, while your computer is awake and Ciaobot is running, each workspace gets one care run. Setup proposes 07:00 in your own timezone and saves it, and you can change the time any time in Automations. A workspace that never went through setup uses the packaged default, 06:00 UTC (a European morning), and each further workspace starts seven minutes later, so they do not all start at once. Pick a time when your computer is usually awake: care only runs then. A run missed because Ciaobot was not running is caught up once when it starts again. Care is listed under Automations as a system routine, where you can pause it. It runs unattended: it never asks you anything or waits for an answer. It leaves what needs you in a report and on the Unsure list.</p>
 
       <h3 id="care-run">How a run goes</h3>
       <ol class="steps">
@@ -134,15 +134,15 @@
       </ol>
 
       <h3 id="care-steps-h">The steps</h3>
-      <p>There are nine steps today. Five run on the nights their check finds work; four are weekly. A step that is not due does not run.</p>
+      <p>There are ten steps today. Six run on the days their check finds work; four are weekly. A step that is not due does not run.</p>
       <ol class="care-steps" role="list">
           <li id="step-unsure">
             <h4>Apply the lines you ticked <code>unsure</code></h4>
             <dl>
-              <dt>Runs when</dt><dd>every night, when <code>Workspace/Unsure.md</code> has a line you ticked.</dd>
+              <dt>Runs when</dt><dd>every day, when <code>Workspace/Unsure.md</code> has a line you ticked.</dd>
               <dt>What it does</dt><dd><p>Writes each ticked line where the line says (a note, a project note, or one of the two memory regions), re-reads the destination, and only then deletes the line. A ticked “drop” line removes a memory entry; a ticked “restore to” line puts back an entry an earlier care step removed. It never acts on a line you did not tick.</p>
                 <p>Three kinds of line stay ticked and come back to you, because an unattended run may not apply them: a new category (you add it in Settings), a fact for a linked code repository's own guide, and a change to a decision rule.</p>
-                <p>One exception to “only ticked lines”: a pattern noticed in three different chats. For up to three of these a night, it reads those chats first, and writes the fact only when your own messages show the pattern, citing the chats.</p></dd>
+                <p>One exception to “only ticked lines”: a pattern noticed in three different chats. For up to three of these a run, it reads those chats first, and writes the fact only when your own messages show the pattern, citing the chats.</p></dd>
               <dt>Checked by</dt><dd>the number of ticked lines left on the list must equal the number it says it left on purpose.</dd>
             </dl>
             <p class="care-file">Instructions: <a href="https://github.com/raffaelefarinaro/ciaobot/blob/main/ciao/stock/skills/ciao-capabilities/references/memory-operations/references/curation-pass-1-unsure.md">curation-pass-1-unsure.md</a></p>
@@ -151,7 +151,7 @@
             <h4>Empty the old review queues (temporary) <code>drain</code></h4>
             <dl>
               <dt>Runs when</dt><dd>only on a workspace that started on an older version, until its old queues are empty.</dd>
-              <dt>What it does</dt><dd><p>A one-time move. Older versions kept doubtful items in review queues (<code>Memory-Proposals.md</code>, <code>Skill-Proposals/</code>, <code>Skill-Drafts/</code>, <code>Observations.md</code>). This step moves each item to where it goes today. A memory or profile row is written to memory only after it reads the chat the row names, and goes on the Unsure list when there is no readable source or it is in doubt; a row for a project or a person is folded into that note; a lesson goes into <code>Learnings.md</code>; a repository fact or open question goes on the Unsure list; a skill record becomes a proposal file; a pattern from <code>Observations.md</code> becomes an <code>observation:</code> line on the Unsure list. At most 25 items a night, never a duplicate, and it never approves or rejects a draft. When nothing is left it writes the marker file <code>Workspace/.care-drained</code> and the step does not run again.</p></dd>
+              <dt>What it does</dt><dd><p>A one-time move. Older versions kept doubtful items in review queues (<code>Memory-Proposals.md</code>, <code>Skill-Proposals/</code>, <code>Skill-Drafts/</code>, <code>Observations.md</code>). This step moves each item to where it goes today. A memory or profile row is written to memory only after it reads the chat the row names, and goes on the Unsure list when there is no readable source or it is in doubt; a row for a project or a person is folded into that note; a lesson goes into <code>Learnings.md</code>; a repository fact or open question goes on the Unsure list; a skill record becomes a proposal file; a pattern from <code>Observations.md</code> becomes an <code>observation:</code> line on the Unsure list. At most 25 items a run, never a duplicate, and it never approves or rejects a draft. When nothing is left it writes the marker file <code>Workspace/.care-drained</code> and the step does not run again.</p></dd>
               <dt>Checked by</dt><dd>the count of rows left in <code>Memory-Proposals.md</code> must match what the step reported, and be zero before the marker is written.</dd>
             </dl>
             <p class="care-file">Instructions: <a href="https://github.com/raffaelefarinaro/ciaobot/blob/main/ciao/stock/skills/ciao-capabilities/references/memory-operations/references/drain-legacy-queues.md">drain-legacy-queues.md</a></p>
@@ -159,7 +159,7 @@
           <li id="step-second-look">
             <h4>Re-read what the memory passes wrote <code>second-look</code></h4>
             <dl>
-              <dt>Runs when</dt><dd>every night when a memory pass has finished since the day before the last run (the last 7 days on a first run).</dd>
+              <dt>Runs when</dt><dd>every day when a memory pass has finished since the day before the last run (the last 7 days on a first run).</dd>
               <dt>What it does</dt><dd><p>The memory pass that runs after you archive a chat writes to your notes directly. This step is the safety net for those writes. It reads up to 10 passes and 15 new notes, newest first, and judges only lines a pass wrote: a line you or another care step wrote is left alone, and so is one a person already put back.</p>
                 <p>It fixes five kinds of mistake:</p>
                 <ul>
@@ -173,6 +173,15 @@
               <dt>Checked by</dt><dd>every removal must be in the undo log and gone from where it was; every move, merge and put-back is re-read at its destination; every proposal passes the format check.</dd>
             </dl>
             <p class="care-file">Instructions: <a href="https://github.com/raffaelefarinaro/ciaobot/blob/main/ciao/stock/skills/ciao-capabilities/references/memory-operations/references/curation-pass-8-second-look.md">curation-pass-8-second-look.md</a></p>
+          </li>
+          <li id="step-closed-tasks">
+            <h4>Learn from tasks closed without a note <code>closed-tasks</code></h4>
+            <dl>
+              <dt>Runs when</dt><dd>every day when a task was completed since the day before the last run (the last 7 days on a first run) and no memory pass read it, usually because it was closed without a note and never worked in a chat.</dd>
+              <dt>What it does</dt><dd><p>A memory pass reads a finished task only when you left a note as you completed it, or when the task was worked in a chat. This step reads the rest: up to 10 tasks, with their description, progress notes, completion and any linked chat. A lasting fact in your own words (a decision, a preference, a fact about a person or project) goes into the right note, one fact per line; what it doubts goes on the Unsure list. A title or description counts as yours only when no agent worked on the task; a note an agent wrote, a completion an agent recorded for you, and text you pasted in (an email, say) are not your words, so at most they become an Unsure line. A task it already read is not read again, and a fact you or the second look removed is not put back. It only reads tasks: it never edits, completes, moves or deletes one.</p></dd>
+              <dt>Checked by</dt><dd>the number of uncovered tasks, counted again, must match what it read, skipped and left; every fact it says it wrote is re-read in its note, and every line it replaced is in the undo log.</dd>
+            </dl>
+            <p class="care-file">Instructions: <a href="https://github.com/raffaelefarinaro/ciaobot/blob/main/ciao/stock/skills/ciao-capabilities/references/memory-operations/references/curation-pass-9-closed-tasks.md">curation-pass-9-closed-tasks.md</a></p>
           </li>
           <li id="step-regions">
             <h4>Tidy the always-loaded memory <code>regions</code></h4>
@@ -231,7 +240,7 @@
       </ol>
 
       <h3 id="care-weekly">Weekly steps and retries</h3>
-      <p>The four weekly steps (stale, hygiene, guide review and rules) are due when the report's “Weekly done” date is missing or seven or more days old. That date moves to today only when every weekly line of the run is ticked or blocked. A weekly step that ends blocked is retried on its own the next night, without the rest of the weekly batch, and the report counts the nights. A retry that succeeds is dropped; after three nights blocked it stops retrying and is listed under “What needs you” with its reason.</p>
+      <p>The four weekly steps (stale, hygiene, guide review and rules) are due when the report's “Weekly done” date is missing or seven or more days old. That date moves to today only when every weekly line of the run is ticked or blocked. A weekly step that ends blocked is retried on its own on the next run, without the rest of the weekly batch, and the report counts the runs. A retry that succeeds is dropped; after three runs blocked it stops retrying and is listed under “What needs you” with its reason.</p>
 
       <h3 id="care-rules">Rules every step follows</h3>
       <ul>
@@ -247,13 +256,13 @@
 
       <h3 id="care-results">Where to see what it did</h3>
       <ul>
-        <li><strong>Home.</strong> <em>At a glance</em> always has one quiet care line, such as “Done today 03:12 · 5 of 5 steps”. A row in <em>Needs you</em> appears only when the run left you something, did not finish, or was cut off.</li>
+        <li><strong>Home.</strong> <em>At a glance</em> always has one quiet care line, such as “Done today 07:12 · 5 of 5 steps”. A row in <em>Needs you</em> appears only when the run left you something, did not finish, or was cut off.</li>
         <li><strong>Memory › Workspace care.</strong> The full report: what needs you, with a button to the right place; every step with its evidence and check; <strong>Run care again</strong>; and, on a step that is blocked or needs you, <strong>Fix with a chat</strong>, which drafts a chat for you to send.</li>
         <li><strong>The files.</strong> <code>Workspace/Care-Report.md</code> is the report itself, <code>Workspace/Unsure.md</code> holds what it could not settle, <code>Workspace/Proposals/</code> holds suggested changes, and <code>Workspace/Memory-Consolidations.md</code> is the undo log.</li>
       </ul>
 
       <h3 id="care-limits">What it cannot promise</h3>
-      <p>Care is a model working on its own at night, so it can get things wrong. The run re-checks each step's work with a command before ticking it, but a check proves the step did what it reported, not that every judgement was right. So it only rewrites what is already there, keeps a copy of any line it replaces or removes in a note, project note or memory region, sends what it doubts to the Unsure list, and leaves skills, your guide and note retirements to you. The second look is there because the memory passes that run after you archive a chat make mistakes too; it judges only what those passes wrote. Where the folder is backed up with Git, a change that has reached a backup commit can also be undone from its history.</p>
+      <p>Care is a model working on its own, so it can get things wrong. The run re-checks each step's work with a command before ticking it, but a check proves the step did what it reported, not that every judgement was right. So it only rewrites what is already there, keeps a copy of any line it replaces or removes in a note, project note or memory region, sends what it doubts to the Unsure list, and leaves skills, your guide and note retirements to you. The second look is there because the memory passes that run after you archive a chat make mistakes too; it judges only what those passes wrote. Where the folder is backed up with Git, a change that has reached a backup commit can also be undone from its history.</p>
     </section>
 
     <section id="backup" aria-labelledby="backup-h">

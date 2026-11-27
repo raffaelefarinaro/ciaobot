@@ -88,6 +88,20 @@ def test_direct_changed_timing_replace_updates_existing_overlay(tmp_path: Path) 
     assert _store(tmp_path, "personal").get(entry.schedule_id).daily_time_utc == "08:25"
 
 
+def test_care_runs_at_06_utc_by_default(tmp_path: Path) -> None:
+    """Care runs while the computer is awake, so the packaged slot is 06:00 UTC (a European morning), not midnight."""
+    store = _store(tmp_path, "personal", "work")
+    store.record_system_first_seen(datetime(2026, 11, 1, tzinfo=UTC))
+    rows = {e.workspace: e for e in store.list_entries()}
+    before = datetime(2026, 11, 27, 5, 59, tzinfo=UTC)
+    assert compute_next_run(rows["personal"], now=before) == datetime(2026, 11, 27, 6, 0, tzinfo=UTC)
+    assert compute_next_run(rows["work"], now=before) == datetime(2026, 11, 27, 6, 7, tzinfo=UTC)
+    # Past today's slot, the next run is tomorrow's; the latest expected run is today's.
+    after = datetime(2026, 11, 27, 9, 0, tzinfo=UTC)
+    assert compute_next_run(rows["personal"], now=after) == datetime(2026, 11, 28, 6, 0, tzinfo=UTC)
+    assert compute_last_expected_run(rows["personal"], now=after) == datetime(2026, 11, 27, 6, 0, tzinfo=UTC)
+
+
 def test_untouched_rows_keep_packaged_stagger(tmp_path: Path) -> None:
     store = _store(tmp_path, "personal", "work")
     rows = [e for e in store.list_entries() if e.schedule_id.startswith("system-memory-curation@")]

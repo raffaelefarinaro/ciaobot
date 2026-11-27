@@ -49,7 +49,7 @@ def test_architecture_doc_indexes_every_ciao_module() -> None:
 
 # PR #328 made per-workspace memory curation consolidate bounded regions.
 # The bounded-memory section of the doc kept the pre-#328 contract ("a region
-# write the unattended nightly curator never performs"), contradicting both
+# write the unattended curator never performs"), contradicting both
 # the schedules section and ciao/stock/schedules.json's own prompt. Readers
 # reach for the bounded-memory section first, so pin the corrected contract
 # and the guardrails that make the unattended write safe. The care run now
@@ -65,7 +65,7 @@ def test_architecture_doc_states_the_consolidation_contract() -> None:
     # curator never performs cannot also carry this sentence. Pin the
     # behaviour, not the stale phrase.
     for fragment in (
-        "The nightly care run consolidates a region once usage reaches",
+        "The daily care run consolidates a region once usage reaches",
         "~85% of the cap",  # the threshold that gates consolidation
         "Workspace/Memory-Consolidations.md",  # the undo log
         "becomes a `drop <region>:` line on the Unsure list instead",  # the escape hatch

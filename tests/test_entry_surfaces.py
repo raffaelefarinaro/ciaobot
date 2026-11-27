@@ -111,7 +111,7 @@ def test_the_map_node_reports_coverage_and_never_raises_the_stale_flag(
 ) -> None:
     """The map cannot stop at the whole-note flag, and does not start at it either.
 
-    `stale` is the file-level verdict and the nightly worklist is where an
+    `stale` is the file-level verdict and the care worklist is where an
     overdue bullet becomes a plan, so the map reports coverage *beside* the flag
     rather than raising it — otherwise the map and the plan would be answering
     two different questions about the same note.

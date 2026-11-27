@@ -29,7 +29,7 @@
     </div>
 
 
-    <!-- Workspace care: the last nightly run, read from its report file. -->
+    <!-- Workspace care: the last daily run, read from its report file. -->
     <div v-else-if="mm.section === 'care'" class="mm-review-wrap">
       <div class="page-grid page-grid--single mm-review-grid">
         <div class="page-main">

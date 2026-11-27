@@ -7,7 +7,7 @@
  * "is this file old?" would show a person note re-stamped yesterday as clean
  * while it held a fact from 2019. What is pinned here is that the node reports
  * the entry coverage *beside* the whole-note flag (never raising it, because the
- * nightly worklist is where an overdue bullet becomes a plan), that a mixed note
+ * care worklist is where an overdue bullet becomes a plan), that a mixed note
  * looks mixed, and that a node whose body could not be read carries no coverage
  * rather than a clean-looking zero.
  */
@@ -161,7 +161,7 @@ describe('MemoryMapView entry coverage', () => {
     // the tile is making.
     expect(block.text()).toContain('Checked 2019-05-01 — unverified for 2698d against a 30d horizon')
     // The whole-note flag is untouched: `stale` is the file verdict and the
-    // nightly worklist is where an overdue bullet becomes a plan, so the map
+    // care worklist is where an overdue bullet becomes a plan, so the map
     // reports beside it rather than raising it.
     expect(wrapper.find('.mm-tile-stale').exists()).toBe(false)
     expect(block.classes()).toContain('mm-tile-entries--due')
