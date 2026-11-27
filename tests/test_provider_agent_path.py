@@ -30,7 +30,8 @@ from ciao.context import capsule as capsule_module
 from ciao.context.capsule import build_context_capsule
 from ciao.core_prompt import ENGINE_PATH_TOKEN
 from ciao.models import AgentRequest
-from ciao.os_support.tool_path import shell_path_export
+from ciao.os_support import tool_path as os_tool_path
+from ciao.os_support.tool_path import engine_powershell_export, powershell_path_export, shell_path_export
 from ciao.schedules import ScheduleStore
 from ciao.sessions import StateStore
 from ciao.tool_path import engine_bin_dir, engine_path_export, prepend_engine_path
@@ -292,8 +293,51 @@ def test_the_shell_export_spells_a_windows_dir_the_git_bash_way() -> None:
 
 
 def test_the_engine_export_names_the_engine_bin_dir() -> None:
-    assert engine_bin_dir() in engine_path_export() or sys.platform == "win32"
-    assert engine_path_export().startswith("export PATH=")
+    assert engine_path_export() == shell_path_export(engine_bin_dir(), windows=sys.platform == "win32")
+
+
+def test_the_powershell_form_quotes_the_dir() -> None:
+    assert powershell_path_export(r"C:\Users\o'b\Scripts") == "$env:PATH = 'C:\\Users\\o''b\\Scripts;' + $env:PATH"
+
+
+def test_on_windows_the_capsule_gives_the_git_bash_and_powershell_forms(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(os_tool_path.sys, "platform", "win32")
+    monkeypatch.setattr(os_tool_path, "engine_bin_dir", lambda: r"C:\Ciaobot\Scripts")
+    assert engine_path_export() == shell_path_export(r"C:\Ciaobot\Scripts", windows=True)
+    assert engine_path_export() == 'export PATH=/c/Ciaobot/Scripts:"$PATH"'
+    line = capsule_module.engine_ciao_line()
+    assert '`export PATH=/c/Ciaobot/Scripts:"$PATH"`' in line
+    assert "(in PowerShell, with `$env:PATH = 'C:\\Ciaobot\\Scripts;' + $env:PATH;`)" in line
+
+
+def test_off_windows_there_is_no_powershell_form() -> None:
+    if sys.platform == "win32":
+        pytest.skip("POSIX only")
+    assert engine_powershell_export() == ""
+    assert "PowerShell" not in capsule_module.engine_ciao_line()
+
+
+def test_an_odd_install_path_cannot_break_the_capsule_into_lines(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(os_tool_path, "engine_bin_dir", lambda: "/odd\npath/bin")
+    assert "\n" not in capsule_module.engine_ciao_line()
+
+
+def test_a_moved_engine_resends_the_stable_context_once(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A session primed under engine A gets the line again, with B, after the engine moves."""
+    monkeypatch.setattr(os_tool_path, "engine_bin_dir", lambda: "/engine/a/bin")
+    manager = _make_manager(tmp_path)
+    project = manager.create_project("path", workspace="personal")
+    chat = manager.create_chat(project.project_id)
+    manager.build_agent_request(chat, prompt="hi")
+    chat.session_id = "sess-1"
+    chat.context_digest, chat.context_session_id = manager._stable_context_marker(chat)
+    assert not manager._needs_stable_context(chat)
+
+    monkeypatch.setattr(os_tool_path, "engine_bin_dir", lambda: "/engine/b/bin")
+    assert manager._needs_stable_context(chat)
+    prefix = manager._build_prompt_prefix(chat)
+    assert "ciao_path=`export PATH=/engine/b/bin:" in prefix
+    assert "/engine/a/bin" not in prefix
 
 
 def test_the_engine_export_makes_a_shell_find_the_engine_ciao_first(tmp_path: Path) -> None:
@@ -323,7 +367,7 @@ def test_the_capsule_hands_the_agent_the_engine_export(monkeypatch: pytest.Monke
     stable = build_context_capsule(workspace="personal")
     line = next(line for line in stable.splitlines() if line.startswith("ciao_path="))
     assert line.startswith('ciao_path=`export PATH=/engine/bin:"$PATH"`')
-    assert "every shell command that runs `ciao`" in line
+    assert "in a POSIX shell start every shell command that runs `ciao`" in line
     assert "subagent" in line
     assert "ciao_path=" not in build_context_capsule(workspace="personal", include_stable=False)
 
@@ -348,7 +392,7 @@ def test_the_care_prompt_is_handed_the_engine_export(tmp_path: Path, monkeypatch
     assert ENGINE_PATH_TOKEN not in prompt
     # The preflight tests the engine's ciao, and says which one it checked.
     assert f"Run once: `{sentinel}; command -v ciao; chk()" in prompt
-    assert "Care cannot run: <the path it printed first> lacks <items>" in prompt
+    assert "On any `missing:` line, reply with one line, \"Care cannot run: ciao at <printed path or none> lacks <items>" in prompt
     # Each step subagent is given the same line.
     assert f"today=<date>; ciao_path=`{sentinel}`. Read" in prompt
 

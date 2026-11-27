@@ -325,7 +325,7 @@ def _preflight_snippet() -> str:
 
     schedules = json.loads((ROOT / "ciao/stock/schedules.json").read_text(encoding="utf-8"))
     prompt = next(e["prompt"] for e in schedules["schedules"] if e["schedule_id"] == "system-memory-curation")
-    match = re.search(r"Run once: `(.+?)`\. If it prints a `missing:` line", prompt, re.S)
+    match = re.search(r"Run once: `(.+?)`\. On any `missing:` line", prompt, re.S)
     assert match, "the preflight snippet changed shape"
     return match.group(1)
 

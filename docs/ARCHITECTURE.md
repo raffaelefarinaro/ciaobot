@@ -692,14 +692,19 @@ one already has its text.
 The stable block also carries one `ciao_path=` line (`capsule.engine_ciao_line`):
 the shell line `tool_path.engine_path_export()` builds (`export PATH=<engine bin
 dir>:"$PATH"`, the directory shell-quoted, and on Windows written the Git Bash way
-as `/c/...`), with the rule to start every shell command that runs `ciao` with it
-and to hand the same line to any subagent that will run `ciao`. The engine already
+as `/c/...` with a PowerShell form beside it from `engine_powershell_export()`),
+with the rule to start every POSIX shell command that runs `ciao` with it and to
+hand the same line to any subagent that will run `ciao`. The engine already
 starts the agent with `prepend_engine_path()`, but the agent's shell sources the
 user's rc files, which can put an older `ciao` (a stale uv-tool install in
 `~/.local/bin`) back in front; so skills, step files and schedules keep saying
 `ciao …` and this line is what makes the word mean the running engine. The value
-comes from `engine_bin_dir()`, never from user input, and is the same for every
-chat of a process, so like the board hint it stays out of `context_digest`.
+comes from `engine_bin_dir()`, never from user input, and goes through `_field` so
+an odd install path cannot split the capsule into extra lines. Unlike the board
+hint it is hashed into the chat's stable digest (`context_digest(engine_path=…)`
+from `_stable_context_marker`), so a session that predates the line, or that
+started under an engine that has since moved (app moved, dev install, uv tool to
+app), gets the stable block once more with the current path.
 One-shot calls (`providers/oneshot.py`) get no capsule and run no shell, so the
 prepended process PATH is all they need. Packaged schedule prompts get the same
 line through the `{{ENGINE_PATH}}` token that `core_prompt.resolve_prompt_asset_paths`

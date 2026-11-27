@@ -80,10 +80,11 @@ def prepend_engine_path(path: str | None = None) -> str:
 def shell_path_export(directory: str, *, windows: bool) -> str:
     """The POSIX shell line that puts ``directory`` first on PATH, quoted.
 
-    Agents run shell commands in bash or zsh on every platform (on Windows,
-    Claude Code and OpenCode use Git Bash), so a Windows directory is written
-    the way Git Bash spells it (``C:\\x\\Scripts`` -> ``/c/x/Scripts``): a
-    drive colon would otherwise split the PATH entry in two.
+    For bash and zsh, and for Git Bash on Windows (Claude Code's shell there), a
+    Windows directory is written the way Git Bash spells it (``C:\\x\\Scripts``
+    -> ``/c/x/Scripts``): a drive colon would otherwise split the PATH entry in
+    two. A Windows agent whose shell is PowerShell (Codex) or cmd uses
+    :func:`powershell_path_export` or its own syntax instead.
     """
     if windows:
         win = PureWindowsPath(directory)
@@ -93,6 +94,17 @@ def shell_path_export(directory: str, *, windows: bool) -> str:
         else:
             directory = win.as_posix()
     return f'export PATH={shlex.quote(directory)}:"$PATH"'
+
+
+def powershell_path_export(directory: str) -> str:
+    """The PowerShell line that puts ``directory`` first on PATH, single-quoted."""
+    quoted = "'" + directory.replace("'", "''") + ";'"
+    return f"$env:PATH = {quoted} + $env:PATH"
+
+
+def engine_powershell_export() -> str:
+    """:func:`powershell_path_export` for the engine's bin dir on Windows; ``""`` elsewhere."""
+    return powershell_path_export(engine_bin_dir()) if sys.platform == "win32" else ""
 
 
 def engine_path_export() -> str:
