@@ -965,7 +965,7 @@ def test_credentials_are_named_never_stored() -> None:
 def test_pass_records_a_lean_as_a_preference_and_splits_two_fact_lines() -> None:
     """A leaned-towards choice is not a decision, and a rewrite keeps the unchanged fact."""
     prompt = memory_pass.MEMORY_PASS_PROMPT
-    assert 'A choice the user only leaned towards ("sounds good", "maybe") is not a decision' in prompt
+    assert 'A choice the user only leaned towards ("sounds good", "maybe"), or an assistant suggestion the user did not confirm, is not a decision' in prompt
     assert "record it as a preference or an open option, never as chosen" in prompt
     assert "split it and keep the unchanged one; never drop it" in prompt
     # The undo log is stated once, in the guide; the pass only points at it.
