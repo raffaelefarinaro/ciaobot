@@ -399,6 +399,15 @@ enum TakeoverCopy {
         }
     }
 
+    static let doneTitle = "Ciaobot now runs inside this app"
+
+    /// The completed move names the old install the engine left untouched
+    /// (in practice the checkout its LaunchAgent still points at).
+    static func doneNotice(left: [String]) -> String {
+        if left.count == 1 { return "Your old install at \(left[0]) was left untouched." }
+        return "Your old install was left untouched: " + left.joined(separator: ", ")
+    }
+
     /// The notice for an outcome, or nil when the screen says nothing.
     static func notice(for outcome: EngineTakeover.Outcome) -> String? {
         switch outcome {
@@ -406,7 +415,7 @@ enum TakeoverCopy {
             return nil
         case .done(let left):
             guard !left.isEmpty else { return nil }
-            return "Ciaobot moved into the app. These 1.x items were left in place: " + left.joined(separator: ", ")
+            return doneNotice(left: left)
         case .refused(let code, let origin):
             let text: String
             if code == "rollback_failed" {

@@ -11,6 +11,65 @@ final class ConnectionResultTests: XCTestCase {
         XCTAssertNil(ConnectionResult(outcome: .done(left: [])))
     }
 
+    func testCompletedMoveCopyNamesTheUntouchedOldInstall() {
+        let card = ConnectionResult(outcome: .done(left: ["/Users/me/repos/ciaobot"]), now: now)!
+        XCTAssertEqual(card.title, "Ciaobot now runs inside this app")
+        XCTAssertEqual(card.reason, "Your old install at /Users/me/repos/ciaobot was left untouched.")
+        XCTAssertEqual(card.kind, .info)
+        XCTAssertFalse(card.reason.contains("1.x"))
+        XCTAssertFalse(card.canTryAgain)
+        let several = ConnectionResult(outcome: .done(left: ["/a", "/b"]))!
+        XCTAssertEqual(several.reason, "Your old install was left untouched: /a, /b")
+    }
+
+    func testOnlyACompletedMoveClearsItselfAndHidesTheCheckedLine() {
+        let done = ConnectionResult(outcome: .done(left: ["/a"]))!
+        XCTAssertTrue(done.succeeded)
+        XCTAssertEqual(done.autoClearDelay, 12)
+        let info = ConnectionResult(outcome: .refused(code: "downgrade", oldOrigin: nil))!
+        let warning = ConnectionResult(outcome: .refused(code: "engine_too_old", oldOrigin: nil))!
+        let failure = ConnectionResult(outcome: .refused(code: "rollback_failed", oldOrigin: nil))!
+        let rolledBack = ConnectionResult(outcome: .rolledBack(code: "not_healthy", oldOrigin: nil))!
+        for card in [info, warning, failure, rolledBack, ConnectionResult.checking()] {
+            XCTAssertFalse(card.succeeded)
+            XCTAssertNil(card.autoClearDelay)
+        }
+    }
+
+    func testStaleTimerNeverClearsALaterBanner() {
+        let done = ConnectionResult(outcome: .done(left: ["/a"]))!
+        let later = ConnectionResult(outcome: .done(left: ["/b"]))!
+        XCTAssertTrue(BannerClearPolicy.shouldClear(current: done, timerResult: done))
+        XCTAssertFalse(BannerClearPolicy.shouldClear(current: later, timerResult: done))
+    }
+
+    func testAWarningReplacingASuccessIsNeverAutoCleared() {
+        let done = ConnectionResult(outcome: .done(left: ["/a"]))!
+        let warning = ConnectionResult(outcome: .refused(code: "engine_too_old", oldOrigin: nil))!
+        let failure = ConnectionResult(outcome: .refused(code: "rollback_failed", oldOrigin: nil))!
+        XCTAssertFalse(BannerClearPolicy.shouldClear(current: warning, timerResult: done))
+        XCTAssertFalse(BannerClearPolicy.shouldClear(current: failure, timerResult: done))
+        // A warning's own timer (never started in the view) would not clear it either.
+        XCTAssertFalse(BannerClearPolicy.shouldClear(current: warning, timerResult: warning))
+        XCTAssertFalse(BannerClearPolicy.shouldClear(current: failure, timerResult: failure))
+    }
+
+    func testDismissThenTimerIsANoOp() {
+        let done = ConnectionResult(outcome: .done(left: ["/a"]))!
+        XCTAssertFalse(BannerClearPolicy.shouldClear(current: nil, timerResult: done))
+    }
+
+    func testForgetMenuNeedsLocalOriginIdleAndASavedSignIn() {
+        func on(_ mode: EngineMode = .local, origin: Bool = true, busy: Bool = false, saved: Bool = true) -> Bool {
+            ForgetMenuPolicy.isEnabled(mode: mode, hasOrigin: origin, busy: busy, hasSavedLocalSignIn: saved)
+        }
+        XCTAssertTrue(on())
+        XCTAssertFalse(on(.external))
+        XCTAssertFalse(on(origin: false))
+        XCTAssertFalse(on(busy: true))
+        XCTAssertFalse(on(saved: false))
+    }
+
     func testEveryRefusalCodeHasATitleAndTheFixedReason() {
         let codes = ["downgrade", "engine_too_old", "custom_data_location", "port_mismatch", "legacy_desktop",
                      "unknown_program", "no_workspace", "unfinished_migration", "already_settled", "plist_changed",
