@@ -12,7 +12,6 @@ import { COMPOSER, boot, horizontalOverflow, isolate, TOUCH_FLOOR } from '../sup
 const CHAT_PATH = '/chat/alpha-chat-1'
 const CHAT_ID = 'alpha-chat-1'
 const TITLE = 'Suggested command — review before running'
-const TOUCH_MIN = 44
 
 /** Put a `command` action on the chat, before the app boots. */
 async function raiseCommand(page: Page, command: string): Promise<void> {
