@@ -138,6 +138,10 @@ const instructionsHtml = computed(() =>
   outline-offset: 2px;
 }
 @media (pointer: coarse) {
-  .task-handover-raw summary { padding: 14px 0; }
+  .task-handover-raw summary {
+    box-sizing: border-box;
+    min-height: var(--touch);
+    padding: 12px 0;
+  }
 }
 </style>

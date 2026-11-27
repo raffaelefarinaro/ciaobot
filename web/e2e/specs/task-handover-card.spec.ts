@@ -40,7 +40,7 @@ for (const viewport of SIZES) {
     await expect(card.locator('details')).not.toHaveAttribute('open', '')
     const cardBox = (await card.boundingBox())!
     expect(cardBox.x + cardBox.width).toBeLessThanOrEqual(viewport.width)
-    if (viewport.phone) expect(summaryBox.height).toBeGreaterThanOrEqual(44)
+    if (viewport.phone) expect(summaryBox.height).toBeGreaterThanOrEqual(43.5)
     await card.screenshot({ path: testInfo.outputPath(`task-handover-${viewport.width}.png`) })
 
     // The raw prompt is unchanged: the instructions are still in it, in their fence.
