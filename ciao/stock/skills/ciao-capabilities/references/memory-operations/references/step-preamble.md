@@ -19,10 +19,22 @@ You are one step of an unattended care run. The orchestrator gave you the vault 
 The person reads what you leave on the Workspace care page and may never have opened these files. Put anything they must decide or do inside the evidence as `needs you: <plain sentence> (path: <vault-relative path>)`:
 
 - One item is one decision or action, in at most two short sentences: the situation, what you recommend, and how to act, naming a button the app has ("Choose Review proposal, then Approve or Reject.", "Open Memory > Unsure and approve or reject them.", "Choose Optimize to trim it together.").
-- Everyday words only. No step ids, command or field names (`updated:`, `pct`, frontmatter), audit or verify output, retry counters or file formats. Never ask the person to edit a file by hand (no "tick `- [x]`").
+- Everyday words only. No step ids, command or field names (`updated:`, `pct`, frontmatter), audit or verify output, retry counters ("retry 1 of 3") or file formats. Name the work, never the step ("re-checking older notes", not "the stale step"). No backticks or other Markdown: the page shows the text as written. Round percentages to whole numbers. Never ask the person to edit a file by hand (no "tick `- [x]`").
 - Never hand the person a decision the run should make itself: a step that failed or needs a rule changed is not their question. It is a `note:`, and the step is retried or fixed.
-- `path` is the one file the person opens to act, relative to the vault and without `..` (`Workspace/Unsure.md`, `Workspace/Proposals/<slug>.md`, `Workspace/Care-Report.md`), or `AGENTS.md` for the workspace guide. The app picks the button from it. Leave `(path: …)` out when there is no file to open.
+- `path` is the one file the person opens to act, relative to the vault and without `..` (`Workspace/Unsure.md`, `Workspace/Proposals/<slug>.md`, `Workspace/Care-Report.md`), or `AGENTS.md` for the workspace guide. It ends the line, after the sentences. The app picks the button from it. Leave `(path: …)` out when there is no file to open.
 - Each proposal file you write is its own item, with the proposal as its path.
-- Lines you add to the Unsure list are not items: the run lists every open Unsure line once, as one item.
+- Lines you add to the Unsure list are not items: the run lists every open Unsure line once, as one item, `N suggestions are waiting for your decision. Open Memory > Unsure and approve or reject them. (path: Workspace/Unsure.md)`.
 
 Anything the person need not act on is a note, written in the evidence as `note: <plain sentence>`: a cap that left work for the next run, a count, what was skipped or retried. A note is never a `needs you` item.
+
+### Writing the section (the orchestrator)
+
+Under `## What needs you`, each item is one numbered line. Copy a step's `needs you:` text without that lead when it follows the rules above, and rewrite it when it does not. Every item whose path is `Workspace/Unsure.md` folds into the one Unsure item, counting all open lines. An id dropped at 3 runs is one item in plain words, such as "Reviewing your guide has failed three runs in a row. Choose Fix with a chat to look at it together. (path: Workspace/Care-Report.md)".
+
+Self-check: after writing the section, run this one line with the report's absolute path. It prints every item that has a backtick, a `[x]` or `[!]` marker, a retry count, a step id or field name, more than 280 characters, or no `(path: …)` at its end:
+
+```
+awk '/^## What needs you/{f=1;next}/^#/{f=0}f&&NF&&(/\140|\[[x!]\]|etry [0-9]|stale step|-(look|tasks|review)|updated:|pct|frontmatter|^[0-9]+[.)] [a-z-]+:/||length>280||!/\(path: [^()]+\)\.?$/)' <V>/Workspace/Care-Report.md
+```
+
+Rewrite each item it prints and run it once more. An item printed only because it has no path may stay when no file fits it; the page then offers Fix with a chat.

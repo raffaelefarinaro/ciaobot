@@ -14,9 +14,9 @@ Skip an entry that already has a proposal file under `Workspace/Proposals/` nami
 **Merge and prune.**
 - Merge entries that are semantically the same learning: keep one, sum the counts, union the sources.
 - Prune x1 entries under `## Active` older than 30 days with no reuse value.
-- Entries under `## Promoted / Resolved` stay where they are. Retiring one is a person's call, so report it as a `needs you` item.
+- Entries under `## Promoted / Resolved` stay where they are. Retiring one is a person's call, so report them as one item: `needs you: N lessons were already put to use and can be cleared from the learnings list. Open the file and remove the ones you no longer need. (path: Workspace/Learnings.md)`.
 
 ## Done when
-Every x3-or-more entry has a destination (a proposal file that passed `ciao proposal-check`, a project doc line, a region entry, or an Unsure line) or an existing proposal. Finish with `done: routed N entries (<proposal paths>), merged M, pruned K`.
+Every x3-or-more entry has a destination (a proposal file that passed `ciao proposal-check`, a project doc line, a region entry, or an Unsure line) or an existing proposal. Finish with `done: routed N entries (<proposal paths>), merged M, pruned K`, then one item per proposal: `needs you: <what the proposal would change, in plain words>. Choose Review proposal, then Approve or Reject. (path: Workspace/Proposals/<slug>.md)`.
 
 Verify: run `ciao proposal-check <file>` on every proposal path the done line names; each must print `ok`. When none was routed, the done line must say `no proposals routed` and `grep -l '^created: <today>' <vault>/Workspace/Proposals/*.md` must list none (a count of 0 from that command).

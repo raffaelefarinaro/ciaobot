@@ -458,6 +458,91 @@ def test_invalid_utf8_is_replaced_not_raised(tmp_path: Path) -> None:
     assert body["steps"][0]["id"] == "unsure"
 
 
+# The three items of a real run (2026-11-27) whose orchestrator copied the
+# steps' old lines: no `(path: …)` tail, backticks, a step named.
+VERBATIM = """# Care report 2026-11-27
+- [x] regions: consolidate regions \u2014 memory 96% -> 94.8%; verify: memory.pct 94.8
+
+## What needs you
+1. Memory regions are still high (memory 94.8%, profile 92.4%) and every entry is a durable rule: choose in an attended chat what leaves.
+2. Open lines in `Workspace/Unsure.md`: 17 (4 added by the stale step). Tick `- [x]` to apply.
+3. Approve or reject `Workspace/Proposals/agents-md-trim-duplicates.md` and the other proposals filed today.
+"""
+
+
+def test_an_item_without_a_tail_takes_its_first_backticked_vault_path() -> None:
+    needs = parse_care_report(VERBATIM)["needs_you"]
+    # Item 1 names no file: no path, so the page offers only Fix with a chat. No keyword routing.
+    assert [n["path"] for n in needs] == ["", "Workspace/Unsure.md", "Workspace/Proposals/agents-md-trim-duplicates.md"]
+    assert needs[0]["title"].startswith("Memory regions are still high")
+    # The page shows the text without the raw backticks.
+    assert needs[1]["title"] == "Open lines in Workspace/Unsure.md: 17 (4 added by the stale step)."
+    assert needs[1]["detail"] == "Tick - [x] to apply."
+    assert all("`" not in n["title"] + n["detail"] for n in needs)
+
+
+def test_verbatim_items_route_to_unsure_and_the_proposal(setup) -> None:
+    _write_report(setup.vault, VERBATIM)
+    _write_proposal(setup.vault, "agents-md-trim-duplicates", "draft")
+    needs = setup.client.get("/api/care-report?workspace=personal").json()["needs_you"]
+    assert [(n["path"], n["open_path"], n["proposal_status"]) for n in needs] == [
+        ("", "", ""),
+        ("Workspace/Unsure.md", "memory-vault/personal/Workspace/Unsure.md", ""),
+        (
+            "Workspace/Proposals/agents-md-trim-duplicates.md",
+            "memory-vault/personal/Workspace/Proposals/agents-md-trim-duplicates.md",
+            "draft",
+        ),
+    ]
+
+
+@pytest.mark.parametrize(
+    "span",
+    [
+        "../../etc/passwd", ".env", "/etc/passwd", "~/notes.md", "C:/Users/x.md", "Workspace\\Unsure.md",
+        "Workspace/../Unsure.md", "Workspace/.care-drained", "People/Rae\u202egnp.md", "Workspace//Unsure.md",
+        # Not a location: a bare file name, a command, a marker, a field name.
+        "Unsure.md", "ciao memory status", "- [x]", "updated:", "Workspace/Unsure",
+    ],
+)
+def test_a_backticked_span_that_is_not_a_safe_vault_file_gives_no_path(span: str) -> None:
+    item = parse_care_report(f"## What needs you\n1. Look at `{span}` today.\n")["needs_you"][0]
+    assert item["path"] == ""
+    assert care_report.backticked_path(f"see `{span}`") == ""
+
+
+def test_backticked_fallback_picks_the_first_valid_path_and_never_bare_words() -> None:
+    long = "After a long run that read " + "many notes and " * 20 + "`People/Rae Smith.md` in the middle, decide."
+    assert care_report.backticked_path(long) == "People/Rae Smith.md"
+    assert care_report.backticked_path("`../x.md` or `.env` or `Workspace/Unsure.md` or `AGENTS.md`") == "Workspace/Unsure.md"
+    assert care_report.backticked_path("`AGENTS.md` then `Workspace/Unsure.md`") == "AGENTS.md"
+    assert care_report.backticked_path("`/etc/passwd` and `../../.ssh/id_rsa`") == ""
+    # Unquoted words are never a path.
+    assert care_report.backticked_path("Open Workspace/Unsure.md and AGENTS.md") == ""
+    # An explicit tail wins, even an unsafe one: the fallback is only for a missing tail.
+    item = parse_care_report("## What needs you\n1. See `Workspace/Unsure.md`. (path: ../outside.md)\n")["needs_you"][0]
+    assert item["path"] == ""
+
+
+def test_a_backticked_proposal_is_read_with_the_same_confinement(tmp_path: Path) -> None:
+    _write_proposal(tmp_path, "trim", "applied")
+    outside = _write_proposal(tmp_path / "elsewhere", "real", "applied")
+    (tmp_path / "Workspace" / "Proposals" / "linked.md").symlink_to(outside)
+    _write_report(
+        tmp_path,
+        "# Care report 2026-11-27\n- [x] a: b \u2014 c; verify: d\n## What needs you\n"
+        "1. Review `Workspace/Proposals/trim.md`.\n"
+        "2. Review `Workspace/Proposals/linked.md`.\n"
+        "3. Review `Workspace/Proposals/../Proposals/trim.md`.\n",
+    )
+    needs = read_care_report(tmp_path)["needs_you"]
+    assert [(n["path"], n["proposal_status"]) for n in needs] == [
+        ("Workspace/Proposals/trim.md", "applied"),
+        ("Workspace/Proposals/linked.md", ""),
+        ("", ""),
+    ]
+
+
 def test_step_files_match_the_care_prompt() -> None:
     """The report page links each step to the file the prompt dispatches it with."""
     schedules = json.loads((Path(care_report.__file__).parent / "stock" / "schedules.json").read_text())
