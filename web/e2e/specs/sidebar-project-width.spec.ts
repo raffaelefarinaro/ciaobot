@@ -1,5 +1,5 @@
 import { expect, test } from '@playwright/test'
-import { boot, isolate } from '../support/app'
+import { boot, isolate, TOUCH_FLOOR } from '../support/app'
 
 const LONG_PROJECT = 'alpha-notes-a-very-long-unbreakable-project-identifier'
 const READY = '.project-header'
@@ -41,8 +41,8 @@ test.describe('sidebar project header width', () => {
     await row.hover()
     for (const control of await row.locator('.project-actions-btn, .add-chat-btn').all()) {
       const box = await control.boundingBox()
-      expect(box?.width).toBeGreaterThanOrEqual(44)
-      expect(box?.height).toBeGreaterThanOrEqual(44)
+      expect(box?.width).toBeGreaterThanOrEqual(TOUCH_FLOOR)
+      expect(box?.height).toBeGreaterThanOrEqual(TOUCH_FLOOR)
     }
     expect(await name.isVisible()).toBe(true)
   })
@@ -59,10 +59,10 @@ test.describe('sidebar project header width', () => {
     await page.keyboard.press('Tab') // project name
     await page.keyboard.press('Tab') // project actions
     await expect(menu).toBeFocused()
-    expect((await menu.boundingBox())?.width).toBeGreaterThanOrEqual(44)
+    expect((await menu.boundingBox())?.width).toBeGreaterThanOrEqual(TOUCH_FLOOR)
     await page.keyboard.press('Tab') // new chat
     await expect(newChat).toBeFocused()
-    expect((await newChat.boundingBox())?.width).toBeGreaterThanOrEqual(44)
+    expect((await newChat.boundingBox())?.width).toBeGreaterThanOrEqual(TOUCH_FLOOR)
 
     await menu.focus()
     await page.keyboard.press('Enter')
@@ -92,8 +92,8 @@ test.describe('sidebar project header width', () => {
     )
     expect(targets).toHaveLength(2)
     for (const target of targets) {
-      expect(target.width).toBeGreaterThanOrEqual(44)
-      expect(target.height).toBeGreaterThanOrEqual(44)
+      expect(target.width).toBeGreaterThanOrEqual(TOUCH_FLOOR)
+      expect(target.height).toBeGreaterThanOrEqual(TOUCH_FLOOR)
     }
     await context.close()
   })

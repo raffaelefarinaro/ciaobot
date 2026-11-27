@@ -1,5 +1,5 @@
 import { devices, expect, test, type Page } from '@playwright/test'
-import { boot, horizontalOverflow, isolate } from '../support/app'
+import { boot, horizontalOverflow, isolate, TOUCH_FLOOR } from '../support/app'
 
 /**
  * Appearance is engine-wide: the engine holds the value, the browser keeps a
@@ -268,8 +268,8 @@ test('on a touch device every accent swatch, including the plus, is at least 44p
     )
     expect(sizes).toHaveLength(10)
     for (const [w, h] of sizes) {
-      expect(w).toBeGreaterThanOrEqual(TOUCH_MIN)
-      expect(h).toBeGreaterThanOrEqual(TOUCH_MIN)
+      expect(w).toBeGreaterThanOrEqual(TOUCH_FLOOR)
+      expect(h).toBeGreaterThanOrEqual(TOUCH_FLOOR)
     }
     expect((await horizontalOverflow(page)).overflow).toBeLessThanOrEqual(0)
   } finally {

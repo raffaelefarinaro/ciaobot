@@ -1,5 +1,5 @@
 import { expect, test, type Page, type Route } from '@playwright/test'
-import { boot, horizontalOverflow, isolate } from '../support/app'
+import { boot, horizontalOverflow, isolate, TOUCH_FLOOR } from '../support/app'
 import { UNSURE_FIXTURE_ITEMS } from '../../src/stories/unsureFixture'
 import type { UnsureItem } from '../../src/lib/unsureList'
 
@@ -137,8 +137,8 @@ test.describe('Memory › Unsure on a phone', () => {
     for (const name of [`Approve: ${FIRST}`, `Reject: ${FIRST}`, `Discuss: ${FIRST}`]) {
       const box = await row.getByRole('button', { name }).boundingBox()
       expect(box, name).not.toBeNull()
-      expect(box!.height, name).toBeGreaterThanOrEqual(44)
-      expect(box!.width, name).toBeGreaterThanOrEqual(44)
+      expect(box!.height, name).toBeGreaterThanOrEqual(TOUCH_FLOOR)
+      expect(box!.width, name).toBeGreaterThanOrEqual(TOUCH_FLOOR)
     }
     const list = await page.locator('.mu').boundingBox()
     const rail = await page.locator('.mm-review-rail').boundingBox()

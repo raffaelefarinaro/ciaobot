@@ -1,5 +1,5 @@
 import { expect, test, type Page } from '@playwright/test'
-import { COMPOSER, boot, horizontalOverflow, isolate } from '../support/app'
+import { COMPOSER, boot, horizontalOverflow, isolate, TOUCH_FLOOR } from '../support/app'
 
 /**
  * The command card, in a real browser.
@@ -84,8 +84,8 @@ test.describe('the command card on a phone', () => {
     expect(count).toBeGreaterThan(0)
     for (let i = 0; i < count; i += 1) {
       const size = (await controls.nth(i).boundingBox())!
-      expect(size.height, `control ${i} is ${size.height}px tall`).toBeGreaterThanOrEqual(TOUCH_MIN - 0.5)
-      expect(size.width, `control ${i} is ${size.width}px wide`).toBeGreaterThanOrEqual(TOUCH_MIN - 0.5)
+      expect(size.height, `control ${i} is ${size.height}px tall`).toBeGreaterThanOrEqual(TOUCH_FLOOR)
+      expect(size.width, `control ${i} is ${size.width}px wide`).toBeGreaterThanOrEqual(TOUCH_FLOOR)
     }
   })
 })

@@ -1,5 +1,5 @@
 import { expect, test, type Locator, type Page } from '@playwright/test'
-import { boot, horizontalOverflow, isolate, quiesce } from '../support/app'
+import { boot, horizontalOverflow, isolate, quiesce, TOUCH_FLOOR } from '../support/app'
 
 /**
  * Settings > Workspace > Overview's "Shared brains" card (#3008), on a phone.
@@ -62,9 +62,9 @@ test.describe('shared brains card', () => {
 
     const field = panel.getByLabel('Folder path', { exact: true })
     expect(Number.parseFloat(await field.evaluate((el) => getComputedStyle(el).fontSize))).toBeGreaterThanOrEqual(16)
-    expect(((await type.boundingBox()) ?? { height: 0 }).height).toBeGreaterThanOrEqual(44)
+    expect(((await type.boundingBox()) ?? { height: 0 }).height).toBeGreaterThanOrEqual(TOUCH_FLOOR)
     const folderButton = panel.getByRole('button', { name: 'Link folder' })
-    expect(((await folderButton.boundingBox()) ?? { height: 0 }).height).toBeGreaterThanOrEqual(44)
+    expect(((await folderButton.boundingBox()) ?? { height: 0 }).height).toBeGreaterThanOrEqual(TOUCH_FLOOR)
 
     // The setup guidance follows the explicit choice, not the rows already listed.
     await expect(panel.getByText('Folder links are read in place')).toBeVisible()

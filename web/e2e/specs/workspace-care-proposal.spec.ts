@@ -1,5 +1,5 @@
 import { expect, test, type Page } from '@playwright/test'
-import { boot, horizontalOverflow, isolate } from '../support/app'
+import { boot, horizontalOverflow, isolate, TOUCH_FLOOR } from '../support/app'
 import { CARE_PROPOSAL_PATH, careReports } from '../../src/lib/careReportFixture'
 import type { CareReport } from '../../src/lib/careReport'
 
@@ -142,7 +142,7 @@ test.describe('Proposal review on a phone', () => {
       const { overflow, culprits } = await horizontalOverflow(page)
       expect(overflow, JSON.stringify(culprits)).toBeLessThanOrEqual(0)
       for (const name of ['Approve', 'Reject']) {
-        expect((await page.getByRole('button', { name }).boundingBox())!.height).toBeGreaterThanOrEqual(44)
+        expect((await page.getByRole('button', { name }).boundingBox())!.height).toBeGreaterThanOrEqual(TOUCH_FLOOR)
       }
       await page.screenshot({ path: `test-results/care-look/proposal-review-${colorScheme}-390.png`, fullPage: true })
     })

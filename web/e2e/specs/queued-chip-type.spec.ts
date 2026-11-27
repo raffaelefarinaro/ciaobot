@@ -1,5 +1,5 @@
 import { expect, test, type Page } from '@playwright/test'
-import { boot, COMPOSER, isolate, quiesce } from '../support/app'
+import { boot, COMPOSER, isolate, quiesce, TOUCH_FLOOR } from '../support/app'
 
 /**
  * #2313: the queued-message chip above the composer carried hard-coded 10–12px
@@ -62,8 +62,8 @@ async function measure(page: Page): Promise<Measurement> {
 function expectControlTargets(m: Measurement) {
   expect(m.controls.length, 'the queued chip has edit controls to measure').toBeGreaterThan(0)
   for (const c of m.controls) {
-    expect(c.width, `${c.cls} width`).toBeGreaterThanOrEqual(44)
-    expect(c.height, `${c.cls} height`).toBeGreaterThanOrEqual(44)
+    expect(c.width, `${c.cls} width`).toBeGreaterThanOrEqual(TOUCH_FLOOR)
+    expect(c.height, `${c.cls} height`).toBeGreaterThanOrEqual(TOUCH_FLOOR)
     expect(c.glyph, `${c.cls} glyph`).toBeGreaterThanOrEqual(18)
   }
 }

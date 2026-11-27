@@ -1,5 +1,5 @@
 import { devices, expect, test, type CDPSession, type Page } from '@playwright/test'
-import { BOOTED, COMPOSER, boot, isolate, openChatDetails, quiesce } from '../support/app'
+import { BOOTED, COMPOSER, boot, isolate, openChatDetails, quiesce, TOUCH_FLOOR } from '../support/app'
 
 /**
  * DESIGN.md requires every interactive target to be at least 44x44 CSS px on
@@ -511,8 +511,8 @@ test.describe('touch targets', () => {
           hit: !!hit && (hit === el || el.contains(hit)),
         }
       })
-      expect(geometry.width).toBeGreaterThanOrEqual(TOUCH_MIN)
-      expect(geometry.height).toBeGreaterThanOrEqual(TOUCH_MIN)
+      expect(geometry.width).toBeGreaterThanOrEqual(TOUCH_FLOOR)
+      expect(geometry.height).toBeGreaterThanOrEqual(TOUCH_FLOOR)
       expect(geometry.withinFooter).toBe(true)
       expect(geometry.hit).toBe(true)
       if (!openMenu) return
@@ -527,8 +527,8 @@ test.describe('touch targets', () => {
           const hit = document.elementFromPoint(rect.left + rect.width / 2, rect.top + rect.height / 2)
           return { width: rect.width, height: rect.height, hit: !!hit && (hit === el || el.contains(hit)) }
         })
-        expect(box.width).toBeGreaterThanOrEqual(TOUCH_MIN)
-        expect(box.height).toBeGreaterThanOrEqual(TOUCH_MIN)
+        expect(box.width).toBeGreaterThanOrEqual(TOUCH_FLOOR)
+        expect(box.height).toBeGreaterThanOrEqual(TOUCH_FLOOR)
         expect(box.hit).toBe(true)
       }
       await page.keyboard.press('Escape')
@@ -781,8 +781,8 @@ test.describe('touch targets', () => {
     await expect(handle).toBeVisible()
     const box = await handle.boundingBox()
     expect(box).not.toBeNull()
-    expect(box!.width).toBeGreaterThanOrEqual(TOUCH_MIN - 0.5)
-    expect(box!.height).toBeGreaterThanOrEqual(TOUCH_MIN - 0.5)
+    expect(box!.width).toBeGreaterThanOrEqual(TOUCH_FLOOR)
+    expect(box!.height).toBeGreaterThanOrEqual(TOUCH_FLOOR)
 
     await page.getByRole('button', { name: 'Actions for workspace beta' }).click()
     for (const name of ['Move workspace beta up', 'Move workspace beta down']) {
@@ -790,8 +790,8 @@ test.describe('touch targets', () => {
       await expect(item).toBeVisible()
       const itemBox = await item.boundingBox()
       expect(itemBox, name).not.toBeNull()
-      expect(itemBox!.height, name).toBeGreaterThanOrEqual(TOUCH_MIN - 0.5)
-      expect(itemBox!.width, name).toBeGreaterThanOrEqual(TOUCH_MIN - 0.5)
+      expect(itemBox!.height, name).toBeGreaterThanOrEqual(TOUCH_FLOOR)
+      expect(itemBox!.width, name).toBeGreaterThanOrEqual(TOUCH_FLOOR)
     }
   })
 })

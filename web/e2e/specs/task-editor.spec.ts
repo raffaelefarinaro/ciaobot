@@ -1,5 +1,5 @@
 import { expect, test } from '@playwright/test'
-import { boot, isolate, quiesce } from '../support/app'
+import { boot, isolate, quiesce, TOUCH_FLOOR } from '../support/app'
 
 for (const width of [1440, 390]) {
   test.describe(`task editor at ${width}px`, () => {
@@ -47,7 +47,7 @@ for (const width of [1440, 390]) {
         // The sheet has just mounted: measure it only once its styles have applied.
         await quiesce(page)
         expect(await page.evaluate(() => matchMedia('(pointer: coarse)').matches), 'touch emulation is a coarse pointer').toBe(true)
-        expect((await page.getByRole('button', { name: 'Mark done' }).boundingBox())!.height).toBeGreaterThanOrEqual(44)
+        expect((await page.getByRole('button', { name: 'Mark done' }).boundingBox())!.height).toBeGreaterThanOrEqual(TOUCH_FLOOR)
       }
       await page.getByRole('button', { name: 'Mark done' }).click()
       await expect(page.locator('#task-detail-name')).toHaveCount(0)

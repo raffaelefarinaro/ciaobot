@@ -1,5 +1,5 @@
 import { expect, test, type Page } from '@playwright/test'
-import { COMPOSER, boot, horizontalOverflow, isolate, settled } from '../support/app'
+import { COMPOSER, boot, horizontalOverflow, isolate, settled, TOUCH_FLOOR } from '../support/app'
 
 // Real layout is essential here: jsdom cannot establish a single visual line,
 // slide motion, a 44px touch target, or overflow at phone width / browser zoom.
@@ -36,7 +36,7 @@ for (const phone of [false, true]) {
     await expect(page.locator('.trace-block.live .trace-body')).toHaveCount(0)
     const box = await row.boundingBox()
     expect(box!.height).toBeLessThanOrEqual(phone ? 48 : 40)
-    if (phone) expect(box!.height).toBeGreaterThanOrEqual(44)
+    if (phone) expect(box!.height).toBeGreaterThanOrEqual(TOUCH_FLOOR)
     expect((await horizontalOverflow(page)).overflow).toBeLessThanOrEqual(1)
     await page.screenshot({ path: info.outputPath('working-collapsed.png') })
 

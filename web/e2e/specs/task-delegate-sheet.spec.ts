@@ -1,5 +1,5 @@
 import { expect, test } from '@playwright/test'
-import { COMPOSER, boot, isolate } from '../support/app'
+import { COMPOSER, boot, isolate, TOUCH_FLOOR } from '../support/app'
 
 /**
  * Why this is a browser test: the sheet's width and whether the model chip stays
@@ -65,8 +65,8 @@ test('delegation model retry stays reachable on a 390px phone', async ({ page },
   await expect(retry).toBeVisible()
   const bounds = await retry.boundingBox()
   expect(bounds).not.toBeNull()
-  expect(bounds!.width).toBeGreaterThanOrEqual(44)
-  expect(bounds!.height).toBeGreaterThanOrEqual(44)
+  expect(bounds!.width).toBeGreaterThanOrEqual(TOUCH_FLOOR)
+  expect(bounds!.height).toBeGreaterThanOrEqual(TOUCH_FLOOR)
   expect(bounds!.x).toBeGreaterThanOrEqual(0)
   expect(bounds!.x + bounds!.width).toBeLessThanOrEqual(390)
   await retry.click()

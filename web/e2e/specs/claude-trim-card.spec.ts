@@ -1,5 +1,5 @@
 import { expect, test, type Page } from '@playwright/test'
-import { boot, isolate } from '../support/app'
+import { boot, isolate, TOUCH_FLOOR } from '../support/app'
 
 // The engine's trim catalog, injected on GET /api/workspaces. The fixture does
 // not carry one, so the card only renders here.
@@ -79,8 +79,8 @@ test.describe('Claude context trimming card', () => {
       for (const target of targets) {
         await target.scrollIntoViewIfNeeded()
         const box = await target.boundingBox()
-        expect(box!.width).toBeGreaterThanOrEqual(44)
-        expect(box!.height).toBeGreaterThanOrEqual(44)
+        expect(box!.width).toBeGreaterThanOrEqual(TOUCH_FLOOR)
+        expect(box!.height).toBeGreaterThanOrEqual(TOUCH_FLOOR)
       }
     } finally {
       await context.close()

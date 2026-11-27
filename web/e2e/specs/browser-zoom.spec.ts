@@ -1,5 +1,5 @@
 import { expect, test } from '@playwright/test'
-import { BOOTED, COMPOSER, boot, horizontalOverflow, isolate, openChatDetails } from '../support/app'
+import { BOOTED, COMPOSER, boot, horizontalOverflow, isolate, openChatDetails, TOUCH_FLOOR } from '../support/app'
 
 /**
  * Why this is a browser test and not a vitest one.
@@ -55,8 +55,8 @@ test.describe('zoom and text scaling', () => {
     await expect(brand).toHaveCSS('width', '30px')
     await expect(brand).toHaveCSS('height', '30px')
     const box = await brand.boundingBox()
-    expect(box?.width).toBeGreaterThanOrEqual(44)
-    expect(box?.height).toBeGreaterThanOrEqual(44)
+    expect(box?.width).toBeGreaterThanOrEqual(TOUCH_FLOOR)
+    expect(box?.height).toBeGreaterThanOrEqual(TOUCH_FLOOR)
     await page.getByRole('button', { name: 'Collapse sidebar', exact: true }).click()
     await expect(brand).toBeHidden()
   })

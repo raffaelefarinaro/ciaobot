@@ -1,5 +1,5 @@
 import { expect, test } from '@playwright/test'
-import { COMPOSER, boot, isolate } from '../support/app'
+import { COMPOSER, boot, isolate, TOUCH_FLOOR } from '../support/app'
 
 test.use({ viewport: { width: 390, height: 844 }, isMobile: true, hasTouch: true })
 
@@ -23,8 +23,8 @@ test.describe('mobile chat model picker', () => {
 
     const close = picker.getByRole('button', { name: 'Close model picker' })
     const box = (await close.boundingBox())!
-    expect(box.width).toBeGreaterThanOrEqual(44)
-    expect(box.height).toBeGreaterThanOrEqual(44)
+    expect(box.width).toBeGreaterThanOrEqual(TOUCH_FLOOR)
+    expect(box.height).toBeGreaterThanOrEqual(TOUCH_FLOOR)
     await close.click()
     await expect(picker).toBeHidden()
     await expect(page.locator('.model-picker-wrap.composer-model .composer-chip')).toBeFocused()

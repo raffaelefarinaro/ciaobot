@@ -1,5 +1,5 @@
 import { devices, expect, test, type Locator, type Page } from '@playwright/test'
-import { boot, isolate, settled } from '../support/app'
+import { boot, isolate, settled, TOUCH_FLOOR } from '../support/app'
 
 /**
  * The board's lanes are one fixed width at every pane width (it scrolls
@@ -285,11 +285,11 @@ test.describe('lanes on a phone', () => {
     expectOneLine(status!, action!)
     // The coarse-pointer rules win over the base ones: both new controls are 44px.
     const tab = await toggle(page).boundingBox()
-    expect(tab!.width).toBeGreaterThanOrEqual(44)
+    expect(tab!.width).toBeGreaterThanOrEqual(TOUCH_FLOOR)
     await toggle(page).click()
     const hide = await lane(page, 'Done').getByRole('button', { name: 'Hide done tasks' }).boundingBox()
-    expect(hide!.height).toBeGreaterThanOrEqual(44)
-    expect(hide!.width).toBeGreaterThanOrEqual(44)
+    expect(hide!.height).toBeGreaterThanOrEqual(TOUCH_FLOOR)
+    expect(hide!.width).toBeGreaterThanOrEqual(TOUCH_FLOOR)
   })
 })
 

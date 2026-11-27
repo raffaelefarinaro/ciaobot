@@ -1,5 +1,5 @@
 import { expect, test } from '@playwright/test'
-import { boot, COMPOSER, isolate } from '../support/app'
+import { boot, COMPOSER, isolate, TOUCH_FLOOR } from '../support/app'
 
 test.use({ viewport: { width: 390, height: 500 }, isMobile: true, hasTouch: true })
 
@@ -23,7 +23,7 @@ test('comment action labels fit their buttons on a phone with the keyboard open'
     await expect(button).toBeInViewport()
     const size = await button.evaluate(el => ({ width: el.clientWidth, contentWidth: el.scrollWidth, height: el.getBoundingClientRect().height }))
     expect(size.width).toBeGreaterThanOrEqual(size.contentWidth)
-    expect(size.height).toBeGreaterThanOrEqual(44)
+    expect(size.height).toBeGreaterThanOrEqual(TOUCH_FLOOR)
   }
   await dialog.getByRole('button', { name: 'Cancel', exact: true }).click()
   await expect(dialog).toBeHidden()

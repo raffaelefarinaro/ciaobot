@@ -1,5 +1,5 @@
 import { expect, test } from '@playwright/test'
-import { boot, COMPOSER, isolate, openChatDetails } from '../support/app'
+import { boot, COMPOSER, isolate, openChatDetails, TOUCH_FLOOR } from '../support/app'
 
 for (const mobile of [false, true]) {
   test.describe(mobile ? 'Chat details drawer' : 'Chat details window', () => {
@@ -38,8 +38,8 @@ for (const mobile of [false, true]) {
       await expect(close.locator('svg path')).toHaveAttribute('d', 'm6 6 12 12M18 6 6 18')
       const size = await close.boundingBox()
       if (mobile) {
-        expect(size!.width).toBeGreaterThanOrEqual(44)
-        expect(size!.height).toBeGreaterThanOrEqual(44)
+        expect(size!.width).toBeGreaterThanOrEqual(TOUCH_FLOOR)
+        expect(size!.height).toBeGreaterThanOrEqual(TOUCH_FLOOR)
       }
       await page.locator('html').evaluate(el => el.classList.remove('theme-light'))
       await page.screenshot({ path: testInfo.outputPath('dark.png'), animations: 'disabled' })

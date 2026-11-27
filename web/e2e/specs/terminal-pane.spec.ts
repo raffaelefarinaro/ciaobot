@@ -1,5 +1,5 @@
 import { expect, test, type Locator, type Page } from '@playwright/test'
-import { COMPOSER, activeWorkspaceButton, boot, isolate, openChatDetails, settled } from '../support/app'
+import { COMPOSER, activeWorkspaceButton, boot, isolate, openChatDetails, settled, TOUCH_FLOOR } from '../support/app'
 
 /**
  * The browser terminal's pane, in a real browser.
@@ -556,8 +556,8 @@ test.describe('on a touch screen wide enough for the tile', () => {
     // Every key is a 44px target.
     for (let i = 0; i < 9; i += 1) {
       const box = (await keys.getByRole('button').nth(i).boundingBox())!
-      expect(box.height, `key ${i} is ${box.height}px tall`).toBeGreaterThanOrEqual(44 - 0.5)
-      expect(box.width, `key ${i} is ${box.width}px wide`).toBeGreaterThanOrEqual(44 - 0.5)
+      expect(box.height, `key ${i} is ${box.height}px tall`).toBeGreaterThanOrEqual(TOUCH_FLOOR)
+      expect(box.width, `key ${i} is ${box.width}px wide`).toBeGreaterThanOrEqual(TOUCH_FLOOR)
     }
   })
 })
@@ -623,8 +623,8 @@ test.describe('on a phone', () => {
     expect(count).toBeGreaterThan(0)
     for (let i = 0; i < count; i += 1) {
       const size = (await controls.nth(i).boundingBox())!
-      expect(size.height, `control ${i} is ${size.height}px tall`).toBeGreaterThanOrEqual(44 - 0.5)
-      expect(size.width, `control ${i} is ${size.width}px wide`).toBeGreaterThanOrEqual(44 - 0.5)
+      expect(size.height, `control ${i} is ${size.height}px tall`).toBeGreaterThanOrEqual(TOUCH_FLOOR)
+      expect(size.width, `control ${i} is ${size.width}px wide`).toBeGreaterThanOrEqual(TOUCH_FLOOR)
     }
   })
 })

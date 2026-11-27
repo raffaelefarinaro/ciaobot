@@ -1,5 +1,5 @@
 import { expect, test, type Page } from '@playwright/test'
-import { boot, COMPOSER, horizontalOverflow, isolate, quiesce, seedInbox } from '../support/app'
+import { boot, COMPOSER, horizontalOverflow, isolate, quiesce, seedInbox, TOUCH_FLOOR } from '../support/app'
 
 /**
  * #2274: the Chat details rail is docked from a ResizeObserver on
@@ -254,7 +254,7 @@ test.describe('sidebar shell navigation', () => {
       })
       await page.setViewportSize({ width: viewport.width, height: 320 })
       await expectMenuWithinViewport(page)
-      expect(await page.locator('.sidebar-context').evaluate(el => el.clientHeight)).toBeGreaterThanOrEqual(44)
+      expect(await page.locator('.sidebar-context').evaluate(el => el.clientHeight)).toBeGreaterThanOrEqual(TOUCH_FLOOR)
       expect(await page.locator('.sidebar-header').evaluate(el => el.scrollHeight > el.clientHeight)).toBe(true)
       await page.keyboard.press('End')
       await expect(items.last()).toBeFocused()
@@ -309,8 +309,8 @@ test.describe('sidebar shell navigation', () => {
       for (const selector of ['.nav-links a', '.workspace-scope-trigger']) {
         for (const control of await page.locator(selector).all()) {
           const box = (await control.boundingBox())!
-          expect(box.height).toBeGreaterThanOrEqual(44)
-          expect(box.width).toBeGreaterThanOrEqual(44)
+          expect(box.height).toBeGreaterThanOrEqual(TOUCH_FLOOR)
+          expect(box.width).toBeGreaterThanOrEqual(TOUCH_FLOOR)
         }
       }
       await page.locator('.workspace-scope-trigger').focus()
@@ -318,8 +318,8 @@ test.describe('sidebar shell navigation', () => {
       await expectMenuWithinViewport(page)
       for (const control of await page.locator('.workspace-scope-menu [role="menuitem"]').all()) {
         const box = (await control.boundingBox())!
-        expect(box.height).toBeGreaterThanOrEqual(44)
-        expect(box.width).toBeGreaterThanOrEqual(44)
+        expect(box.height).toBeGreaterThanOrEqual(TOUCH_FLOOR)
+        expect(box.width).toBeGreaterThanOrEqual(TOUCH_FLOOR)
       }
       const last = page.locator('.workspace-scope-menu [role="menuitem"]').last()
       await page.keyboard.press('End')
@@ -591,7 +591,7 @@ test.describe('workbench layout', () => {
     }))
     expect(report.length).toBeGreaterThan(0)
     for (const row of report) {
-      for (const h of row.heights) expect(h).toBeGreaterThanOrEqual(44)
+      for (const h of row.heights) expect(h).toBeGreaterThanOrEqual(TOUCH_FLOOR)
       for (const g of row.gaps) expect(g).toBeGreaterThanOrEqual(8)
     }
     expect(new Set(report.map(r => r.lead)).size).toBe(1)
@@ -923,7 +923,7 @@ test.describe('compact page toolbar on a coarse pointer', () => {
     await quiesce(page)
     expect(await page.evaluate(() => matchMedia('(pointer: coarse)').matches)).toBe(true)
     const button = (await page.locator('.pane-header .task-new').boundingBox())!
-    expect(button.width).toBeGreaterThanOrEqual(44)
-    expect(button.height).toBeGreaterThanOrEqual(44)
+    expect(button.width).toBeGreaterThanOrEqual(TOUCH_FLOOR)
+    expect(button.height).toBeGreaterThanOrEqual(TOUCH_FLOOR)
   })
 })
