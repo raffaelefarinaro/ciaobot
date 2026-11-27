@@ -88,6 +88,7 @@ export function stepWord(step: CareStep, running: CareReport['running']): string
 const STEP_NAMES: Record<string, string> = {
   unsure: 'Unsure',
   drain: 'Legacy queues',
+  'second-look': 'Second look',
   regions: 'Memory regions',
   learnings: 'Learnings',
   stale: 'Stale notes',

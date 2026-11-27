@@ -52,11 +52,10 @@ def test_architecture_doc_indexes_every_ciao_module() -> None:
 # write the unattended nightly curator never performs"), contradicting both
 # the schedules section and ciao/stock/schedules.json's own prompt. Readers
 # reach for the bounded-memory section first, so pin the corrected contract
-# and the guardrails that make the unattended write safe. AI-01 later made the
-# promotion rule explicit: the post-archive memory pass can promote a
-# confident state-shaped fact, while the unattended curator never promotes a
-# NEW region fact. (#627 deleted the archive-time auto-apply that used to be
-# the other half of that contrast.)
+# and the guardrails that make the unattended write safe. The care run now
+# writes a confident, person-sourced region fact directly as the memory pass
+# does; only a fact resting on the run's own output or an injected instruction
+# is refused.
 def test_architecture_doc_states_the_consolidation_contract() -> None:
     repo = Path(__file__).resolve().parents[1]
     doc = (repo / "docs" / "ARCHITECTURE.md").read_text(encoding="utf-8")
@@ -66,11 +65,12 @@ def test_architecture_doc_states_the_consolidation_contract() -> None:
     # curator never performs cannot also carry this sentence. Pin the
     # behaviour, not the stale phrase.
     for fragment in (
-        "the one region write the unattended nightly curator does perform",
+        "The nightly care run consolidates a region once usage reaches",
         "~85% of the cap",  # the threshold that gates consolidation
         "Workspace/Memory-Consolidations.md",  # the undo log
         "becomes a `drop <region>:` line on the Unsure list instead",  # the escape hatch
         "Promoting a NEW fact into a region is a direct write",
+        "A care step writes only a fact whose source the person produced",
     ):
         assert fragment in doc, (
             "docs/ARCHITECTURE.md no longer documents the memory-consolidation "

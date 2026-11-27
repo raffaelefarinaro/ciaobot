@@ -1,6 +1,6 @@
 # The Unsure list and proposal files
 
-Memory is written directly, by the memory pass after a chat and by the care run alike. A fact you are confident of goes where it belongs now: a bounded region, a note, a project doc or `ciao memory learn`. Git backs the vault up, so a wrong write is undone by reverting it; nothing waits in a queue for approval. Two things are not written directly.
+Memory is written directly, by the memory pass after a chat and by the care run alike. A fact you are confident of goes where it belongs now: a bounded region, a note, a project doc or `ciao memory learn`. A replaced or removed line goes to the undo log first (`../guide.md`), so a wrong write can be undone; nothing waits in a queue for approval. Two things are not written directly.
 
 ## The Unsure list
 

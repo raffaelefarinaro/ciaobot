@@ -39,6 +39,7 @@ MAX_FIELD_CHARS = 600
 STEP_FILES: dict[str, str] = {
     "unsure": "curation-pass-1-unsure.md",
     "drain": "drain-legacy-queues.md",
+    "second-look": "curation-pass-8-second-look.md",
     "regions": "curation-pass-2-regions.md",
     "learnings": "curation-pass-4-learnings.md",
     "stale": "curation-pass-3-stale-notes.md",

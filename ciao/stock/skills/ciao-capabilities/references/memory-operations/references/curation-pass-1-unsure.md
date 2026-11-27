@@ -5,9 +5,9 @@
 - `unsure-and-proposals.md` in this folder: the line format and the table of kinds. Read it first.
 
 ## Procedure
-1. For each ticked line, in file order, do what the last column of that table says for its kind. A fact you write goes to the destination the line names; a person ticking it is the approval, so a region write is allowed here. Run `ciao memory status` after every region write.
+1. For each ticked line, in file order, do what the last column of that table says for its kind. A fact you write goes to the destination the line names. Run `ciao memory status` after every region write.
 2. Delete a line only after its write succeeded and you re-read the destination. A line whose kind the table says to leave (`category:`, `repo <path>:`, `rule flip`) stays ticked: count it and report it as `needs you`, never as a new item.
-3. An unticked `observation:` line that already names three distinct chat ids: its destination decides. A people note: write the fact there and delete the line. The profile region: write nothing to it (an unticked line never reaches a bounded region); replace the observation line with a plain line `- [ ] <fact> — seen in <the chat ids>; source: care run; <YYYY-MM-DD>` for a person to tick. Leave every other unticked line alone.
+3. An unticked `observation:` line that already names three distinct chat ids: write the fact to its profile or people destination, citing the chat ids as its source, then delete the line. Leave every other unticked line alone.
 4. If a write fails or a destination is unclear, leave that line as it was and count it.
 
 ## Done when

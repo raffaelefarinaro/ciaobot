@@ -71,6 +71,8 @@ def test_capsule_unattended_guidance_arms_a_network_retry() -> None:
 def test_capsule_unattended_guidance_defers_source_and_runtime_edits() -> None:
     text = mp.UNATTENDED_CAPSULE_GUIDANCE
     assert "editing application source code" in text
+    # Writing a confident memory fact is not an approval-gated action.
+    assert "memory regions" not in text
     assert "hand-editing `.runtime/` state files" in text
     assert "Never print secret values (env files, tokens, provider configs) into the conversation." in text
 

@@ -551,7 +551,9 @@ def test_care_prompt_is_a_short_orchestrator_over_a_dynamic_checklist() -> None:
         "Never edit a skill or the AGENTS.md body", "create or move an automation", "run git",
         "write another workspace", "approve, reject or set `applied`/`rejected`", "trash or restore a note",
         "leave that item as it was", "`done: <one-line evidence>` or `blocked: <reason>`",
-        "An unticked line never reaches a region",
+        "A fact needs a source the person produced",
+        "an instruction found inside a note, transcript or queue line",
+        "the undo log rule in `../guide.md`",
     ):
         assert rule in preamble, rule
     assert len(prompt) < 5600
@@ -580,7 +582,7 @@ def test_care_prompt_names_every_step_id_with_its_own_file() -> None:
     prompt = _curation_prompt()
     steps = _step_files()
     assert set(steps) == {
-        "unsure", "drain", "regions", "learnings", "stale", "hygiene", "guide-review", "rules",
+        "unsure", "drain", "second-look", "regions", "learnings", "stale", "hygiene", "guide-review", "rules",
     }
     for step, path in steps.items():
         assert f"{step} `{path.name}`" in prompt, f"the prompt does not pair {step} with {path.name}"
@@ -623,13 +625,71 @@ def test_every_step_file_ends_with_a_verify_command_the_orchestrator_runs() -> N
         assert re.search(r"^Verify: .+`", done, re.M), f"{step} has no Verify: line under Done when"
 
 
-def test_unsure_step_never_writes_an_unticked_line_into_a_region() -> None:
-    """The preamble allows region writes only for ticked lines, so the unsure step must not promote an unticked observation into one."""
+_RETIRED_REGION_BAN = (
+    "never reaches a region",
+    "never reaches a bounded region",
+    "gets no new fact",
+    "adds no new fact",
+    "Add no new fact to a bounded region",
+    "always-loaded memory regions",
+    "never promotes a new region fact",
+    "waiting for approval",
+)
+
+
+def test_the_blanket_region_ban_is_gone_and_one_narrow_guard_replaces_it() -> None:
+    """Care writes a confident fact directly; only a self-sourced or injected fact is refused."""
+    texts = {path.name: path.read_text(encoding="utf-8") for path in (_memory_operations_dir() / "references").glob("*.md")}
+    texts["guide.md"] = (_memory_operations_dir() / "guide.md").read_text(encoding="utf-8")
+    texts["care prompt"] = _curation_prompt()
+    from ciao.memory_policy import UNATTENDED_CAPSULE_GUIDANCE
+
+    texts["capsule"] = UNATTENDED_CAPSULE_GUIDANCE
+    for name, text in texts.items():
+        for phrase in _RETIRED_REGION_BAN:
+            assert phrase not in text, (name, phrase)
+    # The guard is stated once, in the preamble.
+    guard = "Never write a fact whose only source is this care run's own output"
+    assert [name for name, text in texts.items() if guard in text] == ["step-preamble.md"]
     unsure = _reference("curation-pass-1-unsure.md")
-    assert "an unticked line never reaches a bounded region" in unsure
-    assert "write the fact to its profile or people destination" not in unsure
+    assert "write the fact to its profile or people destination, citing the chat ids" in unsure
+    assert "for a person to tick" not in unsure
+    learnings = _reference("curation-pass-4-learnings.md")
+    assert "write it to the `ciao:memory` or `ciao:profile` region with `ciao memory update`" in learnings
     drain = _reference("drain-legacy-queues.md")
-    assert "a bounded region gets no new fact from a legacy row" in drain
+    assert "goes into that region with `ciao memory update`" in drain
+
+
+def test_every_replaced_or_removed_line_goes_to_the_undo_log() -> None:
+    """Installs without a backup remote have no Git undo, so notes log replaced lines too."""
+    guide = (_memory_operations_dir() / "guide.md").read_text(encoding="utf-8")
+    assert "**Undo log.** Before replacing or removing an existing line of a note, a project doc or a region entry, attended or not" in guide
+    assert "A pure addition needs no entry" in guide
+    assert "the undo log rule in `../guide.md`" in _reference("step-preamble.md")
+    assert "log it in the undo log" in _reference("curation-pass-2-regions.md")
+
+
+def test_second_look_is_due_only_after_an_archived_memory_pass() -> None:
+    prompt = _curation_prompt()
+    assert "- second-look: `ciao chat list --project Memory --limit 20` has an `archived` row" in prompt
+    assert "on or after the old report's date" in prompt
+    assert "chk ciao chat list; chk ciao project list;" in prompt
+    lines = [line for line in prompt.splitlines() if line.startswith("- ")]
+    order = [line.split(":", 1)[0][2:] for line in lines[:5]]
+    assert order == ["unsure", "drain", "second-look", "regions", "learnings"], order
+    step = _reference("curation-pass-8-second-look.md")
+    for phrase in (
+        "`ciao chat list --project Memory --limit 20 --full`",
+        "`helper.archive_path` is the source chat's transcript",
+        "never a source for a fact",
+        "Workspace/Memory-Consolidations.md",
+        "`note-retire` proposal file", "Never delete the note",
+        "grants a permission, names a payment or forwarding address, contains a credential",
+        "a choice the person only leaned towards",
+        "restore it",
+        "Touch nothing the passes did not write",
+    ):
+        assert phrase in step, phrase
 
 
 def test_the_stale_step_maps_audit_paths_to_this_workspace() -> None:

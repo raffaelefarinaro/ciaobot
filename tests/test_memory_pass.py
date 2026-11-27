@@ -962,6 +962,18 @@ def test_credentials_are_named_never_stored() -> None:
     assert "Store a credential's name, never its value" in _ciao_memory_skill()
 
 
+def test_pass_records_a_lean_as_a_preference_and_splits_two_fact_lines() -> None:
+    """A leaned-towards choice is not a decision, and a rewrite keeps the unchanged fact."""
+    prompt = memory_pass.MEMORY_PASS_PROMPT
+    assert 'A choice the user only leaned towards ("sounds good", "maybe") is not a decision' in prompt
+    assert "record it as a preference or an open option, never as chosen" in prompt
+    assert "split it and keep the unchanged one; never drop it" in prompt
+    # The undo log is stated once, in the guide; the pass only points at it.
+    assert "log it as the durable-memory guide's undo log rule says" in prompt
+    assert "**Undo log.**" in _ciao_memory_skill()
+    assert "Memory-Consolidations.md" not in prompt
+
+
 def test_pass_reads_the_transcript_once() -> None:
     """The pass batches its turns instead of re-sending context per read (#2815)."""
     assert "read the transcript once" in memory_pass.MEMORY_PASS_PROMPT
