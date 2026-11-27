@@ -52,6 +52,72 @@ final class ServerSwitchChoicesTests: XCTestCase {
         ], "Local mode checks This Mac and never a saved host, even one with the same address shape")
     }
 
+    func testEveryLoopbackSpellingIsThisMacOnlyWhenTheBundledEngineIsAvailable() throws {
+        let spellings = [
+            "http://127.0.0.1:8445", "https://127.0.0.1:61190", "http://localhost:8445",
+            "http://[::1]:8445", "https://localhost", "http://127.0.0.1:9999",
+        ]
+        for text in spellings {
+            let origin = try XCTUnwrap(Origin(text), text)
+            XCTAssertTrue(ServerSwitchChoices.isThisMac(origin, localAvailable: true), text)
+            XCTAssertFalse(ServerSwitchChoices.isThisMac(origin, localAvailable: false), text)
+            XCTAssertEqual(ServerSwitchChoices.displayLabel(for: origin, saved: "x", localAvailable: true), "This Mac")
+            XCTAssertEqual(ServerSwitchChoices.displayLabel(for: origin, saved: "x", localAvailable: false), "x")
+        }
+    }
+
+    func testAnotherMachineIsNeverThisMacEvenWhenItReachesThisOne() throws {
+        for text in ["https://100.64.1.2:8445", "https://mac.tailnet.ts.net:8445", "https://192.168.1.20:8445", "https://vps.example:8443"] {
+            let origin = try XCTUnwrap(Origin(text), text)
+            XCTAssertFalse(ServerSwitchChoices.isThisMac(origin, localAvailable: true), text)
+        }
+    }
+
+    func testASavedLoopbackHostIsNotASecondServerWhenThisMacIsAvailable() throws {
+        let rows = ServerSwitchChoices.rows(
+            hosts: [record("http://127.0.0.1:8445"), record("http://localhost:9000"), record("https://mac.tailnet.ts.net:8445")],
+            connected: Origin("https://127.0.0.1:61190"),
+            localMode: true,
+            localAvailable: true
+        )
+        XCTAssertEqual(rows, [
+            .thisMac(checked: true),
+            .host(origin: try XCTUnwrap(Origin("https://mac.tailnet.ts.net:8445")), label: "mac.tailnet.ts.net:8445", checked: false),
+        ])
+    }
+
+    func testASavedLoopbackHostIsKeptWhenThisMacCannotRunTheEngine() throws {
+        let rows = ServerSwitchChoices.rows(
+            hosts: [record("http://127.0.0.1:8445"), record(remote)],
+            connected: Origin("http://127.0.0.1:8445"),
+            localMode: false,
+            localAvailable: false
+        )
+        XCTAssertEqual(rows, [
+            .host(origin: try XCTUnwrap(Origin("http://127.0.0.1:8445")), label: "127.0.0.1:8445", checked: true),
+            .host(origin: try XCTUnwrap(Origin(remote)), label: "vps.example:8443", checked: false),
+        ])
+    }
+
+    func testBeingConnectedToLoopbackInExternalModeChecksThisMac() throws {
+        let rows = ServerSwitchChoices.rows(
+            hosts: [record(remote)],
+            connected: Origin("http://127.0.0.1:8543"),
+            localMode: false,
+            localAvailable: true
+        )
+        XCTAssertEqual(rows.first, .thisMac(checked: true))
+    }
+
+    @MainActor
+    func testTheConnectedTitleNamesThisMacNotItsLoopbackAddress() {
+        let raw = AppSessionStatus.Connection.connected("https://127.0.0.1:61190")
+        XCTAssertEqual(MenuBarController.statusTitle(for: raw, localAvailable: true), "Connected to This Mac")
+        XCTAssertEqual(MenuBarController.statusTitle(for: raw, localAvailable: false), "Connected to https://127.0.0.1:61190")
+        let remoteHost = AppSessionStatus.Connection.connected("https://vps.example:8443")
+        XCTAssertEqual(MenuBarController.statusTitle(for: remoteHost, localAvailable: true), "Connected to https://vps.example:8443")
+    }
+
     func testALocalCapableMacWithNoSavedHostHasOneChoiceAndNoSection() {
         let rows = ServerSwitchChoices.rows(hosts: [], connected: nil, localMode: false, localAvailable: true)
         XCTAssertFalse(ServerSwitchChoices.showsSection(rows), "One choice is not a switch")

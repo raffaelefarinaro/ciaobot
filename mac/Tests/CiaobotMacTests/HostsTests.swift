@@ -121,4 +121,31 @@ final class HostsTests: XCTestCase {
         XCTAssertLessThanOrEqual(label.count, 48)
         XCTAssertTrue(label.hasSuffix("…"), "A clipped label must end with an ellipsis: \(label)")
     }
+
+    func testRemovingTheTakenOverPortDropsOnlyLoopbackHostsOnThatPort() throws {
+        let defaults = try isolatedDefaults()
+        let (store, _) = makeStore(defaults: defaults)
+        for text in ["http://127.0.0.1:8445", "http://localhost:8445", "http://[::1]:8445",
+                     "http://127.0.0.1:9000", "https://mac.tailnet.ts.net:8445", "https://vps.example:8445"] {
+            store.add(try XCTUnwrap(Origin(text)))
+        }
+
+        store.removeLoopbackHosts(port: 8445)
+
+        XCTAssertEqual(store.hosts.map(\.origin), [
+            "http://127.0.0.1:9000", "https://mac.tailnet.ts.net:8445", "https://vps.example:8445",
+        ], "A Tailscale or LAN host on the same port is another server, and another loopback port is not the taken-over engine")
+    }
+
+    func testTheOnlyHostFromTheMigratedLastOriginIsRemovedAndForgotten() throws {
+        let defaults = try isolatedDefaults()
+        let (store, lastServer) = makeStore(defaults: defaults)
+        lastServer.remember(try XCTUnwrap(Origin("http://127.0.0.1:8445")))
+        XCTAssertEqual(store.hosts.map(\.origin), ["http://127.0.0.1:8445"])
+
+        store.removeLoopbackHosts(port: 8445)
+
+        XCTAssertEqual(store.hosts, [], "The migrated last origin is not offered again")
+        XCTAssertNil(lastServer.savedOrigin)
+    }
 }

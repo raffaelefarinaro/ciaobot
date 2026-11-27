@@ -485,6 +485,9 @@ final class EngineTakeover: ObservableObject {
     private let confirmMove: @MainActor (Int) -> Bool
     private let windowVisible: @MainActor () -> Bool
     private let probe: (Origin) async -> Bool
+    /// The saved hosts. A completed takeover drops the ones that point at the
+    /// engine it moved, which the bundled engine now serves as This Mac.
+    private let hosts: HostListStoring?
     private let readyTimeout: TimeInterval
     private let pollInterval: TimeInterval
     private var inFlight: Task<Outcome, Never>?
@@ -503,8 +506,10 @@ final class EngineTakeover: ObservableObject {
         windowVisible: @escaping @MainActor () -> Bool,
         readyTimeout: TimeInterval = EngineTakeover.readyTimeout,
         pollInterval: TimeInterval = EngineTakeover.pollInterval,
-        probe: @escaping (Origin) async -> Bool = EngineTakeover.probeOrigin
+        probe: @escaping (Origin) async -> Bool = EngineTakeover.probeOrigin,
+        hosts: HostListStoring? = nil
     ) {
+        self.hosts = hosts
         self.runner = runner
         self.supervisor = supervisor
         self.trashing = trash
@@ -658,6 +663,9 @@ final class EngineTakeover: ObservableObject {
         if await call(["finish", "--json", "--id", id, "--done"])?.ok != true {
             NSLog("Ciaobot takeover: the finish record was not written; the next launch closes the takeover.")
         }
+        // The old engine's origin is This Mac now. A host saved for it would list
+        // every chat twice, so it is not offered again.
+        hosts?.removeLoopbackHosts(port: plan.port)
         return .done(left: left)
     }
 

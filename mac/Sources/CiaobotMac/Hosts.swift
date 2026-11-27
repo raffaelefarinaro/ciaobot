@@ -53,6 +53,18 @@ protocol HostListStoring: AnyObject {
     func rename(_ origin: Origin, label: String)
 }
 
+extension HostListStoring {
+    /// Removes every saved loopback host on `port`: the origin a taken-over 1.x
+    /// engine served on. A host on another machine (Tailscale, LAN) is another
+    /// server even when it reaches this Mac, so only loopback spellings count.
+    func removeLoopbackHosts(port: Int) {
+        for record in hosts {
+            guard let origin = Origin(record.origin), origin.isLoopback, origin.portNumber == port else { continue }
+            remove(origin)
+        }
+    }
+}
+
 @MainActor
 final class UserDefaultsHostListStore: HostListStoring {
     nonisolated static let defaultKey = "CiaobotHosts"

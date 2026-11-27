@@ -190,7 +190,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         #else
         addressedTestLaunch = false
         #endif
-        let engineParts = Self.makeEngineParts()
+        let hostStore = UserDefaultsHostListStore(defaults: launchDefaults, lastServer: lastServerStore)
+        let engineParts = Self.makeEngineParts(hosts: hostStore)
         self.init(
             session: session,
             presenter: presenter,
@@ -216,7 +217,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             supervisor: engineParts.supervisor,
             takeover: engineParts.takeover,
             lastServer: lastServerStore,
-            hostStore: UserDefaultsHostListStore(defaults: launchDefaults, lastServer: lastServerStore),
+            hostStore: hostStore,
             updateQuit: updateQuit
         )
     }
@@ -305,6 +306,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// (the supervisor then reports the fixed unavailable copy). A DEBUG test
     /// launch can point the home and the engine resources somewhere isolated.
     private static func makeEngineParts(
+        hosts: HostListStoring,
         mainWindow: @escaping @MainActor () -> NSWindow? = { MainWindowPresenter.mainWindow(in: NSApp.windows) }
     ) -> (supervisor: EngineSupervisor, takeover: EngineTakeover?) {
         let resourceDirectory: URL?
@@ -353,7 +355,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             trash: FileManagerTrashing(),
             home: engineHome,
             labelOverride: labelOverride,
-            windowVisible: takeoverWindowVisible(mainWindow)
+            windowVisible: takeoverWindowVisible(mainWindow),
+            hosts: hosts
         )
         return (supervisor, takeover)
     }
@@ -490,7 +493,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             let fleet = HostFleetModel(
                 hosts: savedHosts,
                 status: session,
-                signIn: .live
+                signIn: .live,
+                localEngineAvailable: ConnectionView.canRunLocalEngine(
+                    hostIsArm64: EngineSupervisor.hostIsArm64,
+                    hasEngine: supervisor?.hasEngine == true
+                )
             )
             controller = MenuBarController(
                 status: session,

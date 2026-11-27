@@ -476,11 +476,14 @@ final class MenuBarController: NSObject, MenuBarControlling, NSMenuDelegate {
         statusEntry?.title = Self.stoppingTitle
     }
 
-    static func statusTitle(for connection: AppSessionStatus.Connection) -> String {
+    static func statusTitle(for connection: AppSessionStatus.Connection, localAvailable: Bool = false) -> String {
         switch connection {
         case .disconnected:
             return disconnectedTitle
         case .connected(let origin):
+            if let parsed = Origin(origin), ServerSwitchChoices.isThisMac(parsed, localAvailable: localAvailable) {
+                return connectedTitlePrefix + thisMacTitle
+            }
             return connectedTitlePrefix + origin
         }
     }
@@ -630,7 +633,7 @@ final class MenuBarController: NSObject, MenuBarControlling, NSMenuDelegate {
     }
 
     private func statusChanged(_ connection: AppSessionStatus.Connection) {
-        statusEntry?.title = quitting ? Self.stoppingTitle : Self.statusTitle(for: connection)
+        statusEntry?.title = quitting ? Self.stoppingTitle : Self.statusTitle(for: connection, localAvailable: localEngineAvailable)
         // `@Published` sends before the stored connection is updated. A genuine
         // disconnect or origin switch clears the badge from the emitted fact
         // now, so the previous origin's count cannot survive even one frame. A
@@ -790,7 +793,7 @@ final class MenuBarController: NSObject, MenuBarControlling, NSMenuDelegate {
         animatedRows.removeAll()
 
         let entry = NSMenuItem(
-            title: quitting ? Self.stoppingTitle : Self.statusTitle(for: status.connection),
+            title: quitting ? Self.stoppingTitle : Self.statusTitle(for: status.connection, localAvailable: localEngineAvailable),
             action: nil,
             keyEquivalent: ""
         )

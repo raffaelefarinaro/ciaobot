@@ -82,6 +82,7 @@ final class HostFleetModel: ObservableObject, HostFleetProviding {
     private let sessionContextFactory: @MainActor (AppSessionStatus, Origin) -> ConnectionContext
     private let staticContextFactory: @MainActor (Origin, WKWebsiteDataStore) -> ConnectionContext
     private let now: () -> Date
+    private let localEngineAvailable: Bool
 
     private var entries: [HostFleetEntry] = []
     private var connectionSubscription: AnyCancellable?
@@ -111,8 +112,10 @@ final class HostFleetModel: ObservableObject, HostFleetProviding {
         staticContextFactory: @escaping @MainActor (Origin, WKWebsiteDataStore) -> ConnectionContext = {
             StaticHostContext(origin: $0, dataStore: $1)
         },
-        now: @escaping () -> Date = Date.init
+        now: @escaping () -> Date = Date.init,
+        localEngineAvailable: Bool = false
     ) {
+        self.localEngineAvailable = localEngineAvailable
         self.hosts = hosts
         self.status = status
         self.signIn = signIn
@@ -203,18 +206,21 @@ final class HostFleetModel: ObservableObject, HostFleetProviding {
         guard let active = status.currentOrigin else { return [] }
         var desired = [DesiredHost(origin: active, label: savedLabel(for: active), isActive: true)]
         for record in hosts.hosts {
+            // A loopback saved host is this Mac's own engine when the bundled
+            // engine is available: the active feed already covers it, so it is
+            // neither listed nor polled a second time.
             guard let origin = Origin(record.origin),
-                  origin.canonicalKey != active.canonicalKey else { continue }
+                  origin.canonicalKey != active.canonicalKey,
+                  !ServerSwitchChoices.isThisMac(origin, localAvailable: localEngineAvailable) else { continue }
             desired.append(DesiredHost(origin: origin, label: record.label, isActive: false))
         }
         return desired
     }
 
     private func savedLabel(for origin: Origin) -> String {
-        if let record = hosts.hosts.first(where: { $0.origin == origin.canonicalKey }) {
-            return record.label
-        }
-        return HostRecord.defaultLabel(for: origin.canonicalKey)
+        let saved = hosts.hosts.first(where: { $0.origin == origin.canonicalKey })?.label
+            ?? HostRecord.defaultLabel(for: origin.canonicalKey)
+        return ServerSwitchChoices.displayLabel(for: origin, saved: saved, localAvailable: localEngineAvailable)
     }
 
     private func bindingKind(for origin: Origin, isActive: Bool) -> BindingKind {

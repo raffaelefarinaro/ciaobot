@@ -446,6 +446,63 @@ final class HostFleetTests: XCTestCase {
         )
     }
 
+    // MARK: - This Mac
+
+    func testASavedLoopbackHostIsNeitherListedNorPolledWhenThisMacIsAvailable() throws {
+        let (registry, _) = try makeRegistry()
+        let privatePort = Origin("https://127.0.0.1:61190")!
+        let oldPort = Origin("http://127.0.0.1:8445")!
+        let status = AppSessionStatus()
+        status.reportConnected(privatePort, dataStore: WKWebsiteDataStore.nonPersistent())
+        let transport = FleetChatTransport()
+
+        let fleet = makeFleet(
+            hosts: [record(oldPort, "127.0.0.1:8445"), record(remote, "Remote")],
+            status: status, registry: registry, chatTransport: transport,
+            eventTransport: FleetEventTransport(), localEngineAvailable: true
+        )
+        fleet.start()
+
+        XCTAssertTrue(waitUntil { self.isLoaded(fleet, origin: privatePort.canonicalKey) })
+        XCTAssertEqual(fleet.feeds.map(\.originKey), [privatePort.canonicalKey, remote.canonicalKey])
+        XCTAssertEqual(fleet.feeds.first?.label, "This Mac")
+        XCTAssertFalse(transport.calls.contains { $0.origin.canonicalKey == oldPort.canonicalKey },
+                       "The taken-over origin is the same engine and is never polled")
+    }
+
+    func testThisMacAloneIsOneFeedNamedThisMac() throws {
+        let (registry, _) = try makeRegistry()
+        let privatePort = Origin("https://127.0.0.1:61190")!
+        let status = AppSessionStatus()
+        status.reportConnected(privatePort, dataStore: WKWebsiteDataStore.nonPersistent())
+
+        let fleet = makeFleet(
+            hosts: [record(Origin("http://127.0.0.1:8445")!, "127.0.0.1:8445")],
+            status: status, registry: registry, chatTransport: FleetChatTransport(),
+            eventTransport: FleetEventTransport(), localEngineAvailable: true
+        )
+        fleet.start()
+
+        XCTAssertEqual(fleet.feeds.map(\.label), ["This Mac"], "One feed means no host header at all")
+    }
+
+    func testASavedLoopbackHostStaysWhenThisMacCannotRunTheEngine() throws {
+        let (registry, _) = try makeRegistry()
+        let saved = Origin("http://127.0.0.1:8445")!
+        let status = AppSessionStatus()
+        status.reportConnected(remote, dataStore: WKWebsiteDataStore.nonPersistent())
+
+        let fleet = makeFleet(
+            hosts: [record(saved, "127.0.0.1:8445")],
+            status: status, registry: registry, chatTransport: FleetChatTransport(),
+            eventTransport: FleetEventTransport(), localEngineAvailable: false
+        )
+        fleet.start()
+
+        XCTAssertEqual(fleet.feeds.last?.label, "127.0.0.1:8445", "Named by its address, since it is the only server")
+        XCTAssertTrue(fleet.feeds.contains { $0.originKey == saved.canonicalKey })
+    }
+
     // MARK: - Helpers
 
     private func record(_ origin: Origin, _ label: String) -> HostRecord {
@@ -459,7 +516,8 @@ final class HostFleetTests: XCTestCase {
         chatTransport: FleetChatTransport,
         eventTransport: FleetEventTransport,
         cookieFactory: FleetCookieFactory? = nil,
-        stores: FleetStoreFactory? = nil
+        stores: FleetStoreFactory? = nil,
+        localEngineAvailable: Bool = false
     ) -> HostFleetModel {
         let cookieFactory = cookieFactory ?? FleetCookieFactory()
         let stores = stores ?? FleetStoreFactory()
@@ -472,7 +530,8 @@ final class HostFleetTests: XCTestCase {
             cookieProviderFactory: { cookieFactory.make(store: $0) },
             persistentStoreFactory: { stores.store(for: $0) },
             ephemeralStoreFactory: { stores.ephemeral() },
-            now: { self.now }
+            now: { self.now },
+            localEngineAvailable: localEngineAvailable
         )
     }
 
