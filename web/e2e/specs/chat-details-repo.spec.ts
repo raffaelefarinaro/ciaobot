@@ -26,6 +26,14 @@ test('the Repository section is compact and the rail does not scroll sideways', 
   await expect(section.getByRole('switch')).toHaveCount(0)
   await expect(section).not.toContainText('code mode')
 
+  // Code mode is the project's mark: the linked project's row carries the glyph
+  // (named in text for AT) and its chats carry none.
+  const linked = page.locator('.project-name', { has: page.locator('.code-mark') })
+  await expect(linked.first()).toBeVisible()
+  await expect(linked.first().locator('.code-mark')).toHaveText('›_')
+  await expect(linked.first()).toContainText('Linked to a repository')
+  await expect(page.locator('.chat-item .code-mark')).toHaveCount(0)
+
   await expect(page.locator('.chat-rail-agent-context').getByText('Always loaded', { exact: true })).toBeVisible()
 
   await expect(section.locator('button.chat-repo-branch')).toHaveCount(0)

@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest'
 import {
   chatLocationDiffers,
   repoChip,
-  sidebarCodeBadgeTitle,
+  chatCodeFacts,
 } from './repoLocation'
 import type { ProjectRepo, RepoLocation } from './types'
 
@@ -48,7 +48,7 @@ describe('repoLocation', () => {
   })
 
   it('names the full repository branch and worktree in the code badge tooltip', () => {
-    const title = sidebarCodeBadgeTitle(repo, {
+    const title = chatCodeFacts(repo, {
       path: '/r/app-wt', branch: 'feat-x', is_worktree: true, exists: true,
     })
     expect(title).toBe('Code mode · app · branch feat-x · worktree: /r/app-wt')
@@ -57,15 +57,15 @@ describe('repoLocation', () => {
   })
 
   it('names the main checkout in the code badge tooltip', () => {
-    expect(sidebarCodeBadgeTitle(repo, here)).toBe('Code mode · app · branch main · path: /r/app')
-    expect(sidebarCodeBadgeTitle(repo, null)).toBe('Code mode · app · branch main · path: /r/app')
+    expect(chatCodeFacts(repo, here)).toBe('Code mode · app · branch main · path: /r/app')
+    expect(chatCodeFacts(repo, null)).toBe('Code mode · app · branch main · path: /r/app')
     // A location without a path is no location: the linked checkout, no
     // invented worktree.
-    expect(sidebarCodeBadgeTitle(repo, { is_worktree: true })).toBe('Code mode · app · branch main · path: /r/app')
+    expect(chatCodeFacts(repo, { is_worktree: true })).toBe('Code mode · app · branch main · path: /r/app')
   })
 
   it('marks a removed worktree in the code badge tooltip', () => {
-    const title = sidebarCodeBadgeTitle(repo, {
+    const title = chatCodeFacts(repo, {
       path: '/r/app-wt', branch: 'feat-x', is_worktree: true, exists: false,
     })
     expect(title).toBe('Code mode · app · branch feat-x · worktree removed: /r/app-wt')

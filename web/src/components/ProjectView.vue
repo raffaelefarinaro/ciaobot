@@ -39,7 +39,7 @@
             />
             <!-- The project name is the title. Its workspace is named once, in
                  the sidebar's workspace scope, so it is not repeated here. -->
-            <h2 v-else class="pane-title project-title" @dblclick="startEditName">{{ project.name }}</h2>
+            <h2 v-else class="pane-title project-title" @dblclick="startEditName">{{ project.name }}<template v-if="inCodeMode(project.repo)"><CodeMark :repo="project.repo" class="project-title-code" /><span class="sr-only">, {{ projectCodeTitle(project.repo) }}</span></template></h2>
           </ItemTitleRow>
         </div>
       </template>
@@ -418,7 +418,8 @@ import { railLeanStyle, railMotionClass } from '../lib/titleRail'
 import { takeProjectRailArrival, useProjectRail } from '../composables/useProjectRail'
 import BrowserTerminalButton from './BrowserTerminalButton.vue'
 import RepoPickerDialog from './RepoPickerDialog.vue'
-import { branchLabel, findRepoInstructions } from '../lib/repo'
+import { branchLabel, findRepoInstructions, inCodeMode, projectCodeTitle } from '../lib/repo'
+import CodeMark from './CodeMark.vue'
 import ChatSignals from './ChatSignals.vue'
 import AppIcon from './AppIcon.vue'
 import type { ChatInfo, ChatArchivePage, Schedule } from '../lib/types'
@@ -1122,6 +1123,10 @@ watch(() => [props.projectId, project.value?.vault_folder], async () => {
 .project-title {
   margin: 0;
   cursor: text;
+}
+.project-title-code {
+  margin-left: 6px;
+  vertical-align: middle;
 }
 
 .title-input {

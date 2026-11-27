@@ -57,7 +57,6 @@ for (const viewport of [{ width: 1280, height: 800 }, { width: 1280, height: 900
       await checkChip(page, chip)
       // A switch drops the catalog; the chip reads the new workspace's
       // default without the picker being opened.
-      const before = await box(chip)
       // The switcher is in the drawer on a phone, so read the active workspace
       // from where the app keeps it.
       const active = () => page.evaluate(() => localStorage.getItem('ciao-active-workspace'))
@@ -66,7 +65,9 @@ for (const viewport of [{ width: 1280, height: 800 }, { width: 1280, height: 900
       await page.keyboard.press(start === 'beta' ? '1' : '2')
       await expect.poll(active).not.toBe(start)
       await expect(chip).toContainText('Synthetic Model')
-      expect(await box(chip)).toEqual(before)
+      // The workspaces' project chips differ (one project is linked, so it
+      // carries the code mark), so the chip is compared only with itself in
+      // this workspace: picker closed, then open, then closed.
       await checkChip(page, chip)
     })
 

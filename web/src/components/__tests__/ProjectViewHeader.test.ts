@@ -91,6 +91,25 @@ describe('ProjectView header', () => {
     expect(wrapper.emitted('close')).toHaveLength(1)
   })
 
+  it('carries the code glyph after the title of a linked project, in the rail and in the plain title', async () => {
+    const store = seed()
+    const repo = { path: '/r/app', branch: 'main', dirty: false, missing: false }
+    store.projects[1] = { ...store.projects[1], repo } as typeof store.projects[number]
+    const wrapper = await mountView()
+    const items = wrapper.findAll('.title-rail-item')
+    expect(items.map(i => i.find('.code-mark').exists())).toEqual([false, true, false])
+    expect(items[1].get('.code-mark').attributes('aria-hidden')).toBe('true')
+    expect(items[1].attributes('aria-label')).toContain('Linked to a repository: app')
+    wrapper.unmount()
+
+    const lone = seed(1)
+    lone.projects[0] = { ...lone.projects[0], repo } as typeof lone.projects[number]
+    const plain = await mountView('general')
+    const title = plain.get('.project-title')
+    expect(title.get('.code-mark').attributes('aria-hidden')).toBe('true')
+    expect(title.text()).toContain('Linked to a repository: app')
+  })
+
   it('keeps the plain title for a lone project, and a double-click renames', async () => {
     seed(1)
     const wrapper = await mountView('general')

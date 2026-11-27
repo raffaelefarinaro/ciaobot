@@ -1,5 +1,6 @@
 import { computed } from 'vue'
 import { useRouter } from 'vue-router'
+import { inCodeMode, projectCodeTitle } from '../lib/repo'
 import { useProjectStore } from '../stores/projects'
 import { sidebarProjectOrder, type RailItem, type RailMark } from '../lib/titleRail'
 import { markRailArrival, takeRailArrival, useTitleRail, type TitleRail } from './useTitleRail'
@@ -16,8 +17,9 @@ export function projectRailSubtitle(chatCount: number): string {
 }
 
 /** "<name>, <N chats>" plus ", needs you" | ", working" | ", unread". */
-export function projectRailLabel(name: string, subtitle: string, mark: RailMark | null): string {
+export function projectRailLabel(name: string, subtitle: string, mark: RailMark | null, code = ''): string {
   const parts = [name, subtitle]
+  if (code) parts.push(code)
   if (mark === 'needs') parts.push('needs you')
   else if (mark === 'working') parts.push('working')
   else if (mark === 'unread') parts.push('unread')
@@ -42,13 +44,15 @@ export function useProjectRail(currentId: () => string): TitleRail {
         ? 'working'
         : store.projectUnread(p.project_id) > 0 ? 'unread' : null
     const subtitle = projectRailSubtitle(chats.length)
+    const codeTitle = inCodeMode(p.repo) ? projectCodeTitle(p.repo) : ''
     return {
       id: p.project_id,
       title: p.name,
       subtitle,
       mark,
       titlePending: false,
-      label: projectRailLabel(p.name, subtitle, mark),
+      label: projectRailLabel(p.name, subtitle, mark, codeTitle),
+      ...(inCodeMode(p.repo) ? { repo: p.repo } : {}),
     }
   }))
 
