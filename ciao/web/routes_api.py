@@ -83,7 +83,13 @@ from ciao.workspaces import (
 )
 # Kept as an alias: several call sites predate the shared module.
 _WORKSPACE_NAME_RE = WORKSPACE_NAME_RE
-from ciao.core_prompt import unified_core
+from ciao.core_prompt import durable_memory_guide_path, unified_core
+from ciao.care_report import (
+    REPORT_RELATIVE_PATH as CARE_REPORT_PATH,
+    STEP_FILES as CARE_STEP_FILES,
+    UNSURE_RELATIVE_PATH as CARE_UNSURE_PATH,
+    read_care_report,
+)
 from ciao.provider_service import capabilities_for, supported_providers
 from ciao.subprocess_step import run_step
 from ciao.schedule_command import normalize_schedule_command
@@ -105,6 +111,7 @@ from ciao.schedules import (
     publish_automations_changed,
     run_failed_since,
     stamp_fallback_project,
+    system_schedule_id,
     wall_clock_time_error,
     wall_clock_time_value_error,
     normalize_system_schedule_update,
@@ -4223,6 +4230,93 @@ async def vault_graph(request: Request) -> JSONResponse:
         return JSONResponse({"error": str(exc)}, status_code=409)
     except ConnectedIndexBusy as exc:
         return JSONResponse({"error": str(exc)}, status_code=503)
+
+
+# The packaged Workspace care routine, fanned out per workspace
+# (`system-memory-curation@<workspace>`).
+CARE_SCHEDULE_BASE_ID = "system-memory-curation"
+
+
+def _care_display_path(config: CiaoConfig, path: Path) -> str:
+    """The path the file viewer opens: workspace-relative when it can be."""
+    try:
+        return path.relative_to(Path(config.workspace_root).resolve()).as_posix()
+    except (ValueError, OSError):
+        return str(path)
+
+
+def _parse_iso(value: str) -> datetime | None:
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except (TypeError, ValueError):
+        return None
+    return parsed if parsed.tzinfo else parsed.replace(tzinfo=UTC)
+
+
+async def care_report(request: Request) -> JSONResponse:
+    """GET one workspace's Workspace care report, parsed (read-only).
+
+    The source is `<vault>/Workspace/Care-Report.md`, the checklist the nightly
+    care run writes; :mod:`ciao.care_report` reads it with a size cap and never
+    raises, so a missing file is the "never run" state, not an error.
+
+    Whether a run is in progress comes from the care schedule itself: the
+    scheduler stamps `last_status = "running"` at dispatch and overwrites it with
+    the outcome. The step it is on is the report's first open `- [ ]` line, and
+    only when the report was written after that dispatch: before the new run has
+    rewritten the checklist, the file on disk is the previous run's.
+    """
+    config = request.app.state.config
+    workspace = request.query_params.get("workspace", "").strip()
+    if not workspace or config.workspace(workspace) is None:
+        return JSONResponse({"error": "workspace is required"}, status_code=400)
+    try:
+        vault = Path(config.workspace_vault_root(workspace)).resolve()
+    except (AttributeError, ValueError, OSError) as exc:
+        return JSONResponse({"error": f"vault unavailable: {exc}"}, status_code=409)
+    body: dict[str, Any] = await asyncio.to_thread(read_care_report, vault)
+    references = durable_memory_guide_path().parent / "references"
+    for step in body["steps"]:
+        name = CARE_STEP_FILES.get(step["id"], "")
+        step["step_file"] = str(references / name) if name else ""
+
+    schedule: dict[str, Any] | None = None
+    running: dict[str, Any] | None = None
+    sm = getattr(request.app.state, "schedule_manager", None)
+    if sm is not None:
+        schedule_id = system_schedule_id(CARE_SCHEDULE_BASE_ID, workspace)
+        try:
+            current = sm.get_with_revision(schedule_id)
+        except ScheduleStoreCorrupt:
+            current = None
+        entry = current[0] if current is not None else None
+        if entry is not None:
+            schedule = {
+                "id": entry.schedule_id,
+                "enabled": bool(entry.enabled),
+                "last_status": entry.last_status or "",
+                "last_run_at": entry.last_dispatched_at or "",
+            }
+            if entry.last_status == "running":
+                since = _parse_iso(entry.last_dispatched_at or "")
+                written = _parse_iso(body["modified_at"])
+                fresh = since is not None and written is not None and written >= since
+                open_steps = [s for s in body["steps"] if s["state"] == "open"] if fresh else []
+                counts = body["counts"]
+                running = {
+                    "since": entry.last_dispatched_at or "",
+                    "step": open_steps[0]["id"] if open_steps else "",
+                    "index": counts["done"] + counts["blocked"] + 1 if open_steps else 0,
+                    "total": counts["total"] if open_steps else 0,
+                }
+    body.update({
+        "workspace": workspace,
+        "report_path": _care_display_path(config, vault / CARE_REPORT_PATH),
+        "unsure_path": _care_display_path(config, vault / CARE_UNSURE_PATH),
+        "schedule": schedule,
+        "running": running,
+    })
+    return JSONResponse(body)
 
 
 async def vault_delete_note(request: Request) -> JSONResponse:

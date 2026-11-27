@@ -535,7 +535,7 @@ def test_care_prompt_is_a_short_orchestrator_over_a_dynamic_checklist() -> None:
         "If you have no subagent tool, read both files and run the step yourself, in order, then tick it the same way; write `inline` in the evidence",
         "`Interrupted last run: <ids>`", "the last run was interrupted",
         "`stale_notes.stale_notes` is non-empty",
-        "only when this run had at least one weekly line and every weekly line is `[x]` or `[!]`",
+        "only when this run had at least one weekly line and every weekly line is `[x]`; a `[!]` weekly line leaves it unchanged",
         "an input listed under Inputs in `drain-legacy-queues.md` is non-empty",
         "5 or more", "FRESH subagent", "one at a time", "you wait for it",
         "no subagent", "Re-dispatch a blocked step once",
