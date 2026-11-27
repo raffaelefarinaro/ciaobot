@@ -303,7 +303,18 @@ def _marker_ok(name: str) -> bool:
 
 
 def _private_problem(path: Path) -> str | None:
-    """Why ``path`` may not hold code we run, or ``None``. POSIX only: Windows has no owner bits."""
+    """Why ``path`` may not hold code we run, or ``None``. POSIX only: Windows has no owner bits.
+
+    The sentence can reach a chat's error result, so the home folder is written as ``~``.
+    """
+    problem = _path_problem(path)
+    home = str(Path.home())
+    if problem is not None and home and home != "/":
+        problem = problem.replace(home, "~")
+    return problem
+
+
+def _path_problem(path: Path) -> str | None:
     if _windows():
         return None
     if path.is_symlink():

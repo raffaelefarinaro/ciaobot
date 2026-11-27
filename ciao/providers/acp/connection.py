@@ -62,6 +62,9 @@ _KILL_SETTLE_TIMEOUT = 3.0
 _EXIT_POLL_INTERVAL = 0.05
 # How often a launch re-checks an adapter whose install is running.
 _INSTALL_POLL_S = 1.0
+# When a launch waited the whole cap, the install holding the lock is stuck (npm itself is killed
+# at that cap), so launches within one more cap after it refuse at once instead of waiting again.
+_GAVE_UP: dict[str, float] = {}
 # The ACP layer is POSIX-only for now; Windows gets the closest signal Python defines.
 if sys.platform == "win32":
     _SIGKILL = signal.SIGTERM
@@ -110,16 +113,24 @@ async def _adapter_argv(name: str) -> list[str]:
     chat or a startup job opens its agent. The launch waits for it instead of failing; an install
     that fails, or one still running at the cap, raises the adapter's own sentence.
     """
-    loop = asyncio.get_running_loop()
-    deadline = loop.time() + LAUNCH_WAIT_S
+    deadline = time.monotonic() + LAUNCH_WAIT_S
     while True:
         try:
-            return await asyncio.to_thread(launch_argv, name)
+            argv = await asyncio.to_thread(launch_argv, name)
         except AdapterInstalling as exc:
-            if loop.time() >= deadline:
+            now = time.monotonic()
+            gave_up = _GAVE_UP.get(name)
+            if gave_up is not None and now - gave_up < LAUNCH_WAIT_S:
+                raise AgentStartError(str(exc)) from exc
+            if now >= deadline:
+                _GAVE_UP[name] = now
                 raise AgentStartError(str(exc)) from exc
         except AdapterNotReady as exc:
+            _GAVE_UP.pop(name, None)
             raise AgentStartError(str(exc)) from exc
+        else:
+            _GAVE_UP.pop(name, None)
+            return argv
         await asyncio.sleep(_INSTALL_POLL_S)
 
 

@@ -50,6 +50,7 @@ def prefix(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     monkeypatch.setattr(ai, "_ATTEMPTED", set())
     monkeypatch.setattr(ai, "_FAILURES", {})
     monkeypatch.setattr(ai, "_RUNNING", set())
+    monkeypatch.setattr(connection_module, "_GAVE_UP", {})
     monkeypatch.setattr(ai, "_NODE_MAJOR", {})
     monkeypatch.setattr(ai, "_probe_node_major", lambda node: 22)
     monkeypatch.setattr(connection_module, "terminal_path", lambda: "/term/bin")
@@ -1443,3 +1444,54 @@ def test_launch_does_not_wait_when_the_adapter_cannot_be_installed(
 
 def test_the_cap_is_as_long_as_npm_may_run() -> None:
     assert ai.LAUNCH_WAIT_S >= ai.INSTALL_TIMEOUT_S
+
+
+
+def test_after_one_launch_hit_the_cap_later_launches_refuse_at_once(
+    prefix: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A stuck install holding the lock costs one full wait, not one per chat."""
+    _ready(prefix, ai.CLAUDE_ADAPTER)
+    monkeypatch.setattr(connection_module, "_INSTALL_POLL_S", 0.01)
+    monkeypatch.setattr(connection_module, "LAUNCH_WAIT_S", 0.2)
+    fd = _hold(prefix, ai.CLAUDE_ADAPTER)
+    try:
+        with pytest.raises(connection_module.AgentStartError, match="being installed"):
+            _argv_now(ai.CLAUDE_ADAPTER)
+        assert ai.CLAUDE_ADAPTER in connection_module._GAVE_UP
+        calls: list[str] = []
+        real = connection_module.launch_argv
+        monkeypatch.setattr(connection_module, "launch_argv", lambda name: (calls.append(name), real(name))[1])
+        with pytest.raises(connection_module.AgentStartError, match="being installed"):
+            _argv_now(ai.CLAUDE_ADAPTER)
+        assert len(calls) == 1, "the second launch did not wait out another cap"
+    finally:
+        os.close(fd)
+    # Once the lock is free the adapter starts and the record is cleared.
+    assert _argv_now(ai.CLAUDE_ADAPTER)[1].endswith("dist/index.js")
+    assert connection_module._GAVE_UP == {}
+
+
+def test_the_fail_fast_record_expires_after_one_cap(prefix: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    _ready(prefix, ai.CLAUDE_ADAPTER)
+    monkeypatch.setattr(connection_module, "_INSTALL_POLL_S", 0.01)
+    monkeypatch.setattr(connection_module, "LAUNCH_WAIT_S", 0.2)
+    connection_module._GAVE_UP[ai.CLAUDE_ADAPTER] = connection_module.time.monotonic() - 1.0
+    fd = _hold(prefix, ai.CLAUDE_ADAPTER)
+    threading.Timer(0.05, os.close, args=(fd,)).start()
+    assert _argv_now(ai.CLAUDE_ADAPTER)[1].endswith("dist/index.js"), "an old record does not refuse"
+
+
+def test_a_private_folder_problem_names_the_home_folder_as_tilde(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    home = tmp_path / "home" / "alice"
+    folder = home / "Library" / "adapters"
+    folder.mkdir(parents=True)
+    folder.chmod(0o755)
+    monkeypatch.setattr(ai.Path, "home", classmethod(lambda cls: home))
+
+    problem = ai._private_problem(folder)
+
+    assert problem == "~/Library/adapters is open to other users."
+    assert str(home) not in problem

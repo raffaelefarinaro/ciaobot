@@ -2274,3 +2274,19 @@ def test_handed_over_at_reads_the_newest_handover_that_stuck(machine: Machine) -
     _journal_at("20261123T100000Z", "pointer_written")
 
     assert mac_takeover.handed_over_at() == datetime(2026, 11, 10, 10, 5, tzinfo=UTC)
+
+
+
+def test_handed_over_at_skips_a_stamp_from_the_future(machine: Machine) -> None:
+    """A clock set back, or a forged journal, must not hide every error until that date."""
+    from datetime import timedelta
+
+    now = datetime.now(UTC).replace(microsecond=0)
+    stamp = "%Y%m%dT%H%M%SZ"
+    _journal_at("20261101T100000Z", "finished", handed_over="20261101T100500Z")
+    _journal_at("20261102T100000Z", "finished", handed_over=(now + timedelta(days=30)).strftime(stamp))
+    assert mac_takeover.handed_over_at() == datetime(2026, 11, 1, 10, 5, tzinfo=UTC)
+
+    within_slack = now + timedelta(minutes=2)
+    _journal_at("20261103T100000Z", "healthy", handed_over=within_slack.strftime(stamp))
+    assert mac_takeover.handed_over_at() == within_slack
