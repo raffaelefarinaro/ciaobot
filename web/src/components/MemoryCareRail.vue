@@ -48,7 +48,7 @@
 </template>
 
 <script setup lang="ts">
-import { computed, onMounted, ref } from 'vue'
+import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
 import CareGlyph from './CareGlyph.vue'
 import DockedWindow from './DockedWindow.vue'
 import { careGlyph, careState, dayWords, stampWords } from '../lib/careReport'
@@ -88,15 +88,23 @@ const stateWord = computed(() => {
 /** "Nov 27, 18:56 · 12m ago"; a run in progress is dated by its dispatch. */
 function stamped(iso: string): string {
   const at = stampWords(iso)
-  const ago = relativeOffset(iso)
+  const ago = relativeOffset(iso, now.value)
   return at ? (ago ? `${at} · ${ago}` : at) : ''
 }
 const lastWhen = computed(() => {
   const r = report.value
   if (!r) return ''
   if (r.running) return stamped(r.running.since)
-  return r.status === 'ok' ? stamped(r.modified_at) : ''
+  if (r.status === 'ok') return stamped(r.modified_at)
+  // A report that cannot be read still has a last run: the schedule's own dispatch, else the file's time.
+  return stamped(r.schedule?.last_run_at || r.modified_at)
 })
+
+// The relative words ("11h ago", "in 9h") are re-read every minute while the page is open.
+const now = ref(Date.now())
+let tick: ReturnType<typeof setInterval> | null = null
+onMounted(() => { tick = setInterval(() => { now.value = Date.now() }, 60_000) })
+onBeforeUnmount(() => { if (tick !== null) clearInterval(tick) })
 
 const scheduleRow = computed(() => {
   const id = report.value?.schedule?.id

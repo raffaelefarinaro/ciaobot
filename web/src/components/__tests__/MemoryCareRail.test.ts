@@ -76,6 +76,40 @@ describe('MemoryCareRail', () => {
     expect(wrapper.findAll('.care-rail-fact')[1].get('dd').text()).toBe('Not scheduled')
   })
 
+  it('dates a report that cannot be read by the schedule\'s last run, else the file time', async () => {
+    const unreadable = { ...careReports.never, status: 'unreadable' as const, modified_at: CARE_WRITTEN_AT,
+      schedule: { ...careReports.never.schedule!, last_run_at: '2026-11-26T06:00:00+00:00' } }
+    serve([row], unreadable)
+    const wrapper = await mountRail()
+    const text = wrapper.findAll('.care-rail-fact')[0].text()
+    expect(text).toContain('Report unreadable')
+    expect(text).toContain(stampWords('2026-11-26T06:00:00+00:00'))
+  })
+
+  it('falls back to the report file time when an unreadable report has no schedule run', async () => {
+    const unreadable = { ...careReports.never, status: 'unreadable' as const, modified_at: CARE_WRITTEN_AT }
+    serve([row], unreadable)
+    const wrapper = await mountRail()
+    expect(wrapper.findAll('.care-rail-fact')[0].text()).toContain(stampWords(CARE_WRITTEN_AT))
+  })
+
+  it('re-reads the relative words every minute and stops when unmounted', async () => {
+    vi.useFakeTimers()
+    try {
+      const soon = new Date(Date.now() + 3 * 3_600_000 + 30_000).toISOString()
+      serve([{ ...row, next_run: soon }], careReports.needsYou)
+      const wrapper = await mountRail()
+      expect(wrapper.findAll('.care-rail-fact')[1].text()).toContain('in 3h')
+      vi.advanceTimersByTime(60_000 * 31)
+      await flushPromises()
+      expect(wrapper.findAll('.care-rail-fact')[1].text()).toContain('in 2h')
+      wrapper.unmount()
+      expect(vi.getTimerCount()).toBe(0)
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
   it('says Never run and cannot open a report that does not exist', async () => {
     serve([row], careReports.never)
     const wrapper = await mountRail()

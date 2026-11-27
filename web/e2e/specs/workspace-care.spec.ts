@@ -200,7 +200,13 @@ test.describe('Memory page chrome', () => {
     await isolate(page, `care-chrome-${testInfo.workerIndex}`)
     await page.setViewportSize(DOCKED)
     await answerCare(page, careReports.complete)
+    await page.route(/\/api\/schedules$/, route => route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify([{ schedule_id: careReports.complete.schedule!.id, enabled: true, next_run: new Date(Date.now() + 12 * 3_600_000).toISOString() }]),
+    }))
     await boot(page, '/memory/care', '.mc-summary-title')
+    await expect(page.locator('section.care-rail')).toContainText(/in 1[12]h/)
     await expect(page.getByRole('button', { name: 'How memory works' })).toHaveCount(0)
     await expect(page.locator('.mc-back')).toHaveCount(0)
     const rail = page.locator('section.care-rail')
@@ -221,6 +227,9 @@ test.describe('Memory page chrome', () => {
     await expect(page.getByRole('heading', { name: 'How this works' })).toBeVisible()
     await expect(page.getByRole('button', { name: 'How memory works' })).toHaveCount(0)
     await page.screenshot({ path: 'test-results/care-chrome/unsure-desktop.png' })
+    await page.goto('/memory/categories')
+    await expect(page.getByRole('heading', { name: /categories on/ })).toBeVisible()
+    await page.screenshot({ path: 'test-results/care-chrome/categories-desktop.png' })
   })
 
   test('on a phone the window drops below the card', async ({ page }, testInfo) => {
