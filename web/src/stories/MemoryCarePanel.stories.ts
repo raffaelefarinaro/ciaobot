@@ -152,7 +152,6 @@ export const RunningStale: Story = {
     expect(canvas.queryByText('Steps')).toBeNull()
     expect(canvas.queryByText('Notes')).toBeNull()
     expect(canvas.queryByText('blocked')).toBeNull()
-    expect((canvas.getByRole('button', { name: 'Running…' }) as HTMLButtonElement).disabled).toBe(true)
   },
 }
 

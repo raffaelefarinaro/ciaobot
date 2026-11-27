@@ -209,11 +209,14 @@ test.describe('Workspace care while a run is in progress', () => {
     await boot(page, '/memory/care', '.mc-summary-title')
     await expect(page.getByRole('heading', { name: 'Running now' })).toBeVisible()
     await expect(page.getByText('Care is starting. Results appear here as steps finish.')).toBeVisible()
-    await expect(page.locator('.mc-last-run')).toContainText(/^Previous run: .*: 1 thing needed you$/)
+    await expect(page.locator('.mc-last-run')).toContainText(/^Previous run: .* · 1 thing needed you$/)
     await expect(page.locator('.mc-need')).toHaveCount(0)
     await expect(page.locator('details.mc-disclosure')).toHaveCount(0)
     await expect(page.locator('.mc-seg--done, .mc-seg--blocked')).toHaveCount(0)
-    await expect(page.getByRole('button', { name: 'Running…' })).toBeDisabled()
+    // The Daily care window beside the card says Running, dated by the dispatch, and cannot start a second run.
+    const rail = page.locator('section.care-rail')
+    await expect(rail.getByText('Running', { exact: true })).toBeVisible()
+    await expect(rail.getByRole('button', { name: 'Running…' })).toBeDisabled()
     await page.screenshot({ path: 'test-results/care-look/running-stale.png', fullPage: true })
   })
 

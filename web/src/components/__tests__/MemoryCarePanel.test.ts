@@ -217,8 +217,6 @@ describe('MemoryCarePanel', () => {
     const segs = wrapper.findAll('.mc-seg')
     expect(segs.length).toBeGreaterThan(0)
     expect(segs.every(s => s.classes().includes('mc-seg--wait'))).toBe(true)
-    const run = wrapper.findAll('.mc-foot .mc-link').find(b => b.text() === 'Running…')!
-    expect(run.attributes('disabled')).toBeDefined()
   })
 
   it('shows this run\'s own report, steps open, once the file is newer than the run start', async () => {
