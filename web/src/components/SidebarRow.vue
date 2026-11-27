@@ -1,5 +1,9 @@
 <template>
-  <RouterLink v-if="to" :to="to" class="sidebar-row" :class="{ active }" active-class="active">
+  <a v-if="href" :href="href" target="_blank" rel="noopener noreferrer" class="sidebar-row">
+    <span class="sidebar-row-title">{{ text }}</span>
+    <slot />
+  </a>
+  <RouterLink v-else-if="to" :to="to" class="sidebar-row" :class="{ active }" active-class="active">
     <span v-if="pending" class="title-shimmer" aria-hidden="true" title="Naming conversation" />
     <span v-else class="sidebar-row-title" :class="titleClass">{{ text }}</span>
     <span v-if="pending" class="sr-only">Naming conversation</span>
@@ -38,6 +42,8 @@ const props = defineProps<{
   text: string
   /** A link row; without it the row is a plain element the host wires up. */
   to?: RouteLocationRaw
+  /** An external page: a plain link that opens in a new tab or the system browser. */
+  href?: string
   active?: boolean
   /** Full-strength title: the item has something new. */
   unread?: boolean
