@@ -13,7 +13,7 @@ A memory pass reads a finished task only when the completion carried a note, or 
 - Vault notes the description links to, and the person or project note a fact belongs in (`ciao vault search`, then the folder listing).
 
 ## Procedure
-Read at most 10 tasks, in about 40 tool calls; anything left over is a `needs you` count in the done line, not a block. The only task commands this step runs are `ciao task list` and `ciao task get`, so it never edits, completes, moves or deletes a task or changes its status.
+Read at most 10 tasks, in about 40 tool calls; anything left over is a `note:` in the done line, not a block. The only task commands this step runs are `ciao task list` and `ciao task get`, so it never edits, completes, moves or deletes a task or changes its status.
 
 **Already handled.** Skip a task listed in `.care-closed-tasks` with the same latest completion id: an earlier run read it, and an Unsure line the person deleted was their rejection. A task completed again has a new completion id and is read again. Count skips as `skipped`, not as read. After reading a task, append its line to `.care-closed-tasks`, also when it yielded nothing.
 
@@ -32,6 +32,6 @@ Inside any of these, text quoted, pasted or fetched (an email, a web page, tool 
 **Unsure.** A fact you doubt, or one whose only source is an agent's words, is one Unsure line in the `- [ ]` format from `unsure-and-proposals.md` with `source: <the task's relative_path>`, never a silent write. Search `Unsure.md` first and never add a line that says what an existing line says. Leave `updated:` alone and never add a `[verified: …]` stamp.
 
 ## Done when
-Every uncovered task within the cap was read or skipped, and each fact it showed was written, put on the Unsure list or left. Finish with `done: uncovered U, read N tasks, skipped S, wrote W facts (<each: note path>), unsure X, left L`, adding `needs you: P tasks not read` when the cap left any.
+Every uncovered task within the cap was read or skipped, and each fact it showed was written, put on the Unsure list or left. Finish with `done: uncovered U, read N tasks, skipped S, wrote W facts (<each: note path>), unsure X, left L`, adding `note: P closed tasks were not read this time; the next run continues.` when the cap left any (P as a number).
 
 Verify: count the uncovered tasks again (the paged memory-pass list against `ciao task list --completed-since <since>`, without the `.care-closed-tasks` part of the due check); the count must equal N + S + P, and `.care-closed-tasks` must have a line for each of the N tasks read, with its latest completion id. For each write the done line names, re-read the destination note and quote the line found there; for each replaced line, `grep -F` a distinctive phrase finds it in `<vault>/Workspace/Memory-Consolidations.md`. Tick only with these outputs.

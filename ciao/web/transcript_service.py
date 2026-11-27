@@ -1278,6 +1278,8 @@ def _align_user_turns(
     session_user_rows: list[tuple[int, str, Any]],
     current_rows: list[dict],
     chat: Any,
+    *,
+    rebuilt_head: bool = False,
 ) -> tuple[list[dict], list[tuple[dict, int]]]:
     """Align rendered session user rows with the durable transcript's turns.
 
@@ -1321,7 +1323,7 @@ def _align_user_turns(
         for index, row in durable
         if not cli_envelopes.is_hidden_continuation(str(row.get("content") or ""))
     ]
-    if not durable or not session_user_rows:
+    if not session_user_rows:
         return result, []
     base = chat.turn_index_base
     # The durable file belongs to a provider stint: a handover leaves the
@@ -1344,6 +1346,46 @@ def _align_user_turns(
             return result, []
         if expected < len(durable):
             durable = durable[-expected:]
+    if rebuilt_head:
+        # The session starts with turns whose prompts it does not hold (an ACP journal rebuilt
+        # from a load replay), so its first prompt is not the stint's first turn. Anchor at the
+        # END: of the turns the stint counted, the session holds the last ones, except failed
+        # sends it never recorded. Matching from the start instead paired a repeated text with
+        # its first, older occurrence.
+        session_seen = {" ".join(text.split()) for _pos, text, _message in session_user_rows}
+
+        def unrecorded_failure(position: int) -> bool:
+            index, row = durable[position]
+            reply = current_rows[index + 1] if index + 1 < len(current_rows) else {}
+            return (
+                reply.get("role") == "assistant"
+                and bool(reply.get("is_error"))
+                and " ".join(str(row.get("content") or "").split()) not in session_seen
+            )
+
+        # Walk back from the newest counted turn until the session's prompts are used up. A
+        # failed send the session never recorded consumes no prompt; only the failures after
+        # the boundary count, since the replayed turns before it have no prompts to match.
+        # Positions past the durable list are counted turns the transcript has not recorded
+        # yet (the running turn); each holds one of the session's prompts.
+        head = expected if count else len(durable)
+        need = len(session_user_rows)
+        while head > 0 and need > 0:
+            head -= 1
+            if head >= len(durable) or not unrecorded_failure(head):
+                need -= 1
+        durable = durable[head:]
+        base += head
+        if count:
+            expected -= head
+        if not durable:
+            # Nothing durable to pair with (no transcript, or only the running turn): the
+            # session's prompts are the stint's last turns, in order.
+            for position, (rendered_at, _text, message) in enumerate(session_user_rows):
+                _stamp_user_turn(result[rendered_at], chat, base + position, raw_message=message)
+            return result, []
+    if not durable:
+        return result, []
     durable_texts = [
         " ".join(str(row.get("content") or "").split()) for _index, row in durable
     ]
@@ -1565,12 +1607,26 @@ def _overlay_transcript_metadata(
                 entries[index][key] = source[key]
 
 
+def _overlay_reply_metadata(
+    entries: list[dict], transcript_rows: list[dict], paired: list[tuple[dict, int]]
+) -> None:
+    """Overlay durable reply metadata by the alignment's pairing, else positionally."""
+    if not transcript_rows:
+        return
+    if paired:
+        _overlay_paired_metadata(entries, transcript_rows, paired)
+    else:
+        _overlay_transcript_metadata(entries, transcript_rows)
+
+
 def _overlay_paired_metadata(
     entries: list[dict],
     transcript_rows: list[dict],
     paired: list[tuple[dict, int]],
 ) -> None:
-    """Copy each paired durable turn's reply metadata onto its session turn.
+    """Copy each paired durable turn's reply metadata onto its session or journal turn.
+
+    Used by both history paths: the Claude session JSONL and an ACP session journal.
 
     ``paired`` is ``_align_user_turns``' text pairing: a rendered user row and
     the index of the durable user row it matched. The durable reply is the row
@@ -1764,8 +1820,27 @@ async def _assemble_chat_messages(
         acp_rows = await _acp_history_rows(pcm, config, provider, chat, session_root)
         if acp_rows:
             current = pcm._transcripts.current_messages(ChatContext.for_web(chat_id), provider)
+            # A journal need not hold every prompt since `turn_index_base`: one rebuilt from a
+            # loadSession replay has the replayed turns' events but not their prompts. Number
+            # the user rows from the durable turns they pair with, as the session path does,
+            # so a row carries the engine's turn index (the live `user_echo` is deduped by it).
+            # A rebuilt start is matched against the END of the durable turns, and with no
+            # durable turn to pair, the prompts take the stint's last turn indices.
+            journal_user_rows = [
+                (position, str(row.get("content") or ""), None)
+                for position, row in enumerate(acp_rows)
+                if row.get("role") == "user"
+            ]
+            # Rows before the first prompt are replies whose prompts the journal never got.
+            rebuilt_head = bool(journal_user_rows) and any(
+                row.get("role") != "user" and not row.get("origin")
+                for row in acp_rows[: journal_user_rows[0][0]]
+            )
+            acp_rows, paired = _align_user_turns(
+                acp_rows, journal_user_rows, current, chat, rebuilt_head=rebuilt_head
+            )
             _append_unrendered_error(acp_rows, current)
-            _overlay_transcript_metadata(acp_rows, current)
+            _overlay_reply_metadata(acp_rows, current, paired)
             _overlay_assistant_timings(acp_rows, chat.user_turn_timings)
             return [*handover_messages, *acp_rows]
     if not provider_registry.flag(provider, "session_jsonl_history"):
@@ -2038,10 +2113,7 @@ async def _assemble_chat_messages(
     # same text pairing; the positional overlay is only for chats the alignment
     # could not pair.
     result, paired = _align_user_turns(result, session_user_rows, current, chat)
-    if current and result:
-        if paired:
-            _overlay_paired_metadata(result, current, paired)
-        else:
-            _overlay_transcript_metadata(result, current)
+    if result:
+        _overlay_reply_metadata(result, current, paired)
     _overlay_assistant_timings(result, chat.user_turn_timings)
     return [*handover_messages, *result]

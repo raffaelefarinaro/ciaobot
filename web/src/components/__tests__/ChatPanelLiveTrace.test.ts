@@ -394,7 +394,7 @@ describe('ChatPanel live trace', () => {
     }
   })
 
-  it('falls back to Working... after a denied permission (#1618)', async () => {
+  it('falls back to a bare ellipsis after a denied permission (#1618)', async () => {
     try {
       const { wrapper, send } = await mountWithSocket()
       send({ type: 'tool_use', tool_name: 'shell', tool_input: 'ls', tool_use_id: 'c1' })
@@ -402,7 +402,8 @@ describe('ChatPanel live trace', () => {
       send({ type: 'permission_resolved', request_id: 'c1' })
       send({ type: 'tool_denied', tool_use_id: 'c1' })
       await flushPromises()
-      expect(wrapper.get('.trace-block.live .live-preview').text()).toBe('Working…')
+      expect(wrapper.get('.trace-block.live .live-preview').text()).toBe('…')
+      expect(wrapper.get('.trace-block.live .live-preview-text').attributes('aria-hidden')).toBe('true')
     } finally {
       vi.unstubAllGlobals()
     }

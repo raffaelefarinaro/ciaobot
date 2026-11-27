@@ -252,7 +252,7 @@ export const CareDidNotFinish: Story = {
   play: async ({ canvas }) => {
     await settled(canvas)
     expect(canvas.getByText('Care did not finish')).toBeTruthy()
-    expect(canvas.getByText('4 of 6 steps done. Blocked: hygiene, guide-review.')).toBeTruthy()
+    expect(canvas.getByText('4 of 6 steps done. Blocked: Hygiene, Guide review.')).toBeTruthy()
     expect(canvas.getByText('Error:')).toBeTruthy()
     await assertFenceQuiet(canvas)
   },

@@ -54,4 +54,9 @@ describe('parseFrontmatter', () => {
     expect(parseFrontmatter(source).frontmatter).toEqual({ key: 'value' })
     expect(parseFrontmatter(source).body).toBe('body')
   })
+
+  it('reads block scalars and folded plain continuations', () => {
+    const { frontmatter } = parseFrontmatter('---\nkeep: |\n  one\n    two\nfold: >-\n  a\n  b\nlong: first part\n  second part\nlist:\n  - x\nafter: y\n---\nbody')
+    expect(frontmatter).toEqual({ keep: 'one\n  two', fold: 'a b', long: 'first part second part', list: ['x'], after: 'y' })
+  })
 })

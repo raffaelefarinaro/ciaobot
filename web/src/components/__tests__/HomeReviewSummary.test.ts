@@ -154,10 +154,10 @@ describe('HomeReviewSummary', () => {
 
     it.each([
       ['complete', 'done', 'Workspace care', /^Done .* · 5 of 5 steps$/],
-      ['needsYou', 'blocked', 'Care needs you', /^2 things need you$/],
+      ['needsYou', 'blocked', 'Care needs you', /^4 things need you$/],
       ['blocked', 'blocked', 'Care did not finish', /^4 of 6 steps · 2 blocked$/],
       ['interrupted', 'blocked', /^Care was cut off/, /^Interrupted · 2 of 6 steps$/],
-      ['running', 'running', 'Workspace care', /^Running now · step 3 of 6: learnings$/],
+      ['running', 'running', 'Workspace care', /^Running now · step 3 of 6: Learnings$/],
       ['never', 'open', 'Workspace care', /^Not run yet\. It runs every day\.$/],
     ] as const)('shows one line for %s with its glyph, title and words', async (state, glyph, title, detail) => {
       serveCare(careReports[state])
@@ -190,7 +190,7 @@ describe('HomeReviewSummary', () => {
     })
 
     it.each([
-      ['needsYou', /^Care needs you\. 2 things need you\. Open the care report\.$/],
+      ['needsYou', /^Care needs you\. 4 things need you\. Open the care report\.$/],
       ['blocked', /^Care did not finish\. 4 of 6 steps · 2 blocked\. Open the care report\.$/],
       ['complete', /^Workspace care\. Done .* · 5 of 5 steps\. Open the care report\.$/],
     ] as const)('names the %s state once, in the visible words, on a keyboard-reachable row', async (state, label) => {
