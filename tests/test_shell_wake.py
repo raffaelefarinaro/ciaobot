@@ -520,17 +520,3 @@ def test_a_subagent_end_is_labelled_as_a_subagent_with_its_description() -> None
     bare = ShellFinishedEvent(type="shell_finished", tool_use_id="call_9", duration_s=3.0, subagent=True)
     assert shell_wake.shell_finished_prompt([bare]).splitlines()[2].startswith("— subagent (ran 3 s)")
 
-
-@pytest.mark.asyncio
-async def test_a_held_shell_notice_keeps_a_follow_up_pending_until_its_wake(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    # A schedule run that launched background work waits on this: the held notice's wake is a turn.
-    monkeypatch.setattr(project_chats, "SHELL_FINISHED_WINDOW_S", 0.05)
-    manager = _manager(_chat())
-    assert manager._follow_up_pending("chat-1") is False
-    manager._note_shell_finished("chat-1", _event("a", "one", None))
-    assert manager._follow_up_pending("chat-1") is True
-    await manager._shell_finished_flushes["chat-1"]
-    assert manager._recorder.started  # type: ignore[attr-defined]
-    assert manager._follow_up_pending("chat-1") is False

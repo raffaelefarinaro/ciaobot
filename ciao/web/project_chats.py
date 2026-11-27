@@ -1474,6 +1474,8 @@ class ProjectChatManager:
         self._provider_reaper: asyncio.Task | None = None
         # Background shells that finished, not yet announced, by chat; and the flush task per chat.
         self._shell_finished_pending: dict[str, list[ShellFinishedEvent]] = {}
+        # Stop presses per chat (``_stop_count``).
+        self._stop_counts: dict[str, int] = {}
         # The running background-shell count last published per chat (`chat_shells`), only non-zero
         # entries. The count itself is always read from the live provider, never from here.
         self._running_shells_published: dict[str, int] = {}
@@ -9769,16 +9771,13 @@ class ProjectChatManager:
         service = self._providers.get(chat_id)
         return bool(service is not None and service.background_work_outstanding)
 
-    def _follow_up_pending(self, chat_id: str) -> bool:
-        """True while background work may still give the chat another turn.
+    def _stop_count(self, chat_id: str) -> int:
+        """How many times Stop was pressed on the chat in this process.
 
-        The provider reports work running, or a finished shell's notice is
-        held for the wake it sends (``_note_shell_finished``). A schedule run
-        that launched background work waits on this before it is graded.
+        A schedule run waiting on a background subagent compares it before and
+        after: a Stop between turns leaves no stream to carry it.
         """
-        return self._background_work_outstanding(chat_id) or bool(
-            self._shell_finished_pending.get(chat_id)
-        )
+        return self._stop_counts.get(chat_id, 0)
 
     def running_shells(self, chat_id: str) -> int:
         """Background shells the chat's live provider runs now; 0 with no provider.
@@ -10716,6 +10715,7 @@ class ProjectChatManager:
         # unconditionally would stamp ``retry_status="stopped"`` (with no path
         # back to "") and permanently refuse the archive-proposal helper and the
         # memory pass after any plain Stop.
+        self._stop_counts[chat_id] = self._stop_counts.get(chat_id, 0) + 1
         chat = self._chats.get(chat_id)
         if chat is not None and chat.retry_status == "pending":
             self.stop_chat_retry(chat_id)

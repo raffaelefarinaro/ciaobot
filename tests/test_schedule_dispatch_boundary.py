@@ -108,6 +108,7 @@ class _ScheduleHost:
         self.classified_text: list[str] = []
         self.follow_up_pending = False
         self.follow_up_checks = 0
+        self.stops = 0
 
     @property
     def events(self) -> EventsHub:
@@ -206,10 +207,14 @@ class _ScheduleHost:
         self.needs_user_calls.append(entry)
         return False
 
-    def _follow_up_pending(self, chat_id: str) -> bool:
+    def _background_work_outstanding(self, chat_id: str) -> bool:
         assert chat_id == "chat-1"
         self.follow_up_checks += 1
         return self.follow_up_pending
+
+    def _stop_count(self, chat_id: str) -> int:
+        assert chat_id == "chat-1"
+        return self.stops
 
     async def archive_chat(self, chat_id: str) -> ArchiveOutcome | None:
         self.archives.append(chat_id)
@@ -1333,7 +1338,7 @@ async def test_a_clean_care_run_that_took_no_lease_stays_ok(
     assert [row.status for row in rows] == ["ok"]  # type: ignore[attr-defined]
 
 
-# -- background work: the run is graded on its last follow-up turn ---------------------------
+# -- a background subagent: the run is graded on its last follow-up turn ----------------------
 
 # The first turn of an OpenCode run whose subagent went to the background: the launch is
 # acknowledged as running and the turn ends with interim text.
@@ -1342,6 +1347,7 @@ _LAUNCH_TURN: list[dict[str, object]] = [
     {"type": "tool_result", "tool_name": "", "tool_use_id": "call_a", "background": True},
     {"type": "result", "text": "Workspace care is in progress in a subagent.", "is_error": False},
 ]
+_FOLLOW_UP_RESULT = {"type": "result", "text": "All 7 steps done.", "is_error": False}
 
 
 def _archiving_host(tmp_path: Path, events: list[dict[str, object]]) -> _ScheduleHost:
@@ -1356,12 +1362,33 @@ def _archiving_host(tmp_path: Path, events: list[dict[str, object]]) -> _Schedul
     return host
 
 
+async def _until_read(stream: ChatStream) -> None:
+    while stream.subscriber_count == 0:
+        await asyncio.sleep(0.005)
+
+
+async def _dispatch(host: _ScheduleHost, provider: str = "opencode") -> dict[str, object]:
+    dispatcher = ScheduleDispatcher(cast(ScheduleDispatchHost, host))
+    # Bounded well below the 1 h cap: a wait that only the cap ends fails here.
+    return await asyncio.wait_for(
+        dispatcher.dispatch_schedule(
+            _entry(archive_policy="auto"), "Run the routine.", "opus", "auto", provider
+        ),
+        timeout=5,
+    )
+
+
+@pytest.fixture
+def fast_poll(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr("ciao.web.schedule_dispatch._FOLLOW_UP_POLL_S", 0.01)
+
+
 @pytest.mark.asyncio
+@pytest.mark.usefixtures("fast_poll")
 async def test_a_background_subagent_run_is_graded_and_archived_on_its_follow_up_turn(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setattr("ciao.web.schedule_dispatch._FOLLOW_UP_POLL_S", 0.01)
     host = _archiving_host(tmp_path, _LAUNCH_TURN)
     host.follow_up_pending = True
     rows = _capture_run_records(monkeypatch)
@@ -1374,18 +1401,14 @@ async def test_a_background_subagent_run_is_graded_and_archived_on_its_follow_up
         stream = ChatStream(background=True)
         host._broker.register("chat-1", stream)
         stream.publish({"type": "text_delta", "text": "All 7 steps done."})
-        stream.publish({"type": "result", "text": "All 7 steps done.", "is_error": False})
-        while stream.subscriber_count == 0:
-            await asyncio.sleep(0.005)
+        stream.publish(_FOLLOW_UP_RESULT)
+        await _until_read(stream)
         host.follow_up_pending = False
         stream.finish()
         host._broker.clear("chat-1", stream)
 
     child = asyncio.create_task(child_finishes())
-    dispatcher = ScheduleDispatcher(cast(ScheduleDispatchHost, host))
-    result = await dispatcher.dispatch_schedule(
-        _entry(archive_policy="auto"), "Run the routine.", "opus", "auto", "opencode"
-    )
+    result = await _dispatch(host)
     await child
 
     # Not archived after the interim result: the archive waited for the follow-up turn.
@@ -1397,71 +1420,215 @@ async def test_a_background_subagent_run_is_graded_and_archived_on_its_follow_up
 
 
 @pytest.mark.asyncio
+@pytest.mark.usefixtures("fast_poll")
+async def test_a_wake_turn_for_the_subagent_is_read_as_a_follow_up(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # An unclaimed subagent end: the host starts a wake turn (a foreground stream, origin
+    # background_run) instead of the drain streaming the provider's own continuation.
+    host = _archiving_host(tmp_path, _LAUNCH_TURN)
+    host.follow_up_pending = True
+    _capture_run_records(monkeypatch)
+
+    async def wake() -> None:
+        await asyncio.sleep(0.05)
+        chat = host._chats["chat-1"]
+        chat.user_turn_origin[str(chat.user_turn_count)] = "background_run"
+        chat.user_turn_count += 1
+        stream = ChatStream()
+        host._broker.register("chat-1", stream)
+        host.follow_up_pending = False
+        stream.publish(_FOLLOW_UP_RESULT)
+        await _until_read(stream)
+        stream.finish()
+
+    task = asyncio.create_task(wake())
+    result = await _dispatch(host)
+    await task
+
+    assert host.classified_text == ["All 7 steps done."]
+    assert result["status"] == "ok" and host.archives == ["chat-1"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("fast_poll")
+async def test_another_turn_on_the_chat_ends_the_wait_and_is_never_graded(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # The owner opens the running chat and types: that turn is theirs, not the run's.
+    host = _archiving_host(tmp_path, _LAUNCH_TURN)
+    host.follow_up_pending = True
+    rows = _capture_run_records(monkeypatch)
+    owner_turn = ChatStream("what is happening?")
+    owner_turn.publish({"type": "result", "text": "Still curating; nothing for you.", "is_error": False})
+
+    async def owner_types() -> None:
+        await asyncio.sleep(0.05)
+        chat = host._chats["chat-1"]
+        chat.user_turn_count += 1  # a typed turn has no origin
+        host._broker.register("chat-1", owner_turn)
+
+    task = asyncio.create_task(owner_types())
+    result = await _dispatch(host)
+    await task
+
+    assert owner_turn.subscriber_count == 0  # never read
+    assert host.classified_text == [] and host.archives == []
+    assert result["status"] == "skipped" and rows[0].status == "skipped"
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("fast_poll")
+async def test_a_stop_between_turns_during_the_wait_keeps_the_chat(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    host = _archiving_host(tmp_path, _LAUNCH_TURN)
+    host.follow_up_pending = True
+    rows = _capture_run_records(monkeypatch)
+
+    async def owner_stops() -> None:
+        # Stop with no stream live: the provider drops its background work.
+        await asyncio.sleep(0.05)
+        host.stops += 1
+        host.follow_up_pending = False
+
+    task = asyncio.create_task(owner_stops())
+    result = await _dispatch(host)
+    await task
+
+    assert host.classified_text == [] and host.archives == []
+    assert result["status"] == "skipped" and rows[0].status == "skipped"
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("fast_poll")
+async def test_a_stop_on_a_follow_up_stream_keeps_the_chat(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    host = _archiving_host(tmp_path, _LAUNCH_TURN)
+    host.follow_up_pending = True
+    _capture_run_records(monkeypatch)
+
+    async def stopped_follow_up() -> None:
+        await asyncio.sleep(0.05)
+        stream = ChatStream(background=True)
+        host._broker.register("chat-1", stream)
+        stream.publish({"type": "result", "text": "partial", "is_error": False})
+        await _until_read(stream)
+        stream.stop_publish_turn()  # what stop_chat does to the live stream
+        host.follow_up_pending = False
+        stream.finish()
+
+    task = asyncio.create_task(stopped_follow_up())
+    result = await _dispatch(host)
+    await task
+
+    assert host.archives == [] and host.classified_text == []
+    assert result["status"] == "skipped"
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("fast_poll")
+async def test_a_follow_up_asking_for_approval_ends_the_wait_before_the_cap(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Follow-up turns are attended: an approval card waits for the owner and its stream never ends.
+    host = _archiving_host(tmp_path, _LAUNCH_TURN)
+    host.follow_up_pending = True
+    rows = _capture_run_records(monkeypatch)
+    stream = ChatStream(background=True)
+    stream.publish({"type": "permission_request", "tool_name": "Bash"})
+    host._broker.register("chat-1", stream)
+
+    result = await _dispatch(host)  # bounded at 5 s; the cap is 1 h
+
+    assert result["status"] == "skipped" and rows[0].status == "skipped"
+    assert host.classified_text == [] and host.archives == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("fast_poll")
 async def test_background_work_past_the_cap_marks_the_run_cut_off_and_keeps_the_chat(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setattr("ciao.web.schedule_dispatch._FOLLOW_UP_POLL_S", 0.01)
-    monkeypatch.setattr("ciao.web.schedule_dispatch.SCHEDULE_FOLLOW_UP_MAX_S", 0.05)
+    monkeypatch.setattr("ciao.web.chat_service.SCHEDULE_FOLLOW_UP_MAX_S", 0.05)
     host = _archiving_host(tmp_path, _LAUNCH_TURN)
     host.follow_up_pending = True  # the subagent never finishes
     rows = _capture_run_records(monkeypatch)
-    dispatcher = ScheduleDispatcher(cast(ScheduleDispatchHost, host))
 
-    result = await dispatcher.dispatch_schedule(
-        _entry(archive_policy="auto"), "Run the routine.", "opus", "auto", "opencode"
-    )
+    result = await _dispatch(host)
 
     assert result["status"] == "error"
     assert rows[0].status == "error" and rows[0].error is not None
-    assert rows[0].error.startswith("Cut off")
+    assert rows[0].error.startswith("Cut off: a subagent this run launched was still running after ")
     # Never classified or archived on the interim text.
     assert host.classified_text == []
     assert host.archives == []
 
 
 @pytest.mark.asyncio
+@pytest.mark.usefixtures("fast_poll")
 async def test_a_follow_up_stream_that_outlives_the_cap_is_cut_off(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setattr("ciao.web.schedule_dispatch._FOLLOW_UP_POLL_S", 0.01)
-    monkeypatch.setattr("ciao.web.schedule_dispatch.SCHEDULE_FOLLOW_UP_MAX_S", 0.05)
+    monkeypatch.setattr("ciao.web.chat_service.SCHEDULE_FOLLOW_UP_MAX_S", 0.05)
     host = _archiving_host(tmp_path, _LAUNCH_TURN)
     host.follow_up_pending = True
-    stream = ChatStream(background=True)  # a follow-up turn that never ends
-    host._broker.register("chat-1", stream)
+    host._broker.register("chat-1", ChatStream(background=True))  # a follow-up that never ends
     rows = _capture_run_records(monkeypatch)
-    dispatcher = ScheduleDispatcher(cast(ScheduleDispatchHost, host))
 
-    await dispatcher.dispatch_schedule(
-        _entry(archive_policy="auto"), "Run the routine.", "opus", "auto", "opencode"
-    )
+    await _dispatch(host)
 
     assert rows[0].status == "error" and (rows[0].error or "").startswith("Cut off")
     assert host.archives == []
 
 
+def test_the_cut_off_message_names_the_cap() -> None:
+    from ciao.web import chat_service
+
+    status, error = chat_service._schedule_dispatch_status(
+        chat_service.ScheduleRunOutcome(completed=True, follow_up_unfinished="cut_off")
+    )
+    assert status == "error" and error is not None and "after 1 h" in error
+
+
 @pytest.mark.asyncio
-async def test_a_run_with_no_background_work_never_waits(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    host = _archiving_host(
-        tmp_path,
+@pytest.mark.parametrize(
+    "first_turn",
+    [
+        # No background launch at all.
         [
             {"type": "tool_use", "tool_name": "Read", "tool_use_id": "call_r"},
             {"type": "tool_result", "tool_name": "", "tool_use_id": "call_r"},
             {"type": "result", "text": "done", "is_error": False},
         ],
-    )
+        # A background shell (Claude run_in_background): only a subagent launch makes the run wait.
+        [
+            {"type": "tool_use", "tool_name": "Bash", "tool_use_id": "call_s", "shell": True,
+             "shell_background": True},
+            {"type": "tool_result", "tool_name": "", "tool_use_id": "call_s", "background": True,
+             "shell_id": "b1"},
+            {"type": "result", "text": "done", "is_error": False},
+        ],
+    ],
+)
+async def test_a_run_with_no_background_subagent_never_waits(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    first_turn: list[dict[str, object]],
+) -> None:
+    host = _archiving_host(tmp_path, first_turn)
     host.follow_up_pending = True  # would hold the run if it were asked
     _capture_run_records(monkeypatch)
-    dispatcher = ScheduleDispatcher(cast(ScheduleDispatchHost, host))
 
-    result = await dispatcher.dispatch_schedule(
-        _entry(archive_policy="auto"), "Run the routine.", "opus", "auto", "claude"
-    )
+    result = await _dispatch(host, provider="claude")
 
     assert host.follow_up_checks == 0
     assert host.classified_text == ["done"]
