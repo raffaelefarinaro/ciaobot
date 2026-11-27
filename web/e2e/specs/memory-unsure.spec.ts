@@ -33,7 +33,7 @@ async function answerList(page: Page, items: UnsureItem[] = UNSURE_FIXTURE_ITEMS
     const index = state.items.findIndex(i => i.id === body.id)
     if (state.conflictNext || index < 0) {
       state.conflictNext = false
-      await route.fulfill({ status: 409, contentType: 'application/json', body: JSON.stringify({ error: 'the list changed; reload it' }) })
+      await route.fulfill({ status: 409, contentType: 'application/json', body: JSON.stringify({ error: 'the list changed; reload it', code: 'line_changed' }) })
       return
     }
     if (body.op === 'remove') state.items.splice(index, 1)
