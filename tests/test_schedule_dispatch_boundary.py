@@ -9,6 +9,7 @@ manager's named seams instead of bypassing a test/integration patch.
 
 from __future__ import annotations
 
+import asyncio
 import dataclasses
 from datetime import UTC, datetime
 from pathlib import Path
@@ -32,7 +33,7 @@ from ciao.schedule_command import CommandRun
 from ciao.schedules import ScheduleEntry
 from ciao.sessions import StateStore
 from ciao.transcripts import TranscriptStore
-from ciao.web.chat_broker import ChatStream, EventsHub
+from ciao.web.chat_broker import ChatStream, ChatStreamBroker, EventsHub
 from ciao.web.project_chats import ArchiveOutcome, ChatInfo, ProjectChatManager, ProjectInfo
 from ciao.web.schedule_dispatch import ScheduleDispatchHost, ScheduleDispatcher
 
@@ -101,6 +102,12 @@ class _ScheduleHost:
         self.needs_user_calls: list[ScheduleEntry] = []
         self.archives: list[str] = []
         self.postprocess: list[tuple[str, ArchiveOutcome]] = []
+        self._broker = ChatStreamBroker()
+        # What the classifier was handed, and how often the run asked whether
+        # background work may still give the chat another turn.
+        self.classified_text: list[str] = []
+        self.follow_up_pending = False
+        self.follow_up_checks = 0
 
     @property
     def events(self) -> EventsHub:
@@ -195,9 +202,14 @@ class _ScheduleHost:
     async def _schedule_run_needs_user(
         self, entry: ScheduleEntry, outcome, *, chat_id: str = ""
     ) -> bool:
-        del outcome
+        self.classified_text.append(outcome.final_text)
         self.needs_user_calls.append(entry)
         return False
+
+    def _follow_up_pending(self, chat_id: str) -> bool:
+        assert chat_id == "chat-1"
+        self.follow_up_checks += 1
+        return self.follow_up_pending
 
     async def archive_chat(self, chat_id: str) -> ArchiveOutcome | None:
         self.archives.append(chat_id)
@@ -1319,3 +1331,139 @@ async def test_a_clean_care_run_that_took_no_lease_stays_ok(
 
     assert result["status"] == "ok"
     assert [row.status for row in rows] == ["ok"]  # type: ignore[attr-defined]
+
+
+# -- background work: the run is graded on its last follow-up turn ---------------------------
+
+# The first turn of an OpenCode run whose subagent went to the background: the launch is
+# acknowledged as running and the turn ends with interim text.
+_LAUNCH_TURN: list[dict[str, object]] = [
+    {"type": "tool_use", "tool_name": "Agent", "tool_use_id": "call_a", "tool_input": "[general] Curate"},
+    {"type": "tool_result", "tool_name": "", "tool_use_id": "call_a", "background": True},
+    {"type": "result", "text": "Workspace care is in progress in a subagent.", "is_error": False},
+]
+
+
+def _archiving_host(tmp_path: Path, events: list[dict[str, object]]) -> _ScheduleHost:
+    host = _ScheduleHost(tmp_path, events)
+    archive = ArchiveOutcome(path=tmp_path / "archive.md", turn_count=1)
+
+    async def archive_chat(chat_id: str) -> ArchiveOutcome | None:
+        host.archives.append(chat_id)
+        return archive
+
+    host.archive_chat = archive_chat  # type: ignore[method-assign]
+    return host
+
+
+@pytest.mark.asyncio
+async def test_a_background_subagent_run_is_graded_and_archived_on_its_follow_up_turn(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr("ciao.web.schedule_dispatch._FOLLOW_UP_POLL_S", 0.01)
+    host = _archiving_host(tmp_path, _LAUNCH_TURN)
+    host.follow_up_pending = True
+    rows = _capture_run_records(monkeypatch)
+    archived_during_follow_up: list[list[str]] = []
+
+    async def child_finishes() -> None:
+        # The drain streams the follow-up turn the child's completion gives the chat.
+        await asyncio.sleep(0.05)
+        archived_during_follow_up.append(list(host.archives))
+        stream = ChatStream(background=True)
+        host._broker.register("chat-1", stream)
+        stream.publish({"type": "text_delta", "text": "All 7 steps done."})
+        stream.publish({"type": "result", "text": "All 7 steps done.", "is_error": False})
+        while stream.subscriber_count == 0:
+            await asyncio.sleep(0.005)
+        host.follow_up_pending = False
+        stream.finish()
+        host._broker.clear("chat-1", stream)
+
+    child = asyncio.create_task(child_finishes())
+    dispatcher = ScheduleDispatcher(cast(ScheduleDispatchHost, host))
+    result = await dispatcher.dispatch_schedule(
+        _entry(archive_policy="auto"), "Run the routine.", "opus", "auto", "opencode"
+    )
+    await child
+
+    # Not archived after the interim result: the archive waited for the follow-up turn.
+    assert archived_during_follow_up == [[]]
+    assert host.classified_text == ["All 7 steps done."]
+    assert host.archives == ["chat-1"]
+    assert result["status"] == "ok"
+    assert rows[0].status == "ok"
+
+
+@pytest.mark.asyncio
+async def test_background_work_past_the_cap_marks_the_run_cut_off_and_keeps_the_chat(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr("ciao.web.schedule_dispatch._FOLLOW_UP_POLL_S", 0.01)
+    monkeypatch.setattr("ciao.web.schedule_dispatch.SCHEDULE_FOLLOW_UP_MAX_S", 0.05)
+    host = _archiving_host(tmp_path, _LAUNCH_TURN)
+    host.follow_up_pending = True  # the subagent never finishes
+    rows = _capture_run_records(monkeypatch)
+    dispatcher = ScheduleDispatcher(cast(ScheduleDispatchHost, host))
+
+    result = await dispatcher.dispatch_schedule(
+        _entry(archive_policy="auto"), "Run the routine.", "opus", "auto", "opencode"
+    )
+
+    assert result["status"] == "error"
+    assert rows[0].status == "error" and rows[0].error is not None
+    assert rows[0].error.startswith("Cut off")
+    # Never classified or archived on the interim text.
+    assert host.classified_text == []
+    assert host.archives == []
+
+
+@pytest.mark.asyncio
+async def test_a_follow_up_stream_that_outlives_the_cap_is_cut_off(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr("ciao.web.schedule_dispatch._FOLLOW_UP_POLL_S", 0.01)
+    monkeypatch.setattr("ciao.web.schedule_dispatch.SCHEDULE_FOLLOW_UP_MAX_S", 0.05)
+    host = _archiving_host(tmp_path, _LAUNCH_TURN)
+    host.follow_up_pending = True
+    stream = ChatStream(background=True)  # a follow-up turn that never ends
+    host._broker.register("chat-1", stream)
+    rows = _capture_run_records(monkeypatch)
+    dispatcher = ScheduleDispatcher(cast(ScheduleDispatchHost, host))
+
+    await dispatcher.dispatch_schedule(
+        _entry(archive_policy="auto"), "Run the routine.", "opus", "auto", "opencode"
+    )
+
+    assert rows[0].status == "error" and (rows[0].error or "").startswith("Cut off")
+    assert host.archives == []
+
+
+@pytest.mark.asyncio
+async def test_a_run_with_no_background_work_never_waits(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    host = _archiving_host(
+        tmp_path,
+        [
+            {"type": "tool_use", "tool_name": "Read", "tool_use_id": "call_r"},
+            {"type": "tool_result", "tool_name": "", "tool_use_id": "call_r"},
+            {"type": "result", "text": "done", "is_error": False},
+        ],
+    )
+    host.follow_up_pending = True  # would hold the run if it were asked
+    _capture_run_records(monkeypatch)
+    dispatcher = ScheduleDispatcher(cast(ScheduleDispatchHost, host))
+
+    result = await dispatcher.dispatch_schedule(
+        _entry(archive_policy="auto"), "Run the routine.", "opus", "auto", "claude"
+    )
+
+    assert host.follow_up_checks == 0
+    assert host.classified_text == ["done"]
+    assert host.archives == ["chat-1"]
+    assert result["status"] == "ok"

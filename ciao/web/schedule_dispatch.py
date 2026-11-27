@@ -37,7 +37,7 @@ from ciao.provider_service import ProviderService, supported_providers
 from ciao.schedule_command import CommandRun, run_schedule_command
 from ciao.schedules import ScheduleEntry, ScheduleStore
 from ciao.web import chat_service
-from ciao.web.chat_broker import ChatStream, EventsHub
+from ciao.web.chat_broker import ChatStream, ChatStreamBroker, EventsHub
 from ciao.web.memory_pass import (
     MemoryProjectRefused,
     is_memory_pass_chat,
@@ -50,6 +50,14 @@ if TYPE_CHECKING:  # pragma: no cover - typing only
 logger = logging.getLogger(__name__)
 
 _RUN_OUTPUT_CLOSE_RE = re.compile(r"</\s*run-output", re.IGNORECASE)
+
+# The longest a schedule run waits, after its first result, for the follow-up
+# turns of background work it launched (an OpenCode subagent, which always runs
+# in the background, or a background shell). A run still waiting then is
+# graded as cut off, never archived as clean.
+SCHEDULE_FOLLOW_UP_MAX_S = 60 * 60
+# How often the wait looks for the chat's next follow-up stream.
+_FOLLOW_UP_POLL_S = 0.5
 
 # (description, expected needs_user, exact model output). Rendered into the
 # classifier prompt as <example> blocks; a test checks each output parses.
@@ -92,6 +100,44 @@ _ATTENTION_SYSTEM_PROMPT = (
     )
 )
 
+async def _consume_run_stream(
+    stream: ChatStream, outcome: chat_service.ScheduleRunOutcome
+) -> bool:
+    """Fold one turn's stream into *outcome*; True when it launched background work.
+
+    A ``tool_result`` marked ``background`` is a launch acknowledgement (a
+    background subagent or shell): the work goes on after the turn's result.
+    A later result replaces the final text, so the last turn grades the run.
+    """
+    launched = False
+    async for raw_payload in stream.subscribe():
+        if not isinstance(raw_payload, dict):
+            continue
+        payload = cast(dict[str, object], raw_payload)
+        event_type = payload.get("type")
+        if event_type == "permission_request":
+            outcome.permission_requested = True
+        elif event_type == "status" and payload.get("denied_tool"):
+            outcome.permission_denied = str(payload["denied_tool"])
+        elif (
+            event_type == "tool_use"
+            and payload.get("tool_name") == "AskUserQuestion"
+        ):
+            outcome.question_requested = True
+        elif event_type == "tool_result" and payload.get("background"):
+            launched = True
+        elif event_type == "chat_retry":
+            if (payload.get("status") or "") == "pending":
+                outcome.retry_pending = True
+        elif event_type == "error":
+            outcome.stream_error = True
+        elif event_type == "result":
+            outcome.completed = True
+            outcome.is_error = bool(payload.get("is_error"))
+            outcome.final_text = str(payload.get("text") or "")
+    return launched
+
+
 class ScheduleDispatchHost(Protocol):
     """The complete, typed manager surface used by ``ScheduleDispatcher``."""
 
@@ -99,6 +145,7 @@ class ScheduleDispatchHost(Protocol):
     _chats: dict[str, ChatInfo]
     _projects: dict[str, ProjectInfo]
     _providers: dict[str, ProviderService]
+    _broker: ChatStreamBroker
     schedule_store: ScheduleStore | None
 
     @property
@@ -159,6 +206,8 @@ class ScheduleDispatchHost(Protocol):
         *, chat_id: str = "",
     ) -> bool: ...
 
+    def _follow_up_pending(self, chat_id: str) -> bool: ...
+
     async def archive_chat(self, chat_id: str) -> ArchiveOutcome | None: ...
 
     async def run_archive_postprocess(
@@ -175,6 +224,48 @@ class ScheduleDispatcher:
 
     def __init__(self, host: ScheduleDispatchHost) -> None:
         self._host = host
+
+    async def _await_follow_up_turns(
+        self,
+        chat_id: str,
+        outcome: chat_service.ScheduleRunOutcome,
+        *,
+        first: ChatStream,
+    ) -> None:
+        """Read the follow-up turns of the background work a run launched.
+
+        OpenCode runs every subagent in the background: its first result only
+        says the work started, and the child's completion gives the chat
+        another turn. The between-turns drain streams each such turn on the
+        chat's broker stream; this reads them like the first turn, so the run
+        is graded on its last result. It returns once no follow-up stream is
+        live and the host reports no background work or held wake left, or
+        at once when a turn needs the owner. Past ``SCHEDULE_FOLLOW_UP_MAX_S``
+        the run is marked cut off.
+        """
+        deadline = time.monotonic() + SCHEDULE_FOLLOW_UP_MAX_S
+        read: list[ChatStream] = [first]
+        while chat_service._schedule_run_clean(outcome):
+            stream = self._host._broker.get(chat_id)
+            if stream is not None and any(stream is seen for seen in read):
+                stream = None  # already read to its end
+            if stream is not None:
+                read.append(stream)
+                try:
+                    await asyncio.wait_for(
+                        _consume_run_stream(stream, outcome),
+                        max(deadline - time.monotonic(), 0.0),
+                    )
+                except TimeoutError:
+                    outcome.follow_up_cut_off = True
+                    return
+                continue
+            if not self._host._follow_up_pending(chat_id):
+                return
+            if time.monotonic() >= deadline:
+                outcome.follow_up_cut_off = True
+                return
+            await asyncio.sleep(_FOLLOW_UP_POLL_S)
 
     async def _schedule_run_needs_user(
         self, entry: ScheduleEntry, outcome: chat_service.ScheduleRunOutcome,
@@ -711,29 +802,11 @@ class ScheduleDispatcher:
             stream = self._host.start_stream(
                 target_id, prompt, unattended=True, origin=stream_origin
             )
-            async for raw_payload in stream.subscribe():
-                if not isinstance(raw_payload, dict):
-                    continue
-                payload = cast(dict[str, object], raw_payload)
-                event_type = payload.get("type")
-                if event_type == "permission_request":
-                    outcome.permission_requested = True
-                elif event_type == "status" and payload.get("denied_tool"):
-                    outcome.permission_denied = str(payload["denied_tool"])
-                elif (
-                    event_type == "tool_use"
-                    and payload.get("tool_name") == "AskUserQuestion"
-                ):
-                    outcome.question_requested = True
-                elif event_type == "chat_retry":
-                    if (payload.get("status") or "") == "pending":
-                        outcome.retry_pending = True
-                elif event_type == "error":
-                    outcome.stream_error = True
-                elif event_type == "result":
-                    outcome.completed = True
-                    outcome.is_error = bool(payload.get("is_error"))
-                    outcome.final_text = str(payload.get("text") or "")
+            launched_background = await _consume_run_stream(stream, outcome)
+            if launched_background:
+                # The first result may only say the work was launched: wait
+                # for the turns that work gives the chat before grading it.
+                await self._await_follow_up_turns(target_id, outcome, first=stream)
             # Only a trusted system routine consumed engine-wide evidence.
             # Clear it after a clean run; a failed triage must not wipe the
             # backlog it never processed, and a user schedule never owns this

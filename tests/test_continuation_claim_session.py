@@ -52,6 +52,7 @@ def _session(journal: _Journal | None = None) -> AcpSession:
     session.continuation_hook = None
     session._shells = ShellLiveness()
     session._shell_commands = {}
+    session._subagent_calls = {}
     session._shell_task = None
     session._prompt_active = False
     session._deferred_ends = []

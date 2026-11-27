@@ -9769,6 +9769,17 @@ class ProjectChatManager:
         service = self._providers.get(chat_id)
         return bool(service is not None and service.background_work_outstanding)
 
+    def _follow_up_pending(self, chat_id: str) -> bool:
+        """True while background work may still give the chat another turn.
+
+        The provider reports work running, or a finished shell's notice is
+        held for the wake it sends (``_note_shell_finished``). A schedule run
+        that launched background work waits on this before it is graded.
+        """
+        return self._background_work_outstanding(chat_id) or bool(
+            self._shell_finished_pending.get(chat_id)
+        )
+
     def running_shells(self, chat_id: str) -> int:
         """Background shells the chat's live provider runs now; 0 with no provider.
 

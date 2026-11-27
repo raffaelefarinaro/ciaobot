@@ -853,11 +853,15 @@ class ScheduleRunOutcome:
     retry_pending: bool = False
     final_text: str = ""
     archived_to: str = ""
+    # Background work the run launched was still running when the dispatch
+    # stopped waiting for it (``SCHEDULE_FOLLOW_UP_MAX_S``).
+    follow_up_cut_off: bool = False
 
 
 def _schedule_run_clean(outcome: ScheduleRunOutcome) -> bool:
     return (
         outcome.completed
+        and not outcome.follow_up_cut_off
         and not outcome.is_error
         and not outcome.permission_requested
         and not outcome.permission_denied
@@ -889,6 +893,11 @@ def _schedule_dispatch_status(
     if outcome.stream_error or outcome.is_error:
         error = (outcome.final_text or "stream error")[:1000]
         return "error", annotate_reauth(error, provider, model)
+    if outcome.follow_up_cut_off:
+        return "error", (
+            "Cut off: background work this run launched was still running when "
+            "the schedule stopped waiting for it. The chat was kept."
+        )
     if outcome.permission_requested or outcome.question_requested:
         return "skipped", None
     return "ok", None

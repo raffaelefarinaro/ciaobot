@@ -437,6 +437,8 @@ class ShellFinishedEvent(StreamEvent):
     ended_at: float = 0.0
     # None when the output file could not be read safely; an empty list when it had no output.
     output_tail: list[str] | None = None
+    # A background subagent ended, not a shell: ``command`` is then its description.
+    subagent: bool = False
 
 
 @dataclass(slots=True)

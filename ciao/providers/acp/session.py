@@ -233,6 +233,8 @@ class AcpSession:
         self._end_tasks: set[asyncio.Task[None]] = set()
         # The command each background shell was launched with, by call id, until it settles.
         self._shell_commands: dict[str, str] = {}
+        # The description of each subagent call (``Agent``), by call id, until its launch is acknowledged.
+        self._subagent_calls: dict[str, str] = {}
         self._shell_task: asyncio.Task[None] | None = None
         # The not-offered model status is reported once per session.
         self._model_reported = False
@@ -454,6 +456,7 @@ class AcpSession:
             tool_use_id=call_id,
             command=shell.command,
             output_path=shell.output_path,
+            subagent=shell.subagent,
             duration_s=round(time.monotonic() - shell.launched_at, 1),
             exit_code=exit_code,
             ended_at=time.monotonic(),
@@ -496,8 +499,19 @@ class AcpSession:
             self._touch_late([event], substantive=False)
 
     def _track_shells(self, events: list[StreamEvent]) -> None:
-        """Start watching each background shell whose launch acknowledgement names a pid."""
+        """Start watching each background shell whose launch acknowledgement names a pid.
+
+        A subagent sent to the background (OpenCode always does this) is tracked the same way, with
+        no pid: it ends when the provider reports the child's terminal status, and its end notice
+        names it as a subagent rather than a shell.
+        """
         for event in events:
+            if isinstance(event, ToolUseEvent) and event.type == "tool_use" and event.tool_name == "Agent" and event.tool_use_id:
+                # A re-announce carries the description: the latest one is kept.
+                self._subagent_calls[event.tool_use_id] = event.tool_input
+                while len(self._subagent_calls) > _SHELL_COMMANDS_LIMIT:
+                    del self._subagent_calls[next(iter(self._subagent_calls))]
+                continue
             if (
                 isinstance(event, ToolUseEvent) and event.type == "tool_use"
                 and event.shell_background and event.tool_use_id
@@ -509,10 +523,16 @@ class AcpSession:
                 continue
             if not (isinstance(event, ToolUseEvent) and event.type == "tool_result" and event.background and event.tool_use_id):
                 continue
-            command = self._shell_commands.pop(event.tool_use_id, "")
+            subagent = event.tool_use_id in self._subagent_calls
+            if subagent:
+                command = self._subagent_calls.pop(event.tool_use_id)
+            else:
+                command = self._shell_commands.pop(event.tool_use_id, "")
             if event.shell_pid is None:
-                # No pid on the wire (Claude): the shell ends only by the provider's own settle.
-                tracked = self._shells.track_unpolled(event.tool_use_id, command=command, output_path=event.output_path)
+                # No pid on the wire (Claude, or a subagent): it ends only by the provider's own settle.
+                tracked = self._shells.track_unpolled(
+                    event.tool_use_id, command=command, output_path=event.output_path, subagent=subagent,
+                )
             else:
                 # One ``ps`` snapshot, taken once per launch: the start time is what identifies the pid.
                 tracked = self._shells.track(
@@ -996,6 +1016,7 @@ class AcpSession:
         self._ended_shells.clear()
         self._shells.clear()
         self._shell_commands.clear()
+        self._subagent_calls.clear()
         self._report_shells()
 
     async def close(self) -> None:

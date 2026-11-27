@@ -6,12 +6,17 @@ The process table is a fake here: nothing is signalled and no real process is st
 from __future__ import annotations
 
 import asyncio
+import json
+from pathlib import Path
 from typing import Any
 
 import pytest
 
+from ciao import shell_wake
 from ciao.models import ToolUseEvent
 from ciao.providers.acp import session as session_module
+from ciao.providers.acp.agents import OPENCODE, OpencodeAcpProvider
+from ciao.providers.acp.normalize import UpdateNormalizer
 from ciao.providers.acp.session import AcpSession
 from ciao.providers.acp.shell_liveness import MAX_TRACKED, ShellLiveness
 
@@ -73,6 +78,7 @@ def _session_stub() -> AcpSession:
     session._shells = ShellLiveness()
     session._shell_task = None
     session._shell_commands = {}
+    session._subagent_calls = {}
     session._deferred_ends = []
     session._end_tasks = set()
     session._ended_shells = {}
@@ -286,3 +292,51 @@ def test_an_echoed_pid_and_path_in_command_output_are_never_tracked() -> None:
     results = [e for e in events if getattr(e, "type", "") == "tool_result"]
     assert results, events
     assert all(e.shell_pid is None and e.output_path == "" for e in results)
+
+
+# -- a background subagent's end is named as a subagent, not a shell ------------------------
+
+_SUBAGENT_RUN = Path(__file__).parent / "fixtures" / "acp" / "opencode_subagent_run.jsonl"
+_CHILD_METHOD = "opencode/session/child_update"
+
+
+@pytest.mark.asyncio
+async def test_an_opencode_background_subagent_ends_with_a_subagent_notice(tmp_path: Path) -> None:
+    # The captured OpenCode wire run: the subagent's launch is acknowledged as running, and the
+    # child's terminal status ends it after the prompt. Its notice must not read as a shell.
+    provider = OpencodeAcpProvider(tmp_path)
+    normalizer = UpdateNormalizer(OPENCODE, "ses_e0815d817ffeh7L7ocNuPWytBu")
+    session = _session_stub()
+    ended: list[Any] = []
+    session._touch_late = lambda events, *, substantive: ended.extend(events)  # type: ignore[method-assign]
+    for line in _SUBAGENT_RUN.read_text(encoding="utf-8").splitlines():
+        message = json.loads(line)
+        if message.get("method") == "session/update":
+            events = normalizer.feed(message["params"]["update"])
+        elif message.get("method") == _CHILD_METHOD:
+            events = provider.ext_update(normalizer, _CHILD_METHOD, message["params"])
+        else:
+            continue
+        session._finish_shells(events)
+        session._track_shells(events)
+    await _settle_ends(session)
+
+    (end,) = [event for event in ended if event.type == "shell_finished"]
+    assert (end.tool_use_id, end.subagent, end.command) == (
+        "call_6dad53e1b72a40bab9ed61ca", True, "[general] Sleep 5 then reply done",
+    )
+    head = shell_wake.shell_finished_prompt([end]).splitlines()[2]
+    assert head.startswith("— subagent [general] Sleep 5 then reply done (ran ")
+    assert "shell" not in head
+    assert not session._subagent_calls and not session._shells.tracking
+
+
+def test_a_background_shell_keeps_its_command_label() -> None:
+    session = _session_stub()
+    session._track_shells([ToolUseEvent(
+        type="tool_use", tool_name="shell", tool_input="npm run dev", tool_use_id="call-sh",
+        shell=True, shell_background=True,
+    )])
+    session._track_shells([ToolUseEvent(type="tool_result", tool_use_id="call-sh", background=True)])
+    shell = session._shells.release("call-sh")
+    assert shell is not None and (shell.command, shell.subagent) == ("npm run dev", False)
