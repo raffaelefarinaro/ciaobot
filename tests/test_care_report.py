@@ -44,6 +44,24 @@ Interrupted last run: guide-review, stale
 3. The memory region is at 91% of its limit.
 """
 
+# The items of a real run, as the needs-you standard asks for them
+# (curation-report-example.md): one decision each, plain words, an explicit path.
+STANDARD = """# Care report 2026-11-27
+- [x] unsure: apply ticked lines \\u2014 applied 1; verify: 0 left
+- [!] stale: re-check stale notes (weekly due) \\u2014 blocked: audit still lists the notes
+
+## What needs you
+1. A proposal would trim your guide: it removes an outdated status section and a repeated folder path. Open the proposal and approve or reject it. (path: Workspace/Proposals/guide-trim-duplicates.md)
+2. Your always-loaded memory is nearly full (98% and 95%) and everything in it still matters. Ask a chat to trim it with you. (path: AGENTS.md)
+3. 13 suggestions are waiting for your tick in Unsure, such as which brief template to keep. Tick the ones you agree with. (path: `Workspace/Unsure.md`)
+4. needs you: The vault index lists 63 issues, such as notes nothing links to. Open a chat to fix them with you. (path: Workspace/Care-Report.md).
+
+## Notes
+- Re-checking older notes did not finish; it tries again on the next run.
+- note: 17 memory passes were not re-read this time; the next run continues.
+- [ ] About 200 older patterns are still to be moved to Unsure; the next run continues.
+"""
+
 INTERRUPTED = """# Care report 2026-11-26
 Weekly done: 2026-11-19
 - [x] unsure: apply ticked lines \u2014 applied 1; verify: 0 left
@@ -83,12 +101,99 @@ def test_blocked_report_reads_reasons_interrupted_ids_and_needs_you() -> None:
     needs = body["needs_you"]
     assert [n["title"] for n in needs] == [
         "Hygiene is blocked",
-        "Cross-project fact waiting for approval",
+        'Cross-project fact waiting for approval: "Invoices go out on the 1st." Remember it for every project?',
         "The memory region is at 91% of its limit.",
     ]
     # A continuation line belongs to the item above it.
     assert needs[1]["detail"].endswith("It is on the Unsure list.")
-    assert [n["action"] for n in needs] == ["report", "unsure", "guide"]
+    # A report from before the needs-you standard names no path: no file button.
+    assert [n["path"] for n in needs] == ["", "", ""]
+    assert body["notes"] == []
+
+
+def test_standard_items_read_title_detail_and_path() -> None:
+    body = parse_care_report(STANDARD)
+    needs = body["needs_you"]
+    assert [n["path"] for n in needs] == [
+        "Workspace/Proposals/guide-trim-duplicates.md", "AGENTS.md", "Workspace/Unsure.md", "Workspace/Care-Report.md",
+    ]
+    assert needs[0]["title"] == "A proposal would trim your guide: it removes an outdated status section and a repeated folder path."
+    assert needs[0]["detail"] == "Open the proposal and approve or reject it."
+    # The `needs you:` lead a step wrote is not part of what the person reads.
+    assert needs[3]["title"] == "The vault index lists 63 issues, such as notes nothing links to."
+    assert all("(path:" not in n["title"] + n["detail"] for n in needs)
+    assert body["notes"] == [
+        "Re-checking older notes did not finish; it tries again on the next run.",
+        "17 memory passes were not re-read this time; the next run continues.",
+        "About 200 older patterns are still to be moved to Unsure; the next run continues.",
+    ]
+    # A checkbox under Notes is a note, never a step.
+    assert [s["id"] for s in body["steps"]] == ["unsure", "stale"]
+
+
+@pytest.mark.parametrize(
+    "raw",
+    [
+        "/etc/passwd", "~/secrets.md", "../outside.md", "Workspace/../../x.md", "Workspace/./Unsure.md",
+        "C:/Users/x.md", "c:x.md", "Workspace\\Unsure.md", "Workspace//Unsure.md", "Workspace/Unsure.md/",
+        "Workspace/\x00.md", "Workspace/a\x1b.md", " ", "x" * 300 + ".md",
+    ],
+)
+def test_an_unsafe_path_is_dropped_not_followed(raw: str) -> None:
+    assert care_report.vault_relative_path(raw) == ""
+    item = parse_care_report(f"- [x] a: b\n## What needs you\n1. Look at it. (path: {raw})\n")["needs_you"][0]
+    assert item["path"] == ""
+    assert item["title"] == "Look at it."
+
+
+@pytest.mark.parametrize("raw", ["Workspace/Unsure.md", "People/Rae Smith.md", "`AGENTS.md`", "Projects/Atlas 2026.md"])
+def test_a_vault_relative_path_is_kept(raw: str) -> None:
+    assert care_report.vault_relative_path(raw) == raw.strip("`")
+
+
+@pytest.mark.parametrize(
+    ("path", "proposal"),
+    [
+        ("Workspace/Proposals/trim-guide.md", True),
+        ("Workspace/Proposals/Trim.md", False),
+        ("Workspace/Proposals/sub/trim.md", False),
+        ("Workspace/Proposals/trim.txt", False),
+        ("Workspace/Unsure.md", False),
+        ("", False),
+    ],
+)
+def test_proposal_paths_are_the_proposal_check_slug(path: str, proposal: bool) -> None:
+    assert care_report.is_proposal_path(path) is proposal
+
+
+def _write_proposal(vault: Path, slug: str, status: str) -> Path:
+    path = vault / "Workspace" / "Proposals" / f"{slug}.md"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        f"---\ntype: guide-edit\ntarget: AGENTS.md\ntitle: Trim\nsummary: s\nrationale: r\nevidence:\n  - Workspace/Care-Report.md\n"
+        f"proposed_change: c\ncreated: 2026-11-26\nstatus: {status}\n---\n\nBody.\n",
+        encoding="utf-8",
+    )
+    return path
+
+
+@pytest.mark.parametrize("status", ["draft", "ready", "applied", "rejected"])
+def test_proposal_status_is_read_from_the_file(tmp_path: Path, either_branch: str, status: str) -> None:
+    _write_proposal(tmp_path, "trim-guide", status)
+    assert care_report.read_proposal_status(tmp_path, "Workspace/Proposals/trim-guide.md") == status
+
+
+def test_proposal_status_is_empty_when_it_cannot_be_trusted(tmp_path: Path, either_branch: str) -> None:
+    assert care_report.read_proposal_status(tmp_path, "Workspace/Proposals/missing.md") == ""
+    _write_proposal(tmp_path, "odd", "maybe")
+    assert care_report.read_proposal_status(tmp_path, "Workspace/Proposals/odd.md") == ""
+    # Only a proposal path is read: never a file the path merely names.
+    _write_proposal(tmp_path, "trim", "applied")
+    assert care_report.read_proposal_status(tmp_path, "Workspace/Proposals/../Proposals/trim.md") == ""
+    # A symlinked proposal is not followed.
+    outside = _write_proposal(tmp_path / "elsewhere", "real", "applied")
+    (tmp_path / "Workspace" / "Proposals" / "linked.md").symlink_to(outside)
+    assert care_report.read_proposal_status(tmp_path, "Workspace/Proposals/linked.md") == ""
 
 
 def test_open_lines_are_open_steps() -> None:
@@ -131,6 +236,8 @@ def test_counts_and_fields_are_bounded() -> None:
     assert len(body["steps"]) == care_report.MAX_STEPS
     assert len(body["steps"][0]["what"]) == care_report.MAX_FIELD_CHARS
     assert len(body["needs_you"]) == care_report.MAX_NEEDS
+    notes = "\n".join(f"- note {i}" for i in range(100))
+    assert len(parse_care_report(f"- [x] a: b\n## Notes\n{notes}\n")["notes"]) == care_report.MAX_NOTES
 
 
 def _write_report(vault: Path, text: str) -> Path:
@@ -372,7 +479,8 @@ def test_needs_you_accepts_heading_and_list_variants(heading: str, marker: str) 
         f"# Care report 2026-11-26\n- [x] unsure: a \u2014 b; verify: c\n\n{heading}\n{marker} New line in Unsure: check it\n"
         f"{marker} Memory guide at 91%: pick\n\n## Notes\n- not an item\n"
     )
-    assert [n["title"] for n in body["needs_you"]] == ["New line in Unsure", "Memory guide at 91%"]
+    assert [n["title"] for n in body["needs_you"]] == ["New line in Unsure: check it", "Memory guide at 91%: pick"]
+    assert body["notes"] == ["not an item"]
 
 
 def test_weekly_retry_is_read_and_bounded() -> None:
@@ -448,6 +556,39 @@ def test_route_reads_the_active_workspace_report(setup) -> None:
     assert Path(hygiene["step_file"]).is_file()
     assert body["schedule"] is None and body["running"] is None
     assert setup.schedules.asked == ["system-memory-curation@personal"]
+
+
+def test_route_gives_each_item_its_file_and_proposal_status(setup) -> None:
+    _write_report(setup.vault, STANDARD)
+    _write_proposal(setup.vault, "guide-trim-duplicates", "rejected")
+    body = setup.client.get("/api/care-report?workspace=personal").json()
+    needs = body["needs_you"]
+    assert [n["open_path"] for n in needs] == [
+        "memory-vault/personal/Workspace/Proposals/guide-trim-duplicates.md",
+        "",
+        "memory-vault/personal/Workspace/Unsure.md",
+        "memory-vault/personal/Workspace/Care-Report.md",
+    ]
+    assert [n["proposal_status"] for n in needs] == ["rejected", "", "", ""]
+    assert body["notes"][0].startswith("Re-checking older notes")
+
+
+def test_the_example_report_follows_the_needs_you_standard() -> None:
+    """The worked example the care run copies: every item carries a path, leftovers are notes."""
+    example = (
+        Path(care_report.__file__).parent / "stock" / "skills" / "ciao-capabilities" / "references"
+        / "memory-operations" / "references" / "curation-report-example.md"
+    ).read_text(encoding="utf-8")
+    report = example.split("```\n", 2)[1]
+    body = parse_care_report(report)
+    assert body["needs_you"] and all(n["path"] for n in body["needs_you"])
+    assert any(care_report.is_proposal_path(n["path"]) for n in body["needs_you"])
+    assert body["notes"]
+    for item in body["needs_you"]:
+        text = item["title"] + " " + item["detail"]
+        assert len(re.findall(r"[.?!](?:\s|$)", text)) <= 2, text
+        for jargon in ("frontmatter", "updated:", "verify", "audit", "retry", "[!]", "- [x]"):
+            assert jargon not in text, (jargon, text)
 
 
 def test_route_says_missing_for_a_workspace_care_never_ran_in(setup) -> None:

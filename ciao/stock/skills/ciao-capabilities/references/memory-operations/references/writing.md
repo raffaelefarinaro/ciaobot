@@ -5,7 +5,7 @@
 - Discussion and corrections are not write authorization. For requested notes, drafts or analysis, search for an existing document before creating one; use the active vault's `Workspace/` or the project's canonical document.
 - Use the supplied canonical path without duplicating or renaming it. Only when discovering an unbound project's main file, look for `README.md` first, then `<folder-name>.md`; this is not a folder-naming rule. Update meaningful decisions and status only within authorized document or implementation work.
 - Create vault notes with `ciao note create`, using the categories in `VOCABULARY.md`. When rewriting a note, preserve its frontmatter, including `type:`, `updated:` and `tags:`. Use relative Markdown links, not wikilinks. Frontmatter supplies the explicit metadata needed for reliable indexing and aging; an ordinary edit does not re-verify a note.
-- Leave `updated:` unchanged on ordinary edits. Re-stamp only after re-checking the note against its sources, as the main skill's re-check procedure describes.
+- Leave `updated:` unchanged on ordinary edits. Set it to today only after re-checking every fact bullet of the note against its sources, as "Writing entity notes" in the main guide describes.
 - Run `ciao file surface <path>` for substantial or iterative deliverables, then inspect its response rather than assuming the preview opened.
 
 ## Bounded-region syntax

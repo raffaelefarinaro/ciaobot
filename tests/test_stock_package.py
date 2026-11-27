@@ -751,8 +751,8 @@ def test_second_look_judges_only_what_a_read_pass_wrote_and_stays_bounded() -> N
         "Leave a line you have no contrary evidence against",
         "`- [ ]` format", "Leave `updated:` alone and never add a `[verified: …]` stamp",
         "Read at most 10 passes and 15 notes, newest first, in about 40 tool calls",
-        "is a `needs you` count in the done line, not a block",
-        "`needs you: P passes and Q notes not read`",
+        "is a `note:` in the done line, not a block",
+        "`note: P memory passes and Q notes were not re-read this time; the next run continues.`",
         "use the platform's equivalent elsewhere",
         "re-read the destination and quote the line found there",
         "Tick only with these outputs",
@@ -804,8 +804,8 @@ def test_closed_tasks_reads_only_the_persons_words_and_never_touches_a_task() ->
         "with `by: care closed-tasks`",
         "`- [ ]` format from `unsure-and-proposals.md`",
         "Read at most 10 tasks, in about 40 tool calls",
-        "is a `needs you` count in the done line, not a block",
-        "`needs you: P tasks not read`",
+        "is a `note:` in the done line, not a block",
+        "`note: P closed tasks were not read this time; the next run continues.`",
         "re-read the destination note and quote the line found there",
         "Tick only with these outputs",
     ):
@@ -871,3 +871,48 @@ def test_pass_references_do_not_require_the_retired_lease_commands() -> None:
         for retired in ("curation-begin", "curation-progress", "curation-end", "curation-log-append", "--holder"):
             assert retired not in text, f"{path.name} still names {retired}"
         assert "curation-run-lifecycle" not in text
+
+
+def test_the_needs_you_standard_lives_in_the_preamble_and_the_prompt_points_at_it() -> None:
+    preamble = _reference("step-preamble.md")
+    for rule in (
+        "`needs you: <plain sentence> (path: <vault-relative path>)`",
+        "One item is one decision or action, in at most two short sentences",
+        "No step ids, command or field names",
+        "Leave `(path: …)` out when there is no file to open",
+        "Each proposal file you write is its own item",
+        "`note: <plain sentence>`",
+        "A note is never a `needs you` item",
+    ):
+        assert rule in preamble, rule
+    prompt = _curation_prompt()
+    assert "each written per `step-preamble.md`" in prompt
+    assert "`## Notes` bullets: `note:` items, other `[!]` lines, interrupted ids" in prompt
+    assert "one item for open Unsure lines" in prompt
+    # Leftover counts are notes, never needs-you items.
+    for name in ("curation-pass-8-second-look.md", "curation-pass-9-closed-tasks.md", "drain-legacy-queues.md"):
+        text = _reference(name)
+        assert "`note: " in text, name
+        assert "`needs you: P" not in text, name
+    hygiene = _reference("curation-pass-6-hygiene.md")
+    assert "one item for all of them, never one per finding or per category" in hygiene
+    assert "(path: Workspace/Care-Report.md)" in hygiene
+    assert "Ask a chat to trim it with you. (path: AGENTS.md)" in _reference("curation-pass-2-regions.md")
+
+
+def test_the_stale_step_re_dates_only_a_note_it_re_checked_in_full() -> None:
+    """The audit ages a note by its `updated:`; a step that stamps bullets but never
+    re-dates the note leaves it listed forever and can never pass its Verify."""
+    stale = _reference("curation-pass-3-stale-notes.md")
+    assert "When every fact bullet of the note now carries `[verified: <today>]`, set its frontmatter `updated:` to today" in stale
+    assert "keeps its `updated:`" in stale
+    assert "leave `updated:` alone" not in stale
+    assert "none of the K paths re-checked in full may still be listed" in stale
+    assert "The total count is not the check" in stale
+    assert "W stale notes remain" not in stale
+    guide = (_memory_operations_dir() / "guide.md").read_text(encoding="utf-8")
+    assert "Set it to today only after re-checking every fact bullet of the note" in guide
+    assert "Set it to today only after re-checking every fact bullet of the note" in _reference("writing.md")
+    # Steps that do not re-check a whole note still never touch it.
+    for name in ("curation-pass-8-second-look.md", "curation-pass-9-closed-tasks.md"):
+        assert "Leave `updated:` alone and never add a `[verified: …]` stamp" in _reference(name), name

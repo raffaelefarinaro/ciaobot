@@ -11,4 +11,16 @@ You are one step of an unattended care run. The orchestrator gave you the vault 
 - Pass text with `--text-file`. When a `ciao` command exits nonzero, leave that item as it was.
 - Leave `Care-Report.md` alone; the orchestrator owns it.
 - Use about 25 tool calls unless the step file sets a cap.
-- Your last message is exactly `done: <one-line evidence>` or `blocked: <reason>`. Partial work is not accepted. Put anything the person must act on inside the evidence as `needs you: <item>`.
+- Your last message is exactly `done: <one-line evidence>` or `blocked: <reason>`. Partial work is not accepted.
+
+## What needs you, and notes
+
+The person reads what you leave on the Workspace care page and may never have opened these files. Put anything they must decide or do inside the evidence as `needs you: <plain sentence> (path: <vault-relative path>)`:
+
+- One item is one decision or action, in at most two short sentences: the situation, what you recommend, and how to act ("Tick the ones you agree with in Unsure.", "Open the proposal and approve or reject it.", "Ask a chat to trim it with you.").
+- Everyday words only. No step ids, command or field names (`updated:`, `pct`, frontmatter), audit or verify output, retry counters or file formats.
+- `path` is the one file the person opens to act, relative to the vault and without `..` (`Workspace/Unsure.md`, `Workspace/Proposals/<slug>.md`, `Workspace/Care-Report.md`), or `AGENTS.md` for the workspace guide. The app picks the button from it. Leave `(path: …)` out when there is no file to open.
+- Each proposal file you write is its own item, with the proposal as its path.
+- Lines you add to the Unsure list are not items: the run lists every open Unsure line once, as one item.
+
+Anything the person need not act on is a note, written in the evidence as `note: <plain sentence>`: a cap that left work for the next run, a count, what was skipped or retried. A note is never a `needs you` item.
