@@ -910,7 +910,7 @@ def test_the_stale_step_re_dates_only_a_note_it_re_checked_in_full() -> None:
     assert "W stale notes remain" not in stale
     guide = (_memory_operations_dir() / "guide.md").read_text(encoding="utf-8")
     assert "Set it to today only after re-checking every fact bullet of the note" in guide
-    assert "Set it to today only after re-checking every fact bullet of the note" in _reference("writing.md")
+    assert "set it to today once every fact bullet of the note has been checked" in _reference("writing.md")
     # Steps that do not re-check a whole note still never touch it.
     for name in ("curation-pass-8-second-look.md", "curation-pass-9-closed-tasks.md"):
         assert "Leave `updated:` alone and never add a `[verified: …]` stamp" in _reference(name), name
