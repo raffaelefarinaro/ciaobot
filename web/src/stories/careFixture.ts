@@ -13,14 +13,21 @@ export { careReports, CARE_WORKSPACE }
 export const careReportPath = `/api/care-report?workspace=${CARE_WORKSPACE}`
 export const careRunPath = `/api/schedule-run/system-memory-curation@${CARE_WORKSPACE}`
 
-/** The care read, answering `report`, never answering, or failing. */
-export function careRoute(report: CareReport | 'held' | 'failed'): FixtureRoute {
+/**
+ * The care read, answering `report`, never answering, or failing. A list
+ * answers its reports in turn, the last one repeating (a run that starts).
+ */
+export function careRoute(report: CareReport | CareReport[] | 'held' | 'failed'): FixtureRoute {
+  const queue = Array.isArray(report) ? [...report] : null
   return {
     method: 'GET',
     path: careReportPath,
-    respond: () => report === 'held' ? held() : report === 'failed'
-      ? json({ error: 'Synthetic care read failure' }, 503)
-      : json(report),
+    respond: () => {
+      if (queue) return json(queue.length > 1 ? queue.shift() : queue[0])
+      return report === 'held' ? held() : report === 'failed'
+        ? json({ error: 'Synthetic care read failure' }, 503)
+        : json(report)
+    },
   }
 }
 

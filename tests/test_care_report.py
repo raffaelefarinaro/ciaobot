@@ -169,6 +169,46 @@ def test_a_directory_at_the_report_path_is_unreadable(tmp_path: Path) -> None:
     assert read_care_report(tmp_path)["status"] == "unreadable"
 
 
+def test_a_fifo_is_refused_without_blocking(tmp_path: Path) -> None:
+    (tmp_path / "Workspace").mkdir()
+    os.mkfifo(tmp_path / "Workspace" / "Care-Report.md")
+    assert read_care_report(tmp_path)["status"] == "unreadable"
+
+
+def test_a_symlinked_workspace_folder_is_not_followed(tmp_path: Path) -> None:
+    """A swap of the folder for a link to elsewhere is refused at the open itself."""
+    vault = tmp_path / "vault"
+    vault.mkdir()
+    elsewhere = tmp_path / "elsewhere"
+    _write_report(elsewhere, COMPLETE)
+    (vault / "Workspace").symlink_to(elsewhere / "Workspace")
+    assert read_care_report(vault)["status"] == "unreadable"
+
+
+def test_a_symlink_swapped_in_after_a_check_is_not_followed(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Whatever is at the path when it is opened is what is judged: no check-then-open gap."""
+    vault = tmp_path / "vault"
+    report = _write_report(vault, COMPLETE)
+    secret = tmp_path / "secret.md"
+    secret.write_text(BLOCKED, encoding="utf-8")
+    real_open = os.open
+
+    def swapping_open(path, flags, *args, **kwargs):  # type: ignore[no-untyped-def]
+        if path == "Care-Report.md" and report.is_file() and not report.is_symlink():
+            report.unlink()
+            report.symlink_to(secret)
+        return real_open(path, flags, *args, **kwargs)
+
+    monkeypatch.setattr(care_report.os, "open", swapping_open)
+    assert read_care_report(vault)["status"] == "unreadable"
+
+
+def test_a_file_that_grows_past_the_cap_after_fstat_is_still_bounded(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    _write_report(tmp_path, COMPLETE)
+    monkeypatch.setattr(care_report.os, "read", lambda fd, n: b"x" * n)
+    assert read_care_report(tmp_path)["status"] == "too_large"
+
+
 def test_invalid_utf8_is_replaced_not_raised(tmp_path: Path) -> None:
     path = tmp_path / "Workspace" / "Care-Report.md"
     path.parent.mkdir(parents=True)
@@ -187,11 +227,43 @@ def test_step_files_match_the_care_prompt() -> None:
     assert pairs == STEP_FILES
 
 
-def test_weekly_done_advances_only_when_every_weekly_line_is_done() -> None:
+def test_the_prompt_retries_only_the_blocked_weekly_steps() -> None:
     schedules = json.loads((Path(care_report.__file__).parent / "stock" / "schedules.json").read_text())
     prompt = next(s["prompt"] for s in schedules["schedules"] if s["schedule_id"] == "system-memory-curation")
-    assert "every weekly line is `[x]` or `[!]`" not in prompt
-    assert "every weekly line is `[x]`; a `[!]` weekly line leaves it unchanged" in prompt
+    assert "`Weekly retry: <old value>` when present" in prompt
+    assert "each id in the old `Weekly retry:` line gets its weekly line again, and no other weekly step" in prompt
+    assert "3 nights" in prompt
+
+
+def test_checkboxes_after_the_first_section_are_not_steps() -> None:
+    body = parse_care_report(
+        COMPLETE + "\n## Hygiene\n- index rebuilt; audit exit 1\n- [ ] dead_link: Projects/A.md -> People/B.md\n- [x] other: thing\n"
+    )
+    assert [s["id"] for s in body["steps"]] == ["unsure", "regions"]
+    assert body["counts"]["open"] == 0
+
+
+@pytest.mark.parametrize("heading", ["## What needs you", "### What needs you:", "What needs you", "**What needs you**", "**What needs you:**"])
+@pytest.mark.parametrize("marker", ["1.", "2)", "-", "*"])
+def test_needs_you_accepts_heading_and_list_variants(heading: str, marker: str) -> None:
+    body = parse_care_report(
+        f"# Care report 2026-11-26\n- [x] unsure: a \u2014 b; verify: c\n\n{heading}\n{marker} New line in Unsure: check it\n"
+        f"{marker} Memory guide at 91%: pick\n\n## Notes\n- not an item\n"
+    )
+    assert [n["title"] for n in body["needs_you"]] == ["New line in Unsure", "Memory guide at 91%"]
+
+
+def test_weekly_retry_is_read_and_bounded() -> None:
+    body = parse_care_report("# Care report 2026-11-26\nWeekly retry: hygiene=2, `guide-review`=1, junk, x=\n- [!] hygiene: run \u2014 blocked: no\n")
+    assert body["weekly_retry"] == [{"id": "hygiene", "nights": 2}, {"id": "guide-review", "nights": 1}]
+    assert parse_care_report(COMPLETE)["weekly_retry"] == []
+
+
+@pytest.mark.parametrize("raw", ["none", "None.", "n/a", "-", "\u2014", "empty", "`none`"])
+def test_interrupted_placeholders_are_not_ids(raw: str) -> None:
+    body = parse_care_report(f"# Care report 2026-11-26\nInterrupted last run: {raw}\n- [x] unsure: a \u2014 b\n")
+    assert body["interrupted_ids"] == []
+    assert parse_care_report("Interrupted last run: stale, none\n- [x] a: b")["interrupted_ids"] == ["stale"]
 
 
 # ── GET /api/care-report ───────────────────────────────────────────────────
@@ -298,6 +370,68 @@ def test_running_ignores_the_previous_runs_report(setup) -> None:
     assert body["running"] == {"since": "2026-11-26T00:01:00+00:00", "step": "", "index": 0, "total": 0}
 
 
+def test_route_does_not_leak_the_vault_path_when_it_is_unavailable(setup, monkeypatch, caplog) -> None:
+    config = setup.client.app.state.config
+
+    def broken(workspace):  # type: ignore[no-untyped-def]
+        raise OSError(f"cannot reach {setup.root}/secret/vault")
+
+    monkeypatch.setattr(type(config), "workspace_vault_root", lambda self, ws: broken(ws))
+    response = setup.client.get("/api/care-report?workspace=personal")
+    assert response.status_code == 409
+    assert response.json() == {"error": "vault unavailable"}
+    assert str(setup.root) not in response.text
+    assert "secret/vault" in caplog.text
+
+
 def test_route_needs_a_session(setup) -> None:
     anonymous = TestClient(setup.client.app)
     assert anonymous.get("/api/care-report?workspace=personal").status_code in (401, 403)
+
+
+# ── Run now: one care run at a time ───────────────────────────────────────
+
+
+def _run_now_client(entry: Any) -> tuple[TestClient, list[str]]:
+    from starlette.applications import Starlette
+    from starlette.routing import Route
+
+    from ciao.web.routes_api import run_schedule_now
+
+    dispatched: list[str] = []
+
+    class _Manager:
+        _store = SimpleNamespace(get=lambda schedule_id: entry)
+
+        async def dispatch_now(self, schedule_id: str) -> dict[str, Any]:
+            dispatched.append(schedule_id)
+            return {"schedule_id": schedule_id, "status": "ok"}
+
+    app = Starlette(routes=[Route("/api/schedule-run/{schedule_id}", run_schedule_now, methods=["POST"])])
+    app.state.schedule_manager = _Manager()
+    app.state.project_chat_manager = SimpleNamespace(schedule_target_refusal=lambda e: "")
+    return TestClient(app), dispatched
+
+
+def test_care_run_now_refuses_while_a_run_is_in_progress(monkeypatch) -> None:
+    monkeypatch.setattr("ciao.web.routes_api.publish_automations_changed", lambda pcm: None)
+    client, dispatched = _run_now_client(_entry(status="running"))
+    response = client.post("/api/schedule-run/system-memory-curation@personal")
+    assert response.status_code == 409
+    assert response.json() == {"error": "already running"}
+    assert dispatched == []
+
+
+def test_care_run_now_dispatches_when_idle(monkeypatch) -> None:
+    monkeypatch.setattr("ciao.web.routes_api.publish_automations_changed", lambda pcm: None)
+    client, dispatched = _run_now_client(_entry(status="ok"))
+    assert client.post("/api/schedule-run/system-memory-curation@personal").status_code == 201
+    assert dispatched == ["system-memory-curation@personal"]
+
+
+def test_other_schedules_keep_their_run_now_behaviour(monkeypatch) -> None:
+    monkeypatch.setattr("ciao.web.routes_api.publish_automations_changed", lambda pcm: None)
+    entry = SimpleNamespace(schedule_id="briefing", last_status="running")
+    client, dispatched = _run_now_client(entry)
+    assert client.post("/api/schedule-run/briefing").status_code == 201
+    assert dispatched == ["briefing"]

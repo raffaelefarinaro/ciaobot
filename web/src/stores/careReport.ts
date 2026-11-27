@@ -119,13 +119,10 @@ export const useCareReportStore = defineStore('careReport', () => {
       }
       void tasks.fetchSchedules().catch(() => {})
       await load(ws)
-      // The dispatch stamps the schedule before this read, but a slow store can
-      // answer first; the next poll corrects a Running shown too early.
-      if (workspace.value === ws && report.value && !report.value.running) {
-        report.value = { ...report.value, running: { since: new Date().toISOString(), step: '', index: 0, total: 0 } }
-        schedulePoll()
-      }
-      return { ok: true, message: 'Care started.' }
+      // "Started" is what the engine says, not what was asked: the dispatch
+      // stamps the schedule running before it answers, so the re-read shows it.
+      if (workspace.value === ws && report.value?.running) return { ok: true, message: 'Care started.' }
+      return { ok: true, message: 'Care was asked to run but has not started yet.' }
     } finally {
       starting.value = false
     }

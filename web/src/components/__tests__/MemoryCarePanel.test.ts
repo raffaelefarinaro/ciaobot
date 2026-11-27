@@ -9,6 +9,7 @@ import MemoryCarePanel from '../MemoryCarePanel.vue'
 import { api } from '../../lib/api'
 import type { CareReport } from '../../lib/careReport'
 import { careReports, CARE_WORKSPACE } from '../../lib/careReportFixture'
+import { useCareReportStore } from '../../stores/careReport'
 import { useFileViewerStore } from '../../stores/fileViewer'
 import { useProjectStore } from '../../stores/projects'
 
@@ -63,6 +64,10 @@ describe('MemoryCarePanel', () => {
     expect(wrapper.findAll('.mc-seg--done')).toHaveLength(5)
     expect(wrapper.findAll('.mc-need-title').map(n => n.text())).toEqual(['New line in Unsure', 'Memory guide at 91%'])
     expect(wrapper.findAll('.mc-need .mc-action').map(b => b.text())).toEqual(['Open Unsure', 'Review guide'])
+    // Each button names the item it acts on.
+    expect(wrapper.findAll('.mc-need .mc-action').map(b => b.attributes('aria-label'))).toEqual([
+      'Open Unsure: New line in Unsure', 'Review guide: Memory guide at 91%',
+    ])
     const steps = wrapper.findAll('.mc-step')
     expect(steps).toHaveLength(5)
     expect(steps[1].get('.mc-step-name').text()).toBe('Memory regions')
@@ -106,7 +111,7 @@ describe('MemoryCarePanel', () => {
     expect(options.path).toBe('memory-vault/storybook-alpha/Workspace/Care-Report.md')
     expect(options.title).toBe('Fix care step: hygiene')
     expect(options.workspace).toBe(CARE_WORKSPACE)
-    expect(options.seed).toContain('Reason: cannot write INDEX.md')
+    expect(options.seed).toContain('```text\ncannot write INDEX.md\n```')
     expect(options.seed).toContain('Step file: /stock/references/hygiene.md')
   })
 
@@ -117,11 +122,43 @@ describe('MemoryCarePanel', () => {
     const learnings = wrapper.findAll('.mc-step')[2]
     expect(learnings.find('.care-glyph--running').exists()).toBe(true)
     expect(learnings.get('.mc-step-state').text()).toBe('running')
-    const run = wrapper.findAll('.mc-link').find(b => b.text() === 'Run care again')!
+    // While a run is in progress the control says so and cannot start another.
+    const run = wrapper.findAll('.mc-link').find(b => b.text() === 'Running…')!
+    expect(run.attributes('disabled')).toBeDefined()
     await run.trigger('click')
     await flushPromises()
     expect(post).not.toHaveBeenCalled()
-    expect(wrapper.get('.mc-status').text()).toBe('Care is already running.')
+  })
+
+  it('says it only asked when the run has not started yet', async () => {
+    const post = serve(careReports.blocked)
+    const wrapper = await mountPanel()
+    await wrapper.findAll('.mc-link').find(b => b.text() === 'Run care again')!.trigger('click')
+    await flushPromises()
+    expect(post).toHaveBeenCalledTimes(1)
+    expect(wrapper.get('.mc-status').text()).toBe('Care was asked to run but has not started yet.')
+  })
+
+  it('keeps the last report up with a quiet hint when a refresh fails', async () => {
+    let failing = false
+    vi.spyOn(api, 'get').mockImplementation(async () => {
+      if (failing) throw new Error('engine offline')
+      return careReports.blocked as never
+    })
+    const wrapper = await mountPanel()
+    failing = true
+    await useCareReportStore().refresh()
+    await flushPromises()
+    expect(wrapper.get('.mc-summary-title').text()).toBe('Did not finish: 4 of 6 steps')
+    expect(wrapper.text()).toContain('Could not refresh the report. Showing the last one read.')
+    expect(wrapper.find('[role="alert"]').exists()).toBe(false)
+  })
+
+  it('lists the weekly steps being retried and how the previous run ended', async () => {
+    serve({ ...careReports.blocked, interrupted_ids: ['stale'] })
+    const wrapper = await mountPanel()
+    expect(wrapper.text()).toContain('The previous run stopped before finishing stale.')
+    expect(wrapper.text()).toContain('Retried each night until it works, for up to 3 nights: hygiene (night 2 of 3), guide-review (night 1 of 3).')
   })
 
   it('runs care again through the schedule run-now', async () => {

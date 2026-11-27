@@ -18,6 +18,7 @@ function base(overrides: Partial<CareReport>): CareReport {
     modified_at: '2026-11-27T03:12:00',
     updated: '2026-11-27',
     weekly_done: '2026-11-24',
+    weekly_retry: [],
     interrupted_ids: [],
     nothing_due: false,
     malformed: false,
@@ -66,6 +67,7 @@ export const careReports = {
       step('guide-review', 'blocked', 'review the guide body', 'depends on the index'),
     ],
     weekly_done: '2026-11-17',
+    weekly_retry: [{ id: 'hygiene', nights: 2 }, { id: 'guide-review', nights: 1 }],
     needs_you: [{ title: 'Hygiene is blocked', detail: 'The vault index command exited 2.', action: 'report' }],
   }),
   interrupted: base({

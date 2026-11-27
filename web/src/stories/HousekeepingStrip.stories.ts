@@ -70,7 +70,7 @@ type FixtureOptions = {
   runId?: string
   dismissId?: string
   /** The care read; a clean run (no row) unless a story names another. */
-  care?: CareReport
+  care?: CareReport | CareReport[]
   careRun?: boolean
 }
 
@@ -275,7 +275,8 @@ export const CareNeverRunRendersNothing: Story = {
 }
 
 export const CareRunAgain: Story = {
-  ...story(routes({ care: careReports.blocked, careRun: true })),
+  // The first read and the one inside the press, then the run in progress.
+  ...story(routes({ care: [careReports.blocked, careReports.blocked, careReports.running], careRun: true })),
   play: async ({ canvas, userEvent }) => {
     await settled(canvas)
     await userEvent.click(canvas.getByRole('button', { name: 'More actions for Care did not finish' }))

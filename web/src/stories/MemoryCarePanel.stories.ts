@@ -13,7 +13,7 @@ type Canvas = Parameters<NonNullable<StoryObj['play']>>[0]['canvas']
  * reading one synthetic report per state. Fix with a chat opens a chat, which
  * the fixture does not declare, so no play presses it.
  */
-function story(report: CareReport | 'held' | 'failed', options: { narrow?: boolean, extra?: FixtureRoute[] } = {}) {
+function story(report: CareReport | CareReport[] | 'held' | 'failed', options: { narrow?: boolean, extra?: FixtureRoute[] } = {}) {
   const owner = renderHome(MemoryCarePanel, {
     label: 'Workspace care workshop: one synthetic workspace and a synthetic report.',
     workspace: CARE_WORKSPACE,
@@ -45,8 +45,8 @@ export const NeedsYou: Story = {
   play: async ({ canvas }) => {
     await summary(canvas, 'Done with 2 things for you')
     expect(canvas.getByRole('heading', { name: 'What needs you' })).toBeTruthy()
-    expect(canvas.getByRole('button', { name: 'Open Unsure' })).toBeTruthy()
-    expect(canvas.getByRole('button', { name: 'Review guide' })).toBeTruthy()
+    expect(canvas.getByRole('button', { name: 'Open Unsure: New line in Unsure' })).toBeTruthy()
+    expect(canvas.getByRole('button', { name: 'Review guide: Memory guide at 91%' })).toBeTruthy()
     expect(canvas.getAllByText('done')).toHaveLength(5)
   },
 }
@@ -66,7 +66,7 @@ export const Blocked: Story = {
     await summary(canvas, 'Did not finish: 4 of 6 steps')
     expect(canvas.getAllByText('blocked')).toHaveLength(2)
     expect(canvas.getByRole('button', { name: 'Fix Hygiene with a chat' })).toBeTruthy()
-    expect(canvas.getByRole('button', { name: 'Open report file' })).toBeTruthy()
+    expect(canvas.getByRole('button', { name: 'Open report file: Hygiene is blocked' })).toBeTruthy()
   },
 }
 
@@ -83,6 +83,7 @@ export const Running: Story = {
   play: async ({ canvas }) => {
     await summary(canvas, 'Running: step 3 of 6')
     expect(canvas.getByText('running')).toBeTruthy()
+    expect((canvas.getByRole('button', { name: 'Running…' }) as HTMLButtonElement).disabled).toBe(true)
     expect(canvas.getAllByText('waiting')).toHaveLength(3)
   },
 }
@@ -97,7 +98,8 @@ export const NeverRun: Story = {
 }
 
 export const RunAgain: Story = {
-  ...story(careReports.blocked, { extra: careRunRoutes() }),
+  // Two reads before the press (mount and refresh), one inside it, then the run.
+  ...story([careReports.blocked, careReports.blocked, careReports.blocked, careReports.running], { extra: careRunRoutes() }),
   play: async ({ canvas, userEvent }) => {
     await summary(canvas, 'Did not finish: 4 of 6 steps')
     await userEvent.click(canvas.getByRole('button', { name: 'Run care again' }))

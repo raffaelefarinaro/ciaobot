@@ -111,6 +111,7 @@ from ciao.schedules import (
     publish_automations_changed,
     run_failed_since,
     stamp_fallback_project,
+    system_base_id,
     system_schedule_id,
     wall_clock_time_error,
     wall_clock_time_value_error,
@@ -4273,7 +4274,9 @@ async def care_report(request: Request) -> JSONResponse:
     try:
         vault = Path(config.workspace_vault_root(workspace)).resolve()
     except (AttributeError, ValueError, OSError) as exc:
-        return JSONResponse({"error": f"vault unavailable: {exc}"}, status_code=409)
+        # The detail can name an absolute path: it goes to the log, not the client.
+        logger.warning("care report: vault for %s unavailable: %s", workspace, exc)
+        return JSONResponse({"error": "vault unavailable"}, status_code=409)
     body: dict[str, Any] = await asyncio.to_thread(read_care_report, vault)
     references = durable_memory_guide_path().parent / "references"
     for step in body["steps"]:
@@ -5350,6 +5353,10 @@ async def run_schedule_now(request: Request) -> JSONResponse:
         refusal = request.app.state.project_chat_manager.schedule_target_refusal(entry)
         if refusal:
             return JSONResponse({"error": refusal}, status_code=400)
+        # Workspace care rebuilds and ticks one report file; a second run on top
+        # of a live one would rewrite the checklist under it.
+        if system_base_id(entry.schedule_id) == CARE_SCHEDULE_BASE_ID and entry.last_status == "running":
+            return JSONResponse({"error": "already running"}, status_code=409)
     try:
         result = await sm.dispatch_now(schedule_id)
     except MemoryProjectRefused as exc:

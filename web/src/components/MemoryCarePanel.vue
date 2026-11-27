@@ -20,8 +20,8 @@
              same thing, so the bar is decoration for assistive tech. -->
         <div v-if="report.steps.length" class="mc-progress" aria-hidden="true">
           <i
-            v-for="step in report.steps"
-            :key="step.id"
+            v-for="(step, i) in report.steps"
+            :key="i"
             class="mc-seg"
             :class="`mc-seg--${stepGlyph(step, report.running)}`"
           />
@@ -29,6 +29,7 @@
       </div>
 
       <p class="mc-status" role="status">{{ status }}</p>
+      <p v-if="care.error" class="mc-note">Could not refresh the report. Showing the last one read.</p>
 
       <section v-if="report.needs_you.length" class="mc-section" aria-labelledby="mc-needs-title">
         <h3 id="mc-needs-title" class="rail-title">What needs you</h3>
@@ -38,7 +39,12 @@
             <div class="mc-need-body">
               <p class="mc-need-title">{{ item.title }}</p>
               <p v-if="item.detail" class="mc-need-detail">{{ item.detail }}</p>
-              <button type="button" class="btn-small mc-action" @click="act(item.action)">{{ needActionLabel(item.action) }}</button>
+              <button
+                type="button"
+                class="btn-small mc-action"
+                :aria-label="`${needActionLabel(item.action)}: ${item.title}`"
+                @click="act(item.action)"
+              >{{ needActionLabel(item.action) }}</button>
             </div>
           </li>
         </ol>
@@ -47,7 +53,7 @@
       <section v-if="report.steps.length" class="mc-section" aria-labelledby="mc-steps-title">
         <h3 id="mc-steps-title" class="rail-title">Steps</h3>
         <ul class="mc-steps">
-          <li v-for="step in report.steps" :key="step.id" class="mc-step">
+          <li v-for="(step, i) in report.steps" :key="i" class="mc-step">
             <CareGlyph class="mc-step-glyph" :kind="stepGlyph(step, report.running)" />
             <div class="mc-step-body">
               <p class="mc-step-name">{{ stepName(step.id) }}</p>
@@ -66,7 +72,10 @@
           </li>
         </ul>
         <p v-if="report.interrupted_ids.length" class="mc-note">
-          The run before this one was cut off before: {{ report.interrupted_ids.join(', ') }}.
+          The previous run stopped before finishing {{ report.interrupted_ids.join(', ') }}.
+        </p>
+        <p v-if="report.weekly_retry.length" class="mc-note">
+          Retried each night until it works, for up to 3 nights: {{ retryWords }}.
         </p>
       </section>
 
@@ -77,9 +86,9 @@
             v-if="report.schedule"
             type="button"
             class="mc-link"
-            :disabled="care.starting"
+            :disabled="care.starting || !!report.running"
             @click="runAgain"
-          >{{ care.starting ? 'Starting…' : report.status === 'missing' ? 'Run care now' : 'Run care again' }}</button>
+          >{{ care.starting ? 'Starting…' : report.running ? 'Running…' : report.status === 'missing' ? 'Run care now' : 'Run care again' }}</button>
           <button
             type="button"
             class="mc-link"
@@ -135,6 +144,9 @@ const weeklyWords = computed(() => {
   const day = report.value ? dayWords(report.value.weekly_done) : ''
   return day ? `Weekly checks last done ${day}` : 'Weekly checks not done yet'
 })
+
+const retryWords = computed(() => (report.value?.weekly_retry ?? [])
+  .map(r => `${r.id} (night ${r.nights} of 3)`).join(', '))
 
 const status = ref('')
 const fixing = ref('')

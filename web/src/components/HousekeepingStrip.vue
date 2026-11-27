@@ -304,7 +304,11 @@ const careKey = computed(() => actionNoticeKey(
 ))
 const visibleCareRow = computed(() => (careRow.value && !noticeWindows.isClosed(careKey.value) ? careRow.value : null))
 const careItems = computed<NeedsYouMenuItem[]>(() => [
-  { id: 'care-run', label: care.starting ? 'Starting…' : 'Run care again', disabled: care.starting },
+  {
+    id: 'care-run',
+    label: care.starting ? 'Starting…' : care.report?.running ? 'Running…' : 'Run care again',
+    disabled: care.starting || !!care.report?.running,
+  },
   { id: 'hide', label: 'Hide for now' },
 ])
 // The care read joins the first-load gate once, so the list still arrives in
