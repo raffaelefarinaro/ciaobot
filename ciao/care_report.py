@@ -257,7 +257,7 @@ def _read_fd(fd: int, expect: os.stat_result | None = None) -> tuple[str, bytes,
     if not stat_module.S_ISREG(info.st_mode):
         return "unreadable", b"", 0.0
     # A hard link makes the report another file's contents under the vault's name.
-    if info.st_nlink != 1:
+    if info.st_nlink > 1:
         return "unreadable", b"", 0.0
     if expect is not None and (expect.st_ino or expect.st_dev) and (
         (info.st_dev, info.st_ino) != (expect.st_dev, expect.st_ino)
@@ -306,10 +306,27 @@ def _read_fd_relative(vault_root: Path) -> tuple[str, bytes, float]:
         os.close(fd)
 
 
+# The reparse tags that redirect a path: a symlink and a junction (mount
+# point). Other reparse points are not links: OneDrive Files On-Demand marks
+# every synced file and folder with a cloud tag even when fully downloaded.
+_LINK_REPARSE_TAGS = {
+    getattr(stat_module, "IO_REPARSE_TAG_SYMLINK", 0xA000000C),
+    getattr(stat_module, "IO_REPARSE_TAG_MOUNT_POINT", 0xA0000003),
+}
+
+
 def _is_link(info: os.stat_result) -> bool:
-    """A symlink, or on Windows any reparse point (symlink, junction, mount)."""
+    """A symlink, or on Windows a symlink or junction reparse point.
+
+    The resolved-path-inside-the-vault check and the same-file check after the
+    open stay the backstop for anything else.
+    """
+    if stat_module.S_ISLNK(info.st_mode):
+        return True
     attributes = getattr(info, "st_file_attributes", 0)
-    return stat_module.S_ISLNK(info.st_mode) or bool(attributes & stat_module.FILE_ATTRIBUTE_REPARSE_POINT)
+    if not attributes & getattr(stat_module, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400):
+        return False
+    return getattr(info, "st_reparse_tag", 0) in _LINK_REPARSE_TAGS
 
 
 def _read_by_path(vault_root: Path) -> tuple[str, bytes, float]:

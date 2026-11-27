@@ -249,20 +249,62 @@ def test_a_plain_report_reads_on_both_branches(tmp_path: Path, either_branch: st
     assert body["counts"]["blocked"] == 2
 
 
-def test_the_path_branch_refuses_a_reparse_point(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """On Windows a junction or a symlink reads as a reparse point in lstat's attributes."""
-    monkeypatch.setattr(care_report, "_fd_relative_supported", lambda: False)
-    report = _write_report(tmp_path, COMPLETE)
+def _fake_reparse(monkeypatch: pytest.MonkeyPatch, target: Path, tag: int) -> list[str]:
+    """Give `target` the reparse-point attribute and `tag` in lstat, as Windows reports them."""
     real_lstat = os.lstat
+    resolved = target.resolve()
+    hits: list[str] = []
 
     def lstat(path):  # type: ignore[no-untyped-def]
         info = real_lstat(path)
-        if Path(path) == report.resolve():
-            return SimpleNamespace(st_mode=info.st_mode, st_ino=info.st_ino, st_dev=info.st_dev, st_file_attributes=0x400)
+        if Path(path) == resolved:
+            hits.append(str(path))
+            return SimpleNamespace(
+                st_mode=info.st_mode, st_ino=info.st_ino, st_dev=info.st_dev,
+                st_file_attributes=0x400, st_reparse_tag=tag,
+            )
         return info
 
     monkeypatch.setattr(care_report.os, "lstat", lstat)
+    return hits
+
+
+@pytest.mark.parametrize("tag", [0xA000000C, 0xA0000003], ids=["symlink", "junction"])
+@pytest.mark.parametrize("where", ["report", "folder"])
+def test_the_path_branch_refuses_symlink_and_junction_reparse_points(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, tag: int, where: str,
+) -> None:
+    monkeypatch.setattr(care_report, "_fd_relative_supported", lambda: False)
+    report = _write_report(tmp_path, COMPLETE)
+    hits = _fake_reparse(monkeypatch, report if where == "report" else report.parent, tag)
     assert read_care_report(tmp_path)["status"] == "unreadable"
+    assert hits, "the reparse check never saw the faked entry"
+
+
+@pytest.mark.parametrize("where", ["report", "folder"])
+def test_the_path_branch_reads_a_onedrive_cloud_file(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, where: str) -> None:
+    """OneDrive Files On-Demand tags synced files and folders even when downloaded."""
+    monkeypatch.setattr(care_report, "_fd_relative_supported", lambda: False)
+    report = _write_report(tmp_path, COMPLETE)
+    hits = _fake_reparse(monkeypatch, report if where == "report" else report.parent, 0x9000001A)
+    body = read_care_report(tmp_path)
+    assert hits
+    assert body["status"] == "ok"
+    assert body["counts"]["total"] == 2
+
+
+def test_a_link_count_of_zero_is_tolerated(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Some filesystems report st_nlink 0; only a count above one is a hard link."""
+    _write_report(tmp_path, COMPLETE)
+    real_fstat = os.fstat
+
+    def fstat(fd):  # type: ignore[no-untyped-def]
+        info = real_fstat(fd)
+        return SimpleNamespace(st_mode=info.st_mode, st_nlink=0, st_dev=info.st_dev, st_ino=info.st_ino,
+                               st_size=info.st_size, st_mtime=info.st_mtime)
+
+    monkeypatch.setattr(care_report.os, "fstat", fstat)
+    assert read_care_report(tmp_path)["status"] == "ok"
 
 
 def test_the_path_branch_refuses_a_swap_between_check_and_open(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
