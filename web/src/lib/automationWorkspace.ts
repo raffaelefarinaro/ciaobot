@@ -41,6 +41,16 @@ export function scheduleNeedsAttention(schedule: Schedule): boolean {
   return schedule.enabled && (schedule.missed || schedule.last_status === 'error')
 }
 
+/** The care schedule: bare `system-memory-curation`, or fanned out per workspace as `system-memory-curation@<workspace>`. */
+export const CARE_SCHEDULE_BASE = 'system-memory-curation'
+export const CARE_SCHEDULE_PREFIX = `${CARE_SCHEDULE_BASE}@`
+
+/** Whether a chat is a Workspace care run's chat (same id rule as the engine's `is_care_schedule_id`). */
+export function isCareChat(chat: { schedule_id?: string }): boolean {
+  const id = chat.schedule_id ?? ''
+  return id === CARE_SCHEDULE_BASE || id.startsWith(CARE_SCHEDULE_PREFIX)
+}
+
 /**
  * Whether this schedule is one row of a per-workspace fan-out.
  *

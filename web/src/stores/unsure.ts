@@ -3,9 +3,7 @@ import { ref, watch } from 'vue'
 import { api } from '../lib/api'
 import type { UnsureItem, UnsureList, UnsureOp } from '../lib/unsureList'
 import { useTaskStore } from './tasks'
-
-/** The care schedule fans out per workspace as `system-memory-curation@<workspace>`. */
-const CARE_SCHEDULE_PREFIX = 'system-memory-curation@'
+import { CARE_SCHEDULE_PREFIX } from '../lib/automationWorkspace'
 
 /**
  * The active workspace's Unsure list (`GET /api/memory/unsure`), shared by
