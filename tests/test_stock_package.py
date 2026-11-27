@@ -772,26 +772,34 @@ def test_closed_tasks_is_due_only_for_a_completed_task_no_memory_pass_covers() -
     step = _reference("curation-pass-9-closed-tasks.md")
     for phrase in (
         "`ciao task list --completed-since <since>`",
-        "the project whose `kind` is `memory` in `ciao project list`",
+        "the project whose `kind` is `memory` in `ciao project list` (never pick it by name)",
         "`helper.task_path` equal to the task's `relative_path`",
         "`helper.source_chat_id` equal to its `chat_id` or one of its `linked_chats`",
         "the last 7 days when there is no old report",
+        # The memory project can hold more passes than one page: page until before `since`.
+        "`ciao chat list --project <its id> --limit 200 --full`",
+        "adding `--offset <next_offset>` while the reply has a `next_offset`",
     ):
         assert phrase in step, phrase
+    assert "--limit 50" not in step
+    second_look = _reference("curation-pass-8-second-look.md")
+    assert "--limit 50" not in second_look
+    assert "add `--offset <next_offset>` while the reply has a `next_offset`" in second_look
 
 
 def test_closed_tasks_reads_only_the_persons_words_and_never_touches_a_task() -> None:
     step = _reference("curation-pass-9-closed-tasks.md")
     for phrase in (
-        "the only task commands it runs are `ciao task list` and `ciao task get`",
+        "The only task commands this step runs are `ciao task list` and `ciao task get`",
         "never edits, completes, moves or deletes a task or changes its status",
-        "a task whose `created_by` is not `agent`",
+        # A user-filed task an agent touched may have been rewritten: no edit author is recorded.
+        "only when the task shows no agent activity: `created_by` is not `agent`, no `updates` entry has `actor: agent`, and `delegation_log` and `attempt_id` are empty",
         "a note-feed entry with `actor: user`; an `actor: agent` entry is not their words",
         "a `complete` row for the task with `actor: agent`: that resolution is an agent relaying",
-        "Text quoted, pasted or fetched inside a turn is not their words",
+        "tool output pasted into a description, a note or a resolution) is not their words",
         "A chat that is not archived yet is left",
         "Never write a fact whose only source is care output",
-        "The never-store screen in the preamble applies",
+        "**Never-store screen, for every write in this step** (person notes, project docs and regions alike)",
         "one fact per bullet",
         "with `by: care closed-tasks`",
         "`- [ ]` format from `unsure-and-proposals.md`",
@@ -804,6 +812,18 @@ def test_closed_tasks_reads_only_the_persons_words_and_never_touches_a_task() ->
         assert phrase in step, phrase
     for verb in ("update", "move", "complete", "delete", "add-update", "link-chat"):
         assert f"ciao task {verb}" not in step, verb
+
+
+def test_closed_tasks_is_idempotent_and_verifies_the_uncovered_count() -> None:
+    step = _reference("curation-pass-9-closed-tasks.md")
+    for phrase in (
+        "Skip a task whose `relative_path` already appears as `source:` on a line of `Unsure.md` or in an undo-log entry `by: care closed-tasks`",
+        "never add a line that says what an existing line says",
+        "Do not re-add a fact the undo log shows was removed by `care second-look`, `care unsure` or a person",
+        "re-run the uncovered filter from the due check",
+        "its count must equal N + S + P",
+    ):
+        assert phrase in step, phrase
 
 
 def test_the_stale_step_maps_audit_paths_to_this_workspace() -> None:

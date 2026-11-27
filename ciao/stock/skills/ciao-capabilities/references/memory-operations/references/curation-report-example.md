@@ -9,7 +9,7 @@ Weekly retry: guide-review=1
 Interrupted last run: guide-review
 - [x] unsure: apply ticked Unsure lines (2 ticked) — applied 2, left 0 ticked; verify: 0 `- [x]` lines left
 - [x] second-look: re-read what the memory passes wrote (2 archived since 2026-11-25) — read 2 passes, checked 9 lines, fixed 1 (merged People/Tom.md into People/Tomas Berg.md; note-retire proposal Workspace/Proposals/retire-tom.md), unsure 0, left 8; verify: proposal-check ok, People/Tomas Berg.md holds the moved lines
-- [x] closed-tasks: learn from tasks finished without a memory pass (3 completed since 2026-11-25) — read 3 tasks, wrote 1 fact (Projects/Atlas.md), unsure 0, left 2; verify: Projects/Atlas.md has "- Atlas launch moved to March, decided with Rae"
+- [x] closed-tasks: learn from tasks finished without a memory pass (3 completed since 2026-11-25) — uncovered 3, read 3 tasks, skipped 0, wrote 1 fact (Projects/Atlas.md), unsure 0, left 2; verify: uncovered 3 = 3 + 0 + 0, Projects/Atlas.md has "- Atlas launch moved to March, decided with Rae"
 - [x] regions: consolidate regions at or above 85% (memory 91%) — memory 91% -> 72%, 3 entries logged in Memory-Consolidations.md; verify: memory.pct 72, profile.pct 40
 - [x] stale: re-check stale notes (4 listed, weekly due) — checked 4 notes (People/Rae.md, ...), fixed 1, Unsure 1; verify: 3 of 4 still listed, none of the fixed paths
 - [!] guide-review: review the AGENTS.md body (weekly due) — blocked: AGENTS.md unreadable

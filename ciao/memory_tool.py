@@ -611,7 +611,7 @@ def update_region(
     creates a second memory database.
 
     ``char_limit`` is ADVISORY, which is what it was always documented to be:
-    "Nothing refuses a write at edit time; os_audit and nightly memory curation
+    "Nothing refuses a write at edit time; os_audit and daily memory curation
     report/consolidate when over cap." The code refused anyway, and that turned a
     budget into a wall — on a real vault it made the accept button dead for 67 of
     130 queued proposals, with no way past it from the queue and nothing saying

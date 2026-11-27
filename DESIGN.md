@@ -329,7 +329,7 @@ Borders are structural, not decorative. Active navigation is marked by a slim ac
 
 - **First-run separate notes:** Offer an optional existing notes folder alongside the Ciaobot operational folder. Show both locations, require a successful local inspection before finishing, and describe synchronization as the cloud client's responsibility.
 
-The onboarding care stage follows the setup shell's calm, compact form rhythm: host availability guides the suggested local time, while the editable time and IANA zone are explicit controls. A status line says whether timing will be written: only a time or zone the person edited is saved, when they press Continue; leaving the fields alone keeps the packaged default and writes nothing. There is no Save or Keep-default button, and a failed save shows an inline error and Continue retries it. Without a care routine Continue is available.
+The onboarding care stage follows the setup shell's calm, compact form rhythm: host availability guides the suggested local time, while the editable time and IANA zone are explicit controls. The fields propose 07:00 in the browser's timezone (availability can move the suggestion), and Continue saves what they show as the routine's timing, so an onboarded install runs care in its own morning; a routine already set to a zone other than the packaged UTC is proposed unchanged. A status line says exactly what is saved: *Care will run at 07:00 Europe/Zurich. Saved when you continue.*, then *Care runs at 07:00 Europe/Zurich.* once it matches the engine. There is no Save or Keep-default button, and a failed save shows an inline error and Continue retries it. Without a care routine Continue is available.
 
 ## Onboarding finish
 

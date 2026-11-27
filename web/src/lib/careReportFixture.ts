@@ -6,6 +6,8 @@
 import type { CareReport, CareStep } from './careReport'
 
 export const CARE_WORKSPACE = 'storybook-alpha'
+/** When the fixture reports were written: a UTC instant, as `GET /api/care-report` sends it. */
+export const CARE_WRITTEN_AT = '2026-11-27T07:12:00Z'
 
 function step(id: string, state: CareStep['state'], what: string, evidence = '', verify = ''): CareStep {
   return { id, state, what, evidence, verify, step_file: state === 'open' ? '' : `/stock/references/${id}.md` }
@@ -15,7 +17,7 @@ function base(overrides: Partial<CareReport>): CareReport {
   const steps = overrides.steps ?? []
   return {
     status: 'ok',
-    modified_at: '2026-11-27T07:12:00',
+    modified_at: CARE_WRITTEN_AT,
     updated: '2026-11-27',
     weekly_done: '2026-11-24',
     weekly_retry: [],

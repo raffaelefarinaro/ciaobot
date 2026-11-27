@@ -58,7 +58,7 @@ export function careRoutine(overrides: Partial<Schedule> = {}): Schedule {
   return {
     schedule_id: `system-memory-curation@${WORKSPACE}`,
     revision: 'sb-care-1',
-    daily_time_utc: '08:00',
+    daily_time_utc: '06:00',
     prompt: 'Synthetic workspace care prompt.',
     chat_id: 0,
     created_at: '2026-03-01T09:00:00+00:00',

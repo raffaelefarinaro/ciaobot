@@ -211,7 +211,9 @@ export interface CareRow {
   tone: 'attention' | 'error'
 }
 
-/** "today", "yesterday" or "on Nov 24": the day a cut-off run last wrote its report. */
+const YEAR_MS = 365 * 24 * 60 * 60 * 1000
+
+/** "today", "yesterday", "on Nov 24", or "on Nov 24, 2025" past a year: the day a cut-off run last wrote its report. */
 function dayPhrase(iso: string, now: Date): string {
   const d = parse(iso)
   if (!d) return ''
@@ -219,7 +221,8 @@ function dayPhrase(iso: string, now: Date): string {
   const yesterday = new Date(now)
   yesterday.setDate(now.getDate() - 1)
   if (sameDay(d, yesterday)) return 'yesterday'
-  return `on ${d.toLocaleDateString('en-US', { month: 'short', day: 'numeric' })}`
+  const withYear = now.getTime() - d.getTime() > YEAR_MS
+  return `on ${d.toLocaleDateString('en-US', withYear ? { month: 'short', day: 'numeric', year: 'numeric' } : { month: 'short', day: 'numeric' })}`
 }
 
 /** What happens next after a cut-off run: only a schedule that is on runs again. */
