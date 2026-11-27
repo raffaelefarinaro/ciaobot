@@ -1,7 +1,7 @@
 import type { Meta, StoryObj } from '@storybook/vue3-vite'
 import { expect, screen, waitFor } from 'storybook/test'
 import { ref } from 'vue'
-import ModelSelector from '../components/ModelSelector.vue'
+import ModelSelector, { type ModelSection } from '../components/ModelSelector.vue'
 import PermissionModeMenu from '../components/PermissionModeMenu.vue'
 
 const meta = {
@@ -110,7 +110,7 @@ const OPENCODE_MODELS = [
   'openai/gpt-5.6', 'openai/gpt-5.5-mini', 'ollama-cloud/glm-5.3-flash', 'ollama-cloud/kimi-k2.7-code:cloud',
   'google/gemini-3-pro', 'deepseek/deepseek-v4', 'mistral/devstral-2',
 ]
-const MANY_SECTIONS = [
+const MANY_SECTIONS: ModelSection[] = [
   { key: 'anthropic', label: 'Claude (Anthropic)', models: CLAUDE_MODELS, modelBadges: { sonnet: ['Default'] }, modelLabels: { default: 'Default', opus: 'Opus', sonnet: 'Sonnet', haiku: 'Haiku' } },
   { key: 'opencode', label: 'opencode', models: OPENCODE_MODELS, modelBadges: { 'openai/gpt-5.6': ['Default'] } },
 ]
