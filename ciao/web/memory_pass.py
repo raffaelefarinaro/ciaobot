@@ -142,7 +142,13 @@ MEMORY_PASS_PROMPT = (
     "stored fact the transcript plainly contradicts, citing it (a recorded "
     "decision follows the rule above instead), and "
     "downgrade a claim stated as settled when the transcript shows it was "
-    "uncertain. Write present-tense facts, not a story of the session "
+    "uncertain. A choice the user only leaned towards (\"sounds good\", "
+    "\"maybe\"), or an assistant suggestion the user did not confirm, is "
+    "not a decision: record it as a preference or an open option, never as "
+    "chosen. When a line holds two facts and only one "
+    "changed, split it and keep the unchanged one; never drop it. Before "
+    "replacing or removing an existing line, log it as the durable-memory "
+    "guide's undo log rule says, with `by: memory pass <this chat's id>`. Write present-tense facts, not a story of the session "
     "(\"Integration tests need FOO=1\", not \"the agent then tried...\"): "
     "drop first-person narration and dead-end guesses, but keep what was "
     "tried and why it failed as a fact. Never copy a secret, API key, token "
@@ -684,8 +690,8 @@ class MemoryPassCoordinator:
 
         chat = min(queued, key=lambda candidate: candidate.created_at)
         try:
-            # Attended on purpose: `unattended=True` injects the "defer new
-            # facts" capsule and auto-denies cards, and the experiment measured
+            # Attended on purpose: `unattended=True` injects the unattended
+            # capsule and auto-denies cards, and the experiment measured
             # attended behaviour.
             host.start_stream(chat.chat_id, self._prompt_for(chat), _memory_pass_dispatch=True)
         except Exception:  # noqa: BLE001 — no turn was admitted; leave it queued

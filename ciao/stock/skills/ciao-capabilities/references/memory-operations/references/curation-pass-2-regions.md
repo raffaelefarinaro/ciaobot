@@ -5,7 +5,7 @@
 - The undo log `<vault>/Workspace/Memory-Consolidations.md` (create it if missing).
 
 ## Procedure
-Consolidate each region at or above ~85% (or over its cap). This step edits regions for consolidation only: it adds no new fact. Before removing or replacing any entry, copy its original text into the undo log under a `## YYYY-MM-DD` heading naming the region, so the person can restore any line.
+Consolidate each region at or above ~85% (or over its cap). Consolidation rewrites what the regions already hold; it is not where new facts come from. Before removing or replacing any entry, log it in the undo log, so the person can restore any line.
 
 - Merge duplicate or near-duplicate entries into one present-tense rule.
 - Replace a superseded entry with its current state.

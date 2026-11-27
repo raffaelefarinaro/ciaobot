@@ -1,6 +1,6 @@
 # The Unsure list and proposal files
 
-Memory is written directly, by the memory pass after a chat and by the care run alike. A fact you are confident of goes where it belongs now: a bounded region, a note, a project doc or `ciao memory learn`. Git backs the vault up, so a wrong write is undone by reverting it; nothing waits in a queue for approval. Two things are not written directly.
+Memory is written directly, by the memory pass after a chat and by the care run alike. A fact you are confident of goes where it belongs now: a bounded region, a note, a project doc or `ciao memory learn`. A replaced or removed line goes to the undo log first (`../guide.md`), so a wrong write can be undone; nothing waits in a queue for approval. Two things are not written directly.
 
 ## The Unsure list
 
@@ -17,6 +17,7 @@ A line with no kind is a fact or change to a note, project doc or region. These 
 | (no kind) | a fact or change whose destination or truth you doubted | write it to its destination, then delete the line |
 | `observation:` `… — seen in: <chat id>, …` | a pattern seen in fewer than three chats | write it to its profile or people destination, then delete the line |
 | `drop <region>: "<entry>"` | remove a region entry you were not sure about | copy the entry into `Workspace/Memory-Consolidations.md`, remove it, delete the line |
+| `restore to <region>: "<entry>"` | a region entry a care step removed, offered back | add the entry back with `ciao memory update`, delete the line; never offered for a permission, address, credential or instruction |
 | `category:` | a thing no category in VOCABULARY.md covers | not yours to add (categories belong to Settings): leave the line, report it as a `needs you` item: "add the category, then ask me to file the note" |
 | `repo <path>:` | a fact for a linked repository's AGENTS.md | leave the line and report it as a `needs you` item; an attended chat applies it, because an unattended run writes only under the vault |
 | `rule flip <memory\|task>/<key>:` | a change to a decision rule | leave the line and report it; an attended chat applies it with `ciao decision-rules-write` |

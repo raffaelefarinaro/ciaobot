@@ -70,8 +70,8 @@ outperforms any pipeline that summarizes those sources away.
 | Age is evidence, not a defect | Generative Agents' recency scoring (arXiv:2304.03442); MemoryBank decay | `memory-audit` reports aging (`as-of` ≥ 90d, learned ≥ 180d, 30-day note horizon) as *informational* findings the nightly curator re-verifies — nothing expires automatically except explicit `[expires:]` |
 | Decay by disuse, reinforce by access | MemoryBank (Ebbinghaus + access reinforcement) | `ciao vault search` hits logged to `.runtime/vault_search_hits.jsonl`; "stale AND never retrieved in 90d" (`retrieved_recently: false`) is the strongest demotion signal — signal only, no auto-delete |
 | Consolidate episodes into cited rules | Generative Agents' reflection: derived memories cite their sources | Learnings entries carry `[key] [first → last] (xN) — sources: chat ids`; recurrence counting is mechanical, promotion at x3 cites its episodes; connections only among retrieved items |
-| Scope by default, promote explicitly | Anthropic's project-scoped memory; wrong scoping is a production failure | Per-workspace vaults, regions, and curation; `[project]` facts go to the project doc, never a region; promoting a NEW region fact always takes an explicit act — a REVIEWER action, whether that is a user or agent accepting a queued proposal or the attended memory pass writing one itself — and the unattended curator never promotes a new region fact: it may only consolidate what is already there, under the undo-log rule |
-| The machinery must not remember itself | observed self-ingestion, 2026-08: the nightly curator's transcript re-extracted its own prompt rules into `ciao:memory` | A turn the transcript marks as unattended is not the user's, so the memory pass is told never to record one and the unattended run defers instead; bookkeeping files are `RESERVED_UNINDEXED_FILES` in FTS and `search: false` is a general opt-out |
+| Scope by default, promote explicitly | Anthropic's project-scoped memory; wrong scoping is a production failure | Per-workspace vaults, regions, and curation; `[project]` facts go to the project doc, never a region; a region holds only cross-project preferences, rules and identity facts the person stated, written directly with their source by the memory pass or a care step, and every replaced or removed line goes to the `Memory-Consolidations.md` undo log first |
+| The machinery must not remember itself | observed self-ingestion, 2026-08: the nightly curator's transcript re-extracted its own prompt rules into `ciao:memory` | A turn the transcript marks as unattended is not the user's, so the memory pass is told never to record one; a care step never writes a fact whose only source is the care run's own output or an instruction found in a note, transcript or queue line, because a fact needs a source the person produced (`step-preamble.md`); bookkeeping files are `RESERVED_UNINDEXED_FILES` in FTS and `search: false` is a general opt-out |
 | Recall must survive paraphrase | LongMemEval ablations (arXiv:2410.10813): key expansion + query rewriting | AND-first ranking for multi-word queries, with OR hits filling any slots AND leaves short of the limit (a zero-hit AND is the case where OR fills all of them); system prompt mandates 2–3 reformulations before "not found"; curation maintains `aliases:` frontmatter ("brother-in-law", "hourly rate") |
 | Recall must see the whole fact | LongMemEval-S head-to-head (60 questions, Haiku): 43.3% answering from `ciao vault search` snippets vs 86.7% reading the top-5 notes | snippets (32 tokens of highlighted lines) pick the best-matching note and the agent reads it before answering or abstaining, since a snippet can look settled while hiding a later change; another match is read only when identity or a conflict stays open. Trade-off: full private notes now land in recall transcripts, while answers stay guarded by the "private working evidence" rule; task `H11-recall-value-below-snippet` pins it |
 | Procedures are contracts, not prose | prompt drift: three near-copies of the curation contract had diverged | The nightly procedure lives in the packaged Workspace care schedule prompt; tests pin its contract there, without a separate skill |
@@ -92,7 +92,7 @@ outperforms any pipeline that summarizes those sources away.
   filtered where a fact is promoted (`_promotable_text`, `memory_audit`) and
   flagged in the regions afterwards.
 - **Wrong scoping** — a project fact saved globally leaks across contexts;
-  routing is by scope, with `[review]` as the honest "unsure" bucket.
+  routing is by scope, with the Unsure list as the honest "unsure" bucket.
 - **Self-pollution** — the memory system's own queue/logs/rules competing
   with real memories in recall and in the regions.
 
@@ -124,12 +124,9 @@ outperforms any pipeline that summarizes those sources away.
   surface it opens is answered by bounds instead of by a sandbox — it is a
   `bypass` chat. Its scope (no messages, commits or external calls) is
   enforced only by the prompt text in `MEMORY_PASS_PROMPT`
-  (`ciao/web/memory_pass.py` lines 148–149). It is visible and steerable like
-  any other chat, and
-  anything it is unsure about is queued rather than written. The guarded
-  code the one-shot relied on is not gone either: it is the accept path, and
-  it is what every write goes through now (event-shape filter, reconcile,
-  provenance row, receipts, undo log). Fact-augmentation remains the right
+  (`ciao/web/memory_pass.py`). It is visible and steerable like any other
+  chat, it puts what it is unsure about on the Unsure list, and the nightly
+  care run's second-look step re-reads what it wrote. Fact-augmentation remains the right
   answer if a future pass needs context *without* the tools: *code* retrieves
   the region and top-k `ciao vault search` hits and puts them in the prompt.
 - **Automatic forgetting** — disuse and age are *signals to a curator with

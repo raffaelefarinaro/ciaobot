@@ -113,6 +113,7 @@ describe('the report page words', () => {
   it('names steps, their line, glyph and word', () => {
     expect(stepName('guide-review')).toBe('Guide review')
     expect(stepName('regions')).toBe('Memory regions')
+    expect(stepName('second-look')).toBe('Second look')
     expect(stepName('new-step')).toBe('New step')
     const [, , , , hygiene] = careReports.blocked.steps
     expect(stepLine(hygiene)).toBe('Blocked: cannot write INDEX.md')
