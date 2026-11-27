@@ -321,6 +321,7 @@ describe('ProjectSidebar memory section', () => {
     const items = nav.findAll('.memory-nav-item')
     expect(items.map(i => i.attributes('href'))).toEqual([
       '/memory/unsure', '/memory/care', '/memory/map', '/memory/categories',
+      'https://www.raffaelefarinaro.com/ciaobot/memory.html',
     ])
     expect(items[0].text()).toContain('Unsure')
     expect(items[1].text()).toContain('Workspace care')
@@ -333,6 +334,14 @@ describe('ProjectSidebar memory section', () => {
     expect(items[1].find('.memory-nav-count').exists()).toBe(false)
     expect(items[3].find('.memory-nav-count').exists()).toBe(false)
     expect(items[0].attributes('aria-label')).toBe('Unsure')
+    // How memory works is the last row: a quiet link to the site that opens outside the app.
+    const help = items[4]
+    expect(help.element.tagName).toBe('A')
+    expect(help.text()).toContain('How memory works')
+    expect(help.attributes('target')).toBe('_blank')
+    expect(help.attributes('rel')).toBe('noopener noreferrer')
+    expect(help.attributes('aria-label')).toBe('How memory works, opens the website in a new tab')
+    expect(help.attributes('aria-current')).toBeUndefined()
   })
 
   it('offers a Manage link from the map\'s category chips to the category list', async () => {

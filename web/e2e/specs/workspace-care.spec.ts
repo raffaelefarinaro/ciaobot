@@ -209,7 +209,7 @@ test.describe('Workspace care while a run is in progress', () => {
     await boot(page, '/memory/care', '.mc-summary-title')
     await expect(page.getByRole('heading', { name: 'Running now' })).toBeVisible()
     await expect(page.getByText('Care is starting. Results appear here as steps finish.')).toBeVisible()
-    await expect(page.locator('.mc-last-run')).toContainText(/^Last run: .*: 1 thing needed you$/)
+    await expect(page.locator('.mc-last-run')).toContainText(/^Previous run: .*: 1 thing needed you$/)
     await expect(page.locator('.mc-need')).toHaveCount(0)
     await expect(page.locator('details.mc-disclosure')).toHaveCount(0)
     await expect(page.locator('.mc-seg--done, .mc-seg--blocked')).toHaveCount(0)
@@ -233,6 +233,56 @@ test.describe('Workspace care while a run is in progress', () => {
     await expect(line).toContainText('Care is running')
     await expect(line).not.toContainText('needs you')
     await expect(page.locator('.needs-you-row', { hasText: 'Care' })).toHaveCount(0)
+  })
+})
+
+test.describe('Memory page chrome', () => {
+  test('care has its Daily care window beside the card, and no explainer bar or back link; the site link is in the sidebar', async ({ page }, testInfo) => {
+    await isolate(page, `care-chrome-${testInfo.workerIndex}`)
+    await page.setViewportSize(DOCKED)
+    await answerCare(page, careReports.complete)
+    await page.route(/\/api\/schedules$/, route => route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify([{ schedule_id: careReports.complete.schedule!.id, enabled: true, next_run: new Date(Date.now() + 12 * 3_600_000).toISOString() }]),
+    }))
+    await boot(page, '/memory/care', '.mc-summary-title')
+    await expect(page.locator('section.care-rail')).toContainText(/in 1[12]h/)
+    await expect(page.getByRole('button', { name: 'How memory works' })).toHaveCount(0)
+    await expect(page.locator('.mc-back')).toHaveCount(0)
+    const rail = page.locator('section.care-rail')
+    await expect(rail.getByRole('heading', { name: 'Daily care' })).toBeVisible()
+    for (const label of ['Last run', 'Next run', 'Weekly checks']) await expect(rail.getByText(label, { exact: true })).toBeVisible()
+    const card = (await page.locator('.mc-card').boundingBox())!
+    const window = (await rail.boundingBox())!
+    expect(window.x).toBeGreaterThan(card.x + card.width)
+    for (const name of ['Run care again', 'Open Care-Report.md']) {
+      expect((await rail.getByRole('button', { name }).boundingBox())!.height).toBeGreaterThanOrEqual(44)
+    }
+    const link = page.getByRole('link', { name: /^How memory works/ })
+    await expect(link).toHaveAttribute('href', 'https://www.raffaelefarinaro.com/ciaobot/memory.html')
+    await expect(link).toHaveAttribute('target', '_blank')
+    await expect(link).toHaveAttribute('rel', 'noopener noreferrer')
+    await page.screenshot({ path: 'test-results/care-chrome/care-desktop.png' })
+    await page.goto('/memory/unsure')
+    await expect(page.getByRole('heading', { name: 'How this works' })).toBeVisible()
+    await expect(page.getByRole('button', { name: 'How memory works' })).toHaveCount(0)
+    await page.screenshot({ path: 'test-results/care-chrome/unsure-desktop.png' })
+    await page.goto('/memory/categories')
+    await expect(page.getByRole('heading', { name: /categories on/ })).toBeVisible()
+    await page.screenshot({ path: 'test-results/care-chrome/categories-desktop.png' })
+  })
+
+  test('on a phone the window drops below the card', async ({ page }, testInfo) => {
+    await isolate(page, `care-chrome-phone-${testInfo.workerIndex}`)
+    await page.setViewportSize({ width: 390, height: 844 })
+    await answerCare(page, careReports.complete)
+    await boot(page, '/memory/care', '.mc-summary-title')
+    const card = (await page.locator('.mc-card').boundingBox())!
+    const window = (await page.locator('section.care-rail').boundingBox())!
+    expect(window.y).toBeGreaterThanOrEqual(card.y + card.height)
+    const { overflow, culprits } = await horizontalOverflow(page)
+    expect(overflow, JSON.stringify(culprits)).toBeLessThanOrEqual(0)
   })
 })
 

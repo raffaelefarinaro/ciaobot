@@ -3,7 +3,6 @@
     <!-- The sections are listed in the sidebar (like Settings' tabs), so the
          header only names where you are: no mode switch, no tab row. -->
     <PaneHeader :page-tag="`Memory · ${SECTION_LABELS[mm.section]}`" @open-sidebar="emit('open-sidebar')" />
-    <MemoryHowItWorks />
 
     <!-- Categories is configuration, not a queue: no always-loaded budget rail
          beside it, and one column for the whole list and its drawer. -->
@@ -33,10 +32,13 @@
 
     <!-- Workspace care: the last daily run, read from its report file. -->
     <div v-else-if="mm.section === 'care'" class="mm-review-wrap">
-      <div class="page-grid page-grid--single mm-review-grid">
+      <div class="page-grid mm-review-grid">
         <div class="page-main">
           <MemoryCarePanel />
         </div>
+        <aside class="page-rail mm-review-rail" aria-label="About the daily care run">
+          <MemoryCareRail />
+        </aside>
       </div>
     </div>
 
@@ -289,11 +291,11 @@ import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref, toRaw, w
 import PaneHeader from './PaneHeader.vue'
 import SkeletonLoader from './SkeletonLoader.vue'
 import MemoryGuideBudget from './MemoryGuideBudget.vue'
-import MemoryHowItWorks from './MemoryHowItWorks.vue'
 import MemoryCategoriesPanel from './MemoryCategoriesPanel.vue'
 import MemoryUnsurePanel from './MemoryUnsurePanel.vue'
 import MemoryUnsureRail from './MemoryUnsureRail.vue'
 import MemoryCarePanel from './MemoryCarePanel.vue'
+import MemoryCareRail from './MemoryCareRail.vue'
 import { useProjectStore } from '../stores/projects'
 import {
   useMemoryMapStore, categoryLabelFor, categoryColorFor, catKeyFor, isMemorySection,

@@ -116,6 +116,8 @@
         <li><strong>Git is the undo.</strong> The agent writes to your notes directly, and the folder is a Git repository, so every change is in its history and can be reverted.</li>
         <li><strong>Memory Map.</strong> See the whole vault as a graph of notes and links, or as a list, and open any note from it.</li>
         <li><strong>Old notes are flagged, never deleted.</strong> You decide whether to retire them, and retired notes stay readable.</li>
+        <li><strong>What is not saved.</strong> Nothing from an automated run, because that was not you. A pattern seen in fewer than three chats is counted quietly, not saved as a fact. That a task was finished is not saved either, because the task already records it.</li>
+        <li><strong>Categories decide what gets its own note.</strong> Add one in the Categories tab of Memory.</li>
       </ul>
     </section>
 
@@ -141,7 +143,7 @@
             <dl>
               <dt>Runs when</dt><dd>every day, when <code>Workspace/Unsure.md</code> has a line you ticked.</dd>
               <dt>What it does</dt><dd><p>Writes each ticked line where the line says (a note, a project note, or one of the two memory regions), re-reads the destination, and only then deletes the line. A ticked “drop” line removes a memory entry; a ticked “restore to” line puts back an entry an earlier care step removed. It never acts on a line you did not tick.</p>
-                <p>Three kinds of line stay ticked and come back to you, because an unattended run may not apply them: a new category (you add it in Settings), a fact for a linked code repository's own guide, and a change to a decision rule.</p>
+                <p>Three kinds of line stay ticked and come back to you, because an unattended run may not apply them: a new category (you add it in the Categories tab of Memory), a fact for a linked code repository's own guide, and a change to a decision rule.</p>
                 <p>One exception to “only ticked lines”: a pattern noticed in three different chats. For up to three of these a run, it reads those chats first, and writes the fact only when your own messages show the pattern, citing the chats.</p></dd>
               <dt>Checked by</dt><dd>the number of ticked lines left on the list must equal the number it says it left on purpose.</dd>
             </dl>
