@@ -35,6 +35,13 @@ export const MissingSchedule: Story = {
     expect(canvas.getByText(/identity can be verified/)).toBeTruthy()
   },
 }
+export const WithFix: Story = {
+  args: { retry: { ...retry, mode: 'literal', schedule_id: 's1' }, canFix: true },
+  play: async ({ canvas }) => {
+    const labels = canvas.getAllByRole('button').map(b => b.textContent)
+    expect(labels).toEqual(['Run scheduled prompt', 'Stop trying', 'Fix this error'])
+  },
+}
 export const Streaming: Story = {
   args: { streaming: true },
   play: async ({ canvas }) => {

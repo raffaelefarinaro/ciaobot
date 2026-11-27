@@ -258,9 +258,43 @@ export function retryScheduledNotice(text: string): InjectedPrompt {
 
 const ERROR_HINT_MAX = 200
 
+function errorLine(text: string): string {
+  return text.replace(/^\s*Error:/, '').split('\n').map(l => l.trim()).find(Boolean) ?? ''
+}
+
+// The engine's sign-in annotation on a stored reason (annotate_reauth).
+const REAUTH_NOTE_RE = /\s*\(provider: [^()]*, action: sign in again\)\s*$/i
+// The stored reason is the engine's excerpt of the error (_result_snippet): at
+// most 280 characters, ending in "..." when it was cut.
+const SNIPPET_CUT_LENGTH = 270
+
+/** An error's words, with what the engine's excerpt changes (Markdown, line breaks, punctuation, case, the sign-in note) removed. */
+function errorGist(text: string): { gist: string; cut: boolean } {
+  const body = text.replace(REAUTH_NOTE_RE, '').trim()
+  const cut = body.length >= SNIPPET_CUT_LENGTH && /(?:\.{3}|…)$/.test(body)
+  const gist = body
+    .replace(/^Error:/i, '')
+    .replace(/\]\([^)]*\)/g, ']')
+    .toLowerCase()
+    .replace(/[^\p{L}\p{N}]+/gu, '')
+  return { gist, cut }
+}
+
+/**
+ * Whether a transcript error and a retry's stored reason are the same failure.
+ * The reason is the engine's excerpt of the error, so both sides are reduced to
+ * their words; a reason the engine cut is compared as a prefix of the full text.
+ */
+export function sameErrorMessage(errorText: string, reason: string): boolean {
+  const row = errorGist(errorText).gist
+  const stored = errorGist(reason)
+  if (!row || !stored.gist) return false
+  return stored.cut ? row.startsWith(stored.gist) : row === stored.gist
+}
+
 /** The provider's own message as one line: no leading `Error:`, first non-empty line, clipped. */
 function errorHint(text: string): string {
-  const line = text.replace(/^\s*Error:/, '').split('\n').map(l => l.trim()).find(Boolean) ?? ''
+  const line = errorLine(text)
   return line.length > ERROR_HINT_MAX ? `${line.slice(0, ERROR_HINT_MAX)}…` : line
 }
 

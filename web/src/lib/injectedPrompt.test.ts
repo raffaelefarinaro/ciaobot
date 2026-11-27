@@ -1,6 +1,23 @@
 import { describe, expect, it } from 'vitest'
-import { errorNoticePrompt, parseInjectedPrompt, retryScheduledNotice, summarizeInjectedPrompt } from './injectedPrompt'
+import { errorNoticePrompt, parseInjectedPrompt, retryScheduledNotice, sameErrorMessage, summarizeInjectedPrompt } from './injectedPrompt'
 import type { InjectedPrompt } from './injectedPrompt'
+
+describe('sameErrorMessage', () => {
+  it('compares the words of the whole message without a leading Error:', () => {
+    expect(sameErrorMessage('Error: Provider quota limit reached.', 'Provider quota limit reached.')).toBe(true)
+    expect(sameErrorMessage('Error: limit\nstack line', 'limit stack line')).toBe(true)
+    expect(sameErrorMessage('Error: limit\nstack line', 'limit')).toBe(false)
+    expect(sameErrorMessage('Error: connection refused', 'weekly usage limit')).toBe(false)
+    expect(sameErrorMessage('', '')).toBe(false)
+    expect(sameErrorMessage('Error: **Rate limit** hit, see [docs](https://x.y/z)', 'Rate limit hit, see docs')).toBe(true)
+    expect(sameErrorMessage('Not logged in', 'Not logged in (provider: claude opus, action: sign in again)')).toBe(true)
+    const long = 'word '.repeat(80)
+    expect(sameErrorMessage(long + 'tail', long.trim().slice(0, 277) + '...')).toBe(true)
+    expect(sameErrorMessage('Loading failed badly', 'Loading...')).toBe(false)
+    expect(sameErrorMessage(long + 'tail', 'other '.repeat(55) + '...')).toBe(false)
+    expect(sameErrorMessage('Error:', 'manual')).toBe(false)
+  })
+})
 
 describe('retryScheduledNotice', () => {
   it.each(['manual', 'mcp', '', '  \n'])('treats %j as a neutral scheduled retry', text => {

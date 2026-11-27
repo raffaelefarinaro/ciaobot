@@ -14,7 +14,8 @@ async function setupRetry(page: Page, id: string, mode: RetryMode, retryReason =
     const body = await response.json() as Record<string, unknown> | Array<Record<string, unknown>>
     const withRetry = (chat: Record<string, unknown>) => chat.chat_id === 'alpha-chat-1'
       ? { ...chat, ...(mode === 'continue_recovery' ? {
-          failure_id: failureId, recovery_eligible: true, user_turn_count: 1, last_error: reason,
+          failure_id: failureId, recovery_eligible: true, user_turn_count: 1,
+          last_error: retryReason === 'manual' ? reason : retryReason,
         } : {}), retry: {
           status: 'pending', mode, schedule_id: mode === 'literal' && verified ? scheduleId : '',
           next_at: '2099-01-01T00:00:00Z', last_error: retryReason, attempts: 0, interval_seconds: 3600,
@@ -87,6 +88,63 @@ for (const size of ['desktop', 'phone'] as const) {
       await expect(cards.nth(1)).toContainText('weekly usage limit')
       await expect(cards.nth(1).getByRole('button', { name: 'Run scheduled prompt' })).toBeEnabled()
       await page.screenshot({ path: testInfo.outputPath(`${size}-separate-provider-retry.png`) })
+    })
+
+    const failedTurn = (content: string) => ({ items: [
+      { role: 'user', content: 'Tidy my memory', timestamp: '2026-10-11T18:01:00Z', turn_index: 0, i: 0 },
+      { role: 'assistant', content, timestamp: '2026-10-11T18:01:01Z', is_error: true, i: 1 },
+    ], total: 2, offset: 0, limit: 50, hasMore: false, nextOffset: null })
+
+    test('a retry carrying the transcript error replaces the plain error card', async ({ page }, testInfo) => {
+      await setupRetry(page, `retry-same-${testInfo.workerIndex}`, 'literal', 'Provider quota limit reached.')
+      await page.route('**/api/chats/alpha-chat-1/messages*', route => route.fulfill({ json: failedTurn('Error: Provider quota limit reached.') }))
+      await boot(page, '/chat/alpha-chat-1', COMPOSER)
+      const cards = page.locator('.injected-card')
+      await expect(cards).toHaveCount(1)
+      await expect(cards.first()).toContainText('Provider quota limit reached.')
+      await expect(cards.first().getByRole('button', { name: 'Run scheduled prompt' })).toBeEnabled()
+      await expect(cards.first().getByRole('button', { name: 'Stop trying' })).toBeEnabled()
+      await expect(cards.first().getByRole('button', { name: 'Fix this error' })).toBeVisible()
+      await page.screenshot({ path: testInfo.outputPath(`${size}-one-retry-card.png`) })
+    })
+
+    const longError = `${'The provider could not finish the request because of a very long reason. '.repeat(6)}The end.`
+    const excerpts: Array<[string, string, string]> = [
+      ['multi-line usage limit', 'Error: you have reached your weekly usage limit\nupgrade for higher limits\n\nresets Friday', 'you have reached your weekly usage limit upgrade for higher limits resets Friday'],
+      ['annotated sign-in error', 'Not logged in · Please run /login', 'Not logged in · Please run /login (provider: claude, action: sign in again)'],
+      ['over 280 characters', longError, `${longError.slice(0, 277)}...`],
+      ['Markdown', 'Error: **Rate limit** hit: see [the docs](https://example.com/limits) and `retry` later', 'Rate limit hit: see the docs and retry later'],
+    ]
+    for (const [name, content, excerpt] of excerpts) {
+      test(`a manual recovery draws one card for a ${name} error`, async ({ page }, testInfo) => {
+        await setupRetry(page, `recovery-excerpt-${testInfo.workerIndex}`, 'continue_recovery', excerpt, false)
+        await page.route('**/api/chats/alpha-chat-1/messages*', route => route.fulfill({ json: failedTurn(content) }))
+        await boot(page, '/chat/alpha-chat-1', COMPOSER)
+        await expect(page.locator('.retry-state')).toBeVisible()
+        await expect(page.locator('.injected-card')).toHaveCount(1)
+      })
+    }
+
+    test('an unrelated error keeps its own card beside the retry card', async ({ page }, testInfo) => {
+      await setupRetry(page, `retry-unrelated-${testInfo.workerIndex}`, 'continue_recovery', 'you have reached your weekly usage limit', false)
+      await page.route('**/api/chats/alpha-chat-1/messages*', route => route.fulfill({ json: failedTurn('Error: connection refused') }))
+      await boot(page, '/chat/alpha-chat-1', COMPOSER)
+      await expect(page.locator('.retry-state')).toBeVisible()
+      await expect(page.locator('.injected-card')).toHaveCount(2)
+    })
+
+    test('stopping the retry from the keyboard lands focus on the returning error card', async ({ page }, testInfo) => {
+      await setupRetry(page, `retry-stop-focus-${testInfo.workerIndex}`, 'literal', 'strange failure 42')
+      await page.route('**/api/chats/alpha-chat-1/messages*', route => route.fulfill({ json: failedTurn('Error: strange failure 42') }))
+      await page.route('**/api/chats/alpha-chat-1/retry', route => route.fulfill({ json: { chat_id: 'alpha-chat-1', project_id: 'project-alpha', title: 'Synthetic', retry: null } }))
+      await boot(page, '/chat/alpha-chat-1', COMPOSER)
+      await expect(page.locator('.injected-card')).toHaveCount(1)
+      await tabTo(page, page.locator('.retry-state').getByRole('button', { name: 'Stop trying', exact: true }))
+      await page.keyboard.press('Enter')
+      await tabTo(page, page.getByRole('dialog').getByRole('button', { name: 'Stop trying' }))
+      await page.keyboard.press('Enter')
+      await expect(page.locator('.retry-state')).toHaveCount(0)
+      await expect(page.locator('.injected-card--error').getByRole('button', { name: 'Fix this error' })).toBeFocused()
     })
 
     test('literal schedule without identity cannot be run or stopped', async ({ page }, testInfo) => {

@@ -17,8 +17,10 @@ const props = defineProps<{
   streaming: boolean
   recoveryReady: boolean
   chatId?: string
+  /** The failure this card carries has no known fix of its own, so a diagnosis chat is offered. */
+  canFix?: boolean
 }>()
-defineEmits<{ (e: 'continue'): void; (e: 'try-now'): void; (e: 'stop'): void }>()
+defineEmits<{ (e: 'continue'): void; (e: 'try-now'): void; (e: 'stop'): void; (e: 'fix'): void }>()
 
 const title = computed(() => {
   if (isProviderAuthError(props.retry.last_error)) return 'Signed out — retrying this turn'
@@ -48,6 +50,7 @@ const nextTry = computed(() => {
       <button v-if="retry.mode === 'continue_recovery'" type="button" class="btn-small" :disabled="streaming || !recoveryReady" @click="$emit('continue')">Continue with...</button>
       <button type="button" class="btn-small" :disabled="streaming || (retry.mode === 'continue_recovery' ? !recoveryReady : !retry.schedule_id)" @click="$emit('try-now')">{{ retry.mode === 'continue_recovery' ? 'Try now' : 'Run scheduled prompt' }}</button>
       <button type="button" class="btn-small" :disabled="retry.mode !== 'continue_recovery' && !retry.schedule_id" @click="$emit('stop')">Stop trying</button>
+      <button v-if="canFix" type="button" class="retry-state-fix" @click="$emit('fix')">Fix this error</button>
     </div>
     <p v-if="retry.mode !== 'continue_recovery' && !retry.schedule_id" class="retry-state-meta">Running or stopping this schedule is unavailable until its identity can be verified. It may still run at the scheduled time.</p>
     <p v-if="retry.mode === 'continue_recovery' && !recoveryReady" class="retry-state-meta">Continue is unavailable until this failure and its history are verified. The schedule may still run.</p>
@@ -67,7 +70,15 @@ const nextTry = computed(() => {
 .retry-state-title { color: var(--fg); font-size: var(--text-sm); font-weight: 600; }
 .retry-state-meta { color: var(--fg2); font-size: var(--text-xs); margin-top: var(--space-1); }
 .retry-state-actions { display: flex; flex-wrap: wrap; gap: var(--space-2); }
+/* Quiet: the retry actions lead; this is the way out for an error nothing retries away. */
+.retry-state-fix {
+  background: none; border: 0; padding: var(--space-1) var(--space-2);
+  color: var(--fg2); font: inherit; font-size: var(--text-xs);
+  text-decoration: underline; text-underline-offset: 3px; cursor: pointer;
+  border-radius: var(--radius);
+}
+.retry-state-fix:hover { color: var(--fg); }
 @media (pointer: coarse) {
-  .retry-state-actions .btn-small { min-height: var(--touch); }
+  .retry-state-actions .btn-small, .retry-state-fix { min-height: var(--touch); }
 }
 </style>
