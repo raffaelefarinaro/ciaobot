@@ -5556,6 +5556,7 @@ class ProjectChatManager:
             return False
         self._drop_owned_loops(chat_id, "deleted")
         self._forget_shell_wake_state(chat_id)
+        self._stop_counts.pop(chat_id, None)
         self._repo_location_locks.pop(chat_id, None)
         self._revoke_mcp_chat(chat_id)
         ctx = ChatContext.for_web(chat_id)
@@ -5727,6 +5728,7 @@ class ProjectChatManager:
             return None
         # Held and pending shell notices of an archived chat are not announced: its turns are closed.
         self._forget_shell_wake_state(chat_id)
+        self._stop_counts.pop(chat_id, None)
         ctx = ChatContext.for_web(chat_id)
         # Reading a large session JSONL and rendering the markdown transcript
         # is the expensive part. On the loop that froze every other request and
@@ -9770,6 +9772,25 @@ class ProjectChatManager:
         """True while the chat's provider reports background work still running."""
         service = self._providers.get(chat_id)
         return bool(service is not None and service.background_work_outstanding)
+
+    def _follow_up_pending(self, chat_id: str) -> bool:
+        """True while background work may still give the chat another turn.
+
+        The provider reports work running, or a finished shell's (or
+        subagent's) notice is still on its way to a turn: held for its window
+        or for an open card, claimed by a continuation not yet closed, or a
+        claimed card not yet sent. Between the provider's late turn closing
+        and the wake the held notice sends, only these say a turn is coming.
+        A schedule run that launched a background subagent waits on this.
+        """
+        return (
+            self._background_work_outstanding(chat_id)
+            or bool(self._shell_finished_pending.get(chat_id))
+            or bool(self._shell_finished_waiting.get(chat_id))
+            or bool(self._claimed_notices.get(chat_id))
+            or chat_id in self._unsent_echo
+            or chat_id in self._shell_finished_flushes
+        )
 
     def _stop_count(self, chat_id: str) -> int:
         """How many times Stop was pressed on the chat in this process.

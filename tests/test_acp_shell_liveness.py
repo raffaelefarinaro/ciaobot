@@ -340,3 +340,12 @@ def test_a_background_shell_keeps_its_command_label() -> None:
     session._track_shells([ToolUseEvent(type="tool_result", tool_use_id="call-sh", background=True)])
     shell = session._shells.release("call-sh")
     assert shell is not None and (shell.command, shell.subagent) == ("npm run dev", False)
+
+
+def test_a_background_subagent_is_tracked_but_not_counted_as_a_running_shell() -> None:
+    shells = ShellLiveness()
+    shells.track_unpolled("call-agent", command="[general] Curate", subagent=True)
+    shells.track_unpolled("call-sh", command="make")
+    assert shells.tracking and shells.count == 1
+    shells.release("call-sh")
+    assert shells.tracking and shells.count == 0

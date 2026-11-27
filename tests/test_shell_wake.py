@@ -520,3 +520,32 @@ def test_a_subagent_end_is_labelled_as_a_subagent_with_its_description() -> None
     bare = ShellFinishedEvent(type="shell_finished", tool_use_id="call_9", duration_s=3.0, subagent=True)
     assert shell_wake.shell_finished_prompt([bare]).splitlines()[2].startswith("— subagent (ran 3 s)")
 
+
+@pytest.mark.asyncio
+async def test_a_held_shell_notice_keeps_a_follow_up_pending_until_its_wake(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # A schedule run waiting on a background subagent asks this: between the provider's late turn
+    # closing and the held notice's wake, it is the only sign that a turn is still coming.
+    monkeypatch.setattr(project_chats, "SHELL_FINISHED_WINDOW_S", 0.05)
+    manager = _manager(_chat())
+    assert manager._follow_up_pending("chat-1") is False
+    manager._note_shell_finished("chat-1", _event("a", "one", None))
+    assert manager._follow_up_pending("chat-1") is True
+    await manager._shell_finished_flushes["chat-1"]
+    assert manager._recorder.started  # type: ignore[attr-defined]
+    assert manager._follow_up_pending("chat-1") is False
+
+
+def test_waiting_claimed_and_unsent_notices_keep_a_follow_up_pending() -> None:
+    manager = _manager(_chat())
+    manager._shell_finished_waiting["chat-1"] = [_event("a", "one", None)]
+    assert manager._follow_up_pending("chat-1") is True
+    manager._shell_finished_waiting.clear()
+    manager._claimed_notices["chat-1"] = [_event("a", "one", None)]
+    assert manager._follow_up_pending("chat-1") is True
+    manager._claimed_notices.clear()
+    manager._unsent_echo["chat-1"] = "notice"
+    assert manager._follow_up_pending("chat-1") is True
+    manager._unsent_echo.clear()
+    assert manager._follow_up_pending("chat-1") is False

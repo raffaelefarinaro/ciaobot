@@ -19,10 +19,12 @@ from __future__ import annotations
 
 import asyncio
 import dataclasses
+import functools
 import json
 import logging
 import re
 import time
+from collections.abc import Callable
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Protocol, cast
@@ -103,6 +105,7 @@ async def _consume_run_stream(
     outcome: chat_service.ScheduleRunOutcome,
     *,
     stop_on_attention: bool = False,
+    still_ours: Callable[[], bool] | None = None,
 ) -> bool:
     """Fold one turn's stream into *outcome*; True when it sent a subagent to the background.
 
@@ -112,6 +115,10 @@ async def _consume_run_stream(
     the last turn grades the run. With *stop_on_attention* (a follow-up turn,
     which is attended and raises cards) a permission request or a question ends
     the read at once: that stream waits for the owner, not for the run.
+    *still_ours* guards a foreground wake stream, which also runs any message
+    the owner queues while it streams: a result that arrives once another
+    turn has started on the chat is not the run's, so the read ends there and
+    the run is marked superseded.
     """
     launched = False
     agent_calls: set[str] = set()
@@ -140,6 +147,9 @@ async def _consume_run_stream(
         elif event_type == "error":
             outcome.stream_error = True
         elif event_type == "result":
+            if still_ours is not None and not still_ours():
+                outcome.follow_up_unfinished = chat_service.FOLLOW_UP_SUPERSEDED
+                break
             outcome.completed = True
             outcome.is_error = bool(payload.get("is_error"))
             outcome.final_text = str(payload.get("text") or "")
@@ -216,7 +226,7 @@ class ScheduleDispatchHost(Protocol):
         *, chat_id: str = "",
     ) -> bool: ...
 
-    def _background_work_outstanding(self, chat_id: str) -> bool: ...
+    def _follow_up_pending(self, chat_id: str) -> bool: ...
 
     def _stop_count(self, chat_id: str) -> int: ...
 
@@ -243,6 +253,7 @@ class ScheduleDispatcher:
         outcome: chat_service.ScheduleRunOutcome,
         *,
         first: ChatStream,
+        stops: int,
     ) -> None:
         """Read the follow-up turns of the background subagent a run launched.
 
@@ -252,14 +263,18 @@ class ScheduleDispatcher:
         chat's broker stream (a background stream), or the host starts a wake
         turn for it (origin ``background_run``); this reads those like the
         first turn, so the run is graded on its last result. It returns once
-        no follow-up stream is live and the provider reports no background
-        work left. It stops early, leaving the run unclean, when a follow-up
+        no follow-up stream is live and the host reports no background work
+        and no held or claimed shell notice (``_follow_up_pending``). *stops*
+        is the chat's Stop count taken before the run's turn started. It
+        stops early, leaving the run unclean, when a follow-up
         asks for the owner, when the owner presses Stop on the chat, when any
         other turn takes the chat (the owner typing, another run), or past
         ``SCHEDULE_FOLLOW_UP_MAX_S``.
         """
         deadline = time.monotonic() + chat_service.SCHEDULE_FOLLOW_UP_MAX_S
-        stops = self._host._stop_count(chat_id)
+        if first.user_stopped:
+            outcome.follow_up_unfinished = chat_service.FOLLOW_UP_STOPPED
+            return
         read: list[ChatStream] = [first]
         try:
             while True:
@@ -272,23 +287,32 @@ class ScheduleDispatcher:
                 if stream is not None and any(stream is seen for seen in read):
                     stream = None  # already read to its end
                 if stream is not None:
-                    if not (stream.background or self._wake_turn(chat_id)):
-                        outcome.follow_up_unfinished = chat_service.FOLLOW_UP_SUPERSEDED
-                        return
+                    still_ours: Callable[[], bool] | None = None
+                    if not stream.background:
+                        wake_turns = self._wake_turn_count(chat_id)
+                        if wake_turns is None:
+                            outcome.follow_up_unfinished = chat_service.FOLLOW_UP_SUPERSEDED
+                            return
+                        still_ours = functools.partial(self._turn_count_is, chat_id, wake_turns)
                     read.append(stream)
                     try:
                         await asyncio.wait_for(
-                            _consume_run_stream(stream, outcome, stop_on_attention=True),
+                            _consume_run_stream(
+                                stream, outcome, stop_on_attention=True, still_ours=still_ours
+                            ),
                             max(deadline - time.monotonic(), 0.0),
                         )
                     except TimeoutError:
                         outcome.follow_up_unfinished = chat_service.FOLLOW_UP_CUT_OFF
                         return
+                    if still_ours is not None and not still_ours():
+                        outcome.follow_up_unfinished = chat_service.FOLLOW_UP_SUPERSEDED
+                        return
                     if stream.user_stopped:
                         outcome.follow_up_unfinished = chat_service.FOLLOW_UP_STOPPED
                         return
                     continue
-                if not self._host._background_work_outstanding(chat_id):
+                if not self._host._follow_up_pending(chat_id):
                     return
                 if time.monotonic() >= deadline:
                     outcome.follow_up_unfinished = chat_service.FOLLOW_UP_CUT_OFF
@@ -297,13 +321,17 @@ class ScheduleDispatcher:
         finally:
             read.clear()
 
-    def _wake_turn(self, chat_id: str) -> bool:
-        """True when the chat's latest turn is a wake for finished background work."""
+    def _wake_turn_count(self, chat_id: str) -> int | None:
+        """The chat's turn count when its latest turn is a wake for finished background work, else None."""
         chat = self._host._chats.get(chat_id)
         if chat is None or chat.user_turn_count < 1:
-            return False
+            return None
         origin = chat.user_turn_origin.get(str(chat.user_turn_count - 1))
-        return str(origin or "") == "background_run"
+        return chat.user_turn_count if str(origin or "") == "background_run" else None
+
+    def _turn_count_is(self, chat_id: str, count: int) -> bool:
+        chat = self._host._chats.get(chat_id)
+        return chat is not None and chat.user_turn_count == count
 
     async def _schedule_run_needs_user(
         self, entry: ScheduleEntry, outcome: chat_service.ScheduleRunOutcome,
@@ -837,14 +865,19 @@ class ScheduleDispatcher:
             prompt = loop_wake.loop_wake_prompt(entry, now=datetime.now(UTC))
             stream_origin = "loop"
         try:
+            # Taken before the turn starts, so a Stop during it is seen too.
+            stops = self._host._stop_count(target_id)
             stream = self._host.start_stream(
                 target_id, prompt, unattended=True, origin=stream_origin
             )
             launched_subagent = await _consume_run_stream(stream, outcome)
-            if launched_subagent:
+            if launched_subagent and not loop_owned:
                 # The first result may only say the subagent was launched: wait
-                # for the turns it gives the chat before grading the run.
-                await self._await_follow_up_turns(target_id, outcome, first=stream)
+                # for the turns it gives the chat before grading the run. A
+                # loop's own chat is never archived by its run, so it does not wait.
+                await self._await_follow_up_turns(
+                    target_id, outcome, first=stream, stops=stops
+                )
             # Only a trusted system routine consumed engine-wide evidence.
             # Clear it after a clean run; a failed triage must not wipe the
             # backlog it never processed, and a user schedule never owns this

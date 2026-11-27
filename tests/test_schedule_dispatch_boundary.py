@@ -39,6 +39,8 @@ from ciao.web.schedule_dispatch import ScheduleDispatchHost, ScheduleDispatcher
 
 
 class _Stream:
+    user_stopped = False
+
     def __init__(self, events: list[dict[str, object]]) -> None:
         self._events = events
 
@@ -207,13 +209,13 @@ class _ScheduleHost:
         self.needs_user_calls.append(entry)
         return False
 
-    def _background_work_outstanding(self, chat_id: str) -> bool:
-        assert chat_id == "chat-1"
+    def _follow_up_pending(self, chat_id: str) -> bool:
+        del chat_id
         self.follow_up_checks += 1
         return self.follow_up_pending
 
     def _stop_count(self, chat_id: str) -> int:
-        assert chat_id == "chat-1"
+        del chat_id
         return self.stops
 
     async def archive_chat(self, chat_id: str) -> ArchiveOutcome | None:
@@ -1363,8 +1365,11 @@ def _archiving_host(tmp_path: Path, events: list[dict[str, object]]) -> _Schedul
 
 
 async def _until_read(stream: ChatStream) -> None:
-    while stream.subscriber_count == 0:
-        await asyncio.sleep(0.005)
+    async def attached() -> None:
+        while stream.subscriber_count == 0:
+            await asyncio.sleep(0.005)
+
+    await asyncio.wait_for(attached(), timeout=5)
 
 
 async def _dispatch(host: _ScheduleHost, provider: str = "opencode") -> dict[str, object]:
@@ -1596,7 +1601,7 @@ def test_the_cut_off_message_names_the_cap() -> None:
     status, error = chat_service._schedule_dispatch_status(
         chat_service.ScheduleRunOutcome(completed=True, follow_up_unfinished="cut_off")
     )
-    assert status == "error" and error is not None and "after 1 h" in error
+    assert status == "error" and error is not None and "after 30 min" in error
 
 
 @pytest.mark.asyncio
@@ -1634,3 +1639,151 @@ async def test_a_run_with_no_background_subagent_never_waits(
     assert host.classified_text == ["done"]
     assert host.archives == ["chat-1"]
     assert result["status"] == "ok"
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("fast_poll")
+async def test_an_owner_message_queued_on_a_wake_stream_is_never_graded(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # A wake turn is a foreground stream: a message the owner sends while it runs is queued
+    # and run on that same stream. Its result is the owner's, not the run's.
+    host = _archiving_host(tmp_path, _LAUNCH_TURN)
+    host.follow_up_pending = True
+    rows = _capture_run_records(monkeypatch)
+
+    async def wake_then_owner() -> None:
+        await asyncio.sleep(0.05)
+        chat = host._chats["chat-1"]
+        chat.user_turn_origin[str(chat.user_turn_count)] = "background_run"
+        chat.user_turn_count += 1
+        stream = ChatStream()  # the host's wake turn
+        host._broker.register("chat-1", stream)
+        stream.publish({"type": "result", "text": "subagent done", "is_error": False})
+        await _until_read(stream)
+        # The owner typed while the wake ran: the drive loop runs it on the same stream.
+        chat.user_turn_count += 1
+        stream.publish({"type": "user_echo", "text": "owner question"})
+        stream.publish({"type": "result", "text": "answer to the owner", "is_error": False})
+        host.follow_up_pending = False
+        stream.finish()
+        host._broker.clear("chat-1", stream)
+
+    task = asyncio.create_task(wake_then_owner())
+    result = await _dispatch(host)
+    await task
+
+    assert "answer to the owner" not in host.classified_text
+    assert host.archives == []
+    assert result["status"] == "skipped" and rows[0].status == "skipped"
+
+
+@pytest.mark.asyncio
+async def test_a_turn_stopped_before_its_result_does_not_wait(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    host = _archiving_host(tmp_path, _LAUNCH_TURN)
+    host.follow_up_pending = True
+    _capture_run_records(monkeypatch)
+
+    class _StoppedStream(_Stream):
+        user_stopped = True  # the owner pressed Stop during the run's own turn
+
+    host.start_stream = lambda *a, **k: cast(ChatStream, _StoppedStream(_LAUNCH_TURN))  # type: ignore[method-assign]
+    result = await _dispatch(host)
+
+    assert host.follow_up_checks == 0
+    assert host.archives == [] and result["status"] == "skipped"
+
+
+@pytest.mark.asyncio
+async def test_a_stop_during_the_first_turn_is_seen_by_the_wait(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # The Stop count is taken before the turn starts: a Stop that lands while the first turn
+    # streams (and before the wait begins) still keeps the chat.
+    host = _archiving_host(tmp_path, _LAUNCH_TURN)
+    host.follow_up_pending = True
+    _capture_run_records(monkeypatch)
+
+    class _StopMidTurn(_Stream):
+        async def subscribe(self):
+            async for event in super().subscribe():
+                if event.get("type") == "result":
+                    host.stops += 1
+                yield event
+
+    host.start_stream = lambda *a, **k: cast(ChatStream, _StopMidTurn(_LAUNCH_TURN))  # type: ignore[method-assign]
+    result = await _dispatch(host)
+
+    assert host.archives == [] and result["status"] == "skipped"
+
+
+@pytest.mark.asyncio
+async def test_a_loop_owned_run_does_not_wait(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    host = _archiving_host(tmp_path, _LAUNCH_TURN)
+    host.follow_up_pending = True
+    _capture_run_records(monkeypatch)
+    monkeypatch.setattr("ciao.web.schedule_dispatch.loop_wake.loop_wake_prompt", lambda entry, now: "wake")
+    entry = dataclasses.replace(_entry(), owner_chat_id="chat-1")
+    dispatcher = ScheduleDispatcher(cast(ScheduleDispatchHost, host))
+    await asyncio.wait_for(
+        dispatcher.dispatch_schedule(entry, "Run the routine.", "opus", "auto", "opencode"), timeout=5
+    )
+    assert host.follow_up_checks == 0
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("fast_poll")
+async def test_a_held_shell_notice_keeps_the_run_waiting_with_the_real_predicate(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # The provider's late turn has closed (no background work outstanding), but the subagent's
+    # end notice is held for its wake window: a turn is still coming, so the run must wait.
+    import types
+
+    from ciao.models import ShellFinishedEvent
+
+    host = _archiving_host(tmp_path, _LAUNCH_TURN)
+    host._background_work_outstanding = lambda chat_id: False  # type: ignore[attr-defined]
+    host._shell_finished_pending = {  # type: ignore[attr-defined]
+        "chat-1": [ShellFinishedEvent(type="shell_finished", tool_use_id="call_a", subagent=True)]
+    }
+    host._shell_finished_waiting = {}  # type: ignore[attr-defined]
+    host._claimed_notices = {}  # type: ignore[attr-defined]
+    host._unsent_echo = {}  # type: ignore[attr-defined]
+    host._shell_finished_flushes = {}  # type: ignore[attr-defined]
+    host._follow_up_pending = types.MethodType(  # type: ignore[method-assign]
+        ProjectChatManager._follow_up_pending, host
+    )
+    rows = _capture_run_records(monkeypatch)
+    archived_at_wake: list[list[str]] = []
+
+    async def wake() -> None:
+        await asyncio.sleep(0.05)
+        archived_at_wake.append(list(host.archives))
+        # The window ends: the host sends the wake turn and the notice is no longer held.
+        chat = host._chats["chat-1"]
+        chat.user_turn_origin[str(chat.user_turn_count)] = "background_run"
+        chat.user_turn_count += 1
+        stream = ChatStream()
+        host._broker.register("chat-1", stream)
+        host._shell_finished_pending.pop("chat-1")  # type: ignore[attr-defined]
+        stream.publish(_FOLLOW_UP_RESULT)
+        await _until_read(stream)
+        stream.finish()
+
+    task = asyncio.create_task(wake())
+    result = await _dispatch(host)
+    await task
+
+    assert archived_at_wake == [[]]
+    assert host.classified_text == ["All 7 steps done."]
+    assert result["status"] == "ok" and rows[0].status == "ok"

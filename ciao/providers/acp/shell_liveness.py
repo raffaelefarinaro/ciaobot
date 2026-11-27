@@ -53,8 +53,8 @@ class ShellLiveness:
 
     @property
     def count(self) -> int:
-        """How many background shells are tracked as running."""
-        return len(self._tracked)
+        """How many background shells are tracked as running. Background subagents are not shells."""
+        return sum(1 for shell in self._tracked.values() if not shell.subagent)
 
     @property
     def polling(self) -> bool:
