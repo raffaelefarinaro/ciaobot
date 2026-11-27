@@ -29,6 +29,15 @@
     </div>
 
 
+    <!-- Workspace care: the last nightly run, read from its report file. -->
+    <div v-else-if="mm.section === 'care'" class="mm-review-wrap">
+      <div class="page-grid page-grid--single mm-review-grid">
+        <div class="page-main">
+          <MemoryCarePanel />
+        </div>
+      </div>
+    </div>
+
     <!-- The map takes the whole pane: toolbar across the top, the drawing
          under it, and a note's details in a docked tile at the right edge —
          the same tile a pinned file opens in. The vault's numbers are one line
@@ -281,6 +290,7 @@ import MemoryGuideBudget from './MemoryGuideBudget.vue'
 import MemoryHowItWorks from './MemoryHowItWorks.vue'
 import MemoryCategoriesPanel from './MemoryCategoriesPanel.vue'
 import MemoryUnsurePanel from './MemoryUnsurePanel.vue'
+import MemoryCarePanel from './MemoryCarePanel.vue'
 import { useProjectStore } from '../stores/projects'
 import {
   useMemoryMapStore, categoryLabelFor, categoryColorFor, catKeyFor, isMemorySection,
@@ -1227,6 +1237,7 @@ const SECTION_LABELS: Record<MemorySection, string> = {
   map: 'Map',
   categories: 'Categories',
   unsure: 'Unsure',
+  care: 'Workspace care',
 }
 // The route owns the section. Bare /memory lands on the section last visited
 // (the map on a first visit), replaced rather than pushed so Back does not

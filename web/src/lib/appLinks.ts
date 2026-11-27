@@ -28,6 +28,7 @@ const PAGE_HREFS = [
   '/memory/map',
   '/memory/categories',
   '/memory/unsure',
+  '/memory/care',
 ]
 
 // Settings tabs come from the sidebar's own rail, so a renamed tab cannot

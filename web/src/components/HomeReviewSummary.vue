@@ -6,7 +6,19 @@
 
     <!-- Only what needs a look: an up-to-date queue is not news, so it drops
          out instead of holding a row that says "nothing here". -->
-    <div v-if="visibleItems.length" class="home-review-list">
+    <div v-if="visibleItems.length || careLine" class="home-review-list">
+      <!-- Workspace care: always one quiet line once its report is read. The
+           Needs you list carries the signal; this line only states the fact. -->
+      <button
+        v-if="careLine"
+        type="button"
+        class="home-review-item home-review-item--care"
+        :class="{ 'home-review-item--care-running': careLine.running }"
+        @click="openCare"
+      >
+        <span class="home-review-title home-review-care-title"><CareGlyph :kind="careLine.glyph" />Workspace care</span>
+        <span class="home-review-detail">{{ careLine.detail }}</span>
+      </button>
       <button
         v-for="item in visibleItems"
         :key="item.key"
@@ -29,7 +41,7 @@
 </template>
 
 <script setup lang="ts">
-import { computed } from 'vue'
+import { computed, onBeforeUnmount, onMounted, watch } from 'vue'
 import { useRouter } from 'vue-router'
 import { useProjectStore } from '../stores/projects'
 import { useTaskStore } from '../stores/tasks'
@@ -37,6 +49,10 @@ import { useTaskSignalsStore } from '../stores/taskSignals'
 import type { Schedule } from '../lib/types'
 import { scheduleInWorkspace, scheduleNeedsAttention } from '../lib/automationWorkspace'
 import HomeTodayStats from './HomeTodayStats.vue'
+import CareGlyph from './CareGlyph.vue'
+import { careGlyph, careRailDetail, careState } from '../lib/careReport'
+import { useCareReportStore } from '../stores/careReport'
+import { memorySectionPath } from '../stores/memoryMap'
 
 type ReviewState = 'ready' | 'loading' | 'stale' | 'error'
 type ReviewItem = {
@@ -131,6 +147,23 @@ const items = computed<ReviewItem[]>(() => {
     },
   ]
 })
+
+const care = useCareReportStore()
+watch(() => projects.activeWorkspace, ws => care.show(ws), { immediate: true })
+let releaseCare: () => void = () => {}
+onMounted(() => { releaseCare = care.attach() })
+onBeforeUnmount(() => releaseCare())
+
+const careLine = computed(() => {
+  const report = care.report
+  if (!report || report.workspace !== projects.activeWorkspace) return null
+  const state = careState(report)
+  return { glyph: careGlyph(state), detail: careRailDetail(report), running: state === 'running' }
+})
+
+function openCare(): void {
+  void router.push(memorySectionPath('care'))
+}
 
 const visibleItems = computed(() => items.value.filter(
   item => item.state !== 'ready' || item.count > 0,
@@ -237,6 +270,16 @@ function openItem(key: ReviewItem['key']) {
 .home-review-item--attention .home-review-title {
   color: var(--warning);
 }
+
+/* The care line is quiet in every state: the glyph's shape and the detail's
+   words carry the status, and Needs you carries the call to act. */
+.home-review-care-title {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
+  color: var(--fg2);
+}
+.home-review-item--care-running .home-review-care-title { color: var(--fg); }
 
 .home-review-item--loading .home-review-title {
   color: var(--fg2);

@@ -21,8 +21,10 @@ defineProps<{
   /** The line is an error the operator has to read: announced, and in the error colour. */
   alert?: boolean
   noticeKey?: string
-  /** `error` and `blocking` rows carry a marker and read before the others. */
-  tone?: '' | 'error' | 'blocking'
+  /** `error` and `blocking` rows carry a marker and read before the others;
+   *  `attention` carries the same marker for a row that waits on the owner
+   *  without stopping anything (Workspace care). */
+  tone?: '' | 'error' | 'blocking' | 'attention'
   items?: NeedsYouMenuItem[]
 }>()
 
@@ -111,6 +113,7 @@ onBeforeUnmount(() => document.removeEventListener('pointerdown', onOutside, tru
         <span v-if="tone" class="needs-you-marker" aria-hidden="true"></span>
         <span v-if="tone === 'error'" class="sr-only">Error: </span>
         <span v-else-if="tone === 'blocking'" class="sr-only">Blocking: </span>
+        <span v-else-if="tone === 'attention'" class="sr-only">Needs attention: </span>
         <span class="needs-you-title-text" :title="title">{{ title }}</span>
       </p>
       <p class="needs-you-line" :class="{ 'needs-you-line--alert': alert }" :role="alert ? 'alert' : undefined" :title="line">{{ line }}</p>

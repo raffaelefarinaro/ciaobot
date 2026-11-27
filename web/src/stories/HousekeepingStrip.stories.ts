@@ -9,6 +9,8 @@ import type {
 } from '../lib/types'
 import type { FixtureRoute } from './fixtureBoundary'
 import { assertFenceQuiet, held, homeWorkspace, json, renderHome } from './homeWindowsFixture'
+import type { CareReport } from '../lib/careReport'
+import { careReports, careRoute, careRunRoutes } from './careFixture'
 
 type Canvas = Parameters<NonNullable<StoryObj['play']>>[0]['canvas']
 
@@ -67,6 +69,9 @@ type FixtureOptions = {
   holdRun?: boolean
   runId?: string
   dismissId?: string
+  /** The care read; a clean run (no row) unless a story names another. */
+  care?: CareReport | CareReport[]
+  careRun?: boolean
 }
 
 function routes(options: FixtureOptions = {}): FixtureRoute[] {
@@ -80,7 +85,9 @@ function routes(options: FixtureOptions = {}): FixtureRoute[] {
       respond: () => options.holdFix ? held() : json(okHealth),
     },
     { method: 'POST', path: '/api/host/terminal', respond: () => json({ ok: true, platform: 'mac', launched: 'Terminal' }) },
+    careRoute(options.care ?? careReports.complete),
   ]
+  if (options.careRun) list.push(...careRunRoutes())
   if (options.runId) {
     list.push({
       method: 'POST',
@@ -220,6 +227,71 @@ export const Narrow: Story = {
     const wrapper = canvas.getByLabelText('Fixture ledger').parentElement
     expect(wrapper?.style.maxWidth).toBe('390px')
     expect(canvas.getByRole('button', { name: 'Run narrow' })).toBeTruthy()
+    await assertFenceQuiet(canvas)
+  },
+}
+
+// ── Workspace care ─────────────────────────────────────────────────────────
+
+export const CareNeedsYou: Story = {
+  ...story(routes({ care: careReports.needsYou })),
+  play: async ({ canvas }) => {
+    await settled(canvas)
+    expect(canvas.getByText('Care needs you')).toBeTruthy()
+    expect(canvas.getByText('Needs attention:')).toBeTruthy()
+    expect(canvas.getByRole('button', { name: 'Open report' })).toBeTruthy()
+    await assertFenceQuiet(canvas)
+  },
+}
+
+export const CareDidNotFinish: Story = {
+  ...story(routes({ care: careReports.blocked })),
+  play: async ({ canvas }) => {
+    await settled(canvas)
+    expect(canvas.getByText('Care did not finish')).toBeTruthy()
+    expect(canvas.getByText('4 of 6 steps done. Blocked: hygiene, guide-review.')).toBeTruthy()
+    expect(canvas.getByText('Error:')).toBeTruthy()
+    await assertFenceQuiet(canvas)
+  },
+}
+
+export const CareCutOff: Story = {
+  ...story(routes({ care: careReports.interrupted })),
+  play: async ({ canvas }) => {
+    await settled(canvas)
+    expect(canvas.getByText(/^Care was cut off/)).toBeTruthy()
+    await assertFenceQuiet(canvas)
+  },
+}
+
+export const CareRunningRendersNothing: Story = {
+  ...story(routes({ care: careReports.running })),
+  play: async ({ canvas }) => { await settledEmpty(canvas) },
+}
+
+export const CareNeverRunRendersNothing: Story = {
+  ...story(routes({ care: careReports.never })),
+  play: async ({ canvas }) => { await settledEmpty(canvas) },
+}
+
+export const CareRunAgain: Story = {
+  // The first read and the one inside the press, then the run in progress.
+  ...story(routes({ care: [careReports.blocked, careReports.blocked, careReports.running], careRun: true })),
+  play: async ({ canvas, userEvent }) => {
+    await settled(canvas)
+    await userEvent.click(canvas.getByRole('button', { name: 'More actions for Care did not finish' }))
+    await userEvent.click(canvas.getByRole('menuitem', { name: 'Run care again' }))
+    await waitFor(() => expect(canvas.getByText('Care started.')).toBeTruthy())
+    await assertFenceQuiet(canvas)
+  },
+}
+
+export const CareNarrow: Story = {
+  ...story(routes({ care: careReports.needsYou }), true),
+  play: async ({ canvas }) => {
+    await settled(canvas)
+    const lead = canvas.getByRole('button', { name: 'Open report' })
+    expect(lead.getBoundingClientRect().height).toBeGreaterThanOrEqual(44)
     await assertFenceQuiet(canvas)
   },
 }

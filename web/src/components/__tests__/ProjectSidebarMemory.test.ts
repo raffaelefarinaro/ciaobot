@@ -320,16 +320,18 @@ describe('ProjectSidebar memory section', () => {
     expect(nav.findAll('.sidebar-list-label').map(h => h.text())).toEqual(['Explore'])
     const items = nav.findAll('.memory-nav-item')
     expect(items.map(i => i.attributes('href'))).toEqual([
-      '/memory/unsure', '/memory/map', '/memory/categories',
+      '/memory/unsure', '/memory/care', '/memory/map', '/memory/categories',
     ])
     expect(items[0].text()).toContain('Unsure')
+    expect(items[1].text()).toContain('Workspace care')
     // Explore holds the map, then the list of what the map is drawing.
-    expect(items[1].text()).toContain('Map')
-    expect(items[2].text()).toContain('Categories')
-    // The Unsure list is a file and the category list is configuration: no
-    // count on either.
+    expect(items[2].text()).toContain('Map')
+    expect(items[3].text()).toContain('Categories')
+    // The Unsure list and the care report are files and the category list is
+    // configuration: no count on any of them.
     expect(items[0].find('.memory-nav-count').exists()).toBe(false)
-    expect(items[2].find('.memory-nav-count').exists()).toBe(false)
+    expect(items[1].find('.memory-nav-count').exists()).toBe(false)
+    expect(items[3].find('.memory-nav-count').exists()).toBe(false)
     expect(items[0].attributes('aria-label')).toBe('Unsure')
   })
 
@@ -351,7 +353,7 @@ describe('ProjectSidebar memory section', () => {
     mm.nodes = [{ id: 'n', title: 'n', type: 'note', tags: [], aliases: [], description: '', workspace: 'work', degree: 0, mtime: 0, updated: '', stale: false, ageDays: null, x: 0, y: 0, vx: 0, vy: 0 }] as never
     mm.loadedWorkspace = 'work'
     const wrapper = await mountSidebar()
-    const map = wrapper.findAll('.memory-nav-item')[1]
+    const map = wrapper.findAll('.memory-nav-item')[2]
     expect(map.find('.memory-nav-count').exists()).toBe(false)
 
     mm.loadedWorkspace = 'personal'

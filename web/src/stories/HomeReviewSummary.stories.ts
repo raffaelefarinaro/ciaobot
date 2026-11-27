@@ -7,6 +7,8 @@ import { useTaskStore } from '../stores/tasks'
 import { statsRoutes } from './homeTodayStatsFixture'
 import { assertFenceQuiet } from './homeWindowsFixture'
 import { renderSeeded } from './homeIntakeFixture'
+import type { CareReport } from '../lib/careReport'
+import { careReports, careRoute } from './careFixture'
 
 /** Synthetic workspace only: no real names, paths or tokens. */
 const WORKSPACE = 'storybook-alpha'
@@ -55,7 +57,7 @@ type Story = StoryObj<typeof meta>
 // for the synthetic workspace. Every play asserts the fence stays quiet.
 
 export const Checking: Story = {
-  parameters: { fixture: { routes: statsRoutes('default') } },
+  parameters: { fixture: { routes: [...statsRoutes('default'), careRoute(careReports.complete)] } },
   render: () => renderSeeded(HomeReviewSummary, {
     label: 'Synthetic review summary while checking',
     seed: seedReview({}),
@@ -67,7 +69,7 @@ export const Checking: Story = {
 }
 
 export const Current: Story = {
-  parameters: { fixture: { routes: statsRoutes('default') } },
+  parameters: { fixture: { routes: [...statsRoutes('default'), careRoute(careReports.complete)] } },
   render: () => renderSeeded(HomeReviewSummary, {
     label: 'Synthetic review summary with nothing to review',
     seed: seedReview({
@@ -76,14 +78,16 @@ export const Current: Story = {
   }),
   play: async ({ canvas }) => {
     await assertFenceQuiet(canvas)
-    expect(canvas.getByText('Nothing to review.')).toBeTruthy()
+    // The care line takes the place of "Nothing to review.".
+    await waitFor(() => expect(canvas.getByRole('button', { name: /Workspace care/ })).toBeTruthy())
+    expect(canvas.queryByText('Nothing to review.')).toBeNull()
     expect(canvas.queryByRole('button', { name: /memory/i })).toBeNull()
   },
 }
 
 // A refresh failed after a successful load: the last rows stay, marked stale.
 export const Stale: Story = {
-  parameters: { fixture: { routes: statsRoutes('default') } },
+  parameters: { fixture: { routes: [...statsRoutes('default'), careRoute(careReports.complete)] } },
   render: () => renderSeeded(HomeReviewSummary, {
     label: 'Synthetic review summary with a failed refresh',
     seed: seedReview({
@@ -100,7 +104,7 @@ export const Stale: Story = {
 
 // The first load failed with nothing to show: the row carries the error.
 export const Failed: Story = {
-  parameters: { fixture: { routes: statsRoutes('default') } },
+  parameters: { fixture: { routes: [...statsRoutes('default'), careRoute(careReports.complete)] } },
   render: () => renderSeeded(HomeReviewSummary, {
     label: 'Synthetic review summary with a failed first load',
     seed: seedReview({
@@ -114,7 +118,7 @@ export const Failed: Story = {
 }
 
 export const AutomationAttention: Story = {
-  parameters: { fixture: { routes: statsRoutes('default') } },
+  parameters: { fixture: { routes: [...statsRoutes('default'), careRoute(careReports.complete)] } },
   render: () => renderSeeded(HomeReviewSummary, {
     label: 'Synthetic review summary with a failed automation',
     seed: seedReview({
@@ -128,3 +132,29 @@ export const AutomationAttention: Story = {
     expect(canvas.getByText(/the last run failed\./)).toBeTruthy()
   },
 }
+
+// ── Workspace care: one quiet line per state ───────────────────────────────
+
+function careStory(report: CareReport, detail: RegExp, glyph: string): Story {
+  return {
+    parameters: { fixture: { routes: [...statsRoutes('default'), careRoute(report)] } },
+    render: () => renderSeeded(HomeReviewSummary, {
+      label: 'Synthetic review summary with a Workspace care line',
+      seed: seedReview({ automations: { loaded: true } }),
+    }),
+    play: async ({ canvas, canvasElement }) => {
+      await assertFenceQuiet(canvas)
+      const line = await waitFor(() => canvas.getByRole('button', { name: /Workspace care/ }))
+      expect(line.textContent).toMatch(detail)
+      expect(canvasElement.querySelector(`.care-glyph--${glyph}`)).not.toBeNull()
+      expect(line.className).not.toContain('home-review-item--attention')
+    },
+  }
+}
+
+export const CareComplete: Story = careStory(careReports.complete, /Done .* · 5 of 5 steps/, 'done')
+export const CareNeedsYou: Story = careStory(careReports.needsYou, /Done .* · 5 of 5 steps/, 'done')
+export const CareBlocked: Story = careStory(careReports.blocked, /4 of 6 steps · 2 blocked/, 'blocked')
+export const CareInterrupted: Story = careStory(careReports.interrupted, /Interrupted · 2 of 6 steps/, 'blocked')
+export const CareRunning: Story = careStory(careReports.running, /Running now · step 3 of 6: learnings/, 'running')
+export const CareNeverRun: Story = careStory(careReports.never, /Not run yet\. It runs every night\./, 'open')

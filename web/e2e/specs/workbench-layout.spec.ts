@@ -359,9 +359,11 @@ test.describe('workbench layout', () => {
     // Rows, not a card grid: each row spans the rail's width. Up-to-date
     // queues drop out. The fixture's one automation (`alpha-daily-brief`) is
     // healthy by default, and an active automation is not news, so the test
-    // fails it above and that failure is the one row.
+    // fails it above and that failure is the one queue row, under the
+    // Workspace care line the rail always carries.
     const rows = page.locator('.home-review-item')
-    await expect(rows).toHaveCount(1)
+    await expect(rows).toHaveCount(2)
+    await expect(rows.first()).toContainText('Workspace care')
     // The window insets its rows 16px and a 1px border per side.
     const list = await page.locator('.home-review-list').boundingBox()
     expect(list!.width).toBeGreaterThan(rail!.width - 40)

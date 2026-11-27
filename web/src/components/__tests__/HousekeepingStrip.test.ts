@@ -16,6 +16,7 @@ import { leadLabels, leads, menuLabels, pick, rows, titles, visibleControls } fr
 import { readyHealth } from '../../lib/sourceHealth'
 import { useProjectStore } from '../../stores/projects'
 import { useHousekeepingStore } from '../../stores/housekeeping'
+import { useCareReportStore } from '../../stores/careReport'
 import type { OperatorAction, WorkspaceHealthCheck } from '../../lib/types'
 
 // The router is imported lazily inside the click handlers, so it is stubbed as a
@@ -26,6 +27,14 @@ vi.mock('../../router', () => ({ router: { push: routerPush, replace: vi.fn(asyn
 // The reveal request is module-level state shared by every mounted strip, so a
 // strip left mounted by an earlier test would answer a later test's request.
 enableAutoUnmount(afterEach)
+
+/** The care report is its own source (HousekeepingStripCare.test.ts); here it
+ *  has settled with nothing to say, so it neither fetches nor holds the list. */
+function quietCare(): void {
+  const care = useCareReportStore()
+  vi.spyOn(care, 'show').mockImplementation(() => {})
+  care.settled = true
+}
 
 function action(overrides: Partial<OperatorAction> = {}): OperatorAction {
   return {
@@ -68,6 +77,7 @@ describe('HousekeepingStrip', () => {
     const housekeeping = useHousekeepingStore()
     // Avoid the interval / focus listeners firing during tests.
     vi.spyOn(housekeeping, 'init').mockImplementation(() => {})
+    quietCare()
   })
 
   afterEach(() => {
@@ -347,6 +357,7 @@ describe('the menu', () => {
     pinia = createPinia()
     setActivePinia(pinia)
     vi.spyOn(useHousekeepingStore(), 'init').mockImplementation(() => {})
+    quietCare()
     useHousekeepingStore().actions = [
       action({ id: 'a', run_label: 'Run', chat_label: 'Ask', chat_prompt: 'x', dismiss_label: 'Later' }),
     ]
@@ -458,6 +469,7 @@ describe('workspace health', () => {
     pinia = createPinia()
     setActivePinia(pinia)
     vi.spyOn(useHousekeepingStore(), 'init').mockImplementation(() => {})
+    quietCare()
   })
 
   afterEach(() => {
@@ -625,6 +637,7 @@ describe('the update row', () => {
     pinia = createPinia()
     setActivePinia(pinia)
     vi.spyOn(useHousekeepingStore(), 'init').mockImplementation(() => {})
+    quietCare()
   })
 
   afterEach(() => {
@@ -676,6 +689,7 @@ describe('a row that names an existing surface', () => {
   beforeEach(() => {
     setActivePinia(createPinia())
     vi.spyOn(useHousekeepingStore(), 'init').mockImplementation(() => {})
+    quietCare()
   })
 
   afterEach(() => {
@@ -720,6 +734,7 @@ describe('scoping to the active workspace', () => {
   beforeEach(() => {
     setActivePinia(createPinia())
     vi.spyOn(useHousekeepingStore(), 'init').mockImplementation(() => {})
+    quietCare()
   })
 
   afterEach(() => {
@@ -785,6 +800,7 @@ describe('a blocking precondition', () => {
   beforeEach(() => {
     setActivePinia(createPinia())
     vi.spyOn(useHousekeepingStore(), 'init').mockImplementation(() => {})
+    quietCare()
   })
 
   afterEach(() => {
@@ -852,6 +868,7 @@ describe('a provider update row', () => {
     resetHostTerminalForTests()
     terminalOn(true)
     vi.spyOn(useHousekeepingStore(), 'init').mockImplementation(() => {})
+    quietCare()
   })
 
   afterEach(() => {
@@ -998,6 +1015,7 @@ describe('notice reveal', () => {
     vi.spyOn(housekeeping, 'init').mockImplementation(() => {})
     vi.spyOn(housekeeping, 'refresh').mockResolvedValue(undefined)
     housekeeping.actionsHealth = readyHealth()
+    quietCare()
   })
 
   async function mountAt(url: string) {

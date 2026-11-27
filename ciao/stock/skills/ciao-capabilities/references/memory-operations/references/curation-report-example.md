@@ -4,13 +4,20 @@
 
 ```
 # Care report 2026-11-26
-Weekly done: 2026-11-19
+Weekly done: 2026-11-26
+Weekly retry: guide-review=1
 Interrupted last run: guide-review
 - [x] unsure: apply ticked Unsure lines (2 ticked) — applied 2, left 0 ticked; verify: 0 `- [x]` lines left
 - [x] regions: consolidate regions at or above 85% (memory 91%) — memory 91% -> 72%, 3 entries logged in Memory-Consolidations.md; verify: memory.pct 72, profile.pct 40
 - [x] stale: re-check stale notes (4 listed, weekly due) — checked 4 notes (People/Rae.md, ...), fixed 1, Unsure 1; verify: 3 of 4 still listed, none of the fixed paths
 - [!] guide-review: review the AGENTS.md body (weekly due) — blocked: AGENTS.md unreadable
+
+## Hygiene
+- index rebuilt; audit exit 1, 1 finding
+- dead_link: Projects/Atlas.md links to People/Old.md
 ```
+
+Checkbox lines appear only in the checklist above the first `##` heading; every section after it (`## Hygiene`, `## What needs you`) uses plain bullets or a numbered list. `Weekly retry:` names each weekly step still blocked and for how many nights in a row; after 3 nights it is dropped and listed under What needs you.
 
 The final reply starts with `Care complete: N/N` (or `Care incomplete: N/M, blocked: <ids>`) and is read by someone who has never opened the docs. Use everyday words, name a file only when they must open it, and skip sections that are empty:
 
